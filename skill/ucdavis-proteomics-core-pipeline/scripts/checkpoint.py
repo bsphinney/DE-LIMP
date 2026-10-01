@@ -150,6 +150,14 @@ def cmd_record(a):
 
 
 def cmd_status(a):
+    # The transcript hook: --resume says this conversation now works on this analysis. Without
+    # it, a status query is a peek -- it records only a conversation that runs no analysis yet,
+    # and never moves one that runs another (save_transcript.remember).
+    try:
+        import save_transcript
+        save_transcript.remember(a.session, switch=a.resume)
+    except Exception:
+        pass                    # never a reason to fail a status query
     data = _load(a.session)
     if not data:
         print(json.dumps({"error": "no %s in %s" % (REC_JSON, a.session)}))
@@ -174,6 +182,26 @@ def cmd_status(a):
     # alone has lied before (a segfault masked by a trailing echo)
     if rep and not out["report_exists"]:
         out["done"] = False
+    # A Sage search can finish with quantities it could not measure (sage_lfq_check.py, beside
+    # its report): said here too, so a resumed session sees it before the DE runs on them.
+    if rep:
+        try:
+            import sage_lfq_check
+            lfq = sage_lfq_check.load(os.path.dirname(os.path.abspath(rep)))
+        except Exception:
+            lfq = None
+        if lfq and lfq.get("status") in ("warn", "unchecked") and lfq.get("message"):
+            out.setdefault("warnings", []).append(f"Sage LFQ: {lfq['message']}")
+        # A DIA-NN search that fell back instead of measuring its scan window / mass accuracy
+        # (probe_fallback.py): said here, where a resumed session looks first.
+        try:
+            import probe_fallback
+            fell_back = probe_fallback.caution_for(os.path.dirname(os.path.abspath(rep)))
+        except Exception as e:                          # noqa: BLE001 -- said, never dropped
+            fell_back = (f"could not check for a probe fallback ({type(e).__name__}: {e}); "
+                         "look for probe_fallback.json beside the report")
+        if fell_back:
+            out.setdefault("warnings", []).append(fell_back)
     data["updated"] = datetime.datetime.now().isoformat(timespec="seconds")
     _save(a.session, data)
     out["next_commands"] = [s["next"] for s in data["stages"]
@@ -213,6 +241,9 @@ def main():
 
     s = sub.add_parser("status", help="re-query SLURM and report what is left")
     s.add_argument("--session", required=True)
+    s.add_argument("--resume", action="store_true",
+                   help="this conversation now resumes this analysis (its transcript is saved "
+                        "there); without it, a status query changes nothing")
     s.set_defaults(func=cmd_status)
 
     f = sub.add_parser("find", help="find interrupted runs under a directory")

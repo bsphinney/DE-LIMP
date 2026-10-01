@@ -18,10 +18,13 @@ over-interpret anything. FAILs should stop interpretation; WARNs go in the repor
 | `missingness` | — | very high missing fraction (> `--max-missing`, default 0.5) |
 | `contamination` | — | keratin/trypsin/casein contaminants present at a meaningful level |
 | `de_signal` | — | 0 significant (underpowered) **or** >50% significant (batch/normalization/confounding artefact, not biology) |
+| `quantification` | — | the DE pipeline's own caveat about its protein quantities (de_provenance.json `caveat`, set by the pipeline's descriptor), quoted. Today: a Sage DE, whose protein value is its single most intense peptide per run (no protein rollup model) |
+| `sage_lfq` | — | (`--search-out <search out dir>`, Sage only) a run's median precursor mass error is within 2 ppm of, or beyond, Sage's LFQ window (`quant.lfq_settings.ppm_tolerance`, default ±5 ppm), or Sage kept 0 or very few target MS1 peaks at 5% FDR. Identifications are not affected; the quantities are unreliable. The message is `sage_lfq_check.py`'s own record (`sage_lfq_check.json`), quoted as written and with the fix (a wider window, re-run Sage, `--adapt-only`). PASS when the window fits; INFO when the check could not run |
 
 ## How the orchestrator uses it
 - Run it with `--conditions`, `--de-dir`, and the `detect_acquisition` JSON
-  (`--acquisition-json`) so it can see acquisition/instrument mixing.
+  (`--acquisition-json`) so it can see acquisition/instrument mixing, and `--search-out`
+  (the search's output dir) so a Sage search's LFQ check reaches the report.
 - **STOP on any `FAIL`** — e.g. a singleton group or a confounded batch means the
   differential results aren't trustworthy; tell the user plainly and how to fix it
   (add replicates, de-confound the design, split by acquisition/instrument).

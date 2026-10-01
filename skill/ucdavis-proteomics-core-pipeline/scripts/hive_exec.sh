@@ -19,6 +19,7 @@
 #     bash hive_exec.sh --put-skill
 #   = scripts/ AND .claude-plugin/ into ~/proteomics-pipeline/. plugin.json is where every
 #   HIVE-side record reads the skill version (skill_version.py); scripts/ alone reads "unknown".
+#   `bash skill_version.sh --check-hive` (SKILL.md step 0) says when a re-put is due.
 #
 #   Calls share one SSH connection for 10 minutes (ControlMaster); HIVE_SSH_MUX=0 disables.
 #

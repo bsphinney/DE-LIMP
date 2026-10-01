@@ -351,6 +351,47 @@ def load(session):
     return sanitize(obj)
 
 
+def core_run(session=None, record=None):
+    """Is this a UC Davis Core run -- does it answer a CoreOmics submission? THE one test for
+    what only the Core's own clients see (its feedback survey), asked of the SESSION alone by the
+    report and its .md twin, README, AGENTS.md and make_podcast.py (check, link, share); a
+    --submission given to make_analysis_html feeds only the Submission section. `record` (a
+    delivery's summary, already read) is for the delivery README and its email. Yes when a record
+    that names a submission (a PROT number or a CoreOmics id) loads -- `record`, or the one
+    attached to `session` -- or when session.json parses and announces one, by that number or
+    id, whose record file is missing (the report says so; still the Core's). Anything else is NO,
+    fail closed: a damaged session.json or record, a block or record naming no submission. The
+    skill is used outside the Core too, and those users must never be sent the Core's survey.
+    -> {"prot": "PROT_0807" | None}, or None."""
+    def named(rec):
+        return ({"prot": rec.get("internal_id")}
+                if rec and (rec.get("internal_id") or rec.get("id")) else None)
+    if record is not None:
+        try:
+            return named(sanitize(record))
+        except RecordError:
+            return None
+    if not session:
+        return None
+    p = paths_for(os.path.expanduser(session))
+    try:
+        sj = _read_json(p["session_json"])
+    except RecordError:
+        return None                                  # damaged session.json
+    if sj is not None and not isinstance(sj, dict):
+        return None
+    block = (sj or {}).get("coreomics")
+    if not os.path.lexists(p["submission_record"]):
+        prot = _internal_id(block.get("internal_id")) if isinstance(block, dict) else None
+        if prot or (isinstance(block, dict) and _hex_id(block.get("id"))):
+            return {"prot": prot}                    # announced by number or id, record missing
+        return None
+    try:
+        return named(load(session))
+    except RecordError:
+        return None
+
+
 def resolve(source=None, session=None):
     """(record or None, session dir or None) from a --submission argument (a session dir, a
     record file, or fetch's folder) and/or a session dir."""

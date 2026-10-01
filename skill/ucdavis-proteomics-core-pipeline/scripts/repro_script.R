@@ -88,6 +88,24 @@ write_repro_script <- function(path,
     .hdr(sprintf("Remove contaminants: any precursor mapping to a '%s' entry", contaminants$tag)),
     sprintf("#     (%s -- DIA-NN's --cont-quant-exclude rule). They must not enter", cont_col),
     "#     normalisation, the model or the BH correction.") else NULL
+  # A keratin sample whose database still held keratin-family contaminant entries: those stay in
+  # (contaminants.R is_contaminant with keratin_exemption), so the script applies the same rule to
+  # the same accessions -- another species' entry only beside a sample protein.
+  kexempt <- if (cont_on) unlist(contaminants$keratin_sample$exempt_accessions) else NULL
+  kalone  <- if (cont_on) unlist(contaminants$keratin_sample$exempt_alone_accessions) else NULL
+  cont_flag <- function(ids_expr) if (length(kexempt)) c(
+    "#     Keratin sample: keratin is the analyte, so these keratin-family entries are NOT",
+    "#     contaminants here: a precursor naming only them is kept when it also names a sample",
+    "#     protein, or when they are all the searched organism's own (keratin_alone).",
+    sprintf("keratin_kept  <- %s", .rvec(kexempt)),
+    sprintf("keratin_alone <- %s", if (length(kalone)) .rvec(kalone) else "character(0)"),
+    sprintf("is_contaminant <- vapply(strsplit(as.character(%s), ';', fixed = TRUE), function(x) {",
+            ids_expr),
+    sprintf("  x <- trimws(x); tg <- grepl(%s, x)",
+            .rq(paste0("^(", paste(unlist(contaminants$tags), collapse = "|"), ")"))),
+    "  any(tg) && !(all(x[tg] %in% keratin_kept) && (any(!tg) || all(x[tg] %in% keratin_alone)))",
+    "}, logical(1))")
+    else sprintf("is_contaminant <- grepl(%s, %s)", .rq(contaminants$pattern), ids_expr)
   eq_on   <- !is.na(eq_cutoff)  && eq_cutoff  > 0
   # The random blocking factor, emitted from the record so the script fits the same model.
   blk_on  <- isTRUE(block$applied)
@@ -214,8 +232,7 @@ write_repro_script <- function(path,
       "dat <- dat[, colnames(dat$E) %in% metadata$File.Name]",
       "",
       if (cont_on) c(cont_hdr,
-        sprintf("is_contaminant <- grepl(%s, dat$genes[[%s]])", .rq(contaminants$pattern),
-                .rq(cont_col)),
+        cont_flag(sprintf("dat$genes[[%s]]", .rq(cont_col))),
         "dat <- dat[!is_contaminant, ]",
         if (cont_col != "Protein.Group") sprintf("dat$genes[[%s]] <- NULL", .rq(cont_col)),
         "") else NULL,
@@ -240,7 +257,9 @@ write_repro_script <- function(path,
     if (eq_on)  qfilt <- paste0(qfilt, sprintf(", Empirical.Quality >= %s", .rnum(eq_cutoff)))
     if (pgq_on) qfilt <- paste0(qfilt, sprintf(", PG.MaxLFQ.Quality >= %s", .rnum(pgq_cutoff)))
     L <- c(L,
-      "# --- 1. Read the DIA-NN report, applying FDR (+ QuantUMS) filters ------------",
+      "# --- 1. Read the search report, applying the q-value (+ QuantUMS) filters ------",
+      if (!is.null(descriptor$identification_fdr))
+        sprintf("#     (identification FDR: %s)", descriptor$identification_fdr) else NULL,
       sprintf("rows <- arrow::open_dataset(report, format = %s) |>", .rq(format)),
       sprintf("  dplyr::select(dplyr::all_of(%s)) |>", .rvec(sel)),
       sprintf("  dplyr::filter(%s) |>", qfilt),
@@ -248,10 +267,15 @@ write_repro_script <- function(path,
       "  dplyr::collect()",
       "",
       if (cont_on) c(cont_hdr,
-        sprintf("rows <- rows[!grepl(%s, rows[[%s]]), ]", .rq(contaminants$pattern),
-                .rq(cont_col)),
+        if (length(kexempt)) c(cont_flag(sprintf("rows[[%s]]", .rq(cont_col))),
+                               "rows <- rows[!is_contaminant, ]")
+        else sprintf("rows <- rows[!grepl(%s, rows[[%s]]), ]", .rq(contaminants$pattern),
+                     .rq(cont_col)),
         "") else NULL,
-      "# --- 2. One PG.MaxLFQ per (protein, run); pivot wide; log2; quantile-normalise",
+      # the pipeline's own words for the rollup (build_maxlfq.R descriptor), not this file's
+      sprintf("# --- 2. One value per (protein, run) -- %s; pivot wide; log2; quantile-normalise",
+              if (!is.null(descriptor$rollup_method)) descriptor$rollup_method
+              else "max(PG.MaxLFQ) over the report's rows"),
       "pg_run <- rows |>",
       "  dplyr::group_by(Protein.Group, Run) |>",
       "  dplyr::summarise(PG.MaxLFQ = max(PG.MaxLFQ, na.rm = TRUE), .groups = 'drop') |>",

@@ -162,7 +162,14 @@ warns outside 2,200–3,600.
       (`Detected_<group>`: detected in k of n runs; `Evidence`), or the tier file if the
       analysis wrote one. A hit seen in every run of its group is solid; one carried by
       inferred values is a follow-up;
-    - what to validate first.
+    - what to validate first;
+    - **Core runs only** (the session answers a CoreOmics submission, so the report ends with
+      the Core's "How did we do?" survey): the sign-off may say, in words, "the report ends
+      with a short survey; tell us what you thought of this episode". Never speak the address.
+      Outside the Core, never mention a survey. `check` never asks for it; it FAILs an
+      invitation to a survey ("survey" near "tell us", "feedback", "how did we do", "5-minute"
+      or "questionnaire") unless the session is a Core run (`submission_report.core_run`, as
+      link and share ask it). "MS1 survey scan" is the DDA term and always fine.
 
     **Never tier by PropObs.** It is the observed fraction of a protein's precursors over ALL
     runs, so a protein found only in its own group -- exactly the hit a pulldown is looking for
@@ -323,6 +330,9 @@ python3 scripts/make_podcast.py verify $P/podcast_script.md --cloud-ok "<who agr
 #    -> $P/verify.txt. Listen to every segment it names; fix, re-render, verify again.
 # 5. link it into the report, README and AGENTS.md (safe to re-run)
 python3 scripts/make_podcast.py link $S/output
+# 6. the one file to send: the report with the audio and transcript built in (finalize also
+#    makes it; safe to re-run)
+python3 scripts/make_podcast.py share $S/output
 ```
 
 - **Sources.** Pass the delivered report text you wrote from, all from the session's `output/`
@@ -437,6 +447,10 @@ python3 scripts/make_podcast.py link $S/output
   `README.html` / `README.md` and a section in `AGENTS.md`.
   - Everything link adds sits between `<!-- podcast:start -->` and `<!-- podcast:end -->` and
     is replaced on a re-run.
+  - A Core run's report ends with the Core's "How did we do?" survey line. It is written when
+    the report is made, usually before the podcast. Link rewords it to ask about the podcast
+    too (`core_submission.refresh_feedback`, the one wording) in the HTML and the `.md`,
+    before the PDF reprint. It never adds one to a report that has none.
   - `make_analysis_html.py` and `session.py finalize` keep the card and the entries on their
     own whenever `podcast/podcast.json` exists. The podcast can never stop the report of
     record: a `podcast.json` that is unreadable or has a wrong field is reported once as a
@@ -448,6 +462,48 @@ python3 scripts/make_podcast.py link $S/output
     `Analysis_Report.stale.pdf` -- kept, so it never passes for current -- and link reports it
     as `[SKIPPED]` with the reason. Without `html_to_pdf.py` at all, an `[INFO]` line says how
     to reprint it by hand.
+
+## Sending the report with the audio (`share`)
+
+The Listen card's links are relative (`podcast/podcast.m4a`, `podcast/transcript.html`), so
+`Analysis_Report.html` sent by itself has no audio. `share` writes
+`output/Analysis_Report_with_audio.html`: the same report, with the card built by the same code
+in its share mode. The audio is inside the file as a `data:audio/mp4` URI, the transcript is
+inside it as a "Read the transcript" panel (an `iframe` whose `srcdoc` holds `transcript.html`
+without its player or links), and nothing points outside the file. This is the file to send
+when someone asks for "the report with the audio".
+
+- **Audio.** Re-encoded for speech to AAC, 24 kHz mono, `--kbps` 32 to 64 (default 48), from a
+  24 kHz WAV, by afconvert and otherwise ffmpeg; with neither, `podcast.m4a` goes in as rendered
+  (larger). A 21-minute episode at 48 kbps is about 7.5 MB of audio, 10 MB as base64: the
+  PROT_0756 v2 report came to 20.0 MB.
+- **Checked before it is kept.** The written file is read back. The base64 must decode to
+  exactly the audio that was put in, and that audio must be an MP4 with an AAC (`mp4a`) track of
+  the episode's length (`podcast.json` `duration_s`, within 1 s or 1%). afconvert or ffmpeg must
+  decode it back to that length, and it must have sound in it. There must also be no reference
+  to `podcast/` anywhere. Then, when a Chrome, Chromium or Edge is found (the browser
+  `html_to_pdf.py` prints with), a headless one opens the file and plays the audio for 1.5 s,
+  muted, over the DevTools pipe with a 60 s deadline. It also counts the transcript's turns and
+  any file the page fetched. (A `--virtual-time-budget` probe hangs on a `data:` URI audio, so
+  it is not used.) Any failure removes the file and exits 1. `--no-browser` skips the playback.
+- **Size.** An email attachment travels as base64, about 4/3 larger, so it prints both sizes.
+  Above ~18 MB of file (~25 MB attached) it warns that many email systems will refuse it and
+  suggests Bioshare (`core_submission.py deliver` puts it in the share), or `--kbps 32` with
+  the sizes that would give.
+- **Its survey line.** On a Core run the report's "How did we do?" line comes along, with
+  `src=share` (the copy made to be forwarded). README and AGENTS.md name the file only while
+  it is current: a stale copy is never advertised.
+- **Refuses** while the podcast's check does not hold, like `link` (`--unchecked` overrides and
+  is recorded in the file). Other links in the report that point at files beside it are listed
+  as a `[WARN]`: they will not open when the file travels alone.
+- **Current or not.** The file carries `<!-- podcast:share report=… podcast=… audio=… -->`, the
+  sha256 of `Analysis_Report.html`, `podcast.json` and the audio it was built from, so a copy is
+  checked by content, not by file times. `session.py finalize` leaves a current one alone and
+  builds a missing or out-of-date one (`[OK]`/`[SKIPPED]` in MANIFEST.txt). If it cannot, it
+  renames the old one `Analysis_Report_with_audio.stale.html`, which is scratch and never
+  zipped or sent. `deliver` copies the file only while it is current.
+- **Print.** The printed card hides the player and the transcript panel, and names the file the
+  audio is in. Print `Analysis_Report.html` for paper.
 
 ## What ends up in `output/podcast/`
 

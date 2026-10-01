@@ -64,14 +64,26 @@ if [ "$MODE" = "chain" ]; then
     printf '%s' "$js" | grep -qE "FAILED|TIMEOUT|OUT_OF_ME|NODE_FAIL" && { anyfail=true; worst="$id"; }
     printf '%s' "$js" | grep -qE "RUNNING|PENDING|UNKNOWN" && allterm=false
   done
+  # Step 1b fell back instead of measuring (probe_fallback.py): the chain runs on, and this is
+  # the status view the orchestrator reads, so it says so on every poll from then on.
+  # From the search's provenance, as probe_fallback.fallback_modes() reads it: a fallback mode,
+  # or -- a provenance from before the modes -- a `probe_fallback` record in it (written only
+  # when the search fell back); from probe_fallback.json only when there is no provenance. A
+  # stale record from an earlier search must not outvote the provenance (dda-review N1). Bash,
+  # not the Python reader, because with --hive this runs on HIVE, where the skill's scripts are
+  # not at this path; the provenance is written with indent=2, so these are exact.
+  fb=""
+  if [ "$(run "p=$CHAINDIR/search_provenance.json; if [ -f \$p ]; then grep -qE '\"mode\": \"fallback_|\"probe_fallback\": [{]' \$p && echo yes; else test -s $CHAINDIR/probe_fallback.json && echo yes; fi" 2>/dev/null)" = yes ]; then
+    fb=",\"probe_fallback\":true,\"caution\":\"CAUTION: step 1b FELL BACK -- the scan window (and any planned mass accuracy) was NOT measured; DIA-NN chooses it per run. Tell the user, with the reason in $CHAINDIR/probe_fallback.json, and re-run the search if the cause was transient.\""
+  fi
   if $anyfail; then
-    echo "{\"mode\":\"chain\",\"dir\":\"$CHAINDIR\",\"failed\":true,\"done\":true,\"first_failed_job\":\"$worst\",\"chain\":\"${summary# }\",\"fix\":\"A step FAILED. Inspect it: watch_run.sh --slurm $worst --hive. Downstream steps will sit PENDING with DependencyNeverSatisfied forever until you fix and resubmit them.\"}"
+    echo "{\"mode\":\"chain\",\"dir\":\"$CHAINDIR\",\"failed\":true,\"done\":true,\"first_failed_job\":\"$worst\",\"chain\":\"${summary# }\"$fb,\"fix\":\"A step FAILED. Inspect it: watch_run.sh --slurm $worst --hive. Downstream steps will sit PENDING with DependencyNeverSatisfied forever until you fix and resubmit them.\"}"
     exit 0
   fi
   if $allterm; then
-    echo "{\"mode\":\"chain\",\"dir\":\"$CHAINDIR\",\"failed\":false,\"done\":true,\"chain\":\"${summary# }\"}"
+    echo "{\"mode\":\"chain\",\"dir\":\"$CHAINDIR\",\"failed\":false,\"done\":true,\"chain\":\"${summary# }\"$fb}"
   else
-    echo "{\"mode\":\"chain\",\"dir\":\"$CHAINDIR\",\"failed\":false,\"done\":false,\"chain\":\"${summary# }\"}"
+    echo "{\"mode\":\"chain\",\"dir\":\"$CHAINDIR\",\"failed\":false,\"done\":false,\"chain\":\"${summary# }\"$fb}"
   fi
   exit 0
 fi
@@ -138,7 +150,7 @@ elif m "Number of IDs at 0.01 FDR: 0";                                          
 elif m "java.lang.OutOfMemoryError|Java heap space|Answer from Java side is empty";  then err_class="spark_heap";      fix="A JVM heap OOM inside Fulcrum/Spark. RAISING --mem DOES NOT HELP: Spark sizes its driver heap independently of the SLURM allocation. Pass spark_config = {\"spark.driver.memory\" = \"32g\"} in the workflow TOML (Fulcrum forwards it to SparkSession.builder.config).";
 elif m "0 proteins|No fragment ions|No precursors|no spectra|empty";                then err_class="empty_results"; fix="Check the FASTA matches the organism, the mass-accuracy setting, and that the raw files are the expected acquisition type.";
 elif m "CUDA|no kernel image|cuDNN|device-side|GPU.*not";                           then err_class="gpu";           fix="AlphaDIA needs a GPU. Submit to a GPU node (sbatch --gres=gpu:1) or reduce batch size.";
-elif m "msconvert.*not found|requires mzML|no mzML";                                then err_class="sage_no_mzml";  fix="Sage needs mzML. Convert .d/.raw with msconvert first (Linux/HIVE), then re-run.";
+elif m "msconvert.*not found|requires mzML|no mzML";                                then err_class="sage_no_mzml";  fix="Sage/Radiant read mzML and the conversion in the job failed (run_search.py converts .raw with ThermoRawFileParser, .d with msconvert, before the search). Read the converter's own error above the FAILED line: for ThermoRawFileParser usually .NET (bash scripts/ensure_dotnet8.sh), for .raw via msconvert a Linux build without vendor readers. Fix, then regenerate the job with run_search.py --sbatch and resubmit.";
 elif m "Disk quota exceeded|No space left";                                         then err_class="disk";          fix="Out of disk/quota. Free space or point --out elsewhere and resubmit.";
 elif m "No such file|cannot open|does not exist|not found.*(fasta|\\.d|\\.raw)";     then err_class="missing_input"; fix="An input path is wrong (fasta/raw). Re-check paths (Windows→WSL/HIVE translation) and resubmit.";
 elif [ "${dep_failed:-false}" = true ];                                              then err_class="dependency_failed"; fix="An UPSTREAM job in the chain failed, so this one is stuck PENDING with DependencyNeverSatisfied (it will NEVER run and never leave the queue). Find the failed step (sacct -j <arrayjob>), apply that step's fix, and resubmit the downstream steps reusing already-computed outputs (.quant, step1.predicted.speclib) — don't restart the whole chain.";
@@ -184,6 +196,13 @@ if [ -n "$OUTDIR" ]; then
   fi
 fi
 
+# ---- Sage LFQ: a finished search can still have unusable quantities -------------------
+# sage_lfq_check.py (run in the Sage job and by run_search.py --adapt-only) records whether the
+# LFQ window fits the runs' MS1 mass error. A WARNING there is not a failure -- the job succeeded
+# and the identifications stand -- so it is reported beside the state, never as error_class.
+lfq_rec=""
+[ -n "$OUTDIR" ] && lfq_rec="$(run "cat $(printf %q "$OUTDIR/sage_lfq_check.json") 2>/dev/null" 2>/dev/null)"
+
 # ---- narration: what this stage is doing, plus something to read while waiting
 if $q_failed; then err_class="watcher_query_failed"; fix="$fix_qf"; fi
 
@@ -192,8 +211,8 @@ notes="$(python3 "$HERE/pipeline_notes.py" --stage "$stage" --index "$POLL" 2>/d
 STATE="$state" DONE="$done" FAILED="$failed" STALLED="$stalled" JOB="$JOB" MODE="$MODE" \
 ECLASS="$err_class" FIX="$fix" TAIL="$tail_txt" ATASKS="${array_summary:-}" \
 STAGE="$stage" NDONE="${n_done:-0}" NTOTAL="${n_total:-0}" NOTES="$notes" \
-REASON="${reason:-}" ATERM="${a_term:-0}" python3 - <<'PY'
-import os, json
+REASON="${reason:-}" ATERM="${a_term:-0}" LFQ_REC="$lfq_rec" python3 - <<'PY'
+import os, json, re
 n_done, n_total = int(os.environ.get("NDONE") or 0), int(os.environ.get("NTOTAL") or 0)
 stage = os.environ.get("STAGE", "single")
 out = {
@@ -241,6 +260,26 @@ if queued:
     out["doing"] = ("Held -- the job will not start until it is released." if "JobHeld" in reason
                     else "Waiting in the SLURM queue -- the job has not started, so nothing is "
                          "being searched yet.")
-out["log_tail"] = os.environ["TAIL"][-1500:]
+# Sage LFQ (sage_lfq_check.py): its record with --out, else what the log tail says. The MS1-peak
+# count is Sage's own "discovered N target MS1 peaks at 5% FDR"; 0 means no usable quantities.
+tail = os.environ.get("TAIL", "")
+try:
+    lfq = json.loads(os.environ.get("LFQ_REC") or "null")
+except ValueError:
+    lfq = None
+peaks = re.findall(r"discovered (\d+) target MS1 peaks at 5% FDR", tail)
+if isinstance(lfq, dict) and lfq.get("status"):
+    out["sage_lfq"] = {k: lfq.get(k) for k in ("status", "target_ms1_peaks_5pct_fdr",
+                                               "ppm_tolerance", "runs_outside_lfq_window",
+                                               "suggested_ppm_tolerance") if k in lfq}
+    if lfq["status"] in ("warn", "unchecked") and lfq.get("message"):
+        out.setdefault("warnings", []).append(lfq["message"])
+elif peaks:
+    out["sage_lfq"] = {"target_ms1_peaks_5pct_fdr": int(peaks[-1]), "source": "log tail"}
+if not (isinstance(lfq, dict) and lfq.get("status")):
+    for ln in tail.splitlines():
+        if "[sage_lfq_check] WARNING:" in ln:
+            out.setdefault("warnings", []).append(ln.split("WARNING:", 1)[1].strip())
+out["log_tail"] = tail[-1500:]
 print(json.dumps(out, indent=2))
 PY

@@ -322,7 +322,8 @@ class RunDeRemovesContaminants(unittest.TestCase):
                 with open(os.path.join(self.out(key), "reproducibility_log.R")) as fh:
                     src = fh.read()
                 self.assertIn("Remove contaminants", src)
-                self.assertIn("grepl('(^|;)Cont_'", src)
+                # every contaminant tag: the skill's Cont_ and FragPipe's contam_
+                self.assertIn("grepl('(^|;)(Cont_|contam_)'", src)
                 rerun = os.path.join(self.tmp, f"rerun_{key}")
                 os.makedirs(rerun, exist_ok=True)
                 shutil.copy(os.path.join(self.out(key), "reproducibility_log.R"), rerun)

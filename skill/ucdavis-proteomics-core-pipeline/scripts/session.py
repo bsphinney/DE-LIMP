@@ -144,7 +144,12 @@ def raw_set(session_dir):
 
 
 def do_find_prior(a):
-    """Scan existing sessions for ones covering the same raw files (same dataset)."""
+    """Scan existing sessions for ones covering the same raw files (same dataset).
+
+    A match is a fact to mention, not a decision: a new session is FRESH by default. It
+    reads nothing from the earlier one and does not nest under it unless the user asks for a
+    re-analysis (init --reanalysis-of). It used to print "re-analysis of <session>" as its
+    verdict, and a fresh run was steered into reusing old results (Core staff, skill 2.9)."""
     mine, raw_dirs = set(), set()
     for pat in (a.raw or []):
         hits = [os.path.abspath(p.rstrip("/")) for p in glob.glob(pat)]
@@ -175,10 +180,14 @@ def do_find_prior(a):
                          "of_mine": len(mine), "of_theirs": len(rs),
                          "same_dataset": inter == mine == rs})
     hits.sort(key=lambda h: h["overlap"], reverse=True)
-    print(json.dumps({"query_raw_count": len(mine), "matches": hits,
-                      "suggestion": ("re-analysis of " + hits[0]["session"]) if hits else
-                                    "no prior session covers these raw files — this is a fresh analysis"},
-                     indent=2))
+    if hits:
+        suggestion = ("a fresh analysis (the default). These raw files were analysed before, in "
+                      + hits[0]["session"] + ": mention that in one line and read nothing from "
+                      "it. Re-analyse it (init --reanalysis-of) only if the user asks to.")
+    else:
+        suggestion = "a fresh analysis: no earlier session covers these raw files"
+    print(json.dumps({"query_raw_count": len(mine), "matches": hits, "default": "fresh",
+                      "suggestion": suggestion}, indent=2))
 
 
 def _resolve_raws(patterns):
@@ -275,6 +284,14 @@ def do_init(a):
                      "for exactly what changed.\n")
         fh.write("\nLayout: `input/` (conditions, FASTA, params), `output/` "
                  "(search, tables, figures, reproducibility, report), `scripts/`, `logs/`.\n")
+
+    # this Claude Code conversation runs this analysis: the transcript hook saves it here
+    # (save_transcript.py; a no-op outside Claude Code, and never a reason to fail init)
+    try:
+        import save_transcript
+        save_transcript.remember(session_dir, from_now=getattr(a, "transcript_from_now", False))
+    except Exception as e:
+        sys.stderr.write(f"[session] conversation not recorded for the transcript hook: {e}\n")
 
     print(json.dumps({"created": session_dir, "date": date, "name": a.name,
                       "placement": placement, "reanalysis_of": parent, "paths": p}, indent=2))
@@ -426,8 +443,10 @@ def _write_docs(session_docs, p, man, registry, registry_note, ok_lines=True, pe
         return out
     try:
         import make_report
+        import make_podcast
         listed = [os.path.join(p["session_dir"], n) for n in LATE_DOCS + ("MANIFEST.txt",)]
         listed.append(p["raw_list"])
+        listed.append(os.path.join(p["output_dir"], make_podcast.SHARE_NAME))   # when there is one
         if os.path.isfile(p["output_files_md"]) and man is not None:
             n = make_report.add_finalize_files(p["output_files_md"], listed, p["session_dir"])
             man.ok("OUTPUT_FILES.md: files written at finalize", f"{n} listed")
@@ -507,6 +526,55 @@ def report_pdf_step(p, man, print_report=None):
             "Report PDF (output/Analysis_Report.stale.pdf)", removed[1])
 
 
+def podcast_share_step(p, man):
+    """With a podcast (step 9e): output/Analysis_Report_with_audio.html, the report with the audio
+    and transcript built in -- the one file a collaborator can send on (make_podcast.ensure_share:
+    left alone when current, else built; a copy that cannot be brought up to date is renamed
+    *.stale.html, which scratch_files keeps out of the zip). Never fatal; nothing without a
+    podcast."""
+    name = "Shareable report with audio"
+    try:
+        import make_podcast
+        name = f"{name} (output/{make_podcast.SHARE_NAME})"
+        got = make_podcast.ensure_share(p["output_dir"])
+    except Exception as e:                      # recorded, never swallowed
+        man.skip(name, f"{type(e).__name__}: {e}")
+        return
+    if got:
+        {"OK": man.ok, "SKIPPED": man.skip}.get(got[0], man.info)(name, got[1])
+
+
+def conversation_step(p, man):
+    """The analysis conversation (save_transcript.py): this Claude Code conversation saved,
+    redacted, into logs/conversation/ beside any saved earlier (a resume, a new chat, a HIVE
+    session saved from the laptop). Core-internal: deliver never ships it and the zip leaves it
+    out. [OK] when a conversation is saved; [SKIPPED] when this IS Claude Code and nothing was
+    saved (a real failure, whatever else is there); [INFO] when it is not Claude Code but the
+    decisions log (logs/decisions.md) is there -- another agent, or finalize on HIVE in
+    hive_remote, where save_transcript.py --hive saves it from the laptop; [SKIPPED] when there
+    is neither: a run with no record of how it was done. Never fatal."""
+    name = "Analysis conversation (logs/conversation)"
+    try:
+        import save_transcript
+        got = save_transcript.save(p["session_dir"])
+        n = save_transcript.saved_count(p["session_dir"])
+    except Exception as e:                      # recorded, never swallowed
+        man.skip(name, f"{type(e).__name__}: {e}")
+        return
+    decisions = os.path.isfile(os.path.join(p["logs_dir"], "decisions.md"))
+    if n:
+        man.ok(name, f"{n} conversation(s), redacted -- Core-internal: never delivered, not in "
+                     "the zip" + ("" if got.get("saved") else f" (this one: {got.get('skipped')})"))
+    elif os.environ.get("CLAUDE_CODE_SESSION_ID"):   # Claude Code, and nothing saved: a failure
+        man.skip(name, got.get("skipped") or "nothing saved")
+    elif decisions:
+        man.info(name, "no Claude Code transcript (" + (got.get("skipped") or "none") + "); the "
+                       "decisions log (logs/decisions.md) is the record")
+    else:
+        man.skip(name, "no conversation and no decisions log (log_decision.py): nothing records "
+                       "how this analysis was done -- " + (got.get("skipped") or "nothing saved"))
+
+
 def do_finalize(a):
     p = paths_for(a.dir)
     if not os.path.isdir(p["session_dir"]):
@@ -570,6 +638,8 @@ def do_finalize(a):
             except Exception as e:
                 man.skip("Deposit package (output/DATA_SUBMISSION)", f"{type(e).__name__}: {e}")
         report_pdf_step(p, man)
+        podcast_share_step(p, man)             # before the README, which lists it
+        conversation_step(p, man)
     registry, registry_note = _registry_lookup(p["session_dir"])
     docs = _write_docs(session_docs, p, man, registry, registry_note,
                        pending=("manifest",))        # MANIFEST.txt is written right below
@@ -614,6 +684,13 @@ def do_finalize(a):
         base = os.path.basename(sdir)
         skips = {os.path.abspath(os.path.join(sdir, "output", "raw_data")):
                  "output/raw_data (symlinks to raw files)",
+                 # the analysis conversation (save_transcript.py): Core-internal -- it holds
+                 # internal paths and remarks, and a zip travels
+                 os.path.abspath(os.path.join(sdir, "logs", "conversation")):
+                 "logs/conversation (the analysis conversation: Core-internal, kept on disk)",
+                 # ... and the decisions log, internal for the same reason (log_decision.py)
+                 os.path.abspath(os.path.join(sdir, "logs", "decisions.md")):
+                 "logs/decisions.md (the decisions log: Core-internal, kept on disk)",
                  os.path.abspath(os.path.join(p["deposit_dir"], "upload_staging")):
                  "output/DATA_SUBMISSION/upload_staging (raw archives staged for upload)"}
         archive = sdir + ".zip"
@@ -664,6 +741,9 @@ def do_finalize(a):
                         continue
                     if is_predicted_speclib(fn):
                         n_speclib += 1
+                        continue
+                    if os.path.abspath(full) in skips:           # a file kept out (decisions.md)
+                        excluded[skips[os.path.abspath(full)]] = 1
                         continue
                     if os.path.islink(full) or os.path.abspath(full) == manifest_txt \
                             or os.path.abspath(full) in late:
@@ -902,13 +982,17 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
     i = sub.add_parser("init", help="scaffold a session directory and print canonical paths")
+    i.add_argument("--transcript-from-now", action="store_true",
+                   help="this analysis's part of the conversation starts now, not at the "
+                        "skill's first load (a conversation about several clients)")
     i.add_argument("--name", required=True, help="short descriptive study name")
     i.add_argument("--base", default="", help="central location for the session (e.g. ~/Documents/DataAnalysis). OMIT to put results in the folder with the raw data (default).")
     i.add_argument("--date", default="", help="YYYY-MM-DD (default: today)")
     i.add_argument("--raw", nargs="*", help="raw file paths/globs; their folder is where results go by default")
     i.add_argument("--reanalysis-of", default="", help="prior session dir; nests this run under <prior>/reanalysis/")
     i.set_defaults(func=do_init)
-    fp = sub.add_parser("find-prior", help="find existing sessions covering the same raw files")
+    fp = sub.add_parser("find-prior", help="find existing sessions covering the same raw files "
+                                           "(to mention; a new session is fresh by default)")
     fp.add_argument("--base", default="", help="also scan this central location's sessions/ (optional)")
     fp.add_argument("--raw", nargs="*", required=True)
     fp.set_defaults(func=do_find_prior)

@@ -111,8 +111,40 @@ empirical-library round-trip.
   `mkdir -p <out>/quant_step2 <out>/quant_step4` before submitting. (This bit us on the
   first DDA cohort run — every first-pass array task died in ~7 s until the dirs existed.
   If you ever hand-edit or hand-run a step script, create the temp dirs first.)
-- **DDA:** put `--dda` in the `--cfg` (it is not stripped, so it flows into every step);
-  `.raw` inputs get a `.NET 8` export prefix automatically (see `ensure_dotnet8.sh`).
+- **DDA:** `estimate_params.py --acquisition DDA` puts `--dda` in the `--cfg`. It is not
+  stripped, so it flows into every step, library prediction included (proven on the nail
+  chain, 2.6.0). `run_search.py` refuses a cfg whose `--dda` disagrees with the bundle's
+  acquisition. **A DDA chain has no step 1b.** DIA-NN logs no scan-window radius in DDA mode,
+  so the probe cannot measure anything, and `probe_window.py` refuses `--dda`. Mass accuracy
+  must be pinned: `estimate_params.py` pins the SOP for a level outside DIA-NN's table, tagged
+  DEFAULT. A pre-2.9 sidecar that still plans `measure_with_diann` declines
+  (`mass_acc_dda`). `--window` stays unset (`dda_window_unset`), and steps 3 and 5 print
+  DIA-NN's `.quant`-reuse warning about automatic scan-window optimisation, as they did on
+  the nail chain. `.raw` inputs get a `.NET 8` export prefix automatically (see
+  `ensure_dotnet8.sh`).
+- **Step 5 compares the two passes.** After its report, step 5 runs `pass_comparison.py`: a
+  per-run table of precursors and protein groups, step 3's first-pass report
+  (`step3_assembly.stats.tsv`) against its own (`report.stats.tsv`), printed in the job log,
+  written to `<out>/pass_comparison.json` and to `search_provenance.json` (`pass_comparison`),
+  and reported by `audit_results.py` in AUDIT.md. A run that kept less than half its first-pass
+  precursors gets a `WARNING`. DIA-NN's README: compare the first-pass and MBR reports and use the
+  first pass if it performs better. Those counts are before protein-group FDR, so the table also
+  counts each report's rows after `run_de.R`'s q-value filter (`diann_q_columns.py`, with
+  pyarrow), and `switch_recommended_for` names only the runs where the first pass has more of
+  them. On SET28 (hair DDA) 4 of 6 runs fell by more than half. At 1% on every q-column they had
+  0 rows in both reports; with `run_de.R`'s filter (PG.Q.Value at 5%) the first pass kept
+  109–160 rows for them against 0–9, all protein groups with a run-specific q between 1% and 5%.
+  The job never fails over the comparison (SKILL.md step 7b).
+- **Array tasks have their own `--out`.** Step 2 writes to `<out>/firstpass/t<task>.parquet`,
+  step 4 to `<out>/xic/…` with XICs or `<out>/finalpass/…` without. Before, every task wrote
+  `report.parquet`, `report.stats.tsv`, `report-lib.parquet` and `report.log.txt` into `<out>`
+  itself, concurrently: a one-run report at the path the DE step reads if steps 3–5 never
+  finished. Steps 3 and 5 read only the `.quant` folders, so nothing downstream moved.
+- **`submit.sh` records before it prints.** It writes `jobs.txt` and the checkpoint straight
+  after the last `sbatch`, and every message goes through a `say()` that cannot fail with
+  SIGPIPE ignored. Under `set -euo pipefail`, `bash submit.sh | head -1` used to kill it at
+  the second echo, after all the jobs were queued but before `jobs.txt` and `RECOVERY.md`
+  existed (SET28).
 
 ## Usage
 ```
@@ -261,14 +293,68 @@ cannot read `.raw`, no radius is logged, and steps 2–5 wait on `afterok` for e
 
 Only after a radius (and a planned mass accuracy) is measured does step 1b write
 `<out>/params.resolved.cfg` — the cfg plus the measured `--window` (and `--mass-acc` /
-`--mass-acc-ms1`) — so a "resolved" cfg without them can never exist; a
-resubmitted step 1b first removes the previous run's `window.txt`, `massacc.txt`, `window.json`, resolved
-cfg and probe logs. If no radius comes back, step 1b exits non-zero with `FAILED:` (keeping
-`window.json` as the evidence) and steps 2–5 never
-start: they were submitted `afterok` on that job id, so they sit `DependencyNeverSatisfied`
-even if a fixed step 1b is resubmitted and succeeds. Cancel them and resubmit step 1b and
-steps 2–5 chained on the new ids (ids in `jobs.txt`; reuse `step1.predicted.speclib`), or
-re-run `submit.sh`, which also repeats step 1 (→ `references/watcher.md`).
+`--mass-acc-ms1`) — so a "resolved" cfg without them never exists unless the probe fell back
+(below); a resubmitted step 1b first removes the previous run's `window.txt`, `massacc.txt`,
+`window.json`, fallback record, resolved cfg and probe logs.
+
+**A probe whose own machinery failed no longer fails the chain** (`probe_attempts()`, the one
+definition, shared with the single-shot search's probe). Between 2026-09-29 17:00 and 09-30
+08:00, 62 of fran-5b's 261 step-1b jobs (24%, on 28 of 56 nodes) died in `run_probe` with
+`OSError: [Errno 116] Stale file handle` at `pending += src.read()`: the probe tailed
+`<workdir>/probe.log` on Flinders NFS through one handle held open for the whole ~20-minute
+DIA-NN run. DIA-NN itself succeeded; afterok then left 183 downstream jobs
+`DependencyNeverSatisfied`. Now:
+- the live log is on **node-local storage** (`$TMPDIR`, else `/tmp` — local ext4 and private per
+  job on HIVE) and only a copy is published to `<workdir>/probe.log`, in a `finally` every return
+  passes through; the tail also reopens on `ESTALE` at a byte offset it tracks itself, and an
+  I/O error that still gets through fails that RUN (`io_error` in `window.json`, replaced like a
+  run that logged nothing), not the probe;
+- the probe's **exit status** says why it pinned nothing (`probe_window.EXIT_*`, classified by
+  `failure_class()`, also in `window.json` `failure` / `exit_status`), and the rule is: **fall back
+  only when the probe's own machinery failed**. `EXIT_CRASH` (1, an uncaught exception) and
+  `EXIT_IO_ERROR` (7: every run that failed, failed on its own unreadable log) are **retried
+  once**, from what is left of the same `--budget` and only when at least `PROBE_RETRY_MIN_S`
+  (900 s) is left, then fall back; `EXIT_TIMED_OUT` (8: every run that failed hit `--timeout`, or
+  `--budget` ran out) falls back at once — a second attempt from the same budget would hit the
+  same limit. Attempt 1's evidence stays as `window.json.attempt1` and its logs as
+  `window_probe.attempt1/`;
+- then **`probe_fallback.py`** writes what the search runs with instead and step 1b exits 0:
+  `window.txt` = `auto` (steps 2–5 accept it only with `probe_fallback.json` beside it recording
+  a window fallback — `needs_measured()` — and pass **no** `--window` — `window_flag()` — so
+  DIA-NN chooses the radius per run, exactly what the chain normally prevents), and a planned mass accuracy at the documented level as given and the
+  other at the facility SOP (`estimate_params.SOP_MASS_ACC`, the floor a measured level gets
+  anyway), tagged DEFAULT. `params.resolved.cfg` then has no `--window`, because steps 2–5 ran
+  without one. The record is `<out>/probe_fallback.json` and `search_provenance.json`
+  `probe_fallback`, `scan_window` (`mode: fallback_auto`, `fallback: true`, `value: null`, a
+  source beginning `fallback (probe failed: <reason>)`) and `mass_acc` / `result.mass_acc`
+  (`mode: fallback_default`) — the `mode` values are stable, for FRAN
+  (→ `references/environment.md`); the Methods say the measurement failed and DIA-NN set the
+  window automatically, per run — never that it was measured (DE-LIMP rule 2) — and AUDIT.md
+  (so the report's Audit & caveats), the report's Results at a glance, the run record's Data
+  Quality Notes, `checkpoint.py status`, the Slack post and `watch_run.sh --all` carry a
+  CAUTION (`probe_fallback.caution()`). Its `reason` lists any value a run did log before the
+  probe failed (a lone measured mass accuracy included), which the fallback does not use.
+
+Everything else still **fails** step 1b — `FAILED:`, the cause named from the exit status,
+`window.json` kept as the evidence — never retried or fallen back past, because no fallback can
+fix it and one would hide it (dda-review, 2026-09-30):
+- `EXIT_REFUSED` (3): a mass accuracy refused as implausible — band or spread over the runs that
+  logged everything, or a value outside the band logged by **any** run, complete or not (a run
+  that logged 60 ppm and no radius used to make the probe "measure nothing" and fall back to
+  20 ppm). It normally means the wrong FASTA, species or calibration;
+- `EXIT_ENVIRONMENT` (4): DIA-NN could not start, could not read `.raw` (no .NET 8), or will not
+  optimise under these flags — every step 2–5 task would fail on the same thing, later and
+  noisier;
+- `EXIT_USAGE` (2, argparse) and `EXIT_CONFIG` (5): the probe's own arguments or inputs — a bug in
+  what generated them, which a recorded "fallback" would hide;
+- `EXIT_NOT_MEASURED` (6): DIA-NN **finished** runs without logging it — the data answering (a
+  wrong FASTA or library, a >100 ppm miscalibration, failed injections) — or too few runs logged
+  it for that reason, or no run could be probed. One such run among the failures is enough;
+- a signal (≥ 128), or a fallback that could not be written. Steps 2–5 then never start: they were submitted `afterok`
+on that job id, so they sit `DependencyNeverSatisfied` even if a fixed step 1b is resubmitted
+and succeeds. Cancel them and resubmit step 1b and steps 2–5 chained on the new ids (ids in
+`jobs.txt`; reuse `step1.predicted.speclib`), or re-run `submit.sh`, which also repeats step 1
+(→ `references/watcher.md`).
 `search_provenance.json` records the file as `resolved_params_file` with
 `resolved_params_produced: "runtime"` (and `scan_window` saying it is measured by step 1b,
 with `evidence_file` pointing at `window.json` and `probe_rule` stating the rule), because
@@ -414,7 +500,7 @@ Why these rules, measured on HIVE:
     environment`), no `window.txt`, no resolved cfg, no traceback.
 
 **Each probe gets its own `--temp` and `--out`** under `<out>/window_probe/probe<N>_<run>/`
-(with its `probe.log`), placed before `--threads` so the search's flags stay the tail of
+(with a copy of its `probe.log`; the live one is node-local, above), placed before `--threads` so the search's flags stay the tail of
 DIA-NN's argv, as in steps 2–5. Without them a probe that never logs a radius writes its
 report into `<out>` and, if the search completes, its `.quant` next to the raw file.
 
@@ -436,7 +522,8 @@ would kill the job. Three probes at the full 3600 s still fit.
 **Stopping DIA-NN means all of it.** `--diann` is not always the engine: without a native
 build `acquire_tools.sh` records `apptainer exec --bind /quobyte:/quobyte <sif>
 /diann-*/diann-linux`, and sites wrap binaries in scripts. DIA-NN runs in its own process
-group, writes to `probe.log` rather than a pipe a grandchild could hold open, and every stop
+group, writes to its (node-local) `probe.log` rather than a pipe a grandchild could hold
+open, and every stop
 (radius found: SIGTERM then SIGKILL after 30 s; timeout, budget, or SIGTERM/SIGINT/SIGHUP to
 the probe: SIGKILL) goes to the whole group. On HIVE (apptainer 1.5.3, srun job 23521026) with
 `--diann "apptainer exec … bash -c 'sleep 40; echo Scan window radius set to 9'"`: a 5 s
@@ -546,10 +633,14 @@ is never floored.
 A probe **counts only when its run logged everything asked** — the radius and the mass accuracy.
 A run that did not is replaced by the next run nearest the median, exactly as a run with no
 radius is, and what it did log is recorded in `window.json` but never pinned: otherwise the radius
-and the mass accuracy would describe different sets of runs. If no run answers (3 failures, the
-budget, or no runs left), step 1b fails with `FAILED: step 1b measured no scan-window radius and
-mass accuracy`, keeps `window.json`, and leaves no `window.txt`, `massacc.txt` or
-`params.resolved.cfg`; the earlier ones are deleted before the probe starts. The generator's
+and the mass accuracy would describe different sets of runs. If no run answers, step 1b fails
+with `FAILED: step 1b measured no scan-window radius and mass accuracy` when DIA-NN finished the
+runs without logging it (3 failures), and falls back (above) only when the probe's own
+machinery failed: the documented MS1 as given, MS2 at the SOP tagged DEFAULT, the window left to
+DIA-NN, `window.json` kept, and `mass_acc` / `result.mass_acc` replaced by the fallback's record
+(`mode: fallback_default`, `measured: false`, `fallback: true`). The earlier `window.txt`,
+`massacc.txt` and `params.resolved.cfg` are deleted before the probe starts, so neither path
+inherits them. The generator's
 `mass_acc` record — `result.mass_acc` in `search_provenance.json` — says `measured: true`, with
 `value_file` (`massacc.txt`), `evidence_file` (`window.json`) and the documented level, instead of
 the record for an omitted flag ("not in the cfg (DIA-NN calibrates it itself)").
@@ -565,9 +656,12 @@ what the runs said is checked for plausibility before it is pinned for the cohor
 | agreement | per-run spread ≤ **50%** of the median (`MASS_ACC_MAX_SPREAD`) | the widest real disagreement measured here: the same three runs gave MS2 14/17/14 with the window auto (21%) and 12/17/14 with `--window 7` (36%), both reproducible. 35% would refuse the cohort this branch was validated on |
 | runs | at least **2** runs logged everything (`MASS_ACC_MIN_RUNS`) | one run is DIA-NN's own first-run auto mode — "use this mode for preliminary analyses only" — which measuring representative runs exists to replace, and a lone value agrees with itself |
 
-Failing any of them is a **probe failure**, handled exactly like a run that logged nothing:
-nothing reaches the cfg or `massacc.txt`, `window.json` keeps every per-run value with the reason
-under `mass_acc_refused`, the exit status is non-zero, and step 1b fails. The band is a
+Failing the band or the agreement check is a **refusal**: nothing reaches the cfg or
+`massacc.txt`, `window.json` keeps every per-run value with the reason under
+`mass_acc_refused`, the probe exits `EXIT_REFUSED` (3), and step 1b fails — never retried,
+never bypassed by the fallback. The band applies to what **every** run logged, complete or not,
+before a failure is classified (`implausible_logged()`). Too few runs is not a refusal: it fails
+or falls back by why the other runs failed (`failure_class()`). The band is a
 plausibility check and **not** a recommendation — the measured 14, the pilot's 20 and DIA-NN's own
 25 for a 15k MS2 are all inside it, so it leaves the open question below exactly where it was.
 Steps 2–5 check the band again on `massacc.txt` itself: `MEASURED_FILE_RE` checks only the
@@ -596,7 +690,8 @@ nothing when the file is missing, and DIA-NN then optimises mass accuracy per fi
 writes a `.quant`, so `must_exist` passes. Step 1b deletes the file before probing, and
 `references/watcher.md` resubmits the downstream steps of a stalled chain, so this is reachable
 (review reproduction: `step2_firstpass.sbatch` after a failed step 1b ran DIA-NN with no
-mass-accuracy flag). Each of steps 2–5 now checks that `window.txt` holds a positive integer and
+mass-accuracy flag). Each of steps 2–5 now checks that `window.txt` holds a positive integer (or `auto`, the
+fallback) and
 `massacc.txt` holds the two flags before anything else, and names step 1b when either does not.
 (Steps 2–5 of the *same* submission are `afterok` on a failed step 1b and never start; this is
 for the resubmission, which must run step 1b again before them.)
@@ -718,7 +813,11 @@ arguments step 1b uses (`--measure mass-acc`, the documented level as `--ms1-ppm
 `<out>/massacc.txt` and `<out>/mass_acc.json` (the evidence), then moves `<out>/params.resolved.cfg`
 into place from a `.tmp` only once the value is measured; `search_provenance.json` records it as
 `resolved_params_file` with `resolved_params_produced: "runtime"`, and `result.mass_acc` as
-measured. The search refuses to run without a valid `massacc.txt`. The window is left as before (DIA-NN infers it in the search). With
+measured. The search refuses to run without a valid `massacc.txt`. A probe that measures nothing
+is retried once and then falls back exactly as step 1b does (`probe_attempts()`: documented level
+plus SOP, tagged DEFAULT, `<out>/probe_fallback.json`, and in `search_provenance.json` — written by
+the job on the `--sbatch` routes, at the end on the inline one); a refused one still stops the
+search before DIA-NN runs. The window is left as before (DIA-NN infers it in the search). With
 `--one-step` there is no library before the search to measure against: `run_search.py` says so,
 records `mass_acc.measured: false`, and DIA-NN optimises on the first run. Two other cfg shapes
 reach the same note and are named separately, because their fixes differ: a cfg that searches an
@@ -760,7 +859,7 @@ DIA-NN 2.7.0 (HIVE, review srun 23512013): a re-run with no .NET logged `ERROR: 
 | step | deletes first | asserts |
 |---|---|---|
 | 1 | `step1.predicted.speclib` | the predicted spectral library exists and is non-empty |
-| 1b (window measured) | `window.txt`, `window.json`, `params.resolved.cfg` and its `.tmp` | a positive-integer radius was measured, and `window.txt` and `params.resolved.cfg` are non-empty regular files |
+| 1b (window measured) | `window.txt`, `window.json`, `params.resolved.cfg` and its `.tmp` (and, when it fell back, `probe_fallback.json`) | a positive-integer radius was measured -- or the probe measured nothing twice and fell back to `auto` -- and `window.txt` and `params.resolved.cfg` are non-empty regular files |
 | 2 | this task's `quant_step2/<run>.quant` | this task's `.quant` was written to `quant_step2/` |
 | 3 | `empirical.parquet` | the empirical spectral library exists |
 | 4 | this task's `quant_step4/<run>.quant` (before the no-step-2-quant skip) | this task's `.quant` was written to `quant_step4/` |

@@ -66,6 +66,30 @@ Bounded: --timeout (45 s: the job-end hook allows 60), no directory walks, a per
 per-record copy budget. Stdlib only. Nothing named like a credential and no text that looks like
 one is ever copied; raw data and per-run .quant files never are -- the record says where they are.
 """
+import os
+import sys
+
+# ---- where this file is (begin: kept identical in notify_slack.py and record_run.py) --------
+# Piped to a remote python (`python3 - relay`, `python3 - list`), __file__ is "<stdin>", not a
+# file, and Python puts the current directory -- on HIVE, the home folder -- first on sys.path.
+# A stray ~/core_submission.py (or ~/json.py) would then be imported as a sibling. So HERE is
+# this file's folder only when __file__ is a real file. Otherwise there is no HERE, the current
+# directory comes off sys.path before anything else is imported, and every sibling import
+# degrades as it does when the sibling is missing.
+_FILE = globals().get("__file__")
+_FILE = _FILE if _FILE and not _FILE.startswith("<") and os.path.isfile(_FILE) else None
+HERE = os.path.dirname(os.path.abspath(_FILE)) if _FILE else None
+if HERE:
+    if HERE not in sys.path:
+        sys.path.insert(0, HERE)
+else:
+    try:
+        _CWD = os.getcwd()
+    except OSError:
+        _CWD = None
+    sys.path[:] = [p for p in sys.path if p not in ("", ".", _CWD)]
+# ---- where this file is (end) -----------------------------------------------------------------
+
 import argparse
 import copy
 import csv
@@ -75,7 +99,6 @@ import glob
 import hashlib
 import io
 import json
-import os
 import random
 import re
 import shlex
@@ -85,19 +108,17 @@ import socket
 import statistics
 import struct
 import subprocess
-import sys
 import tempfile
 import time
 import zipfile
 
-# Piped to a remote python (`python3 - list ...`) there is no __file__: the sibling modules are
-# then simply unavailable, and every caller degrades to "not parsed here" instead of failing.
-_FILE = globals().get("__file__")
-HERE = os.path.dirname(os.path.abspath(_FILE)) if _FILE else os.getcwd()
-if _FILE and HERE not in sys.path:
-    sys.path.insert(0, HERE)
-
-SCHEMA_VERSION = 2
+# run_record.json's schema, an integer: bumped whenever a key is renamed or its meaning changes,
+# so a reader of records across versions (the registry keeps every one) can tell the shapes apart.
+#   2  the 2.7.0 registry
+#   3  search.cont_quant_exclude (DIA-NN's --cont-quant-exclude as the run recorded it) added;
+#      fasta.cont_quant_exclude renamed fasta.cont_quant_exclude_recommended -- it was the FASTA
+#      sidecar's recommendation, never a record that the flag ran (skill 2.9)
+SCHEMA_VERSION = 3
 GROUP_ROOT = "/quobyte/proteomics-grp"
 MB, GB = 1 << 20, 1 << 30
 OFF = ("off", "0", "no", "false")
@@ -152,9 +173,14 @@ try:
 except ImportError:
     contains_secret = None
 # CoreOmics identifiers (DataAnalysis CLAUDE.md, "Every session links to its CoreOmics
-# submission"): PROT_#### plus a 12-hex id. The same forms core_submission.py accepts.
-HEX_ID_RE = re.compile(r"^[0-9a-f]{12}$")
-PROT_RE = re.compile(r"^#?(?:prot)?[\s_\-]*0*(\d{1,5})$", re.I)
+# submission"): PROT_#### plus a 12-hex id, read by core_submission's one definition. The copy
+# of the PROT pattern kept here used \d, so it still read Arabic-Indic and fullwidth digits as
+# a PROT number after core_submission had stopped (review, 2.9). Piped alone to a remote python
+# (`list`, which reads no PROT) there is no sibling to import: find_prot then reads none.
+try:
+    from core_submission import HEX_ID as HEX_ID_RE, normalize_submission  # noqa: E402
+except ImportError:
+    HEX_ID_RE = normalize_submission = None
 UPLOAD_DIR = ".proteomics-pipeline/record_run_upload"
 # The shared files' lock. NOT flock: measured 2026-09-24 on /quobyte with two SLURM jobs on
 # different HIVE nodes writing 400 times each to one file, flock lost 578 of 800 updates -- the
@@ -667,7 +693,7 @@ def csv_row(values):
 
 # ---------------------------------------------------------------------------------- routing
 def hive_exec_path():
-    return os.environ.get("HIVE_EXEC") or os.path.join(HERE, "hive_exec.sh")
+    return os.environ.get("HIVE_EXEC") or (os.path.join(HERE, "hive_exec.sh") if HERE else "")
 
 
 def hive_login():
@@ -734,19 +760,21 @@ def not_recorded(reason, detail, **extra):
 # ------------------------------------------------------------------------ CoreOmics (PROT)
 def parse_prot(values):
     """--prot values -> {"prot": "PROT_0807", "id": "<12 hex>"} (either may be None), or None.
-    Accepts PROT_0807, prot-807, 0807, 807, #807 and a 12-hex CoreOmics id, several per value."""
+    Several per value, each read by core_submission.normalize_submission: PROT_0807, prot-807,
+    0807, 807, #807 or a 12-hex CoreOmics id (ASCII digits only)."""
     prot = hexid = None
     for v in values or []:
         for tok in re.split(r"[\s,;/:()]+", str(v)):
-            t = tok.strip()
-            if not t:
+            if not tok.strip():
                 continue
-            if HEX_ID_RE.match(t.lower()):
-                hexid = t.lower()
+            try:
+                kind, val = normalize_submission(tok)
+            except ValueError:
+                continue
+            if kind == "id":
+                hexid = val
             else:
-                m = PROT_RE.match(t)
-                if m and int(m.group(1)) > 0:
-                    prot = "PROT_%04d" % int(m.group(1))
+                prot = val
     return {"prot": prot, "id": hexid} if (prot or hexid) else None
 
 
@@ -802,6 +830,8 @@ def find_prot(explicit, session, out):
     """{"prot", "id", "source"} or None. --prot first; then the metadata the session keeps; then
     a `.core_submission.json` in a folder above the session, but ONLY when that receipt names this
     session or search out dir -- never a guess from whatever receipt happens to sit above."""
+    if normalize_submission is None:          # no core_submission.py beside this copy
+        return None
     p = parse_prot(explicit)
     if p:
         return dict(p, source="--prot")
@@ -1049,6 +1079,10 @@ def parameters(out, prov, params_file, manifest_path, rationale):
     except OSError:
         pass
     p["scan_window"] = prov.get("scan_window")
+    # the stable mode (diann_parallel.MASS_ACC_MODES), with scan_window's
+    p["mass_acc"] = prov.get("mass_acc") or res.get("mass_acc")
+    # read by probe_fallback.fallback_modes(), with the modes (measurement_caution)
+    p["probe_fallback"] = prov.get("probe_fallback")
     return p
 
 
@@ -1057,8 +1091,7 @@ def _database_state(merged):
     definition; for an identity-only database, the measured near-identical set for this
     organism, fetch_fasta.near_identical_measured(), or None). (None, None) when fetch_fasta.py
     cannot be loaded here (never fatal)."""
-    try:
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    try:                                                # HERE is on sys.path (or no sibling is)
         from fetch_fasta import sidecar_state, near_identical_measured
     except Exception:                                   # noqa: BLE001
         return None, None
@@ -1069,7 +1102,6 @@ def _database_state(merged):
 def _rebuild_advice():
     """fetch_fasta.REBUILD_ADVICE -- the one wording of the fix for an older database."""
     try:
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from fetch_fasta import REBUILD_ADVICE
         return REBUILD_ADVICE
     except Exception:                                   # noqa: BLE001
@@ -1100,11 +1132,46 @@ def fasta_facts(meta_path):
             "contaminant_target_rule": g("contaminant_target_rule"),
             "contaminant_source": g("contaminant_source"),
             "contaminant_citation": g("contaminant_citation"),
-            "cont_quant_exclude": g("diann_cont_quant_exclude"),
+            # the sidecar's RECOMMENDATION for a DIA-NN search -- never a record that the flag ran
+            # (that is search.cont_quant_exclude, read from the run itself)
+            "cont_quant_exclude_recommended": g("diann_cont_quant_exclude"),
             "digestion_enzymes_used": g("digestion_enzymes_used"),
             "min_unique_peptides": g("min_unique_peptides"),
             **dict(zip(("database_state", "near_identical_measured"), _database_state(merged))),
             "warnings": g("warnings") or []}
+
+
+def cont_quant_exclude_facts(engine, report, prov):
+    """Did DIA-NN run with --cont-quant-exclude, as the run itself records it? Asked of
+    make_methods.diann_cont_quant_exclude, THE reader of that flag (the DIA-NN log beside the
+    report, then the parameters a DIA-NN search ran with). The run record used to say "excluded
+    from quantification with --cont-quant-exclude Cont_" from the FASTA sidecar's recommendation,
+    for any engine and whether or not the flag ran. -> {value, source, recorded: True}; for a
+    DIA-NN search with no record of it {recorded: False, why}; None for another engine that ran no
+    DIA-NN (nothing to say)."""
+    try:
+        from make_methods import diann_cont_quant_exclude
+        rec = diann_cont_quant_exclude(report, prov or None)
+    except Exception as e:          # noqa: BLE001 -- reported in the record, never raised
+        rec, why = None, f"make_methods.py could not read it ({type(e).__name__}: {e})"
+    else:
+        why = "no DIA-NN command line beside the report and no DIA-NN parameters file was found"
+    if rec is not None:
+        return dict(rec, recorded=True)
+    return {"recorded": False, "why": why} if engine == "diann" else None
+
+
+def cont_quant_exclude_clause(cq):
+    """The run record's words for cont_quant_exclude_facts(), or "" when there is nothing to say."""
+    if not cq:
+        return ""
+    if not cq.get("recorded"):
+        return f"; whether DIA-NN's `--cont-quant-exclude` was set: not recorded ({cq.get('why')})"
+    if cq.get("value"):
+        return (f"; excluded from DIA-NN's quantification with `--cont-quant-exclude "
+                f"{cq['value']}` (per {cq.get('source')})")
+    return (f"; DIA-NN was given no `--cont-quant-exclude` (per {cq.get('source')}), so they "
+            f"took part in its quantification")
 
 
 def first_existing(paths):
@@ -1426,6 +1493,7 @@ def plan_search(plan, out, a, deadline):
         + sorted(glob.glob(os.path.join(os.path.dirname(os.path.dirname(out)), "input",
                                         "*.fasta.meta.json"))))
     s["fasta"] = fasta_facts(meta_path) if meta_path else None
+    s["cont_quant_exclude"] = cont_quant_exclude_facts(engine, report, prov)
     if not s["fasta"]:
         s["warnings"].append("no FASTA sidecar (<fasta>.meta.json) was found -- the organism "
                              "and database are not recorded")
@@ -1458,6 +1526,20 @@ def plan_search(plan, out, a, deadline):
               "submit.sh", "window.json", "window.txt", "massacc.txt", "job_input_files.txt",
               "parallel_input_files.txt", "file_list.txt", "results.json", "fragpipe.workflow"):
         add_copy(plan, os.path.join(out, f), f"output/search/{f}", "search")
+    # probe_fallback.json only when THIS search fell back, by its provenance's stable modes
+    # (probe_fallback.fallback_modes, the one reader): a record an earlier search left in the
+    # same folder is not this search's (dda-review N1)
+    try:
+        from probe_fallback import fallback_modes, WINDOW_FALLBACK, MASS_ACC_FALLBACK
+        fell_back = bool({WINDOW_FALLBACK, MASS_ACC_FALLBACK} & set(fallback_modes(prov)))
+    except Exception as e:                              # noqa: BLE001 -- said, never dropped
+        fell_back = False
+        s["warnings"].append(f"whether the search fell back could not be read here "
+                             f"(probe_fallback.py: {type(e).__name__}: {e}); probe_fallback.json "
+                             "not copied")
+    if fell_back:
+        add_copy(plan, os.path.join(out, "probe_fallback.json"),
+                 "output/search/probe_fallback.json", "search")
     for f in listdir(out):
         if f.endswith((".log.txt", ".stats.tsv", ".cfg", ".rationale.json", ".fp-manifest",
                        ".toml")) or re.match(r"log_.*\.txt$", f):
@@ -1596,6 +1678,10 @@ def plan_analysis(plan, session, a, zip_cap):
           "data_submission": dep if os.path.isdir(dep) else None,
           "how_to_submit": first_existing([os.path.join(dep, "HOW_TO_SUBMIT.md")]),
           "reproduce_md": first_existing([os.path.join(out_d, "reproducibility", "REPRODUCE.md")]),
+          # the analysis conversation and decisions log (save_transcript.py, log_decision.py):
+          # POINTED TO, never copied -- they stay Core-internal in the session
+          "conversation": _conversation(session),
+          "decisions": first_existing([os.path.join(session, "logs", "decisions.md")]),
           "audit": [{"check": f.get("check"), "status": f.get("status"),
                      "message": f.get("message")} for f in (audit.get("findings") or [])
                     if isinstance(f, dict) and f.get("status") in ("WARN", "FAIL")],
@@ -1824,6 +1910,22 @@ def dq(severity, what, where=None, why=None, cause=None, fix=None, source=None):
             "fix": fix, "source": source}
 
 
+def measurement_caution(params):
+    """probe_fallback.provenance_caution() for a search that fell back instead of measuring its
+    scan window or mass accuracy (the stable modes in its provenance), or None."""
+    sub = {k: params.get(k) for k in ("scan_window", "mass_acc", "probe_fallback")}
+    try:
+        from probe_fallback import provenance_caution
+    except Exception as e:                              # noqa: BLE001 -- said, never dropped
+        if not sub["probe_fallback"] and not any(
+                str((x or {}).get("mode") if isinstance(x, dict) else "").startswith("fallback")
+                for x in (sub["scan_window"], sub["mass_acc"])):
+            return None
+        return ("CAUTION: the search may have fallen back instead of measuring its scan window "
+                f"or mass accuracy [probe_fallback.py not loadable here: {type(e).__name__}]")
+    return provenance_caution(sub)
+
+
 def data_quality_notes(rec):
     """The anomalies the skill already found, in the DataAnalysis five-part form -- what, where,
     why it matters, likely cause, suggested fix -- where the source says enough to fill them."""
@@ -1848,6 +1950,12 @@ def data_quality_notes(rec):
                         "out of the inputs", res.get("stats_file")))
     det = s.get("detection") or {}
     params = s.get("parameters") or {}
+    fell_back = measurement_caution(params)
+    # AUDIT.md says it too (search_measurement), and its findings are added below: once is enough
+    if fell_back and not any(f.get("check") == "search_measurement" for f in an.get("audit") or []):
+        notes.append(dq("WARNING", fell_back,
+                        os.path.join(s.get("out_dir") or "", "probe_fallback.json"),
+                        source="search_provenance.json scan_window.mode / mass_acc.mode"))
     oru = det.get("orbitrap_resolution_unknown")
     if oru or (params.get("instrument_class") == "orbitrap_generic"):
         files = (oru or {}).get("files") if isinstance(oru, dict) else None
@@ -1892,8 +2000,9 @@ def data_quality_notes(rec):
                                 f"matched a target protein (identical, or too few peptides of "
                                 f"their own) and were dropped",
                         fa.get("meta_file"),
-                        "left in, they take the target's peptides and --cont-quant-exclude "
-                        "removes them from quant", "the universal contaminant set holds bovine/"
+                        "left in, they take the target's peptides and the contaminant filters "
+                        "(DIA-NN's --cont-quant-exclude, run_de.R's) remove them from quant",
+                        "the universal contaminant set holds bovine/"
                         "human/mouse proteins identical to real ones",
                         None, "FASTA sidecar"))
     state = fa.get("database_state") if fa else None
@@ -1905,9 +2014,10 @@ def data_quality_notes(rec):
             "WARNING", "legacy database: built before contaminants identical to a target protein "
                        "were removed", fa.get("meta_file"),
             "a contaminant entry identical to a real protein (bovine ACTB = human ACTB, ...) takes "
-            "its peptides; --cont-quant-exclude Cont_ then drops them from quant and "
-            "normalisation, and run_de.R removes Cont_ groups from the DE, so real proteins go "
-            "missing without an error",
+            "its peptides, so the search reports it only as the Cont_ group (DIA-NN's "
+            "--cont-quant-exclude Cont_ also drops it from quant and normalisation), and "
+            "run_de.R removes Cont_ groups from the DE, so real proteins go missing without an "
+            "error",
             "the FASTA sidecar has no contaminant_target_rule: fetch_fasta.py predates the check",
             _rebuild_advice() + " AUDIT.md names the proteins.", "FASTA sidecar"))
     elif state == "identity_only":
@@ -2018,17 +2128,23 @@ def render_parameters(s):
                              ("ms1_tol", "MS1 mass accuracy", "--mass-acc-ms1")):
         if rec.get(key):
             t = rec[key]
-            L.append(_row(label, f"{fmt_n(t['value'])} {t.get('unit') or ''}".strip(),
+            # make_methods.search_record marks a level pinned at the SOP (rule 2)
+            L.append(_row(label, f"{fmt_n(t['value'])} {t.get('unit') or ''}".strip()
+                          + (f" ({t['default']})" if t.get("default") else ""),
                           "; ".join(x for x in (t.get("source"), ma.get("source")) if x)))
         elif rec:
             L.append(_row(label, "not fixed -- the engine optimised it per run",
                           "; ".join(x for x in (rec.get("tol_note"),
                                                 why.get(flag) or ma.get("source")) if x)))
+    # a pre-search measurement that failed and fell back (make_methods.probe_fallback_record)
+    fb = rec.get("probe_fallback") or {}
     if ma.get("massacc_txt"):
-        L.append(_row("Mass accuracy the chain pinned", f"`{ma['massacc_txt']}`",
-                      "massacc.txt (measured by step 1b)"))
+        L.append(_row("Mass accuracy the search pinned", f"`{ma['massacc_txt']}`",
+                      f"massacc.txt -- FALLBACK, NOT measured: {fb.get('reason')}"
+                      if fb.get("mass_acc") else "massacc.txt (measured before the search)"))
     if ma.get("measured"):
-        L.append(_row("Mass accuracy measured", f"`{json.dumps(ma['measured'])[:160]}`",
+        L.append(_row("Mass accuracy record (FALLBACK, not measured)" if fb.get("mass_acc") else
+                      "Mass accuracy measured", f"`{json.dumps(ma['measured'])[:160]}`",
                       "search_provenance.json result.mass_acc"))
     lm = s.get("engine_log_mass_accuracy") or {}
     o2, r1 = lm.get("optimised_ms2_ppm") or [], lm.get("recommended_ms1_ppm") or []
@@ -2050,7 +2166,8 @@ def render_parameters(s):
     sw = p.get("scan_window")
     if isinstance(sw, dict):
         L.append(_row("Scan window", fmt_n(sw.get("value")) if sw.get("value") is not None else
-                      "not pinned", (sw.get("source") or "")[:220]))
+                      "auto -- DIA-NN chose it per run (FALLBACK, not measured)"
+                      if fb.get("window") else "not pinned", (sw.get("source") or "")[:220]))
     if rec.get("precursor_fdr"):
         L.append(_row("FDR", f"{fmt_n(rec['precursor_fdr']['value'])} "
                              f"({rec['precursor_fdr'].get('level') or 'precursor'})",
@@ -2074,7 +2191,7 @@ def render_parameters(s):
     if rec.get("library"):
         L.append(_row("Library", rec["library"]["value"], src(rec["library"])))
     if rec.get("mbr"):
-        L.append(_row("Match-between-runs", "on", src(rec["mbr"])))
+        L.append(_row("Match-between-runs", rec["mbr"].get("label") or "on", src(rec["mbr"])))
     if len(L) == 2:
         L.append(_row("(none parsed)", p.get("record_error") or "no parameters file was found",
                       ""))
@@ -2130,8 +2247,7 @@ def render_search(s):
               f"- **Contaminants:** {fmt_n(nc)} ({fa.get('contaminant_set') or 'none'})"
               + (f", {fa['n_contaminants_dropped_as_target']} dropped as matching a target "
                  f"protein" if fa.get("n_contaminants_dropped_as_target") else "")
-              + (f"; excluded from quantification with `--cont-quant-exclude "
-                 f"{fa['cont_quant_exclude']}`" if fa.get("cont_quant_exclude") else "")
+              + cont_quant_exclude_clause(s.get("cont_quant_exclude"))
               + (f"; digestion enzymes kept as contaminants (`fetch_fasta.py --enzyme`): "
                  f"{', '.join(fa['digestion_enzymes_used'])}"
                  if fa.get("digestion_enzymes_used") else ""),
@@ -2189,6 +2305,15 @@ def render_search(s):
     return L
 
 
+def _conversation(session):
+    """logs/conversation/ in the session: where it is and how many conversations -- or None."""
+    d = os.path.join(session, "logs", "conversation")
+    if not os.path.isdir(d):
+        return None
+    return {"dir": d, "n": len(glob.glob(os.path.join(d, "*.jsonl"))),
+            "readable": first_existing([os.path.join(d, "conversation.md")])}
+
+
 def render_analysis(rec, an):
     de = an.get("de") or {}
     L = ["", f"## Analysis -- finalized {an.get('finalized') or '?'}",
@@ -2214,6 +2339,13 @@ def render_analysis(rec, an):
                  + (" (start with HOW_TO_SUBMIT.md)" if an.get("how_to_submit") else ""))
     if an.get("reproduce_md"):
         L.append(f"- **Reproduce:** `{an['reproduce_md']}` (copy: `scripts/REPRODUCE.md`)")
+    cv = an.get("conversation") or {}
+    if cv.get("dir"):
+        L.append(f"- **The analysis conversation (Core-internal, not copied):** `{cv['dir']}` -- "
+                 f"{cv.get('n', 0)} conversation(s), redacted"
+                 + (f"; readable: `{cv['readable']}`" if cv.get("readable") else ""))
+    if an.get("decisions"):
+        L.append(f"- **Decisions log:** `{an['decisions']}`")
     m = an.get("manifest") or {}
     if m:
         L.append(f"- **MANIFEST.txt:** {m.get('n_ok', 0)} part(s) OK, "
@@ -2935,12 +3067,13 @@ def ship(plan, a, deadline):
     try:
         sd = os.path.join(stage, "scripts")
         os.makedirs(sd)
-        for f in glob.glob(os.path.join(HERE, "*.py")) + glob.glob(os.path.join(HERE, "*.sh")):
-            shutil.copy2(f, sd)
-        pj = os.path.join(HERE, "..", ".claude-plugin", "plugin.json")
-        if os.path.isfile(pj):
-            os.makedirs(os.path.join(stage, ".claude-plugin"))
-            shutil.copy2(pj, os.path.join(stage, ".claude-plugin"))
+        if HERE:        # not a file (piped in): no scripts to stage, and HIVE's merge says so
+            for f in glob.glob(os.path.join(HERE, "*.py")) + glob.glob(os.path.join(HERE, "*.sh")):
+                shutil.copy2(f, sd)
+            pj = os.path.join(HERE, "..", ".claude-plugin", "plugin.json")
+            if os.path.isfile(pj):
+                os.makedirs(os.path.join(stage, ".claude-plugin"))
+                shutil.copy2(pj, os.path.join(stage, ".claude-plugin"))
         for c in list(plan["copies"]):
             try:
                 copy_file(c["src"], os.path.join(stage, "files", c["rel"]), stage_deadline)

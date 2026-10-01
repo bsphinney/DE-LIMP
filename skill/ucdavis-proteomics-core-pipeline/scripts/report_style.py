@@ -177,7 +177,12 @@ footer.foot{max-width:78rem;margin:0 auto;padding:0 1rem 2.5rem;color:var(--mute
   thead th{position:static}
   .callout,.figmissing,.tile.key,tbody tr:nth-child(even) td{-webkit-print-color-adjust:exact;print-color-adjust:exact}
   a{color:#000;text-decoration:none}
+  p.feedback a::after{content:"\A" attr(href);white-space:pre}
+  p.star a::after{content:" (" attr(href) ")";white-space:nowrap}
 }
+p.feedback,p.star{margin:2rem 0 0;padding-top:.8rem;border-top:1px solid var(--line)}
+p.star + p.feedback{margin-top:.6rem;padding-top:0;border-top:0}
+p.star .name{white-space:nowrap}
 """
 
 

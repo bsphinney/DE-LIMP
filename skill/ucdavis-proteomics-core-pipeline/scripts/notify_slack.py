@@ -42,33 +42,52 @@ this same script on HIVE through hive_exec.sh (`relay`), which posts from there.
                                       # THE JOB-END HOOK: fran_deposit.py stage (success
                                       # of the last job) -> record_run.py -> Slack
     notify_slack.py analysis-done --session <session dir> [--zip <session>.zip]
+    notify_slack.py note --event sent|reply --sender U --to U|all --subject S [--reply T]
+                                      # notes.py's one line for a note from the Core
     notify_slack.py --test            # one short test message; prints sent / not sent
     any of them + --dry-run           # print the JSON payload, send nothing
 Setup, permissions and what gets posted: references/notifications.md.
 """
+import os
+import sys
+
+# ---- where this file is (begin: kept identical in notify_slack.py and record_run.py) --------
+# Piped to a remote python (`python3 - relay`, `python3 - list`), __file__ is "<stdin>", not a
+# file, and Python puts the current directory -- on HIVE, the home folder -- first on sys.path.
+# A stray ~/core_submission.py (or ~/json.py) would then be imported as a sibling. So HERE is
+# this file's folder only when __file__ is a real file. Otherwise there is no HERE, the current
+# directory comes off sys.path before anything else is imported, and every sibling import
+# degrades as it does when the sibling is missing.
+_FILE = globals().get("__file__")
+_FILE = _FILE if _FILE and not _FILE.startswith("<") and os.path.isfile(_FILE) else None
+HERE = os.path.dirname(os.path.abspath(_FILE)) if _FILE else None
+if HERE:
+    if HERE not in sys.path:
+        sys.path.insert(0, HERE)
+else:
+    try:
+        _CWD = os.getcwd()
+    except OSError:
+        _CWD = None
+    sys.path[:] = [p for p in sys.path if p not in ("", ".", _CWD)]
+# ---- where this file is (end) -----------------------------------------------------------------
+
 import argparse
 import base64
 import datetime
 import getpass
 import glob
 import json
-import os
 import re
 import shlex
 import shutil
 import socket
 import statistics
 import subprocess
-import sys
 import threading
 import urllib.error
 import urllib.parse
 import urllib.request
-
-# `python3 - relay` (the HIVE side of a relay) reads this file from stdin and has no __file__.
-HERE = (os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else None)
-if HERE and HERE not in sys.path:
-    sys.path.insert(0, HERE)
 
 WEBHOOK_ENV = "SKILL_SLACK_WEBHOOK"
 OPT_OUT_ENV = "SKILL_SLACK"
@@ -134,7 +153,8 @@ REDACTED = "[redacted]"
 _SECRET_PATTERNS = [
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)"),
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY[\s\S]*"),       # a header with no dashes after it
-    re.compile(r"ghp_[A-Za-z0-9]{20,}"),
+    re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),                 # GitHub: personal, OAuth, user,
+                                                                # server, refresh tokens
     re.compile(r"github_pat_[A-Za-z0-9_]+"),
     re.compile(r"hf_[A-Za-z0-9]{20,}"),
     re.compile(r"(?i)authorization:\s*(?:token|bearer)\s+\S+"),
@@ -507,6 +527,8 @@ def search_facts(out, exit_code=None, status=None, signal=None, started=None,
         "since_setup_seconds": _age_s(prov_path),
         "since": _mtime_date(prov_path) or datetime.date.today().isoformat(),
         "stats": _run_stats(report) if st == "ok" and final else None,
+        # a DIA-NN search that fell back instead of measuring (probe_fallback.caution_for)
+        "caution": _fallback_caution(out),
         "location": out,
         "log": _find_log(out),
         "job": {k: os.environ.get(v) for k, v in (("id", "SLURM_JOB_ID"),
@@ -517,6 +539,17 @@ def search_facts(out, exit_code=None, status=None, signal=None, started=None,
         "skill_version": _skill_version(),
     }
     return f
+
+
+def _fallback_caution(out):
+    """probe_fallback.caution_for(out): the CAUTION for a search that fell back instead of
+    measuring its scan window / mass accuracy, or None. A failure to check is said, not dropped."""
+    try:
+        import probe_fallback
+        return probe_fallback.caution_for(out)
+    except Exception as e:                              # noqa: BLE001
+        return (f"could not check for a probe fallback ({type(e).__name__}: {e}); look for "
+                "probe_fallback.json in the search folder")
 
 
 def _find_log(out):
@@ -664,6 +697,24 @@ def render(f):
                 "blocks": [{"type": "section", "text": {"type": "mrkdwn",
                                                         "text": _cut(head + _esc(f.get("body") or ""), 2900)}},
                            {"type": "context", "elements": [{"type": "mrkdwn", "text": ctx}]}]}
+    if f.get("kind") == "note":
+        subj = _esc(f.get("subject") or "(no subject)")
+        if f.get("event") == "reply":
+            text = _cut(f":speech_balloon: {_esc(f.get('replier'))} replied to "
+                        f"{_esc(f.get('sender'))}'s note \"{subj}\": "
+                        f"{_esc(f.get('reply') or '(no text)')}", 600)
+        else:
+            to = f.get("to")
+            text = _cut(f":incoming_envelope: Note from {_esc(f.get('sender'))} for "
+                        + ("everyone in the Core" if to == "all" else _esc(to))
+                        + f": \"{subj}\". "
+                        + ("Each person's Claude" if to == "all" else "Their Claude")
+                        + " shows it when they next run the skill (2.9 or later).", 600)
+        ctx = " · ".join((_skill_label(f.get("skill_version")),
+                          f"{_esc(f.get('who'))} on {_esc(f.get('host'))}"))
+        return {"text": text,
+                "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": text}},
+                           {"type": "context", "elements": [{"type": "mrkdwn", "text": ctx}]}]}
     if f.get("kind") == "test":
         text = _esc(f"{_ICON['test']} UC Davis proteomics pipeline: Slack notifications work "
                     f"(test sent by {f.get('who')} from {f.get('host')})")
@@ -689,6 +740,8 @@ def render(f):
         bits.append(f"{len(f['significant'])} contrast(s)")
     if f.get("why") and f["status"] != "ok":
         bits.append(f["why"])
+    if f.get("caution"):
+        bits.append("CAUTION: fell back, not measured")
     # Escaped like the blocks: `<!channel>` or `<url|x>` in a session name must not ping or link.
     text = _cut(f"{icon} {head}: {_esc(name)}" + (f" ({_esc(', '.join(str(b) for b in bits))})"
                                                    if bits else "")
@@ -727,6 +780,9 @@ def render(f):
     blocks = [{"type": "section",
                "text": {"type": "mrkdwn", "text": _cut(f"{icon} *{head}* — `{_esc(name)}`", 2900)}},
               {"type": "section", "fields": fields[:10]}]
+    if f.get("caution"):
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": _cut(
+            f":warning: {_esc(f['caution'])}", 2900)}})
 
     if f["kind"] == "analysis":
         sig = f.get("significant")
@@ -1291,6 +1347,38 @@ def send_alert(text, *, title=None, with_status=False):
     return (sent, status) if with_status else sent
 
 
+#: How much of a reply to a note is posted. Redacted FIRST, then cut: a cut first could leave
+#: the head of a token too short for its pattern, and post it.
+NOTE_REPLY_CHARS = 300
+
+
+def note_facts(event, *, sender, to=None, subject=None, reply=None, replier=None):
+    """The facts of a `note` post (notes.py, references/notes.md). event "sent": a note was left
+    -- who for, who from and its subject, NEVER its body, which is for the recipient's Claude and
+    not for the channel. event "reply": the recipient's reply, redacted and cut to
+    NOTE_REPLY_CHARS. Everything is redacted again, with the rest of the payload, in payload()."""
+    f = {"kind": "note", "status": "note", "event": "reply" if event == "reply" else "sent",
+         "sender": one_line(sender or "?"), "to": one_line(to or "?"),
+         "subject": _cut(one_line(redact(subject or "(no subject)")), 150),
+         "who": _who(), "host": socket.gethostname().split(".")[0],
+         "skill_version": _skill_version()}
+    if f["event"] == "reply":
+        f["replier"] = one_line(replier or _who())
+        f["reply"] = _cut(" ".join(redact(reply or "").split()), NOTE_REPLY_CHARS)
+    return f
+
+
+def send_note(event, *, sender, to=None, subject=None, reply=None, replier=None,
+              relay_ok=True, dry_run=False):
+    """Post one `note` line. (sent?, status line); never raises. From a laptop whose only
+    webhook is on HIVE it relays, as finalize does. --dry-run prints the payload to stdout."""
+    try:
+        return deliver(note_facts(event, sender=sender, to=to, subject=subject, reply=reply,
+                                  replier=replier), relay_ok=relay_ok, dry_run=dry_run)
+    except Exception as e:  # noqa: BLE001
+        return False, clean_text(f"not sent: {type(e).__name__}: {e}")
+
+
 def send_test(dry_run=False):
     return deliver({"kind": "test", "status": "test", "who": _who(),
                     "host": socket.gethostname().split(".")[0]},
@@ -1368,7 +1456,9 @@ def wrap_job_script(script, out, *, final, time_limit_h, stage, slack=True, fran
         n += 1
     head, body = lines[:n], lines[n:]
     q = shlex.quote
-    here = scripts_dir or HERE or os.path.dirname(os.path.abspath(sys.argv[0]))
+    here = scripts_dir or HERE
+    if not here:           # this file came in on stdin: it cannot say where the scripts are
+        raise ValueError("wrap_job_script needs scripts_dir when notify_slack.py is not a file")
     notifier = os.path.join(here, "notify_slack.py")
     py = py or sys.executable or "python3"
     mins = int(round(float(time_limit_h) * 60)) if time_limit_h else 0
@@ -1458,6 +1548,15 @@ def main(argv=None):
                              "finalize runs record_run.py itself, first)")
     an.add_argument("--session", required=True)
     an.add_argument("--zip")
+    nt = sub.add_parser("note", parents=[common],
+                        help="a note from the Core was left, or answered (notes.py posts these "
+                             "itself; this is for trying one out)")
+    nt.add_argument("--event", choices=["sent", "reply"], required=True)
+    nt.add_argument("--sender", required=True, help="who left the note")
+    nt.add_argument("--to", help="its recipient, or all")
+    nt.add_argument("--subject", required=True)
+    nt.add_argument("--reply", help="the reply's text (event reply)")
+    nt.add_argument("--replier", help="who replied (default: this user)")
     r = sub.add_parser("relay", help=argparse.SUPPRESS)   # the HIVE side of a relay
     r.add_argument("--facts-b64", required=True)
     a = ap.parse_args(argv)
@@ -1476,6 +1575,9 @@ def main(argv=None):
                               qc=(True if a.qc else False if a.not_qc else None))
     elif a.cmd == "analysis-done":
         ok, msg = analysis_done(a.session, a.zip, dry_run=a.dry_run)
+    elif a.cmd == "note":
+        ok, msg = send_note(a.event, sender=a.sender, to=a.to, subject=a.subject, reply=a.reply,
+                            replier=a.replier, relay_ok=True, dry_run=a.dry_run)
     elif a.cmd == "relay":
         try:
             facts = json.loads(base64.b64decode(a.facts_b64).decode("utf-8"))

@@ -50,6 +50,11 @@ PROPS = ("Source_Type", "Source_CapillarySetValue", "Source_DryGasSetValue",
 # ramp instead of the 20->65 eV one that ran misses the same windows by up to 3.7 eV).
 CE_CHECK_EV = 1.0
 MS_FRAME_TYPES = {0: "MS1", 8: "ddaPASEF", 9: "dia-PASEF"}
+# The m/z range timsControl acquired the run over (analysis.tdf GlobalMetadata), e.g. 100-1700.
+# One reader: the Methods text reports it (read_tdf), and detect_acquisition.py takes it as a
+# ddaPASEF run's precursor m/z range -- every precursor it picked came from an MS1 frame
+# acquired over it (a dia-PASEF run's range comes from its isolation windows instead).
+MS1_RANGE_FIELDS = ("MzAcqRangeLower", "MzAcqRangeUpper")
 
 
 def _num(x):
@@ -75,6 +80,13 @@ def _enum(display_value_text):
         if k.strip().lstrip("-").isdigit() and v:
             out[int(k)] = v.strip()
     return out
+
+
+def ms1_acq_range(gm):
+    """(lo, hi) from a GlobalMetadata {Key: Value} dict, or None when either end is missing,
+    not a number, or not above the other."""
+    lo, hi = (_num((gm or {}).get(f)) for f in MS1_RANGE_FIELDS)
+    return (lo, hi) if lo is not None and hi is not None and hi > lo else None
 
 
 def _tables(cur):
@@ -109,7 +121,7 @@ def read_tdf(d, out, src):
                 if gm.get(field):
                     out[key] = str(gm[field])
                     src[key] = f"analysis.tdf GlobalMetadata {field}"
-            for key, field in (("mz_low", "MzAcqRangeLower"), ("mz_high", "MzAcqRangeUpper"),
+            for key, field in (("mz_low", MS1_RANGE_FIELDS[0]), ("mz_high", MS1_RANGE_FIELDS[1]),
                                ("im_low", "OneOverK0AcqRangeLower"),
                                ("im_high", "OneOverK0AcqRangeUpper")):
                 if _num(gm.get(field)) is not None:

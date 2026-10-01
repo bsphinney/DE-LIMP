@@ -18,6 +18,7 @@ and session_docs.py keep it.
 import array
 import base64
 import contextlib
+import html
 import io
 import json
 import os
@@ -42,6 +43,7 @@ import make_podcast as mp  # noqa: E402
 
 VERIFY_AUDIO = mp._verify_audio          # the real ones; Verify patches the module attributes
 ENCODE_AAC = mp.encode_aac
+HAS_AAC = bool(shutil.which("afconvert") or shutil.which("ffmpeg"))
 
 FAKE_KEY = "AIzaSyFAKE0123456789abcdefghijklmnopqrs"   # shaped like a key; not one
 
@@ -269,6 +271,45 @@ class Check(Workspace):
         self.assertRegex(txt, r"5e-15 matches a source value rounded")
         self.assertRegex(txt, r"10\^-15 is spoken as an order of magnitude")
         self.assertIn("Kcnb2 is not in the sources; it is listed under Claims", txt)
+
+    def test_a_survey_invitation_is_for_a_core_run_only(self):
+        # the brief lets a Core episode's sign-off mention the report's survey in words (no
+        # address). check never asks for it (the clean script above has none) and decides with
+        # submission_report.core_run of the session, as link and share do -- from the
+        # documented sources alone (verification of cba30b0: it read the sources' text, so a
+        # Core sign-off failed with them and passing Analysis_Report.md fought link)
+        survey = ("The report ends with a short survey; tell us what you thought of this "
+                  "episode.")
+        said = script_text().replace("cousin we will not over-read.",
+                                     "cousin we will not over-read. " + survey)
+        base = self.check()[1]
+        rc, txt = self.check(said)                                    # not a Core run: FAIL
+        self.assertEqual(rc, 1)
+        self.assertIn("invites listeners to a survey, but this is not a UC Davis Core run", txt)
+        import submission_report
+        os.makedirs(os.path.join(self.d, "input"))
+        submission_report.attach(self.d, {"internal_id": "PROT_0756"})
+        rc, txt = self.check(said)                                    # a Core run: PASS
+        self.assertEqual(rc, 0, txt)
+        fails = lambda s: sorted(ln for ln in s.splitlines() if ln.startswith("FAIL"))
+        self.assertEqual(fails(txt), fails(base))
+        self.assertIn(survey, mp.parse_script(self.script).turns()[-1].text)
+
+    def test_a_survey_scan_is_not_a_survey(self):
+        # "MS1 survey scan" is the DDA term the teaching segment invites; and "survey" with no
+        # feedback word near it is not an invitation either
+        for words in ("In DDA, the MS1 survey scans pick which precursors get fragmented.",
+                      "Each survey scan is followed by up to ten MS2 scans.",
+                      "It is like a survey of the whole proteome at once."):
+            said = script_text().replace("cousin we will not over-read.",
+                                         "cousin we will not over-read. " + words)
+            rc, txt = self.check(said)
+            self.assertNotIn("invites listeners to a survey", txt, words)
+        for words in ("Tell us what you thought in the survey.",
+                      "There is a five-minute survey for your feedback."):
+            said = script_text().replace("cousin we will not over-read.",
+                                         "cousin we will not over-read. " + words)
+            self.assertIn("invites listeners to a survey", self.check(said)[1], words)
 
     def test_an_invented_number_fails(self):
         rc, txt = self.check(script_text().replace("215 proteins", "4,555 proteins"))
@@ -1229,6 +1270,125 @@ class ReportGenerator(Workspace):
         self.assertIn('<p class="subtitle">A one-line standfirst.</p>', page)   # still the standfirst
 
 
+class FeedbackLine(ReportGenerator):
+    """A Core run's report ends with the Core's survey line (core_submission.feedback_line). It is
+    made before the podcast, so link rewords it to ask about the podcast too -- in the HTML, the
+    .md twin and the reprinted PDF -- and never adds one to a report outside the Core."""
+
+    def make(self, core):
+        write(self.report, "# Study\n\nA one-line standfirst.\n\n## Overview\n\nText 6,112.\n")
+        if core:
+            import submission_report
+            os.makedirs(os.path.join(self.d, "input"))
+            submission_report.attach(self.d, {"internal_id": "PROT_0756"})
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "make_analysis_html.py"),
+                            "--session", self.d, "--out",
+                            os.path.join(self.out, "Analysis_Report.html")],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        src = os.path.join(self.out, "source_report.md")
+        write(src, REPORT)
+        checked_podcast(self.out, src)                    # the podcast comes after the report
+        return (os.path.join(self.out, "Analysis_Report.html"),
+                os.path.join(self.out, "Analysis_Report.md"),
+                os.path.join(self.out, "Analysis_Report.pdf"))
+
+    def pdf_text(self, pdf):
+        if not (shutil.which("pdftotext") and os.path.isfile(pdf)):
+            return None
+        return subprocess.run(["pdftotext", pdf, "-"], capture_output=True, text=True).stdout
+
+    def test_link_asks_about_the_podcast_in_the_html_md_and_pdf(self):
+        import core_submission as cs
+        page, md, pdf = self.make(core=True)
+        before = {fmt: cs.feedback_line("report", "PROT_0756", False, fmt) for fmt in ("html", "md")}
+        after = {fmt: cs.feedback_line("report", "PROT_0756", True, fmt) for fmt in ("html", "md")}
+        self.assertIn(before["html"], read(page))
+        self.assertIn(before["md"], read(md))
+        text = self.pdf_text(pdf)
+        if text is not None:
+            self.assertIn("thought of this report: a 5-minute survey", text)
+        rc, out, err = run("link", self.out)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("[OK] output/Analysis_Report.html: the feedback survey line now asks about "
+                      "the podcast too", out)
+        self.assertIn("[OK] output/Analysis_Report.md: the feedback survey line now asks", out)
+        self.assertIn(after["html"] + "</main>", read(page))
+        self.assertIn(after["md"], read(md))
+        self.assertNotIn(before["md"], read(md))
+        text = self.pdf_text(pdf)                         # link reprinted it after the edit
+        if text is not None:
+            self.assertIn("reprinted with the Listen card", out)
+            self.assertIn("thought of this report and the podcast: a 5-minute survey", text)
+        once = {path: read(path) for path in (page, md)}
+        rc, out, err = run("link", self.out)              # again: nothing more to change
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("feedback survey line", out)
+        for path in (page, md):
+            self.assertEqual(read(path), once[path], path)   # byte-identical
+            self.assertEqual(read(path).count("How did we do?"), 1, path)   # never doubled
+        for path, fmt in ((page, "html"), (md, "md")):       # the star line: left as it was
+            self.assertEqual(read(path).count(cs.star_line(fmt)), 1, path)
+            self.assertEqual(read(path).count("Found this report useful?"), 1, path)
+
+    def test_link_never_adds_one_outside_the_core(self):
+        page, md, pdf = self.make(core=False)
+        rc, out, err = run("link", self.out)
+        self.assertEqual(rc, 0, err)
+        self.assertIn(mp.START, read(page))                            # the card went in
+        import core_submission as cs
+        for path in (page, md):
+            self.assertNotIn("How did we do", read(path))
+            self.assertNotIn(cs.FEEDBACK_URL, read(path))
+        self.assertNotIn("feedback survey line", out)
+
+
+@unittest.skipUnless(HAS_AAC, "needs afconvert or ffmpeg to make the AAC")
+class CoreFlow(Workspace):
+    """check -> render -> link -> share -> link on a Core run whose episode signs off with the
+    survey: link rewords the report's survey line, and that never makes the check stale
+    (verification of cba30b0: read_check said "source changed after check.txt", and share,
+    finalize's share step, deliver and the next link all refused)."""
+
+    def test_check_link_share_link(self):
+        import core_submission as cs
+        import submission_report
+        os.makedirs(os.path.join(self.d, "input"))
+        submission_report.attach(self.d, {"internal_id": "PROT_0756"})
+        html_out = os.path.join(self.out, "Analysis_Report.html")
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "make_analysis_html.py"),
+                            "--session", self.d, "--out", html_out, "--no-pdf"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        twin = os.path.join(self.out, "Analysis_Report.md")
+        self.assertIn(cs.feedback_line("report", "PROT_0756"), read(twin))
+        said = script_text().replace("cousin we will not over-read.", "cousin we will not "
+                                     "over-read. The report ends with a short survey; tell us "
+                                     "what you thought of this episode.")
+        # the documented sources, and the twin too (the case that fought link)
+        rc, txt = self.check(said, "--source", twin)
+        self.assertEqual(rc, 0, txt)
+        mp.BACKENDS["fake"] = FakeTTS
+        try:
+            rc, o, err = run("render", self.script, "--tts", "fake")
+        finally:
+            mp.BACKENDS.pop("fake", None)
+        self.assertEqual(rc, 0, err)
+        rc, o, err = run("link", self.out)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("the feedback survey line now asks about the podcast too", o)
+        self.assertIn(cs.feedback_line("report", "PROT_0756", podcast=True), read(twin))
+        self.assertIsNone(mp.read_check(mp.parse_script(self.script))[2])   # still holds
+        rc, o, err = run("share", self.out, "--no-browser")
+        self.assertEqual(rc, 0, err)
+        self.assertIn(cs.feedback_line("share", "PROT_0756", True, "html"),
+                      read(os.path.join(self.out, mp.SHARE_NAME)))
+        self.assertEqual(mp.share_state(self.out)[0], True)
+        rc, o, err = run("link", self.out)                            # and again: no refusal
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("refusing", err)
+
+
 class ReviewFixes(Workspace):
     """podcast-reviewer, 2026-09-25 (FIX-FIRST on ddc959b): each hole it found stays shut."""
 
@@ -1841,6 +2001,300 @@ class Release280(Workspace):
         self.assertIsNone(mp.read_check(mp.parse_script(os.path.join(dest, "podcast_script.md")))[2])
 
 
+
+
+def built_in(page):
+    """(audio bytes, transcript page) taken back out of a shareable report."""
+    a = re.search(r'<audio controls preload="none" src="data:audio/mp4;base64,([A-Za-z0-9+/=]+)"',
+                  page)
+    t = re.search(r'<iframe title="Podcast transcript" srcdoc="([^"]*)"', page)
+    return (base64.b64decode(a.group(1), validate=True) if a else None,
+            html.unescape(t.group(1)) if t else None)
+
+
+@unittest.skipUnless(HAS_AAC, "needs afconvert or ffmpeg to make the AAC")
+class Share(Workspace):
+    """share: the report with the audio and transcript built in, one file to send (Brett,
+    2026-09-28: how to send the HTML to someone with the audio working). The Listen card links
+    podcast/podcast.m4a and podcast/transcript.html, so the HTML alone had no audio."""
+
+    def setUp(self):
+        super().setUp()
+        mp.BACKENDS["fake"] = FakeTTS
+        FakeTTS.calls = []
+        self.assertEqual(self.check()[0], 0)
+        rc, out, err = run("render", self.script, "--tts", "fake")   # a real AAC, from a tone
+        self.assertEqual(rc, 0, err)
+        self.man = json.loads(read(os.path.join(self.pod, "podcast.json")))
+        self.assertEqual(self.man["audio"], "podcast.m4a")
+        self.assertEqual(run("link", self.out)[0], 0)
+        self.html = os.path.join(self.out, "Analysis_Report.html")
+        self.share = os.path.join(self.out, mp.SHARE_NAME)
+
+    def tearDown(self):
+        mp.BACKENDS.pop("fake", None)
+        super().tearDown()
+
+    def test_one_file_nothing_outside_it_and_the_audio_decodes(self):
+        before, listing = read(self.html), sorted(os.listdir(self.out))
+        rc, out, err = run("share", self.out, "--no-browser")
+        self.assertEqual(rc, 0, err)
+        self.assertIn(f"[OK] {mp.SHARE_NAME}: ", out)
+        self.assertIn("send this one file", out)
+        self.assertEqual(read(self.html), before)                    # the report is untouched
+        self.assertEqual(sorted(os.listdir(self.out)), sorted(listing + [mp.SHARE_NAME]))
+        page = read(self.share)
+        self.assertEqual((page.count(mp.START), page.count('class="pc-card"')), (1, 1))
+        self.assertIn('<main id="main">' + mp.START, page)
+        # nothing in it points out of the file: not the audio, not the transcript, nothing
+        self.assertNotIn("podcast/", page)
+        self.assertEqual(mp.local_refs(page), [])
+        # the base64 decodes to an MP4 AAC track of the episode's length ...
+        data, tr = built_in(page)
+        info = mp.mp4_info(data)
+        self.assertEqual((info["codec"], info["rate"]), ("mp4a", mp.RATE))
+        self.assertAlmostEqual(info["duration_s"], self.man["duration_s"], delta=1.0)
+        # ... which the platform's decoder reads back to that length, with sound in it
+        with tempfile.TemporaryDirectory() as tmp:
+            secs, peak = mp.decode_back(data, tmp)
+        self.assertAlmostEqual(secs, self.man["duration_s"], delta=1.0)
+        self.assertGreater(peak, 1000)
+        self.assertIn(f"decode it back to {secs:.1f} s", out)
+        # the transcript is inside, with every turn and the claims ledger, and no player or link
+        self.assertEqual(tr.count('class="pc-turn'), len(mp.parse_script(self.script).turns()))
+        self.assertIn("Claims beyond the report", tr)
+        self.assertIn("An AI-generated audio discussion of this report", tr)
+        # ... and nothing in it points out of the file: transcript.html's own player
+        # (src="podcast.m4a") showed a second player reading "Error" inside the hand-made
+        # prototype, and its link to ../Analysis_Report.html went nowhere (Brett, 2026-09-28)
+        self.assertNotIn("<audio", tr)
+        self.assertNotIn("Analysis_Report.html", tr)
+        refs = re.findall(r"""\b(?:src|href)\s*=\s*["']([^"']*)""", tr)
+        self.assertEqual([r for r in refs if not re.match(r"#|data:|https?:", r)], [], refs)
+        self.assertEqual((mp.embedded_refs(page), mp.local_refs(tr)), ([], []))
+        self.assertIn("in the podcast folder of the full results", tr)
+        # the card says so; print shows neither player nor transcript, and says where they are
+        self.assertIn("built into this file, so it can be sent on its own", page)
+        self.assertIn("Your browser cannot play the built-in audio.", page)
+        self.assertIn(f'<p class="pc-print">The audio and its transcript are built into '
+                      f"{mp.SHARE_NAME}", page)
+        self.assertIn("@media print{.pc-card audio{display:none}.pc-card .pc-print{display:block}"
+                      ".pc-card details{display:none}", page)
+        self.assertEqual(mp.share_state(self.out), (True, "current: built from this report and "
+                                                          "episode"))
+
+    def test_bitrate_and_the_email_size_warning(self):
+        sizes = {}
+        for kbps in (32, 64):
+            rc, out, err = run("share", self.out, "--no-browser", "--kbps", str(kbps))
+            self.assertEqual(rc, 0, err)
+            self.assertIn(f"AAC {kbps} kbps, 24 kHz mono", out)
+            sizes[kbps] = len(built_in(read(self.share))[0])
+            self.assertNotIn("Bioshare", out)                        # a few KB: fine to email
+        self.assertLess(sizes[32], sizes[64])
+        for bad in ("16", "96"):
+            rc, out, err = run("share", self.out, "--kbps", bad)
+            self.assertEqual(rc, 2)
+            self.assertIn("use 32 to 64", err)
+        with mock.patch.object(mp, "SHARE_WARN_MB", 0.001):
+            rc, out, err = run("share", self.out, "--no-browser")
+            self.assertEqual(rc, 0, err)
+            self.assertRegex(out, r"\[WARN\] [\d.]+ MB is [\d.]+ MB as an email attachment "
+                                  r"\(base64, about 4/3 larger\), more than the ~25 MB many "
+                                  r"email systems accept: share it through Bioshare instead .*, "
+                                  r"or re-run with --kbps 32 \(about [\d.]+ MB, [\d.]+ MB "
+                                  r"attached\)")
+            rc, out, err = run("share", self.out, "--no-browser", "--kbps", "32")
+            self.assertIn("share it through Bioshare instead", out)
+            self.assertNotIn("re-run with --kbps", out)              # already the smallest
+
+    def test_the_email_size_is_the_attached_size(self):
+        # review of f18d95e: an attachment travels as base64, ~4/3 larger -- warn at ~18 MB of
+        # file (~25 MB attached) and say both sizes
+        self.assertEqual((mp.SHARE_WARN_MB, mp.EMAIL_LIMIT_MB), (18.0, 25.0))
+        self.assertEqual(mp._attached(18 * 10**6), 24 * 10**6)
+        rc, out, err = run("share", self.out, "--no-browser")
+        self.assertEqual(rc, 0, err)
+        size = os.path.getsize(self.share)
+        self.assertIn(f"[OK] {mp.SHARE_NAME}: {mp._mb(size)} ({mp._mb(mp._attached(size))} as an "
+                      "email attachment)", out)
+
+    def test_a_stale_copy_is_never_advertised(self):
+        # review of f18d95e: README and AGENTS.md named the file whenever it existed
+        self.assertEqual(run("share", self.out, "--no-browser")[0], 0)
+        self.assertTrue(mp.share_item_md(self.out, self.d))
+        self.assertIn(mp.SHARE_NAME, "\n".join(mp.agents_md_lines(self.out, self.d)))
+        write(self.html, read(self.html).replace("<p>body</p>", "<p>body, regenerated</p>"))
+        self.assertTrue(os.path.isfile(self.share))                    # there, but stale
+        self.assertEqual(mp.share_item_md(self.out, self.d), "")
+        self.assertNotIn(mp.SHARE_NAME, "\n".join(mp.agents_md_lines(self.out, self.d)))
+        self.assertIn("a derivative, not a record", "\n".join(mp.agents_md_lines(self.out, self.d)))
+
+    def test_it_refuses_a_stale_episode_and_knows_when_it_is_out_of_date(self):
+        self.assertEqual(mp.share_state(self.out), (False, "not built yet"))
+        self.assertEqual(run("share", self.out, "--no-browser")[0], 0)
+        self.assertTrue(mp.share_state(self.out)[0])
+        write(self.html, read(self.html).replace("<p>body</p>", "<p>body, regenerated</p>"))
+        self.assertEqual(mp.share_state(self.out),
+                         (False, "built from another version of the report or the episode"))
+        self.assertEqual(run("share", self.out, "--no-browser")[0], 0)   # rebuilt: current
+        self.assertTrue(mp.share_state(self.out)[0])
+        write(self.report, REPORT + "\nA new paragraph.\n")           # the check's source moved
+        self.assertEqual(mp.share_state(self.out), (False, "the podcast's check no longer holds"))
+        rc, out, err = run("share", self.out, "--no-browser")
+        self.assertEqual(rc, 2)
+        self.assertIn("[share] refusing: source AI_Analysis_Report.md changed after check.txt", err)
+        rc, out, err = run("share", self.out, "--no-browser", "--unchecked")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("[WARN] the podcast's check does not hold", out)
+        self.assertTrue(mp.share_state(self.out)[0])                  # --unchecked is recorded
+        os.remove(os.path.join(self.pod, "podcast.json"))
+        rc, out, err = run("share", self.out)
+        self.assertEqual(rc, 2)
+        self.assertIn("render first", err)
+        self.assertEqual(mp.share_state(self.out), (None, "no podcast was made"))
+
+    def test_without_an_encoder_the_rendered_audio_goes_in_as_it_is(self):
+        with open(os.path.join(self.pod, "podcast.m4a"), "rb") as fh:
+            rendered = fh.read()
+        with mock.patch.object(mp.shutil, "which", return_value=None):
+            rc, out, err = run("share", self.out, "--no-browser")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("podcast.m4a as rendered, not re-encoded (neither afconvert nor ffmpeg is "
+                      "installed)", out)
+        self.assertIn("(no afconvert or ffmpeg here to decode it back)", out)
+        self.assertEqual(built_in(read(self.share))[0], rendered)
+
+    def test_a_transcript_that_points_outside_the_file_is_never_built_in(self):
+        # the prototype's bug: transcript.html as it is on disk, with its own player and its
+        # link to the report, put into the srcdoc. The check reads the srcdoc of the file as
+        # written, not just the outer page.
+        real = mp.transcript_html
+        with mock.patch.object(mp, "transcript_html",
+                               lambda s, man, out, embedded=False: real(s, man, out)):
+            rc, out, err = run("share", self.out, "--no-browser")
+        self.assertEqual(rc, 1)
+        self.assertIn("the built-in transcript points out of the file: ../Analysis_Report.html, "
+                      "podcast.m4a", err)
+        self.assertEqual([f for f in os.listdir(self.out) if "with_audio" in f], [])
+
+    def test_embedded_refs_reads_every_srcdoc_nested_too(self):
+        inner = ('<p><a href="#t">t</a> <a href="https://www.uniprot.org">u</a> '
+                 '<img src="data:image/png;base64,AAAA"></p><audio src="podcast.m4a"></audio>')
+        nested = f'<iframe srcdoc="{html.escape(inner)}"></iframe><a href="../x.html">x</a>'
+        page = (f'<main><a href="#top">top</a><iframe srcdoc="{html.escape(nested)}"></iframe>'
+                "<iframe srcdoc='<a href=\"mailto:a@b.c\">m</a>'></iframe></main>")
+        self.assertEqual(mp.embedded_refs(page), ["../x.html", "podcast.m4a", "mailto:a@b.c"])
+        self.assertEqual(mp.local_refs(page), [])         # the outer page's own links are fine
+
+    def test_a_core_runs_survey_line_comes_along(self):
+        # Analysis_Report_with_audio.html is the report itself, so a Core run's "How did we
+        # do?" line (make_analysis_html, core_submission.feedback_line) is in it too
+        import core_submission
+        import submission_report
+        os.makedirs(os.path.join(self.d, "input"))
+        submission_report.attach(self.d, {"internal_id": "PROT_0756"})
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "make_analysis_html.py"),
+                            "--session", self.d, "--out", self.html, "--no-pdf"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        line = core_submission.feedback_line("report", "PROT_0756", podcast=True, fmt="html")
+        self.assertIn("prot=PROT_0756&amp;src=report", line)
+        self.assertIn("this report and the podcast", line)
+        self.assertIn(line + "</main>", read(self.html))
+        self.assertEqual(run("share", self.out, "--no-browser")[0], 0)
+        # the copy made to be forwarded says so: src=share (review of f18d95e)
+        shared = core_submission.feedback_line("share", "PROT_0756", podcast=True, fmt="html")
+        self.assertIn("prot=PROT_0756&amp;src=share", shared)
+        self.assertIn(shared + "</main>", read(self.share))
+        self.assertIn(line + "</main>", read(self.html))              # the report keeps its own
+
+    def test_the_star_line_comes_along(self):
+        # every report asks for a GitHub star, Core run or not (core_submission.star_line), and
+        # Analysis_Report_with_audio.html is the report itself: it has the line, once
+        import core_submission
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "make_analysis_html.py"),
+                            "--session", self.d, "--out", self.html, "--no-pdf"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        star = core_submission.star_line("html")
+        self.assertIn('href="https://github.com/', star)
+        self.assertEqual(read(self.html).count(star), 1)
+        self.assertEqual(run("share", self.out, "--no-browser")[0], 0)
+        self.assertEqual(read(self.share).count(star), 1)
+        self.assertEqual(read(self.share).count("Found this report useful?"), 1)
+
+    def test_audio_that_is_not_playable_is_never_built_in(self):
+        with mock.patch.object(mp, "share_audio", return_value=(b"\0" * 5000, "test")):
+            rc, out, err = run("share", self.out, "--no-browser")
+        self.assertEqual(rc, 1)
+        self.assertIn("is not playable MP4/AAC (test): not an MP4 file", err)
+        self.assertEqual(sorted(f for f in os.listdir(self.out) if "with_audio" in f), [])
+
+    def test_finalize_keeps_it_current_and_never_leaves_a_stale_one_to_send(self):
+        import scratch_files
+        with mock.patch.object(mp, "browser_play", return_value=(None, "test")):
+            level, note = mp.ensure_share(self.out)                   # built
+            self.assertEqual(level, "OK")
+            self.assertRegex(note, r"^[\d.]+ MB: the report with the audio \(AAC 48 kbps")
+            self.assertEqual(mp.ensure_share(self.out),
+                             ("OK", "current: built from this report and episode"))
+            write(self.html, read(self.html).replace("<p>body</p>", "<p>new</p>"))
+            with mock.patch.object(mp, "share_audio", side_effect=mp.ShareError("no encoder")):
+                level, note = mp.ensure_share(self.out)
+            self.assertEqual(level, "SKIPPED")
+            self.assertTrue(note.startswith(f"the older copy no longer matches and was renamed "
+                                            f"{mp.SHARE_STALE}: never send it -- not built: no "
+                                            "encoder"), note)
+            self.assertFalse(os.path.exists(self.share))
+            self.assertTrue(scratch_files.is_scratch_file(mp.SHARE_STALE))  # not zipped
+            self.assertEqual(mp.ensure_share(self.out)[0], "OK")      # built again ...
+            self.assertFalse(os.path.exists(os.path.join(self.out, mp.SHARE_STALE)))   # ... gone
+        os.remove(os.path.join(self.pod, "podcast.json"))
+        self.assertIsNone(mp.ensure_share(self.out))                  # no podcast: no line
+
+    def test_readme_and_agents_say_send_this_one_file(self):
+        self.assertEqual(mp.share_item_md(self.out, self.d), "")      # not built yet
+        self.assertEqual(run("share", self.out, "--no-browser")[0], 0)
+        item = mp.share_item_md(self.out, self.d)
+        self.assertRegex(item, r"^- \[Analysis_Report_with_audio\.html\]\(output/Analysis_Report_"
+                               r"with_audio\.html\) — \*\*to send the report with its audio, send "
+                               r"this one file\*\*: .* \([\d.]+ MB\)$")
+        agents = "\n".join(mp.agents_md_lines(self.out, self.d))
+        self.assertIn("`output/Analysis_Report_with_audio.html` is the same report with this audio",
+                      agents)
+        self.assertIn("Read `output/Analysis_Report.html` instead", agents)
+
+    def test_a_browser_that_cannot_play_it_removes_it_one_that_cannot_test_says_so(self):
+        for res, why, line in (
+                (None, "no Chrome, Chromium or Edge found", "no Chrome, Chromium or Edge found"),
+                ({"skip": "this browser has no AAC decoder"}, None, "this browser has no AAC"),
+                ({"timeout": "no loadedmetadata within 20 s"}, None, "no loadedmetadata within")):
+            with mock.patch.object(mp, "browser_play", return_value=(res, why)):
+                rc, out, err = run("share", self.out)
+            self.assertEqual(rc, 0, err)
+            self.assertIn(f"[INFO] not played in a browser: {line}", out)
+        with mock.patch.object(mp, "browser_play", return_value=({"error": "media error 4"}, None)):
+            rc, out, err = run("share", self.out)
+        self.assertEqual(rc, 1)
+        self.assertIn("a headless browser could not play the built-in audio: media error 4", err)
+        self.assertFalse(os.path.exists(self.share))
+
+    @unittest.skipUnless(os.name == "posix", "the browser test runs on macOS and Linux")
+    def test_a_real_browser_plays_the_built_in_audio(self):
+        # Headless Chrome with --virtual-time-budget hung on a data: URI audio (2026-09-28);
+        # the DevTools pipe has a real deadline. Skips without Chrome/Chromium/Edge.
+        import html_to_pdf
+        if not html_to_pdf.find_browser():
+            self.skipTest("no Chrome, Chromium or Edge")
+        rc, out, err = run("share", self.out)
+        self.assertEqual(rc, 0, err)
+        n = len(mp.parse_script(self.script).turns())
+        self.assertRegex(out, r"\[OK\] a headless browser loaded it \([\d.]+ s\) and played "
+                              rf"[\d.]+ s; the transcript shows {n} of {n} turns and no player; "
+                              r"files fetched: 0")
+
+
 class SessionFiles(unittest.TestCase):
     """session_docs.py lists the podcast itself (so finalize keeps it), link then adds nothing,
     and the session zip carries the podcast but not its TTS cache."""
@@ -1886,6 +2340,44 @@ class SessionFiles(unittest.TestCase):
             self.assertEqual(res["zip_excluded"][scratch_files.LABEL], 5)   # 3 + .part + .wav
             readme = read(p["readme"])                                   # finalize rewrote it
             self.assertEqual(readme.count("(output/podcast/podcast.m4a)"), 1)
+
+    @unittest.skipUnless(HAS_AAC, "needs afconvert or ffmpeg to make the AAC")
+    def test_finalize_builds_the_report_with_the_audio_built_in(self):
+        import session_docs  # noqa: F401  (the README and AGENTS.md that finalize writes)
+        import test_deposit_package as tdp
+        with tempfile.TemporaryDirectory() as d:
+            p = tdp.dia_session(d)
+            out = p["output_dir"]
+            write(os.path.join(out, "Analysis_Report.html"), REPORT_HTML)
+            src = os.path.join(out, "podcast_source.md")
+            write(src, REPORT)
+            script = checked_podcast(out, src)
+            mp.BACKENDS["fake"] = FakeTTS
+            try:
+                rc, o, err = run("render", script, "--tts", "fake")
+            finally:
+                mp.BACKENDS.pop("fake", None)
+            self.assertEqual(rc, 0, err)
+            self.assertEqual(run("link", out)[0], 0)
+            r = tdp.finalize(p["session_dir"], "--zip")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            res = json.loads(r.stdout)
+            manifest = read(p["manifest_txt"])
+            self.assertRegex(manifest, r"\[OK\] +Shareable report with audio \(output/Analysis_Report_"
+                                       r"with_audio\.html\) +-- [\d.]+ MB: the report with the audio")
+            names = zipfile.ZipFile(res["zip"]).namelist()
+            self.assertTrue(any(n.endswith("output/" + mp.SHARE_NAME) for n in names), names)
+            readme = read(p["readme"])
+            self.assertIn("(output/Analysis_Report_with_audio.html) — **to send the report with its "
+                          "audio, send this one file**", readme)
+            starts = [ln for ln in readme.splitlines() if ln.startswith("- [")]
+            self.assertIn("Audio discussion of these results", starts[1])
+            self.assertIn(mp.SHARE_NAME, starts[2])                   # right after the podcast
+            self.assertIn(f"`output/{mp.SHARE_NAME}` is the same report",
+                          read(os.path.join(p["session_dir"], "AGENTS.md")))
+            again = tdp.finalize(p["session_dir"])                    # current: left alone
+            self.assertEqual(again.returncode, 0, again.stderr)
+            self.assertIn("current: built from this report and episode", read(p["manifest_txt"]))
 
     def test_output_files_catalog(self):
         import make_report

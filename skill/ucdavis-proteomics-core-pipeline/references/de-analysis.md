@@ -64,6 +64,45 @@ pivot `PG.MaxLFQ` to a protein×run matrix, log2, quantile-normalize
 (`limma::normalizeBetweenArrays`), then `lmFit → contrasts.fit → eBayes →
 topTable(BH)`. NAs are left in place; limma drops them per row.
 
+**A Sage report is not MaxLFQ, and is not described as MaxLFQ.** `adapt_sage` writes one row
+per **peptide** × run, and declares that in the report itself (parquet metadata
+`delimp.quantity.*`: level `peptide`, what the value is, Sage's FDR, the citation).
+`build_maxlfq.R` takes the highest row per (protein, run), so each protein's value is its
+single most intense peptide. `maxlfq_descriptor()` turns the declaration into the one
+description every output reads:
+- pipeline `peptide_max`, "Highest-peptide intensity + limma";
+- a `rollup_method` naming that rollup, and an `identification_fdr` naming Sage's own FDR (the
+  report's q-columns are 0.0 placeholders);
+- a `caveat` that `audit_results.py` turns into a `quantification` WARN (AUDIT.md, then the
+  report's Audit & caveats);
+- the AI brief's `plain_language` line.
+
+methods.txt, de_provenance.json, the Methods (`make_methods.py`), the AI brief and
+reproducibility_log.R all quote these, so none of them says "DIA-NN" or "MaxLFQ" for a Sage
+DE. A real peptide → protein rollup for Sage is a backlog item (`docs/SKILL_OPEN_DEFECTS.md`
+in the DE-LIMP repo). DIA-NN's own report declares nothing and is described as DIA-NN
+PG.MaxLFQ, as before.
+
+**The other adapters declare too, at level `protein`**:
+- `adapt_fragpipe_dda`: FragPipe/IonQuant MaxLFQ from `combined_protein.tsv`, with the
+  versions and Philosopher filter read from `fragpipe.workflow`;
+- `adapt_alphadia`: AlphaDIA's protein-group LFQ, directLFQ or QuantSelect, with the version and
+  FDR read from `frozen_config.yaml`;
+- `adapt_radiant`: Radiant's Fulcrum `PG.*` quantity and q-value.
+
+For these, the descriptor's `protein` branch passes the engine's quantity through, labelled
+e.g. "FragPipe IonQuant MaxLFQ + limma", with no rollup described, since each is already one
+value per protein and run. A Fulcrum output with only a `Precursor.*` quantity is collapsed to
+the highest precursor by the adapter. That is the peptide-level rule, so it is declared
+`peptide` and described (and caveated) like Sage.
+
+Every declaration also says whether the report's q-value columns are `placeholder` (0.0: Sage,
+FragPipe-DDA, AlphaDIA filtered upstream) or `real` (Radiant's Fulcrum q). For `placeholder`, the
+methods state the engine's own FDR, and the DE's filter line says it kept every row. For `real`,
+the numeric cutoff (e.g. "q <= 0.010", "Q.Value ≤ 0.01") is printed beside the declaration. Citations are
+Crossref-verified: MSFragger (Kong 2017), IonQuant (Yu 2021), MaxLFQ (Cox 2014), AlphaDIA
+(Wallmann 2025), directLFQ (Ammar 2023), Radiant DIA (Just 2026, bioRxiv).
+
 ## DE-input contract (§8.3)
 A DIA-NN-shaped report with: `Run, Protein.Group, PG.MaxLFQ, Q.Value, Lib.Q.Value,
 Lib.PG.Q.Value` (+ optional `Empirical.Quality, PG.MaxLFQ.Quality, Genes,
@@ -216,10 +255,38 @@ engine's adapted output can support, not which method is better.
 
 ## Contaminant filter (both paths, on by default)
 
-`run_de.R` drops every precursor that maps to a `Cont_` entry before quantification —
-any accession in `Protein.Ids` (`Protein.Group` for protein-level input), which is
-DIA-NN's own `--cont-quant-exclude` rule: a peptide shared between a sample protein and
-a contaminant entry can carry the contaminant's signal. The rule, the tag and the counting
+`run_de.R` drops every precursor that maps to a `Cont_` (or FragPipe `contam_`) entry
+before quantification. That is any accession in `Protein.Ids` (`Protein.Group` for an adapted
+report), the rule of DIA-NN's own `--cont-quant-exclude`: a peptide shared between a sample
+protein and a contaminant entry can carry the contaminant's signal.
+- **Every engine's report.** The rule tests bare accessions, as DIA-NN writes them, so every
+  adapter writes those through `protein_ids.py`: `group_accessions` for Sage's `proteins` and
+  Radiant's groups, and FragPipe's `Protein ID`, keeping `contam_`.
+- **Before 2.9 Sage slipped past.** `adapt_sage` wrote Sage's full FASTA IDs
+  (`sp|Cont_P02769|ALBU_BOVIN`), so no Sage DE ever had a contaminant removed. gabrig's HeL50
+  UnvPe tested 171 `Cont_` groups, while methods.txt said "none".
+- **Counts are distinct items in the report's own unit** (`contaminant_unit` in contaminants.R,
+  from the declared quantity level): DIA-NN precursors, Sage peptides (`Peptide.Id`, written by
+  `adapt_sage`), a protein-level adapter's protein groups. Up to b1b94f5 an adapted report
+  counted item × run rows as "precursors": a Sage DE said 2,744 for 686 peptides × 4 runs.
+- **Mixed groups.** A removed group that also names a sample accession is counted
+  (`n_protein_groups_mixed`). For a peptide-level report, the sample proteins it named are
+  counted per accession: those that keep other peptides, and those left with none. A
+  protein-level report cannot show that, and its record says "not computed" rather than 0.
+- **A keratin sample's kept keratins** are then described per engine, by the pipeline's own
+  descriptor (`kept_contaminant_quant`):
+  - DIA-NN: what its `--cont-quant-exclude` left out of its own quantities, stated only when
+    the run recorded the flag. The source is the command line in the DIA-NN log beside the report,
+    else the parameters file the search ran with (`make_methods.diann_cont_quant_exclude`, the
+    one reader). DIA-NN logs a `--cfg <file>` unexpanded, so the reader opens that file where
+    `--cfg` stands. A relative path resolves where DIA-NN ran. A `--cfg` that can't be read
+    never counts as "not set". Otherwise the text says `[not recorded -- confirm]`. FragPipe's
+    DIA-NN step may not have been given the flag.
+  - Sage: the highest peptide is taken here from the rows kept.
+  - FragPipe / AlphaDIA / Radiant: the engine's own quantities, used as reported. Whether
+    keratin is under-quantified there is "not known" (JSON null), because the engine's protein
+    inference (Philosopher's razor peptides) can move shared peptides.
+  - None of the non-DIA-NN routes is told that DIA-NN did anything. The rule, the tag and the counting
 live in `scripts/contaminants.R` (the tag mirrors `fetch_fasta.py`'s `CONT_TAG`; a test
 asserts it).
 
@@ -330,6 +397,8 @@ no status legend is drawn. Never describe those points as measured.
   `dpc_pipeline_descriptor()` mis-cites this as "Law CW, Smyth GK" — fix upstream.)
 - **MaxLFQ path:** DIA-NN MaxLFQ (Demichev et al. 2020, Nat Methods 17:41) +
   limma (Ritchie et al. 2015, NAR 43:e47).
+- **Sage (highest-peptide path):** Lazear MR (2023) J Proteome Res 22(11):3652-3659,
+  doi:10.1021/acs.jproteome.3c00486 (Crossref-verified 2026-09-29) + limma.
 - **QuantUMS quality filtering:** da Cruz Moschem J, Silva Campitelli de Barros BC,
   de Toledo Serrano SM, Chaves AFA (2025) *Decoding the Impact of Isolation Window
   Selection and QuantUMS Filtering in DIA-NN for DIA Quantification of Peptides and

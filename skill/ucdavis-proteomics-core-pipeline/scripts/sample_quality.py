@@ -57,7 +57,7 @@ import sys, os, csv, json, math, argparse, random, re, itertools
 
 # The list's ONE definition is the FASTA sidecar; the wording for lost proteins lives there too.
 from fetch_fasta import (target_contaminants, seen_only_as_cont, lost_to_contaminants_message,
-                         CONT_TAG)
+                         keratin_sample_recorded, CONT_TAG)
 
 # Curated marker panels, as HUMAN gene symbols (matched case-insensitively against every
 # id column of the matrix). Deliberately specific markers -- avoid ubiquitous glycolytic
@@ -611,6 +611,8 @@ def main():
         try:
             with open(fasta_meta) as fh:
                 meta = json.load(fh)
+            # a database built with fetch --keratin-sample makes this a keratin sample too
+            a.keratin_sample = a.keratin_sample or keratin_sample_recorded(meta) is True
             tc = target_contaminants(meta, a.keratin_sample)
         except (OSError, ValueError) as e:
             tc_note = f"not assessed: could not read {fasta_meta} ({e})"

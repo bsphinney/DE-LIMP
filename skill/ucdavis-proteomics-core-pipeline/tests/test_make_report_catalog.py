@@ -11,6 +11,7 @@ stdlib only.
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -29,6 +30,8 @@ SKILL_FILES = [
     "qc_pvalue_panel.png",
     # audit_results.py / sample_quality.py
     "AUDIT.md", "AUDIT.json", "SAMPLE_QUALITY.md", "SAMPLE_QUALITY.json",
+    # sage_lfq_check.py (via run_search.py)
+    "sage_lfq_check.json", "sage_adapt.json",
     # submission_report.py
     "submission.json", "samples.tsv", "session.json",
     # make_deposit.py
@@ -38,11 +41,43 @@ SKILL_FILES = [
     "DIFFERENCES.md", "README.html", "README.md", "AGENTS.md", "raw_files.txt",
     # make_podcast.py
     "podcast.m4a", "podcast_script.md", "transcript.html", "podcast.json", "check.txt",
-    "verify.txt", "verify_transcript.txt",
+    "verify.txt", "verify_transcript.txt", "Analysis_Report_with_audio.html",
+    # save_transcript.py / log_decision.py
+    "conversation.md", "11111111-2222-4333-8444-555555555555.jsonl", "decisions.md",
 ]
 
 
 class Catalog(unittest.TestCase):
+    def test_the_shareable_reports_name_is_defined_once(self):
+        # review of f18d95e: the CATALOG builds it from SHARE_NAME, which lives in the
+        # import-free report_files.py that make_podcast and core_submission read too
+        import core_submission
+        import make_podcast
+        import report_files
+        self.assertEqual(make_report.describe(report_files.SHARE_NAME)[0], "Analysis report")
+        self.assertIs(make_podcast.SHARE_NAME, report_files.SHARE_NAME)
+        self.assertIs(core_submission.SHARE_FILE, report_files.SHARE_NAME)
+        with open(make_report.__file__, encoding="utf-8") as fh:
+            self.assertNotIn(report_files.SHARE_NAME.split(".")[0], fh.read())
+
+    def test_a_partial_scripts_copy_still_catalogues(self):
+        # verification of cba30b0: make_report imported make_podcast (and notify_slack) at load
+        with tempfile.TemporaryDirectory() as d:
+            lone = os.path.join(d, "scripts")
+            os.makedirs(lone)
+            for f in ("make_report.py", "report_files.py", "scratch_files.py"):
+                shutil.copy(os.path.join(SCRIPTS, f), lone)
+            out = os.path.join(d, "OUTPUT_FILES.md")
+            with open(os.path.join(d, "Analysis_Report_with_audio.html"), "w") as fh:
+                fh.write("x")
+            r = subprocess.run([sys.executable, os.path.join(lone, "make_report.py"), "--out", out,
+                                "--extra", os.path.join(d, "Analysis_Report_with_audio.html"),
+                                "--root", d], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            with open(out, encoding="utf-8") as fh:
+                self.assertIn("The report with the podcast's audio and transcript built in",
+                              fh.read())
+
     def test_every_file_the_skill_writes_is_described(self):
         for name in SKILL_FILES:
             with self.subTest(name):

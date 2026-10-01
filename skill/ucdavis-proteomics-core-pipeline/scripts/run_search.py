@@ -11,12 +11,17 @@ Routing (PLAN.md §7b):
 Per engine:
   diann    <cmd> --cfg <bundle .cfg> --f <files> --fasta <fasta>
            --out report.parquet --threads N        (native contract, no adapter)
-           adds --dda for DDA acquisition (DIA-NN 2.6+); if inputs are Thermo .raw,
+           DDA is searched with --dda, which estimate_params.py writes into the cfg;
+           a cfg whose --dda disagrees with the bundle's acquisition is refused on both
+           routes (diann_parallel.dda_mismatch). If inputs are Thermo .raw,
            auto-provisions a .NET 8 runtime (ensure_dotnet8.sh) so 2.6 can read them
-  sage     convert .d/.raw -> mzML if needed (msconvert), then
+  sage     convert .raw -> mzML (ThermoRawFileParser) / .d -> mzML (msconvert) if needed --
+           inside the job with --sbatch, never before submission -- then
            <cmd> <bundle sage_config.json> -f <fasta> -o <out> --parquet
            --disable-telemetry-i-dont-want-to-improve-sage
-           then adapt lfq.parquet -> DIA-NN-shaped report for --method maxlfq
+           then sage_lfq_check.py (LFQ window vs the runs' MS1 mass error; WARNS, never re-runs)
+           then adapt lfq.parquet -> DIA-NN-shaped report for --method maxlfq, keeping only
+           Sage's valid MS1 quantities (not decoy, q_value <= 0.05; counts in sage_adapt.json)
   fragpipe <cmd> --headless --workflow <.workflow> --manifest <m> --workdir <out>
            then adapt combined_protein.tsv -> DIA-NN-shaped report
 
@@ -41,6 +46,8 @@ import sys, os, json, glob, re, shlex, argparse, subprocess, shutil, stat, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # ONE definition of the q-value columns -- see diann_q_columns.py.
 from diann_q_columns import FDR_REQUIRED, PROTEIN_Q_PREFERENCE
+# the one reading of a protein identifier
+from protein_ids import fragpipe_protein_id, group_accessions, group_entry_names
 # No Bruker .d is searched before its analysis.tdf has been checked -- see bruker_tdf.py.
 from bruker_tdf import STATUSES, integrity_warning, tdf_integrity
 
@@ -404,33 +411,14 @@ SBATCH_NOT_WRITTEN = 3
 
 
 def _not_a_regular_file(path):
-    """None if `path` is absent or a regular file; otherwise what it is (for the refusal)."""
-    try:
-        mode = os.lstat(path).st_mode
-    except FileNotFoundError:
-        return None
-    if stat.S_ISREG(mode):
-        return None
-    return ("a directory" if stat.S_ISDIR(mode) else "a symlink" if stat.S_ISLNK(mode)
-            else "not a regular file")
+    """diann_parallel._not_a_regular_file -- the one definition."""
+    return _diann_parallel_mod()._not_a_regular_file(path)
 
 
 def set_aside(path):
-    """Rename an existing REGULAR FILE out of the way -- never delete it. Returns the new path,
-    or None when there was nothing there. The name records that it is stale and when it was
-    moved. Anything else (a directory, a symlink, a device) raises ValueError: `--sbatch proj`
-    once renamed a whole project folder, including the cfg the search was about to read."""
-    kind = _not_a_regular_file(path)
-    if kind:
-        raise ValueError(f"{path} is {kind}, not a job script -- refusing to move it")
-    if not os.path.lexists(path):
-        return None
-    base = f"{path}.stale-{time.strftime('%Y%m%dT%H%M%S')}"
-    new, k = base, 1
-    while os.path.lexists(new):
-        new, k = f"{base}.{k}", k + 1
-    os.rename(path, new)
-    return new
+    """diann_parallel.set_aside -- the one definition: rename a regular file `.stale-<time>`,
+    never delete it; anything else raises ValueError."""
+    return _diann_parallel_mod().set_aside(path)
 
 
 def scan_window_record(engine, params, res):
@@ -449,7 +437,22 @@ def scan_window_record(engine, params, res):
         # passed, "unverified" where DIA-NN's handling has not been measured
         return dp.window_record(dp.mass_acc_status(params))
     except dp.CfgError as e:
-        return {"source": f"unknown -- {e}", "value": None, "passed": None}
+        return {"mode": "unknown", "source": f"unknown -- {e}", "value": None, "passed": None}
+
+
+def mass_acc_provenance(engine, params, res):
+    """What set DIA-NN's mass accuracy, for search_provenance.json `mass_acc` -- present for every
+    DIA-NN search, with its stable `mode` (diann_parallel.MASS_ACC_MODES), as scan_window is: the
+    search's own record (result.mass_acc) when it has one, else read from the cfg it ran."""
+    if isinstance(res, dict) and isinstance(res.get("mass_acc"), dict):
+        return res["mass_acc"]
+    if engine != "diann":
+        return None
+    dp = _diann_parallel_mod()
+    try:
+        return dp.mass_acc_record(dp.mass_acc_status(params), params)
+    except dp.CfgError as e:
+        return {"mode": "unknown", "fixed": None, "reason": f"unknown -- {e}"}
 
 
 def ensure_temp_dirs(params, out):
@@ -540,9 +543,26 @@ def ensure_xic(params, out):
     return aug
 
 
-def run_diann_parallel(cmd, params, files, fasta, out, threads, a):
+def refuse_dda_mismatch(params, acquisition):
+    """Stop before anything is generated when the cfg's --dda disagrees with the bundle's
+    acquisition -- the same check on both DIA-NN routes (diann_parallel.dda_mismatch)."""
+    dp = _diann_parallel_mod()
+    try:
+        why = dp.dda_mismatch(params, acquisition)
+    except dp.CfgError as e:
+        if e.code == "cfg_missing":
+            return          # each route reports a missing cfg its own way, as before
+        sys.exit(f"[run_search] {e}")
+    if why:
+        sys.exit(f"[run_search] REFUSING the DIA-NN search: {why} Nothing was generated.")
+
+
+def run_diann_parallel(cmd, params, files, fasta, out, threads, a, acquisition=""):
     """Generate DIA-NN's 5-step SLURM chain (does not submit -- the orchestrator does,
     then watches the step-5 job with watch_run.sh)."""
+    # Before the generator: its own failure message says "re-run with --no-parallel", and the
+    # single-shot route refuses the same cfg.
+    refuse_dda_mismatch(params, acquisition)
     os.makedirs(out, exist_ok=True)
     listing = os.path.join(out, "parallel_input_files.txt")
     with open(listing, "w") as fh:                    # a list file survives spaces in paths
@@ -633,7 +653,8 @@ def report_guard(report, listing):
     ])
 
 
-def single_shot_mass_acc(params, listing, fasta, predicted, out, threads, cmd, libfree):
+def single_shot_mass_acc(params, listing, fasta, predicted, out, threads, cmd, libfree,
+                         provenance=None):
     """Measure an undocumented Orbitrap mass accuracy before a single-shot search.
 
     For a cfg estimate_params.py planned `measure_with_diann` (diann_parallel.
@@ -647,7 +668,11 @@ def single_shot_mass_acc(params, listing, fasta, predicted, out, threads, cmd, l
     representative runs (and replacements), the same flags step 1b gives it -- as bash words
     after `--` -- and the same budget; the median of each measured level and the documented
     value of the other, pinned for the search via massacc.txt. params.resolved.cfg is built in a
-    .tmp and moved into place only once the value is measured, as in step 1b.
+    .tmp and moved into place only once the value is measured -- or, as in step 1b, once a
+    probe that measured nothing twice has fallen back (diann_parallel.probe_attempts(),
+    probe_fallback.py): the documented level as given, the other at the SOP, tagged DEFAULT,
+    recorded in <out>/probe_fallback.json and, when `provenance` is given (the --sbatch routes,
+    whose search_provenance.json exists before the job runs), in it.
 
     `listing` is the caller's per-job file list -- the probe reads it at RUN time, so it must
     be the job's own, never a shared name (see the comment on it below).
@@ -661,6 +686,12 @@ def single_shot_mass_acc(params, listing, fasta, predicted, out, threads, cmd, l
     plan = dp.mass_acc_measure_plan(params)
     if not plan:
         return [], "", None, None
+    # A DDA cfg that still plans a measurement: refused now, with the chain's own words, rather
+    # than carried into the job for probe_window.py to refuse at run time.
+    refusal = dp.mass_acc_dda_refusal(params)
+    if refusal:
+        sys.exit(f"[run_diann] REFUSING the search: {refusal['reason']}. Fix: "
+                 f"{refusal['remedy']}. Nothing was generated.")
     if not libfree:
         # Three different reasons land here and they have three different fixes. Saying "no
         # library to measure against" and "drop --one-step" for all of them is wrong for the
@@ -690,7 +721,7 @@ def single_shot_mass_acc(params, listing, fasta, predicted, out, threads, cmd, l
                "optimise it on the first run of the search instead -- 'use this mode for "
                f"preliminary analyses only'. {fix}")
         sys.stderr.write(f"[run_diann] NOTE: {why}\n")
-        return [], "", {"fixed": False, "measured": False, "reason": why}, None
+        return [], "", {"mode": "auto", "fixed": False, "measured": False, "reason": why}, None
     q = shlex.quote
     # The CALLER's list file, named after the job (run_diann: `{stem}_input_files.txt`), not a
     # fixed search_input_files.txt of our own. This probe is generated now and read by the job
@@ -709,29 +740,51 @@ def single_shot_mass_acc(params, listing, fasta, predicted, out, threads, cmd, l
     # the same flags the chain's step 1b probes with: the cfg minus the step-specific ones
     flags = dp.read_cfg_flags(params, drop=dp.MASS_ACC_FLAGS)
     pattern = dp.MEASURED_FILE_RE["massacc.txt"]
-    failed = (f'{{ echo "FAILED: no mass accuracy measured -- see the messages above; per-run '
-              f'evidence in {evidence}. Nothing was searched." >&2; rm -f {q(tmp)}; exit 1; }}')
+    fallback_out = os.path.join(out, dp.FALLBACK_RECORD)
+    # A probe whose own machinery failed no longer stops the search: probe_attempts() retries
+    # it (a crash, an unreadable log) and falls back (probe_fallback.py: the documented level as
+    # given, the other at the SOP, tagged DEFAULT). Anything else stops it before DIA-NN runs.
+    failed = ("{ echo \"FAILED: no mass accuracy measured, and no fallback (only a failure of "
+              "the probe's own machinery may fall back):\" >&2; "
+              + " ".join(ln.strip() for ln in dp.probe_failure_lines()) + ";"
+              + f' echo "Per-run evidence in {evidence}. Nothing was searched." >&2; '
+              f'rm -f {q(tmp)} {q(massacc)}; exit 1; }}')
     lines = [
         'echo "measuring mass accuracy with DIA-NN on representative runs before the search"',
-        # an earlier run's value, evidence or resolved cfg must not survive
-        f"rm -f {q(evidence)} {q(massacc)} {q(resolved)} {q(tmp)}",
-        f"rm -rf {q(workdir)}",
+        # an earlier run's value, evidence, fallback or resolved cfg must not survive
+        f"rm -f {q(evidence)} {q(evidence + '.attempt1')} {q(massacc)} {q(fallback_out)} "
+        f"{q(resolved)} {q(tmp)}",
+        f"rm -rf {q(workdir)} {q(workdir + '.attempt1')}",
         f"cp {q(params)} {q(tmp)}",
-        f"python3 {q(probe)} --diann {q(cmd)} --raw-list {q(listing)} --fasta {q(fasta)} "
-        f"--lib {q(predicted)} --threads {threads} --measure mass-acc{doc_args} "
-        f"--max-probes {dp.PROBE_CANDIDATES} --max-failures {dp.PROBE_MAX_FAILURES} "
-        f"--timeout {dp.PROBE_TIMEOUT_S} --budget {dp.PROBE_BUDGET_S} "
-        f"--workdir {q(workdir)} --write-cfg {q(tmp)} -- {flags} > {q(evidence)} || {failed}",
+        *dp.probe_attempts(
+            f"python3 {q(probe)} --diann {q(cmd)} --raw-list {q(listing)} --fasta {q(fasta)} "
+            f"--lib {q(predicted)} --threads {threads} --measure mass-acc{doc_args} "
+            f"--max-probes {dp.PROBE_CANDIDATES} --max-failures {dp.PROBE_MAX_FAILURES} "
+            f"--timeout {dp.PROBE_TIMEOUT_S} --workdir {q(workdir)} --write-cfg {q(tmp)}",
+            flags, evidence, ["mass-acc"], documented,
+            reset=dp.keep_attempt(workdir) + [f"cp {q(params)} {q(tmp)}"],
+            massacc_file=massacc, write_cfg=tmp, provenance=provenance,
+            fallback_out=fallback_out),
+        'if [ "$PROBE_RC" -eq 0 ]; then',
         # the two flags, in exactly the shape the guard below accepts
-        "python3 -c \"import json,re,sys; m=json.load(open(sys.argv[1]))['mass_acc']['pin_as']; "
+        "  python3 -c \"import json,re,sys; m=json.load(open(sys.argv[1]))['mass_acc']['pin_as']; "
         f"assert re.fullmatch(sys.argv[2], m); print(m)\" {q(evidence)} {q(pattern)} "
         f"> {q(massacc)} || {failed}",
+        # probe_fallback.py wrote massacc.txt and the cfg's two flags
+        f'elif [ "$PROBE_FALLBACK" -ne 1 ]; then {failed}; fi',
         dp.needs_measured(massacc, "the two mass-accuracy flags",
                           producer="the probe before this search"),
         f"mv -f {q(tmp)} {q(resolved)}",
-        f'echo "mass accuracy = $(cat {q(massacc)}) (pinned for the search; evidence {evidence})"',
+        'if [ "$PROBE_FALLBACK" -eq 1 ]; then',
+        f'  echo "mass accuracy = $(cat {q(massacc)}) -- FALLBACK: the probe measured nothing, '
+        'so the documented level as given and the other at the facility SOP (DEFAULT, not '
+        f'measured); record in {fallback_out}"',
+        "else",
+        f'  echo "mass accuracy = $(cat {q(massacc)}) (pinned for the search; evidence '
+        f'{evidence})"',
+        "fi",
     ]
-    record = {"fixed": True, "measured": True, "documented": documented,
+    record = {"mode": "measured", "fixed": True, "measured": True, "documented": documented,
               "ms1": documented.get("--mass-acc-ms1"), "ms2": documented.get("--mass-acc"),
               "source": "measured with DIA-NN on representative runs by the single-shot search "
                         "job's probe before the search (probe_window.py --measure mass-acc); "
@@ -743,9 +796,11 @@ def single_shot_mass_acc(params, listing, fasta, predicted, out, threads, cmd, l
               "reason": "not in the cfg; measured before the search and passed to it"}
     resolved_params = {"file": resolved, "produced": "runtime",
                        "by": "the single-shot search's pre-search probe",
-                       "note": "written only after mass accuracy is measured, just before the "
-                               "DIA-NN search; absent until then, so a missing file after the "
-                               "search job means the measurement failed"}
+                       "note": "written only after mass accuracy is measured -- or set by the "
+                               "fallback when the probe measured nothing (probe_fallback.json) -- "
+                               "just before the DIA-NN search; absent until then, so a missing "
+                               "file after the search job means the probe was refused or "
+                               "stopped"}
     return lines, f" $(cat {q(massacc)})", record, resolved_params
 
 
@@ -754,6 +809,7 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
     to every emit_sbatch() call -- without it slurm_queue() re-detects a queue and overrides
     the one the user chose."""
     queue = queue or {}
+    refuse_dda_mismatch(params, acquisition)
     os.makedirs(out, exist_ok=True)
     report = os.path.join(out, "report.parquet")
     f_args = " ".join(f"--f {shlex.quote(f)}" for f in files)
@@ -771,7 +827,10 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
     # DIA-NN 2.6 supports DDA via --dda (must NOT be used on DIA data). QuantUMS is
     # auto-disabled on DDA; for DDA quant DIA-NN recommends extra MS1 filtering on
     # Ms1.Global.Q.Value / Ms1.Global.Quality (see references/search-engines.md).
-    dda = " --dda" if (acquisition or "").upper() == "DDA" else ""
+    # The flag comes from the cfg (estimate_params.py writes it), as it does for the chain. This
+    # route used to append it to the command instead -- so the chain never had it, and a cfg that
+    # already carried it got it twice. A cfg that disagrees with the bundle is refused (at the
+    # top of this function, before anything is written).
 
     # Library-free runs are split into TWO SLURM JOBS: predict the library, then search
     # against it as an afterok dependency. Not because DIA-NN's one-step warning is
@@ -795,6 +854,7 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
             sys.exit(f"[run_diann] {e}")
         groups = []                         # onecmd below hands DIA-NN the path; it reports it
     present = {f for f, _ in groups}
+    dda = dp.DIANN_DDA_FLAG in present          # recorded in the result; the cfg carries it
     libfree = {"--fasta-search", "--gen-spec-lib"} <= present \
         and not getattr(a_globals, "one_step", False)
     dnet = dotnet_env_for(files)          # .NET 8 for reading Thermo .raw, if needed
@@ -808,10 +868,18 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
                f"--out-lib {shlex.quote(lib)} --threads {threads}")
     # An undocumented Orbitrap mass accuracy is measured between the library and the search
     # (single_shot_mass_acc); `mflag` then carries the pinned flags into the search.
+    # the --sbatch routes write search_provenance.json now, before the job runs, so a fallback
+    # in the job records itself there; inline, it is written after the search, from ma_rec
     measure_lines, mflag, mass_acc, resolved_params = single_shot_mass_acc(
-        params, listing, fasta, lib + ".predicted.speclib", out, threads, cmd, libfree)
+        params, listing, fasta, lib + ".predicted.speclib", out, threads, cmd, libfree,
+        provenance=os.path.join(out, "search_provenance.json") if sbatch else None)
     # recorded only when there is something to say, so a pinned cfg's result is unchanged
     ma_rec = {} if mass_acc is None else {"mass_acc": mass_acc}
+    if mass_acc is None and groups:
+        # ...and when the cfg pins a DDA level at the SOP, say it is a DEFAULT (rule 2)
+        st = dp.mass_acc_status(params)
+        if dp.mass_acc_defaults(params, st):
+            ma_rec["mass_acc"] = dp.mass_acc_record(st, params)
     if resolved_params:
         ma_rec["resolved_params"] = resolved_params
     # --temp, always. Without it DIA-NN writes every run's .quant NEXT TO THE RAW FILE -- on
@@ -827,10 +895,10 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
         tmp_arg = f" --temp {shlex.quote(quant_dir)}"
     search_cmd = (f"{cmd} {search_cfg}{mflag} {f_args} --fasta {shlex.quote(fasta)} "
                   f"--lib {shlex.quote(lib)}.predicted.speclib --reanalyse --matrices "
-                  f"--out {shlex.quote(report)} --threads {threads}{dda}{tmp_arg}")
+                  f"--out {shlex.quote(report)} --threads {threads}{tmp_arg}")
     onecmd = (f"{cmd} --cfg {shlex.quote(params)} {f_args} "
               f"--fasta {shlex.quote(fasta)} --out {shlex.quote(report)} "
-              f"--threads {threads}{dda}{tmp_arg}")
+              f"--threads {threads}{tmp_arg}")
     # DIA-NN exits 0 on fatal errors, so each job asserts the artefact it exists to make --
     # the same contract every step of the 5-step chain has (references/diann_parallel.md).
     # And each job first DELETES that artefact, because an existence check cannot tell this
@@ -847,6 +915,11 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
     search_job = "\n".join([dp.clear_stale(*report_files), *measure_lines, search_cmd, guard])
     one_job = "\n".join([dp.clear_stale(*report_files), onecmd, guard])
 
+    # Every refusal is behind us (single_shot_mass_acc's is the last): an earlier search's probe
+    # outputs must not describe this one -- set aside, never deleted (dda-review N1, R1). Inline,
+    # they go with the report files in the loop below, after its own refusal.
+    if sbatch:
+        dp.set_aside_probe_outputs(out)
     # TWO JOBS + dependency when emitting sbatch: the library is expensive and
     # reusable, so a failed search requeues against it instead of rebuilding.
     if libfree and sbatch:
@@ -910,6 +983,8 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
             moved.append(old)
     if moved:
         print(f"  [run_diann] previous artefacts set aside: {', '.join(moved)}")
+    # ...and their probe outputs with them: kept as that search's evidence, never this one's
+    dp.set_aside_probe_outputs(out)
     if libfree:
         sh(pre + lib_cmd)
         if not (os.path.exists(predicted) and os.path.getsize(predicted) > 0):
@@ -924,6 +999,14 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
                 sys.exit(f"single-shot DIA-NN search stopped (exit {e.returncode}) -- see "
                          "the messages above; nothing was searched with an unmeasured mass "
                          "accuracy")
+            # the probe measured nothing and fell back: the record says so, not "measured"
+            fb = os.path.join(out, dp.FALLBACK_RECORD)
+            if os.path.isfile(fb):
+                with open(fb) as fh:
+                    rec = json.load(fh)
+                ma_rec["mass_acc"] = dict(rec["mass_acc"], value_file=mass_acc["value_file"],
+                                          evidence_file=mass_acc["evidence_file"])
+                ma_rec["probe_fallback"] = rec
         sh(pre + search_cmd)
     else:
         sh(pre + onecmd)
@@ -939,6 +1022,192 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
     print(f"  [run_diann] {msg}")
     return {"engine": "diann", "report": report, "ran": True, "dda": bool(dda),
             "previous_artefacts_moved_to": moved, **ma_rec}
+
+
+# ------------------------------------------------- quantity declarations -----
+# Every adapter says what its report's numbers ARE (architectural rule 1), as parquet schema
+# metadata under QUANTITY_META; build_maxlfq.R declared_quantity() reads it and
+# maxlfq_descriptor() -- the one description the methods, the report, the AI brief and the
+# reproducibility log all read -- is built from it. No downstream file names an engine. Keys:
+#   level           "protein" (one value per protein and run, the engine's own) | "peptide"
+#   label           the short name the DE's display label uses
+#   value           what the number is, with engine version and source file
+#   identification  the FDR the engine applied (the report's q-columns may be placeholders)
+#   citation        the engine / quantification papers, Crossref-verified
+#   caveat          optional: a limitation the report and AUDIT.md must carry
+# DIA-NN's own report (native, or FragPipe's DIA route) declares nothing: its PG.MaxLFQ IS
+# DIA-NN's MaxLFQ.
+QUANTITY_META = "delimp.quantity."
+# Crossref-verified 2026-09-29 (doi in brackets)
+CITE = {
+    "sage": "Sage (Lazear 2023, J Proteome Res 22:3652-3659) [10.1021/acs.jproteome.3c00486]",
+    "msfragger": "MSFragger (Kong et al. 2017, Nat Methods 14:513-520) [10.1038/nmeth.4256]",
+    "ionquant": "IonQuant (Yu et al. 2021, Mol Cell Proteomics 20:100077) "
+                "[10.1016/j.mcpro.2021.100077]",
+    "maxlfq": "MaxLFQ (Cox et al. 2014, Mol Cell Proteomics 13:2513-2526) "
+              "[10.1074/mcp.M113.031591]",
+    "alphadia": "AlphaDIA (Wallmann et al. 2025, Nat Biotechnol) [10.1038/s41587-025-02791-w]",
+    "directlfq": "directLFQ (Ammar et al. 2023, Mol Cell Proteomics 22:100581) "
+                 "[10.1016/j.mcpro.2023.100581]",
+    "radiant": "Radiant DIA (Just et al. 2026, bioRxiv) [10.64898/2026.04.29.721743]",
+}
+PLACEHOLDER_Q = ("The report's q-value columns are 0.0 placeholders, so the DE's q-value filter "
+                 "keeps every row")
+# Set by main() before a search runs: the engine version it recorded (engine_version_record),
+# for an adapter whose engine output does not carry its own version.
+ENGINE_VERSION = None
+
+
+def declare_quantity(tbl, declared):
+    """`tbl` with `declared` as its QUANTITY_META schema metadata (None values left out)."""
+    return tbl.replace_schema_metadata(
+        {QUANTITY_META + k: str(v) for k, v in declared.items() if v is not None})
+
+
+def recorded_engine_version(out):
+    """The engine version for an adapter's declaration: main()'s, else the one
+    search_provenance.json recorded when the job was generated (--adapt-only), else None."""
+    if ENGINE_VERSION:
+        return ENGINE_VERSION
+    try:
+        with open(os.path.join(out, "search_provenance.json")) as fh:
+            return json.load(fh).get("version")
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def _vtag(name, ver):
+    return f"{name} {ver}" if ver else f"{name} (version not recorded)"
+
+
+def fragpipe_quantity_declaration(out, maxlfq_columns):
+    """combined_protein.tsv's quantity, read from the fragpipe.workflow FragPipe saves beside it:
+    its '# FragPipe version' / '# IonQuant version' header, the Philosopher filter it ran, and
+    whether IonQuant matched between runs (ionquant.mbr)."""
+    vers, filt, mbr = {}, None, None
+    wf = _find(out, ["fragpipe.workflow"])
+    try:
+        with open(wf or "") as fh:
+            for ln in fh:
+                m = re.match(r"#\s*(FragPipe|IonQuant|MSFragger) version (\S.*)$", ln.strip())
+                if m:
+                    vers[m.group(1)] = m.group(2).strip()
+                elif ln.startswith("phi-report.filter="):
+                    filt = ln.split("=", 1)[1].strip()
+                elif ln.startswith("ionquant.mbr="):
+                    mbr = ln.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    what = "MaxLFQ intensity" if maxlfq_columns else "protein intensity (not MaxLFQ)"
+    cols = "'<sample> MaxLFQ Intensity'" if maxlfq_columns else "'<sample> Intensity'"
+    mbr_txt = ("match-between-runs on" if mbr == "1" else "match-between-runs off" if mbr == "0"
+               else "match-between-runs not recorded" + ("" if wf else " (no fragpipe.workflow)"))
+    return {
+        "level": "protein",
+        "label": "FragPipe IonQuant" + (" MaxLFQ" if maxlfq_columns else ""),
+        "value": f"{_vtag('FragPipe', vers.get('FragPipe'))} / "
+                 f"{_vtag('IonQuant', vers.get('IonQuant'))} {what}, {mbr_txt} "
+                 f"(combined_protein.tsv {cols})",
+        "identification": (f"FragPipe's own FDR: Philosopher filter {filt} (fragpipe.workflow)"
+                           if filt else "FragPipe's own FDR (its Philosopher filter is not "
+                           "recorded: no fragpipe.workflow in the output)") + f". {PLACEHOLDER_Q}",
+        "q_columns": "placeholder",
+        "citation": "; ".join([CITE["msfragger"], CITE["ionquant"]]
+                              + ([CITE["maxlfq"]] if maxlfq_columns else [])),
+    }
+
+
+def _version_tuple(v):
+    m = re.match(r"v?(\d+)\.(\d+)", str(v or ""))
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def _frozen_config(out):
+    """AlphaDIA's <output>/frozen_config.yaml (search_step.py writes it for every search) ->
+    {"found", "version", "normalization_method", "fdr"}; a key the file lacks is None.
+
+    `version` is the package version only from AlphaDIA 2.0.3 on (search_step.py sets it); up
+    to 2.0.0 the file carries the config SCHEMA version `1` (constants/default.yaml), so only a
+    number shaped like a release (\\d+.\\d+) is taken as AlphaDIA's version. `schema_v1` records
+    that the file was the old shape."""
+    rec = {"found": False, "version": None, "normalization_method": None, "fdr": None,
+           "schema_v1": False}
+    p = _find(out, ["frozen_config.yaml"])
+    if not p:
+        return rec
+    try:
+        with open(p) as fh:
+            text = fh.read()
+    except OSError:
+        return rec
+    rec["found"] = True
+    try:
+        import yaml
+        cfg = yaml.safe_load(text) or {}
+        raw = (cfg.get("version"), (cfg.get("search_output") or {}).get("normalization_method"),
+               (cfg.get("fdr") or {}).get("fdr"))
+    except Exception:
+        # no PyYAML: the three keys are plain scalars (alphadia/constants/default.yaml)
+        def key(k, indented):
+            m = re.search(rf"^{'[ ]+' if indented else ''}{k}:\s*['\"]?([^'\"#\n]+)", text, re.M)
+            return m.group(1).strip() if m else None
+        raw = (key("version", False), key("normalization_method", True), key("fdr", True))
+    ver, rec["normalization_method"], rec["fdr"] = raw
+    if _version_tuple(ver) and "." in str(ver):
+        rec["version"] = str(ver)
+    elif str(ver).strip() == "1":
+        rec["schema_v1"] = True
+    return rec
+
+
+def alphadia_quantity_declaration(out, source):
+    fc = _frozen_config(out)
+    ver = fc["version"] or recorded_engine_version(out)
+    m = (fc["normalization_method"] or "").lower()
+    vt = _version_tuple(ver)
+    if m in ("directlfq", "quantselect"):
+        algo = "directLFQ" if m == "directlfq" else "QuantSelect"
+    elif fc["found"] and (fc["schema_v1"] or (vt and vt < (2, 1))):
+        # AlphaDIA before 2.1 has no normalization_method: directLFQ is its only protein LFQ
+        algo, m = "directLFQ", "directlfq"
+    elif fc["found"]:
+        algo = "its protein LFQ (method not recorded in frozen_config.yaml)"
+    else:
+        algo = "its protein LFQ (method not recorded: no frozen_config.yaml)"
+    fdr = fc["fdr"]
+    no_fdr = ("no fdr.fdr in frozen_config.yaml" if fc["found"] else "no frozen_config.yaml")
+    return {
+        "level": "protein",
+        "label": "AlphaDIA" + (f" {algo}" if m in ("directlfq", "quantselect") else ""),
+        "value": f"{_vtag('AlphaDIA', ver)} protein-group LFQ intensity ({algo}; {source})",
+        "identification": (f"AlphaDIA's own FDR: precursors and protein groups at {fdr} "
+                           f"(frozen_config.yaml fdr.fdr)" if fdr is not None else
+                           f"AlphaDIA's own FDR (threshold not recorded: {no_fdr})")
+                          + f". {PLACEHOLDER_Q}",
+        "q_columns": "placeholder",
+        "citation": "; ".join([CITE["alphadia"]] + ([CITE["directlfq"]] if m == "directlfq"
+                                                     else [])),
+    }
+
+
+def radiant_quantity_declaration(out, intensity_col, q_col):
+    protein = intensity_col.lower().startswith("pg.")
+    ver = recorded_engine_version(out)
+    ident = (f"Fulcrum's {q_col}, one q-value per protein and run, copied into each of the "
+             f"report's q-value columns and filtered at the DE's q-value cutoff" if q_col else
+             "none applied here: the Fulcrum output has no q-value column, so the report's "
+             "q-value columns are 0.0 placeholders and the DE's q-value filter keeps every row")
+    if protein:
+        return {"level": "protein", "label": "Radiant Fulcrum",
+                "value": f"{_vtag('Radiant', ver)} Fulcrum {intensity_col} per protein group",
+                "identification": ident, "q_columns": "real" if q_col else "placeholder",
+                "citation": CITE["radiant"]}
+    # Fulcrum reported only a precursor-level quantity and the adapter kept the highest one per
+    # protein and run: that is the peptide-level rollup, and it is declared as one
+    return {"level": "peptide", "label": "Radiant Fulcrum",
+            "value": f"{_vtag('Radiant', ver)} Fulcrum {intensity_col} precursor intensity",
+            "identification": ident, "q_columns": "real" if q_col else "placeholder",
+            "citation": CITE["radiant"]}
 
 
 # --------------------------------------------------------------- AlphaDIA -----
@@ -959,18 +1228,25 @@ def run_alphadia(cmd, config, files, fasta, out, threads, sbatch, queue=None):
 
 
 def adapt_alphadia(out):
-    """AlphaDIA pg.matrix.parquet (protein-group × run) -> DIA-NN-shaped report.parquet.
-    Falls back to precursors.parquet (raw.name, pg.name, pg.intensity). Like the Sage
-    adapter, this is the part to confirm on real data the first time."""
+    """AlphaDIA pg.matrix (protein-group × run) -> DIA-NN-shaped report.parquet.
+    Falls back to precursors.parquet (raw.name, pg.name, pg.intensity). The matrix is parquet
+    or TSV, as the run's search_output.file_format chose: HIVE has both (AlphaDIA 2.0.1 service
+    runs wrote pg.matrix.parquet; 2.1.2 runs with file_format tsv wrote pg.matrix.tsv, id column
+    pg.name). Like the Sage adapter, this is the part to confirm on real data the first time."""
     try:
         import pyarrow.parquet as pq, pyarrow as pa
     except ImportError:
         sys.exit("pyarrow required to adapt AlphaDIA output. pip install pyarrow.")
 
     runs, prots, ints = [], [], []
-    pgm = _find(out, ["pg.matrix.parquet"])
+    pgm = _find(out, ["pg.matrix.parquet", "pg.matrix.tsv"])
     if pgm:
-        t = pq.read_table(pgm); cols = t.column_names
+        if pgm.endswith(".tsv"):
+            import pyarrow.csv as pacsv
+            t = pacsv.read_csv(pgm, parse_options=pacsv.ParseOptions(delimiter="\t"))
+        else:
+            t = pq.read_table(pgm)
+        cols = t.column_names
         id_col = next((c for c in cols if c.lower() in
                        ("pg", "pg.name", "protein", "proteins", "protein.group", "proteingroup")), cols[0])
         sample_cols = [c for c in cols if c != id_col]
@@ -983,7 +1259,7 @@ def adapt_alphadia(out):
     else:
         pr = _find(out, ["precursors.parquet"])
         if not pr:
-            sys.exit(f"No pg.matrix.parquet or precursors.parquet under {out}.")
+            sys.exit(f"No pg.matrix.parquet / pg.matrix.tsv or precursors.parquet under {out}.")
         t = pq.read_table(pr); cols = {c.lower(): c for c in t.column_names}
         def col(*c):
             for x in c:
@@ -1006,10 +1282,12 @@ def adapt_alphadia(out):
     # emitted as 0.0 placeholders -- the downstream filter is deliberately a
     # no-op here rather than a second, different FDR. Names come from the shared
     # definition so this adapter cannot fall behind the contract it satisfies.
-    pq.write_table(pa.table({
+    # The declaration says what the numbers are (rule 1): AlphaDIA's, not DIA-NN's.
+    pq.write_table(declare_quantity(pa.table({
         "Run": runs, "Protein.Group": prots, "PG.MaxLFQ": ints,
         **{c: [0.0] * n for c in FDR_REQUIRED},
-    }), report)
+    }), alphadia_quantity_declaration(
+        out, os.path.basename(pgm) if pgm else "precursors.parquet pg.intensity")), report)
     print(f"  [adapt] AlphaDIA -> {report}  ({n} protein×run rows)")
     return report
 
@@ -1107,6 +1385,29 @@ def radiant_library(tools, fasta, out, threads, params=None):
     return info["library"]
 
 
+def radiant_library_job(tools, fasta, out, threads):
+    """radiant_library() for a --sbatch search: (the library path, the job lines that build it).
+    The same helper writes the same file (make_radiant_library.py keeps its output name, and
+    reuses one already there), but on the compute node: predicting a library is a DIA-NN run,
+    and it used to run here, on the login node, before the job was written."""
+    dn = tools.get("diann")
+    if not dn:
+        sys.exit("Radiant needs a spectral library, but tools.json has no DIA-NN command. "
+                 "Acquire DIA-NN first (it is the library generator for this route), or "
+                 "pass --library with an existing .tsv/.csv/.fragLibFF library.")
+    q = shlex.quote
+    libdir = os.path.join(out, "radiant_lib")
+    tsv = os.path.join(libdir, "radiant_library.tsv")
+    helper = os.path.join(os.path.dirname(os.path.abspath(__file__)), "make_radiant_library.py")
+    return tsv, [
+        'echo "building the Radiant spectral library (DIA-NN predictor) on this compute node"',
+        _job_python(),
+        f'"$_py" {q(helper)} --diann {q(dn)} --fasta {q(fasta)} --out-dir {q(libdir)} '
+        f"--threads {threads}",
+        f"[ -s {q(tsv)} ] || {{ echo {q(f'FAILED: make_radiant_library.py wrote no {tsv}')} "
+        ">&2; exit 1; }"]
+
+
 def run_radiant_parallel(tools, params, files, fasta, out, threads, a, library=None):
     """On a cluster, search each file as its own array task, then rescore once.
 
@@ -1156,7 +1457,8 @@ def run_radiant(tools, params, files, fasta, out, threads, sbatch, library=None,
                  "mzML or Parquet. This route is for Thermo Orbitrap DIA.\n"
                  f"  Bruker inputs: {bad}\n"
                  "  Use the DIA-NN or FragPipe/diaTracer route for timsTOF data.")
-    mzml = ensure_mzml(files, out)          # .raw -> mzML (msconvert), same path Sage uses
+    # .raw -> mzML, planned as for Sage (mzml_plan): converted in the job with --sbatch
+    mzml, steps = mzml_plan(files, out)
     if library and not library.lower().endswith(RADIANT_LIB_SUFFIXES):
         sys.exit(f"Radiant cannot read {os.path.basename(library)} — its loader accepts "
                  f"only {', '.join(RADIANT_LIB_SUFFIXES)}.")
@@ -1167,7 +1469,17 @@ def run_radiant(tools, params, files, fasta, out, threads, sbatch, library=None,
             "  supported'. If this is a DIA-NN library, convert it first:\n"
             "    python3 scripts/make_radiant_library.py --from-speclib <lib> "
             "--diann '<cmd>' --out-dir <dir>\n")
-    lib = library or radiant_library(tools, fasta, out, threads, params)
+    if not sbatch:
+        convert_inline(steps)               # an inline search converts here, now
+        steps = []
+    # The predicted library is a DIA-NN run: in the job too with --sbatch, not here.
+    lib_lines = []
+    if library:
+        lib = library
+    elif sbatch:
+        lib, lib_lines = radiant_library_job(tools, fasta, out, threads)
+    else:
+        lib = radiant_library(tools, fasta, out, threads, params)
 
     results = os.path.join(out, "radiant_results")
     os.makedirs(results, exist_ok=True)
@@ -1198,8 +1510,11 @@ def run_radiant(tools, params, files, fasta, out, threads, sbatch, library=None,
     argv = _container_argv(tools, mounts, inner)
     full = " ".join(shlex.quote(x) for x in argv)
     if sbatch:
-        emit_sbatch(sbatch, full, out, threads, job="radiant_search", **(queue or {}))
-        return {"engine": "radiant", "out": out, "submitted": sbatch, "ran": False}
+        job = "\n".join(conversion_lines(steps) + lib_lines + [full])
+        emit_sbatch(sbatch, job, out, threads, job="radiant_search", **(queue or {}))
+        return {"engine": "radiant", "out": out, "submitted": sbatch, "ran": False,
+                "library": lib, "library_built": "in the job" if lib_lines else "given",
+                "mzml_conversion": conversion_record(steps, "in the job, before Radiant")}
     sh(full)
     report = adapt_radiant(out)
     return {"engine": "radiant", "report": report, "ran": True, "library": lib}
@@ -1281,7 +1596,9 @@ def adapt_radiant(out):
     c_q = col(*PROTEIN_Q_PREFERENCE)
 
     runs = [_radiant_run_name(r) for r in t.column(c_run).to_pylist()]
-    pgs = [str(p) for p in t.column(c_pg).to_pylist()]
+    # as DIA-NN writes Protein.Group (bare accessions; group_accessions leaves a bare one as it
+    # is), so a FASTA-header-shaped id cannot hide a Cont_ entry from the contaminant filter
+    pgs = [group_accessions(p) for p in t.column(c_pg).to_pylist()]
     vals = t.column(c_int).to_pylist()
     qs = t.column(c_q).to_pylist() if c_q else [0.0] * len(pgs)
 
@@ -1308,39 +1625,185 @@ def adapt_radiant(out):
     # Fulcrum reports ONE q-value per protein x run, so it is broadcast to every
     # column of the contract rather than invented per column. Names derived from
     # the shared definition -- see the AlphaDIA adapter above.
-    pq.write_table(pa.table({
+    # The declaration says what the numbers are (rule 1): Fulcrum's, not DIA-NN's.
+    pq.write_table(declare_quantity(pa.table({
         "Run": runs2, "Protein.Group": pgs2, "PG.MaxLFQ": ints,
         **{c: qv for c in FDR_REQUIRED},
-    }), report)
+    }), radiant_quantity_declaration(out, c_int, c_q)), report)
     print(f"  [adapt] Radiant/Fulcrum -> {report}  ({n} protein×run rows)")
     return report
 
 
-# ------------------------------------------------------------------- Sage -----
-def ensure_mzml(files, out):
-    """mzML-first engines (Sage, Radiant). Convert .d/.raw via msconvert if present."""
-    msconvert = shutil.which("msconvert")
-    converted, need = [], []
-    for f in files:
-        low = f.lower()
-        if low.endswith((".mzml", ".mzml.gz")):
-            converted.append(f)
-        else:
-            need.append(f)
-    if need and not msconvert:
-        sys.exit("Sage needs mzML. Found non-mzML inputs but no msconvert on PATH.\n"
-                 "  Convert .d/.raw to mzML first (ProteoWizard), or use a Bruker-reader Sage build.\n"
-                 f"  Inputs needing conversion: {need}")
+# ------------------------------------------------------------ mzML inputs -----
+# Sage and Radiant read mzML. The conversion is PLANNED here (mzml_plan -- nothing is run) and
+# RUN wherever the search runs: in this process for an inline search (convert_inline), inside
+# the job for --sbatch (conversion_lines), on the compute node. It used to run right here,
+# before the job script was even written: gabrig 2026-09-29, 4 Fusion Lumos .raw (~2.4 GB) on
+# HIVE login2 -- `run_search.py --engine sage --sbatch` started msconvert on the LOGIN NODE for
+# every file (golden rule 3). It failed at once only because bioconda's Linux msconvert is built
+# from ProteoWizard's source WITHOUT the vendor readers (recipe: pwiz-src-without-v), so it
+# cannot open a .raw at all.
+#
+# .raw -> ThermoRawFileParser (-f=2, indexed mzML): the parser step 2 already reads .raw with,
+# found the same way (detect_acquisition.locate_trfp: $THERMORAWFILEPARSER, PATH, the pipeline
+# env, the Core's shared copy) and given the same checked DOTNET_ROOT (trfp_launch -- directory
+# checks only, nothing is started here). msconvert only when there is no usable parser.
+# .d (and anything else not mzML) -> msconvert, as before.
+MZML_SUFFIXES = (".mzml", ".mzml.gz")
+TRFP_UNSET_ENV = ("DOTNET_ROOT_X64", "DOTNET_ROOT_ARM64", "DOTNET_ROOT_X86")  # see _child_env
+
+
+def _trfp_converter():
+    """(argv prefix, {env}, label) for ThermoRawFileParser, or (None, None, why not)."""
+    import detect_acquisition as da
+    cmd, where = da.locate_trfp()
+    if not cmd:
+        return None, None, da._trfp_not_found()
+    launch = da.trfp_launch(cmd)
+    if launch["problem"]:
+        return None, None, launch["problem"]
+    env = {"DOTNET_ROOT": launch["dotnet_root"]} if launch["dotnet_root"] else {}
+    return launch["cmd"], env, f"ThermoRawFileParser ({where})"
+
+
+def mzml_plan(files, out):
+    """(the mzML each input is searched as, in order; the conversion steps). Nothing is run or
+    created. A step is {"input", "mzml", "partial", "tool", "argv", "env", "complete"}: `argv`
+    (with `env` added) writes `partial`, which is moved to `mzml` only once `complete` -- the
+    closing tag an indexed mzML ends with, or None for "non-empty" -- is found in its tail."""
     mzdir = os.path.join(out, "mzml")
-    if need:
-        os.makedirs(mzdir, exist_ok=True)
-        for f in need:
-            sh(f"{shlex.quote(msconvert)} {shlex.quote(f)} --mzML --zlib -o {shlex.quote(mzdir)}")
-            base = os.path.splitext(os.path.basename(f.rstrip('/')))[0]
-            converted.append(os.path.join(mzdir, base + ".mzML"))
-    return converted
+    partial_dir = os.path.join(mzdir, ".partial")
+    mzml, steps, trfp, msconvert = [], [], None, None
+    for f in files:
+        if f.lower().endswith(MZML_SUFFIXES):
+            mzml.append(f)
+            continue
+        base = os.path.splitext(os.path.basename(f.rstrip("/")))[0]
+        final, partial = os.path.join(mzdir, base + ".mzML"), os.path.join(partial_dir,
+                                                                            base + ".mzML")
+        tool = None
+        if f.lower().endswith(".raw"):
+            if trfp is None:
+                trfp = _trfp_converter()
+            argv0, env, label = trfp
+            if argv0:
+                # every value inlined: TRFP takes optional parameters only as -option=value
+                tool = {"tool": label, "argv": argv0 + [f"-i={f}", f"-b={partial}", "-f=2"],
+                        "env": env, "complete": "</indexedmzML>"}
+        if tool is None:
+            if msconvert is None:
+                msconvert = shutil.which("msconvert") or ""
+            if not msconvert:
+                why = (f"ThermoRawFileParser: {trfp[2]}\n  " if trfp and not trfp[0] else "")
+                sys.exit("[run_search] Sage/Radiant read mzML, and this input is not mzML: "
+                         f"{f}\n  Nothing was converted, written or submitted.\n  {why}"
+                         "msconvert: not on PATH (.d/other formats need it).\n  Convert to mzML "
+                         "first, or install ThermoRawFileParser for .raw (bash scripts/setup.sh "
+                         "puts bioconda's in the pipeline env).")
+            if sys.platform.startswith("linux"):
+                why = (f" because ThermoRawFileParser is not usable here ({trfp[2]})"
+                       if f.lower().endswith(".raw") and trfp else "")
+                sys.stderr.write(
+                    f"[run_search] WARNING: converting {os.path.basename(f.rstrip('/'))} with "
+                    f"msconvert ({msconvert}){why}. bioconda's Linux msconvert has no vendor "
+                    "readers and cannot open .raw or .d; this works only with a vendor-enabled "
+                    "build. (Sage 0.14 reads .d itself, but without its MS1 scans, so with no "
+                    "LFQ.)\n")
+            # centroided MS1 and MS2 (Sage and Radiant want peaks, not profile), and the same
+            # completeness check as the parser: an indexed mzML ends with its closing tag
+            tool = {"tool": f"msconvert ({msconvert})",
+                    "argv": [msconvert, f, "--mzML", "--zlib",
+                             "--filter", "peakPicking vendor msLevel=1-", "-o", partial_dir],
+                    "env": {}, "complete": "</indexedmzML>"}
+        steps.append(dict(tool, input=f, mzml=final, partial=partial))
+        mzml.append(final)
+    # One mzML per name: two inputs called s1 (from two folders) would overwrite each other's
+    # conversion, and Sage names a run by its file name alone.
+    seen = {}
+    for m in mzml:
+        seen.setdefault(os.path.basename(m), []).append(m)
+    dupes = {k: v for k, v in seen.items() if len(v) > 1}
+    if dupes:
+        sys.exit("[run_search] inputs share an mzML name, so they would overwrite each other or "
+                 "merge into one run: " + "; ".join(f"{k}: {v}" for k, v in dupes.items())
+                 + ". Rename them, or search them separately. Nothing was converted, written or "
+                   "submitted.")
+    return mzml, steps
 
 
+def _step_argv(step):
+    """The step as one argv, its environment applied with env(1) -- in the job and inline alike."""
+    if not step["env"]:
+        return list(step["argv"])
+    unset = [x for k in TRFP_UNSET_ENV for x in ("-u", k)]
+    return (["env"] + unset + [f"{k}={v}" for k, v in step["env"].items()]
+            + list(step["argv"]))
+
+
+def conversion_lines(steps):
+    """Bash lines that do the conversions on the compute node, first thing in the job. A
+    converter that exits 0 without a complete file stops the job here, before the search."""
+    if not steps:
+        return []
+    q = shlex.quote
+    tools = sorted({s["tool"] for s in steps})
+    lines = [f'echo "converting {len(steps)} input file(s) to mzML on this compute node: '
+             f'{"; ".join(tools)}"',
+             f"mkdir -p {q(os.path.dirname(steps[0]['partial']))}"]
+    for s in steps:
+        # quoted as one word: an input path is data, never shell. `|| { ... }` on the converter
+        # itself: under set -e a converter that exits non-zero would end the job before any
+        # FAILED line was printed (and the watcher would have nothing to classify).
+        fail = (f"{{ echo {q(_no_mzml(s))} >&2; exit 1; }}")
+        # `case` on the file's tail, not `tail | grep -q`: under pipefail a grep that stops
+        # early can fail the pipeline with tail's SIGPIPE
+        check = ([f"case \"$(tail -c 256 {q(s['partial'])} 2>/dev/null)\" in "
+                  f"*{q(s['complete'])}*) ;; *) {fail} ;; esac"] if s["complete"] else
+                 [f"[ -s {q(s['partial'])} ] || {fail}"])
+        lines += [f"rm -f {q(s['mzml'])} {q(s['partial'])}",
+                  " ".join(q(x) for x in _step_argv(s)) + f" || {fail}",
+                  *check,
+                  f"mv -f {q(s['partial'])} {q(s['mzml'])}"]
+    return lines
+
+
+def _no_mzml(step):
+    """The one failure message (job and inline): 'no mzML' is what watch_run.sh classifies as
+    sage_no_mzml."""
+    return (f"FAILED: no mzML from {step['tool']} for {step['input']} (expected a complete "
+            f"{step['partial']}). Nothing was searched.")
+
+
+def convert_inline(steps):
+    """Run the conversions here (an inline search: never on a login node -- main() refuses)."""
+    for s in steps:
+        os.makedirs(os.path.dirname(s["partial"]), exist_ok=True)
+        for p in (s["mzml"], s["partial"]):
+            if os.path.lexists(p):
+                os.remove(p)
+        try:
+            sh(" ".join(shlex.quote(x) for x in _step_argv(s)))
+        except subprocess.CalledProcessError as e:
+            sys.exit(f"{_no_mzml(s)} (it exited {e.returncode})")
+        ok = os.path.isfile(s["partial"]) and os.path.getsize(s["partial"]) > 0
+        if ok and s["complete"]:
+            with open(s["partial"], "rb") as fh:
+                fh.seek(max(0, os.path.getsize(s["partial"]) - 256))
+                ok = s["complete"].encode() in fh.read()
+        if not ok:
+            sys.exit(_no_mzml(s))
+        os.replace(s["partial"], s["mzml"])
+
+
+def conversion_record(steps, where):
+    """What converted what, for search_provenance.json."""
+    return {"where": where, "tools": sorted({s["tool"] for s in steps}),
+            "files": [{"input": s["input"], "mzml": s["mzml"],
+                       "command": " ".join(shlex.quote(x) for x in _step_argv(s))}
+                      for s in steps]} if steps else None
+
+
+# ------------------------------------------------------------------- Sage -----
 def refuse_sage_fragment_mismatch(bundle, params):
     """Stop before anything is generated when the Sage cfg's fragment window does not fit the MS2
     analyzer workflow.manifest.json records (estimate_params.sage_fragment_mismatch() decides).
@@ -1446,33 +1909,280 @@ def warn_contaminant_digest(engine, params, fasta):
     return msg
 
 
+def keratin_sample_check(fasta, flag, engine="diann"):
+    """A keratin sample (hair, wool, feather, skin, nail ...) is never searched against a database
+    that still holds keratin-family Cont_ entries. Keratin is the analyte there, and those entries
+    take its peptides away: DIA-NN's --cont-quant-exclude Cont_ keeps every peptide they share with
+    the sample's keratins out of quantification, and run_de.R removes every precursor that names a
+    Cont_ entry. msalemi's hair benchmark (SET28, skill 2.8.0) lost them exactly this way, with
+    --keratin-sample reaching only the auditors after the search.
+
+    The sample is a keratin sample when --keratin-sample says so OR the FASTA's sidecar was built
+    with fetch --keratin-sample (fetch_fasta.keratin_sample_recorded). The FASTA's own headers are
+    checked with fetch_fasta's one keratin rule, sidecar or not. -> the record search_provenance.json
+    keeps; exits (REFUSED) before anything is converted, written or submitted."""
+    import fetch_fasta as ff
+    sidecar = fasta + ".meta.json"
+    try:
+        with open(sidecar) as fh:
+            meta = json.load(fh)
+    except (OSError, ValueError):
+        meta = None
+    recorded = ff.keratin_sample_recorded(meta)
+    rec = {"value": bool(flag) or recorded is True,
+           "source": "--keratin-sample" if flag else (sidecar if recorded is True else None),
+           # was the question asked? "user" (this flag, or the sidecar's answer), "default"
+           # (the sidecar says nobody answered), None (nothing recorded) -- rule 2
+           "sample_source": ("user" if flag else
+                             (meta.get("keratin_sample_source") or "default")
+                             if recorded is not None else None),
+           "sidecar_keratin_sample": recorded, "fasta": fasta,
+           "keratin_contaminants_in_database": None, "contaminant_tags_in_database": None}
+    if not rec["value"]:
+        return rec
+    stop = "[run_search] REFUSED -- nothing was converted, written or submitted."
+    try:
+        found, rec["contaminant_tags_in_database"] = ff.fasta_contaminant_summary(fasta)
+    except OSError as e:
+        sys.exit(f"{stop} This is a keratin sample ({rec['source']}), and {fasta} could not be "
+                 f"read to check it for keratin-family contaminant entries ({e}).")
+    rec["keratin_contaminants_in_database"] = len(found)
+    if found:
+        m = meta if isinstance(meta, dict) else {}
+        src = (m.get("source") or "")
+        kind, _, where = src.partition(":")
+        base = (f"--path {where}" if kind == "override"
+                else f"--ncbi-accession {where}" if kind == "ncbi_refseq"
+                else f"--proteome {m['proteome']}" if m.get("proteome")
+                else "--proteome <UPID>")
+        cont = m.get("contaminant_set")
+        cont = cont if cont and cont not in ("none", "already_in_supplied_database") else "universal"
+        enz = ",".join(m.get("digestion_enzymes_used") or ["trypsin", "lysc"])
+        content = m.get("content_requested") or "one_per_gene"
+        new = os.path.splitext(fasta)[0] + "_keratin.fasta"
+        sys.exit(
+            f"{stop} This is a keratin sample ({rec['source']}), but {fasta} still holds "
+            f"{len(found)} keratin-family contaminant entr"
+            f"{'y' if len(found) == 1 else 'ies'}: {ff._entry_list(found)}. Keratin is the analyte "
+            f"here: "
+            # what THIS engine would do with them -- only DIA-NN is given --cont-quant-exclude
+            + ("the search engine (DIA-NN --cont-quant-exclude) would keep every peptide they "
+               "share with the sample's keratins out of quantification, and "
+               if engine == "diann" else "")
+            + f"run_de.R's contaminant filter would remove those precursors from the DE. Build the "
+            f"database with them removed and search that one:\n"
+            f"  python3 scripts/fetch_fasta.py fetch {base} --content {content} --contaminants "
+            f"{cont} --enzyme {enz} --keratin-sample --out {new}"
+            + ("  [--hive as before]" if m.get("staged_file") else "")
+            + (f"\n(values from {sidecar}; check them)" if m else
+               f"\n({fasta} has no fetch_fasta.py sidecar: fill in the proteome and settings it "
+               f"was built with)"))
+    if not flag:
+        print(f"[run_search] keratin sample: {sidecar} says the database was built with "
+              f"--keratin-sample, so this search is recorded as one (keratin quantified as the "
+              f"analyte).", file=sys.stderr)
+    return rec
+
+
+def fragpipe_databases(params, fasta):
+    """The database(s) a FragPipe search reads: its workflow's database.db-path (make_presets.py
+    writes --fasta there) and --fasta, existing files only, each once."""
+    paths = [fasta]
+    try:
+        with open(params, encoding="utf-8", errors="replace") as fh:
+            for ln in fh:
+                if ln.startswith("database.db-path="):
+                    # a Java .properties value: a backslash escapes the next character
+                    paths.append(re.sub(r"\\(.)", r"\1", ln.split("=", 1)[1].strip()))
+    except OSError:
+        pass
+    return [p for p in dict.fromkeys(os.path.abspath(p) for p in paths if p) if os.path.isfile(p)]
+
+
+def fragpipe_contam_entries(databases):
+    """[(database, number of FragPipe `contam_`-tagged entries it holds)] for the readable ones.
+    The ONE count of them: the refusal before a FragPipe search and the warning when an older
+    FragPipe DIA output is adapted both read it."""
+    import fetch_fasta as ff
+    out = []
+    for path in databases:
+        try:
+            heads = ff._fasta_headers(path)
+        except OSError:
+            continue
+        out.append((path, sum(1 for h, _l in heads
+                              if (ff._contaminant_ids(h) or ("",))[0] == ff.FRAGPIPE_CONT_TAG)))
+    return out
+
+
+def refuse_fragpipe_contam_database(params, fasta):
+    """A FragPipe search on a database holding `contam_` entries (built with Philosopher's --contam,
+    not by fetch_fasta.py) is REFUSED before anything is written. keratin-review, 2026-09-29,
+    verified on HIVE (haggerman_brains_dia_NN): FragPipe's DIA route writes library.tsv without the
+    tag, so its DIA-NN report.tsv carries those contaminants as bare accessions -- nothing
+    downstream (DIA-NN --cont-quant-exclude, run_de.R's filter, a keratin sample's exemption) can
+    see them as contaminants, and they go into the DE. The skill's own set is tagged Cont_ inside
+    the accession field, which survives both routes. FragPipe itself adds no contaminants when it
+    searches: they come only from such a database."""
+    import fetch_fasta as ff
+    for path, n in fragpipe_contam_entries(fragpipe_databases(params, fasta)):
+        if n:
+            sys.exit(
+                f"[run_search] REFUSED -- nothing was converted, written or submitted. {path} holds "
+                f"{n} contaminant entries tagged {ff.FRAGPIPE_CONT_TAG} (a database built with "
+                f"FragPipe/Philosopher's --contam, not by the skill). FragPipe's DIA route drops that "
+                f"tag when it builds its library, so those contaminants reach report.tsv as plain "
+                f"accessions that neither DIA-NN nor run_de.R's contaminant filter can recognise, and "
+                f"they would be tested as sample proteins. Build the database with the skill's "
+                f"contaminant set (tagged {ff.CONT_TAG}) instead and point the workflow at it:\n"
+                f"  python3 scripts/fetch_fasta.py fetch --proteome <UPID> --contaminants universal "
+                f"--out ./search.fasta [--keratin-sample | --no-keratin-sample]\n"
+                f"  python3 scripts/make_presets.py --engine fragpipe ... --fasta ./search.fasta")
+
+
+# Sage's own output (its log lines are on stderr), teed here by the job and by an inline run:
+# sage_lfq_check.py reads its "discovered N target MS1 peaks at 5% FDR" from it.
+SAGE_LOG = "sage.log"
+
+
+def _job_python():
+    """A job's interpreter for the skill's own scripts: this one (the pipeline env, which has
+    pyarrow), else python3 -- the job-end hook's rule (notify_slack.wrap_job_script)."""
+    return f'_py={shlex.quote(sys.executable or "python3")}; [ -x "$_py" ] || _py=python3'
+
+
+def sage_check_line(out, params):
+    """The job's LFQ check, right after Sage. Never fails the job (Sage succeeded); if the check
+    itself cannot run it says so, and --adapt-only runs it again."""
+    q = shlex.quote
+    check = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sage_lfq_check.py")
+    return (f'"$_py" {q(check)} --out {q(out)} --params {q(params)} '
+            f'--log {q(os.path.join(out, SAGE_LOG))} > /dev/null '
+            '|| echo "[sage_lfq_check] NOTE: the LFQ check itself failed (exit $?); '
+            'run_search.py --adapt-only runs it again" >&2')
+
+
+def sh_logged(cmd, log):
+    """sh(), with everything the command prints also written to `log`."""
+    print(f"  $ {cmd}", flush=True)
+    with open(log, "w") as fh:
+        p = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             text=True, errors="replace")
+        for line in p.stdout:
+            sys.stdout.write(line)
+            fh.write(line)
+        rc = p.wait()
+    if rc:
+        raise subprocess.CalledProcessError(rc, cmd)
+
+
+def sage_lfq(out, params, log=None):
+    """Run the LFQ mass-window check (sage_lfq_check.py), record it, say it. The record."""
+    import sage_lfq_check
+    rec = sage_lfq_check.check(out, params, log)
+    try:
+        rec["written_to"] = sage_lfq_check.record(out, rec)
+    except OSError as e:
+        sys.stderr.write(f"{sage_lfq_check.TAG} NOTE: could not write "
+                         f"{sage_lfq_check.RECORD} in {out}: {e}\n")
+    sage_lfq_check.say(rec)
+    return rec
+
+
 def run_sage(cmd, params, files, fasta, out, threads, sbatch, queue=None):
     os.makedirs(out, exist_ok=True)
-    mzml = ensure_mzml(files, out)
+    mzml, steps = mzml_plan(files, out)
     files_args = " ".join(shlex.quote(m) for m in mzml)
     full = (f"{cmd} {shlex.quote(params)} -f {shlex.quote(fasta)} -o {shlex.quote(out)} "
             f"--parquet --disable-telemetry-i-dont-want-to-improve-sage {files_args}")
+    log = os.path.join(out, SAGE_LOG)
     if sbatch:
-        emit_sbatch(sbatch, full, out, threads, job="sage_search", **(queue or {}))
+        # Conversion, search and LFQ check all run in the job, on the compute node: nothing
+        # heavy happens before submission (golden rule 3). pipefail keeps Sage's exit status.
+        job = "\n".join(conversion_lines(steps)
+                        + [f"{full} 2>&1 | tee {shlex.quote(log)}",
+                           _job_python(), sage_check_line(out, params)])
+        emit_sbatch(sbatch, job, out, threads, job="sage_search", **(queue or {}))
         return {"engine": "sage", "out": out, "submitted": sbatch, "ran": False,
-                "note": "After the job runs, re-run with --adapt-only to build report.parquet."}
-    sh(full)
+                "mzml_conversion": conversion_record(steps, "in the job, before Sage"),
+                "note": "After the job runs, re-run with --adapt-only to build report.parquet "
+                        "(it also re-runs the LFQ mass-window check, sage_lfq_check.json)."}
+    convert_inline(steps)
+    sh_logged(full, log)
+    rec = sage_lfq(out, params, log)
     report = adapt_sage(out)
-    return {"engine": "sage", "report": report, "ran": True}
+    try:
+        with open(os.path.join(out, SAGE_ADAPT)) as fh:
+            adapted = json.load(fh)
+    except (OSError, ValueError):
+        adapted = None                  # adapt_sage said why it could not write it
+    return {"engine": "sage", "report": report, "ran": True,
+            "mzml_conversion": conversion_record(steps, "inline, before Sage"),
+            "sage_lfq_check": rec, "sage_adapt": adapted}
+
+
+SAGE_ADAPT = "sage_adapt.json"
+
+
+def sage_version(out):
+    """The Sage version for the methods: the one run_search.py recorded for the engine it ran,
+    else Sage's own results.json -- whose number is the CRATE version: the v0.14.7 release
+    writes "0.14.6" (crates/sage-cli/Cargo.toml at tag v0.14.7), so that one is said as such."""
+    ver = recorded_engine_version(out)
+    if ver:
+        return ver
+    try:
+        with open(_find(out, ["results.json"]) or "") as fh:
+            rj = json.load(fh).get("version")
+    except (OSError, ValueError, AttributeError):
+        return None
+    if rj == "0.14.6":
+        return "0.14.6 per its results.json (the v0.14.7 release also reports 0.14.6)"
+    return rj or None
+
+
+def sage_quantity_declaration(out, qmax):
+    """What adapt_sage's rows are, in words the DE's methods can quote."""
+    return {
+        "level": "peptide",
+        "label": "Sage",
+        "value": f"{_vtag('Sage', sage_version(out))} label-free MS1 peptide intensity "
+                 f"(lfq.parquet)",
+        "identification": (f"Sage's own FDR -- peptides passing its 1% peptide-level q-value "
+                           f"enter its LFQ, and MS1 peaks are kept at a stored LFQ q_value <= "
+                           f"{qmax:g} with its decoy peaks dropped (run_search.py adapt_sage; the "
+                           f"stored q is shared with the precursor's decoy, so this keeps a "
+                           f"conservative subset of Sage's own 5% count). {PLACEHOLDER_Q}"),
+        "q_columns": "placeholder",
+        "citation": CITE["sage"],
+    }
 
 
 def adapt_sage(out):
-    """Map Sage lfq.parquet -> a DIA-NN-shaped protein x run report.parquet.
+    """Sage lfq.parquet -> the DE-input report.parquet, one row per (peptide, file) that Sage
+    counts as a valid MS1 quantity. Sage quantifies PEPTIDES; build_maxlfq.R makes the protein x
+    run cell from these rows downstream.
 
-    This adapter is the part flagged for real-data testing (Sage VALIDATION.md).
-    Sage's lfq.parquet has, per (protein, filename), an LFQ intensity. We emit
-    the minimal DIA-NN contract columns the MaxLFQ DE path needs.
+    lfq.parquet is NOT filtered by Sage. Its writer (sage-cloudpath parquet.rs serialize_lfq,
+    v0.14.7) writes every traced MS1 peak: each target AND its decoy -- the same peptide measured
+    in a +11.06 Da-shifted window (lfq.rs build_feature_map), with the SAME `proteins` string,
+    so an unfiltered decoy row reads as that protein's quantity -- at any q_value. Sage's own
+    lfq.tsv writer (sage-cli output.rs write_lfq) drops the decoys and filters on no q_value;
+    Sage counts an MS1 peak as discovered only at q_value <= 0.05 (fdr.rs picked_precursor,
+    logged "target MS1 peaks at 5% FDR"). So a row is kept when is_decoy is false (as write_lfq
+    keeps it) AND its stored q_value <= sage_lfq_check.LFQ_Q_MAX. The q_value Sage stores is
+    shared with the precursor's decoy (the lower-scoring member's q -- see LFQ_Q_MAX), so this
+    keeps a conservative subset of Sage's own count; Sage's logged count is recorded beside what
+    was kept. Until 2.9 every row went through, decoys included (gabrig 2026-09-29: a cohort whose
+    targets all sat at q 0.128 still produced a full matrix). What was kept and dropped, per file,
+    goes to <out>/sage_adapt.json and search_provenance.json `sage_adapt`.
     """
     try:
         import pyarrow.parquet as pq
         import pyarrow as pa
     except ImportError:
         sys.exit("pyarrow required to adapt Sage output. pip install pyarrow.")
+    import sage_lfq_check
 
     lfq = _find(out, ["lfq.parquet"])
     if not lfq:
@@ -1489,24 +2199,107 @@ def adapt_sage(out):
     c_prot = col("proteins", "protein", "protein_group")
     c_run = col("filename", "run", "file")
     c_int = col("intensity", "lfq", "abundance")
+    c_dec, c_q = col("is_decoy"), col("q_value")
     if not all([c_prot, c_run, c_int]):
         sys.exit(f"Sage lfq.parquet missing expected columns; saw {t.column_names}")
+    if not (c_dec and c_q):
+        # every Sage lfq.parquet since v0.14.0 has both: without them decoys cannot be told
+        # from targets, and adapting anyway is how they reached the DE before
+        sys.exit(f"{lfq} has no is_decoy / q_value column ({t.column_names}), so its decoy MS1 "
+                 "peaks cannot be told from the targets. Nothing was adapted. Re-run the search "
+                 "with Sage >= 0.14.")
 
-    prot = t.column(c_prot).to_pylist()
-    run = [os.path.splitext(os.path.basename(str(r)))[0] for r in t.column(c_run).to_pylist()]
-    inten = t.column(c_int).to_pylist()
+    qmax = sage_lfq_check.LFQ_Q_MAX
+    per_file, runs, prots, ints, names, feats = {}, [], [], [], [], []
+    # the precursors kept, to set beside Sage's own logged count (one q per precursor, not per row)
+    n_rows = t.num_rows
+    peps = t.column(col("peptide")).to_pylist() if col("peptide") else [None] * n_rows
+    chgs = t.column(col("charge")).to_pylist() if col("charge") else [None] * n_rows
+    kept_precursors = set()
+    for p, r, v, dec, ok, pep, chg in zip(
+            t.column(c_prot).to_pylist(), t.column(c_run).to_pylist(),
+            t.column(c_int).to_pylist(), t.column(c_dec).to_pylist(),
+            sage_lfq_check.q_passes(t.column(c_q)).to_pylist(), peps, chgs):
+        rn = os.path.splitext(os.path.basename(str(r)))[0]
+        n = per_file.setdefault(rn, {"rows": 0, "decoy_dropped": 0, "q_value_dropped": 0,
+                                     "kept": 0})
+        n["rows"] += 1
+        if dec:
+            n["decoy_dropped"] += 1
+            continue
+        if not ok:
+            n["q_value_dropped"] += 1
+            continue
+        n["kept"] += 1
+        kept_precursors.add((pep, chg))
+        runs.append(rn)
+        # Sage's `proteins` is a ';' list of full FASTA IDs (sp|Cont_P02769|ALBU_BOVIN): written
+        # as DIA-NN writes Protein.Group -- bare accessions -- so the contaminant filter, whose
+        # rule is "an accession starts with Cont_/contam_", sees them. Written as Sage gave it,
+        # no Sage DE ever had a contaminant removed (gabrig HeL50 UnvPe: 171 Cont_ groups tested,
+        # methods "Contaminants : none"). The entry names go where DIA-NN puts them.
+        prots.append(group_accessions(p))
+        names.append(group_entry_names(p))
+        # the item the DE counts (contaminants.R CONTAMINANT_FEATURE_COLUMNS): Sage's quantified
+        # peptide -- its charge only when Sage kept charge states apart (combine_charge_states
+        # false). Without it every peptide x run row was counted as a "precursor".
+        feats.append(str(pep) if chg is None else f"{pep}/{chg}")
+        ints.append(float(v) if v is not None else float("nan"))
 
-    n = len(prot)
+    k = len(prots)
     out_tbl = pa.table({
-        "Run": run,
-        "Protein.Group": [str(p) for p in prot],
-        "PG.MaxLFQ": [float(x) if x is not None else float("nan") for x in inten],
-        # Sage already FDR-filtered at write time, so these are 0.0 placeholders.
-        **{c: [0.0] * n for c in FDR_REQUIRED},
-    })
+        "Run": runs, "Protein.Group": prots, "Protein.Names": names, "Peptide.Id": feats,
+        "PG.MaxLFQ": ints,
+        # The rows are already Sage's valid MS1 quantities (decoys out, q_value <= LFQ_Q_MAX), so
+        # the contract's q-columns are 0.0: the DE's own q filter must not apply a second,
+        # different threshold to an MS1-integration q-value that none of them describes.
+        **{c: [0.0] * k for c in FDR_REQUIRED},
+    }, schema=pa.schema([("Run", pa.string()), ("Protein.Group", pa.string()),
+                         ("Protein.Names", pa.string()), ("Peptide.Id", pa.string()),
+                         ("PG.MaxLFQ", pa.float64())]
+                        + [(c, pa.float64()) for c in FDR_REQUIRED]))
+    # PG.MaxLFQ here is the DE contract's column NAME, not what the numbers are: the report says
+    # what they are, and build_maxlfq.R's methods text reads it from there.
+    declared = sage_quantity_declaration(out, qmax)
+    out_tbl = declare_quantity(out_tbl, declared)
     report = os.path.join(out, "report.parquet")
     pq.write_table(out_tbl, report)
-    print(f"  [adapt] Sage -> {report}  ({n} protein×run rows)")
+    totals = {key: sum(f[key] for f in per_file.values())
+              for key in ("rows", "decoy_dropped", "q_value_dropped", "kept")}
+    logp = sage_lfq_check.find_log(out)
+    rec = {"source": lfq, "report": report,
+           "kept_rule": (f"is_decoy false and stored q_value <= {qmax:g} (the stored q is shared "
+                         f"with the precursor's decoy, so this is a conservative subset of "
+                         f"Sage's own count)"),
+           "decoy_rule_source": "Sage 0.14.7 sage-cli output.rs write_lfq (lfq.tsv) drops "
+                                "decoys; lfq.parquet keeps them",
+           "q_value_max": qmax,
+           "q_value_source": ("Sage 0.14.7 fdr.rs picked_precursor / main.rs: an MS1 peak is "
+                              "discovered at its own q_value <= 0.05 ('target MS1 peaks at 5% "
+                              "FDR'); the q it then STORES is keyed by precursor, shared by the "
+                              "target and its decoy (the lower-scoring member's), so filtering "
+                              "it keeps a conservative subset of that count"),
+           "target_precursors_kept": len(kept_precursors),
+           "sage_logged_target_ms1_peaks_5pct": (sage_lfq_check.ms1_peaks_from_log(logp)
+                                                 if logp else None),
+           "sage_log": logp,
+           "row_unit": "one row per (peptide, file); protein rollup downstream",
+           "declared_quantity": declared,
+           "per_file": per_file, "totals": totals}
+    try:
+        rec["written_to"] = sage_lfq_check.write_record(out, SAGE_ADAPT, "sage_adapt", rec)
+    except OSError as e:
+        sys.stderr.write(f"[adapt] NOTE: could not write {SAGE_ADAPT} in {out}: {e}\n")
+    logged = rec["sage_logged_target_ms1_peaks_5pct"]
+    print(f"  [adapt] Sage -> {report}  ({k} peptide x run rows kept of {totals['rows']}: "
+          f"{totals['decoy_dropped']} decoy, {totals['q_value_dropped']} above stored q_value "
+          f"{qmax:g} dropped; {len(kept_precursors)} target precursors kept"
+          + (f" of the {logged} Sage logged at 5% FDR" if logged is not None else "")
+          + f"; per file in {SAGE_ADAPT})")
+    if totals["rows"] and not k:
+        sys.stderr.write(f"[adapt] WARNING: no Sage MS1 peak passed q_value <= {qmax:g} -- "
+                         f"{report} has no rows, so there is nothing to quantify. See "
+                         f"sage_lfq_check.json.\n")
     return report
 
 
@@ -1553,6 +2346,31 @@ def run_fragpipe(cmd, bundle, params, files, fasta, out, threads, sbatch, queue=
     return {"engine": "fragpipe", "report": report, "ran": True}
 
 
+def warn_fragpipe_dia_contam(out):
+    """A FragPipe DIA output searched on a database with `contam_` entries (Philosopher's --contam)
+    is WARNED about when it is adapted: its report carries those contaminants as bare accessions
+    (FragPipe's DIA route drops the tag in library.tsv), so run_de.R's contaminant filter cannot
+    see them and they are tested as sample proteins. run_search.py refuses such a database before
+    a new FragPipe search (refuse_fragpipe_contam_database); an output made before 2.9, or
+    outside the skill, only gets this. The database is the one the output's own fragpipe.workflow
+    names. -> the message, or None."""
+    wf = _find(out, ["fragpipe.workflow"])
+    if not wf:
+        return None
+    hits = [(p, n) for p, n in fragpipe_contam_entries(fragpipe_databases(wf, "")) if n]
+    if not hits:
+        return None
+    msg = ("[adapt] WARNING: this FragPipe DIA search used a database with FragPipe `contam_` "
+           "contaminant entries (" + "; ".join(f"{p}: {n}" for p, n in hits) + "). Its DIA route "
+           "drops that tag, so report.parquet carries them as plain accessions: run_de.R's "
+           "contaminant filter cannot recognise them, and they will be tested as sample proteins "
+           "(a keratin sample's exemption cannot see them either). Re-search on a database built "
+           "by fetch_fasta.py (contaminants tagged Cont_), or name them from the database and "
+           "drop them before the DE.")
+    print(msg, file=sys.stderr)
+    return msg
+
+
 def adapt_fragpipe_dia(out):
     """FragPipe's DIA route (diaTracer -> MSFragger -> DIA-NN) writes DIA-NN's own
     output to <workdir>/dia-quant-output/ (report.parquet + report.tsv +
@@ -1570,10 +2388,12 @@ def adapt_fragpipe_dia(out):
         return None
 
     pq_path = in_dia_out("report.parquet")
+    tsv = None if pq_path else in_dia_out("report.tsv")
+    if pq_path or tsv:
+        warn_fragpipe_dia_contam(out)
     if pq_path:
         print(f"  [adapt] FragPipe DIA: DIA-NN output already meets the contract -> {pq_path}")
         return pq_path
-    tsv = in_dia_out("report.tsv")
     if not tsv:
         return None
     try:
@@ -1651,10 +2471,15 @@ def adapt_fragpipe_dda(out):
         lfq_cols = [c for c in rows[0] if c.endswith("Intensity") and c != "Intensity"]
     if not lfq_cols:
         sys.exit("No per-sample MaxLFQ Intensity columns in combined_protein.tsv.")
-    pid_col = "Protein" if "Protein" in rows[0] else "Protein ID"
+    # Protein.Group is the accession, as DIA-NN reports it: "Protein ID" (P12345), not
+    # "Protein" (sp|P12345|ALBU_HUMAN), which compare_searches.py could never match to DIA-NN
+    # (0 shared proteins). The entry name and gene go where DIA-NN puts them.
+    names = {"Genes": "Gene", "Protein.Names": "Entry Name"}
+    names = {k: v for k, v in names.items() if v in rows[0]}
     runs, prots, ints = [], [], []
+    ann = {k: [] for k in names}
     for r in rows:
-        pg = r.get(pid_col, "").strip()
+        pg = fragpipe_protein_id(r.get("Protein", ""), r.get("Protein ID", ""))
         if not pg:
             continue
         for c in lfq_cols:
@@ -1665,10 +2490,15 @@ def adapt_fragpipe_dda(out):
             except ValueError:
                 v = float("nan")
             runs.append(sample); prots.append(pg); ints.append(v if v > 0 else float("nan"))
+            for k, src in names.items():
+                ann[k].append((r.get(src) or "").strip())
     n = len(prots)
-    tbl = pa.table({"Run": runs, "Protein.Group": prots, "PG.MaxLFQ": ints,
+    tbl = pa.table({"Run": runs, "Protein.Group": prots, "PG.MaxLFQ": ints, **ann,
                     # already FDR-filtered upstream -> 0.0 placeholders
                     **{c: [0.0] * n for c in FDR_REQUIRED}})
+    # what these numbers are, for the DE's methods (rule 1): IonQuant's, not DIA-NN's
+    tbl = declare_quantity(tbl, fragpipe_quantity_declaration(
+        out, maxlfq_columns=lfq_cols[0].endswith("MaxLFQ Intensity")))
     report = os.path.join(out, "report.parquet")
     pq.write_table(tbl, report)
     print(f"  [adapt] FragPipe -> {report}  ({n} protein×run rows)")
@@ -2078,6 +2908,11 @@ def main():
                          "(diann_parallel.py default: 2)")
     ap.add_argument("--adapt-only", action="store_true",
                     help="skip the search; just build report.parquet from an existing engine output dir")
+    ap.add_argument("--keratin-sample", action="store_true",
+                    help="the samples ARE keratin (hair, wool, feather, skin, nail ...): refuse a "
+                         "--fasta that still holds keratin-family Cont_ entries (build it with "
+                         "fetch_fasta.py fetch --keratin-sample). Also implied by a sidecar built "
+                         "that way; recorded in search_provenance.json as keratin_sample")
     ap.add_argument(ALLOW_DAMAGED_TDF, action="store_true",
                     help="search a Bruker .d whose analysis.tdf is not `ok` (truncated, "
                          "stale -wal/-journal beside it, WAL-mode header, unreadable) "
@@ -2125,19 +2960,28 @@ def main():
                      "one Run. Rename them, or search them separately.")
 
     if a.adapt_only:
+        # After a Sage job: the LFQ mass-window check again, here, where the orchestrator sees
+        # it (the job ran it too, into its log) -- and its record into search_provenance.json.
+        lfq = sage_lfq(a.out, a.params) if engine == "sage" else None
         report = {"sage": adapt_sage, "fragpipe": adapt_fragpipe,
                   "alphadia": adapt_alphadia,
                   "radiant": adapt_radiant}.get(engine, lambda o: None)(a.out)
-        print(json.dumps({"engine": engine, "report": report, "ran": False, "adapt_only": True}, indent=2))
+        print(json.dumps({"engine": engine, "report": report, "ran": False, "adapt_only": True,
+                          **({"sage_lfq_check": lfq} if lfq else {})}, indent=2))
         return
 
     if engine == "sage":
         refuse_sage_fragment_mismatch(bundle, a.params)
+    if engine == "fragpipe":
+        refuse_fragpipe_contam_database(a.params, a.fasta)
 
     # Before anything is provisioned, submitted or run: no damaged .d gets searched here.
     # --adapt-only is above this on purpose -- it reads an engine's finished output and
     # never touches a raw file.
     refuse_damaged_tdf(files, a.allow_damaged_tdf)
+    # Same place, same reason: a keratin sample is never searched on a database whose keratin-
+    # family Cont_ entries would take its analyte out of quantification.
+    keratin_rec = keratin_sample_check(a.fasta, a.keratin_sample, engine)
 
     cmd = tools.get(engine)
     if not cmd:
@@ -2147,6 +2991,8 @@ def main():
     # Before anything is submitted, so a version the user did not confirm is on screen
     # while it can still be stopped -- not only in a file read after the search.
     ver_rec = engine_version_record(engine, tools, bundle)
+    global ENGINE_VERSION
+    ENGINE_VERSION = ver_rec.get("value")     # for an adapter's quantity declaration
 
     # A DIA-NN cfg that is not there is reported as exactly that, first -- not as whatever a
     # later reader makes of an empty flag list ("mass accuracy is not pinned").
@@ -2220,7 +3066,8 @@ def main():
                           "exit_status": SBATCH_NOT_WRITTEN,
                           "why": "routed to the 5-step chain, which submits itself via submit.sh"}
     if use_parallel:
-        res = run_diann_parallel(cmd, a.params, files, a.fasta, a.out, a.threads, a)
+        res = run_diann_parallel(cmd, a.params, files, a.fasta, a.out, a.threads, a,
+                                 acquisition=bundle.get("acquisition", ""))
         if sbatch_refused:
             # Only now that the chain exists: a failed generation must leave the user's file
             # exactly where it was. run_diann_parallel exits on failure, so reaching here is
@@ -2304,8 +3151,15 @@ def main():
                        "resolved_params_produced": ((rp or {}).get("produced")
                                                     or "before the search (the params file as given)"),
                        "resolved_params_note": (rp or {}).get("note"),
+                       # scan_window.mode / mass_acc.mode: STABLE values FRAN ingests
+                       # (diann_parallel.SCAN_WINDOW_MODES / MASS_ACC_MODES)
                        "scan_window": scan_window_record(engine, a.params, res),
+                       "mass_acc": mass_acc_provenance(engine, a.params, res),
                        "fasta": a.fasta, "threads": a.threads,
+                       # read by run_de.R (contaminants.R): keratin kept as the analyte
+                       "keratin_sample": keratin_rec["value"],
+                       "keratin_sample_source": keratin_rec["sample_source"],
+                       "keratin_sample_check": keratin_rec,
                        "n_files": len(files), "files": files,
                        "search_mode": "parallel_5step" if use_parallel else "single_shot",
                        "parallel_routing_reason": why,
@@ -2314,7 +3168,15 @@ def main():
                        "submitted_sbatch": None if sbatch_refused else (
                            (res.get("submitted") if isinstance(res, dict) else None)
                            or a.sbatch or None),
-                       "sbatch_refused": sbatch_refused, "result": res}, fh, indent=2)
+                       "sbatch_refused": sbatch_refused, "result": res,
+                       # an inline Sage search's LFQ mass-window check (sage_lfq_check.py) and
+                       # which lfq.parquet rows the adapter kept; a Sage job's are merged in here
+                       # by the job and by --adapt-only. probe_fallback: an inline search's
+                       # pre-search probe measured nothing (a job's probe_fallback.py writes it
+                       # here itself)
+                       **{k: res[k] for k in ("sage_lfq_check", "sage_adapt", "probe_fallback")
+                          if isinstance(res, dict) and res.get(k)}},
+                      fh, indent=2)
     except Exception as e:
         sys.stderr.write(f"[run_search] could not write search_provenance.json: {e}\n")
 

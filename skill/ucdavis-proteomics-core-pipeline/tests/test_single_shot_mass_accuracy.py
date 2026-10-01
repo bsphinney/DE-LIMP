@@ -15,6 +15,7 @@ measures (and the documented level as documented) for the search.
 run_search.py is run as the orchestrator runs it, against a fake DIA-NN that predicts a library,
 replays the captured HIVE logs for a one-run probe, and writes a report for the search.
 """
+import glob
 import json
 import os
 import re
@@ -33,6 +34,7 @@ from job_env import job_env  # noqa: E402  (env for running job scripts)
 import diann_parallel as dp  # noqa: E402
 import run_search  # noqa: E402
 import test_step1b_mass_accuracy_probe as fx  # noqa: E402  (captured logs and the probe fake)
+from estale_inject import estale_env  # noqa: E402
 
 # library job (--out-lib) -> write the predicted library; one --f -> the probe fake, replaying the
 # run's captured log; several --f -> the search: write --out.
@@ -230,6 +232,8 @@ class SingleShotMassAccTests(unittest.TestCase):
                             ["result"]["ran"])
 
     def test_a_failed_measurement_stops_before_the_search(self):
+        """No run reaches its MS2 line and DIA-NN finishes each: the data answered, so nothing
+        is searched -- not retried, not fallen back past."""
         with tempfile.TemporaryDirectory() as d:
             raws = fx._cohort(d)
             for r in raws:                                  # no run reaches its MS2 line
@@ -240,17 +244,100 @@ class SingleShotMassAccTests(unittest.TestCase):
             self.assertEqual(self._calls(d, "SEARCH"), [], "searched with nothing measured")
             self.assertIn("Ex01162023_10_TT33.raw", p.stdout + p.stderr)
             self.assertNotIn("Traceback", p.stderr)
-            self.assertFalse(os.path.exists(os.path.join(out, "params.resolved.cfg")))
-            self.assertFalse(os.path.exists(os.path.join(out, "massacc.txt")))
+            self.assertNotIn("retrying", p.stderr)
+            self.assertIn("DIA-NN ran and finished without logging it", p.stderr)
+            for gone in ("params.resolved.cfg", "massacc.txt", dp.FALLBACK_RECORD):
+                self.assertFalse(os.path.exists(os.path.join(out, gone)), gone)
+
+    def _estale_env(self, d):
+        env = self._env(d)
+        env.update(estale_env(d, "always"))
+        return env
+
+    def test_an_unreadable_probe_log_falls_back_inline_and_says_so(self):
+        """The probe's own log goes stale on every run, twice: the search is not stopped over
+        it. It runs at the documented MS1 and the SOP MS2, and every record says FALLBACK."""
+        with tempfile.TemporaryDirectory() as d:
+            raws, fasta, cfg, tools, bundle = self._setup(d)
+            out = os.path.join(d, "out")
+            p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "run_search.py"),
+                                "--tools", tools, "--bundle", bundle, "--params", cfg,
+                                "--fasta", fasta, "--out", out, "--files", *raws,
+                                "--engine", "diann", "--threads", "8", "--allow-inline"],
+                               capture_output=True, text=True, env=self._estale_env(d),
+                               timeout=240)
+            log = p.stdout + p.stderr
+            self.assertEqual(p.returncode, 0, log)
+            self.assertNotIn("Traceback", p.stderr)
+            self.assertIn("retrying once", log)
+            self.assertIn("-- FALLBACK", log)
+            # the attempt and its one retry, each with every run's log unreadable (DIA-NN is
+            # stopped at once, so the evidence -- not the fake's argv log -- is the record)
+            for ev in ("mass_acc.json.attempt1", "mass_acc.json"):
+                w = json.load(open(os.path.join(out, ev)))
+                self.assertEqual(w["failure"], "io_error", ev)
+                self.assertEqual(len(w["probes"]), dp.PROBE_MAX_FAILURES, ev)
+            search = self._calls(d, "SEARCH")
+            self.assertEqual(len(search), 1)
+            self.assertIn("--mass-acc 20 --mass-acc-ms1 7", search[0])
+            self.assertEqual(open(os.path.join(out, "massacc.txt")).read().strip(),
+                             "--mass-acc 20 --mass-acc-ms1 7")
+            self.assertTrue(os.path.exists(os.path.join(out, "params.resolved.cfg")))
+            prov = json.load(open(os.path.join(out, "search_provenance.json")))
+            self.assertTrue(prov["probe_fallback"]["fallback"])
+            # the stable modes FRAN reads (references/environment.md)
+            self.assertEqual(prov["mass_acc"]["mode"], "fallback_default")
+            self.assertEqual(prov["scan_window"]["mode"], "auto", "single-shot never measures it")
+            ma = prov["result"]["mass_acc"]
+            self.assertFalse(ma["measured"])
+            self.assertTrue(ma["fallback"])
+            self.assertEqual(ma["default"], {"--mass-acc": 20.0})
+            self.assertEqual(ma["value_file"], os.path.join(out, "massacc.txt"))
+
+    def test_sbatch_fallback_is_recorded_in_the_provenance_the_job_finds(self):
+        """The --sbatch route writes search_provenance.json before the job runs, so the job's
+        probe_fallback.py records the fallback in it -- replacing the "measured" plan."""
+        with tempfile.TemporaryDirectory() as d:
+            p, out = self._run_search(d, *self._setup(d), "--sbatch", os.path.join(d, "job.sh"))
+            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+            before = json.load(open(os.path.join(out, "search_provenance.json")))
+            self.assertTrue(before["result"]["mass_acc"]["measured"], "the plan, at generation")
+            self.assertEqual(before["mass_acc"]["mode"], "measured")
+            env = self._estale_env(d)
+            for script in ("job_1_lib.sh", "job_2_search.sh"):
+                r = subprocess.run(["bash", os.path.join(d, script)], capture_output=True,
+                                   text=True, env=env, timeout=240)
+                self.assertEqual(r.returncode, 0, script + "\n" + r.stdout + r.stderr)
+            self.assertIn("--mass-acc 20 --mass-acc-ms1 7", self._calls(d, "SEARCH")[0])
+            prov = json.load(open(os.path.join(out, "search_provenance.json")))
+            self.assertTrue(prov["probe_fallback"]["fallback"])
+            self.assertEqual(prov["mass_acc"]["mode"], "fallback_default")
+            self.assertEqual(prov["result"]["mass_acc"]["mode"], "fallback_default")
+            self.assertFalse(prov["result"]["mass_acc"]["measured"])
+            self.assertIn("fallback (probe failed: ", prov["result"]["mass_acc"]["source"])
 
     def test_a_pinned_cfg_is_not_probed(self):
         with tempfile.TemporaryDirectory() as d:
+            # an earlier search's probe outputs in the same --out (dda-review N1): generation
+            # removes them, since a search that does not probe would never replace them
+            os.makedirs(os.path.join(d, "out"))
+            for name in (dp.FALLBACK_RECORD, "massacc.txt", "mass_acc.json"):
+                with open(os.path.join(d, "out", name), "w") as fh:
+                    fh.write("{}\n")
             p, out = self._run_search(d, *self._setup(d, ms2_res=30000),
                                       "--sbatch", os.path.join(d, "job.sh"))
+            for name in (dp.FALLBACK_RECORD, "massacc.txt", "mass_acc.json"):
+                self.assertFalse(os.path.exists(os.path.join(out, name)), name)
+                self.assertTrue(glob.glob(os.path.join(out, name + ".stale-*")),
+                                f"{name} was deleted, not set aside")
             self.assertEqual(p.returncode, 0, p.stderr)
             srch_sh = open(os.path.join(d, "job_2_search.sh")).read()
             self.assertNotIn("probe_window.py", srch_sh)
             self.assertNotIn("massacc.txt", srch_sh)
+            # no result.mass_acc for a pinned cfg, and still a top-level mode, read from the cfg
+            prov = json.load(open(os.path.join(out, "search_provenance.json")))
+            self.assertNotIn("mass_acc", prov["result"])
+            self.assertEqual(prov["mass_acc"]["mode"], "pinned")
 
     def test_a_cfg_that_gets_xic_added_keeps_its_plan(self):
         """run_search.ensure_xic() searches a COPY of a cfg with no --xic. The copy must carry the
@@ -317,7 +404,10 @@ class SingleShotMassAccTests(unittest.TestCase):
             p, _ = self._run_search(d, *self._setup(d), "--sbatch", os.path.join(d, "job.sh"))
             self.assertEqual(p.returncode, 0, p.stderr)
             srch = os.path.join(d, "job_2_search.sh")
-            self.assertIn("--budget %d" % dp.PROBE_BUDGET_S, open(srch).read())
+            body = open(srch).read()
+            # one budget for the attempt and its retry, set before both
+            self.assertIn("PROBE_DEADLINE=$(( $(date +%%s) + %d ))" % dp.PROBE_BUDGET_S, body)
+            self.assertIn("--budget $PROBE_BUDGET", body)
             self.assertGreaterEqual(
                 hours(srch) * 3600 - dp.PROBE_BUDGET_S, base * 3600,
                 "the probe's budget is taken out of the search's own wall clock")

@@ -10,7 +10,9 @@ DataAnalysis sessions:
 
 The record is written the moment a search ends, or fails, and updated when the analysis is
 finalized. The registry sits beside `skill_issues/`, which is where `report_issue.sh` writes, and
-uses the same routing.
+uses the same routing. Two more siblings: `skill_release/CURRENT_VERSION` names the Core's
+current release (`references/access.md`, "Keeping the skill current"), and `skill_notes/`
+holds notes from the Core to staff, and their replies (`references/notes.md`).
 
 It exists because the evidence for one search ends up in many places:
 

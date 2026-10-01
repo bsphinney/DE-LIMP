@@ -599,8 +599,8 @@ server_search <- function(input, output, session, values, add_to_log,
           #      not by `(base_name, output_dir)` — substep entries often
           #      have different / empty output_dirs and end up uncollapsed.
           #   3. Rewrite the surviving entry's `name` to the clean base
-          #      so the queue UI shows "Gemma_set2", not
-          #      "diann_Gemma_set2_s5_report".
+          #      so the queue UI shows "PI_Example_C_set2", not
+          #      "diann_PI_Example_C_set2_s5_report".
           n_before <- length(saved_jobs)
           job_ids_v <- vapply(saved_jobs,
             function(j) as.character(j$job_id %||% ""), character(1))

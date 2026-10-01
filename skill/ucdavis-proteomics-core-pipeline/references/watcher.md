@@ -60,13 +60,30 @@ any auto-fix you applied to the user.
 | `spark_heap` | `java.lang.OutOfMemoryError: Java heap space` / `Answer from Java side is empty` | JVM heap OOM in Fulcrum/Spark. **Raising `--mem` does not help** — Spark sizes its driver heap independently of the SLURM allocation. Set `spark.driver.memory` via the workflow TOML's `spark_config`. |
 | `empty_results` | 0 proteins / no fragment ions | FASTA/organism mismatch, mass-accuracy, or wrong acquisition type — check inputs |
 | `gpu` | CUDA / no kernel image | AlphaDIA needs a GPU: submit to a GPU node (`--gres=gpu:1`) or reduce batch size |
-| `sage_no_mzml` | msconvert not found / needs mzML | convert `.d`/`.raw` → mzML first (Linux/HIVE), then re-run Sage |
+| `sage_no_mzml` | `FAILED: no mzML from …` / msconvert not found / needs mzML | the job's own conversion failed (it converts `.raw` with ThermoRawFileParser and `.d` with msconvert before Sage/Radiant). Read the converter's error above the FAILED line: for ThermoRawFileParser usually .NET (`bash scripts/ensure_dotnet8.sh`); for `.raw` through msconvert, a Linux build without vendor readers (bioconda's). Fix it, regenerate with `run_search.py --sbatch`, resubmit |
 | `disk` | Disk quota / No space left | free space or point `--out` elsewhere; resubmit |
 | `missing_input` | No such file / fasta/raw not found | a path is wrong — re-check Windows→WSL/HIVE path translation; resubmit |
 | `stalled` | job **RUNNING** but log frozen > `--stall-min` (default 15 min) | a hung file. `scancel` the task/job, **retry it once on a fresh node**; if it stalls again, **drop that file** and continue (see playbook), note it in Data Quality Notes |
 | `held` | job PENDING with reason **`JobHeldUser`** / **`JobHeldAdmin`** | it will **never start by itself**, and it is **not** failed — do **not** resubmit (that duplicates it). `JobHeldUser`: `scontrol release <jobid>` once whatever it was held for is fixed; `JobHeldAdmin`: ask the HIVE admins. (A PENDING job otherwise reports "queued, not started" only when nothing has run yet; a chain step waiting on earlier steps keeps its file count.) |
-| `dependency_failed` | job PENDING with reason **`DependencyNeverSatisfied`** (an upstream step failed) | the chain is dead but **sits PENDING forever** (never leaves the queue). `sacct -j <arrayjob>` to find the failed step, fix it, resubmit downstream steps reusing completed outputs. If it was **step 1b**, `scancel` the pending steps 2–5 (ids in `<out>/jobs.txt`), then resubmit `step1b_window.sbatch` and steps 2–5 chained `afterok` on its new id (reusing `step1.predicted.speclib`), or re-run `submit.sh`: steps 2–5 refuse to start without the `window.txt` / `massacc.txt` step 1b writes (without them DIA-NN would optimise per file) |
+| `dependency_failed` | job PENDING with reason **`DependencyNeverSatisfied`** (an upstream step failed) | the chain is dead but **sits PENDING forever** (never leaves the queue). `sacct -j <arrayjob>` to find the failed step, fix it, resubmit downstream steps reusing completed outputs. If it was **step 1b**, `scancel` the pending steps 2–5 (ids in `<out>/jobs.txt`), then resubmit `step1b_window.sbatch` and steps 2–5 chained `afterok` on its new id (reusing `step1.predicted.speclib`), or re-run `submit.sh`: steps 2–5 refuse to start without the `window.txt` / `massacc.txt` step 1b writes (without them DIA-NN would optimise per file). Since 2.9 step 1b does **not** fail when only the probe's own machinery failed (its log unreadable — e.g. an NFS `Stale file handle` — a crash, or a time limit): it retries a crash or an unreadable log once and then **falls back** (`window.txt` = `auto`, `<out>/probe_fallback.json`), and the chain runs on — `watch_run.sh --all` then reports `probe_fallback: true` with a CAUTION: say so to the user, with its `reason`. It still fails, as before, on everything else — the job log names which: a **refused** mass accuracy (implausible: check the FASTA, species and calibration first), no .NET / DIA-NN cannot start, the probe's arguments, runs DIA-NN finished without logging a radius, a signal |
 | `unknown_failure` | job FAILED with no known signature | read the full log; diagnose; fix; resubmit (and add the new signature here) |
+
+## Warnings that are not failures: Sage LFQ
+
+A Sage search can finish cleanly and still have quantities it could not measure. With
+`--out <search out dir>` the watcher reads `sage_lfq_check.json` (written by the Sage job,
+and again by `run_search.py --adapt-only`); without it, it reads the log tail. It adds:
+
+- `sage_lfq`: `status` (`ok` / `warn` / `unchecked`), `target_ms1_peaks_5pct_fdr` (Sage's own
+  count, "discovered N target MS1 peaks at 5% FDR"), `ppm_tolerance`,
+  `runs_outside_lfq_window`, `suggested_ppm_tolerance`.
+- `warnings`: the check's message when it warns (or could not run).
+
+This is **not** a failure: `failed` and `error_class` are unchanged, and there is nothing
+to resubmit automatically. Tell the user before any DE on those quantities, quoting the
+message. It names the fix (a wider `quant.lfq_settings.ppm_tolerance`, then
+`--adapt-only`). Re-run Sage only once they agree: a changed LFQ setting is a changed
+search.
 
 ## SLURM specifics (HIVE)
 - State comes from `sacct -j <jobid> -o State` (falls back to `squeue`). Terminal

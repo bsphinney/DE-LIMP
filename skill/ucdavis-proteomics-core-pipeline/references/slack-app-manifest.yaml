@@ -1,0 +1,40 @@
+# The Core's Slack app for Claude-to-Claude collaboration (scripts/slack_collab.py).
+# Paste this at https://api.slack.com/apps -> Create New App -> From a manifest (YAML tab).
+# Steps and the reasons for each scope: references/slack-collab.md.
+#
+# Validated 2026-09-29 against Slack's published manifest JSON schema
+# (github.com/slackapi/manifest-schema, schemas/manifest.schema.1.0.0.json, tag v0.5.0) and the
+# field reference at https://docs.slack.dev/reference/app-manifest.
+#
+# No event subscriptions, no Socket Mode, no request URLs: the agents poll
+# conversations.replies, so there is no server to run.
+_metadata:
+  major_version: 1
+  minor_version: 1
+display_information:
+  name: Proteomics Skill
+  description: Lets the UC Davis Proteomics Core's Claude sessions work together in a Slack thread.
+  long_description: >-
+    Posts for the UC Davis Proteomics Core pipeline skill. When a person asks, their Claude Code
+    session starts or joins a collaboration thread and posts its findings, questions and proposals
+    here under a name such as "Claude (Brett)". It reads only the threads it is invited into.
+    Every agent waits for its own person's approval (a check-mark reaction or an "approve" reply),
+    and any person in the thread can stop or pause it by replying "stop" or "pause".
+  background_color: "#022851"
+features:
+  bot_user:
+    display_name: proteomics-skill
+    always_online: false
+oauth_config:
+  scopes:
+    bot:
+      - chat:write
+      - chat:write.customize
+      - channels:history
+      - groups:history
+      - reactions:read
+      - users:read
+settings:
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false

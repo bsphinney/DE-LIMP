@@ -61,6 +61,15 @@ FDR_REQUIRED = ["Q.Value", "Lib.Q.Value", "Lib.PG.Q.Value"]
 # them -- not because they are discretionary.
 FDR_OPTIONAL = ["PG.Q.Value", "Global.Q.Value", "Global.PG.Q.Value"]
 
+# DDA MS1 filters would go HERE, as a DDA-only set beside FDR_OPTIONAL -- they are not applied
+# today. DIA-NN's README recommends, for DDA quant, extra filtering on "Ms1.Global.Q.Value
+# (< 0.0001 - 0.01) and Ms1.Global.Quality (> 0.5 - 0.9), possibly with addition of
+# Ms1.Q.Value (< 0.01 - 0.5) and Averagine (> 0.1 - 0.9)". Those are NOT the column names
+# DIA-NN 2.7.0 writes: its DDA report.parquet has `Global.Ms1.Q.Value`, `Global.Ms1.Quality` and
+# `Ms1.Q.Value` (read from the SET28 test chain's step-5 report, HIVE 2026-09-29), and the chain's
+# first-pass report (step3_assembly.parquet) has none of the three. Filter on the names found in
+# the report, never the README's; and the R mirror (diann_q_columns.R) needs the same set.
+
 # Preference order for reading a SINGLE protein-level q-value. Most global and
 # most protein-specific first, degrading toward the run-level precursor q-value.
 PROTEIN_Q_PREFERENCE = [
@@ -83,6 +92,11 @@ PROTEIN_Q_PREFERENCE = [
 #
 # Anything not named here uses the run's --q-cutoff.
 COLUMN_CUTOFFS = {"PG.Q.Value": 0.05}
+
+# run_de.R's --q-cutoff default, for a Python reader that has to predict what the DE step will
+# keep before it runs (pass_comparison.py). tests/test_q_columns.py asserts it equals the
+# default in run_de.R's getarg("--q-cutoff", ...), so the two cannot drift.
+DEFAULT_Q_CUTOFF = 0.01
 
 
 def cutoff_for(column, q_cutoff, uniform=False):

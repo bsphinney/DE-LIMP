@@ -97,7 +97,7 @@ def make_d(path, instrument="timsTOF HT"):
 def init_session(root, raw_glob, name="demo"):
     r = subprocess.run([PY, os.path.join(SCRIPTS, "session.py"), "init", "--name", name,
                         "--date", "2026-09-24", "--raw", raw_glob, "--base", root],
-                       capture_output=True, text=True, check=True)
+                       capture_output=True, text=True, check=True, env=job_env(root))
     return json.loads(r.stdout)["paths"]
 
 
@@ -332,6 +332,12 @@ class FullSession(unittest.TestCase):
     def setUpClass(cls):
         cls.tmp = tempfile.mkdtemp()
         cls.p = dia_session(cls.tmp)
+        # the agent logs its decisions (log_decision.py); without them, or a saved conversation,
+        # finalize says [SKIPPED] "nothing records how this analysis was done"
+        import log_decision
+        with mock.patch.dict(os.environ, {"SKILL_CONFIG_DIR": os.path.join(cls.tmp, "cfg")}):
+            log_decision.append(cls.p["session_dir"], "Groups: Control vs Treated",
+                                "the user confirmed the design table")
         cls.res = finalize(cls.p["session_dir"], "--zip")
         cls.out = json.loads(cls.res.stdout) if cls.res.returncode == 0 else {}
         cls.pkg = cls.p["deposit_dir"]

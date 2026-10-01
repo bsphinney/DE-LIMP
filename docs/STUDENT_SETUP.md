@@ -34,6 +34,16 @@ Get in the habit of reading that. A plugin runs code on your machine with your p
 as any program you install — so "who made this and what does it add" is a fair question to ask every
 time.
 
+**Shortcut, in a terminal:** sections 2 and 3 below in one line (paste it whole), then start
+Claude Code, or run `/reload-plugins` if it is already open:
+
+```
+claude plugin marketplace add bsphinney/DE-LIMP && claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core
+```
+
+Inside Claude Code, do them one at a time: paste the first command, press Enter, then the second.
+Pasting both at once does not work.
+
 ## 2. Add the marketplace
 
 A *marketplace* is a catalog. Adding one lets you browse it; nothing is installed yet.
@@ -89,14 +99,21 @@ report.
 
 ## Updating later
 
-Marketplaces that aren't Anthropic's **do not auto-update.** When a new version of this skill ships,
-you won't get it until you ask:
+Marketplaces that aren't Anthropic's **do not auto-update** unless you turn it on. When a new
+version of this skill ships, you won't get it until you ask. Turn it on once: `/plugin` →
+**Marketplaces** → **ucdavis-proteomics-core** → **Enable auto-update**.
+
+To update now: `/plugin` → **Installed** → **ucdavis-proteomics-core-pipeline** → **Update now**,
+or in a terminal:
 
 ```
-/plugin marketplace update ucdavis-proteomics-core
+claude plugin update ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core
 ```
 
-If something in the pipeline seems fixed for everyone else but not for you, run that first.
+then `/reload-plugins` (or restart Claude Code). `/plugin marketplace update` alone only refreshes
+the catalog; the installed skill stays on its old version.
+
+If something in the pipeline seems fixed for everyone else but not for you, update first.
 
 ## Where everything lives
 
@@ -120,10 +137,14 @@ experimenting is cheap.
 
 ## Want to check your understanding?
 
-Try installing an unrelated plugin from Anthropic's marketplace and then removing it:
+Try installing an unrelated plugin from Anthropic's marketplace and then removing it. Paste the
+first command, press Enter, then the second:
 
 ```
 /plugin install commit-commands@claude-plugins-official
+```
+
+```
 /plugin uninstall commit-commands@claude-plugins-official
 ```
 

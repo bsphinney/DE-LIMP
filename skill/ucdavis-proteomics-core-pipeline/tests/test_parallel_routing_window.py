@@ -227,7 +227,7 @@ class OneCfgRuleTests(_SlurmStub):
                     body_s = _read(os.path.join(out, step))
                     self.assertEqual(body_s.count("--window"), 1,
                                      f"{label}: {step} carries more than the measured --window")
-                    self.assertIn("--window $(cat", body_s)
+                    self.assertIn(dp.window_flag(os.path.join(out, "window.txt")), body_s)
                     self.assertIn("--qvalue 0.01", body_s)
                 base = _read(os.path.join(out, "params.base.cfg"))
                 self.assertNotIn("--window", base, f"{label}: params.base.cfg kept the cfg --window")
@@ -443,20 +443,24 @@ class Step1bRunsTests(unittest.TestCase):
     def test_no_radius_fails_loudly_and_leaves_no_resolved_cfg(self):
         """Finding 6. params.resolved.cfg was copied into place BEFORE the probe ran, so a failed
         probe left a "resolved" cfg with no window -- and a resubmit could find the previous
-        run's window.txt. Both must be gone, and the job must fail."""
+        run's window.txt. Both must be gone, and the job must fail: runs DIA-NN finishes without
+        a radius are the data answering, which no fallback may hide (only a failure of the
+        probe's own machinery falls back -- tests/test_probe_estale.py)."""
         with tempfile.TemporaryDirectory() as d:
             out, info = self._chain(d, ["blank_%d.mzML" % i for i in range(6)])
             self.assertEqual(info["resolved_params"]["produced"], "runtime")
             self.assertFalse(os.path.exists(os.path.join(out, "params.resolved.cfg")),
                              "the generator created the resolved cfg before anything was measured")
+            self.assertIn("auto", info["scan_window"]["if_probe_fails"])
             for stale in ("window.txt", "params.resolved.cfg"):           # a previous run's
                 _write(os.path.join(out, stale), "--window 9\n")
             p, probed = self._run_step1b(d, out)
             self.assertNotEqual(p.returncode, 0)
-            self.assertEqual(len(probed), dp.PROBE_MAX_FAILURES)
+            self.assertEqual(len(probed), dp.PROBE_MAX_FAILURES, "retried a data failure")
             self.assertIn("FAILED", p.stderr)
             self.assertFalse(os.path.exists(os.path.join(out, "window.txt")))
             self.assertFalse(os.path.exists(os.path.join(out, "params.resolved.cfg")))
+            self.assertFalse(os.path.exists(os.path.join(out, dp.FALLBACK_RECORD)))
             # Round 2, item 5: resubmitting step 1b alone does not restart the chain -- steps
             # 2-5 are afterok on THIS job id. The message must say so and name the way out.
             self.assertIn("DependencyNeverSatisfied", p.stderr)
@@ -491,7 +495,10 @@ class Step1bRunsTests(unittest.TestCase):
             out, _ = self._chain(d, ["s%d.mzML" % i for i in range(6)])
             body = _read(os.path.join(out, "step1b_window.sbatch"))
             self.assertIn("--timeout 3600", body)
-            self.assertIn(f"--budget {dp.PROBE_BUDGET_S}", body)
+            # ONE budget for the attempt and its retry: the deadline is set once, before both
+            self.assertEqual(body.count(f"PROBE_DEADLINE=$(( $(date +%s) + {dp.PROBE_BUDGET_S} ))"),
+                             1)
+            self.assertIn("--budget $PROBE_BUDGET", body)
             self.assertIn(f"#SBATCH --time={dp.PROBE_WALL_HOURS}:00:00", body)
 
 
@@ -682,7 +689,7 @@ class ProvenanceSaysWhatWasPassedTests(unittest.TestCase):
             self.assertEqual(p.returncode, 0, p.stderr)
             info = json.loads(p.stdout)
             self.assertEqual(info["mass_acc"],
-                             {"fixed": True, "ms1": 15.0, "ms2": 15.0,
+                             {"mode": "pinned", "fixed": True, "ms1": 15.0, "ms2": 15.0,
                               "reason": "MS1 15.0 ppm / MS2 15.0 ppm, pinned in the cfg"})
 
     def test_override_with_a_pinned_window_says_pinned(self):

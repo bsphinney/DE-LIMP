@@ -30,13 +30,19 @@ Usage:
       [--assembly-cpus 64] [--assembly-mem 128] [--assembly-time 12] \
       [--partition <auto>] [--account <auto>] [--max-simultaneous 20] [--no-norm]
 """
-import os, re, sys, glob, argparse, json, shlex, subprocess, math
+import os, re, sys, glob, argparse, json, shlex, subprocess, math, stat, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # ONE definition of what a plausible Orbitrap mass accuracy is: probe_window.py measures it and
 # refuses to pin a value outside the band, and needs_measured() below refuses to let one that
 # reached massacc.txt some other way onto a DIA-NN command line.
 from probe_window import MASS_ACC_BAND, SOP_MASS_ACC, band_text        # noqa: E402
+# what a probe's exit status allows: the ONE rule (probe_window: fall back only when the probe's
+# own machinery failed -- never on a refusal, the environment, the arguments or the data)
+from probe_window import RETRY_ON, FALLBACK_ON, EXIT_MEANING            # noqa: E402
+# ONE definition of "this cfg searches DDA" (the flag estimate_params.py writes for DDA), and of
+# what an unset --window means under it.
+from estimate_params import DIANN_DDA_FLAG, DDA_WINDOW_NOTE, is_dda     # noqa: E402
 
 # The same SOP floor, keyed by the DIA-NN flag rather than by level, for the provenance records.
 SOP_MASS_ACC_FLAGS = {"--mass-acc": SOP_MASS_ACC["ms2_ppm"],
@@ -58,14 +64,28 @@ def floor_note(evidence_file, value_file):
               "level given from DIA-NN's resolution table is pinned as given and never floored.")
 
 # flags that are step-specific or auto-determined — never carry them into every step.
-# NOTE: --dda is intentionally NOT stripped — for DDA data put --dda in the --cfg and it
-# flows into every step (DIA-NN 2.6 searches DDA per file exactly as it does DIA).
+# NOTE: --dda is intentionally NOT stripped: estimate_params.py writes it into a DDA cfg and it
+# flows into every step, library prediction included (DIA-NN 2.6 searches DDA per file exactly
+# as it does DIA). run_search.py refuses a cfg whose --dda disagrees with the bundle's
+# acquisition (dda_mismatch) before it generates anything.
 STRIP = ("--fasta-search", "--predictor", "--gen-spec-lib", "--matrices", "--reanalyse",
          "--rt-profiling", "--no-norm", "--xic", "--mobilograms", "--out-lib", "--lib", "--out", "--f",
          # NOTE: --xic is stripped here on purpose and re-added to step 4 ONLY (see
          # xic_flag() below) -- step 2 IDs are not final, and step 5 runs --use-quant,
          # which never re-reads the raw spectra so --xic is silently a no-op there.
          "--fasta", "--threads", "--temp")
+
+# Step 3's cross-run report: the FIRST pass (each run searched once against the predicted
+# library), which step 5 compares its own report with (pass_comparison.py). The one name of it:
+# the comparison, the Methods (make_methods.py, when it is the deliverable) and SKILL.md use it.
+FIRST_PASS_REPORT = "step3_assembly.parquet"
+
+# The per-task --out of the array steps. Without one, DIA-NN writes report.parquet,
+# report.stats.tsv, report-lib.parquet and report.log.txt into the WORKING directory -- <out>,
+# from every task, concurrently, on several nodes: a one-run report at the very path run_de.R is
+# pointed at if steps 3-5 never finish, and a stray report-lib.parquet that record_run.py lists
+# as a library (SET28, HIVE 2026-09-29). One folder per step, one file set per task.
+TASK_OUT_DIRS = {"step2": "firstpass", "step4": "finalpass"}
 
 # Step 1b measures the radius on this many REPRESENTATIVE runs (the median and quartile runs
 # of the cohort, never a blank, wash, failed injection or a .d with a damaged index -- see
@@ -84,6 +104,125 @@ PROBE_WALL_HOURS = -(-PROBE_CANDIDATES * PROBE_TIMEOUT_S // 3600) + 1   # 3 full
 # at the full per-probe timeout): the wall clock less 10 minutes, so the probe stops itself and
 # writes window.json before SLURM kills the job with no evidence.
 PROBE_BUDGET_S = PROBE_WALL_HOURS * 3600 - 600
+# A probe that measured nothing is retried ONCE in the same job, from what is left of that one
+# budget -- and only when at least this much is left: a retry that cannot finish one probe only
+# delays the fallback (probe_attempts()).
+PROBE_RETRY_MIN_S = 900
+# ZERO is `invalid` for both flags, never `auto`: `auto` means the flag was not set, and DIA-NN
+# does not read a literal 0 on the command line as "optimise automatically" for either (its
+# README's "set to 0 ... optimise them automatically" describes the GUI fields, which omit the
+# flag at 0 -- https://github.com/vdemichev/DiaNN, "Changing default settings"):
+#   --window 0     DIA-NN logs "scan window radius should be a positive integer" and then
+#                  chooses a radius per file (the 18-file poplar run: 7 for seventeen, 8 for
+#                  one; _window_value)
+#   --mass-acc 0   a literal 0 ppm tolerance: "Mass accuracy will be fixed to 0 (MS2) and 0
+#                  (MS1)", 0 IDs at 1% FDR on a 28-run Lumos search (_mass_acc_value, PR #38)
+# search_provenance.json `scan_window.mode` and `mass_acc.mode` (also on result.scan_window /
+# result.mass_acc): STABLE, machine-readable values -- FRAN ingests them, from fran_manifest.json's
+# copy of the provenance, as a variable of its DIA-NN vs Spectronaut comparison. Never rename or
+# reuse one; a new case gets a new value, added here, in references/environment.md
+# ("search_provenance.json: scan_window.mode / mass_acc.mode") and in
+# tests/test_probe_estale.py's ProvenanceModeTests, which pin them.
+SCAN_WINDOW_MODES = {
+    "measured": "measured on these runs by step 1b and pinned for every step (set at generation, "
+                "as the plan; replaced by fallback_auto if the measurement fails)",
+    "fallback_auto": "step 1b's measurement failed; DIA-NN chose the radius itself, per run",
+    "pinned": "given in the cfg and passed to every step",
+    "auto": "not set, by design (single-shot search, DDA): DIA-NN chose the radius itself",
+    "invalid": "the cfg passes a --window that is not one positive integer, 0 included (see "
+               "below); what DIA-NN does with anything but 0 is unverified",
+    "unknown": "the cfg could not be read"}
+MASS_ACC_MODES = {
+    "measured": "measured on these runs before the search: a measured level is floored at the "
+                "SOP, a documented level passed as documented (set at generation, as the plan; "
+                "replaced by fallback_default if the measurement fails)",
+    "fallback_default": "the measurement failed; the documented level as given, the other at the "
+                        "facility SOP -- DEFAULT, not measured",
+    "pinned": "given in the cfg",
+    "pinned_default": "pinned by estimate_params.py at the facility SOP for a level that cannot "
+                      "be measured (DDA) -- DEFAULT (`default` names the levels)",
+    "auto": "neither level set: DIA-NN optimised it itself",
+    "partial": "one level given in the cfg: DIA-NN 2.7.0 then fixes both, the other at 20 ppm "
+               "(estimate_params.LONE_FLAG_NOTE)",
+    "invalid": "the cfg passes a value DIA-NN does not read as a tolerance: 0 (see below), "
+               "negative, not a number, or set twice with different values",
+    "unknown": "the cfg could not be read"}
+
+# probe_fallback.py's record, beside window.txt / massacc.txt: steps 2-5 accept window.txt `auto`
+# only with it (needs_measured)
+FALLBACK_RECORD = "probe_fallback.json"
+# What a pre-search probe leaves in <out> -- step 1b's, or the single-shot search's
+PROBE_OUTPUTS = ("window.txt", "massacc.txt", "window.json", "window.json.attempt1",
+                 "mass_acc.json", "mass_acc.json.attempt1", FALLBACK_RECORD)
+
+
+def _not_a_regular_file(path):
+    """None if `path` is absent or a regular file; otherwise what it is (for the refusal)."""
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        return None
+    if stat.S_ISREG(mode):
+        return None
+    return ("a directory" if stat.S_ISDIR(mode) else "a symlink" if stat.S_ISLNK(mode)
+            else "not a regular file")
+
+
+def set_aside(path):
+    """Rename an existing REGULAR FILE out of the way -- never delete it. Returns the new path,
+    or None when there was nothing there. The name records that it is stale and when it was
+    moved. Anything else (a directory, a symlink, a device) raises ValueError: `--sbatch proj`
+    once renamed a whole project folder, including the cfg the search was about to read. The one
+    definition: run_search.py's re-run and --sbatch paths use it too."""
+    kind = _not_a_regular_file(path)
+    if kind:
+        raise ValueError(f"{path} is {kind}, not a job script -- refusing to move it")
+    if not os.path.lexists(path):
+        return None
+    base = f"{path}.stale-{time.strftime('%Y%m%dT%H%M%S')}"
+    new, k = base, 1
+    while os.path.lexists(new):
+        new, k = f"{base}.{k}", k + 1
+    os.rename(path, new)
+    return new
+
+
+def set_aside_probe_outputs(out):
+    """Set an earlier search's probe outputs in `out` aside (set_aside: renamed `.stale-<time>`,
+    never deleted) when the next search is GENERATED there, and say so on stderr. Each job
+    removes them before it probes, but a search that does not probe (a pinned --window, a pinned
+    mass accuracy) never did: dda-review N1 (2026-09-30) generated a pinned-window chain into a
+    folder holding an earlier chain's probe_fallback.json, and checkpoint.py status, the Slack
+    post and watch_run.sh --all then reported THIS search as fallen back. Callers run this only
+    once every refusal has passed (dda-review R1: when it ran first, a REFUSED generation deleted
+    a completed search's window.txt / massacc.txt / window.json and left its provenance pointing
+    at files that were gone). Returns [(name, new path)]."""
+    moved = []
+    for name in PROBE_OUTPUTS:
+        path = os.path.join(out, name)
+        try:
+            new = set_aside(path)
+        except ValueError as e:                  # never a reason to stop a generated search:
+            sys.stderr.write(f"[probe outputs] WARNING: {e}; left in place\n")   # it is said
+            continue
+        if new:
+            moved.append((name, new))
+    if moved:
+        sys.stderr.write("[probe outputs] an earlier search's " + ", ".join(n for n, _ in moved)
+                         + f" in {out} do not describe this search: set aside as "
+                         + ", ".join(os.path.basename(p) for _, p in moved) + "\n")
+    return moved
+
+
+# What the search runs with when it did not measure (probe_fallback.py writes it), as the plan
+# records it at generation.
+FALLBACK_PLAN = {
+    "window": "retried once; if it still measures nothing, window.txt says `auto`, steps 2-5 pass "
+              "no --window and DIA-NN chooses the radius itself, per run -- recorded as a "
+              "fallback (search_provenance.json probe_fallback), never as measured",
+    "mass-acc": "retried once; if it still measures nothing, the documented level as given and "
+                "the other at the facility SOP, tagged DEFAULT -- recorded as a fallback "
+                "(search_provenance.json probe_fallback), never as measured"}
 
 
 def dotnet_prefix(raws):
@@ -441,13 +580,46 @@ def mass_acc_status(cfg):
             "bad": bad, "unset": unset,
             "mass_acc_fixed": ma_fixed, "mass_acc_reason": ma_reason,
             "window_state": win[0], "window_passed": _passed(groups, "--window"),
-            "window_reason": win_reason, "reason": reason}
+            "window_reason": win_reason, "reason": reason,
+            # the cfg searches DDA: nothing in it can be measured by step 1b (DDA_WINDOW_NOTE)
+            "dda": any(f == DIANN_DDA_FLAG for f, _ in groups)}
 
 
-def mass_acc_record(ma):
-    """Mass accuracy only, for the generator's output and search_provenance.json."""
-    return {"fixed": ma["mass_acc_fixed"], "ms1": ma["ms1"], "ms2": ma["ms2"],
-            "reason": ma["mass_acc_reason"]}
+def mass_acc_defaults(cfg, ma):
+    """{flag: ppm} of the cfg's mass-accuracy levels that estimate_params.py pinned at the SOP as
+    a DEFAULT (a DDA level with no DIA-NN table value: estimate_params.dda_sop_levels), from the
+    cfg's rationale sidecar -- and only while the cfg still passes that very value, so a cfg edited
+    since cannot inherit a label that no longer describes it."""
+    try:
+        with open(cfg + ".rationale.json") as fh:
+            side = json.load(fh)
+    except (OSError, ValueError, TypeError):
+        return {}
+    got = side.get("mass_accuracy_default") if isinstance(side, dict) else None
+    now = {"--mass-acc": ma.get("ms2"), "--mass-acc-ms1": ma.get("ms1")}
+    return {f: v for f, v in (got if isinstance(got, dict) else {}).items()
+            if f in now and isinstance(v, (int, float)) and not isinstance(v, bool)
+            and now[f] is not None and float(now[f]) == float(v)}
+
+
+def mass_acc_record(ma, cfg=None):
+    """Mass accuracy only, for the generator's output and search_provenance.json. A level the
+    cfg's sidecar calls a DEFAULT (mass_acc_defaults) is named as one: rule 2 of CLAUDE.md."""
+    levels = [ma["state"][f] for f in MASS_ACC_FLAGS]
+    default = mass_acc_defaults(cfg, ma) if cfg else {}
+    rec = {"mode": ("invalid" if "invalid" in levels else
+                    "auto" if levels.count("unset") == 2 else "partial" if "unset" in levels else
+                    "pinned_default" if default else "pinned"),
+           "fixed": ma["mass_acc_fixed"], "ms1": ma["ms1"], "ms2": ma["ms2"],
+           "reason": ma["mass_acc_reason"]}
+    if default:
+        rec["default"] = default
+        rec["default_note"] = (
+            "DEFAULT, not user-confirmed: " + ", ".join(f"{f} {v:g}" for f, v in
+                                                        sorted(default.items()))
+            + " pinned at the facility SOP by estimate_params.py for a DDA search, which cannot "
+              "measure it -- see mass_accuracy_default in the cfg's .rationale.json")
+    return rec
 
 
 def window_record(ma):
@@ -456,21 +628,70 @@ def window_record(ma):
     does not probe, and by run_search.py for the single-shot search."""
     st, passed = ma["window_state"], ma["window_passed"]
     if st == "ok":
-        return {"source": f"pinned in the cfg ({'; '.join(passed)})", "value": ma["window"],
-                "passed": passed}
+        return {"mode": "pinned", "source": f"pinned in the cfg ({'; '.join(passed)})",
+                "value": ma["window"], "passed": passed}
+    if st == "unset" and ma.get("dda"):
+        return {"mode": "auto", "source": DDA_WINDOW_NOTE, "value": None, "passed": []}
     if st == "unset":
-        return {"source": "not in the cfg -- DIA-NN chooses the radius itself (on the 18-file "
+        return {"mode": "auto",
+                "source": "not in the cfg -- DIA-NN chooses the radius itself (on the 18-file "
                           "poplar chain it chose per file: 7 for seventeen, 8 for one; how it "
                           "chooses within one multi-file search is unverified)",
                 "value": None, "passed": []}
     if st == "zero":
-        return {"source": "passed as `--window 0`, which is not a positive integer -- on the "
+        # not `auto`: the flag IS set, to a value DIA-NN itself rejects (SCAN_WINDOW_MODES)
+        return {"mode": "invalid",
+                "source": "passed as `--window 0`, which is not a positive integer -- on the "
                           "poplar run DIA-NN warned and chose a radius per file; unverified "
                           "beyond that run",
                 "value": None, "passed": passed}
-    return {"source": f"passed as given ({'; '.join(passed)}) -- not one positive integer, so "
+    return {"mode": "invalid",
+            "source": f"passed as given ({'; '.join(passed)}) -- not one positive integer, so "
                       "what DIA-NN does with it is unverified",
             "value": None, "passed": passed}
+
+
+def cfg_acquisition(cfg):
+    """The acquisition estimate_params.py wrote `cfg` for (`acquisition` in its
+    <cfg>.rationale.json), or None when there is no readable sidecar."""
+    try:
+        with open(cfg + ".rationale.json") as fh:
+            side = json.load(fh)
+    except (OSError, ValueError, TypeError):
+        return None
+    acq = side.get("acquisition") if isinstance(side, dict) else None
+    return acq if isinstance(acq, str) else None
+
+
+def dda_mismatch(cfg, acquisition, source="the bundle's acquisition"):
+    """Why this cfg must not search data of this acquisition, or None. THE check, for both of
+    run_search.py's DIA-NN routes (the 5-step chain and the single-shot search).
+
+    DIA-NN's README: "--dda process data as DDA -- must be used with DDA data, must not be used
+    with DIA data". The flag lives in the cfg (estimate_params.py writes it for DDA) and nowhere
+    else: run_search.py used to append it to the single-shot command only, so a DDA cohort of more
+    than 5 files went to the chain without it and was searched as DIA, silently (SET28, 28 Exploris
+    DDA .raw, caught by a manual grep). A cfg that disagrees with the bundle is refused, not
+    patched: patching the command would leave the recorded cfg describing a different search.
+    An acquisition that is not DIA or DDA (empty, "unknown", "mixed") is not checked.
+    Raises CfgError for a cfg that cannot be read."""
+    acq = (acquisition or "").strip().upper()
+    if acq not in ("DIA", "DDA"):
+        return None
+    has = any(f == DIANN_DDA_FLAG for f, _ in cfg_groups(cfg_tokens(cfg)))
+    if is_dda(acq) and not has:
+        return (f"{source} is DDA, but {cfg} has no {DIANN_DDA_FLAG}, so DIA-NN "
+                "would search the DDA spectra as DIA -- with no error. Fix: re-run "
+                "estimate_params.py --engine diann --acquisition DDA (it writes "
+                f"{DIANN_DDA_FLAG}, the MS1 survey range and a DDA mass accuracy), or add "
+                f"{DIANN_DDA_FLAG} to the cfg.")
+    if acq == "DIA" and has:
+        return (f"{source} is DIA, but {cfg} has {DIANN_DDA_FLAG}, which DIA-NN "
+                "says must not be used with DIA data. Fix: re-run estimate_params.py --engine "
+                f"diann --acquisition DIA, or remove {DIANN_DDA_FLAG} from the cfg -- or, if the "
+                "data really is DDA, re-run estimate_params.py with --acquisition DDA and correct "
+                "the bundle's acquisition (step 4).")
+    return None
 
 
 def mass_acc_measure_plan(cfg):
@@ -521,6 +742,119 @@ def mass_acc_measure_plan(cfg):
     return {"documented": dict(doc)}
 
 
+MASS_ACC_DDA_REASON = (
+    "mass accuracy is to be measured with DIA-NN before the search (planned by "
+    f"estimate_params.py), but the cfg searches DDA ({DIANN_DDA_FLAG}) and the probe cannot "
+    "measure anything under it: no scan-window radius is logged in DDA mode, and mass-accuracy "
+    "optimisation did not finish within 3600 s on the SET28 runs")
+
+
+def mass_acc_dda_refusal(cfg):
+    """{code, reason, remedy} when `cfg` plans a DIA-NN mass-accuracy measurement AND searches
+    DDA, else None. The one rule for both routes: parallel_safe() declines the chain with it, and
+    run_search.py refuses the single-shot search with it at GENERATION -- the single-shot job
+    used to carry the probe into the job, where probe_window.py refused --dda at run time.
+    The plan comes from a sidecar written before 2.9 (estimate_params.py pins a DDA cfg now) or
+    a cfg given --dda by hand."""
+    if not mass_acc_measure_plan(cfg):
+        return None
+    try:
+        if not mass_acc_status(cfg)["dda"]:
+            return None
+    except CfgError:
+        return None
+    return {"code": "mass_acc_dda", "reason": MASS_ACC_DDA_REASON,
+            "remedy": _remedy("mass_acc_dda")}
+
+
+def window_flag(path):
+    """Bash for the --window steps 2-5 pass: `--window N` from `path`, or nothing when it says
+    `auto` (the probe's fallback: DIA-NN chooses the radius per run). needs_measured() has
+    already refused anything else, a missing file included."""
+    return f"$(sed -n 's/^\\([1-9][0-9]*\\)$/--window \\1/p' {path}) "
+
+
+def keep_attempt(workdir):
+    """probe_attempts() `reset` lines that keep attempt 1's probe logs, as `<workdir>.attempt1`,
+    beside its evidence (`<evidence>.attempt1`) -- they are what says why it measured nothing."""
+    q = shlex.quote
+    return [f"rm -rf {q(workdir + '.attempt1')}",
+            f"mv -f {q(workdir)} {q(workdir + '.attempt1')} 2>/dev/null || true"]
+
+
+def _rc_case(codes):
+    """A bash `case` pattern for these exit statuses."""
+    return "|".join(str(c) for c in codes)
+
+
+def probe_failure_lines(indent="  "):
+    """Bash: why the probe stopped the job, from $PROBE_RC (probe_window.EXIT_MEANING)."""
+    q = shlex.quote
+    return ([f'{indent}case "$PROBE_RC" in']
+            + [f"{indent}  {code}) echo {q('  ' + text)} >&2 ;;"
+               for code, text in sorted(EXIT_MEANING.items())]
+            + [f'{indent}  {_rc_case(FALLBACK_ON)}) echo "  the fallback could not be written '
+               '(above)" >&2 ;;',
+               f'{indent}  *) if [ "$PROBE_RC" -ge 128 ]; then echo "  the probe was stopped by '
+               'a signal (exit $PROBE_RC)" >&2; else echo "  the probe exited $PROBE_RC" >&2; '
+               'fi ;;',
+               f"{indent}esac"])
+
+
+def probe_attempts(head, tail, evidence, measure, documented, reset, window_file=None,
+                   massacc_file=None, write_cfg=None, provenance=None, fallback_out=None):
+    """Bash that runs the probe, runs it ONCE more when its own machinery failed, and then falls
+    back (probe_fallback.py) instead of failing the search -- only then. The one definition, for
+    the chain's step 1b and the single-shot search's probe.
+
+    A failed probe used to fail its job, and in the chain afterok then left steps 2-5
+    DependencyNeverSatisfied -- 62 of fran-5b's 261 step-1b jobs overnight 2026-09-29/30 died
+    that way, over an ESTALE in the probe's log tail while DIA-NN itself succeeded. The probe's
+    exit status now says why it pinned nothing (probe_window.EXIT_*), and:
+      0                   measured -- the caller takes the values from `evidence`
+      RETRY_ON            a crash, or its own log unreadable (io_error): retried once when at
+                          least PROBE_RETRY_MIN_S of the budget is left, then probe_fallback.py
+      FALLBACK_ON, else   a time limit: probe_fallback.py, no retry (a second attempt from what
+                          is left of the same budget would hit it again)
+      anything else       the job FAILS as before -- a refused measurement, the environment
+                          (no .NET, DIA-NN cannot start), the probe's arguments, runs DIA-NN
+                          finished without logging it, a signal: no fallback can fix those, and
+                          one would hide them (dda-review, 2026-09-30)
+    `head` is the probe's command up to (not including) `--budget`; `tail` the DIA-NN flags
+    after `--`. `reset` clears an attempt's leftovers before the retry. Afterwards PROBE_RC is
+    the probe's last exit status and PROBE_FALLBACK is 1 when the fallback was written. Safe
+    under `set -e` (the single-shot inline route runs these lines with it)."""
+    q = shlex.quote
+    fb = os.path.join(os.path.dirname(os.path.abspath(__file__)), "probe_fallback.py")
+    doc = f" {probe_mass_acc_args(documented)}" if documented else ""
+    opt = "".join(f" {flag} {q(v)}" for flag, v in (
+        ("--window-file", window_file), ("--massacc-file", massacc_file),
+        ("--write-cfg", write_cfg), ("--provenance", provenance)) if v)
+    return [
+        f"PROBE_DEADLINE=$(( $(date +%s) + {PROBE_BUDGET_S} )); PROBE_RC=1; PROBE_FALLBACK=0; "
+        "PROBE_ATTEMPTS=0",
+        "for PROBE_ATTEMPT in 1 2; do",
+        "  PROBE_BUDGET=$(( PROBE_DEADLINE - $(date +%s) ))",
+        '  if [ "$PROBE_ATTEMPT" -gt 1 ]; then',
+        f'    if [ "$PROBE_BUDGET" -lt {PROBE_RETRY_MIN_S} ]; then echo "[probe] not retried: '
+        'only $PROBE_BUDGET s of the budget left" >&2; break; fi',
+        '    echo "[probe] WARNING: attempt 1 failed in the probe\'s own machinery (exit '
+        f'$PROBE_RC); retrying once. Its evidence: {evidence}.attempt1" >&2',
+        f"    mv -f {q(evidence)} {q(evidence + '.attempt1')} 2>/dev/null || true",
+        *("    " + r for r in reset),
+        "  fi",
+        "  PROBE_ATTEMPTS=$PROBE_ATTEMPT",
+        f"  {head} --budget $PROBE_BUDGET -- {tail} > {q(evidence)} && PROBE_RC=0 || PROBE_RC=$?",
+        f'  case "$PROBE_RC" in {_rc_case(RETRY_ON)}) ;; *) break ;; esac',
+        "done",
+        f'case "$PROBE_RC" in {_rc_case(FALLBACK_ON)})',
+        f"  if python3 {q(fb)} --measure {' '.join(measure)}{doc} --exit-code $PROBE_RC "
+        f"--attempts $PROBE_ATTEMPTS --evidence {q(evidence)}{opt}"
+        + (f" --out {q(fallback_out)}" if fallback_out else "") + "; then PROBE_FALLBACK=1; fi ;;",
+        "esac",
+    ]
+
+
 def probe_mass_acc_args(documented):
     """probe_window.py flags that pin the documented levels: {"--mass-acc-ms1": 7} -> "--ms1-ppm 7"."""
     names = {"--mass-acc-ms1": "--ms1-ppm", "--mass-acc": "--ms2-ppm"}
@@ -541,6 +875,9 @@ def documented_levels_text(documented):
 # It checks the SHAPE of the line -- the two flags, in order, each with a number. A shape check
 # cannot tell 14 ppm from 999999, so massacc.txt gets massacc_band_check() as well.
 MEASURED_FILE_RE = {
+    # a radius. `auto` (probe_fallback.py: DIA-NN chooses per run, and steps 2-5 pass no
+    # --window -- window_flag()) is accepted by needs_measured() only beside the fallback's own
+    # record, never on its own
     "window.txt": "[1-9][0-9]*",
     "massacc.txt": "--mass-acc [0-9]*[.]?[0-9]+ --mass-acc-ms1 [0-9]*[.]?[0-9]+",
 }
@@ -568,8 +905,8 @@ def massacc_band_check(path, producer):
 def needs_measured(path, what, producer="step 1b (step1b_window.sbatch)"):
     """Bash that fails the job unless step 1b's `path` holds a measurement.
 
-    Steps 2-5 splice `$(cat massacc.txt)` and `--window $(cat window.txt)` into DIA-NN's command
-    line. A missing file expands to NOTHING: DIA-NN then optimises mass accuracy per file -- the
+    Steps 2-5 splice `$(cat massacc.txt)` and `--window N` from window.txt (window_flag();
+    nothing for the fallback's `auto`) into DIA-NN's command line. A missing file expands to NOTHING: DIA-NN then optimises mass accuracy per file -- the
     very thing the chain exists to prevent -- and still writes its .quant, so must_exist passes
     and steps 3/5 stitch auto-calibrated passes together. That is not hypothetical: step 1b
     deletes both files before it probes, and references/watcher.md tells the orchestrator to
@@ -578,7 +915,15 @@ def needs_measured(path, what, producer="step 1b (step1b_window.sbatch)"):
     content is checked too, so a "None" printed into the file cannot reach DIA-NN."""
     base = os.path.basename(path)
     pat = MEASURED_FILE_RE[base]
-    shape = (f'if ! grep -Eqx -- {shlex.quote(pat)} "{path}" 2>/dev/null; then '
+    ok = f'grep -Eqx -- {shlex.quote(pat)} "{path}" 2>/dev/null'
+    if base == "window.txt":
+        # `auto` only with probe_fallback.py's record of a window fallback beside it: a
+        # hand-written or stale `auto` must not make steps 2-5 run without a window unrecorded
+        fb = os.path.join(os.path.dirname(path), FALLBACK_RECORD)
+        marker = shlex.quote('"mode": "fallback_auto"')
+        ok = (f'{{ {ok} || {{ grep -qx auto "{path}" 2>/dev/null && '
+              f'grep -q {marker} "{fb}" 2>/dev/null; }}; }}')
+    shape = (f'if ! {ok}; then '
              f'echo "FAILED: {path} does not hold {what} -- {producer} measures '
              f'it and has not completed successfully. Re-run it first; running DIA-NN '
              f'without it would let DIA-NN optimise it itself." >&2; exit 1; fi')
@@ -592,7 +937,8 @@ def needs_measured(path, what, producer="step 1b (step1b_window.sbatch)"):
 # --allow-auto-mass-acc may override (upstream #70: never an invalid value, a bad --window or an
 # unreadable cfg). A cfg estimate_params.py planned to measure is omitted mass accuracy too, when
 # the chain has no step 1b to measure it in.
-MASS_ACC_OMITTED_CODES = ("mass_acc_unset", "mass_acc_seeded", "mass_acc_no_probe")
+MASS_ACC_OMITTED_CODES = ("mass_acc_unset", "mass_acc_seeded", "mass_acc_no_probe",
+                          "mass_acc_dda")
 
 
 def _remedy(code):
@@ -626,13 +972,18 @@ def _remedy(code):
         "mass_acc_no_probe":
             "drop --no-probe-window (step 1b then measures mass accuracy), or pin --mass-acc "
             "and --mass-acc-ms1 in the cfg",
+        "mass_acc_dda":
+            "re-run estimate_params.py --engine diann --acquisition DDA: for DDA it pins the "
+            "level it cannot measure at the facility SOP (tagged DEFAULT) instead of planning a "
+            "measurement -- or pin --mass-acc and --mass-acc-ms1 in the cfg yourself",
         "mass_acc_invalid":
             "correct --mass-acc/--mass-acc-ms1 in the cfg to ONE positive ppm value each "
             f"({table}), or re-run estimate_params.py with the real instrument. For "
             "auto-calibration delete the flags -- never 0 -- and run single-shot",
         "window_invalid":
             "set --window to one positive integer, or delete it and the chain measures it "
-            "itself (step 1b). Do not guess a value: it depends on the acquisition scheme",
+            "itself (step 1b) -- for a DDA cfg (--dda) just delete it: step 1b does not run for "
+            "DDA. Do not guess a value: it depends on the acquisition scheme",
         "window_seeded":
             "pin --window in the cfg: a seeded chain has no step 1 for step 1b to follow, so "
             "measure it once with probe_window.py against the seed library, handing it the "
@@ -681,15 +1032,22 @@ def parallel_safe(cfg, probe_window=True, seed_lib=None):
         differently -- NOT recoverable. A typo is a mistake to report, not something to
         quietly measure over.
       * an unparseable cfg (unbalanced quote) -- NOT recoverable.
+      * a DDA cfg (--dda): nothing is measured, because step 1b's probe cannot measure anything
+        under --dda (DDA_WINDOW_NOTE; probe_window.py refuses it). Mass accuracy must be pinned
+        -- estimate_params.py pins a DDA cfg -- and a plan to measure it is refused
+        (mass_acc_dda). An unset --window is accepted as it is (dda_window_unset): there is no
+        radius to measure and nothing to derive one from, and window_record() says so; a
+        `--window 0` is refused (window_invalid) -- nothing would replace it.
 
     Returns {ok, probe, code, ma, reason, remedy, measure, mass_acc_documented}: `probe` says
     step 1b is needed, `measure` lists what it measures ("window", "mass-acc"),
     `mass_acc_documented` the mass-accuracy levels it pins as documented instead ({flag: ppm}),
-    `code` names the outcome (probe | pinned | cfg_missing | cfg_unparseable | mass_acc_unset |
-    mass_acc_seeded | mass_acc_no_probe | mass_acc_invalid | window_invalid | window_seeded |
-    window_no_probe), `remedy` is how to fix a refusal. A cfg path that is not a file is
-    `cfg_missing`, never "mass accuracy is not pinned": `--sbatch proj` once renamed the folder
-    holding the cfg, and the refusal that followed blamed mass accuracy.
+    `code` names the outcome (probe | pinned | dda_window_unset | cfg_missing | cfg_unparseable |
+    mass_acc_unset | mass_acc_seeded | mass_acc_no_probe | mass_acc_dda | mass_acc_invalid |
+    window_invalid | window_seeded | window_no_probe), `remedy` is how to fix a refusal. A cfg
+    path that is not a file is `cfg_missing`, never "mass accuracy is not pinned": `--sbatch
+    proj` once renamed the folder holding the cfg, and the refusal that followed blamed mass
+    accuracy.
     `ma` is mass_acc_status() untouched -- on the probe path what step 1b measures is still
     unset, because it IS unset until step 1b runs.
     """
@@ -705,7 +1063,7 @@ def parallel_safe(cfg, probe_window=True, seed_lib=None):
         ma = mass_acc_status(cfg)
     except CfgError as e:
         return verdict(False, False, e.code, None, str(e))
-    st = ma["state"]
+    st, dda = ma["state"], ma["dda"]
     # Invalid values before unset ones: the MASS_ACC_OMITTED_CODES are the ones
     # --allow-auto-mass-acc may override, so they must never hide a junk value behind them --
     # and a plan to measure never rescues a junk value either.
@@ -715,6 +1073,10 @@ def parallel_safe(cfg, probe_window=True, seed_lib=None):
     if st["--window"] == "invalid":
         return verdict(False, False, "window_invalid", ma,
                        f"--window is set but is not a usable radius ({ma['reason']})")
+    if dda and st["--window"] == "zero":
+        return verdict(False, False, "window_invalid", ma,
+                       f"{ma['window_reason']}, and in a DDA cfg ({DIANN_DDA_FLAG}) step 1b does "
+                       "not run, so nothing would replace it")
     if any(st[f] == "unset" for f in MASS_ACC_FLAGS):
         plan = mass_acc_measure_plan(cfg)          # None unless BOTH are unset and planned
         if not plan:
@@ -723,6 +1085,9 @@ def parallel_safe(cfg, probe_window=True, seed_lib=None):
                            f"mass accuracy is not pinned ({ma['reason']})"
                            + (f"; {cfg}.rationale.json does not plan to measure it with DIA-NN"
                               if both else ""))
+        refusal = mass_acc_dda_refusal(cfg)       # SET28's step 1b burned ~3 h of probes on it
+        if refusal:
+            return verdict(False, False, refusal["code"], ma, refusal["reason"])
         if seed_lib:
             return verdict(False, False, "mass_acc_seeded", ma,
                            "mass accuracy is to be measured in step 1b (planned by "
@@ -734,6 +1099,13 @@ def parallel_safe(cfg, probe_window=True, seed_lib=None):
                            "estimate_params.py), and --no-probe-window was given")
         measure.append("mass-acc")
         documented = plan["documented"]
+    if st["--window"] != "ok" and dda:
+        # "unset" (zero was refused above): nothing measures it and nothing is pinned for it --
+        # window_record() describes exactly that in the provenance.
+        return verdict(True, False, "dda_window_unset", ma,
+                       f"MS1 {ma['ms1']} ppm / MS2 {ma['ms2']} ppm, pinned in the cfg; --window "
+                       f"not in the cfg and not measured: the cfg searches DDA ({DIANN_DDA_FLAG}), "
+                       "where DIA-NN logs no scan-window radius for step 1b to measure")
     if st["--window"] != "ok":
         if seed_lib:
             return verdict(False, False, "window_seeded", ma,
@@ -923,6 +1295,18 @@ def main():
                  "in the report -- and their array tasks would write the same .quant. Rename "
                  "them, or search them separately.")
     refuse_unsafe_path(a.out)
+    # run_search.py checks --dda against the bundle; the documented direct call -- and a
+    # --seed-lib phase 2 -- never pass through it. So the generator checks it too, against the
+    # acquisition estimate_params.py wrote the cfg for. An unreadable cfg is parallel_safe's to
+    # report, below.
+    if a.cfg:
+        try:
+            why = dda_mismatch(a.cfg, cfg_acquisition(a.cfg),
+                               source=f"{a.cfg}.rationale.json's acquisition")
+        except CfgError:
+            why = None
+        if why:
+            sys.exit(f"[diann_parallel] REFUSING: {why} Nothing was generated.")
 
     # Detect the queue from the submitting user's SLURM associations rather than
     # assuming facility membership. genome-center-grp/high for members; publicgrp/low
@@ -999,6 +1383,9 @@ def main():
     norm = "--no-norm" if a.no_norm else ""
     xic = xic_flag(a.cfg)          # step 4 only -- see xic_flag() docstring
 
+    # Every refusal is behind us: an earlier search's probe outputs must not describe this one
+    # (set aside, not deleted -- they are that search's evidence)
+    set_aside_probe_outputs(out)
     # file list (1 raw path per line) — array tasks index into it
     open(os.path.join(out, "file_list.txt"), "w").write("\n".join(raws) + "\n")
     all_f = " ".join(f"--f {shlex.quote(r)}" for r in raws)   # quote — data paths may contain spaces
@@ -1006,6 +1393,8 @@ def main():
     seed = os.path.abspath(a.seed_lib) if a.seed_lib else None
     predicted = seed if seed else f"{D}/step1.predicted.speclib"
     empirical = f"{D}/empirical.parquet"
+    first_pass = f"{D}/{FIRST_PASS_REPORT}"
+    pass_cmp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pass_comparison.py")
 
     # QUEUE CHOICE, ported from DE-LIMP's select_best_partition()
     # (R/helpers_search.R) + docs/QUEUE_SWITCHING.md:
@@ -1094,7 +1483,9 @@ def main():
         # the numbers (SKILL.md golden rule 5). params.base.cfg is the cfg minus any --window,
         # by the same token rule as the step flags. params.resolved.cfg is NOT created here:
         # step 1b builds it in a .tmp and moves it into place only once a radius is measured,
-        # so a "resolved" cfg with no --window can never exist to be replayed.
+        # so a "resolved" cfg with no --window can never exist to be replayed -- unless the probe
+        # measured nothing and fell back (probe_attempts()): then it has no --window BECAUSE
+        # steps 2-5 ran without one, and replaying it lets DIA-NN choose per run, as they did.
         base_cfg = os.path.join(out, "params.base.cfg")
         resolved_cfg = os.path.join(out, "params.resolved.cfg")
         tmp_cfg = resolved_cfg + ".tmp"
@@ -1118,9 +1509,9 @@ def main():
             *([f"{dnet.strip()}   # .NET 8 for Thermo .raw, inherited by probe_window.py's DIA-NN"]
               if dnet else []),
             # A resubmitted step 1b must never find the previous run's answer and carry on.
-            f"rm -f {wtxt} {D}/window.json {q(resolved_cfg)} {q(tmp_cfg)}"
-            + (f" {mtxt}" if mess else ""),
-            f"rm -rf {q(probe_dir)}",
+            f"rm -f {wtxt} {D}/window.json {D}/window.json.attempt1 {D}/{FALLBACK_RECORD} "
+            f"{q(resolved_cfg)} {q(tmp_cfg)}" + (f" {mtxt}" if mess else ""),
+            f"rm -rf {q(probe_dir)} {q(probe_dir + '.attempt1')}",
             f"cp {q(base_cfg)} {q(tmp_cfg)}",
             # WHICH runs: not the first files of the listing. The probe gets the whole cohort
             # (file_list.txt) and, at run time on this node, keeps out blanks, washes, failed
@@ -1132,16 +1523,26 @@ def main():
             # --timeout bounds one hung run; --budget bounds them all inside this job's limit.
             *(['W=""'] if "window" in measure else []),
             *(['M=""'] if mess else []),
-            f"if python3 {q(probe)} --diann {q(a.diann)} \\",
-            f"    --raw-list {q(os.path.join(out, 'file_list.txt'))} \\",
-            f"    --fasta {fasta} --lib {predicted} --threads {a.threads_per_file} \\",
-            f"    --max-probes {PROBE_CANDIDATES} --max-failures {PROBE_MAX_FAILURES} \\",
-            f"    --timeout {PROBE_TIMEOUT_S} --budget {PROBE_BUDGET_S} \\",
-            *([f"    --measure {' '.join(measure)}{doc_args} \\"] if mess else []),
-            f"    --workdir {q(probe_dir)} --write-cfg {q(tmp_cfg)} \\",
-            # the flags as bash words, after `--`: the probe's DIA-NN gets the same argv as
-            # steps 2-5, not a second parse of them through shlex
-            f"    -- {flags} > {D}/window.json; then",
+            # the probe, once more if it measured nothing, then probe_fallback.py -- see
+            # probe_attempts(): a failed probe no longer blocks steps 2-5
+            *probe_attempts(
+                "python3 " + " \\\n    ".join([
+                    f"{q(probe)} --diann {q(a.diann)}",
+                    f"--raw-list {q(os.path.join(out, 'file_list.txt'))}",
+                    f"--fasta {fasta} --lib {predicted} --threads {a.threads_per_file}",
+                    f"--max-probes {PROBE_CANDIDATES} --max-failures {PROBE_MAX_FAILURES}",
+                    f"--timeout {PROBE_TIMEOUT_S}"
+                    + (f" --measure {' '.join(measure)}{doc_args}" if mess else ""),
+                    f"--workdir {q(probe_dir)} --write-cfg {q(tmp_cfg)}"]),
+                # the flags as bash words, after `--`: the probe's DIA-NN gets the same argv as
+                # steps 2-5, not a second parse of them through shlex
+                flags, f"{D}/window.json", measure, documented,
+                reset=keep_attempt(probe_dir) + [f"cp {q(base_cfg)} {q(tmp_cfg)}"],
+                window_file=wtxt if "window" in measure else None,
+                massacc_file=mtxt if mess else None, write_cfg=tmp_cfg,
+                provenance=f"{D}/search_provenance.json",
+                fallback_out=f"{D}/{FALLBACK_RECORD}"),
+            'if [ "$PROBE_RC" -eq 0 ]; then',
             *(['  W=$(python3 -c "import json,sys; w=json.load(open(sys.argv[1]))[\'window_radius\']; '
                f'assert isinstance(w, int) and w > 0; print(w)" {D}/window.json)']
               if "window" in measure else []),
@@ -1149,10 +1550,17 @@ def main():
             *(['  M=$(python3 -c "import json,re,sys; m=json.load(open(sys.argv[1]))[\'mass_acc\'][\'pin_as\']; '
                f'assert re.fullmatch(sys.argv[2], m); print(m)" {D}/window.json '
                f'{q(MEASURED_FILE_RE["massacc.txt"])})'] if mess else []),
+            'elif [ "$PROBE_FALLBACK" -eq 1 ]; then',
+            # probe_fallback.py wrote window.txt / massacc.txt and the cfg's mass-acc flags
+            *([f'  W=$(cat {wtxt})'] if "window" in measure else []),
+            *([f'  M=$(cat {mtxt})'] if mess else []),
             "fi",
             f"if {failed_if}; then",
-            f'  echo "FAILED: step 1b measured no {what} -- the reason and each '
-            f'probe\'s DIA-NN log tail are above; every probe is recorded in {D}/window.json." >&2',
+            f'  echo "FAILED: step 1b measured no {what} -- the reason and each probe\'s DIA-NN '
+            'log tail are above -- and did not fall back (only a failure of the probe\'s own '
+            'machinery may):" >&2',
+            *probe_failure_lines(),
+            f'  echo "Every probe is recorded in {D}/window.json." >&2',
             # Resubmitting step 1b ALONE does not restart the chain: steps 2-5 were submitted
             # afterok on THIS job id, so they sit PENDING (DependencyNeverSatisfied) for ever.
             '  echo "Steps 2-5 were submitted afterok on THIS job, so they are now PENDING with '
@@ -1167,7 +1575,7 @@ def main():
             'repeats step 1. See references/watcher.md (dependency_failed)." >&2',
             # window.json stays: it is the evidence. window.txt, massacc.txt and the resolved cfg
             # never exist.
-            f"  rm -f {q(tmp_cfg)}",
+            f"  rm -f {q(tmp_cfg)} {wtxt}" + (f" {mtxt}" if mess else ""),
             "  exit 1",
             "fi",
             # These are written by this script, not by DIA-NN, so must_exist()'s "DIA-NN exited
@@ -1192,15 +1600,23 @@ def main():
             f'place from {tmp_cfg} (disk full? permissions?)" >&2',
             "  exit 1",
             "fi",
-            *(['echo "scan window radius = $W (median of the runs listed above; pinned for steps 2-5)"']
+            'if [ "$PROBE_FALLBACK" -eq 1 ]; then',
+            *(['  echo "scan window = auto -- FALLBACK: the probe measured nothing, so DIA-NN '
+               'chooses the radius itself, per run (search_provenance.json probe_fallback)"']
               if "window" in measure else []),
-            *(['echo "mass accuracy = $M (per level: the median of the runs listed above, or the '
+            *(['  echo "mass accuracy = $M -- FALLBACK: the documented level as given, the other '
+               'at the facility SOP (DEFAULT, not measured)"'] if mess else []),
+            'else',
+            *(['  echo "scan window radius = $W (median of the runs listed above; pinned for '
+               'steps 2-5)"'] if "window" in measure else []),
+            *(['  echo "mass accuracy = $M (per level: the median of the runs listed above, or the '
                'documented value; pinned for steps 2-5)"'] if mess else []),
+            'fi',
             f'echo "fully-resolved parameters -> {resolved_cfg}"']),
             stage=f"step 1b/5 measuring {what}", hours=PROBE_WALL_HOURS)
     # steps 2-5 read the measured values at RUNTIME so every pass uses the identical ones --
     # after checking they are there (needs_measured: a missing file expands to nothing)
-    wflag = f'--window $(cat {wtxt}) ' if "window" in measure else ''
+    wflag = window_flag(wtxt) if "window" in measure else ''
     mflag = f'$(cat {mtxt}) ' if "mass-acc" in measure else ''
     measured_guard = (([needs_measured(wtxt, "a scan-window radius")]
                        if "window" in measure else [])
@@ -1221,10 +1637,12 @@ def main():
         header("s2_firstpass", a.threads_per_file, a.mem_per_file, a.time_per_file, _pa, _aa, qos=_qa, array=array), "",
         f'echo "Step 2/5 first pass, task ${{SLURM_ARRAY_TASK_ID}} of {n}"; date',
         *measured_guard, pick, tmpguard("quant_step2"),
+        f'mkdir -p {D}/{TASK_OUT_DIRS["step2"]}   # this task\'s report files (TASK_OUT_DIRS)',
         'QOUT="${FILE##*/}"; QOUT="${QOUT%.*}.quant"',
         clear_stale(f'{D}/quant_step2/$QOUT'),
         f'{DN} --f "$FILE" --fasta {fasta} --lib {predicted} \\',
         f'  --temp {D}/quant_step2 --rt-profiling --gen-spec-lib --quant-ori-names \\',
+        f'  --out {D}/{TASK_OUT_DIRS["step2"]}/t${{SLURM_ARRAY_TASK_ID}}.parquet \\',
         f'  --threads {a.threads_per_file} {wflag}{mflag}{flags}',
         must_exist(f'{D}/quant_step2/$QOUT', "this file's .quant")]),
         stage="step 2/5 first pass (array)", hours=a.time_per_file)
@@ -1235,10 +1653,12 @@ def main():
         f'echo "Step 3/5 empirical library assembly"; date', *measured_guard,
         tmpguard("quant_step2"),
         f'cp -r {D}/quant_step2 {D}/quant_step2_orig 2>/dev/null || true   # backup for resume',
-        clear_stale(empirical),
+        # the first-pass report and its stats too: step 5 compares them with its own
+        # (pass_comparison.py), and a previous run's must not stand in for this one's
+        clear_stale(empirical, first_pass, stats_path(first_pass)),
         f'{DN} {all_f} --fasta {fasta} --lib {predicted} --use-quant --quant-ori-names \\',
         f'  --rt-profiling --gen-spec-lib --out-lib {empirical} \\',
-        f'  --temp {D}/quant_step2 --out {D}/step3_assembly.parquet \\',
+        f'  --temp {D}/quant_step2 --out {first_pass} \\',
         f'  --threads {a.assembly_cpus} {wflag}{mflag}{flags}',
         must_exist(empirical, "the empirical spectral library")]),
         stage="step 3/5 empirical library assembly", hours=a.assembly_time)
@@ -1254,7 +1674,10 @@ def main():
     # Both carry their own leading space so the command line has no double space (and no
     # trailing space before the line continuation) when XICs are off.
     xic_arg = f' {xic}' if xic else ''
-    xic_out = f' --out {D}/xic/t${{SLURM_ARRAY_TASK_ID}}.parquet' if xic else ''
+    # With XICs off the task still gets its own --out (TASK_OUT_DIRS), for the same reason as
+    # step 2: otherwise its report files land in <out> itself.
+    out4_dir = "xic" if xic else TASK_OUT_DIRS["step4"]
+    task_out4 = f' --out {D}/{out4_dir}/t${{SLURM_ARRAY_TASK_ID}}.parquet'
 
     s4 = write("step4_finalpass.sbatch", "\n".join([
         header("s4_finalpass", a.threads_per_file, a.mem_per_file, a.time_per_file, _pa, _aa, qos=_qa, array=array), "",
@@ -1264,9 +1687,7 @@ def main():
         # cleared BEFORE the skip: a skipped task must leave no .quant for step 5 to count
         clear_stale(f'{D}/quant_step4/$QUANT'),
         f'if [ ! -f "{D}/quant_step2/$QUANT" ]; then echo "SKIP: no step-2 quant for $QUANT"; exit 0; fi',
-        # Splat an empty list, not an empty string: a conditional string leaves a stray
-        # blank line in the generated sbatch when XICs are off.
-        *([f'mkdir -p {D}/xic'] if xic else []),
+        f'mkdir -p {D}/{out4_dir}',
         # DIA-NN re-saves the library it is handed as "<lib>.skyline.speclib", written
         # NEXT TO --lib. With one shared path every concurrent array task writes the same
         # file; most win the race in seconds, the losers block until the wall clock kills
@@ -1276,7 +1697,7 @@ def main():
         f'cp -f {empirical} "$LIBPRIV/lib.parquet"',
         'trap \'rm -rf "$LIBPRIV"\' EXIT',
         f'{DN} --f "$FILE" --fasta {fasta} --lib "$LIBPRIV/lib.parquet" \\',
-        f'  --temp {D}/quant_step4 --quant-ori-names{xic_arg}{xic_out} \\',
+        f'  --temp {D}/quant_step4 --quant-ori-names{xic_arg}{task_out4} \\',
         f'  --threads {a.threads_per_file} {wflag}{mflag}{flags}',
         must_exist(f'{D}/quant_step4/$QUANT', "this file's final-pass .quant")]),
         stage="step 4/5 final pass (array)", hours=a.time_per_file)
@@ -1318,18 +1739,43 @@ def main():
         f'if [ "$NQ" -ne {n} ]; then '
         f'echo "FAILED: report built from $NQ of {n} runs -- a step-4 task produced no .quant." >&2; '
         f'exit 1; fi',
-        f'echo "OK: report built from all {n} runs"']),
+        f'echo "OK: report built from all {n} runs"',
+        # Did the final pass keep what the first pass found? A table, a WARNING per run that
+        # lost more than half its precursors, and the record in search_provenance.json -- see
+        # pass_comparison.py. It never fails the job: the report is not wrong, the numbers are a
+        # decision for the user. A comparison that cannot be made is said, never skipped quietly.
+        # Under the generator's own python (the pipeline env's, which has pyarrow for the rows
+        # after run_de.R's q filter), else python3 -- which still gives the stats table.
+        f'PY={shlex.quote(sys.executable)}; [ -x "$PY" ] || PY=python3; '
+        f'"$PY" {shlex.quote(pass_cmp)} --first-report {shlex.quote(first_pass)} '
+        f'--final-report {shlex.quote(D + "/" + report)} '
+        f'--out {shlex.quote(D + "/pass_comparison.json")} '
+        f'--provenance {shlex.quote(D + "/search_provenance.json")} '
+        '|| echo "WARNING: the first-pass / final-pass comparison could not be made -- the '
+        'messages above say why" >&2']),
         stage="step 5/5 cross-run report", hours=a.assembly_time, final=True)
 
-    # submit.sh — chain the steps with afterok dependencies
-    sub_lines = ["#!/bin/bash", "set -euo pipefail", f'cd "{out}"',
+    # submit.sh — chain the steps with afterok dependencies.
+    #
+    # It runs under `set -euo pipefail`, and the orchestrator often reads only the first line of
+    # what it prints (`bash submit.sh | head -1`). The reader then closes the pipe, and the next
+    # echo killed bash with SIGPIPE -- after every sbatch had succeeded, but before the checkpoint
+    # and jobs.txt were written (msalemi, SET28 2026-09-25: a whole chain queued with no jobs.txt
+    # and no RECOVERY.md). So SIGPIPE is ignored, every message goes through say(), which cannot
+    # fail, and jobs.txt and the checkpoint are written straight after the last sbatch, before
+    # anything else is printed -- the order run_search.py's two-job submit.sh already uses.
+    sub_lines = ["#!/bin/bash", "set -euo pipefail",
+                 "trap '' PIPE   # a reader that stops early must not kill this script",
+                 # messages only: it never fails, so a closed stdout cannot stop the script
+                 "say() { printf '%s\\n' \"$*\" 2>/dev/null || true; }",
+                 f'cd "{out}"',
                  f'mkdir -p "{D}/quant_step2" "{D}/quant_step4"   # DIA-NN --temp dirs MUST pre-exist']
     if seed:
         # Step 1 skipped — the InfinDIA/empirical seed library IS the first-pass lib.
         # First pass optionally waits (afterok) on the lib-build job that produces it.
         dep2 = f'--dependency=afterok:{a.seed_dep} ' if a.seed_dep else ''
         sub_lines += [
-            f'echo "Step 1/5 SKIPPED — seeding first pass with {predicted}"',
+            f'say "Step 1/5 SKIPPED — seeding first pass with {predicted}"',
             'jid2=$(sbatch --parsable %s%s)' % (dep2, s2)]
     else:
         sub_lines += ['jid1=$(sbatch --parsable %s)' % s1]
@@ -1342,9 +1788,7 @@ def main():
     sub_lines += [
         'jid3=$(sbatch --parsable --dependency=afterok:$jid2 %s)' % s3,
         'jid4=$(sbatch --parsable --dependency=afterok:$jid3 %s)' % s4,
-        'jid5=$(sbatch --parsable --dependency=afterok:$jid4 %s)' % s5,
-        'echo "submitted: firstpass=$jid2 assembly=$jid3 finalpass=$jid4 report=$jid5"',
-        f'echo "final report will be {D}/{report}; watch with: watch_run.sh --slurm $jid5 --log {D}/s5_report_${{jid5}}.log"']
+        'jid5=$(sbatch --parsable --dependency=afterok:$jid4 %s)' % s5]
 
     # Record the submission so a disconnected session can pick the run back up.
     # SLURM keeps the jobs alive after the user closes their terminal; without this
@@ -1360,14 +1804,17 @@ def main():
             '$jid1,$jid1b,$jid2,$jid3,$jid4,$jid5' if s1b else
             '$jid1,$jid2,$jid3,$jid4,$jid5')
     sub_lines += [
+        # the record first: nothing may be printed between the last sbatch and these two
+        f'printf "%s\\n" {jobs.replace(",", " ")} > "{D}/jobs.txt"',
         f'python3 "{ck}" record --session "{sess}" --stage search \\',
         f'  --jobs "{jobs}" --desc "DIA-NN 5-step parallel chain ({n} files)" \\',
         f'  --report "{D}/{report}" --watch-job "$jid5" --watch-log "{D}/s5_report_${{jid5}}.log" \\',
         f'  --next "Rscript run_de.R --input {D}/{report} --metadata {sess}/input/conditions.csv --method dpc --outdir {sess}/output/tables" \\',
         '  >/dev/null 2>&1 || true',
-        f'printf "%s\\n" {jobs.replace(",", " ")} > "{D}/jobs.txt"',
-        f'echo "all chain job ids -> {D}/jobs.txt  (watch the WHOLE chain: watch_run.sh --all {D})"',
-        f'echo "recovery notes written to {sess}/RECOVERY.md — you can safely close your terminal"']
+        'say "submitted: firstpass=$jid2 assembly=$jid3 finalpass=$jid4 report=$jid5"',
+        f'say "final report will be {D}/{report}; watch with: watch_run.sh --slurm $jid5 --log {D}/s5_report_${{jid5}}.log"',
+        f'say "all chain job ids -> {D}/jobs.txt  (watch the WHOLE chain: watch_run.sh --all {D})"',
+        f'say "recovery notes written to {sess}/RECOVERY.md — you can safely close your terminal"']
     write("submit.sh", "\n".join(sub_lines))
 
     # Describe what WILL run, not what the cfg says (CLAUDE.md rule 1). On the probe path the
@@ -1381,7 +1828,8 @@ def main():
         # cfg (DIA-NN calibrates it itself)". That is not what runs: step 1b measures it and every
         # step gets the same pinned value. The documented level is known now; the measured one
         # only at run time, in massacc.txt.
-        mass_acc = {"fixed": True, "measured": True, "documented": documented,
+        mass_acc = {"mode": "measured", "fixed": True, "measured": True,
+                    "documented": documented,
                     "ms1": documented.get("--mass-acc-ms1"), "ms2": documented.get("--mass-acc"),
                     "source": "measured at run time by step 1b (probe_window.py --measure "
                               "mass-acc) and pinned for steps 2-5; planned by estimate_params.py "
@@ -1393,17 +1841,23 @@ def main():
                     "sop_floor": dict(SOP_MASS_ACC_FLAGS),
                     "floor_note": floor_note(f"{D}/window.json", mtxt),
                     "reason": "not in the cfg; measured with DIA-NN on representative runs in "
-                              "step 1b, the same value for every step"}
+                              "step 1b, the same value for every step",
+                    # a probe that measures nothing twice falls back instead of failing the chain;
+                    # step 1b's probe_fallback.py then REPLACES this record (result.mass_acc)
+                    "if_probe_fails": FALLBACK_PLAN["mass-acc"]}
     else:
-        mass_acc = mass_acc_record(ma)
+        mass_acc = mass_acc_record(ma, a.cfg)
     if "window" in measure:
-        scan_window = {"source": "measured at run time by step 1b (probe_window.py) and pinned "
+        scan_window = {"mode": "measured",
+                       "source": "measured at run time by step 1b (probe_window.py) and pinned "
                                  "for steps 2-5",
                        "value": None, "value_file": wtxt,
                        # which runs were measured is decided on the compute node, against the
                        # files as they are then; window.json is the record of it
                        "evidence_file": f"{D}/window.json",
-                       "probe_rule": SELECTION_RULE}
+                       "probe_rule": SELECTION_RULE,
+                       # ...and replaced by probe_fallback.py's when the probe measures nothing
+                       "if_probe_fails": FALLBACK_PLAN["window"]}
     else:
         # --window pinned in the cfg (also when step 1b measures only mass accuracy), or, under
         # --allow-auto-mass-acc, whatever the cfg hands every step
@@ -1411,8 +1865,15 @@ def main():
     if win_probe:
         resolved = {"file": resolved_cfg, "produced": "runtime", "by": s1b,
                     "note": f"written by step 1b only after the {what} "
-                            f"{'are' if len(measure) > 1 else 'is'} measured; absent until "
-                            "then, so a missing file after step 1b means step 1b failed"}
+                            f"{'are' if len(measure) > 1 else 'is'} measured -- or set by the "
+                            "fallback when the probe measured nothing (probe_fallback.json: "
+                            "no --window in it, DIA-NN chooses per run); absent until then, so "
+                            "a missing file after step 1b means the probe was refused or "
+                            "stopped"}
+    elif safe["code"] == "dda_window_unset":
+        resolved = {"file": resolved_cfg, "produced": "generation", "by": None,
+                    "note": "the cfg as given pins mass accuracy; --window is not in it, and for "
+                            "a DDA search nothing measures it (see scan_window)"}
     elif safe["ok"]:
         resolved = {"file": resolved_cfg, "produced": "generation", "by": None,
                     "note": "the cfg as given already pins mass accuracy and --window"}
@@ -1433,6 +1894,11 @@ def main():
         "mass_acc": mass_acc,
         "scan_window": scan_window,
         "resolved_params": resolved,
+        # made at run time by step 5 (pass_comparison.py), which also copies it into
+        # search_provenance.json as `pass_comparison`
+        "pass_comparison": {"file": f"{D}/pass_comparison.json", "produced": "runtime",
+                            "by": s5, "first_pass_report": first_pass,
+                            "final_report": f"{D}/{report}"},
         "seeded": bool(seed), "seed_lib": predicted if seed else None,
         "scripts": [x for x in [s1, s1b, s2, s3, s4, s5, "submit.sh"] if x],
         "submit": f"bash {out}/submit.sh   (or: hive_exec.sh 'bash {out}/submit.sh')",

@@ -18,6 +18,9 @@
 #                               timeout | other, with the line that says so
 #   hive_host_key_*             is HIVE in known_hosts yet, and its fingerprint
 #   local_python3               is there a python3 here that actually runs?
+#   hive_login_saved            once the SSH login works, it is saved (user + key PATH, mode
+#                               600) to $HIVE_ENV_FILE, default ~/.config/ucdavis-proteomics/
+#                               hive.env, for every later call
 #
 # Model: Claude Code runs LOCALLY; HIVE work is driven over SSH with the user's
 # private key. So this tests SSH to HIVE using that key.
@@ -168,6 +171,45 @@ elif ! $ON_HIVE && [ -n "$HU" ] && [ "$KEY_FOUND" = true ]; then
   rm -f "$ERRF"
 fi
 
+# Save the login that just worked, so every later call finds it: hive_exec.sh, report_issue.sh,
+# record_run.py, notify_slack.py and skill_version.sh --check-hive read hive.env when HIVE_USER
+# is not in the environment -- and the environment does not survive from one tool call to the
+# next. Nothing wrote the file, so the step-0 skill check skipped itself for exactly the staff
+# it was for (review, 2.9). The user and the key's PATH only (never the key), mode 600; any other
+# lines already in the file are kept.
+ENV_FILE="${HIVE_ENV_FILE:-$HOME/.config/ucdavis-proteomics/hive.env}"
+ENV_SAVED=false; ENV_NOTE="not saved: the SSH login to HIVE was not confirmed"
+if [ "$HIVE_SSH" = ok ]; then
+  # An absolute form of the key path, when one can be made that names the same file. A Windows
+  # path (C:\Users\gabrig\.ssh\id_ed25519) has no "/", so dirname said "." and a broken path was
+  # saved: Git Bash spells it /c/Users/... (cygpath, as hive_exec.sh's winpath does). A path that
+  # does not resolve to a file is saved as given -- never a made-up one.
+  case "$KEY" in
+    /*) KEY_ABS="$KEY" ;;
+    [A-Za-z]:[\\/]*) KEY_ABS=""
+         command -v cygpath >/dev/null 2>&1 && KEY_ABS="$(cygpath -u "$KEY" 2>/dev/null)" ;;
+    *) KEY_ABS="$(cd "$(dirname "$KEY")" 2>/dev/null && pwd)" && KEY_ABS="$KEY_ABS/$(basename "$KEY")" ;;
+  esac
+  { [ -n "$KEY_ABS" ] && [ -f "$KEY_ABS" ]; } || KEY_ABS="$KEY"
+  if [ ! -f "$KEY_ABS" ]; then
+    ENV_NOTE="not saved: the key path does not name a file here"
+  else case "$HU$KEY_ABS" in
+    *"'"*|*$'\n'*) ENV_NOTE="not saved: the user or key path contains a quote or a line break" ;;
+    *)
+      ENV_TMP=""
+      if ( umask 077; mkdir -p "$(dirname "$ENV_FILE")" ) 2>/dev/null \
+         && ENV_TMP="$(mktemp "$ENV_FILE.XXXXXX" 2>/dev/null)" \
+         && { grep -Ev '^[[:space:]]*(export[[:space:]]+)?HIVE_(USER|KEY)=' "$ENV_FILE" 2>/dev/null
+              printf "HIVE_USER='%s'\nHIVE_KEY='%s'\n" "$HU" "$KEY_ABS"; } > "$ENV_TMP" \
+         && chmod 600 "$ENV_TMP" && mv -f "$ENV_TMP" "$ENV_FILE"; then
+        ENV_SAVED=true; ENV_NOTE="saved: later calls use this login without HIVE_USER/HIVE_KEY in the environment"
+      else
+        [ -n "$ENV_TMP" ] && rm -f "$ENV_TMP"
+        ENV_NOTE="not saved: could not write $ENV_FILE"
+      fi ;;
+  esac; fi
+fi
+
 # Decide the recommended execution mode + facility-software availability.
 # Model: Claude Code is LOCAL; HIVE work is driven over SSH with the key.
 HAS_SLURM=$([ "$ON_HIVE" = true ] || [ "$SSH_SBATCH" = true ] && echo true || echo false)
@@ -196,6 +238,7 @@ cat <<JSON
   "hive_host_key_fingerprints": [$FP_JSON],
   "hive_host_key_matches_published": $FP_MATCH,
   "hive_user_warning": $([ -n "$USER_WARN" ] && js "$USER_WARN" || echo null),
+  "hive_login_saved": {"path": $(js "$ENV_FILE"), "saved": $ENV_SAVED, "note": $(js "$ENV_NOTE")},
   "local_python3": {"path": $([ -n "$PY" ] && js "$PY" || echo null), "usable": $PY_OK, "note": $(js "$PY_NOTE")},
   "can_use_slurm": $HAS_SLURM,
   "facility_software_available": $FACILITY_SW,

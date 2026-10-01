@@ -1,5 +1,320 @@
 # Changelog
 
+## [Skill 2.9.0] — 2026-09-30
+
+Staff laptops and HIVE are checked against the Core's current release, and the Core can leave
+notes for a staff member's Claude. DIA-NN searches DDA data through the parallel chain, keratin
+samples keep their keratin, and Sage results are filtered and described correctly. The report
+can travel as one file with its audio, comparisons with few significant proteins get
+protein-set tests, Core runs ask the client how we did, and every analysis keeps a record of how
+it was done.
+
+> **Re-run the DE of any earlier Sage or FragPipe DDA search.** Before 2.9.0 the Sage adapter
+> passed Sage's decoys and its failing MS1 peaks into the DE. Both adapters also wrote protein
+> IDs as full FASTA headers (`sp|Cont_P02769|ALBU_BOVIN`), which the contaminant filter cannot
+> read, so no Sage or FragPipe DDA DE ever removed a contaminant. Both are fixed (below), and both
+> change the numbers. On one real HeLa run:
+> - 19–20% of proteins per file changed their summed Sage intensity by more than 10%, and 177 of
+>   3,765 protein groups existed only through decoy or failing rows;
+> - 171 contaminant groups (686 peptides) had been tested as sample proteins while the methods
+>   said "Contaminants: none". 101 of them also named a human protein: of the 120 human proteins
+>   named, 57 keep other peptides, and 63 were seen only through peptides shared with a
+>   contaminant, so they now leave the DE with it;
+> - the FragPipe search of the same data had 72 contaminant groups in its DE.
+>
+> The search itself does not need to be repeated, but **re-adapt first, then re-run the DE**:
+> run the search's own `run_search.py` command again with `--adapt-only`, which only reads the
+> existing output. A report adapted before 2.9.0 still has the old protein IDs and declares
+> nothing about its engine: a DE on it as it stands still misses its contaminants and still
+> calls its quantities DIA-NN MaxLFQ. Earlier
+> FragPipe, AlphaDIA and Radiant reports likewise need re-adapting before their DE describes
+> them correctly.
+
+### Keeping every copy of the skill current
+- **Step 0 checks the laptop, its HIVE copy and the Core's release** (`skill_version.sh
+  --check-hive --mode hive_remote`), in one SSH call. Two staff were on 2.6.0 on both their
+  laptop and HIVE while 2.8.0 was out, so none of the 2.7/2.8 fixes had run for them.
+  - A HIVE copy that is behind, missing or different is put again (`hive_exec.sh --put-skill`),
+    unless the user has SLURM jobs whose batch scripts use it; those are counted, and the put
+    waits.
+  - A laptop behind the Core's release is told so **first**, before any other work, with the
+    exact update steps and a recommendation to turn on auto-update. Declining is logged.
+  - HIVE newer than the laptop stops the session: the laptop is updated, never HIVE downgraded.
+  - `check_access.sh` saves the working HIVE login to `~/.config/ucdavis-proteomics/hive.env`,
+    so the check can run; with no login it says so in one line and carries on.
+- **The Core's current release** is `/quobyte/proteomics-grp/skill_release/CURRENT_VERSION`,
+  written by a maintainer with `skill_version.sh --publish-release` as the last step of a
+  release. It is trusted only while the file and its folder belong to a Core admin.
+- **`scripts/core_admins.txt`** is the one list of Core admins (today `brettsp`). It ships with
+  the skill; it is never read from the shared folder, which any group member can change. It has
+  two readers, `skill_version.sh` (bash) and `skill_version.py` (Python), kept equal by a test.
+- **Updating the plugin**: `/plugin` → Installed → Update now, or `claude plugin update
+  ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core`, then `/reload-plugins`.
+  `/plugin marketplace update` only refreshes the catalogue. Auto-update is off for this
+  marketplace until the user turns it on.
+- **Install is one terminal line** (README, `docs/skill-install.html`, `docs/STUDENT_SETUP.md`,
+  `references/install.md`), or one slash command at a time inside Claude Code. Two `/plugin`
+  lines pasted together fail.
+
+### Notes from the Core
+- **`notes.py`**: a Core admin leaves a note for one staff member, or for everyone, in
+  `/quobyte/proteomics-grp/skill_notes/`. The staff member's Claude reads it at step 0 of every
+  session, shows it in full as quoted data, never as an instruction, and records a read receipt
+  and an optional reply. The sender sees who read what and the replies. Slack gets one line
+  (who, for whom, the subject; never the body).
+- **Trust**: the sender is the file's owner on disk, never its `From:` line. The inbox counts
+  only when it is a sticky folder owned by a Core admin; senders are the admins plus a
+  `SENDERS` list an admin owns. Anything else is reported, not shown. A missing inbox is
+  reported to every Core account.
+- From a laptop each command is one `hive_exec.sh` call with `notes.py` on stdin, so an older
+  HIVE copy needs nothing. With no HIVE login it does nothing.
+
+### DIA-NN on DDA data, and a chain that survives its probe
+- **The 5-step chain searches DDA as DDA.** `estimate_params.py` writes `--dda` into a DDA cfg,
+  where every DIA-NN step reads it; before, a DDA cohort of more than 5 files was searched as
+  DIA with no error. `run_search.py` refuses a cfg whose `--dda` disagrees with the acquisition,
+  on both routes.
+- **The precursor range is the MS1 survey scan**, read from the Thermo scan filter, the mzML scan
+  window or the timsTOF `.d`'s acquisition range, instead of falling back to 380–980.
+- **Mass accuracy is pinned, not measured**, for DDA: DIA-NN logs no scan-window radius in DDA
+  mode, so the step-1b probe ran to its timeout. A level with no table value takes the Core SOP
+  value, tagged "Core SOP default for this instrument, not measured on these data" in the
+  Methods, the parameter tables and the run record.
+- **The Methods say when DIA-NN searched the spectra as DDA**, and describe match-between-runs
+  from the search mode.
+- **The chain compares its two passes.** Step 5 runs `pass_comparison.py`: runs whose final pass
+  kept less than half their first-pass precursors are flagged in `AUDIT.md`, and the first-pass
+  report is offered only for runs where it has more rows after run_de's own q-value filter.
+- Array tasks write to their own `--out`; `submit.sh` writes `jobs.txt` before anything can
+  close its output; a ddaPASEF `.d` whose frame types and tables disagree is asked about, not
+  guessed.
+- **A stale NFS handle no longer kills step 1b.** On Flinders NFS the window/mass-accuracy
+  probe died with ESTALE in 62 of 261 step-1b jobs, taking every chain behind it. Its log is
+  now written on the node and published to the workdir, and reading it survives ESTALE.
+- **Only the probe's own machinery failing lets the search carry on.** A crash or an unreadable
+  log is retried once; a crash or unreadable log again, or a time limit, falls back: steps 2–5
+  run on `--window auto` and the documented + SOP mass accuracy, tagged DEFAULT
+  (`probe_fallback.py`). Everything else still stops the chain with its reason: an implausible
+  mass accuracy logged by any run, runs DIA-NN finished without logging one (a wrong FASTA,
+  failed injections), no .NET or a DIA-NN that will not start, and a bad configuration.
+  - A fallback is recorded in the provenance with stable `scan_window.mode` / `mass_acc.mode`,
+    stated in the Methods, and shown as a CAUTION in `AUDIT.md`, the report's Results at a
+    glance, the run record, `checkpoint.py status`, the Slack post and `watch_run.sh --all`.
+  - `--window 0` or `--mass-acc 0` is invalid, never "auto".
+  - A new search in the same folder sets the earlier search's probe outputs aside
+    (`.stale-<time>`, never deleted, and only once nothing refuses it), so an earlier search's
+    fallback never marks the next one; the run record copies `probe_fallback.json` only when
+    the provenance says the search fell back.
+
+### Keratin samples (hair, wool, feather, skin, nail)
+- **Step 3 asks whether the samples are keratinous.** For a keratin sample, `fetch_fasta.py
+  --keratin-sample` removes every keratin-family contaminant entry from the search database, and
+  `run_search.py` refuses a database that still holds one: DIA-NN's `--cont-quant-exclude` would
+  keep every peptide shared with the sample's keratins out of quantification.
+- **`run_de.R` keeps a keratin sample's keratin** when the database still holds such entries,
+  while trypsin, BSA and the rest are removed. Another species' keratin counts only when the
+  precursor also names a sample protein. The methods, report, brief and auditors say what was
+  kept and whether its quantities could still be under-counted.
+- A run that is not a keratin sample is unchanged: same database, DE tables and methods.
+- On a real hair DDA dataset, the normal setting removed 25–50% of the main hair keratins'
+  precursors; the keratin-sample setting kept them, with no other protein lost.
+- **FragPipe's `contam_` is a contaminant tag too** (`CONTAMINANT_TAGS`), in the filter and the
+  keratin rule. A FragPipe search on a database built with Philosopher's `--contam` is refused,
+  because FragPipe's DIA route drops that tag.
+
+### Sage, FragPipe, AlphaDIA and Radiant results
+- **Sage keeps only its valid MS1 quantities**: decoys and rows above Sage's stored q-value
+  cutoff are dropped, with the counts per file in `sage_adapt.json`.
+- **Sage protein IDs are bare accessions**, as DIA-NN writes them, so the contaminant filter and
+  a keratin sample's exemption work on Sage reports (`protein_ids.group_accessions`). Radiant's
+  groups are read the same way.
+- **Sage's LFQ mass window is checked** (`sage_lfq_check.py`). Sage integrates MS1 only within
+  ±5 ppm; a run whose MS1 error sits outside that identifies normally but quantifies badly. The
+  check warns in the job log, at `--adapt-only`, in `AUDIT.md` and the report. It corrects
+  nothing yet.
+- **Sage converts its input inside the SLURM job** (ThermoRawFileParser for `.raw`), never on the
+  login node.
+- **Every engine's DE names its own quantity.** A Sage DE is "Highest-peptide intensity + limma"
+  (each protein's value is its most intense peptide) with a caveat, not "DIA-NN MaxLFQ"; FragPipe,
+  AlphaDIA and Radiant name their engine's protein quantity and citation.
+- **FragPipe DDA reports the accession**, so `compare_searches.py` finds the proteins it shares
+  with DIA-NN (it found 0 before), and names the accessions two groups shared.
+- **Contaminant counts are in the report's own unit**: distinct precursors (DIA-NN), peptides
+  (Sage) or protein groups (an engine's own protein quantities), never report rows. A
+  contaminant group shared with a sample protein is counted, with the sample proteins that lost
+  peptides to it; for a protein-level report that loss is "not computed", never 0.
+- **Whether DIA-NN ran with `--cont-quant-exclude` is read from the run**: its log, including any
+  `--cfg` file the logged command names, or its parameters file. It is "not recorded" otherwise;
+  it is never assumed, and never taken from the FASTA's recommendation. The methods, the
+  keratin lines and the run record (`SEARCH_LOG.md`) all say it that way; before, the run record
+  restated the FASTA's recommendation for every engine.
+
+### The report with its audio, in one file
+- **`make_podcast.py share <session>/output`** writes `output/Analysis_Report_with_audio.html`.
+  It is the report with the audio discussion and its transcript built in, so it is the one file
+  to send when someone wants the report with the audio. (The Listen card in
+  `Analysis_Report.html` links `podcast/`, so that file sent alone has no audio.)
+  - The speech is re-encoded to AAC (`--kbps` 32–64, default 48).
+  - The file is read back before it is kept: the audio must decode to the episode's length, and
+    nothing may point outside the file. Where a Chrome, Chromium or Edge is found, a headless one
+    also plays it. A file that fails any check is removed.
+  - Above ~18 MB (~25 MB as an email attachment) it says to use Bioshare instead.
+  - It carries the sha256 of the report, the episode and the audio, so "current" is checked by
+    content. `finalize` builds it or brings it up to date, and records the result in
+    MANIFEST.txt. `deliver` ships it only while it is current, and the README, email draft and
+    AGENTS.md name it only then. A copy that cannot be updated becomes `*.stale.html`, which is
+    never zipped or sent.
+
+### "How did we do?" and a GitHub star
+- A Core run's report and its `.md` twin end with a link to the Core's 5-minute survey. So do the
+  session README, AGENTS.md, the delivery README and the email draft. The link is
+  `https://feedback-ucd-proteomics.azurewebsites.net/?prot=<PROT number>&src=<where>`
+  (`core_submission.FEEDBACK_URL`, `feedback_url`, `feedback_line`: one definition).
+- The one test for a Core run is `submission_report.core_run(session)`: a CoreOmics record
+  attached, or one announced whose record file is missing. It fails closed: a run outside the
+  Core, or one where this cannot be told, never shows the survey.
+- After `make_podcast.py link`, the line also asks about the podcast. A Core episode may mention
+  the survey in words at its sign-off; `check` fails a survey invitation in a non-Core episode.
+- **Every report asks for a GitHub star**, just before a Core run's survey line (or last outside
+  the Core), in the HTML, its `.md` twin, the PDF and the shareable report. The words live in
+  `core_submission.star_line`; the address is `plugin.json`'s `repository`.
+
+### Protein-set tests (`run_sets.R`)
+- `run_de.R` names every comparison with fewer than 10 significant proteins
+  (`de_provenance.json` `set_tests.suggested_for`, `--sets-trigger`), and the skill offers
+  protein-set tests for it. They can be run for any analysis.
+- **camera** (competitive) and **fry** (self-contained) run side by side on run_de's own model:
+  `run_de.R` writes `set_test_inputs.rds`, and run_sets.R checks that its refit reproduces run_de's
+  t to 1e-6. `--block` is handled: a random block goes to fry, and camera uses the blocked fit
+  with block-whitened residuals. Adjustment is BH across sets within each comparison.
+- **Sets are a-priori only**: GO (offline; `setup.sh` installs the annotation), Reactome, or a GMT
+  file whose origin must be given. A list drawn up from the results is never used.
+- **Checks on every call**:
+  - each test repeated with log2 run depth in the model;
+  - DPC presence-call fractions, and measured-only versions of both tests;
+  - fry re-tested on four other residual bases;
+  - camera's power measured per comparison. Where it is low, as in pulldowns, its count of zero
+    is not a result.
+  - Residual effects use one canonical basis, because R's QR gave different signs on different
+    HIVE CPUs and moved p-values by up to 0.09.
+- **Pulldowns (`--ip-map`)**:
+  - a control-vs-control contrast for the lysate background;
+  - between-condition tests relative to each bait's complex: the interactome is chosen on
+    enrichment over the control pooled over conditions, at least 4-fold; the interactome
+    median is the reference, and the bait protein is the cross-check.
+  - Stated limits:
+    - with the 4-fold minimum, **losses from a complex are harder to detect than gains**
+      (nearly undetectable in the simulation), and finding nothing is not evidence that the
+      complex lost nothing;
+    - random null sets run at about 0.07, not 0.05, in the pulldown simulation;
+    - calls that depend on the reference are unresolved, not findings.
+- **Outputs and wording**:
+  - Writes `Sets_<contrast>.csv`, `Sets_baitnorm_<contrast>.csv`, `sets_members.csv`,
+    `sets_provenance.json`, `sets_methods.txt` and `sets_<contrast>.png`.
+  - The report, the analysis brief, AGENTS.md and methods.md quote the record's own reading,
+    for example "not detectable in this design", with n and residual df, never "unchanged".
+  - Validation on PROT_0756 v2, and the simulations behind the defaults, are in
+    `references/set-tests.md`.
+
+### Reproducibility: exact numbers need the same CPU family
+- DPC-Quant's per-protein BFGS fit runs through OpenBLAS's CPU-specific kernels. On PROT_0756 v2
+  the same inputs, software and command gave |ΔlogFC| ≤ 0.0022 and 0 changed significance calls
+  between zen4 and zen2 nodes. Each family reproduced its own tables exactly.
+- `run_de.R` now records the machine in `de_provenance.json` `compute` and at the top of
+  `sessionInfo.txt`: the CPU model, the BLAS and LAPACK libraries, `OPENBLAS_CORETYPE` as found,
+  and on SLURM the node's CPU-family feature.
+- `REPRODUCE.md` names the family. To match an earlier HIVE run, submit with
+  `sbatch --constraint=<family>`. Never pin `OPENBLAS_CORETYPE`: it segfaulted `dpcQuant`.
+
+### The record of the analysis: decisions log and conversation (Core-internal)
+- **`log_decision.py`** appends each decision (conditions, defaults, contrasts, overrides) with
+  the user's words or the evidence to `logs/decisions.md`. It works with any agent.
+- **`save_transcript.py`** (Claude Code) saves the analysis conversation, **redacted**, to
+  `logs/conversation/`. It adds `index.json` and a readable `conversation.md`.
+  - Redaction covers the skill's secret patterns, the secret values this computer holds, and
+    anything named like a key, token, password or webhook.
+  - It runs after the search is submitted, after DE, and at `finalize` (a MANIFEST line).
+  - `--hive` saves it from the laptop for a hive_remote session.
+- **The plugin hook** (`hooks/hooks.json` → `transcript_hook.py`) saves it before a compaction
+  and at the end of the session. It does nothing in a conversation not recorded for an analysis.
+- **One conversation, several analyses**: each analysis keeps only its own part.
+  `--transcript-from-now` starts a copy at `init`; use it whenever the conversation has touched
+  another client.
+- **Both records are Core-internal**, because redaction cannot catch a secret written as prose:
+  - `deliver` never ships them, and the session zip leaves them out;
+  - the files are 0640, in a 0750 folder;
+  - the session's own AGENTS.md gains a "Reviewing this analysis" checklist; the collaborator's
+    copy does not.
+
+### CoreOmics keys: staff can make, save and check one
+- **`core_submission.py check`** says in plain words whether this computer's CoreOmics key
+  works, and what to do if it does not: `ok`, `no_key`, `key_in_wrong_place`, `key_empty`,
+  `key_malformed`, `key_unreadable`, `key_rejected`, `no_lab_access` (ask brettsp to add the
+  account to the Proteomics lab), `unreachable` or `unexpected`. It never prints the key.
+  SKILL.md step 1c runs it before `fetch`. Two staff could not reach CoreOmics from the skill:
+  nothing said how to get a key, and on a Windows domain account a key saved in Git Bash's `~`
+  sat where Python never looks.
+- **Making and saving the key is documented** (CoreOmics Profile → API Key → Create;
+  `references/core-submissions.md`). The user saves it in their own terminal with ONE line that
+  never shows it or keeps it in the history, and on Windows writes it to `USERPROFILE`, where
+  Python reads it. An empty Enter keeps a key already saved. The key never goes into the chat.
+- **Finding the key**: `COREOMICS_TOKEN`, then Python's `~`, then `$HOME` when that is another
+  folder. A UTF-16 or BOM-marked file gives the key itself. A key saved under the wrong name
+  (Notepad's `.txt`, a dropped dot), or on Windows in Documents or OneDrive, is named with the
+  `mv` that fixes it.
+- **The key stays secret**:
+  - a key with a space, line break or quote is refused before any request (before, a two-line key
+    file made `fetch` print the key in a traceback);
+  - a redirect to another scheme, host or port is refused, because urllib would have sent the
+    key along with it;
+  - anything a server echoes back is redacted in `fetch`, `identify` and `bioshare`;
+  - a 401/403 is read only from CoreOmics' own JSON, so a proxy's error page is not reported as
+    "no lab access".
+- `save_transcript.py` redacts the key from every place `core_submission.py` reads it.
+
+### CoreOmics submission numbers
+- **A submission number is ASCII digits only.** Python's `\d` also matched Arabic-Indic and
+  fullwidth digits, which `int()` reads, so `٧٥٦` attached PROT_0756 and made a run the Core's.
+- `record_run.py` now reads PROT numbers with `core_submission.normalize_submission`, which is the
+  one definition, instead of keeping its own copy.
+- `identify` asks for a number only when there is evidence the data are the Core's. Otherwise it
+  asks "Were these samples run by the UC Davis Proteomics Core?" first, and on "no" the analysis
+  carries on without a submission.
+- `report_files.py` holds the shareable report's file name (`SHARE_NAME`), with no imports, so
+  `make_report.py` can read it.
+
+### Sessions start fresh
+- **A new request is a new analysis** (`session.py find-prior`, SKILL.md 1b and 0c). An earlier
+  session on the same data is mentioned in one line, and nothing is read from it unless the user
+  asks for a re-analysis. Only work the user is coming back to is a resume; a running search is
+  never resubmitted without asking.
+
+### Claudes working together in Slack — off until the Core sets up the Slack app
+- **`slack_collab.py`** lets two people's Claude sessions work on one analysis in one Slack
+  thread, on request only. Authority comes only from the people, by Slack user ID: each agent
+  starts only after its own person approves, and anyone in the thread can stop it. Posts are
+  redacted and rate- and length-limited, and the bot token is never printed or stored on a
+  laptop.
+- **It is dormant in this release.** Nothing starts it, and with no bot token set up every
+  command stops with "no Slack bot token" and sends nothing. The Core's Slack app, its token and
+  the Slack-people list are to be set up after the release (`references/slack-collab.md`).
+
+### Smaller fixes
+- Run from stdin (`python3 -` on HIVE), `record_run.py` and `notify_slack.py` no longer read or
+  import anything from the current folder, which on HIVE is the home folder.
+- `provenance.py`'s "Installed with" names the plugin with its marketplace, as the install does.
+- **`run_record.json` is schema 3**: `search.cont_quant_exclude` is new (as the run recorded it),
+  and `fasta.cont_quant_exclude` is renamed `fasta.cont_quant_exclude_recommended`. Earlier
+  records keep schema 2.
+
+### Still open (in `docs/SKILL_OPEN_DEFECTS.md`)
+- Sage: the LFQ window is warned about, not corrected; the protein value is the highest peptide,
+  not a rollup model; a `.d` has no LFQ route on HIVE.
+- FragPipe DDA tests only a group's leading protein for a contaminant tag; AlphaDIA's and
+  Radiant's IDs have not been checked on a real output with contaminants.
+- DIA-NN on DDA (2.10, each behind an A/B): `--fwhm`, `--fix-scoring`, a tighter timsTOF DDA
+  range, and a registry flag for test runs.
+
 ## [Skill 2.8.0] — 2026-09-28
 
 The report of record becomes one HTML page, paired and repeated designs are modelled, and
@@ -1458,12 +1773,12 @@ Proteogenomics workflow is now feature-complete and integrated end-to-end into t
   2. **Whitespace stripped before underscore conversion.** "Acquisition mode" → my key normalization first stripped all whitespace (`gsub("[*:[:space:]]", "", ...)`) then tried to convert whitespace to underscores. By that point there was no whitespace left, so the key became `acquisitionmode` and didn't match `kv$acquisition_mode`. Now strips only `*:` first, THEN collapses whitespace runs to `_`.
   3. **FASTA paths weren't extracted.** They live under a `### FASTA Files (N)` heading as one bullet per line with backtick-quoted paths — not as a `**FASTA**:` key-value. Added a section parser that switches into "FASTA Files" mode on the heading and pulls each backtick-quoted path until the next heading.
 
-  Verified against Gemma_set2's real `search_info.md`: instrument_model = "timsTOF HT", serial, acquisition_mode = "dia-PASEF", DIA windows = 37, m/z range = "100-1700", and both FASTA files all extract correctly.
+  Verified against PI_Example_C_set2's real `search_info.md`: instrument_model = "timsTOF HT", serial, acquisition_mode = "dia-PASEF", DIA windows = 37, m/z range = "100-1700", and both FASTA files all extract correctly.
 
 ## [3.10.12] — 2026-05-06
 
 ### Fixed
-- **Queue still showed phase-substep names like `diann_Gemma_set2_s5_report` after the v3.10.11 collapse.** Two issues remained: (1) array-task entries (`#13828143_0`) from earlier broken Recovers were never filtered from existing queues, and (2) the v3.10.11 collapse keyed on `(base_name + output_dir)` — but substep entries often have different or empty output_dirs and end up in distinct groups, so dedup was incomplete; surviving entries also kept their substep name. The startup queue cleanup now: (a) drops any entry whose `job_id` matches `^\d+_\d+$` (array tasks); (b) groups by `base_name` only, ignoring output_dir; (c) rewrites the surviving entry's `name` to the clean base name so the queue UI shows "Gemma_set2" instead of "diann_Gemma_set2_s5_report". Console message reports `dropped N array-task entries, collapsed M substep entries -> K logical searches`.
+- **Queue still showed phase-substep names like `diann_PI_Example_C_set2_s5_report` after the v3.10.11 collapse.** Two issues remained: (1) array-task entries (`#13828143_0`) from earlier broken Recovers were never filtered from existing queues, and (2) the v3.10.11 collapse keyed on `(base_name + output_dir)` — but substep entries often have different or empty output_dirs and end up in distinct groups, so dedup was incomplete; surviving entries also kept their substep name. The startup queue cleanup now: (a) drops any entry whose `job_id` matches `^\d+_\d+$` (array tasks); (b) groups by `base_name` only, ignoring output_dir; (c) rewrites the surviving entry's `name` to the clean base name so the queue UI shows "PI_Example_C_set2" instead of "diann_PI_Example_C_set2_s5_report". Console message reports `dropped N array-task entries, collapsed M substep entries -> K logical searches`.
 
 ## [3.10.11] — 2026-05-06
 
@@ -1479,7 +1794,7 @@ Proteogenomics workflow is now feature-complete and integrated end-to-end into t
 - **Recover no longer creates 23 queue entries per parallel-pipeline search** (5 phase substeps + 20 array-task rows). Two filters added in `recover_slurm_jobs()`:
   1. `grep -v '^[0-9]\+_'` drops array task rows (e.g. `13828143_0`) — they're substeps of the parent.
   2. The Recover handler now collapses the remaining `diann_<NAME>_s<N>_<phase>` substep rows into one logical search per unique base name (preferring `_s5_report` as canonical for output_dir).
-  Net: `Gemma_set2`'s 23 sacct rows → 1 queue entry.
+  Net: `PI_Example_C_set2`'s 23 sacct rows → 1 queue entry.
 - **Recover no longer freezes the queue render with a 490-row sacct dump.** The handler used to `values$diann_jobs <- c(values$diann_jobs, list(job_entry))` *inside* a tight loop. With N rows: O(N²) memory churn, N reactive invalidations, N persistence writes. Brett saw "490 jobs recovered" but the queue stayed empty (render couldn't keep up). Refactored to accumulate new entries in a local list, then assign once at the end → one invalidation, one persistence write, one render pass.
 - **Dedup by `output_dir` as well as `job_id`** — re-running Recover doesn't pile up duplicate entries for the same logical search even when the original entry's `job_id` was the array parent and the recovered row has the report-step ID.
 - **Recover and Load-from-HPC now read `search_info.md`** so LC + mass spec settings flow through. Added `parse_search_info_md()` helper in `R/helpers_search.R` — parses the markdown key-value lines into the same shape that submit-time code populates into `values$diann_search_settings`, plus an `instrument_metadata` block. Both the Recover handler and the Load-from-HPC handler now SCP `search_info.md` from the search's `output_dir` and merge the parsed settings. Brett's question: "Load from HPC isn't supposed to read the search LC and mass spec settings?" — yes it is, now it does.
@@ -1503,14 +1818,14 @@ Proteogenomics workflow is now feature-complete and integrated end-to-end into t
 ## [3.10.7] — 2026-05-06
 
 ### Fixed (Complete Analysis export — three issues from real downstream review)
-- **`parameters.txt` listed stale covariates from a previous analysis.** The export read `values$cov1_name` / `values$cov2_name` unconditionally, but those reactiveValues persist across pipeline runs even when the user un-checked the "include in model" boxes for the current analysis. Brett's Gemma export listed `Covariate 1: Student` and `Covariate 2: RunOrder` from an earlier session that wasn't using the current sample groups. Now we only emit a covariate line if the covariate name actually appears in `colnames(values$design)` — the canonical "what was used" source. CLAUDE.md Architectural Rule #2 (tagged %||% defaults) and Rule #3 (single source of truth for covariate name).
+- **`parameters.txt` listed stale covariates from a previous analysis.** The export read `values$cov1_name` / `values$cov2_name` unconditionally, but those reactiveValues persist across pipeline runs even when the user un-checked the "include in model" boxes for the current analysis. Brett's PI_Example_C export listed `Covariate 1: Student` and `Covariate 2: RunOrder` from an earlier session that wasn't using the current sample groups. Now we only emit a covariate line if the covariate name actually appears in `colnames(values$design)` — the canonical "what was used" source. CLAUDE.md Architectural Rule #2 (tagged %||% defaults) and Rule #3 (single source of truth for covariate name).
 - **`detection_matrix.csv` skipped with `unimplemented type 'list' in 'EncodeElement'`.** The per-protein detection-count construction used `do.call(rbind, lapply(..., c(... as.list(detected))))`, which produced a row matrix where every cell was a length-1 list. `as.data.frame()` preserved the list-columns and `write.csv()` rejected them. Rewrote the section to build a proper numeric matrix via `vapply(..., numeric(ncol(raw_mat)))`, attach `Detected_*` integer columns one at a time, and write a clean atomic data.frame. CLAUDE.md gotcha: "nested lists in data.frame() = silent breakage."
 - **`PROMPT.md` confidently stated organism = Human even when detection had silently fallen back to the default.** `detect_organism_db()` matches UniProt SwissProt suffixes (`_HUMAN`/`_MOUSE`/etc.); when the IDs are NCBI RefSeq (XP_/NP_/WP_) or any non-suffixed format, it falls through to `org.Hs.eg.db`. The PROMPT then asserted "Organism: Human" with no caveat — Brett's Peromyscus californicus (mouse-mapped) export read as a human dataset and the downstream LLM almost did GSEA against `org.Hs.eg.db`. Per CLAUDE.md Architectural Rule #2, fallback values that hit user-facing text must be tagged. The PROMPT.md organism line now: (a) prints the FASTA filename inline as a hint, (b) checks whether any UniProt organism suffix is present in the IDs, (c) when no suffix found, replaces the confident "Organism: X" line with a `**WARNING — auto-detection FELL BACK to human default**` block telling the downstream LLM to verify from the FASTA name before any GSEA/KEGG/GO work, with a stronger NCBI-specific message when the IDs are XP_/NP_/WP_.
 
 ## [3.10.6] — 2026-05-06
 
 ### Fixed
-- **HOTFIX: "Recover" button never recovered any DIA-NN jobs**. `recover_slurm_jobs()` in `R/helpers_search.R` queries `sacct` for diann-named jobs over the last 14 days, then ran `grep -v '\\.'` to filter out `.batch` / `.extern` substep rows. But the sacct format includes the StdOut path (`/path/.../diann_*_%j.out`), and **every** line has a dot somewhere — so the filter dropped all 23+ matching rows, leaving zero jobs to recover. Verified against the live HIVE cluster: with the broken filter `wc -l` returned 0; the parent diann jobs were obviously present. Replaced with `grep -v '^[^|]*[.][^|]*|'` which only checks for a dot in the JobID field (field 1, before the first `|`) — so `13828146.batch` is filtered, but `13828146` plus its `/path/diann_*.out` StdOut field passes through. Caught by Brett — clicked Recover after the Gemma_set2 search completed and nothing appeared in the queue.
+- **HOTFIX: "Recover" button never recovered any DIA-NN jobs**. `recover_slurm_jobs()` in `R/helpers_search.R` queries `sacct` for diann-named jobs over the last 14 days, then ran `grep -v '\\.'` to filter out `.batch` / `.extern` substep rows. But the sacct format includes the StdOut path (`/path/.../diann_*_%j.out`), and **every** line has a dot somewhere — so the filter dropped all 23+ matching rows, leaving zero jobs to recover. Verified against the live HIVE cluster: with the broken filter `wc -l` returned 0; the parent diann jobs were obviously present. Replaced with `grep -v '^[^|]*[.][^|]*|'` which only checks for a dot in the JobID field (field 1, before the first `|`) — so `13828146.batch` is filtered, but `13828146` plus its `/path/diann_*.out` StdOut field passes through. Caught by Brett — clicked Recover after the PI_Example_C_set2 search completed and nothing appeared in the queue.
 
 ## [3.10.5] — 2026-05-06
 

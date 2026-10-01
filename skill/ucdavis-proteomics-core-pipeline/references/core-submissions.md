@@ -18,8 +18,8 @@ When any link in that chain is wrong, nothing errors:
 - **The raw files have to be found.** A submission records each sample's `unique_id`, not a
   path. Ids are short, reused across submissions, and collide with plate wells — a glob
   searches another lab's runs and the search succeeds.
-- **The service directory is organized by people, not a formula** (`McDonald karen`,
-  `UCSF/Feeley_lab`), so "where does PROT_0807 live" is a lookup that can be wrong.
+- **The service directory is organized by people, not a formula** (`Doe jane`,
+  `Institution_X/Lab_Y`), so "where does PROT_0807 live" is a lookup that can be wrong.
 - **A share built from links depends on server settings nobody watches.** Links into
   `/quobyte` served nothing over https, and SMB hides absolute links (the PROT_0793 lesson,
   below).
@@ -32,6 +32,7 @@ call back as an **exit code plus the exact question**. It never runs a search en
 
 | step | runs | why there |
 |---|---|---|
+| `check` | **local** | is the CoreOmics key on this computer, and does CoreOmics accept it for the Proteomics lab? |
 | `identify` | **local** | reads names offline; a sample-id lookup needs the CoreOmics token |
 | `fetch` | **local** | the CoreOmics token is on the staff member's computer; `~/.coreomics_token` does **not** exist on HIVE (checked) |
 | `locate` | **HIVE** | reads the Flinders `raw_data` tree |
@@ -42,15 +43,18 @@ call back as an **exit code plus the exact question**. It never runs a search en
 | `deliver` | **HIVE** | copies into the Flinders share dir (big copies → `sbatch`) |
 | `bioshare`, `email-draft` | **local** | CoreOmics API again; drafts never send |
 
-Every subcommand prints one JSON object to stdout and notes to stderr. `stage`, `deliver` and
-`bioshare ensure|send` are dry runs until `--apply`.
+Every subcommand prints one JSON object to stdout (`check` with `--json`) and notes to
+stderr. `stage`, `deliver` and `bioshare ensure|send` are dry runs until `--apply`.
 
 ## What staff need first
 
-- **A CoreOmics API token with staff access**, saved on **their own computer** as
-  `~/.coreomics_token` (`chmod 600`), or exported as `COREOMICS_TOKEN`. Not on HIVE. How to
-  obtain one is not documented here yet: ask the Core's CoreOmics administrator. Without it,
-  `identify` still reads ids in names and the agent asks the rest (section 0).
+- **Their own CoreOmics API key, on their own computer** (the "CoreOmics token" elsewhere in
+  this skill). Not on HIVE, which deliberately has none. Without it, `identify` still reads ids
+  in names and the agent asks the rest (section 0). `check` says whether the key works and
+  what to fix; nothing it prints contains the key:
+  ```
+  python3 scripts/core_submission.py check          # --json for the agent
+  ```
 - **A HIVE account in `proteomics-grp`.** The service directory is
   `gc-prot-core-user:proteomics-grp`, mode `2775`.
 - **The whole skill on HIVE at `~/proteomics-pipeline/`** (`hive_exec.sh --put-skill`,
@@ -76,6 +80,79 @@ forward slashes from `/nfs/lssc0/flinders/proteomics`. A staff member on Windows
 root pointed at an SMB mount, still registers the right path. That HIVE path, and the
 `Data/raw_data` and `Data/lab/service` trees under it, are defined once: `scripts/hive_shares.tsv`
 and `share_map.py`, which `fran_deposit.py`'s backfill reads too.
+
+### Making and saving the CoreOmics key
+
+1. **Make it.** Sign in to CoreOmics (https://ucdavis.coreomics.com), open your **Profile**,
+   find **API Key**, click to show it, and click **Create** if there is none yet (or
+   **Regenerate** to replace it). That is CoreOmics' own profile page (read from its web app,
+   2026-09-30: `users/get_token/`, `users/create_token/`); the API takes the key as
+   `Authorization: Token <key>`.
+2. **Save it in your own terminal, never in the chat, with ONE line.** `read -rs` takes the
+   key without showing it, and the key is never on a command line, so it is not in the shell
+   history or the process list (`printf` is a shell builtin). It must be one line: pasted as two
+   into a terminal without bracketed paste (macOS's bash 3.2, the old Windows console), `read`
+   takes the second line as its input and the key pasted next runs as a command, echoed and
+   kept in the history. Nothing runs after a failed `read` (Ctrl-D) or an empty one (Enter
+   before the paste), so a key already saved is never overwritten with nothing.
+   - **Windows (Git Bash)** — run the line, then paste the key with Shift+Insert or
+     right-click → Paste, then Enter. `chmod` may not restrict access here (Git Bash does not
+     map it onto NTFS permissions); the profile folder it saves into is private to you by
+     default:
+     ```
+     read -rs TOK && [ -n "$TOK" ] && F="$(cygpath "$USERPROFILE")/.coreomics_token" && (umask 077; printf '%s\n' "$TOK" > "$F") && chmod 600 "$F"; unset TOK
+     ```
+   - **macOS / Linux** (`umask 077` and `chmod 600` make the file yours alone):
+     ```
+     read -rs TOK && [ -n "$TOK" ] && F="$HOME/.coreomics_token" && (umask 077; printf '%s\n' "$TOK" > "$F") && chmod 600 "$F"; unset TOK
+     ```
+3. **Check it:** `python3 scripts/core_submission.py check` → `ok`.
+
+**Never paste the key into the chat.** The agent never asks for it, echoes it or prints the
+file. A key that was pasted into a chat anyway: Regenerate it in CoreOmics and save the new one.
+
+**Where the scripts look** (`key_files()` in `core_submission.py`): `COREOMICS_TOKEN` if set,
+else `.coreomics_token` in Python's home folder, then in `$HOME` when that is another folder.
+On Windows the two differ: Python's `~` is the profile folder (`USERPROFILE`, e.g.
+`C:\Users\<id>`) and ignores `HOME`, while Git Bash's `~` is `$HOME`, which on a domain
+account (the Core's laptops log in as `AD3+<id>`) can be somewhere else, such as a network
+home drive. So the Windows line saves to `$USERPROFILE`, and a key already saved in Git Bash's
+`~` is still found. A key saved under another name (Notepad's Save As adds `.txt`; a dropped
+leading dot), on Windows in `Documents` or OneDrive's `Documents` (where a Save As usually
+starts), or in the Windows home drive (`HOMEDRIVE`+`HOMEPATH`) is **not** read: `check`
+reports `key_in_wrong_place` with the `mv` that fixes it. A file in UTF-16 (Windows
+PowerShell's `>`) or with a UTF-8 BOM (Notepad) is read correctly.
+
+**Python on this computer.** `check`, `identify` and `fetch` run locally, so they need a
+working Python 3. On Windows `python3` is often the Microsoft Store stub (`check_access.sh` →
+`local_python3.usable: false`): then none of them can run here, and the key is not moved to
+HIVE to get around it. Carry on without a lookup (section 0: ask the key facts, `attach
+--given`, labelled "given by the user"), and have Python 3 installed from python.org to make
+the lookups work; if `python3` still opens the Store after that, run the scripts as `py -3`.
+
+### Troubleshooting `check`
+
+`check` exits 0 only for `ok`, and 3 for every other status (the script's exit code for auth
+and network problems); branch on `status` and relay `say` and `fix`. Without a usable key
+`fetch` also exits 3, with `diagnosis` and `fix`; a 401/403 from any subcommand carries a
+`hint` to run `check`. For every subcommand, the key is blanked out (`<key>`) of anything
+CoreOmics or the network library says, and a redirect that changes scheme, host or port is
+refused, because urllib would send the `Authorization` header with it.
+
+| `status` | what it means | fix |
+|---|---|---|
+| `ok` | the key works and the account can read Proteomics submissions | nothing. A key read from Git Bash's `$HOME` rather than the profile folder works; `fix` offers an optional `mv` so programs started outside Git Bash find it too |
+| `no_key` | no key in any file in `looked_in`, and no `COREOMICS_TOKEN` | make and save one (above) |
+| `key_in_wrong_place` | a key file under another name, in Windows' (or OneDrive's) Documents, or in the Windows home drive | the `mv` in `fix`, then `check` again |
+| `key_empty` | the key file is empty | save it again |
+| `key_malformed` | the file holds more than the key: the word `Token`, a space or line break, quotes, odd characters | save it again, the key alone |
+| `key_unreadable` | the key file exists but cannot be opened (permissions) | save it again |
+| `key_rejected` | CoreOmics' own JSON reply to a 401/403 is `Invalid token.`: copied wrongly, or replaced in CoreOmics since | copy the current key and save it again. `COREOMICS_TOKEN`, if set, wins over the file: fix or unset it. A freshly copied key refused too → ask Brett (brettsp) |
+| `no_lab_access` | the key works, but the account sees no Proteomics submissions (count 0 on `submissions/?lab=PROTEOMICS&page_size=1`, or CoreOmics' JSON 403 "You do not have permission…") | ask Brett (brettsp) to add the CoreOmics account to the Proteomics lab; nothing changes on the computer |
+| `unreachable` | no answer (DNS, timeout, TLS, refused) or a CoreOmics 5xx | check the network and retry later. Off campus the UC Davis VPN might be needed (not confirmed). A TLS failure can be a network that inspects traffic |
+| `unexpected` | something other than CoreOmics answered: a web page (a Wi-Fi sign-in, or a 401/403 page from a proxy or firewall — its HTTP status is named, and it says nothing about the key), a redirect to another server (never followed: the key would go with it), a reply that is not HTTP; a proxy removed the key; a CoreOmics refusal not listed above (quoted); a `COREOMICS_BASE_URL` that is not a web address; or a bug (check reports it rather than crash) | finish any network sign-in or try another network; check or unset `COREOMICS_BASE_URL`; a quoted CoreOmics refusal → ask Brett (brettsp); otherwise `report_issue.sh` |
+
+`users/me/` answers 403 even with a valid key, so `check` never uses it.
 
 ## 0. `identify` — which submission is this data? (local)
 
@@ -289,8 +366,8 @@ bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/core_submission
 **The service directory (verified)** is `<flinders>/Data/lab/service/{on_campus,off_campus}/`
 — the active one, updated daily (newest change 2026-09-15). Layout:
 `on_campus/<PI folder>/<project>` and `off_campus/<Institution folder>/[<PI/lab folder>/]<project>`.
-Folder names are human and inconsistent: `Isseroff`, `McDonald karen`, `Serapio-Palacios-lab`,
-`UCSF/Feeley_lab`, `Stanford/Dixon-lab`, `Meneses-Erica_National-Autonm-Uni-MX`, `Reckitt`.
+Folder names are human and inconsistent: `Roe`, `Doe jane`, `Doe-Roe-lab`,
+`Institution_X/Lab_Y`, `Institution_W/Lab-V`, `Surname-Given_Institution-Name-Country`, `Company_Z`.
 Existing project folders hold **real raw copies** today (0 symlinks); this flow links instead.
 `/quobyte/proteomics-grp/SERVICE/` is a small HIVE-side compute mirror, **not** the service
 directory.
@@ -304,7 +381,7 @@ exists because the looser version picked a wrong folder with exit 0:
   surnames (Li, Wu) match whole.
 - **A folder naming somebody else is not a match.** Other personal-name tokens in the folder
   that are not the PI's first name make it ambiguous: PI Ying Wang is not `Wang Wei`.
-  (`McDonald karen` for Karen McDonald is fine.)
+  (`Doe jane` for Jane Doe is fine.)
 - **on campus:** top-level folders. **off campus:** first- and second-level folders; a
   second-level match must sit under a folder that looks like the PI's institution.
 - **off campus with no PI folder:** a top-level folder whose *distinctive* institution words
@@ -572,8 +649,12 @@ python3 scripts/core_submission.py email-draft --summary ~/core/PROT_0807/submis
 
 A plain, friendly draft to the submitter (cc the PI): the Bioshare link, "start with
 Analysis_Report.html" (or, for raw-only, where the raw files are), what is in the folder, the
-acknowledgment request. Numbers appear only when they are in its inputs. It never sends; exit 2
-means a placeholder is left (no link, or no submitter address).
+acknowledgment request, and, for an analysis delivery, one line before the sign-off asking how
+we did, with the Core's feedback survey (`feedback_line("email", ...)`: the address written out,
+pre-filled with the PROT number). The delivery README ends with the same question
+(`src=readme`); a raw-only delivery has no report to ask about and carries neither. Numbers
+appear only when they are in its inputs. It never sends; exit 2 means a placeholder is left (no
+link, or no submitter address).
 
 ## Troubleshooting by exit code
 
@@ -585,7 +666,7 @@ means a placeholder is left (no link, or no submitter address).
 | 2 | `conditions` | blank / case-variant / single / all-unique / singleton conditions | ask exactly the `questions` |
 | 2 | `deliver` | no `Analysis_Report.html`; session not this submission's; folder not empty; symlink in the path or the share; raw requested but no staged project; any verification failure | finish step 9 and push it; use the right session (or `--force` with staff); `--label`; remove the offending link; `stage --apply` |
 | 2 | `bioshare send` | no share linked; no or unverified `delivery.json`, or one for another share | `bioshare ensure --apply`; deliver again and `--get` the new `delivery.json` |
-| 3 | `fetch`, `bioshare` | no/invalid token; CoreOmics down; DRF validation error; a redirect or unexpected reply to a write | fix `~/.coreomics_token`; read the detail |
+| 3 | `check`, `fetch`, `bioshare` | no usable key, a rejected key, no Proteomics lab access; CoreOmics down; DRF validation error; a redirect or unexpected reply to a write | `core_submission.py check` names the problem and the fix (table above); read the detail |
 | 3 | `locate`, `stage`, `deliver`, `conditions` | not on a machine with the Flinders tree; incomplete scripts directory | run through `hive_exec.sh`; re-put the skill (`hive_exec.sh --put-skill`) |
 | 4 | `locate` | the submission is an HT plate | `ht_manifest.py` (step 1a) |
 | 5 | `deliver` | more than `--max-gb` to copy | `sbatch deliver_job.sh` |

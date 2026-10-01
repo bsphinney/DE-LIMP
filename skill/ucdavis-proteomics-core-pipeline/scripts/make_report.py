@@ -17,10 +17,16 @@ Usage:
 """
 import sys, os, json, glob, argparse, re
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from report_files import SHARE_NAME  # noqa: E402  defined once; no make_podcast / notify_slack
+
 # (regex on basename, category, description). First match wins.
 CATALOG = [
     (r"^report\.parquet$", "Search output",
-     "Normalized search result in the DIA-NN report format (protein × run, with PG.MaxLFQ and Q-values). This is the exact input to the DE step."),
+     "The search result the DE step reads, in the DE-input column layout (Run, Protein.Group, "
+     "PG.MaxLFQ, q-values). From DIA-NN it is DIA-NN's own report; from another engine it is "
+     "that engine's quantities under those column names -- de_provenance.json / methods.txt say "
+     "what they are."),
     (r"^report\.tsv$", "Search output", "DIA-NN precursor report (tab-separated)."),
     (r".*\.stats\.tsv$", "Search output", "DIA-NN per-run summary stats (IDs, proteins, precursors)."),
     (r".*\.log\.txt$|.*\.log$", "Search output", "Search-engine run log (parameters, timing, warnings)."),
@@ -40,6 +46,14 @@ CATALOG = [
     (r"^lfq\.parquet$|^results\.sage\.parquet$", "Search output", "Sage output (LFQ intensities / PSMs)."),
     (r"^combined_protein\.tsv$", "Search output", "FragPipe/IonQuant protein-level MaxLFQ table."),
     (r"^search_provenance\.json$", "Search output", "Exact search engine, version, and command used (reproducibility)."),
+    (r"^sage_adapt\.json$", "Search output",
+     "Sage only: which lfq.parquet rows became report.parquet -- targets at q_value <= 0.05, "
+     "decoys and failing rows dropped -- with the counts per file."),
+    (r"^sage_lfq_check\.json$", "Search output",
+     "Sage only: whether Sage's LFQ window (quant.lfq_settings.ppm_tolerance) fit each run's "
+     "median precursor mass error, and how many target MS1 peaks Sage kept at 5% FDR "
+     "(sage_lfq_check.py). A warning here means the identifications stand but the quantities "
+     "are unreliable."),
 
     (r"^qc_pvalue_panel\.png$", "Figures",
      "QC panel: the raw p-value distribution of every contrast as small multiples "
@@ -73,6 +87,23 @@ CATALOG = [
     (r"^contaminants_removed\.csv$", "Differential expression",
      "The contaminant protein groups removed before quantification. A real protein that sat "
      "in the database only as a contaminant entry is listed here, not in the DE tables."),
+    (r"^Sets_baitnorm_.*\.csv$", "Protein-set tests",
+     "Pulldown only: protein-set tests between conditions for one bait, relative to its complex "
+     "(each IP offset by its bait's interactome median; the bait protein as a cross-check). "
+     "Columns: sets_provenance.json `columns`."),
+    (r"^Sets_.*\.csv$", "Protein-set tests",
+     "Protein-set tests for one comparison: camera (competitive) and fry (self-contained) side "
+     "by side, the same tests with run depth in the model, presence-call fractions and a "
+     "measured-only version. Columns: sets_provenance.json `columns`."),
+    (r"^sets_provenance\.json$", "Protein-set tests",
+     "The protein-set tests' record: set sources and versions, mapping rate, settings (defaults "
+     "tagged), per-contrast counts, the pulldown record, how to read them, methods."),
+    (r"^sets_methods\.txt$", "Protein-set tests", "The protein-set tests' Methods paragraph."),
+    (r"^sets_members\.csv$", "Protein-set tests",
+     "Every tested set's proteins (gene symbols), the same for every comparison."),
+    (r"^set_test_inputs\.rds$", "Differential expression",
+     "The DE model's inputs for the protein-set tests (run_sets.R reads it): expression, "
+     "weights, design, contrasts, block, statistics."),
     (r"^DE-LIMP_session\.rds$", "Differential expression",
      "The analysis as a DE-LIMP session: load it in the DE-LIMP app "
      "(https://delimp.stan-proteomics.org/) to explore the results interactively."),
@@ -131,9 +162,19 @@ CATALOG = [
     (r"^AGENTS\.md$", "Analysis report",
      "For an AI agent given this folder: the study, which file is authoritative for what, the "
      "table columns, the traps, and what it must not do."),
+    ("^" + re.escape(SHARE_NAME) + "$", "Analysis report",
+     "The report with the podcast's audio and transcript built in: one file to send on by itself "
+     "(make_podcast.py share). The same report as Analysis_Report.html, plus the audio."),
     (r"^podcast\.(m4a|wav)$", "Analysis report",
      "OPTIONAL: an AI-generated audio discussion of the report (synthetic voices; the report is "
      "the record). make_podcast.py."),
+    (r"^conversation\.md$", "Analysis report",
+     "The analysis conversation, readable (save_transcript.py): the user's messages, the "
+     "assistant's replies and each command. CORE-INTERNAL: never delivered, not in the zip."),
+    (r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$", "Analysis report",
+     "A Claude Code transcript of the analysis, redacted (save_transcript.py). CORE-INTERNAL."),
+    (r"^decisions\.md$", "Analysis report",
+     "The decisions log (log_decision.py): what was decided at each decision point, and why."),
     (r"^podcast_script\.md$", "Analysis report",
      "The podcast's script, with its 'Claims beyond the report' ledger (what it says that the "
      "report does not)."),
@@ -186,7 +227,13 @@ CATALOG = [
      "A SLURM job script of the search, as submitted (submit.sh submitted the chain in order)."),
     (r"^window\.(json|txt)$", "Search internals",
      "The DIA-NN scan window measured on these runs (step 1b): window.json records every probe, "
-     "window.txt is the value passed as --window."),
+     "window.txt is the value passed as --window -- or `auto` when the measurement failed and "
+     "DIA-NN chose the window per run (probe_fallback.json)."),
+    (r".*\.stale-\d{8}T\d{6}(\.\d+)?$", "Search internals",
+     "An earlier search's file, set aside (renamed, never deleted) when this search was generated "
+     "or re-run into the same folder. It does not describe this search."),
+    (r"^probe_fallback\.json$", "Search internals",
+     "The pre-search measurement failed: what the search ran with instead (not measured)."),
     (r"^(file_list|parallel_input_files)\.txt$", "Search internals",
      "The raw files the search read, one path per line."),
     (r"^jobs\.txt$", "Search internals", "The search's SLURM job ids (watch_run.sh --all reads it)."),
@@ -206,8 +253,8 @@ INTERNAL_KINDS = [
      "quant_step2_orig = step 3's copy of quant_step2). Kept out of the session zip."),
 ]
 
-CATEGORY_ORDER = ["Analysis report", "Differential expression", "Figures", "Search output",
-                  "Search internals",
+CATEGORY_ORDER = ["Analysis report", "Differential expression", "Protein-set tests", "Figures",
+                  "Search output", "Search internals",
                   "Reproducibility bundle", "Inputs", "Data deposit (PRIDE / MassIVE)", "Other"]
 
 

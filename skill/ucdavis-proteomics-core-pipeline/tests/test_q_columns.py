@@ -128,6 +128,17 @@ class TestPreferenceSemantics(unittest.TestCase):
                         <= set(FDR_REQUIRED + FDR_OPTIONAL))
 
 
+class TestDefaultCutoffMatchesRunDe(unittest.TestCase):
+    def test_default_q_cutoff_is_run_de_rs_own_default(self):
+        """pass_comparison.py predicts what run_de.R will keep before it runs, so it needs
+        run_de.R's --q-cutoff default -- asserted here, never assumed."""
+        from diann_q_columns import DEFAULT_Q_CUTOFF
+        with open(os.path.join(SCRIPTS, "run_de.R")) as fh:
+            m = re.search(r'getarg\("--q-cutoff",\s*"([0-9.]+)"\)', fh.read())
+        self.assertIsNotNone(m, "run_de.R no longer reads --q-cutoff with getarg")
+        self.assertEqual(float(m.group(1)), DEFAULT_Q_CUTOFF)
+
+
 class TestPerColumnCutoffs(unittest.TestCase):
     """SKILL_OPEN_DEFECTS #3: one --q-cutoff was applied to all six columns."""
 

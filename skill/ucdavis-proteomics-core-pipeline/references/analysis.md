@@ -77,6 +77,10 @@ Unrecognized files are listed under "Other" with a note — never silently dropp
   heading); `--adjp` applies only when the tables carry no `de_provenance.json`.
 - `analysis_prompt.py --qc <QC_Metrics.csv> --gsea <GSEA_Results.csv>` add those sections to
   the brief; `--report-out` names the report the brief asks for (default `AI_Analysis_Report.md`).
+  A `--gsea` file from gene-permutation GSEA (gseGO / fgsea) treats a set's proteins as
+  independent, the flaw that keeps `geneSetTest` out of `run_sets.R`: the brief presents it as
+  exploratory only, and never beside the protein-set tests as a second test
+  (`references/set-tests.md`).
 - `make_report.py --root <dir>`: the folder paths in OUTPUT_FILES.md are shown relative to.
 - `html_to_pdf.py --html <report.html> [--pdf <out.pdf>] [--timeout 120]`: print a report by
   hand (default: beside it, `.pdf`).
