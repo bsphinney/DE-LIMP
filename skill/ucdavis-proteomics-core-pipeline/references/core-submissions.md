@@ -18,8 +18,8 @@ When any link in that chain is wrong, nothing errors:
 - **The raw files have to be found.** A submission records each sample's `unique_id`, not a
   path. Ids are short, reused across submissions, and collide with plate wells — a glob
   searches another lab's runs and the search succeeds.
-- **The service directory is organized by people, not a formula** (`McDonald karen`,
-  `UCSF/Feeley_lab`), so "where does PROT_0807 live" is a lookup that can be wrong.
+- **The service directory is organized by people, not a formula** (`Doe jane`,
+  `Institution_X/Lab_Y`), so "where does PROT_0807 live" is a lookup that can be wrong.
 - **A share built from links depends on server settings nobody watches.** Links into
   `/quobyte` served nothing over https, and SMB hides absolute links (the PROT_0793 lesson,
   below).
@@ -366,8 +366,8 @@ bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/core_submission
 **The service directory (verified)** is `<flinders>/Data/lab/service/{on_campus,off_campus}/`
 — the active one, updated daily (newest change 2026-09-15). Layout:
 `on_campus/<PI folder>/<project>` and `off_campus/<Institution folder>/[<PI/lab folder>/]<project>`.
-Folder names are human and inconsistent: `Isseroff`, `McDonald karen`, `Serapio-Palacios-lab`,
-`UCSF/Feeley_lab`, `Stanford/Dixon-lab`, `Meneses-Erica_National-Autonm-Uni-MX`, `Reckitt`.
+Folder names are human and inconsistent: `Roe`, `Doe jane`, `Doe-Roe-lab`,
+`Institution_X/Lab_Y`, `Institution_W/Lab-V`, `Surname-Given_Institution-Name-Country`, `Company_Z`.
 Existing project folders hold **real raw copies** today (0 symlinks); this flow links instead.
 `/quobyte/proteomics-grp/SERVICE/` is a small HIVE-side compute mirror, **not** the service
 directory.
@@ -381,7 +381,7 @@ exists because the looser version picked a wrong folder with exit 0:
   surnames (Li, Wu) match whole.
 - **A folder naming somebody else is not a match.** Other personal-name tokens in the folder
   that are not the PI's first name make it ambiguous: PI Ying Wang is not `Wang Wei`.
-  (`McDonald karen` for Karen McDonald is fine.)
+  (`Doe jane` for Jane Doe is fine.)
 - **on campus:** top-level folders. **off campus:** first- and second-level folders; a
   second-level match must sit under a folder that looks like the PI's institution.
 - **off campus with no PI folder:** a top-level folder whose *distinctive* institution words

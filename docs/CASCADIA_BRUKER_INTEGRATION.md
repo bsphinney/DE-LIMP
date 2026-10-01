@@ -185,7 +185,7 @@ This is the pre-trained Cascadia model from the original paper. Fine-tuned model
 | Training produces 0 labeled spectra | RT unit mismatch (minutes vs seconds) OR missing MS1 frames. Check both |
 | `pyarrow` not found | `pip install pyarrow` in the cascadia5 env |
 | Cascadia `train` CLI rejects `--batch-size` | Use short flags: `-b 64 -e 10 -lr 1e-5 -c 4` (underscores in long form: `--batch_size`) |
-| Older Berger DIA data has isolation window centers as precursor m/z | Standard DIA (not diaPASEF) — precursor m/z values like 412.5, 612.5 are window centers, not real precursors. Training data from these files may not be suitable for diaPASEF fine-tuning |
+| Older PI_Example_D DIA data has isolation window centers as precursor m/z | Standard DIA (not diaPASEF) — precursor m/z values like 412.5, 612.5 are window centers, not real precursors. Training data from these files may not be suitable for diaPASEF fine-tuning |
 | `read_all_spectra()` returns spectra without DIA window info | Use `SpectrumReader.new_with_span_step(d_folder, 1, 1)` to get spectra with `precursor_mz` and `isolation_width` fields. ~7.7x more spectra (174k vs 21k) due to per-window expansion |
 | Training data matches 0 PSMs to spectra | DIA window matching must use actual `isolation_width` from span-step reader, not a fixed tolerance. Also check RT units (minutes vs seconds) |
 | IM-enhanced model incompatible with old checkpoint | Zero-initialize the 4th embedding weight column after loading. Ensures exact match with 3-channel model when IM=0 |
@@ -214,11 +214,11 @@ Both paths process the same `.d` file (`03232025__100SPD_DIA-LV100_S3-D4_1_20588
 
 | Dataset | Species | Files | Report |
 |---------|---------|-------|--------|
-| Berger DIA | Porcine | 87 .d (older DIA, not diaPASEF) | `/service/on_campus/Berger/dia/out/report.parquet` |
-| Kim | Human | 65 .d | `/service/on_campus/Kim-Jinhwan/out/report.parquet` |
+| PI_Example_D DIA | Porcine | 87 .d (older DIA, not diaPASEF) | `/service/on_campus/PI_Example_D/dia/out/report.parquet` |
+| PI_Example_E | Human | 65 .d | `/service/on_campus/PI_Example_E/out/report.parquet` |
 | PI_Example_C | California mouse | 43 .d (validation set) | `/service/on_campus/PI_Example_C/.../report.parquet` |
-| Liver (bovine) | Bovine | 60 .d | `.../Vinning-paul/Liver/Bovine_Liver__20260330_1149/report.parquet` |
-| Muscle (bovine) | Bovine | 60 .d | `.../Vinning-paul/Muscle/Liver_Muscle_research_20260330_1735/report.parquet` |
+| Liver (bovine) | Bovine | 60 .d | `.../PI_Example_F/Liver/Bovine_Liver__20260330_1149/report.parquet` |
+| Muscle (bovine) | Bovine | 60 .d | `.../PI_Example_F/Muscle/Liver_Muscle_research_20260330_1735/report.parquet` |
 
 #### ddaPASEF Pre-Training Data (public repositories)
 

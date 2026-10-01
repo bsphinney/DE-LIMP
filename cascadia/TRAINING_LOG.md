@@ -10,16 +10,16 @@
 | Dataset | Files | Organism | Instrument | DIA-NN Report |
 |---------|-------|----------|------------|---------------|
 | HeLa affinisep/evosep | 12 | Human | timsTOF HT | ✅ |
-| Berger DIA | 8 | Porcine (Sus scrofa) | timsTOF (2019) | ✅ |
-| Kim | 6 | Human | timsTOF | ✅ |
-| Freja | 6 | Human | timsTOF | ✅ |
-| Zhao | 4 | California mouse (Peromyscus californicus) | timsTOF HT | ✅ |
+| PI_Example_D DIA | 8 | Porcine (Sus scrofa) | timsTOF (2019) | ✅ |
+| PI_Example_E | 6 | Human | timsTOF | ✅ |
+| PI_Example_G | 6 | Human | timsTOF | ✅ |
+| PI_Example_C | 4 | California mouse (Peromyscus californicus) | timsTOF HT | ✅ |
 | **Subtotal (available now)** | **36** | **4 species** | | |
-| Liver (Oklahoma) | 60 | Bovine (Bos taurus) | timsTOF HT | Pending |
-| Muscle (Oklahoma) | 60 | Bovine (Bos taurus) | timsTOF HT | Pending |
+| Liver (Institution_Q) | 60 | Bovine (Bos taurus) | timsTOF HT | Pending |
+| Muscle (Institution_Q) | 60 | Bovine (Bos taurus) | timsTOF HT | Pending |
 | **Total (after searches complete)** | **156** | **4 species** | | |
 
-**Excluded**: All DDA data (Berger DDA, xlink files) — Cascadia is DIA-specific.
+**Excluded**: All DDA data (PI_Example_D DDA, xlink files) — Cascadia is DIA-specific.
 
 ### Data Split
 - **Training**: ~80% (~125 files) — all species represented
@@ -101,5 +101,5 @@ Time: 4 hours (estimate)
 ### Notes
 - Starting with 36 files (available now), will retrain with 156 when Liver/Muscle complete
 - All data is timsTOF DIA-PASEF from the same instrument model
-- Berger data is from 2019 (older timsTOF Pro) — different instrument generation
+- PI_Example_D data is from 2019 (older timsTOF Pro) — different instrument generation
 - Ion mobility dimension is collapsed (not used as input feature)

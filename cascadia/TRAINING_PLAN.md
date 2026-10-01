@@ -27,7 +27,7 @@ Fine-tune the existing model on timsTOF data without architectural changes. This
 **Priority 1: Own data (best instrument match)**
 - HeLa affinisep/evosep files (12 files, timsTOF HT, 100 SPD)
 - Ground truth: DIA-NN identifications at 1% FDR
-- Location: `/quobyte/proteomics-grp/service/off_campus/University_of_Oaklahoma/Vinning-paul/Liver/`
+- Location: `/quobyte/proteomics-grp/service/off_campus/Institution_Q/PI_Example_F/Liver/`
 
 **Priority 2: Public benchmarks**
 | PRIDE ID | Description | Instrument |

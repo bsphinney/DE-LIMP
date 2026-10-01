@@ -100,8 +100,8 @@ Items:
 - [x] **IM ASF pipeline verified**: `new_with_span_step()` produces 174k spectra from single .d file with IM values. All 5 unit tests pass (creation, forward, zero-init match, IM sensitivity, mixed batch). (April 2026)
 - [x] **Native .d validation**: 738 peptides from native .d path vs 44 from mzML (16.8x improvement). bruker_patch v3 working. (April 2026)
 - [x] **Training pipeline audit**: Verified all hyperparameters against Cascadia source. Key findings: (1) Cascadia does NOT use peak filtering — `max_num_peaks=200` is a depthcharge default, not what the pretrained model expects; (2) `configure_optimizers()` has hidden CosineWarmupScheduler that must be overridden for fine-tuning; (3) batch_size=1 + grad_accum=16 needed for full unfiltered spectra (median 9,558 peaks, max 113k). (April 2026)
-- [ ] **Run IM-enhanced training**: Submit IM training (5-column ASF) after baseline fine-tuning validates. Compare IM vs baseline on Zhao validation set.
-- [ ] **Compare baseline vs IM model on test data**: Use held-out Zhao dataset (43 .d files). Metrics: peptide count, sequence accuracy, score distribution.
+- [ ] **Run IM-enhanced training**: Submit IM training (5-column ASF) after baseline fine-tuning validates. Compare IM vs baseline on PI_Example_C validation set.
+- [ ] **Compare baseline vs IM model on test data**: Use held-out PI_Example_C dataset (43 .d files). Metrics: peptide count, sequence accuracy, score distribution.
 - [ ] **Download and process ddaPASEF pre-training data**: PXD014777 (Prianichnikov 2020, HeLa) and PXD010012 (Meier 2018, HeLa). Clean isolated precursor spectra for timsTOF-specific pre-training.
 - [ ] **Propose Noble Lab collaboration**: Working prototype with 738 peptides (16.8x mzML), IM integration, ddaPASEF training pipeline. Demonstrate value of native Bruker support.
 - [ ] **Per-residue amino acid coloring**: Color each amino acid in the sequence column by its confidence probability. Requires modifying Cascadia's output to export per-residue softmax probabilities from the transformer beam search (not in SSL format currently).

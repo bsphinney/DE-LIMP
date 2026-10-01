@@ -11,8 +11,8 @@ silently attach to the wrong thing:
   * The sample sheet's `unique_id`s are the ONLY link to the raw files, and they are short,
     reused by other submissions (BN1-6 in both PROT_0794 and PROT_0776), and collide with
     plate wells (A3, H10) that match thousands of files.
-  * The service directory is organized by human-named folders (`McDonald karen`,
-    `UCSF/Feeley_lab`), so "where does this project live" is a lookup, not a formula.
+  * The service directory is organized by human-named folders (`Doe jane`,
+    `Institution_X/Lab_Y`), so "where does this project live" is a lookup, not a formula.
   * A share built from links depends on server settings. PROT_0793's links into /quobyte
     served nothing over https because Bioshare's Apache file-streaming allowed /quobyte on
     port 80 but not 443 (fixed 2026-09-16); absolute /nfs links are invisible over SMB. So deliverables are
