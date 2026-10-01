@@ -144,13 +144,18 @@ class ThermoRawIsReadThroughTheRealCommandLine(_FakeParserCase):
         self.assertLess(lo, centre_lo - 20, "used the lowest window CENTRE as the bound")
         self.assertGreater(hi, centre_hi + 20, "used the highest window CENTRE as the bound")
 
-    def test_dda_is_detected_with_confidence_and_no_range(self):
+    def test_dda_is_detected_with_confidence_and_its_survey_scan_range(self):
         r = da.classify(self.raw(DDA))
         self.assertEqual(r["acquisition"], "DDA", r["reason"])
         self.assertEqual(r["confidence"], "high", r["reason"])
         self.assertEqual(r["instrument"], "Orbitrap Exploris 480")
-        # DDA isolation windows are precursor picks, not an acquired range.
-        self.assertIsNone(r["precursor_mz_range"])
+        # DDA isolation windows are precursor picks, not an acquired range: the range is the
+        # MS1 survey scan's, read from its filter string "FTMS + p NSI Full ms [350.0000-
+        # 1500.0000]" (verbatim in the fixture). It used to be null, and DIA-NN on DDA then
+        # searched 380-980 (SET28).
+        self.assertEqual(r["precursor_mz_range"], [350.0, 1500.0])
+        self.assertEqual(r["precursor_mz_range_source"], "ms1_survey_scan")
+        self.assertIn("MS1 survey scan range 350-1500", r["reason"])
 
     def test_dependent_scan_flag_is_used_as_evidence(self):
         """The filter string's `d` token is the instrument saying 'data-dependent'. It is
@@ -611,26 +616,28 @@ class ThermoRawCLI(_FakeParserCase):
         self.assertIn("WARNING", res.stderr)
 
 
-class SkillMdExplainsTheNullRange(_FakeParserCase):
-    """A Thermo DDA read is the one clean result that carries no precursor m/z range: DIA,
-    high confidence, no warning, `precursor_mz_range: null`. SKILL.md 6b said only "Always
-    pass --precursor-mz-range" and never covered the null, leaving the orchestrator to guess
-    between passing nothing and treating a correct answer as a failed read."""
+class SkillMdExplainsTheDdaRange(_FakeParserCase):
+    """A DDA run's precursor m/z range is its MS1 SURVEY scan range. SKILL.md 6b used to say a
+    DDA range is `null` "and that is correct" and to omit --precursor-mz-range -- so
+    estimate_params.py wrote its 380-980 fallback into a DIA-NN DDA cfg, and SET28 (survey
+    350-1500, FragPipe PSMs 360-1315 m/z) would have lost about a third of its precursors."""
 
-    def test_a_thermo_dda_read_is_clean_and_has_no_range(self):
+    def test_a_thermo_dda_read_is_clean_and_carries_its_survey_range(self):
         r = da.classify(self.raw(DDA))
         self.assertEqual((r["acquisition"], r["confidence"]), ("DDA", "high"), r["reason"])
-        self.assertIsNone(r["precursor_mz_range"])
+        self.assertEqual(r["precursor_mz_range"], [350.0, 1500.0])
         self.assertEqual(r["warnings"], [])
 
-    def test_skill_md_says_a_null_range_on_dda_is_correct(self):
+    def test_skill_md_passes_the_survey_range_and_says_dda_is_refused_without_it(self):
         with open(os.path.join(os.path.dirname(HERE), "SKILL.md")) as fh:
             text = fh.read()
         para = text.split("**Always pass `--precursor-mz-range`**", 1)
         self.assertEqual(len(para), 2, "the --precursor-mz-range paragraph moved")
         para = para[1].split("\n\n", 1)[0]
-        self.assertIn("`null` for a DDA run", para)
-        self.assertIn("not a failure", para)
+        self.assertIn("MS1 survey scan range", para)
+        self.assertIn("refuses", para)
+        self.assertNotIn("`null` for a DDA run", para)
+        self.assertNotIn("omit the flag", para)
 
 
 class ThermoRawCohortOnALoginNode(_FakeParserCase):

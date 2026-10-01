@@ -23,6 +23,8 @@ a human as an exit code plus the exact question. The search and DE in between ar
 ordinary skill flow -- nothing here runs an engine.
 
 WHERE EACH SUBCOMMAND RUNS
+    check        LOCAL    is there a CoreOmics API key here, and does CoreOmics accept it for
+                          the Proteomics lab? One diagnosis, in plain words, with the fix
     identify     LOCAL    which submission is this data? PROT/hex ids in the names or the
                           user's message, else the sample ids in the file names (token)
     fetch        LOCAL    the CoreOmics token lives on the staff member's computer
@@ -40,8 +42,9 @@ WHERE EACH SUBCOMMAND RUNS
     bash hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/core_submission.py locate \\
         --summary ~/core/PROT_0807/submission_summary.json --out ~/core/PROT_0807'
 
-Every subcommand prints ONE JSON object to stdout; human notes go to stderr. `stage`,
-`deliver` and `bioshare ensure|send` are DRY RUNS unless --apply is given.
+Every subcommand prints ONE JSON object to stdout (`check` only with --json; without it, a
+few lines for a person); human notes go to stderr. `stage`, `deliver` and
+`bioshare ensure|send` are DRY RUNS unless --apply is given. Nothing prints the key.
 
 PATHS. Bioshare and CoreOmics know a share only by its HIVE path, so every server-side path
 (`share_dir` in the summary, Bioshare's `link_to_path`) is built with posixpath from the HIVE
@@ -50,7 +53,9 @@ Windows drive, or a test directory. CORE_FLINDERS_ROOT only says where to do fil
 
 CONFIGURATION (environment -- which is also how the tests point it at temp dirs)
     COREOMICS_BASE_URL   default https://ucdavis.coreomics.com/server/api
-    COREOMICS_TOKEN      else the contents of ~/.coreomics_token
+    COREOMICS_TOKEN      else the contents of ~/.coreomics_token -- Python's ~, which on
+                         Windows is the profile folder (USERPROFILE), then Git Bash's $HOME
+                         when that is somewhere else (key_files)
     CORE_FLINDERS_ROOT   default: the Flinders share's HIVE path in hive_shares.tsv
                          (/nfs/lssc0/flinders/proteomics)  (local file work only)
     CORE_WORK_ROOT       default: the proteomics-grp share's SERVICE tree (hive_shares.tsv)
@@ -61,7 +66,8 @@ EXIT CODES -- the orchestrator branches on these:
        From `deliver --apply`: the delivery is NOT verified -- do not share it.
        From `identify`: none or several candidates -- ask the user for the number
     3  CoreOmics or the filesystem is unreachable, auth failed (server detail printed), or
-       the scripts directory on this machine is incomplete
+       the scripts directory on this machine is incomplete.
+       From `check`: every diagnosis but `ok` -- branch on its `status`
     4  (locate) the files look like an HT plate -- use ht_manifest.py instead
     5  (deliver) refused by the size guard -- sbatch the deliver_job.sh it wrote
     1  an unexpected error, i.e. a bug -- read stderr
@@ -69,11 +75,14 @@ EXIT CODES -- the orchestrator branches on these:
 from __future__ import annotations
 
 import argparse
+import codecs
 import csv
 import datetime as dt
 import errno
 import glob
 import hashlib
+import html
+import http.client
 import importlib
 import json
 import os
@@ -81,6 +90,7 @@ import posixpath
 import re
 import shlex
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -98,9 +108,20 @@ try:                        # imported now, while os.path is the real one (tests
     import share_map
 except ImportError:         # a partial copy of scripts/: server_flinders_root() says so
     share_map = None
+try:                        # the podcast's shareable report: whether it is current
+    import make_podcast
+except ImportError:         # a partial copy of scripts/: _plan_share says so
+    make_podcast = None
+try:                        # ... and its name (import-free)
+    from report_files import SHARE_NAME as SHARE_FILE
+except ImportError:
+    SHARE_FILE = None
+try:                        # only to name a TLS failure in `check`
+    import ssl
+except ImportError:
+    ssl = None
 
 DEFAULT_BASE_URL = "https://ucdavis.coreomics.com/server/api"
-TOKEN_FILE = "~/.coreomics_token"
 LAB = "PROTEOMICS"
 HTTP_TIMEOUT = 60
 SCHEMA = "core_submission/1"
@@ -144,9 +165,26 @@ class Stop(Exception):
 
 
 class ApiError(Exception):
-    def __init__(self, status, detail: str, url: str | None):
+    """`kind`: "http" (an error status), "redirect" (a redirect that was not followed),
+    "unreachable" (no answer -- `cause` is the socket/DNS/TLS error), "not_json" (a 200 that is
+    not CoreOmics data), "bad_reply" (not an HTTP reply at all), "bad_url" (COREOMICS_BASE_URL is
+    not a web address), "key" (KeyProblem), or None (a reply of the wrong shape). `drf` is
+    CoreOmics' own {"detail": ...} text when the error body was that JSON, else None."""
+
+    def __init__(self, status, detail: str, url: str | None, kind: str | None = None, cause=None,
+                 drf: str | None = None):
         super().__init__(f"HTTP {status}: {detail}" if status else detail)
         self.status, self.detail, self.url = status, detail, url
+        self.kind, self.cause, self.drf = kind or ("http" if status else None), cause, drf
+
+
+class KeyProblem(ApiError):
+    """No usable CoreOmics key on this computer. `diagnosis` is `check`'s status for it and
+    `fix` the steps. Neither ever contains the key."""
+
+    def __init__(self, diagnosis: str, detail: str, fix: str):
+        super().__init__(None, detail, None, kind="key")
+        self.diagnosis, self.fix = diagnosis, fix
 
 
 class UnsafePath(Exception):
@@ -270,7 +308,8 @@ def skill_version():
 
 # ------------------------------------------------------------ ids, dates, campus --
 HEX_ID = re.compile(r"^[0-9a-f]{12}$")
-SUBMISSION_NUMBER = re.compile(r"^(?:prot)?[\s_\-]*0*(\d{1,5})$", re.I)
+# ASCII digits only: Python's \d also matches ٧٥٦ and １２３, which int() reads as numbers
+SUBMISSION_NUMBER = re.compile(r"^(?:prot)?[\s_\-]*0*([0-9]{1,5})$", re.I | re.ASCII)
 
 
 def normalize_submission(text) -> tuple:
@@ -286,6 +325,176 @@ def normalize_submission(text) -> tuple:
         return "internal_id", "PROT_%04d" % int(m.group(1))
     raise ValueError(f"not a submission number or CoreOmics id: {text!r} "
                      f"(try 807, PROT_0807, or the 12-character id)")
+
+
+# ------------------------------------------------------------- the Core's feedback survey --
+# The UC Davis Proteomics Core's feedback form, on Brett's UC Davis Azure (2026-09-28; not a
+# Hugging Face Space, which sleeps after 48 h without visitors). It reads
+# ?prot=<PROT number>&src=<where the link was> to pre-fill the project and ignores parameters
+# it does not know. CORE RUNS ONLY -- a run that answers a
+# CoreOmics submission, the same test that turns on the report's Submission section
+# (submission_report.report_section / load): the skill is used outside the Core too, and those
+# users never see it. The URL, the link and its wording live here and nowhere else.
+FEEDBACK_URL = "https://feedback-ucd-proteomics.azurewebsites.net/"
+FEEDBACK_SOURCES = ("report", "readme", "email", "share", "web")   # share: the file with the audio
+
+
+def feedback_url(src: str, prot=None) -> str:
+    """The survey link for one place (`src`, one of FEEDBACK_SOURCES), pre-filled with the
+    submission number when `prot` is one (normalize_submission: PROT_0807, prot-807 and 807 all
+    give PROT_0807). A CoreOmics hex id, a label or anything else is left out, never guessed."""
+    if src not in FEEDBACK_SOURCES:
+        raise ValueError(f"feedback link source {src!r}: one of {', '.join(FEEDBACK_SOURCES)}")
+    query = []
+    try:
+        kind, key = normalize_submission(prot) if _s(prot) else (None, None)
+    except ValueError:
+        kind = None
+    if kind == "internal_id":
+        query.append(("prot", key))
+    query.append(("src", src))
+    return FEEDBACK_URL + "?" + urllib.parse.urlencode(query)
+
+
+def _core_run(summary: dict):
+    """submission_report.core_run for a summary already read (a delivery, its email): the one
+    test of a Core run. None -- no survey -- when it cannot be asked."""
+    try:
+        import submission_report
+    except ImportError:
+        return None
+    return submission_report.core_run(record=summary)
+
+
+def feedback_line(src: str, prot=None, podcast: bool = False, fmt: str = "md") -> str:
+    """The "How did we do?" line with the survey link for `src`: Markdown (fmt="md"), HTML
+    (fmt="html"; report_style prints the address on its own line after it, so the PDF carries
+    it -- hence no full stop there, which would read as part of the address) or plain text
+    with the address written out (fmt="text", for an email). `podcast`: the run has an audio
+    discussion, so the line asks about that too."""
+    url = feedback_url(src, prot)
+    ask = (f"Tell us what you thought of {'this' if src == 'report' else 'the'} report"
+           + (" and the podcast" if podcast else ""))
+    if fmt == "html":
+        return (f'<p class="feedback"><strong>How did we do?</strong> {html.escape(ask)}: '
+                f'<a href="{html.escape(url)}">a 5-minute survey</a></p>')
+    if fmt == "text":
+        return f"How did we do? {ask}: a 5-minute survey at {url}"
+    return f"**How did we do?** {ask}: [a 5-minute survey]({url})."
+
+
+# ------------------------------------------------------------------ the GitHub star line --
+# Brett (2026-09-29): "if you like this report please star the github repo so others can find
+# it". EVERY report carries it, Core run or not -- unlike the survey: users outside the Core are
+# exactly who should find the tools. It goes just before the survey line, in
+# Analysis_Report.html, its .md twin and PDF (so also in the copy with the audio), and nowhere
+# else: not README, AGENTS.md or the podcast. The address is plugin.json's `repository`
+# (skill_version.plugin_meta, the one reader), never a copy of it here: without it, no line.
+GITHUB = "https://github.com/"
+
+
+def repository_url():
+    """plugin.json's `repository` when it is a GitHub address, or None: plugin.json is not
+    beside scripts/, or names none. Never guessed."""
+    try:
+        import skill_version as sv
+    except ImportError:
+        return None
+    url = sv.plugin_meta().get("repository")
+    url = url.strip().rstrip("/") if isinstance(url, str) else ""
+    return url if url.startswith(GITHUB) and len(url) > len(GITHUB) else None
+
+
+def star_line(fmt: str = "md") -> str:
+    """The "Found this report useful?" line asking the reader to star the skill's GitHub
+    repository: Markdown (fmt="md") or HTML (fmt="html"; the print stylesheet writes the address
+    after the link, so the PDF carries it, and breaks neither it nor the name at its hyphen).
+    "" when repository_url() has no address."""
+    url = repository_url()
+    if not url:
+        return ""
+    name = url.rsplit("/", 1)[-1]
+    if fmt == "html":
+        return (f'<p class="star"><strong>Found this report useful?</strong> Please star '
+                f'<a href="{html.escape(url)}">the <span class="name">{html.escape(name)}</span> '
+                f"repository on GitHub</a> &mdash; it helps other labs find these tools.</p>")
+    return (f"**Found this report useful?** Please star [the {name} repository on GitHub]({url}) "
+            f"— it helps other labs find these tools.")
+
+
+_FEEDBACK_MD = r"^\*\*How did we do\?\*\* .*$"
+_STAR_MD = r"^\*\*Found this report useful\?\*\* .*$"
+_FEEDBACK_LINE = {"html": re.compile(r'<p class="feedback">.*?</p>', re.S),
+                  "md": re.compile("(?m)" + _FEEDBACK_MD)}
+_STAR_HTML = re.compile(r'<p class="star">.*?</p>', re.S)
+_FEEDBACK_LINK = re.compile(r'(?:href="|\]\()([^")\s]+)')
+
+
+def _ruled(line):
+    """A footer line of the .md twin with the rule render_md may put before it: stripping
+    takes both."""
+    return re.compile(r"(?m)(?:^---[ \t]*\n(?:[ \t]*\n)*)?" + line + r"\n?")
+
+
+_FEEDBACK_MD_RULED = _ruled(_FEEDBACK_MD)
+_STAR_MD_RULED = _ruled(_STAR_MD)
+
+
+def _link(line: str) -> str:
+    link = _FEEDBACK_LINK.search(line)
+    return html.unescape(link.group(1)) if link else ""
+
+
+def _survey_link(line: str) -> str:
+    """The survey address a feedback line links, or '' (a line of the same words that does
+    not link the survey is not ours)."""
+    url = _link(line)
+    return url if url.startswith(FEEDBACK_URL) else ""
+
+
+def _star_link(line: str) -> bool:
+    """A star line is ours when it links GitHub: the repository it named may have moved since."""
+    return _link(line).startswith(GITHUB)
+
+
+def strip_feedback(md: str) -> str:
+    """Markdown without the survey line and the star line (and the rule before them): for a
+    report re-rendered from its own .md twin, which would carry the old lines into the body --
+    twice with the new ones, or the survey once on a run that is not the Core's."""
+    md = _FEEDBACK_MD_RULED.sub(lambda m: "" if _survey_link(m.group(0)) else m.group(0), md)
+    return _STAR_MD_RULED.sub(lambda m: "" if _star_link(m.group(0)) else m.group(0), md)
+
+
+def without_feedback(text: str) -> str:
+    """A report (HTML or Markdown) without its survey and star lines, in either form: what
+    make_podcast's check hashes, so link rewording the survey line never makes a check stale,
+    and a podcast's sources are the report, not its footer."""
+    text = _FEEDBACK_LINE["html"].sub(lambda m: "" if _survey_link(m.group(0)) else m.group(0),
+                                      text)
+    text = _STAR_HTML.sub(lambda m: "" if _star_link(m.group(0)) else m.group(0), text)
+    return strip_feedback(text)
+
+
+def refresh_feedback(text: str, fmt: str, podcast: bool, src=None) -> tuple:
+    """`text` -- a report, fmt "html" or "md" -- with its "How did we do?" line rebuilt by
+    feedback_line, for the same PROT number (read back from its link, and checked again there)
+    and the same place unless `src` names another (share: the copy made to be forwarded), so it
+    asks about the podcast when `podcast`. Only a line that is there: a report outside the Core
+    has none, and none is added -- nor is a line of the same words that does not link the
+    survey. -> (text, lines rebuilt)."""
+    n = [0]
+
+    def rebuild(m):
+        url = _survey_link(m.group(0))
+        if not url:
+            return m.group(0)
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+        was = (q.get("src") or ["report"])[0]
+        line = feedback_line(src or (was if was in FEEDBACK_SOURCES else "report"),
+                             (q.get("prot") or [None])[0], podcast, fmt)
+        n[0] += line != m.group(0)
+        return line
+    return _FEEDBACK_LINE[fmt].sub(rebuild, text), n[0]
 
 
 def parse_date(value):
@@ -370,37 +579,258 @@ def local_share_dir(summary: dict, warnings: list) -> str:
     return local
 
 
+# ------------------------------------------------------------- the CoreOmics API key --
+# Each staff member makes their own key in CoreOmics: Profile -> "API Key" -> show it -> Create
+# (or Regenerate). That is CoreOmics' own profile page (its web app, read 2026-09-30: the
+# users/get_token/ and users/create_token/ calls), and the API takes the key as
+# `Authorization: Token <key>`. The key lives on the staff member's computer; HIVE has none.
+KEY_NAME = ".coreomics_token"
+# Typed into `read -s`, the key never reaches the screen, a command line (so neither the shell
+# history nor the process list: printf is a builtin) or the conversation. ONE line: pasted as two
+# into a terminal without bracketed paste (macOS bash 3.2, the old Windows console), `read` took
+# the second line as its input and the key the user then pasted ran as a command -- echoed as
+# "command not found" and kept in the history. umask 077 makes a new file private from its first
+# byte (on POSIX; Git Bash's chmod does not restrict an NTFS file, where the profile folder is
+# what keeps it private); chmod 600 fixes an older one. Nothing runs after a failed `read`
+# (Ctrl-D) or an empty one (Enter before the paste), so a saved key and an earlier $F are left
+# alone. On Windows the file goes where Python's ~ points ($USERPROFILE), which Git Bash's own
+# ~ ($HOME) need not be.
+SAVE_KEY_LINE = {
+    "posix": ("read -rs TOK && [ -n \"$TOK\" ] && F=\"$HOME/.coreomics_token\" && (umask 077; "
+              "printf '%s\\n' \"$TOK\" > \"$F\") && chmod 600 \"$F\"; unset TOK"),
+    "windows": ("read -rs TOK && [ -n \"$TOK\" ] && F=\"$(cygpath \"$USERPROFILE\")/.coreomics_token\" "
+                "&& (umask 077; printf '%s\\n' \"$TOK\" > \"$F\") && chmod 600 \"$F\"; unset TOK"),
+}
+LAB_ADMIN = "a Core admin (Brett Phinney, brettsp)"
+CHECK_HINT = "run `python3 scripts/core_submission.py check` on this computer: it says what is wrong and how to fix it"
+
+
+def _windows() -> bool:
+    return os.name == "nt"
+
+
+def _drive_path(p: str) -> str:
+    """Git Bash hands a Windows program HOME as C:\\Users\\x, but the MSYS spelling (/c/Users/x)
+    can slip through: read it as the drive path it names."""
+    m = re.match(r"^/([A-Za-z])(?=/|$)(.*)$", p)
+    return (m.group(1).upper() + ":" + (m.group(2) or "/")).replace("/", "\\") if m else p
+
+
+def _same_place(a: str, b: str) -> bool:
+    return os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b))
+
+
+def key_files() -> list:
+    """The files api_token() reads, in order: Python's ~ first, then $HOME when that names
+    another folder. On Windows Python's ~ is the profile folder (USERPROFILE; Python ignores
+    HOME there) while Git Bash's ~ is $HOME, and on a domain account the two can differ, so a
+    key saved with Git Bash's `~/.coreomics_token` could sit where Python never looks."""
+    out, py_home = [], os.path.expanduser("~")
+    if py_home != "~":                                # no home to expand at all
+        out.append(os.path.join(py_home, KEY_NAME))
+    home = _s(os.environ.get("HOME"))
+    if home:
+        p = os.path.join(_drive_path(home) if _windows() else home, KEY_NAME)
+        if not any(_same_place(p, q) for q in out):
+            out.append(p)
+    return out
+
+
+def key_target() -> str:
+    """Where a new key should be saved: the first place api_token() reads."""
+    return (key_files() or ["~/" + KEY_NAME])[0]
+
+
+def stray_key_files() -> list:
+    """Places a key is sometimes saved that api_token() does NOT read: another name (Notepad's
+    Save As adds .txt unless "All files" is chosen; the leading dot is easy to drop), the
+    Windows Documents folder a Save As usually starts in (on a OneDrive PC, OneDrive's), or the
+    Windows home drive (HOMEDRIVE + HOMEPATH), which a domain account can map to a network
+    share. `check` names the one it finds (key_in_wrong_place) rather than guessing it is meant."""
+    read = key_files()
+    dirs = [os.path.dirname(p) for p in read]
+    if _windows():                  # not on macOS: Documents is privacy-guarded (and iCloud)
+        if os.environ.get("HOMEDRIVE") and os.environ.get("HOMEPATH"):
+            dirs.append(os.environ["HOMEDRIVE"] + os.environ["HOMEPATH"])
+        if read:
+            profile = os.path.dirname(read[0])
+            dirs += [os.path.join(profile, "Documents"), os.path.join(profile, "OneDrive", "Documents")]
+        for var in ("OneDrive", "OneDriveCommercial"):      # set by the OneDrive client
+            if os.environ.get(var):
+                dirs.append(os.path.join(os.environ[var], "Documents"))
+    bare, out = KEY_NAME.lstrip("."), []
+    for d in dirs:
+        for name in (KEY_NAME, KEY_NAME + ".txt", bare, bare + ".txt"):
+            p = os.path.join(d, name)
+            if not any(_same_place(p, q) for q in read + out):
+                out.append(p)
+    return out
+
+
+def read_key_file(path: str) -> str:
+    """The key saved in `path`, stripped. Decoded by its byte-order mark: Windows PowerShell's `>`
+    writes UTF-16 and Notepad can write a UTF-8 BOM, and read as plain UTF-8 either would be a
+    different string. Raises OSError."""
+    with open(path, "rb") as fh:
+        raw = fh.read(65536)
+    enc = "utf-16" if raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)) else "utf-8-sig"
+    return raw.decode(enc, "replace").strip()
+
+
+def key_shape_problem(key: str):
+    """Why `key` cannot be a CoreOmics key, or None. It goes into an HTTP header, and there a line
+    break makes http.client raise ValueError("Invalid header value b'Token <the key>'") -- a
+    traceback that prints the key."""
+    if key[:6].lower() == "token ":
+        return "it begins with the word \"Token\" -- the file must hold only the key itself"
+    if any(c.isspace() for c in key):
+        return "it has a space or a line break inside it -- the file must hold only the key, on one line"
+    if any(c in "\"'`" for c in key):
+        return "it has quote marks in it -- the file must hold only the key, without quotes"
+    if not all("!" <= c <= "~" for c in key):
+        return "it has characters a key never has -- copy the key from CoreOmics again"
+    return None
+
+
+def site_url() -> str:
+    """The CoreOmics web site the API belongs to: where a person signs in."""
+    b = base_url()
+    return b[:-len("/server/api")] if b.endswith("/server/api") else b
+
+
+def save_key_steps() -> str:
+    """How to make a key and save it on this computer, for a person to follow."""
+    win = _windows()
+    return "\n".join([
+        f"1. In a web browser, sign in to CoreOmics ({site_url()}), open your Profile and find "
+        "\"API Key\". Click to show it; if there is none yet, click Create. Copy it.",
+        f"2. Open {'Git Bash' if win else 'a terminal'} yourself (not this chat) and run this one "
+        "line. It then waits, showing nothing, while you paste the key"
+        f"{' (Shift+Insert, or right-click > Paste)' if win else ''}; then press Enter.",
+        "       " + SAVE_KEY_LINE["windows" if win else "posix"],
+        f"   That saves it as {key_target()}"
+        f"{', in your own profile folder' if win else ', readable only by you (chmod 600)'}.",
+        "3. Never paste the key into the chat. If it was pasted there, Regenerate it in CoreOmics "
+        "and save the new one the same way.",
+        "HIVE has no CoreOmics key: CoreOmics lookups run on this computer.",
+    ])
+
+
+def move_key_steps(src: str) -> str:
+    """The commands that move a key file saved somewhere unread to key_target()."""
+    if _windows():
+        dst = f"\"$(cygpath \"$USERPROFILE\")/{KEY_NAME}\""
+        mv = f"mv \"$(cygpath {shlex.quote(src)})\" {dst} && chmod 600 {dst}"
+    else:
+        dst = shlex.quote(key_target())
+        mv = f"mv {shlex.quote(src)} {dst} && chmod 600 {dst}"
+    return (f"Move it where the scripts read it -- in {'Git Bash' if _windows() else 'a terminal'}:\n"
+            f"       {mv}\n"
+            "Then run check again. Never print the file or paste the key into the chat.")
+
+
+def find_key() -> tuple:
+    """(key, where it came from): COREOMICS_TOKEN, else the first of key_files() holding a usable
+    key. Raises KeyProblem, whose `diagnosis` is check's status. No message carries the key."""
+    tok = _s(os.environ.get("COREOMICS_TOKEN"))
+    if tok:
+        why = key_shape_problem(tok)
+        if why:
+            raise KeyProblem("key_malformed", f"The COREOMICS_TOKEN variable is not a usable key: {why}.",
+                             "Set COREOMICS_TOKEN to the key alone, or unset it and save the key in a "
+                             "file:\n" + save_key_steps())
+        return tok, "the COREOMICS_TOKEN variable"
+    files, empty, unreadable, malformed = key_files(), [], [], []
+    for path in files:
+        try:
+            tok = read_key_file(path)
+        except FileNotFoundError:
+            continue
+        except OSError as e:
+            unreadable.append(f"{path} ({e.strerror or e.__class__.__name__})")
+            continue
+        why = key_shape_problem(tok) if tok else None
+        if not tok:
+            empty.append(path)
+        elif why:
+            malformed.append(f"{path} does not hold a usable key: {why}")
+        else:
+            return tok, path
+    if malformed:
+        raise KeyProblem("key_malformed", "; ".join(malformed) + ".",
+                         "Save the key again (this replaces the file):\n" + save_key_steps())
+    if unreadable:
+        raise KeyProblem("key_unreadable", f"The key file could not be read: {'; '.join(unreadable)}.",
+                         "Save the key again (this replaces the file):\n" + save_key_steps())
+    stray = [p for p in stray_key_files() if os.path.isfile(p)]
+    if stray:
+        raise KeyProblem("key_in_wrong_place", f"A key file is saved as {stray[0]}, where the scripts "
+                                               f"do not look; they read {key_target()}.",
+                         move_key_steps(stray[0]))
+    if empty:
+        raise KeyProblem("key_empty", f"{' and '.join(empty)} {'is' if len(empty) == 1 else 'are'} "
+                                      f"empty: the key was not saved into it.",
+                         "Save the key again:\n" + save_key_steps())
+    places = files + ["the COREOMICS_TOKEN variable"]
+    raise KeyProblem("no_key", f"There is no CoreOmics API key on this computer (looked in "
+                               f"{', '.join(places[:-1]) + ' and ' if files else ''}{places[-1]}).",
+                     save_key_steps())
+
+
+def api_token() -> str:
+    return find_key()[0]
+
+
+def token_help() -> str:
+    return (f"Looking a submission up needs YOUR CoreOmics API key, saved on THIS computer as "
+            f"~/.coreomics_token (here: {key_target()}; chmod 600) or exported as COREOMICS_TOKEN; "
+            f"HIVE has none. `python3 scripts/core_submission.py check` says what is wrong. To make "
+            f"and save a key:\n" + save_key_steps())
+
+
 # ------------------------------------------------------------------- CoreOmics API --
-class _NoRedirectForWrites(urllib.request.HTTPRedirectHandler):
+def _origin(url: str) -> tuple:
+    u = urllib.parse.urlsplit(url)
+    scheme = u.scheme.lower()
+    return scheme, (u.hostname or "").lower(), u.port or {"http": 80, "https": 443}.get(scheme)
+
+
+class _SafeRedirects(urllib.request.HTTPRedirectHandler):
     """urllib silently turns a redirected POST into a GET, so `send --apply` once reported
-    success with the share LISTING as its response. A write that redirects is an error."""
+    success with the share LISTING as its response: a write that redirects is an error. And
+    urllib copies every header to the new URL, Authorization included, even from https to http
+    or to another host (reviewed 2026-09-30: a 302 to a second server handed it the key and
+    `check` said ok), so a redirect that changes scheme, host or port is an error too."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         if req.get_method() != "GET":
             raise urllib.error.HTTPError(req.full_url, code,
                                          f"{req.get_method()} was redirected to {newurl}; refusing to follow",
                                          headers, fp)
+        try:
+            elsewhere = _origin(newurl) != _origin(req.full_url)
+        except ValueError:                               # a Location with a malformed port
+            elsewhere = True
+        if elsewhere:
+            raise urllib.error.HTTPError(req.full_url, code,
+                                         f"redirected to another server ({newurl}); not followed, "
+                                         f"because the key would go with it", headers, fp)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-_OPENER = urllib.request.build_opener(_NoRedirectForWrites)
+_OPENER = urllib.request.build_opener(_SafeRedirects)
 
 
-def api_token() -> str:
-    tok = _s(os.environ.get("COREOMICS_TOKEN"))
-    if tok:
-        return tok
-    path = os.path.expanduser(TOKEN_FILE)
-    try:
-        with open(path) as fh:
-            tok = fh.read().strip()
-    except OSError as e:
-        raise ApiError(None, f"no CoreOmics token: set COREOMICS_TOKEN or save your token in "
-                             f"{TOKEN_FILE} ({e.strerror}). This runs on YOUR computer -- "
-                             f"HIVE has no CoreOmics token.", None)
-    if not tok:
-        raise ApiError(None, f"{TOKEN_FILE} is empty", None)
-    return tok
+def _redact(v, key: str):
+    """`v` with the key blanked out of every string in it. Nothing here writes the key into a
+    message, but a server's reply -- or a library's error about it -- is quoted as it came."""
+    if isinstance(v, str):
+        return v.replace(key, "<key>") if key else v
+    if isinstance(v, dict):
+        return {k: _redact(x, key) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_redact(x, key) for x in v]
+    return v
 
 
 def api_url(path: str, params: dict | None = None) -> str:
@@ -410,45 +840,59 @@ def api_url(path: str, params: dict | None = None) -> str:
     return url
 
 
-def _error_detail(e: urllib.error.HTTPError) -> str:
+def _error_body(e: urllib.error.HTTPError) -> tuple:
+    """(detail, drf): the error reply as text, and CoreOmics' own `detail` when the body is its
+    JSON {"detail": ...} -- None for anything else, such as an Apache or proxy error page."""
     if 300 <= e.code < 400:
-        return _s(e.msg)
+        return _s(e.msg), None
     try:
         body = e.read().decode("utf-8", "replace")
     except Exception:
         body = ""
     try:
         j = json.loads(body)
-        if isinstance(j, dict) and set(j) == {"detail"}:
-            return _s(j["detail"])
-        return json.dumps(j)
     except ValueError:
-        return (body.strip()[:500] or _s(e.reason))
+        return (body.strip()[:500] or _s(e.reason)), None
+    drf = _s(j["detail"]) if isinstance(j, dict) and isinstance(j.get("detail"), str) else None
+    return (drf if drf is not None and set(j) == {"detail"} else json.dumps(j)), drf
 
 
 def api_call(method: str, path: str, params: dict | None = None, payload=None):
-    url = api_url(path, params)
-    headers = {"Authorization": f"Token {api_token()}", "Accept": "application/json"}
+    """Every CoreOmics request. Whatever comes back -- data, an error, a library's complaint --
+    has the key blanked out before any caller can print it."""
+    url, key = api_url(path, params), api_token()
+
+    def fail(status, detail, kind, cause=None, drf=None):
+        return ApiError(status, _redact(detail, key), _redact(url, key), kind, cause, _redact(drf, key))
+
+    headers = {"Authorization": f"Token {key}", "Accept": "application/json"}
     data = None
     if payload is not None:
         data = json.dumps(payload).encode()
         headers["Content-Type"] = "application/json"
-    req = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
         with _OPENER.open(req, timeout=HTTP_TIMEOUT) as r:
             body = r.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
-        raise ApiError(e.code, _error_detail(e), url) from None
+        detail, drf = _error_body(e)
+        raise fail(e.code, detail, "redirect" if 300 <= e.code < 400 else "http", drf=drf) from None
     except urllib.error.URLError as e:
-        raise ApiError(None, f"cannot reach {base_url()}: {e.reason}", url) from None
+        raise fail(None, f"cannot reach {base_url()}: {e.reason}", "unreachable", e.reason) from None
     except OSError as e:                                 # socket timeout, reset
-        raise ApiError(None, f"cannot reach {base_url()}: {e}", url) from None
+        raise fail(None, f"cannot reach {base_url()}: {e}", "unreachable", e) from None
+    except http.client.HTTPException as e:               # BadStatusLine, IncompleteRead
+        raise fail(None, f"{base_url()} did not answer like a web server ({e.__class__.__name__})",
+                   "bad_reply") from None
+    except ValueError as e:                              # "unknown url type"
+        raise fail(None, f"COREOMICS_BASE_URL {base_url()!r} is not a web address ({e})",
+                   "bad_url") from None
     if not body.strip():
         return {}
     try:
-        return json.loads(body)
+        return _redact(json.loads(body), key)
     except ValueError:
-        raise ApiError(None, f"non-JSON response: {body[:200]}", url) from None
+        raise fail(None, f"non-JSON response: {body[:200]}", "not_json") from None
 
 
 def api_get_all(path: str, params: dict | None = None, max_pages: int = 50) -> list:
@@ -762,6 +1206,166 @@ def cmd_fetch(a) -> int:
           "n_neighbors": len(neighbors), "n_existing_shares": len(shares),
           "warnings": warnings, "outputs": paths})
     return EXIT_OK if summary["share_dir"] else EXIT_DECIDE
+
+
+# -------------------------------------------------------------------------- check --
+def _why_unreachable(cause) -> str:
+    host = urllib.parse.urlsplit(base_url()).hostname or base_url()
+    if ssl is not None and isinstance(cause, ssl.SSLError):
+        return (f"the secure connection to {host} failed ({cause}). A network that inspects "
+                f"traffic (some guest, hotel or company Wi-Fi) can cause this")
+    if isinstance(cause, socket.gaierror):
+        return f"this computer could not look up {host} (DNS: {cause})"
+    if isinstance(cause, (socket.timeout, TimeoutError)):
+        return f"the connection to {host} timed out"
+    return f"no connection to {host} ({cause})"
+
+
+def _page_summary(text: str) -> str:
+    """An error page in a few words: its <title>, else its text without tags."""
+    m = re.search(r"<title[^>]*>(.*?)</title>", text, re.I | re.S)
+    words = " ".join(re.sub(r"<[^>]+>", " ", m.group(1) if m else text).split())
+    return html.unescape(words)[:160]
+
+
+def diagnose() -> dict:
+    """check's one diagnosis: status, say (plain words), fix (steps; "" when nothing to do).
+    The key is looked for as api_token() looks, then tried on a lab-scoped list query: a key
+    that works for an account outside the Proteomics lab sees no Proteomics submissions. A
+    401/403 is read only from CoreOmics' own JSON `detail`: an Apache or proxy page saying
+    "permission" or "Access Denied" says nothing about the key or the lab."""
+    out = {"server": base_url(), "platform": "windows" if _windows() else "posix",
+           "looked_in": key_files(), "key_source": None, "http_status": None, "detail": None}
+    try:
+        key, where = find_key()
+    except KeyProblem as e:
+        return dict(out, status=e.diagnosis, say=e.detail, fix=e.fix)
+    out["key_source"] = where
+
+    def said(status, say, fix=""):
+        return _redact(dict(out, status=status, say=say, fix=fix), key)
+
+    again = "Then run check again."
+    report = "otherwise report it (scripts/report_issue.sh)."
+    try:
+        data = api_call("GET", "submissions/", {"lab": LAB, "page_size": 1})
+    except KeyProblem:
+        raise
+    except ApiError as e:                               # api_call has redacted its text
+        detail = _s(e.detail)
+        out.update(http_status=e.status, detail=detail)
+        if e.kind == "http" and e.status in (401, 403) and e.drf is None:
+            page = _page_summary(detail)
+            out["detail"] = page
+            return said("unexpected",
+                        f"Something answered HTTP {e.status} with a web page ({page!r}), not with "
+                        f"CoreOmics' own reply: a proxy, firewall or network sign-in between this "
+                        f"computer and CoreOmics. It says nothing about the key.",
+                        f"Open {site_url()} in a web browser and finish any network sign-in, or try "
+                        f"another network or the campus VPN. {again} If it persists, {report}")
+        if e.kind == "http" and e.status in (401, 403):
+            low = e.drf.lower()
+            if "invalid token" in low:
+                if where == "the COREOMICS_TOKEN variable":
+                    fix = ("COREOMICS_TOKEN is set here and is used before any key file: set it to "
+                           "your current key, or unset it and save the key in a file:\n" + save_key_steps())
+                else:
+                    fix = "Copy your current key from CoreOmics and save it again:\n" + save_key_steps()
+                return said("key_rejected",
+                            f"CoreOmics refused the key from {where} ({e.drf}). It may have been "
+                            f"copied wrongly, or replaced in CoreOmics since it was saved.",
+                            fix + f"\nIf a freshly copied key is refused too, ask {LAB_ADMIN} to "
+                                  f"check your CoreOmics account.")
+            if "permission" in low:
+                return said("no_lab_access",
+                            f"CoreOmics accepts your key, but your account may not read the "
+                            f"Proteomics lab's submissions (it said: {e.drf}).",
+                            f"Ask {LAB_ADMIN} to add your CoreOmics account to the Proteomics lab. "
+                            f"Nothing on this computer needs to change. {again}")
+            if "not provided" in low:
+                return said("unexpected",
+                            f"A key was sent, but CoreOmics says none arrived ({e.drf}): something "
+                            f"between this computer and CoreOmics, such as a proxy, removed it.",
+                            f"Try another network, or the campus VPN. {again}")
+            return said("unexpected", f"CoreOmics refused the request (HTTP {e.status}: {e.drf}).",
+                        f"Ask {LAB_ADMIN} about your CoreOmics account, quoting that reply. {again}")
+        if e.kind == "redirect":
+            return said("unexpected",
+                        f"{base_url()} answered with a redirect that was not followed ({detail}). "
+                        f"The key is never sent on to another server, so CoreOmics was not asked.",
+                        f"If COREOMICS_BASE_URL is set, check it. A network sign-in page can do this: "
+                        f"open {site_url()} in a web browser and finish it. {again}")
+        if e.kind == "unreachable" or (e.kind == "http" and e.status >= 500):
+            why = (_why_unreachable(e.cause) if e.kind == "unreachable" else
+                   f"CoreOmics answered with a server error (HTTP {e.status}: "
+                   f"{_page_summary(detail) if e.drf is None else e.drf}); it may be down")
+            return said("unreachable", f"Could not ask CoreOmics: {why}.",
+                        "Check this computer's internet connection and try again later. Off campus, "
+                        "the UC Davis VPN might be needed (not confirmed). If CoreOmics opens in a "
+                        "web browser on this computer but check still fails, " + report)
+        if e.kind == "not_json":
+            return said("unexpected",
+                        "Something other than CoreOmics answered: a web page instead of CoreOmics "
+                        "data. A Wi-Fi sign-in page or a proxy can do this.",
+                        f"Open {site_url()} in a web browser, finish any network sign-in, then run "
+                        f"check again.")
+        if e.kind == "bad_reply":
+            return said("unexpected", f"Something that is not a web server answered: {detail}.",
+                        f"If COREOMICS_BASE_URL is set, check it; {report}")
+        if e.kind == "bad_url":
+            return said("unexpected", f"{detail}.",
+                        "Unset COREOMICS_BASE_URL (staff never need it) or correct it. " + again)
+        return said("unexpected",
+                    f"CoreOmics answered in a way this check does not recognise"
+                    f"{f' (HTTP {e.status})' if e.status else ''}: {detail}",
+                    f"If COREOMICS_BASE_URL is set, check it; {report}")
+    if isinstance(data, list):
+        count = len(data)
+    elif isinstance(data, dict) and isinstance(data.get("count"), int):
+        count = data["count"]
+    elif isinstance(data, dict) and isinstance(data.get("results"), list):
+        count = len(data["results"])
+    else:
+        return said("unexpected", "CoreOmics answered the submissions list with something that is "
+                                  "not a list of submissions.",
+                    f"If COREOMICS_BASE_URL is set, check it; {report}")
+    if count == 0:
+        return said("no_lab_access",
+                    "CoreOmics accepts your key, but your account sees no Proteomics lab "
+                    "submissions: it is not a member of the Proteomics lab.",
+                    f"Ask {LAB_ADMIN} to add your CoreOmics account to the Proteomics lab. Nothing "
+                    f"on this computer needs to change. {again}")
+    res = said("ok", f"CoreOmics accepts your key (from {where}) and your account can read the "
+                     f"Proteomics lab's submissions.")
+    res["submissions_visible"] = count
+    first = key_target()
+    if where != "the COREOMICS_TOKEN variable" and not _same_place(where, first):
+        # Read from Git Bash's HOME: fine here, but a Python started outside Git Bash (PowerShell,
+        # cmd, an IDE) does not know that folder.
+        res["say"] += (f" It was read from {where}, not from {first}, so a program started "
+                       f"outside Git Bash would not find it.")
+        res["fix"] = "Optional, so every program finds it:\n" + move_key_steps(where)
+    return res
+
+
+def cmd_check(a) -> int:
+    try:
+        res = diagnose()
+    except Exception as e:          # check exists to explain a failure: never a traceback
+        try:
+            key = find_key()[0]
+        except Exception:
+            key = ""
+        res = _redact({"server": base_url(), "status": "unexpected",
+                       "say": f"check could not finish: {e.__class__.__name__}: {e}",
+                       "fix": "Report it (scripts/report_issue.sh) with this message."}, key)
+    if a.json:
+        emit(res)
+    else:
+        print(f"CoreOmics key check: {res['status']}\n{res['say']}")
+        if res["fix"]:
+            print(f"\nWhat to do:\n{res['fix']}")
+    return EXIT_OK if res["status"] == "ok" else EXIT_UNREACHABLE
 
 
 # ------------------------------------------------------------------------- locate --
@@ -1368,10 +1972,6 @@ HEX_TOKEN = re.compile(r"(?<![0-9a-z])(?<![0-9a-f]{4}-)([0-9a-f]{12})(?![0-9a-z]
 # file of thirty. The candidate must own at least half the files and two distinct sheet ids.
 MIN_FILE_SHARE, MIN_SHEET_IDS = 0.5, 2
 STALE_SNAPSHOT = "/quobyte/proteomics-grp/coreomics/.submissions_db"
-TOKEN_HELP = (
-    "Looking a submission up needs a CoreOmics API token with staff access, saved on THIS "
-    f"computer as {TOKEN_FILE} (chmod 600) or exported as COREOMICS_TOKEN; HIVE has none. How "
-    "to obtain one is not documented in this skill -- ask the Core's CoreOmics administrator.")
 
 
 def ids_in(text: str, typed: bool = False) -> list:
@@ -1449,15 +2049,19 @@ def cmd_identify(a) -> int:
         named.setdefault(hit, []).append("in the user's message")
     base = {"never_search": f"{STALE_SNAPSHOT} is a stale snapshot -- never search it for a "
                             f"submission (a search for 0756 there matched an unrelated 2019 record)"}
-    ask_none = ("Which CoreOmics submission is this data from? Give the PROT number (e.g. "
-                "PROT_0756) or the 12-character CoreOmics id.")
+    # No evidence of Core data: ask whether the Core ran the samples at all -- an outside user
+    # asked "which submission?" answers with a number, and the run becomes the Core's.
+    ask_none = ("Were these samples run by the UC Davis Proteomics Core? If so, what is the PROT "
+                "number?")
+    ask_number = ("Which CoreOmics submission is this data from? Give the PROT number (e.g. "
+                  "PROT_0756) or the 12-character CoreOmics id.")
 
     def label_of(kind, key):
         return key if kind == "internal_id" else f"CoreOmics id {key}"
 
-    def lookup_failed(e):
-        emit(dict(base, status="lookup_failed", detail=e.detail, token_help=TOKEN_HELP,
-                  ask=ask_none + " (CoreOmics could not be asked: " + e.detail + ")"))
+    def lookup_failed(e, ask=ask_none):
+        emit(dict(base, status="lookup_failed", detail=e.detail, token_help=token_help(),
+                  ask=ask + " (CoreOmics could not be asked: " + e.detail + ")"))
         return EXIT_UNREACHABLE
 
     have_token = False
@@ -1486,7 +2090,7 @@ def cmd_identify(a) -> int:
                 merged.setdefault(k, []).extend(where)
                 found[k] = rec
         except ApiError as e:
-            return lookup_failed(e)
+            return lookup_failed(e, ask_number)           # a submission was named: evidence
         named = merged
         if len(named) == 1:
             (kind, key), where = next(iter(named.items()))
@@ -1528,7 +2132,7 @@ def cmd_identify(a) -> int:
     if not have_token:
         emit(dict(base, status="needs_token", looked_up=False,
                   ask=ask_none + " (No PROT number is in the names, and without a CoreOmics token "
-                                 "I cannot look it up by sample ID.)", token_help=TOKEN_HELP))
+                                 "I cannot look it up by sample ID.)", token_help=token_help()))
         return EXIT_UNREACHABLE
     dates = [d for d in (date_from_name(os.path.basename(_s(n).rstrip("/\\"))) for n in raws) if d]
     today = dt.date.today()
@@ -2055,12 +2659,21 @@ DELIVER_FILES = (("Analysis_Report.html", True), ("Analysis_Report.pdf", False),
 DELIVER_DIRS = ("tables", "figures", "reproducibility")
 # The optional audio discussion (make_podcast.py): the audio and its transcript only. Its
 # chunk cache, script, check/verify logs and podcast.json (consent notes) stay in the session.
-# The report's "Listen" card links podcast/<file> relative to Analysis_Report.html.
+# The report's "Listen" card links podcast/<file> relative to Analysis_Report.html. Beside the
+# report goes make_podcast.SHARE_NAME, the report with the audio and transcript built in (one file
+# a collaborator can send on) -- only while make_podcast.share_state says it is current.
 PODCAST_FILES = ("podcast.m4a", "podcast.wav", "transcript.html")
 SEARCH_FILES = ("report.parquet", "report.pg_matrix.tsv", "report.pr_matrix.tsv", "report.gg_matrix.tsv",
                 "report.unique_genes_matrix.tsv", "report.stats.tsv", "report.log.txt",
                 "search_provenance.json")
 EXCLUDED_DIRS = {"xic", "report_xic", "temp", "tmp", ".tmp", "__pycache__", "raw_data"}
+# The analysis conversation (save_transcript.py -> logs/conversation/) and the decisions log are
+# CORE-INTERNAL: internal paths, other projects, offhand remarks. logs/ is never delivered; this
+# keeps them out wherever a copy ends up (a Claude Code transcript is <uuid>.jsonl).
+INTERNAL_DIRS = {"conversation"}
+INTERNAL_FILES = re.compile(r"^(?:conversation\.(?:md|html)|decisions\.md|"
+                            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl)$")
+INTERNAL_REASON = "Core-internal: the analysis conversation is never delivered"
 EXCLUDED_SUFFIXES = (".quant", ".speclib")
 
 
@@ -2082,6 +2695,23 @@ def _plan_file(src: str, name: str, required: bool = False) -> dict:
     if not os.access(src, os.R_OK):
         return dict(item, status="SKIPPED", reason="unreadable (permission denied)")
     return dict(item, status="OK", bytes=st.st_size)
+
+
+def _plan_share(output_dir: str) -> dict:
+    """The shareable report (make_podcast.py share) -- delivered only when current: an older one
+    would hand the collaborator a report or episode that is not the one beside it."""
+    if make_podcast is None:
+        return {"name": "report with the audio built in", "status": "SKIPPED", "required": False,
+                "reason": f"make_podcast.py could not be imported from {HERE}; {SYNC_HINT}"}
+    try:
+        current, why = make_podcast.share_state(output_dir)
+    except OSError as e:
+        return {"name": SHARE_FILE, "status": "SKIPPED", "required": False,
+                "reason": f"cannot check it is current ({e.strerror or type(e).__name__})"}
+    if current:
+        return _plan_file(os.path.join(output_dir, SHARE_FILE), SHARE_FILE)
+    return {"name": SHARE_FILE, "status": "SKIPPED", "required": False,
+            "reason": f"{why}; `make_podcast.py share output/` builds it (finalize does)"}
 
 
 def plan_delivery(output_dir: str) -> list:
@@ -2109,7 +2739,10 @@ def plan_delivery(output_dir: str) -> list:
             rel_dir = os.path.relpath(dirpath, output_dir)
             keep = []
             for n in sorted(dirnames):
-                if _excluded_dir(n):
+                if n.lower() in INTERNAL_DIRS:
+                    items.append({"name": os.path.join(rel_dir, n) + "/", "status": "SKIPPED",
+                                  "reason": INTERNAL_REASON, "required": False})
+                elif _excluded_dir(n):
                     items.append({"name": os.path.join(rel_dir, n) + "/", "status": "SKIPPED",
                                   "reason": "excluded: chromatograms/temp data are not a deliverable",
                                   "required": False})
@@ -2118,6 +2751,10 @@ def plan_delivery(output_dir: str) -> list:
             dirnames[:] = keep
             for fn in sorted(filenames):
                 rel = os.path.join(rel_dir, fn)
+                if INTERNAL_FILES.match(fn):
+                    items.append({"name": rel, "status": "SKIPPED", "reason": INTERNAL_REASON,
+                                  "required": False})
+                    continue
                 if fn.lower().endswith(EXCLUDED_SUFFIXES):
                     items.append({"name": rel, "status": "SKIPPED",
                                   "reason": "excluded: engine intermediate", "required": False})
@@ -2133,6 +2770,8 @@ def plan_delivery(output_dir: str) -> list:
             items.append({"name": "podcast/", "status": "SKIPPED", "required": False,
                           "reason": "no rendered audio in output/podcast"})
         items += [_plan_file(os.path.join(pdir, fn), "podcast/" + fn) for fn in audio]
+        if any(fn != "transcript.html" for fn in audio):
+            items.append(_plan_share(output_dir))
     for fn in SEARCH_FILES:
         items.append(_plan_file(os.path.join(output_dir, "search", fn), "search/" + fn))
     return items
@@ -2306,14 +2945,16 @@ def _item(name: str) -> str:
 
 
 def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "analysis",
-                 html_twin: bool = False, for_html: bool = False, hive_md=None) -> str:
+                 html_twin: bool = False, for_html: bool = False, hive_md=None,
+                 podcast: bool = False) -> str:
     """Collaborator-facing. Every claim comes from the submission record or from a file that
     was actually delivered -- no email addresses, no numbers that are not in the inputs, and no
     "we compared your groups" without a comparison table beside it. The only paths are the
     "Where this lives on HIVE" table (`hive_md`, session_docs' own), which every collaborator
     README carries so the Core can find the session and the raw data again.
     README.md is this text; README.html (`html_twin`) is the same text rendered, without the
-    line pointing a Markdown reader at the .html (`for_html`)."""
+    line pointing a Markdown reader at the .html (`for_html`). `podcast`: the delivery carries
+    the run's podcast (delivered_podcast), so the survey line asks about it too."""
     label = submission_label(summary)
     pi_name = (summary.get("pi") or {}).get("name")
     fixed = ("MANIFEST.txt", "checksums.sha256") + (("README.html",) if html_twin else ())
@@ -2368,6 +3009,10 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
                   "is embedded, so it opens by double-clicking in any web browser, with no internet "
                   "connection and nothing to install. The quality-control panels come before the results "
                   "on purpose: they show how much weight the results can carry.", ""]
+            if SHARE_FILE and SHARE_FILE in delivered:
+                L += [f"**To send the report on with its audio discussion, send `{SHARE_FILE}`** — the "
+                      "same report with the audio and its transcript built in, so this one file works "
+                      "on its own.", ""]
         L += ["## What is in this folder", "", "| item | what it is |", "|---|---|"]
         desc = (
             ("README.html", "this README as a web page, with working links"),
@@ -2383,6 +3028,8 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
             ("figures/", "every figure as a separate image file"),
             ("podcast/", "an optional AI-generated audio discussion of these results (synthetic "
                          "voices) and its transcript; the report links it near the top"),
+            (SHARE_FILE or "", "the same report with that audio discussion and its transcript built in: "
+                         "send this one file to pass on both"),
             ("reproducibility/", "the pinned record of the run: software versions, parameters, checksums, "
                                  "and reproduce.sh"),
             ("search/", "the search engine's own output (report.parquet and the matrices delivered)"),
@@ -2422,6 +3069,9 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
                                if "methods.md" in delivered else
                                ", and ask us for the instrument grant acknowledgment that applies."),
           "", "## Questions", "", "Contact the UC Davis Proteomics Core.", ""]
+    core = _core_run(summary) if "Analysis_Report.html" in delivered else None
+    if core:
+        L += [feedback_line("readme", core["prot"], podcast), ""]
     return "\n".join(L)
 
 
@@ -2434,6 +3084,13 @@ AGENTS_DELIVERY_NOTE = (
     "`output/search/report.parquet` is `search/report.parquet`); `input/`, `scripts/`, `logs/` "
     "and `output/DATA_SUBMISSION/` stayed in the session. `MANIFEST.txt` lists exactly what "
     "this folder holds.\n\n")
+
+
+def delivered_podcast(session_dir, delivered) -> bool:
+    """The delivery carries the run's podcast: make_podcast.has_podcast (the one test -- an
+    invalid podcast.json is none) and its files were delivered."""
+    return bool(session_dir and make_podcast and any(x.startswith("podcast/") for x in delivered)
+                and make_podcast.has_podcast(os.path.join(session_dir, "output")))
 
 
 def delivery_docs(summary: dict, session_dir, delivery: str, delivered: set, raw_names: list,
@@ -2459,7 +3116,8 @@ def delivery_docs(summary: dict, session_dir, delivery: str, delivered: set, raw
         lines.append(("AGENTS.md", why or "no analysis session to describe (a raw-only delivery)"))
     else:
         try:
-            head, _, body = docs.agents_md(f).partition("\n")      # the note goes under the title
+            # the collaborator's copy: without the Core-internal review records
+            head, _, body = docs.agents_md(f, for_delivery=True).partition("\n")
             write_text_nofollow(os.path.join(delivery, "AGENTS.md"),
                                 head + "\n\n" + AGENTS_DELIVERY_NOTE + body.lstrip("\n"),
                                 froot, warnings)
@@ -2477,7 +3135,7 @@ def delivery_docs(summary: dict, session_dir, delivery: str, delivered: set, raw
     if docs:
         try:
             src = build_readme(summary, delivered, raw_names, mode, html_twin=True, for_html=True,
-                               hive_md=hive)
+                               hive_md=hive, podcast=delivered_podcast(session_dir, delivered))
             write_text_nofollow(os.path.join(delivery, "README.html"),
                                 docs._render_html(src, src.splitlines()[0].lstrip("# ").strip()),
                                 froot, warnings)
@@ -2490,7 +3148,8 @@ def delivery_docs(summary: dict, session_dir, delivery: str, delivered: set, raw
         lines.append(("README.html", why or "session_docs.py could not be loaded"))
     write_text_nofollow(os.path.join(delivery, "README.md"),
                         build_readme(summary, delivered, raw_names, mode, html_twin=html_ok,
-                                     hive_md=hive), froot, warnings)
+                                     hive_md=hive, podcast=delivered_podcast(session_dir, delivered)),
+                        froot, warnings)
     delivered.add("README.md")
     lines.append(("README.md", None))
     return lines
@@ -2871,6 +3530,7 @@ def cmd_deliver(a) -> int:
                          + [f"../raw/{r['name']} -- {r['reason']}" for r in raw_plan if r["status"] != "OK"]
                          + ([f"results link -- {results_link['reason']}"] if results_link and results_link.get("state") == "SKIPPED" else []),
               "raw_links": raw_result, "raw_whitelist_unverified": bool(raw_plan), "results_link": results_link,
+              "podcast": delivered_podcast(session_dir, expected),
               "verified": verified, "violations": violations, "failed_required": failed_required,
               "error": fatal, "errors": errors, "warnings": warnings}
     djson = os.path.join(record_dir, "delivery.json") if record_dir else None
@@ -3061,6 +3721,9 @@ def cmd_email_draft(a) -> int:
             for name, text in (("tables", "the result tables"),
                                ("figures", "every figure as an image file"),
                                ("Analysis_Report.pdf", "the report as a PDF, for printing"),
+                               (SHARE_FILE or "", f"{SHARE_FILE}: the report with an AI-generated audio "
+                                            "discussion built in -- to pass the report on with the "
+                                            "audio, send this one file"),
                                ("methods.md", "a Methods section you can adapt for a manuscript"),
                                ("reproducibility", "a full record of the software and settings used"),
                                ("search", "the search engine output")):
@@ -3074,7 +3737,12 @@ def cmd_email_draft(a) -> int:
            if "methods.md" in contents or (not contents and not raw_only) else
            "reply to this email and we will send the wording, including the instrument grant.")
     L += ["", "If you use these data in a publication, please acknowledge the UC Davis Proteomics Core; " + ack, "",
-          "Let us know if anything is unclear.", "", "Best regards,", "UC Davis Proteomics Core", ""]
+          "Let us know if anything is unclear."]
+    core = (_core_run(s) if not raw_only and (not contents or "Analysis_Report.html" in contents)
+            else None)
+    if core:
+        L += ["", feedback_line("email", core["prot"], bool(delivery.get("podcast")), fmt="text")]
+    L += ["", "Best regards,", "UC Davis Proteomics Core", ""]
     os.makedirs(os.path.dirname(os.path.abspath(a.out)) or ".", exist_ok=True)
     with open(a.out, "w") as fh:
         fh.write("\n".join(L))
@@ -3087,6 +3755,11 @@ def cmd_email_draft(a) -> int:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
+
+    ck = sub.add_parser("check", help="LOCAL: is the CoreOmics API key here, and does CoreOmics "
+                                      "accept it for the Proteomics lab? (never prints the key)")
+    ck.add_argument("--json", action="store_true", help="one JSON object: status, say, fix, ...")
+    ck.set_defaults(func=cmd_check)
 
     f = sub.add_parser("fetch", help="LOCAL: fetch a submission + neighbours + Bioshare shares")
     f.add_argument("submission", help="807, 0807, PROT_0807, prot-807, #807, or the 12-hex CoreOmics id")
@@ -3180,8 +3853,16 @@ def main(argv=None) -> int:
         emit(e.payload)
         note(e.payload.get("error", "stopped"))
         return e.code
+    except KeyProblem as e:
+        emit({"error": "no usable CoreOmics API key on this computer", "diagnosis": e.diagnosis,
+              "detail": e.detail, "fix": e.fix})
+        note(f"CoreOmics: {e.detail}")
+        return EXIT_UNREACHABLE
     except ApiError as e:
-        emit({"error": "CoreOmics request failed", "status": e.status, "detail": e.detail, "url": e.url})
+        out = {"error": "CoreOmics request failed", "status": e.status, "detail": e.detail, "url": e.url}
+        if e.status in (401, 403):
+            out["hint"] = CHECK_HINT
+        emit(out)
         note(f"CoreOmics: {e}")
         return EXIT_UNREACHABLE
 

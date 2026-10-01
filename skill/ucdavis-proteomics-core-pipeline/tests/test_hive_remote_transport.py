@@ -34,7 +34,7 @@ HIVE_EXEC = os.path.join(SCRIPTS, "hive_exec.sh")
 CHECK_ACCESS = os.path.join(SCRIPTS, "check_access.sh")
 
 COREUTILS = ("bash", "tr", "awk", "dirname", "basename", "ls", "sort", "wc", "stat", "grep",
-             "head", "tail", "cat", "mkdir", "mv", "rmdir", "rm", "mktemp", "sed")
+             "head", "tail", "cat", "mkdir", "mv", "rmdir", "rm", "mktemp", "sed", "chmod")
 HOST = "hive.hpc.ucdavis.edu"
 FLINDERS = "/nfs/lssc0/flinders/proteomics"
 PUBLISHED_ED25519 = "SHA256:b5nv86Ciaqg1yrUVai6bZ0Hk4IpzAFLWtIPDBdacbQM"
@@ -577,6 +577,125 @@ class CheckAccessTests(Harness):
         j = self.check(FAKE_KNOWN_FP=PUBLISHED_ED25519)
         self.assertIsNone(j["local_python3"]["path"])
         self.assertIs(j["local_python3"]["usable"], False)
+
+
+class HiveLoginSavedTests(Harness):
+    """check_access.sh saves the login that worked. Nothing wrote hive.env before, and the
+    environment does not survive from one tool call to the next, so skill_version.sh
+    --check-hive (SKILL.md step 0) skipped itself for exactly the staff it was for."""
+
+    def check(self, user="tester", key=None, **env):
+        r = self.run_script(CHECK_ACCESS, user, key or self.key,
+                            **{"HIVE_ENV_FILE": self.env_file, **env})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)
+
+    def setUp(self):
+        super().setUp()
+        self.env_file = os.path.join(self.d, "cfg", "ucdavis-proteomics", "hive.env")
+
+    def read(self):
+        with open(self.env_file) as fh:
+            return fh.read()
+
+    def test_a_working_login_is_saved_user_and_key_path_only(self):
+        j = self.check(FAKE_KNOWN_FP=PUBLISHED_ED25519)
+        self.assertEqual(j["hive_login_saved"]["saved"], True, j["hive_login_saved"])
+        self.assertEqual(j["hive_login_saved"]["path"], self.env_file)
+        self.assertEqual(self.read(), f"HIVE_USER='tester'\nHIVE_KEY='{self.key}'\n")
+        self.assertEqual(stat.S_IMODE(os.stat(self.env_file).st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.dirname(self.env_file)).st_mode), 0o700)
+
+    def test_a_failed_login_is_not_saved(self):
+        j = self.check(FAKE_SSH="denied", FAKE_KNOWN_FP=PUBLISHED_ED25519)
+        self.assertIs(j["hive_login_saved"]["saved"], False)
+        self.assertFalse(os.path.exists(self.env_file))
+
+    def test_other_lines_are_kept_and_an_old_login_replaced(self):
+        os.makedirs(os.path.dirname(self.env_file))
+        with open(self.env_file, "w") as fh:
+            fh.write("export HIVE_USER=olduser\nHIVE_HOST=hive2.example\nHIVE_KEY=~/old_key\n")
+        self.check(FAKE_KNOWN_FP=PUBLISHED_ED25519)
+        self.assertEqual(self.read(), "HIVE_HOST=hive2.example\n"
+                                      f"HIVE_USER='tester'\nHIVE_KEY='{self.key}'\n")
+
+    def test_a_key_path_with_a_space_is_saved_and_read_back(self):
+        key = os.path.join(self._mk("my keys"), "id ed25519")
+        open(key, "w").close()
+        j = self.check(key=key, FAKE_KNOWN_FP=PUBLISHED_ED25519)
+        self.assertIs(j["hive_login_saved"]["saved"], True)
+        # hive_exec.sh, with nothing in the environment, now reaches HIVE as that user and key
+        env = {k: v for k, v in self.env(HIVE_ENV_FILE=self.env_file).items()
+               if k not in ("HIVE_USER", "HIVE_KEY")}
+        r = subprocess.run(["bash", HIVE_EXEC, "hostname"], capture_output=True, text=True,
+                           env=env, cwd=self.d, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        argv = self.calls("ssh")[-1]
+        self.assertIn(key, argv)
+        self.assertIn(f"tester@{HOST}", argv)
+
+    def test_the_python_readers_read_it(self):
+        """record_run.py and notify_slack.py read hive.env themselves: quotes and all."""
+        self.check(FAKE_KNOWN_FP=PUBLISHED_ED25519)
+        sys.path.insert(0, SCRIPTS)
+        import notify_slack
+        import record_run
+        saved = {k: os.environ.pop(k) for k in ("HIVE_USER", "HIVE_KEY") if k in os.environ}
+        old = os.environ.get("HIVE_ENV_FILE")
+        os.environ["HIVE_ENV_FILE"] = self.env_file
+        try:
+            self.assertEqual(notify_slack._hive_env_user(), "tester")
+            self.assertEqual(record_run.hive_login(), "tester")
+        finally:
+            os.environ.update(saved)
+            if old is None:
+                os.environ.pop("HIVE_ENV_FILE", None)
+            else:
+                os.environ["HIVE_ENV_FILE"] = old
+
+    def test_a_windows_key_path_is_saved_as_git_bash_spells_it(self):
+        """Review: C:\\Users\\gabrig\\.ssh\\id_ed25519 has no "/", so dirname said "." and
+        "$PWD/C:\\Users\\..." was saved. cygpath -u gives the path Git Bash reads."""
+        win = "C:\\Users\\gabrig\\.ssh\\id_ed25519"
+        open(os.path.join(self.d, win), "w").close()        # what -f sees, here, for that path
+        j = self.check(key=win, FAKE_CYGPATH_OUT=self.key, FAKE_KNOWN_FP=PUBLISHED_ED25519)
+        self.assertIs(j["hive_login_saved"]["saved"], True, j["hive_login_saved"])
+        self.assertIn(f"HIVE_KEY='{self.key}'\n", self.read())
+        self.assertNotIn(self.d + "/C:", self.read())
+
+    def test_a_path_that_resolves_to_no_file_is_saved_as_given(self):
+        win = "C:\\Users\\gabrig\\.ssh\\id_ed25519"
+        open(os.path.join(self.d, win), "w").close()
+        j = self.check(key=win, FAKE_CYGPATH_OUT=os.path.join(self.d, "not", "there"),
+                       FAKE_KNOWN_FP=PUBLISHED_ED25519)
+        self.assertIs(j["hive_login_saved"]["saved"], True)
+        self.assertIn(f"HIVE_KEY='{win}'\n", self.read())
+
+    def test_a_relative_key_is_saved_absolute(self):
+        j = self.check(key="id_test", FAKE_KNOWN_FP=PUBLISHED_ED25519)
+        self.assertIs(j["hive_login_saved"]["saved"], True)
+        self.assertIn(f"HIVE_KEY='{self.key}'\n", self.read())
+
+    def test_an_unwritable_place_is_reported_not_fatal(self):
+        j = self.check(HIVE_ENV_FILE="/nonexistent/hive.env", FAKE_KNOWN_FP=PUBLISHED_ED25519)
+        self.assertIs(j["hive_login_saved"]["saved"], False)
+        self.assertIn("could not write", j["hive_login_saved"]["note"])
+        self.assertEqual(j["hive_ssh"], "ok")
+
+
+class HiveLoginSavedWithoutCygpathTests(HiveLoginSavedTests):
+    """Git Bash without cygpath: a Windows key path is saved as the user gave it."""
+    SKIP_SHIMS = ("cygpath",)
+
+    def test_a_windows_key_path_is_saved_as_git_bash_spells_it(self):
+        win = "C:\\Users\\gabrig\\.ssh\\id_ed25519"
+        open(os.path.join(self.d, win), "w").close()
+        j = self.check(key=win, FAKE_KNOWN_FP=PUBLISHED_ED25519)
+        self.assertIs(j["hive_login_saved"]["saved"], True)
+        self.assertIn(f"HIVE_KEY='{win}'\n", self.read())
+
+    def test_a_path_that_resolves_to_no_file_is_saved_as_given(self):
+        self.skipTest("needs cygpath")
 
 
 class ScriptModeTests(unittest.TestCase):

@@ -37,7 +37,34 @@ Give it `.raw`, `.d` or `.mzML` files and it takes them all the way to different
 
 You can also ask it for just one piece — *"re-run this search with the settings matched to the Spectronaut run"* — without wanting the full analysis.
 
-### New in skill 2.8.0
+### New in skill 2.9.0
+
+- **If you ran Sage or FragPipe DDA with an earlier version, re-run the differential expression.** Earlier versions let contaminants (BSA, trypsin, keratins ...) into the statistics as if they were sample proteins, and for Sage they also counted decoy matches and failed measurements. Both are fixed, and the fixes change the results. The search itself does not need to be repeated, but its output has to be read again with this version (the search's `run_search.py` command with `--adapt-only`) before the DE is re-run; a DE on the old adapted report would repeat the old mistakes.
+- **Your copy of the skill stays current.** At the start of each session the skill checks your computer's copy, your copy on the cluster and the Core's current release. If you are behind, it tells you first and gives you the one-minute update; your cluster copy is refreshed for you, never while your jobs are using it. Installing is now one line in a terminal.
+- **DDA data can be searched with DIA-NN on the cluster.** Large DDA cohorts now go through the parallel search as DDA, with the precursor range read from your survey scans. The Methods say that DIA-NN searched the spectra as DDA, and mark any setting taken from the Core's defaults rather than measured. The parallel search also no longer stops when its first measuring step fails on the cluster's network storage: it retries once, then carries on with the Core's documented settings and says so in the Methods.
+- **Keratin samples keep their keratin.** For hair, wool, feather, skin or nail, the skill asks at the start and builds a search database that does not treat the sample's own keratins as contaminants, so they are quantified and tested like any other protein. Trypsin, BSA and other contaminants are still removed.
+- **Sage results are described as what they are.** A Sage analysis now says that each protein's amount is its most intense peptide, with a caveat, instead of calling it MaxLFQ. The skill also warns when Sage's quantification window does not fit your instrument's mass error. FragPipe, AlphaDIA and Radiant results name their own quantification too.
+- **Send the report with its audio as one file.** `Analysis_Report_with_audio.html` is the report with the audio discussion and its transcript built in, so a collaborator can forward it and the audio still plays. The skill builds it when the analysis is finalized, if there is an audio discussion. Before keeping it, the skill reads the audio back out of the file and checks it. If the file is too big to email, it says so and suggests Bioshare.
+- **Protein-set tests when few single proteins pass.** When a comparison has fewer than 10 significant proteins, the skill offers to test predefined sets of proteins (GO, Reactome, or a list you supply with its source). This can find a group of proteins that shifted together even when none passed on its own.
+  - Two tests, camera and fry, run side by side on the same model as the differential expression, including paired designs.
+  - Each result is checked against run depth, model-estimated values and the choice of reference.
+  - Where a test has little power in your design (camera in a pulldown, for example), the report says so and does not present its zero as a result.
+  - **Pulldowns (IPs) have their own mode, with stated limits.** Comparisons are made relative to each bait's complex. A protein must be enriched at least 4-fold over the control to count as part of the complex, so losses from a complex are harder to detect than gains: finding nothing does not mean the complex lost nothing. Each bait's result states this with its own numbers.
+  - Nothing significant is reported as "not detectable in this design", never as "unchanged".
+- **Exact reproducibility names the CPU.** The quantification's last decimal places can differ between CPU families; on a real dataset this changed logFC by up to 0.002 and changed no significance calls. The run now records which CPU family it ran on, and `REPRODUCE.md` says how to re-run on the same kind of machine for identical numbers.
+- **A record of how each analysis was done.** A decisions log records each choice and the reason for it. In Claude Code, the analysis conversation is also saved, with passwords, keys and tokens redacted, so a reviewer (a person or an AI) can check the work later. Both stay in the session folder: they are left out of the session zip, and a Core delivery never includes them.
+- **A new request starts a new analysis.** An earlier analysis of the same data is mentioned, not reused, unless you ask for a re-analysis.
+- **For UC Davis Proteomics Core runs:**
+  - **"How did we do?"** The report, README and delivery email end with a link to the Core's short feedback survey, pre-filled with the submission number. It appears only on Core runs, never on analyses done outside the Core.
+  - **Reaching CoreOmics.** The skill shows staff how to make their CoreOmics key and save it with one line in their own terminal, never in the chat, including on Windows. `core_submission.py check` then says in plain words whether the key works and, if not, what to fix, without ever showing the key.
+  - **Submission numbers are read strictly.** Only ordinary digits count as a PROT number. Before, a number written in another script's digits, such as Arabic-Indic, was read as one, which could turn an outside analysis into a Core run. When there is no sign that the Core ran the samples, the skill asks before asking for a number.
+  - **Notes from the Core.** The Core can leave a note for a staff member's Claude, which shows it at the start of their next session and passes their reply back.
+- **Coming later: Claudes working together in Slack.** Two people's Claude sessions will be able to work on one analysis in one Slack thread, each acting only when its own person approves. It ships switched off, and does nothing until the Core sets up its Slack app.
+
+The full list is in the [CHANGELOG](CHANGELOG.md).
+
+<details>
+<summary><strong>New in skill 2.8.0</strong></summary>
 
 - **One report you can open and share.** Every analysis produces a single self-contained `Analysis_Report.html`, the report of record, with every figure embedded. It comes with a PDF copy and a plain-text twin you can feed to NotebookLM. The session folder opens from `README.html`. An `AGENTS.md` explains every file to an AI assistant, including where the raw data, search and database live on the cluster.
 - **Listen to your results (optional).** You can have a two-host audio discussion of your results ("Signal to Noise": a biologist and a statistician). It covers what your data show, how your samples were measured, and how proteomics works, all using your own numbers.
@@ -57,16 +84,35 @@ You can also ask it for just one piece — *"re-run this search with the setting
   - finished searches are handed to the FRAN corpus automatically and recorded in a central registry.
 - **Simpler setup.** One setup script installs the toolchain (including limpa 1.4 from Bioconductor), checks it, and prints the exact fix if anything is wrong.
 
-The full list is in the [CHANGELOG](CHANGELOG.md).
+</details>
 
 ### Install
 
-Requires [Claude Code](https://claude.com/claude-code). In a Claude Code session:
+Requires [Claude Code](https://claude.com/claude-code).
+
+**Easiest, in a terminal** (one line; paste it whole):
+
+```
+claude plugin marketplace add bsphinney/DE-LIMP && claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core
+```
+
+Then start Claude Code, or run `/reload-plugins` if it is already open.
+
+**Or inside Claude Code:** paste the first command, press Enter, then the second. Pasting both
+at once does not work.
 
 ```
 /plugin marketplace add bsphinney/DE-LIMP
+```
+
+```
 /plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core
 ```
+
+**Keep it current:** `/plugin` → **Marketplaces** → **ucdavis-proteomics-core** → **Enable
+auto-update**. Automatic updates are off by default for marketplaces that are not Anthropic's.
+
+**Update later:** `claude plugin update ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core`, then `/reload-plugins`.
 
 Then just ask, in your own words:
 
@@ -314,11 +360,32 @@ It runs in **Claude Code** and **Claude Desktop**.
   who prepared the samples) in every report, and deliver to the collaborator's Bioshare folder.
 - **Optional audio discussion** of the results for the collaborator (AI-generated, on request).
 
-**Install (one time)** — in **Claude Code**:
+**Install (one time)** — for **Claude Code**:
+
+**Easiest, in a terminal** (one line; paste it whole):
+
+```
+claude plugin marketplace add bsphinney/DE-LIMP && claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core
+```
+
+Then start Claude Code, or run `/reload-plugins` if it is already open.
+
+**Or inside Claude Code:** paste the first command, press Enter, then the second. Pasting both
+at once does not work.
+
 ```
 /plugin marketplace add bsphinney/DE-LIMP
+```
+
+```
 /plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core
 ```
+
+**Keep it current:** `/plugin` → **Marketplaces** → **ucdavis-proteomics-core** → **Enable
+auto-update**. Automatic updates are off by default for marketplaces that are not Anthropic's.
+
+**Update later:** `claude plugin update ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core`, then `/reload-plugins`.
+
 On **Claude Desktop**: click the **+** button beside the prompt box → *Plugins* →
 *Add plugin*, add the marketplace `bsphinney/DE-LIMP`, then install
 **ucdavis-proteomics-core-pipeline**.

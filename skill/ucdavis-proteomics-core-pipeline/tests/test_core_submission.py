@@ -9,9 +9,11 @@ orchestrator branches on and on the filesystem state a collaborator will actuall
 
 Stdlib only, no network, no SSH: temp dirs, env overrides, and an in-process fake CoreOmics.
 """
+import codecs
 import contextlib
 import csv
 import datetime as dt
+import http.client
 import http.server
 import importlib
 import io
@@ -19,6 +21,7 @@ import json
 import ntpath
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -26,6 +29,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import urllib.error
 import urllib.parse
 from unittest import mock
 
@@ -148,7 +152,8 @@ def write(root, rel, text):
 
 
 class FakeCoreOmics:
-    """A tiny CoreOmics: routes are (method, path) -> fn(query, body) -> (status, json[, headers])."""
+    """A tiny CoreOmics: routes are (method, path) -> fn(query, body) -> (status, json[, headers]);
+    bytes in place of the json are sent as they are (an HTML error page)."""
 
     def __init__(self):
         self.requests, self.routes = [], {}
@@ -168,11 +173,12 @@ class FakeCoreOmics:
                 fn = fake.routes.get((method, u.path))
                 res = fn(q, body) if fn else (404, {"detail": "Not found."})
                 status, obj = res[0], res[1]
-                data = json.dumps(obj).encode()
+                raw = isinstance(obj, bytes)            # a web page, not CoreOmics JSON
+                data = obj if raw else json.dumps(obj).encode()
                 self.send_response(status)
                 for k, v in (res[2] if len(res) > 2 else {}).items():
                     self.send_header(k, v)
-                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Type", "text/html" if raw else "application/json")
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
@@ -216,7 +222,10 @@ class TestSubmissionIds(unittest.TestCase):
         self.assertEqual(cs.normalize_submission(HEX.upper()), ("id", HEX))
 
     def test_garbage_is_refused_not_guessed(self):
-        for s in ("", "abc", "PROT_", "0", "12345678", HEX[:-1], "807a"):
+        # review of f18d95e: Python's \d matched Arabic-Indic and fullwidth digits, which int()
+        # reads, so `attach --given '{"internal_id": "٧٥٦"}'` made PROT_0756
+        for s in ("", "abc", "PROT_", "0", "12345678", HEX[:-1], "807a", "٧٥٦", "PROT_٠٧٥٦",
+                  "１２３", "prot-８０７", "PROT\u00a0807"):
             with self.assertRaises(ValueError, msg=s):
                 cs.normalize_submission(s)
 
@@ -901,6 +910,76 @@ class TestDeliver(DeliverBase):
         self.assertEqual(got, ["podcast.m4a", "transcript.html"], "no cache, script or consent record")
         self.assertIn("`podcast/`", read(os.path.join(self.delivery, "README.md")))
 
+    def test_the_report_with_the_audio_built_in_goes_only_while_current(self):
+        # make_podcast.py share: the report with the audio and transcript inside, one file the
+        # collaborator can send on. A copy built from another report or episode stays behind.
+        mp = cs.make_podcast
+        write(self.output, "podcast/podcast.json", json.dumps(
+            {"show": "Signal to Noise", "title": "T", "audio": "podcast.m4a",
+             "transcript": "transcript.html", "duration_s": 60}))
+        for fn in ("podcast.m4a", "transcript.html"):
+            write(self.output, "podcast/" + fn, fn)
+        man = json.loads(read(os.path.join(self.output, "podcast", "podcast.json")))
+        write(self.output, mp.SHARE_NAME, f"<html><!-- podcast:share "
+                                          f"{mp.share_keys(self.output, man)} kbps=48 unchecked=1 --></html>")
+        rc, out, p = self.deliver("--apply", "--label", "t2")
+        self.assertEqual(rc, 0, p.stderr + p.stdout)
+        d2 = os.path.join(self.share, "PROT_0807_t2")
+        self.assertTrue(os.path.isfile(os.path.join(d2, mp.SHARE_NAME)))
+        self.assertIn(f"[OK] {mp.SHARE_NAME}", read(os.path.join(d2, "MANIFEST.txt")))
+        readme = read(os.path.join(d2, "README.md"))
+        self.assertIn(f"**To send the report on with its audio discussion, send `{mp.SHARE_NAME}`**",
+                      readme)
+        self.assertIn(f"| [`{mp.SHARE_NAME}`]({mp.SHARE_NAME}) | the same report with that audio", readme)
+        out_md = os.path.join(self.tmp, "EMAIL_DRAFT.md")
+        rc, js, p = run(["email-draft", "--summary", self.summary, "--delivery",
+                         os.path.join(self.session, "delivery.json"), "--out", out_md], self.env)
+        self.assertIn(f"{mp.SHARE_NAME}: the report with an AI-generated audio discussion built in "
+                      "-- to pass the report on with the audio, send this one file", read(out_md))
+
+        write(self.output, "Analysis_Report.html", "<html>report, regenerated</html>")
+        rc, out, p = self.deliver("--apply", "--label", "t3")
+        self.assertEqual(rc, 0, p.stderr + p.stdout)
+        d3 = os.path.join(self.share, "PROT_0807_t3")
+        self.assertFalse(os.path.exists(os.path.join(d3, mp.SHARE_NAME)))
+        self.assertIn(f"[SKIPPED] {mp.SHARE_NAME} -- built from another version of the report or "
+                      "the episode; `make_podcast.py share output/` builds it (finalize does)",
+                      read(os.path.join(d3, "MANIFEST.txt")))
+        self.assertNotIn(mp.SHARE_NAME, read(os.path.join(d3, "README.md")))
+
+    def test_the_readme_and_the_email_ask_how_we_did(self):
+        rc, out, p = self.deliver("--apply")
+        self.assertEqual(rc, 0, p.stderr + p.stdout)
+        line = ("**How did we do?** Tell us what you thought of the report: [a 5-minute survey]"
+                f"({SURVEY}?prot=PROT_0807&src=readme).")
+        readme = read(os.path.join(self.delivery, "README.md"))
+        self.assertIn("Contact the UC Davis Proteomics Core.\n\n" + line + "\n", readme)
+        self.assertIn(f'<a href="{SURVEY}?prot=PROT_0807&amp;src=readme">a 5-minute survey</a>',
+                      read(os.path.join(self.delivery, "README.html")))
+        out_md = os.path.join(self.tmp, "EMAIL_DRAFT.md")
+        run(["email-draft", "--summary", self.summary, "--delivery",
+             os.path.join(self.session, "delivery.json"), "--out", out_md], self.env)
+        self.assertIn("Let us know if anything is unclear.\n\nHow did we do? Tell us what you "
+                      f"thought of the report: a 5-minute survey at {SURVEY}?prot=PROT_0807"
+                      "&src=email\n\nBest regards,", read(out_md))
+
+    def test_the_review_records_stay_in_the_session(self):
+        # the analysis conversation and the decisions log (save_transcript.py, log_decision.py)
+        # are Core-internal: not delivered, and the collaborator's AGENTS.md does not send their
+        # AI looking for them (review of 32a0780)
+        write(self.session, "logs/conversation/11111111-2222-4333-8444-555555555555.jsonl", "{}")
+        write(self.session, "logs/conversation/conversation.md", "# c")
+        write(self.session, "logs/decisions.md", "# Decisions log")
+        rc, out, p = self.deliver("--apply")
+        self.assertEqual(rc, 0, p.stderr + p.stdout)
+        agents = read(os.path.join(self.delivery, "AGENTS.md"))
+        for word in ("Reviewing this analysis", "logs/conversation", "conversation.md",
+                     "decisions.md", "transcript"):
+            self.assertNotIn(word, agents)
+        got = [os.path.relpath(os.path.join(dp, f), self.delivery)
+               for dp, _, fs in os.walk(self.delivery) for f in fs]
+        self.assertFalse([g for g in got if "conversation" in g or "decisions" in g], got)
+
     def test_readme_html_and_agents_md_go_to_the_collaborator(self):
         """Brett's standing rule: every collaborator folder has README.html to double-click and
         AGENTS.md for an AI assistant -- with links that work IN THE DELIVERY'S layout."""
@@ -1150,6 +1229,12 @@ class TestRawOnlyDelivery(DeliverBase):
         self.assertIn("[OK] README.html", manifest)
         self.assertIn("[SKIPPED] AGENTS.md -- no analysis session to describe (a raw-only delivery)",
                       manifest)
+        # no report was made, so nothing asks what they thought of one
+        self.assertNotIn(SURVEY, readme)
+        out_md = os.path.join(self.tmp, "EMAIL_DRAFT.md")
+        run(["email-draft", "--summary", self.summary, "--delivery",
+             os.path.join(self.work, "delivery.json"), "--out", out_md], self.env)
+        self.assertNotIn(SURVEY, read(out_md))
 
 
 # ---------------------------------------------------------------------- bioshare --
@@ -1376,6 +1461,139 @@ class TestFetch(unittest.TestCase):
             self.assertEqual(run(["fetch", "807", "--out", tmp], child_env(tmp, base))[0], 3)
 
 
+SURVEY = "https://feedback-ucd-proteomics.azurewebsites.net/"   # pinned here, once
+
+
+class TestFeedbackSurvey(unittest.TestCase):
+    """The Core's feedback survey (Brett, 2026-09-28): one URL and one link builder
+    (core_submission.feedback_url / feedback_line), pre-filled with the PROT number only when it
+    is one -- read with the one submission-number pattern, normalize_submission."""
+
+    def test_the_url_prefills_only_a_real_prot_number(self):
+        self.assertEqual(cs.FEEDBACK_URL, SURVEY)
+        for given in ("PROT_0756", "prot-756", "756", "#756", "PROT_756"):
+            with self.subTest(given):
+                self.assertEqual(cs.feedback_url("report", given), SURVEY + "?prot=PROT_0756&src=report")
+        for given in (None, "", "99922f5337f8", "submission", "PROT_0756&src=web", "PROT_0000",
+                      "PROT_123456", "PROT_0756 x"):
+            with self.subTest(given):
+                self.assertEqual(cs.feedback_url("readme", given), SURVEY + "?src=readme")
+        for src in cs.FEEDBACK_SOURCES:
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(cs.feedback_url(src, "807")).query,
+                                      strict_parsing=True)
+            self.assertEqual(q, {"prot": ["PROT_0807"], "src": [src]})
+        with self.assertRaises(ValueError):
+            cs.feedback_url("slack", "807")
+
+    def test_link_rewords_only_a_survey_line_that_is_there(self):
+        # make_podcast.py link asks about the podcast too once there is one: the same place and
+        # PROT number, the one wording; a report without the line, or with the same words but
+        # no survey link, is left alone
+        for fmt in ("html", "md"):
+            with self.subTest(fmt):
+                wrap = ("<main>x{}</main>" if fmt == "html" else "# R\n\nText.\n\n{}\n")
+                page = wrap.format(cs.feedback_line("readme", "PROT_0807", fmt=fmt))
+                new, n = cs.refresh_feedback(page, fmt, podcast=True)
+                self.assertEqual((n, new), (1, wrap.format(cs.feedback_line(
+                    "readme", "PROT_0807", podcast=True, fmt=fmt))))
+                self.assertEqual(cs.refresh_feedback(new, fmt, podcast=True), (new, 0))
+        for text, fmt in (("<main>no line</main>", "html"), ("# R\n\nText.\n", "md"),
+                          ("**How did we do?** Very well, thanks.\n", "md"),
+                          ('<p class="feedback">a <a href="https://example.org">x</a></p>', "html")):
+            self.assertEqual(cs.refresh_feedback(text, fmt, podcast=True), (text, 0))
+
+    def test_the_md_twins_line_is_stripped_with_its_rule(self):
+        line = cs.feedback_line("report", "PROT_0756")
+        body = "# R\n\nText.\n"
+        self.assertEqual(cs.strip_feedback(body + "\n---\n\n" + line + "\n"), body + "\n")
+        self.assertEqual(cs.strip_feedback(body + line + "\n"), body)
+        other = body + "\n---\n\n**How did we do?** Very well.\n"    # not the survey's: kept
+        self.assertEqual(cs.strip_feedback(other), other)
+
+    def test_the_sources_the_form_reads(self):
+        # review of f18d95e: the shareable file is made to be forwarded (src=share); "podcast"
+        # was never used (no address is spoken)
+        self.assertEqual(cs.FEEDBACK_SOURCES, ("report", "readme", "email", "share", "web"))
+        with self.assertRaises(ValueError):
+            cs.feedback_url("podcast")
+        html_line = cs.feedback_line("report", "PROT_0756", fmt="html")
+        new, n = cs.refresh_feedback(html_line, "html", podcast=False, src="share")
+        self.assertEqual((n, new), (1, cs.feedback_line("share", "PROT_0756", fmt="html")))
+        # what make_podcast's check hashes: the line gone in either form, so link rewording
+        # it never makes a check stale
+        body = "<main><p>Body 6,112.</p>{}</main>"
+        for podcast in (False, True):
+            self.assertEqual(cs.without_feedback(body.format(cs.feedback_line(
+                "report", "PROT_0756", podcast, fmt="html"))), body.format(""))
+            self.assertEqual(cs.without_feedback("# R\n\nText.\n\n---\n\n" + cs.feedback_line(
+                "report", "PROT_0756", podcast) + "\n"), "# R\n\nText.\n\n")
+
+    def test_a_share_state_that_cannot_be_read_is_skipped_not_fatal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(cs.make_podcast, "share_state",
+                                   side_effect=PermissionError(13, "Permission denied")):
+                item = cs._plan_share(tmp)
+        self.assertEqual(item, {"name": cs.SHARE_FILE, "status": "SKIPPED", "required": False,
+                                "reason": "cannot check it is current (Permission denied)"})
+
+    def test_the_line_in_each_format(self):
+        self.assertEqual(cs.feedback_line("report", "PROT_0756"),
+                         "**How did we do?** Tell us what you thought of this report: [a 5-minute "
+                         f"survey]({SURVEY}?prot=PROT_0756&src=report).")
+        self.assertEqual(cs.feedback_line("report", "PROT_0756", podcast=True, fmt="html"),
+                         '<p class="feedback"><strong>How did we do?</strong> Tell us what you '
+                         f'thought of this report and the podcast: <a href="{SURVEY}?prot=PROT_0756'
+                         '&amp;src=report">a 5-minute survey</a></p>')
+        self.assertEqual(cs.feedback_line("email", "PROT_0756", fmt="text"),
+                         "How did we do? Tell us what you thought of the report: a 5-minute survey "
+                         f"at {SURVEY}?prot=PROT_0756&src=email")
+
+    def test_the_star_line_reads_its_address_from_plugin_json(self):
+        # Brett (2026-09-29): every report asks for a GitHub star. The address is plugin.json's
+        # `repository` (skill_version.plugin_meta, the one reader), never a copy of it
+        import skill_version
+        with open(os.path.join(SCRIPTS, "..", ".claude-plugin", "plugin.json")) as fh:
+            repo = json.load(fh)["repository"]
+        self.assertEqual(cs.repository_url(), repo)
+        self.assertEqual(cs.star_line(), "**Found this report useful?** Please star [the DE-LIMP "
+                         f"repository on GitHub]({repo}) — it helps other labs find these "
+                         "tools.")
+        self.assertEqual(cs.star_line("html"), '<p class="star"><strong>Found this report '
+                         f'useful?</strong> Please star <a href="{repo}">the <span class="name">DE-LIMP'
+                         "</span> repository on GitHub</a> &mdash; it helps other labs find these "
+                         "tools.</p>")
+        moved = {"repository": "https://github.com/someone/Moved/"}
+        with mock.patch.object(skill_version, "plugin_meta", return_value=moved):
+            self.assertIn("[the Moved repository on GitHub](https://github.com/someone/Moved) ",
+                          cs.star_line())
+        for meta in ({}, {"repository": ""}, {"repository": 7}, {"repository": cs.GITHUB},
+                     {"repository": "https://example.org/x"}):      # no address: no line
+            with mock.patch.object(skill_version, "plugin_meta", return_value=meta):
+                self.assertIsNone(cs.repository_url(), meta)
+                self.assertEqual((cs.star_line(), cs.star_line("html")), ("", ""), meta)
+
+    def test_the_star_line_is_stripped_but_never_reworded(self):
+        star, survey = cs.star_line(), cs.feedback_line("report", "PROT_0756")
+        body = "# R\n\nText.\n"
+        # the .md twin's footer (render_md): a rule, the star line, then a Core run's survey
+        for tail in ("\n---\n\n" + star + "\n\n" + survey + "\n", "\n---\n\n" + star + "\n"):
+            self.assertEqual(cs.strip_feedback(body + tail).rstrip("\n"), body.rstrip("\n"))
+            self.assertEqual(cs.without_feedback(body + tail).rstrip("\n"), body.rstrip("\n"))
+        other = body + "\n**Found this report useful?** Very.\n"    # links no GitHub: kept
+        self.assertEqual(cs.strip_feedback(other), other)
+        page = "<main><p>Body.</p>{}{}</main>"
+        self.assertEqual(cs.without_feedback(page.format(cs.star_line("html"), cs.feedback_line(
+            "report", "PROT_0756", fmt="html"))), page.format("", ""))
+        # link rewording the survey line (and share's src=share) leaves the star line as it is
+        for fmt in ("html", "md"):
+            text = cs.star_line(fmt) + "\n\n" + cs.feedback_line("report", "PROT_0756", fmt=fmt)
+            for src in (None, "share"):
+                new, n = cs.refresh_feedback(text, fmt, podcast=True, src=src)
+                self.assertEqual(n, 1)
+                self.assertTrue(new.startswith(cs.star_line(fmt) + "\n\n"), (fmt, src))
+                self.assertEqual(new.count("Found this report useful?"), 1)
+
+
 # ------------------------------------------------------------------- email-draft --
 class TestEmailDraft(unittest.TestCase):
     def test_draft_names_the_link_and_only_numbers_it_was_given(self):
@@ -1463,6 +1681,10 @@ class TestIdentifyByName(unittest.TestCase):
             self.assertIn(".submissions_db", out["never_search"])
             rc, out, _ = run(["identify", "--no-lookup"] + LRS_RUNS, env)
             self.assertEqual((rc, out["status"]), (2, "none"))
+            # no evidence of Core data: ask whether the Core ran them, not "which submission?"
+            # (an outside user answering with any number would become a Core run)
+            self.assertEqual(out["ask"], "Were these samples run by the UC Davis Proteomics "
+                                         "Core? If so, what is the PROT number?")
             rc, out, _ = run(["identify", "--no-lookup", "/svc/PROT_0756/a.d", "--text", "or is it PROT_0757?"], env)
             self.assertEqual((rc, out["status"]), (2, "ambiguous"))
             self.assertEqual({c["submission"] for c in out["candidates"]}, {"PROT_0756", "PROT_0757"})
@@ -1474,7 +1696,9 @@ class TestIdentifyByName(unittest.TestCase):
             rc, out, _ = run(["identify"] + LRS_RUNS, env)
             self.assertEqual((rc, out["status"]), (3, "needs_token"))
             self.assertIn("~/.coreomics_token", out["token_help"])
-            self.assertIn("PROT", out["ask"])
+            self.assertTrue(out["ask"].startswith("Were these samples run by the UC Davis "
+                                                  "Proteomics Core? If so, what is the PROT "
+                                                  "number?"), out["ask"])
 
 
 class TestIdentifyBySampleIds(unittest.TestCase):
@@ -1654,6 +1878,551 @@ class TestPartialScriptsDirectory(unittest.TestCase):
                                    capture_output=True, text=True, env=child_env(tmp))
                 self.assertEqual(p.returncode, 3, args[0] + p.stderr)
                 self.assertIn("sync the whole scripts/ directory", json.loads(p.stdout)["hint"])
+
+
+# ------------------------------------------------------------ the CoreOmics API key --
+KEY = "k3yNotReal0a1b2c3d4e5f60718293a4b5c6d7e8"     # a planted key: it must never be printed
+WIN_ENV = {"USERPROFILE": "C:\\Users\\msalemi", "HOMEDRIVE": "H:", "HOMEPATH": "\\"}
+
+
+def key_home(tmp, content=None, name=".coreomics_token", raw=None):
+    home = os.path.join(tmp, "home")
+    os.makedirs(home, exist_ok=True)
+    if content is not None or raw is not None:
+        with open(os.path.join(home, name), "wb") as fh:
+            fh.write(raw if raw is not None else content.encode())
+    return home
+
+
+def key_env(tmp, base_url="http://127.0.0.1:9/server/api", **extra):
+    """child_env whose key comes from the files under HOME, unless COREOMICS_TOKEN is passed."""
+    e = child_env(tmp, base_url, HOME=key_home(tmp))
+    e.pop("COREOMICS_TOKEN")
+    e.update(extra)
+    return e
+
+
+def windows_places(env):
+    """key_files() and stray_key_files() as Windows Python computes them (ntpath's expanduser
+    reads USERPROFILE and never HOME) -- only the environment named here."""
+    with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(cs.os, "name", "nt"), \
+            mock.patch.object(cs.os, "path", ntpath):
+        return cs.key_files(), cs.stray_key_files(), cs.key_target()
+
+
+class TestKeyPlaces(unittest.TestCase):
+    """Windows: Python's ~ is USERPROFILE, Git Bash's ~ is HOME, and on a domain account
+    (Michelle's, "AD3+msalemi") they can differ -- a key saved with Git Bash's ~ must be found."""
+
+    def test_windows_reads_the_profile_folder_then_git_bash_home(self):
+        read, _, target = windows_places(dict(WIN_ENV, HOME="H:\\"))
+        self.assertEqual(read, ["C:\\Users\\msalemi\\.coreomics_token", "H:\\.coreomics_token"])
+        self.assertEqual(target, "C:\\Users\\msalemi\\.coreomics_token", "save where Python reads first")
+
+    def test_windows_home_in_the_profile_folder_is_one_place(self):
+        for home in ("C:\\Users\\msalemi", "c:/users/MSALEMI/", "/c/Users/msalemi"):
+            read, _, _ = windows_places(dict(WIN_ENV, HOME=home))
+            self.assertEqual(read, ["C:\\Users\\msalemi\\.coreomics_token"], home)
+
+    def test_windows_an_msys_spelled_home_is_its_drive(self):
+        read, _, _ = windows_places(dict(WIN_ENV, HOME="/h/"))
+        self.assertEqual(read[1], "H:\\.coreomics_token")
+        self.assertEqual(cs._drive_path("/home/msalemi"), "/home/msalemi", "not a drive letter")
+
+    def test_windows_without_home_reads_the_profile_only(self):
+        read, stray, _ = windows_places(WIN_ENV)
+        self.assertEqual(read, ["C:\\Users\\msalemi\\.coreomics_token"])
+        # the home drive and Notepad's .txt are looked at by check, never read as the key
+        self.assertIn("H:\\.coreomics_token", stray)
+        self.assertIn("C:\\Users\\msalemi\\.coreomics_token.txt", stray)
+        self.assertIn("C:\\Users\\msalemi\\coreomics_token", stray)
+        self.assertNotIn("C:\\Users\\msalemi\\.coreomics_token", stray)
+
+    def test_posix_reads_home_and_ignores_userprofile(self):
+        with mock.patch.dict(os.environ, {"HOME": "/Users/msalemi", "USERPROFILE": "C:\\Users\\x"},
+                             clear=True), mock.patch.object(cs.os, "name", "posix"):
+            self.assertEqual(cs.key_files(), ["/Users/msalemi/.coreomics_token"])
+
+    def test_the_save_line_writes_where_python_reads(self):
+        self.assertIn('cygpath "$USERPROFILE"', cs.SAVE_KEY_LINE["windows"])
+        self.assertIn('"$HOME/.coreomics_token"', cs.SAVE_KEY_LINE["posix"])
+        for plat, line in cs.SAVE_KEY_LINE.items():
+            self.assertNotIn("\n", line, plat)                        # ONE line (TestSaveLine)
+            self.assertTrue(line.startswith("read -rs TOK && "), plat) # silent; stops on EOF
+            self.assertIn('"$TOK"', line)                             # never the key itself
+            self.assertTrue(line.endswith("; unset TOK"), plat)
+            self.assertIn('chmod 600 "$F"', line)
+        with mock.patch.object(cs.os, "name", "nt"):
+            self.assertIn('cygpath "$USERPROFILE"', cs.move_key_steps("H:\\.coreomics_token"))
+
+    def test_windows_documents_and_onedrive_are_looked_at(self):
+        """Notepad's Save As usually starts in Documents -- OneDrive's, on a OneDrive PC."""
+        _, stray, _ = windows_places(dict(WIN_ENV, OneDrive="C:\\Users\\msalemi\\OneDrive - UC Davis"))
+        for p in ("C:\\Users\\msalemi\\Documents\\.coreomics_token.txt",
+                  "C:\\Users\\msalemi\\OneDrive\\Documents\\coreomics_token.txt",
+                  "C:\\Users\\msalemi\\OneDrive - UC Davis\\Documents\\.coreomics_token.txt"):
+            self.assertIn(p, stray)
+
+    def test_macos_documents_is_never_looked_at(self):
+        """~/Documents on a Mac is privacy-guarded (a prompt) and often iCloud: not for a guess."""
+        with mock.patch.dict(os.environ, {"HOME": "/Users/msalemi"}, clear=True), \
+                mock.patch.object(cs.os, "name", "posix"):
+            self.assertFalse([p for p in cs.stray_key_files() if "Documents" in p])
+
+    def test_git_bash_home_key_is_read_when_the_profile_has_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            profile, home = os.path.join(tmp, "profile"), key_home(tmp, KEY)
+            os.makedirs(profile)
+            with mock.patch.dict(os.environ, {"HOME": home}), \
+                    mock.patch.object(cs.os, "name", "nt"), \
+                    mock.patch.object(cs.os.path, "expanduser",
+                                      lambda p: p.replace("~", profile, 1)):
+                os.environ.pop("COREOMICS_TOKEN", None)
+                self.assertEqual(cs.find_key(), (KEY, os.path.join(home, ".coreomics_token")))
+                with open(os.path.join(profile, ".coreomics_token"), "w") as fh:
+                    fh.write("\n")                       # an empty profile file hides nothing
+                self.assertEqual(cs.api_token(), KEY)
+                with open(os.path.join(profile, ".coreomics_token"), "w") as fh:
+                    fh.write("Token " + KEY)              # nor does a botched one
+                self.assertEqual(cs.api_token(), KEY)
+
+
+def _shells():
+    """(name, argv) for the shells a staff member pastes into: /bin/bash (3.2 on macOS, no
+    bracketed paste), zsh, and a bash 4/5 like Git Bash's when one is installed."""
+    out = []
+    for name in ("bash", "zsh"):
+        for path in dict.fromkeys(filter(None, ["/bin/" + name, shutil.which(name)])):
+            if os.path.exists(path):
+                v = subprocess.run([path, "-c", 'echo "$BASH_VERSION$ZSH_VERSION"'],
+                                   capture_output=True, text=True).stdout.strip()
+                out.append((f"{name} {v}", path))
+    return out
+
+
+class TestSaveLine(unittest.TestCase):
+    """The save line in real shells, fed as a terminal without bracketed paste feeds it: the
+    line, then the key typed at the silent prompt. The key must land in the file and never
+    run as a command (two lines did: `read` took the second line, the key ran)."""
+
+    def paste(self, shell, line, key, env):
+        p = subprocess.run([shell, "-s"], input=f"{line}\n{key}\n", capture_output=True,
+                           text=True, env=env, timeout=30)
+        return p
+
+    def check_saved(self, path):
+        with open(path) as fh:
+            self.assertEqual(fh.read(), KEY + "\n")
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+
+    def test_posix_line(self):
+        shells = _shells()
+        self.assertTrue(shells)
+        for name, sh in shells:
+            if "zsh" in name:
+                continue                  # zsh -s buffers its script; tested with -c below
+            with tempfile.TemporaryDirectory() as tmp:
+                env = {"PATH": os.environ["PATH"], "HOME": tmp}
+                p = self.paste(sh, cs.SAVE_KEY_LINE["posix"], KEY, env)
+                self.assertEqual(p.returncode, 0, name + p.stderr)
+                self.assertNotIn(KEY, p.stdout + p.stderr, name)
+                self.check_saved(os.path.join(tmp, ".coreomics_token"))
+                # the hazard this guards against, shown on the same shell
+                old = ("read -rs TOK\nF=\"$HOME/.coreomics_token\"; (umask 077; printf '%s\\n' "
+                       "\"$TOK\" > \"$F\"); unset TOK; chmod 600 \"$F\"")
+                q = self.paste(sh, old, KEY, env)
+                self.assertIn(KEY, q.stdout + q.stderr, name)
+        for name, sh in shells:
+            if "zsh" in name:
+                with tempfile.TemporaryDirectory() as tmp:
+                    p = subprocess.run([sh, "-c", cs.SAVE_KEY_LINE["posix"]], input=KEY + "\n",
+                                       capture_output=True, text=True, timeout=30,
+                                       env={"PATH": os.environ["PATH"], "HOME": tmp})
+                    self.assertEqual(p.returncode, 0, name + p.stderr)
+                    self.assertNotIn(KEY, p.stdout + p.stderr, name)
+                    self.check_saved(os.path.join(tmp, ".coreomics_token"))
+
+    def test_git_bash_line_with_a_space_in_the_profile(self):
+        for name, sh in _shells():
+            if not name.startswith("bash"):
+                continue
+            with tempfile.TemporaryDirectory() as tmp:
+                profile = os.path.join(tmp, "Mary O Brien")
+                os.makedirs(profile)
+                stub = "cygpath() { printf '%s\\n' \"$1\"; }; "      # Git Bash's, for a POSIX path
+                p = self.paste(sh, stub + cs.SAVE_KEY_LINE["windows"], KEY,
+                               {"PATH": os.environ["PATH"], "USERPROFILE": profile})
+                self.assertEqual(p.returncode, 0, name + p.stderr)
+                self.assertNotIn(KEY, p.stdout + p.stderr, name)
+                self.check_saved(os.path.join(profile, ".coreomics_token"))
+
+    def test_nothing_is_written_or_chmodded_when_read_gets_no_key(self):
+        """Ctrl-D at the prompt leaves an $F from earlier alone; Enter before the paste leaves
+        a saved key alone."""
+        for name, sh in _shells():
+            with tempfile.TemporaryDirectory() as tmp:
+                other = os.path.join(tmp, "other.sh")
+                with open(other, "w") as fh:
+                    fh.write("x")
+                os.chmod(other, 0o755)
+                env = {"PATH": os.environ["PATH"], "HOME": tmp}
+                p = subprocess.run([sh, "-c", f"F={shlex.quote(other)}; " + cs.SAVE_KEY_LINE["posix"]],
+                                   input="", capture_output=True, text=True, timeout=30, env=env)
+                self.assertEqual(stat.S_IMODE(os.stat(other).st_mode), 0o755, name + p.stderr)
+                self.assertFalse(os.path.exists(os.path.join(tmp, ".coreomics_token")), name)
+                saved = write(tmp, ".coreomics_token", KEY + "\n")
+                subprocess.run([sh, "-c", cs.SAVE_KEY_LINE["posix"]], input="\n",
+                               capture_output=True, text=True, timeout=30, env=env)
+                self.assertEqual(read(saved), KEY + "\n", name)
+
+
+class TestKeyContents(unittest.TestCase):
+    def test_utf16_and_bom_files_hold_the_key(self):
+        """Windows PowerShell's `>` writes UTF-16; Notepad can add a UTF-8 BOM."""
+        with tempfile.TemporaryDirectory() as tmp:
+            for raw in ((KEY + "\r\n").encode("utf-16"), codecs.BOM_UTF8 + (KEY + "\r\n").encode()):
+                p = os.path.join(tmp, "k")
+                with open(p, "wb") as fh:
+                    fh.write(raw)
+                self.assertEqual(cs.read_key_file(p), KEY)
+
+    def test_a_malformed_key_never_reaches_a_header(self):
+        for bad in ("Token " + KEY, KEY[:20] + " " + KEY[20:], KEY[:20] + "\n" + KEY[20:],
+                    '"' + KEY + '"', KEY + "\u2019"):
+            with tempfile.TemporaryDirectory() as tmp, \
+                    mock.patch.dict(os.environ, {"HOME": key_home(tmp, bad)}):
+                os.environ.pop("COREOMICS_TOKEN", None)
+                with self.assertRaises(cs.KeyProblem) as e:
+                    cs.api_token()
+                self.assertEqual(e.exception.diagnosis, "key_malformed", repr(bad))
+                for text in (e.exception.detail, e.exception.fix, str(e.exception)):
+                    self.assertNotIn(KEY[:20], text)
+
+    def test_fetch_with_a_two_line_key_exits_3_without_printing_it(self):
+        """http.client's error for a line break in a header is "Invalid header value b'Token
+        <key>'": before the shape check, fetch died with a traceback holding the key."""
+        with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
+            env = key_env(tmp, fake.base)
+            with open(os.path.join(env["HOME"], ".coreomics_token"), "w") as fh:
+                fh.write(KEY[:20] + "\n" + KEY[20:] + "\n")
+            rc, out, p = run(["fetch", "807", "--out", os.path.join(tmp, "o")], env)
+            self.assertEqual((rc, out["diagnosis"]), (3, "key_malformed"), p.stderr)
+            self.assertNotIn(KEY[:20], p.stdout + p.stderr)
+            self.assertNotIn(KEY[20:], p.stdout + p.stderr)
+            self.assertEqual(fake.requests, [], "nothing was sent")
+
+
+class TestCheck(unittest.TestCase):
+    """`check`: one diagnosis with the fix -- and never the key, whatever the server says."""
+
+    def check(self, env, *extra):
+        rc, out, p = run(["check", "--json", *extra], env)
+        for part in (KEY, KEY[:20], KEY[20:]):
+            self.assertNotIn(part, p.stdout + p.stderr)
+        return rc, out, p
+
+    def lab(self, fake, reply):
+        fake.routes[("GET", "/server/api/submissions/")] = lambda q, b: reply
+
+    def assert_save_steps(self, fix):
+        for s in ("Profile", '"API Key"', "Create", "read -rs TOK", 'chmod 600 "$F"',
+                  "Never paste the key into the chat", "HIVE has no CoreOmics key"):
+            self.assertIn(s, fix)
+
+    def test_ok_asks_one_lab_scoped_page_with_the_key(self):
+        with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
+            self.lab(fake, (200, {"count": 812, "next": "x", "results": [record()]}))
+            env = key_env(tmp, fake.base)
+            key_home(tmp, KEY + "\n")
+            rc, out, p = self.check(env)
+            self.assertEqual((rc, out["status"], out["fix"]), (0, "ok", ""), p.stderr)
+            self.assertEqual(out["key_source"], os.path.join(env["HOME"], ".coreomics_token"))
+            (req,) = fake.requests
+            self.assertEqual(req["query"], {"lab": "PROTEOMICS", "page_size": "1"})
+            self.assertEqual(req["auth"], "Token " + KEY)
+
+    def test_no_key_names_where_it_looked_and_how_to_make_one(self):
+        with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
+            env = key_env(tmp, fake.base)
+            rc, out, _ = self.check(env)
+            self.assertEqual((rc, out["status"]), (3, "no_key"))
+            self.assertEqual(out["looked_in"], [os.path.join(env["HOME"], ".coreomics_token")])
+            self.assertIn(out["looked_in"][0], out["say"])
+            self.assert_save_steps(out["fix"])
+            self.assertEqual(fake.requests, [], "no key, no call")
+
+    def test_the_plain_output_is_for_a_person(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = subprocess.run([sys.executable, CS, "check"], capture_output=True, text=True,
+                               env=key_env(tmp), timeout=60)
+            self.assertEqual(p.returncode, 3)
+            self.assertTrue(p.stdout.startswith("CoreOmics key check: no_key\n"), p.stdout)
+            self.assertIn("What to do:", p.stdout)
+            self.assertIn("read -rs TOK", p.stdout)
+
+    def test_empty_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = key_env(tmp)
+            key_home(tmp, "\n")
+            rc, out, _ = self.check(env)
+            self.assertEqual((rc, out["status"]), (3, "key_empty"))
+            self.assert_save_steps(out["fix"])
+
+    @unittest.skipIf(IS_ROOT, "root reads a mode-000 file")
+    def test_an_unreadable_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = key_env(tmp)
+            key_home(tmp, KEY)
+            path = os.path.join(env["HOME"], ".coreomics_token")
+            os.chmod(path, 0)
+            try:
+                rc, out, _ = self.check(env)
+            finally:
+                os.chmod(path, 0o600)
+            self.assertEqual((rc, out["status"]), (3, "key_unreadable"))
+            self.assertIn(path, out["say"])
+
+    def test_a_key_saved_by_notepad_is_in_the_wrong_place(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = key_env(tmp)
+            key_home(tmp, KEY, name=".coreomics_token.txt")
+            rc, out, _ = self.check(env)
+            self.assertEqual((rc, out["status"]), (3, "key_in_wrong_place"))
+            src, dst = (os.path.join(env["HOME"], n) for n in (".coreomics_token.txt", ".coreomics_token"))
+            self.assertIn(f"mv {shlex.quote(src)} {shlex.quote(dst)}", out["fix"])
+            self.assertIn(src, out["say"])
+
+    def test_rejected_key(self):
+        with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
+            self.lab(fake, (403, {"detail": "Invalid token."}))
+            env = key_env(tmp, fake.base)
+            key_home(tmp, KEY)
+            rc, out, _ = self.check(env)
+            self.assertEqual((rc, out["status"], out["http_status"]), (3, "key_rejected", 403))
+            self.assertIn("Invalid token.", out["say"])
+            self.assert_save_steps(out["fix"])
+
+    def test_rejected_key_from_the_variable_says_the_variable_wins(self):
+        with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
+            self.lab(fake, (401, {"detail": "Invalid token."}))
+            rc, out, _ = self.check(key_env(tmp, fake.base, COREOMICS_TOKEN=KEY))
+            self.assertEqual((rc, out["status"]), (3, "key_rejected"))
+            self.assertIn("COREOMICS_TOKEN is set here", out["fix"])
+
+    def test_a_server_that_echoes_the_key_is_redacted(self):
+        with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
+            self.lab(fake, (403, {"detail": f"Invalid token {KEY}."}))
+            rc, out, _ = self.check(key_env(tmp, fake.base, COREOMICS_TOKEN=KEY))
+            self.assertEqual(out["detail"], "Invalid token <key>.")
+
+    def test_no_lab_access_two_ways(self):
+        for reply in ((200, {"count": 0, "next": None, "results": []}),
+                      (403, {"detail": "You do not have permission to perform this action."})):
+            with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
+                self.lab(fake, reply)
+                rc, out, _ = self.check(key_env(tmp, fake.base, COREOMICS_TOKEN=KEY))
+                self.assertEqual((rc, out["status"]), (3, "no_lab_access"), reply)
+                self.assertIn("brettsp", out["fix"])
+                self.assertIn("Proteomics lab", out["fix"])
+
+    def test_a_web_page_401_or_403_is_not_about_the_key_or_the_lab(self):
+        """Apache's 403 page says "permission"; a proxy says "Access Denied". Only CoreOmics'
+        own JSON detail classifies a 401/403."""
+        pages = {403: b"<!DOCTYPE HTML PUBLIC><html><head><title>403 Forbidden</title></head><body><h1>Forbidden</h1><p>You don't have permission to access this resource.</p></body></html>",
+                 401: b"<html><head><title>Access Denied</title></head><body>Access Denied</body></html>"}
+        for status, page in pages.items():
+            with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
+                self.lab(fake, (status, page))
+                rc, out, _ = self.check(key_env(tmp, fake.base, COREOMICS_TOKEN=KEY))
+                self.assertEqual((rc, out["status"], out["http_status"]), (3, "unexpected", status))
+                self.assertIn(f"HTTP {status}", out["say"])
+                self.assertNotIn("<", out["say"] + out["detail"])
+                self.assertNotIn("brettsp", out["fix"])           # not an account problem
+
+    def test_another_coreomics_refusal_is_quoted_not_guessed(self):
+        with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
+            self.lab(fake, (401, {"detail": "User inactive or deleted."}))
+            rc, out, _ = self.check(key_env(tmp, fake.base, COREOMICS_TOKEN=KEY))
+            self.assertEqual((rc, out["status"]), (3, "unexpected"))
+            self.assertIn("User inactive or deleted.", out["say"])
+            self.assertIn("brettsp", out["fix"])
+
+    def test_a_redirect_to_another_server_never_carries_the_key(self):
+        """urllib copies Authorization to wherever a redirect points: before the fix a 302 to a
+        second server handed it the key and check said ok."""
+        with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake, FakeCoreOmics() as other:
+            other.routes[("GET", "/server/api/submissions/")] = lambda q, b: (200, {"count": 9})
+            away = {"Location": other.base + "/submissions/?lab=PROTEOMICS&page_size=1"}
+            self.lab(fake, (302, {}, away))
+            env = key_env(tmp, fake.base, COREOMICS_TOKEN=KEY)
+            rc, out, _ = self.check(env)
+            self.assertEqual((rc, out["status"]), (3, "unexpected"))
+            self.assertIn("redirect", out["say"])
+            rc, _, p = run(["fetch", "807", "--out", os.path.join(tmp, "o")], env)
+            self.assertEqual(rc, 3, p.stderr)
+            self.assertEqual(other.requests, [], "the other server was never asked")
+
+    def test_a_redirect_with_a_malformed_port_is_a_refused_redirect(self):
+        with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
+            self.lab(fake, (302, {}, {"Location": "http://127.0.0.1:abc/x"}))
+            rc, out, _ = self.check(key_env(tmp, fake.base, COREOMICS_TOKEN=KEY))
+            self.assertEqual((rc, out["status"]), (3, "unexpected"))
+            self.assertIn("redirect", out["say"])
+            self.assertNotIn("COREOMICS_BASE_URL", out["say"])
+
+    def test_a_redirect_on_coreomics_itself_is_followed(self):
+        with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
+            self.lab(fake, (301, {}, {"Location": "/server/api/moved/?lab=PROTEOMICS&page_size=1"}))
+            fake.routes[("GET", "/server/api/moved/")] = lambda q, b: (200, {"count": 4})
+            rc, out, p = self.check(key_env(tmp, fake.base, COREOMICS_TOKEN=KEY))
+            self.assertEqual((rc, out["status"]), (0, "ok"), p.stderr)
+            self.assertEqual(fake.requests[-1]["auth"], "Token " + KEY)
+
+    def test_a_base_url_that_is_not_a_web_address_is_a_diagnosis(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, out, p = self.check(key_env(tmp, "ucdavis.coreomics.com/server/api", COREOMICS_TOKEN=KEY))
+            self.assertEqual((rc, out["status"]), (3, "unexpected"), p.stderr)
+            self.assertIn("COREOMICS_BASE_URL", out["say"] + out["fix"])
+            self.assertNotIn("Traceback", p.stderr)
+
+    def test_no_key_arriving_is_not_blamed_on_the_key(self):
+        with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
+            self.lab(fake, (403, {"detail": "Authentication credentials were not provided."}))
+            rc, out, _ = self.check(key_env(tmp, fake.base, COREOMICS_TOKEN=KEY))
+            self.assertEqual((rc, out["status"]), (3, "unexpected"))
+
+    def test_down_or_refused_is_unreachable(self):
+        with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
+            self.lab(fake, (503, {"detail": "Service Unavailable"}))
+            rc, out, _ = self.check(key_env(tmp, fake.base, COREOMICS_TOKEN=KEY))
+            self.assertEqual((rc, out["status"]), (3, "unreachable"))
+        with tempfile.TemporaryDirectory() as tmp:           # port 9: connection refused
+            rc, out, _ = self.check(key_env(tmp, COREOMICS_TOKEN=KEY))
+            self.assertEqual((rc, out["status"]), (3, "unreachable"))
+            self.assertIn("VPN", out["fix"])
+            self.assertIn("not confirmed", out["fix"])
+
+
+class _Opener:
+    """An injected transport: raises `exc`, or answers `body` with 200."""
+
+    def __init__(self, exc=None, body=b""):
+        self.exc, self.body = exc, body
+
+    def open(self, req, timeout=None):
+        if self.exc is not None:
+            raise self.exc
+        return io.BytesIO(self.body)
+
+
+class TestCheckTransport(unittest.TestCase):
+    """DNS, timeout, TLS and a captive portal, in-process with an injected transport."""
+
+    def diagnose(self, opener):
+        env = {"HOME": tempfile.gettempdir(), "COREOMICS_TOKEN": KEY,
+               "COREOMICS_BASE_URL": "https://coreomics.invalid/server/api"}
+        with mock.patch.dict(os.environ, env), mock.patch.object(cs, "_OPENER", opener):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()) as err:
+                rc = cs.main(["check", "--json"])
+        self.assertNotIn(KEY, out.getvalue() + err.getvalue())
+        return rc, json.loads(out.getvalue())
+
+    def test_dns_timeout_and_tls_are_unreachable_and_say_which(self):
+        import socket
+        import ssl
+        cases = {"DNS": urllib.error.URLError(socket.gaierror(8, "nodename nor servname provided")),
+                 "timed out": urllib.error.URLError(socket.timeout("timed out")),
+                 "secure connection": urllib.error.URLError(ssl.SSLCertVerificationError(
+                     1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed"))}
+        for words, exc in cases.items():
+            rc, out = self.diagnose(_Opener(exc=exc))
+            self.assertEqual((rc, out["status"]), (3, "unreachable"), words)
+            self.assertIn(words, out["say"])
+        rc, out = self.diagnose(_Opener(exc=socket.timeout("timed out")))   # mid-read
+        self.assertEqual(out["status"], "unreachable")
+
+    def test_a_sign_in_page_is_not_coreomics(self):
+        rc, out = self.diagnose(_Opener(body=b"<html>Sign in to the guest Wi-Fi</html>"))
+        self.assertEqual((rc, out["status"]), (3, "unexpected"))
+        self.assertIn("web page", out["say"])
+
+    def test_not_http_at_all_and_anything_else_never_crash(self):
+        rc, out = self.diagnose(_Opener(exc=http.client.BadStatusLine("HELLO")))
+        self.assertEqual((rc, out["status"]), (3, "unexpected"))
+        self.assertIn("not a web server", out["say"])
+        rc, out = self.diagnose(_Opener(exc=RuntimeError("boom " + KEY)))      # a bug, reported
+        self.assertEqual((rc, out["status"]), (3, "unexpected"))
+        self.assertIn("RuntimeError: boom <key>", out["say"])
+
+    def test_ok_in_process(self):
+        rc, out = self.diagnose(_Opener(body=b'{"count": 3, "next": null, "results": []}'))
+        self.assertEqual((rc, out["status"], out["submissions_visible"]), (0, "ok", 3))
+
+
+class TestKeyNeverPrinted(unittest.TestCase):
+    """api_call blanks the key out of everything a server or a library says, so fetch,
+    identify and bioshare cannot print it either."""
+
+    def assert_clean(self, p, *paths):
+        self.assertNotIn(KEY, p.stdout + p.stderr)
+        for root in paths:
+            for d, _, fs in os.walk(root):
+                for f in fs:
+                    self.assertNotIn(KEY, read(os.path.join(d, f)), f)
+
+    def test_fetch_error_replies_that_echo_the_key(self):
+        for reply in ((403, {"detail": f"Invalid token {KEY}."}),
+                      (400, {"internal_id": [f"bad value; your token is {KEY}"]}),
+                      (200, f"<html>signed in as {KEY}</html>".encode())):
+            with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
+                fake.routes[("GET", "/server/api/submissions/")] = lambda q, b, r=reply: r
+                rc, out, p = run(["fetch", "807", "--out", os.path.join(tmp, "o")],
+                                 key_env(tmp, fake.base, COREOMICS_TOKEN=KEY))
+                self.assertEqual(rc, 3, p.stderr)
+                self.assert_clean(p)
+                self.assertIn("<key>", p.stdout, reply[0])
+
+    def test_a_record_that_holds_the_key_is_written_without_it(self):
+        with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
+            rec = record()
+            rec["submission_data"]["description"] = f"token {KEY} pasted by mistake"
+            fake.routes[("GET", "/server/api/submissions/")] = \
+                lambda q, b: (200, {"count": 1, "next": None, "results": [rec]})
+            fake.routes[("GET", SHARES)] = lambda q, b: (200, [])
+            out_dir = os.path.join(tmp, "o")
+            rc, _, p = run(["fetch", "807", "--out", out_dir], key_env(tmp, fake.base, COREOMICS_TOKEN=KEY))
+            self.assertEqual(rc, 0, p.stderr)
+            self.assert_clean(p, out_dir)
+
+    def test_identify_lookup_failure_that_echoes_the_key(self):
+        with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
+            fake.routes[("GET", "/server/api/submissions/")] = lambda q, b: (403, {"detail": f"Invalid token {KEY}."})
+            rc, out, p = run(["identify", "/svc/PROT_0756/a.d"], key_env(tmp, fake.base, COREOMICS_TOKEN=KEY))
+            self.assertEqual((rc, out["status"]), (3, "lookup_failed"), p.stderr)
+            self.assert_clean(p)
+
+
+class TestKeyHelpElsewhere(unittest.TestCase):
+    def test_fetch_on_a_rejected_key_points_at_check(self):
+        with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
+            fake.routes[("GET", "/server/api/submissions/")] = lambda q, b: (403, {"detail": "Invalid token."})
+            rc, out, p = run(["fetch", "807", "--out", os.path.join(tmp, "o")], child_env(tmp, fake.base))
+            self.assertEqual(rc, 3, p.stderr)
+            self.assertIn("core_submission.py check", out["hint"])
+
+    def test_fetch_without_a_key_gives_the_steps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, out, _ = run(["fetch", "807", "--out", os.path.join(tmp, "o")], key_env(tmp))
+            self.assertEqual((rc, out["diagnosis"]), (3, "no_key"))
+            self.assertIn("read -rs TOK", out["fix"])
+
+    def test_token_help_is_the_steps_not_ask_someone(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
+            h = cs.token_help()
+        self.assertNotIn("not documented", h)
+        for s in ("~/.coreomics_token", '"API Key"', "read -rs TOK", "HIVE has none", "check"):
+            self.assertIn(s, h)
 
 
 if __name__ == "__main__":

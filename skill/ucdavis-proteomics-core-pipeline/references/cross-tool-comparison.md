@@ -68,7 +68,11 @@ where signal is scarce. Break the QC panel down by sample quality rather than re
 single mean — the mean hides the pattern that explains the mechanism.
 
 ### Protein-group identifiers are not perfectly comparable across tools
-Different parsimony rules mean a protein can appear "unique to engine X" purely because
+`compare_searches.py` compares each group on its first accession, without the FASTA header
+around it or an isoform suffix (`protein_ids.normalize_protein_id`): DIA-NN's `P12345;Q67890`,
+FragPipe's `P12345` and Sage's `sp|P12345|ALBU_HUMAN` are all `P12345`. Before this, a FragPipe
+DDA search shared 0 proteins with DIA-NN on the same files. That fixes the spelling, not the
+grouping: different parsimony rules mean a protein can appear "unique to engine X" purely because
 it was merged into a differently-named group. Some fraction of every unique list is
 grouping, not detection. **Warn about this before anyone reads biology into a unique
 set**, and check per-protein claims at peptide level first.

@@ -118,9 +118,15 @@ instead, and labelled so. Two hard-won lessons it encodes:
 
 For **nail, hair, wool, skin, feather** (and other epidermal/keratinaceous) samples,
 keratins (KRT/KRTAP) are *what you are measuring* — **never flag them as contamination.**
-Pass **`--keratin-sample`** to both `sample_quality.py` and `audit_results.py`: the
-EPIDERMIS/keratin panel is then reported for QC but excluded from contamination flags,
-and the audit stops warning on KRT/KRTAP/keratin (trypsin/casein/BSA are still flagged).
+It is decided at SKILL.md step 3, before the database is built: `fetch_fasta.py fetch
+--keratin-sample` removes the keratin-family `Cont_` entries (left in, run_de.R's contaminant
+filter, and for DIA-NN also its `--cont-quant-exclude Cont_`, take the sample's keratin
+peptides out of quantification), `run_search.py --keratin-sample` refuses a database that
+still holds them, and the sidecar's `keratin_sample: true` reaches run_de.R and both auditors.
+With that sidecar as `--fasta-meta` (or `--keratin-sample` for a database that does not record
+it), the EPIDERMIS/keratin panel of `sample_quality.py` is reported for QC but excluded from
+contamination flags, and `audit_results.py` stops warning on KRT/KRTAP/keratin
+(trypsin/casein/BSA are still flagged).
 The generic "contaminants in the top-20 by intensity (keratin, trypsin, BSA)" check means
 prep contamination **only for non-keratin matrices**; on a keratin sample, keratin at the
 top is expected biology. (Blood/hemolysis and muscle panels still apply — a nail sample

@@ -17,7 +17,9 @@ table (verified against the DIA-NN README, June 2026):
     SCIEX TripleTOF / ZenoTOF:   MS1 20 ppm, MS2 20 ppm
     Orbitrap level outside 30k-240k (the other level has a tier):
                                  MEASURED with DIA-NN on representative runs
-                                 before the search; the level that has a tier keeps it
+                                 before the search; the level that has a tier keeps it.
+                                 DDA (--dda) cannot be measured that way, so there the
+                                 level is pinned at the facility SOP, tagged DEFAULT
     Orbitrap of unknown resolution (no level has a tier):
                                  automatic calibration -- NOT measured, because both
                                  levels would be and DIA-NN warns on a measured MS1;
@@ -94,6 +96,55 @@ SOP_MASS_ACC_SOURCE = ("the facility's validated SOP tolerance for the Orbitraps
 # a contaminant can be told apart from a target protein by the peptides this search looks for.
 DIANN_DIGEST = {"cut": "K*,R*", "missed_cleavages": 1, "min_pep_len": 7, "max_pep_len": 30,
                 "met_excision": True}
+
+# DIA-NN's DDA switch. The ONE definition of "this cfg searches DDA": build_diann() writes it for
+# --acquisition DDA, and diann_parallel.py reads it back (the chain's routing, the refusal of a
+# cfg that does not match the bundle's acquisition, probe_window.py's refusal to measure).
+# It used to live nowhere: run_search.py appended it to the single-shot command only, so every
+# DDA cohort of more than 5 files went to the 5-step chain WITHOUT it and DIA-NN searched DDA
+# spectra as DIA, with no error (msalemi, SET28 / PROT_0000, 28 Exploris .raw, 2026-09-25).
+DIANN_DDA_FLAG = "--dda"
+SRC_DDA = ("DDA acquisition: DIA-NN README, '--dda process data as DDA -- must be used with DDA "
+           "data, must not be used with DIA data' (beta DDA support since DIA-NN 2.3)")
+
+
+def is_dda(acquisition):
+    return (acquisition or "").strip().upper() == "DDA"
+
+
+# What a precursor m/z range is, by acquisition. detect_acquisition.py reads DIA's from the
+# isolation windows and DDA's from the MS1 survey scans, and says which per file
+# (`precursor_mz_range_source`); build_diann() tags the cfg's --min/--max-pr-mz with the same words.
+PR_MZ_RANGE_BASIS = {"DIA": "isolation_windows", "DDA": "ms1_survey_scan"}
+PR_MZ_RANGE_TEXT = {
+    "isolation_windows": "measured from the acquired isolation windows",
+    "ms1_survey_scan": ("measured from the acquired MS1 survey scan range -- a DDA run picks its "
+                        "precursors from its survey scans, so none lies outside it"),
+}
+
+# Scan window under --dda. DIA-NN logs NO scan-window radius in DDA mode: not on the 67-run nail
+# DDA chain (DIA-NN 2.6.0, HIVE, /quobyte/proteomics-grp/brett/diann26_dda_parallel_nail: "RT window
+# set to 3.55907" and "Recommended MS1 mass accuracy setting: 9 ppm", and no radius line in the
+# step 2, 3, 4 and 5 logs read), and not in SET28's step 1b probes (DIA-NN 2.7.0), two of which
+# waited out their 3600 s for it before the third was cancelled. So nothing can measure it, and
+# nothing known before the search can derive it: the flag is left out. The one description, for
+# the cfg's rationale and diann_parallel.window_record().
+DDA_WINDOW_NOTE = (
+    "not set (flag omitted), not probed: DDA (--dda), so DIA-NN chooses. DIA-NN logs no "
+    "scan-window radius in DDA mode (nail DDA chain, DIA-NN 2.6.0; SET28 probes, 2.7.0), so the "
+    "5-step chain's step 1b cannot measure one and does not run for DDA, and nothing known before "
+    "the search can derive one. Whether DIA-NN applies a scan window to DDA data at all is "
+    "unverified. EXPECTED for DDA: the chain's steps 3 and 5 print DIA-NN's 'combining reuse of "
+    ".quant files with automatic optimisation of mass accuracies or scan window' warning, "
+    "because the flag is absent (seen on the nail chain with mass accuracy pinned)")
+# How published text (the Methods paragraph and its parameter table, the run record) names a
+# mass-accuracy level pinned at the SOP as a DEFAULT: the one wording, read by make_methods.py
+# wherever the run's provenance marks a level as one (diann_parallel.mass_acc_defaults).
+SOP_DEFAULT_PUBLISHED = "Core SOP default for this instrument, not measured on these data"
+# Why a DDA search cannot have its mass accuracy measured, for the tags that say so.
+DDA_SOP_WHY = ("no scan-window radius is logged in DDA mode, and mass-accuracy optimisation did "
+               "not finish within 3600 s on the SET28 runs (DIA-NN 2.7.0), so step 1b's probe "
+               "cannot measure it")
 
 
 def instrument_ppm_summary():
@@ -184,6 +235,24 @@ class LoneMassAccOverride(ValueError):
     as a lone flag (LONE_FLAG_NOTE). references/parameters.md's own example, {"--mass-acc": 8},
     once went into the cfg alone for a 120k/15k Orbitrap while the sidecar still planned to measure
     MS2 -- so MS1 ran at 20 ppm instead of its documented 7, and nothing said so."""
+
+
+class NoPrecursorRange(ValueError):
+    """A DIA-NN DDA cfg with no --precursor-mz-range. It used to fall back to 380-980, and
+    SKILL.md told the agent to omit the range for DDA: SET28's Exploris DDA surveyed 350-1500 and
+    its FragPipe PSMs spanned 360-1315 m/z, so about a third of the identifiable precursors would
+    have been left out of the predicted library, silently."""
+
+
+NO_DDA_RANGE_MESSAGE = (
+    "DIA-NN in DDA mode needs the acquired precursor m/z range and none was given "
+    "(--precursor-mz-range). It is not guessed: the old 380-980 fallback would have cut about a "
+    "third of SET28's precursors (survey scan 350-1500, FragPipe PSMs 360-1315 m/z) without an "
+    "error. Pass --precursor-mz-range <LO> <HI> from step 2's detect_acquisition.py "
+    "`precursor_mz_range` -- for a DDA run it is the MS1 survey scan range, read from the Thermo "
+    "scan filter ('Full ms [lo-hi]'), the mzML MS1 scan window or a timsTOF .d's MzAcqRange -- or, "
+    "when step 2 could not read it, the survey scan range from the instrument method (ask the "
+    "user). No cfg was written.")
 
 
 def lone_override_message(given, missing, instr_class, label):
@@ -461,11 +530,36 @@ def classify_instrument(name, ms1_res=None, ms2_res=None, res_source=None, ms2_a
     return ("unknown", None, None, f"unrecognized instrument '{name}'", "auto-calibration fallback")
 
 
-def mass_acc_plan(instr_class, ms1, ms2):
-    """pinned | measure_with_diann | auto -- see PLAN_PINNED above. The one place that decides."""
+def dda_sop_levels(instr_class, ms1, ms2, acquisition):
+    """{flag: ppm} -- the levels a DIA-NN DDA cfg pins at the facility SOP, else {}.
+
+    For DIA these levels (an Orbitrap level outside DIA-NN's table: SET28's 15k MS2) are MEASURED
+    with DIA-NN before the search. Under --dda that cannot work: step 1b's probe waits for a
+    scan-window radius DIA-NN never logs in DDA mode (DDA_WINDOW_NOTE); SET28's probes each ran to
+    their 3600 s timeout -- about 3 h of step 1b, then a failed step 1b and steps 2-5 stuck on
+    DependencyNeverSatisfied. So the level is pinned at the SOP -- the floor a measured level would
+    have been raised to anyway (SOP_MASS_ACC) -- and tagged as a DEFAULT, not user-confirmed. The
+    level that has a tier keeps it, as in DIA. Classes with no usable tier at all (resolution
+    unknown, ion-trap MS2) are not covered: the SOP is an Orbitrap-MS2 number, and those stay on
+    DIA-NN's own calibration as before."""
+    if not is_dda(acquisition) or instr_class not in MEASURE_CLASSES:
+        return {}
+    whole = lambda v: int(v) if float(v).is_integer() else v   # noqa: E731 -- "20", not "20.0"
+    return {flag: whole(SOP_MASS_ACC[key])
+            for flag, key, value in (("--mass-acc-ms1", "ms1_ppm", ms1),
+                                     ("--mass-acc", "ms2_ppm", ms2))
+            if value is None}
+
+
+def mass_acc_plan(instr_class, ms1, ms2, acquisition="DIA"):
+    """pinned | measure_with_diann | auto -- see PLAN_PINNED above. The one place that decides.
+
+    DDA never measures (dda_sop_levels): a level DIA would measure is pinned at the SOP instead."""
     if ms1 and ms2:
         return PLAN_PINNED
-    return MEASURE_WITH_DIANN if instr_class in MEASURE_CLASSES else PLAN_AUTO
+    if instr_class in MEASURE_CLASSES:
+        return PLAN_PINNED if is_dda(acquisition) else MEASURE_WITH_DIANN
+    return PLAN_AUTO
 
 
 def read_mzml_resolution(path, max_bytes=4_000_000):
@@ -511,7 +605,15 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
         else:
             lines.append(f"{flag} {value}")
 
+    dda = is_dda(acq)
     add("--qvalue", 0.01, "standard 1% precursor FDR")
+    # In the cfg, not on a command line: every route reads the cfg (the chain's steps 1-5 and
+    # step-1 library prediction, the single-shot library and search jobs), and the cfg is what
+    # the provenance records and a replay re-runs. Library prediction with --dda is proven: the
+    # nail DDA chain's step 1 (DIA-NN 2.6.0) logged "All runs will be analysed as DDA runs" and
+    # saved its predicted library.
+    if dda:
+        add(DIANN_DDA_FLAG, True, SRC_DDA)
     add("--matrices", True, UNIV)
     # Extracted ion chromatograms: needed to visually validate an identification
     # (DIA-NN XIC Viewer / Skyline) rather than trusting a q-value alone. 10s is
@@ -546,12 +648,17 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
     # detect_acquisition.py already reads the isolation windows to classify
     # DIA vs DDA; it now returns their bounds too, and run_search.py passes them
     # in. Round outward to whole m/z so we never clip the edge window.
+    #
+    # DDA has no isolation-window scheme: its range is the MS1 SURVEY scan range, which
+    # detect_acquisition.py reads for a DDA run instead (PR_MZ_RANGE_BASIS). With none, a DDA
+    # cfg is refused, not given the fallback below -- see NoPrecursorRange.
     if mz_range:
         lo, hi = float(mz_range[0]), float(mz_range[1])
-        add("--min-pr-mz", int(math.floor(lo)),
-            f"measured from the acquired isolation windows ({lo:.1f}-{hi:.1f} m/z)")
-        add("--max-pr-mz", int(math.ceil(hi)),
-            f"measured from the acquired isolation windows ({lo:.1f}-{hi:.1f} m/z)")
+        what = PR_MZ_RANGE_TEXT[PR_MZ_RANGE_BASIS["DDA" if dda else "DIA"]]
+        add("--min-pr-mz", int(math.floor(lo)), f"{what} ({lo:.1f}-{hi:.1f} m/z)")
+        add("--max-pr-mz", int(math.ceil(hi)), f"{what} ({lo:.1f}-{hi:.1f} m/z)")
+    elif dda:
+        raise NoPrecursorRange(NO_DDA_RANGE_MESSAGE)
     else:
         # Tagged FALLBACK, not UNIV: a reader must be able to tell a measured
         # range from a guess, and this guess can silently cost identifications.
@@ -596,7 +703,9 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
     # diann_parallel.parallel_safe() declines the chain for both an absent flag (auto) and
     # a 0 (literal 0 ppm) -- for different reasons, which its message now names -- EXCEPT an
     # absent pair this function planned to measure (MEASURE_WITH_DIANN, below).
-    plan = mass_acc_plan(instr_class, ms1, ms2)
+    plan = mass_acc_plan(instr_class, ms1, ms2, acq)
+    # DDA: the levels DIA would measure, pinned at the SOP instead ({} for DIA) -- dda_sop_levels
+    sop_default = dda_sop_levels(instr_class, ms1, ms2, acq)
     documented, basis = {}, {}
     # An SOP override of a mass-accuracy level (applied below, with the other overrides) is a
     # value for that level. Both levels known -- overridden, or from the table -- means both are
@@ -605,6 +714,7 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
     given = [f for f in MASS_ACC_FLAGS if f in (overrides or {})]
     if given:
         table = {"--mass-acc-ms1": ms1, "--mass-acc": ms2}
+        table.update(sop_default)
         missing = [f for f in MASS_ACC_FLAGS if f not in given and table[f] is None]
         if missing:
             raise LoneMassAccOverride(lone_override_message(given[0], missing[0], instr_class,
@@ -643,10 +753,19 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
         # names ITS level's evidence (a documented tier vs an interpolation), not a merged one.
         # An overridden level is written by the override loop below, with its own tag.
         s1, s2 = level_src or (src, src)
-        if "--mass-acc" not in given:
-            add("--mass-acc", ms2, f"{label}: MS2 {ms2} ppm [{s2}]")
-        if "--mass-acc-ms1" not in given:
-            add("--mass-acc-ms1", ms1, f"{label}: MS1 {ms1} ppm [{s1}]")
+        for flag, level, value, lsrc in (("--mass-acc", "MS2", ms2, s2),
+                                         ("--mass-acc-ms1", "MS1", ms1, s1)):
+            if flag in given:
+                continue
+            if flag in sop_default:
+                # rule 2: a value nobody confirmed, in a cfg every export describes
+                add(flag, sop_default[flag],
+                    f"{label}: {level} {sop_default[flag]:g} ppm -- DEFAULT, not user-confirmed: "
+                    f"{lsrc}, and a DDA search (--dda) cannot measure it ({DDA_SOP_WHY}), so it "
+                    f"is pinned at {SOP_MASS_ACC_SOURCE}. Set it with --overrides if the "
+                    "instrument needs another value")
+            else:
+                add(flag, value, f"{label}: {level} {value} ppm [{lsrc}]")
     # --window 0 is likewise rejected ("scan window radius should be a positive
     # integer"); omitting it lets DIA-NN set the radius from the observed peak width.
     #
@@ -657,6 +776,7 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
     # here was wrong for the chain, which is the route most real cohorts take. The route
     # that actually ran is recorded in search_provenance.json (`scan_window`).
     add("--window", "not set here (flag omitted)",
+        DDA_WINDOW_NOTE if dda else
         "radius depends on the acquisition scheme and must be measured, not guessed. "
         "Single-shot search: DIA-NN chooses it itself (how, within one multi-file search, "
         "is unverified). 5-step parallel chain: step 1b "
@@ -677,8 +797,14 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
         r[k] = tagged(v, "user-override (validated SOP)")
         lines = [ln for ln in lines if not (ln == k or ln.startswith(k + " "))]
         lines.append(k if v is True else f"{k} {v}")
+    # The DDA levels pinned at the SOP, by flag -- what an export must call a default. A level
+    # the caller overrode is theirs, not a default, so it is not listed.
+    defaulted = {f: v for f, v in sop_default.items() if f not in given}
     r["mass_accuracy_plan"] = tagged(plan, {
-        PLAN_PINNED: "--mass-acc/--mass-acc-ms1 are in the cfg",
+        PLAN_PINNED: "--mass-acc/--mass-acc-ms1 are in the cfg" + (
+            "; " + ", ".join(f"{f} {v:g}" for f, v in sorted(defaulted.items()))
+            + " pinned at the facility SOP -- DEFAULT, not user-confirmed (a DDA search cannot "
+              "measure it: " + DDA_SOP_WHY + ")" if defaulted else ""),
         MEASURE_WITH_DIANN: SRC_MEASURE,
         # It said "instrument not identified" for every auto cfg -- also for a named Orbitrap of
         # unknown resolution, and for an ion-trap MS2, neither of which is unidentified.
@@ -698,6 +824,11 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
          "resolution table: " + "; ".join(f"{f} {v} [{basis[f]}]" for f, v in documented.items()))
         if documented else
         "none: only a measure_with_diann plan pins a level from the table alongside a measured one")
+    r["mass_accuracy_default"] = tagged(
+        defaulted,
+        (f"DEFAULT, not user-confirmed: DDA levels with no DIA-NN resolution-table value, pinned "
+         f"at {SOP_MASS_ACC_SOURCE}, because {DDA_SOP_WHY}") if defaulted else
+        "none: only a DDA cfg for an Orbitrap level outside DIA-NN's table pins one")
 
     return "\n".join(lines) + "\n", r
 
@@ -853,9 +984,10 @@ def main():
     ap.add_argument("--precursor-mz-range", nargs=2, type=float, metavar=("LO", "HI"),
                     default=None,
                     help="ACQUIRED precursor m/z bounds, from detect_acquisition.py's "
-                         "precursor_mz_range. Without it the range falls back to 380-980 "
-                         "and is tagged FALLBACK -- which silently discards anything the "
-                         "method acquired outside that window.")
+                         "precursor_mz_range (DIA: the isolation windows; DDA: the MS1 survey "
+                         "scan range). Without it a DIA range falls back to 380-980 and is "
+                         "tagged FALLBACK -- which silently discards anything the method "
+                         "acquired outside that window -- and a DIA-NN DDA cfg is refused.")
     ap.add_argument("--fasta-meta", default="",
                     help="fetch_fasta.py's <fasta>.meta.json — supplies the contaminant "
                          "tag so DIA-NN excludes contaminants from quant")
@@ -903,7 +1035,7 @@ def main():
             text, rationale = build_diann(a.acquisition, cls, ms1, ms2, label, src, var_mods,
                                           overrides, cont_tag, a.precursor_mz_range,
                                           level_src=level_src)
-        except LoneMassAccOverride as e:
+        except (LoneMassAccOverride, NoPrecursorRange) as e:
             # The message says "no cfg was written", so leave nothing at --out that contradicts
             # it. build_diann() raises BEFORE the write below, so THIS run wrote neither file --
             # but an earlier run of the same command may have left both, and the next step reads
@@ -933,6 +1065,9 @@ def main():
         # search measure it; the documented levels are pinned as documented
         "mass_accuracy_plan": (rationale.get("mass_accuracy_plan") or {}).get("value"),
         "mass_accuracy_documented": (rationale.get("mass_accuracy_documented") or {}).get("value"),
+        # DDA levels pinned at the facility SOP because they cannot be measured under --dda:
+        # DEFAULT, not user-confirmed ({flag: ppm}; {} when nothing was defaulted)
+        "mass_accuracy_default": (rationale.get("mass_accuracy_default") or {}).get("value"),
         "params_file": os.path.abspath(a.out),
         "rationale": rationale,
         "note": "Every value is tagged with its provenance. Mass tolerances are the "

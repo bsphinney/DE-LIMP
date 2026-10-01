@@ -377,14 +377,23 @@ footer p { max-width: var(--col); }
   <div class="wrap">
     <h2>Install the skill</h2>
     <p class="lede">
-      Two commands, or a few clicks. You do this once; it stays installed.
+      One line in a terminal, two commands in Claude Code, or a few clicks. You do this once;
+      it stays installed.
     </p>
 
     <div class="two">
       <div class="card">
         <h3>In Claude Code</h3>
         <p class="sub">The terminal version</p>
-        <p>Type these two commands at the Claude Code prompt, one after the other:</p>
+        <p><strong>Easiest, in a terminal:</strong> paste this one line whole, then start Claude
+        Code (or run <code>/reload-plugins</code> if it is already open).</p>
+        <div class="cmd" data-copy="claude plugin marketplace add bsphinney/DE-LIMP &amp;&amp; claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core">
+          <button class="copy" type="button">Copy</button>
+          <div class="cmd-label">Add the source and install, in one line</div>
+          <pre><code>claude plugin marketplace add bsphinney/DE-LIMP &amp;&amp; claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core</code></pre>
+        </div>
+        <p><strong>Or inside Claude Code:</strong> paste the first command, press Enter, then the
+        second. Pasting both at once does not work.</p>
         <div class="cmd" data-copy="/plugin marketplace add bsphinney/DE-LIMP">
           <button class="copy" type="button">Copy</button>
           <div class="cmd-label">Step one &mdash; add the source</div>
@@ -427,14 +436,27 @@ footer p { max-width: var(--col); }
       <code>/reload-plugins</code> activates it without restarting.
     </p>
     <p>
-      Updates arrive automatically unless you've turned that off. To pull the newest version
-      yourself:
+      <strong>Updates do not arrive on their own.</strong> Claude Code leaves automatic updates
+      off for a marketplace like this one, so an installed skill stays on the version you first
+      installed until you update it. Turn them on once, right after installing:
+      run <code>/plugin</code>, open <strong>Marketplaces</strong>, choose
+      <strong>ucdavis-proteomics-core</strong>, and pick <strong>Enable auto-update</strong>.
     </p>
-    <div class="cmd" data-copy="/plugin marketplace update ucdavis-proteomics-core">
+    <p>
+      To update now: run <code>/plugin</code>, open <strong>Installed</strong>, choose
+      <strong>ucdavis-proteomics-core-pipeline</strong>, and pick <strong>Update now</strong>. Or,
+      in a terminal:
+    </p>
+    <div class="cmd" data-copy="claude plugin update ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core">
       <button class="copy" type="button">Copy</button>
-      <div class="cmd-label">Fetch the latest version</div>
-      <pre><code>/plugin marketplace update ucdavis-proteomics-core</code></pre>
+      <div class="cmd-label">Update the skill to the latest version</div>
+      <pre><code>claude plugin update ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core</code></pre>
     </div>
+    <p>
+      Then run <code>/reload-plugins</code>, or restart Claude Code. Note that
+      <code>/plugin marketplace update</code> only refreshes the list of available versions. The
+      installed skill stays where it was.
+    </p>
     <p>
       Note the two different names: <code>bsphinney/DE-LIMP</code> is the GitHub repository you add,
       while <code>ucdavis-proteomics-core</code> is the marketplace inside it that later commands

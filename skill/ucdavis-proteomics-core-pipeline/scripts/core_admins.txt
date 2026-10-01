@@ -1,0 +1,20 @@
+# core_admins.txt -- the ONE list of UC Davis Proteomics Core admins: HIVE usernames, one per
+# line. `#` starts a comment; blank lines are ignored.
+#
+# /quobyte/proteomics-grp is group-writable and not sticky, so any group member can rename or
+# replace a folder at its top. What an admin publishes there is trusted only while the file
+# and its folder are owned by someone on this list:
+#   - skill_version.sh --check-hive trusts skill_release/CURRENT_VERSION only then, and only
+#     an admin can --publish-release it;
+#   - notes.py trusts skill_notes/, its folders and SENDERS only when they are an admin's,
+#     and an admin is always a trusted sender;
+#   - slack_collab.py uses the Core's bot token and Slack-people list only when they and
+#     .config/ are an admin's.
+# It ships with the skill: changing it is a code change, released like any other. A missing,
+# unreadable or empty file means no admins, and nothing is trusted.
+#
+# Two readers, kept equal by tests/test_skill_version.py: skill_version.sh's skill_core_admins
+# (bash) and skill_version.py's core_admins() (Python). Read it through one of them, not with a
+# parser of your own. (notes.py's copy sent over stdin carries a mirror of the Python reader,
+# kept equal by tests/test_notes.py.)
+brettsp

@@ -53,6 +53,7 @@ sys.path.insert(0, HERE)
 from job_env import job_env  # noqa: E402  (env for running job scripts)
 
 import probe_window  # noqa: E402
+import diann_parallel as dp  # noqa: E402
 
 GB = 1024 ** 3
 
@@ -720,7 +721,7 @@ class Step1bMassAccChainTests(unittest.TestCase):
                          "step4_finalpass.sbatch", "step5_report.sbatch"):
                 body = self._step(out, name)
                 self.assertIn(f"$(cat {massacc})", body, name)
-                self.assertIn(f"--window $(cat {os.path.join(out, 'window.txt')})", body, name)
+                self.assertIn(dp.window_flag(os.path.join(out, "window.txt")), body, name)
                 self.assertNotRegex(body, r"--mass-acc(-ms1)? \d", name)
             self.assertNotIn("--mass-acc", self._step(out, "step1_libpred.sbatch"))
 
@@ -866,6 +867,9 @@ class Step1bMassAccChainTests(unittest.TestCase):
             self.assertIn("--window 7 --mass-acc 20 --mass-acc-ms1 7", call)
 
     def test_a_failed_mass_accuracy_step1b_stops_and_leaves_no_stale_value(self):
+        """No run logs its MS2 mass accuracy and DIA-NN finishes each one: the data answered, so
+        step 1b fails -- not retried, not fallen back past (only a failure of the probe's own
+        machinery may: tests/test_probe_estale.py) -- and no earlier run's value survives."""
         with tempfile.TemporaryDirectory() as d:
             raws = _cohort(d)
             for r in raws:                                  # no run gets to its MS2 line
@@ -881,13 +885,16 @@ class Step1bMassAccChainTests(unittest.TestCase):
             log = p.stdout + p.stderr
             self.assertNotEqual(p.returncode, 0, log)
             self.assertNotIn("Traceback", log)
+            self.assertNotIn("retrying", log)
             self.assertIn("FAILED: step 1b measured no scan-window radius and mass accuracy", log)
             self.assertIn("DependencyNeverSatisfied", log)
-            for stale in ("massacc.txt", "window.txt", "params.resolved.cfg"):
+            for stale in ("massacc.txt", "window.txt", "params.resolved.cfg",
+                          dp.FALLBACK_RECORD):
                 self.assertFalse(os.path.exists(os.path.join(out, stale)),
                                  f"a stale {stale} survived a failed step 1b")
             w = json.load(open(os.path.join(out, "window.json")))     # the evidence stays
             self.assertIsNone(w["mass_acc"])
+            self.assertEqual(w["exit_status"], probe_window.EXIT_NOT_MEASURED)
 
     def test_a_run_without_mass_accuracy_does_not_fail_step1b_when_another_can_replace_it(self):
         with tempfile.TemporaryDirectory() as d:

@@ -17,7 +17,9 @@ Reports, per search and per pair:
   - data completeness: how many proteins are quantified in every run
   - quantitative precision: CV of each protein across runs (replicate-level only --
     with no group labels a low CV means reproducible measurement, not no biology)
-  - overlap between searches (shared / unique protein groups, Jaccard)
+  - overlap between searches (shared / unique protein groups, Jaccard), on each group's
+    accession (protein_ids.normalize_protein_id): DIA-NN's "P12345;Q67890", FragPipe's
+    "P12345" and Sage's "sp|P12345|ALBU_HUMAN" are all P12345
   - agreement on shared proteins: Pearson/Spearman of log2 intensity, per run
 
 Usage:
@@ -32,10 +34,18 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # ONE definition of the q-value columns, shared with run_search.py and (mirrored)
 # the R scripts -- see diann_q_columns.py. SKILL_OPEN_DEFECTS #2.
 from diann_q_columns import PROTEIN_Q_PREFERENCE
+# ONE reading of a protein identifier, shared with run_search.py's FragPipe adapter.
+from protein_ids import normalize_protein_id
 
 
 def read_report(path, q_cut):
-    """Read a DIA-NN-shaped report into {run: {protein: intensity}}.
+    """Read a DIA-NN-shaped report into {run: {accession: intensity}}, plus the q-value basis,
+    the rows the q filter dropped, the rows whose accession another group of the same run
+    already had, and those accessions.
+
+    Each protein group is keyed on its accession (normalize_protein_id), so engines that
+    spell the same protein differently still meet. Two groups of one run that read as the same
+    accession (P12345 and P12345-2) keep the larger intensity, and the row is counted.
 
     Filters on the GLOBAL q-value when the column exists. Run-level Q.Value is not
     comparable across tools -- the global one is the defensible cross-tool cutoff --
@@ -89,7 +99,7 @@ def read_report(path, q_cut):
         ints = tbl.column(c_int).to_pylist()
         qs = tbl.column(c_q).to_pylist() if c_q else [0.0] * len(runs)
 
-    data, dropped = defaultdict(dict), 0
+    data, dropped, merged, collided = defaultdict(dict), 0, 0, set()
     for run, pg, val, q in zip(runs, pgs, ints, qs):
         try:
             q = float(q)
@@ -102,9 +112,15 @@ def read_report(path, q_cut):
             v = float(val)
         except (TypeError, ValueError):
             continue
-        if v > 0 and pg:
-            data[str(run)][str(pg)] = v
-    return data, q_basis, dropped
+        acc = normalize_protein_id(pg)
+        if v > 0 and acc:
+            row = data[str(run)]
+            if acc in row:
+                merged += 1
+                collided.add(acc)
+                v = max(v, row[acc])
+            row[acc] = v
+    return data, q_basis, dropped, merged, sorted(collided)
 
 
 def cv_percent(values):
@@ -221,11 +237,13 @@ def main():
         if ":" not in spec:
             sys.exit(f'--search must be "Label:/path", got: {spec}')
         label, path = spec.split(":", 1)
-        data, q_basis, dropped = read_report(path.strip(), a.q)
+        data, q_basis, dropped, merged, collided = read_report(path.strip(), a.q)
         if not data:
             sys.exit(f"{label}: no rows survived the q <= {a.q} filter ({path}).")
         s = summarize(label.strip(), data)
         s["q_basis"], s["rows_dropped_by_q"], s["path"] = q_basis, dropped, path.strip()
+        s["rows_sharing_an_accession"] = merged
+        s["accessions_shared_by_groups"] = collided      # which, so they can be checked
         loaded.append(data)
         summaries.append(s)
 
@@ -274,8 +292,13 @@ def main():
            "Read the three columns together — protein groups, how many survive in *every* "
            "run, and the CV.", ""]
     for s in summaries:
+        acc = s["accessions_shared_by_groups"]
+        same = (f" {s['rows_sharing_an_accession']} rows named an accession another group of "
+                "the same run also had (isoforms, overlapping groups); the larger intensity was "
+                f"kept ({', '.join(acc[:10])}{', ...' if len(acc) > 10 else ''})."
+                if s["rows_sharing_an_accession"] else "")
         md.append(f"- **{s['label']}** — q filtered on `{s['q_basis']}`, "
-                  f"{s['rows_dropped_by_q']} rows dropped. `{s['path']}`")
+                  f"{s['rows_dropped_by_q']} rows dropped.{same} `{s['path']}`")
     md += ["", "## How the searches agree", ""]
     for p in pairs:
         la, lb = p["pair"].split(" vs ")
@@ -294,9 +317,11 @@ def main():
            "- CV here is computed across **all runs**, with no knowledge of experimental "
            "groups. If the runs span real conditions, a high CV may be biology rather than "
            "imprecision. It is only a precision measure when the runs are replicates.",
-           "- Protein-group identifiers must be comparable between searches. Different "
-           "FASTA files, or different protein-inference rules, shift group membership and "
-           "will depress the overlap for reasons that have nothing to do with sensitivity.",
+           "- Protein groups are compared on their first accession, without the FASTA "
+           "header around it or an isoform suffix (`sp|P12345-2|X_HUMAN;Q67890` is P12345). "
+           "Different FASTA files, or different protein-inference rules, still shift group "
+           "membership, and depress the overlap for reasons that have nothing to do with "
+           "sensitivity.",
            "- This compares searches, not conclusions. Run `compare_analyses.R` on the DE "
            "output to see whether the differences here actually change which proteins come "
            "out as significant.", ""]

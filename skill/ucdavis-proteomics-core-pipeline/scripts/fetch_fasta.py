@@ -58,6 +58,11 @@ CONTAMINANTS
   own, so it must be appended here). The Core's own staged database is
   proteome + Universal contaminants, so `universal` is the default.
 
+  KERATIN SAMPLES (hair, wool, feather, skin, nail ...): keratin is the analyte, so
+  `fetch --keratin-sample` also removes every keratin-family Cont_ entry -- left in, the
+  peptides they share with the sample's keratins are excluded from quantification.
+  run_search.py --keratin-sample refuses a database that still holds them.
+
 Emits JSON on stdout and writes a `<out>.meta.json` sidecar with the same content
 plus checksums, for the reproducibility bundle.
 """
@@ -118,6 +123,16 @@ CONTAM_SETS = {
 CONTAM_CITATION = ("Frankenfield AM, Ni J, Ahmed M, Hao L. (2022) J Proteome Res "
                    "21(9):2104-2113. doi:10.1021/acs.jproteome.2c00145")
 CONT_TAG = "Cont_"
+# Every tag that marks a contaminant entry: this script's (CONT_TAG, the one DIA-NN's
+# --cont-quant-exclude is given) and FragPipe's, which Philosopher writes in front of the
+# database field of the contaminants in a database it builds with --contam
+# (">contam_sp|P00761|TRYP_PIG"); run_search.py's FragPipe DDA adapter keeps it on the accession
+# (contam_P00761; protein_ids.py). FragPipe adds none when it searches, and its DIA route drops the
+# tag (library.tsv), so run_search.py refuses such a database for FragPipe. contaminants.R's
+# CONTAMINANT_TAGS mirrors this (tests/test_keratin_sample.py keeps them equal). Only the keratin
+# rule reads contam_ here; everything this script WRITES is tagged CONT_TAG.
+FRAGPIPE_CONT_TAG = "contam_"
+CONTAMINANT_TAGS = (CONT_TAG, FRAGPIPE_CONT_TAG)
 
 KINGDOM_DIR = {"eukaryota": "Eukaryota", "bacteria": "Bacteria",
                "archaea": "Archaea", "viruses": "Viruses"}
@@ -783,6 +798,7 @@ KEEP_TARGET_CONTAMINANTS_RULE = "disabled (--keep-target-contaminants)"
 MEASURED_TARGET_OVERLAP = {9606: 153, 10090: 31, 9913: 145, 9823: 9, 93061: 2}
 _UNIPROT_HEADER = re.compile(r"^>(?:sp|tr)\|([^|\s]+)\|(\S*)")
 _GENE_NAME = re.compile(r"\bGN=(\S+)")
+_TAXID = re.compile(r"\bOX=(\d+)")
 
 # The ONE exception to the rule above: the digestion enzyme(s) USED in this search are
 # reagents we added, so their autolysis peptides must stay Cont_ and out of normalisation
@@ -1080,6 +1096,13 @@ def contaminants_matching_targets(contam_recs, target_recs, min_len=MIN_CONTAINE
                 "n_shared_with_target": p["targets"][0][1],
                 **{k: p[k] for k in counts}}))
         out.sort(key=lambda x: x[0])
+    # Keratin-family, stamped here where the contaminant's own header (its protein name) is at
+    # hand: the sheep wool keratins have no gene on either side, so a later gene-only test called
+    # them non-keratins (keratin-review, 2026-09-29: 17 wool keratins flagged as possible
+    # contamination in a keratin sample). record_is_keratin() is the one reader.
+    for ci, rec in out:
+        rec["keratin_family"] = (is_keratin_gene(rec["cont_gene"], _protein_name(contam_recs[ci][0]))
+                                 or is_keratin_gene(rec["gene"]))
     return out
 
 
@@ -1149,8 +1172,216 @@ def _pair_list(records, limit=12):
     return "; ".join(shown) + more
 
 
-def is_keratin_gene(gene):
-    return (gene or "").upper().startswith(("KRT", "KRTAP"))
+# Keratin-family = keratins and keratin-associated proteins. THE one definition: it puts keratins
+# last in warning lists, leaves them out of a keratin sample's "possible contamination" list
+# (target_contaminants) and removes them from a keratin sample's contaminant set
+# (--keratin-sample). A gene KRT<n> / KRTAP<n> in any case (KRT1, Krt31, KRTAP5-9, KRT87P, and
+# the old hair-keratin symbols KRTHA1 / KRTHB1), or a UniProt protein name that starts
+# "Keratin": the Universal set's 14 sheep wool keratins (KRB2A_SHEEP "Keratin, high-sulfur
+# matrix protein, B2A", K1M1_SHEEP ...) carry no GN=, so a gene test alone kept them. "KRT"
+# followed by a letter is not a keratin: Krtcap2, keratinocyte-associated protein 2, is in the
+# mouse and rat sets. Checked 2026-09-29 against all six contaminant sets in contaminants/: 189
+# keratin-family entries in the Universal set, and the gene and name rules disagree only on
+# those 14 sheep entries (no gene), Q3KNV1 "KRT7 protein" (gene KRT7) and Krtcap2.
+_KERATIN_GENE = re.compile(r"^KRT(?:AP|H[AB])?\d", re.I)
+_KERATIN_NAME = re.compile(r"^(?:putative\s+)?keratin\b", re.I)
+KERATIN_FAMILY_RULE = ("keratin-family: gene KRT<n> or KRTAP<n> (any case), or a UniProt "
+                       "protein name starting 'Keratin' (sheep wool keratins have no gene name)")
+
+
+def _entry_list(records, limit=12):
+    """'Cont_Q61765 (K1H1_MOUSE), Cont_P02438 (KRB2A_SHEEP); +N more' for a note."""
+    shown = [f"{r['cont_acc']} ({r.get('cont_entry') or r.get('cont_gene') or '?'})"
+             for r in records[:limit]]
+    return ", ".join(shown) + (f"; +{len(records) - limit} more" if len(records) > limit else "")
+
+
+def is_keratin_gene(gene, protein_name=""):
+    return bool(_KERATIN_GENE.match((gene or "").strip())
+                or _KERATIN_NAME.match((protein_name or "").strip()))
+
+
+def record_is_keratin(rec):
+    """Is a contaminant/target match record (contaminants_matching_targets) keratin-family? Its
+    build-time `keratin_family` stamp; a record from before the stamp by its genes, the target's
+    or the contaminant's (which misses gene-less entries such as the sheep wool keratins)."""
+    v = rec.get("keratin_family")
+    if isinstance(v, bool):
+        return v
+    return is_keratin_gene(rec.get("gene")) or is_keratin_gene(rec.get("cont_gene"))
+
+
+def _protein_name(header):
+    """'>sp|P02438|KRB2A_SHEEP Keratin, high-sulfur ... OS=Ovis aries ...' -> 'Keratin, high-sulfur
+    ...': the words after the identifier, up to the first UniProt field (OS= GN= ...)."""
+    parts = header[1:].strip().split(None, 1)
+    if len(parts) < 2:
+        return ""
+    return re.split(r"\s(?:OS|OX|GN|PE|SV)=", " " + parts[1], maxsplit=1)[0].strip()
+
+
+# A keratin sample: the tissue IS keratin, so keratin is the analyte, not handling contamination.
+# The ONE list of those tissues (SKILL.md step 3 asks the sample type; the help texts cite it).
+KERATIN_SAMPLE_TISSUES = ("hair", "wool", "fur", "feather", "skin (epidermis, stratum corneum)",
+                          "nail", "claw", "hoof", "horn", "beak", "baleen", "quill", "scale")
+
+
+def keratin_sample_recorded(meta):
+    """What a fetch_fasta.py sidecar records about the sample: True (built with --keratin-sample),
+    False (built without it, by a release that asks), None (not recorded: an older sidecar). The ONE
+    reader of that field; run_search.py, the auditors and contaminants.R go through it or its
+    `keratin-db` answer."""
+    v = (meta if isinstance(meta, dict) else {}).get("keratin_sample")
+    return v if isinstance(v, bool) else None
+
+
+def _contaminant_ids(header):
+    """(tag, accession as the report carries it, entry name, gene) of a contaminant entry's header,
+    or None. Cont_ as this script writes it (">sp|Cont_P00761|TRYP_PIG"); FragPipe's contam_ in
+    front of the database field (">contam_sp|P00761|TRYP_PIG" -> contam_P00761, as
+    protein_ids.header_accession reads it)."""
+    if header.startswith(">" + FRAGPIPE_CONT_TAG):
+        acc, entry, gene = _header_ids(">" + header[1 + len(FRAGPIPE_CONT_TAG):])
+        return FRAGPIPE_CONT_TAG, FRAGPIPE_CONT_TAG + acc, entry, gene
+    if CONT_TAG in header:
+        return (CONT_TAG,) + _header_ids(header)
+    return None
+
+
+def contaminant_tags_in(recs):
+    """The contaminant tags (CONTAMINANT_TAGS order) the entries of `recs` carry."""
+    seen = {t[0] for t in (_contaminant_ids(h) for h, _l in recs) if t}
+    return [t for t in CONTAMINANT_TAGS if t in seen]
+
+
+def keratin_contaminants(recs):
+    """-> [(index, record)] for every contaminant entry of `recs` (_fasta_records), either tag,
+    that is keratin-family (is_keratin_gene on its gene and protein name). record: cont_acc (as
+    the report carries it), cont_entry, cont_gene, protein_name, tag, taxid (OX=; 0 if none)."""
+    out = []
+    for i, (header, _lines) in enumerate(recs):
+        ids = _contaminant_ids(header)
+        if not ids:
+            continue
+        tag, acc, entry, gene = ids
+        name = _protein_name(header)
+        if is_keratin_gene(gene, name):
+            ox = _TAXID.search(header)
+            out.append((i, {"cont_acc": acc, "cont_entry": entry, "cont_gene": gene,
+                            "protein_name": name, "tag": tag,
+                            "taxid": int(ox.group(1)) if ox else 0}))
+    return out
+
+
+def drop_keratin_contaminants(text):
+    """-> (text without its keratin-family Cont_ entries, [their records]). Every other record is
+    written back byte-for-byte."""
+    recs = _fasta_records(text)
+    hits = keratin_contaminants(recs)
+    if not hits:
+        return text, []
+    drop = {i for i, _ in hits}
+    kept = "".join(h + "".join(lines) for i, (h, lines) in enumerate(recs) if i not in drop)
+    return kept, [rec for _, rec in hits]
+
+
+def _fasta_headers(path):
+    """A FASTA file's headers as header-only records (a full proteome's sequences are never held
+    in memory). OSError propagates."""
+    opn = gzip.open if path.endswith(".gz") else open
+    with opn(path, "rt", errors="replace") as fh:
+        return [(ln, []) for ln in fh if ln.startswith(">")]
+
+
+def keratin_contaminants_in_fasta(path):
+    """The keratin-family contaminant entries a FASTA file holds -> [record]."""
+    return [rec for _, rec in keratin_contaminants(_fasta_headers(path))]
+
+
+def fasta_contaminant_summary(path):
+    """(keratin-family contaminant records, contaminant tags present) of a FASTA file, one read."""
+    heads = _fasta_headers(path)
+    return [rec for _, rec in keratin_contaminants(heads)], contaminant_tags_in(heads)
+
+
+def keratin_database_check(meta_path=None, search_dir=None):
+    """For run_de.R (contaminants.R, through `fetch_fasta.py keratin-db`): which keratin-family
+    contaminant entries does the searched database hold, and which are the searched species' own?
+    A keratin sample keeps the precursors that map only to those entries; a sample recorded as not
+    keratin (or not recorded) is told how many keratin precursors the filter removed.
+
+    Read, in order, from: the sidecar's own keratin_contaminants_in_database (written from skill
+    2.9.0 on); the FASTA the sidecar describes, when it is still there AND still the one searched
+    (sha256); the FASTA the search itself names (search_provenance.json / report.log.txt). Never
+    guessed. Both contaminant tags count (CONTAMINANT_TAGS).
+    -> {checked, accessions, own_species, taxid, n, tags, fasta, source, why}: `own_species` are
+    the accessions whose OX= is the searched organism's taxid (the sidecar's, else the one the
+    FASTA's own target entries carry); `tags` the contaminant tags that database holds; `why` says
+    what was found or why nothing could be."""
+    res = {"checked": False, "accessions": [], "own_species": [], "taxid": None, "n": 0,
+           "tags": [], "fasta": None, "source": None, "why": None}
+    tried = []
+    meta = None
+    if meta_path:
+        try:
+            with open(meta_path, encoding="utf-8") as fh:
+                meta = json.load(fh)
+        except (OSError, ValueError) as e:
+            tried.append(f"{meta_path} could not be read ({e})")
+
+    def found(recs, taxid, fasta, why, tags):
+        accs = [r["cont_acc"] for r in recs]
+        own = [r["cont_acc"] for r in recs if taxid and r.get("taxid") == taxid]
+        res.update(checked=True, accessions=accs, own_species=own, taxid=taxid or None,
+                   n=len(accs), tags=tags, fasta=fasta, source=fasta,
+                   why=f"{why}: {len(accs)} keratin-family contaminant entries, {len(own)} of "
+                       f"them the searched organism's own (taxid {taxid or 'unknown'})")
+        return res
+
+    if isinstance(meta, dict):
+        try:
+            taxid = int(meta.get("taxid") or 0)
+        except (TypeError, ValueError):
+            taxid = 0
+        listed = meta.get("keratin_contaminants_in_database")
+        if isinstance(listed, list):
+            accs = [a for a in listed if isinstance(a, str) and a]
+            own = set(meta.get("keratin_contaminants_same_species") or [])
+            # a sidecar from before the field: this script tags what it writes CONT_TAG, so that
+            # one is known (contaminants.R reads it the same way)
+            tags = meta.get("contaminant_tags_in_database")
+            tags = tags if isinstance(tags, list) else [CONT_TAG]
+            res.update(checked=True, accessions=accs, own_species=[a for a in accs if a in own],
+                       taxid=taxid or None, n=len(accs), fasta=meta.get("fasta"),
+                       tags=[t for t in tags if t in CONTAMINANT_TAGS], source=meta_path,
+                       why=f"{meta_path} lists {len(accs)} keratin-family contaminant entries in "
+                           f"the searched database, {len(own)} of them the searched organism's own")
+            return res
+        recs, why = _recheck(meta)
+        if why is None:
+            return found([r for _, r in keratin_contaminants(recs)], taxid, meta["fasta"],
+                         f"re-checked {meta['fasta']} (sha256 matches {meta_path})",
+                         contaminant_tags_in(recs))
+        tried.append(why)
+    if search_dir:
+        try:
+            import fran_deposit as fd       # lazy: fran_deposit imports this module's helpers
+            named = fd.search_fastas(os.path.abspath(search_dir))
+        except Exception as e:              # noqa: BLE001 -- reported, not raised
+            fd, named = None, None
+            tried.append(f"the search's FASTA could not be looked up ({type(e).__name__}: {e})")
+        if named is not None and not named:
+            tried.append(f"the search in {search_dir} names no FASTA")
+        for path in named or []:
+            try:
+                recs, tags = fasta_contaminant_summary(path)
+                taxid = fd.organism_from_headers(path)[1] or 0
+            except OSError as e:
+                tried.append(f"{path} (named by the search) could not be read ({e})")
+                continue
+            return found(recs, taxid, path, f"re-checked {path}, the FASTA the search names", tags)
+    res["why"] = "; ".join(tried) or "no sidecar and no search folder to read the FASTA from"
+    return res
 
 
 def target_contaminants(meta, keratin_sample=False):
@@ -1166,7 +1397,10 @@ def target_contaminants(meta, keratin_sample=False):
     `genes`/`accessions` (upper-case) cover the dropped list only. For a keratin-matrix
     sample (nail/hair/wool/skin/feather) keratin is the ANALYTE, so keratin records leave
     `dropped` -- they are not possible contamination there. `kept_as_contaminant` keeps
-    them: an analyte excluded from quant is a loss either way.
+    them: an analyte excluded from quant is a loss either way. A keratin sample is the
+    `keratin_sample` argument (the auditors' --keratin-sample) OR a sidecar built with
+    fetch --keratin-sample (keratin_sample_recorded), so the auditors no longer depend on
+    the flag being repeated at step 8c.
 
     `legacy_note` is set for a database built by an older rule (sidecar_state): "legacy",
     written BEFORE the overlap check -- exactly the databases that lost ACTB, EEF1A1 and KRT8
@@ -1187,8 +1421,8 @@ def target_contaminants(meta, keratin_sample=False):
     elif state == "identity_only":
         near, legacy_note = _identity_only_overlap(meta)
         kept = kept + near
-    if keratin_sample:
-        dropped = [r for r in dropped if not is_keratin_gene(r.get("gene"))]
+    if keratin_sample or keratin_sample_recorded(meta):
+        dropped = [r for r in dropped if not record_is_keratin(r)]
     genes = {r["gene"].upper() for r in dropped if r.get("gene")}
     accs = {a.upper() for r in dropped for a in matched_target_accs(r) if a}
     return {"organism": meta.get("organism") or "", "dropped": dropped,
@@ -1735,6 +1969,31 @@ def cmd_fetch(a):
         warnings.append(msg)
         a.contaminants = "none"
 
+    # A keratin sample (hair, wool, feather, skin, nail ...): keratin is the ANALYTE. A keratin-
+    # family Cont_ entry left in the database takes its peptides away from the sample -- DIA-NN's
+    # --cont-quant-exclude Cont_ keeps every peptide it shares out of quantification, and run_de.R
+    # removes every precursor that names a Cont_ entry (msalemi's hair benchmark SET28, 2026-09-29:
+    # ~46 keratin-family Cont_ entries survived the target-identity rule for human -- KRT34,
+    # KRTAPs, mouse hair and sheep wool keratins). So they come out here, where the database is
+    # built -- from a supplied database's own Cont_ entries too (a --path / --hive file that already
+    # carries contaminants), after the "already contains contaminants" decision above so that
+    # decision is unchanged by the removal.
+    # Either tag: a FragPipe-made database carries contam_ entries and no Cont_ at all.
+    # --keratin-sample / --no-keratin-sample: the answer to SKILL.md step 3's sample-type question.
+    # Neither = nobody asked, recorded as keratin_sample_source "default" (rule 2: never passed off
+    # as the user's answer).
+    answer = getattr(a, "keratin_sample", None)
+    keratin_sample = bool(answer)
+    keratin_sample_source = "default" if answer is None else "user"
+    keratin_dropped = []
+    if keratin_sample:
+        base_text, from_base = drop_keratin_contaminants(base_text)
+        if from_base:
+            keratin_dropped += [dict(r, source="supplied_database") for r in from_base]
+            n_base = _count(base_text)
+            n_cont_in_base = sum(1 for ln in base_text.splitlines()
+                                 if ln.startswith(">") and CONT_TAG in ln)
+
     # A database used as-is cannot have its contaminant entries removed, so the
     # target-identical ones found there stay -- and those real proteins will be reported
     # only as Cont_ groups and kept out of quant. Find them and say so, loudly.
@@ -1851,6 +2110,29 @@ def cmd_fetch(a):
             _warn(msg)
             warnings.append(msg)
 
+    # A keratin sample's keratin-family entries leave the contaminant set too -- after the
+    # target-identity rule, so an entry that rule removes keeps its record there (with the target
+    # it matched); this takes the rest (KRTAPs, KRT34, mouse hair and sheep wool keratins ...).
+    if keratin_sample and contam_text:
+        contam_text, from_set = drop_keratin_contaminants(contam_text)
+        keratin_dropped += [dict(r, source="contaminant_set") for r in from_set]
+        n_contam = _count(contam_text)
+    keratin_note = None
+    if keratin_sample:
+        n_kt = sum(1 for r in dropped if record_is_keratin(r))
+        keratin_note = (
+            f"keratin sample (--keratin-sample): removed {len(keratin_dropped)} keratin-family "
+            f"contaminant entr{'y' if len(keratin_dropped) == 1 else 'ies'}"
+            + (f" ({_entry_list(keratin_dropped)})" if keratin_dropped else "")
+            + (f", besides {n_kt} keratin entr{'y' if n_kt == 1 else 'ies'} already removed as "
+               f"{meta.get('organism') or 'target'} proteins" if n_kt else "")
+            + f". Keratin is the analyte here, so no keratin-family contaminant entry is left to "
+              f"take its peptides out of quantification (DIA-NN --cont-quant-exclude {CONT_TAG}) or "
+              f"out of the DE (run_de.R's contaminant filter); the other contaminant entries "
+              f"(trypsin, BSA, ...) stay {CONT_TAG}. Keratin from handling can no longer be told "
+              f"apart from the sample's own. Listed under contaminants_dropped_keratin_sample.")
+        sys.stderr.write(f"[fetch_fasta] {keratin_note}\n")
+
     tagged = CONT_TAG in contam_text if contam_text else False
     if contam_text and not tagged:
         msg = (f"contaminant set '{a.contaminants}' has no '{CONT_TAG}' header tag -- "
@@ -1865,6 +2147,13 @@ def cmd_fetch(a):
         if contam_text:
             fh.write(contam_text)
 
+    written_heads = [(ln, []) for t in (base_text, contam_text) if t for ln in t.splitlines()
+                     if ln.startswith(">")]
+    keratin_left = [r for _, r in keratin_contaminants(written_heads)]
+    try:
+        build_taxid = int(meta.get("taxid") or 0)
+    except (TypeError, ValueError):
+        build_taxid = 0
     result = {
         "fasta": os.path.abspath(a.out),
         "sha256": _sha256(a.out),
@@ -1935,6 +2224,30 @@ def cmd_fetch(a):
                             else ("already_in_supplied_database" if n_cont_in_base else "none")),
         "contaminant_source": contam_source or (source if n_cont_in_base else None),
         "contaminant_citation": CONTAM_CITATION if n_contam else None,
+        # A keratin sample (--keratin-sample; KERATIN_SAMPLE_TISSUES): keratin is the analyte.
+        # true/false from this release on; absent in an older sidecar, which never asked --
+        # keratin_sample_recorded() is the one reader. Its keratin-family entries left the
+        # contaminant set (and a supplied database's Cont_ entries), each listed with `source`.
+        "keratin_sample": keratin_sample,
+        # "user": --keratin-sample / --no-keratin-sample (step 3 was asked); "default": neither,
+        # so keratin_sample false is an assumption, and run_de.R tags it in the methods.
+        "keratin_sample_source": keratin_sample_source,
+        "keratin_family_rule": KERATIN_FAMILY_RULE,
+        "n_contaminants_dropped_keratin_sample": len(keratin_dropped),
+        "contaminants_dropped_keratin_sample": keratin_dropped,
+        "keratin_sample_note": keratin_note,
+        # The keratin-family Cont_ accessions the written database still holds ([] for a keratin
+        # sample): what run_de.R keeps, instead of removing, if these samples turn out to be
+        # keratin after all (run_de.R --keratin-sample; keratin_database_check).
+        "keratin_contaminants_in_database": [r["cont_acc"] for r in keratin_left],
+        # ... and those of them that are the searched organism's own (OX= = taxid): a precursor
+        # mapping only to one of these is the sample's; one mapping only to another species'
+        # keratin (mouse fur, sheep wool in human hair) is not, unless it also names a target.
+        "keratin_contaminants_same_species": [
+            r["cont_acc"] for r in keratin_left if build_taxid and r.get("taxid") == build_taxid],
+        # The contaminant tags (CONTAMINANT_TAGS) the written database holds: a report tag beyond
+        # them (contam_ from a database the skill did not build) was never checked for keratins.
+        "contaminant_tags_in_database": contaminant_tags_in(written_heads),
         # Pass this to DIA-NN so contaminants are identified but kept out of
         # quantification/normalisation (DIA-NN README, --cont-quant-exclude).
         "diann_cont_quant_exclude": (CONT_TAG if ((n_contam and tagged) or n_cont_in_base)
@@ -1978,6 +2291,12 @@ def main():
     c.add_argument("--search-dir", required=True,
                    help="the search's output folder (search_provenance.json / report.log.txt)")
 
+    k = sub.add_parser("keratin-db", help="a keratin sample searched on a database NOT built with "
+                                          "--keratin-sample: its keratin-family Cont_ entries (JSON)")
+    k.add_argument("--fasta-meta", help="the database's <fasta>.meta.json")
+    k.add_argument("--search-dir",
+                   help="the search's output folder (search_provenance.json / report.log.txt)")
+
     f = sub.add_parser("fetch", help="build the search FASTA")
     f.add_argument("--proteome", help="UniProt proteome ID, e.g. UP000005640")
     f.add_argument("--path", help="explicit FASTA override; used verbatim if set")
@@ -2015,6 +2334,13 @@ def main():
                    help="do NOT remove contaminant entries identical to a target protein. Only "
                         "for replaying a database built before that check (provenance.py adds "
                         "it for an old sidecar); those proteins then stay Cont_ and out of quant")
+    f.add_argument("--keratin-sample", action=argparse.BooleanOptionalAction, default=None,
+                   help="the answer to SKILL.md step 3: --keratin-sample when the samples ARE "
+                        "keratin (" + ", ".join(KERATIN_SAMPLE_TISSUES) + ") -- remove every "
+                        "keratin-family contaminant entry (" + KERATIN_FAMILY_RULE + "), so "
+                        "keratin is quantified as the analyte instead of being excluded as a "
+                        "contaminant; --no-keratin-sample when they are not. Recorded as "
+                        "keratin_sample + keratin_sample_source (user); neither = source default")
     f.add_argument("--hive", action="store_true",
                    help="prefer pre-staged HIVE FASTAs (set when env is uc_davis_hive)")
     f.add_argument("--out", required=True)
@@ -2027,6 +2353,11 @@ def main():
     if legacy and not explicit_contam:
         a.contaminants = "universal" if a.add_contaminants else "none"
 
+    if a.cmd == "keratin-db":
+        if not (a.fasta_meta or a.search_dir):
+            ap.error("keratin-db needs --fasta-meta or --search-dir")
+        print(json.dumps(keratin_database_check(a.fasta_meta, a.search_dir), indent=2))
+        return 0
     if a.cmd == "check-db":
         print(json.dumps(database_without_sidecar(a.search_dir), indent=2))
         return 0

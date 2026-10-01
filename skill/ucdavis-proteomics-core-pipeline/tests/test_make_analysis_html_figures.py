@@ -329,7 +329,15 @@ class Restyle(unittest.TestCase):
         self.assertNotRegex(p, r"<script[^>]+\bsrc=")
         self.assertNotRegex(p, r"@import|@font-face")
         self.assertNotRegex(p, r"url\(\s*['\"]?(https?:)?//")
-        self.assertNotRegex(p, r"(?:src|href)=[\"']?(https?:)?//")
+        self.assertNotRegex(p, r"\bsrc=[\"']?(https?:)?//")
+        self.assertNotRegex(p, r"<(?!a\b)[a-z]+\b[^>]*\bhref=[\"']?(https?:)?//")
+        # the only ways out are links a reader clicks -- navigations, not something the page
+        # loads: the GitHub star line every report has (core_submission.star_line, plugin.json's
+        # address), then this Core run's feedback survey (core_submission.feedback_url)
+        out = re.findall(r'<a\b[^>]*\bhref="((?:https?:)?//[^"]*)"', p)
+        import core_submission
+        self.assertEqual(out, [core_submission.repository_url(),
+                               core_submission.FEEDBACK_URL + "?prot=PROT_0001&amp;src=report"])
 
     def test_toc_links_resolve(self):
         ids = set(re.findall(r'\bid="([^"]+)"', self.page))

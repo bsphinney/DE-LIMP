@@ -30,6 +30,12 @@ Detection per format (best-effort, with a confidence score):
               `orbitrap_resolution_unknown` for files it could not read -- ask the user
               for those.
 
+  The precursor m/z range (`precursor_mz_range`, with `precursor_mz_range_source` saying which)
+  is the isolation windows' span for DIA, and the MS1 SURVEY scan range for DDA -- a DDA run
+  picks its precursors from its survey scans: the Thermo scan filter's "Full ms [lo-hi]", the
+  mzML MS1 scan window, a timsTOF .d's GlobalMetadata MzAcqRange. It used to be null for DDA,
+  and a DIA-NN DDA search then ran on a 380-980 fallback (SET28: survey 350-1500).
+
 Every Bruker .d is also checked for a truncated or at-risk analysis.tdf
 (bruker_tdf.tdf_integrity): WAL-mode header, a non-empty -wal/-journal beside it,
 or a frame index that ends short of analysis.tdf_bin. Anything but `ok` becomes a
@@ -50,7 +56,7 @@ Usage: python3 detect_acquisition.py [--allow-login-node] FILE [FILE ...]
        python3 detect_acquisition.py --check-reader # setup.sh: which parser, does it start
                                                     # (JSON; exit 0 = ready, 1 = not)
 """
-import sys, os, json, glob, gzip, math, sqlite3, statistics, shutil, subprocess, shlex, tempfile, time
+import sys, os, json, glob, gzip, math, re, sqlite3, statistics, shutil, subprocess, shlex, tempfile, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # Every analysis.tdf is opened through bruker_tdf.connect_tdf (read-only AND immutable):
@@ -59,6 +65,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from bruker_tdf import connect_tdf, tdf_integrity, integrity_warning  # noqa: E402
 # The Orbitrap keyword list lives there, once (DE-LIMP rule 3): see add_resolutions().
 from estimate_params import classify_instrument, DIANN_INSTRUMENT_PPM  # noqa: E402
+# What a precursor m/z range is, by acquisition -- the one vocabulary (DE-LIMP rule 3).
+from estimate_params import PR_MZ_RANGE_BASIS  # noqa: E402
+# A timsTOF run's MS1 acquisition range: the one reader of it, shared with the Methods text.
+from bruker_method import ms1_acq_range  # noqa: E402
 # The resolution reader runs as a subprocess; only its words are shared.
 from thermo_resolution import PYTHONNET_MISSING  # noqa: E402
 
@@ -97,7 +107,65 @@ def detect_instrument(path):
         return instrument_thermo_raw(path)
     return None
 
+def _dda_pasef_range(cur, tables):
+    """A ddaPASEF run's precursor m/z range: the MS1 acquisition range timsControl recorded
+    (GlobalMetadata MzAcqRangeLower/Upper, read by bruker_method.ms1_acq_range), or None."""
+    if "GlobalMetadata" not in tables:
+        return None
+    try:
+        return ms1_acq_range(dict(cur.execute("SELECT Key, Value FROM GlobalMetadata")))
+    except sqlite3.Error:
+        return None
+
+
+DDA_PASEF_RANGE_WHY = ("; precursor m/z range = the MS1 acquisition range "
+                       "(GlobalMetadata MzAcqRange)")
+
+
+def _has_rows(cur, table):
+    try:
+        return cur.execute(f'SELECT 1 FROM "{table}" LIMIT 1').fetchone() is not None
+    except sqlite3.Error:
+        return False
+
+
+def _dia_pasef_range(cur, tables):
+    """A dia-PASEF run's ACQUIRED precursor m/z range, from its isolation windows, or None.
+
+    The windows live in DiaFrameMsMsWindows (IsolationMz, IsolationWidth);
+    DiaFrameMsMsWindowGroups holds only an Id -- schema verified against a real analysis.tdf on
+    2026-08-17. Without this the caller falls back to a hardcoded 380-980, which on a
+    299.5-1200.5 dia-PASEF method silently discards both tails."""
+    if "DiaFrameMsMsWindows" not in tables:
+        return None
+    try:
+        lo, hi = cur.execute("SELECT MIN(IsolationMz - IsolationWidth/2.0), "
+                             "       MAX(IsolationMz + IsolationWidth/2.0) "
+                             "FROM DiaFrameMsMsWindows").fetchone()
+    except sqlite3.Error:
+        return None
+    return (float(lo), float(hi)) if lo is not None and hi is not None and hi > lo else None
+
+
 def detect_bruker_d(path):
+    """DIA vs DDA from what the run ACQUIRED, never from which tables exist.
+
+    Two kinds of evidence, both per FRAME: Frames.MsMsType (9 dia-PASEF, 8 ddaPASEF) and the
+    frame-level method table that has ROWS (DiaFrameMsMsInfo maps each dia-PASEF frame to its
+    window group; PasefFrameMsMsInfo lists each ddaPASEF precursor). Read on HIVE, 2026-09-29,
+    PI_Example/SET1-28 (timsTOF HT), immutable open:
+        ddaPASEF 09292026__30SPD_DDANS27  MsMsType {0: 4115, 8: 24686}; PasefFrameMsMsInfo
+                                          327,207 rows; DiaFrameMsMsInfo / -Windows /
+                                          -WindowGroups PRESENT with 0 rows
+        dia-PASEF 09112026__60SPD_DIA-NS10 MsMsType {0: 1146, 9: 12598}; DiaFrameMsMsInfo
+                                          12,598 rows, 36 windows; no Pasef tables
+    The detector used to key on the dia-PASEF tables EXISTING, so the first came back "DIA,
+    high confidence" (msalemi, 2026-09-29) -- a DDA run headed for a library-free DIA search
+    with nothing asking the user.
+
+    Evidence that disagrees -- frames of both types, or typed frames with the OTHER kind's
+    frame table populated -- is not guessed: `unknown`/low, which sets needs_confirmation. With
+    no typed frames at all, the tables' rows decide (DiaFrameMsMsWindows counts there too)."""
     tdf = os.path.join(path, "analysis.tdf")
     if not os.path.exists(tdf):
         return ("unknown", "low", "no analysis.tdf in .d folder", None)
@@ -107,37 +175,52 @@ def detect_bruker_d(path):
         cur = con.cursor()
         tables = {r[0] for r in cur.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
-        if {"DiaFrameMsMsInfo", "DiaFrameMsMsWindowGroups"} & tables:
-            # Also read the ACQUIRED precursor m/z range while we are in here.
-            # The isolation windows live in DiaFrameMsMsWindows (IsolationMz,
-            # IsolationWidth); DiaFrameMsMsWindowGroups holds only an Id, so
-            # detecting on the latter and reading from the former is deliberate
-            # -- schema verified against a real analysis.tdf on 2026-08-17.
-            # Without this the caller falls back to a hardcoded 380-980, which
-            # on a 299.5-1200.5 dia-PASEF method silently discards both tails.
-            rng = None
-            if "DiaFrameMsMsWindows" in tables:
-                try:
-                    lo, hi = cur.execute(
-                        "SELECT MIN(IsolationMz - IsolationWidth/2.0), "
-                        "       MAX(IsolationMz + IsolationWidth/2.0) "
-                        "FROM DiaFrameMsMsWindows").fetchone()
-                    if lo is not None and hi is not None and hi > lo:
-                        rng = (float(lo), float(hi))
-                except sqlite3.Error:
-                    rng = None
-            return ("DIA", "high", "dia-PASEF window tables present", rng)
-        if "PasefFrameMsMsInfo" in tables:
-            return ("DDA", "high", "PasefFrameMsMsInfo present (ddaPASEF)", None)
-        # fall back to MsMsType histogram
         try:
-            rows = dict(cur.execute(
-                "SELECT MsMsType, COUNT(*) FROM Frames GROUP BY MsMsType"))
-            if rows.get(9, 0) > 0:  return ("DIA", "high", "Frames.MsMsType==9", None)
-            if rows.get(8, 0) > 0:  return ("DDA", "medium", "Frames.MsMsType==8", None)
+            types = (dict(cur.execute("SELECT MsMsType, COUNT(*) FROM Frames GROUP BY MsMsType"))
+                     if "Frames" in tables else {})
         except sqlite3.Error:
-            pass
-        return ("unknown", "low", "no DIA/DDA markers in tdf", None)
+            types = {}
+        rows = {t: t in tables and _has_rows(cur, t)
+                for t in ("DiaFrameMsMsInfo", "DiaFrameMsMsWindows", "PasefFrameMsMsInfo")}
+        n_dia, n_dda = types.get(9, 0), types.get(8, 0)
+        dia_frames_table, dda_frames_table = rows["DiaFrameMsMsInfo"], rows["PasefFrameMsMsInfo"]
+        conflict = []
+        if n_dia and n_dda:
+            conflict.append(f"{n_dia} frames with Frames.MsMsType==9 (dia-PASEF) and {n_dda} "
+                            "with 8 (ddaPASEF)")
+        elif n_dia and dda_frames_table:
+            conflict.append(f"{n_dia} dia-PASEF frames (MsMsType==9), but PasefFrameMsMsInfo "
+                            "has rows (ddaPASEF precursors)")
+        elif n_dda and dia_frames_table:
+            conflict.append(f"{n_dda} ddaPASEF frames (MsMsType==8), but DiaFrameMsMsInfo has "
+                            "rows (dia-PASEF frames)")
+        elif not (n_dia or n_dda) and (dia_frames_table or rows["DiaFrameMsMsWindows"]) \
+                and dda_frames_table:
+            conflict.append("no frame is typed, and both the dia-PASEF and the ddaPASEF tables "
+                            "have rows")
+        if conflict:
+            return ("unknown", "low", "the run's DIA/DDA evidence disagrees: " + conflict[0]
+                    + " -- confirm the acquisition method with the user", None)
+        if n_dia:
+            return ("DIA", "high", f"{n_dia} dia-PASEF frames (Frames.MsMsType==9)",
+                    _dia_pasef_range(cur, tables))
+        if n_dda:
+            rng = _dda_pasef_range(cur, tables)
+            return ("DDA", "high" if dda_frames_table else "medium",
+                    f"{n_dda} ddaPASEF frames (Frames.MsMsType==8)"
+                    + ("; PasefFrameMsMsInfo has rows" if dda_frames_table else "")
+                    + (DDA_PASEF_RANGE_WHY if rng else ""), rng)
+        # No typed frames (a Frames table without MsMsType, or none): the tables, by rows.
+        dia_rows = [t for t in ("DiaFrameMsMsInfo", "DiaFrameMsMsWindows") if rows[t]]
+        if dia_rows:
+            return ("DIA", "high", f"dia-PASEF window tables have rows ({', '.join(dia_rows)})",
+                    _dia_pasef_range(cur, tables))
+        if dda_frames_table:
+            rng = _dda_pasef_range(cur, tables)
+            return ("DDA", "high", "PasefFrameMsMsInfo has rows (ddaPASEF)"
+                    + (DDA_PASEF_RANGE_WHY if rng else ""), rng)
+        return ("unknown", "low", "no DIA/DDA markers in tdf (no typed frames, and no method "
+                "table has rows)", None)
     except sqlite3.Error as e:
         return ("unknown", "low", f"tdf read error: {e}", None)
     finally:
@@ -147,22 +230,37 @@ def detect_bruker_d(path):
 def _iter_mzml(path, cap=3000):
     """Yield (ms_level, iso_target, iso_width, lo, hi) for spectra, streaming.
 
-    lo/hi are the ACQUIRED isolation bounds (target -/+ the CV offsets). They are
-    what the precursor m/z search range should be derived from; previously only
-    the width was kept and the bounds were discarded."""
+    For an MS2, lo/hi are the ACQUIRED isolation bounds (target -/+ the CV offsets). They are
+    what a DIA precursor m/z search range should be derived from; previously only the width
+    was kept and the bounds were discarded.
+
+    For an MS1 (the survey scan), lo/hi are its scan window -- MS:1000501 "scan window lower
+    limit" / MS:1000500 "scan window upper limit", as msconvert writes them (350 / 1500 on a
+    Thermo DDA mzML, read 2026-09-29) -- yielded as (1, None, None, lo, hi), and only when both
+    are there. A DDA run's precursors are picked from these scans. `cap` counts MS2 spectra.
+    Every value is reset where a spectrum STARTS, so nothing outside one leaks into it."""
     import xml.etree.ElementTree as ET
     opn = gzip.open if path.endswith(".gz") else open
-    ms_level = iso_target = lower = upper = None
+    ms_level = iso_target = lower = upper = win_lo = win_hi = None
     n = 0
     with opn(path, "rb") as fh:
-        for ev, el in ET.iterparse(fh, events=("end",)):
+        for ev, el in ET.iterparse(fh, events=("start", "end")):
             tag = el.tag.rsplit("}", 1)[-1]
+            if ev == "start":
+                if tag == "spectrum":
+                    ms_level = iso_target = lower = upper = win_lo = win_hi = None
+                continue
             if tag == "cvParam":
                 acc = el.get("accession"); val = el.get("value")
                 if acc == "MS:1000511": ms_level = int(float(val))
                 elif acc == "MS:1000827" and val: iso_target = float(val)
                 elif acc == "MS:1000828" and val: lower = float(val)
                 elif acc == "MS:1000829" and val: upper = float(val)
+                # several scan windows: the span of all of them
+                elif acc == "MS:1000501" and val:
+                    win_lo = float(val) if win_lo is None else min(win_lo, float(val))
+                elif acc == "MS:1000500" and val:
+                    win_hi = float(val) if win_hi is None else max(win_hi, float(val))
             elif tag == "spectrum":
                 if ms_level == 2:
                     w = (lower or 0) + (upper or 0)
@@ -172,7 +270,10 @@ def _iter_mzml(path, cap=3000):
                         hi = iso_target + (upper or 0)
                     yield (2, iso_target, w if w else None, lo, hi)
                     n += 1
-                ms_level = iso_target = lower = upper = None
+                elif ms_level == 1 and win_lo is not None and win_hi is not None \
+                        and win_hi > win_lo:
+                    yield (1, None, None, win_lo, win_hi)
+                ms_level = iso_target = lower = upper = win_lo = win_hi = None
                 el.clear()
                 if n >= cap: break
 
@@ -221,17 +322,36 @@ def classify_isolation_windows(widths, targets, los, his):
     return ("unknown", "low",
             f"ambiguous: median width {med:.1f} Da, {distinct} centers{gap}", None)
 
+def survey_scan_range(ranges, where):
+    """A DDA run's precursor m/z range from its MS1 survey scan ranges [(lo, hi)]: their span
+    (a run acquires one survey range; a method that alternates two is searched over both).
+    Returns (range or None, text for the reason). The one rule for all three formats."""
+    ranges = [r for r in ranges if r and r[1] > r[0]]
+    if not ranges:
+        return None, ""
+    rng = (min(r[0] for r in ranges), max(r[1] for r in ranges))
+    return rng, (f"; precursor m/z range = the MS1 survey scan range {rng[0]:g}-{rng[1]:g}, "
+                 f"from {where} of {len(ranges)} MS1 scan(s)")
+
+
 def detect_mzml(path):
-    widths, targets, los, his = [], [], [], []
+    widths, targets, los, his, survey = [], [], [], [], []
     try:
         for lvl, tgt, w, lo, hi in _iter_mzml(path):
+            if lvl == 1:
+                survey.append((lo, hi))
+                continue
             if w: widths.append(w)
             if tgt is not None: targets.append(tgt)
             if lo is not None and hi is not None and hi > lo:
                 los.append(lo); his.append(hi)
     except Exception as e:
         return ("unknown", "low", f"mzML parse error: {e}", None)
-    return classify_isolation_windows(widths, targets, los, his)
+    kind, conf, why, rng = classify_isolation_windows(widths, targets, los, his)
+    if kind == "DDA":
+        rng, how = survey_scan_range(survey, "the scan window (MS:1000501/MS:1000500)")
+        why += how
+    return kind, conf, why, rng
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +429,16 @@ QUERY_SCANS_WITHOUT_METADATA = 1000
 FALLBACK_CONSEQUENCE = ("precursor m/z range NOT measured, so estimate_params.py will search "
                         "its 380-980 FALLBACK -- pass --precursor-mz-range if the method "
                         "acquired wider")
+# A DDA file whose survey scan range could not be read. A NOTE, not a warning: a warning sets
+# needs_confirmation, and Sage -- the DDA default -- does not use the range at all. What gates
+# DIA-NN is estimate_params.py, which refuses a DDA cfg without a range (NoPrecursorRange). The
+# note goes into the file's `reason` and, once, into the top-level `dda_range_note`.
+DDA_NO_RANGE = ("DDA, but the MS1 survey scan range could not be read (Thermo: no 'Full ms "
+                "[lo-hi]' scan filter in the slice read; mzML: no MS1 scan window; timsTOF: no "
+                "GlobalMetadata MzAcqRange), so there is no precursor m/z range. A DIA-NN search "
+                "needs one -- estimate_params.py refuses a DDA cfg without --precursor-mz-range: "
+                "take the survey scan range from the instrument method (ask the user). A Sage "
+                "search does not use it.")
 
 
 def _pipeline_env_bin():
@@ -835,8 +965,26 @@ def query_scan_range(meta):
     return a, min(last, a + want - 1), None
 
 
+# An MS1 survey scan's filter string names the m/z range it was acquired over -- "FTMS + p NSI
+# Full ms [350.0000-1500.0000]" in the Exploris 480 DDA fixture (real TRFP 2.0.0.0 output, HIVE
+# srun job 23510571), the range msalemi confirmed for SET28. "Full ms" then the bracket: "Full ms2
+# 572.3181@hcd30.00 [...]" is an MS2 and never matches; SIM scans are not survey scans.
+FULL_MS1_RE = re.compile(r"\bFull\s+ms\s+\[([^\]]+)\]")
+MZ_PAIR_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*-\s*([0-9]+(?:\.[0-9]+)?)")
+
+
+def ms1_filter_range(filt):
+    """(lo, hi) of a Thermo MS1 filter string's "Full ms [lo-hi]" (the span of every range in
+    the brackets), or None."""
+    m = FULL_MS1_RE.search(filt) if isinstance(filt, str) else None
+    pairs = [(float(a), float(b)) for a, b in MZ_PAIR_RE.findall(m.group(1))] if m else []
+    pairs = [p for p in pairs if p[1] > p[0]]
+    return (min(p[0] for p in pairs), max(p[1] for p in pairs)) if pairs else None
+
+
 def thermo_isolation_windows(spectra):
-    """MS2 isolation windows + data-dependent evidence from TRFP `query` JSON.
+    """MS2 isolation windows + data-dependent evidence from TRFP `query` JSON, and the MS1 survey
+    scan ranges (`ms1_ranges`, from their filter strings) that are a DDA run's precursor range.
 
     Edges are target -/+ the lower/upper offsets TRFP reports, which already fold in the
     instrument's isolation-width offset -- the same values it writes to mzML, so the two
@@ -845,16 +993,23 @@ def thermo_isolation_windows(spectra):
     this reader 350.0-1201.0 and 350.05-1200.95 after rounding (job 23511567).
     """
     w = {"widths": [], "centres": [], "los": [], "his": [],
-         "n_ms2": 0, "n_filter": 0, "n_dependent": 0}
+         "n_ms2": 0, "n_filter": 0, "n_dependent": 0, "n_ms1": 0, "ms1_ranges": []}
     for s in spectra:
         attrs = {}
         for a in (s.get("attributes") or []) if isinstance(s, dict) else []:
             if isinstance(a, dict) and a.get("accession"):
                 attrs.setdefault(a["accession"], a.get("value"))
         try:
-            if int(float(attrs.get("MS:1000511"))) != 2:
-                continue
+            level = int(float(attrs.get("MS:1000511")))
         except (TypeError, ValueError):
+            continue
+        if level == 1:
+            w["n_ms1"] += 1
+            rng = ms1_filter_range(attrs.get(CV_FILTER) or attrs.get(CV_FILTER_PRE_1_4_5))
+            if rng:
+                w["ms1_ranges"].append(rng)
+            continue
+        if level != 2:
             continue
         w["n_ms2"] += 1
         filt = attrs.get(CV_FILTER) or attrs.get(CV_FILTER_PRE_1_4_5)
@@ -975,6 +1130,12 @@ def read_thermo_raw(path):
 
     w = thermo_isolation_windows(spectra)
     kind, conf, why, rng = classify_thermo_windows(w)
+    if kind == "DDA":
+        # DDA has no window scheme to take a range from: its precursors come from the survey
+        # scans. classify() warns when there is none (DDA_NO_RANGE).
+        rng, how = survey_scan_range(w.get("ms1_ranges") or [],
+                                     "the scan filter ('Full ms [lo-hi]')")
+        why += how
     if q_notes:
         conf = _cap_medium(conf)     # a partial answer is not a high-confidence read
     if w["n_filter"] == 0:
@@ -1041,12 +1202,17 @@ def classify(path):
     if integrity and integrity["status"] != "ok":
         # the same per-file list the Thermo reader fills: one place to look, one gate
         warnings = warnings + [integrity_warning(integrity)]
+    if kind == "DDA" and not mz_range:
+        why = f"{why}; NOTE: {DDA_NO_RANGE}"
     return {"file": p, "vendor": vendor, "acquisition": kind,
             "confidence": conf, "reason": why, "instrument": instrument,
             # ACQUIRED precursor m/z bounds, or null when the format cannot tell
             # us. estimate_params.py searches this range instead of a hardcoded
             # 380-980 -- see its --precursor-mz-range flag.
             "precursor_mz_range": (list(mz_range) if mz_range else None),
+            # what that range is: "isolation_windows" (DIA) or "ms1_survey_scan" (DDA), from
+            # estimate_params.PR_MZ_RANGE_BASIS; null with no range
+            "precursor_mz_range_source": (PR_MZ_RANGE_BASIS.get(kind) if mz_range else None),
             # Bruker .d only (None otherwise): bruker_tdf.tdf_integrity() of its analysis.tdf
             "tdf_integrity": integrity,
             # every problem with this file the user must hear before a search starts, in
@@ -1513,6 +1679,8 @@ def main(argv):
     ranges = [r["precursor_mz_range"] for r in results if r.get("precursor_mz_range")]
     mz_range = [min(x[0] for x in ranges), max(x[1] for x in ranges)] if ranges else None
     mixed_ranges = len({tuple(x) for x in ranges}) > 1
+    range_sources = sorted({r["precursor_mz_range_source"] for r in results
+                            if r.get("precursor_mz_range_source")})
     print(json.dumps({
         "overall": overall,
         "instrument": instrument,
@@ -1520,8 +1688,17 @@ def main(argv):
         # Feed straight to estimate_params.py --precursor-mz-range LO HI.
         "precursor_mz_range": mz_range,
         "precursor_mz_range_mixed": mixed_ranges,
+        # isolation_windows (DIA) / ms1_survey_scan (DDA); "mixed" when the files differ
+        "precursor_mz_range_source": (range_sources[0] if len(range_sources) == 1 else
+                                      "mixed" if range_sources else None),
         "precursor_mz_range_files_without": [
             r["file"] for r in results if not r.get("precursor_mz_range")],
+        # a note, not a warning (it does not set needs_confirmation): DDA files with no survey
+        # range, which a DIA-NN search needs and a Sage search does not
+        "dda_range_note": ({"files": [r["file"] for r in results if r["acquisition"] == "DDA"
+                                      and not r.get("precursor_mz_range")], "note": DDA_NO_RANGE}
+                           if any(r["acquisition"] == "DDA" and not r.get("precursor_mz_range")
+                                  for r in results) else None),
         # Feed straight to resolve_defaults.py / estimate_params.py as --ms1-resolution /
         # --ms2-resolution WITH --resolution-source detected (so the manifest says the numbers
         # came from the raw file): set when every Orbitrap .raw read the same value from its

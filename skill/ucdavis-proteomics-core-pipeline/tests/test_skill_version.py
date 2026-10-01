@@ -5,8 +5,10 @@ scripts/). On HIVE it read "unknown" -- and make_deposit wrote "0.0.0" into sdrf
 scripts/ went up without .claude-plugin/ (access.md's "put ./scripts once"). Every reader now asks
 skill_version.py, and a missing plugin.json is a tagged UNKNOWN, never a made-up number.
 
-notify_slack.py (runs from stdin on HIVE, no siblings), report_issue.sh (bash) and skill_version.R
-(run_de.R's, in R) carry mirrors; this file keeps each one equal to the original.
+notify_slack.py (runs from stdin on HIVE, no siblings), skill_version.sh (bash: report_issue.sh
+sources it, and its --check-hive reads HIVE's copy with it) and skill_version.R (run_de.R's, in R)
+carry mirrors; this file keeps each one equal to the original. It also keeps skill_version.py's
+core_admins() equal to skill_version.sh's skill_core_admins, the two readers of core_admins.txt.
 """
 import json
 import os
@@ -125,18 +127,109 @@ class NotifySlackMirror(unittest.TestCase):
         self.assertEqual(notify_slack._skill_label(None), "ucdavis-proteomics-core-pipeline")
 
 
+class BashMirror(unittest.TestCase):
+    """skill_version.sh: the one bash reading, sourced by report_issue.sh (Windows `python3` is
+    often the Microsoft Store stub) and used by --check-hive on this computer and on HIVE."""
+    SCRIPT = os.path.join(SCRIPTS, "skill_version.sh")
+
+    def bash(self, snippet, sd=None):
+        script = self.SCRIPT
+        if sd is not None:                  # a copy of scripts/ in a fixture
+            shutil.copy(self.SCRIPT, sd)
+            script = os.path.join(sd, "skill_version.sh")
+        with tempfile.TemporaryDirectory() as tmp:
+            r = subprocess.run(["bash", "-c", f'. "$1"; {snippet}', "bash", script],
+                               capture_output=True, timeout=60,
+                               env=job_env(tmp, LC_ALL="C.UTF-8", LANG="C.UTF-8"))
+        self.assertEqual(r.returncode, 0, r.stderr.decode("utf-8", "replace"))
+        return r.stdout.decode("utf-8").rstrip("\n")
+
+    def test_same_constant(self):
+        self.assertEqual(self.bash('printf "%s" "$SKILL_VERSION_UNKNOWN"'), sv.UNKNOWN)
+
+    def test_same_answer_for_every_fixture(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, text in CASES.items():
+                with self.subTest(name):
+                    sd = fixture(tmp, name, text)
+                    self.assertEqual(self.bash("skill_version", sd), sv.skill_version(sd))
+                    self.assertEqual(self.bash('skill_version "$(dirname "$1")"', sd),
+                                     sv.skill_version(sd))
+        self.assertEqual(self.bash("skill_version"), sv.skill_version())
+
+    def test_run_as_a_command_it_prints_the_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            r = subprocess.run(["bash", self.SCRIPT], capture_output=True, text=True,
+                               env=job_env(tmp), timeout=60)
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, sv.skill_version()))
+
+    def test_same_label(self):
+        self.assertEqual(self.bash('skill_label 2.8.0; skill_label "$SKILL_VERSION_UNKNOWN"'),
+                         f"{sv.label('2.8.0')}\n{sv.label(sv.UNKNOWN)}")
+
+
+#: core_admins.txt files that differ only in what both readers must strip or skip.
+ADMIN_FILES = {
+    "comments_and_blank_lines": "# admins\n\n#msalemi\n   # indented comment\nbrettsp\n",
+    "blanks_at_both_ends": "  brettsp  \n\tgabrig\t\n \x0b\x0cmsalemi \x0c\n",
+    "crlf_and_a_lone_cr": "brettsp\r\n\r\ngab\rrig\r\n \r \n",
+    "comments_after_a_name": "brettsp # the director\ngabrig#staff\n#\n",
+    "no_final_newline": "brettsp\ngabrig",
+    "a_blank_or_comma_inside_and_twice": "Bad Name\na,b\nbrettsp\nbrettsp\n",
+    "empty": "",
+    "only_comments_and_blanks": "# nobody\n\n   \n\t\n",
+}
+
+
+class CoreAdminsMirror(unittest.TestCase):
+    """scripts/core_admins.txt has two readers: skill_version.sh's skill_core_admins (bash:
+    --check-hive, --publish-release) and skill_version.py's core_admins() (Python: notes.py,
+    slack_collab.py). They must give the same admins for every file, or the two sides of the
+    skill trust different people."""
+    SCRIPT = os.path.join(SCRIPTS, "skill_version.sh")
+
+    def bash_admins(self, path, locale):
+        with tempfile.TemporaryDirectory() as tmp:
+            r = subprocess.run(["bash", "-c", '. "$1"; skill_core_admins "$2"', "bash",
+                                self.SCRIPT, path or ""],
+                               capture_output=True, timeout=60,
+                               env=job_env(tmp, LC_ALL=locale, LANG=locale))
+        return r.stdout.decode("utf-8").splitlines()
+
+    def test_same_admins_for_every_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, text in ADMIN_FILES.items():
+                p = os.path.join(tmp, name + ".txt")
+                with open(p, "w", encoding="utf-8", newline="") as fh:
+                    fh.write(text)
+                for locale in ("C.UTF-8", "C"):
+                    with self.subTest(name, locale=locale):
+                        self.assertEqual(self.bash_admins(p, locale), sv.core_admins(p))
+            missing = os.path.join(tmp, "missing.txt")
+            self.assertEqual(self.bash_admins(missing, "C"), [])
+            self.assertEqual(sv.core_admins(missing), [])
+
+    def test_same_admins_for_the_shipped_list(self):
+        self.assertEqual(self.bash_admins(None, "C.UTF-8"), sv.core_admins())
+        self.assertEqual(sv.core_admins(), ["brettsp"])
+
+
 class ReportIssueMirror(unittest.TestCase):
     SCRIPT = os.path.join(SCRIPTS, "report_issue.sh")
 
-    def test_same_constant(self):
+    def test_it_reads_the_version_through_skill_version_sh(self):
+        """One bash reading, not a second copy of it (CLAUDE.md rule 3)."""
         with open(self.SCRIPT, encoding="utf-8") as fh:
-            m = re.search(r'^VER_UNKNOWN="([^"]*)"$', fh.read(), re.M)
-        self.assertIsNotNone(m, "report_issue.sh has no VER_UNKNOWN")
-        self.assertEqual(m.group(1), sv.UNKNOWN)
+            code = "\n".join(l for l in fh.read().splitlines() if not l.lstrip().startswith("#"))
+        self.assertIn('. "$HERE/skill_version.sh"', code)
+        self.assertIn('skill_version "$HERE"', code)
+        self.assertNotIn("plugin.json", code)
+        self.assertNotIn('"version"', code)
 
-    def _entry(self, sd):
+    def _entry(self, sd, siblings=("skill_version.sh",)):
         """The entry report_issue.sh writes when run from <sd> (a copy of scripts/)."""
-        shutil.copy(self.SCRIPT, sd)
+        for f in ("report_issue.sh",) + tuple(siblings):
+            shutil.copy(os.path.join(SCRIPTS, f), sd)
         out = os.path.join(os.path.dirname(sd), "issues")
         # no HIVE login, nothing of a real job: the entry goes to `out` directly
         env = job_env(os.path.dirname(sd), HOME=os.path.dirname(sd), SKILL_ISSUES_DIR=out,
@@ -159,6 +252,12 @@ class ReportIssueMirror(unittest.TestCase):
                     want = sv.skill_version(sd)
                     self.assertIn(f"- **Skill version:** {want}\n", text)
                     self.assertIn(f"- **Skill:** {sv.label(want)}, mode ", text)
+
+    def test_without_its_sibling_the_entry_is_still_written(self):
+        """Recording a problem must never become a second problem."""
+        with tempfile.TemporaryDirectory() as tmp:
+            text = self._entry(fixture(tmp, "alone", CASES["present"]), siblings=())
+        self.assertIn("- **Skill version:** (unknown -- skill_version.sh not found", text)
 
 
 def _r_has(*pkgs):

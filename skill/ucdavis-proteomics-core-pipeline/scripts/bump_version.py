@@ -21,6 +21,11 @@ version" a single action rather than something to remember.
     python3 scripts/bump_version.py major        # 2.4.1 -> 3.0.0
     python3 scripts/bump_version.py --check      # report agreement, change nothing
 
+Bumping is not releasing. Once the new version is merged to main (where `/plugin marketplace
+update` gets it), publish it to Core staff -- whose sessions then warn a laptop that is behind:
+
+    bash scripts/skill_version.sh --publish-release   # writes CURRENT_VERSION on HIVE
+
 Edits are surgical -- the version LINE is rewritten by regex and nothing else in the file is
 touched. Rewriting these files with json.dump() would reflow them and convert every escaped
 `\\u2014` to a literal em-dash, producing a diff full of changes nobody made.
@@ -123,6 +128,8 @@ def main():
     print(f"plugin.json: {pv2} | marketplace: {mv2} | agree: {ok}")
     if not ok:
         sys.exit("version did not land in every location -- check both files by hand")
+    print(f"once {new} is merged to main: bash scripts/skill_version.sh --publish-release "
+          "(tells Core staff on older copies to update -- references/access.md)")
 
 
 if __name__ == "__main__":

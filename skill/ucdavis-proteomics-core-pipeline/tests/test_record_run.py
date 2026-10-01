@@ -672,6 +672,24 @@ class CoreOmics(Base):
                          {"prot": "PROT_0807", "id": "99922f5337f8"})
         self.assertIsNone(p(["hela"]))
 
+    def test_prot_digits_are_ascii_only(self):
+        # record_run kept its own \d pattern and read these as PROT numbers after
+        # core_submission had stopped; it now reads ids with core_submission's one definition
+        import core_submission
+        self.assertIs(record_run.normalize_submission, core_submission.normalize_submission)
+        self.assertFalse(hasattr(record_run, "PROT_RE"))
+        for s in ("٧٥٦", "PROT_٠٧٥٦", "１２３",
+                  "prot-８０７", "#٧٥٦"):
+            self.assertIsNone(record_run.parse_prot([s]), s)
+            self.assertIsNone(record_run.prot_from_obj({"prot": s, "internal_id": s}), s)
+        self.assertEqual(record_run.parse_prot(["٧٥٦ 807"]),
+                         {"prot": "PROT_0807", "id": None})
+        out = make_search(self.d)
+        self.run_it("search-done", "--out", out, "--prot", "٧٥٦")
+        folder = self.only_folder()
+        self.assertIn("**CoreOmics submission:** not recorded", self.read(folder))
+        self.assertIsNone(self.read(folder, "run_record.json")["prot"])
+
     def test_prot_given_is_recorded_everywhere(self):
         out = make_search(self.d)
         self.run_it("search-done", "--out", out, "--prot", "807", "--prot", "99922f5337f8")
@@ -1465,6 +1483,102 @@ class ReviewFixes(Base):
                          ["findings"], [])
         dq = self.read(self.only_folder()).split("## Data Quality Notes", 1)[1].split("\n## ")[0]
         self.assertNotIn(".quant files", dq)
+
+
+class ContQuantExcludeIsReadFromTheRun(Base):
+    """The run record said "excluded from quantification with `--cont-quant-exclude Cont_`"
+    whenever the FASTA sidecar RECOMMENDED it (fetch_fasta.py diann_cont_quant_exclude): for a
+    Sage or FragPipe search too, and for a DIA-NN search that ran without it (rule 2). It is now
+    read from the run by make_methods.diann_cont_quant_exclude, the one reader of the flag
+    (rule 3), as the DE descriptors read it."""
+
+    def record(self, out):
+        self.run_it("search-done", "--out", out, "--status", "completed", "--exit-code", "0")
+        folder = self.only_folder()
+        line = next(ln for ln in self.read(folder).splitlines()
+                    if ln.startswith("- **Contaminants:**"))
+        return line, self.read(folder, "run_record.json")["search"]
+
+    def prov(self, out, **change):
+        path = os.path.join(out, "search_provenance.json")
+        with open(path) as fh:
+            p = json.load(fh)
+        p.update(change)
+        write(path, json.dumps(p))
+
+    def test_a_diann_search_says_what_its_parameters_ran_with(self):
+        line, s = self.record(make_search(self.d))
+        self.assertIn("excluded from DIA-NN's quantification with `--cont-quant-exclude Cont_` "
+                      "(per params.cfg)", line)
+        self.assertEqual(s["cont_quant_exclude"],
+                         {"value": "Cont_", "source": "params.cfg", "recorded": True})
+        self.assertEqual(s["fasta"]["cont_quant_exclude_recommended"], "Cont_")
+
+    def test_the_diann_log_is_what_ran(self):
+        out = make_search(self.d, log_extra="/x/diann-linux --f /d/a.raw --out "
+                                            "/o/report.parquet --qvalue 0.01 \n")
+        line, s = self.record(out)
+        self.assertIn("DIA-NN was given no `--cont-quant-exclude` (per the DIA-NN command line "
+                      "in report.log.txt)", line)
+        self.assertNotIn("excluded from", line)
+
+    def test_a_cfg_on_the_logged_command_line_is_read(self):
+        """sage-review: a --one-step search's log shows `diann --cfg params.cfg ...` unexpanded;
+        SEARCH_LOG said "DIA-NN was given no --cont-quant-exclude" although params.cfg had it.
+        The provenance names no params file here, so only the log's --cfg can answer."""
+        cfg = os.path.join(self.d, "run1", "wf", "params.cfg")
+        out = make_search(self.d, log_extra=f"/x/diann-linux --cfg {cfg} --f /d/a.raw --out "
+                                            f"/o/report.parquet --threads 16\n")
+        self.prov(out, params_file=None, resolved_params_file=None)
+        line, s = self.record(out)
+        self.assertIn("excluded from DIA-NN's quantification with `--cont-quant-exclude Cont_` "
+                      "(per the DIA-NN command line in report.log.txt and the --cfg file it names "
+                      "(params.cfg))", line)
+        self.assertEqual(s["cont_quant_exclude"]["value"], "Cont_")
+
+    def test_a_diann_search_with_no_record_says_so(self):
+        out = make_search(self.d)
+        self.prov(out, params_file=None, resolved_params_file=None)
+        line, s = self.record(out)
+        self.assertIn("whether DIA-NN's `--cont-quant-exclude` was set: not recorded", line)
+        self.assertIs(s["cont_quant_exclude"]["recorded"], False)
+
+    def test_the_schema_version_names_the_new_keys(self):
+        """Schema 3 for search.cont_quant_exclude and the renamed
+        fasta.cont_quant_exclude_recommended; an old record is rewritten at the new version
+        on re-record, without the old key."""
+        self.assertEqual(record_run.SCHEMA_VERSION, 3)
+        out = make_search(self.d)
+        self.run_it("search-done", "--out", out, "--status", "completed", "--exit-code", "0")
+        folder = self.only_folder()
+        rec = self.read(folder, "run_record.json")
+        self.assertEqual(rec["schema_version"], 3)
+        self.assertIn("cont_quant_exclude", rec["search"])
+        self.assertIn("cont_quant_exclude_recommended", rec["search"]["fasta"])
+        self.assertNotIn("cont_quant_exclude", rec["search"]["fasta"])
+        # a record from the 2.7.0 registry: integer schema 2, the old key
+        rec["schema_version"] = 2
+        rec["search"]["fasta"]["cont_quant_exclude"] = rec["search"]["fasta"].pop(
+            "cont_quant_exclude_recommended")
+        del rec["search"]["cont_quant_exclude"]
+        write(os.path.join(folder, "run_record.json"), json.dumps(rec))
+        self.run_it("search-done", "--out", out, "--status", "completed", "--exit-code", "0")
+        self.assertEqual(self.only_folder(), folder)
+        rec = self.read(folder, "run_record.json")
+        self.assertEqual(rec["schema_version"], 3)
+        self.assertIn("cont_quant_exclude", rec["search"])
+        self.assertNotIn("cont_quant_exclude", rec["search"]["fasta"])
+        self.assertIn("(schema 3)", self.read(folder))
+
+    def test_another_engine_is_never_said_to_have_run_it(self):
+        """A Sage search on the same sidecar (which recommends Cont_ for DIA-NN): nothing about
+        the flag -- its parameters file says nothing about DIA-NN."""
+        out = make_search(self.d)
+        self.prov(out, engine="sage", version="0.14.7",
+                  engine_version={"value": "0.14.7", "source": "results.json"})
+        line, s = self.record(out)
+        self.assertNotIn("cont-quant-exclude", line)
+        self.assertIsNone(s["cont_quant_exclude"])
 
 
 class FindingPartsAreDeclared(unittest.TestCase):

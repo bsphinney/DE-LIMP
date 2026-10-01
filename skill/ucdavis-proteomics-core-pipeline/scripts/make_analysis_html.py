@@ -45,6 +45,7 @@ import report_style as rs  # noqa: E402  -- the ONE look shared by the skill's H
 import html_to_pdf  # noqa: E402  -- the PDF: the same page printed by a headless browser
 import make_podcast       # noqa: E402  -- an optional audio discussion keeps its Listen card
 from session_docs import IP_CONTROL_NAME  # noqa: E402  -- which groups are pull-down controls
+from fetch_fasta import CONTAMINANT_TAGS  # noqa: E402  -- Cont_ and FragPipe's contam_: one definition
 
 # Galleries (no report only): QC first, then overview, then per-contrast results, and the
 # p-value calibration check last, as an appendix.
@@ -796,13 +797,25 @@ def is_ig_chain(gene, names=None):
     return bool(_IG_GENE.match(g) or _IG_ENTRY.match(n) or _IG_DESC.search(n))
 
 
-def background_flag(gene, protein, names=None):
-    """"Ig chain" / "contaminant" / None for one DE row."""
-    if any(t.strip().startswith("Cont_") for t in (protein or "").split(";")):
+def background_flag(gene, protein, names=None, keratin_kept=()):
+    """"Ig chain" / "contaminant" / None for one DE row. `keratin_kept`: a keratin sample's
+    keratin-family Cont_ accessions run_de.R kept as the analyte (keratin_kept_accessions) --
+    a row whose only Cont_ accessions are those is sample protein, not contamination."""
+    cont = [t.strip() for t in (protein or "").split(";")
+            if t.strip().startswith(CONTAMINANT_TAGS)]
+    if cont and not all(t in keratin_kept for t in cont):
         return "contaminant"
     if is_ig_chain(gene, names):
         return "Ig chain"
     return None
+
+
+def keratin_kept_accessions(prov):
+    """The keratin-family Cont_ accessions run_de.R's contaminant filter left in for a keratin
+    sample (de_provenance.json contaminants.keratin_sample.exempt_accessions); empty otherwise."""
+    cont = prov.get("contaminants") if isinstance(prov.get("contaminants"), dict) else {}
+    k = cont.get("keratin_sample") if isinstance(cont.get("keratin_sample"), dict) else {}
+    return frozenset(a for a in (k.get("exempt_accessions") or []) if isinstance(a, str))
 
 
 def detected_columns(row, contrast):
@@ -907,6 +920,10 @@ def build_page(a, prov, tables, figs, md_text, used):
     for title, body in report_secs:
         sections.append({"anchor": anchor(title, used), "title": title,
                          "kind": severity(title, body), "blocks": [("md", body)]})
+    sd = getattr(a, "_sets", None)
+    if sd and norm_title(SETS_TITLE) not in report_h2:     # the report's own section wins
+        sections.append({"anchor": anchor(SETS_TITLE, used), "title": SETS_TITLE, "kind": None,
+                         "blocks": [("md", sd["md"])]})
     if top:
         sections.append({"anchor": anchor("Top proteins per contrast", used),
                          "title": "Top proteins per contrast", "kind": None,
@@ -960,7 +977,8 @@ def glance_data(prov, tables, tables_dir, session=None):
     if rows:
         tiles.append((len(rows), "contrasts"))
         tiles.append((max(r["tested"] for r in rows), "proteins tested"))
-    notes = [n for n in (inferred_note(prov, tables_dir), database_note(prov, tables_dir, session))
+    notes = [n for n in (search_measurement_note(prov, session), inferred_note(prov, tables_dir),
+                         database_note(prov, tables_dir, session), keratin_note(prov))
              if n]
     return {"tiles": tiles, "contrasts": rows, "adjp": tables.adjp, "adjp_src": tables.src,
             "recorded": tables.src == "de_provenance.json", "notes": notes,
@@ -1063,6 +1081,50 @@ def database_note(prov, tables_dir, session=None):
             "text": text}
 
 
+def search_measurement_note(prov, session=None):
+    """The fixed CAUTION for a search that fell back instead of measuring its scan window or mass
+    accuracy (search_provenance.json scan_window.mode / mass_acc.mode), worded by
+    probe_fallback.caution() -- the one wording, shared with AUDIT.md and the run record. Shown by
+    the page itself, like database_note: it must never depend on the report writer remembering
+    it. The search record is the one beside de_provenance.json's `input` (as audit_results.py
+    reads it), else the session's output/search/. None when nothing fell back."""
+    inp = prov.get("input")
+    path = next((c for c in (
+        os.path.join(os.path.dirname(str(inp)), "search_provenance.json") if inp else None,
+        os.path.join(session, "output", "search", "search_provenance.json") if session else None)
+        if c and os.path.exists(c)), None)
+    sprov = load_record(path)
+    if not sprov:
+        return None
+    # provenance_caution() type-checks every piece: a malformed record never stops the page
+    from probe_fallback import provenance_caution
+    text = provenance_caution(sprov)
+    if not text:
+        return None
+    return {"kind": "warning", "title": "The search did not measure what it was to measure",
+            "text": text}
+
+
+def keratin_note(prov):
+    """The fixed keratin-sample callout: run_de.R's record says these samples are keratin (hair,
+    wool, feather, skin, nail) and keratin is the analyte -- what was kept and why, worded by
+    make_methods.de_keratin_sentence (the one description). A warning when the record carries a
+    caution (keratin entries left in the search database, not identified, or added by the search
+    engine itself). None for any other sample."""
+    cont = prov.get("contaminants") if isinstance(prov.get("contaminants"), dict) else {}
+    k = cont.get("keratin_sample") if isinstance(cont.get("keratin_sample"), dict) else {}
+    if k.get("value") is not True:
+        return None
+    from make_methods import de_keratin_sentence
+    text = de_keratin_sentence(cont)
+    warn = k.get("caution") is True
+    note = str(k.get("note") or "").strip()
+    if warn and note:
+        text += f" {note[:1].upper()}{note[1:]}"
+    return {"kind": "warning" if warn else "info",
+            "title": "Keratin sample: keratin is the analyte, not a contaminant", "text": text}
+
+
 TOP_K = 20
 
 
@@ -1074,6 +1136,7 @@ def top_data(tables, a, prov):
     note = detection_note_fn(a.tables, prov, cond)
     word = "quantified" if (prov.get("detection_matrix") or {}).get("zero_means") == "missing" \
         else "detected"
+    kept = keratin_kept_accessions(prov)
     out = []
     for c in tables.contrasts:
         raw = tables.label.get(c)
@@ -1087,10 +1150,153 @@ def top_data(tables, a, prov):
             rows.append({"protein": prot, "gene": "—" if name == prot.split(";")[0] else name,
                          "lfc": r["_lfc"], "p": r["_p"], "sig": r["_p"] < tables.adjp,
                          "det": det, "flag": background_flag(r.get("Genes"), r.get("Protein.Group"),
-                                                             r.get("Protein.Names"))})
+                                                             r.get("Protein.Names"), kept)})
         out.append({"contrast": tables.display(c), "rows": rows, "counts": tables.counts(c),
                     "adjp": tables.adjp})
     return out
+
+
+# ---- protein-set tests (run_sets.R) ---------------------------------------------------------
+# Drawn from run_sets.R's own record: its counts, its reading rules and its methods paragraph are
+# quoted, never restated here. Detail tables list only sets significant in BOTH tests -- a list
+# of one-test sets invites reading a broad shift as a specific category.
+SETS_RECORD = "sets_provenance.json"
+SETS_TITLE = "Protein-set tests"
+SETS_TOP = 10
+
+
+def _sets_detail(tables_dir, cn, c, check_col, check, what="sets"):
+    """The sets significant in BOTH tests for one comparison, as a Markdown table."""
+    path = os.path.join(tables_dir, c.get("file") or "")
+    try:
+        top = [r for r in csv.DictReader(csv_text(path)) if r.get("Call") == "camera + fry"]
+    except OSError:
+        top = []
+    L = [f"**{contrast_label(cn)}** ({what}) — sets significant in both tests ({len(top)}; the "
+         f"first {min(len(top), SETS_TOP)} by FDR, `{c.get('file')}`):", "",
+         f"| Set | Source | Proteins | Mean log2FC | camera FDR | fry FDR | {check_col} | Flags |",
+         "|---|---|---|---|---|---|---|---|"]
+    for r in top[:SETS_TOP]:
+        L.append(f"| {r.get('Set_Name')} | {r.get('Source')} | {r.get('NGenes')} | "
+                 f"{float(r['Mean_logFC']):.2f} | {r.get('camera_Direction')} "
+                 f"{fmt_p(float(r['camera_FDR']))} | {r.get('fry_Direction')} "
+                 f"{fmt_p(float(r['fry_FDR']))} | {check(r)} | {r.get('Flags') or ''} |")
+    return L + [""]
+
+
+def sets_data(tables_dir, figures_dir, base, suggested=()):
+    """run_sets.R's record -> {"md": section text, "figures": [names shown], "all_figures":
+    [every figure it drew], "captions": {name: caption}}, or None without a record."""
+    rec = load_record(os.path.join(tables_dir or "", SETS_RECORD)) if tables_dir else {}
+    if not rec:
+        return None
+    fdr = (rec.get("settings") or {}).get("fdr", {}).get("value")
+    fdr_s = f"{fdr:g}" if isinstance(fdr, (int, float)) else "the recorded threshold"
+    sets = rec.get("settings") or {}
+
+    def val(k):
+        v = sets.get(k) or {}
+        tagged = str(v.get("source", "")).startswith("DEFAULT")
+        return f"{v.get('value')}" + (" (DEFAULT — not user-confirmed)" if tagged else "")
+    fig_dir = os.path.normpath(os.path.join(tables_dir, rec.get("figure_dir") or ""))
+
+    def fig_ref(name):
+        return os.path.relpath(os.path.join(fig_dir, name), base).replace(os.sep, "/")
+
+    srcs = "; ".join(s.get("name", "?") for s in (rec.get("sources") or {}).values()) or \
+        "not recorded"
+    L = [f"Protein-set tests ask whether a predefined group of proteins ({srcs}) shifted "
+         "together in a comparison, even when few of its proteins change enough on their own. "
+         "**camera** asks whether the set's proteins changed *more than the other proteins* "
+         "(competitive); **fry** asks whether they changed *at all* (self-contained). Both use "
+         f"the differential-expression model itself. Significant: FDR < {fdr_s} "
+         f"(Benjamini–Hochberg across the sets of each comparison); sets of {val('min_size')} to "
+         f"{val('max_size')} tested proteins; camera's inter-protein correlation "
+         f"{val('camera_inter_gene_cor')}.", ""]
+    rows, shown, all_figs, caps, detail = [], [], [], {}, []
+    for cn, c in (rec.get("contrasts") or {}).items():
+        role = c.get("ip_role")
+        what = {"control_vs_control": " — control vs control: the lysate background",
+                "bait_vs_control": " — bait vs control: what co-purifies",
+                "bait_between_conditions": " — one bait between conditions (not normalised)"
+                }.get(role, "")
+        # camera's count is not a result where camera has little power (the record says where)
+        cam = (f"{c.get('camera', '?')} (little power)" if c.get("camera_low_power")
+               else f"{c.get('camera', '?')}")
+        rows.append(f"| {contrast_label(cn)}{what} | {c.get('n_significant_proteins', '?')} | "
+                    f"{c.get('n_sets', '?')} | {cam} | {c.get('fry', '?')} | "
+                    f"{c.get('reading') or 'no reading recorded'} |")
+        if c.get("figure") and not str(c["figure"]).startswith("skipped"):
+            all_figs.append(c["figure"])
+            caps[c["figure"]] = (f"Each point is a protein set in {contrast_label(cn)}: its effect "
+                                 "(mean log2 fold change of its proteins) against camera's FDR (left) "
+                                 "and fry's (right); the colour says which test is significant, a "
+                                 f"hollow point carries a flag ({c.get('file')}).")
+        if c.get("both"):
+            detail.append((cn, c))
+        if c.get("figure") in all_figs and (c.get("both") or cn in suggested):
+            shown.append((cn, c["figure"]))
+    L += ["| Comparison | Significant proteins | Sets tested | camera | fry | What it shows |",
+          "|---|---|---|---|---|---|", *rows, ""]
+    for cn, c in detail:
+        L += _sets_detail(tables_dir, cn, c, "Run depth",
+                          lambda r: "/".join(x for x in (r.get("camera_Depth"), r.get("fry_Depth"))
+                                             if x) or "—")
+    for cn, fn in shown:
+        L += [f"![Protein-set tests: {contrast_label(cn)}]({fig_ref(fn)})", ""]
+    ip = rec.get("pulldown") or {}
+    baits = ip.get("baits") or {}
+    if baits:
+        L += ["**Pulldown: between-condition tests relative to each bait's complex.** Each IP was "
+              "offset by the median of its bait's interactome (" + (ip.get("interactome_rule") or
+              "rule not recorded") + "); sets within the interactome were then compared between "
+              "conditions. The recovery difference is how much less (negative) or more of the "
+              "complex the first condition's IPs brought down, by each reference.", ""]
+        # the general statement once here; each bait's reading (in the table) gives its own numbers
+        bias = ip.get("direction_bias") or ""
+        if bias:
+            L += [f"**What these tests see less well.** {bias}", ""]
+        L += ["| Bait | Comparison | Interactome proteins | Recovery difference, interactome / "
+              "bait protein (log2) | Sets | camera | fry | What it shows |",
+              "|---|---|---|---|---|---|---|---|"]
+        for b, r in baits.items():
+            if r.get("skipped"):
+                L.append(f"| {b} | — | — | — | not run: {r['skipped']} | | | |")
+                continue
+            od = r.get("offset_difference") or {}
+            for cn, c in (r.get("contrasts") or {}).items():
+                diff = " / ".join(f"{od[k][cn]:+.2f}" if cn in (od.get(k) or {}) else "—"
+                                  for k in ("interactome", "bait"))
+                if c.get("error"):
+                    L.append(f"| {b} | {contrast_label(cn)} | {r.get('n_interactome')} | {diff} | "
+                             f"not run: {c['error']} | | | |")
+                    continue
+                L.append(f"| {b} | {contrast_label(cn)} | {r.get('n_interactome')} | {diff} | "
+                         f"{c.get('n_sets')} | {c.get('camera')} | {c.get('fry')} | "
+                         f"{c.get('reading') or 'no reading recorded'} |")
+                if c.get("figure") and not str(c["figure"]).startswith("skipped"):
+                    all_figs.append(c["figure"])
+                    caps[c["figure"]] = (f"Bait-normalised set tests, {contrast_label(cn)}: each "
+                                         "point is a set within the interactome; effect relative "
+                                         "to the reference against camera's and fry's FDR "
+                                         f"({c.get('file')}).")
+            if r.get("bait_normaliser_note"):
+                L.append(f"| {b} | | | {r['bait_normaliser_note']} | | | | |")
+        L.append("")
+        for b, r in baits.items():
+            for cn, c in (r.get("contrasts") or {}).items():
+                if c.get("both"):
+                    L += _sets_detail(tables_dir, cn, c, "Other reference",
+                                      lambda row: row.get("Reference_Robust") or "—",
+                                      f"bait {b}, relative to the {c.get('reference')} reference")
+    rules = rec.get("reading") or []
+    if rules:
+        L += ["**How to read these** (run_sets.R's rules, `sets_provenance.json`):", ""]
+        L += [f"- {x}" for x in rules] + [""]
+    if rec.get("methods_paragraph"):
+        L += [f"*Methods:* {rec['methods_paragraph']}", ""]
+    return {"md": "\n".join(L), "figures": [fn for _, fn in shown], "all_figures": all_figs,
+            "captions": caps}
 
 
 def severity(title, content):
@@ -1105,7 +1311,7 @@ def severity(title, content):
 
 
 # ------------------------------------------------------------------ renderer 1: HTML
-def render_html(title, subtitle, sections, figs, facts, used):
+def render_html(title, subtitle, sections, figs, facts, used, feedback=None, star=None):
     emitted = set()
     hf = _HtmlFigs(figs, emitted)
     body = []
@@ -1128,6 +1334,10 @@ def render_html(title, subtitle, sections, figs, facts, used):
             elif b[0] == "submission":
                 parts.append(b[1])
         body.append(rs.section(sec["anchor"], md_inline(sec["title"]), "".join(parts), sec["kind"]))
+    if star:                                     # the GitHub star line, before the survey
+        body.append(star)
+    if feedback:                                 # the Core's survey line, last in the page
+        body.append(feedback)
     return rs.page(title, "".join(body),
                    toc=[(s["anchor"], md_inline(s["title"])) for s in sections],
                    facts=facts, subtitle=md_inline(subtitle) if subtitle else None,
@@ -1233,7 +1443,7 @@ def quote(text):
     return "\n".join(("> " + ln) if ln.strip() else ">" for ln in text.strip("\n").splitlines())
 
 
-def render_md(title, subtitle, sections, figs, facts, md_dir):
+def render_md(title, subtitle, sections, figs, facts, md_dir, feedback=None, star=None):
     emitted = set()
     L = [f"# {title}", ""]
     fl = " · ".join(f"**{k}:** {v}" for k, v in facts if v not in (None, ""))
@@ -1262,6 +1472,9 @@ def render_md(title, subtitle, sections, figs, facts, md_dir):
         if sec["kind"]:
             body = quote(f"**{rs.CALLOUT_KINDS[sec['kind']][1]}.**\n\n{body}")
         L += [body, ""]
+    footer = [x for x in (star, feedback) if x]
+    if footer:
+        L += ["---", ""] + [y for x in footer for y in (x, "")]
     doc = "\n".join(L)
     return re.sub(r"\n{3,}", "\n\n", doc).rstrip() + "\n"
 
@@ -1363,15 +1576,23 @@ def main():
     base = os.path.dirname(os.path.abspath(a.report)) if has_report else (a.figures or ".")
     root = os.path.abspath(a.session) if a.session else base
     complete, complete_why = matrix_complete(a.tables, prov)
+    # run_sets.R's section: its figures are its own record's, not figures.json's
+    a._sets = sets_data(a.tables, a.figures, base,
+                        suggested=(prov.get("set_tests") or {}).get("suggested_for") or ())
+    if a._sets:
+        caps.update(a._sets["captions"])
     figs = Figures(base, root, a.figures, caps,
                    summarize=lambda nm: figure_summary(nm, tables, qc, em),
                    suppress=SUPPRESS_WHEN_COMPLETE if complete else (),
-                   current=a._listed if have_fj else None, failed=failed)
+                   current=(a._listed + (a._sets["all_figures"] if a._sets else [])) if have_fj
+                   else None, failed=failed)
 
     md_text = md_orig = None
     n_par = 0
     if has_report:
-        md_text = md_orig = make_podcast.strip_block(read_text(a.report))  # its Listen line: the card is below
+        import core_submission            # ... and its survey + star lines (the twin's): added below
+        md_text = md_orig = core_submission.strip_feedback(
+            make_podcast.strip_block(read_text(a.report)))  # its Listen line: the card is below
         # The one source both renderers draw from, so the HTML, .md and PDF all lose it.
         md_text, gone, n_par = drop_suppressed(md_text, figs.suppress)
         figs.suppressed += [g for g in gone if g not in figs.suppressed]
@@ -1396,16 +1617,36 @@ def main():
         sections.insert(0, {"anchor": sub_anchor, "title": "Submission",
                             "kind": None, "blocks": [("submission", sub["html"], sub["md"])]})
 
-    doc = render_html(title, subtitle, sections, figs, facts, used)
+    # The Core's feedback survey, last in the page and its twin: Core runs only, as
+    # submission_report.core_run decides of the SESSION (the one test, the one input, as README,
+    # link and share ask it; --submission feeds only the Submission section above); the link
+    # and its words are core_submission.feedback_line's. It asks about the podcast when one
+    # exists now.
+    fb = {}
+    core = submission_report.core_run(a.session)
+    if core:
+        pod = make_podcast.has_podcast(os.path.dirname(os.path.abspath(a.out)))
+        import core_submission
+        fb = {fmt: core_submission.feedback_line("report", core["prot"], pod, fmt)
+              for fmt in ("html", "md")}
+    # Just before it, on every run (Core or not): please star the skill's GitHub repository
+    # (core_submission.star_line, its words and plugin.json's address)
+    import core_submission
+    star = {fmt: core_submission.star_line(fmt) for fmt in ("html", "md")}
+    doc = render_html(title, subtitle, sections, figs, facts, used, feedback=fb.get("html"),
+                      star=star["html"])
     md_doc = render_md(title, subtitle, sections, figs, facts,
-                       os.path.dirname(os.path.abspath(md_out)))
+                       os.path.dirname(os.path.abspath(md_out)), feedback=fb.get("md"),
+                       star=star["md"])
 
     if has_report:
         referenced = set(report_figures(md_orig))
-        left_out = [f for f in available if f not in set(figs.embedded) and f not in referenced]
+        left_out = [f for f in available if f not in set(figs.embedded) and f not in referenced
+                    and f not in set(a._sets["all_figures"] if a._sets else ())]
         why = f"not referenced in {os.path.basename(a.report)}"
     else:
         left_out = [f for f in available if f not in set(a._listed)
+                    and f not in set(a._sets["all_figures"] if a._sets else ())
                     and not (figs.suppress and f.startswith(figs.suppress))]
         why = "not listed in figures.json" if a._listed else "no report and no figures.json"
     if left_out:

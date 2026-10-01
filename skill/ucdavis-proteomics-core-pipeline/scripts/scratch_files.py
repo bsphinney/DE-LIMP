@@ -8,6 +8,8 @@ to a record. session.py (the session zip) and make_report.py (OUTPUT_FILES.md) b
   * every `*.stale.pdf` -- a report PDF that no longer matches its HTML (html_to_pdf.print_report
     renames it rather than leave it looking current). It must never reach a collaborator;
     finalize deletes it once a current PDF exists (session.report_pdf_step);
+  * every `*.stale.html` -- the same for the shareable report with the audio built in
+    (make_podcast.ensure_share: Analysis_Report_with_audio.stale.html);
   * podcast.wav when podcast.m4a sits beside it (render --keep-wav): the .m4a is the episode.
 
 They stay on disk where they are. Stdlib only.
@@ -15,8 +17,8 @@ They stay on disk where they are. Stdlib only.
 import os
 
 SCRATCH_DIRS = frozenset({".cache"})
-LABEL = ("scratch: .cache folders, *.part files, *.stale.pdf, podcast.wav beside podcast.m4a "
-         "(kept on disk)")
+LABEL = ("scratch: .cache folders, *.part files, *.stale.pdf/.html, podcast.wav beside "
+         "podcast.m4a (kept on disk)")
 
 
 def is_scratch_dir(name):
@@ -24,7 +26,7 @@ def is_scratch_dir(name):
 
 
 def is_scratch_file(name, siblings=()):
-    return (name.endswith((".part", ".stale.pdf"))
+    return (name.endswith((".part", ".stale.pdf", ".stale.html"))
             or (name == "podcast.wav" and "podcast.m4a" in siblings))
 
 

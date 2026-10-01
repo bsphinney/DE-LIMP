@@ -218,6 +218,14 @@ Significant counts are the ones `run_de.R` wrote; they are never recounted.
 3. **The top-level `text`** is escaped like the blocks (`&`, `<`, `>`), so `<!channel>` or
    `<url|x>` in a session name cannot ping or link.
 
+## Notes from the Core (`note`)
+
+`notes.py send` posts one line: who the note is for, who left it and its subject, never its
+body. `notes.py ack --reply` posts the reply, redacted and then cut to about 300 characters.
+Both go through `notify_slack.note_facts()` / `send_note()`, relay from a laptop like finalize,
+and never fail the note. `notify_slack.py note --event sent|reply ... --dry-run` shows one.
+→ `references/notes.md`.
+
 ## Posting from another script (`send_alert`)
 
 `notify_slack.send_alert(text, *, title=None, with_status=False)` posts a one- or two-line

@@ -112,7 +112,7 @@ fi
 # CI case-insensitive. \b and lookbehinds are spelled out as "(^|[^A-Za-z0-9_])" prefixes.
 read -r -d '' SECRET_CS <<'ERE'
 -----BEGIN [A-Z ]*PRIVATE KEY
-ghp_[A-Za-z0-9]{20,}
+gh[pousr]_[A-Za-z0-9]{20,}
 github_pat_[A-Za-z0-9_]+
 hf_[A-Za-z0-9]{20,}
 AIza[0-9A-Za-z_-]{20,}
@@ -159,13 +159,14 @@ if looks_secret "$ALL"; then
 fi
 
 # ---- context captured automatically, so the agent never has to remember it ----------
-# The skill version: a bash copy of skill_version.py (the one reader of plugin.json) -- on Windows
-# `python3` is often the Microsoft Store stub. tests/test_skill_version.py keeps the two equal.
-PLUGIN_JSON="$HERE/../.claude-plugin/plugin.json"
-VER_UNKNOWN="(unknown — plugin.json not found)"
-VER="$(sed -nE 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' "$PLUGIN_JSON" 2>/dev/null | head -n1 | tr -d '[:space:]')"
-[ -n "$VER" ] || VER="$VER_UNKNOWN"
-if [ "$VER" = "$VER_UNKNOWN" ]; then VER_SHOWN="$VER"; else VER_SHOWN="v$VER"; fi
+# The skill version: skill_version.sh, the bash mirror of skill_version.py (the one reader of
+# plugin.json) -- on Windows `python3` is often the Microsoft Store stub. Without its sibling
+# (a script copied up alone) the entry is still written, and says why the version is missing.
+VER="" VER_SHOWN=""
+if . "$HERE/skill_version.sh" 2>/dev/null; then
+  VER="$(skill_version "$HERE")"; VER_SHOWN="$(skill_label "$VER")"
+fi
+if [ -z "$VER" ]; then VER="(unknown -- skill_version.sh not found beside report_issue.sh)"; VER_SHOWN="$VER"; fi
 LOCAL_USER="$(id -un 2>/dev/null || echo "${USERNAME:-${USER:-unknown}}")"
 WHO="${HIVE_USER:-$LOCAL_USER}"
 OS="$(uname -sr 2>/dev/null || echo unknown)"

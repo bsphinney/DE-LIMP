@@ -244,8 +244,10 @@ def main():
     # run_de.R's contaminant record -- stated as recorded, never assumed.
     cont = prov.get("contaminants") if isinstance(prov.get("contaminants"), dict) else {}
     if cont.get("policy") == "removed":
-        w(f"- Contaminants: {cont.get('n_precursors')} precursors mapping to a {cont.get('tag')} "
-          f"entry were removed before quantification ({cont.get('n_protein_groups')} contaminant "
+        from make_methods import _count_of          # the record's unit, singular for one
+        n_items, were = _count_of(cont.get("n_precursors"), cont)
+        w(f"- Contaminants: {n_items} mapping to a {cont.get('tag')} "
+          f"entry {were} removed before quantification ({cont.get('n_protein_groups')} contaminant "
           f"protein groups); they are NOT in the DE tables or the expression matrix.")
     elif cont.get("policy") == "kept":
         w(f"- Contaminants: KEPT (--keep-contaminants) — {cont.get('n_protein_groups')} "
@@ -257,6 +259,18 @@ def main():
     if cont.get("database_risk") is True:
         w(f"- **Contaminant-filter caveat (say this in Data Quality Notes, naming the proteins):** "
           f"{cont.get('database_note')}")
+    # A keratin sample (hair, wool, feather, skin, nail): make_methods' sentence is its one
+    # description. Keratins are the analyte there -- never call them contamination.
+    from make_methods import de_keratin_sentence
+    ker = de_keratin_sentence(cont)
+    if ker and (cont.get("keratin_sample") or {}).get("value") is not True:
+        w(f"- Keratin: {ker} Say so in Data Quality Notes if keratins matter to the question.")
+    elif ker:
+        kn = (cont.get("keratin_sample") or {}).get("note")
+        w(f"- Keratin sample: {ker} Keratins in the results are the ANALYTE -- do not call them "
+          f"contamination." + (f" Caveat (say it in Data Quality Notes): {kn}"
+                               if (cont.get("keratin_sample") or {}).get("caution") is True
+                               and kn else ""))
     # run_de.R's block record (--block): make_methods' sentence is its one description.
     blk = prov.get("block") if isinstance(prov.get("block"), dict) else {}
     if blk.get("applied") is True:
@@ -341,7 +355,24 @@ def main():
     if has_qc:
         w(f"- `{a.qc}` — per-sample QC metrics.")
     if has_gsea:
-        w(f"- `{a.gsea}` — Gene Set Enrichment results.")
+        w(f"- `{a.gsea}` — Gene Set Enrichment results (gene-permutation GSEA: exploratory, see "
+          "below).")
+    # run_sets.R: its record, its tables, its own reading rules -- quoted, not restated
+    sets_rec = load_record(os.path.join(a.de_dir, "sets_provenance.json"))
+    if sets_rec:
+        w("- `tables/Sets_<contrast>.csv` — protein-set tests per comparison (camera + fry, the "
+          "run-depth check, presence-call fractions); `tables/sets_provenance.json` — their "
+          "record and methods" + ("; `tables/Sets_baitnorm_<contrast>.csv` — the pulldown's "
+                                  "tests relative to each bait's complex"
+                                  if (sets_rec.get("pulldown") or {}).get("baits") else "") + ".")
+        cols = sets_rec.get("columns") if isinstance(sets_rec.get("columns"), dict) else {}
+        for col, desc in cols.items():
+            w(f"  - `{col}`: {desc}")
+    elif (prov.get("set_tests") or {}).get("suggested_for"):
+        w(f"- Protein-set tests were suggested by run_de for "
+          f"{', '.join(prov['set_tests']['suggested_for'])} (few significant proteins) but have "
+          "not been run: say so if the report discusses pathways, and do not stand in for them "
+          "by eye.")
     w("")
     w("Compute everything you cite directly from these files:")
     w(f"- significant proteins per contrast (adj.P.Val < {adjp_txt} only) and the up/down split;")
@@ -526,8 +557,49 @@ def main():
         w("")
     if has_gsea:
         w("### Pathway & Gene Set Enrichment Analysis")
-        w("Summarize the top enriched pathways by ontology (highest |NES|). Connect "
-          "enriched pathways to the DE protein findings above.")
+        # gseGO / fgsea permute GENES: they treat a set's proteins as independent -- the flaw
+        # that keeps limma's geneSetTest out of run_sets.R (Dog CSF, 2026-09-21)
+        w("The GSEA file comes from gene-permutation GSEA (gseGO / fgsea), which treats a set's "
+          "proteins as independent: co-regulated proteins are not, so its p-values are too small "
+          "for exactly the sets that matter.")
+        if sets_rec:
+            w("Do not summarise it as findings, and do not put it beside the protein-set tests as "
+              "if it were a second test: the protein-set tests (camera + fry, above) are the "
+              "result. Mention the GSEA file at most as exploratory, with that caveat.")
+        else:
+            w("Summarise it only as exploratory, with that caveat stated: the top pathways by "
+              "|NES|, each connected to the DE proteins it rests on. Never as a finding on its own.")
+        w("")
+    if sets_rec:
+        fdr_rec = ((sets_rec.get("settings") or {}).get("fdr") or {}).get("value")
+        w("### Protein-set tests")
+        w("The HTML report adds its own 'Protein-set tests' section from `sets_provenance.json` "
+          "(counts, the sets significant in both tests, the pulldown table, the methods). In your "
+          "text, interpret; do not re-tabulate. Per comparison, from the `Sets_*.csv` tables "
+          f"(significant = FDR < {fdr_rec if fdr_rec is not None else 'not recorded'}):")
+        w("- start from the record's own reading of each comparison (below): use its words, and "
+          "do not make it stronger — 'not detectable in this design' never becomes 'unchanged', a "
+          "broad shift that cannot be separated from run depth never becomes a named signature, "
+          "and where camera has little power its count of zero is not a finding;")
+        w("- lead with sets significant in BOTH camera and fry that hold with run depth in the "
+          "model, whose fry call holds on every reference basis and that are not mostly presence "
+          "calls; name their proteins from the DE table;")
+        w("- a one-test result is reported as such (which test, and what that means below), never "
+          "as a pathway finding.")
+        w("The record's reading of each comparison:")
+        for cn, c in (sets_rec.get("contrasts") or {}).items():
+            if c.get("reading"):
+                w(f"- {contrast_label(cn)}: {c['reading']}")
+        for b, r in ((sets_rec.get("pulldown") or {}).get("baits") or {}).items():
+            for cn, c in (r.get("contrasts") or {}).items():
+                if c.get("reading"):
+                    w(f"- {b}, relative to its complex, {contrast_label(cn)}: {c['reading']}")
+        if (sets_rec.get("pulldown") or {}).get("direction_bias"):
+            w("Relative to a bait's complex, what is not found is not evidence of no loss: "
+              + sets_rec["pulldown"]["direction_bias"] + " Never write that the complex lost nothing.")
+        w("Read them by run_sets.R's own rules:")
+        for rule in sets_rec.get("reading") or []:
+            w(f"- {rule}")
         w("")
     w("### Biological Interpretation")
     w("Synthesize what biological processes or pathways are affected based on the protein "
@@ -558,7 +630,11 @@ def main():
         if engine == "sage":
             w("- **Sage**: a very fast database search engine that matches each MS2 spectrum to "
               "peptides from the FASTA, with target-decoy FDR control and label-free quant.")
-    if method == "dpc":
+    if prov.get("plain_language"):
+        # the pipeline's own words for itself (build_maxlfq.R descriptor), never a guess from
+        # the --method flag: a Sage DE runs --method maxlfq and is not MaxLFQ
+        w(f"- {prov['plain_language']}")
+    elif method == "dpc":
         w("- **LIMPA / limma (DPC-Quant)**: limma borrows information across all proteins for "
           "better variance estimates (empirical Bayes moderation), which is powerful with the "
           "few replicates typical in proteomics; limpa adds a detection-probability model so "

@@ -13,6 +13,11 @@ Microsoft Store stub) and skill_version.R (R: run_de.R's, for the DE-LIMP sessio
 When plugin.json is not there -- a scripts/ folder copied up on its own -- the version is UNKNOWN,
 a tagged value, never a guessed one (CLAUDE.md rule 2): it used to read "0.0.0" in sdrf.tsv.
 
+It is also the Python reader of core_admins.txt beside it, the Proteomics Core admins:
+core_admins(), line for line what skill_version.sh's skill_core_admins prints (bash). notes.py
+imports it; notes.py's copy sent over stdin to HIVE carries a copy, kept equal by
+tests/test_notes.py.
+
     python3 skill_version.py        # prints the version, or UNKNOWN
 """
 import json
@@ -45,6 +50,33 @@ def plugin_meta(here=HERE):
     except (OSError, ValueError, TypeError):
         return {}
     return m if isinstance(m, dict) else {}
+
+
+#: The characters sed's [[:space:]] matches (skill_version.sh strips them from both ends).
+_SPACE = " \t\n\r\x0b\x0c"
+
+
+def admin_lines(text):
+    """core_admins.txt's text -> its admins, in file order: `#` to the end of a line dropped,
+    blanks at both ends and every CR removed, empty lines skipped -- skill_version.sh's
+    `sed 's/#.*//; s/[[:space:]]*$//; s/^[[:space:]]*//' | tr -d '\r' | grep -v '^$'`."""
+    out = []
+    for ln in text.split("\n"):
+        ln = ln.split("#", 1)[0].rstrip(_SPACE).lstrip(_SPACE).replace("\r", "")
+        if ln:
+            out.append(ln)
+    return out
+
+
+def core_admins(path=None):
+    """The Proteomics Core admins in core_admins.txt (`path`, default beside this file). [] when
+    it is missing or unreadable: no admins, and whatever they would vouch for is not trusted."""
+    try:
+        with open(path or os.path.join(HERE, "core_admins.txt"), "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return []
+    return admin_lines(data.decode("utf-8", "replace"))
 
 
 def label(version, ascii=False):

@@ -35,6 +35,8 @@ FAKE_JWT = "eyJhbGciOiJIUzI1NiJ9" + "." + "eyJzdWIiOiJmYWtlIn0" + "." + "fakesig
 EXAMPLES = {
     "private key": "-----BEGIN " + "OPENSSH PRIVATE KEY-----\nAAAAfake\n-----END OPENSSH PRIVATE KEY-----",
     "github": "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2",
+    "github oauth": "gho_" + "A1b2C3d4E5f6G7h8I9j0K1l2",           # and ghu_, ghs_, ghr_
+    "github server": "ghs_" + "A1b2C3d4E5f6G7h8I9j0K1l2",
     "github pat": "github_pat_" + "11AAAAAAA0fakefakefake",
     "huggingface": "hf_" + "abcdefghijklmnopqrstuvwxyz",
     "authorization": "Authorization: Bearer " + "fakefakefake123",

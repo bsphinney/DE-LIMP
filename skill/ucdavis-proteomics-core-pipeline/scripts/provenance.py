@@ -41,7 +41,8 @@ Outputs under --outdir:
 import sys, os, json, glob, shutil, hashlib, argparse, subprocess, platform, shlex
 
 # one definition each, where it is written
-from fetch_fasta import KEEP_TARGET_CONTAMINANTS_RULE, MIN_UNIQUE_PEPTIDES, sidecar_state
+from fetch_fasta import (KEEP_TARGET_CONTAMINANTS_RULE, MIN_UNIQUE_PEPTIDES, sidecar_state,
+                         keratin_sample_recorded)
 from skill_version import skill_version, plugin_meta, label as skill_label
 
 MANIFEST_LINES = []
@@ -114,6 +115,37 @@ def load_json(path):
         return json.load(open(path))
     except Exception:
         return None
+
+
+# PROT_0756 v2 (2026-09-28): identical inputs, software and flags on a zen4 and a zen2 HIVE node.
+CPU_FAMILY_EVIDENCE = ("|ΔlogFC| ≤ 0.0022 and |Δt| ≤ 0.0064 across 12 contrasts, no significance "
+                       "call changed; each family reproduced its own tables exactly")
+
+
+def compute_section(compute):
+    """REPRODUCE.md's 'same numbers need the same kind of CPU' section, from run_de.R's record."""
+    if not compute:
+        return ("## Exact numbers need the same kind of CPU\n\n"
+                "This DE record does not name the machine it ran on (a run_de.R from before the "
+                "`compute` record). DPC-Quant's numbers are exact only on the same CPU family "
+                "(`references/reproducibility.md`).\n")
+    fam = compute.get("cpu_family")
+    where = (f"`{compute.get('cpu_model')}`" +
+             (f" on HIVE node `{compute.get('slurm_node')}` (CPU family `{fam}`)" if fam else ""))
+    how = (f"On HIVE, submit the re-run to the same family: `sbatch --constraint={fam} ...` "
+           "(`sinfo -N -o '%N %f'` lists each node's features)." if fam else
+           "On HIVE, find the family of the node that ran it with `sinfo -N -o '%N %f'` (its "
+           "`zen2` / `zen3` / `zen4` ... feature) and submit the re-run with "
+           "`sbatch --constraint=<family>`; elsewhere, re-run on the same kind of CPU.")
+    return f"""## Exact numbers need the same kind of CPU
+
+The DE ran on {where}, BLAS `{compute.get('blas')}`, LAPACK `{compute.get('lapack')}`
+(de_provenance.json `compute`). DPC-Quant fits each protein with an optimiser that stops at a
+tolerance, and the BLAS library's CPU-specific kernels round the last bit differently, so the
+same inputs and software give slightly different numbers on another CPU family. Measured on
+PROT_0756 v2 (a zen4 and a zen2 HIVE node): {CPU_FAMILY_EVIDENCE}. {how} Do not set
+`OPENBLAS_CORETYPE` to force one kind of kernel: it crashed limpa's dpcQuant on an EPYC 9734.
+"""
 
 
 def main():
@@ -227,7 +259,7 @@ def main():
         "marketplace": "ucdavis-proteomics-core",
         "install": [
             "claude plugin marketplace add bsphinney/DE-LIMP",
-            "claude plugin install ucdavis-proteomics-core-pipeline",
+            "claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core",
         ],
     }
     open(os.path.join(env_dir, "skill.txt"), "w", encoding="utf-8").write(
@@ -423,6 +455,17 @@ def main():
     elif (_state != "legacy" and _k is not None and _k != MIN_UNIQUE_PEPTIDES and
           _rule != KEEP_TARGET_CONTAMINANTS_RULE and fasta_repro_contam != "none"):
         fasta_repro_keep += f" --min-unique-peptides {int(_k)}"
+    # A keratin sample's database (fetch --keratin-sample) has no keratin-family contaminant
+    # entries; rebuilt without the flag it would have them, and run_search.py --keratin-sample
+    # would refuse it. The one reader of the field is fetch_fasta.keratin_sample_recorded().
+    fasta_repro_keratin = keratin_sample_recorded(fi) is True
+    if fasta_repro_keratin:
+        fasta_repro_keep += " --keratin-sample"
+        fasta_repro_note += (" A keratin sample: its keratin-family contaminant entries were "
+                             "removed (--keratin-sample).")
+    elif keratin_sample_recorded(fi) is False and fi.get("keratin_sample_source") == "user":
+        # the user's "not keratin" is replayed as an answer, never left to the default
+        fasta_repro_keep += " --no-keratin-sample"
     if fasta_repro_content in ("unknown", "as_staged"):
         # A --path override or a HIVE-staged file: not reconstructible from a proteome ID.
         # fetch_fasta.py's entry-count check (content_inferred) is the best guess at what a
@@ -469,7 +512,7 @@ python3 "$SKILL/scripts/fetch_fasta.py" fetch --proteome {fasta_repro_proteome} 
 # 5. Re-run the search (inputs from inputs/checksums; verify against checksums/checksums.json).
 python3 "$SKILL/scripts/run_search.py" --tools ~/.proteomics-pipeline/tools/tools.json \\
   --bundle ./wf/workflow.manifest.json --params ./wf/$(basename "$(ls wf | grep -vi manifest | head -n1)") \\
-  --fasta ./search.fasta --out ./search_out --files {raw_arg}
+  --fasta ./search.fasta --out ./search_out --files {raw_arg}{' --keratin-sample' if fasta_repro_keratin else ''}
 
 # 6. Re-run differential expression with identical settings.
 Rscript "$SKILL/scripts/run_de.R" --input ./search_out/report.parquet \\
@@ -514,9 +557,22 @@ make input drift visible.
         skip("reproducibility_log.R", "not found in --de-dir (run run_de.R to generate it)")
         r_section = ""
 
+    # The machine the DE ran on (run_de.R's de_provenance.json `compute`): DPC-Quant's numbers
+    # are exact only on the same CPU family -- say which, and how to get it again on HIVE.
+    compute = {}
+    dp = os.path.join(a.de_dir or "", "de_provenance.json")
+    if a.de_dir and os.path.exists(dp):
+        try:
+            with open(dp, encoding="utf-8") as fh:
+                compute = json.load(fh).get("compute") or {}
+        except (OSError, ValueError) as e:
+            skip("de_provenance.json compute", f"unreadable: {e}")
+    cpu_section = compute_section(compute)
+
     md = f"""# Reproducibility — {(wfman or {}).get('name', 'proteomics analysis')}
 
 {r_section}
+{cpu_section}
 ## Skill that produced this
 - **{skill_info['title']}** — `{skill_info['name']}` {skill_label(skill_info['version'])}
 - Repository: {skill_info['repository']}

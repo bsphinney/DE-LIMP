@@ -163,6 +163,43 @@ reproducibility/
 ### Verifying a reproduction
 After `reproduce.sh` runs, compare the new `de_results/` against
 `checksums/checksums.json`. DE CSVs should match bit-for-bit when the env lock,
-engine version, params, and inputs all match. (DIA-NN/Sage are deterministic for a
-fixed thread count + version; if you change thread count, intensities can shift
-slightly — record threads in `commands.log`.)
+engine version, params, inputs **and the CPU family** all match. (DIA-NN/Sage are
+deterministic for a fixed thread count + version; if you change thread count, intensities can
+shift slightly — record threads in `commands.log`.)
+
+### Exact DE numbers need the same kind of CPU (DPC-Quant)
+
+limpa's `dpcQuant` fits each protein with `optim(method = "BFGS")` at its default tolerance
+(`newton.polish` is off), and the objective runs through the BLAS library. OpenBLAS picks
+kernels for the CPU it runs on (AVX-512 "SkylakeX" kernels on AMD zen4, "Haswell" kernels on
+zen2), and they round the last bit differently; that moves where BFGS stops, inside its
+tolerance. So identical inputs, software and flags give slightly different numbers on a
+different CPU family — and identical numbers on the same one.
+
+Measured on PROT_0756 v2 (2026-09-28): v2's DE ran on a zen4 node (EPYC 9734), the re-runs on
+zen2 nodes (EPYC 7532/7662), same env (R 4.6.1, limpa 1.4.0, limma 3.68.5, OpenBLAS 0.3.34), same
+input md5s and command. Across 12 contrasts **|ΔlogFC| ≤ 0.0022, |Δt| ≤ 0.0064, 0 significance
+calls changed**. v2's command re-run on its own zen4 node reproduced its tables exactly, and a
+zen2 re-run reproduced the zen2 pre-release tables exactly. Stage by stage: readDIANN and the
+filters, and `dpcCN`, were bit-identical across families; `dpcQuant` differed (protein values by
+up to 0.0026, standard errors by 7e-5), and was reproduced exactly within a family; limma
+(`dpcDE`, `eBayes`) given the same protein values agreed to 2e-12.
+
+What the skill does about it:
+- `run_de.R` records the machine in `de_provenance.json` `compute` and at the top of
+  `sessionInfo.txt`: the CPU model, the BLAS and LAPACK libraries, `OPENBLAS_CORETYPE` (as found,
+  never set) and, on a SLURM node, the node and its CPU-family feature (`cpu_family`, from
+  `scontrol show node`).
+- `REPRODUCE.md` names that family and says how to get it again.
+- **For an exact re-analysis on HIVE, submit to the same family**: `sbatch --constraint=<family>`.
+  HIVE's CPU-family features (`sinfo -o '%f'`, 2026-09-28) are `zen`, `zen2`, `zen3`, `zen4`,
+  `zen5` and `icelake`; in the `high` partition, 110 zen2, 24 zen4 and 16 zen3 nodes carry them.
+  `sinfo -N -o '%N %f'` lists each node's.
+- **Do not pin `OPENBLAS_CORETYPE`** to force one kind of kernel: on the EPYC 9734 node,
+  `OPENBLAS_CORETYPE=Haswell` (8 threads or 1) and `=Zen` all segfaulted in `dpcQuant`
+  (sbatch 24180764, 24180793, 24180794).
+
+A difference at this level is not an error in either run, and it is far below what would
+change a conclusion; but "reproduces exactly" means "on the same CPU family", and the record now
+says which one that was. (limpa's `newton.polish = TRUE` would polish each fit to machine
+precision; that is a method choice for limpa, not the skill.)

@@ -199,6 +199,14 @@ flag, which the message checks and says -- that the ANNOUNCEMENT's wording chang
 releases: AUTO_ACC_RE and FIXED_ACC_RE were written against 2.7.0's exact words, and a reworded or
 reordered settings block would land here with nothing wrong with the flags at all.
 
+NOT FOR DDA
+-----------
+A run searched with --dda is refused before anything starts. No scan-window radius is logged in
+DDA mode (the 67-run nail DDA chain, 2.6.0; SET28, 2.7.0), and mass-accuracy optimisation did not
+finish within 3600 s on the SET28 runs: each probe ran to its timeout, ~3 h in all, and measured
+nothing. estimate_params.py pins a DDA cfg's mass accuracy instead, and the chain has no
+step 1b for DDA (diann_parallel.parallel_safe).
+
 USAGE
 -----
     probe_window.py --diann <diann cmd> --raw <run> [<run> ...] | --raw-list <file> \\
@@ -212,11 +220,12 @@ after a bare `--` goes to DIA-NN verbatim (the chain passes the cfg flags this w
 runs under exactly the flags steps 2-5 run). --diann is exec'd without a shell, so the .NET 8
 exports Thermo .raw needs must be in THIS script's environment (ensure_dotnet8.sh, next to
 this script, prints DOTNET_ROOT). Prints JSON: the pinned radius and/or mass accuracy and every
-probe's evidence -- also on failure, with window_radius and mass_acc null and a non-zero exit
-status.
+probe's evidence -- also on failure, with window_radius and mass_acc null, `failure` saying why
+and a non-zero exit status that says it too (EXIT_* below: what a job may retry or fall back
+past).
 """
-import argparse, json, os, re, shlex, signal, sqlite3, statistics, struct, subprocess, sys
-import tempfile, time
+import argparse, errno, json, os, re, shlex, shutil, signal, sqlite3, statistics, struct
+import subprocess, sys, tempfile, time
 from urllib.parse import quote
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -225,6 +234,8 @@ sys.path.insert(0, HERE)
 # The facility's SOP tolerance, defined once, next to DIA-NN's own tables. It is the FLOOR under
 # a measured level (MASS ACCURACY, above): never re-typed here, so the floor tracks the SOP.
 from estimate_params import SOP_MASS_ACC, SOP_MASS_ACC_SOURCE      # noqa: E402
+# DIA-NN's DDA switch, defined once; nothing here can be measured under it (see main()).
+from estimate_params import DIANN_DDA_FLAG                         # noqa: E402
 
 # DIA-NN prints e.g. "Scan window radius set to 7". Match loosely (case-insensitive,
 # tolerant of the leading '[m:ss]' timestamp) but require the integer.
@@ -354,6 +365,48 @@ SELECTION_RULE = (
     "what the runs that logged everything measured")
 
 POLL_S = 0.2          # how often DIA-NN's log is read; nothing against minutes of calibration
+
+# Exit status: WHY nothing was pinned, and so what the job running the probe may do next
+# (diann_parallel.probe_attempts, which reads only this). The rule: the job retries and falls
+# back (probe_fallback.py) ONLY when the probe's own machinery failed -- a log it could not read,
+# a crash, a time limit -- never when the runs, the data, the flags or the environment answered,
+# which no fallback can fix and a fallback would hide. Every deliberate exit has its own status,
+# so 1 is only ever Python's own for an uncaught exception, and 2 only argparse's.
+EXIT_CRASH = 1           # an uncaught exception: the evidence is missing or partial
+EXIT_USAGE = 2           # argparse: the command line itself is wrong (a generator bug)
+EXIT_REFUSED = 3         # a mass accuracy MEASURED and implausible (band, spread): usually the
+                         # wrong FASTA, species or calibration
+EXIT_ENVIRONMENT = 4     # DIA-NN could not start, could not read .raw (no .NET), or will not
+                         # optimise under these flags / this build: every run would fail alike
+EXIT_CONFIG = 5          # the probe's arguments or inputs (ppm misuse, --dda, --window in the
+                         # flags, a missing FASTA or library): a generator or user error
+EXIT_NOT_MEASURED = 6    # DIA-NN ran and finished WITHOUT logging it (a wrong FASTA or library,
+                         # a >100 ppm miscalibration, failed injections), too few runs logged it,
+                         # or no run could be probed: the data answered
+EXIT_IO_ERROR = 7        # the probe's own log could not be read (io_error, e.g. ESTALE) on the
+                         # runs that failed; none of them answered
+EXIT_TIMED_OUT = 8       # the runs that failed all hit the per-probe --timeout, or --budget ran
+                         # out; none of them answered
+# Retried once: a crash or an unreadable log can be a passing fault of the node or the storage.
+# Fallen back past (after the retry): those two, and a time limit -- DIA-NN still running when
+# the probe's clock ran out is the probe's limit, not an answer from the data, and a second
+# attempt from what is left of the same budget would only hit it again (so no retry). Nothing
+# else is ever retried or fallen back past.
+RETRY_ON = (EXIT_CRASH, EXIT_IO_ERROR)
+FALLBACK_ON = (EXIT_CRASH, EXIT_IO_ERROR, EXIT_TIMED_OUT)
+# What each status means, for the job log of a step that stopped on it
+EXIT_MEANING = {
+    EXIT_USAGE: "the probe's command line was refused (argparse) -- a bug in what generated it",
+    EXIT_REFUSED: "the probe REFUSED what it measured: an implausible mass accuracy, which "
+                  "normally means the wrong FASTA, species or calibration",
+    EXIT_ENVIRONMENT: "DIA-NN could not run here (could not start, could not read .raw -- no "
+                      ".NET 8 -- or would not optimise under these flags); every run would fail "
+                      "alike, and steps 2-5 with them",
+    EXIT_CONFIG: "the probe's arguments or inputs were refused (above)",
+    EXIT_NOT_MEASURED: "DIA-NN ran and finished without logging it (a wrong FASTA or library, a "
+                       "large miscalibration, failed injections), too few runs logged it, or no "
+                       "run could be probed",
+}
 STOP_GRACE_S = 30     # SIGTERM -> SIGKILL, once a radius is in hand
 _HARD = getattr(signal, "SIGKILL", signal.SIGTERM)
 
@@ -905,6 +958,56 @@ def describe_missing(keys):
     return " or ".join(names[k] for k in keys) or "anything"
 
 
+def _fail(status, message):
+    """Exit with `status` (one of the EXIT_* above) after saying why -- sys.exit(message) would
+    exit 1, which is EXIT_CRASH's."""
+    _say(message)
+    sys.exit(status)
+
+
+def implausible_logged(probes, measure, documented=None):
+    """Every mass accuracy ANY probe logged -- a run that logged all of it or not -- outside
+    MASS_ACC_BAND, for a level being measured (a documented level is pinned as documented and
+    never measured). pin_mass_acc() checks only the runs that logged everything; without this, a
+    run that logged 60 ppm and then no radius made the probe fail as "nothing measured", and the
+    job fell back to the SOP -- searching at 20 ppm with Methods that said "not measured" over a
+    measurement that said something was badly wrong (dda-review, 2026-09-30)."""
+    if "mass-acc" not in measure:
+        return []
+    documented = documented or {}
+    out = []
+    for key in ("ms2_ppm", "ms1_ppm"):
+        if key in documented:
+            continue
+        lo, hi = MASS_ACC_BAND[key]
+        bad = [(p, p.get(key)) for p in probes if p.get(key) is not None
+               and not lo <= p[key] <= hi]
+        if bad:
+            out.append(f"{LEVEL_OF[key]} " + ", ".join(
+                f"{ppm_text(v)} ppm ({_base(p['file'])})" for p, v in bad)
+                + f" logged, outside {band_text(key)}")
+    return out
+
+
+def failure_class(stopped, probes, refused):
+    """(name, exit status) of a probe that pinned nothing: the ONE classification behind what
+    the job may retry or fall back past (RETRY_ON / FALLBACK_ON). `refused` is the implausibility
+    refusals only (band, spread, implausible_logged), not "too few runs". A failure is the
+    machinery's own only when EVERY run that failed failed that way -- one run DIA-NN finished
+    without logging it is the data answering, and the whole probe is then not measured."""
+    if refused:
+        return "refused", EXIT_REFUSED
+    if stopped == "environment":
+        return "environment", EXIT_ENVIRONMENT
+    failed = [p for p in probes if p.get("missing")]
+    answered = [p for p in failed if not p.get("io_error") and not p.get("timed_out")]
+    if stopped == "no_probeable_run" or answered or (not failed and stopped != "budget"):
+        return "not_measured", EXIT_NOT_MEASURED
+    if any(p.get("io_error") for p in failed):
+        return "io_error", EXIT_IO_ERROR
+    return "timed_out", EXIT_TIMED_OUT
+
+
 def pin_mass_acc(probes, documented=None):
     """The mass accuracy to pin from the per-run values: the MEDIAN of each measured level, taken
     high, and the documented value of a level in `documented` ({"ms1_ppm": 7}).
@@ -1035,6 +1138,51 @@ def pin_mass_acc(probes, documented=None):
     return out
 
 
+class _Tail:
+    """Read a growing file from where the last read stopped, surviving a stale handle.
+
+    The offset is tracked HERE, not by tell(): a read that fails part-way need not have moved the
+    file position, and a reopened handle starts at 0. On ESTALE the handle is reopened at that
+    offset, once; a second failure is raised to the caller."""
+
+    def __init__(self, path):
+        self.path, self.offset, self.fh = path, 0, None
+
+    def read(self):
+        for attempt in (1, 2):
+            try:
+                if self.fh is None:
+                    self.fh = open(self.path, "rb")
+                    self.fh.seek(self.offset)
+                data = self.fh.read()
+                self.offset += len(data)
+                return data
+            except OSError as e:
+                self.close()
+                if e.errno != errno.ESTALE or attempt == 2:
+                    raise
+        return b""
+
+    def close(self):
+        if self.fh is not None:
+            try:
+                self.fh.close()
+            except OSError:
+                pass
+            self.fh = None
+
+
+def publish_log(live, dest):
+    """Copy the probe's node-local log to `dest` (the workdir, which may be NFS). Returns None,
+    or why it could not be copied -- the measurement in hand does not depend on it."""
+    try:
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        shutil.copyfile(live, dest)
+        return None
+    except OSError as e:
+        return f"{type(e).__name__}: {e}"
+
+
 def run_probe(diann, raw, fasta, lib, threads, timeout, extra="", extra_args=(), workdir=None,
               tag="", measure=("window",), skip=()):
     """Run DIA-NN on one run until it has logged everything in `measure` (bar the `skip` levels).
@@ -1051,7 +1199,17 @@ def run_probe(diann, raw, fasta, lib, threads, timeout, extra="", extra_args=(),
     that never logs a radius runs on, writes its report into the working directory (in the
     chain, <out> -- the path step 5's check reads) and, if the search completes, its .quant
     NEXT TO THE RAW FILE. They go before --threads, so the flags of the real search stay the
-    tail of DIA-NN's argv, as in steps 2-5."""
+    tail of DIA-NN's argv, as in steps 2-5.
+
+    The LIVE log is on node-local storage (tempfile: $TMPDIR, else /tmp -- local ext4 and private
+    per job on HIVE), and only a copy is published to <workdir>/probe.log, in a `finally` that
+    every return passes through. It used to be written and tailed in the workdir itself, through
+    one handle held open for the ~20-minute DIA-NN run; on Flinders NFS that handle went stale,
+    `src.read()` raised `OSError: [Errno 116] Stale file handle`, and the probe died while DIA-NN
+    carried on -- 62 of 261 step-1b jobs between 2026-09-29 17:00 and 09-30 08:00, on 28 of 56
+    nodes (fran-5b), each taking steps 2-5 down with it. The tail also reopens on ESTALE at its
+    own offset (_Tail), and an I/O error that still gets through is this run's failure
+    (`io_error`), not the probe's crash."""
     workdir = workdir or tempfile.mkdtemp(prefix="probe_window_")
     os.makedirs(workdir, exist_ok=True)
     flags = shlex.split(extra) + list(extra_args)
@@ -1062,26 +1220,41 @@ def run_probe(diann, raw, fasta, lib, threads, timeout, extra="", extra_args=(),
         cmd += ["--out", os.path.join(workdir, "report.parquet")]
     cmd += ["--threads", str(threads)] + flags
     log_path = os.path.join(workdir, "probe.log")
+    local_dir = tempfile.mkdtemp(prefix="probe_log_")
+    live = os.path.join(local_dir, "probe.log")
+    open(live, "wb").close()
     reader = LogReader(measure, skip)
     res = {"radius": None, "found": reader.found, "missing": reader.missing(), "lines": [],
-           "timed_out": False, "log": log_path, "environmental": False}
+           "timed_out": False, "log": log_path, "environmental": False, "io_error": None,
+           "log_publish_error": None}
+    try:
+        return _run_probe(cmd, live, res, reader, timeout, tag)
+    finally:
+        res["log_publish_error"] = publish_log(live, log_path)
+        if res["log_publish_error"]:
+            _say(f"{tag}[probe_window] WARNING: the probe log could not be copied to {log_path} "
+                 f"({res['log_publish_error']}); the lines above are all of it")
+        shutil.rmtree(local_dir, ignore_errors=True)
+
+
+def _run_probe(cmd, live, res, reader, timeout, tag):
+    """run_probe()'s body, against the node-local log `live`."""
     deadline = time.time() + max(0.0, timeout)
 
     def note(msg):
         res["lines"].append(msg)
         _say(tag + msg)
-        with open(log_path, "a") as fh:
+        with open(live, "a") as fh:
             fh.write(msg + "\n")
 
     if _STOP or time.time() >= deadline:
-        open(log_path, "w").close()
         res["timed_out"] = not _STOP
         note("[probe_window] stopped by a signal before this probe started" if _STOP else
              "[probe_window] timeout: no time left to start this probe")
         return res
 
     try:
-        with open(log_path, "wb") as sink:
+        with open(live, "wb") as sink:
             p = subprocess.Popen(cmd, stdout=sink, stderr=subprocess.STDOUT,
                                  stdin=subprocess.DEVNULL, start_new_session=True)
     except OSError as e:
@@ -1091,36 +1264,47 @@ def run_probe(diann, raw, fasta, lib, threads, timeout, extra="", extra_args=(),
     _LIVE.add(p)
     if _STOP:                       # a signal arrived while it was starting
         _signal_group(p, _HARD)
+    src = _Tail(live)
     try:
-        with open(log_path, "rb") as src:
-            pending = b""
-            while not reader.done():
-                exited = p.poll() is not None   # before reading: the read then has it all
+        pending = b""
+        while not reader.done():
+            exited = p.poll() is not None   # before reading: the read then has it all
+            try:
                 pending += src.read()
-                if exited and pending and not pending.endswith(b"\n"):
-                    pending += b"\n"              # DIA-NN is gone: its last line is complete
-                *complete, pending = pending.split(b"\n")
-                for raw_line in complete:
-                    line = raw_line.decode("utf-8", "replace").rstrip()
-                    res["lines"].append(line)
-                    _say(tag + line)
-                    reader.feed(line)
-                    if reader.done():
-                        break              # got it all -- no need to finish the search
-                if reader.done() or exited or _STOP:
-                    break
-                if time.time() >= deadline:
-                    res["timed_out"] = True
-                    break
-                time.sleep(POLL_S)
-            if not reader.done() and pending.strip():
-                res["lines"].append(pending.decode("utf-8", "replace").rstrip())
-                _say(tag + res["lines"][-1])
+            except OSError as e:
+                # still unreadable after one reopen: this run's failure, recorded -- the
+                # probe goes on to the next run instead of dying with DIA-NN still running
+                # without the per-probe path, so the same error reads the same on every run
+                res["io_error"] = (f"{type(e).__name__}: [Errno {e.errno}] {e.strerror}"
+                                   if e.errno else f"{type(e).__name__}: {e}")
+                note(f"[probe_window] the probe log could not be read ({res['io_error']}); "
+                     "this run is abandoned")
+                break
+            if exited and pending and not pending.endswith(b"\n"):
+                pending += b"\n"              # DIA-NN is gone: its last line is complete
+            *complete, pending = pending.split(b"\n")
+            for raw_line in complete:
+                line = raw_line.decode("utf-8", "replace").rstrip()
+                res["lines"].append(line)
+                _say(tag + line)
+                reader.feed(line)
+                if reader.done():
+                    break              # got it all -- no need to finish the search
+            if reader.done() or exited or _STOP:
+                break
+            if time.time() >= deadline:
+                res["timed_out"] = True
+                break
+            time.sleep(POLL_S)
+        if not reader.done() and pending.strip():
+            res["lines"].append(pending.decode("utf-8", "replace").rstrip())
+            _say(tag + res["lines"][-1])
     finally:
-        if p.poll() is None and not (res["timed_out"] or _STOP):
+        src.close()
+        if p.poll() is None and not (res["timed_out"] or _STOP or res["io_error"]):
             _end_group(p)                   # values in hand: let it stop gracefully
         else:
-            _kill_now(p)                    # timeout, signal, or the leader already gone
+            _kill_now(p)                    # timeout, signal, I/O error, or the leader gone
         _LIVE.discard(p)
     res["radius"], res["missing"] = reader.found.get("radius"), reader.missing()
     if res["timed_out"]:
@@ -1201,41 +1385,59 @@ def main():
     documented = {k: v for k, v in (("ms1_ppm", a.ms1_ppm), ("ms2_ppm", a.ms2_ppm))
                   if v is not None}
     if documented and "mass-acc" not in measure:
-        sys.exit("--ms1-ppm/--ms2-ppm pin a documented level of a mass-accuracy measurement; "
-                 "add --measure mass-acc, or drop them")
+        _fail(EXIT_CONFIG,
+              "--ms1-ppm/--ms2-ppm pin a documented level of a mass-accuracy measurement; "
+              "add --measure mass-acc, or drop them")
     if any(not v > 0 for v in documented.values()):
-        sys.exit("--ms1-ppm/--ms2-ppm must be positive ppm values")
+        _fail(EXIT_CONFIG, "--ms1-ppm/--ms2-ppm must be positive ppm values")
     # A documented level is pinned as given and never measured, so pin_mass_acc() cannot check
     # it. Check it here, before any DIA-NN starts: every number that can reach `pin_as` -- and
     # so massacc.txt, params.resolved.cfg and a DIA-NN command line -- is inside the band.
     for key, value in sorted(documented.items()):
         lo, hi = MASS_ACC_BAND[key]
         if not lo <= value <= hi:
-            sys.exit(f"--{key.replace('_ppm', '-ppm')} {value:g} is outside {band_text(key)}, "
-                     f"the plausible band for an Orbitrap {LEVEL_OF[key]} mass accuracy. "
-                     "DIA-NN's own Orbitrap table spans 4-15 ppm and it calibrates from 25 ppm; "
-                     "a value outside that is not a documented tier. Check the resolution the "
-                     "value came from.")
+            _fail(EXIT_CONFIG,
+                  f"--{key.replace('_ppm', '-ppm')} {value:g} is outside {band_text(key)}, "
+                  f"the plausible band for an Orbitrap {LEVEL_OF[key]} mass accuracy. "
+                  "DIA-NN's own Orbitrap table spans 4-15 ppm and it calibrates from 25 ppm; "
+                  "a value outside that is not a documented tier. Check the resolution the "
+                  "value came from.")
     if len(documented) == 2:
-        sys.exit("--ms1-ppm and --ms2-ppm both given: both levels are documented, so there is "
-                 "nothing to measure -- pin them in the cfg instead of running DIA-NN")
+        _fail(EXIT_CONFIG,
+              "--ms1-ppm and --ms2-ppm both given: both levels are documented, so there is "
+              "nothing to measure -- pin them in the cfg instead of running DIA-NN")
     if "mass-acc" in measure and a.max_probes < MASS_ACC_MIN_RUNS:
-        sys.exit(f"--max-probes {a.max_probes} cannot measure mass accuracy: it is pinned from "
-                 f"the median of at least {MASS_ACC_MIN_RUNS} representative runs. One run is "
-                 "exactly DIA-NN's own first-run auto mode -- 'use this mode for preliminary "
-                 "analyses only' -- which measuring representative runs exists to replace, and "
-                 "a lone value agrees with itself whatever it is. Use --max-probes 3, or "
-                 "measure only the scan window (--measure window).")
+        _fail(EXIT_CONFIG,
+              f"--max-probes {a.max_probes} cannot measure mass accuracy: it is pinned from "
+              f"the median of at least {MASS_ACC_MIN_RUNS} representative runs. One run is "
+              "exactly DIA-NN's own first-run auto mode -- 'use this mode for preliminary "
+              "analyses only' -- which measuring representative runs exists to replace, and "
+              "a lone value agrees with itself whatever it is. Use --max-probes 3, or "
+              "measure only the scan window (--measure window).")
     try:
         flag_words = shlex.split(a.extra) + extra_args
     except ValueError as e:
-        sys.exit(f"--extra is not a valid shell word list: {e}")
+        _fail(EXIT_CONFIG, f"--extra is not a valid shell word list: {e}")
+    if DIANN_DDA_FLAG in flag_words:
+        # Before any run is selected or started. No scan-window radius is logged in DDA mode
+        # (nail DDA chain, 2.6.0; SET28, 2.7.0), and mass-accuracy optimisation did not finish
+        # within 3600 s on the SET28 runs -- so each probe ran its full 3600 s and step 1b spent
+        # ~3 h before failing. Nothing waits for lines that will not come.
+        _fail(EXIT_CONFIG,
+              f"the DIA-NN flags carry {DIANN_DDA_FLAG}, and this probe cannot measure a DDA "
+              "search: no scan-window radius is logged in DDA mode, and mass-accuracy "
+              "optimisation did not finish within 3600 s on the SET28 runs (DIA-NN 2.7.0), so "
+              "every probe would run to its --timeout. A DDA search is not probed: "
+              "estimate_params.py --acquisition DDA pins its mass accuracy (DIA-NN's table "
+              "level, and the facility SOP for a level with none, tagged DEFAULT), and the "
+              "5-step chain leaves --window unset for DDA and has no step 1b.")
     if "window" in measure and "--window" in flag_words:
         # DIA-NN 2.7.0 echoes a given --window N as "Scan window radius set to N" among its
         # startup settings (HIVE, 2026-09-16), so this would report the flags' value as measured.
-        sys.exit("the DIA-NN flags (--extra, or after --) pin --window, so there is no radius to "
-                 "measure: DIA-NN only echoes the given value. Drop --window from them, or "
-                 "measure only mass-acc (--measure mass-acc).")
+        _fail(EXIT_CONFIG,
+              "the DIA-NN flags (--extra, or after --) pin --window, so there is no radius to "
+              "measure: DIA-NN only echoes the given value. Drop --window from them, or "
+              "measure only mass-acc (--measure mass-acc).")
 
     started = time.time()
     deadline = started + a.budget if a.budget is not None else None
@@ -1244,10 +1446,10 @@ def main():
         with open(a.raw_list) as fh:
             raws += [ln.strip() for ln in fh if ln.strip()]
     if not raws:
-        sys.exit("no runs given (--raw or --raw-list)")
+        _fail(EXIT_CONFIG, "no runs given (--raw or --raw-list)")
     for f, what in ((a.fasta, "fasta"), (a.lib, "library")):
         if not os.path.exists(f):
-            sys.exit(f"{what} not found: {f}")
+            _fail(EXIT_CONFIG, f"{what} not found: {f}")
 
     def report(result):
         print(json.dumps(result, indent=2))
@@ -1268,8 +1470,9 @@ def main():
         report({"measured": measure, "window_radius": None, "pin_as": None, "radii": [],
                 "radii_agree": None, "mass_acc": None, "mass_acc_refused": None,
                 "incomplete": None, "failed": [],
-                "stopped_because": "no_probeable_run", "probes": [], "selection": e.selection})
-        sys.exit(str(e))
+                "stopped_because": "no_probeable_run", "probes": [], "selection": e.selection,
+                "failure": "not_measured", "exit_status": EXIT_NOT_MEASURED})
+        _fail(EXIT_NOT_MEASURED, str(e))
 
     for f in sel["unreadable"]:
         _say(f"[probe_window] WARNING: cannot read {f}; not considered")
@@ -1325,7 +1528,8 @@ def main():
                       skip=tuple(documented))
         secs = round(time.time() - t0, 1)
         rec = dict(c, radius=r["radius"], seconds=secs, threads=a.threads,
-                   timed_out=r["timed_out"], missing=r["missing"], log=r["log"])
+                   timed_out=r["timed_out"], missing=r["missing"], log=r["log"],
+                   io_error=r["io_error"], log_publish_error=r["log_publish_error"])
         if "mass-acc" in measure:
             rec.update(ms2_ppm=r["found"].get("ms2_ppm"), ms1_ppm=r["found"].get("ms1_ppm"),
                        mass_acc_fixed_by_flags=bool(r["found"].get("fixed_mass_acc")),
@@ -1369,13 +1573,13 @@ def main():
     # Refusals that are NOT "no run answered": runs DID answer, and what they said must not be
     # pinned. They fail the probe exactly as a run that logged nothing does -- loudly, with the
     # evidence written -- because a wrong number pinned cohort-wide is worse than no number.
-    refused = []
+    refused, too_few = [], None
     if pin and "mass-acc" in measure and len(good) < MASS_ACC_MIN_RUNS:
         # `stopped_because: budget` after one run leaves one good probe, whose value "agrees"
         # with itself. That is DIA-NN's first-run auto mode wearing the evidence of a measurement.
-        refused.append(
-            f"only {len(good)} run logged everything asked, and mass accuracy is pinned from "
-            f"the median of at least {MASS_ACC_MIN_RUNS} representative runs")
+        # Not an implausibility refusal: failure_class() says why the other runs failed.
+        too_few = (f"only {len(good)} run logged everything asked, and mass accuracy is pinned "
+                   f"from the median of at least {MASS_ACC_MIN_RUNS} representative runs")
         pin = False
     radii = [p["radius"] for p in good] if "window" in measure else []
     radius = statistics.median_low(radii) if pin and radii else None
@@ -1384,6 +1588,13 @@ def main():
         refused += mass_acc["rejected"]
     pinned = pin and not refused and (radius is not None or "window" not in measure) and \
         (mass_acc is not None or "mass-acc" not in measure)
+    if not pinned and not refused:
+        # B1: a mass accuracy logged by ANY run, complete or not, is checked before the failure
+        # is classified -- an implausible one is refused, never fallen back past
+        refused = implausible_logged(probes, measure, documented)
+    failure, status = ((None, 0) if pinned else ("signal", 128 + _STOP[0])
+                       if stopped == "signal" and _STOP else
+                       failure_class(stopped, probes, refused))
     what = _what(measure)
     result = {
         "measured": measure,
@@ -1397,7 +1608,11 @@ def main():
         "mass_acc": mass_acc if pinned else None,
         # why a measurement that WAS made is not being pinned (band, spread, too few runs);
         # null when there is nothing to refuse. `mass_acc` above is null whenever this is not.
-        "mass_acc_refused": refused or None,
+        "mass_acc_refused": (refused + ([too_few] if too_few else [])) or None,
+        # why nothing was pinned, and the exit status that says it (failure_class); null when
+        # pinned. The job running the probe acts on the status alone (RETRY_ON / FALLBACK_ON).
+        "failure": failure,
+        "exit_status": None if pinned else status,
         "incomplete": (len(good) < len(targets)) if pinned else None,
         "failed": [_base(p["file"]) for p in probes if p["missing"]],
         "stopped_because": stopped,
@@ -1485,13 +1700,17 @@ def main():
                     "above with them and update the pattern if the wording has changed.\n")
                  + "Every run gets the same flags, so no other run was tried.")
         if refused:
-            sys.exit(f"Refusing to pin the {what}: " + "; ".join(refused)
-                     + ". Every probe's values are in the JSON above. Do NOT widen the band or "
-                     "pin one of these numbers by hand: a mass accuracy this far from what "
-                     "DIA-NN itself works with normally means the search was pointed at the "
-                     "wrong FASTA or the wrong species, or the batch is miscalibrated -- and the "
-                     "median over three runs cannot see that, because all three move together. "
-                     "Check the library, the FASTA and the instrument, then re-run.")
+            # EXIT_REFUSED: the job neither retries nor falls back past it
+            _say(f"Refusing to pin the {what}: " + "; ".join(refused)
+                 + ". Every probe's values are in the JSON above. Do NOT widen the band or "
+                 "pin one of these numbers by hand: a mass accuracy this far from what "
+                 "DIA-NN itself works with normally means the search was pointed at the "
+                 "wrong FASTA or the wrong species, or the batch is miscalibrated -- and the "
+                 "median over three runs cannot see that, because all three move together. "
+                 "Check the library, the FASTA and the instrument, then re-run.")
+            sys.exit(EXIT_REFUSED)
+        if too_few:
+            _say(f"Not pinning the {what}: {too_few}.")
         why = {"environment": "a failure no other run can fix -- DIA-NN could not start, "
                               "cannot read .raw in this environment, or no run will optimise the "
                               "mass accuracy under these flags and this DIA-NN build (above) -- "
@@ -1499,13 +1718,19 @@ def main():
                "max_failures": f"{failures} runs did not log it",
                "budget": f"the {a.budget} s budget ran out",
                "no_more_runs": "every eligible run was tried"}.get(stopped, stopped)
-        sys.exit(f"Could not read the {what}: " + why + " ("
-                 + ", ".join(result["failed"]) + "). Do NOT guess a value, and do not pin one "
-                 "from what a failed run did log -- a value inconsistent across files is exactly "
-                 "the defect this probe exists to prevent. Fix the cause above and re-run. --raw "
-                 "is not a way past it: it narrows the cohort the checks are applied to, and "
-                 "every run named there still has to clear them, so a run left out as damaged or "
-                 "as a blank is left out however it is named.")
+        _fail(status, f"Could not read the {what}: " + why + " ("
+              + ", ".join(result["failed"]) + "). Do NOT guess a value, and do not pin one "
+              "from what a failed run did log -- a value inconsistent across files is exactly "
+              "the defect this probe exists to prevent. "
+              + ("This is the probe's own machinery failing, not the data answering "
+                 f"({failure}): a job running this probe "
+                 + ("retries it once and then " if status in RETRY_ON else "")
+                 + "falls back to DIA-NN's own choice (probe_fallback.py), recorded as a fallback."
+                 if status in FALLBACK_ON else
+                 "Fix the cause above and re-run. --raw is not a way past it: it narrows the "
+                 "cohort the checks are applied to, and every run named there still has to "
+                 "clear them, so a run left out as damaged or as a blank is left out however it "
+                 "is named."))
 
     if a.write_cfg:
         with open(a.write_cfg, "a") as fh:

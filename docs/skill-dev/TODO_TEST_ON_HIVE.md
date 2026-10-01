@@ -44,6 +44,14 @@ the **2.6 native binary**. Generate the chain, run `submit.sh`, and check each s
 
 ## 4. Sage / FragPipe adapters (already flagged)
 - [ ] Sage `lfq.parquet` → `adapt_sage` → `report.parquet` columns correct on real data.
+- [ ] `run_search.py --engine sage --sbatch` on `.raw` (2.9): no converter runs at generation;
+      the job converts with the Core's ThermoRawFileParser (`-f=2`, `DOTNET_ROOT` baked in),
+      every mzML ends in `</indexedmzML>`, and Sage reads them. Only fixtures and stand-ins
+      have tested this so far.
+- [ ] `sage_lfq_check.py` on gabrig's HeL50 Fusion Lumos Sage output (2026-09-29): the +7.1/+7.7
+      ppm runs WARN (Sage logged 0 target MS1 peaks); of the +1.8 to +5.8 ppm runs, those whose
+      median + 2 ppm exceeds the 5 ppm window are named. The median `precursor_ppm` it prints should match what
+      she measured from `results.sage.parquet`.
 - [ ] FragPipe `combined_protein.tsv` → `adapt_fragpipe` correct (if used).
 
 ## 5. HIVE remote execution + access gate

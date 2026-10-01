@@ -32,8 +32,19 @@ CHECKS the script, RENDERS it to audio and LINKS the audio into the outputs.
             the Markdown report, an entry in README.html / README.md and AGENTS.md. Idempotent:
             the card sits between <!-- podcast:start --> and <!-- podcast:end --> and is replaced
             on a re-run. A file that is not there is skipped with [INFO]. Refuses while the
-            check does not hold (--unchecked overrides); reprints an older Analysis_Report.pdf.
+            check does not hold (--unchecked overrides); rewords a Core run's "How did we do?"
+            survey line to ask about the podcast too (never adds one); reprints an older
+            Analysis_Report.pdf.
             The hooks the report calls never raise: a bad podcast.json is one [WARN].
+  share  OUTDIR [--kbps 48] [--unchecked] [--no-browser]
+         -> OUTDIR/Analysis_Report_with_audio.html: the report with the audio (AAC, 32-64 kbps
+            mono, as a data: URI) and the transcript (an iframe srcdoc) built in -- one file to
+            send by itself; nothing in it points outside it. The same Listen card code as link.
+            Checked before it is kept: the embedded bytes decode back from the written file to
+            an MP4 audio track of the episode's length (its boxes, then afconvert/ffmpeg), and a
+            headless Chromium plays it when one is here. Warns above ~18 MB (~25 MB attached:
+            email sends base64) with Bioshare as the way to send it. Refuses while the check
+            does not hold, like link.
 
 Privacy: only the final transcript (render: the turns, after pronunciation substitutions) and
 the rendered audio (verify, downsampled) ever leave the machine -- never the report -- and only
@@ -59,6 +70,7 @@ import json
 import math
 import os
 import re
+import select
 import shutil
 import struct
 import subprocess
@@ -73,6 +85,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 from notify_slack import REDACTED, redact as _redact    # noqa: E402  the ONE secret list
+from report_files import SHARE_NAME, SHARE_STALE    # noqa: E402  names defined once
 
 SHOW = "Signal to Noise"
 HOSTS = (("Maya", "cell biologist"), ("Leo", "statistician"))
@@ -101,12 +114,12 @@ DISCLOSURE = ("AI-generated, in synthetic voices. It discusses this report and m
               "anything important against it.")
 
 
-def extras_note(man):
+def extras_note(man, where="folder"):
     """" It also drew on: <labels> (not in this folder)." when the check had extra sources."""
     labs = [x.get("label") or x.get("file") for x in (man.get("sources") or [])
             if isinstance(x, dict) and x.get("delivered") is False]
     labs = [str(x) for x in labs if x]
-    return f" It also drew on: {'; '.join(labs)} (not in this folder)." if labs else ""
+    return f" It also drew on: {'; '.join(labs)} (not in this {where})." if labs else ""
 DISCLOSURE_RE = re.compile(r"\bAI[-\s]generated\b|\bgenerated\s+(?:by|with)\s+(?:an?\s+)?"
                            r"(?:AI|artificial\s+intelligence)\b", re.I)
 
@@ -748,9 +761,15 @@ def pronunciation_problems(written, spoken):
 # ----------------------------------------------------------------------------- sources
 def source_text(path):
     """A source as check hashes it: its text without any podcast block, so `link` adding its
-    Listen line to the report does not make the check stale."""
+    Listen line to the report does not make the check stale -- and without the Core's survey
+    line, which link rewords to ask about the podcast (core_submission.without_feedback)."""
     with open(path, "rb") as fh:
-        return strip_block(fh.read().decode("utf-8", errors="replace"))
+        text = strip_block(fh.read().decode("utf-8", errors="replace"))
+    try:
+        import core_submission
+    except ImportError:
+        return text
+    return core_submission.without_feedback(text)
 
 
 def source_sha(text):
@@ -774,6 +793,34 @@ def load_source(path):
 
 
 # ----------------------------------------------------------------------------- check
+# "survey" as an invitation to the Core's feedback survey: near a feedback word, and never
+# "survey scan(s)" -- the DDA term (an MS1 survey scan) the teaching segment may well use
+SURVEY = re.compile(r"\bsurveys?\b(?![\s-]+scans?\b)", re.I)
+_FEEDBACK_WORDS = re.compile(r"how did we do|tell us|feedback|(?:5|five)[\s-]*minutes?\b|"
+                             r"questionnaire", re.I)
+
+
+def survey_invites(text):
+    """The places `text` invites someone to a survey: "survey" (not "survey scan") within 120
+    characters of a feedback word. -> [snippet]."""
+    out = []
+    for m in SURVEY.finditer(text):
+        a, b = max(0, m.start() - 120), m.end() + 120
+        if _FEEDBACK_WORDS.search(text[a:b]):
+            out.append(" ".join(text[max(0, m.start() - 40):m.end() + 40].split()))
+    return out
+
+
+def _core_run(session):
+    """submission_report.core_run: the one test of a UC Davis Core run. False when it cannot be
+    asked -- never invite a user outside the Core to the Core's survey."""
+    try:
+        import submission_report
+    except ImportError:
+        return False
+    return bool(submission_report.core_run(session))
+
+
 def _as_source(x):
     """A source as check uses it: a dict with path, sha, text, kind ('delivered' | 'extra'),
     label and ref (what check.txt records). A (path, sha, text) tuple is a delivered source."""
@@ -784,11 +831,13 @@ def _as_source(x):
             "ref": os.path.basename(path)}
 
 
-def check(s, sources, forbid=()):
+def check(s, sources, forbid=(), core=False):
     """-> dict with fails / warns / infos (lists of str) and stats. `sources`: dicts from
     cmd_check (or (path, sha, text) tuples, taken as delivered). A token found only in an
     extra source (one the lab was not given) passes only when a Claims bullet names it and that
-    source."""
+    source. `core`: a UC Davis Core run (submission_report.core_run of the session, as link and
+    share ask it), whose report ends with the Core's survey -- the only kind of episode that may
+    invite listeners to it."""
     fails, warns, infos = [], [], []
     for line, msg in s.problems:
         fails.append((f"line {line}: " if line else "") + msg)
@@ -892,6 +941,10 @@ def check(s, sources, forbid=()):
                          "the observed fraction over ALL runs, so a hit found only in its own "
                          "group scores low. Point to the per-group detection columns "
                          "(Detected_<group>, Evidence) or the tier file instead")
+        for inv in ([] if core else survey_invites(t.text)):
+            fails.append(f"{where}: '{inv}' -- invites listeners to a survey, but this is not a "
+                         "UC Davis Core run: only a Core run's report ends with the Core's "
+                         "feedback survey. Take it out")
         for m in SPECIALTY.finditer(t.text):
             fails.append(f"{where}: '{m.group(0)}' -- a host must not claim a real research "
                          "specialty (it lends a synthetic voice false authority); say \"I'm the "
@@ -1131,7 +1184,7 @@ def cmd_check(a):
         sha, text = load_source(p)
         sources.append({"path": os.path.realpath(p), "sha": sha, "text": text, "kind": "extra",
                         "label": lab.strip() or os.path.basename(p), "ref": os.path.basename(p)})
-    res = check(s, sources, a.forbid_name or [])
+    res = check(s, sources, a.forbid_name or [], core=bool(out and _core_run(_session_of(out))))
     for pr in reversed(problems):
         res["fails"].insert(0, pr)
     if problems:
@@ -2496,13 +2549,18 @@ def _inline(t):
                   re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", t))
 
 
-def transcript_html(s, man, out):
+def transcript_html(s, man, out, embedded=False):
+    """transcript.html for the podcast folder `out`. `embedded`: the copy built into the
+    shareable report (share) -- no player (the card's is right above it) and nothing that
+    points out of the file."""
     sys.path.insert(0, HERE)
     import report_style as rs
     title = f"{s.show} — {s.title or 'Untitled'}"
     report = os.path.join(os.path.dirname(out), "Analysis_Report.html")
-    what = ('<a href="../Analysis_Report.html">the analysis report</a>' if os.path.isfile(report)
+    what = ("this report" if embedded else
+            '<a href="../Analysis_Report.html">the analysis report</a>' if os.path.isfile(report)
             else "the analysis report")
+    where = " (in the podcast folder of the full results)" if embedded else ""
     second = s.hosts[1][0] if len(s.hosts) > 1 else None
     segs = []
     for seg in s.segments:
@@ -2522,16 +2580,17 @@ def transcript_html(s, man, out):
                            f"{man['turns']} turns)")],
             ["Script check", esc(f"{man['check']['status']}"
                                  + (" (overridden with --unchecked)" if man["check"]["overridden"]
-                                    else "") + " — check.txt")],
+                                    else "") + " — check.txt" + where)],
             ["Made", esc(man["created"])],
             ["Script sha256", f"<code>{esc(s.sha256[:16])}…</code>"]]
     body = (f"<header><h1>{esc(title)}</h1><p>An AI-generated audio discussion of {what}: "
             f"two synthetic hosts talk through the results.</p></header>\n"
-            + rs.callout("info", f"<p>{esc(DISCLOSURE + extras_note(man))} The hosts are fictional, their voices are "
+            + rs.callout("info", f"<p>{esc(DISCLOSURE + extras_note(man, 'file' if embedded else 'folder'))} The hosts are fictional, their voices are "
                                  "synthetic, and the script was written by an AI from the report; "
                                  "anything said beyond the report is listed below.</p>",
                          title="AI-generated")
-            + f'<audio controls preload="none" src="{href(man["audio"])}"></audio>'
+            + ("" if embedded else
+               f'<audio controls preload="none" src="{href(man["audio"])}"></audio>')
             + f"<style>{TRANSCRIPT_CSS}</style>"
             + '<section><h2 id="transcript">Transcript</h2>' + "".join(segs) + "</section>"
             + '<section><h2 id="claims">Claims beyond the report</h2><p>Statements the script '
@@ -2539,7 +2598,7 @@ def transcript_html(s, man, out):
               "speculation). Check these before relying on them.</p>" + claims + "</section>"
             + '<section><h2 id="made">How this was made</h2>' + rs.table(["", ""], rows)
             + "<p>Pronunciation substitutions change only what the voices say; the transcript "
-              "above keeps the written form. They are listed in check.txt.</p></section>")
+              f"above keeps the written form. They are listed in check.txt{where}.</p></section>")
     if hasattr(rs, "document"):
         return rs.document(title, body)
     return rs.page(title, body)
@@ -2565,7 +2624,11 @@ CARD_CSS = (
     ".pc-card audio{display:block;width:100%;margin:.2rem 0 .45rem}"
     ".pc-card p{margin:.2rem 0;font-size:.9rem;color:var(--muted,#5d6570);max-width:none}"
     ".pc-card .pc-print{display:none}"
+    ".pc-card details{margin:.4rem 0 0}.pc-card summary{cursor:pointer;font-size:.9rem;"
+    "color:var(--pc)}.pc-card iframe{display:block;width:100%;height:32rem;margin-top:.4rem;"
+    "border:1px solid var(--line,#dfe3e8);border-radius:8px;background:var(--surface,#fff)}"
     "@media print{.pc-card audio{display:none}.pc-card .pc-print{display:block}"
+    ".pc-card details{display:none}"
     ".pc-card{box-shadow:none;break-inside:avoid;-webkit-print-color-adjust:exact;"
     "print-color-adjust:exact}}")
 
@@ -2616,6 +2679,13 @@ def load_manifest(outdir):
     return man
 
 
+def has_podcast(outdir):
+    """Does this run have a podcast -- a usable podcast/podcast.json under `outdir`? The one test
+    (the Listen card, the survey line's "and the podcast", README, the delivery's wording): an
+    invalid podcast.json is no podcast, as it gets no Listen card."""
+    return bool(load_manifest(outdir))
+
+
 def _paths(outdir, base, man):
     pdir = os.path.join(outdir, "podcast")
     return (rel(os.path.join(pdir, man["audio"]), base),
@@ -2627,19 +2697,34 @@ def _name(man):
 
 
 @_never_raise("")
-def listen_card_html(outdir, base_dir=None):
+def listen_card_html(outdir, base_dir=None, share=None):
     """The "Listen" card (with its markers) for a page in `base_dir` (default: `outdir`, where
-    Analysis_Report.html sits). '' when `outdir` has no podcast/podcast.json."""
+    Analysis_Report.html sits). '' when `outdir` has no podcast/podcast.json. `share` (from
+    build_share: the audio as a data: URI, the transcript page, the provenance mark) makes the
+    shareable report's card: the audio and the transcript built in, no link out of the file."""
     man = load_manifest(outdir)
     if not man:
         return ""
-    audio, tr = _paths(outdir, base_dir or outdir, man)
-    return (f"{START}<style>{CARD_CSS}</style>"
+    head = (f"{START}<style>{CARD_CSS}</style>"
             f'<aside class="pc-card" aria-label="Audio discussion of these results">'
             f'<div class="pc-h">{_HEADPHONES}<span class="pc-k">Listen</span>'
             f"<span>{esc(_name(man))}</span>"
-            f'<span class="pc-d">{esc(minutes_label(man.get("duration_s")))}</span></div>'
-            f'<audio controls preload="none" src="{href(audio)}">Open '
+            f'<span class="pc-d">{esc(minutes_label(man.get("duration_s")))}</span></div>')
+    if share:
+        return (head + share["mark"]
+                + f'<audio controls preload="none" src="{share["audio"]}">Your browser cannot '
+                  "play the built-in audio.</audio>"
+                + f"<p>{esc(DISCLOSURE + extras_note(man, 'file'))} The transcript, with the "
+                  "claims that go beyond the report, is below. The audio and the transcript are "
+                  "built into this file, so it can be sent on its own.</p>"
+                + f'<p class="pc-print">The audio and its transcript are built into '
+                  f"{esc(SHARE_NAME)}; open it in a browser to listen.</p>"
+                + '<details><summary>Read the transcript</summary><iframe title="Podcast '
+                  f'transcript" srcdoc="{esc(share["transcript"])}"></iframe></details>'
+                + f"</aside>{END}")
+    audio, tr = _paths(outdir, base_dir or outdir, man)
+    return (head
+            + f'<audio controls preload="none" src="{href(audio)}">Open '
             f'<a href="{href(audio)}">{esc(audio)}</a> to listen.</audio>'
             f"<p>{esc(DISCLOSURE + extras_note(man))} <a href=\"{href(tr)}\">Read the transcript</a> "
             f"(with the claims that go beyond the report). The audio is a separate file in the podcast folder "
@@ -2673,6 +2758,18 @@ def readme_item_md(outdir, base_dir):
             f"([transcript]({href(tr)}))")
 
 
+@_never_raise("")
+def share_item_md(outdir, base_dir):
+    """The README "Start here" bullet for the shareable report (share), after the podcast's.
+    '' when it is not there."""
+    path = os.path.join(outdir, SHARE_NAME)
+    if not (load_manifest(outdir) and _share_current(outdir)):
+        return ""
+    return (f"- [{SHARE_NAME}]({href(rel(path, base_dir))}) — **to send the report with its "
+            f"audio, send this one file**: the same report with the audio discussion and its "
+            f"transcript built in ({_mb(os.path.getsize(path))})")
+
+
 @_never_raise([])
 def agents_md_lines(outdir, base_dir):
     """AGENTS.md's section on the podcast. [] without a podcast."""
@@ -2680,6 +2777,7 @@ def agents_md_lines(outdir, base_dir):
     if not man:
         return []
     pdir = rel(os.path.join(outdir, "podcast"), base_dir)
+    share = os.path.join(outdir, SHARE_NAME)
     return ["## Audio discussion (podcast): a derivative, not a record", "",
             f"`{pdir}/` holds an AI-generated audio discussion of this analysis "
             f"(*{man.get('show') or SHOW}*: two synthetic hosts, a script written by an AI from "
@@ -2688,7 +2786,11 @@ def agents_md_lines(outdir, base_dir):
             f"`{pdir}/transcript.html`; the script, with its \"Claims beyond the report\" ledger "
             f"(statements not in the report), is `{pdir}/podcast_script.md`; the automated "
             f"fidelity check is `{pdir}/check.txt`; how it was made (TTS service, model, voices, "
-            f"consent) is `{pdir}/podcast.json`."]
+            f"consent) is `{pdir}/podcast.json`."] + ([
+            "", f"`{rel(share, base_dir)}` is the same report with this audio and its transcript "
+            "built in, one file for a person to send on; it is mostly the audio as base64. Read "
+            f"`{rel(os.path.join(outdir, 'Analysis_Report.html'), base_dir)}` instead, and never "
+            "treat the copy as a second source."] if _share_current(outdir) else [])
 
 
 def _md_inline_html(t):
@@ -2729,10 +2831,11 @@ def _html_slot(doc):
 
 
 @_never_raise(lambda text, *rest: text)
-def add_listen_card(doc, outdir):
+def add_listen_card(doc, outdir, share=None):
     """`doc` with the Listen card near the top; unchanged when `outdir` has no podcast. The
-    hook make_analysis_html.py calls, so regenerating the report keeps the card."""
-    card = listen_card_html(outdir)
+    hook make_analysis_html.py calls, so regenerating the report keeps the card. `share`: the
+    shareable report's card in its place (build_share)."""
+    card = listen_card_html(outdir, share=share)
     return _upsert(doc, card, _html_slot)[0] if card else doc
 
 
@@ -2783,6 +2886,22 @@ def _agents_slot(text):
     return len(text)
 
 
+def vouch(out, man, unchecked=False):
+    """The Listen card vouches for the episode, so link and share go on only while its check
+    still holds. -> (script, refuse, warn): the parsed script (None when it is missing); why to
+    refuse (None: go on); what to warn about when going on although the check does not hold
+    (--unchecked now, or the episode was rendered with it)."""
+    path = os.path.join(out, "podcast", man.get("script") or "podcast_script.md")
+    s = parse_script(path) if os.path.isfile(path) else None
+    stale = (read_check(s)[2] if s else f"no {os.path.basename(path)} beside podcast.json")
+    overridden = bool((man.get("check") or {}).get("overridden"))
+    if stale and not (unchecked or overridden):
+        return s, (f"refusing: {stale}. Re-run `make_podcast.py check` (and `render`, if the "
+                   "script changed) so the episode matches the report, or pass --unchecked."), None
+    return s, None, (stale and stale + (" (rendered with --unchecked)" if overridden
+                                        else " (--unchecked)"))
+
+
 def cmd_link(a):
     out = os.path.abspath(a.outdir)
     man, why = manifest_problem(out)
@@ -2793,18 +2912,12 @@ def cmd_link(a):
         log(f"[link] no podcast/podcast.json under {out}: render first, and point link at the "
             "folder that holds Analysis_Report.html and podcast/")
         return 2
-    # The Listen card vouches for the episode: link only while the check still holds.
-    script = os.path.join(out, "podcast", man.get("script") or "podcast_script.md")
-    stale = (read_check(parse_script(script))[2] if os.path.isfile(script) else
-             f"no {os.path.basename(script)} beside podcast.json")
-    overridden = bool((man.get("check") or {}).get("overridden"))
-    if stale and not (a.unchecked or overridden):
-        log(f"[link] refusing: {stale}. Re-run `make_podcast.py check` (and `render`, if the "
-            "script changed) so the episode matches the report, or pass --unchecked.")
+    refuse, warn = vouch(out, man, a.unchecked)[1:]
+    if refuse:
+        log(f"[link] {refuse}")
         return 2
-    if stale:
-        log(f"[WARN] linking an episode whose check does not hold: {stale}"
-            + (" (rendered with --unchecked)" if overridden else " (--unchecked)"))
+    if warn:
+        log(f"[WARN] linking an episode whose check does not hold: {warn}")
     done = []
 
     def edit(path, fn, what):
@@ -2851,10 +2964,45 @@ def cmd_link(a):
         edit(os.path.join(root, "README.html"), readme_html, "file-list entry")
         edit(os.path.join(root, "README.md"), readme_md, "file-list entry")
         edit(os.path.join(root, "AGENTS.md"), agents, "podcast section")
+    done += refresh_feedback(out)                     # before the PDF is reprinted
     done.append(refresh_pdf(os.path.join(out, "Analysis_Report.html")))
     for level, path, note in done:
         print(f"[{level}] {rel(path, os.path.dirname(out))}: {note}")
     return 0
+
+
+def _session_of(out):
+    """The session folder of an output folder (README and AGENTS.md sit there too)."""
+    return os.path.dirname(out) if os.path.basename(out) == "output" else out
+
+
+def refresh_feedback(out):
+    """A Core run's report ends with the Core's "How did we do?" survey line, written when the
+    report was made -- usually before the podcast, so it asks about the report alone. Reword it
+    to ask about the podcast too (core_submission.refresh_feedback / feedback_line: the one
+    wording) in Analysis_Report.html and its .md twin. Only a line that is there: a report
+    outside the Core has none, and link never adds one. -> [(level, path, note)]."""
+    try:
+        import core_submission
+        import submission_report
+    except ImportError as e:
+        return [("INFO", os.path.join(out, "Analysis_Report.html"),
+                 f"feedback line not checked: {e}")]
+    if not submission_report.core_run(_session_of(out)):   # the one test of a Core run
+        return []                                           # (link: never add a line)
+    done = []
+    for name, fmt in (("Analysis_Report.html", "html"), ("Analysis_Report.md", "md")):
+        path = os.path.join(out, name)
+        if not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+        new, n = core_submission.refresh_feedback(text, fmt, podcast=has_podcast(out))
+        if n:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(new)
+            done.append(("OK", path, "the feedback survey line now asks about the podcast too"))
+    return done
 
 
 def refresh_pdf(html_path):
@@ -2880,6 +3028,536 @@ def refresh_pdf(html_path):
     if status == "SKIPPED":
         return "SKIPPED", pdf, f"NOT reprinted: {note}"
     return "INFO", pdf, f"older than the HTML and NOT reprinted: {note}"
+
+
+# ----------------------------------------------------------------------------- share
+SHARE_KBPS = 48                         # AAC, 24 kHz mono: speech stays clear from 32 to 64 kbps
+SHARE_KBPS_RANGE = (32, 64)             # afconvert takes at most 64 kbps for 24 kHz mono AAC
+EMAIL_LIMIT_MB = 25.0                   # many email systems refuse a message larger than ~25 MB
+SHARE_WARN_MB = 18.0                    # ... and an attachment travels as base64, ~4/3 larger
+SHARE_MARK = re.compile(r"<!-- podcast:share ([^>]*?) -->")
+_DATA_AUDIO = re.compile(r'<audio\b[^>]*?\bsrc="data:(audio/[\w.+-]+);base64,([A-Za-z0-9+/=]*)"')
+_REF = re.compile(r"""\s(?:src|href|poster|srcset|action)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>"']+))""",
+                  re.I)
+_CSS_URL = re.compile(r"""url\(\s*['"]?([^'")]+)""")
+_SAFE_REF = re.compile(r"^(?:#|data:|https?:|mailto:|javascript:|about:)", re.I)
+_EMBED_SAFE = re.compile(r"^(?:#|data:|https?:)", re.I)     # inside an iframe srcdoc
+_SRCDOC = re.compile(r"""\ssrcdoc\s*=\s*(?:"([^"]*)"|'([^']*)')""", re.I)
+_POD_REF = re.compile(r"(?:^|/)podcast/|\.(?:m4a|wav|mp3|aac)(?:[?#]|$)", re.I)
+
+
+class ShareError(Exception):
+    """share could not make a file it can vouch for. `code`: 2 a refusal (nothing to share, or
+    the check does not hold), 1 a failure."""
+
+    def __init__(self, msg, code=1):
+        super().__init__(msg)
+        self.code = code
+
+
+def _mb(n):
+    return f"{n / 1e6:.1f} MB"
+
+
+def _attached(n):
+    """The size of an n-byte file as an email attachment: base64, 4 bytes for every 3."""
+    return (n + 2) // 3 * 4
+
+
+def _share_current(outdir):
+    """share_state's verdict, False when it cannot be read: README and AGENTS.md name the file
+    only while it is the current report and episode, never a stale copy."""
+    try:
+        return share_state(outdir)[0] is True
+    except OSError:
+        return False
+
+
+def local_refs(doc, safe=_SAFE_REF):
+    """What in an HTML page points at another file -- a relative path, file:, a CSS url() --
+    and so breaks when the page is sent by itself. data:, #anchors, http(s) and mailto do not.
+    The page itself only: an iframe's srcdoc is a page of its own (embedded_refs)."""
+    doc = _SRCDOC.sub(' srcdoc=""', doc)
+    out = []
+    for m in _REF.finditer(doc):
+        v = html.unescape(next(g for g in m.groups() if g is not None)).strip()
+        if v and not safe.match(v):
+            out.append(v)
+    out += [m.group(1).strip() for m in _CSS_URL.finditer(doc)
+            if not safe.match(m.group(1).strip())]
+    return out
+
+
+def embedded_refs(doc):
+    """The same inside every iframe srcdoc of `doc`, nested ones too, where only #anchors,
+    data: and http(s) may appear. A srcdoc resolves a relative src against the page that holds
+    it, so transcript.html's own player (src="podcast.m4a") showed a second player reading
+    "Error" in the hand-made prototype (Brett, 2026-09-28), and its ../Analysis_Report.html link
+    went nowhere."""
+    out = []
+    for m in _SRCDOC.finditer(doc):
+        inner = html.unescape(m.group(1) if m.group(1) is not None else m.group(2))
+        out += local_refs(inner, _EMBED_SAFE) + embedded_refs(inner)
+    return out
+
+
+def _boxes(data, start=0, end=None):
+    """(type, body start, end) of each ISO base-media box in data[start:end]."""
+    end = len(data) if end is None else end
+    i = start
+    while i + 8 <= end:
+        size, kind = struct.unpack(">I4s", data[i:i + 8])
+        head = 8
+        if size == 1:
+            size, head = struct.unpack(">Q", data[i + 8:i + 16])[0], 16
+        elif size == 0:
+            size = end - i
+        if size < head or i + size > end:
+            raise ValueError(f"box {kind.decode('latin-1')!r} runs past the end of the file")
+        yield kind, i + head, i + size
+        i += size
+
+
+def _box(data, span, kind):
+    for k, a, b in _boxes(data, *span):
+        if k == kind:
+            return a, b
+    raise ValueError(f"no {kind.decode()} box")
+
+
+def mp4_info(data):
+    """What a browser needs to play an .m4a, read from its boxes (ISO/IEC 14496-12): an ftyp
+    first, a moov holding an audio track (handler 'soun') whose sample entry is mp4a (AAC), and
+    the samples (mdat). -> {"brand", "codec", "rate", "duration_s", "mdat_bytes"}; ValueError
+    for anything else. (The sample entry's channel count is a fixed 2 whatever the audio.)"""
+    try:
+        if data[4:8] != b"ftyp":
+            raise ValueError("not an MP4 file (it does not start with an ftyp box)")
+        top = {}
+        for k, a, b in _boxes(data):
+            top.setdefault(k, (a, b))
+        if b"moov" not in top:
+            raise ValueError("no moov box (the index a player reads first)")
+        mdat = top.get(b"mdat")
+        if not mdat or mdat[1] - mdat[0] < 1000:
+            raise ValueError("no audio samples (the mdat box is missing or empty)")
+        for k, a, b in _boxes(data, *top[b"moov"]):
+            if k != b"trak":
+                continue
+            mdia = _box(data, (a, b), b"mdia")
+            h = _box(data, mdia, b"hdlr")[0]
+            if data[h + 8:h + 12] != b"soun":
+                continue
+            m = _box(data, mdia, b"mdhd")[0]
+            scale, dur = (struct.unpack(">IQ", data[m + 20:m + 32]) if data[m] == 1 else
+                          struct.unpack(">II", data[m + 12:m + 20]))
+            stsd = _box(data, _box(data, _box(data, mdia, b"minf"), b"stbl"), b"stsd")
+            entry = next(_boxes(data, stsd[0] + 8, stsd[1]), None)
+            if not entry or not scale:
+                raise ValueError("the audio track has no sample description or timescale")
+            info = {"brand": data[top[b"ftyp"][0]:top[b"ftyp"][0] + 4].decode("latin-1").strip(),
+                    "codec": entry[0].decode("latin-1"),
+                    "rate": struct.unpack(">I", data[entry[1] + 24:entry[1] + 28])[0] >> 16,
+                    "duration_s": dur / float(scale), "mdat_bytes": mdat[1] - mdat[0]}
+            if info["codec"] != "mp4a":
+                raise ValueError(f"the audio is {info['codec']!r}, not AAC (mp4a)")
+            return info
+        raise ValueError("no audio track in the moov box")
+    except struct.error as e:
+        raise ValueError(f"a truncated MP4 box ({e})")
+
+
+def _tool(cmd, tried):
+    """Run an audio tool when it is installed; True when it exited 0. A failure is added to
+    `tried` (for the message that names what was attempted)."""
+    if not shutil.which(cmd[0]):
+        return False
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+    except (OSError, subprocess.SubprocessError) as e:
+        tried.append(f"{cmd[0]}: {e}")
+        return False
+    if r.returncode:
+        tried.append(f"{cmd[0]}: exit {r.returncode} {(r.stderr or r.stdout).strip()[:160]}")
+    return r.returncode == 0
+
+
+def share_audio(audio, kbps, tmp):
+    """The episode for the shareable report: AAC at `kbps`, 24 kHz mono, in an .m4a -- through a
+    24 kHz WAV (afconvert encodes AAC from PCM only), with afconvert, else ffmpeg. With neither,
+    podcast.m4a as rendered (larger). -> (bytes, how)."""
+    wav, m4a, tried = os.path.join(tmp, "speech.wav"), os.path.join(tmp, "speech.m4a"), []
+    if audio.lower().endswith(".wav"):
+        wav = audio                                     # render writes 24 kHz mono 16-bit
+    elif not any(_tool(cmd, tried) and os.path.isfile(wav) for cmd in (
+            ["afconvert", "-f", "WAVE", "-d", f"LEI16@{RATE}", "-c", "1", audio, wav],
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", audio, "-ar", str(RATE), "-ac", "1",
+             wav])):
+        wav = None
+    for cmd in ([] if wav is None else [
+            ["afconvert", "-f", "m4af", "-d", "aac", "-b", str(kbps * 1000), wav, m4a],
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", wav, "-c:a", "aac", "-b:a", f"{kbps}k",
+             "-movflags", "+faststart", m4a]]):
+        if _tool(cmd, tried) and os.path.isfile(m4a) and os.path.getsize(m4a) > 1000:
+            with open(m4a, "rb") as fh:
+                return fh.read(), f"AAC {kbps} kbps, {RATE // 1000} kHz mono, by {cmd[0]}"
+    why = "; ".join(tried) or "neither afconvert nor ffmpeg is installed"
+    if audio.lower().endswith(".m4a"):
+        with open(audio, "rb") as fh:
+            return fh.read(), f"{os.path.basename(audio)} as rendered, not re-encoded ({why})"
+    raise ShareError(f"cannot make AAC from {os.path.basename(audio)} ({why}): install ffmpeg")
+
+
+def decode_back(data, tmp):
+    """Decode `data` -- the audio taken back out of the written page -- with afconvert or ffmpeg,
+    to 8 kHz mono. -> (seconds, peak sample), or None when neither tool is here."""
+    src, back, tried = os.path.join(tmp, "embedded.m4a"), os.path.join(tmp, "decoded.wav"), []
+    with open(src, "wb") as fh:
+        fh.write(data)
+    for cmd in (["afconvert", "-f", "WAVE", "-d", "LEI16@8000", "-c", "1", src, back],
+                ["ffmpeg", "-y", "-loglevel", "error", "-i", src, "-ar", "8000", "-ac", "1", back]):
+        if _tool(cmd, tried) and os.path.isfile(back):
+            peak = 0
+            with wave.open(back, "rb") as w:
+                n, rate = w.getnframes(), w.getframerate()
+                while True:
+                    a = _arr(w.readframes(1 << 16))
+                    if not a:
+                        break
+                    peak = max(peak, max(a), -min(a))
+            return n / float(rate), peak
+    if tried:
+        raise ShareError("the built-in audio does not decode: " + "; ".join(tried))
+    return None
+
+
+def _close(a, b):
+    return abs(a - b) <= max(1.0, 0.01 * b)
+
+
+PLAY_JS = r"""(async () => { try {
+  const a = document.querySelector('.pc-card audio');
+  if (!a) return {error: 'no audio player in the Listen card'};
+  if (!a.canPlayType('audio/mp4; codecs="mp4a.40.2"')) return {skip: 'this browser has no AAC decoder'};
+  const wait = (ev, ms) => new Promise((ok, no) => {
+    const t = setTimeout(() => no({timeout: 'no ' + ev + ' within ' + ms / 1000 + ' s'}), ms);
+    a.addEventListener(ev, () => { clearTimeout(t); ok(); }, {once: true});
+    a.addEventListener('error', () => { clearTimeout(t);
+      no(new Error('media error ' + (a.error ? a.error.code + ' ' + a.error.message : ''))); }, {once: true});
+  });
+  a.preload = 'auto'; const meta = wait('loadedmetadata', 20000); a.load(); await meta;
+  a.muted = true; const t0 = a.currentTime; let played = 0, playErr = null;
+  try { await a.play(); await new Promise(r => setTimeout(r, 1500)); played = a.currentTime - t0; a.pause(); }
+  catch (e) { playErr = String(e); }
+  const f = document.querySelector('.pc-card iframe');
+  const d = f && f.contentDocument;
+  return {duration: a.duration, played: played, playErr: playErr,
+          turns: d ? d.querySelectorAll('.pc-turn').length : null,
+          players: d ? d.querySelectorAll('audio, video').length : null,
+          fetched: performance.getEntriesByType('resource').map(e => e.name.slice(0, 120))};
+} catch (e) { return e && e.timeout ? e : {error: String(e && e.message || e)}; } })()"""
+
+
+def browser_play(path, timeout=60.0):
+    """Open the page in a headless Chromium (html_to_pdf.find_browser, the browser the PDF is
+    printed with) and play the built-in audio for 1.5 s, muted, over the DevTools pipe
+    (--remote-debugging-pipe: JSON messages ending in NUL on fds 3 and 4). A --virtual-time-budget
+    probe hangs on a data: URI audio (2026-09-28); this has a real deadline. -> (result, None),
+    or (None, why the test could not run)."""
+    if os.name != "posix":
+        return None, "the browser test runs on macOS and Linux only"
+    try:
+        import html_to_pdf
+    except ImportError:
+        return None, "html_to_pdf.py, which finds the browser, is not beside this script"
+    exe = html_to_pdf.find_browser()
+    if not exe:
+        return None, "no Chrome, Chromium or Edge found"
+    profile = tempfile.mkdtemp(prefix="podcast-play-")
+    to_b, from_me = os.pipe()                   # we write commands -> the browser's fd 3
+    from_b, to_me = os.pipe()                   # the browser writes replies -> its fd 4
+
+    def fds():
+        a, b = os.dup(to_b), os.dup(to_me)      # dup first: a pipe may already sit on 3 or 4
+        os.dup2(a, 3)
+        os.dup2(b, 4)
+        os.set_inheritable(3, True)             # dup2 onto itself keeps close-on-exec
+        os.set_inheritable(4, True)
+    try:
+        proc = subprocess.Popen(
+            [exe, "--headless=new", "--remote-debugging-pipe", f"--user-data-dir={profile}",
+             "--no-first-run", "--no-default-browser-check", "--mute-audio",
+             "--autoplay-policy=no-user-gesture-required", "about:blank"],
+            preexec_fn=fds, close_fds=False, start_new_session=True,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as e:
+        for fd in (to_b, from_me, from_b, to_me):
+            os.close(fd)
+        html_to_pdf._remove_profile(profile)
+        return None, f"the browser did not start ({e})"
+    os.close(to_b)
+    os.close(to_me)
+    deadline, buf, ids = time.monotonic() + timeout, b"", [0]
+
+    def call(method, params=None, session=None):
+        nonlocal buf
+        ids[0] += 1
+        msg = {"id": ids[0], "method": method, "params": params or {}}
+        if session:
+            msg["sessionId"] = session
+        os.write(from_me, json.dumps(msg).encode() + b"\0")
+        while True:
+            while b"\0" in buf:
+                raw, buf = buf.split(b"\0", 1)
+                reply = json.loads(raw.decode("utf-8", "replace"))
+                if reply.get("id") == ids[0]:
+                    if "error" in reply:
+                        raise RuntimeError(f"{method}: {reply['error'].get('message')}")
+                    return reply.get("result") or {}
+            left = deadline - time.monotonic()
+            if left <= 0 or not select.select([from_b], [], [], left)[0]:
+                raise TimeoutError(f"no answer from the browser within {timeout:.0f} s")
+            chunk = os.read(from_b, 1 << 16)
+            if not chunk:
+                raise RuntimeError("the browser closed the DevTools pipe")
+            buf += chunk
+    try:
+        target = call("Target.createTarget", {"url": "file://" + urllib.parse.quote(
+            os.path.abspath(path))})["targetId"]
+        session = call("Target.attachToTarget", {"targetId": target, "flatten": True})["sessionId"]
+        while call("Runtime.evaluate", {"expression": "location.protocol + document.readyState",
+                                        "returnByValue": True}, session
+                   )["result"].get("value") != "file:complete":
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"the page did not load within {timeout:.0f} s")
+            time.sleep(0.2)
+        r = call("Runtime.evaluate", {"expression": PLAY_JS, "awaitPromise": True,
+                                      "returnByValue": True}, session)
+        return r["result"].get("value") or {"error": "the page returned nothing"}, None
+    except (OSError, ValueError, KeyError, RuntimeError, TimeoutError) as e:
+        return None, f"the browser test did not finish: {e}"
+    finally:
+        for fd in (from_me, from_b):
+            os.close(fd)
+        html_to_pdf._stop(proc)
+        html_to_pdf._remove_profile(profile)
+
+
+def share_keys(out, man):
+    """What the shareable report is built from: Analysis_Report.html, podcast.json and the audio
+    (sha256, 16 hex). Its mark records them, so a copy on HIVE or in a delivery can be checked
+    without trusting file times."""
+    pdir = os.path.join(out, "podcast")
+    return (f"report={sha256_file(os.path.join(out, 'Analysis_Report.html'))[:16]} "
+            f"podcast={sha256_file(os.path.join(pdir, 'podcast.json'))[:16]} "
+            f"audio={sha256_file(os.path.join(pdir, man['audio']))[:16]}")
+
+
+def share_state(outdir):
+    """Is OUTDIR/Analysis_Report_with_audio.html the current report and episode? -> (None, why)
+    with no podcast/podcast.json (nothing to share); (False, why) when it is missing, built from
+    another report, podcast.json or audio, or the podcast's check no longer holds; (True, what)."""
+    out = os.path.abspath(outdir)
+    man, why = manifest_problem(out)
+    if not man:                             # the reason without the session's path: it is delivered
+        return ((False, "podcast/podcast.json is not usable: " + why.split(": ", 1)[-1]) if why
+                else (None, "no podcast was made"))
+    path = os.path.join(out, SHARE_NAME)
+    if not os.path.isfile(path):
+        return False, "not built yet"
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        m = SHARE_MARK.search(fh.read())
+    try:
+        now = share_keys(out, man)
+    except OSError as e:
+        return False, f"cannot read what it is built from ({e.strerror or type(e).__name__})"
+    if not m or not m.group(1).startswith(now):
+        return False, "built from another version of the report or the episode"
+    if "unchecked=1" not in m.group(1):
+        refuse = vouch(out, man)[1]
+        if refuse:
+            return False, "the podcast's check no longer holds"
+    return True, "current: built from this report and episode"
+
+
+def build_share(outdir, kbps=SHARE_KBPS, unchecked=False, play=True):
+    """Write OUTDIR/Analysis_Report_with_audio.html: Analysis_Report.html with the Listen card
+    (listen_card_html, share mode) holding the audio as a data: URI and the transcript as an
+    iframe srcdoc. Kept only once the file as written holds up: the audio taken back out of it
+    is the audio put in, an MP4 AAC track of the episode's length that afconvert/ffmpeg decode
+    to that length, nothing in it points at podcast/ and nothing in the transcript's srcdoc
+    points outside the file, and (play) a headless Chromium plays it.
+    Written via a .part; intermediates live in a temporary folder outside the session.
+    -> {"path", "bytes", "lines": [(level, text)], "note"}. ShareError otherwise."""
+    out = os.path.abspath(outdir)
+    lo, hi = SHARE_KBPS_RANGE
+    if not lo <= kbps <= hi:
+        raise ShareError(f"--kbps {kbps}: use {lo} to {hi} (speech, 24 kHz mono AAC)", 2)
+    man, why = manifest_problem(out)
+    if why:
+        raise ShareError(f"podcast.json exists but is invalid: {why}. Re-render, or fix the file.", 2)
+    if not man:
+        raise ShareError(f"no podcast/podcast.json under {out}: render first, and point share at "
+                         "the folder that holds Analysis_Report.html and podcast/", 2)
+    report = os.path.join(out, "Analysis_Report.html")
+    audio = os.path.join(out, "podcast", man["audio"])
+    for f in (report, audio):
+        if not os.path.isfile(f):
+            raise ShareError(f"no {rel(f, os.path.dirname(out))}: nothing to build it from", 2)
+    s, refuse, warn = vouch(out, man, unchecked)
+    if refuse:
+        raise ShareError(refuse, 2)
+    if not s:
+        raise ShareError("no podcast_script.md beside podcast.json: the transcript is built from it", 2)
+    lines = [("WARN", f"the podcast's check does not hold: {warn}")] if warn else []
+    mark = f"<!-- podcast:share {share_keys(out, man)} kbps={kbps}{' unchecked=1' if warn else ''} -->"
+    path, want = os.path.join(out, SHARE_NAME), man.get("duration_s")
+    part = path + ".part"
+    try:
+        with tempfile.TemporaryDirectory(prefix="podcast-share-") as tmp:
+            data, how = share_audio(audio, kbps, tmp)
+            try:
+                info = mp4_info(data)
+            except ValueError as e:
+                raise ShareError(f"the audio to build in is not playable MP4/AAC ({how}): {e}")
+            if want and not _close(info["duration_s"], want):
+                raise ShareError(f"the audio to build in is {info['duration_s']:.1f} s long; "
+                                 f"podcast.json says {want:.1f} s")
+            page = transcript_html(s, man, os.path.dirname(audio), embedded=True)
+            with open(report, encoding="utf-8", errors="replace") as fh:
+                doc = fh.read()
+            b64 = base64.b64encode(data).decode("ascii")
+            doc = add_listen_card(doc, out, share={"audio": "data:audio/mp4;base64," + b64,
+                                                   "transcript": page, "mark": mark})
+            if mark not in doc:
+                raise ShareError("the Listen card could not be built (the [WARN] above says why)")
+            doc = _share_feedback(doc, out)            # the survey link says src=share
+            with open(part, "w", encoding="utf-8") as fh:
+                fh.write(doc)
+            with open(part, encoding="utf-8") as fh:          # what a recipient gets
+                doc = fh.read()
+            inner = embedded_refs(doc)                        # the transcript: nothing outside
+            if inner:
+                raise ShareError("the built-in transcript points out of the file: "
+                                 + ", ".join(inner)[:300])
+            refs = local_refs(doc)
+            if [r for r in refs if _POD_REF.search(r)]:
+                raise ShareError("it still points at the podcast folder: "
+                                 + ", ".join(r for r in refs if _POD_REF.search(r))[:300])
+            got = _DATA_AUDIO.search(doc)
+            if not got or base64.b64decode(got.group(2), validate=True) != data:
+                raise ShareError("the audio read back out of the written file is not the audio "
+                                 "put in")
+            dec = decode_back(data, tmp)
+            if dec and (not _close(dec[0], want or info["duration_s"]) or dec[1] < 300):
+                raise ShareError(f"the built-in audio decodes to {dec[0]:.1f} s (peak {dec[1]}); "
+                                 f"expected {want or info['duration_s']:.1f} s of sound")
+            os.replace(part, path)
+    finally:
+        if os.path.exists(part):
+            os.remove(part)
+    size = os.path.getsize(path)
+    lines.insert(0, ("OK", f"{SHARE_NAME}: {_mb(size)} ({_mb(_attached(size))} as an email "
+                           f"attachment), the report with the audio ({how}, "
+                           f"{minutes_label(want)}) and its transcript built in: send this one file"))
+    lines.append(("OK", f"built-in audio: MP4 ({info['brand']}) AAC {info['rate']} Hz, "
+                        f"{info['duration_s']:.1f} s in its header"
+                  + (f"; afconvert/ffmpeg decode it back to {dec[0]:.1f} s" if dec else
+                     " (no afconvert or ffmpeg here to decode it back)")
+                  + (f" (podcast.json: {want:.1f} s)" if want else "")))
+    other = [r for r in refs if not _POD_REF.search(r)]
+    if other:
+        lines.append(("WARN", f"{len(other)} link(s) in the report point at files beside it and "
+                              f"will not open when this file is sent alone: {', '.join(other[:5])}"))
+    if play:
+        res, why = browser_play(path)
+        if res is None or res.get("skip") or res.get("timeout"):
+            lines.append(("INFO", "not played in a browser: "
+                                  + (why or res.get("skip") or res.get("timeout"))))
+        elif res.get("error") or not res.get("duration") or not _close(res["duration"], info["duration_s"]):
+            os.remove(path)
+            raise ShareError("a headless browser could not play the built-in audio: "
+                             + str(res.get("error") or f"duration {res.get('duration')}"))
+        elif res.get("players"):
+            os.remove(path)
+            raise ShareError(f"the built-in transcript has {res['players']} player(s) of its own, "
+                             "which cannot play from inside the file")
+        else:
+            played = (res.get("played") or 0) > 0.5
+            lines.append(("OK" if played else "WARN",
+                          f"a headless browser loaded it ({res['duration']:.1f} s) and "
+                          + (f"played {res['played']:.1f} s" if played
+                             else f"did not play it ({res.get('playErr') or 'no progress'})")
+                          + f"; the transcript shows {res.get('turns')} of {len(s.turns())} "
+                            f"turns and no player; files fetched: {len(res.get('fetched') or [])}"))
+            if res.get("fetched"):
+                lines.append(("WARN", "it fetched: " + ", ".join(res["fetched"][:5])))
+    note = (f"{_mb(size)}: the report with the audio ({how}) and transcript built in; "
+            "send this one file")
+    if size > SHARE_WARN_MB * 1e6:
+        est = size - len(b64) + int(lo * 125 * (want or info["duration_s"]) * 4 / 3)
+        lines.append(("WARN", f"{_mb(size)} is {_mb(_attached(size))} as an email attachment "
+                              f"(base64, about 4/3 larger), more than the ~{EMAIL_LIMIT_MB:.0f} MB "
+                              "many email systems accept: share it through Bioshare instead "
+                              "(core_submission.py deliver puts it in the share)"
+                      + (f", or re-run with --kbps {lo} (about {_mb(est)}, "
+                         f"{_mb(_attached(est))} attached)" if kbps > lo else "")))
+        note = (f"{_mb(size)} ({_mb(_attached(size))} attached), more than many email systems "
+                "accept: share it through Bioshare. " + note)
+    return {"path": path, "bytes": size, "lines": lines, "note": note}
+
+
+def _share_feedback(doc, out):
+    """The shareable report's survey line: the report's own, with src=share (the copy made to be
+    forwarded), for a Core run only (submission_report.core_run) and only when the line is there."""
+    try:
+        import core_submission
+        import submission_report
+    except ImportError:
+        return doc
+    if not submission_report.core_run(_session_of(out)):
+        return doc
+    return core_submission.refresh_feedback(doc, "html", has_podcast(out), src="share")[0]
+
+
+def ensure_share(outdir):
+    """finalize's step: with a podcast, the shareable report current -- left alone when it is,
+    built when it is missing or out of date. A copy that cannot be brought up to date is renamed
+    Analysis_Report_with_audio.stale.html (scratch_files: never zipped or catalogued) so it is
+    never sent; once a current one exists the stale one is deleted. -> None without a podcast,
+    else (level, note) for MANIFEST.txt."""
+    out = os.path.abspath(outdir)
+    current, why = share_state(out)
+    if current is None:
+        return None
+    stale = os.path.join(out, SHARE_STALE)
+    if current:
+        level, note = "OK", why
+    else:
+        try:
+            level, note = "OK", build_share(out)["note"]
+        except Exception as e:                      # recorded in MANIFEST.txt, never swallowed
+            level, note = "SKIPPED", f"not built: {e if isinstance(e, ShareError) else repr(e)}"
+            path = os.path.join(out, SHARE_NAME)
+            if os.path.isfile(path):
+                os.replace(path, stale)
+                # first, so MANIFEST's 200-character cap on a reason never cuts it off
+                note = (f"the older copy no longer matches and was renamed {SHARE_STALE}: never "
+                        f"send it -- {note}")
+    if level == "OK" and os.path.isfile(stale):
+        os.remove(stale)
+    return level, note
+
+
+def cmd_share(a):
+    try:
+        res = build_share(a.outdir, kbps=a.kbps, unchecked=a.unchecked, play=not a.no_browser)
+    except ShareError as e:
+        log(f"[share] {e}")
+        return e.code
+    for level, text in res["lines"]:
+        print(f"[{level}] {text}")
+    return 0
 
 
 # ----------------------------------------------------------------------------- main
@@ -2937,13 +3615,23 @@ def main(argv=None):
     k.add_argument("--unchecked", action="store_true",
                    help="link although the script's check no longer holds (the report or the "
                         "script changed since)")
+    h = sub.add_parser("share", help="write Analysis_Report_with_audio.html: the report with the "
+                                     "audio and transcript built in, one file to send")
+    h.add_argument("outdir", help="the folder with Analysis_Report.html and podcast/")
+    h.add_argument("--kbps", type=int, default=SHARE_KBPS,
+                   help="AAC bitrate for the built-in speech, %d-%d (default %%(default)s)"
+                        % SHARE_KBPS_RANGE)
+    h.add_argument("--unchecked", action="store_true",
+                   help="build it although the script's check no longer holds")
+    h.add_argument("--no-browser", action="store_true",
+                   help="skip the headless-browser playback test")
     a = ap.parse_args(argv)
     if not a.cmd:
         ap.print_help()
         return 2
     try:
         return {"check": cmd_check, "render": cmd_render, "verify": cmd_verify,
-                "link": cmd_link}[a.cmd](a)
+                "link": cmd_link, "share": cmd_share}[a.cmd](a)
     except RenderError as e:
         log(f"[{a.cmd}] {e}")
         return 1

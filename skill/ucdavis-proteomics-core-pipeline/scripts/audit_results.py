@@ -29,6 +29,24 @@ Checks:
                     database used as-is -- excluded from quant, missing here (WARN)
   de_signal         0 significant (WARN: underpowered) or >50% significant
                     (WARN: likely batch/normalization/confounding artefact)
+  first_vs_final_pass
+                    5-step DIA-NN chain only: runs whose final pass kept less than half
+                    their first-pass precursors (pass_comparison.py, recorded by step 5 in
+                    search_provenance.json; counts before protein-group FDR) -- WARN,
+                    offering the first-pass report only for runs where it has more rows
+                    after the q-value filter; INFO when the DE already used it, or when no
+                    comparison was recorded
+  search_measurement
+                    (DIA-NN) the scan window and/or mass accuracy the search was to measure on
+                    these runs were NOT measured: the measurement failed and the search fell back
+                    (search_provenance.json scan_window.mode fallback_auto / mass_acc.mode
+                    fallback_default) -- a CAUTION, worded by probe_fallback.caution() (WARN)
+  quantification    the DE pipeline's own caveat about its protein quantities
+                    (de_provenance.json `caveat`, e.g. a Sage DE's highest-peptide rollup),
+                    quoted as the pipeline states it (WARN)
+  sage_lfq          (--search-out, Sage searches) the runs' MS1 mass error does not fit
+                    Sage's LFQ window, or Sage kept (almost) no MS1 peaks: quantities
+                    unreliable (WARN) -- sage_lfq_check.py's record, quoted as written
 
 Usage:
   python3 audit_results.py --out AUDIT.md \
@@ -36,13 +54,16 @@ Usage:
       [--acquisition-json acq.json] [--adjp 0.05] [--logfc 1] \
       [--min-proteins 500] [--max-missing 0.5] \
       [--fasta-meta search.fasta.meta.json]   # default: ./search.fasta.meta.json if present
+      [--search-prov output/search/search_provenance.json]
+                                              # default: beside de_provenance.json's input
+      [--search-out search_out]               # the search's output dir (Sage LFQ check)
 """
 import sys, os, csv, json, glob, argparse
 from collections import Counter, defaultdict
 
 # The list's ONE definition is the FASTA sidecar; the wording for lost proteins lives there too.
 from fetch_fasta import (target_contaminants, seen_only_as_cont, lost_to_contaminants_message,
-                         CONT_TAG)
+                         keratin_sample_recorded, CONT_TAG)
 # What a subject / animal column is called: one definition, shared with --map.
 from collect_conditions import subject_header, subject_assessment
 
@@ -159,6 +180,25 @@ def audit_acquisition(findings, acq_json):
             "effect — account for it (add a Batch covariate) or analyze per instrument.")
     elif instr:
         add(findings, "instrument_mix", "PASS", f"Single instrument: {instr[0]}.")
+
+
+def audit_quantification(findings, prov):
+    """The pipeline's own caveat about its quantities (build_maxlfq.R maxlfq_descriptor ->
+    de_provenance.json `caveat`), quoted -- this check knows no pipeline by name."""
+    if prov.get("caveat"):
+        add(findings, "quantification", "WARN",
+            f"{prov.get('display_label') or 'This pipeline'}: {prov['caveat']}",
+            {"rollup_method": prov.get("rollup_method")})
+
+
+def audit_search(findings, search_out):
+    """What the search itself recorded about its own output. Sage: sage_lfq_check.py's record
+    (the ONE judgement of whether the LFQ window fit the runs' MS1 mass error), quoted, not
+    re-derived."""
+    import sage_lfq_check
+    hit = sage_lfq_check.audit_finding(sage_lfq_check.load(search_out))
+    if hit:
+        add(findings, "sage_lfq", *hit)
 
 
 def audit_matrix(findings, em_path, min_proteins, max_missing, keratin_sample=False):
@@ -363,6 +403,90 @@ def audit_de(findings, de_dir, adjp, logfc):
                 f"{beyond} of those are also ≥{2**logfc:.3g}-fold.")
 
 
+def load_search_prov(de_prov, search_prov=None):
+    """(path, search_provenance.json) -- --search-prov, else the one beside de_provenance.json's
+    `input` -- or (path, None) when there is none to read."""
+    inp = (de_prov or {}).get("input")
+    path = search_prov or (os.path.join(os.path.dirname(inp), "search_provenance.json")
+                           if inp else None)
+    try:
+        with open(path) as fh:
+            return path, json.load(fh)
+    except (OSError, TypeError, ValueError):
+        return path, None
+
+
+def audit_search_measurement(findings, de_prov, search_prov=None):
+    """A search that was to measure the scan window / mass accuracy on these runs and fell back
+    instead (probe_fallback.py): the CAUTION, in probe_fallback.caution()'s one wording."""
+    path, sprov = load_search_prov(de_prov, search_prov)
+    if not isinstance(sprov, dict):
+        return                      # no search record here: not a question this audit can ask
+    from probe_fallback import fallback_modes, provenance_caution
+    msg = provenance_caution(sprov)
+    if msg:
+        window, mass_acc = fallback_modes(sprov)
+        fb = sprov.get("probe_fallback") if isinstance(sprov.get("probe_fallback"), dict) else {}
+        add(findings, "search_measurement", "WARN", msg,
+            {"scan_window_mode": window, "mass_acc_mode": mass_acc, "reason": fb.get("reason"),
+             "search_provenance": path})
+
+
+def audit_passes(findings, de_prov, search_prov=None):
+    """The chain's first pass vs its final pass, as step 5 recorded it (pass_comparison.py)."""
+    inp = (de_prov or {}).get("input")
+    path, sprov = load_search_prov(de_prov, search_prov)
+    if sprov is None:
+        return                      # no search record here: not a question this audit can ask
+    if sprov.get("search_mode") != "parallel_5step":
+        return                      # single-shot: DIA-NN's own MBR, no separate first pass
+    from diann_parallel import FIRST_PASS_REPORT
+    used_first = os.path.basename(str(inp or "")) == FIRST_PASS_REPORT
+    pc = sprov.get("pass_comparison")
+    if not isinstance(pc, dict) or not isinstance(pc.get("runs"), list):
+        add(findings, "first_vs_final_pass", "INFO",
+            "the 5-step chain's first-pass / final-pass comparison is not in "
+            f"{os.path.basename(path)} (a chain generated before skill 2.9, or step 5 did not "
+            f"get that far): compare {FIRST_PASS_REPORT[:-len('.parquet')]}.stats.tsv with "
+            "report.stats.tsv by hand before trusting the final pass")
+        return
+    flagged = [r for r in pc["runs"] if r.get("flagged")]
+    better = pc.get("switch_recommended_for")          # None: post-filter rows not counted
+    if not flagged and not better:
+        add(findings, "first_vs_final_pass", "PASS",
+            f"no run lost more than half its first-pass precursors in the final pass "
+            f"({pc.get('n_runs')} runs compared)", pc)
+        return
+    caveat = ("counts before protein-group FDR; compare the rows that pass the q-value filter "
+              "before switching")
+    lost = ", ".join(
+        f"{r['run']} {r['first']['precursors']} -> {r['final']['precursors']}"
+        + ("" if r["first"].get("rows_after_q") is None else
+           f" ({r['first']['rows_after_q']} vs {r['final']['rows_after_q']} rows after the q "
+           "filter)") for r in flagged)
+    what = (f"{len(flagged)} of {pc.get('n_runs')} runs kept less than half their first-pass "
+            f"precursors in the final pass ({lost}; {caveat})" if flagged else
+            f"no run lost more than half its first-pass precursors ({caveat})")
+    if better is None:
+        verdict = (" The rows after the q-value filter were not counted (no pyarrow where step 5 "
+                   "ran): count them with pass_comparison.py before offering the first-pass "
+                   f"report ({FIRST_PASS_REPORT}).")
+    elif better:
+        verdict = (f" After the q-value filter the first pass has more rows for "
+                   f"{', '.join(better)}: offer the user the first-pass report "
+                   f"({FIRST_PASS_REPORT}: each run searched once, no match-between-runs) as the "
+                   "DE input -- DIA-NN's README: use the first pass when it performs better.")
+    else:
+        verdict = (" After the q-value filter the first pass has no more rows than the final pass "
+                   "for any run, so switching would not recover them.")
+    if used_first:
+        add(findings, "first_vs_final_pass", "INFO",
+            f"{what}. The DE used the first-pass report ({FIRST_PASS_REPORT}), so the results "
+            "do not depend on the second pass.", pc)
+    else:
+        add(findings, "first_vs_final_pass", "WARN", what + "." + verdict, pc)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", default="AUDIT.md")
@@ -378,9 +502,16 @@ def main():
     ap.add_argument("--keratin-sample", action="store_true",
                     help="sample IS keratin (nail/hair/wool/skin/feather) — keratin is the analyte, "
                          "not a contaminant; do not flag KRT/KRTAP/keratin")
+    ap.add_argument("--search-prov",
+                    help="run_search.py's search_provenance.json, for the 5-step chain's "
+                         "first-pass / final-pass comparison. Default: beside "
+                         "de_provenance.json's `input`")
     ap.add_argument("--fasta-meta",
                     help="fetch_fasta.py's <fasta>.meta.json -- the list of proteins that are also "
                          "common-contaminant sequences. Default: ./search.fasta.meta.json if present")
+    ap.add_argument("--search-out",
+                    help="the search's output directory: a Sage search's LFQ mass-window check "
+                         "(sage_lfq_check.json) becomes the sage_lfq finding")
     a = ap.parse_args()
     fasta_meta = a.fasta_meta or ("search.fasta.meta.json"
                                   if os.path.exists("search.fasta.meta.json") else None)
@@ -407,12 +538,29 @@ def main():
         audit_conditions(findings, read_csv(a.conditions), a.adjp, block_col=prov.get("block_column"))
     if a.acquisition_json and os.path.exists(a.acquisition_json):
         audit_acquisition(findings, a.acquisition_json)
+    # A keratin sample: --keratin-sample, or a database built with fetch --keratin-sample (its
+    # sidecar says so), so the step-8c flag is no longer the only way the audit learns it.
+    keratin = a.keratin_sample
+    if fasta_meta and not keratin:
+        try:
+            with open(fasta_meta) as fh:
+                keratin = keratin_sample_recorded(json.load(fh)) is True
+        except (OSError, ValueError):
+            pass            # audit_target_contaminants reports the unreadable sidecar
+    audit_quantification(findings, prov)
+    if a.search_out and os.path.isdir(a.search_out):
+        audit_search(findings, a.search_out)
+    elif a.search_out:
+        add(findings, "search_checks", "INFO", f"--search-out {a.search_out} is not a directory, "
+            "so the search's own checks (Sage LFQ window) were not read.")
     em = os.path.join(a.de_dir, "Expression_Matrix.csv") if a.de_dir else None
     if em and os.path.exists(em):
-        audit_matrix(findings, em, a.min_proteins, a.max_missing, a.keratin_sample)
+        audit_matrix(findings, em, a.min_proteins, a.max_missing, keratin)
     if a.de_dir and os.path.isdir(a.de_dir):
-        audit_target_contaminants(findings, fasta_meta, em, a.de_dir, a.adjp, a.keratin_sample)
+        audit_target_contaminants(findings, fasta_meta, em, a.de_dir, a.adjp, keratin)
         audit_de(findings, a.de_dir, a.adjp, a.logfc)
+    audit_search_measurement(findings, prov, a.search_prov)
+    audit_passes(findings, prov, a.search_prov)
 
     n_fail = sum(1 for f in findings if f["status"] == "FAIL")
     n_warn = sum(1 for f in findings if f["status"] == "WARN")

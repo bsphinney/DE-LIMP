@@ -6,7 +6,17 @@ genuine manual fallback.
 
 ## Installing the SKILL itself — marketplace only
 
-Install via the plugin marketplace. **Do not hand-copy this directory into
+Install via the plugin marketplace. In a terminal, one line (then start Claude Code, or
+`/reload-plugins` if it is open):
+```
+claude plugin marketplace add bsphinney/DE-LIMP && claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core
+```
+Inside Claude Code the same is two commands, **entered one at a time** (pasted together they
+fail): `/plugin marketplace add bsphinney/DE-LIMP`, then `/plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core`. Automatic updates are off for this marketplace until the
+user turns them on: `/plugin` → Marketplaces → ucdavis-proteomics-core → Enable auto-update.
+To update now: `claude plugin update ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core`, then `/reload-plugins`.
+
+**Do not hand-copy this directory into
 `~/.claude/skills/<name>/` while the plugin is installed** — the plugin already owns
 the name, so the copy is silently inert. `claude plugin list` reports it as
 `@skills-dir: Not loaded — the name is already taken`: it looks installed and does
@@ -32,7 +42,7 @@ a `~/.condarc` listing `defaults` cannot pull in its R ≤ 4.3 builds — contai
 | `r-nanoparquet` | reading a DIA-NN `report.parquet` |
 | `r-arrow`, `r-dplyr`, `r-tidyr` | reading parquet + the MaxLFQ matrix builder |
 | `sage-proteomics` | the DDA search engine |
-| `proteowizard` (msconvert) | `.d`/`.raw` → mzML for Sage — **Linux only on bioconda** |
+| `proteowizard` (msconvert) | `.d` → mzML for Sage — **Linux only on bioconda**, and built without vendor readers (`.raw` goes through ThermoRawFileParser) |
 | `thermorawfileparser` (2.0.0.dev; linux-64, osx-64, osx-arm64) | reads Thermo `.raw` for `detect_acquisition.py` (step 2): acquisition, instrument and the **acquired precursor m/z range**. Without a parser every `.raw` is `unknown` and a DIA search falls back to 380–980. bioconda's build is the **self-contained** one — it needs no .NET on the machine. Installed in a **separate, non-fatal** step after the env exists, so a platform without a build cannot take R/limpa down with it |
 | `pythonnet` (conda-forge, 3.1.0, noarch) | lets `thermo_resolution.py` read the **Orbitrap MS1/MS2 resolution** from each `.raw`'s scan trailer with the RawFileReader DLLs the parser ships — ThermoRawFileParser itself never outputs it, and `estimate_params.py` needs it to pin DIA-NN's documented Orbitrap tolerances. Same separate, non-fatal step as the parser; only what is missing is installed. It runs on a .NET 8 root with `Microsoft.NETCore.App` (`ensure_dotnet8.sh`'s; a self-contained parser's bundled runtime cannot host it) |
 | `pandas` (conda-forge) | ad-hoc tables in Python (a user's first reach). In the same separate step — not the main solve — so an env that already exists gets it on a re-run of `setup.sh` |
@@ -121,12 +131,15 @@ is already in mzML never touches Docker at all.
 
 ## macOS + Sage + Bruker/Thermo
 
-`msconvert` is Linux-only on bioconda, so on a Mac the skill can't auto-convert
-`.d`/`.raw` to mzML for Sage. Options, in order of preference:
+Thermo `.raw` is converted to mzML with ThermoRawFileParser, which bioconda builds for
+macOS too (`setup.sh` installs it). Bruker `.d` goes to `msconvert`, which is Linux-only on
+bioconda. Bioconda's recipe also builds it from ProteoWizard's `pwiz-src-without-v` source,
+without the vendor readers, and on HIVE it failed at once on a `.raw` (gabrig 2026-09-29).
+Don't count on it for vendor files anywhere. For `.d` with Sage, options in order of
+preference:
 1. If the data is DIA, use DIA-NN (reads `.d`/`.raw` natively) — no conversion.
-2. Convert to mzML elsewhere (a Windows/Linux box, or ProteoWizard Docker) and point
-   the skill at the `.mzML` files.
-3. Run the whole skill on HIVE/Linux where msconvert is available.
+2. Convert to mzML elsewhere (Windows msconvert, or ProteoWizard's vendor-enabled Docker
+   image) and point the skill at the `.mzML` files.
 
 ## Windows
 
@@ -150,7 +163,9 @@ R or engines; every script runs on HIVE through `hive_exec.sh`. Git Bash is enou
   drop the slash.
 - **`python3` may be the Microsoft Store stub** (`...\WindowsApps\python3`), which opens
   the Store instead of running. `check_access.sh` reports it as
-  `local_python3.usable: false`; in `hive_remote` that is fine.
+  `local_python3.usable: false`; in `hive_remote` that is fine, except for Core staff's
+  CoreOmics lookups, which run locally (`references/core-submissions.md` "Python on this
+  computer").
 - **The HIVE username is the plain UC Davis id**, not the Windows login (`AD3+gabrig`);
   see `references/access.md` → "Windows (Git Bash)".
 

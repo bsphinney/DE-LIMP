@@ -85,6 +85,11 @@ adjp_thr  <- as.numeric(getarg("--adjp", "0.05"))
 # see contaminants.R for the rule and why. --keep-contaminants quantifies and tests them
 # with the sample proteins instead; either way de_provenance.json records which.
 keep_contaminants <- isTRUE(getarg("--keep-contaminants", FALSE))
+# The samples ARE keratin (hair, wool, feather, skin, nail ...): keratin is the analyte, so the
+# contaminant filter keeps precursors of keratin-family Cont_ entries. Normally read from the
+# FASTA sidecar (fetch_fasta.py --keratin-sample) or search_provenance.json; this flag declares
+# it for a search that records neither. contaminants.R keratin_sample_status() says which ran.
+keratin_flag <- isTRUE(getarg("--keratin-sample", FALSE))
 # fetch_fasta.py's sidecar: says whether real proteins sat in the database only as Cont_
 # entries, which the filter would then remove too. Same default as the auditors.
 fasta_meta <- getarg("--fasta-meta", NULL)
@@ -100,6 +105,10 @@ if (is.null(block_scope)) block_scope <- "within"
 if (!block_scope %in% c("within", "all"))
   stop("--block-scope must be 'within' (default) or 'all'")
 block_effect_req <- getarg("--block-effect", NULL)
+# Protein-set tests (run_sets.R) are suggested for a contrast with fewer significant proteins
+# than this (set_tests.R SET_DEFAULTS$trigger). They can always be run; this only decides
+# when run_de says so.
+sets_trigger_arg <- getarg("--sets-trigger", NULL)
 if (!is.null(block_effect_req) && is.null(block_col))
   stop("--block-effect needs --block <column>")
 if (is.null(block_effect_req)) block_effect_req <- "auto"
@@ -157,6 +166,15 @@ local({
     stop("skill_version.R not found next to run_de.R -- it reads the skill version the session records.")
   source(f, encoding = "UTF-8")
 })
+# The protein-set tests' defaults and definitions (the trigger below; run_sets.R uses the rest).
+local({
+  f <- .sibling("set_tests.R")
+  if (is.null(f))
+    stop("set_tests.R not found next to run_de.R -- it defines when protein-set tests are suggested.")
+  source(f)
+})
+sets_trigger <- if (is.null(sets_trigger_arg)) SET_DEFAULTS$trigger else as.integer(sets_trigger_arg)
+if (is.na(sets_trigger) || sets_trigger < 0) stop("--sets-trigger must be a whole number >= 0")
 # readDIANN() across limpa versions (1.2.x extra.columns / 1.4.x annotation.columns).
 local({
   f <- .sibling("limpa_compat.R")
@@ -252,6 +270,22 @@ if (!is.null(block_col)) {
 check_design_rank(meta, covariates)
 check_residual_df(build_design(meta, covariates)$design, "in this design")
 
+# The search's own folder (search_provenance.json, its log): the report's, or its parent for
+# FragPipe's DIA route (<workdir>/dia-quant-output/report.*) -- contaminants.R search_folder().
+search_dir <- search_folder(input)
+# Keratin sample? Decided once, before either pipeline filters (contaminants.R). `cont_exempt`
+# is the keratin-family contaminant accessions the filter leaves in (keratin_exemption) -- NULL
+# for every other sample, so its filter is exactly the rule it always was.
+keratin <- keratin_sample_status(keratin_flag, fasta_meta, search_dir = search_dir)
+cont_exempt <- keratin_exemption(keratin)
+if (isTRUE(keratin$value))
+  message(sprintf("[run_de] keratin sample (%s): keratin-family contaminant entries are the analyte%s",
+                  keratin$source,
+                  if (length(cont_exempt$shared))
+                    sprintf("; %d in the database are exempt from the filter (%d the searched organism's own)",
+                            length(cont_exempt$shared), length(cont_exempt$alone)) else ""))
+if (!is.null(keratin$note)) message("[run_de] keratin sample: ", keratin$note)
+
 message(sprintf("[run_de] method=%s  q=%.3f  samples=%d  covariates=%s  block=%s  contaminants=%s",
                 method, q_cutoff, nrow(meta),
                 if (length(covariates)) paste(covariates, collapse = ",") else "none",
@@ -267,6 +301,7 @@ quantums_applied <- character(0)   # populated on the dpc path; kept defined for
 # Both branches set these: what the contaminant filter found (contaminants.R) and every
 # filter the run applied, in order -- recorded in de_provenance.json and methods.txt.
 cont_census <- NULL; cont_share <- NULL; cont_col <- NA_character_; cont_intensity <- NA_character_
+cont_tag <- CONTAMINANT_TAG
 filters_applied <- character(0)
 
 # limpa/DPC is the DEFAULT path. It needs PRECURSOR-level input: readDIANN() keys on
@@ -491,11 +526,19 @@ if (method == "dpc") {
   # above carry no data in the analysed runs and are not counted.
   cont_col <- contaminant_id_column(names(dat$genes))
   if (!is.na(cont_col)) {
-    .flag <- is_contaminant(dat$genes[[cont_col]])
+    .flag <- is_contaminant(dat$genes[[cont_col]], exempt = cont_exempt)
     .seen <- rowSums(!is.na(dat$E)) > 0
+    if (length(cont_exempt$shared))     # a keratin sample's precursors the exemption kept
+      keratin$n_precursors_kept <- sum((is_contaminant(dat$genes[[cont_col]]) & !.flag)[.seen])
     cont_census <- contaminant_census(group = dat$genes$Protein.Group[.seen],
                                       is_cont = .flag[.seen], feature = rownames(dat$E)[.seen],
-                                      genes = dat$genes$Genes[.seen])
+                                      genes = dat$genes$Genes[.seen], exempt = cont_exempt)
+    # which tags (Cont_, FragPipe's contam_) the removed precursors carried; for a keratin
+    # sample, any the database check did not cover is said (keratin_unchecked)
+    cont_tag <- contaminant_tag_label(contaminant_tag_counts(dat$genes[[cont_col]][.seen],
+                                                             .flag[.seen]))
+    keratin <- keratin_unchecked(keratin, dat$genes[[cont_col]][.seen], .flag[.seen])
+    keratin <- keratin_default_removed(keratin, dat$genes[[cont_col]][.seen], .flag[.seen])
     # The share is on the measured signal (Precursor.Quantity), read for exactly the
     # precursor x run cells readDIANN kept; Precursor.Normalised -- what dat$E holds --
     # only when the report has no Precursor.Quantity.
@@ -526,9 +569,16 @@ if (method == "dpc") {
   E         <- y_protein$E
   run_names <- colnames(E)
   genes     <- y_protein$genes
+  # what DIA-NN's own normalisation did with contaminant peptides, as the run recorded it
+  .dk <- diann_kept_quant(diann_cont_quant_exclude(input), requantified = TRUE)
   descriptor <- list(
     pipeline_id   = "dpc",
     display_label = "DPC-Quant + limma (limpa)",
+    # protein quantities are re-derived here from the precursors that passed the filters, so a
+    # precursor the contaminant filter keeps (a keratin sample's) counts in them
+    requantified_from_precursors = TRUE,
+    kept_contaminant_quant = .dk$text,
+    kept_keratin_under_quantified = .dk$under_quantified,
     rollup_method = "DPC-Quant (Detection Probability Curve quantification, dpcCN)",
     quantums_filter = if (length(quantums_applied)) paste(quantums_applied, collapse = " | ") else "none",
     de_engine     = "limpa::dpcDE (voomaLmFitWithImputation) -> contrasts.fit -> eBayes",
@@ -552,16 +602,25 @@ if (method == "dpc") {
   q_cuts <- vapply(q_use, diann_cutoff_for, numeric(1), q_cutoff = q_cutoff)
   ml <- build_maxlfq(input, format = format, q_cutoff = q_cutoff,
                      eq_cutoff = eq_cutoff, pgq_cutoff = pgq_cutoff,
-                     keep_runs = keep_runs, drop_contaminants = !keep_contaminants)
+                     keep_runs = keep_runs, drop_contaminants = !keep_contaminants,
+                     contaminant_exempt = cont_exempt)
   E         <- ml$E
   run_names <- colnames(E)
   genes     <- ml$genes
   descriptor <- ml$descriptor
   q_use     <- ml$q_columns
   cont_census    <- ml$contaminants$census
+  cont_tag       <- ml$contaminants$tag
+  keratin <- keratin_unchecked(keratin, ml$contaminants$flagged_ids,
+                               rep(TRUE, length(ml$contaminants$flagged_ids)),
+                               unit = ml$contaminants$unit)
+  # (no exemption unless it is a keratin sample, so flagged_ids are every tagged precursor here)
+  keratin <- keratin_default_removed(keratin, ml$contaminants$flagged_ids,
+                                     rep(TRUE, length(ml$contaminants$flagged_ids)))
   cont_share     <- ml$contaminants$share
   cont_col       <- ml$contaminants$id_column
   cont_intensity <- ml$contaminants$intensity_column
+  if (length(cont_exempt$shared)) keratin$n_precursors_kept <- ml$contaminants$n_exempt
   message(sprintf("[run_de] MaxLFQ matrix: %d proteins x %d runs (%.1f%% missing)",
                   nrow(E), ncol(E), 100 * mean(is.na(E))))
 
@@ -599,11 +658,21 @@ if (method == "dpc") {
 # With no sidecar, the report's folder is where the search names its FASTA (provenance / log).
 cont_risk <- if (!is.null(cont_census) && cont_census$n_precursors > 0 && !keep_contaminants)
   contaminant_database_risk(fasta_meta, cont_census$n_groups_contaminant,
-                            search_dir = dirname(normalizePath(input, mustWork = FALSE))) else NULL
+                            search_dir = search_dir) else NULL
+# Whether a kept precursor reaches a protein quantity is the pipeline's to say (rule 1).
+keratin$requantified <- isTRUE(descriptor$requantified_from_precursors)
+# ... and what the search engine's own quantities did with a kept keratin's peptides, per engine
+keratin$kept_quant <- descriptor$kept_contaminant_quant
+# TRUE / FALSE, or NA = not known (an engine's own protein quantities) -- JSON null, never FALSE
+keratin$under_quantified <- {
+  .uq <- descriptor$kept_keratin_under_quantified
+  if (length(.uq) && is.na(.uq)) NA else isTRUE(.uq)
+}
 cont_rec <- contaminant_record(cont_census, cont_share, keep_contaminants, cont_col,
                                cont_intensity, risk = cont_risk,
                                fasta_meta = if (is.null(fasta_meta)) NULL
-                                            else normalizePath(fasta_meta, mustWork = FALSE))
+                                            else normalizePath(fasta_meta, mustWork = FALSE),
+                               keratin = keratin, tag = cont_tag)
 if (method == "dpc")   # build_maxlfq() records its own contaminant step in ml$filters_applied
   filters_applied <- c(filters_applied, switch(cont_rec$policy,
     removed = sprintf("contaminants removed: %d precursors mapping to a %s entry (%s); %d %s protein groups",
@@ -615,6 +684,8 @@ if (method == "dpc")   # build_maxlfq() records its own contaminant step in ml$f
 for (.l in contaminant_methods_lines(cont_rec)) message("[run_de] ", sub("^ +", "", .l))
 if (isTRUE(cont_rec$database_risk))
   warning("contaminant filter: ", cont_rec$database_note, call. = FALSE)
+if (isTRUE(keratin$caution))
+  warning("keratin sample: ", keratin$note, call. = FALSE)
 if (!is.null(cont_share)) {
   .qs <- cont_share
   .qs$Group <- meta$Group[match(.qs$Run, meta$File.Name)]
@@ -740,6 +811,11 @@ if (!is.null(block)) {
                block_rec$n_proteins))
   for (.w in unlist(block_rec$warnings)) warning("--block: ", .w, call. = FALSE)
 }
+# The precision weights each fit ran with (dpc: voomaLmFitWithImputation's, kept in fit$EList)
+# -- run_sets.R tests protein sets on the same model, so it needs them as fitted.
+set_weights <- list(
+  blocked = if (!is.null(block) && method == "dpc") fit$EList$weights,
+  independent = if (!is.null(fit_ind) && method == "dpc") fit_ind$EList$weights)
 if (!is.null(fit_ind)) fit_ind <- limma::eBayes(limma::contrasts.fit(fit_ind, cmat))
 # One fit object whose columns are each contrast's reporting fit (block_merge_fits), so the
 # DE tables and the DE-LIMP session read the same numbers.
@@ -794,7 +870,7 @@ detection_rec <- list(
   zero_means = if (method == "dpc") "inferred" else "missing",
   values = if (method == "dpc")
     "precursors observed for the protein in that run; 0 = value inferred by the DPC model"
-  else "1 = quantified in the MaxLFQ matrix, 0 = missing (NA)",
+  else "1 = quantified in the protein matrix, 0 = missing (NA)",
   na_means = "protein not in the precursor matrix: status not recorded")
 utils::write.csv(data.frame(Protein.Group = expr_df$Protein.Group,
                             det_n[match(expr_df$Protein.Group, rownames(det_n)), , drop = FALSE],
@@ -862,6 +938,56 @@ for (cn in forms) {
   de_tables[[cn]] <- list(file = basename(fn), model = contrast_model[[cn]], n_significant = nrow(sig))
 }
 
+# ---- protein-set test inputs (run_sets.R) ----------------------------------------
+# Set tests must run on THIS model, not a refit that could differ: each contrast's moderated
+# t as reported (from the fit that reported it), and the expression, weights, design,
+# contrasts and block the fits used. run_sets.R reads them from here.
+set_inputs_file <- "set_test_inputs.rds"
+set_inputs_note <- NULL
+tryCatch({
+  .rep_fit <- function(cn) if (identical(contrast_model[[cn]], "independent")) fit_ind else .fit_blocked
+  .cg_of <- function(cn) intersect(c(rownames(cmat)[cmat[, cn] > 0], rownames(cmat)[cmat[, cn] < 0]),
+                                   levels(groups))
+  saveRDS(list(
+    format = 1L, written_by = paste("run_de.R", skill_label(skill_version(.script_dir))),
+    method = method,
+    y = if (method == "dpc") y_protein else E,     # what fit_like_run_de() refits from
+    E = E, genes = genes, meta = meta, groups = groups, design = design, cmat = cmat,
+    contrasts = forms, contrast_model = contrast_model,
+    block = block, block_column = block_col, block_effect = block_rec$effect,
+    correlation = if (identical(block_rec$effect, "random")) block_rec$consensus_correlation,
+    weights = set_weights,
+    stat = lapply(setNames(forms, forms), function(cn) {
+      f <- .rep_fit(cn)
+      list(t = f$t[, cn], df_total = f$df.total, logFC = f$coefficients[, cn])
+    }),
+    # Evidence per protein and contrast -- detection_columns(), the DE tables' own definition
+    evidence = lapply(setNames(forms, forms), function(cn) {
+      .cg <- .cg_of(cn)
+      if (length(.cg)) detection_columns(rownames(E), .cg)$Evidence else rep(NA_character_, nrow(E))
+    }),
+    det_n = det_n, detection = detection_rec, de_tables = de_tables, adjp = adjp_thr,
+    fasta_meta = if (is.null(fasta_meta)) NULL else normalizePath(fasta_meta, mustWork = FALSE)),
+    file.path(outdir, set_inputs_file))
+}, error = function(e) {
+  set_inputs_note <<- paste("not written:", conditionMessage(e))
+  set_inputs_file <<- NULL
+  warning("[run_de] set_test_inputs.rds ", set_inputs_note, " -- run_sets.R cannot run on this outdir",
+          call. = FALSE)
+})
+.few <- names(all_sig)[unlist(all_sig) < sets_trigger]
+if (length(.few))
+  message(sprintf(paste0("[run_de] %d contrast(s) with fewer than %d significant proteins (%s): a ",
+                         "protein-set test can still find a shift shared by many modestly changed ",
+                         "proteins -- Rscript run_sets.R --de-dir %s (references/set-tests.md)"),
+                  length(.few), sets_trigger, paste(.few, collapse = ", "), outdir))
+set_tests_rec <- list(
+  inputs = set_inputs_file, inputs_note = set_inputs_note,
+  suggest_below = sets_trigger,
+  suggest_below_source = if (is.null(sets_trigger_arg)) "DEFAULT -- not user-confirmed" else "--sets-trigger",
+  suggested_for = as.list(.few),
+  run = "Rscript run_sets.R --de-dir <this directory> (references/set-tests.md)")
+
 # ---- the analysis as plain R ------------------------------------------------
 # The bundle in reproducibility/ pins the whole environment, which is what you need
 # to reproduce byte-for-byte -- but it is not something a reviewer can read. This is:
@@ -905,7 +1031,14 @@ methods_txt <- c(
   sprintf("Quantification: %s", descriptor$rollup_method),
   sprintf("DE engine     : %s", descriptor$de_engine),
   sprintf("Missing values: %s", descriptor$missing_policy),
-  sprintf("ID FDR cutoff : q <= %.3f", q_cutoff),
+  # a pipeline whose identification FDR was applied upstream says so itself (build_maxlfq.R
+  # maxlfq_descriptor: a Sage report's q-columns are placeholders the cutoff cannot touch)
+  if (!is.null(descriptor$identification_fdr))
+    sprintf("ID FDR        : %s", descriptor$identification_fdr),
+  # the numeric cutoff whenever the report's q-columns are real (DIA-NN; Radiant's Fulcrum q),
+  # never for placeholder columns it cannot touch
+  if (is.null(descriptor$identification_fdr) || identical(descriptor$q_columns_role, "real"))
+    sprintf("ID FDR cutoff : q <= %.3f", q_cutoff),
   sprintf("Filters       : %s", if (length(filters_applied)) filters_applied[1] else "none"),
   if (length(filters_applied) > 1) sprintf("                %s", filters_applied[-1]),
   contaminant_methods_lines(cont_rec),
@@ -919,15 +1052,57 @@ methods_txt <- c(
   sprintf("                |log2FC| = %.3g is drawn on the volcano for reference only, so", logfc_ref),
   "                the reported error rate matches the hypothesis actually tested.",
   "",
-  sprintf("Citation      : %s", descriptor$citation)
+  sprintf("Citation      : %s", descriptor$citation),
+  if (!is.null(descriptor$caveat)) c("", sprintf("Caveat        : %s", descriptor$caveat))
 )
 writeLines(methods_txt, file.path(outdir, "methods.txt"))
 
 # ---- exact R provenance: sessionInfo + machine-readable record --------------
 # Faithful capture of the stack that actually ran this DE (not re-derived later).
+# The machine the numbers came from. DPC-Quant's per-protein fits (limpa dpcQuant: optim BFGS
+# at its default tolerance) stop at slightly different points on different CPU families, because
+# OpenBLAS picks CPU-specific kernels whose last-bit rounding differs: PROT_0756 v2, zen4 vs zen2
+# HIVE nodes, identical inputs and software -- |dlogFC| <= 0.0022, |dt| <= 0.0064, no call
+# changed; the same family reproduces bit for bit (references/reproducibility.md). So the record
+# names the CPU, the BLAS/LAPACK libraries and, on a SLURM node, its CPU-family feature (what
+# `sbatch --constraint=` selects). OPENBLAS_CORETYPE is recorded, never set: forcing it
+# segfaulted dpcQuant on an EPYC 9734 (sbatch 24180764).
+compute_record <- function() {
+  sh <- function(cmd, args) tryCatch(suppressWarnings(system2(cmd, args, stdout = TRUE, stderr = FALSE)),
+                                     error = function(e) character(0))
+  cpu <- if (file.exists("/proc/cpuinfo")) {
+    m <- grep("^model name", readLines("/proc/cpuinfo", warn = FALSE), value = TRUE)[1]
+    if (is.na(m)) NA_character_ else trimws(sub("^model name\\s*:", "", m))
+  } else if (nzchar(Sys.which("sysctl"))) {
+    v <- sh("sysctl", c("-n", "machdep.cpu.brand_string")); if (length(v)) v[1] else NA_character_
+  } else NA_character_
+  node <- Sys.getenv("SLURMD_NODENAME", "")
+  feats <- if (nzchar(node) && nzchar(Sys.which("scontrol"))) {
+    out <- sh("scontrol", c("show", "node", node))
+    f <- regmatches(out, regexpr("AvailableFeatures=[^ ]*", out))
+    if (length(f)) strsplit(sub("^AvailableFeatures=", "", f[1]), ",")[[1]] else character(0)
+  } else character(0)
+  fam <- grep("^(zen[0-9]*|icelake|cascadelake|skylake|sapphirerapids|emeraldrapids|haswell|broadwell)$",
+              feats, value = TRUE)
+  si <- utils::sessionInfo()
+  list(cpu_model = cpu, slurm_node = if (nzchar(node)) node else NULL,
+       slurm_features = if (length(feats)) as.list(feats) else NULL,
+       cpu_family = if (length(fam)) fam[1] else NULL,
+       blas = si$BLAS %||% unname(extSoftVersion()[["BLAS"]]), lapack = si$LAPACK %||% La_library(),
+       lapack_version = La_version(),
+       openblas_coretype = Sys.getenv("OPENBLAS_CORETYPE", "not set"),
+       note = paste("DPC-Quant results reproduce bit for bit on the same CPU family and BLAS; across",
+                    "families they differ in about the third decimal (references/reproducibility.md)"))
+}
+compute <- compute_record()
+
 si <- file.path(outdir, "sessionInfo.txt")
 con <- file(si, "w"); sink(con)
 cat(R.version.string, "\n\n")
+cat(sprintf("CPU      %s%s\n", compute$cpu_model,
+            if (is.null(compute$cpu_family)) "" else sprintf(" (SLURM feature %s, node %s)", compute$cpu_family, compute$slurm_node)))
+cat(sprintf("BLAS     %s\nLAPACK   %s (%s)\nOPENBLAS_CORETYPE %s\n\n", compute$blas, compute$lapack,
+            compute$lapack_version, compute$openblas_coretype))
 for (p in c("limpa", "limma", "arrow", "dplyr", "tidyr"))
   try(cat(sprintf("%-8s %s\n", p, as.character(packageVersion(p)))), silent = TRUE)
 cat("\n"); print(utils::sessionInfo())
@@ -953,10 +1128,37 @@ jsonlite_or_manual <- function(x) {
   enc(x)
 }
 pkg_ver <- function(p) tryCatch(as.character(packageVersion(p)), error = function(e) NA_character_)
+input_sha256 <- tryCatch(
+  if (file.exists(input) && requireNamespace("digest", quietly = TRUE))
+    digest::digest(input, algo = "sha256", file = TRUE)
+  else if (file.exists(input) && nzchar(Sys.which("shasum")))
+    sub(" .*", "", system2("shasum", c("-a", "256", shQuote(input)), stdout = TRUE)[1])
+  else NA_character_,
+  error = function(e) NA_character_)
+# When DE results FIRST existed for this input in this outdir: carried forward from the earlier
+# record of the same input, so a re-run does not reset it. run_sets.R dates a user's own set
+# list (GMT) against it -- a list drawn up after the results must not look older than them.
+first_written <- format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
+.prev <- file.path(outdir, "de_provenance.json")
+if (file.exists(.prev) && requireNamespace("jsonlite", quietly = TRUE)) {
+  .o <- tryCatch(jsonlite::fromJSON(.prev, simplifyVector = FALSE), error = function(e) {
+    message("[run_de] the earlier de_provenance.json here is unreadable (", conditionMessage(e),
+            "): first_written starts now"); NULL })
+  if (!is.null(.o) && identical(.o$input_sha256, input_sha256))
+    first_written <- .o$first_written %||%
+      format(file.info(.prev)$mtime, "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
+}
 prov <- list(
   pipeline_id = descriptor$pipeline_id, display_label = descriptor$display_label,
   rollup_method = descriptor$rollup_method, de_engine = descriptor$de_engine,
   missing_policy = descriptor$missing_policy, citation = descriptor$citation,
+  # set only by a pipeline that has them (build_maxlfq.R maxlfq_descriptor): its own
+  # identification FDR, the caveat the report and AUDIT.md carry, the AI brief's plain-language
+  # line, and what the search report declared about its quantity
+  identification_fdr = descriptor$identification_fdr, caveat = descriptor$caveat,
+  q_columns_role = descriptor$q_columns_role,
+  plain_language = descriptor$plain_language,
+  declared_quantity = if (method == "maxlfq") ml$declared_quantity else NULL,
   method = method, q_cutoff = q_cutoff,
   # WHICH columns were filtered and at WHAT cutoff. q_cutoff alone stopped being
   # the whole story once PG.Q.Value took DIA-NN's recommended 0.05: a record
@@ -967,14 +1169,10 @@ prov <- list(
   # Ties this DE run to the EXACT search output it consumed. A path alone is not
   # traceability -- it does not survive the file being moved, regenerated, or
   # shipped in a bundle without its input.
-  input_sha256 = tryCatch(
-    if (file.exists(input) && requireNamespace("digest", quietly = TRUE))
-      digest::digest(input, algo = "sha256", file = TRUE)
-    else if (file.exists(input) && nzchar(Sys.which("shasum")))
-      sub(" .*", "", system2("shasum", c("-a", "256", shQuote(input)), stdout = TRUE)[1])
-    else NA_character_,
-    error = function(e) NA_character_),
+  input_sha256 = input_sha256,
   input_bytes = tryCatch(as.numeric(file.info(input)$size), error = function(e) NA_real_),
+  written = format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC"),
+  first_written = first_written,
   # Report the cutoffs as APPLIED. On the dpc path these were previously recorded
   # whether or not they had any effect, so a provenance file could assert a filter the
   # run never performed.
@@ -999,7 +1197,12 @@ prov <- list(
   de_tables = de_tables,
   # Detection_Matrix.csv: what each 0 means depends on the pipeline -- say it here.
   detection_matrix = detection_rec,
+  # Protein-set tests: the inputs file run_sets.R reads, and the contrasts it is suggested for
+  # (fewer significant proteins than suggest_below).
+  set_tests = set_tests_rec,
   R_version = as.character(getRversion()),
+  # the machine: CPU (and its SLURM CPU-family feature), BLAS/LAPACK -- see compute_record()
+  compute = compute,
   # dpc: the limpa that read the report and the readDIANN() annotation path it took
   # (limpa_compat.R) -- an older limpa is not an error, but it is on the record.
   limpa_read = limpa_read,

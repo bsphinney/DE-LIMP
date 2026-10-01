@@ -216,7 +216,7 @@ Both paths process the same `.d` file (`03232025__100SPD_DIA-LV100_S3-D4_1_20588
 |---------|---------|-------|--------|
 | Berger DIA | Porcine | 87 .d (older DIA, not diaPASEF) | `/service/on_campus/Berger/dia/out/report.parquet` |
 | Kim | Human | 65 .d | `/service/on_campus/Kim-Jinhwan/out/report.parquet` |
-| Zhao | California mouse | 43 .d (validation set) | `/service/on_campus/Zhao_Gemma/.../report.parquet` |
+| PI_Example_C | California mouse | 43 .d (validation set) | `/service/on_campus/PI_Example_C/.../report.parquet` |
 | Liver (bovine) | Bovine | 60 .d | `.../Vinning-paul/Liver/Bovine_Liver__20260330_1149/report.parquet` |
 | Muscle (bovine) | Bovine | 60 .d | `.../Vinning-paul/Muscle/Liver_Muscle_research_20260330_1735/report.parquet` |
 

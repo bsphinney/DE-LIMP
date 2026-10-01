@@ -7,7 +7,7 @@ DE-input contract.
 
 | format | how DIA/DDA is decided | instrument |
 |---|---|---|
-| Bruker `.d` | `analysis.tdf` SQLite, opened immutable: `DiaFrameMsMsInfo`/`DiaFrameMsMsWindowGroups` or `Frames.MsMsType==9` → DIA; `PasefFrameMsMsInfo`/`MsMsType==8` → DDA. Every `.d` also gets `tdf_integrity` (below); anything but `ok` → `warnings` | `GlobalMetadata.InstrumentName` (e.g. "timsTOF Pro") |
+| Bruker `.d` | `analysis.tdf` SQLite, opened immutable: what the run acquired decides — `Frames.MsMsType==9` → DIA, `==8` → DDA (`high` with rows in `PasefFrameMsMsInfo`). Evidence that disagrees (frames of both types, or typed frames beside the other kind's populated `DiaFrameMsMsInfo`/`PasefFrameMsMsInfo`) → `unknown`/low, so the user is asked. Only with no typed frames do the method tables decide, by their **rows**, never by existing: a real ddaPASEF run carries all three dia-PASEF tables EMPTY (SET1-28, timsTOF HT; it was called DIA/high, 2026-09-29). Range: DIA from `DiaFrameMsMsWindows`, DDA from GlobalMetadata `MzAcqRangeLower/Upper`. Every `.d` also gets `tdf_integrity` (below); anything but `ok` → `warnings` | `GlobalMetadata.InstrumentName` (e.g. "timsTOF Pro") |
 | `.mzML[.gz]` | stream MS2 isolation windows: median width ≥3 Da over few centers → DIA; ≤2 Da, many centers → DDA | none (mzML rarely carries model reliably) |
 | Thermo `.raw` | ThermoRawFileParser `query` of a mid-run slice of scans → MS2 isolation windows → the **same** width/centre rule as mzML, then the filter string's data-dependent `d` flag, which outranks window shape. Parser missing or failing → `unknown`/`low` + `warnings` | ThermoRawFileParser metadata JSON, `MS:1000494` (e.g. "Orbitrap Exploris 480") |
 | `.wiff` | convert to mzML first | none |
@@ -226,13 +226,31 @@ command **+** an OS-appropriate path — not a HIVE/`/quobyte` path they can't r
 ```
 `report.parquet` is already the DE contract — `run_de.R` reads it directly.
 
-**DDA data (DIA-NN 2.6+).** DIA-NN 2.3+ can search DDA / DDA-PASEF with **`--dda`**
-(`run_search.py` adds it automatically when the bundle's acquisition is `DDA`). Notes:
+**DDA data (DIA-NN 2.6+).** DIA-NN 2.3+ can search DDA / DDA-PASEF with **`--dda`**.
+`estimate_params.py --engine diann --acquisition DDA` writes it **into the cfg**, and every
+route reads it from there: the single-shot jobs and all five steps of the parallel chain.
+`run_search.py` used to append it to the single-shot command only, so a DDA cohort of more
+than 5 files went to the chain without it and was searched as DIA, with no error (SET28,
+2026-09-25). It now **refuses** a cfg whose `--dda` disagrees with the bundle's acquisition,
+on both routes (`diann_parallel.dda_mismatch`). Notes:
 - `--dda` **must** be used with DDA and **must not** be used with DIA data.
+- **Precursor range = the MS1 survey scan range.** `detect_acquisition.py` reads it from the
+  Thermo scan filter (`FTMS + p NSI Full ms [350.0000-1500.0000]`), the mzML MS1 scan window
+  (`MS:1000501`/`MS:1000500`) or a timsTOF `.d`'s GlobalMetadata `MzAcqRangeLower/Upper`.
+  Without it, `estimate_params.py` **refuses** a DIA-NN DDA cfg; there is no 380–980 fallback.
+- **Nothing is measured.** DIA-NN logs no scan-window radius in DDA mode (the nail chain,
+  2.6.0; SET28's step 1b, 2.7.0, whose probes each ran to the 3600 s timeout). So a DDA cfg
+  pins mass accuracy: DIA-NN's table value where the level has one, and the facility SOP
+  (MS2 20 / MS1 7 ppm) for a level outside the table, tagged `DEFAULT, not user-confirmed`.
+  `--window` is left unset and the chain has no step 1b; `probe_window.py` refuses `--dda`.
 - QuantUMS is auto-disabled on DDA; PTM-localisation probabilities are unreliable on DDA.
 - For DDA **quant**, DIA-NN recommends extra MS1 filtering on `Ms1.Global.Q.Value`
   (< 0.0001–0.01) and `Ms1.Global.Quality` (> 0.5–0.9), optionally `Ms1.Q.Value` /
-  `Averagine`. Standard DIA/DDA q-value filters still apply.
+  `Averagine`. Standard DIA/DDA q-value filters still apply. **DIA-NN 2.7.0 names them
+  differently:** its DDA report has `Global.Ms1.Q.Value`, `Global.Ms1.Quality` and
+  `Ms1.Q.Value` (SET28 test chain, 2026-09-29), and the chain's first-pass report
+  (`step3_assembly.parquet`) has none of them. The skill does not apply them yet
+  (`diann_q_columns.py` says where they would go).
 - It's officially "beta", but performs strongly — on UC Davis nail (Exploris, 67 runs)
   it matched/beat the delivered FragPipe/Scaffold result at ~equal keratin coverage.
 - Default routing still sends DDA → Sage (validated); use `--engine diann` (or a
@@ -351,8 +369,8 @@ Radiant source (`seerbio/radiant`, internal name **Pythia**), not inferred from 
 
 - **Thermo Orbitrap only, in this route.** The container's search backend accepts
   **mzML or Parquet** (`radiant_fulcrum_search/search.py`), so `.raw` is converted
-  with `msconvert` first and Bruker `.d` is refused with a pointer to the DIA-NN or
-  diaTracer route. (Radiant's *source* does have an ion-mobility module, but that
+  first (ThermoRawFileParser, as for Sage; in the job with `--sbatch`) and Bruker `.d` is
+  refused with a pointer to the DIA-NN or diaTracer route. (Radiant's *source* does have an ion-mobility module, but that
   is not reachable through this container CLI.)
 - **A spectral library is always required.** `--library` is `required=True`, and
   **`--libfree` does not mean library-free** — in the click definition it is the
@@ -457,14 +475,53 @@ Apache-2.0 — the open-source alternative to DIA-NN for non-academic users. Lib
   runs are unaffected.
 
 ### Sage (mzML-first; adapter required)
-1. Convert `.d`/`.raw` → mzML with `msconvert` if needed (fails loudly if msconvert
-   is absent and inputs aren't mzML).
+1. Convert to mzML if needed: `.raw` with **ThermoRawFileParser** (`-i=<raw> -b=<out>/mzml/
+   <name>.mzML -f=2`, indexed mzML). The parser is found and given its .NET exactly as
+   `detect_acquisition.py` finds it (above). msconvert is used only if no parser is usable,
+   and on Linux with a warning: bioconda's `proteowizard` is built from ProteoWizard's source
+   **without vendor readers** (its recipe downloads `pwiz-src-without-v`), so it cannot open a
+   `.raw`. `.d` goes to msconvert as before. With `--sbatch` the conversion runs **in the
+   job**, first, never at generation (gabrig 2026-09-29: msconvert had run on the HIVE login
+   node). A converter that leaves no complete file (an indexed mzML must end in
+   `</indexedmzML>`) stops the job before Sage. With no converter at all, `run_search.py`
+   refuses before anything is written.
 2. `<cmd> <bundle sage_config.json> -f <fasta> -o <out> --parquet
-   --disable-telemetry-i-dont-want-to-improve-sage <mzml...>`
-3. **Adapter:** map `lfq.parquet` (protein, filename, intensity) →
-   DIA-NN-shaped `report.parquet` with `Run, Protein.Group, PG.MaxLFQ` and zeroed
-   Q-value columns (Sage already FDR-filtered). Q-values default to 0 so the
-   MaxLFQ DE path keeps every row.
+   --disable-telemetry-i-dont-want-to-improve-sage <mzml...>`, its output teed to
+   `<out>/sage.log`.
+3. **LFQ mass-window check** (`sage_lfq_check.py`, in the job and again at `--adapt-only`).
+   Sage integrates MS1 only within ±`quant.lfq_settings.ppm_tolerance` of the theoretical
+   mass (default 5 ppm, `lfq.rs`). The search itself uses `precursor_tol` (±10 ppm). So a
+   cohort with a +7 ppm MS1 offset identifies normally, and Sage logs "discovered 0 target
+   MS1 peaks at 5% FDR" (gabrig 2026-09-29, Fusion Lumos). The check reads each run's
+   median `precursor_ppm` (Sage writes it **unsigned**; the signed offset,
+   `(expmass − isotope_error − calcmass)/calcmass`, is reported for direction) from
+   confident target PSMs (`peptide_q` ≤ 0.01, rank 1). It also reads that MS1-peak count
+   (the log, else `lfq.parquet` targets at `q_value` ≤ 0.05). It **warns** when a median + 2
+   ppm exceeds the window, or when the count is 0 or under 10% of the target peptides at
+   1%. The warning names the fix (a wider `lfq_settings.ppm_tolerance`) and changes
+   nothing. Record: `<out>/sage_lfq_check.json` + `search_provenance.json`
+   `sage_lfq_check`.
+4. **Adapter:** map `lfq.parquet` (one row per **peptide** × file: peptide, proteins,
+   is_decoy, q_value, filename, intensity) → DIA-NN-shaped `report.parquet` with
+   `Run, Protein.Group, PG.MaxLFQ`. **`lfq.parquet` is not filtered by Sage.** It holds
+   every traced MS1 peak: each target and its decoy (the same peptide in a +11.06 Da window,
+   with the same `proteins` string), at any `q_value`. Sage's own `lfq.tsv` writer drops
+   the decoys (`output.rs write_lfq`), and Sage counts a peak as discovered at its own
+   `q_value` ≤ 0.05 (`fdr.rs picked_precursor`).
+   - **The `q_value` Sage *stores* is not the one it counted with.** `picked_precursor`
+     keys its q map by precursor, so a target and its decoy end up with one shared q, the
+     lower-scoring member's (≥ the target's own). In gabrig's HeL50 UnvPe, 1,489 of 1,489
+     pairs were identical.
+   - The adapter keeps a row only when `is_decoy` is false **and** the stored `q_value` ≤
+     0.05 (`sage_lfq_check.LFQ_Q_MAX`, the one definition). That is a **conservative
+     subset** of Sage's own count: 16,649 kept against Sage's logged 17,288 there. Both
+     numbers are recorded (`target_precursors_kept`, `sage_logged_target_ms1_peaks_5pct`).
+   - It refuses an `lfq.parquet` without those columns.
+   - The kept and dropped rows per file go to `sage_adapt.json` and `search_provenance.json`
+     `sage_adapt`. The contract's q-columns are then 0.0, and the report declares them
+     placeholders (`q_columns: placeholder`), so the DE applies no second threshold and
+     says so.
+   - **Before 2.9 decoys and failing rows went through** (`docs/SKILL_OPEN_DEFECTS.md`).
    - v0.14.x has no native protein grouping → may need `sage_protein_groups.py`
      post-hoc (DE-LIMP keeps it on HIVE). v0.15+ has IDPicker grouping.
 
@@ -644,7 +701,11 @@ Say so rather than crediting it all to the method.
 - `<cmd> --headless --workflow <.workflow> --manifest <m> --workdir <out>
   [--config-tools-folder $FRAGPIPE_TOOLS_FOLDER]`
 - **Adapter:** `combined_protein.tsv` per-sample `MaxLFQ Intensity` columns →
-  DIA-NN-shaped `report.parquet`.
+  DIA-NN-shaped `report.parquet`. `Protein.Group` is FragPipe's `Protein ID` (`P12345`, the
+  accession DIA-NN reports), never `Protein` (`sp|P12345|ALBU_HUMAN`), which shared 0 proteins
+  with DIA-NN in `compare_searches.py`. FragPipe's own contaminants keep their tag
+  (`contam_P00167`: `Protein ID` alone drops it); `Gene` and `Entry Name` go to `Genes` and
+  `Protein.Names` (`scripts/protein_ids.py`).
 - Needs Java 9+; MSFragger/IonQuant must already be licensed/present.
 - **Reading Thermo `.raw`:** MSFragger reads `.raw` directly via
   `tools/ext/thermo/BatmassIoThermoServer.exe` — a **Windows .NET-Framework** exe that on

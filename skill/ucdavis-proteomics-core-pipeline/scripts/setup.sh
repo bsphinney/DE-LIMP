@@ -20,6 +20,8 @@
 #                         detect_acquisition.py) + pythonnet (conda-forge: lets
 #                         thermo_resolution.py read the Orbitrap resolution) + pandas
 #                         -- one separate, non-fatal install that an existing env gets too
+#   - AnnotationDbi + GO.db + org.Hs.eg.db + org.Mm.eg.db: offline GO sets for run_sets.R
+#                         (bioconda, else Bioconductor source; non-fatal)
 #   - .NET 8 (NETCore + AspNetCore) via ensure_dotnet8.sh, into ~/.proteomics-pipeline/dotnet8:
 #                         DIA-NN's .raw reader and the resolution reader both run on it
 #
@@ -202,6 +204,40 @@ if [ -n "$CONDA" ] && env_ready && [ -n "$EXTRA_PKGS" ] && ! $CHECK_ONLY; then
   esac || NOTES+=("Could not install$EXTRA_PKGS into the env (the rest of the env is unaffected). Thermo .raw needs thermorawfileparser, and reading the Orbitrap resolution needs pythonnet: see thermo_raw_reader in setup.json.")
 fi
 
+# ---- 2b2. protein-set annotation: GO, offline -----------------------------------
+# run_sets.R tests Gene Ontology sets. They come from the Bioconductor annotation packages,
+# installed here once, so a set test never downloads anything and its record names the GO
+# release it used (the package's GOSOURCEDATE). org.Hs.eg.db also serves every organism
+# without its own package (human gene symbols; run_sets.R records that route). About 250 MB.
+# Not installed: reactome.db (about 2 GB); run_sets.R --sets reactome says how to add it.
+# bioconda first (its R 4.5 builds suit this env); an env whose R bioconda has no builds for
+# (R 4.6: HIVE's proteomics-pipeline-r46) gets the Bioconductor source packages instead --
+# AnnotationDbi's dependencies compile, which the env's own compilers do. Not fatal: DE runs
+# without them; setup.json's set_annotation says what is missing and the fix.
+SET_ANN_PKGS="AnnotationDbi GO.db org.Hs.eg.db org.Mm.eg.db"
+set_ann_missing() {
+  "$ENV_PREFIX/bin/Rscript" -e "p <- strsplit('$SET_ANN_PKGS', ' ')[[1]]; cat(p[!vapply(p, requireNamespace, TRUE, quietly = TRUE)])" 2>/dev/null
+}
+if env_ready && ! $CHECK_ONLY && [ -n "$(set_ann_missing)" ]; then
+  say "[setup] installing the GO annotation packages for protein-set tests ($SET_ANN_PKGS)..."
+  case "$CONDA" in
+    *micromamba) "$CONDA" install -y -r "$MAMBA_ROOT" -p "$ENV_PREFIX" --override-channels -c conda-forge -c bioconda \
+                   bioconductor-annotationdbi bioconductor-go.db bioconductor-org.hs.eg.db bioconductor-org.mm.eg.db >&2 ;;
+    "")          false ;;
+    *)           "$CONDA" install -y -p "$ENV_PREFIX" --override-channels -c conda-forge -c bioconda \
+                   bioconductor-annotationdbi bioconductor-go.db bioconductor-org.hs.eg.db bioconductor-org.mm.eg.db >&2 ;;
+  esac || say "[setup] conda could not install them; trying the Bioconductor $LIMPA_BIOC source packages"
+  if [ -n "$(set_ann_missing)" ]; then
+    "$ENV_PREFIX/bin/Rscript" -e "install.packages(strsplit('$(set_ann_missing)', ' ')[[1]], repos = c(BioCsoft = 'https://bioconductor.org/packages/$LIMPA_BIOC/bioc', BioCann = 'https://bioconductor.org/packages/$LIMPA_BIOC/data/annotation', CRAN = 'https://cloud.r-project.org'), dependencies = NA)" >&2 \
+      || say "[setup] the annotation install failed (above)"
+  fi
+fi
+SET_ANN_MISSING=""; SET_ANN_OK=false
+if env_ready; then SET_ANN_MISSING="$(set_ann_missing)"; [ -z "$SET_ANN_MISSING" ] && SET_ANN_OK=true; fi
+if env_ready && ! $SET_ANN_OK; then
+  NOTES+=("Protein-set tests (run_sets.R) need $SET_ANN_MISSING. Fix: $ENV_PREFIX/bin/Rscript -e \"install.packages(c('$(printf '%s' "$SET_ANN_MISSING" | sed "s/ /','/g")'), repos = c('https://bioconductor.org/packages/$LIMPA_BIOC/bioc', 'https://bioconductor.org/packages/$LIMPA_BIOC/data/annotation', 'https://cloud.r-project.org'))\" where there is internet. DE does not need them.")
+fi
+
 # ---- 2c. .NET 8 (ensure_dotnet8.sh) ------------------------------------------
 # One root with Microsoft.NETCore.App >= 8.0.17 + AspNetCore serves DIA-NN's .raw reader, a
 # framework-dependent ThermoRawFileParser and the resolution reader. Left to a manual step, most
@@ -315,6 +351,8 @@ j() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
   printf '  "dotnet8": {"root": "%s", "note": "%s"},\n' "$(j "$DOTNET8_ROOT")" "$(j "$DOTNET8_NOTE")"
   printf '  "limpa": {"version": "%s", "required": ">= %s", "ok": %s, "source": "Bioconductor %s"},\n' \
          "$(j "$LIMPA_VERSION")" "$LIMPA_MIN" "$($LIMPA_OK && echo true || echo false)" "$LIMPA_BIOC"
+  printf '  "set_annotation": {"ok": %s, "packages": "%s", "missing": "%s"},\n' \
+         "$($SET_ANN_OK && echo true || echo false)" "$SET_ANN_PKGS" "$(j "$SET_ANN_MISSING")"
   printf '  "ready_for": {"de": %s, "dia": %s, "dda": %s, "thermo_raw": %s},\n' \
          "$($DE_READY && echo true || echo false)" \
          "$($DIA_READY && echo true || echo false)" \

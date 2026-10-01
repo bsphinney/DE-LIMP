@@ -13,6 +13,7 @@ import csv
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -364,6 +365,283 @@ class TestAttach(unittest.TestCase):
                     self.assertIn(f"- {line}", fh.read(), key)
             os.remove(p["submission_record"])           # announced but gone: said, not dropped
             self.assertIn("could not be read", session_docs.submission_line(p))
+
+
+# --------------------------------------------------------------- feedback survey --
+SURVEY = sr.cs.FEEDBACK_URL                       # its value is pinned in test_core_submission
+
+
+class TestFeedbackSurvey(unittest.TestCase):
+    """The Core's feedback survey is for the Core's own clients (Brett, 2026-09-28). A Core run
+    -- a CoreOmics submission attached, the test that shows the report's Submission section --
+    asks "How did we do?" at the end of the report, its Markdown twin and PDF, in the README and
+    in AGENTS.md. A run outside the Core carries it nowhere."""
+
+    def finished(self, tmp, core):
+        import test_deposit_package as tdp
+        p = tdp.dia_session(tmp)
+        s = p["session_dir"]
+        with open(os.path.join(p["output_dir"], "AI_Analysis_Report.md"), "w") as fh:
+            fh.write("# Analysis\n\nA standfirst.\n\n## Overview\n\nText.\n")
+        if core:
+            attach_fixture(s)
+        r = run("make_analysis_html.py", "--session", s, "--out",
+                os.path.join(p["output_dir"], "Analysis_Report.html"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        f = tdp.finalize(s)
+        self.assertEqual(f.returncode, 0, f.stderr)
+        return p
+
+    def read(self, *parts):
+        with open(os.path.join(*parts), encoding="utf-8") as fh:
+            return fh.read()
+
+    def pdf_text(self, pdf):
+        import shutil
+        if not (shutil.which("pdftotext") and os.path.isfile(pdf)):
+            return None
+        r = subprocess.run(["pdftotext", pdf, "-"], capture_output=True, text=True)
+        return re.sub(r"\s+", "", r.stdout)
+
+    def test_a_core_run_asks_in_the_report_readme_and_agents(self):
+        import html as html_mod
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self.finished(tmp, core=True)
+            o, s = p["output_dir"], p["session_dir"]
+            url = SURVEY + "?prot=PROT_0756&src=report"
+            page = self.read(o, "Analysis_Report.html")
+            self.assertIn('<p class="feedback"><strong>How did we do?</strong> Tell us what you '
+                          f'thought of this report: <a href="{html_mod.escape(url)}">a 5-minute '
+                          "survey</a></p></main>", page)              # last in the page
+            import report_style                                        # the PDF prints the URL
+            self.assertIn('p.feedback a::after{content:"\\A" attr(href);white-space:pre}',
+                          report_style.CSS)
+            self.assertTrue(self.read(o, "Analysis_Report.md").endswith(
+                "\n\n**How did we do?** Tell us what you thought of this report: [a 5-minute "
+                f"survey]({url}).\n"))                            # after the star line's rule
+            text = self.pdf_text(os.path.join(o, "Analysis_Report.pdf"))
+            if text is not None:
+                self.assertIn(url.replace("https://", ""), text)
+            readme = SURVEY + "?prot=PROT_0756&src=readme"
+            self.assertIn("\n**How did we do?** Tell us what you thought of the report: [a 5-minute "
+                          f"survey]({readme}).\n", self.read(s, "README.md"))
+            self.assertIn(f'<a href="{html_mod.escape(readme)}">a 5-minute survey</a>',
+                          self.read(s, "README.html"))
+            agents = self.read(s, "AGENTS.md")
+            self.assertIn(f"**Feedback:** the UC Davis Proteomics Core's survey for this project is "
+                          f"{readme} -- ", agents)
+            self.assertLess(agents.index("**Feedback:**"), agents.index("## Do not"))
+
+    def test_a_run_outside_the_core_has_it_nowhere(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self.finished(tmp, core=False)
+            s = p["session_dir"]
+            self.assertIsNone(sr.core_run(s))
+            seen = 0
+            for dp, dns, fns in os.walk(s):
+                if dp == s:                      # the copy of the skill's own code, not an output
+                    dns.remove("scripts")
+                for fn in fns:
+                    with open(os.path.join(dp, fn), "rb") as fh:
+                        data = fh.read()
+                    seen += 1
+                    for s_ in (SURVEY, SURVEY.split("/")[2]):   # the address, and its host
+                        self.assertNotIn(s_.encode(), data, os.path.join(dp, fn))
+                    self.assertNotIn(b"How did we do", data, os.path.join(dp, fn))
+            self.assertGreater(seen, 20)
+            text = self.pdf_text(os.path.join(p["output_dir"], "Analysis_Report.pdf"))
+            if text is not None:
+                self.assertNotIn(SURVEY.split("/")[2], text)
+            for key in ("readme", "agents", "report_html"):
+                self.assertTrue(os.path.isfile({"readme": os.path.join(s, "README.md"),
+                                                "agents": os.path.join(s, "AGENTS.md"),
+                                                "report_html": os.path.join(
+                                                    p["output_dir"], "Analysis_Report.html")}[key]))
+
+    def test_core_run_is_the_one_test_and_fails_closed(self):
+        # review of f18d95e: the report asked report_section() (truthy for an unreadable
+        # --submission) while README asked core_run, and core_run called ANY RecordError Core
+        with tempfile.TemporaryDirectory() as tmp:
+            s = make_session(tmp)
+            p = session_mod.paths_for(s)
+            self.assertIsNone(sr.core_run(s))
+            attach_fixture(s)
+            self.assertEqual(sr.core_run(s), {"prot": "PROT_0756"})
+            with open(p["submission_record"]) as fh:
+                record = fh.read()
+            os.remove(p["submission_record"])                # announced, record missing: Core
+            self.assertEqual(sr.core_run(s), {"prot": "PROT_0756"})
+            with open(p["submission_record"], "w") as fh:     # there but unreadable: NOT Core
+                fh.write("{")
+            self.assertIsNone(sr.core_run(s))
+            with open(p["submission_record"], "w") as fh:
+                fh.write(record)
+            for damaged in ("{", "[1, 2]", ""):                # session.json truncated / not a dict
+                with open(p["session_json"], "w") as fh:
+                    fh.write(damaged)
+                self.assertIsNone(sr.core_run(s), repr(damaged))
+            # announced with no record file: Core only when the block names a submission
+            # (verification of cba30b0: any dict passed, so {"coreomics": {}} got the survey)
+            os.remove(p["submission_record"])
+            for block, want in (({}, None), ({"foo": 1}, None), ({"internal_id": "hello"}, None),
+                                ({"note": "n/a"}, None), ({"internal_id": "PROT_0807"},
+                                                          {"prot": "PROT_0807"}),
+                                ({"id": "99922f5337f8"}, {"prot": None})):
+                with open(p["session_json"], "w") as fh:
+                    json.dump({"coreomics": block}, fh)
+                self.assertEqual(sr.core_run(s), want, block)
+            # a record already read (a delivery's summary): it must name a submission
+            self.assertEqual(sr.core_run(record={"internal_id": "PROT_0807"}), {"prot": "PROT_0807"})
+            self.assertEqual(sr.core_run(record={"id": "99922f5337f8"}), {"prot": None})
+            self.assertIsNone(sr.core_run(record={"internal_id": "not a number"}))
+            for i, digits in enumerate(("٧٥٦", "１２３")):      # not ASCII: not a PROT number
+                self.assertIsNone(sr.core_run(record={"internal_id": digits}), digits)
+                given = make_session(os.path.join(tmp, f"given{i}"))
+                r = run("submission_report.py", "attach", "--session", given, "--given",
+                        json.dumps({"internal_id": digits, "organism": "mouse"}))
+                self.assertIsNone(sr.core_run(given), (digits, r.stdout, r.stderr))
+            self.assertIsNone(sr.core_run(record=["not", "a", "record"]))
+
+    def test_a_render_from_the_md_twin_carries_the_line_once_or_not_at_all(self):
+        # review of f18d95e: --report output/Analysis_Report.md copied the old line into the body
+        with tempfile.TemporaryDirectory() as tmp:
+            s = make_session(tmp)
+            o = os.path.join(s, "output")
+            with open(os.path.join(o, "AI_Analysis_Report.md"), "w") as fh:
+                fh.write("# Analysis\n\ntext\n\n## Overview\n\nmore\n")
+            attach_fixture(s)
+            r = run("make_analysis_html.py", "--session", s, "--out",
+                    os.path.join(o, "Analysis_Report.html"), "--no-pdf")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            twin = os.path.join(o, "Analysis_Report.md")
+            with open(twin, encoding="utf-8") as fh:
+                self.assertEqual(fh.read().count("How did we do?"), 1)
+            again = os.path.join(o, "again.html")
+            for core, n in ((True, 1), (False, 0)):
+                if not core:                                  # the same twin, no longer a Core run
+                    p = session_mod.paths_for(s)
+                    os.remove(p["session_json"])
+                    os.remove(p["submission_record"])
+                r = run("make_analysis_html.py", "--session", s, "--report", twin, "--out", again,
+                        "--no-pdf")
+                self.assertEqual(r.returncode, 0, r.stderr)
+                for path in (again, os.path.splitext(again)[0] + ".md"):
+                    with open(path, encoding="utf-8") as fh:
+                        text = fh.read()
+                    self.assertEqual(text.count("How did we do?"), n, (core, path))
+                    self.assertEqual(text.count(SURVEY.split("/")[2]), n, (core, path))
+                    # the star line, on every run: once, never carried into the body
+                    self.assertEqual(text.count("Found this report useful?"), 1, (core, path))
+
+    def test_every_report_asks_for_a_github_star_once(self):
+        # Brett (2026-09-29): "if you like this report please star the github repo so others can
+        # find it ... towards the bottom". Core run or not, just before the survey line when
+        # there is one, in the HTML, the .md twin and the PDF; not in README or AGENTS.md
+        import core_submission as cs
+        with open(os.path.join(SCRIPTS, "..", ".claude-plugin", "plugin.json")) as fh:
+            repo = json.load(fh)["repository"]
+        star = {fmt: cs.star_line(fmt) for fmt in ("html", "md")}
+        self.assertIn(f'<a href="{repo}">', star["html"])
+        self.assertIn(f"]({repo}) ", star["md"])
+        for core in (True, False):
+            with self.subTest(core=core), tempfile.TemporaryDirectory() as tmp:
+                p = self.finished(tmp, core)
+                o, s = p["output_dir"], p["session_dir"]
+                page = self.read(o, "Analysis_Report.html")
+                md = self.read(o, "Analysis_Report.md")
+                for text in (page, md):
+                    self.assertEqual(text.count("Found this report useful?"), 1)
+                self.assertEqual(page.count(star["html"]), 1)
+                self.assertEqual(md.count(star["md"]), 1)
+                if core:
+                    self.assertIn(star["html"] + '<p class="feedback">', page)
+                    self.assertIn("\n---\n\n" + star["md"] + "\n\n**How did we do?**", md)
+                else:
+                    self.assertIn(star["html"] + "</main>", page)
+                    self.assertTrue(md.endswith("\n---\n\n" + star["md"] + "\n"))
+                pdf = os.path.join(o, "Analysis_Report.pdf")
+                if shutil.which("pdftotext") and os.path.isfile(pdf):
+                    raw = subprocess.run(["pdftotext", pdf, "-"], capture_output=True,
+                                         text=True).stdout
+                    self.assertEqual(raw.count("Found this report useful?"), 1)
+                    self.assertIn(f"({repo})", raw)          # printed whole: no break in DE-LIMP
+                for doc in ("README.md", "README.html", "AGENTS.md"):
+                    self.assertNotIn("Found this report useful", self.read(s, doc), doc)
+
+    def test_an_invalid_podcast_json_is_no_podcast(self):
+        # review of f18d95e: "... and the podcast" was decided by podcast.json existing; an
+        # invalid one gets no Listen card, so it is no podcast (make_podcast.has_podcast)
+        with tempfile.TemporaryDirectory() as tmp:
+            s = make_session(tmp)
+            o = os.path.join(s, "output")
+            with open(os.path.join(o, "AI_Analysis_Report.md"), "w") as fh:
+                fh.write("# Analysis\n\ntext\n")
+            os.makedirs(os.path.join(o, "podcast"))
+            with open(os.path.join(o, "podcast", "podcast.json"), "w") as fh:
+                fh.write("{")
+            attach_fixture(s)
+            r = run("make_analysis_html.py", "--session", s, "--out",
+                    os.path.join(o, "Analysis_Report.html"), "--no-pdf")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            written = session_docs.write_docs(s)
+            for path in (os.path.join(o, "Analysis_Report.html"),
+                         os.path.join(o, "Analysis_Report.md"), written["readme"]):
+                with open(path, encoding="utf-8") as fh:
+                    text = fh.read()
+                self.assertIn("How did we do?", text, path)
+                self.assertNotIn("and the podcast", text, path)
+
+    def test_a_block_naming_no_submission_is_not_core_anywhere(self):
+        # verification of cba30b0: session.json {"coreomics": {...}} naming no submission, with
+        # no record file, put the survey in the report AND README/AGENTS.md
+        for i, block in enumerate(({}, {"foo": 1}, {"internal_id": "hello"}, {"note": "n/a"})):
+            with self.subTest(block=block), tempfile.TemporaryDirectory() as tmp:
+                s = make_session(tmp)
+                with open(os.path.join(s, "output", "AI_Analysis_Report.md"), "w") as fh:
+                    fh.write("# Analysis\n\ntext\n")
+                with open(session_mod.paths_for(s)["session_json"], "w") as fh:
+                    json.dump({"coreomics": block}, fh)
+                out = os.path.join(s, "output", "Analysis_Report.html")
+                r = run("make_analysis_html.py", "--session", s, "--out", out, "--no-pdf")
+                self.assertEqual(r.returncode, 0, r.stderr)
+                written = session_docs.write_docs(s)
+                for path in (out, os.path.splitext(out)[0] + ".md", written["readme"],
+                             written["agents"]):
+                    with open(path, encoding="utf-8") as fh:
+                        text = fh.read()
+                    self.assertNotIn(SURVEY.split("/")[2], text, path)
+                    self.assertNotIn("How did we do", text, path)
+
+    def test_a_non_core_report_has_no_survey_whatever_submission_is_given(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s = make_session(tmp)
+            with open(os.path.join(s, "output", "AI_Analysis_Report.md"), "w") as fh:
+                fh.write("# Analysis\n\ntext\n\n## Overview\n\nmore\n")
+            out = os.path.join(s, "output", "Analysis_Report.html")
+            # --submission feeds the Submission section only; the survey asks the session
+            # (option a), so even a real record there, unattached, gives none -- as README
+            for extra in (["--submission", "PROT_1234"],
+                          ["--submission", os.path.join(tmp, "nonexistent", "record.json")],
+                          ["--submission", FIXTURE]):
+                r = run("make_analysis_html.py", "--session", s, "--out", out, "--no-pdf", *extra)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                for path in (out, os.path.splitext(out)[0] + ".md"):
+                    with open(path, encoding="utf-8") as fh:
+                        text = fh.read()
+                    self.assertNotIn(SURVEY.split("/")[2], text, (extra, path))
+                    self.assertNotIn("How did we do", text, (extra, path))
+            with open(out, encoding="utf-8") as fh:           # the last: the real record's
+                self.assertIn('id="submission"', fh.read())   # Submission section is as it was
+            attach_fixture(s)                                 # then damage session.json
+            with open(session_mod.paths_for(s)["session_json"], "w") as fh:
+                fh.write("{")
+            r = run("make_analysis_html.py", "--session", s, "--out", out, "--no-pdf")
+            with open(out, encoding="utf-8") as fh:
+                self.assertNotIn(SURVEY.split("/")[2], fh.read())
+            written = session_docs.write_docs(s)
+            for key in ("readme", "agents"):
+                with open(written[key], encoding="utf-8") as fh:
+                    self.assertNotIn(SURVEY.split("/")[2], fh.read(), key)
 
 
 # ----------------------------------------------------------------- who prepared --

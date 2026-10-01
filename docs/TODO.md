@@ -77,6 +77,18 @@ Two QC sub-tabs in the proteogenomics section to vet novel/variant peptides (sta
 - ~~Evidence Score 0-100~~: REJECTED — double-counts info (SE already incorporates nObs). Use SE directly if single number needed.
 - ~~Filterable high-confidence subset~~: REJECTED — contradicts DPC-Quant's design. At most export-only option with warning.
 
+## DDA / Sage quantification (found by the skill 2.9 Sage review, 2026-09-29; app code not yet changed)
+The skill fixed the same issues in `run_search.py adapt_sage` / `sage_lfq_check.py` (see `docs/SKILL_OPEN_DEFECTS.md`).
+Sage 0.14.7 facts, from its source:
+- `lfq.tsv` has no decoys (`output.rs write_lfq`) but keeps targets at ANY `q_value`.
+- An MS1 peak counts at `q_value` ≤ 0.05 (`fdr.rs picked_precursor`, compared in f32).
+- LFQ integrates only within ±`lfq_settings.ppm_tolerance`, default 5 ppm (`lfq.rs`).
+
+Items:
+- [ ] **`parse_sage_results()` (R/helpers_dda.R) sums every target peptide in `lfq.tsv` with no `q_value` filter.** Keep rows with `q_value` ≤ 0.05 (compare as float32) before the per-protein sum.
+- [ ] **Its "legacy long-format" branch** (`proteins`/`filename`/`intensity`, `dcast … fun.aggregate = sum`) checks no `is_decoy`. Fed `lfq.parquet`-shaped data, it would add the decoy MS1 peaks, which carry the target's `proteins` string, to the protein. Drop `is_decoy` there too.
+- [ ] **`generate_sage_config()` leaves `lfq_settings.ppm_tolerance` at Sage's 5 ppm and never checks the MS1 offset.** A cohort whose MS1 is +7 ppm off identifies normally and quantifies nothing: gabrig's HeL50 HCDOT kept 0 MS1 peaks, silently. Port the skill's check: the median `precursor_ppm` per run from `results.sage.tsv`, plus Sage's "target MS1 peaks at 5% FDR" count. Warn, and offer a wider window.
+
 ## Cascadia De Novo Sequencing
 - [x] **R integration (Phases 2-4)**: SSL parsing, peptide classification, DIAMOND BLAST, sbatch generation, server module, UI (feature/cascadia-denovo branch)
 - [x] **Bruker native loader**: `bruker_augment.py` using timsrust_pyo3 for native `.d` file reading (~2-5 min vs 45-90 min mzML conversion)
@@ -135,6 +147,7 @@ Two QC sub-tabs in the proteogenomics section to vet novel/variant peptides (sta
 - [ ] **Core Facility QC report section**: Add contaminant summary to generated reports. Flag samples above 90th percentile.
 - [ ] **Instrument-specific baselines**: Track contaminant levels per instrument (from instrument_metadata). Different instruments have different typical contamination.
 - [ ] **Keratin trend monitoring**: Track keratin contamination over time to detect sample prep workflow degradation.
+- [ ] **Skill: a "handling" tag for keratin samples** (keratin-review of skill 2.9, 2026-09-29). `fetch_fasta.py --keratin-sample` removes every keratin-family contaminant entry, so on a non-human appendage (wool, feather, mouse fur) the human skin keratins (KRT1/2/9/10) -- genuine handling contamination there -- become indistinguishable from the sample's keratins. Design: keep those four human entries under a separate tag (not `Cont_`), NOT excluded from quantification by `--cont-quant-exclude` or `run_de.R`, and report their share per run as a handling-contamination QC readout (next to `QC_contaminant_share.csv`). Same question for skin samples and FLG/FLG2/HRNR/DMKN (analytes there, contaminants elsewhere), and for species whose proteome lacks KRTAPs (the contaminant KRTAPs may be the only ones in the search). Documented as limits in SKILL.md step 3 for 2.9.
 
 ## Data Explorer
 - [x] **Abundance Profiles (Quartile Analysis)**: Heatmap of top 10 proteins per intensity quartile with per-sample consistency (v3.7)
@@ -264,3 +277,6 @@ Moved out of CLAUDE.md's Version History during the v3.x doc refactor. These are
 - [ ] **`DIANN_DEFAULTS` constant extraction** in `helpers_search.R` — stop scattering default mass-acc/Q-value fallbacks.
 - [ ] **`detect_organism_db()` silent-fallback refactor** — currently returns `"org.Hs.eg.db"` as a default with no signal to callers; should return `NULL` or `list(db, method)` so callers (PROMPT.md builder, Run Comparator, Explorer prompt, GSEA tab) handle uncertainty explicitly per Architectural Rule #2. Caused the v3.10.6 → v3.10.7 "Organism: Human" bug on a Peromyscus dataset. Sweep for similar silent-fallback functions (`coalesce_setting`, default Q-value cutoffs, default mass-acc fallbacks).
 - [ ] **Convert export bundlers to `safe_section()`** — sweep all export paths for the `if (!is.null(f)) files_to_zip <- c(...)` and `tryCatch(error = function(e) NULL)` patterns (Architectural Rule #4). The v3.10.4 → v3.10.8 hotfix train (5 patches in one day) was almost entirely silent-failure-masquerading-as-success bugs in export paths. Files to audit: `R/server_ai.R` (Claude AI export), `R/server_viz.R` (Explorer export), `R/server_phospho.R` (Phospho export), `R/server_mofa.R` (MOFA export), `R/server_comparator.R` (Comparator export). The Complete Analysis bundle in `R/server_session.R` was made clean in v3.10.8; the others are still likely broken the same way.
+
+## Skill (ucdavis-proteomics-core-pipeline) — backlog
+- [ ] **Pulldown set tests: background subtraction in place of the 4-fold minimum (`pooled_bgsub`)** — after 2.9. The 4-fold interactome minimum makes the bait-normalised tests one-sided: a set that falls in one condition keeps 4.5 / 2.9 of 20 members (Old background +0 / +0.6 log2) and reaches the 10-member minimum in 0.9% / 0.0% of replicates, so losses from a complex are close to undetectable (2.9 says so in every reading). Candidate: subtract the condition's mean control (IgG) background on the linear scale, with no minimum enrichment, and floor what falls to or below the background. In rel-stats' simulation (check6, 1,000 reps) a falling set then keeps 19.4 / 19.1 members with fry power 0.98 / 0.96; null random sets 0.065 / 0.085; the 20 least-enriched interactors 0.094 / 0.094. **That simulation uses the same additive background + signal model the method assumes, so it cannot validate it: validate on real pulldowns first** (e.g. PROT_0756, and a spike-in or known-interactor pulldown), and decide the floor there. Details: `skill/ucdavis-proteomics-core-pipeline/references/set-tests.md` "Known limitations".

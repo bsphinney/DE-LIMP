@@ -45,7 +45,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # analysis.tdf (and every other sqlite file in a .d) is opened read-only AND immutable -- see
 # bruker_tdf.py for how a read-write open truncates a tdf (the state of 342 on HIVE).
 import bruker_method  # noqa: E402
-from fetch_fasta import CONT_TAG  # noqa: E402  the contaminant tag: one definition (rule 3)
+# the contaminant tag and the sidecar's keratin_sample reader: one definition each (rule 3)
+from fetch_fasta import CONT_TAG, keratin_sample_recorded  # noqa: E402
 
 ACK_SOURCE = "https://proteomics.ucdavis.edu/instrument-grant-acknowledgments"
 # (instrument-name substrings, facility filename prefixes, label, acknowledgment).
@@ -532,6 +533,134 @@ def _sage_mods(mods, mtype, where):
     return out
 
 
+# DIA-NN echoes its argv, joined with single spaces and unquoted, near the top of its log; an
+# option's value runs to the next "--" (fran_deposit._FASTA_ARG has the why: FragPipe's DIA-NN
+# 1.8.1 logs even `--cfg <workdir>/filelist_diann.txt-- `). The command line is the first line of
+# the head that carries an option. A `--cfg <file>` on it is logged UNEXPANDED (DIA-NN 1.8.1,
+# 2.6.1, 2.7.0 on HIVE; run_search.py --one-step passes the whole cfg that way), so its flags are
+# read from the file, spliced in where --cfg stands, as DIA-NN reads them.
+_DIANN_CMD_LINE = re.compile(r"^\S.*?\s--[a-z]", re.M)
+
+
+def _logged_options(line):
+    """[(flag, value)] of a logged DIA-NN command line, in order; the binary is dropped."""
+    out = []
+    for seg in line.split("--")[1:]:
+        flag, _, val = seg.strip().partition(" ")
+        if flag:
+            out.append(("--" + flag, val.strip().strip("\"'")))
+    return out
+
+
+def _diann_workdirs(logp, opts):
+    """Where a relative path on the logged command line resolves: DIA-NN's working directory,
+    which the log does not name. A relative --out tells it exactly (the log is written beside
+    --out, so the log's folder minus --out's own folder part; FragPipe's DIA route runs in its
+    workdir with --out dia-quant-output/report.tsv); otherwise the log's folder (run_search.py
+    runs every DIA-NN job with `cd <out>`), then its parent."""
+    d = os.path.dirname(os.path.abspath(logp))
+    outs = [v for f, v in opts if f == "--out" and v]
+    if outs and not os.path.isabs(outs[-1]):
+        rel = os.path.dirname(os.path.normpath(outs[-1]))
+        if not rel:
+            return [d]
+        if d.endswith(os.sep + rel):
+            return [d[:-len(rel) - 1]]
+    return [d, os.path.dirname(d)]
+
+
+def _expand_cfgs(opts, workdirs, depth=0):
+    """opts with each --cfg replaced by the flags of the file it names (cfg_groups, the one
+    tokeniser) -> (expanded [(flag, [values])], [cfg files read], [cfg paths NOT read])."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from diann_parallel import cfg_tokens, cfg_groups, CfgError
+    out, read, unread = [], [], []
+    for flag, val in opts:
+        if flag != "--cfg":
+            out.append((flag, val.split() if isinstance(val, str) else list(val)))
+            continue
+        path = val if isinstance(val, str) else " ".join(val)
+        cands = [path] if os.path.isabs(path) else [os.path.join(w, path) for w in workdirs]
+        hit = next((c for c in cands if os.path.isfile(c)), None)
+        try:
+            if hit is None or depth > 3:
+                raise CfgError(f"not found: {path}")
+            sub, r, u = _expand_cfgs(cfg_groups(cfg_tokens(hit)), workdirs, depth + 1)
+        except CfgError:
+            unread.append(path)
+            continue
+        out += sub
+        read += [hit] + r
+        unread += u
+    return out, read, unread
+
+
+def diann_cont_quant_exclude(report=None, prov=None, params_file=None):
+    """Did DIA-NN run with --cont-quant-exclude for this report, and where does that come from?
+
+    THE reader of that flag (DE-LIMP rule 3): search_record() takes it from here for the
+    database-search paragraph, record_run.py for the run record, and contaminants.R asks it
+    (`make_methods.py cont-quant-exclude <report>`) before a DE descriptor says what DIA-NN left
+    out of its quantities. Why (sage-review N1, 2026-09-30): the dpc and maxlfq descriptors said
+    "DIA-NN --cont-quant-exclude" left keratin peptides out for every DIA-NN report -- FragPipe's
+    DIA-NN step and a hand-run DIA-NN included, which nothing had checked.
+
+    Most authoritative first: the command line in the DIA-NN log that wrote the report
+    (<report>.log.txt: what ran), with every `--cfg` file it names read in place; then the
+    parameters file the search ran with (`params_file`, else search_provenance.json
+    resolved_params_file, then params_file -- only for a DIA-NN search: a Sage or FragPipe
+    parameters file says nothing about DIA-NN). A command line whose --cfg cannot be read is not
+    taken as "absent" (sage-review, ca9aff2: every --one-step search then read "not set").
+    -> {"value": tag or None, "source": where} -- value None when that source was read and has
+    no such flag -- or None when no source could be read, which the caller prints as NOT
+    RECORDED (rule 2)."""
+    if prov is None and report:
+        d = os.path.dirname(os.path.abspath(report))
+        for cand in (d, os.path.dirname(d)):
+            prov = _load_json(os.path.join(cand, "search_provenance.json"))
+            if prov is not None:
+                break
+    prov = prov if isinstance(prov, dict) else {}
+    if report:
+        logp = os.path.splitext(report)[0] + ".log.txt"
+        try:
+            with open(logp, errors="replace") as fh:
+                head = fh.read(2 << 20).replace("\r", "")
+        except OSError:
+            head = ""
+        cmd = _DIANN_CMD_LINE.search(head)
+        if cmd:
+            opts = _logged_options(head[cmd.start():].split("\n", 1)[0])
+            groups, read, unread = _expand_cfgs(opts, _diann_workdirs(logp, opts))
+            vals = [v for f, v in groups if f == "--cont-quant-exclude"]
+            src = f"the DIA-NN command line in {os.path.basename(logp)}" + (
+                f" and the --cfg file{'s' if len(read) > 1 else ''} it names "
+                f"({', '.join(os.path.basename(r) for r in read)})" if read else "")
+            if vals:
+                return {"value": (vals[-1][0].strip("\"'") if vals[-1] else None) or None,
+                        "source": src}
+            if not unread:
+                return {"value": None, "source": src}
+            # the flag may be in the --cfg that could not be read: not "absent" -- ask the
+            # parameters file the search ran with, else NOT RECORDED
+    cands = [params_file] if params_file else (
+        [prov.get("resolved_params_file"), prov.get("params_file")]
+        if (prov.get("engine") or "diann").lower() == "diann" else [])
+    for pf in cands:
+        if not (pf and os.path.isfile(pf)):
+            continue
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from diann_parallel import cfg_tokens, cfg_groups, CfgError
+        try:
+            groups = cfg_groups(cfg_tokens(pf))
+        except CfgError:
+            continue
+        vals = [v for f, v in groups if f == "--cont-quant-exclude"]
+        return {"value": (vals[-1][0] if vals[-1] else None) if vals else None,
+                "source": os.path.basename(pf)}
+    return None
+
+
 def search_record(params=None, search_prov=None, manifest=None):
     """What the database search ran with, each value with where it came from.
 
@@ -551,8 +680,10 @@ def search_record(params=None, search_prov=None, manifest=None):
            "params_source": None, "cleavage": None, "missed_cleavages": None,
            "pep_len": None, "pr_charge": None, "pr_mz": None, "mods": [],
            "max_var_mods": None, "met_excision": False, "ms1_tol": None, "ms2_tol": None,
-           "tol_note": None, "precursor_fdr": None, "library": None, "mbr": None,
-           "labelled": None, "cont_quant_exclude": None, "warnings": []}
+           "tol_note": None, "precursor_fdr": None, "library": None, "mbr": None, "dda": None,
+           "search_mode": prov.get("search_mode"),
+           "labelled": None, "cont_quant_exclude": None,
+           "probe_fallback": probe_fallback_record(prov), "warnings": []}
     if prov.get("version"):
         rec["version"] = str(prov["version"])
         rec["version_source"] = "search_provenance.json (the version that ran)"
@@ -586,7 +717,9 @@ def search_record(params=None, search_prov=None, manifest=None):
     if engine == "diann" or pf.endswith(".cfg"):
         # the cfg tokeniser every other DIA-NN reader uses (diann_parallel.cfg_tokens)
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from diann_parallel import cfg_tokens, cfg_groups, CfgError
+        from diann_parallel import cfg_tokens, cfg_groups, CfgError, mass_acc_defaults, \
+            mass_acc_status
+        from estimate_params import SOP_DEFAULT_PUBLISHED, DIANN_DDA_FLAG
         try:
             groups = cfg_groups(cfg_tokens(pf))
         except CfgError as e:
@@ -624,6 +757,9 @@ def search_record(params=None, search_prov=None, manifest=None):
         if num("--var-mods") is not None:
             rec["max_var_mods"] = {"value": int(num("--var-mods")), "source": where}
         rec["met_excision"] = "--met-excision" in flags
+        # DIA-NN searched the spectra as DDA: the paragraph must say so (DE-LIMP rule 1)
+        if DIANN_DDA_FLAG in flags:
+            rec["dda"] = {"value": True, "source": f"{DIANN_DDA_FLAG} in {where}"}
         ms2, ms1 = num("--mass-acc"), num("--mass-acc-ms1")
         if ms2 is None and ms1 is None:
             ma = ((prov.get("result") or {}).get("mass_acc") or {})
@@ -640,6 +776,27 @@ def search_record(params=None, search_prov=None, manifest=None):
             rec["ms2_tol"] = {"value": ms2, "unit": "ppm", "source": where_ma}
         if ms1 is not None:
             rec["ms1_tol"] = {"value": ms1, "unit": "ppm", "source": where_ma}
+        # DE-LIMP rule 2: a level estimate_params.py pinned at the SOP -- a DDA level it cannot
+        # measure -- was nobody's choice for these data, and the Methods must not read as if it
+        # were. Which levels those are comes from the run's provenance (search_provenance.json
+        # result.mass_acc.default); with no run record, from the params file's own rationale
+        # sidecar, through the same check (diann_parallel.mass_acc_defaults). A level is tagged
+        # only while its value is the one the provenance names.
+        ma_rec = (prov.get("result") or {}).get("mass_acc") or {}
+        if isinstance(ma_rec.get("default"), dict):
+            defaults = ma_rec["default"]
+            default_src = "search_provenance.json result.mass_acc.default"
+        else:
+            try:
+                defaults = mass_acc_defaults(pf, mass_acc_status(pf))
+            except CfgError:
+                defaults = {}
+            default_src = f"{where}.rationale.json mass_accuracy_default"
+        for key, flag in (("ms2_tol", "--mass-acc"), ("ms1_tol", "--mass-acc-ms1")):
+            t, v = rec.get(key), _num(defaults.get(flag))
+            if t and v is not None and float(t["value"]) == v:
+                t["default"] = SOP_DEFAULT_PUBLISHED
+                t["source"] = f"{t['source']}; DEFAULT per {default_src}"
         if num("--qvalue") is not None:
             rec["precursor_fdr"] = {"value": num("--qvalue"), "level": "precursor",
                                     "source": where}
@@ -651,13 +808,25 @@ def search_record(params=None, search_prov=None, manifest=None):
             rec["library"] = {"value": "library-free: an in silico spectral library was "
                                        "predicted from the sequence database with DIA-NN's "
                                        "deep-learning predictor", "source": where}
-        if "--reanalyse" in flags or "--reanalyse" in cmd_words:
-            rec["mbr"] = {"value": True, "source": where if "--reanalyse" in flags else
-                          "search_provenance.json resolved_command"}
-        # DIA-NN's own contaminant handling, as the parameters set it -- {"value": None} when
-        # the file was read and the flag is absent. The sidecar's diann_cont_quant_exclude is
-        # only a recommendation, so it is never taken as proof that the flag ran.
-        rec["cont_quant_exclude"] = {"value": one("--cont-quant-exclude"), "source": where}
+        # DE-LIMP rule 1: match-between-runs is described from how the search RAN
+        # (search_provenance.json search_mode), not from --reanalyse in the cfg. The 5-step
+        # chain strips --reanalyse and does its own two-pass round trip as separate jobs; a
+        # cfg that carries the flag said "with match-between-runs" for a DIA-NN MBR that never
+        # ran as such.
+        if rec["search_mode"] == "parallel_5step":
+            seeded = bool((prov.get("result") or {}).get("seeded"))
+            rec["mbr"] = {"value": "two_pass_chain", "label": "two-pass, as separate jobs "
+                          "(empirical-library round trip)", "seeded": seeded,
+                          "source": "search_provenance.json search_mode (parallel_5step)"}
+        elif "--reanalyse" in flags or "--reanalyse" in cmd_words:
+            rec["mbr"] = {"value": True, "label": "on", "source": where if "--reanalyse" in flags
+                          else "search_provenance.json resolved_command"}
+        # DIA-NN's own contaminant handling, as the run's log (else these parameters) set it --
+        # {"value": None} when that was read and the flag is absent. The sidecar's
+        # diann_cont_quant_exclude is only a recommendation, so it is never taken as proof that
+        # the flag ran.
+        rec["cont_quant_exclude"] = diann_cont_quant_exclude(
+            (prov.get("result") or {}).get("report"), prov, pf)
         labelled = "--channels" in flags or any(m.get("label") for m in rec["mods"])
         rec["labelled"] = {"value": labelled, "source": where + (
             " (--channels / label mods present)" if labelled else
@@ -724,6 +893,79 @@ def mod_phrase(m):
     return f"{name} ({site})" if site else name
 
 
+def _first_pass_library(rec):
+    """What the chain's first pass searched against: its seed library, or the predicted one."""
+    return ("the seed spectral library" if (rec.get("mbr") or {}).get("seeded")
+            else "the predicted library")
+
+
+# The 5-step chain's match-between-runs, in the words of the proteomics review of 2026-09-29.
+def chain_mbr_sentence(rec):
+    first = _first_pass_library(rec)
+    return ("Match-between-runs used DIA-NN's two-pass procedure, run as separate jobs: each run "
+            f"was first searched against {first}; precursors identified across the experiment "
+            "were assembled into an experiment-specific empirical spectral library; every run was "
+            "then searched again against it. This differs from the retention-time-alignment-based "
+            "match-between-runs of DDA software such as MaxQuant.")
+
+
+def first_pass_used(de_prov):
+    """Did the DE step read the 5-step chain's FIRST-pass report (diann_parallel.
+    FIRST_PASS_REPORT), per de_provenance.json `input`? SKILL.md offers it when the final pass
+    lost identifications (pass_comparison.py); the Methods must then describe that report."""
+    inp = (de_prov or {}).get("input")
+    if not inp:
+        return False
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from diann_parallel import FIRST_PASS_REPORT
+    return os.path.basename(str(inp)) == FIRST_PASS_REPORT
+
+
+def first_pass_sentence(rec):
+    """What was quantified, as a fact -- no "because", which would imply the first pass recovered
+    what the second lost. It may not have: pass_comparison's flag is a pre-FDR count, and on SET28
+    the flagged runs had no rows at 1% on every q-column in either report (what the first pass
+    kept for them under run_de.R's filter were protein groups with a q between 1% and 5%)."""
+    return ("Quantification used the experiment-wide first-pass report: each run was searched "
+            f"once against {_first_pass_library(rec)}, with no match-between-runs; the second "
+            "pass against an experiment-specific empirical library was not used.")
+
+
+def probe_fallback_record(prov):
+    """What a pre-search measurement that FAILED left the search with (probe_fallback.py: the
+    stable scan_window.mode / mass_acc.mode, read by probe_fallback.fallback_modes()), or None
+    when nothing fell back. DE-LIMP rule 2: the Methods must say the value was not measured,
+    never present it as a measurement."""
+    # the stable modes, read by the one reader the CAUTION uses too (DE-LIMP rule 3)
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from probe_fallback import fallback_modes, WINDOW_FALLBACK, MASS_ACC_FALLBACK
+    window, mass_acc = fallback_modes(prov)
+    if WINDOW_FALLBACK != window and MASS_ACC_FALLBACK != mass_acc:
+        return None
+    fb = (prov or {}).get("probe_fallback")
+    fb = fb if isinstance(fb, dict) else {}
+    return {"window": window == WINDOW_FALLBACK, "mass_acc": mass_acc == MASS_ACC_FALLBACK,
+            "reason": fb.get("reason"),
+            "source": "search_provenance.json scan_window.mode / mass_acc.mode"}
+
+
+def probe_fallback_sentence(rec):
+    """The Methods sentence for a failed pre-search measurement, or "" when none failed."""
+    fb = rec.get("probe_fallback")
+    if not fb or not (fb["window"] or fb["mass_acc"]):
+        return ""
+    what = " and ".join(x for x in ("the scan window" if fb["window"] else None,
+                                    "the mass accuracy" if fb["mass_acc"] else None) if x)
+    then = []
+    if fb["window"]:
+        then.append("DIA-NN set the scan window automatically, for each run")
+    if fb["mass_acc"]:
+        then.append("the mass tolerances given here were not measured on these data")
+    return (f"{what[0].upper() + what[1:]} {'were' if ' and ' in what else 'was'} to be measured "
+            "on representative runs before the search, but that measurement failed; "
+            + ", and ".join(then) + ".")
+
+
 def search_paragraph(rec, de_prov=None):
     """The Database-search paragraph. Every number comes from `rec`; anything missing prints
     as NOT_RECORDED rather than as a default."""
@@ -735,9 +977,16 @@ def search_paragraph(rec, de_prov=None):
     s = [f"Raw data were processed with {eng} {ver}"]
     if rec.get("library"):
         s[0] += f" ({rec['library']['value']})"
-    if rec.get("mbr"):
-        s[0] += ", with match-between-runs"
-    s[0] += "."
+    mbr = (rec.get("mbr") or {}).get("value")
+    first_pass = first_pass_used(de_prov)
+    s[0] += ", with match-between-runs." if mbr is True and not first_pass else "."
+    if rec.get("dda"):
+        s.append("DIA-NN searched the spectra in its DDA mode (--dda), which it describes as "
+                 "beta-stage support.")
+    if first_pass:
+        s.append(first_pass_sentence(rec))
+    elif mbr == "two_pass_chain":
+        s.append(chain_mbr_sentence(rec))
     if not rec.get("params_file"):
         s.append(f"The search parameters could not be read from here: {NOT_RECORDED}.")
         return " ".join(s)
@@ -772,11 +1021,14 @@ def search_paragraph(rec, de_prov=None):
         t = rec.get(key)
         if t:
             sym = "±" if t.get("symmetric", True) and rec["engine"] == "sage" else ""
-            tol.append(f"{lvl} {sym}{_g(t['value'])} {t['unit']}")
+            tol.append(f"{lvl} {sym}{_g(t['value'])} {t['unit']}"
+                       + (f" ({t['default']})" if t.get("default") else ""))
     if tol:
         s.append("Mass tolerances were " + " and ".join(tol) + ".")
     elif rec.get("tol_note"):
         s.append(rec["tol_note"][0].upper() + rec["tol_note"][1:] + ".")
+    if probe_fallback_sentence(rec):
+        s.append(probe_fallback_sentence(rec))
     fdr = rec.get("precursor_fdr")
     if fdr:
         s.append(f"Precursor identifications were filtered at {fdr['value'] * 100:g}% FDR "
@@ -809,9 +1061,116 @@ def diann_contaminant_sentence(srec):
             f"containing no {tag} entry.")
 
 
+def keratin_database_sentence(fmeta):
+    """The FASTA sidecar's keratin-sample build (fetch_fasta.py --keratin-sample), or "" for any
+    other database -- whose paragraph is then exactly what it was before keratin samples were
+    handled."""
+    if keratin_sample_recorded(fmeta) is not True:
+        return ""
+    n = fmeta.get("n_contaminants_dropped_keratin_sample")
+    n = f"{n:,}" if isinstance(n, int) else "____"
+    return (f" The samples are keratinous (hair, wool, feather, skin or nail: keratin is the "
+            f"analyte), so the {n} keratin-family entries (keratins and keratin-associated "
+            f"proteins) were also removed from the contaminant sequences, and keratin peptides "
+            f"were identified and quantified as sample proteins; keratin introduced during "
+            f"sample handling cannot be distinguished from the sample's own.")
+
+
+def _count_of(n, c, missing="____"):
+    """('<n> <unit>', verb) as contaminants.R count_of() words a count: the record's own unit
+    (contaminant_unit), its singular for exactly one -- "1 protein groups" was printed
+    (sage-review) -- and the verb that agrees. A record from before 2.9 counted precursors."""
+    unit, unit1 = c.get("unit") or "precursors", c.get("unit_singular") or "precursor"
+    if not isinstance(n, int):
+        return f"{missing} {unit}".strip(), "were"
+    return f"{n:,} {unit1 if n == 1 else unit}", "was" if n == 1 else "were"
+
+
+def de_keratin_sentence(c):
+    """A keratin sample's step of the DE, from the contaminant record's `keratin_sample`
+    (contaminants.R keratin_sample_status); for a sample whose "not keratin" nobody confirmed,
+    one tagged sentence when keratin precursors were removed on that default (rule 2); "" for a
+    sample the user said is not keratin."""
+    k = c.get("keratin_sample") if isinstance(c, dict) else None
+    if not isinstance(k, dict):
+        return ""
+    # the unit the record counted in (contaminants.R contaminant_unit); older records: precursors
+    unit = c.get("unit") or "precursors"
+    if k.get("value") is not True:
+        n = k.get("n_keratin_precursors_removed")
+        if k.get("default_removed") is not True:
+            return ""
+        t, were = _count_of(n, c, missing="")
+        return (f"{t} mapping to keratin-family contaminant entries {were} removed as "
+                f"contaminants; whether samples are keratinous was not recorded (DEFAULT — not "
+                f"user-confirmed).")
+    head = ("The samples are keratinous (a keratin sample), so keratin is the analyte, not a "
+            "contaminant: ")
+    db = k.get("database")
+    if db == "keratins_removed_at_build":
+        n = k.get("n_removed_at_build")
+        out = (head + f"the search database was built without its "
+               f"{f'{n:,} ' if isinstance(n, int) else ''}keratin-family contaminant entries, so "
+               f"keratin {unit} were quantified and tested as sample proteins.")
+    elif db == "no_keratin_contaminants":
+        out = (head + f"the search database held no keratin-family contaminant entry, so keratin "
+               f"{unit} were quantified and tested as sample proteins.")
+    elif db == "keratins_in_database":
+        n_kept = k.get("n_precursors_kept")
+        kept, were = _count_of(n_kept, c)
+        n_ent = len(k.get("exempt_accessions") or [])
+        # the pipeline's own descriptor says whether a kept item reaches a quantity
+        # (requantified), and what the SEARCH ENGINE's own quantities did with those peptides
+        # (kept_quant, per engine -- never assumed to be DIA-NN's; contaminants.R)
+        if k.get("requantified") is True:
+            out = (head + f"{kept} mapping only to keratin-family contaminant entries "
+                   f"({n_ent:,} in the search database) {were} kept and quantified as sample "
+                   f"proteins rather than removed.")
+        else:
+            out = (head + f"{kept} mapping only to keratin-family contaminant entries "
+                   f"({n_ent:,} in the search database) {were} kept, so their protein groups stay "
+                   f"in the analysis.")
+        # none kept: what the engine did with kept ones is moot (sage-review N5)
+        if n_kept != 0:
+            eng = k.get("kept_quant")
+            if isinstance(eng, str) and eng:
+                out += f" {eng}"
+            elif k.get("requantified") is not True:
+                out += (f" What the search engine's own protein quantities did with those "
+                        f"peptides: {NOT_RECORDED} (this DE record predates it).")
+            under = k.get("under_quantified")
+            if under is True:
+                out += " [keratin under-quantified — resolve before publication]"
+            elif under is None and k.get("requantified") is not True and eng:
+                # the engine's own quantities, and whether its protein inference moved the
+                # shared peptides elsewhere is not recorded (sage-review N4)
+                out += (" [whether keratin is under-quantified is not known — check before "
+                        "publication]")
+    else:
+        out = (head + f"the keratin-family entries of the search database could not be "
+               f"identified, so {unit} mapping to them were removed with the other contaminants "
+               f"[keratin under-counted — resolve before publication].")
+    tags = [t for t in (k.get("unchecked_tags") or []) if isinstance(t, str)]
+    if tags:
+        t, were = _count_of(k.get("n_precursors_unchecked"), c, missing="")
+        out += (f" {t} of "
+                f"{'/'.join(tags)}-tagged contaminant entries -- contaminants the skill did not "
+                f"add, never checked for keratins -- {were} removed with the other contaminants "
+                f"[keratin may be under-counted — resolve before publication].")
+    return out
+
+
 def de_contaminant_sentence(prov):
     """The contaminant step of the DE, from run_de.R's `contaminants` record -- never assumed.
-    A record older than the filter says so, tagged, instead of implying either answer."""
+    A record older than the filter says so, tagged, instead of implying either answer. A keratin
+    sample's own sentence (de_keratin_sentence) follows it."""
+    c = prov.get("contaminants")
+    ker = de_keratin_sentence(c)
+    out = _de_contaminant_sentence(prov)
+    return f"{out} {ker}" if ker else out
+
+
+def _de_contaminant_sentence(prov):
     c = prov.get("contaminants")
     if not isinstance(c, dict):
         return (f"Contaminant handling in the differential-expression step: {NOT_RECORDED} "
@@ -820,13 +1179,26 @@ def de_contaminant_sentence(prov):
     tag = c.get("tag") or CONT_TAG
     fmt = lambda k: f"{c.get(k):,}" if isinstance(c.get(k), int) else "____"  # noqa: E731
     policy = c.get("policy")
+    # what one counted item is (contaminants.R contaminant_unit): DIA-NN precursors, Sage
+    # peptides, a protein-level adapter's protein groups -- a record without it predates 2.9
+    # and counted DIA-NN precursors (_count_of)
+    unit1 = c.get("unit_singular") or "precursor"
     if policy == "removed":
-        out = (f"Before protein quantification, {fmt('n_precursors')} precursors mapping to a "
-               f"{tag}-tagged contaminant entry (any accession in {c.get('id_column') or '____'}, "
-               f"the rule of DIA-NN's --cont-quant-exclude) were removed, taking out "
-               f"{fmt('n_protein_groups')} contaminant protein groups, so contaminants entered "
-               f"neither normalisation, the linear model nor the multiple-testing correction.")
-        if c.get("n_sample_groups_sharing") or c.get("n_sample_groups_all_shared"):
+        # THE rule text, as run_de.R recorded it (contaminants.R) -- not restated here
+        rule = c.get("rule") or (f"any accession in {c.get('id_column') or '____'} starts with "
+                                 f"{tag}")
+        mixed = c.get("n_protein_groups_mixed")
+        t, were = _count_of(c.get("n_precursors"), c)
+        out = (f"Before protein quantification, {t} mapping to a "
+               f"{tag}-tagged contaminant entry {were} removed ({rule}), taking out "
+               f"{fmt('n_protein_groups')} contaminant protein groups"
+               + (f" ({mixed:,} of them also naming a sample protein)"
+                  if isinstance(mixed, int) and mixed else "")
+               + ", so contaminants entered neither normalisation, the linear model nor the "
+                 "multiple-testing correction.")
+        if c.get("sample_loss"):
+            out += f" {c['sample_loss']}"
+        elif c.get("n_sample_groups_sharing") or c.get("n_sample_groups_all_shared"):
             out += (f" Sample protein groups sharing precursors with a contaminant entry lost "
                     f"those precursors ({fmt('n_sample_groups_sharing')} lost some, "
                     f"{fmt('n_sample_groups_all_shared')} lost all).")
@@ -836,7 +1208,7 @@ def de_contaminant_sentence(prov):
                 f"kept in the differential-expression analysis (--keep-contaminants): they were "
                 f"quantified, normalised and tested together with the sample proteins.")
     if policy == "none_present":
-        return f"No identified precursor mapped to a {tag}-tagged contaminant entry."
+        return f"No identified {unit1} mapped to a {tag}-tagged contaminant entry."
     return (f"Contaminant filtering in the differential-expression step: {NOT_RECORDED} "
             f"({c.get('note') or 'not checked'}).")
 
@@ -901,7 +1273,16 @@ def de_paragraph(prov):
     if prov.get("missing_policy"):
         s.append(prov["missing_policy"].rstrip(".") + ".")
     cols, cuts = prov.get("q_columns") or [], prov.get("q_cutoffs") or []
-    if cols and len(cols) == len(cuts):
+    ident = prov.get("identification_fdr")
+    if ident:
+        # a pipeline that states its own FDR (build_maxlfq.R descriptor, from the report's
+        # declaration) is quoted; its q-columns are named with their cutoffs only when they are
+        # real (q_columns_role) -- placeholder columns filter nothing, and naming them would
+        # describe a filter that did not happen
+        s.append(f"Identifications entering quantification: {ident}.")
+    if ident and prov.get("q_columns_role") != "real":
+        pass
+    elif cols and len(cols) == len(cuts):
         s.append("Identifications entering quantification were filtered at "
                  + ", ".join(f"{c} ≤ {x:g}" for c, x in zip(cols, cuts)) + ".")
     elif prov.get("q_cutoff") is not None:
@@ -1316,6 +1697,7 @@ def main():
                          f"accessions.")
         else:
             sent += " No contaminant database was appended."
+        sent += keratin_database_sentence(fmeta)
         w(sent)
         # The drop note is described in the sentence above -- it is a record, not
         # something to resolve before publication.
@@ -1351,6 +1733,19 @@ def main():
             w(f"> Contaminant filter caveat (resolve before publication): "
               f"{cont['database_note']}")
             w("")
+        ker = cont.get("keratin_sample") if isinstance(cont.get("keratin_sample"), dict) else {}
+        if ker.get("value") is True and ker.get("caution") is True and ker.get("note"):
+            w(f"> Keratin-sample caveat (resolve before publication): {ker['note']}")
+            w("")
+
+    # The protein-set tests' paragraph, as run_sets.R wrote it (sets_provenance.json): its
+    # defaults carry their "(DEFAULT — not user-confirmed)" tags from there.
+    sets_prov = _load_json(os.path.join(a.de_dir, "sets_provenance.json")) if a.de_dir else None
+    if sets_prov and sets_prov.get("methods_paragraph"):
+        w("## Protein-set tests")
+        w("")
+        w(sets_prov["methods_paragraph"])
+        w("")
 
     # parameter table (value + source)
     w("## Acquisition parameters (extracted from the raw data)" if not from_record else
@@ -1373,6 +1768,14 @@ def main():
                   srec.get("version_source") or "not recorded"),
                  ("Parameters file", srec.get("params_file") and
                   os.path.basename(srec["params_file"]), srec.get("params_source"))]
+        if srec.get("dda"):
+            srows.append(("Spectra searched as", "DDA (--dda)", srec["dda"]["source"]))
+        if first_pass_used(de_prov):
+            srows.append(("Report quantified", "the first pass (no match-between-runs)",
+                          "de_provenance.json input"))
+        elif srec.get("mbr"):
+            srows.append(("Match-between-runs", srec["mbr"].get("label") or "on",
+                          srec["mbr"]["source"]))
         cl = srec.get("cleavage")
         if cl:
             srows.append(("Cleavage", f"{cl.get('name') or '[not mapped — confirm]'} "
@@ -1390,9 +1793,20 @@ def main():
         for key, label in (("ms1_tol", "Precursor (MS1) tolerance"),
                            ("ms2_tol", "Fragment (MS2) tolerance")):
             t = srec.get(key)
-            srows.append((label, f"{_g(t['value'])} {t['unit']}" if t else
+            srows.append((label, (f"{_g(t['value'])} {t['unit']}"
+                                  + (f" ({t['default']})" if t.get("default") else "")) if t else
                           (srec.get("tol_note") or NOT_RECORDED),
                           t["source"] if t else "search record"))
+        fb = srec.get("probe_fallback")
+        if fb:
+            if fb["window"]:
+                srows.append(("Scan window", "set automatically by DIA-NN, per run (NOT "
+                              "measured: the pre-search measurement failed)",
+                              f"{fb['source']}: {fb.get('reason') or 'no reason recorded'}"))
+            if fb["mass_acc"]:
+                srows.append(("Mass accuracy measurement", "failed -- the tolerances above were "
+                              "not measured on these data",
+                              f"{fb['source']}: {fb.get('reason') or 'no reason recorded'}"))
         if srec.get("precursor_fdr"):
             f = srec["precursor_fdr"]
             srows.append(("Precursor FDR", f"q ≤ {f['value']:g}", f["source"]))
@@ -1418,4 +1832,9 @@ def main():
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["cont-quant-exclude"]:
+        # contaminants.R's question: make_methods.py cont-quant-exclude <report> -> JSON
+        rec = diann_cont_quant_exclude(sys.argv[2] if len(sys.argv) > 2 else None)
+        print(json.dumps(dict(rec or {}, recorded=rec is not None)))
+        sys.exit(0)
     main()

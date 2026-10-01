@@ -164,6 +164,46 @@ the Docker image) or get the new version confirmed. `version: null` means the se
 recorded — and deposited to FRAN — with no engine version; for a `sage` on PATH that is
 currently the only outcome.
 
+### search_provenance.json: `scan_window.mode` / `mass_acc.mode` (stable)
+
+Every DIA-NN search's `search_provenance.json` has a top-level `scan_window` and `mass_acc`
+record, each with a **`mode`**: one machine-readable word for how the value was set. The prose
+(`source`, `reason`) may be reworded; **these values are stable**. FRAN ingests them — from
+`fran_manifest.json`'s copy of the provenance — as a variable of its DIA-NN vs Spectronaut
+comparison. A value is never renamed or reused; a new case gets a new value, added in
+`diann_parallel.SCAN_WINDOW_MODES` / `MASS_ACC_MODES` (the one definition), here, and in the
+test that pins them (`tests/test_probe_estale.py`, `ProvenanceModeTests`). The same records
+appear under `result` where the search itself wrote one.
+
+| `scan_window.mode` | meaning |
+|---|---|
+| `measured` | measured on these runs by step 1b (the 5-step chain) and pinned for every step. Written at generation as the plan; `value` is null and `value_file` (`window.txt`) holds the radius once step 1b has run |
+| `fallback_auto` | step 1b's measurement failed (retried once): DIA-NN chose the radius itself, for each run. `probe_fallback` holds the `reason` |
+| `pinned` | given in the cfg and passed to every step (`value`) |
+| `auto` | not set, by design — a single-shot search, or DDA: DIA-NN chose the radius itself |
+| `invalid` | the cfg passes a `--window` that is not one positive integer — `0` included: DIA-NN logs `scan window radius should be a positive integer` and then chooses a radius per file (the poplar run), so `0` is a rejected value, not `auto` (which means the flag was not set). What DIA-NN does with any other non-integer is unverified |
+| `unknown` | the cfg could not be read |
+
+| `mass_acc.mode` | meaning |
+|---|---|
+| `measured` | measured on these runs before the search (step 1b, or the single-shot search's probe): a measured level floored at the SOP, a documented level as documented. Written at generation as the plan; `value_file` (`massacc.txt`) holds the pair |
+| `fallback_default` | that measurement failed (retried once): the documented level as given, the other at the facility SOP — `default` names the DEFAULT levels; `probe_fallback` holds the `reason` |
+| `pinned` | given in the cfg |
+| `pinned_default` | pinned by `estimate_params.py` at the facility SOP for a level that cannot be measured (DDA); `default` names the levels |
+| `auto` | neither level set: DIA-NN optimised it itself |
+| `partial` | one level given in the cfg: DIA-NN 2.7.0 then fixes both, the other at 20 ppm |
+| `invalid` | the cfg passes a value DIA-NN does not read as a tolerance: `0` (a literal 0 ppm on the command line — "Mass accuracy will be fixed to 0 (MS2) and 0 (MS1)", 0 IDs on a 28-run Lumos search — not "automatic"), negative, not a number, or set twice with different values |
+| `unknown` | the cfg could not be read |
+
+`0` is `invalid` for **both** flags. DIA-NN's README says these settings "are set to 0, meaning
+that DIA-NN will optimise them automatically" — that describes its GUI fields, which leave the
+flag out at 0; a literal `0` on the command line is a rejected radius (`--window`) or a 0 ppm
+tolerance (`--mass-acc`), never `auto`.
+
+A `measured` plan whose step 1b then fails outright (a refused mass accuracy, a signal) leaves no
+report, so it is never deposited as `measured`. "Was the window measured?" is `scan_window.mode
+== "measured"`; "did DIA-NN choose it?" is `mode in ("fallback_auto", "auto")`.
+
 ## FASTA resolution (`fetch_fasta.py`)
 
 ### `resolve` — organism → proteome (always run this; never guess a UPID)
@@ -273,6 +313,16 @@ recorded under `contaminants_kept_despite_target_match`; any other protease entr
 normal rule (S. aureus's own SspA is identical to the Glu-C entry and stays quantified on a
 trypsin digest). The
 auditors flag the dropped proteins as "possible contamination, kept in quantification".
+
+**A keratin sample loses every keratin entry (`fetch --keratin-sample`).** For hair, wool,
+feather, skin or nail, keratin is the analyte, and the keratin-family entries the rules above
+leave (for human: KRT34, KRTAPs, mouse hair and sheep wool keratins) take every peptide they
+share with the sample's keratins out of quantification. With `--keratin-sample`, every
+keratin-family `Cont_` entry (`fetch_fasta.is_keratin_gene`: gene KRT*/KRTAP*, or a protein
+name starting "Keratin" — the Universal set's 14 sheep wool keratins have no gene name; 189
+entries in all) leaves the set and a supplied database's own `Cont_` entries, recorded with
+`keratin_sample: true` under `contaminants_dropped_keratin_sample`. `run_search.py
+--keratin-sample` refuses a database that still holds one; `reproduce.sh` replays the flag.
 
 **A failure to fetch contaminants is fatal, not a warning** — the GPM cRAP URL
 this script used previously now 404s, and the old warn-and-continue behaviour

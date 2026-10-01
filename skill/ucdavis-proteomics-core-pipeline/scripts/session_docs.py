@@ -260,6 +260,18 @@ def submission_line(p):
     return submission_report.one_line(rec) if rec else None
 
 
+def feedback(p):
+    """For a UC Davis Core run (submission_report.core_run: the test that shows the report's
+    Submission section) -> {"prot"}: the README and AGENTS.md then carry the Core's feedback
+    survey (core_submission.feedback_line / feedback_url). None otherwise -- and None when that
+    cannot be told, since a user outside the Core must never be sent the Core's survey."""
+    try:
+        import submission_report
+        return submission_report.core_run(p["session_dir"])
+    except Exception:
+        return None
+
+
 def _submission_facts(p):
     """Who prepared the samples and the record's data-quality notes, from the attached CoreOmics
     record -- submission_report's readings (prepared_by, quality_notes), never re-derived here.
@@ -320,6 +332,7 @@ def gather(session_dir, registry=None, registry_note=None, pending=(), located_a
 
     # --- the study
     f["submission"] = submission_line(p)
+    f["feedback"] = feedback(p)
     f["submission_facts"] = _submission_facts(p)
     f["organism"] = fm.get("organism") or None
     f["taxid"] = fm.get("taxid") or wf.get("organism_taxid") or q.get("organism_taxid")
@@ -379,6 +392,7 @@ def gather(session_dir, registry=None, registry_note=None, pending=(), located_a
         if cont.get("share_table") else None,
         "submission": p["submission_record"],
         "methods_txt": os.path.join(p["de_dir"], "methods.txt"),
+        "sets_prov": os.path.join(p["de_dir"], "sets_provenance.json"),
         "de_prov": os.path.join(p["de_dir"], "de_provenance.json"),
         "repro_R": os.path.join(p["de_dir"], "reproducibility_log.R"),
         "reproduce_md": os.path.join(p["repro_dir"], "REPRODUCE.md"),
@@ -391,8 +405,13 @@ def gather(session_dir, registry=None, registry_note=None, pending=(), located_a
         "quality": os.path.join(out, "SAMPLE_QUALITY.md"),
         "agents": os.path.join(sd, "AGENTS.md"),
         "podcast": os.path.join(out, "podcast", "podcast.json"),
+        "conversation": os.path.join(sd, "logs", "conversation", "conversation.md"),
+        "decisions": os.path.join(sd, "logs", "decisions.md"),
+        "commands_log": p["commands_log"],
     }.items() if v and (has(v) or k in pending)}
     f["de_files"] = sorted(glob.glob(os.path.join(p["de_dir"], "DE_*.csv")))
+    f["sets_files"] = sorted(glob.glob(os.path.join(p["de_dir"], "Sets_*.csv")))
+    f["sets"] = _load(os.path.join(p["de_dir"], "sets_provenance.json")) or {}
     f["rel"] = rel
     f["audit_overall"], f["audit_notes"] = _audit_notes(p)
     f["quality_notes"] = _quality_notes(p)
@@ -530,6 +549,8 @@ def _named_tables(f):
             ("qc_di", "per sample: proteins detected (at least one precursor observed) vs "
                       "inferred by the model"),
             ("cont_removed", "the contaminant protein groups removed before the DE"),
+            ("sets_prov", "the protein-set tests' record: sets, versions, methods, how to read "
+                          "the `Sets_*.csv` tables"),
             ("audit", "the pitfall audit: PASS / WARN / FAIL per check" + both("audit")),
             ("quality", "sample quality and contamination flags" + both("quality")))
 
@@ -556,7 +577,9 @@ def readme_md(f, for_html=False):
             ("methods_docx", "Methods for the paper (Word)", ""),
             ("methods_md", "Methods for the paper (text)", ""),
             ("tables", "Results tables", " — one `DE_*.csv` per comparison, "
-                                         "`Expression_Matrix.csv`, `methods.txt`"),
+                                         "`Expression_Matrix.csv`, `methods.txt`"
+                                         + (", protein-set tests `Sets_*.csv`"
+                                            if f.get("sets_files") else "")),
             ("howto_html", "How to deposit the data in PRIDE / MassIVE", ""),
             ("agents", "AGENTS.md", " — for an AI assistant: give it this file with the folder"),
             ("manifest", "MANIFEST.txt", " — what this export contains, and anything that could "
@@ -572,10 +595,11 @@ def readme_md(f, for_html=False):
                      + ": open `Analysis_Report.html`, Print, Save as PDF")
     if not files.get("agents"):
         start.append("- `AGENTS.md` — for an AI assistant: give it this file with the folder")
-    item = (make_podcast.readme_item_md(f["p"]["output_dir"], f["p"]["session_dir"])
-            if files.get("podcast") else "")
-    if item:                                     # after the report it discusses
-        start.insert(1 if files.get("report_html") else 0, item)
+    items = ([make_podcast.readme_item_md(f["p"]["output_dir"], f["p"]["session_dir"]),
+              make_podcast.share_item_md(f["p"]["output_dir"], f["p"]["session_dir"])]
+             if files.get("podcast") else [])
+    at = 1 if files.get("report_html") else 0    # after the report it discusses
+    start[at:at] = [x for x in items if x]
     L += ["", "## Start here", "", *start]
     L += ["", "## Summary", "", *summary_lines(f)]
     if f["contrasts"]:
@@ -629,14 +653,21 @@ def readme_md(f, for_html=False):
           ("`MANIFEST.txt` lists every part of the Methods and deposit package as [OK], or "
            "[SKIPPED] with the reason." if files.get("manifest") else
            "This session has no `MANIFEST.txt` (it was finalized before the skill wrote one).")
-          + " `AGENTS.md` is a guide to this folder for an AI agent.", "",
-          f"*Written {datetime.date.today().isoformat()} by `session.py` from this session's "
+          + " `AGENTS.md` is a guide to this folder for an AI agent.", ""]
+    if f.get("feedback"):                        # a Core run: the Core's survey
+        import core_submission
+        L += [core_submission.feedback_line(
+            "readme", f["feedback"]["prot"], make_podcast.has_podcast(f["p"]["output_dir"])), ""]
+    L += [f"*Written {datetime.date.today().isoformat()} by `session.py` from this session's "
           "records.*", ""]
     return "\n".join(L)
 
 
-def agents_md(f):
-    """AGENTS.md: what an AI agent handed this folder needs, from the records only."""
+def agents_md(f, for_delivery=False):
+    """AGENTS.md: what an AI agent handed this folder needs, from the records only.
+    `for_delivery`: the collaborator's copy (core_submission deliver) -- without "Reviewing this
+    analysis", whose records (the conversation, the decisions log) are Core-internal and stay in
+    the session."""
     de, files, rel = f["de"], f["files"], f["rel"]
     L = ["# AGENTS.md — guide to this folder for an AI agent", "",
          "Generated by `session.py` from this session's own records. Every fact here is read "
@@ -666,6 +697,8 @@ def agents_md(f):
                     "de_prov"),
                    ("The Methods text of the DE (verbatim, do not paraphrase)", "methods_txt"),
                    ("DE results, one table per contrast", None),
+                   ("Protein-set tests (camera + fry) per contrast, and how they were run",
+                    "sets"),
                    ("Protein abundance per sample (log2)", "expr"),
                    ("Which values were measured vs inferred, per protein and sample",
                     "det_matrix"),
@@ -694,6 +727,11 @@ def agents_md(f):
             n = len(f["de_files"])
             v = (f"`output/tables/DE_<pipeline>_<contrast>.csv` ({n} file{'s' if n != 1 else ''})"
                  if n else "not in this folder")
+        elif key == "sets":
+            n = len(f["sets_files"])
+            v = (f"`output/tables/Sets_<contrast>.csv` ({n} file{'s' if n != 1 else ''}) + "
+                 f"`{rel(files['sets_prov'])}`" if n and files.get("sets_prov") else
+                 "not run for this analysis")
         else:
             v = f"`{rel(files[key])}`" if files.get(key) else "not in this folder"
         L.append(f"| {q} | {v} |")
@@ -722,6 +760,11 @@ def agents_md(f):
                   f"{len(hdr) - len(ann)} sample columns (named as "
                   "`File.Name` in conditions.csv). Values: log2 protein quantities from "
                   f"{de.get('rollup_method') or 'the quantification (not recorded)'}."]
+    sets_cols = (f.get("sets") or {}).get("columns")
+    if f.get("sets_files") and isinstance(sets_cols, dict):
+        # run_sets.R's own column descriptions (sets_provenance.json), read, never restated
+        L += ["", "`Sets_*.csv` (protein-set tests; `sets_provenance.json` `columns`):"]
+        L += [f"- `{c}` — {d}" for c, d in sets_cols.items()]
     if files.get("qc_di"):
         hdr = _csv_header(files["qc_di"])
         L += ["", "`QC_detected_vs_inferred.csv`: "
@@ -811,6 +854,10 @@ def agents_md(f):
                      "the control gets its control values from the missing-value policy above, "
                      "so its logFC rests on that policy, not on a measured baseline. (Check "
                      "conditions.csv: the name is the only evidence these are controls.)")
+    if f.get("sets_files") and (f.get("sets") or {}).get("reading"):
+        L.append("- **Protein-set tests** (`Sets_*.csv`): read them by run_sets.R's rules "
+                 "(`sets_provenance.json` `reading`):")
+        L += [f"  - {r}" for r in f["sets"]["reading"]]
     skipped = [ln for ln in f["manifest_lines"] if ln.startswith("[SKIPPED]")]
     if skipped:
         L.append("- **Missing parts** (MANIFEST.txt): a [SKIPPED] part is absent, not empty — "
@@ -841,6 +888,14 @@ def agents_md(f):
     L += ["", "## Where this lives on HIVE", "", locations_table(f)]
     if files.get("podcast"):
         L += ["", *make_podcast.agents_md_lines(f["p"]["output_dir"], f["p"]["session_dir"])]
+    if f.get("feedback"):                        # a Core run: the Core's survey
+        import core_submission
+        L += ["", "**Feedback:** the UC Davis Proteomics Core's survey for this project is "
+                  f"{core_submission.feedback_url('readme', f['feedback']['prot'])} -- when the "
+                  "person you are helping has comments on the report or the podcast, point them "
+                  "to it; never fill it in for them."]
+    if not for_delivery:
+        L += ["", *reviewing_lines(f)]
 
     L += ["", "## Do not", "",
           "- Invent a value, protein, count or threshold that is not in these files.",
@@ -852,6 +907,43 @@ def agents_md(f):
           "- Edit the records (`*_provenance.json`, `methods.txt`, `MANIFEST.txt`); write new "
           "files instead.", ""]
     return "\n".join(L)
+
+
+def reviewing_lines(f):
+    """AGENTS.md's checklist for an AI reviewing the analysis (reproducibility, not the biology),
+    naming the records this session has: the decisions log, the saved conversation
+    (save_transcript.py -- Core-internal, never delivered), commands.log."""
+    files, rel = f["files"], f["rel"]
+    have = [f"`{rel(files['decisions'])}` (the decisions, and why)" if files.get("decisions")
+            else None,
+            f"`{rel(files['conversation'])}` (the conversation, readable; the redacted "
+            "transcripts are beside it -- Core-internal, never delivered)"
+            if files.get("conversation") else None,
+            f"`{rel(files['commands_log'])}` (every command run)" if files.get("commands_log")
+            else None]
+    have = [x for x in have if x]
+    return ["## Reviewing this analysis", "",
+            "For an AI asked to review how this analysis was done (a reproducibility check, not "
+            "the biology). Read " + ("; ".join(have) if have else
+                                     "`MANIFEST.txt` and the provenance files (no decisions log, "
+                                     "conversation or commands.log is in this folder)")
+            + ", then check:", "",
+            "- **Groups and contrasts:** were the groups and contrasts analysed the ones the user "
+            "confirmed? Compare `input/conditions.csv` and the contrasts in "
+            "`output/tables/de_provenance.json` with what the user agreed to.",
+            "- **Every number traces to a command:** does each count, threshold and result in "
+            "the report trace to a logged command (`logs/commands.log`) and a table in "
+            "`output/tables/`?",
+            "- **Nothing unrecorded:** was any step skipped, changed or re-run without being "
+            "recorded -- a command in the conversation that is not in `commands.log`, a "
+            "parameter that differs from `search_provenance.json` / `de_provenance.json`, a "
+            "re-run with no note?",
+            "- **No warning ignored:** were any warnings ignored -- `[WARN]`/`WARNING` lines in "
+            "the conversation and logs, `[SKIPPED]` lines in `MANIFEST.txt`, AUDIT.md findings "
+            "the report does not mention?",
+            "",
+            "Say what you checked and what you could not (a record that is missing is a "
+            "finding, not a pass)."]
 
 
 def _render_html(md, title):

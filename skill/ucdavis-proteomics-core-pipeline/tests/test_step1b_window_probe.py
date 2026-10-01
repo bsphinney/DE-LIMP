@@ -1258,7 +1258,9 @@ class Step1bChainTests(unittest.TestCase):
             hours = int(re.search(r"#SBATCH --time=(\d+):00:00", body).group(1))
             self.assertEqual(hours, dp.PROBE_WALL_HOURS)
             self.assertIn(f"--timeout {dp.PROBE_TIMEOUT_S}", body)
-            budget = int(re.search(r"--budget (\d+)", body).group(1))
+            self.assertIn("--budget $PROBE_BUDGET", body)
+            budget = int(re.search(r"PROBE_DEADLINE=\$\(\( \$\(date \+%s\) \+ (\d+) \)\)",
+                                   body).group(1))
             self.assertLess(budget, hours * 3600, "probes could outlive the job's wall clock")
             self.assertGreaterEqual(budget, dp.PROBE_CANDIDATES * dp.PROBE_TIMEOUT_S,
                                     "three probes at their full timeout no longer fit")
@@ -1276,6 +1278,9 @@ class Step1bChainTests(unittest.TestCase):
                 self.assertTrue(x["log"].startswith(os.path.join(out, "window_probe") + os.sep))
 
     def test_a_failed_step1b_stops_cleanly_keeps_its_evidence_and_leaves_no_radius(self):
+        """Runs DIA-NN finishes without logging a radius are the data answering (a wrong FASTA
+        or library, failed injections): step 1b fails, not retried and not fallen back past --
+        only a failure of the probe's own machinery may fall back (dda-review, 2026-09-30)."""
         with tempfile.TemporaryDirectory() as d:
             runs = [_raw(d, f"run{i}_nowin.mzML", (30 + i) * MB) for i in range(5)]
             out, env, _ = self._chain(d, runs)
@@ -1285,13 +1290,18 @@ class Step1bChainTests(unittest.TestCase):
             log = p.stdout + p.stderr
             self.assertNotEqual(p.returncode, 0, log)
             self.assertNotIn("Traceback", log)
+            self.assertNotIn("retrying", log)
             self.assertIn("FAILED", log)
+            self.assertIn("DIA-NN ran and finished without logging it", log)
             self.assertIn("DependencyNeverSatisfied", log)
             self.assertFalse(os.path.exists(os.path.join(out, "window.txt")))
             self.assertFalse(os.path.exists(os.path.join(out, "params.resolved.cfg")))
+            self.assertFalse(os.path.exists(os.path.join(out, dp.FALLBACK_RECORD)))
             w = json.load(open(os.path.join(out, "window.json")))
             self.assertIsNone(w["window_radius"])
             self.assertEqual(len(w["probes"]), dp.PROBE_MAX_FAILURES)
+            self.assertEqual((w["failure"], w["exit_status"]),
+                             ("not_measured", probe_window.EXIT_NOT_MEASURED))
 
     def test_timstof_only_step1b_has_no_dotnet_export(self):
         with tempfile.TemporaryDirectory() as d:
