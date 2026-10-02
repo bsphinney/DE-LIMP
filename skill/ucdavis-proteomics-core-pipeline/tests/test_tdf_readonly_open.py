@@ -759,9 +759,9 @@ class TestNoOtherTdfOpens(unittest.TestCase):
 
     The first version of this test walked `os.listdir(SCRIPTS)` only. Three raw
     `sqlite3.connect(f"file:{tdf}?mode=ro", uri=True)` calls sat one directory away the
-    whole time, in skill/ucdavis-proteomics-dev/ -- a second plugin in the same
-    marketplace.json, so it installs for everyone who adds the marketplace, points at the
-    same real .d, and its SKILL.md saying "not for production" is an instruction to a
+    whole time, in skill/ucdavis-proteomics-dev/ -- a second plugin, listed in the same
+    marketplace.json until 2.10 (so it installed for everyone who added the marketplace), that
+    points at the same real .d; its SKILL.md saying "not for production" is an instruction to a
     model, not packaging. A per-directory allowlist is the thing that failed; the scan is
     the repo.
     """

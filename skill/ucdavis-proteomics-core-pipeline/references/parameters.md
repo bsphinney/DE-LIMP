@@ -129,17 +129,27 @@ Every emitted value is tagged in the `rationale`:
   at the top of the sidecar) are what `diann_parallel.mass_acc_measure_plan()` reads, for the
   chain and the single-shot search alike
 - `universal trypsin/LFQ default`
-- `user-override (validated SOP)` — forced via the workflow's `param_overrides`
+- `user override: <setting> = <value>, set by Core staff; reason: <why>` — forced with
+  `--overrides` (or the workflow's `param_overrides`), with `--override-by` and
+  `--override-reason` (`estimate_params.override_source`, the one wording; the sidecar's
+  `overrides` holds the same as fields). Never "validated SOP": an override may be a one-off
+  workaround (a cohort searched at 25 ppm to cover a ~20 ppm calibration error was once
+  recorded as an SOP), and the skill cannot tell. The sidecar travels to the client
+  (`reproducibility/inputs/`, the session zip), so it names the role. Who set it, by name
+  (`--override-by`, or the login that ran it, said to be that), is in the staff-only
+  `<params>.staff.json` (`staff.py`; never delivered, never zipped), which `overrides.*.staff_record`
+  names. No reason: "reason not given [ask the user -- confirm]"
 
 The rationale is written to `<params>.rationale.json` and is pulled into the
 reproducibility bundle automatically. Surface it to the user so a derived default
 is never mistaken for a confirmed setting.
 
-## Overriding with a validated SOP
+## Overriding a setting (the user's choice)
 Two ways, both honored:
-- `param_overrides` in the workflow.yaml (e.g. `{"--mass-acc": 8}` or
-  `{"fragment_tol": {"ppm": [-15, 15]}}`) — merged on top of the estimate, tagged
-  `user-override`. An override of one mass-accuracy flag is a value for that level, so
+- `param_overrides` in the workflow.yaml, or `--overrides` (e.g. `{"--mass-acc": 8}` or
+  `{"fragment_tol": {"ppm": [-15, 15]}}`) — merged on top of the estimate, tagged as a user
+  override with who set it and why (above). A Sage override replaces the derived rationale
+  entry it changes (`precursor_tol` drops `precursor_tol_ppm`). An override of one mass-accuracy flag is a value for that level, so
   nothing is measured: the other level is written from DIA-NN's table (`{"--mass-acc": 8}` at
   120k/15k gives `--mass-acc-ms1 7 --mass-acc 8`, plan `pinned`). When the table has no value
   for the other level (outside 30k–240k, resolution unknown, instrument not identified), the

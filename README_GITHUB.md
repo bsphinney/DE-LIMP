@@ -37,12 +37,30 @@ Give it `.raw`, `.d` or `.mzML` files and it takes them all the way to different
 
 You can also ask it for just one piece — *"re-run this search with the settings matched to the Spectronaut run"* — without wanting the full analysis.
 
-### New in skill 2.9.1
+### New in skill 2.10
+
+- **IPs and pull-downs default to non-normalised quantities.** The skill records what kind of experiment it is and checks the data before the final analysis; when the data disagree with the default it stops and shows both versions side by side for you to choose. The check cannot be skipped: the final analysis and a Core delivery wait for it.
+- **Add your own sequences to the search** (a GFP bait, a tag): they are searched as proteins, and a contaminant that is really the same protein no longer takes their peptides. You are asked which one is the bait, and the data check looks for it.
+- **The skill never decides which file is which sample.** When a label matches several files, two samples share a label, or a sample was injected twice, it asks.
+- **Fewer silent surprises:** a cut-short database download stops instead of becoming the full proteome; a Sage quantification window that misses your instrument's mass error stops with the fix; the Methods name each engine's own contaminant rule; the sample type is asked, never guessed.
+- **For UC Davis Proteomics Core runs:**
+  - Core staff check the instrument's QC runs around each project (from STAN) before the results are delivered;
+  - the Core's LIMS spreadsheet is read directly, and replicate labels such as `ctrl_mix_1` … `_5` become conditions;
+  - decisions such as a QC sign-off are made by a named member of the Core staff, never by the assistant;
+  - searches on the cluster use the CPUs and memory real runs need, and a failure caused by a broken node comes with the command to re-run it elsewhere.
+
+The full list is in the [CHANGELOG](CHANGELOG.md).
+
+<details>
+<summary><strong>New in skill 2.9.1</strong></summary>
 
 - **STAN's database credential must never be shared.** Earlier versions suggested a shared copy of it; it is a long-lived secret, and staff use the STAN dashboard with a share token instead.
 - **HT plate files named `<date>_PROT_<n>` are now found.** Before, such a plate was not recognised and none of its samples were found.
 
-### New in skill 2.9.0
+</details>
+
+<details>
+<summary><strong>New in skill 2.9.0</strong></summary>
 
 - **If you ran Sage or FragPipe DDA with an earlier version, re-run the differential expression.** Earlier versions let contaminants (BSA, trypsin, keratins ...) into the statistics as if they were sample proteins, and for Sage they also counted decoy matches and failed measurements. Both are fixed, and the fixes change the results. The search itself does not need to be repeated, but its output has to be read again with this version (the search's `run_search.py` command with `--adapt-only`) before the DE is re-run; a DE on the old adapted report would repeat the old mistakes.
 - **Your copy of the skill stays current.** At the start of each session the skill checks your computer's copy, your copy on the cluster and the Core's current release. If you are behind, it tells you first and gives you the one-minute update; your cluster copy is refreshed for you, never while your jobs are using it. Installing is now one line in a terminal.
@@ -66,7 +84,7 @@ You can also ask it for just one piece — *"re-run this search with the setting
   - **Notes from the Core.** The Core can leave a note for a staff member's Claude, which shows it at the start of their next session and passes their reply back.
 - **Coming later: Claudes working together in Slack.** Two people's Claude sessions will be able to work on one analysis in one Slack thread, each acting only when its own person approves. It ships switched off, and does nothing until the Core sets up its Slack app.
 
-The full list is in the [CHANGELOG](CHANGELOG.md).
+</details>
 
 <details>
 <summary><strong>New in skill 2.8.0</strong></summary>

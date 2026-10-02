@@ -51,6 +51,13 @@ import make_analysis_html as mah  # noqa: E402
 import run_search as rs         # noqa: E402
 
 
+def _organism(args):
+    """A --path database needs its organism named (fetch_fasta.user_organism); these tests are
+    about the contaminant rules, so they say "no single organism" unless they name one."""
+    named = {"--organism", "--taxid", "--ncbi-organism", "--ncbi-taxid"}
+    return ["--organism", "none"] if "--path" in args and not named & set(args) else []
+
+
 def protein(seed, n=160):
     """A deterministic synthetic protein, tryptic sites every few residues."""
     r = random.Random(seed)
@@ -161,7 +168,7 @@ class FetchKeratinSample(unittest.TestCase):
 
     def fetch(self, *args, name="search.fasta"):
         out = os.path.join(self.root, "out", name)
-        argv = ["fetch_fasta.py", "fetch", *args, "--out", out]
+        argv = ["fetch_fasta.py", "fetch", *args, *_organism(args), "--out", out]
         err = io.StringIO()
         with mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(io.StringIO()), \
                 contextlib.redirect_stderr(err):
@@ -375,7 +382,7 @@ class RunSearchRefusesKeratinContaminants(unittest.TestCase):
         for name, extra in (("plain.fasta", []), ("keratin.fasta", ["--keratin-sample"])):
             argv = ["fetch_fasta.py", "fetch", "--path", _write(os.path.join(d, "t.fasta"), TARGET),
                     "--contaminants", "universal", "--contaminants-path",
-                    _write(os.path.join(d, "c.fasta"), CONT), *extra,
+                    _write(os.path.join(d, "c.fasta"), CONT), *extra, "--organism", "none",
                     "--out", os.path.join(d, name)]
             with mock.patch.object(sys, "argv", argv), \
                     contextlib.redirect_stdout(io.StringIO()), \
@@ -400,7 +407,8 @@ class RunSearchRefusesKeratinContaminants(unittest.TestCase):
         self.assertIn("REFUSED -- nothing was converted, written or submitted", p.stderr)
         self.assertIn("still holds 3 keratin-family contaminant entries", p.stderr)
         self.assertIn("Cont_P02438 (KRB2A_SHEEP)", p.stderr)
-        self.assertIn(f"--path {os.path.join(self._td.name, 't.fasta')}", p.stderr)
+        # the suggested rebuild names the organism the sidecar recorded (--path needs one)
+        self.assertIn(f"--path {os.path.join(self._td.name, 't.fasta')} --organism none", p.stderr)
         self.assertIn("--keratin-sample --out", p.stderr)
         self.assertFalse(os.path.exists(self.w.out), "the search folder was created")
         self.assertFalse(any(n.startswith("diann_job") for n in os.listdir(self._td.name)))
@@ -932,7 +940,7 @@ class FragPipeContamTag(unittest.TestCase):
 
     def fetch(self, root, *args):
         out = os.path.join(root, "out", "search.fasta")
-        argv = ["fetch_fasta.py", "fetch", *args, "--out", out]
+        argv = ["fetch_fasta.py", "fetch", *args, *_organism(args), "--out", out]
         with mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(io.StringIO()), \
                 contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(ff.main(), 0)
@@ -1228,7 +1236,11 @@ class SkillDocAsksAtStep3(unittest.TestCase):
 
     def test_step3_asks_the_sample_type(self):
         s3 = self.section("### 3. Ask organism + experimental design")
-        self.assertIn("**Sample type — is the tissue itself keratin?**", s3)
+        # asked for every analysis since 2.10 (tests/test_sample_type_asked.py); keratin is
+        # decided from that answer
+        self.assertIn("**Sample type — ask, for every analysis, and never infer it.**", s3)
+        self.assertIn("**Is the sample keratin?** Decide it from the sample type the user gave",
+                      s3)
         for tissue in ("hair", "wool", "feather", "skin", "nail"):
             self.assertIn(tissue, s3)
         self.assertIn("Deciding it after the search is too late", s3)

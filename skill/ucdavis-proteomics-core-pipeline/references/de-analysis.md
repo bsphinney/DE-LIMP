@@ -217,6 +217,22 @@ and fitting them as independent throws the pairing away. Put the unit in its own
 - With no `--block`, `run_de.R` prints a note when a metadata column recurs across
   groups (the same Mouse in several conditions) — the hint to ask the user.
 
+### Technical replicates — the `Sample` column (automatic)
+Runs of ONE biological sample (`core_submission.py locate --reinjections all` keeps every
+injection) are technical replicates. `conditions` / `collect_conditions.py` (`--mapping-json`
+key `technical_replicates`) write each run's sample into the column **`Sample`**
+(`TECH_REPLICATE_COLUMN`; the name is the declaration, so a CSV copied without its
+`.decisions.json` still carries it). When a `Sample` value is shared by several runs, `run_de.R`
+blocks on it by itself: the sample is a **random** blocking factor (duplicateCorrelation),
+**every** contrast is reported from that fit (scope `all` -- the samples are nested in the
+groups, so the independent fit would count each injection), and a sample injected once is a
+block of one. It stops instead when a `Sample` has runs in two groups, or with `--block <other>`,
+`--block-effect fixed` or `--block-scope within`. `de_provenance.json` `block.technical_replicates`,
+methods.txt (`Replicates :`) and the Methods sentence name the samples. Averaging the injections
+first is not offered: DPC-Quant's per-run standard errors and observation counts would have to
+be combined, not just its means. To keep one injection per sample instead: `locate
+--reinjections latest`. (2.10 review, MED 7: before this, two injections counted as n = 2.)
+
 ## Method choice — limpa/DPC is the default
 
 `--method dpc` (limpa) is the default and should stay that way. It models the
@@ -253,15 +269,114 @@ look filtered.
 Do not read a bundle's `de.method: maxlfq` as a recommendation — it records what that
 engine's adapted output can support, not which method is better.
 
+## Normalised or non-normalised quantities: the experiment type and the data check
+
+Global normalisation — DIA-NN's, and the maxlfq path's quantile step — assumes most proteins
+do not change between samples. An IP / pull-down breaks that: its IgG or bead controls carry
+little protein, normalisation scales them up several-fold, and the enrichment is hidden or
+turned into depletion. So the DE's input is a decision, made once and recorded:
+
+1. **The experiment type** (`experiment_type.py`, step 3): proposed from the CoreOmics
+   submission's experiment type and confirmed with the user, or asked; never taken from file
+   names. Its default (`experiment_type.DEFAULTS`):
+
+   | type | default quantities | why |
+   |---|---|---|
+   | whole proteome | normalised | most proteins do not change |
+   | IP / AP-MS / pull-down (IgG or bead controls) | **non-normalised** | the controls carry little protein and are not loaded by amount |
+   | proximity labelling (TurboID / BioID / APEX) | normalised | the controls carry plenty of signal; samples usually loaded by equal protein |
+   | fractionated for depth (offline high-pH, fractions combined per sample) | normalised | every sample is still the whole proteome |
+   | separation / profiling fractions COMPARED (SEC, density or sucrose gradient, BN-PAGE complexome, organelle or subcellular) | **non-normalised** | each fraction holds a different part of the proteome. DIA-NN's README (FAQ "What is normalisation and how does it work?"): "If this condition is not satisfied (e.g. when analysing fractions obtained with some separation technique, like SEC, for instance), then normalisation should not be used"; and "Disabling normalisation" lists "any kind of protein fractionation" |
+   | secretome, other | normalised | leaning on the data check |
+
+   The submitter's "Normalization" answer (how the samples were loaded) is set beside it; a
+   contradiction (normalised quantities for samples normalised by volume; non-normalised for
+   eluates loaded by protein amount) is a question for the user.
+2. **The quantities** (`run_de.R --quantities`), verified in DIA-NN 2.7.0's README and a 2.7.0
+   report: `Precursor.Quantity` is non-normalised, `Precursor.Normalised` normalised, and
+   `normalised = Normalisation.Factor × non-normalised`; `PG.MaxLFQ` is normalised unless the
+   search ran with `--no-norm`. **dpc** reads either precursor column through limpa's own
+   quantity-column argument (limpa ≥ 1.4 `intensity.column`, 1.2.x `qty.column`; limpa adds no
+   between-run normalisation of its own) — the cleanest route, with no re-search. **maxlfq**
+   `raw` needs a `--no-norm` report (checked from the data: `Precursor.Normalised` equals
+   `Precursor.Quantity` on every row) and then applies no quantile step; a normalised report is
+   refused, never relabelled. A pull-down on maxlfq used to be normalised twice. **maxlfq
+   `normalised`** says what its `PG.MaxLFQ` carries before the quantile step — DIA-NN's
+   normalisation, or none for a `--no-norm` search — from the search's provenance
+   (`normalization_check.searched_no_norm`: the chain's `no_norm_report.parquet` name, else
+   `search_provenance.json`), reading the data only when that records nothing, and NOT RECORDED
+   when neither can tell (`de_provenance.json` `dia_nn_normalisation`).
+3. **The data check** (`normalization_check.py`), for EVERY type, after the DE has been run
+   both ways. Thresholds, each justified in the script and set on the synthetic whole-proteome,
+   IP and TurboID cases of `tests/test_normalization_check.py`:
+   - **B1 factors vs groups** — the deciding signal: the per-run factor (median log2
+     `Precursor.Normalised / Precursor.Quantity`) differs ≥ 2-fold between group medians AND the
+     groups separate completely (a permutation p is reported; with 3 vs 3 runs its floor is 0.1,
+     which is why separation, not p, decides). **With n = 2 per group it trips more**: two runs
+     per group separate by chance a third of the time, and the 2.10 review's simulation of
+     whole-proteome 2 vs 2 cohorts tripped B1 in 0.1% / 4% / 13% at a per-run loading SD of
+     0.3 / 0.5 / 0.7 log2. A trip only asks, so B1 stays;
+   - **B2 shift before normalisation** — a simple contrast's median per-protein log2 shift in
+     `Precursor.Quantity` ≥ 1 with ≥ 80% of proteins moving the same way;
+   - **B3 identifications** — group medians of precursors per run ≥ 1.5-fold apart;
+   - **B4** — `Normalisation.Instability` above 0.3 in any run (see `normalisation_stability`);
+   - **volcano**, per contrast, from the DE tables (never an image), both versions: the
+     non-significant proteins' median log2FC ≥ 0.5 off zero; more than 5:1 up:down (or
+     down:up) among ≥ 20 significant — for an enrichment-vs-control contrast only many proteins
+     DOWN counts (background made to look depleted); over half the proteins significant; the
+     bait outside the 10 most enriched or not significant; a p-value histogram with an excess
+     near 1. In the non-normalised version an enrichment contrast's background sitting above
+     zero, and much of it significant, is expected and not counted.
+
+   Separation / profiling fractions are compared without normalisation by design, so their
+   non-normalised volcano's shift, lopsidedness and % significant are reported as expected, not
+   counted. With a **normalised** default, B1-B4 and the normalised volcano trip it. With a
+   **non-normalised** default (IP), it trips on factors that span ≥ 2-fold across runs WITHOUT
+   following the groups (loading variation the raw quantities would keep) and on the raw
+   volcano. **A trip stops the analysis before the final DE** — and so does a session with no
+   experiment type recorded, where nothing is decided for the user: `NORMALIZATION_CHECK.md`
+   gives the side-by-side summary and a recommendation (the type's default unless that
+   default's own volcano is clearly the worse one, by 2 or more anomalies; the trips are named as
+   questions), a Core staff member chooses — never Claude (`decide --by <their HIVE login>
+   --reason`, the login checked against the Core's staff list by `staff.py`) — and the final `run_de.R
+   --normalization-check` refuses any other quantities, and any report or conditions other than
+   the ones checked (sha256 recorded). No silent switch in either direction. In a session that
+   records a type, `run_de.R` refuses a DE with neither `--normalization-check` nor
+   `--check-input`; a DE without a decided check is a WARN in AUDIT.md and holds
+   `core_submission.py deliver` (the second gate beside the QC one). A DE from before 2.10 (no
+   check record) is let through only by `normalization_check.py ack-legacy --session S --by
+   <login> --note "<why it stands>"`, tied to that DE record. MaxLFQ's non-normalised DE needs
+   a `--no-norm` report, given to the check as `--report-raw` (dpc reads both quantities from
+   one report). Proximity labelling also reports how steady the endogenously
+   biotinylated carboxylases are under each option (PC, PCCA, MCCC1, ACACA, ACACB — UniProt
+   KW-0092, human and mouse): a reference, never a normaliser.
+4. **The record**: `de_provenance.json` `normalization_check` (`schema_version` 1, fixed keys:
+   the type and its source, the default, every check's numbers, the volcano metrics per
+   contrast and version, the carboxylases, the trips, the decision — by role, "Core staff", with
+   `statement` the sentence the Methods and AUDIT.md quote; the name and login are only in the
+   staff-only `logs/normalization_check.staff.json`), written
+   whether or not anything trips so projects can be compared over time; methods.txt's
+   `Quantities` / `Normalization` / `Norm. check` lines; the Methods' normalisation sentence;
+   AUDIT.md's `normalization_check`. A DE run without a check says NOT RUN.
+
 ## Contaminant filter (both paths, on by default)
 
 `run_de.R` drops every precursor that maps to a `Cont_` (or FragPipe `contam_`) entry
 before quantification. That is any accession in `Protein.Ids` (`Protein.Group` for an adapted
 report), the rule of DIA-NN's own `--cont-quant-exclude`: a peptide shared between a sample
 protein and a contaminant entry can carry the contaminant's signal.
+- **Where the rule came from is the pipeline's to say.** The record's `rule` text (which
+  methods.txt and `make_methods.py` quote) ends with the descriptor's `contaminant_rule_origin`
+  (`contaminants.R`): "the rule of DIA-NN's --cont-quant-exclude, applied here" for a DIA-NN
+  report (dpc, and maxlfq on DIA-NN's PG.MaxLFQ), "applied here, in the DE step, to the Sage
+  report" (or the FragPipe / AlphaDIA / Radiant label the report declares) for an adapted one.
+  Before 2.10 every engine's Methods named DIA-NN's flag, which a reader could take to mean
+  DIA-NN had run.
 - **Every engine's report.** The rule tests bare accessions, as DIA-NN writes them, so every
   adapter writes those through `protein_ids.py`: `group_accessions` for Sage's `proteins` and
-  Radiant's groups, and FragPipe's `Protein ID`, keeping `contam_`.
+  Radiant's groups, and `fragpipe_group` for FragPipe DDA: its `Protein ID` (keeping `contam_`),
+  then every protein under `Indistinguishable Proteins`, so a `Cont_` entry listed only there is
+  seen, as any member of a DIA-NN group is (before 2.10 only the leading protein was read).
 - **Before 2.9 Sage slipped past.** `adapt_sage` wrote Sage's full FASTA IDs
   (`sp|Cont_P02769|ALBU_BOVIN`), so no Sage DE ever had a contaminant removed. gabrig's HeL50
   UnvPe tested 171 `Cont_` groups, while methods.txt said "none".

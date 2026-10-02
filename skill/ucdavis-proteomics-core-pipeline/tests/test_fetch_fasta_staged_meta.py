@@ -157,7 +157,8 @@ class StagedMeta(unittest.TestCase):
         with open(p, "w") as fh:
             fh.write(fasta(5))
         out = os.path.join(self.root, "o2", "search.fasta")
-        argv = ["fetch_fasta.py", "fetch", "--path", p, "--contaminants", "none", "--out", out]
+        argv = ["fetch_fasta.py", "fetch", "--path", p, "--organism", "Homo sapiens", "--taxid",
+                "9606", "--contaminants", "none", "--out", out]
         with mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(ff.main(), 0)
         with open(out + ".meta.json") as fh:
@@ -165,7 +166,9 @@ class StagedMeta(unittest.TestCase):
         self.assertIsNone(m["staged_file"])
         self.assertFalse(m["staged_release_unknown"])
         self.assertIsNone(m["content_inferred"])
-        self.assertEqual(m["organism_source"], "none")
+        # the organism of a supplied file is the user's answer, and says so
+        self.assertEqual((m["organism"], m["taxid"]), ("Homo sapiens", 9606))
+        self.assertEqual(m["organism_source"], "user (--organism/--taxid)")
 
     # -- one-per-gene inference ------------------------------------------------------------
     def test_gene_count_inference_on_the_real_human_numbers(self):

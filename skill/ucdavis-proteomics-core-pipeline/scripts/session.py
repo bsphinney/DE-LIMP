@@ -31,6 +31,8 @@ Subcommands:
   python3 session.py init --name "HeLa QC DIA" --raw /data/HeLaQC/*.d
   #   central location instead (user chose Documents / a custom folder):
   python3 session.py init --name "HeLa QC DIA" --raw /data/HeLaQC/*.d --base ~/Documents/DataAnalysis
+  #   a re-analysis BESIDE the earlier session (which is not written to): <date>_<name>_v2
+  python3 session.py init --name "HeLa QC DIA" --raw ... --reanalysis-of <prior> --beside
   #   -> prints JSON with every canonical path + "placement"; route later steps into them
 
   # at the end — ensure the publication Methods, write the deposit package
@@ -91,6 +93,9 @@ def paths_for(session_dir):
         "session_json": os.path.join(d, "session.json"),
         "submission_record": os.path.join(d, "input", "submission.json"),
         "submission_samples": os.path.join(d, "input", "samples.tsv"),
+        # the staff decisions behind the file list (core_submission.py locate: run choices and
+        # the re-injection policy), carried in by submission_report.py attach
+        "locate_decisions": os.path.join(d, "input", "locate_decisions.json"),
     }
 
 
@@ -183,11 +188,64 @@ def do_find_prior(a):
     if hits:
         suggestion = ("a fresh analysis (the default). These raw files were analysed before, in "
                       + hits[0]["session"] + ": mention that in one line and read nothing from "
-                      "it. Re-analyse it (init --reanalysis-of) only if the user asks to.")
+                      "it. Re-analyse it (init --reanalysis-of, plus --beside to put the new run "
+                      "beside it as _v<N> rather than inside it) only if the user asks to.")
     else:
         suggestion = "a fresh analysis: no earlier session covers these raw files"
     print(json.dumps({"query_raw_count": len(mine), "matches": hits, "default": "fresh",
                       "suggestion": suggestion}, indent=2))
+
+
+# A re-analysis's link to the analysis it re-does: the marker (one line, the prior session's
+# path; what 2.9 and older wrote) and the record beside it (the version and the prior's own
+# provenance files). reanalysis_of() is the one reader.
+REANALYSIS_MARKER = ".reanalysis_of"
+REANALYSIS_JSON = "reanalysis.json"
+_VERSION_RE = re.compile(r"_v(\d+)$")
+
+
+def reanalysis_of(session_dir):
+    """{"session": prior dir, "version": N or None, "placement": ..., ...} for a re-analysis
+    session, else None. From reanalysis.json, else the marker alone (sessions made before it)."""
+    rec = _load(os.path.join(session_dir, REANALYSIS_JSON))
+    if isinstance(rec, dict) and rec.get("reanalysis_of"):
+        return dict(rec, session=rec["reanalysis_of"])
+    marker = os.path.join(session_dir, REANALYSIS_MARKER)
+    if os.path.exists(marker):
+        with open(marker, encoding="utf-8", errors="replace") as fh:   # 2.7 and older: any encoding
+            prior = fh.read().strip()
+        if prior:
+            return {"session": prior, "reanalysis_of": prior, "version": None,
+                    "placement": None, "source": REANALYSIS_MARKER}
+    return None
+
+
+def version_of(session_dir):
+    """A session's version: its re-analysis record's, else a trailing _v<N> in its name, else 1."""
+    rec = reanalysis_of(session_dir) or {}
+    if isinstance(rec.get("version"), int):
+        return rec["version"]
+    m = _VERSION_RE.search(os.path.basename(os.path.normpath(session_dir)))
+    return int(m.group(1)) if m else 1
+
+
+def beside_dir(prior, date, slug):
+    """The folder for a re-analysis BESIDE `prior`: <prior's parent>/<date>_<slug>_v<N>, N one
+    above the prior's version and above every <any date>_<slug>_v<M> already there -- never an
+    existing folder (two re-analyses of one session do not share a v2). Returns (dir, N)."""
+    parent = os.path.dirname(os.path.normpath(prior))
+    stem = _VERSION_RE.sub("", slug)
+    taken = [version_of(prior)]
+    pat = re.compile(r"^\d{4}-\d{2}-\d{2}_" + re.escape(stem) + r"_v(\d+)$")
+    try:
+        names = os.listdir(parent)
+    except OSError:
+        names = []
+    taken += [int(m.group(1)) for m in map(pat.match, names) if m]
+    n = max(taken) + 1
+    while os.path.exists(os.path.join(parent, f"{date}_{stem}_v{n}")):
+        n += 1
+    return os.path.join(parent, f"{date}_{stem}_v{n}"), n
 
 
 def _resolve_raws(patterns):
@@ -215,15 +273,30 @@ def do_init(a):
     raw_dir = _raw_dir(raws)
 
     # WHERE the results go (the orchestrator asks the user; see SKILL.md):
+    #   --reanalysis-of <prior> --beside -> beside the original, <date>_<name>_v<N>; nothing is
+    #                                       written into the original (a delivered folder)
     #   --reanalysis-of <prior>  -> nested under the original
     #   --base <path>            -> a central location the user chose (e.g. ~/Documents/DataAnalysis)
     #   (neither, with --raw)    -> DEFAULT: in the folder with the raw data being analyzed
+    version = None
+    if getattr(a, "beside", False) and not a.reanalysis_of:
+        sys.exit("--beside places a re-analysis beside the session it re-does: give that session "
+                 "with --reanalysis-of <prior session dir>")
     if a.reanalysis_of:
         prior = os.path.abspath(os.path.expanduser(a.reanalysis_of))
         if not os.path.isdir(prior):
             sys.exit(f"--reanalysis-of: prior session not found: {prior}")
-        session_dir = os.path.join(prior, "reanalysis", f"{date}_{slug}")
-        placement = "reanalysis"
+        if getattr(a, "beside", False):
+            # A Core re-analysis (2026-09-25): the prior was a delivered, read-only-by-policy folder,
+            # and nesting wrote into it; the agent had to patch _raw_dir from a wrapper.
+            session_dir, version = beside_dir(prior, date, slug)
+            placement = "beside-prior"
+        else:
+            session_dir = os.path.join(prior, "reanalysis", f"{date}_{slug}")
+            placement = "reanalysis"
+            version = max([version_of(prior)] + [
+                version_of(d) for d in glob.glob(os.path.join(prior, "reanalysis", "*"))
+                if os.path.isdir(d) and os.path.abspath(d) != os.path.abspath(session_dir)]) + 1
     elif a.base:
         base = os.path.abspath(os.path.expanduser(a.base))
         session_dir = os.path.join(base, "sessions", f"{date}_{slug}")
@@ -270,18 +343,32 @@ def do_init(a):
             except OSError:
                 pass   # e.g. Windows without developer mode — the text list still has it
 
-    # record the parent when this is a re-analysis
+    # record the parent when this is a re-analysis: the marker, and the record that links this
+    # session's provenance to the prior's (DIFFERENCES.md, the README, AGENTS.md and the run log
+    # read it through reanalysis_of())
     parent = os.path.abspath(os.path.expanduser(a.reanalysis_of)) if a.reanalysis_of else None
     if parent:
-        with open(os.path.join(session_dir, ".reanalysis_of"), "w", encoding="utf-8") as fh:
+        with open(os.path.join(session_dir, REANALYSIS_MARKER), "w", encoding="utf-8") as fh:
             fh.write(parent + "\n")
+        pp = paths_for(parent)
+        link = {"reanalysis_of": parent, "version": version, "prior_version": version_of(parent),
+                "placement": placement, "created": datetime.datetime.now().isoformat(
+                    timespec="seconds"),
+                # the prior's own records, as they are now: what DIFFERENCES.md compares with
+                "prior_records": {k: pp[k] for k in ("search_prov", "readme", "raw_list")
+                                  if os.path.isfile(pp[k])}}
+        de_prov = os.path.join(pp["de_dir"], "de_provenance.json")
+        if os.path.isfile(de_prov):
+            link["prior_records"]["de_prov"] = de_prov
+        with open(os.path.join(session_dir, REANALYSIS_JSON), "w", encoding="utf-8") as fh:
+            json.dump(link, fh, indent=2)
 
     # starter README (finalize fills in results)
     with open(p["readme"], "w", encoding="utf-8") as fh:
         fh.write(f"# {a.name}\n\n- Date: {date}\n- Status: in progress\n")
         if parent:
-            fh.write(f"- **Re-analysis of:** `{parent}` — see `DIFFERENCES.md` (written at finalize) "
-                     "for exactly what changed.\n")
+            fh.write(f"- **Re-analysis of:** `{parent}` (this is version {version}) — see "
+                     "`DIFFERENCES.md` (written at finalize) for exactly what changed.\n")
         fh.write("\nLayout: `input/` (conditions, FASTA, params), `output/` "
                  "(search, tables, figures, reproducibility, report), `scripts/`, `logs/`.\n")
 
@@ -294,7 +381,8 @@ def do_init(a):
         sys.stderr.write(f"[session] conversation not recorded for the transcript hook: {e}\n")
 
     print(json.dumps({"created": session_dir, "date": date, "name": a.name,
-                      "placement": placement, "reanalysis_of": parent, "paths": p}, indent=2))
+                      "placement": placement, "reanalysis_of": parent, "version": version,
+                      "paths": p}, indent=2))
 
 
 def _load(path):
@@ -335,6 +423,11 @@ def _finish_hooks(a, session_dir, zip_path):
     rl = notify_slack.run_log_manifest(run_log)
     if a.no_notify:
         sent, detail = False, "--no-notify was given"
+    elif (run_log or {}).get("analysis_logged") == "unchanged":
+        # finalize run again on the same analysis (to add a podcast, say): the run log already
+        # has it, unchanged, so the Core channel is not told a second time
+        sent, detail = False, ("not posted again: this analysis was already logged and posted, "
+                               "and nothing in it changed")
     else:
         sent, detail = notify_slack.analysis_done(session_dir, zip_path, run_log=run_log)
     sl = notify_slack.slack_manifest(sent, detail)
@@ -662,12 +755,8 @@ def do_finalize(a):
               "methods": methods_md, "manifest": p["manifest_txt"],
               "deposit": deposit, "skipped": (man.n_skipped if man is not None else 1)}
 
-    # re-analysis: write DIFFERENCES.md vs the parent
-    parent = a.reanalysis_of
-    marker = os.path.join(p["session_dir"], ".reanalysis_of")
-    if not parent and os.path.exists(marker):
-        with open(marker, encoding="utf-8", errors="replace") as fh:   # 2.7 and older: any encoding
-            parent = fh.read().strip()
+    # re-analysis: write DIFFERENCES.md vs the parent (read, never written to)
+    parent = a.reanalysis_of or (reanalysis_of(p["session_dir"]) or {}).get("session")
     if parent:
         diff_path = write_differences(parent, p["session_dir"])
         result["differences"] = diff_path
@@ -718,6 +807,24 @@ def do_finalize(a):
         # podcast itself (podcast.m4a, transcript, script, check.txt, podcast.json) goes in.
         import scratch_files
         n_scratch = 0
+        # Staff-only records (staff.py, *.staff.json): who decided, by name and login -- wherever
+        # they are, never in a zip that goes to collaborators.
+        import staff
+        staff_label = "staff-only records (*.staff.json: who decided, by name -- kept on disk)"
+        n_staff = 0
+        # The QC verdict around the project (qc_bracket.py) is staff-only: ANY file carrying its
+        # marker, wherever it is and whatever it is called (--out can name it anything), and
+        # deliver's delivery.json (its record of a delivery, staff-side) stay out. Without
+        # qc_bracket.py beside this (a partial copy), its file names are the rule.
+        qc_label = ("staff-only QC records (qc_bracket.py's marker, any name, anywhere) and "
+                    "delivery.json (kept on disk)")
+        n_qc = 0
+        try:
+            from qc_bracket import is_staff_only_file
+        except ImportError:
+            def is_staff_only_file(path):
+                return bool(re.match(r"^(?:qc_bracket(?:_ack)?\.(?:json|md)|qc_gate\.json)$",
+                                     os.path.basename(path)))
 
         def is_search_out(d):
             return (os.path.abspath(d) == os.path.abspath(p["search_out"])
@@ -742,17 +849,34 @@ def do_finalize(a):
                     if is_predicted_speclib(fn):
                         n_speclib += 1
                         continue
+                    if staff.is_staff_only(fn):
+                        n_staff += 1
+                        continue
                     if os.path.abspath(full) in skips:           # a file kept out (decisions.md)
                         excluded[skips[os.path.abspath(full)]] = 1
+                        continue
+                    if fn == "delivery.json" or (not os.path.islink(full)
+                                                 and is_staff_only_file(full)):
+                        n_qc += 1
                         continue
                     if os.path.islink(full) or os.path.abspath(full) == manifest_txt \
                             or os.path.abspath(full) in late:
                         continue                 # MANIFEST.txt and the docs go in last, below
+                    if fn == os.path.basename(p["commands_log"]):
+                        # every command verbatim (logs/, or a copy anywhere), but who decided is
+                        # staff-only (staff.redact)
+                        with open(full, encoding="utf-8", errors="replace") as fh:
+                            z.writestr(os.path.join(base, os.path.relpath(full, sdir)),
+                                       staff.redact(fh.read()))
+                        continue
                     z.write(full, os.path.join(base, os.path.relpath(full, sdir)))
         excluded[quant_label] = n_quant
         excluded[speclib_label] = n_speclib
+        excluded[qc_label] = n_qc
         if n_scratch:
             excluded[scratch_files.LABEL] = n_scratch
+        if n_staff:
+            excluded[staff_label] = n_staff
         result["zip"] = archive
         result["zip_excluded"] = excluded
 
@@ -833,7 +957,8 @@ def params_file(p, resolved=True):
         cands += sorted(glob.glob(os.path.join(wf, pat)))
     for pat in ("params.*", "*.cfg", "sage_config*.json"):
         cands += sorted(glob.glob(os.path.join(inp, pat)))
-    return next((c for c in cands if os.path.isfile(c)
+    import staff                                 # a cfg's staff-only record is not a cfg
+    return next((c for c in cands if os.path.isfile(c) and not staff.is_staff_only(c)
                  and not c.endswith((".rationale.json", "manifest.json"))), None)
 
 
@@ -990,6 +1115,10 @@ def main():
     i.add_argument("--date", default="", help="YYYY-MM-DD (default: today)")
     i.add_argument("--raw", nargs="*", help="raw file paths/globs; their folder is where results go by default")
     i.add_argument("--reanalysis-of", default="", help="prior session dir; nests this run under <prior>/reanalysis/")
+    i.add_argument("--beside", action="store_true",
+                   help="with --reanalysis-of: put this run BESIDE the prior session, as "
+                        "<date>_<name>_v<N> in the prior's parent folder, instead of inside it -- "
+                        "nothing is written into the prior (a delivered folder)")
     i.set_defaults(func=do_init)
     fp = sub.add_parser("find-prior", help="find existing sessions covering the same raw files "
                                            "(to mention; a new session is fresh by default)")

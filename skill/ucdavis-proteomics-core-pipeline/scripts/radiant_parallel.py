@@ -142,6 +142,16 @@ def main():
     files = [ln.strip() for ln in open(a.raw_list) if ln.strip()]
     if not files:
         sys.exit(f"{a.raw_list} listed no input files.")
+    # a file listed twice is searched once and flagged; different files sharing a run name are
+    # flagged and stop here (check_report_runs: the one rule, as in run_search.py)
+    sys.path.insert(0, HERE)
+    from check_report_runs import distinct_inputs, names_stop, repeated_names, repeats_note
+    files, repeats = distinct_inputs(files)
+    shared = repeated_names(files)
+    if repeats or shared:
+        sys.stderr.write(repeats_note(repeats, "radiant_parallel", shared))
+    if shared:
+        sys.exit(names_stop(shared, "radiant_parallel"))
     bad = [f for f in files if f.rstrip("/").lower().endswith(".d")]
     if bad:
         sys.exit("Radiant cannot read Bruker .d — convert to mzML or use DIA-NN/diaTracer.\n"

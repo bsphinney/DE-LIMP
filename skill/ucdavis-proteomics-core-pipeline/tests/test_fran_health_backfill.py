@@ -2113,6 +2113,15 @@ class CorpusQueryGuardTests(unittest.TestCase):
             for m, n, f in saved:
                 setattr(m, n, f)
 
+    def test_no_credential_is_read_from_a_group_folder(self):
+        """2.10: a database credential is the reader's own. 2.9 also tried
+        <group>/fran/.pgfarm_token, where every group member could have read it."""
+        for c in fd.TOKEN_CANDIDATES:
+            if c:
+                self.assertFalse(os.path.expanduser(c).startswith(fd.GROUP_ROOT + "/"), c)
+        self.assertNotIn("fran/.pgfarm_token", _read(fd.__file__).split("TOKEN_CANDIDATES = [")[1]
+                         .split("]")[0])
+
     def test_every_fran_test_module_switches_it_off(self):
         for mod in ("test_fran_deposit_gate.py", "test_fran_manifest_fasta.py",
                     "test_fran_health_backfill.py"):

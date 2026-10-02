@@ -74,7 +74,8 @@ class AuditorsDoNotFlagParalogs(unittest.TestCase):
         out = os.path.join(root, "search.fasta")
         p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "fetch_fasta.py"), "fetch",
                             "--path", tgt, "--contaminants", "universal", "--contaminants-path", cp,
-                            "--out", out], capture_output=True, text=True, cwd=root)
+                            "--organism", "none", "--out", out],
+                           capture_output=True, text=True, cwd=root)
         assert p.returncode == 0, p.stderr
         cls.meta = out + ".meta.json"
         de = cls.de = os.path.join(root, "de_results")

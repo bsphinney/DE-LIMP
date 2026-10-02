@@ -65,7 +65,11 @@ with open(os.environ["FAKE_CONV_LOG"], "a") as fh:
     fh.write(json.dumps({{"tool": "sage", "argv": args,
                          "missing": [f for f in files if not os.path.isfile(f)]}}) + "\n")
 off = float(os.environ.get("FAKE_SAGE_OFFSET", "7.2"))
-fx.write_sage_outputs(out, {{os.path.basename(f): off for f in files}}, log=False)
+# results.json carries the LFQ settings the config set, as Sage writes the parameters it ran with
+with open(args[0]) as fh:
+    lfq_settings = (json.load(fh).get("quant") or {{}}).get("lfq_settings")
+fx.write_sage_outputs(out, {{os.path.basename(f): off for f in files}}, log=False,
+                      lfq_settings=lfq_settings)
 print("[INFO sage] discovered %s target MS1 peaks at 5%% FDR"
       % os.environ.get("FAKE_SAGE_PEAKS", "0"), file=sys.stderr)
 '''
@@ -276,7 +280,9 @@ class ConversionRefusals(_Harness):
         job = os.path.join(self.d, "sage_job.sh")
         p = self.run_search("--sbatch", job, files=[self.raws[0], twin])
         self.assertNotEqual(p.returncode, 0)
-        self.assertIn("share an mzML name", p.stderr)
+        # flagged and stopped by run_search's one rule (check_report_runs.names_stop) before the
+        # conversion's own "share an mzML name" backstop is reached
+        self.assertIn("STOPPED before searching: different input files share a run name", p.stderr)
         self.assertFalse(os.path.exists(job))
 
     def test_mzml_input_needs_no_converter(self):

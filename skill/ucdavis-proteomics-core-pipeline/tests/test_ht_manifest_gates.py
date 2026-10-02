@@ -139,7 +139,6 @@ class TestWarnGates(unittest.TestCase):
             self.assertEqual(g["needs_rerun"]["n"], 6)
 
 
-
 class CredentialIsNeverShared(unittest.TestCase):
     """The owner's .pgfarm_token is the service account's long-lived SECRET (STAN CLAUDE.md:
     512 bytes, mode 0600), not a 7-day token. Skill 2.9 called it safe to copy group-readable to
@@ -182,6 +181,133 @@ class CredentialIsNeverShared(unittest.TestCase):
         self.assertNotIn("7-day token", doc.replace('"7-day token"', ""))
         self.assertNotIn("publish here", doc)
         self.assertIn("Never copy it, and never make it group-readable", doc)
+
+
+def _entries(files, well=lambda i: f"A{i + 1}"):
+    """STAN's per-run entries, shaped like the live payload (2026-10-01): one per line of
+    `files`, a repeated file repeating its entry exactly."""
+    first = {}
+    out = []
+    for f in files:
+        i = first.setdefault(f, len(first))
+        out.append({"run_name": os.path.basename(f)[:-2], "raw_path": f, "class": "sample",
+                    "plate": "S5", "well": well(i), "injection": 24000 + i,
+                    "needs_rerun": False, "verdict": "pass"})
+    return out
+
+
+class TestRepeatedRuns(unittest.TestCase):
+    """Brett (2026-10-01): repeats in a run list are okay, but they are flagged. STAN listed one
+    run 4 times and another twice -- 100 lines for 96 files -- with every gate PASS (a staff
+    plate). The same file goes into files.txt once and is flagged with its count; different
+    files sharing a run name are all kept and flagged. Neither stops ht_manifest."""
+
+    def manifest(self, tmp):
+        with open(os.path.join(tmp, "ht_manifest.json")) as fh:
+            return json.load(fh)
+
+    def listed(self, tmp):
+        with open(os.path.join(tmp, "files.txt")) as fh:
+            return [l for l in fh.read().split("\n") if l]
+
+    def rerun_in_another_folder(self, tmp, f):
+        os.makedirs(os.path.join(tmp, "rerun"))
+        twin = os.path.join(tmp, "rerun", os.path.basename(f))
+        open(twin, "w").close()
+        return twin
+
+    def test_one_path_listed_twice_is_listed_once_and_flagged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m = _ok(tmp)
+            f = m["files"]
+            m["files"] = f + [f[3], f[3], f[3], f[7]]
+            m["entries"], m["n_files"] = _entries(m["files"]), len(m["files"])
+            r = _run(tmp, m)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(self.listed(tmp), f)
+            out = self.manifest(tmp)
+            self.assertEqual((out["n_files_listed"], out["n_files"]), (28, 24))
+            self.assertEqual([(d["path"], d["times"]) for d in out["repeated_paths"]],
+                             [(f[3], 4), (f[7], 2)])
+            self.assertEqual(out["repeated_names"], [])
+            g = {x["gate"]: x for x in out["gates"]}
+            self.assertEqual((g["repeated_paths"]["status"], g["repeated_paths"]["n"]), ("WARN", 4))
+            self.assertEqual(g["repeated_names"]["status"], "PASS")
+            self.assertEqual(g["n_files"]["n"], 24)
+            self.assertIn(f"[ht_manifest] FLAG: 2 input file(s) were listed more than once; each "
+                          f"is searched once: {f[3]} (listed 4 times)", r.stderr)
+            self.assertIn("files      : 24 (28 listed by STAN; repeats removed)", r.stdout)
+
+    def test_one_name_in_two_folders_keeps_both_and_flags_them(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m = _ok(tmp)
+            twin = self.rerun_in_another_folder(tmp, m["files"][2])
+            m["files"].append(twin)
+            r = _run(tmp, m)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn(twin, self.listed(tmp))
+            self.assertIn(m["files"][2], self.listed(tmp))
+            out = self.manifest(tmp)
+            self.assertEqual(out["repeated_names"], [{"run_name": "run2",
+                                                      "paths": [m["files"][2], twin]}])
+            g = {x["gate"]: x for x in out["gates"]}
+            self.assertEqual(g["repeated_names"]["status"], "WARN")
+            self.assertIn("run_search.py stops before searching them as given",
+                          g["repeated_names"]["detail"])
+            self.assertIn(f"FLAG: 1 run name(s) are shared by different files, all kept: run2: "
+                          f"{m['files'][2]}, {twin}", r.stderr)
+
+    def test_a_mix_of_both_is_flagged_both_ways(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m = _ok(tmp)
+            f = list(m["files"])
+            twin = self.rerun_in_another_folder(tmp, f[2])
+            m["files"] = f + [f[5], twin, twin]
+            r = _run(tmp, m)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(self.listed(tmp), f + [twin])
+            out = self.manifest(tmp)
+            self.assertEqual([(d["path"], d["times"]) for d in out["repeated_paths"]],
+                             [(f[5], 2), (twin, 2)])
+            self.assertEqual([d["run_name"] for d in out["repeated_names"]], ["run2"])
+            self.assertEqual(r.stderr.count("[ht_manifest] FLAG:"), 2)
+
+    def test_a_symlink_to_a_listed_run_is_the_same_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m = _ok(tmp)
+            alias = os.path.join(tmp, "alias.d")
+            os.symlink(m["files"][0], alias)
+            m["files"].append(alias)
+            r = _run(tmp, m)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertNotIn(alias, self.listed(tmp))
+            self.assertEqual(self.manifest(tmp)["repeated_paths"][0]["also_listed_as"], [alias])
+
+    def test_entries_that_disagree_about_one_file_are_a_hard_fail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m = _ok(tmp)
+            f = m["files"]
+            m["files"] = f + [f[5]]
+            m["entries"] = _entries(m["files"])
+            m["entries"][-1] = dict(m["entries"][-1], well="H12")
+            r = _run(tmp, m)
+            self.assertEqual(r.returncode, 2)
+            g = {x["gate"]: x for x in self.manifest(tmp)["gates"]}
+            self.assertEqual(g["repeated_paths"]["status"], "FAIL")
+            self.assertIn("not a repeat but a contradiction about which sample the file is",
+                          g["repeated_paths"]["detail"])
+            self.assertEqual(g["repeated_paths"]["examples"][0], f"{f[5]}: well=A6 vs well=H12")
+            self.assertEqual(g["repeated_paths"]["conflicts"][0]["entries"],
+                             [{"well": "A6"}, {"well": "H12"}])
+
+    def test_no_repeat_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m = _ok(tmp)
+            m["entries"] = _entries(m["files"])
+            self.assertEqual(_run(tmp, m).returncode, 0)
+            g = {x["gate"]: x for x in self.manifest(tmp)["gates"]}
+            self.assertEqual((g["repeated_paths"]["status"], g["repeated_names"]["status"]),
+                             ("PASS", "PASS"))
 
 if __name__ == "__main__":
     unittest.main()

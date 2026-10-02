@@ -103,12 +103,13 @@ class ParallelChainTempTests(unittest.TestCase):
                 body = open(path).read()
                 # the guard line itself mentions --temp in its comment; look only at the
                 # DIA-NN invocation lines
-                temp = re.findall(r"--temp\s+(\S+)", body.replace("\n", " "))
+                # the paths are double-quoted (a service folder may hold a space)
+                temp = re.findall(r'--temp\s+"([^"]+)"', body.replace("\n", " "))
                 temp = [t for t in temp if t.startswith("/")]
                 self.assertTrue(temp, f"{step} has no --temp path")
                 # the dir each step hands DIA-NN must be mkdir'd by that same step
                 for which in set(temp):
-                    self.assertIn(f"mkdir -p {which}", body,
+                    self.assertIn(f'mkdir -p "{which}"', body,
                                   f"{step} passes --temp {which} but never creates it")
 
     def test_submit_sh_still_makes_them_too(self):

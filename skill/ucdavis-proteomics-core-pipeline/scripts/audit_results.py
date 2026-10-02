@@ -47,6 +47,17 @@ Checks:
   sage_lfq          (--search-out, Sage searches) the runs' MS1 mass error does not fit
                     Sage's LFQ window, or Sage kept (almost) no MS1 peaks: quantities
                     unreliable (WARN) -- sage_lfq_check.py's record, quoted as written
+  normalization_check
+                    the DE's quantities (normalised / non-normalised), the experiment type's
+                    default and whether normalization_check.py's data check agreed -- quoted
+                    from de_provenance.json: WARN when it did not and someone chose, when no
+                    type was recorded, and when no check was run (the delivery is then held)
+  normalisation_stability
+                    (a DIA-NN report) DIA-NN's per-run Normalisation.Instability, from the
+                    <report>.stats.tsv beside the DE input, for the runs in conditions.csv:
+                    WARN naming every run above check_report_runs.NORM_INSTABILITY_WARN, with
+                    the alternatives DIA-NN documents (--global-norm / --no-norm, and the
+                    report's non-normalised Precursor.Quantity); every value in AUDIT.json
 
 Usage:
   python3 audit_results.py --out AUDIT.md \
@@ -432,6 +443,106 @@ def audit_search_measurement(findings, de_prov, search_prov=None):
              "search_provenance": path})
 
 
+def audit_normalisation(findings, de_prov, rows=None, search_prov=None):
+    """DIA-NN's Normalisation.Instability for the runs the DE used (check_report_runs.
+    normalisation_instability: the one reader, threshold and its basis). The DE quantities are
+    DIA-NN's normalised ones (Precursor.Normalised, PG.MaxLFQ), so a normalisation DIA-NN itself
+    calls unstable reaches every result -- and nothing said so (a staff report: 0.67-1.00 in
+    every run of a cohort, passed silently into the DE)."""
+    inp = (de_prov or {}).get("input")
+    if not inp:
+        return                      # no DE record of its input: nothing to read
+    from check_report_runs import (normalisation_instability, stats_path,
+                                   NORM_INSTABILITY_COLUMN)
+    runs = [r["File.Name"] for r in rows or [] if (r.get("File.Name") or "").strip()]
+    ni = normalisation_instability(inp, runs or None)
+    if ni is None:
+        _, sprov = load_search_prov(de_prov, search_prov)
+        if isinstance(sprov, dict) and (sprov.get("engine") or "").lower() == "diann":
+            add(findings, "normalisation_stability", "INFO",
+                f"Not assessed: there is no {os.path.basename(stats_path(str(inp)))} beside "
+                f"{os.path.basename(str(inp))} (a cfg with --no-stats?), so DIA-NN's per-run "
+                f"{NORM_INSTABILITY_COLUMN} could not be read.")
+        return                      # another engine's report: DIA-NN's question does not apply
+    where = os.path.basename(ni["stats_file"])
+    if not ni["column"]:
+        add(findings, "normalisation_stability", "INFO",
+            f"Not assessed: {where} has no {NORM_INSTABILITY_COLUMN} column (a DIA-NN version "
+            "that does not write it).", {"stats_file": ni["stats_file"]})
+        return
+    if not ni["per_run"]:
+        add(findings, "normalisation_stability", "INFO",
+            f"Not assessed: none of the analysed runs has identified precursors in {where}.",
+            {"stats_file": ni["stats_file"]})
+        return
+    detail = {k: ni[k] for k in ("stats_file", "per_run", "median", "max", "flagged",
+                                 "threshold", "basis")}
+    n, thr = len(ni["per_run"]), ni["threshold"]
+    if not ni["flagged"]:
+        add(findings, "normalisation_stability", "PASS",
+            f"DIA-NN's {NORM_INSTABILITY_COLUMN} is at most {thr:g} in all {n} runs (median "
+            f"{ni['median']:.2f}, max {ni['max']:.2f}; {where}).", detail)
+        return
+    runs_txt = ", ".join(f"{k} {v:.2f}" for k, v in sorted(ni["flagged"].items(),
+                                                            key=lambda kv: -kv[1]))
+    add(findings, "normalisation_stability", "WARN",
+        f"DIA-NN's {NORM_INSTABILITY_COLUMN} is above {thr:g} in {len(ni['flagged'])} of {n} runs "
+        f"({runs_txt}; median of all {n}: {ni['median']:.2f}; {where}). DIA-NN's own "
+        "normalisation was unstable for these runs, and the DE used its normalised quantities "
+        "(Precursor.Normalised / PG.MaxLFQ), so a distortion of that normalisation is in every "
+        f"result. ({ni['basis']}.) The alternatives DIA-NN documents: re-quantify with "
+        "--global-norm (one global factor per run instead of RT-dependent normalisation) or "
+        "--no-norm (no cross-run normalisation: Precursor.Normalised and PG.MaxLFQ are then "
+        "not normalised). Either can reuse this search's .quant files: DIA-NN's README lists "
+        "cross-run normalisation among the settings that may differ when .quant files are "
+        "reused. The "
+        "report's Precursor.Quantity is DIA-NN's non-normalised quantity. Run the DE both "
+        "ways and compare before trusting either.", detail)
+
+
+def audit_normalization_check(findings, de_prov):
+    """The normalisation decision, quoted from run_de.R's record (normalization_check.py's block
+    in de_provenance.json): which quantities, the experiment type's default, whether the data
+    check agreed, and who chose otherwise -- never re-judged here."""
+    nc = (de_prov or {}).get("normalization_check")
+    if not isinstance(nc, dict):
+        return                      # a DE record from before 2.10: nothing to quote
+    if nc.get("status") != "decided":
+        # a WARN, and core_submission.py deliver holds the delivery (normalization_check.
+        # delivery_gate): an IP read with normalised quantities must not pass as a footnote
+        add(findings, "normalization_check", "WARN",
+            ("This DE is one of the normalisation check's inputs, not the final DE" if
+             nc.get("status") == "check_input" else "The normalisation check was not run")
+            + f": {nc.get('note') or 'no normalisation check'} (quantities: "
+            f"{nc.get('quantities_applied')}). Run step 8's check and the final DE with "
+            "--normalization-check before delivering.", {"status": nc.get("status")})
+        return
+    et_ = nc.get("experiment_type") or {}
+    d = nc.get("decision") or {}
+    # AUDIT.md is delivered: a person's decision by role (normalization_check.statement), never
+    # by name -- the name is in the staff-only record
+    chose = d.get("statement") or (f"{d.get('by')} chose {d.get('quantities')} quantities: "
+                                   f"{d.get('reason')}.")
+    detail = {"experiment_type": et_.get("type"), "default": (nc.get("default") or {}).get("quantities"),
+              "applied": nc.get("quantities_applied"), "trips": nc.get("trips"),
+              "decision_by": d.get("by")}
+    if not et_.get("type"):
+        # no experiment type recorded: nothing to agree with, and never a PASS
+        add(findings, "normalization_check", "WARN",
+            "No experiment type was recorded, so no default applied"
+            + (f" (the data check: {'; '.join(nc.get('trips') or [])})" if nc.get("trips") else "")
+            + f"; {chose}", detail)
+    elif nc.get("tripped"):
+        add(findings, "normalization_check", "WARN",
+            f"Experiment type {et_.get('label')} ({et_.get('source')}): the data check did not "
+            f"agree with its default ({'; '.join(nc.get('trips') or [])}); {chose}", detail)
+    else:
+        add(findings, "normalization_check", "PASS",
+            f"Experiment type {et_.get('label')} ({et_.get('source')}): "
+            f"{nc.get('quantities_applied')} quantities, its default; the data check agreed.",
+            detail)
+
+
 def audit_passes(findings, de_prov, search_prov=None):
     """The chain's first pass vs its final pass, as step 5 recorded it (pass_comparison.py)."""
     inp = (de_prov or {}).get("input")
@@ -561,6 +672,10 @@ def main():
         audit_de(findings, a.de_dir, a.adjp, a.logfc)
     audit_search_measurement(findings, prov, a.search_prov)
     audit_passes(findings, prov, a.search_prov)
+    audit_normalization_check(findings, prov)
+    audit_normalisation(findings, prov,
+                        read_csv(a.conditions) if a.conditions and os.path.exists(a.conditions)
+                        else None, a.search_prov)
 
     n_fail = sum(1 for f in findings if f["status"] == "FAIL")
     n_warn = sum(1 for f in findings if f["status"] == "WARN")

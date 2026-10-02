@@ -67,6 +67,11 @@ write_repro_script <- function(path,
                                # readDIANN annotation.columns the dpc run used (limpa's
                                # defaults + the accession column the filter reads).
                                dpc_annotation_columns = NULL,
+                               # the quantity column the dpc run read (--quantities raw:
+                               # Precursor.Quantity); NULL = limpa's default, Precursor.Normalised
+                               intensity_column = NULL,
+                               # FALSE when the maxlfq run applied no quantile step (--quantities raw)
+                               quantile_normalise = TRUE,
                                timestamp = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
                                # TRUE only when this is being generated for a run that
                                # predates the feature, from that run's recorded provenance
@@ -208,10 +213,20 @@ write_repro_script <- function(path,
                  sprintf("c(%s)", paste(sprintf("%s = %s", .rq(q_columns),
                                                 vapply(.cuts, .rnum, character(1))),
                                         collapse = ", "))
+    # A quantity column other than limpa's default (--quantities raw reads DIA-NN's non-normalised
+    # Precursor.Quantity): passed under this limpa's name for the argument, as limpa_compat.R does.
+    raw_int <- !is.null(intensity_column) && !identical(intensity_column, "Precursor.Normalised")
+    int_lines <- if (raw_int) c(
+      sprintf("#     Quantities: %s (DIA-NN's non-normalised precursor quantity; limpa", intensity_column),
+      "#     normalises nothing between runs). limpa >= 1.4 names the argument intensity.column,",
+      "#     1.2.x qty.column.",
+      "int_arg <- intersect(c('intensity.column', 'qty.column'), names(formals(limpa::readDIANN)))[1]")
+    int_list <- if (raw_int) sprintf(", setNames(list(%s), int_arg)", .rq(intensity_column)) else ""
     L <- c(L,
       "# --- 1. Read the DIA-NN report, applying the identification FDR cutoffs ------",
       "#     PG.Q.Value uses DIA-NN's recommended 0.05; the rest use --q-cutoff.",
       "#     limpa recycles q.cutoffs against q.columns element-wise.",
+      int_lines,
       if (cont_on) c(
       "#     The annotation columns (the contaminant filter reads the accessions): limpa",
       "#     >= 1.4.0 names that argument annotation.columns, 1.2.x extra.columns.",
@@ -222,7 +237,11 @@ write_repro_script <- function(path,
       sprintf("dat <- do.call(limpa::readDIANN, c(list(%s, format = %s, q.cutoffs = %s,",
               src, .rq(format), .cuts_src),
       sprintf("                                        q.columns = %s),", .rvec(q_columns)),
-      "                                   setNames(list(ann_cols), ann_arg)))")
+      sprintf("                                   setNames(list(ann_cols), ann_arg)%s))", int_list))
+      else if (raw_int) c(
+      sprintf("dat <- do.call(limpa::readDIANN, c(list(%s, format = %s, q.cutoffs = %s,",
+              src, .rq(format), .cuts_src),
+      sprintf("                                        q.columns = %s)%s))", .rvec(q_columns), int_list))
       else c(
       sprintf("dat <- limpa::readDIANN(%s, format = %s, q.cutoffs = %s,",
               src, .rq(format), .cuts_src),
@@ -273,9 +292,11 @@ write_repro_script <- function(path,
                      .rq(cont_col)),
         "") else NULL,
       # the pipeline's own words for the rollup (build_maxlfq.R descriptor), not this file's
-      sprintf("# --- 2. One value per (protein, run) -- %s; pivot wide; log2; quantile-normalise",
+      sprintf("# --- 2. One value per (protein, run) -- %s; pivot wide; log2%s",
               if (!is.null(descriptor$rollup_method)) descriptor$rollup_method
-              else "max(PG.MaxLFQ) over the report's rows"),
+              else "max(PG.MaxLFQ) over the report's rows",
+              if (quantile_normalise) "; quantile-normalise" else
+                "; NOT normalised (--quantities raw: a --no-norm report)"),
       "pg_run <- rows |>",
       "  dplyr::group_by(Protein.Group, Run) |>",
       "  dplyr::summarise(PG.MaxLFQ = max(PG.MaxLFQ, na.rm = TRUE), .groups = 'drop') |>",
@@ -286,7 +307,7 @@ write_repro_script <- function(path,
       "E[E <= 0 | !is.finite(E)] <- NA_real_",
       "E <- log2(E)",
       "E <- E[, colSums(is.finite(E)) >= 2, drop = FALSE]   # drop runs with <2 proteins",
-      "E <- limma::normalizeBetweenArrays(E, method = 'quantile')",
+      if (quantile_normalise) "E <- limma::normalizeBetweenArrays(E, method = 'quantile')",
       "",
       sprintf("# --- 3. Coverage filter: a protein must be quantified in >= %.0f%% of samples",
               100 * cov_min_frac),

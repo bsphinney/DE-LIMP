@@ -108,6 +108,14 @@ class GateTests(unittest.TestCase):
             self.assertEqual(fd.check(Args(out))["reason"], "engine_unsupported")
 
 
+class CredentialTests(unittest.TestCase):
+    def test_no_credential_is_read_from_a_group_folder(self):
+        """A database credential is the reader's own: never a path every group member can read."""
+        for c in fd.TOKEN_CANDIDATES:
+            if c:
+                self.assertFalse(os.path.expanduser(c).startswith(fd.GROUP_ROOT + "/"), c)
+
+
 class EngineDetectionTests(unittest.TestCase):
     """All three DIA routes must be recognised, and told apart from each other."""
 

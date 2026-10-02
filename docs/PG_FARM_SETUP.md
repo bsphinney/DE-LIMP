@@ -109,7 +109,7 @@ file):
 chmod 600 /Volumes/proteomics-grp/brett/.pgfarm_delimp_secret.json
 ```
 
-Mint the 7-day token. **Reuse STAN's refresher** — it's generic, just point it
+Mint the token: a 7-day JWT, minted from the long-lived secret above. **Reuse STAN's refresher** — it's generic, just point it
 at the DE-LIMP files (the script lives in the STAN repo):
 
 ```bash
@@ -124,8 +124,10 @@ That writes the token (chmod 600) to `.pgfarm_delimp_token` — exactly the path
 
 **[SHARED] variant:** skip the new secret; point `--secret-file` at the
 existing `.pgfarm_secret.json` but still write a DE-LIMP-named token file if you
-want the import scripts to keep using `.pgfarm_delimp_token`. (Or just symlink
-`.pgfarm_delimp_token -> .pgfarm_token`.)
+want the import scripts to keep using `.pgfarm_delimp_token`. Do **not** symlink or copy
+STAN's `.pgfarm_token` instead: despite its name it holds the service account's long-lived
+512-character SECRET, not a token (STAN `CLAUDE.md`, "PG Farm auth"; mode 0600). Whoever can read
+it can act as the service account, so it is never copied, linked or made group-readable.
 
 ### Auto-refresh cron
 
@@ -144,10 +146,13 @@ against the fresh DB. First grant yourself schema privileges if needed (the SQL
 header notes this).
 
 ```bash
-PGPASSWORD=$(cat /Volumes/proteomics-grp/brett/.pgfarm_token) \
+# PGPASSWORD is a minted token (the JWT in .pgfarm_delimp_token), never a secret file, and the
+# user is the account that token belongs to: genome-proteomics-delimp-service-account [SEPARATE],
+# genome-proteomics-service-account [SHARED]
+PGPASSWORD=$(cat /Volumes/proteomics-grp/brett/.pgfarm_delimp_token) \
 psql "host=pgfarm.library.ucdavis.edu port=5432 \
       dbname=uc-davis-genome-center-proteomics-core/delimp \
-      user=genome-proteomics-service-account sslmode=require" \
+      user=genome-proteomics-delimp-service-account sslmode=require" \
   -c "SELECT 1;"   # sanity: can the OWNER connect? (use brettsp creds if SA isn't owner)
 ```
 

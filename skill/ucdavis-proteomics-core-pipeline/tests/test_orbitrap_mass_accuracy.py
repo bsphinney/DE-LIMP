@@ -253,8 +253,10 @@ class EstimateParamsTests(unittest.TestCase):
                 self.assertIn(ep.SRC_TABLE, src)
                 self.assertNotIn(ep.LONE_FLAG_NOTE, src)
                 for f in ov:
-                    self.assertEqual(side["rationale"][f]["source"],
-                                     "user-override (validated SOP)")
+                    # the user's value, never a "validated SOP" (tests/test_overrides_are_the_users)
+                    self.assertTrue(side["rationale"][f]["source"].startswith(
+                        f"user override: {f} = {ov[f]}, set by "), side["rationale"][f])
+                    self.assertNotIn("SOP", side["rationale"][f]["source"])
                 self.assertIsNone(dp.mass_acc_measure_plan(cfg))
                 safe = dp.parallel_safe(cfg)
                 self.assertTrue(safe["ok"], safe["reason"])
@@ -337,7 +339,7 @@ class OtherRoutesTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             _, s = self._resolve(d, "diann", "--ms2-ppm", "20", name="ms2only")
             self.assertEqual((s["ms1_ppm"], s["ms2_ppm"]), (7, 20.0))
-            self.assertIn("MS2: site SOP override", s["ppm_source"])
+            self.assertIn("MS2: user override: --ms2-ppm = 20, set by", s["ppm_source"])
             self.assertNotIn("measured with DIA-NN", s["ppm_source"],
                              "the SOP supplied the only level there was to measure")
             # the MS1 half is still described, and it is the one from the table
@@ -345,11 +347,14 @@ class OtherRoutesTests(unittest.TestCase):
             # a lone --ms1-ppm is the mirror image: MS2 is still the measured level
             _, s = self._resolve(d, "diann", "--ms1-ppm", "9", name="ms1only")
             self.assertEqual((s["ms1_ppm"], s["ms2_ppm"]), (9.0, None))
-            self.assertIn("MS1: site SOP override", s["ppm_source"])
+            self.assertIn("MS1: user override: --ms1-ppm = 9, set by", s["ppm_source"])
             self.assertIn("measured with DIA-NN", s["ppm_source"])
             # both given: nothing is derived at all
             _, s = self._resolve(d, "diann", "--ms1-ppm", "9", "--ms2-ppm", "20", name="both")
-            self.assertEqual(s["ppm_source"], "site SOP override")
+            self.assertTrue(s["ppm_source"].startswith("MS1: user override: --ms1-ppm = 9"))
+            self.assertIn("; MS2: user override: --ms2-ppm = 20", s["ppm_source"])
+            self.assertNotIn("SOP", s["ppm_source"])
+            self.assertNotIn("measured with DIA-NN", s["ppm_source"])
             # and with neither, nothing changes
             _, s = self._resolve(d, "diann", name="neither")
             self.assertIn("measured with DIA-NN", s["ppm_source"])

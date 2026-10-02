@@ -977,7 +977,8 @@ def glance_data(prov, tables, tables_dir, session=None):
     if rows:
         tiles.append((len(rows), "contrasts"))
         tiles.append((max(r["tested"] for r in rows), "proteins tested"))
-    notes = [n for n in (search_measurement_note(prov, session), inferred_note(prov, tables_dir),
+    notes = [n for n in (search_measurement_note(prov, session), search_inputs_note(prov, session),
+                         added_sequences_note(session), inferred_note(prov, tables_dir),
                          database_note(prov, tables_dir, session), keratin_note(prov))
              if n]
     return {"tiles": tiles, "contrasts": rows, "adjp": tables.adjp, "adjp_src": tables.src,
@@ -1081,6 +1082,52 @@ def database_note(prov, tables_dir, session=None):
             "text": text}
 
 
+def search_record(prov, session=None):
+    """The search's search_provenance.json: the one beside de_provenance.json's `input` (as
+    audit_results.py reads it), else the session's output/search/. {} when there is none."""
+    inp = prov.get("input")
+    path = next((c for c in (
+        os.path.join(os.path.dirname(str(inp)), "search_provenance.json") if inp else None,
+        os.path.join(session, "output", "search", "search_provenance.json") if session else None)
+        if c and os.path.exists(c)), None)
+    return load_record(path)
+
+
+def added_sequences_note(session=None):
+    """The fixed callout for the user's own target sequences in the search database (fetch_fasta
+    --add-fasta: a bait, a tag), from the session's FASTA sidecar, worded by
+    make_methods.added_sequences_sentence (the one description): what was added, the
+    contaminant entries removed because most of each is an added protein, and the peptides an
+    added sequence shares with a contaminant kept beside it -- ambiguous between the two, which a
+    reader of its numbers must know. A warning when there are such peptides; None when nothing
+    was added."""
+    fmeta = load_record(os.path.join(session, "input", "search.fasta.meta.json")) if session else {}
+    if not fmeta.get("added_sequences"):
+        return None
+    from make_methods import added_sequences_sentence
+    text = added_sequences_sentence(fmeta).strip()
+    shared = bool(fmeta.get("contaminants_sharing_peptides_with_added_sequences"))
+    return {"kind": "warning" if shared else "info",
+            "title": ("Added sequences share peptides with contaminants" if shared
+                      else "Sequences added to the search database"), "text": text}
+
+
+def search_inputs_note(prov, session=None):
+    """The fixed flag for repeats in the search's input list (search_provenance.json
+    `repeated_paths`: one file listed more than once and searched once; `repeated_names`:
+    different files sharing a run name), worded by check_report_runs.repeats_text -- the one
+    wording, shared with stderr and the HT manifest. None when nothing was repeated."""
+    sprov = search_record(prov, session)
+    paths = [r for r in sprov.get("repeated_paths") or [] if isinstance(r, dict) and r.get("path")]
+    names = [r for r in sprov.get("repeated_names") or [] if isinstance(r, dict) and r.get("paths")]
+    if not (paths or names):
+        return None
+    from check_report_runs import repeats_text
+    return {"kind": "warning" if names else "info",
+            "title": "The search's file list repeated runs", "text": " ".join(
+                t[:1].upper() + t[1:] + "." for t in repeats_text(paths, names))}
+
+
 def search_measurement_note(prov, session=None):
     """The fixed CAUTION for a search that fell back instead of measuring its scan window or mass
     accuracy (search_provenance.json scan_window.mode / mass_acc.mode), worded by
@@ -1088,12 +1135,7 @@ def search_measurement_note(prov, session=None):
     the page itself, like database_note: it must never depend on the report writer remembering
     it. The search record is the one beside de_provenance.json's `input` (as audit_results.py
     reads it), else the session's output/search/. None when nothing fell back."""
-    inp = prov.get("input")
-    path = next((c for c in (
-        os.path.join(os.path.dirname(str(inp)), "search_provenance.json") if inp else None,
-        os.path.join(session, "output", "search", "search_provenance.json") if session else None)
-        if c and os.path.exists(c)), None)
-    sprov = load_record(path)
+    sprov = search_record(prov, session)
     if not sprov:
         return None
     # provenance_caution() type-checks every piece: a malformed record never stops the page

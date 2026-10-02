@@ -39,7 +39,9 @@ import test_tdf_readonly_open as tdf      # noqa: E402
 FILE_KEYS = {"file", "vendor", "acquisition", "confidence", "reason", "instrument",
              "precursor_mz_range", "precursor_mz_range_source", "tdf_integrity", "warnings",
              "reader",
-             "ms1_resolution", "ms2_resolution", "ms2_analyzer", "resolution_note"}
+             "ms1_resolution", "ms2_resolution", "ms2_analyzer", "resolution_note",
+             # acq_time.result(): when the run was acquired (qc_bracket.py), or why not
+             "acquired_at", "acquired_at_source", "acquired_at_note"}
 
 
 class _MixedCohort(trfp._FakeParserCase):
@@ -121,6 +123,14 @@ class OneShapeForEveryFile(_MixedCohort):
         self.assertIsNone(by_file[d]["reader"])
         self.assertIsNone(by_file[mzml]["tdf_integrity"])
         self.assertIsNone(by_file[mzml]["reader"])
+        # the acquisition time: the .raw's creation date (a placeholder, 01/01/2026 00:00:00,
+        # in the fixture) read as Pacific time -- PST in January; the synthetic .d has no
+        # GlobalMetadata and the mzML is not read: null, each with its reason
+        self.assertEqual(by_file[raw]["acquired_at"], "2026-01-01T08:00:00Z")
+        self.assertIn("America/Los_Angeles", by_file[raw]["acquired_at_note"])
+        for f in (d, mzml):
+            self.assertIsNone(by_file[f]["acquired_at"], f)
+            self.assertTrue(by_file[f]["acquired_at_note"], f)
 
     def test_there_is_no_second_top_level_list_of_problems(self):
         """`files[].warnings` is the list to read. A top-level list for one vendor's problems

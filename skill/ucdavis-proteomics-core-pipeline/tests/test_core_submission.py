@@ -81,6 +81,9 @@ def child_env(tmp, base_url="http://127.0.0.1:9/server/api", **extra):
     e["NO_PROXY"] = e["no_proxy"] = "127.0.0.1,localhost"
     e.update(roots(tmp))
     e.update(COREOMICS_TOKEN=TOKEN, COREOMICS_BASE_URL=base_url)
+    # never the Core's real staff list (it exists on HIVE): qc_bracket.py ack falls back to
+    # refusing agent-like names only
+    e["CORE_STAFF_FILE"] = os.path.join(tmp, "no_core_staff.txt")
     e.update(extra)
     return e
 
@@ -500,16 +503,38 @@ class TestLocate(unittest.TestCase):
         self.assertIn(files["KG1"], self.files_txt())
         self.assertTrue(load(os.path.join(self.out, "locate.json"))["accepted"]["accept_ambiguous"])
 
-    def test_an_unambiguous_run_wins_over_an_ambiguous_one(self):
+    def test_an_unambiguous_and_an_ambiguous_run_ask_staff_which_is_the_sample(self):
+        """It used to take the unambiguous run with a WARN (ambiguous_files_excluded). Which run
+        IS the sample is a question about identity, so staff answer it (2.10)."""
         files = self.clean_tree()
-        tims(self.tmp, "03252025", "KG1", 7)
+        later = tims(self.tmp, "03252025", "KG1", 7)
         neighbor = {"internal_id": "PROT_0810", "id": "aaaaaaaaaaaa",
                     "submitted": "2025-03-20T09:00:00-07:00", "unique_ids": ["kg1"]}
         summary, _ = write_summary(self.tmp, neighbors=[neighbor])
         rc, out, _ = self.locate(summary)
-        self.assertEqual(rc, 0)
+        self.assertEqual(rc, 2)
+        self.assertNotIn(files["KG1"], self.files_txt())
+        g = gates(out)["choose_run"]
+        self.assertEqual(g["status"], "FAIL")
+        self.assertIn("--choose <key>=<file>", g["detail"])
+        self.assertEqual(g["samples"][0]["kind"], "collision")
+        (smp,) = g["samples"]
+        self.assertEqual(smp["unique_id"], "KG1")
+        self.assertEqual([(c["file"], c["acquired"], c["label_also_used_by"]) for c in smp["candidates"]],
+                         [(later, "2025-03-25", ["PROT_0810"]), (files["KG1"], "2025-03-12", [])])
+        self.assertNotIn("ambiguous_files_excluded", gates(out))
+        rc, out, p = self.locate(summary, "--choose", f"KG1={files['KG1']}")
+        self.assertEqual(rc, 0, p.stderr)
         self.assertIn(files["KG1"], self.files_txt())
-        self.assertEqual(gates(out)["ambiguous_files_excluded"]["status"], "WARN")
+        self.assertNotIn(later, self.files_txt())
+        self.assertEqual(gates(out)["staff_choices"]["samples"][0]["chosen"], files["KG1"])
+        rec = load(os.path.join(self.out, "locate.json"))["accepted"]["choices"]
+        self.assertEqual(rec, [{"unique_id": "KG1", "sample_key": "KG1", "file": files["KG1"],
+                                "source": "--choose"}])
+        rows = {r["unique_id"]: r for r in tsv_rows(os.path.join(self.out, "sample_files.tsv"))}
+        self.assertEqual(rows["KG1"]["chosen_by"], "--choose")
+        self.assertIn("chosen by staff (--choose) from 2 candidate run(s)", rows["KG1"]["note"])
+        self.assertEqual(rows["KG2"]["chosen_by"], "")
 
     def test_max_days_wider_than_the_neighbour_window_is_refused(self):
         """Defect 2: beyond fetch's window nobody checked who else used the label."""
@@ -517,16 +542,95 @@ class TestLocate(unittest.TestCase):
         summary, _ = write_summary(self.tmp)
         self.assertEqual(self.locate(summary, "--max-days", "300")[0], 2)
 
-    def test_several_files_per_sample_most_recent_wins_with_alternates(self):
+    def test_several_runs_per_sample_ask_staff_which_one(self):
+        """Re-injections: the most recent used to win with a WARN (alternates). Now staff say,
+        and an older run is as good an answer as a newer one."""
         files = self.clean_tree()
         newer = tims(self.tmp, "03142025", "KG2", 8)
         summary, _ = write_summary(self.tmp)
         rc, out, _ = self.locate(summary)
+        self.assertEqual(rc, 2)
+        g = gates(out)["choose_run"]
+        self.assertEqual([c["file"] for c in g["samples"][0]["candidates"]], [newer, files["KG2"]])
+        self.assertEqual(g["samples"][0]["kind"], "reinjections")
+        self.assertIn("ONE decision covers them all", g["detail"])
+        rows = {r["unique_id"]: r for r in tsv_rows(os.path.join(self.out, "sample_files.tsv"))}
+        self.assertEqual((rows["KG2"]["status"], rows["KG2"]["file"]), ("needs_choice", ""))
+        self.assertIn("--choose KG2=<file>", rows["KG2"]["note"])
+        self.assertNotIn("alternates", gates(out))
+        choices = os.path.join(self.tmp, "choices.txt")
+        with open(choices, "w") as fh:
+            fh.write(f"# staff, 2026-10-01\nKG2={files['KG2']}\n")
+        rc, out, p = self.locate(summary, "--choices", choices)
+        self.assertEqual(rc, 0, p.stderr)
+        self.assertIn(files["KG2"], self.files_txt())
+        self.assertNotIn(newer, self.files_txt())
+        self.assertEqual(load(os.path.join(self.out, "locate.json"))["accepted"]["choices"][0]["source"],
+                         f"--choices {choices}")
+
+    def test_a_choice_must_be_a_run_carrying_the_samples_id(self):
+        files = self.clean_tree()
+        tims(self.tmp, "03142025", "KG2", 8)
+        summary, _ = write_summary(self.tmp)
+        rc, out, _ = self.locate(summary, "--choose", f"KG2={files['KG13']}")
+        self.assertEqual(rc, 2)
+        self.assertIn("not one of the runs whose name carries KG2", out["error"])
+        rc, out, _ = self.locate(summary, "--choose", f"KG99={files['KG1']}")
+        self.assertEqual(rc, 2)
+        self.assertIn("no sample of this submission has that unique_id", out["error"])
+        rc, out, _ = self.locate(summary, "--choose", "KG2")
+        self.assertIn("expected UNIQUE_ID=FILE", out["error"])
+
+    def test_accepting_an_ambiguous_label_still_asks_which_of_several_runs(self):
+        self.clean_tree()
+        later = tims(self.tmp, "03252025", "KG1", 7)
+        neighbor = {"internal_id": "PROT_0810", "id": "aaaaaaaaaaaa",
+                    "submitted": "2025-02-20T09:00:00-08:00", "unique_ids": ["KG1"]}
+        summary, _ = write_summary(self.tmp, neighbors=[neighbor])
+        rc, out, _ = self.locate(summary, "--accept-ambiguous")
+        self.assertEqual(rc, 2)
+        self.assertEqual(len(gates(out)["choose_run"]["samples"][0]["candidates"]), 2)
+        rc, out, _ = self.locate(summary, "--accept-ambiguous", "--choose", f"KG1={later}")
         self.assertEqual(rc, 0)
-        g = gates(out)["alternates"]
-        self.assertEqual(g["status"], "WARN")
-        self.assertEqual(g["samples"][0]["chosen"], newer)
-        self.assertEqual(g["samples"][0]["alternates"], [files["KG2"]])
+        rows = {r["unique_id"]: r for r in load(os.path.join(self.out, "locate.json"))["samples"]}
+        self.assertTrue(rows["KG1"]["accepted_ambiguous"])
+
+    def test_two_samples_with_one_label_are_asked_and_answered_by_key(self):
+        """The label cannot say which of the two samples a run is -- not even with one run."""
+        run1 = tims(self.tmp, "03122025", "KG1", 1)
+        tims(self.tmp, "03122025", "KG2", 2)
+        rec = record(samples=[("KG1", "ctrl"), ("KG2", "ctrl"), ("kg-1", "treat")])
+        summary, _ = write_summary(self.tmp, rec)
+        rc, out, _ = self.locate(summary)
+        self.assertEqual(rc, 2)
+        g = gates(out)["duplicate_ids"]
+        self.assertEqual(g["status"], "FAIL")
+        self.assertEqual([(x["key"], x["unique_id"]) for x in g["samples"][0]],
+                         [("KG1#1", "KG1"), ("kg-1#2", "kg-1")])
+        self.assertNotIn(run1, self.files_txt(), "a shared label assigned its one run")
+        self.assertEqual({x["key"] for x in gates(out)["choose_run"]["samples"]}, {"KG1#1", "kg-1#2"})
+        rc, out, _ = self.locate(summary, "--choose", f"KG1={run1}")
+        self.assertIn("2 samples share that unique_id", out["error"])
+        self.assertIn("KG1#1 (sample KG1, ctrl)", out["hint"])
+        # KG1#1 was run; kg-1#2 was not: its one candidate is taken, so it is unmatched
+        rc, out, _ = self.locate(summary, "--choose", f"KG1#1={run1}")
+        self.assertEqual(rc, 2)
+        self.assertEqual(gates(out)["duplicate_ids"]["status"], "FAIL")
+        rows = {r["sample_key"]: r for r in tsv_rows(os.path.join(self.out, "sample_files.tsv"))}
+        self.assertEqual((rows["KG1#1"]["file"], rows["kg-1#2"]["status"]), (run1, "unmatched"))
+        rc, out, p = self.locate(summary, "--choose", f"KG1#1={run1}", "--allow-partial")
+        self.assertEqual(rc, 0, p.stderr)
+        self.assertEqual(gates(out)["duplicate_ids"]["status"], "INFO")
+
+    def test_a_weak_id_can_be_answered_by_a_choice(self):
+        rec = record(samples=[("A5", "ctrl"), ("KG2", "ctrl")])
+        mine = raw(self.tmp, "Exploris480", "mar25", "Ex03122025_400_A5.raw")
+        tims(self.tmp, "03122025", "KG2", 2)
+        summary, _ = write_summary(self.tmp, rec)
+        self.assertEqual(self.locate(summary)[0], 2)
+        rc, out, p = self.locate(summary, "--choose", f"A5={mine}")
+        self.assertEqual(rc, 0, p.stderr)
+        self.assertIn(mine, self.files_txt())
 
     def test_ht_plate_token_exits_4(self):
         self.clean_tree()
@@ -613,6 +717,327 @@ class TestLocate(unittest.TestCase):
         rc, out, _ = self.locate(summary, "--files-from", cur)
         self.assertEqual(rc, 2)
         self.assertEqual(gates(out)["paths_exist"]["status"], "FAIL")
+
+
+class TestHtFilesFrom(unittest.TestCase):
+    """An HT plate's runs carry the submitter's sample_name, never the CoreOmics unique_id
+    (a 96-well plate, 2026-10-01: --files-from with the plate's 96 runs left 96 samples
+    unmatched, and the only bypass offered, --allow-partial, means "not run"). --files-from
+    now recognises this submission's plate runs the way locate does (ht_pattern) and matches
+    them on sample_name, in their sample field, by the same token rules."""
+
+    NAMES = [("DB1", "S-101", "a"), ("DB2", "QCPOOL", "a"), ("DB3", "QCPOOL", "b"),
+             ("DB4", "BX7", "b"), ("DB5", "12.5", "a"), ("DB6", "S5", "b")]
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = self._tmp.name
+        self.env = child_env(self.tmp)
+        self.out = os.path.join(self.tmp, "loc")
+        rec = record(samples=[(u, c) for u, _n, c in self.NAMES])
+        for smp, (_u, name, _c) in zip(rec["submission_data"]["samples"], self.NAMES):
+            smp["sample_name"] = name
+        self.summary, _ = write_summary(self.tmp, rec)
+        self.files = {}
+        for i, (u, name, _c) in enumerate(self.NAMES[:5]):
+            tag = "_rep2" if u == "DB3" else ""
+            self.files[u] = raw(self.tmp, "tTOF_HT", "mar25",
+                                f"20250315_PROT_0807_100spd_{name}{tag}_S5-A{i + 1}_1_{24100 + i}.d")
+        # DB6 ("S5") was not run: every plate run has `_S5-` in its position, not its name.
+        self.list = os.path.join(self.tmp, "plate.txt")
+        with open(self.list, "w") as fh:
+            fh.write("\n".join(self.files.values()) + "\n")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def locate(self, *extra):
+        return run(["locate", "--summary", self.summary, "--out", self.out,
+                    "--files-from", self.list, *extra], self.env)
+
+    def rows(self):
+        return {r["unique_id"]: r for r in tsv_rows(os.path.join(self.out, "sample_files.tsv"))
+                if r["unique_id"]}
+
+    def test_the_sample_field_is_between_the_plate_token_and_the_position(self):
+        pat = cs.ht_pattern("PROT_0807")
+        self.assertEqual(cs.ht_sample_field("20250315_PROT_0807_100spd_S-101_S5-A1_1_24100.d", pat),
+                         "_100spd_S-101")
+        self.assertEqual(cs.ht_sample_field("20250315_0807_rerun_B7_S6-H12_1_9.d", pat), "_rerun_B7")
+
+    def test_plate_runs_match_on_sample_name_and_a_shared_name_asks_staff(self):
+        rc, out, p = self.locate()
+        self.assertEqual(rc, 2, p.stderr)
+        rows = self.rows()
+        for u in ("DB1", "DB4", "DB5"):
+            self.assertEqual((rows[u]["status"], rows[u]["file"]), ("matched", self.files[u]), u)
+            self.assertIn("matched on sample_name (HT plate run)", rows[u]["note"])
+        self.assertEqual(rows["DB6"]["status"], "unmatched", "S5 must not match the plate position")
+        g = gates(out)
+        self.assertEqual(g["ht_plate_runs"]["status"], "INFO")
+        self.assertEqual(g["choose_run"]["status"], "FAIL")
+        self.assertEqual({x["unique_id"]: sorted(c["file"] for c in x["candidates"])
+                          for x in g["choose_run"]["samples"]},
+                         {u: sorted([self.files["DB2"], self.files["DB3"]]) for u in ("DB2", "DB3")})
+        self.assertEqual(g["unmatched_samples"]["samples"][0]["unique_id"], "DB6")
+        self.assertIn("--choose <unique_id>=<file>", g["unmatched_samples"]["detail"])
+
+    def test_staff_choices_settle_the_shared_name(self):
+        rc, out, p = self.locate("--choose", f"DB2={self.files['DB2']}",
+                                 "--choose", f"DB3={self.files['DB3']}", "--allow-partial")
+        self.assertEqual(rc, 0, p.stderr)
+        rows = self.rows()
+        self.assertEqual((rows["DB3"]["file"], rows["DB3"]["chosen_by"]), (self.files["DB3"], "--choose"))
+        self.assertEqual(out["counts"]["matched"], 5)
+        self.assertEqual(gates(out)["staff_choices"]["status"], "INFO")
+
+    def test_a_well_like_label_on_a_plate_run_is_asked_not_taken(self):
+        """A submitter's tube labelled like a well (B3): a run carrying it in its sample field may
+        still be naming a well, so staff say whose run it is (2.10 review, HIGH 3)."""
+        rec = record(samples=[("WL1", "a"), ("WL2", "b")])
+        for smp, name in zip(rec["submission_data"]["samples"], ("B3", "Kidney")):
+            smp["sample_name"] = name
+        summary, _ = write_summary(self.tmp, rec, name="wells.json")
+        b3 = raw(self.tmp, "tTOF_HT", "mar25", "20250315_PROT_0807_100spd_B3_S5-C1_1_24400.d")
+        kid = raw(self.tmp, "tTOF_HT", "mar25", "20250315_PROT_0807_100spd_Kidney_S5-B3_1_24401.d")
+        lst = os.path.join(self.tmp, "wells.txt")
+        with open(lst, "w") as fh:
+            fh.write(f"{b3}\n{kid}\n")
+        rc, out, _ = run(["locate", "--summary", summary, "--out", self.out, "--files-from", lst],
+                         self.env)
+        self.assertEqual(rc, 2)
+        need = {x["unique_id"]: x for x in gates(out)["choose_run"]["samples"]}
+        self.assertEqual(need["WL1"]["kind"], "well_like_label")
+        self.assertEqual([c["file"] for c in need["WL1"]["candidates"]], [b3])
+        rows = {r["unique_id"]: r for r in tsv_rows(os.path.join(self.out, "sample_files.tsv"))
+                if r["unique_id"]}
+        # Kidney's run sits in the Core's well B3; that never makes it WL1's
+        self.assertEqual((rows["WL2"]["status"], rows["WL2"]["file"]), ("matched", kid))
+        rc, out, p = run(["locate", "--summary", summary, "--out", self.out, "--files-from", lst,
+                          "--choose", f"WL1={b3}"], self.env)
+        self.assertEqual(rc, 0, p.stderr)
+
+    def test_a_choice_must_be_in_the_list(self):
+        other = raw(self.tmp, "tTOF_HT", "mar25", "20250315_PROT_0807_100spd_QCPOOL_S5-B1_1_24200.d")
+        rc, out, _ = self.locate("--choose", f"DB2={other}")
+        self.assertEqual(rc, 2)
+        self.assertIn("not in the --files-from list", out["error"])
+
+    def test_another_submissions_plate_is_not_matched_on_names(self):
+        stray = raw(self.tmp, "tTOF_HT", "mar25", "20250315_PROT_9999_100spd_S-101_S5-C1_1_24300.d")
+        with open(self.list, "a") as fh:
+            fh.write(stray + "\n")
+        rc, out, _ = self.locate()
+        loose = {r["file"]: r for r in tsv_rows(os.path.join(self.out, "sample_files.tsv"))
+                 if r["status"] == "unassigned"}
+        self.assertIn("matches no sample id or sample name", loose[stray]["note"])
+
+
+class TestReinjections(unittest.TestCase):
+    """Several runs of ONE sample are re-injections, and one staff decision covers all of them
+    (team lead for Brett, 2026-10-01: a 96-well plate can have many): --reinjections
+    ask|latest|all. A label two samples or submissions share is a collision and still needs its
+    own --choose, whatever the policy."""
+
+    IDS = [f"RJ{i}" for i in range(1, 10)]
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = self._tmp.name
+        self.env = child_env(self.tmp)
+        self.out = os.path.join(self.tmp, "loc")
+        rec = record(samples=[(u, "ctrl" if i < 5 else "treat") for i, u in enumerate(self.IDS)])
+        self.summary, _ = write_summary(self.tmp, rec)
+        # every sample injected twice the same day: the counter orders them
+        self.first = {u: tims(self.tmp, "03122025", u, 10 + i) for i, u in enumerate(self.IDS)}
+        self.rerun = {u: tims(self.tmp, "03122025", u, 50 + i) for i, u in enumerate(self.IDS)}
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def locate(self, *extra):
+        return run(["locate", "--summary", self.summary, "--out", self.out, *extra], self.env)
+
+    def rows(self):
+        return tsv_rows(os.path.join(self.out, "sample_files.tsv"))
+
+    def files_txt(self):
+        return read(os.path.join(self.out, "files.txt")).split()
+
+    def test_ask_is_the_default_and_names_the_one_decision(self):
+        rc, out, _ = self.locate()
+        self.assertEqual(rc, 2)
+        g = gates(out)["choose_run"]
+        self.assertEqual(len(g["samples"]), 9)
+        self.assertEqual({x["kind"] for x in g["samples"]}, {"reinjections"})
+        self.assertIn("--reinjections latest", g["detail"])
+
+    def test_latest_settles_nine_reinjections_in_one_call(self):
+        rc, out, p = self.locate("--reinjections", "latest")
+        self.assertEqual(rc, 0, p.stderr)
+        self.assertEqual(sorted(self.files_txt()), sorted(self.rerun.values()))
+        g = gates(out)["reinjections"]
+        self.assertEqual(g["status"], "INFO")
+        self.assertIn("--reinjections latest: 9 sample(s)", g["detail"])
+        self.assertIn("9 run(s) set aside", g["detail"])
+        self.assertEqual({x["key"] for x in g["samples"]}, set(self.IDS))
+        rows = {r["unique_id"]: r for r in self.rows()}
+        self.assertEqual(rows["RJ3"]["reinjections"],
+                         f"latest (set aside: {os.path.basename(self.first['RJ3'])})")
+        self.assertIn("kept " + os.path.basename(self.rerun["RJ3"]), rows["RJ3"]["note"])
+        loc = load(os.path.join(self.out, "locate.json"))
+        self.assertEqual(loc["accepted"]["reinjections"], "latest")
+        rec = {r["unique_id"]: r for r in loc["samples"]}["RJ3"]["reinjections"]
+        self.assertEqual((rec["kept"], rec["set_aside"]), ([self.rerun["RJ3"]], [self.first["RJ3"]]))
+
+    def test_all_keeps_every_injection_and_says_so(self):
+        rc, out, p = self.locate("--reinjections", "all")
+        self.assertEqual(rc, 0, p.stderr)
+        self.assertEqual(len(self.files_txt()), 18)
+        g = gates(out)["reinjections"]
+        self.assertIn("technical replicate (18 runs)", g["detail"])
+        rows = [r for r in self.rows() if r["unique_id"] == "RJ1"]
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(r["reinjections"] == "all (2 runs kept as technical replicates)" for r in rows))
+        # the DE never counts them as independent samples: conditions.csv names each run's
+        # sample (Sample), which run_de.R blocks on (2.10 review, MED 7)
+        out_csv = os.path.join(self.tmp, "conditions.csv")
+        rc, js, p = run(["conditions", "--summary", self.summary, "--sample-files",
+                         os.path.join(self.out, "sample_files.tsv"), "--out", out_csv], self.env)
+        self.assertEqual(rc, 0, p.stderr + p.stdout)
+        self.assertEqual(len(js["technical_replicates"]["samples"]), 9)
+        with open(out_csv, newline="") as fh:
+            rows = list(csv.DictReader(fh))
+        self.assertEqual({r["Sample"] for r in rows}, set(self.IDS))
+        with open(out_csv + ".decisions.json") as fh:
+            self.assertEqual(json.load(fh)["technical_replicates"]["column"], "Sample")
+
+    def test_a_collision_blocks_under_every_policy(self):
+        rec = record(samples=[("KG1", "ctrl"), ("kg-1", "treat"), ("KG2", "ctrl")])
+        summary, _ = write_summary(self.tmp, rec, name="collide.json")
+        tims(self.tmp, "03122025", "KG1", 1)
+        tims(self.tmp, "03122025", "KG1", 2)
+        tims(self.tmp, "03122025", "KG2", 3)
+        for policy in ("latest", "all"):
+            rc, out, _ = run(["locate", "--summary", summary, "--out", self.out,
+                              "--reinjections", policy], self.env)
+            self.assertEqual(rc, 2, policy)
+            kinds = {x["key"]: x["kind"] for x in gates(out)["choose_run"]["samples"]}
+            self.assertEqual(kinds, {"KG1#1": "collision", "kg-1#2": "collision"}, policy)
+        # another submission's label on one of the runs is a collision too, unless accepted
+        neighbor = {"internal_id": "PROT_0810", "id": "aaaaaaaaaaaa",
+                    "submitted": "2025-03-11T09:00:00-07:00", "unique_ids": ["RJ4"]}
+        summary2, _ = write_summary(self.tmp, record(samples=[(u, "c") for u in self.IDS]),
+                                    neighbors=[neighbor], name="neighbour.json")
+        rc, out, _ = run(["locate", "--summary", summary2, "--out", self.out,
+                          "--reinjections", "latest"], self.env)
+        self.assertEqual(rc, 2)
+        self.assertEqual([x["key"] for x in gates(out)["choose_run"]["samples"]
+                          if x["kind"] == "collision"], [])
+        self.assertEqual(gates(out)["ambiguous_label"]["status"], "FAIL")
+
+    def test_latest_never_orders_same_day_runs_across_instruments(self):
+        """2.10 review: the acquisition counter counts ONE instrument's runs. Same-day runs on two
+        instruments (or with no counter) cannot be ordered, so latest asks for that sample."""
+        other = raw(self.tmp, "Exploris480", "mar25", "Ex03122025_400_RJ1.raw")
+        rc, out, _ = self.locate("--reinjections", "latest")
+        self.assertEqual(rc, 2)
+        (need,) = gates(out)["choose_run"]["samples"]
+        self.assertEqual((need["key"], need["kind"]), ("RJ1", "reinjections"))
+        self.assertEqual(sorted(c["file"] for c in need["candidates"]),
+                         sorted([self.first["RJ1"], self.rerun["RJ1"], other]))
+        row = {r["unique_id"]: r for r in self.rows()}["RJ1"]
+        self.assertIn("different instruments (Exploris480, tTOF_HT)", row["note"])
+        # every other sample was still decided by the one policy
+        self.assertEqual(len(gates(out)["reinjections"]["samples"]), 8)
+        # same day, one instrument, no counter in the names: also asked
+        for n in (401, 402):
+            raw(self.tmp, "Exploris480", "mar25", f"Ex03122025_{n}_RJ2.raw")
+        rc, out, _ = self.locate("--reinjections", "latest")
+        keys = {x["key"] for x in gates(out)["choose_run"]["samples"]}
+        self.assertIn("RJ2", keys)
+
+    def test_dates_order_runs_across_instruments(self):
+        newer = raw(self.tmp, "Exploris480", "mar25", "Ex03142025_400_RJ1.raw")
+        rc, out, p = self.locate("--reinjections", "latest")
+        self.assertEqual(rc, 0, p.stderr)
+        self.assertIn(newer, self.files_txt())
+
+    def test_latest_never_keeps_a_run_stan_flags_needs_rerun(self):
+        stan = os.path.join(self.tmp, "ht_manifest.json")
+        with open(stan, "w") as fh:
+            json.dump({"entries": [{"raw_path": self.rerun["RJ5"], "needs_rerun": True},
+                                   {"raw_path": self.first["RJ5"], "needs_rerun": False}]}, fh)
+        rc, out, p = self.locate("--reinjections", "latest", "--ht-manifest", stan)
+        self.assertEqual(rc, 0, p.stderr)
+        rec = {r["unique_id"]: r for r in load(os.path.join(self.out, "locate.json"))["samples"]}["RJ5"]
+        self.assertEqual(rec["file"], self.first["RJ5"])
+        self.assertIn("needs_rerun", rec["reinjections"]["reason"])
+
+    def test_all_with_one_name_in_two_folders_keeps_both_and_flags_them(self):
+        twin = tims(self.tmp, "03122025", "RJ1", 10, month="apr25")    # same name, another folder
+        rc, out, p = self.locate("--reinjections", "all")
+        self.assertEqual(rc, 0, p.stderr)
+        self.assertIn(twin, self.files_txt())
+        g = gates(out)["repeated_names"]
+        self.assertEqual(g["status"], "WARN")
+        self.assertIn("run_search.py stops before searching them as given", g["detail"])
+        self.assertEqual(sorted(g["names"][0]["paths"]), sorted([self.first["RJ1"], twin]))
+
+    def test_curated_lists_follow_the_same_policy(self):
+        lst = os.path.join(self.tmp, "list.txt")
+        with open(lst, "w") as fh:
+            fh.write("\n".join(list(self.first.values()) + list(self.rerun.values())) + "\n")
+        rc, out, _ = self.locate("--files-from", lst)
+        self.assertEqual(rc, 2)
+        self.assertEqual(len(gates(out)["choose_run"]["samples"]), 9)
+        self.assertEqual(self.files_txt(), [])
+        rc, out, p = self.locate("--files-from", lst, "--reinjections", "latest")
+        self.assertEqual(rc, 0, p.stderr)
+        self.assertEqual(sorted(self.files_txt()), sorted(self.rerun.values()))
+        rc, out, p = self.locate("--files-from", lst, "--reinjections", "all")
+        self.assertEqual(rc, 0, p.stderr)
+        self.assertEqual(len(self.files_txt()), 18)
+
+    def test_the_analysis_report_names_every_sample_the_policy_applied_to(self):
+        """attach carries locate's decisions into the session; the report's Data Quality Notes
+        (submission_report.quality_notes) name each sample, file names only."""
+        rc, _out, p = run(["locate", "--summary", self.summary, "--out", self.tmp,
+                           "--reinjections", "latest"], self.env)
+        self.assertEqual(rc, 0, p.stderr)
+        sess = os.path.join(self.tmp, "session")
+        os.makedirs(os.path.join(sess, "input"))
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "submission_report.py"), "attach",
+                            "--session", sess, "--record", self.tmp], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        dec = load(os.path.join(sess, "input", "locate_decisions.json"))
+        self.assertEqual(dec["reinjections_policy"], "latest")
+        self.assertEqual(dec["reinjections"]["RJ7"]["set_aside"], [os.path.basename(self.first["RJ7"])])
+        sys.path.insert(0, SCRIPTS)
+        import submission_report as sr
+        rec = sr.load(sess)
+        notes = {n["id"]: n["text"] for n in sr.quality_notes(rec, sess)}
+        self.assertIn("9 sample(s) had several runs of their own, and staff chose the newest "
+                      "injection of each (--reinjections latest)", notes["reinjections"])
+        self.assertIn(f"RJ7: kept {os.path.basename(self.rerun['RJ7'])}, set aside "
+                      f"{os.path.basename(self.first['RJ7'])}", notes["reinjections"])
+        self.assertNotIn(self.tmp, notes["reinjections"], "no paths in a collaborator's report")
+
+    def test_stage_records_the_policy_and_each_sample(self):
+        sroot = os.path.join(self.tmp, "flinders", "Data", "lab", "service")
+        group = os.path.join(sroot, "on_campus", "Placeholder lab")
+        os.makedirs(group)
+        os.makedirs(os.path.join(sroot, "off_campus"))
+        self.assertEqual(self.locate("--reinjections", "latest")[0], 0)
+        rc, out, p = run(["stage", "--summary", self.summary, "--files",
+                          os.path.join(self.out, "files.txt"), "--apply"], self.env)
+        self.assertEqual(rc, 0, p.stderr)
+        marker = load(os.path.join(group, "PROT_0807", cs.MARKER))
+        self.assertEqual(marker["locate_accepted"]["reinjections"], "latest")
+        self.assertEqual(len(marker["reinjections"]), 9)
+        md = read(os.path.join(group, "PROT_0807", "SUBMISSION.md"))
+        self.assertIn(f"| matched (re-injections: latest (set aside: "
+                      f"{os.path.basename(self.first['RJ2'])})) |", md)
 
 
 # ------------------------------------------------------------------------- stage --
@@ -755,6 +1180,25 @@ class TestStage(unittest.TestCase):
             json.dump({"mode": "files_from", "hard_fail": True, "gates": []}, fh)
         self.assertEqual(self.stage(summary, "--apply")[0], 0)
 
+    def test_apply_records_the_staff_choices_the_file_list_rests_on(self):
+        group = self.folder("on_campus", "Placeholder lab")
+        summary, _ = write_summary(self.tmp)
+        choice = {"unique_id": "KG2", "file": self.files[1], "source": "--choose"}
+        with open(os.path.join(self.tmp, "locate.json"), "w") as fh:
+            json.dump({"mode": "auto", "hard_fail": False, "gates": [],
+                       "accepted": {"allow_partial": False, "accept_ambiguous": False,
+                                    "choices": [choice]}}, fh)
+        with open(os.path.join(self.tmp, "sample_files.tsv"), "w") as fh:
+            fh.write("unique_id\tsample_name\tcondition_name\tfile\tacquired\tstatus\tchosen_by\n"
+                     f"KG1\ts1\tctrl\t{self.files[0]}\t2025-03-12\tmatched\t\n"
+                     f"KG2\ts2\tctrl\t{self.files[1]}\t2025-03-12\tmatched\t--choose\n")
+        rc, out, p = self.stage(summary, "--apply")
+        self.assertEqual(rc, 0, p.stderr)
+        project = os.path.join(group, "PROT_0807")
+        self.assertEqual(load(os.path.join(project, cs.MARKER))["locate_accepted"]["choices"], [choice])
+        md = read(os.path.join(project, "SUBMISSION.md"))
+        self.assertIn("| matched (staff choice: --choose) |", md)
+
     def test_a_hand_written_submission_md_is_kept(self):
         """Defect 16."""
         project = self.folder("on_campus", "Placeholder lab", "PROT_0807")
@@ -781,7 +1225,7 @@ class TestConditions(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def conditions(self, pairs, status="matched"):
+    def conditions(self, pairs, status="matched", extra=()):
         tsv = os.path.join(self.tmp, "sample_files.tsv")
         with open(tsv, "w", newline="") as fh:
             w = csv.writer(fh, delimiter="\t", lineterminator="\n")
@@ -792,8 +1236,13 @@ class TestConditions(unittest.TestCase):
                 os.makedirs(f, exist_ok=True)
                 w.writerow([uid, f"sample {uid}", cond, f, "2025-03-12", "filename", status, "", ""])
         out = os.path.join(self.tmp, "conditions.csv")
-        rc, js, p = run(["conditions", "--summary", self.summary, "--sample-files", tsv, "--out", out], self.env)
+        rc, js, p = run(["conditions", "--summary", self.summary, "--sample-files", tsv, "--out", out,
+                         *extra], self.env)
         return rc, js, out, p
+
+    def groups_in(self, out):
+        with open(out, newline="") as fh:
+            return dict(Counter_(r["Group"] for r in csv.DictReader(fh)))
 
     def test_clean_two_groups_writes_the_run_names_collect_conditions_uses(self):
         rc, js, out, p = self.conditions([("KG1", "ctrl"), ("KG2", "ctrl"), ("KG13", "treat"), ("KG14", "treat")])
@@ -823,6 +1272,46 @@ class TestConditions(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertTrue(js["findings"]["all_unique"])
 
+    # Integration 2.10: a condition per REPLICATE (the Core LIMS: <sample>_mix_1 .. _n) is
+    # read by collect_conditions.py as conditions + replicates, and its proposal is relayed.
+    PER_REPLICATE = [("KG1", "CtrlA_mix_1"), ("KG2", "CtrlA_mix_2"), ("KG13", "TrtB_mix_1"),
+                     ("KG14", "TrtB_mix_2")]
+
+    def test_per_replicate_conditions_are_proposed_as_conditions_and_asked(self):
+        rc, js, out, p = self.conditions(self.PER_REPLICATE)
+        self.assertEqual(rc, 2, p.stderr + p.stdout)
+        self.assertEqual(js["findings"]["replicate_labels"]["conditions"],
+                         {"CtrlA_mix": {"1": "CtrlA_mix_1", "2": "CtrlA_mix_2"},
+                          "TrtB_mix": {"1": "TrtB_mix_1", "2": "TrtB_mix_2"}})
+        self.assertNotIn("all_unique", js["findings"])          # one question, not two
+        self.assertEqual(js["groups"], {"CtrlA_mix": 2, "TrtB_mix": 2})
+        self.assertTrue(any("--replicate-labels collapse" in q for q in js["questions"]))
+        self.assertEqual(self.groups_in(out), {"CtrlA_mix": 2, "TrtB_mix": 2})
+
+    def test_the_users_collapse_answer_needs_no_more_input(self):
+        rc, js, out, p = self.conditions(self.PER_REPLICATE, extra=("--replicate-labels", "collapse"))
+        self.assertEqual(rc, 0, p.stderr + p.stdout)
+        self.assertFalse(js["needs_user_input"])
+        self.assertEqual(self.groups_in(out), {"CtrlA_mix": 2, "TrtB_mix": 2})
+
+    def test_an_ambiguous_per_replicate_column_is_asked_with_its_reasons(self):
+        rc, js, out, p = self.conditions([("KG1", "A_1"), ("KG2", "A_3"), ("KG13", "B_1"),
+                                          ("KG14", "B_2")])
+        self.assertEqual(rc, 2, p.stderr + p.stdout)
+        amb = js["findings"]["replicate_labels_ambiguous"]
+        self.assertTrue(any("do not run" in r for r in amb["reasons"]), amb)
+        self.assertNotIn("all_unique", js["findings"])
+        q = [q for q in js["questions"] if "--replicate-labels" in q]
+        self.assertEqual(len(q), 1)
+        self.assertIn("do not run", q[0])
+        self.assertEqual(self.groups_in(out), {"A_1": 1, "A_3": 1, "B_1": 1, "B_2": 1})
+
+    def test_keep_uses_the_labels_as_given(self):
+        rc, js, out, p = self.conditions(self.PER_REPLICATE, extra=("--replicate-labels", "keep"))
+        self.assertEqual(rc, 2)
+        self.assertTrue(js["findings"]["all_unique"])
+        self.assertEqual(len(self.groups_in(out)), 4)
+
     def test_singleton_group_needs_input(self):
         rc, js, _, _ = self.conditions([("KG1", "ctrl"), ("KG2", "ctrl"), ("KG13", "treat"),
                                         ("KG14", "treat"), ("KG15", "odd")])
@@ -845,6 +1334,12 @@ def Counter_(it):
 
 
 # ----------------------------------------------------------------------- deliver --
+NORM_DECIDED = {"normalization_check": {
+    "schema": "normalization_check", "schema_version": 1, "status": "decided",
+    "decision": {"quantities": "normalised", "by": "the skill: the default for this experiment "
+                                                  "type, and the data check agreed"}}}
+
+
 class DeliverBase(unittest.TestCase):
     """A staged submission with a finished session under its work dir."""
     rec_kwargs = {}
@@ -866,12 +1361,18 @@ class DeliverBase(unittest.TestCase):
         for d in ("tables", "figures", "reproducibility", "search/xic", "raw_data"):
             os.makedirs(os.path.join(o, d), exist_ok=True)
         os.makedirs(os.path.join(self.session, "logs"))
+        # qc_bracket.py's record (step 8e), verdict good: a check or concern would hold delivery
+        write(self.session, "logs/qc_bracket.json",
+              json.dumps(qc_record("good", session=self.session)))
         write(o, "Analysis_Report.html", "<html>report</html>")
         write(o, "AUDIT.md", "# audit")
         # The DE table is a symlink to a file elsewhere: the delivery must hold the BYTES.
         elsewhere = write(self.tmp, "elsewhere/DE_dpc_ctrl.vs.treat.csv", "Protein,logFC\nP1,1\n")
         os.symlink(elsewhere, os.path.join(o, "tables", "DE_dpc_ctrl.vs.treat.csv"))
         write(o, "tables/reproducibility_log.R", "# R")
+        # run_de.R's record of a DE run under a decided normalisation check (step 8): without one
+        # the delivery is held (normalization_check.delivery_gate)
+        write(o, "tables/de_provenance.json", json.dumps(NORM_DECIDED))
         write(o, "figures/pca.png", "png")
         write(o, "figures/tmp/scratch.png", "scratch")
         write(o, "tables/run1.quant", "quant")
@@ -894,6 +1395,123 @@ class DeliverBase(unittest.TestCase):
         if "--include-raw" not in extra:
             args += ["--include-raw", "no"]
         return run(args + list(extra), env or self.env)
+
+
+def qc_record(*verdicts, status="ok", session=None):
+    """A minimal qc_bracket.py record (schema 1): one instrument per verdict, covering `session`'s
+    raw-file list as it is now (the gate refuses a record for another list)."""
+    import qc_bracket
+    insts = [{"instrument": f"Instrument {i}", "verdict": v} for i, v in enumerate(verdicts, 1)]
+    order = {"good": 0, "check": 1, "no_qc_on_record": 2, "concern": 3}
+    files = qc_bracket.session_files(session)[0] if session else []
+    return {"staff_only_marker": qc_bracket.STAFF_ONLY_MARKER,      # first, as qc_bracket writes it
+            "schema": "qc_bracket/1", "schema_version": 1, "status": status,
+            "verdict": max(verdicts, key=order.get) if verdicts and status == "ok" else None,
+            "instruments": insts, "stan": {"url": "http://stan.invalid", "error": None},
+            "files": {"n": len(files), "list_sha256": qc_bracket.list_sha256(files)},
+            "not_checked": []}
+
+
+class TestDeliverQcGate(DeliverBase):
+    """Brett, 2026-10-01: the QC verdict is staff-only, and a check or concern holds the client
+    delivery until a staff member records an acknowledgement (who, when, a one-line note)."""
+
+    def set_qc(self, *verdicts, **kw):
+        write(self.session, "logs/qc_bracket.json",
+              json.dumps(qc_record(*verdicts, session=self.session, **kw)))
+
+    def ack(self, note="reviewed the 2 runs after the failed QC; data stand"):
+        p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "qc_bracket.py"), "ack",
+                            "--session", self.session, "--by", "staffexample", "--note", note],
+                           capture_output=True, text=True, env=self.env)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+
+    def test_check_or_concern_holds_the_delivery_dry_run_included(self):
+        for verdicts in (("check",), ("good", "concern")):
+            self.set_qc(*verdicts)
+            rc, out, _ = self.deliver()
+            self.assertEqual(rc, 2, verdicts)
+            self.assertIn("held for staff review", out["error"])
+            self.assertIn("qc_bracket.py ack", out["hint"])
+            rc, out, _ = self.deliver("--apply")
+            self.assertEqual(rc, 2, verdicts)
+            self.assertFalse(os.path.exists(self.delivery))
+
+    def test_an_acknowledgement_lets_it_through_and_a_new_record_needs_a_new_one(self):
+        self.set_qc("concern")
+        self.ack()
+        rc, out, p = self.deliver("--apply")
+        self.assertEqual(rc, 0, p.stdout + p.stderr)
+        # delivery.json: whether and when, never who or why (2.10 safety review)
+        self.assertEqual(set(out["qc_gate"]), {"proceed", "record_sha256", "ack_at"})
+        with open(os.path.join(self.session, "logs", "qc_gate.json")) as fh:
+            self.assertEqual(json.load(fh)["gate"]["ack"]["by"], "staffexample")
+        self.set_qc("check")                          # a re-run: another record
+        rc, out, _ = self.deliver("--label", "t2")
+        self.assertEqual(rc, 2)
+
+    def test_good_and_no_qc_on_record_proceed_and_no_qc_is_noted_staff_side(self):
+        self.set_qc("good", "no_qc_on_record")
+        rc, out, p = self.deliver()
+        self.assertEqual(rc, 0, p.stdout + p.stderr)
+        self.assertEqual(out["qc_gate"]["no_qc_on_record"], ["Instrument 2"])   # printed to staff
+        self.assertFalse([w for w in out["warnings"] if "QC" in w])          # not in delivery.json
+
+    def test_no_record_or_a_check_that_could_not_run_needs_an_acknowledgement(self):
+        os.remove(os.path.join(self.session, "logs", "qc_bracket.json"))
+        rc, out, _ = self.deliver()
+        self.assertEqual(rc, 2)
+        self.assertIn("were not checked", out["error"])
+        self.set_qc(status="stan_unreachable")
+        rc, out, _ = self.deliver()
+        self.assertEqual(rc, 2)
+        self.assertIn("could not be checked", out["error"])
+
+    def test_a_record_for_another_file_list_is_refused_even_acknowledged(self):
+        self.set_qc("check")
+        self.ack()
+        write(self.session, "input/raw_files.txt", "# Raw MS files\n" + "\n".join(self.raw_files) + "\n")
+        rc, out, _ = self.deliver()
+        self.assertEqual(rc, 2)
+        self.assertIn("re-run step 8e", out["error"])
+        self.assertTrue(out["qc_gate"]["needs_rerun"])
+
+    def test_delivery_json_carries_no_verdict_and_is_not_world_readable(self):
+        """2.10 safety review: deliver wrote the gate -- verdict, the acknowledging login, the
+        note -- into <session>/delivery.json at 0664, in a service tree others can read."""
+        old = os.umask(0o002)                                # HIVE's umask
+        try:
+            self.set_qc("concern")
+            self.ack(note="CANARYNOTE reviewed")
+            rc, out, p = self.deliver("--apply")
+            self.assertEqual(rc, 0, p.stdout + p.stderr)
+        finally:
+            os.umask(old)
+        dj = os.path.join(self.session, "delivery.json")
+        text = read(dj)
+        for canary in ('"verdict"', "concern", "CANARYNOTE", "staffexample", "reason"):
+            self.assertNotIn(canary, text.split('"qc_gate"')[1].split("}")[0], canary)
+        self.assertNotIn("CANARYNOTE", text)
+        self.assertEqual(os.stat(dj).st_mode & 0o777, 0o640)
+
+    def test_a_qc_record_under_another_name_is_never_delivered(self):
+        self.set_qc("concern")
+        self.ack()
+        write(self.output, "figures/notes.json", read(os.path.join(self.session, "logs",
+                                                                   "qc_bracket.json")))
+        rc, out, p = self.deliver("--apply")
+        self.assertEqual(rc, 0, p.stdout + p.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.delivery, "figures", "notes.json")))
+        self.assertIn("staff-only", read(os.path.join(self.delivery, "MANIFEST.txt")))
+
+    def test_the_qc_record_is_never_delivered(self):
+        self.set_qc("concern")
+        self.ack()
+        write(self.output, "tables/qc_bracket.json", "{}")       # a stray copy, wherever it lands
+        rc, out, p = self.deliver("--apply")
+        self.assertEqual(rc, 0, p.stdout + p.stderr)
+        for dp, _dn, fns in os.walk(self.delivery):
+            self.assertFalse([f for f in fns if f.startswith("qc_bracket")], dp)
 
 
 class TestDeliver(DeliverBase):
@@ -1091,6 +1709,8 @@ class TestDeliver(DeliverBase):
         self.assertEqual(rc, 2)
         self.assertIn("does not belong", out["error"])
         write(other, "input/raw_files.txt", "# Raw MS files\n" + "\n".join(self.raw_files) + "\n")
+        # its QC check covers its own file list (the gate refuses a record for another one)
+        write(other, "logs/qc_bracket.json", json.dumps(qc_record("good", session=other)))
         rc, out, _ = run(["deliver", "--summary", self.summary, "--session", other, "--include-raw", "no"], self.env)
         self.assertEqual(rc, 0)
 
@@ -1818,7 +2438,7 @@ class TestIdentifyBySampleIds(unittest.TestCase):
     def test_a_named_submission_that_does_not_exist_is_asked_about(self):
         with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
             self.serve(fake, [[rec_0756()]])
-            rc, out, _ = run(["identify", "/svc/PROT_0999/a.d"], child_env(tmp, fake.base))
+            rc, out, _ = run(["identify", "/svc/PROT_9999/a.d"], child_env(tmp, fake.base))
             self.assertEqual((rc, out["status"]), (2, "not_found"))
 
     def test_a_failed_lookup_says_so_and_how_to_fix_the_token(self):

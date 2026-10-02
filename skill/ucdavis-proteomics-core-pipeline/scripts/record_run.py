@@ -371,6 +371,17 @@ def skill_version():
     return sv.skill_version()
 
 
+def reanalysis_link(session):
+    """session.reanalysis_of() -- the one reader of a session's link to the analysis it re-does:
+    {"session", "version"}, or None. Piped to a remote python there is no sibling: None."""
+    try:
+        import session as sess
+    except ImportError:
+        return None
+    rec = sess.reanalysis_of(session)
+    return {"session": rec["session"], "version": rec.get("version")} if rec else None
+
+
 def _named_version(plan):
     """The plan's skill version for "with skill X or later" -- "this version" when it is not a
     number (not recorded, or skill_version.py's unknown tag)."""
@@ -1662,6 +1673,8 @@ def plan_analysis(plan, session, a, zip_cap):
     for md in (os.path.join(session, "README.md"), os.path.join(out_d, "AI_Analysis_Report.md")):
         expert = expert or section_of(md, "Expert Review Notes")
     an = {"session": session, "finalized": mtime_iso(man_txt) if man_txt else None,
+          # the analysis this one re-does (session.reanalysis_of), or None
+          "reanalysis_of": reanalysis_link(session),
           "recorded_at": now_iso(),
           "de": {k: de.get(k) for k in ("method", "contrasts", "significant_per_contrast",
                                          "q_cutoff", "logfc", "adjp")} if de else None,
@@ -1682,6 +1695,9 @@ def plan_analysis(plan, session, a, zip_cap):
           # POINTED TO, never copied -- they stay Core-internal in the session
           "conversation": _conversation(session),
           "decisions": first_existing([os.path.join(session, "logs", "decisions.md")]),
+          # qc_bracket.py's verdict on the instrument's QC around the project: STAFF-ONLY, so it
+          # is recorded here (the registry is the Core's) and never in anything delivered
+          "instrument_qc": qc_facts(session),
           "audit": [{"check": f.get("check"), "status": f.get("status"),
                      "message": f.get("message")} for f in (audit.get("findings") or [])
                     if isinstance(f, dict) and f.get("status") in ("WARN", "FAIL")],
@@ -1699,6 +1715,10 @@ def plan_analysis(plan, session, a, zip_cap):
     # ---- copies, mirroring the session: top level, input/, output/, scripts/
     for rel in ("README.md", "README.html", "AGENTS.md", "MANIFEST.txt", "DIFFERENCES.md"):
         add_copy(plan, os.path.join(session, rel), rel, "analysis")
+    # the staff-only QC record, its staff page and acknowledgements (qc_bracket.py) -- the board
+    # reads the record from here
+    for f in ("qc_bracket.json", "qc_bracket.md", "qc_bracket_ack.json", "qc_gate.json"):
+        add_copy(plan, os.path.join(session, "logs", f), f"qc/{f}", "analysis")
     inp = os.path.join(session, "input")
     for f in listdir(inp):
         if f in ("conditions.csv", "raw_files.txt") or f.endswith(
@@ -2305,6 +2325,59 @@ def render_search(s):
     return L
 
 
+def qc_facts(session):
+    """The staff-only QC record of a session (qc_bracket.py, logs/qc_bracket.json): status,
+    verdict, the summary lines and the client-delivery gate -- or why there is none. Piped alone to
+    a remote python there is no qc_bracket to import: the record is read, the gate is not."""
+    path = os.path.join(session, "logs", "qc_bracket.json")
+    rec = load_json(path) if os.path.isfile(path) else None
+    out = {"record": path if os.path.isfile(path) else None,
+           "schema_version": None, "status": None, "verdict": None, "checked_at": None,
+           "summary": None, "gate": None, "note": None}
+    if os.path.isfile(path) and not (isinstance(rec, dict)
+                                    and str(rec.get("schema", "")).startswith("qc_bracket/")):
+        out["note"] = "logs/qc_bracket.json could not be read"
+    elif rec:
+        out.update({k: rec.get(k) for k in ("schema_version", "status", "verdict", "checked_at",
+                                            "summary")})
+    else:
+        out["note"] = "qc_bracket.py was not run for this session (SKILL.md step 8e)"
+    try:
+        import qc_bracket
+        out["gate"] = qc_bracket.delivery_gate(session)
+    except ImportError:
+        out["gate"] = None
+    except Exception as e:                    # the record is reported, never stopped by this
+        out["gate"] = {"error": f"{type(e).__name__}: {e}"}
+    return out
+
+
+def render_qc(q):
+    """SEARCH_LOG.md's staff-only section: the QC verdict and whether the client report may go."""
+    if not q:
+        return []
+    L = ["", "## Instrument QC around this project (staff only -- never delivered)"]
+    if q.get("verdict"):
+        L.append(f"- **Verdict:** {str(q['verdict']).replace('_', ' ').upper()} (qc_bracket.py, "
+                 f"checked {q.get('checked_at') or '?'}); the staff page is `qc/qc_bracket.md`")
+    else:
+        L.append(f"- **Not checked:** {q.get('note') or q.get('status') or 'no verdict'}")
+    g = q.get("gate") or {}
+    if g.get("error"):
+        L.append(f"- **Client delivery:** the gate could not be read ({g['error']})")
+    elif g:
+        ack = g.get("ack") or {}
+        L.append("- **Client delivery:** " + (
+            f"may go out; acknowledged by {ack.get('by')} at {ack.get('at')}: \"{ack.get('note')}\""
+            if ack else "may go out" if g.get("proceed") else
+            f"HELD until a staff member acknowledges ({g.get('reason')}): `qc_bracket.py ack "
+            f"--session <session> --by <HIVE login> --note \"<one line>\"`"))
+        if g.get("no_qc_on_record"):
+            L.append(f"- **No QC on record in STAN for:** {', '.join(g['no_qc_on_record'])}")
+    L += [f"  - {ln}" for ln in str(q.get("summary") or "").splitlines()[1:]]
+    return L
+
+
 def _conversation(session):
     """logs/conversation/ in the session: where it is and how many conversations -- or None."""
     d = os.path.join(session, "logs", "conversation")
@@ -2427,6 +2500,7 @@ def render_log(rec):
                  + (f" ({iss['note']})" if iss.get("note") else ""))
     if an:
         L += render_analysis(rec, an)
+        L += render_qc(an.get("instrument_qc"))
         if an.get("expert_review_notes"):
             L += ["", "## Expert Review Notes", "", an["expert_review_notes"]]
     L += ["", "## Copies in this folder"]
@@ -2615,10 +2689,60 @@ def merge(old, plan, folder, route_name):
     return rec
 
 
+def analysis_body(rec):
+    """The analysis entry's lines for data_analysis.md -- what a finalize produced, no dates."""
+    an = rec.get("analysis") or {}
+    folder = f"sessions/{rec['name']}/"
+    body = []
+    for x in an.get("deliverables") or an.get("docx") or []:   # report of record first
+        body.append(f"- **{x['kind']}:** `{folder}output/{os.path.basename(x['file'])}`")
+    sig = (an.get("de") or {}).get("significant_per_contrast") or {}
+    if sig:
+        body.append("- **Significant proteins:** " + ", ".join(
+            f"{k} = {fmt_n(v)}" for k, v in sig.items()))
+    zc, z = rec.get("zip_copy") or {}, an.get("zip") or {}
+    if z.get("exists"):
+        body.append(f"- **Reproducibility / zip:** "
+                    + (f"`{folder}{zc['rel']}`" if zc.get("copied") else
+                       f"`{z.get('path')}` (not copied: {zc.get('reason') or z.get('reason')})"))
+    if an.get("reproduce_md"):
+        body.append(f"- **Reproduce:** `{folder}scripts/REPRODUCE.md`")
+    ro = an.get("reanalysis_of") or {}
+    if ro.get("session"):
+        body.append(f"- **Re-analysis of:** `{ro['session']}`"
+                    + (f" (version {ro['version']})" if ro.get("version") else "")
+                    + " -- `DIFFERENCES.md` says what changed")
+    body.append(f"- **CoreOmics submission:** {prot_label(rec.get('prot'))}")
+    return body
+
+
+def analysis_digest(rec):
+    """What makes one finalize's entry different from another's: a digest of analysis_body().
+    The SAME analysis finalized again (to add a podcast, say) has the same digest, so the master
+    log and the activity log get nothing new; the old marker, keyed on MANIFEST.txt's time,
+    changed on every finalize and appended an identical entry each time (2026-09-28). Sizes are
+    left out of what is hashed: an over-cap zip's reason quotes its size, which a podcast added
+    to the zip changes, and that is not a changed analysis (review of 2.10)."""
+    body = [_SIZE_RE.sub("<size>", ln) for ln in analysis_body(rec)]
+    return hashlib.sha1("\n".join(body).encode()).hexdigest()[:12]
+
+
+# a size as fmt_bytes writes it ("2.4 GB", "512 MB", "12 B"), for analysis_digest
+_SIZE_RE = re.compile(r"\b\d+(?:[.,]\d+)?\s?(?:[KMGTP]i?)?B\b")
+
+
+def analysis_logged_before(rec):
+    """True when this run's master log already has an analysis entry (any finalize, any
+    marker form)."""
+    key = key16(rec["identity"].get("out") or rec["identity"].get("session"))
+    return any(f" {key} analysis " in m for m in rec.get("master_log") or [])
+
+
 def master_entries(rec, event):
     """[(marker, text)] for data_analysis.md: the run's first entry is a `## date:` block; every
     later event is a dated `###` line under it. The marker keeps an event from being logged
-    twice for the same status."""
+    twice for the same status -- and an analysis twice for the same content (analysis_digest),
+    so re-running finalize is idempotent."""
     s, an = rec.get("search") or {}, rec.get("analysis") or {}
     name, key = rec["name"], key16(rec["identity"].get("out") or rec["identity"].get("session"))
     folder = f"sessions/{name}/"
@@ -2663,25 +2787,12 @@ def master_entries(rec, event):
         out.append((marker, text.rstrip("\n") + f"\n{marker}\n"))
         first = False
     if event == "analysis-done" and an:
-        marker = f"<!-- record_run {key} analysis {an.get('finalized') or 'complete'} -->"
-        body = []
-        for x in an.get("deliverables") or an.get("docx") or []:   # report of record first
-            body.append(f"- **{x['kind']}:** `{folder}output/{os.path.basename(x['file'])}`")
-        sig = (an.get("de") or {}).get("significant_per_contrast") or {}
-        if sig:
-            body.append("- **Significant proteins:** " + ", ".join(
-                f"{k} = {fmt_n(v)}" for k, v in sig.items()))
-        zc, z = rec.get("zip_copy") or {}, an.get("zip") or {}
-        if z.get("exists"):
-            body.append(f"- **Reproducibility / zip:** "
-                        + (f"`{folder}{zc['rel']}`" if zc.get("copied") else
-                           f"`{z.get('path')}` (not copied: {zc.get('reason') or z.get('reason')})"))
-        if an.get("reproduce_md"):
-            body.append(f"- **Reproduce:** `{folder}scripts/REPRODUCE.md`")
-        body.append(f"- **CoreOmics submission:** {prot_label(rec.get('prot'))}")
+        marker = f"<!-- record_run {key} analysis {analysis_digest(rec)} -->"
+        body = analysis_body(rec)
         head = (f"\n## {a_day}: analysis of {name} -- finalized\n\n- **Session:** "
                 f"[{folder}]({folder}) -- `SEARCH_LOG.md`\n" if first else
-                f"\n### {a_day} update -- {name}: analysis complete\n\n")
+                f"\n### {a_day} update -- {name}: analysis "
+                f"{'re-finalized, changed' if analysis_logged_before(rec) else 'complete'}\n\n")
         out.append((marker, head + "\n".join(body) + f"\n{marker}\n"))
     return out
 
@@ -2741,11 +2852,16 @@ def activity_rows(rec, event, plan):
     if event == "analysis-done" and an:
         sig = (an.get("de") or {}).get("significant_per_contrast") or {}
         zc = rec.get("zip_copy") or {}
+        # keyed on the content, like the master log: the same analysis finalized again adds no
+        # row; a changed one adds one, marked re-finalized
+        again = (analysis_logged_before(rec)
+                 or any(str(k).startswith("analysis:") for k in rec.get("activity_logged") or []))
         notes = "; ".join(x for x in (
             ", ".join(f"{k}={v}" for k, v in sig.items()) or None,
             ("zip copied" if zc.get("copied") else f"zip not copied: {zc.get('reason')}")
-            if (an.get("zip") or {}).get("exists") else "no session zip") if x) + prot_note
-        out.append((None, csv_row([ts_min(), name, "analysis_completed",
+            if (an.get("zip") or {}).get("exists") else "no session zip",
+            "re-finalized" if again else None) if x) + prot_note
+        out.append((f"analysis:{analysis_digest(rec)}", csv_row([ts_min(), name, "analysis_completed",
                                    f"session.py finalize ({(an.get('de') or {}).get('method') or '?'})",
                                    an.get("session"), "completed", notes])))
     return out
@@ -2918,6 +3034,12 @@ def _execute(plan, a, deadline, route_name, root, ident):
         cur["data_quality_notes"] = data_quality_notes(cur)
         cur.setdefault("master_log", [])
         cur.setdefault("activity_logged", [])
+        if plan["event"] == "analysis-done" and cur.get("analysis"):
+            mark = f" analysis {analysis_digest(cur)} -->"
+            analysis_logged = ("unchanged" if any(mark in m for m in cur["master_log"]) else
+                               "changed" if analysis_logged_before(cur) else "new")
+        else:
+            analysis_logged = None
         for marker, text in master_entries(cur, plan["event"]):
             if marker in cur["master_log"]:
                 continue
@@ -2946,6 +3068,10 @@ def _execute(plan, a, deadline, route_name, root, ident):
                zip_copied=zc.get("copied") if z.get("exists") else None,
                n_data_quality_notes=len(cur["data_quality_notes"]),
                findings=[f["id"] for f in cur.get("findings") or []])
+    if analysis_logged:
+        # new / changed / unchanged: an unchanged re-finalize logged nothing new, and finalize
+        # does not post it to Slack again (session._finish_hooks)
+        out["analysis_logged"] = analysis_logged
     return out
 
 

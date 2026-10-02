@@ -212,12 +212,20 @@ block_validate_column <- function(meta, block_col, covariates) {
 }
 
 # The checks that need the design as it will be fitted. Returns the block sizes.
-block_check <- function(block, design, block_col) {
+# technical = TRUE: the block is the biological sample of technical replicates (run_de.R's
+# Sample column), where a sample injected once is a block of one -- duplicateCorrelation takes
+# it -- so only "no sample has two runs left" stops.
+block_check <- function(block, design, block_col, technical = FALSE) {
   sizes <- table(block)
   if (length(sizes) < 2)
     stop(sprintf("--block %s: every sample is in the same block ('%s'); there is nothing to estimate.",
                  block_col, names(sizes)[1]), call. = FALSE)
-  small <- names(sizes)[sizes < 2]
+  if (technical && !any(sizes >= 2))
+    stop(sprintf(paste0(
+      "%s: no sample has two analysed runs left, so there are no technical replicates to block ",
+      "on (a run removed from the analysis can leave its sample with one). Drop the %s column, ",
+      "or check which runs were removed."), block_col, block_col), call. = FALSE)
+  small <- if (technical) character(0) else names(sizes)[sizes < 2]
   if (length(small))
     stop(sprintf(paste0(
       "--block %s: %d block(s) hold a single analysed sample (%s). A block needs at least 2 ",
@@ -416,6 +424,11 @@ block_engine_suffix <- function(rec) {
 
 block_methods_lines <- function(rec) {
   pad <- "                "
+  tr <- rec$technical_replicates
+  tech <- if (!is.null(tr))
+    sprintf(paste0("Replicates    : %d sample(s) were injected more than once (%d runs; %s column): ",
+                   "technical replicates, blocked on %s below, never counted as independent samples"),
+            tr$n_samples, tr$n_runs, tr$column, tr$column)
   if (!isTRUE(rec$applied) && is.null(rec$column))
     return("Blocking      : none -- samples modelled as independent (no --block)")
   if (!isTRUE(rec$applied))
@@ -454,7 +467,7 @@ block_methods_lines <- function(rec) {
         }, character(1))))
     } else NULL,
     if (length(rec$warnings)) sprintf("%sCAUTION: %s", pad, unlist(rec$warnings)))
-  out[!is.na(out)]
+  c(tech, out[!is.na(out)])
 }
 
 # Columns that look like a blocking unit the user did not pass: a level that recurs

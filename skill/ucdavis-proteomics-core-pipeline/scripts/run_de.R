@@ -16,6 +16,7 @@
 #   maxlfq  MaxLFQ + limma. DE-LIMP alternative path.
 #           DIA-NN PG.MaxLFQ -> log2 -> quantile normalize
 #           (limma::normalizeBetweenArrays) -> lmFit -> contrasts.fit -> eBayes.
+#           (--quantities raw: a --no-norm report's PG.MaxLFQ, and no quantile step.)
 #           NAs are left in place; limma drops them per row at fit time.
 #           Proteins entirely missing in one condition are reported separately
 #           as qualitative on/off calls.
@@ -40,6 +41,15 @@
 #   within: contrasts inside a block (bait vs IgG in the same mice) come from the blocked
 #   fit, contrasts BETWEEN blocks (Old vs Young mice) from the same data fitted without it;
 #   all: every contrast from the blocked fit. blocking.R says why.
+# --quantities normalised|raw (default normalised): which of DIA-NN's quantities the DE reads.
+#   normalised  dpc: Precursor.Normalised (DIA-NN's cross-run normalisation); maxlfq: PG.MaxLFQ,
+#               then quantile normalisation.
+#   raw         dpc: Precursor.Quantity (DIA-NN's non-normalised quantity); maxlfq: PG.MaxLFQ of a
+#               report searched with --no-norm (refused otherwise), with NO quantile step.
+#   The choice is normalization_check.py's (the experiment type's default, checked against the
+#   data); --normalization-check <its json> holds the DE to it -- and to the report and conditions
+#   the check was made on -- and records it. In a session that records an experiment type a DE
+#   without it is refused; --check-input marks the check's own two DEs.
 # --block-effect auto|fixed|random (default auto): auto fits the block as a FIXED effect
 #   when it is crossed with the groups and every contrast is within one block (a paired
 #   design: the exact analysis), and as a random effect otherwise (nested / multi-level).
@@ -85,6 +95,20 @@ adjp_thr  <- as.numeric(getarg("--adjp", "0.05"))
 # see contaminants.R for the rule and why. --keep-contaminants quantifies and tests them
 # with the sample proteins instead; either way de_provenance.json records which.
 keep_contaminants <- isTRUE(getarg("--keep-contaminants", FALSE))
+# Which DIA-NN quantities (see the header): DIA-NN's normalised ones, or its non-normalised
+# ones -- an IP's controls carry little protein, and normalising them up hides the enrichment.
+# Decided by normalization_check.py, which --normalization-check names; recorded either way.
+quantities <- getarg("--quantities", "normalised")
+if (!quantities %in% c("normalised", "raw")) stop("--quantities must be 'normalised' or 'raw'")
+norm_check_path <- getarg("--normalization-check", NULL)
+if (isTRUE(norm_check_path)) stop("--normalization-check needs the check's json path")
+if (!is.null(norm_check_path) && !file.exists(norm_check_path))
+  stop("--normalization-check ", norm_check_path, " does not exist")
+# --check-input: this DE is one of the two the check compares (step 8's normalised and raw runs
+# into <S>/output/norm_check/), never a final DE -- recorded so, and never deliverable.
+check_input <- isTRUE(getarg("--check-input", FALSE))
+if (check_input && !is.null(norm_check_path))
+  stop("--check-input is for the check's own DEs; the final DE takes --normalization-check only")
 # The samples ARE keratin (hair, wool, feather, skin, nail ...): keratin is the analyte, so the
 # contaminant filter keeps precursors of keratin-family Cont_ entries. Normally read from the
 # FASTA sidecar (fetch_fasta.py --keratin-sample) or search_provenance.json; this flag declares
@@ -193,6 +217,59 @@ if (!all(c("File.Name", "Group") %in% names(meta)))
   stop("metadata CSV must have at least File.Name and Group columns")
 covariates <- intersect(c("Batch", "Covariate1", "Covariate2"), names(meta))
 
+# ---- technical replicates (the Sample column) ---------------------------------
+# core_submission.py locate --reinjections all keeps every injection of a sample, and
+# `conditions` names each run's biological sample in the Sample column (collect_conditions.py
+# TECH_REPLICATE_COLUMN -- the column name IS the declaration, so a CSV copied without its
+# decisions file still carries it). Runs sharing a Sample are technical replicates: counted as
+# independent they inflate n (2.10 review, MED 7). The route run_de.R has for them is
+# blocking: the sample is fitted as a random blocking factor (limma duplicateCorrelation),
+# EVERY contrast is reported from that fit (the samples are nested in the groups, so the
+# independent fit would count each injection), and a sample injected once is a block of one.
+# Averaging the injections first is not offered: DPC-Quant's per-run standard errors and
+# observation counts would have to be combined, not just its means. Methods say which.
+TECH_REPLICATE_COLUMN <- "Sample"
+tech_reps <- NULL
+if (TECH_REPLICATE_COLUMN %in% names(meta)) {
+  .smp <- trimws(as.character(meta[[TECH_REPLICATE_COLUMN]]))
+  .n <- table(.smp[!is.na(.smp) & nzchar(.smp)])
+  if (any(.n > 1)) {
+    .span <- tapply(as.character(meta$Group), .smp, function(x) length(unique(x)))
+    if (any(.span > 1))
+      stop(sprintf(paste0("Sample %s has runs in more than one Group (%s): runs of one biological ",
+                          "sample are technical replicates and belong to one group. Fix the ",
+                          "Sample or Group column of %s."),
+                   names(.span)[.span > 1][1],
+                   paste(unique(meta$Group[.smp == names(.span)[.span > 1][1]]), collapse = ", "),
+                   meta_path), call. = FALSE)
+    if (!is.null(block_col) && !identical(block_col, TECH_REPLICATE_COLUMN))
+      stop(sprintf(paste0("--block %s and technical replicates (the Sample column: %d sample(s) ",
+                          "with several runs) cannot both be blocked in one fit. Keep one injection ",
+                          "per sample (core_submission.py locate --reinjections latest), or drop ",
+                          "--block %s."), block_col, sum(.n > 1), block_col), call. = FALSE)
+    if (!is.null(getarg("--block-effect", NULL)) && !identical(block_effect_req, "random"))
+      stop("technical replicates (the Sample column) are blocked as a random effect; ",
+           "--block-effect ", block_effect_req, " cannot apply to them", call. = FALSE)
+    if (!is.null(getarg("--block-scope", NULL)) && !identical(block_scope, "all"))
+      stop("technical replicates (the Sample column) are blocked in every contrast; ",
+           "--block-scope ", block_scope, " cannot apply to them", call. = FALSE)
+    block_col <- TECH_REPLICATE_COLUMN
+    block_effect_req <- "random"
+    block_scope <- "all"
+    tech_reps <- list(column = TECH_REPLICATE_COLUMN, n_samples = sum(.n > 1),
+                      n_runs = as.integer(sum(.n[.n > 1])),
+                      samples = as.list(as.integer(.n[.n > 1])),
+                      how = paste0("blocked: the sample as a random blocking factor ",
+                                   "(duplicateCorrelation), every contrast from that fit"))
+    names(tech_reps$samples) <- names(.n)[.n > 1]
+    message(sprintf(paste0("[run_de] technical replicates: %d sample(s) have several runs (%s); ",
+                           "blocked on %s as a random effect, not counted as independent samples"),
+                    tech_reps$n_samples,
+                    paste(sprintf("%s x%d", names(.n)[.n > 1], .n[.n > 1]), collapse = ", "),
+                    TECH_REPLICATE_COLUMN))
+  }
+}
+
 # ~ 0 + groups [+ covariates]. A function because the design is built twice: from the
 # whole metadata up front, so a --block that cannot be fitted fails before quantification
 # (which can take an hour), and again from the runs that survived it.
@@ -246,7 +323,7 @@ check_residual_df <- function(design, where) {
 if (!is.null(block_col)) {
   block_validate_column(meta, block_col, covariates)
   block_check(trimws(as.character(meta[[block_col]])), build_design(meta, covariates)$design,
-              block_col)
+              block_col, technical = !is.null(tech_reps))
   # a requested fixed effect the design cannot carry (block nested in the groups) stops here
   if (identical(block_effect_req, "fixed"))
     block_choose_effect("fixed", trimws(as.character(meta[[block_col]])),
@@ -273,6 +350,65 @@ check_residual_df(build_design(meta, covariates)$design, "in this design")
 # The search's own folder (search_provenance.json, its log): the report's, or its parent for
 # FragPipe's DIA route (<workdir>/dia-quant-output/report.*) -- contaminants.R search_folder().
 search_dir <- search_folder(input)
+# A Sage search whose LFQ window did not fit its runs' MS1 mass error has quantities known to be
+# wrong: run_search.py --adapt-only refuses to build its report, and so does this, for a report
+# built before that gate (2.10). Open again once the search is re-run with the corrected window,
+# or once the user accepts the quantities (run_search.py --adapt-only --accept-lfq-window). The
+# rule is sage_lfq_check.gated(), asked here -- never re-decided.
+if (!is.null(search_dir) && file.exists(file.path(search_dir, "sage_lfq_check.json"))) {
+  .lfq <- python_json("sage_lfq_check.py", "gate", c("--out", shQuote(search_dir)),
+                      "read the Sage LFQ window gate")
+  if (is.null(.lfq$res))
+    stop("this Sage search has an LFQ window check (", file.path(search_dir, "sage_lfq_check.json"),
+         ") that could not be evaluated: ", .lfq$why, ". Fix that, then run the DE again.",
+         call. = FALSE)
+  if (isTRUE(.lfq$res$refused)) stop(.lfq$res$message, call. = FALSE)
+}
+# The normalisation decision (normalization_check.py): the DE reads the quantities it decided --
+# never the other ones silently, in either direction -- and records the check. Its rule is
+# normalization_check.gate(), asked here. Without a check the record says it was not run.
+# A session that records an experiment type has a default this DE must not override silently:
+# without a check (or --check-input) it is refused, naming step 8's exact commands
+# (normalization_check.required(): the one rule, asked here). A DE outside such a session runs,
+# recorded as not_run -- which audit_results.py warns about and core_submission.py deliver holds.
+if (is.null(norm_check_path) && !check_input) {
+  .rq <- python_json("normalization_check.py", "required",
+                     c("--input", shQuote(normalizePath(input, mustWork = FALSE)),
+                       "--metadata", shQuote(normalizePath(meta_path, mustWork = FALSE)),
+                       "--method", method),
+                     "ask whether this session records an experiment type")
+  if (is.null(.rq$res))
+    stop("could not ask whether this DE's session records an experiment type (", .rq$why,
+         "): run it with --normalization-check, or fix that first", call. = FALSE)
+  if (isTRUE(.rq$res$required)) stop(.rq$res$message, call. = FALSE)
+}
+norm_check_rec <- if (is.null(norm_check_path)) {
+  list(schema = "normalization_check", schema_version = 1L,
+       status = if (check_input) "check_input" else "not_run",
+       quantities_applied = quantities,
+       note = if (check_input)
+         paste("one of the two DEs normalization_check.py compares (--check-input),",
+               "not a final DE: its quantities were not decided")
+       else paste("no normalisation check was run for this DE (normalization_check.py):",
+                  "whether these quantities suit the experiment was NOT CHECKED"))
+} else {
+  .ng <- python_json("normalization_check.py", "gate",
+                     c("--check", shQuote(normalizePath(norm_check_path)), "--quantities", quantities,
+                       "--report", shQuote(normalizePath(input, mustWork = FALSE)),
+                       "--conditions", shQuote(normalizePath(meta_path, mustWork = FALSE))),
+                     "read the normalisation decision")
+  if (is.null(.ng$res))
+    stop("the normalisation check ", norm_check_path, " could not be evaluated: ", .ng$why,
+         call. = FALSE)
+  if (!isTRUE(.ng$res$ok)) stop(.ng$res$message, call. = FALSE)
+  message("[run_de] normalisation: ", .ng$res$message)
+  # the record verbatim (simplifyVector = FALSE keeps every JSON array an array, so the block's
+  # schema survives into de_provenance.json unchanged -- python_json simplifies)
+  .r <- jsonlite::fromJSON(norm_check_path, simplifyVector = FALSE)
+  .r$status <- "decided"
+  .r$quantities_applied <- quantities
+  .r
+}
 # Keratin sample? Decided once, before either pipeline filters (contaminants.R). `cont_exempt`
 # is the keratin-family contaminant accessions the filter leaves in (keratin_exemption) -- NULL
 # for every other sample, so its filter is exactly the rule it always was.
@@ -314,7 +450,8 @@ if (method == "dpc") {
     if (identical(format, "parquet")) names(arrow::open_dataset(input)$schema)
     else names(utils::read.delim(input, nrows = 1, check.names = FALSE))
   }, error = function(e) character(0))
-  need_dpc <- c("Precursor.Id", "Precursor.Normalised")
+  dpc_intensity <- if (quantities == "raw") "Precursor.Quantity" else LIMPA_INTENSITY_DEFAULT
+  need_dpc <- c("Precursor.Id", dpc_intensity)
   miss_dpc <- setdiff(need_dpc, have_cols)
   if (length(have_cols) > 0 && length(miss_dpc) > 0)
     stop(sprintf(paste0(
@@ -493,7 +630,7 @@ if (method == "dpc") {
   dpc_ann_default <- limpa_annotation_default()
   dpc_ann <- unique(c(dpc_ann_default, CONTAMINANT_ID_COLUMNS))
   .rd <- read_diann_annotated(dpc_input, format = format, q.cutoffs = unname(q_cuts),
-                              q.columns = q_use, annotation = dpc_ann)
+                              q.columns = q_use, annotation = dpc_ann, intensity = dpc_intensity)
   dat <- .rd$dat
   limpa_read <- list(limpa_version = limpa_version(), annotation_argument = .rd$argument,
                      path = .rd$path)
@@ -579,7 +716,15 @@ if (method == "dpc") {
     requantified_from_precursors = TRUE,
     kept_contaminant_quant = .dk$text,
     kept_keratin_under_quantified = .dk$under_quantified,
-    rollup_method = "DPC-Quant (Detection Probability Curve quantification, dpcCN)",
+    # dpc reads DIA-NN's precursor report: the filter's rule is that of DIA-NN's flag
+    contaminant_rule_origin = contaminant_rule_origin(),
+    rollup_method = sprintf("DPC-Quant (Detection Probability Curve quantification, dpcCN) of %s",
+                            dpc_intensity),
+    # what the quantities are, and the only between-run normalisation they carry (limpa adds none)
+    quantities = quantities,
+    normalisation = if (quantities == "raw")
+      "none: DIA-NN's non-normalised Precursor.Quantity (limpa applies no between-run normalisation)"
+    else "DIA-NN's cross-run normalisation (Precursor.Normalised); limpa applies none of its own",
     quantums_filter = if (length(quantums_applied)) paste(quantums_applied, collapse = " | ") else "none",
     de_engine     = "limpa::dpcDE (voomaLmFitWithImputation) -> contrasts.fit -> eBayes",
     missing_policy = "Missing precursors modelled via the detection probability curve; not imputed, not dropped.",
@@ -600,10 +745,21 @@ if (method == "dpc") {
   # reproducibility script can state them instead of the scalar --q-cutoff.
   q_use  <- diann_fdr_columns(names(arrow::open_dataset(input, format = format)$schema))
   q_cuts <- vapply(q_use, diann_cutoff_for, numeric(1), q_cutoff = q_cutoff)
+  # Normalised MaxLFQ must say what its PG.MaxLFQ carries: DIA-NN's cross-run normalisation, or
+  # none (a search with --no-norm). From the search's provenance (normalization_check.py
+  # searched_no_norm, the one rule); not recorded there -> build_maxlfq() reads the data.
+  no_norm <- if (identical(quantities, "normalised")) {
+    .nn <- python_json("normalization_check.py", "no-norm",
+                       c("--report", shQuote(normalizePath(input, mustWork = FALSE)),
+                         if (!is.null(search_dir)) c("--search-dir", shQuote(search_dir))),
+                       "read whether the search ran with --no-norm")
+    .nn$res %||% list(no_norm = NULL, source = paste0("not recorded (", .nn$why, ")"))
+  }
   ml <- build_maxlfq(input, format = format, q_cutoff = q_cutoff,
                      eq_cutoff = eq_cutoff, pgq_cutoff = pgq_cutoff,
                      keep_runs = keep_runs, drop_contaminants = !keep_contaminants,
-                     contaminant_exempt = cont_exempt)
+                     contaminant_exempt = cont_exempt, quantities = quantities,
+                     no_norm = no_norm)
   E         <- ml$E
   run_names <- colnames(E)
   genes     <- ml$genes
@@ -672,7 +828,8 @@ cont_rec <- contaminant_record(cont_census, cont_share, keep_contaminants, cont_
                                cont_intensity, risk = cont_risk,
                                fasta_meta = if (is.null(fasta_meta)) NULL
                                             else normalizePath(fasta_meta, mustWork = FALSE),
-                               keratin = keratin, tag = cont_tag)
+                               keratin = keratin, tag = cont_tag,
+                               rule_origin = descriptor$contaminant_rule_origin)
 if (method == "dpc")   # build_maxlfq() records its own contaminant step in ml$filters_applied
   filters_applied <- c(filters_applied, switch(cont_rec$policy,
     removed = sprintf("contaminants removed: %d precursors mapping to a %s entry (%s); %d %s protein groups",
@@ -714,7 +871,7 @@ check_residual_df(design, "among the runs that survived quantification")
 block <- NULL
 if (!is.null(block_col)) {
   block <- trimws(as.character(meta[[block_col]]))
-  block_check(block, design, block_col)
+  block_check(block, design, block_col, technical = !is.null(tech_reps))
   meta[[block_col]] <- block   # the values fitted are the values the repro script and session carry
 }
 
@@ -792,6 +949,16 @@ if (is.null(block)) {
   block_rec <- block_record(block_col, block, method, .dc$consensus.correlation,
                             .dc$atanh.correlations, nrow(E), groups = groups, cmat = cmat,
                             scope = block_scope, effect_choice = .eff$choice)
+}
+if (!is.null(tech_reps)) {
+  block_rec$technical_replicates <- tech_reps
+  # The between-block caution stands (one consensus correlation), but its way out does not: for
+  # technical replicates --block-scope within would count every injection as a sample.
+  block_rec$warnings <- lapply(block_rec$warnings, function(w)
+    sub("Prefer between-.*$", paste0("For technical replicates the way out is not --block-scope ",
+                                     "within (that would count every injection as a sample) but ",
+                                     "one injection per sample: core_submission.py locate ",
+                                     "--reinjections latest."), w))
 }
 # Which fit reports each contrast: block.contrast_model, the one definition.
 contrast_model <- if (is.null(block)) {
@@ -1017,13 +1184,36 @@ if (is.null(.rs)) {
       forms = forms, adjp_thr = adjp_thr, logfc_ref = logfc_ref,
       ann_cols = gene_cols, descriptor = descriptor,
       contaminants = cont_rec, block = block_rec, contrast_model = contrast_model,
-      dpc_annotation_columns = if (exists("dpc_ann")) dpc_ann else NULL)
+      dpc_annotation_columns = if (exists("dpc_ann")) dpc_ann else NULL,
+      intensity_column = if (exists("dpc_intensity")) dpc_intensity else NULL,
+      quantile_normalise = !identical(quantities, "raw"))
     message(sprintf("[run_de] reproducibility_log.R: the analysis as %d lines of plain R (Rscript-runnable)",
                     length(repro_lines)))
   }, error = function(e) message("[run_de] reproducibility_log.R not written: ", e$message))
 }
 
 # ---- methods + reproducibility provenance -----------------------------------
+# The normalisation check's lines (normalization_check.py's record), or NOT RUN, tagged.
+norm_check_methods_lines <- function(r) {
+  pad <- strrep(" ", 16)
+  if (!identical(r$status, "decided"))
+    return(sprintf("Norm. check   : %s -- %s [confirm]",
+                   if (identical(r$status, "check_input")) "CHECK INPUT, NOT A FINAL DE" else "NOT RUN",
+                   r$note))
+  et <- r$experiment_type
+  d <- r$decision
+  # a person's decision, by role (normalization_check.statement); their name is staff-only
+  chose <- d$statement %||% sprintf("%s chose %s quantities: %s.", d$by %||% "who: not recorded",
+                                    d$quantities, d$reason %||% "no reason recorded")
+  c(sprintf("Norm. check   : experiment type %s (%s); default for it: %s quantities.",
+            et$label %||% "not recorded", et$source %||% "source not recorded",
+            r$default$quantities %||% "?"),
+    if (isTRUE(r$tripped))
+      sprintf("%sThe data check did not agree (%s); %s", pad,
+              paste(unlist(r$trips), collapse = "; "), chose)
+    else sprintf("%sThe data check (normalisation factors vs groups, fold-change balance, IDs per group, normalisation stability, volcano shape) agreed.", pad),
+    if (!isTRUE(r$tripped) && identical(d$source, "user")) paste0(pad, chose))
+}
 methods_txt <- c(
   "Differential expression — methods",
   strrep("=", 40), "",
@@ -1042,8 +1232,10 @@ methods_txt <- c(
   sprintf("Filters       : %s", if (length(filters_applied)) filters_applied[1] else "none"),
   if (length(filters_applied) > 1) sprintf("                %s", filters_applied[-1]),
   contaminant_methods_lines(cont_rec),
-  if (method == "maxlfq") sprintf("Normalization : quantile (limma::normalizeBetweenArrays)") else
-                          sprintf("Normalization : DPC-CN (applied within dpcCN before dpcQuant)"),
+  sprintf("Quantities    : %s", if (identical(descriptor$quantities, "raw")) "non-normalised (--quantities raw)"
+                                else "normalised (--quantities normalised)"),
+  sprintf("Normalization : %s", descriptor$normalisation),
+  norm_check_methods_lines(norm_check_rec),
   sprintf("Design        : %s", design_label),
   block_methods_lines(block_rec),
   sprintf("Contrasts     : %s", paste(forms, collapse = ", ")),
@@ -1095,10 +1287,33 @@ compute_record <- function() {
                     "families they differ in about the third decimal (references/reproducibility.md)"))
 }
 compute <- compute_record()
+# The R this DE ran in -- where it lives, the libraries it loaded packages from, the conda env
+# and the container around it -- as THIS process sees them. provenance.py builds the
+# reproducibility bundle's environment from this record (and sessionInfo.txt beside it); it used
+# to take setup.json's env, which was not the one a DE run in a separate R 4.6 env had used
+# (staff report, 2026-09-28: the bundle would have named the wrong limpa and R). The container
+# variables are the ones app.R checks (Apptainer/Singularity set them; Docker leaves /.dockerenv).
+runtime_record <- function() {
+  env1 <- function(...) { for (v in c(...)) { x <- Sys.getenv(v, ""); if (nzchar(x)) return(x) }; NULL }
+  rs <- file.path(R.home("bin"), "Rscript")
+  list(r_version = R.version.string, r_home = R.home(),
+       rscript = if (file.exists(rs)) rs else NULL,
+       lib_paths = as.list(.libPaths()),
+       conda_prefix = env1("CONDA_PREFIX"),
+       container = env1("APPTAINER_CONTAINER", "SINGULARITY_CONTAINER"),
+       container_name = env1("APPTAINER_NAME", "SINGULARITY_NAME"),
+       docker = file.exists("/.dockerenv"),
+       session_info = "sessionInfo.txt",
+       note = "recorded by run_de.R in the process that ran this DE")
+}
+runtime <- runtime_record()
 
 si <- file.path(outdir, "sessionInfo.txt")
 con <- file(si, "w"); sink(con)
 cat(R.version.string, "\n\n")
+cat(sprintf("R home   %s\nLibrary  %s\n", runtime$r_home, paste(.libPaths(), collapse = " : ")))
+if (!is.null(runtime$conda_prefix)) cat(sprintf("Conda    %s\n", runtime$conda_prefix))
+if (!is.null(runtime$container)) cat(sprintf("Container %s\n", runtime$container))
 cat(sprintf("CPU      %s%s\n", compute$cpu_model,
             if (is.null(compute$cpu_family)) "" else sprintf(" (SLURM feature %s, node %s)", compute$cpu_family, compute$slurm_node)))
 cat(sprintf("BLAS     %s\nLAPACK   %s (%s)\nOPENBLAS_CORETYPE %s\n\n", compute$blas, compute$lapack,
@@ -1203,6 +1418,14 @@ prov <- list(
   R_version = as.character(getRversion()),
   # the machine: CPU (and its SLURM CPU-family feature), BLAS/LAPACK -- see compute_record()
   compute = compute,
+  # which quantities the DE read, the normalisation they carry, and the check that decided it
+  # (normalization_check.py; schema_version'd so it can be aggregated across projects)
+  quantities = quantities, normalisation = descriptor$normalisation,
+  # maxlfq: whether the search ran with --no-norm, and how that is known (build_maxlfq.R)
+  dia_nn_normalisation = descriptor$dia_nn_normalisation,
+  normalization_check = norm_check_rec,
+  # the R, libraries, conda env and container this DE ran in -- see runtime_record()
+  runtime = runtime,
   # dpc: the limpa that read the report and the readDIANN() annotation path it took
   # (limpa_compat.R) -- an older limpa is not an error, but it is on the record.
   limpa_read = limpa_read,

@@ -222,7 +222,13 @@ The log's sections, in order:
     - where `methods.md`, `DATA_SUBMISSION/` and `REPRODUCE.md` are;
     - `MANIFEST.txt` counts;
     - what happened to the zip.
-16. **Expert Review Notes**, copied from the session README when it has them.
+16. **Instrument QC around this project (staff only -- never delivered):** `qc_bracket.py`'s
+    verdict, its summary, the instruments with no QC on record, and whether the client
+    delivery may go out (acknowledged by whom, when, with what note) or is held. The record
+    copies sit in `qc/` (`qc_bracket.json`, `qc_bracket.md`, `qc_bracket_ack.json`), and
+    `run_record.json` has them as `analysis.instrument_qc`; the board reads them there. →
+    `references/qc-bracket.md`.
+17. **Expert Review Notes**, copied from the session README when it has them.
 17. **Copies, not-copied items and links.**
 18. **Record history.**
 
@@ -338,6 +344,12 @@ can append before the header exists.
   path, `REPRODUCE.md` and the submission.
 - **No duplicates.** Each entry ends with a `<!-- record_run <key> <event> <status> -->`
   marker. The marker is checked under the same lock, so the same event is never logged twice.
+  An analysis's marker is a digest of what its line says (`analysis_digest`), not the finalize
+  time: **re-running finalize on an unchanged analysis adds nothing** (it used to append an
+  identical block each time, 2026-09-28), and finalize does not post it to Slack again
+  (`analysis_logged: unchanged` in the result). A changed one — new significant counts, a new
+  deliverable — adds one `... analysis re-finalized, changed` line. A re-analysis's line names
+  the session it re-does (`Re-analysis of: <prior> (version N)`).
 
 ## The activity log: `activity_log.csv`
 
@@ -352,7 +364,7 @@ the lock, append-only, with the header written only at creation.
 | `search_completed` / `search_failed` | every `search-done` (a repeat says `re-recorded`) | every call |
 | `fran_staged` / `fran_skipped` | receipt found / no receipt at finalize | once |
 | `issue_recorded` | each `report_issue.sh` entry for the session | once each |
-| `analysis_completed` | every `analysis-done` | every call |
+| `analysis_completed` | an `analysis-done` whose analysis is new or changed (a change says `re-finalized`) | once per distinct analysis |
 
 ## What is never copied
 

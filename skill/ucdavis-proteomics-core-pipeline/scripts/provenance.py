@@ -28,6 +28,8 @@ Usage (the orchestrator fills these from earlier steps):
     --q-cutoff 0.01 --logfc 1.0 --adjp 0.05 \
     --organism-taxid 9606 --instrument "Orbitrap Astral" --acquisition DIA \
     --commands ./commands.log         # optional: a log of the exact commands run
+    --qc-bracket <session>/logs/qc_bracket.json   # optional: the instrument's QC record
+                                      # (qc_bracket.py) -- referenced by path + sha256 only
 
 Outputs under --outdir:
   run_manifest.json          everything, machine-readable
@@ -48,6 +50,7 @@ from skill_version import skill_version, plugin_meta, label as skill_label
 MANIFEST_LINES = []
 def ok(msg):      MANIFEST_LINES.append(f"[OK]      {msg}")
 def skip(w, why): MANIFEST_LINES.append(f"[SKIPPED] {w} -- {why}")
+def note(msg):    MANIFEST_LINES.append(f"[NOTE]    {msg}")
 
 MAX_HASH_BYTES = 5 * 1024**3   # don't sha256 files bigger than 5 GB (record size instead)
 
@@ -122,6 +125,50 @@ CPU_FAMILY_EVIDENCE = ("|ΔlogFC| ≤ 0.0022 and |Δt| ≤ 0.0064 across 12 cont
                        "call changed; each family reproduced its own tables exactly")
 
 
+def de_runtime(de_dir):
+    """(de_provenance.json, its `runtime`) -- the R, libraries, conda env and container the DE ran
+    in, as run_de.R recorded them in that process. runtime None: no such record (no --de-dir, or a
+    run_de.R before skill 2.10)."""
+    rec = load_json(os.path.join(de_dir, "de_provenance.json")) if de_dir else None
+    rec = rec if isinstance(rec, dict) else {}
+    rt = rec.get("runtime")
+    return rec, (rt if isinstance(rt, dict) else None)
+
+
+def conda_prefix_of_r_home(r_home):
+    """A conda env's R lives at <prefix>/lib/R: that prefix when it is a conda env, else None."""
+    if not r_home:
+        return None
+    cand = os.path.dirname(os.path.dirname(os.path.normpath(r_home)))
+    return cand if os.path.isdir(os.path.join(cand, "conda-meta")) else None
+
+
+def runtime_section(rec, rt, setup_env):
+    """REPRODUCE.md's 'environment the DE ran in' section, from run_de.R's record."""
+    head = "## The environment the DE ran in\n\n"
+    if not rt:
+        return (head + "NOT RECORDED -- this DE record has no `runtime` (a run_de.R before skill "
+                "2.10), so `environment/` describes setup.json's environment, which may not be "
+                "the one the DE ran in. The DE's own `sessionInfo.txt` (beside its tables) is the "
+                "record of its R packages.\n")
+    pk = rec.get("packages") or {}
+    pkgs = ", ".join(f"{k} {v}" for k, v in pk.items() if v) or "not recorded"
+    where = (f"inside the container `{rt['container']}`" if rt.get("container") else
+             "in a Docker container (image not recorded)" if rt.get("docker") else
+             "outside any container")
+    env = rt.get("conda_prefix") or conda_prefix_of_r_home(rt.get("r_home"))
+    lines = [f"- {rt.get('r_version') or 'R version not recorded'} (`{rt.get('r_home')}`), {where}",
+             f"- packages: {pkgs}",
+             f"- conda env: `{env}`" if env else "- conda env: none recorded",
+             f"- library paths: {', '.join(f'`{x}`' for x in rt.get('lib_paths') or [])}"]
+    if setup_env:
+        lines.append(f"- setup.json names a different environment ({setup_env}); the bundle "
+                     "describes the one above, which is the one the DE ran in")
+    return (head + "As run_de.R recorded it in the process that ran the DE "
+            "(`de_provenance.json` `runtime`); `environment/` was captured from it:\n\n"
+            + "\n".join(lines) + "\n")
+
+
 def compute_section(compute):
     """REPRODUCE.md's 'same numbers need the same kind of CPU' section, from run_de.R's record."""
     if not compute:
@@ -169,6 +216,10 @@ def main():
     ap.add_argument("--organism-taxid"); ap.add_argument("--instrument", default="")
     ap.add_argument("--acquisition")
     ap.add_argument("--commands", help="optional log file of the exact commands run")
+    ap.add_argument("--qc-bracket", help="qc_bracket.py's record (logs/qc_bracket.json): "
+                                         "referenced in run_manifest.json by path and sha256 "
+                                         "only -- the bundle is delivered, the verdict is "
+                                         "staff-only")
     ap.add_argument("--timestamp", default="", help="ISO timestamp (script can't call clock)")
     a = ap.parse_args()
 
@@ -185,14 +236,41 @@ def main():
         except json.JSONDecodeError: skip("fasta-info", "not valid JSON")
 
     # ---- environment capture -------------------------------------------------
-    # Always capture versions, even if setup.json is missing fields: discover the
-    # env from setup.json first, then fall back to whatever is on PATH.
+    # The environment the DE RAN in, as run_de.R recorded it (de_provenance.json `runtime`):
+    # its Rscript and conda env. setup.json says only which env setup.sh built, and a DE run in
+    # another (a separate R 4.6 env for limpa 1.4, staff report 2026-09-28) made the bundle name
+    # the wrong R and limpa. setup.json / PATH only when the DE recorded no runtime -- said so.
     env_dir = os.path.join(out, "environment")
+    de_rec, rt = de_runtime(a.de_dir)
     py = (setup or {}).get("python") or shutil.which("python3") or sys.executable
-    rscript = (setup or {}).get("rscript") or shutil.which("Rscript")
     conda = (setup or {}).get("conda") or shutil.which("micromamba") or shutil.which("mamba") or shutil.which("conda")
-    env_prefix = (setup or {}).get("env_prefix")
-    if (not env_prefix or not os.path.isdir(env_prefix)) and py:
+    setup_rscript, setup_prefix = (setup or {}).get("rscript"), (setup or {}).get("env_prefix")
+    setup_differs = None
+    if rt:
+        rscript = rt.get("rscript")
+        env_prefix = rt.get("conda_prefix") or conda_prefix_of_r_home(rt.get("r_home"))
+        env_source = ("de_provenance.json runtime: recorded by run_de.R in the process that ran "
+                      "the DE")
+        ok(f"environment: the one the DE ran in ({rt.get('r_version')}, {rt.get('r_home')})")
+        def _same(x, y):
+            return bool(x and y) and os.path.realpath(x) == os.path.realpath(y)
+        diff = {k: (sv, dv) for k, sv, dv in (("rscript", setup_rscript, rscript),
+                                              ("env_prefix", setup_prefix, env_prefix))
+                if sv and not _same(sv, dv)}
+        if diff:
+            setup_differs = {k: {"setup_json": sv, "de": dv} for k, (sv, dv) in diff.items()}
+            note("setup.json names a different environment than the one the DE ran in ("
+                 + "; ".join(f"{k}: setup.json {sv}, DE {dv}" for k, (sv, dv) in diff.items())
+                 + "): the bundle describes the DE's")
+    else:
+        rscript = setup_rscript or shutil.which("Rscript")
+        env_prefix = setup_prefix
+        env_source = ("setup.json / PATH -- NOT necessarily the environment the DE ran in: "
+                      "de_provenance.json records no runtime (run_de.R before skill 2.10)")
+        skip("DE runtime", "de_provenance.json records none (run_de.R before skill 2.10, or no "
+             "--de-dir): environment/ describes setup.json's environment, which may not be the "
+             "one the DE ran in")
+    if not rt and (not env_prefix or not os.path.isdir(env_prefix)) and py:
         # infer the env prefix from the interpreter location (…/<env>/bin/python)
         cand = os.path.dirname(os.path.dirname(os.path.realpath(py)))
         if os.path.isdir(os.path.join(cand, "conda-meta")):
@@ -202,30 +280,48 @@ def main():
     if conda and env_prefix and os.path.isdir(env_prefix):
         txt = run_capture(f"{conda} list -p {env_prefix} --explicit --md5")
         if txt and "://" in txt:
-            open(os.path.join(env_dir, "conda-explicit.txt"), "w").write(txt); ok("conda explicit lock")
+            open(os.path.join(env_dir, "conda-explicit.txt"), "w").write(txt)
+            ok(f"conda explicit lock of {env_prefix}" + (" (the env the DE ran in)" if rt else ""))
         else:
             skip("conda-explicit.txt", "conda list returned no URLs")
     else:
-        skip("conda-explicit.txt", "no conda env found (setup.json + PATH)")
+        skip("conda-explicit.txt",
+             f"no conda / mamba / micromamba here to list {env_prefix}"
+             if env_prefix and os.path.isdir(env_prefix) else
+             f"the DE's R ({rt.get('r_home')}) is in no conda env it recorded" if rt else
+             "no conda env found (setup.json + PATH)")
 
     # pip freeze (the env's python)
     if py:
         txt = run_capture(f"{py} -m pip freeze")
         open(os.path.join(env_dir, "pip-freeze.txt"), "w").write(txt); ok("pip freeze")
 
-    # R sessionInfo with every package version (the DE step's exact stack)
-    if rscript:
+    # R sessionInfo with every package version (the DE step's exact stack): the one run_de.R
+    # wrote as the DE ran, when it is there -- it IS that stack, whatever R this runs under
+    si_de = os.path.join(a.de_dir or "", "sessionInfo.txt")
+    if a.de_dir and os.path.isfile(si_de):
+        shutil.copy2(si_de, os.path.join(env_dir, "r-sessionInfo.txt"))
+        ok("R sessionInfo + package versions, as the DE recorded them (sessionInfo.txt)")
+    elif rscript and (os.path.exists(rscript) or not rt):
         txt = run_capture(f"{rscript} -e 'sink(stdout()); "
                           f"cat(R.version.string,\"\\n\"); "
                           f"for(p in c(\"limpa\",\"limma\",\"arrow\",\"dplyr\",\"tidyr\")) "
                           f"try(cat(p, as.character(packageVersion(p)), \"\\n\")); "
                           f"cat(\"\\n\"); print(sessionInfo())'")
-        open(os.path.join(env_dir, "r-sessionInfo.txt"), "w").write(txt); ok("R sessionInfo + package versions")
+        open(os.path.join(env_dir, "r-sessionInfo.txt"), "w").write(txt)
+        ok(f"R sessionInfo + package versions, from {'the DE' if rt else 'setup.json / PATH'}'s "
+           f"Rscript ({rscript})" + ("" if rt else " -- may not be the R the DE ran in"))
     else:
-        skip("r-sessionInfo.txt", "no Rscript found (setup.json + PATH)")
+        skip("r-sessionInfo.txt", "no sessionInfo.txt in --de-dir and no Rscript found ("
+             + ("the DE's recorded Rscript is not here" if rt else "setup.json + PATH") + ")")
 
     # engine versions
     versions = {"os": platform.platform(), "python": platform.python_version()}
+    if rt:
+        # the DE's R stack, as run_de.R recorded it -- not whatever R is on PATH here
+        versions["de_r"] = {"r_version": rt.get("r_version"), "packages": de_rec.get("packages"),
+                            "container": rt.get("container"), "conda_prefix": env_prefix,
+                            "source": "de_provenance.json runtime"}
     if tools:
         versions["tools_versions"] = tools.get("versions")
         for eng in ("diann", "sage"):
@@ -276,13 +372,27 @@ def main():
     for label, src in (("params", a.params), ("conditions.csv", a.conditions),
                        ("workflow.manifest.json", a.workflow_manifest),
                        ("commands.log", a.commands)):
-        if src and os.path.exists(src):
+        if src and os.path.exists(src) and label == "commands.log":
+            # every command verbatim -- but who decided is staff-only: names become the role
+            import staff
+            with open(src, encoding="utf-8", errors="replace") as fh:
+                logged = fh.read()
+            with open(os.path.join(in_dir, os.path.basename(src)), "w", encoding="utf-8") as fh:
+                fh.write(staff.redact(logged))
+            ok(f"copied {label} (names after --by/--override-by replaced by \"{staff.ROLE}\")")
+        elif src and os.path.exists(src):
             shutil.copy2(src, os.path.join(in_dir, os.path.basename(src))); ok(f"copied {label}")
             # params estimated by estimate_params.py carry a sibling rationale — capture it
             if label == "params" and os.path.exists(src + ".rationale.json"):
                 shutil.copy2(src + ".rationale.json",
                              os.path.join(in_dir, os.path.basename(src) + ".rationale.json"))
                 ok("copied params rationale (per-setting provenance)")
+            # the user's sample-identity answers behind the design (collect_conditions.py
+            # --confirm-multi), when there were any
+            if label == "conditions.csv" and os.path.exists(src + ".decisions.json"):
+                shutil.copy2(src + ".decisions.json",
+                             os.path.join(in_dir, os.path.basename(src) + ".decisions.json"))
+                ok("copied conditions decisions (labels the user said name several runs)")
         elif src:
             skip(label, f"not found: {src}")
 
@@ -309,6 +419,26 @@ def main():
         skip("de_outputs", f"not a dir: {a.de_dir}")
     open(os.path.join(out, "checksums", "checksums.json"), "w").write(json.dumps(checks, indent=2))
 
+    # ---- the instrument's QC around the project (qc_bracket.py), when it was checked --------
+    # STAFF-ONLY: this bundle is delivered to the client, so it carries where the record is and
+    # its checksum -- never the verdict, its summary or the record itself (logs/ in the session
+    # and the run registry hold those).
+    instrument_qc = None
+    if a.qc_bracket and os.path.exists(a.qc_bracket):
+        q = load_json(a.qc_bracket)
+        if isinstance(q, dict) and str(q.get("schema", "")).startswith("qc_bracket/"):
+            instrument_qc = {"record": os.path.abspath(a.qc_bracket),
+                             "sha256": sha256_file(a.qc_bracket),
+                             "schema_version": q.get("schema_version"),
+                             "checked_at": q.get("checked_at"),
+                             "note": "the instrument's QC around this project was checked; the "
+                                     "record is Core-internal and not in this bundle"}
+            ok("instrument QC record referenced (Core-internal; not copied)")
+        else:
+            skip("instrument QC (qc_bracket.json)", "not a qc_bracket.py record, or unreadable")
+    elif a.qc_bracket:
+        skip("instrument QC (qc_bracket.json)", f"not found: {a.qc_bracket}")
+
     # ---- the master run manifest --------------------------------------------
     reg = (wfman or {}).get("registry")
     manifest = {
@@ -328,10 +458,15 @@ def main():
                "q_cutoff": a.q_cutoff, "logfc": a.logfc, "adjp": a.adjp},
         "environment": {"os": platform.platform(), "python": py, "rscript": rscript,
                         "conda": conda, "env_prefix": env_prefix,
+                        # where rscript / env_prefix come from: the DE's own record, or setup.json
+                        "source": env_source,
+                        "de_runtime": rt, "setup_json_differs": setup_differs,
                         "tool_versions": versions},
         "inputs": {"raw": [f.rstrip("/") for f in raw_files],
                    "fasta": a.fasta, "fasta_info": fasta_info,
                    "conditions": a.conditions, "params": a.params},
+        # qc_bracket.py's record: where and which (sha256), never its verdict; null = not given
+        "instrument_qc": instrument_qc,
         "checksums_file": "checksums/checksums.json",
         "files_in_bundle": "see MANIFEST.txt",
     }
@@ -466,6 +601,12 @@ def main():
     elif keratin_sample_recorded(fi) is False and fi.get("keratin_sample_source") == "user":
         # the user's "not keratin" is replayed as an answer, never left to the default
         fasta_repro_keep += " --no-keratin-sample"
+    # The user's own target sequences (fetch --add-fasta), from the files the sidecar records.
+    for f in (fi or {}).get("added_sequences") or []:
+        fasta_repro_keep += f" --add-fasta {shlex.quote(f.get('file') or '<added sequences file>')}"
+        fasta_repro_note += (f" Target sequences were added from {f.get('file') or '?'} "
+                             f"({f.get('n_entries', '?')} entries, sha256 "
+                             f"{(f.get('sha256') or '?')[:12]}...): check that file is unchanged.")
     if fasta_repro_content in ("unknown", "as_staged"):
         # A --path override or a HIVE-staged file: not reconstructible from a proteome ID.
         # fetch_fasta.py's entry-count check (content_inferred) is the best guess at what a
@@ -476,6 +617,32 @@ def main():
         fasta_repro_note += (" NOTE: the original FASTA was supplied directly (override or "
                              "pre-staged), not downloaded — this command approximates it.")
 
+    # the quantities the DE read (normalised / non-normalised, normalization_check.py's decision):
+    # a replay without them would quietly read the other ones
+    de_quantities = (f" \\\n  --quantities {de_rec['quantities']}"
+                     if de_rec.get("quantities") in ("normalised", "raw") else "")
+    # maxlfq + raw read a --no-norm report's PG.MaxLFQ. run_search.py has no --no-norm, so the
+    # replayed search below writes a NORMALISED report, on which run_de.R refuses --quantities raw:
+    # said here plainly, with what to do, rather than left to fail at step 6.
+    de_nonorm_note = ""
+    if de_rec.get("method") == "maxlfq" and de_rec.get("quantities") == "raw":
+        de_nonorm_note = (
+            "\n#    NOTE: the DE read a --no-norm report's PG.MaxLFQ (--method maxlfq --quantities "
+            "raw: no\n#    between-run normalisation). This search replay passes no --no-norm, so "
+            "its report is\n#    normalised and step 6 would be refused. Re-quantify with "
+            "--no-norm instead -- diann_parallel.py\n#    --no-norm (it writes "
+            "no_norm_report.parquet), or --no-norm in a single-shot cfg -- and point\n#    "
+            "step 6's --input at that report.\n"
+            "echo 'reproduce.sh: the DE read a --no-norm report: re-quantify with --no-norm "
+            "before step 6 (see the NOTE above)' >&2")
+    # where the DE ran (run_de.R's runtime record), so the re-run can be put in the same place
+    de_where = ""
+    if rt and rt.get("container"):
+        de_where = (f"\n#    The DE ran inside the container {rt['container']} "
+                    f"({rt.get('r_version')}): run this step inside it (apptainer exec ...).")
+    elif rt:
+        de_where = (f"\n#    The DE ran in {rt.get('r_version')} at {rt.get('r_home')}"
+                    + (f" (conda env {env_prefix})" if env_prefix else "") + ".")
     repro = f"""#!/usr/bin/env bash
 # Auto-generated by provenance.py — re-creates this exact analysis.
 # Requires: this skill's scripts/ on $SKILL, and internet for the registry + UniProt.
@@ -509,17 +676,17 @@ PIN_ENGINE={a.engine or '<engine>'} PIN_VERSION={(wfman or {}).get('engine',{}).
 python3 "$SKILL/scripts/fetch_fasta.py" fetch --proteome {fasta_repro_proteome} \\
   --content {fasta_repro_content} --contaminants {fasta_repro_contam} --enzyme {fasta_repro_enzyme}{fasta_repro_keep} --out ./search.fasta
 
-# 5. Re-run the search (inputs from inputs/checksums; verify against checksums/checksums.json).
+# 5. Re-run the search (inputs from inputs/checksums; verify against checksums/checksums.json).{de_nonorm_note}
 python3 "$SKILL/scripts/run_search.py" --tools ~/.proteomics-pipeline/tools/tools.json \\
   --bundle ./wf/workflow.manifest.json --params ./wf/$(basename "$(ls wf | grep -vi manifest | head -n1)") \\
   --fasta ./search.fasta --out ./search_out --files {raw_arg}{' --keratin-sample' if fasta_repro_keratin else ''}
 
-# 6. Re-run differential expression with identical settings.
+# 6. Re-run differential expression with identical settings.{de_where}
 Rscript "$SKILL/scripts/run_de.R" --input ./search_out/report.parquet \\
   --metadata inputs/{os.path.basename(a.conditions) if a.conditions else 'conditions.csv'} \\
   --method {a.de_method or '<method>'} --outdir ./de_results \\
   {('--contrasts "'+a.contrasts+'"') if a.contrasts else ''} \\
-  --q-cutoff {a.q_cutoff or '0.01'} --logfc {a.logfc or '1.0'} --adjp {a.adjp or '0.05'}
+  --q-cutoff {a.q_cutoff or '0.01'} --logfc {a.logfc or '1.0'} --adjp {a.adjp or '0.05'}{de_quantities}
 
 echo "Done. Compare ./de_results against checksums/checksums.json to confirm reproduction."
 """
@@ -568,10 +735,13 @@ make input drift visible.
         except (OSError, ValueError) as e:
             skip("de_provenance.json compute", f"unreadable: {e}")
     cpu_section = compute_section(compute)
+    rt_section = runtime_section(de_rec, rt, "; ".join(
+        f"{k} {v['setup_json']}" for k, v in (setup_differs or {}).items()))
 
     md = f"""# Reproducibility — {(wfman or {}).get('name', 'proteomics analysis')}
 
 {r_section}
+{rt_section}
 {cpu_section}
 ## Skill that produced this
 - **{skill_info['title']}** — `{skill_info['name']}` {skill_label(skill_info['version'])}
@@ -621,7 +791,8 @@ See `MANIFEST.txt` for exactly what was and wasn't captured.
         "Reproducibility bundle — capture log\n" + "=" * 40 + "\n" + "\n".join(MANIFEST_LINES) + "\n")
 
     n_skip = sum(1 for l in MANIFEST_LINES if l.startswith("[SKIPPED]"))
-    print(json.dumps({"bundle": out, "captured": len(MANIFEST_LINES) - n_skip,
+    print(json.dumps({"bundle": out, "captured": sum(1 for l in MANIFEST_LINES
+                                                     if l.startswith("[OK]")),
                       "skipped": n_skip, "manifest": os.path.join(out, "MANIFEST.txt"),
                       "reproduce": rp}, indent=2))
 

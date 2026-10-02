@@ -19,7 +19,9 @@ Per engine:
            inside the job with --sbatch, never before submission -- then
            <cmd> <bundle sage_config.json> -f <fasta> -o <out> --parquet
            --disable-telemetry-i-dont-want-to-improve-sage
-           then sage_lfq_check.py (LFQ window vs the runs' MS1 mass error; WARNS, never re-runs)
+           then sage_lfq_check.py (LFQ window vs the runs' MS1 mass error: warns; runs outside
+           the window are a gate -- --adapt-only refuses report.parquet until the recorded
+           corrected-window re-run is used or --accept-lfq-window; never re-runs by itself)
            then adapt lfq.parquet -> DIA-NN-shaped report for --method maxlfq, keeping only
            Sage's valid MS1 quantities (not decoy, q_value <= 0.05; counts in sage_adapt.json)
   fragpipe <cmd> --headless --workflow <.workflow> --manifest <m> --workdir <out>
@@ -47,7 +49,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # ONE definition of the q-value columns -- see diann_q_columns.py.
 from diann_q_columns import FDR_REQUIRED, PROTEIN_Q_PREFERENCE
 # the one reading of a protein identifier
-from protein_ids import fragpipe_protein_id, group_accessions, group_entry_names
+from protein_ids import fragpipe_group, group_accessions, group_entry_names
 # No Bruker .d is searched before its analysis.tdf has been checked -- see bruker_tdf.py.
 from bruker_tdf import STATUSES, integrity_warning, tdf_integrity
 
@@ -345,8 +347,24 @@ def dotnet_env_for(files):
             f'export PATH={shlex.quote(root)}:"$PATH";')
 
 
-# Per-user CPU cap on HIVE's genome-center-grp/high (docs/QUEUE_SWITCHING.md).
+# Per-user CPU cap on HIVE's genome-center-grp/high (docs/QUEUE_SWITCHING.md). The fallback
+# only: user_limits() reads the QOS's own MaxTRESPU from sacctmgr first (cpu=64,mem=1T on
+# genome-center-grp-high-qos; publicgrp-low-qos has none -- `sacctmgr show qos`, 2026-10-01).
 HIVE_USER_CPU_CAP = int(os.environ.get('HIVE_USER_CPU_CAP', '64'))
+# The fewest CPUs array_task_cpus() gives an array task it sizes itself. MEASURED (HIVE,
+# 2026-10-01, jobs 24276579-82): the chain's step-2 first pass of one 50 ng HeLa QC run
+# (timsTOF HT diaPASEF, 60 SPD, 1.9 GB .d; the Core's human 2026-09 predicted library, 3.5 M
+# precursors; DIA-NN 2.7.0), each thread count alone on an AMD EPYC 7532 node (zen2, the
+# commonest CPU on `high`), identical IDs at every count (43,123 precursors, 5,287 groups):
+#   threads   4      8      16     32
+#   wall      39.3   21.4   10.9   6.7 min    (doubling: 1.84x, 1.96x, 1.62x)
+#   CPU x s   9,437  10,283 10,469 12,957     (what one file costs a per-user cap)
+#   peak RSS  7.4    7.9    8.7    9.7 GB
+# Under the 64-CPU cap a 29-file array then takes 79 / 86 / 87 / 101 min at 4 / 8 / 16 / 32
+# per file. 8 is the floor: within 9% of the cheapest per file (4) at half its wall time, and
+# 32 per file -- what --threads 32 used to give every task -- costs 26% more per file.
+# references/diann_parallel.md ("CPUs per array task") has the table.
+ARRAY_TASK_MIN_CPUS = 8
 
 
 def slurm_available():
@@ -570,7 +588,7 @@ def run_diann_parallel(cmd, params, files, fasta, out, threads, a, acquisition="
     argv = [sys.executable,
             os.path.join(os.path.dirname(os.path.abspath(__file__)), "diann_parallel.py"),
             "--diann", cmd, "--raw-list", listing, "--fasta", fasta,
-            "--out", out, "--cfg", params, "--threads-per-file", str(threads)]
+            "--out", out, "--cfg", params, "--threads-max", str(threads)]
     # Chain resources are forwarded only when given, so diann_parallel.py's own defaults stay
     # the single definition of them. They are exposed because steps 3 and 5 ask for 64 CPUs
     # by default (--assembly-cpus), a whole node's worth that can sit pending for a long time
@@ -578,10 +596,14 @@ def run_diann_parallel(cmd, params, files, fasta, out, threads, a, acquisition="
     # run_search.py and hand-run diann_parallel.py (FRAN pilot, publicgrp/low, 2026-09-16).
     for flag, val in (("--partition", a.partition), ("--account", a.account),
                       ("--qos", a.qos), ("--max-simultaneous", a.max_simultaneous),
+                      # pins the array tasks' CPUs; without it diann_parallel.py sizes them to
+                      # the queue's per-user cap, at most --threads (array_task_cpus)
+                      ("--threads-per-file", getattr(a, "threads_per_file", None)),
                       ("--libpred-cpus", getattr(a, "libpred_cpus", None)),
                       ("--assembly-cpus", getattr(a, "assembly_cpus", None)),
                       ("--assembly-mem", getattr(a, "assembly_mem", None)),
-                      ("--time-per-file", getattr(a, "time_per_file", None))):
+                      ("--time-per-file", getattr(a, "time_per_file", None)),
+                      ("--mem-per-file", getattr(a, "mem_per_file", None))):
         if val:
             argv += [flag, str(val)]
     argv += _job_end_argv(a)
@@ -809,8 +831,21 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
     to every emit_sbatch() call -- without it slurm_queue() re-detects a queue and overrides
     the one the user chose."""
     queue = queue or {}
+    # `--cfg <params>` goes on the job's command line verbatim, and the job runs after
+    # `cd <out>`: a relative path would be read there -- another file, or none -- and DIA-NN logs
+    # it as given, so the run's own record could not say which file it read. Absolute, and it
+    # must exist now, before anything is written (main() checks too; this writes the command).
+    params = os.path.abspath(params)
+    if not os.path.isfile(params):
+        sys.exit(f"[run_diann] cfg not found: {params}")
     refuse_dda_mismatch(params, acquisition)
     os.makedirs(out, exist_ok=True)
+    # The job's first lines check that its node reaches DIA-NN, --out, the FASTA and the raw
+    # data (node_fault.py): a dropped mount is a node fault (exit 75), never "DIA-NN failed".
+    if sbatch:
+        import node_fault
+        queue = dict(queue, preflight=node_fault.preflight_lines(
+            node_fault.chain_checks(cmd, os.path.abspath(out), fasta, files)))
     report = os.path.join(out, "report.parquet")
     f_args = " ".join(f"--f {shlex.quote(f)}" for f in files)
     # Named after the JOB, not fixed, because report_guard() bakes this path into the script
@@ -850,9 +885,7 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
     try:
         groups = dp.cfg_groups(dp.cfg_tokens(params))
     except dp.CfgError as e:
-        if e.code != "cfg_missing":
-            sys.exit(f"[run_diann] {e}")
-        groups = []                         # onecmd below hands DIA-NN the path; it reports it
+        sys.exit(f"[run_diann] {e}")
     present = {f for f, _ in groups}
     dda = dp.DIANN_DDA_FLAG in present          # recorded in the result; the cfg carries it
     libfree = {"--fasta-search", "--gen-spec-lib"} <= present \
@@ -1955,6 +1988,13 @@ def keratin_sample_check(fasta, flag, engine="diann"):
                 else f"--ncbi-accession {where}" if kind == "ncbi_refseq"
                 else f"--proteome {m['proteome']}" if m.get("proteome")
                 else "--proteome <UPID>")
+        if kind in ("override", "ncbi_refseq"):
+            # the organism the user named for it (fetch_fasta.user_organism; --path needs one)
+            base += (f" --organism {shlex.quote(m['organism'])}" if m.get("organism")
+                     else " --organism none" if str(m.get("organism_source") or "").startswith(
+                         "user: no single organism")
+                     else " --organism '<scientific name>'")
+            base += f" --taxid {int(m['taxid'])}" if m.get("taxid") else ""
         cont = m.get("contaminant_set")
         cont = cont if cont and cont not in ("none", "already_in_supplied_database") else "universal"
         enz = ",".join(m.get("digestion_enzymes_used") or ["trypsin", "lysc"])
@@ -2076,10 +2116,15 @@ def sh_logged(cmd, log):
         raise subprocess.CalledProcessError(rc, cmd)
 
 
-def sage_lfq(out, params, log=None):
-    """Run the LFQ mass-window check (sage_lfq_check.py), record it, say it. The record."""
+def sage_lfq(out, params, log=None, accept=None):
+    """Run the LFQ mass-window check (sage_lfq_check.py), record it, say it. The record. A record
+    the user accepted before is kept accepted while nothing it accepted has changed; `accept`
+    (--accept-lfq-window's reason) accepts a gated one now."""
     import sage_lfq_check
-    rec = sage_lfq_check.check(out, params, log)
+    rec = sage_lfq_check.carry_acceptance(sage_lfq_check.load(out),
+                                          sage_lfq_check.check(out, params, log))
+    if accept and sage_lfq_check.gated(rec):
+        sage_lfq_check.accept(out, rec, accept)
     try:
         rec["written_to"] = sage_lfq_check.record(out, rec)
     except OSError as e:
@@ -2109,7 +2154,13 @@ def run_sage(cmd, params, files, fasta, out, threads, sbatch, queue=None):
                         "(it also re-runs the LFQ mass-window check, sage_lfq_check.json)."}
     convert_inline(steps)
     sh_logged(full, log)
-    rec = sage_lfq(out, params, log)
+    rec = sage_lfq(out, params, log, accept=getattr(a_globals, "accept_lfq_window", None))
+    if sage_lfq_check_mod().gated(rec):
+        # the gate (sage_lfq_check.refusal): no report.parquet from quantities known to be wrong;
+        # main() records the search, then says how to re-run it and exits non-zero
+        return {"engine": "sage", "report": None, "ran": True, "lfq_window_refused": True,
+                "mzml_conversion": conversion_record(steps, "inline, before Sage"),
+                "sage_lfq_check": rec}
     report = adapt_sage(out)
     try:
         with open(os.path.join(out, SAGE_ADAPT)) as fh:
@@ -2122,6 +2173,11 @@ def run_sage(cmd, params, files, fasta, out, threads, sbatch, queue=None):
 
 
 SAGE_ADAPT = "sage_adapt.json"
+
+
+def sage_lfq_check_mod():
+    import sage_lfq_check
+    return sage_lfq_check
 
 
 def sage_version(out):
@@ -2473,13 +2529,19 @@ def adapt_fragpipe_dda(out):
         sys.exit("No per-sample MaxLFQ Intensity columns in combined_protein.tsv.")
     # Protein.Group is the accession, as DIA-NN reports it: "Protein ID" (P12345), not
     # "Protein" (sp|P12345|ALBU_HUMAN), which compare_searches.py could never match to DIA-NN
-    # (0 shared proteins). The entry name and gene go where DIA-NN puts them.
+    # (0 shared proteins). The entry name and gene go where DIA-NN puts them. The group is every
+    # member, as DIA-NN writes one: the leading protein, then FragPipe's Indistinguishable
+    # Proteins (protein_ids.fragpipe_group), so the contaminant rule sees a Cont_/contam_ entry
+    # listed only there -- it reads every accession of a group, as on the DIA-NN path. The
+    # leading protein stays first, which is what compare_searches.py compares on. Genes and
+    # Protein.Names stay the leading protein's (FragPipe gives no per-member gene).
     names = {"Genes": "Gene", "Protein.Names": "Entry Name"}
     names = {k: v for k, v in names.items() if v in rows[0]}
     runs, prots, ints = [], [], []
     ann = {k: [] for k in names}
     for r in rows:
-        pg = fragpipe_protein_id(r.get("Protein", ""), r.get("Protein ID", ""))
+        pg = fragpipe_group(r.get("Protein", ""), r.get("Protein ID", ""),
+                            r.get("Indistinguishable Proteins", ""))
         if not pg:
             continue
         for c in lfq_cols:
@@ -2530,8 +2592,9 @@ def _lab_cpus_available():
 
     The per-user limit is the binding constraint on genome-center-grp/high (not the
     much larger account limit, which is shared), so this counts what I am already
-    running there rather than what the group is."""
+    running there rather than what the group is. The cap is the QOS's own (user_limits)."""
     user = os.environ.get("USER", "")
+    cap = user_limits("high", "genome-center-grp").get("cpu") or HIVE_USER_CPU_CAP
     try:
         used = 0
         out = subprocess.run(["squeue", "-h", "-u", user, "-t", "RUNNING",
@@ -2542,9 +2605,160 @@ def _lab_cpus_available():
                 used += int(ln)
             except ValueError:
                 pass
-        return max(HIVE_USER_CPU_CAP - used, 0)
+        return max(cap - used, 0)
     except Exception:
         return None
+
+
+def _sacctmgr_path():
+    """sacctmgr, or None. It is frequently absent from PATH in a non-login shell, so the usual
+    install locations are looked in too."""
+    found = shutil.which("sacctmgr")
+    if found:
+        return found
+    for c in ("/usr/bin/sacctmgr", "/usr/local/bin/sacctmgr",
+              "/cvmfs/hpc.ucdavis.edu/sw/spack/environments/core/view/generic/slurm/bin/sacctmgr"):
+        if os.path.exists(c):
+            return c
+    return None
+
+
+def _associations():
+    """The current user's SLURM associations, [(account, partition, qos)]; [] when sacctmgr is
+    missing or cannot answer (no SLURM here)."""
+    assoc = []
+    sacctmgr = _sacctmgr_path()
+    try:
+        if not sacctmgr:
+            raise FileNotFoundError("sacctmgr not found")
+        out = subprocess.run(
+            [sacctmgr, "-nP", "show", "assoc",
+             f"user={os.environ.get('USER', '')}", "format=account,partition,qos"],
+            capture_output=True, text=True, timeout=30).stdout
+        for line in out.splitlines():
+            f = line.split("|")
+            if len(f) >= 3 and f[0]:
+                assoc.append((f[0].strip(), f[1].strip(), f[2].strip()))
+    except Exception:
+        pass                                  # no SLURM, or sacctmgr unavailable
+    return assoc
+
+
+def _tres(text, key):
+    """One TRES out of a sacctmgr TRES string: 'cpu=64,gres/gpu=0,mem=1T' -> 64 for "cpu", and
+    for "mem" 1024 (GB; SLURM's unit is MB when none is given). None when it is not there."""
+    m = re.search(rf"(?:^|,){re.escape(key)}=(\d+(?:\.\d+)?)([KMGTP]?)(?:,|$)", text or "")
+    if not m:
+        return None
+    if key != "mem":
+        return int(float(m.group(1)))
+    mb = float(m.group(1)) * {"K": 1 / 1024, "": 1, "M": 1, "G": 1024, "T": 1024 ** 2,
+                              "P": 1024 ** 3}[m.group(2)]
+    return int(mb // 1024)
+
+
+def user_limits(partition, account, qos=None):
+    """The limits a job on this queue runs under: the PER-USER caps of its QOS (MaxTRESPU: every
+    job of yours on it counts) and the PER-JOB cap (MaxTRESPerJob: a bigger job never starts).
+
+    Read from SLURM, not assumed: `sacctmgr show qos` gives genome-center-grp-high-qos
+    MaxTRESPU cpu=64,mem=1T, publicgrp-high-qos MaxTRESPerJob cpu=8,mem=128G and
+    publicgrp-low-qos neither (HIVE, 2026-10-01). A queue with no QOS named is looked up in your
+    associations (a facility job on `high` writes no --qos, and SLURM assigns the association's).
+    When sacctmgr cannot be read, genome-center-grp/high falls back to HIVE_USER_CPU_CAP and any
+    other queue is UNKNOWN -- said in `source`, never guessed.
+    Returns {"qos", "cpu", "mem_gb", "per_job_cpu", "per_job_mem_gb", "source"}; a limit that
+    does not exist is None."""
+    lim = {"qos": qos, "cpu": None, "mem_gb": None, "per_job_cpu": None, "per_job_mem_gb": None,
+           "source": None}
+    if not qos:
+        hits = {q for a, p, q in _associations() if a == account and p == partition and q}
+        if len(hits) == 1 and "," not in next(iter(hits)):
+            lim["qos"] = qos = next(iter(hits))
+    sacctmgr = _sacctmgr_path()
+    out = None
+    if qos and sacctmgr:
+        try:
+            r = subprocess.run([sacctmgr, "-nP", "show", "qos", qos,
+                                "format=name,MaxTRESPU,MaxTRESPerJob"],
+                               capture_output=True, text=True, timeout=30)
+            out = r.stdout if r.returncode == 0 else None
+        except (OSError, subprocess.SubprocessError):
+            out = None
+    row = next((ln.split("|") for ln in (out or "").splitlines()
+                if ln.split("|")[0].strip() == qos and len(ln.split("|")) >= 3), None)
+    if row:
+        lim.update(cpu=_tres(row[1], "cpu"), mem_gb=_tres(row[1], "mem"),
+                   per_job_cpu=_tres(row[2], "cpu"), per_job_mem_gb=_tres(row[2], "mem"),
+                   source=f"sacctmgr show qos {qos} (MaxTRESPU / MaxTRESPerJob)")
+    elif (account, partition) == ("genome-center-grp", "high"):
+        lim.update(cpu=HIVE_USER_CPU_CAP,
+                   source=(f"HIVE_USER_CPU_CAP={HIVE_USER_CPU_CAP} (sacctmgr could not be read "
+                           f"for {qos or 'this queue'}; docs/QUEUE_SWITCHING.md)"))
+    else:
+        lim["source"] = (f"unknown: sacctmgr could not be read for {qos or 'this queue'} "
+                         f"({account}/{partition}), so no per-user cap is assumed")
+    return lim
+
+
+def fit_to_queue(cpus, limits):
+    """`cpus` lowered to what one job on this queue can ever get: the per-job cap, and the
+    per-user cap (a job asking for more than your whole cap waits for ever, QOSMaxCpuPerUser)."""
+    caps = [c for c in (limits.get("cpu"), limits.get("per_job_cpu")) if c]
+    return min([cpus] + caps)
+
+
+def array_task_cpus(n_tasks, ceiling, *, limits, mem_per_task_gb, max_simultaneous,
+                    pinned=None):
+    """CPUs per task of an array step (the DIA-NN chain's steps 2 and 4), and how many tasks run
+    at once. The ONE sizing rule; diann_parallel.py calls it and records what it returns
+    (search_provenance.json `cpu_sizing`).
+
+    Under a per-user CPU cap C, k tasks of t CPUs run at once with k = C // t, so throughput is
+    C / (t x T(t)) for a per-file time T(t). t x T(t) -- the CPU-seconds one file costs -- does
+    not fall as t rises (no program scales better than linearly), so fewer CPUs per task never
+    lowers throughput while there are files waiting. 32 per task under a 64 cap ran 2 of 29
+    files at a time (2026-09-25: the rest PENDING with QOSMaxCpuPerUserLimit). So, on a
+    capped queue, t = C // (the tasks that could run at once), never below ARRAY_TASK_MIN_CPUS
+    and never above `ceiling` (what the caller asked for: run_search.py's --threads). Few files
+    get more CPUs each, as many as the cap allows them all at once. Without a cap (publicgrp/
+    low) nothing competes for one, so t = `ceiling`. `pinned` (--threads-per-file) is honoured
+    as given, lowered only to fit the queue -- and said when it costs concurrency."""
+    cap, mem_cap = limits.get("cpu"), limits.get("mem_gb")
+    want = max(1, min(n_tasks, max_simultaneous or n_tasks))
+
+    def at_once(t):
+        k = [want]
+        if cap:
+            k.append(cap // t)
+        if mem_cap and mem_per_task_gb:
+            k.append(mem_cap // mem_per_task_gb)
+        return max(1, min(k))
+
+    asked = pinned or ceiling
+    if pinned:
+        t = fit_to_queue(pinned, limits)
+        why = (f"pinned with --threads-per-file {pinned}"
+               + (f", lowered to {t} to fit the queue" if t < pinned else ""))
+    elif cap:
+        t = fit_to_queue(min(ceiling, max(cap // want, ARRAY_TASK_MIN_CPUS)), limits)
+        why = (f"sized to the per-user cap: {cap} CPUs shared by up to {want} task(s), "
+               f"at least {ARRAY_TASK_MIN_CPUS} and at most {ceiling} (--threads) each")
+    else:
+        t = fit_to_queue(ceiling, limits)
+        why = f"no per-user CPU cap on this queue: {t} CPUs each, as asked (--threads)"
+    k, k_asked = at_once(t), at_once(fit_to_queue(asked, limits))
+    rec = {"cpus": t, "concurrent": k, "tasks": n_tasks, "requested": asked,
+           "pinned": bool(pinned), "concurrent_at_requested": k_asked,
+           "per_user_cpu_cap": cap, "per_user_mem_cap_gb": mem_cap,
+           "per_job_cpu_cap": limits.get("per_job_cpu"), "mem_per_task_gb": mem_per_task_gb,
+           "max_simultaneous": max_simultaneous, "qos": limits.get("qos"),
+           "cap_source": limits.get("source"), "reason": why}
+    rec["summary"] = (f"{t} CPUs per file, up to {k} of {n_tasks} files at once"
+                      + (f" ({limits.get('qos') or 'this queue'} caps you at {cap} CPUs"
+                         + (f" / {mem_cap} GB" if mem_cap else "") + ")" if cap else "")
+                      + (f"; {asked} per file would run {k_asked} at once" if asked != t else ""))
+    return rec
 
 
 def slurm_queue(partition=None, account=None, qos=None,
@@ -2574,31 +2788,10 @@ def slurm_queue(partition=None, account=None, qos=None,
     entirely, so the only overrides that got validated were the incomplete ones.
     Returns (partition, account, qos); any may be None, and a None is simply omitted
     from the script so SLURM applies its own default."""
-    assoc = []
-    # sacctmgr is frequently absent from PATH in a non-login shell, so look for it
-    # explicitly. Failing to find it must NOT silently emit an empty queue: SLURM would
+    # Failing to read the associations must NOT silently emit an empty queue: SLURM would
     # then use the cluster default partition, which on HIVE is `high` — precisely the
     # queue a non-facility account cannot use.
-    sacctmgr = shutil.which("sacctmgr")
-    if not sacctmgr:
-        for c in ("/usr/bin/sacctmgr", "/usr/local/bin/sacctmgr",
-                  "/cvmfs/hpc.ucdavis.edu/sw/spack/environments/core/view/generic/slurm/bin/sacctmgr"):
-            if os.path.exists(c):
-                sacctmgr = c
-                break
-    try:
-        if not sacctmgr:
-            raise FileNotFoundError("sacctmgr not found")
-        out = subprocess.run(
-            [sacctmgr, "-nP", "show", "assoc",
-             f"user={os.environ.get('USER', '')}", "format=account,partition,qos"],
-            capture_output=True, text=True, timeout=30).stdout
-        for line in out.splitlines():
-            f = line.split("|")
-            if len(f) >= 3 and f[0]:
-                assoc.append((f[0].strip(), f[1].strip(), f[2].strip()))
-    except Exception:
-        pass                                  # no SLURM, or sacctmgr unavailable
+    assoc = _associations()
 
     # An empty partition or QOS field in an association means "no restriction", which is a
     # fine DEFAULT but not a licence to confirm a value the user typed: a blank QOS field used
@@ -2785,7 +2978,8 @@ def _job_end_plan(a, engine):
 
 def emit_sbatch(path, command, out, threads, job, preamble="",
                 partition=None, account=None, qos=None, mem="64G", hours=SEARCH_WALL_HOURS,
-                submit_hint=True, notify="final", stage="search", fran_guarded=False):
+                submit_hint=True, notify="final", stage="search", fran_guarded=False,
+                preflight=None):
     """Emit a minimal SLURM script (login-node-safe). Orchestrator submits it.
     The queue is DETECTED from the submitting user's own SLURM associations — see
     slurm_queue() — unless the caller passes one, which then wins. Every caller must forward
@@ -2801,7 +2995,8 @@ def emit_sbatch(path, command, out, threads, job, preamble="",
     hook. --no-notify / SKILL_SLACK=0 at generation switch off only the Slack post; --no-fran /
     FRAN_DEPOSIT=off at generation, the FRAN hand-over. `fran_guarded`: this job ends with a
     completeness guard (report_guard), so a finished search may be staged for FRAN from the job;
-    without one it is left to step 7c."""
+    without one it is left to step 7c. `preflight`: node_fault.preflight_lines(), run first in the
+    job (through the hook)."""
     part, acct, q = slurm_queue(partition, account, qos)
     pre = (preamble + "\n") if preamble else ""
     lines = [
@@ -2829,7 +3024,8 @@ def emit_sbatch(path, command, out, threads, job, preamble="",
             script, os.path.abspath(out), final=(notify == "final"), time_limit_h=hours,
             stage=stage, slack=not getattr(a_globals, "no_notify", False),
             fran=not getattr(a_globals, "no_fran", False), fran_guarded=fran_guarded,
-            fran_name=getattr(a_globals, "fran_name", None), qc=_qc_choice(a_globals))
+            fran_name=getattr(a_globals, "fran_name", None), qc=_qc_choice(a_globals),
+            preflight=preflight)
     with open(path, "w") as fh:
         fh.write(script)
     print(f"  [sbatch] wrote {path} (partition={part or 'default'}, "
@@ -2848,7 +3044,9 @@ def main():
     ap.add_argument("--fasta", required=True)
     ap.add_argument("--out", default="search_out")
     ap.add_argument("--files", nargs="+", required=True)
-    ap.add_argument("--threads", type=int, default=8)
+    ap.add_argument("--threads", type=int, default=8,
+                    help="CPUs for the search job(s); on the 5-step chain, the MOST an array task "
+                         "gets -- each is sized to the queue's per-user cap (--threads-per-file)")
     ap.add_argument("--engine", choices=["diann", "alphadia", "sage", "fragpipe", "radiant"])
     ap.add_argument("--library", help="Radiant: an existing DIA-NN .tsv spectral library. "
                                       "Omit and one is generated with DIA-NN's predictor.")
@@ -2892,6 +3090,12 @@ def main():
     ap.add_argument("--qos", help="SLURM QOS for every job this writes")
     ap.add_argument("--max-simultaneous", type=int,
                     help="cap concurrent array tasks in the parallel chain")
+    ap.add_argument("--threads-per-file", type=_positive_int,
+                    help="parallel chain: PIN the CPUs of each array task (steps 2 and 4) and "
+                         "step 1b. Default: sized to the queue's per-user CPU cap so more files "
+                         "run at once -- on genome-center-grp/high (64 CPUs per user) 8 each, "
+                         "8 files at a time, never more than --threads (array_task_cpus; "
+                         "recorded as cpu_sizing in search_provenance.json)")
     ap.add_argument("--libpred-cpus", type=_positive_int,
                     help="parallel chain: CPUs for step 1, library prediction "
                          "(diann_parallel.py default: 16)")
@@ -2905,9 +3109,21 @@ def main():
                          "still waits for 128 GB")
     ap.add_argument("--time-per-file", type=_positive_int,
                     help="parallel chain: wall-clock hours per array task in steps 2 and 4 "
-                         "(diann_parallel.py default: 2)")
+                         "(diann_parallel.py default: 4 h at 16 CPUs per task -- real runs' "
+                         "p99 is 160 min, p99.5 248 min -- scaled up for fewer: 8 h at 8; "
+                         "array_task_hours)")
+    ap.add_argument("--mem-per-file", type=_positive_int,
+                    help="parallel chain: memory in GB per array task in steps 2 and 4, and step "
+                         "1b (diann_parallel.py default: 64 GB for steps 1b and 2, 48 GB for step "
+                         "4 -- from real Core runs' sacct memory); raise it for a much larger "
+                         "library")
     ap.add_argument("--adapt-only", action="store_true",
                     help="skip the search; just build report.parquet from an existing engine output dir")
+    ap.add_argument("--accept-lfq-window", metavar="REASON",
+                    help="Sage: build report.parquet although the LFQ window did not fit the "
+                         "runs' MS1 mass error (sage_lfq_check.py's gate), because the user "
+                         "accepts those quantities as they are -- give who and why; recorded in "
+                         "sage_lfq_check.json and search_provenance.json, and AUDIT.md says so")
     ap.add_argument("--keratin-sample", action="store_true",
                     help="the samples ARE keratin (hair, wool, feather, skin, nail ...): refuse a "
                          "--fasta that still holds keratin-family Cont_ entries (build it with "
@@ -2947,22 +3163,29 @@ def main():
             setattr(a, attr, os.path.abspath(v))
     files = [os.path.abspath(f) for f in files]
 
-    # DIA-NN names a run by its file name without the folder, so /plate1/s1.raw and
-    # /plate2/s1.raw become ONE Run: two samples merged in the report (and, in the chain, two
-    # array tasks writing the same .quant). That is knowable now, from the input list, so it
-    # stops here instead of failing check_report_runs.py after the search has run.
-    if engine == "diann" and not a.adapt_only:
-        import check_report_runs
-        dupes = check_report_runs.duplicate_run_names(files)
-        if dupes:
-            sys.exit(f"[run_search] inputs share a run name: {', '.join(dupes)}. DIA-NN names a "
-                     "run by its file name without the folder, so they would be merged into "
-                     "one Run. Rename them, or search them separately.")
+    # Repeats in the input list, for every engine (check_report_runs: the one rule and the one
+    # wording). One file listed more than once is searched ONCE and flagged -- on stderr and in
+    # search_provenance.json `repeated_paths`, which the analysis report shows. Different files
+    # that share a run name are flagged too (`repeated_names`) -- and stop here, before any
+    # engine: DIA-NN names a run by its file name without the folder, so /plate1/s1.raw and
+    # /plate2/s1.raw would become ONE Run (two samples merged; in the chain two array tasks
+    # writing one .quant), and Sage converts both to one mzML name. Knowable from the list, so
+    # it stops now rather than in check_report_runs.py after the search has run.
+    import check_report_runs
+    files, repeated_paths = check_report_runs.distinct_inputs(files)
+    repeated_names = check_report_runs.repeated_names(files)
+    if repeated_paths or repeated_names:
+        sys.stderr.write(check_report_runs.repeats_note(repeated_paths, "run_search", repeated_names))
+    if repeated_names and not a.adapt_only:
+        sys.exit(check_report_runs.names_stop(repeated_names, "run_search"))
 
     if a.adapt_only:
         # After a Sage job: the LFQ mass-window check again, here, where the orchestrator sees
         # it (the job ran it too, into its log) -- and its record into search_provenance.json.
-        lfq = sage_lfq(a.out, a.params) if engine == "sage" else None
+        lfq = sage_lfq(a.out, a.params, accept=a.accept_lfq_window) if engine == "sage" else None
+        refused = sage_lfq_check_mod().refusal(a.out, lfq) if lfq else None
+        if refused:
+            sys.exit(f"[run_search] {refused}")
         report = {"sage": adapt_sage, "fragpipe": adapt_fragpipe,
                   "alphadia": adapt_alphadia,
                   "radiant": adapt_radiant}.get(engine, lambda o: None)(a.out)
@@ -3032,10 +3255,12 @@ def main():
 
     # These size the 5-step chain only. Said out loud when the route is single-shot, where
     # they change nothing: the flag being accepted reads as the jobs having got smaller.
-    chain_only = [f for f, v in (("--libpred-cpus", a.libpred_cpus),
+    chain_only = [f for f, v in (("--threads-per-file", a.threads_per_file),
+                                 ("--libpred-cpus", a.libpred_cpus),
                                  ("--assembly-cpus", a.assembly_cpus),
                                  ("--assembly-mem", a.assembly_mem),
                                  ("--time-per-file", a.time_per_file),
+                                 ("--mem-per-file", a.mem_per_file),
                                  ("--max-simultaneous", a.max_simultaneous)) if v]
     if chain_only and not use_parallel:
         sys.stderr.write(f"[run_search] NOTE: {', '.join(chain_only)} size the 5-step chain "
@@ -3144,6 +3369,9 @@ def main():
                        "params_file": a.params,
                        # read back by notify_slack.py (instrument + acquisition in the post)
                        "bundle": os.path.abspath(a.bundle),
+                       # with the queue, what a re-run of this search needs (sage_lfq_check's
+                       # corrected-window command)
+                       "tools": os.path.abspath(a.tools), "queue": queue,
                        # what the jobs' end hook will do, as baked into them at generation
                        # (only DIA-NN routes have a completeness guard to stage from)
                        "job_end_hook": _job_end_plan(a, engine),
@@ -3161,6 +3389,9 @@ def main():
                        "keratin_sample_source": keratin_rec["sample_source"],
                        "keratin_sample_check": keratin_rec,
                        "n_files": len(files), "files": files,
+                       # inputs listed more than once, each searched once, with the count
+                       # (check_report_runs.distinct_inputs); the analysis report shows them
+                       "repeated_paths": repeated_paths,
                        "search_mode": "parallel_5step" if use_parallel else "single_shot",
                        "parallel_routing_reason": why,
                        # what was actually written to submit -- for a library-free search
@@ -3174,13 +3405,21 @@ def main():
                        # by the job and by --adapt-only. probe_fallback: an inline search's
                        # pre-search probe measured nothing (a job's probe_fallback.py writes it
                        # here itself)
-                       **{k: res[k] for k in ("sage_lfq_check", "sage_adapt", "probe_fallback")
+                       # cpu_sizing: the chain's CPUs per array task and how many run at once,
+                       # and why (array_task_cpus) -- `threads` above is what was ASKED
+                       **{k: res[k] for k in ("sage_lfq_check", "sage_adapt", "probe_fallback",
+                                              "cpu_sizing")
                           if isinstance(res, dict) and res.get(k)}},
                       fh, indent=2)
     except Exception as e:
         sys.stderr.write(f"[run_search] could not write search_provenance.json: {e}\n")
 
     print(json.dumps(res, indent=2))
+
+    if isinstance(res, dict) and res.get("lfq_window_refused"):
+        # recorded above, so the re-run command can be built from the record (rerun_plan)
+        sys.stderr.write(f"[run_search] {sage_lfq_check_mod().refusal(a.out, res['sage_lfq_check'])}\n")
+        sys.exit(1)
 
     if sbatch_refused:
         moved = sbatch_refused["existing_file_moved_to"]

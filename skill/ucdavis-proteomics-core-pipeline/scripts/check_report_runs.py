@@ -66,8 +66,9 @@ def runs_from_parquet(report):
 
 
 def stats_path(report):
-    """DIA-NN writes <report stem>.stats.tsv next to <report stem>.parquet."""
-    stem = report[:-len(".parquet")] if report.endswith(".parquet") else report
+    """DIA-NN writes <report stem>.stats.tsv next to <report stem>.parquet (DIA-NN 1.x:
+    next to <report stem>.tsv)."""
+    stem = next((report[:-len(e)] for e in (".parquet", ".tsv") if report.endswith(e)), report)
     return stem + ".stats.tsv"
 
 
@@ -96,12 +97,139 @@ def runs_from_stats(path):
     return {name for name, r in rows.items() if _num(r, "Precursors.Identified") > 0}
 
 
+def distinct_inputs(files):
+    """(each input once, [repeated paths]) -- THE rule for one file listed more than once, which
+    every route that takes a file list follows (run_search.py for every engine, diann_parallel.py,
+    radiant_parallel.py, ht_manifest.py, and verify() below): the file is searched ONCE, because
+    an engine cannot take it twice, and the repeat is FLAGGED (repeats_text), never refused and
+    never dropped silently. "The same file" is judged on the RESOLVED path, so a symlink and its
+    target, or `a/./x.d` and `a/x.d`, are one. The first spelling is kept, in first-seen order. A
+    repeat is {"path", "times", "also_listed_as": [other spellings]}.
+
+    Why: STAN's HT manifest listed one run 4 times and another twice (100 lines for 96 files) with
+    every gate PASS (a staff plate, 2026-10-01); searched as given, those runs would count 2-4
+    times in the experiment and the empirical library. Brett (2026-10-01): repeats are okay, but
+    they are flagged."""
+    order, seen = [], {}
+    for f in files:
+        key = os.path.realpath(str(f).rstrip("/"))
+        if key in seen:
+            seen[key].append(f)
+        else:
+            seen[key] = [f]
+            order.append(f)
+    repeats = [{"path": v[0], "times": len(v),
+                "also_listed_as": sorted({x for x in v[1:] if x != v[0]})}
+               for v in seen.values() if len(v) > 1]
+    return order, repeats
+
+
+def repeated_names(files):
+    """[{"run_name", "paths"}]: DIFFERENT files (distinct_inputs) that share a run name -- a rerun
+    in another folder, one name on two plates. Kept in every list and flagged (repeats_text). An
+    engine cannot search them as given: DIA-NN names a run by its file name without the folder,
+    so /plate1/s1.raw and /plate2/s1.raw become ONE Run in the report (and, in the 5-step chain,
+    two array tasks writing one .quant), and Sage converts both to one mzML name -- so
+    run_search.py stops before any engine with this list in its message."""
+    by = {}
+    for f in distinct_inputs(files)[0]:
+        by.setdefault(run_name(f), []).append(f)
+    return [{"run_name": n, "paths": v} for n, v in by.items() if len(v) > 1]
+
+
+def repeats_text(repeated_paths=(), repeated_names_=()):
+    """THE wording of the flag, one sentence per kind -- stderr, the HT manifest, and the analysis
+    report all print these."""
+    out = []
+    if repeated_paths:
+        out.append(f"{len(repeated_paths)} input file(s) were listed more than once; each is "
+                   f"searched once: " + "; ".join(
+                       f"{r['path']} (listed {r['times']} times"
+                       + (f", also as {', '.join(r['also_listed_as'])}" if r.get("also_listed_as")
+                          else "") + ")" for r in repeated_paths))
+    if repeated_names_:
+        out.append(f"{len(repeated_names_)} run name(s) are shared by different files, all kept: "
+                   + "; ".join(f"{r['run_name']}: {', '.join(r['paths'])}" for r in repeated_names_))
+    return out
+
+
+def repeats_note(repeated_paths, prog, repeated_names_=()):
+    """repeats_text() as stderr lines."""
+    return "".join(f"[{prog}] FLAG: {t}\n" for t in repeats_text(repeated_paths, repeated_names_))
+
+
+def names_stop(repeated_names_, prog):
+    """THE message an engine route stops with when different inputs share a run name: what is
+    shared, that the list keeps and flags them, and why the search cannot take them as given."""
+    return (f"[{prog}] STOPPED before searching: different input files share a run name -- "
+            + "; ".join(f"{r['run_name']}: {', '.join(r['paths'])}" for r in repeated_names_)
+            + ". They are kept in the file list and flagged (repeated_names), but a search cannot "
+              "take them as given: DIA-NN names a run by its file name without the folder, so they "
+              "would become ONE run in the report (two samples merged), and Sage converts both to "
+              "one mzML name; every engine route holds to the same rule. Ways out: if they are "
+              "re-injections of one sample, keep one (core_submission.py locate --reinjections "
+              "latest, or leave the other out of the list); otherwise give one a different name "
+              "(a link under another name works), or search them separately. Searching both under "
+              "unique run names is a 2.11 item. Nothing was written or submitted.")
+
+
+# DIA-NN's per-run Normalisation.Instability, a column of <report>.stats.tsv (DIA-NN 2.7.0 writes
+# it, between Median.Mass.Acc.MS2.Corrected and Median.RT.Prediction.Acc). Its README documents
+# neither what the value means nor a cutoff, so the threshold is this skill's, set between two
+# measured cohorts (a staff report, DIA-NN 2.7.0): an E. coli cohort at 0.04-0.07, and a
+# timsTOF tissue cohort at 0.67-1.00 in every run, whose Precursor.Normalised /
+# Precursor.Quantity ratio then spread ~8-fold between runs and varied with RT inside each run.
+# The ONE definition: audit_results.py warns on it and record_run.py records it.
+NORM_INSTABILITY_COLUMN = "Normalisation.Instability"
+NORM_INSTABILITY_WARN = 0.3
+NORM_INSTABILITY_BASIS = (
+    f"DIA-NN documents no cutoff for {NORM_INSTABILITY_COLUMN}; {NORM_INSTABILITY_WARN:g} is this "
+    "skill's, between a cohort that measured 0.04-0.07 and one that measured 0.67-1.00 in every "
+    "run (DIA-NN 2.7.0)")
+
+
+def normalisation_instability(report, runs=None):
+    """DIA-NN's Normalisation.Instability per run, from the stats file beside `report`.
+
+    -> None when there is no stats file (another engine's report, or --no-stats), else
+    {"stats_file", "column" (False: this DIA-NN wrote no such column), "per_run" {run: value},
+    "median", "max", "flagged" {run: value above NORM_INSTABILITY_WARN}, "threshold", "basis"}.
+    A run with no identified precursor is left out: DIA-NN writes 0 for a run it could not load or
+    found nothing in, which says nothing about its normalisation. `runs` (run names, as
+    run_name() gives them) restricts the answer to the runs an analysis used."""
+    path = stats_path(report)
+    rows = stats_rows(path)
+    if rows is None:
+        return None
+    rec = {"stats_file": path, "column": False, "per_run": {}, "median": None, "max": None,
+           "flagged": {}, "threshold": NORM_INSTABILITY_WARN, "basis": NORM_INSTABILITY_BASIS}
+    want = {run_name(r) for r in runs} if runs else None
+    for name, r in rows.items():
+        if NORM_INSTABILITY_COLUMN not in r:
+            return rec
+        rec["column"] = True
+        if (want is not None and name not in want) or _num(r, "Precursors.Identified") <= 0:
+            continue
+        rec["per_run"][name] = _num(r, NORM_INSTABILITY_COLUMN)
+    vals = sorted(rec["per_run"].values())
+    if vals:
+        mid = len(vals) // 2
+        rec["median"] = vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2
+        rec["max"] = vals[-1]
+    rec["flagged"] = {k: v for k, v in rec["per_run"].items() if v > NORM_INSTABILITY_WARN}
+    return rec
+
+
 def duplicate_run_names(files):
-    """Run names more than one input would share. DIA-NN names a run by its file name without
-    the folder, so /a/s1.raw and /b/s1.raw are one Run in the report. Known from the input list
-    alone, which is why run_search.py calls this before it writes a job."""
-    names = [run_name(f) for f in files]
-    return sorted({x for x in names if names.count(x) > 1})
+    """The run names repeated_names() finds, sorted -- what a check that only needs the names
+    reads (the step-5 report check)."""
+    return sorted(r["run_name"] for r in repeated_names(files))
+
+
+def sharing_run_name(files, names):
+    """'s1: /a/s1.raw, /b/s1.raw; ...' -- the distinct inputs behind each shared run name."""
+    return "; ".join(f"{r['run_name']}: {', '.join(r['paths'])}" for r in repeated_names(files)
+                     if r["run_name"] in names)
 
 
 def why_missing(name, stats, stats_file):
@@ -129,14 +257,15 @@ def why_missing(name, stats, stats_file):
 
 def verify(report, files, parquet_runs=runs_from_parquet):
     """(ok, message). `parquet_runs` is injectable so the stdlib route can be tested."""
+    files = distinct_inputs(files)[0]           # a file listed twice was searched once
     n = len(files)
     expected = [run_name(f) for f in files]
     dupes = duplicate_run_names(files)
     if dupes:
         return False, (f"FAILED: {n} inputs but only {len(set(expected))} distinct run names -- "
-                       f"{', '.join(dupes)} appear more than once. DIA-NN names a run by its file "
-                       "name without the folder, so these would be merged into one Run in the "
-                       "report. Rename or search them separately.")
+                       f"different files share a name ({sharing_run_name(files, dupes)}). DIA-NN "
+                       "names a run by its file name without the folder, so these would be merged "
+                       "into one Run in the report. Rename or search them separately.")
     runs = parquet_runs(report)
     source = os.path.basename(report)
     if runs is None:
