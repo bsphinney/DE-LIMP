@@ -46,7 +46,11 @@ class RunDeRecordsCompute(unittest.TestCase):
             fh.write(STUB_SCONTROL)
         os.chmod(os.path.join(bin_dir, "scontrol"), 0o755)
         env = {k: v for k, v in os.environ.items() if k not in ("OPENBLAS_CORETYPE", "SLURMD_NODENAME")}
-        slurm = dict(env, PATH=bin_dir + os.pathsep + env.get("PATH", ""), SLURMD_NODENAME="hive-dc-7-5-46")
+        env = {k: v for k, v in env.items() if k not in ("APPTAINER_CONTAINER", "SINGULARITY_CONTAINER",
+                                                         "APPTAINER_NAME", "SINGULARITY_NAME")}
+        # the slurm run is also "inside a container": the variables Apptainer sets (app.R's)
+        slurm = dict(env, PATH=bin_dir + os.pathsep + env.get("PATH", ""), SLURMD_NODENAME="hive-dc-7-5-46",
+                     APPTAINER_CONTAINER="/containers/delimp-r.sif", APPTAINER_NAME="delimp-r.sif")
         cls.runs = {}
         for key, e in (("plain", env), ("slurm", slurm)):
             out = os.path.join(cls.tmp, key)
@@ -85,6 +89,36 @@ class RunDeRecordsCompute(unittest.TestCase):
         self.assertEqual(comp["slurm_features"], ["cpu", "ib", "zen4"])
         self.assertEqual(comp["cpu_family"], "zen4")
         self.assertIn("(SLURM feature zen4, node hive-dc-7-5-46)", si)
+
+
+    def runtime(self, key):
+        p, out = self.runs[key]
+        self.assertEqual(p.returncode, 0, p.stderr[-1500:])
+        with open(os.path.join(out, "de_provenance.json")) as fh:
+            return json.load(fh)
+
+    def test_the_r_it_ran_in_is_recorded(self):
+        """provenance.py builds the bundle's environment from this (staff report, 2026-09-28: a
+        DE run in a separate R env was bundled with setup.json's R and limpa)."""
+        rec = self.runtime("plain")
+        rt = rec["runtime"]
+        r_home = rscript("cat(R.home())")
+        self.assertEqual(rt["r_home"], r_home)
+        self.assertTrue(os.path.isfile(rt["rscript"]), rt)
+        self.assertTrue(rt["lib_paths"] and all(os.path.isdir(x) for x in rt["lib_paths"]), rt)
+        self.assertTrue(rt["r_version"].startswith("R version "), rt)
+        self.assertIsNone(rt["container"])
+        self.assertEqual(rt["session_info"], "sessionInfo.txt")
+        self.assertTrue(rec["packages"]["limma"])
+        _, si = self.record("plain")
+        self.assertIn(f"R home   {r_home}", si)
+
+    def test_a_container_is_recorded(self):
+        rt = self.runtime("slurm")["runtime"]
+        self.assertEqual((rt["container"], rt["container_name"]),
+                         ("/containers/delimp-r.sif", "delimp-r.sif"))
+        _, si = self.record("slurm")
+        self.assertIn("Container /containers/delimp-r.sif", si)
 
 
 class ReproduceMdNamesTheFamily(unittest.TestCase):

@@ -80,7 +80,12 @@ incomplete. This is the skill's implementation of DE-LIMP architectural rules #1
 3. **Locked software environment.** `provenance.py` captures
    `environment/conda-explicit.txt` (every package pinned with URL + md5),
    `pip-freeze.txt`, and `r-sessionInfo.txt` (all R package versions). `reproduce.sh`
-   rebuilds the env from the explicit lock — same packages, same versions.
+   rebuilds the env from the explicit lock — same packages, same versions. All of it is
+   **the environment the DE ran in**: run_de.R records `runtime` in `de_provenance.json` (R
+   home, Rscript, library paths, conda env, container), `r-sessionInfo.txt` is the DE's own
+   `sessionInfo.txt`, and `run_manifest.json` `environment.source` says where the env came
+   from. setup.json is used only for a DE record without `runtime`, and said to be (a DE once
+   ran in a separate R 4.6 env while setup.json named the default one).
 4. **Recorded inputs + parameters.** Copies of the exact params file and
    `conditions.csv`; the organism taxid, instrument, contrasts, and all thresholds
    in `run_manifest.json`; sha256 of the FASTA, the search report, and DE outputs.

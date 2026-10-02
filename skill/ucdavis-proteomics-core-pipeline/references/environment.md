@@ -240,7 +240,11 @@ Common IDs (still confirm with `resolve`): human `UP000005640`, mouse
 
 ### `fetch` — proteome → search FASTA
 Priority, cheapest/most-trusted first:
-1. `--path` override → used verbatim (pre-staged proteome).
+1. `--path` override → used verbatim (pre-staged proteome). Its organism is the user's answer:
+   `--organism '<scientific name>' --taxid <taxid>` (or `--organism none` for a database with
+   no single organism) is required, and recorded with `organism_source: user (...)`. A name and
+   a taxid the curated table says are different organisms (different genus: `Homo sapiens`
+   with 10090) are refused.
 2. **HIVE** (`--hive`): reuse `/quobyte/proteomics-grp/MRS/`. Matches only files
    whose name starts with the proteome ID and skips `*_plus_*contam*` /
    `*decoy*` / `*predicted*` variants — appending contaminants to a database that
@@ -263,9 +267,44 @@ returns byte-identical output (6,067 entries) with and without it. A plain REST
 (`R/helpers_search.R`) uses FTP, and why the Core's staged HIVE database is
 `UP000005640_9606.fasta` = 20,663 sequences, not 147k.
 
-If no FTP file exists (non-reference proteome), the script warns loudly, records
-the warning in its output, and falls back to the REST full set — it never swaps
-databases silently. If REST also fails it exits with the reason.
+**Only a whole file is used.** Each download is checked three ways: the bytes against the
+server's Content-Length, the gzip stream read to its end (its CRC is checked there), and the
+entry count against UniProt's `geneCount` for the proteome (within 5%). Measured 2026-10-01
+(release 2026_03): the FTP file's count EQUALS geneCount for human (20,652), mouse (21,860),
+yeast S288c (6,066), E. coli K-12 (4,403) and Arabidopsis (27,496); the 5% only absorbs REST and
+FTP serving different releases around a release day. A failed attempt is retried twice
+(after 5 s and 20 s); the sidecar's `download_check` records the bytes, the count and the
+attempts. A transfer that is still cut short, or a count that does not fit, **stops with exit
+≠ 0** (a staff search, 2026-10-01: a truncated gzip used to fall back to the 147,520-entry full set
+with exit 0, and the re-run a minute later was whole). Re-run, or pass `--content full` to
+search the full set on purpose.
+
+Only when the FTP server answers **404** (no such file: a non-reference proteome) does the
+script warn loudly, record the warning in its output, and fall back to the REST full set — it
+never swaps databases silently. If REST also fails it exits with the reason.
+
+### User-supplied target sequences (`--add-fasta <file>`, repeatable)
+A bait, a tag or a construct the experiment is about (EGFP, TurboID). Each entry is a TARGET,
+written after the proteome and before the contaminants, and recorded in the sidecar under
+`added_sequences` (the file's path and sha256; each entry's accession, name, length and sequence
+sha256). A contaminant entry most of which is the added protein — identical to it, contained in
+it, or with at least `ADDED_SEQUENCE_SHARED_FRACTION` (0.5) of its own peptides also in it, in the
+search's digest (I = L) — is removed, from the contaminant set and from a supplied database's own
+`Cont_` entries, and listed under `contaminants_dropped_for_added_sequences` (each with
+`shared_fraction` and `shared_peptides`). Measured: wild-type GFP (`Cont_P42212`) shares 21 of its
+28 peptides with EGFP (75%) and has 3 of its own, so the ordinary 2-own-peptide rule kept it
+beside an EGFP bait. An entry sharing fewer stays — dropping it would also hide real
+contamination with it, which its own peptides show — and the peptides it shares are named under
+`contaminants_sharing_peptides_with_added_sequences`, in the Methods and in a report callout, as
+ambiguous between the two. The digestion enzymes in use stay
+(`contaminants_kept_near_added_sequences`). A supplied database's contaminant entries are judged
+under either tag (`Cont_`, and FragPipe's `contam_`). The ordinary own-peptide rule counts a
+contaminant's own peptides against **every** target -- the proteome AND the added sequences -- so
+one whose peptides are split between a proteome protein and a bait (one of its own left in the
+whole database) is removed. Refused: text before the file's first `>` header (it would be
+written onto the previous entry's sequence), an entry with a contaminant tag, no sequence, or an
+accession (`protein_ids.header_accession`) used twice or already in the database. An entry
+identical to a proteome entry is warned. Methods and `reproduce.sh` carry them.
 
 ### Contaminants (`--contaminants`, default `universal`)
 Sets: `universal` (default; what the Core stages on HIVE), `cell_culture`,
@@ -380,6 +419,10 @@ whenever 16 or more of your CPUs were free there at generation, and then wait on
 for the rest; they do not move to `low` because the 64 they ask for are unavailable. To put
 the chain on `low`, pass `--partition low --account publicgrp` (the generator adds
 `--qos=publicgrp-low-qos`).
+
+How many CPUs each array task of the DIA-NN chain asks for is sized to the chosen queue's
+per-user cap (`references/diann_parallel.md`, "CPUs per array task"): 8 each on `high` for a
+large cohort, so 8 files run at once under the 64-CPU cap, instead of `--threads` each.
 
 If associations cannot be read at all the script falls back to `publicgrp/low`, **not** the
 cluster default: that is `high`, which rejects a non-facility account.

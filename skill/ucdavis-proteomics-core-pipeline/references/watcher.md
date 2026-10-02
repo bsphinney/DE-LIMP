@@ -53,6 +53,7 @@ any auto-fix you applied to the user.
 ## Error classes → fixes (what `watch_run.sh` detects)
 | error_class | signal | fix |
 |---|---|---|
+| `node_fault` | a FAILED job whose node could not reach the storage: exit **75** (the job's node check: `NODE_FAULT: node=… check=… path=… detail=…`), SLURM `NODE_FAIL`, or a storage I/O error in its log (`Transport endpoint is not connected`, `Stale file handle`, `Input/output error`) — never over OOM/TIMEOUT/CANCELLED. Checked first; the JSON carries `node_fault` (node, evidence, `say`) | **a node problem, not DIA-NN and not the data — say so to the user.** Run `node_fault.py retry --out <search out dir> --job <id>` on HIVE (from a laptop: `bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/node_fault.py retry --out … --job …'`): it resubmits the failed step — an array's failed tasks only, once the array has finished — and every step waiting on it with `--exclude=<node>` (every node that failed this search stays excluded), scancels the dependants left `DependencyNeverSatisfied`, rewrites `jobs.txt` and the session's `.recovery.json`, and records it in `<out>/node_faults.json` and `search_provenance.json` `node_faults`. Each failed task is judged on its own log and sacct row. At most **2** retries per step; it refuses (exit 3) a third, failures spread over more than 3 nodes (the storage, not a node), a step with ANY failed task that is not a node fault — an `OUT_OF_MEMORY` or `TIMEOUT` task, or one with no node-fault evidence: nothing is resubmitted, and `not_node_faults` lists each with its fix (`--force` overrides) — and a chain it cannot map; then tell the user and check the HIVE status page. `complete` is true only when every failed task and every step after it was resubmitted |
 | `out_of_memory` | oom-kill, `std::bad_alloc`, OUT_OF_MEMORY | raise sbatch `--mem` (e.g. 64G→128G); DIA-NN: fewer threads; resubmit |
 | `timeout` | TIMEOUT / "DUE TO TIME LIMIT" | raise `--time`, or split the run; resubmit |
 | `diann_no_dotnet` | `dotnet: not found` | wrong DIA-NN container (no .NET → `.raw` silently skipped). Use the HIVE **native** build `build_<v>/diann-<v>/diann-linux` or a .NET image |
@@ -94,7 +95,25 @@ search.
 - When resubmitting after a fix, edit the sbatch (`--mem`/`--time`/`--gres`) and note
   the change in `commands.log` so the reproducibility bundle records what happened.
 
+## Node faults: the node check every chain job runs first
+
+Every job of the DIA-NN chain starts with a **node check** (`node_fault.preflight_lines`, run
+inside the job-end hook): the DIA-NN binary (or image), the search folder (writable), the FASTA
+and the raw-data folders must answer on this node within 120 s. They all existed on the login
+node when the chain was generated, so one this node cannot see — a dropped `/quobyte` FUSE mount
+(`Transport endpoint is not connected`, hive-dc-7-4-50, 2026-09-28), or a mount that never answers
+(16 min on hive-dc-7-4-54 the same day) — ends the job with exit **75** and a
+`NODE_FAULT: node=<n> check=<what> path=<p> detail=<why>` line, **before** DIA-NN runs, so the
+failure is never reported as "DIA-NN exited 0 but did not write …". The job-end post says
+"the compute node could not reach the storage". It is not the probe's ESTALE handling: step 1b's
+probe rereads its own log on `Stale file handle`, retries and falls back
+(`probe_fallback.py`) — that job succeeds, and only a failed job is classified.
+
 ## Auto-recovery playbook (apply autonomously; log every action to `commands.log`)
+- **`node_fault`:** `node_fault.py retry --out <out> --job <id>` (above). Tell the user in one
+  line that a compute node could not reach the storage and the step was resubmitted on another
+  node — the `say` field. Not a retry of the same class against the 2-attempt limit below: the
+  node retry is bounded by its own (2 per step).
 - **`stalled` (hung file):** `scancel <arrayjob>_<taskid>` (or the job). Retry that one file
   once on a fresh node. If it stalls again, **drop it** — it's pathological (often a file
   the facility itself re-ran). In the 5-step parallel chain, step 4 already auto-skips a

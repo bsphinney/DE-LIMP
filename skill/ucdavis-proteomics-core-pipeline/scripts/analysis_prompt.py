@@ -19,7 +19,7 @@ Usage:
       --conditions input/conditions.csv --figures-dir output/figures \
       [--qc QC_Metrics.csv] [--gsea GSEA_Results.csv] \
       --engine diann --acquisition DIA --instrument "Orbitrap Astral" \
-      --workflow-manifest input/wf/workflow.manifest.json
+      --workflow-manifest input/wf/workflow.manifest.json --session <session dir>
 """
 import sys, os, json, glob, argparse
 
@@ -30,8 +30,9 @@ from make_analysis_html import (matrix_complete, SUPPRESS_WHEN_COMPLETE,  # noqa
                                 contrast_label, LOGFC_DIRECTION, DEFAULT_TAG, background_flag,
                                 _make_names, read_figures_json, APPENDIX, APPENDIX_FIGURES,
                                 load_record, read_text, csv_text, _UNREADABLE, gene_label)
-# which groups are pull-down controls, and what the DE columns mean -- session_docs' own.
-from session_docs import IP_CONTROL_NAME, COLUMNS as DE_COLUMNS  # noqa: E402
+# what the DE columns mean -- session_docs' own (which groups are pull-down controls is
+# experiment_type.pulldown_design's).
+from session_docs import COLUMNS as DE_COLUMNS  # noqa: E402
 import csv  # noqa: E402
 
 # Abundant ER proteins that ride along in almost any membrane pull-down: background, not
@@ -75,6 +76,70 @@ def submission_brief(w, source):
             w(f"  - {n['text']}")
     w("")
     w(sr.render_markdown(rec, (), heading="### The record, as submitted"))
+
+
+def sample_type_brief(w, session):
+    """What the samples are, as the user stated it (sample_type.py, the session's one record) --
+    or NOT STATED, and never to be guessed. A draft report once named a tissue from an
+    abbreviation in the file names, and the data did not support it (a staff report, 2.10)."""
+    import sample_type as st
+    try:
+        rec = st.load(session) if session else None
+    except (OSError, ValueError) as e:
+        print(f"[analysis_prompt] the sample-type record could not be read: {e}", file=sys.stderr)
+        rec, unreadable = None, str(e)
+    else:
+        unreadable = None
+    w("## What the samples are — as the user stated it")
+    w(f"- **Sample type: {st.describe(rec)}**"
+      + (f" (its record could not be read: {unreadable})" if unreadable else ""))
+    if rec and rec.get("stated"):
+        w("- Describe the samples in these words, adding nothing they do not state (a tissue "
+          "region, a cell type, a disease state).")
+        w("- Check it against the data: if the most abundant proteins or the sample-quality "
+          "panels (SAMPLE_QUALITY.md) point to a different tissue or biofluid (e.g. muscle, "
+          "plasma or skin proteins dominating a sample stated as brain), say so in **Data "
+          "Quality Notes** as a question for the user; do not resolve it either way yourself.")
+    else:
+        w("- Do not name a tissue, cell type or biofluid anywhere in the report or Methods; "
+          f"{st.NEVER_INFER}. Say in **Data Quality Notes** that the sample type was not stated, "
+          "and describe the samples by their groups only. If the data suggest one (e.g. muscle "
+          "proteins dominating), you may say what the proteins suggest, as an observation, "
+          "never as the sample's identity.")
+    w("")
+
+
+def normalisation_brief(w, prov, etype, etype_err, design):
+    """The experiment type, the quantities the DE read, and the normalisation check -- quoted
+    from run_de.R's record (de_provenance.json normalization_check), never re-judged here."""
+    nc = prov.get("normalization_check") if isinstance(prov.get("normalization_check"), dict) else {}
+    w("## Experiment type and normalisation — as recorded")
+    w(f"- **Experiment type:** " + (f"{etype['label']} ({etype['source']})" if etype else
+                                    "NOT RECORDED" + (f" (its record could not be read: {etype_err})"
+                                                      if etype_err else " -- do not assume one")))
+    w(f"- **Pull-down design:** {'yes' if design['pulldown'] else 'no'} ({design['source']})"
+      + (f". **Raise with the user:** {design['note']}" if design.get("note") else ""))
+    w(f"- **Quantities the DE read:** {prov.get('normalisation') or 'NOT RECORDED'}")
+    if nc.get("status") != "decided":
+        w("- **Normalisation check: NOT RUN.** Say in Data Quality Notes that whether "
+          "normalisation suited this experiment was not checked.")
+    else:
+        d = nc.get("decision") or {}
+        w(f"- **Normalisation check:** default {nc.get('default', {}).get('quantities')} for this "
+          "type; the data check " + ("agreed." if not nc.get("tripped") else
+                                    "did NOT agree (" + "; ".join(nc.get("trips") or []) +
+                                    f"); {d.get('by')} chose {d.get('quantities')}: {d.get('reason')}."
+                                    " Say so in Data Quality Notes."))
+        vol = (nc.get("volcano") or {}).get(nc.get("quantities_applied") or "") or {}
+        for c, v in (vol.get("contrasts") or {}).items():
+            if "n" not in v:
+                continue
+            ctr = "n/a" if v.get("centre_nonsig") is None else f"{v['centre_nonsig']:+.2f}"
+            w(f"  - Volcano {c}: centre (non-significant) {ctr} log2, "
+              f"{v['up']} up : {v['down']} down"
+              + (f", bait rank {v['bait']['rank']}" if (v.get("bait") or {}).get("rank") else "")
+              + ". Caption this contrast's volcano with the centre shift and the up:down ratio.")
+    w("")
 
 
 def _detection(de_dir, conditions):
@@ -155,6 +220,9 @@ def main():
     ap.add_argument("--report-out", default="AI_Analysis_Report.md")
     ap.add_argument("--submission", help="the session dir: its CoreOmics submission "
                                          "(submission_report.py) is quoted in the brief")
+    ap.add_argument("--session", help="the session dir: its sample-type record "
+                                      "(sample_type.py) is quoted in the brief. Default: "
+                                      "--submission when that is a session dir")
     a = ap.parse_args()
 
     # the page's loaders: UTF-8 whatever the locale, and a record that exists but cannot be
@@ -176,9 +244,20 @@ def main():
     adjp = adjp_rec if adjp_rec is not None else 0.05
     adjp_txt = f"{adjp:g}" if adjp_rec is not None else f"{adjp:g} {DEFAULT_TAG}"
     groups_all = list((prov.get("groups") or {}).keys()) if isinstance(prov.get("groups"), dict) else []
-    controls = [g for g in groups_all if IP_CONTROL_NAME.search(g)]
-    vs_control = [c for c in contrasts if "-" in c and c.split("-", 1)[1] in controls]
-    pulldown = bool(vs_control)
+    # THE pull-down decision (experiment_type.pulldown_design): from the session's experiment
+    # type when one is recorded -- the same record that set the DE's quantities -- else from the
+    # group names, said so. The brief and the DE cannot disagree about the design.
+    session = a.session or (a.submission if a.submission and os.path.isdir(
+        os.path.join(a.submission, "input")) else None)
+    import experiment_type as etm
+    try:
+        etype, etype_err = etm.load(session), None
+    except (OSError, ValueError) as e:
+        etype, etype_err = None, str(e)
+        print(f"[analysis_prompt] the experiment-type record could not be read: {e}",
+              file=sys.stderr)
+    design = etm.pulldown_design(etype, groups_all, contrasts)
+    controls, vs_control, pulldown = design["controls"], design["vs_control"], design["pulldown"]
     det, det_groups = _detection(a.de_dir, a.conditions)
     has_detmat = os.path.exists(os.path.join(a.de_dir, "Detection_Matrix.csv"))
     zero_word = ("missing" if (prov.get("detection_matrix") or {}).get("zero_means") == "missing"
@@ -302,8 +381,15 @@ def main():
       + f". {LOGFC_DIRECTION}" if contrasts else f"- {LOGFC_DIRECTION}")
     w("- The exact, self-describing methods text is in `tables/methods.txt` — do not "
       "contradict it or invent a different pipeline.")
+    # qc_bracket.py's verdict is staff-only (Brett, 2026-10-01): the writer of a client report
+    # must not carry it over from logs/ or from what staff were told
+    w("- The instrument's QC check around this project (`logs/qc_bracket.*`) is STAFF-ONLY: "
+      "do not mention its verdict, the QC runs, IPS or that check in this report.")
     w("")
 
+    # the sample type, as the user stated it -- or NOT STATED, which forbids a guess
+    sample_type_brief(w, session)
+    normalisation_brief(w, prov, etype, etype_err, design)
     if a.submission:
         submission_brief(w, a.submission)
 

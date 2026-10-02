@@ -196,6 +196,9 @@ CATALOG = [
      "The submission's sample sheet as a table, for people to read (submission.json is the record)."),
     (r"^session\.json$", "Inputs",
      "Which CoreOmics submission this session answers (its id and link)."),
+    (r"^acquisition\.json$", "Inputs",
+     "Step 2's detection (detect_acquisition.py): each raw file's acquisition, instrument and "
+     "acquisition time, as read from the file."),
 
     (r"^AUDIT\.(md|json)$", "Analysis report",
      "The pitfall audit (audit_results.py): PASS / WARN / FAIL per check -- replication, "

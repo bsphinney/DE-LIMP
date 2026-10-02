@@ -22,11 +22,26 @@ log, else lfq.parquet), and WARNS when
   * Sage kept 0 target MS1 peaks, or fewer than LOW_PEAK_FRACTION of the target peptides it
     identified at 1% FDR (the peptides LFQ tries to quantify).
 
-It never changes or re-runs anything: the warning names the fix (a wider
-quant.lfq_settings.ppm_tolerance, or recalibrated mzML). The record goes to
-<out>/sage_lfq_check.json and into <out>/search_provenance.json (`sage_lfq_check`); watch_run.sh
---out, checkpoint.py status and audit_results.py --search-out (-> AUDIT.md -> the report's
-"Audit & caveats") read it from there.
+It never changes or re-runs the search. The record goes to <out>/sage_lfq_check.json and into
+<out>/search_provenance.json (`sage_lfq_check`); watch_run.sh --out, checkpoint.py status and
+audit_results.py --search-out (-> AUDIT.md -> the report's "Audit & caveats") read it from there.
+
+When it warns BECAUSE OF THE MASS ERROR (runs outside the window), the quantities are known to
+be wrong and the fix is known, so it is a GATE, not only a warning (2.10; it only warned in 2.9
+and the quantities went on into the DE):
+  * the corrected window is computed from the measured offsets (suggest(): the worst run's
+    median + MARGIN_PPM) and written into a copy of the config the search ran with,
+    <out>/sage_config.lfq_ppm<N>.json (`corrected_params`);
+  * refusal() records the exact run_search.py command that repeats the search with it into a
+    new folder, <out>_lfq_ppm<N> (`rerun`), from what search_provenance.json recorded;
+  * run_search.py --adapt-only (and an inline search) will not build report.parquet, and
+    run_de.R will not read one beside this record, until either that re-run is used or the
+    user accepts these quantities as they are: run_search.py --adapt-only --accept-lfq-window
+    "<who, and why>" (accept(), recorded as `accepted`).
+Nothing is re-run automatically: a wider window also admits more co-eluting interference, so
+the re-run's target/decoy separation has to be compared, and a changed search setting is a new
+search to confirm. A low peak count with a fitting window stays a warning: its cause is unknown,
+so there is no corrected run to point to.
 
 Columns, from Sage 0.14.7 crates/sage-cloudpath/src/parquet.rs:
   results.sage.parquet: filename, is_decoy, rank, peptide, peptide_q, precursor_ppm (ABSOLUTE:
@@ -89,6 +104,9 @@ def q_passes(q):
                                       pa.scalar(LFQ_Q_MAX, pa.float32())), False)
 RECORD = "sage_lfq_check.json"
 PROVENANCE = "search_provenance.json"
+# The config with the corrected window, beside the search, and the folder its re-run goes to.
+CORRECTED_CONFIG = "sage_config.lfq_ppm{ppm}.json"
+RERUN_SUFFIX = "_lfq_ppm{ppm}"
 TAG = "[sage_lfq_check]"
 LOG_RE = re.compile(r"discovered (\d+) target MS1 peaks at 5% FDR")
 
@@ -275,8 +293,152 @@ def check(out, params=None, log=None):
         return rec
     rec["status"] = "warn"
     rec["suggested_ppm_tolerance"] = suggest(runs, flagged, tol)
+    if flagged and rec["suggested_ppm_tolerance"]:
+        rec["corrected_params"], why = corrected_config(out, params,
+                                                        rec["suggested_ppm_tolerance"])
+        if why:
+            rec["corrected_params_why"] = why
     rec["message"] = warn_message(rec, runs, flagged, peaks, peptides, tol, tol_src) + (
         f" Not judged{unjudged.replace(' not judged', '')}." if too_few else "")
+    return rec
+
+
+def _load_json(path):
+    try:
+        with open(path) as fh:
+            v = json.load(fh)
+    except (OSError, ValueError, TypeError):
+        return None
+    return v if isinstance(v, dict) else None
+
+
+def corrected_config(out, params, ppm):
+    """Write <out>/sage_config.lfq_ppm<N>.json: the config the search ran with (`params`, else
+    the params_file search_provenance.json names) with quant.lfq_settings.ppm_tolerance = N, and
+    nothing else changed -> (path, None), or (None, why) when no config could be read."""
+    src = params or (_load_json(os.path.join(out, PROVENANCE)) or {}).get("params_file")
+    cfg = _load_json(src) if src else None
+    if cfg is None:
+        return None, (f"the Sage config the search ran with ({src}) could not be read"
+                      if src else "the Sage config the search ran with is not known (no "
+                                  "--params, and search_provenance.json names none)")
+    quant = cfg.setdefault("quant", {})
+    if not isinstance(quant, dict):
+        return None, f"{src} has a quant entry that is not a block"
+    settings = quant.setdefault("lfq_settings", {})
+    if not isinstance(settings, dict):
+        return None, f"{src} has a quant.lfq_settings entry that is not a block"
+    settings["ppm_tolerance"] = float(ppm)
+    path = os.path.join(out, CORRECTED_CONFIG.format(ppm=ppm))
+    with open(path + ".tmp", "w") as fh:
+        json.dump(cfg, fh, indent=2)
+        fh.write("\n")
+    os.replace(path + ".tmp", path)
+    return path, None
+
+
+def rerun_plan(out, corrected, ppm):
+    """The run_search.py command that repeats this search with the corrected window, into a new
+    folder beside it, from what search_provenance.json recorded. -> {"out", "command"}, with
+    command None and `why` when the record lacks what the command needs (a search from before
+    2.10 records no tools.json)."""
+    import shlex
+    out = os.path.abspath(out)
+    new_out = out.rstrip(os.sep) + RERUN_SUFFIX.format(ppm=ppm)
+    prov = _load_json(os.path.join(out, PROVENANCE)) or {}
+    need = {"tools": prov.get("tools"), "bundle": prov.get("bundle"),
+            "fasta": prov.get("fasta"), "files": prov.get("files")}
+    missing = [k for k, v in need.items() if not v]
+    if not corrected:
+        missing.insert(0, "the corrected config")
+    if missing:
+        return {"out": new_out, "command": None,
+                "why": f"not recorded: {', '.join(missing)} (search_provenance.json of a search "
+                       f"from before 2.10, or none). Run the search's own run_search.py command "
+                       f"again with --params {corrected or '<the config, with quant.lfq_settings.ppm_tolerance ' + str(ppm) + '>'} "
+                       f"and --out {new_out}"}
+    argv = ["python3", os.path.join(os.path.dirname(os.path.abspath(__file__)), "run_search.py"),
+            "--tools", need["tools"], "--bundle", need["bundle"], "--engine", "sage",
+            "--params", corrected, "--fasta", need["fasta"], "--out", new_out,
+            "--threads", str(prov.get("threads") or 8)]
+    if prov.get("keratin_sample") is True:
+        argv.append("--keratin-sample")
+    for k in ("partition", "account", "qos"):
+        v = (prov.get("queue") or {}).get(k)
+        if v:
+            argv += [f"--{k}", str(v)]
+    job = prov.get("submitted_sbatch")
+    if job:
+        stem, ext = os.path.splitext(job)
+        argv += ["--sbatch", stem + RERUN_SUFFIX.format(ppm=ppm) + (ext or ".sh")]
+    argv += ["--files", *need["files"]]
+    return {"out": new_out, "command": " ".join(shlex.quote(str(x)) for x in argv)}
+
+
+def gated(rec):
+    """True when report.parquet must not be built from this search: the window did not fit the
+    runs' MS1 mass error (runs outside it, so the quantities are known to be wrong and the fix
+    is known) and nobody has accepted the quantities as they are."""
+    return bool(rec and rec.get("status") == "warn" and rec.get("runs_outside_lfq_window")
+                and not rec.get("accepted"))
+
+
+def refusal(out, rec):
+    """The gate's message for a gated() record, with the exact re-run command (rerun_plan),
+    recorded into the record and search_provenance.json (`rerun`, `refusal`). None when the gate
+    is open."""
+    if not gated(rec):
+        return None
+    s = rec.get("suggested_ppm_tolerance")
+    plan = rec.get("rerun") or rerun_plan(out, rec.get("corrected_params"), s)
+    rec["rerun"] = plan
+    worst = max((rec["runs"][f]["median_abs_ppm"] for f in rec["runs_outside_lfq_window"]
+                 if f in (rec.get("runs") or {})), default=None)
+    how = (f"\n  {plan['command']}\nthen run_search.py --adapt-only on {plan['out']}" if
+           plan.get("command") else f" {plan.get('why')}")
+    rec["refusal"] = (
+        f"REFUSED: report.parquet is not built from this Sage search -- {len(rec['runs_outside_lfq_window'])} "
+        f"run(s) sit outside its +/-{rec.get('ppm_tolerance'):g} ppm LFQ window, so their MS1 "
+        f"quantities are known to be wrong. The corrected window, from the measured offsets: "
+        f"+/-{s} ppm (the worst run's median {_ppm(worst)} + {MARGIN_PPM:g} ppm, rounded up)"
+        + (f", in {rec['corrected_params']}" if rec.get("corrected_params") else
+           f" ({rec.get('corrected_params_why')})")
+        + f". Re-run the search with it:{how}. Before using the re-run, compare its target MS1 "
+        "peaks and target/decoy separation with this one: a wider window also admits more "
+        "interference. Or, if the user accepts these quantities as they are, run this "
+        "--adapt-only again with --accept-lfq-window \"<who accepted, and why>\" (recorded).")
+    try:
+        record(out, rec)
+    except OSError as e:
+        print(f"{TAG} NOTE: could not record the re-run plan in {out}: {e}", file=sys.stderr)
+    return rec["refusal"]
+
+
+def accept(out, rec, reason, by=None):
+    """The user accepts a gated record's quantities as they are: `accepted` = who, when and why,
+    recorded; the record stays a warning (AUDIT.md says it was accepted, and by whom)."""
+    if not (reason and reason.strip()):
+        raise ValueError("--accept-lfq-window needs the reason, in the user's words")
+    if by is None:
+        import getpass
+        try:
+            by = getpass.getuser()
+        except (KeyError, OSError):
+            by = None
+    rec["accepted"] = {"reason": reason.strip(), "by": by,
+                       "by_source": "the login that ran run_search.py --accept-lfq-window",
+                       "at": datetime.datetime.now().isoformat(timespec="seconds")}
+    record(out, rec)
+    return rec
+
+
+def carry_acceptance(prev, rec):
+    """A re-check of the same search keeps an earlier acceptance while what was accepted -- the
+    window and the runs outside it -- is unchanged."""
+    if (prev and prev.get("accepted") and rec.get("status") == "warn"
+            and prev.get("ppm_tolerance") == rec.get("ppm_tolerance")
+            and prev.get("runs_outside_lfq_window") == rec.get("runs_outside_lfq_window")):
+        rec["accepted"] = prev["accepted"]
     return rec
 
 
@@ -363,9 +525,14 @@ def audit_finding(rec):
     status = {"warn": "WARN", "ok": "PASS", "unchecked": "INFO"}[rec["status"]]
     detail = {k: rec.get(k) for k in ("ppm_tolerance", "ppm_tolerance_source",
                                       "target_ms1_peaks_5pct_fdr", "target_peptides_1pct",
-                                      "runs_outside_lfq_window", "suggested_ppm_tolerance")
+                                      "runs_outside_lfq_window", "suggested_ppm_tolerance",
+                                      "corrected_params", "rerun", "accepted")
               if rec.get(k) is not None}
-    return status, rec.get("message") or "", detail
+    acc = rec.get("accepted") or {}
+    who = acc.get("by") or "who: not recorded"
+    return status, (rec.get("message") or "") + (
+        f" The user accepted these quantities as they are ({who}, {acc.get('at')}): "
+        f"{acc.get('reason')}." if acc else ""), detail
 
 
 def say(rec, stream=None):
@@ -415,15 +582,31 @@ def main(argv=None):
     ap.add_argument("--log", help="Sage's log (default: <out>/sage.log, else the newest "
                                   "<out>/sage_search_*.log)")
     a = ap.parse_args(argv)
-    rec = check(a.out, a.params, a.log)
+    rec = carry_acceptance(load(a.out), check(a.out, a.params, a.log))
     try:
         rec["written_to"] = record(a.out, rec)
     except OSError as e:
         print(f"{TAG} NOTE: could not write {RECORD} in {a.out}: {e}", file=sys.stderr)
     say(rec)
+    msg = refusal(a.out, rec)
+    if msg:
+        # the job does not fail -- Sage did its part -- but the next step will refuse, so say how
+        print(f"{TAG} {msg}", file=sys.stderr, flush=True)
     print(json.dumps(rec, indent=2))
     return 0
 
 
+def gate_main(argv):
+    """`sage_lfq_check.py gate --out <dir>` -> {"checked", "refused", "message"} on stdout, exit 0:
+    run_de.R's question (the gate's one rule is gated()). Reads the record; re-checks nothing."""
+    ap = argparse.ArgumentParser(prog="sage_lfq_check.py gate")
+    ap.add_argument("--out", required=True)
+    a = ap.parse_args(argv)
+    rec = load(a.out)
+    msg = (rec.get("refusal") or refusal(a.out, rec)) if gated(rec) else None
+    print(json.dumps({"checked": rec is not None, "refused": bool(msg), "message": msg}))
+    return 0
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(gate_main(sys.argv[2:]) if sys.argv[1:2] == ["gate"] else main())

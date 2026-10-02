@@ -51,6 +51,10 @@ import subprocess
 import sys
 import urllib.parse
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from check_report_runs import (distinct_inputs, repeated_names, repeats_note,  # noqa: E402
+                               repeats_text)   # repeated inputs: the one rule
+
 # STAN's own venv on HIVE. Overridable because nothing should hardcode one person's path.
 DEFAULT_STAN = "/quobyte/proteomics-grp/brett/stan_venv/bin/stan"
 
@@ -307,6 +311,60 @@ def fetch(a) -> int:
     files = m.get("files") or []
     gates, hard_fail = [], False
 
+    # --- Repeats (check_report_runs: the one rule and the one wording). Brett (2026-10-01):
+    # repeats are okay, but they are flagged. STAN listed one run 4 times and another twice (100
+    # lines for 96 files) with every gate PASS (a staff plate, 2026-10-01). The same file is in
+    # files.txt ONCE -- no engine can take it twice -- and flagged (`repeated_paths`, with the
+    # count). Different files that share a run name (a rerun in another folder, one name on two
+    # plates) are ALL kept and flagged (`repeated_names`); run_search.py stops before searching
+    # them as given, because an engine would merge them into one run. Both are WARN, never a stop
+    # here. STAN entries that name one file but DISAGREE (another well, run name, class or
+    # verdict) are a hard fail: which sample that file is cannot be read from the manifest.
+    listed = len(files)
+    files, repeats = distinct_inputs(files)
+    shared = repeated_names(files)
+    by_path = {}
+    for e in m.get("entries") or []:
+        if isinstance(e, dict) and e.get("raw_path"):
+            by_path.setdefault(os.path.realpath(str(e["raw_path"]).rstrip("/")), []).append(e)
+    clash = []
+    for v in by_path.values():
+        if len(v) > 1 and any(x != v[0] for x in v[1:]):
+            differ = sorted({k for x in v[1:] for k in set(x) | set(v[0]) if x.get(k) != v[0].get(k)})
+            clash.append({"path": v[0]["raw_path"], "differ_in": differ,
+                          "entries": [{k: x.get(k) for k in differ} for x in v]})
+    if clash:
+        # Not a repeat: a CONTRADICTION about which sample the file is. Brett's "repeats are
+        # okay, but flagged" covers plain repeats only, so this stays a stop (2026-10-01).
+        hard_fail = True
+        gates.append({"gate": "repeated_paths", "status": "FAIL", "n": len(clash),
+                      "detail": f"{len(clash)} file(s) are listed by STAN more than once with "
+                                f"CONFLICTING entries. That is not a repeat but a contradiction "
+                                f"about which sample the file is, so it stops here (repeats alone "
+                                f"are only flagged). Ask the operator which entry is right",
+                      "conflicts": clash,
+                      "examples": [f"{c['path']}: " + " vs ".join(
+                          ", ".join(f"{k}={e.get(k)}" for k in c["differ_in"]) for e in c["entries"])
+                          for c in clash[:5]]})
+    elif repeats:
+        gates.append({"gate": "repeated_paths", "status": "WARN", "n": listed - len(files),
+                      "detail": f"STAN listed {listed} runs for {len(files)} files. "
+                                + repeats_text(repeats)[0] + ". STAN's counts include the repeats",
+                      "examples": [f"{r['path']} x{r['times']}" for r in repeats[:5]]})
+    else:
+        gates.append({"gate": "repeated_paths", "status": "PASS", "n": 0})
+    if shared:
+        gates.append({"gate": "repeated_names", "status": "WARN", "n": len(shared),
+                      "detail": repeats_text((), shared)[0] + ". run_search.py stops before "
+                                "searching them as given (an engine would merge them into one "
+                                "run): give one another name, or search them separately",
+                      "examples": [f"{r['run_name']}: {', '.join(r['paths'])}" for r in shared[:5]]})
+    else:
+        gates.append({"gate": "repeated_names", "status": "PASS", "n": 0})
+    m["files"] = files
+    m["n_files_listed"], m["n_files"] = listed, len(files)
+    m["repeated_paths"], m["repeated_names"] = repeats, shared
+
     # --- HARD: runs STAN knows about but has no raw path for. They are EXCLUDED from
     # `files`, so proceeding means searching a subset and then reporting success.
     missing = m.get("missing_paths") or []
@@ -376,7 +434,8 @@ def fetch(a) -> int:
         json.dump(_scrubbed(m), fh, indent=2)
 
     _say(f"submission {m.get('submission', a.submission)}  include={m.get('include', a.include)}")
-    _say(f"  files      : {len(files)}")
+    _say(f"  files      : {len(files)}" + (f" ({listed} listed by STAN; repeats removed)"
+                                           if listed != len(files) else ""))
     _say(f"  plates     : {', '.join(map(str, plates)) or '(none reported)'}")
     _say(f"  counts     : {counts}")
     _say(f"  files.txt  : {fl}")
@@ -386,6 +445,8 @@ def fetch(a) -> int:
             _say(f"  [{g['status']}] {g['gate']}: {g.get('detail', '')}")
             for ex in g.get("examples", [])[:5]:
                 _say(f"        {ex}")
+    if repeats or shared:
+        _say(repeats_note(repeats, "ht_manifest", shared).rstrip("\n"), file=sys.stderr)
     if hard_fail:
         _say("\nHARD GATE FAILED — do not search. Resolve the above with the operator first.",
               file=sys.stderr)

@@ -320,9 +320,9 @@ each has a gate:
 | failure mode seen | example | handling |
 |---|---|---|
 | short / well-like / numeric / too-common ids match hundreds–thousands of files | `A3`, `H10`, `001` | **weak id** (alnum < 3, all digits, `^[A-H](1-12)$`, or > 10 files overall): never auto-assigned → `weak_ids` FAIL |
-| the same ids reused by another submission | `BN1–6` in 0794 **and** 0776; `SG001`; `GV1` | **ambiguous label**: a run is ambiguous when ANY other submission — older, same day or newer — uses the label and was submitted on or before the run. Only ambiguous runs → `ambiguous_label` FAIL; an unambiguous run also exists → it is chosen, `ambiguous_files_excluded` WARN |
+| the same ids reused by another submission | `BN1–6` in 0794 **and** 0776; `SG001`; `GV1` | **ambiguous label**: a run is ambiguous when ANY other submission — older, same day or newer — uses the label and was submitted on or before the run. Only ambiguous runs → `ambiguous_label` FAIL; an unambiguous run as well → `choose_run` FAIL (staff say which) |
 | older runs of the same label | 2025 files for a 2026 submission | date window; counted in `out_of_window` INFO |
-| several files per sample | re-injections | most recent chosen, the rest listed → `alternates` WARN |
+| several files per sample | re-injections | **staff decide, once** — none is picked by default: `choose_run` FAIL (`kind: reinjections`) lists each candidate; `--reinjections latest` (newest injection) or `--reinjections all` (technical replicates) settles every such sample, `--choose <key>=<file>` one |
 
 **Labels alone cannot decide an ambiguous run, so staff do.** The `ambiguous_label` detail
 names each other submission and whether it already has **earlier unambiguous runs** of that
@@ -331,10 +331,53 @@ example: PROT_0776 and PROT_0794 both use BN1–6. For 0776, the Aug-24 BN runs 
 (0794 had not been submitted) and are chosen. For 0794, the Sep-8 BN runs are ambiguous —
 0776 was submitted first — so `locate` fails, and the detail says 0776 already has its own
 Aug-24 runs. That fact is what lets staff decide: re-run with `--accept-ambiguous` (recorded in
-`locate.json` under `accepted`) if these runs are this submission's, or `--files-from` their
-own list.
+`locate.json` under `accepted`) if these runs are this submission's, `--choose` the one run that
+is, or `--files-from` their own list.
 
-Also hard gates: `no_files`, and `duplicate_assignment` (one file claimed by two samples).
+**Which run IS a sample is never picked by `locate`** (2.10). It used to take the most recent of
+several runs (`alternates` WARN) and an unambiguous run over an ambiguous one
+(`ambiguous_files_excluded` WARN); a duplicate label was later resolved without the user on a
+real submission, and identity really was in doubt. Now a sample with several candidate runs is
+`needs_choice` and `choose_run` FAILs, listing each candidate (file, acquired date, any other
+submission using the label). Staff answer with `--choose <unique_id>=<file>` (repeatable) or
+`--choices FILE` (one `UNIQUE_ID=FILE` per line): the file must be a run whose name carries
+that id (in the window or not; a weak id too). The answers go into `locate.json`
+(`accepted.choices`), the row (`chosen_by`, note), the `staff_choices` INFO gate, `stage`'s
+`.core_submission.json` (`locate_accepted`) and `SUBMISSION.md` ("staff choice"). To search
+more than one run of a sample, `--files-from` their list.
+
+**Re-injections: one decision for all of them.** Several runs of ONE sample (its own label, no
+other sample or submission using it, or accepted with `--accept-ambiguous`) are re-injections.
+A 96-well plate can have many, so staff answer once: `--reinjections ask` (default: `choose_run`
+lists them, `kind: reinjections`), `latest` (the newest injection — by acquisition date; on the
+same day by the name's acquisition counter `…_1_24376`, which counts ONE instrument's runs, so
+only among runs on one instrument. Same-day runs on different instruments, same-day runs with no
+counter, or a run with no date cannot be ordered, and that sample is asked (`choose_run`, the
+reason in its note) -- modification times are no evidence, a copy resets them; a run STAN flags
+`needs_rerun` is never kept while another is not, from `--ht-manifest <ht_manifest.json>`), or
+`all` (every injection, as technical replicates of the sample: `conditions` writes each run's
+biological sample into conditions.csv's `Sample` column, and `run_de.R` blocks on it -- see
+de-analysis.md "Technical replicates"). Recorded:
+`locate.json` (`accepted.reinjections`, and per row `reinjections`: policy, runs, kept,
+set_aside, reason), `sample_files.tsv` (`reinjections`), gate `reinjections` (INFO, every sample
+named), `SUBMISSION.md`, `stage`'s record (`reinjections`), and — `submission_report.py attach`
+copies `input/locate_decisions.json` into the session — the report's Data Quality Notes. A
+**collision** — a label another sample of this submission or another submission shares — is
+never a re-injection: `choose_run` (`kind: collision`) needs `--choose` per sample under every
+policy. Different files sharing a run name (the same name in two folders) are kept and flagged
+(`repeated_names` WARN); `run_search.py` stops before searching them as given, so `all` with
+same-named re-injections stops there until the 2.11 unique-run-name route lands.
+
+Also hard gates: `no_files`, `duplicate_ids`, and `duplicate_assignment` (one file claimed by
+two samples). **`duplicate_ids`: two samples of this submission share a label** (`KG1` and
+`kg-1`), so a run carrying it cannot say which sample it is — not even when there is one run.
+No run is assigned to them by the label: each is `needs_choice`, and the gate lists each
+sample's **key** (`KG1#1`, `kg-1#2`: the label plus its place among them in the sheet), with its
+sample name and condition. Staff answer `--choose KG1#1=<file>`; a run chosen for one is no
+longer the other's candidate, so a sample left with none is `unmatched` (`--allow-partial` if
+it was not run). The gate turns INFO once every sample sharing the label is answered. A plain
+`--choose KG1=…` is refused, naming the keys. In `--files-from` mode the same keys assign
+listed runs.
 `unmatched_samples` is a hard gate unless staff confirm those samples were never run
 (`--allow-partial`).
 
@@ -346,9 +389,30 @@ Exploris `Ex08312026_380_JE21.raw` would otherwise impersonate submission 0380. 
 the `PROT_` form was not recognised, so such a plate went to sample matching and found none
 of its samples.
 
+**Staging an HT plate: `locate --files-from <ht_manifest files.txt>`.** An HT run is named
+`<date>_[PROT_]<n>_<speed>_<sample name>_S<plate>-<well>_<n>_<acq#>.d`: it carries the
+submitter's `sample_name`, never the CoreOmics `unique_id` (measured on a 96-well plate,
+2026-10-01: every run's sample field equalled a `sample_name`; no run carried a `unique_id`).
+So in `--files-from` mode a listed run that carries this submission's plate token (the same
+`ht_pattern` test that makes `locate` exit 4) is matched **only inside its sample field**
+(`ht_sample_field`: after the plate token, before the `_S<n>-<well>_…` position): on the
+`unique_id`, else on the `sample_name`, by the same token and longest-wins rules. The plate
+position is never matched -- in 2.10.0 a `unique_id` was tried against the whole name, so tubes
+labelled `A1`..`A4` took the runs in the Core's wells A1..A4, exit 0 (2.10 review, HIGH 3); every
+run name now has its plate positions blanked before matching (`PLATE_POSITION`). A label that
+itself looks like a well or a plate position (`B3`, `S5-A1`) is never taken: its runs go to
+`choose_run` (`kind: well_like_label`) for staff, and in auto mode such an id is weak. The row's
+note says "matched on sample_name (HT plate run)" (or unique_id) and gate `ht_plate_runs` (INFO)
+counts them. Samples that share a `sample_name` (a pooled QC sample run
+several times) cannot be told apart by name: each gets `needs_choice` with the runs that carry
+the name, and `choose_run` FAILs until staff say which run is which (`--choose`). A sample whose
+name is in no run stays `unmatched` — `--allow-partial` only if it really was not run.
+
 **Outputs:** `files.txt` (chosen absolute paths), `sample_files.tsv` (`unique_id,
-sample_name, condition_name, file, acquired, date_source, status, alternates, note`; status
-`matched|weak|unmatched|ambiguous_label`, plus `unassigned` in `--files-from` mode), and
+sample_name, condition_name, file, acquired, date_source, status, alternates, note, chosen_by,
+sample_key`;
+status `matched|needs_choice|weak|unmatched|ambiguous_label`, plus `unassigned` in
+`--files-from` mode; a `needs_choice` row has no file and its candidates in `alternates`), and
 `locate.json` (every gate with detail, the file list, and the `accepted` flags). Proposal
 files are written even on exit 2.
 
@@ -356,7 +420,8 @@ files are written even on exit 2.
 files by hand, write them to a list and re-run with `--files-from FILE`: matching is skipped,
 paths are still checked for existence (`paths_exist`), and each file is mapped back to the
 sample whose id is the longest one it carries — which makes even a weak id usable inside a
-curated list.
+curated list (an HT plate run: its `sample_name`, as above). `--choose <unique_id>=<file>`
+assigns a listed file to a sample outright.
 
 ## 3. `stage` — link the raw files into the service directory (HIVE)
 
@@ -458,6 +523,14 @@ group has one sample, or `collect_conditions.py` reports ambiguities. The output
 `questions` are exactly what to ask — nothing more. Otherwise the conditions go into the one
 compute confirmation as they are.
 
+**A condition per replicate** (the Core LIMS writes `<sample>_mix_1` … `_5`): `collect_conditions.py`
+reads it as conditions + replicate numbers when that is unambiguous, and `conditions` counts
+those conditions and asks once, with the proposal (`findings.replicate_labels`); when it is not
+unambiguous it asks with the reasons (`findings.replicate_labels_ambiguous`) instead of the
+generic "every condition is unique" question. Either way, re-run `conditions` with the answer:
+`--replicate-labels collapse` (they are replicates; no more questions about it) or `keep` (the
+labels are the groups).
+
 ## 5. The search and DE — session on HIVE, report written locally
 
 **"I only require raw data" submissions get no search and no DE** unless staff explicitly ask:
@@ -544,6 +617,12 @@ submissions) have
   folder is recognised by the `.core_delivery.json` it left.)
 - **the path passes through a symlink or leaves the Flinders root** — e.g. `<id>/share` itself
   linked into /quobyte would have put the delivery there, verified.
+- **an analysis delivery's QC check holds it** (step 8e, staff-only). The session's
+  `logs/qc_bracket.json` says check or concern, could not run or cannot be read, or there is
+  none. It is held until a staff member records `qc_bracket.py ack --session <S> --by <HIVE
+  login> --note "<one line>"` for that record. The plan's `qc_gate` says why. Good and
+  no-QC-on-record go through. A stray `qc_bracket*` file in a delivered folder is never
+  shipped. → `references/qc-bracket.md` "The delivery gate".
 
 **Analysis mode** (`--mode analysis`, the default unless CoreOmics says raw data only) fills
 `<share>/<internal_id>_analysis_<YYYY-MM-DD>/` (`--label` replaces the suffix), copied
@@ -664,10 +743,10 @@ link, or no submitter address).
 | exit | from | usual cause | fix |
 |---|---|---|---|
 | 2 | `fetch` | no such number; garbage id | check the number; pass the 12-hex id |
-| 2 | `locate` | `weak_ids`, `ambiguous_label`, `duplicate_assignment`, `unmatched_samples`, `no_files`; `--max-days` wider than the neighbour window | show the proposal; `--files-from` a corrected list, `--accept-ambiguous` or `--allow-partial` as staff decide; re-fetch with `--neighbor-days` |
+| 2 | `locate` | `choose_run`, `weak_ids`, `ambiguous_label`, `duplicate_ids`, `duplicate_assignment`, `unmatched_samples`, `no_files`; `--max-days` wider than the neighbour window; a `--choose` that names no candidate | show the proposal; `--reinjections latest|all` for re-injections, `--choose <key>=<file>` for collisions, `--files-from` a corrected list, `--accept-ambiguous` or `--allow-partial` as staff decide; re-fetch with `--neighbor-days` |
 | 2 | `stage` | several candidate folders, or one naming someone else; project owned by another submission; `--apply` on a hard-failed locate | `--service-dir <folder>`; resolve the locate gates |
 | 2 | `conditions` | blank / case-variant / single / all-unique / singleton conditions | ask exactly the `questions` |
-| 2 | `deliver` | no `Analysis_Report.html`; session not this submission's; folder not empty; symlink in the path or the share; raw requested but no staged project; any verification failure | finish step 9 and push it; use the right session (or `--force` with staff); `--label`; remove the offending link; `stage --apply` |
+| 2 | `deliver` | no `Analysis_Report.html`; session not this submission's; folder not empty; symlink in the path or the share; raw requested but no staged project; **held by `qc_gate`** (QC check, step 8e: check/concern, unplaced files, not run, or for another file list); any verification failure | finish step 9 and push it; use the right session (or `--force` with staff); `--label`; remove the offending link; `stage --apply`; for `qc_gate`, a staff member reads `logs/qc_bracket.md` and records `qc_bracket.py ack --by <login>` — or re-runs step 8e when it says so |
 | 2 | `bioshare send` | no share linked; no or unverified `delivery.json`, or one for another share | `bioshare ensure --apply`; deliver again and `--get` the new `delivery.json` |
 | 3 | `check`, `fetch`, `bioshare` | no usable key, a rejected key, no Proteomics lab access; CoreOmics down; DRF validation error; a redirect or unexpected reply to a write | `core_submission.py check` names the problem and the fix (table above); read the detail |
 | 3 | `locate`, `stage`, `deliver`, `conditions` | not on a machine with the Flinders tree; incomplete scripts directory | run through `hive_exec.sh`; re-put the skill (`hive_exec.sh --put-skill`) |

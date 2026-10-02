@@ -43,9 +43,12 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from estimate_params import (classify_instrument, MEASURE_CLASSES,  # noqa: E402  (one ppm table)
                              add_resolution_args, resolution_args_error, resolution_source,
-                             resolution_record, resolution_question, SAGE_ITMS_FRAGMENT_DA)
+                             resolution_record, resolution_question, SAGE_ITMS_FRAGMENT_DA,
+                             override_setter, override_source, override_record,
+                             staff_record_name, record_override_setter)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+MANIFEST = "workflow.manifest.json"
 
 # Version the DEFAULTS TABLE itself, so a run record can name what produced its
 # parameters without depending on a git commit in another repo.
@@ -138,8 +141,17 @@ def main():
     ap.add_argument("--organism-taxid", default=None,
                     help="recorded for provenance only -- it does NOT affect any search parameter")
     add_resolution_args(ap)
-    ap.add_argument("--ms1-ppm", type=float, default=None, help="site SOP override")
-    ap.add_argument("--ms2-ppm", type=float, default=None, help="site SOP override")
+    ap.add_argument("--ms1-ppm", type=float, default=None,
+                    help="the user's MS1 tolerance (ppm), recorded as a user override with who "
+                         "set it and why -- never as an SOP")
+    ap.add_argument("--ms2-ppm", type=float, default=None,
+                    help="the user's MS2 tolerance (ppm); recorded the same way")
+    ap.add_argument("--override-by", default=None,
+                    help="who chose --ms1-ppm/--ms2-ppm (default: the login running this, "
+                         "recorded as such) -- in the staff-only workflow.manifest.json.staff.json "
+                         "only; the manifest says Core staff")
+    ap.add_argument("--override-reason", default=None,
+                    help="why, in the user's words; without it the record says it was not given")
     ap.add_argument("--fasta", default=None)
     ap.add_argument("--threads", type=int, default=None)
     ap.add_argument("--env", default=None, help="detect_env.sh JSON, to flag engines that "
@@ -208,22 +220,32 @@ def main():
             sys.exit(f"resolve_defaults: preset generation failed:\n{r.stderr.strip()}")
         preset_prov = json.loads(r.stdout)
 
-    # An SOP --ms1-ppm/--ms2-ppm REPLACES that level in the manifest below, so ppm_source has to
-    # account for BOTH flags. Gated on --ms1-ppm alone, a site SOP that sets only --ms2-ppm left
-    # ppm_source saying MS2 "is measured with DIA-NN before the search" beside the SOP's own
-    # number -- and SKILL.md tells the agent to read this line out to the user for confirmation.
-    sop = [lvl for lvl, v in (("MS1", args.ms1_ppm), ("MS2", args.ms2_ppm)) if v is not None]
-    # What the manifest will actually carry: the SOP's number where it gave one, the table's
-    # otherwise. UNDOCUMENTED_LEVEL applies to a level that is STILL without a value -- an SOP
-    # that supplies the untabled level means nothing is left to measure, so saying it "is
-    # measured with DIA-NN before the search" beside the SOP's own number is simply false.
+    # A user's --ms1-ppm/--ms2-ppm REPLACES that level in the manifest below, so ppm_source has
+    # to account for BOTH flags. Gated on --ms1-ppm alone, an override that sets only --ms2-ppm
+    # left ppm_source saying MS2 "is measured with DIA-NN before the search" beside the user's
+    # own number -- and SKILL.md tells the agent to read this line out to the user for
+    # confirmation. Each given level is a USER override (estimate_params.override_source: the
+    # value, who set it and why); it was called a "site SOP override", which the skill cannot
+    # know it is (staff report, 2026-09-25: a calibration workaround recorded as an SOP).
+    given = {f"--{lvl.lower()}-ppm": v for lvl, v in (("MS1", args.ms1_ppm), ("MS2", args.ms2_ppm))
+             if v is not None}
+    if (args.override_by or args.override_reason) and not given:
+        sys.exit("resolve_defaults: --override-by/--override-reason describe --ms1-ppm/--ms2-ppm, "
+                 "and neither was given")
+    by, by_how = override_setter(args.override_by) if given else (None, "unknown")
+    sop = [f"{f[2:5].upper()}: {override_source(f, f'{v:g}', args.override_reason)}"
+           for f, v in given.items()]
+    # What the manifest will actually carry: the user's number where they gave one, the table's
+    # otherwise. UNDOCUMENTED_LEVEL applies to a level that is STILL without a value -- an
+    # override that supplies the untabled level means nothing is left to measure, so saying it
+    # "is measured with DIA-NN before the search" beside the user's own number is simply false.
     eff_ms1 = args.ms1_ppm if args.ms1_ppm is not None else ms1
     eff_ms2 = args.ms2_ppm if args.ms2_ppm is not None else ms2
     derived = (f"{src}; {ION_TRAP_MS2_ROUTE[engine]}" if cls == "orbitrap_iontrap" else
                f"{src}; {UNDOCUMENTED_LEVEL[engine]}"
                if cls in MEASURE_CLASSES and (eff_ms1 is None or eff_ms2 is None) else src)
-    ppm_source = ("site SOP override" if len(sop) == 2 else derived if not sop else
-                  f"{sop[0]}: site SOP override; the instrument's own values: {derived}")
+    ppm_source = ("; ".join(sop) if len(sop) == 2 else derived if not sop else
+                  f"{sop[0]}; the instrument's own values: {derived}")
 
     # gabrig 2026-09-23: a Fusion Lumos with no resolution exited 0 with "resolution unknown" in
     # the manifest and nothing asked the user. Still exit 0 -- callers rely on it -- but say so
@@ -258,6 +280,11 @@ def main():
             "ms1_ppm": eff_ms1,
             "ms2_ppm": eff_ms2,
             "ppm_source": ppm_source,
+            # each --ms1-ppm/--ms2-ppm the user gave: by role, and why ({} when none); who, by
+            # name, is in the staff-only record beside the manifest
+            "overrides": override_record(given, args.override_reason,
+                                         staff_record_name(os.path.join(dest, MANIFEST))
+                                         if given else None),
             "preset_provenance": preset_prov,
         },
         "validated": {
@@ -273,9 +300,11 @@ def main():
         "alternatives": [e for e in routes if e != engine],
         "notes": notes,
     }
-    mpath = os.path.join(dest, "workflow.manifest.json")
+    mpath = os.path.join(dest, MANIFEST)
     with open(mpath, "w") as fh:
         json.dump(manifest, fh, indent=2)
+    if given:
+        record_override_setter(mpath, given, by, by_how, args.override_reason)
 
     print(json.dumps({
         "id": manifest["id"], "dir": dest, "manifest": mpath,

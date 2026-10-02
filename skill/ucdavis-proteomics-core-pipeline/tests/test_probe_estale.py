@@ -67,6 +67,9 @@ while [ $# -gt 0 ]; do case "$1" in --f) f="$2"; shift;; esac; shift; done
 [ -n "${FAKE_NO_RADIUS:-}" ] && { echo "fake DIA-NN: $f"; echo "Finished"; exit 0; }
 # goes silent before the radius: the probe's --timeout
 [ -n "${FAKE_HANG:-}" ] && { echo "fake DIA-NN: $f"; exec sleep 30; }
+# killed for memory before the radius: the kernel's OOM killer (SIGKILL), or a failed allocation
+[ -n "${FAKE_OOM:-}" ] && { echo "fake DIA-NN: $f"; echo "[0:01] Loading run $f"; kill -9 $$; }
+[ -n "${FAKE_BAD_ALLOC:-}" ] && { echo "fake DIA-NN: $f"; echo "terminate called after throwing an instance of 'std::bad_alloc'"; exit 134; }
 if [ -n "${FAKE_NO_DOTNET:-}" ]; then
   echo "ERROR: cannot read .raw files, please download and install .NET Runtime 8: 8.0.17 or later https://dotnet.microsoft.com/en-us/download/dotnet/8.0 : 1"
   exit 0
@@ -343,7 +346,9 @@ exit "$rc"
         self.assertEqual(probe_window.RETRY_ON, (1, 7))
         self.assertEqual(probe_window.FALLBACK_ON, (1, 7, 8))
         # every deliberate stop explains itself in a failed job's log
-        self.assertEqual(set(probe_window.EXIT_MEANING), {2, 3, 4, 5, 6})
+        self.assertEqual(set(probe_window.EXIT_MEANING), {2, 3, 4, 5, 6, 9})
+        # out of memory is never retried or fallen back past: the job's memory is the cause
+        self.assertNotIn(probe_window.EXIT_OOM, probe_window.FALLBACK_ON)
 
     def test_no_retry_without_the_time_for_one(self):
         with tempfile.TemporaryDirectory() as d:
@@ -629,6 +634,22 @@ class Step1bEstaleChainTests(unittest.TestCase):
             w = self._failed_without_fallback(out, p, probe_window.EXIT_NOT_MEASURED)
             self.assertEqual(w["failure"], "not_measured")
             self.assertEqual(len(w["probes"]), dp.PROBE_MAX_FAILURES)
+
+    def test_out_of_memory_fails_step1b_at_once_and_says_so(self):
+        """Review of 2.10: an OOM-killed DIA-NN read as 'finished without logging a radius' --
+        blamed on the data, and two more runs tried that would die the same way. It is its own
+        status, never fallen back past, and the job says to raise the memory."""
+        for fake in ("FAKE_OOM", "FAKE_BAD_ALLOC"):
+            with tempfile.TemporaryDirectory() as d:
+                out = self._chain(d)
+                p = self._run(d, out, "step1b_window.sbatch", **{fake: "1"})
+                w = self._failed_without_fallback(out, p, probe_window.EXIT_OOM)
+                self.assertEqual((w["failure"], w["stopped_because"]), ("oom", "oom"), fake)
+                self.assertEqual(len(w["probes"]), 1, "one run is enough: the memory is the job's")
+                self.assertTrue(w["probes"][0]["oom"], fake)
+                self.assertIn("--mem-per-file", p.stdout + p.stderr)
+                self.assertNotIn(probe_window.EXIT_MEANING[probe_window.EXIT_NOT_MEASURED][:40],
+                                 p.stdout + p.stderr)
 
     def test_no_dotnet_fails_step1b_at_once_with_its_own_message(self):
         """S2: DIA-NN cannot read .raw without .NET 8. Every step 2-5 task would fail on the same

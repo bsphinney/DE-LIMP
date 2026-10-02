@@ -37,6 +37,8 @@ Usage:
                                                       # cannot be read from here
       [--submission <session dir>]  # its CoreOmics submission (submission_report.py):
                                     # adds Sample preparation -- who prepared the samples
+      [--qc-bracket logs/qc_bracket.json]   # qc_bracket.py's record: adds its one fixed
+                                    # Instrument performance sentence (never the verdict)
 """
 import sys, os, re, csv, json, glob, argparse, statistics
 from datetime import datetime
@@ -557,7 +559,9 @@ def _diann_workdirs(logp, opts):
     which the log does not name. A relative --out tells it exactly (the log is written beside
     --out, so the log's folder minus --out's own folder part; FragPipe's DIA route runs in its
     workdir with --out dia-quant-output/report.tsv); otherwise the log's folder (run_search.py
-    runs every DIA-NN job with `cd <out>`), then its parent."""
+    runs every DIA-NN job with `cd <out>`), then its parent -- CANDIDATES, of which
+    _expand_cfgs() reads one only when the others hold no different file of that name. (The
+    skill's own jobs pass --cfg as an absolute path, run_search.run_diann.)"""
     d = os.path.dirname(os.path.abspath(logp))
     outs = [v for f, v in opts if f == "--out" and v]
     if outs and not os.path.isabs(outs[-1]):
@@ -569,9 +573,23 @@ def _diann_workdirs(logp, opts):
     return [d, os.path.dirname(d)]
 
 
+def _same_file_contents(paths):
+    """True when every path holds the same bytes (one file seen from two folders counts)."""
+    blobs = set()
+    for p in paths:
+        with open(p, "rb") as fh:
+            blobs.add(fh.read())
+    return len(blobs) <= 1
+
+
 def _expand_cfgs(opts, workdirs, depth=0):
     """opts with each --cfg replaced by the flags of the file it names (cfg_groups, the one
-    tokeniser) -> (expanded [(flag, [values])], [cfg files read], [cfg paths NOT read])."""
+    tokeniser) -> (expanded [(flag, [values])], [cfg files read], [why each cfg NOT read]).
+
+    A relative --cfg is looked for in every candidate working directory (_diann_workdirs). Found
+    in more than one, with different contents, it is NOT read: the log does not say which one
+    DIA-NN opened, and reading the first would describe a run from a file it may never have seen
+    (sage-review, 6d49ec3: the log's folder won even when DIA-NN ran in its parent)."""
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from diann_parallel import cfg_tokens, cfg_groups, CfgError
     out, read, unread = [], [], []
@@ -581,21 +599,35 @@ def _expand_cfgs(opts, workdirs, depth=0):
             continue
         path = val if isinstance(val, str) else " ".join(val)
         cands = [path] if os.path.isabs(path) else [os.path.join(w, path) for w in workdirs]
-        hit = next((c for c in cands if os.path.isfile(c)), None)
+        hits = [c for c in cands if os.path.isfile(c)]
         try:
-            if hit is None or depth > 3:
-                raise CfgError(f"not found: {path}")
-            sub, r, u = _expand_cfgs(cfg_groups(cfg_tokens(hit)), workdirs, depth + 1)
-        except CfgError:
-            unread.append(path)
+            if len(hits) > 1 and not _same_file_contents(hits):
+                raise CfgError(f"the log names --cfg {path}, a relative path, and both "
+                               f"{' and '.join(hits)} exist and differ: which one DIA-NN read "
+                               "is not recorded")
+            if not hits:
+                raise CfgError(f"the log names --cfg {path}, which could not be read (not found"
+                               + ("" if os.path.isabs(path) else f" in {', '.join(workdirs)}")
+                               + ")")
+            if depth > 3:
+                raise CfgError(f"the log names --cfg {path}, nested more than 3 deep")
+            sub, r, u = _expand_cfgs(cfg_groups(cfg_tokens(hits[0])), workdirs, depth + 1)
+        except CfgError as e:
+            unread.append(str(e))
             continue
         out += sub
-        read += [hit] + r
+        read += [hits[0]] + r
         unread += u
     return out, read, unread
 
 
 def diann_cont_quant_exclude(report=None, prov=None, params_file=None):
+    """Did DIA-NN run with --cont-quant-exclude for this report? -> the record, or None when
+    nothing answered (diann_cont_quant_exclude_why() says why)."""
+    return diann_cont_quant_exclude_why(report, prov, params_file)[0]
+
+
+def diann_cont_quant_exclude_why(report=None, prov=None, params_file=None):
     """Did DIA-NN run with --cont-quant-exclude for this report, and where does that come from?
 
     THE reader of that flag (DE-LIMP rule 3): search_record() takes it from here for the
@@ -611,9 +643,11 @@ def diann_cont_quant_exclude(report=None, prov=None, params_file=None):
     resolved_params_file, then params_file -- only for a DIA-NN search: a Sage or FragPipe
     parameters file says nothing about DIA-NN). A command line whose --cfg cannot be read is not
     taken as "absent" (sage-review, ca9aff2: every --one-step search then read "not set").
-    -> {"value": tag or None, "source": where} -- value None when that source was read and has
-    no such flag -- or None when no source could be read, which the caller prints as NOT
-    RECORDED (rule 2)."""
+    -> ({"value": tag or None, "source": where}, None) -- value None when that source was read
+    and has no such flag -- or (None, why) when no source could be read, which the caller prints
+    as NOT RECORDED with that reason (rule 2): "no DIA-NN log" was said even when the log named a
+    --cfg that could not be read (sage-review, 6d49ec3)."""
+    why = []
     if prov is None and report:
         d = os.path.dirname(os.path.abspath(report))
         for cand in (d, os.path.dirname(d)):
@@ -638,11 +672,17 @@ def diann_cont_quant_exclude(report=None, prov=None, params_file=None):
                 f"({', '.join(os.path.basename(r) for r in read)})" if read else "")
             if vals:
                 return {"value": (vals[-1][0].strip("\"'") if vals[-1] else None) or None,
-                        "source": src}
+                        "source": src}, None
             if not unread:
-                return {"value": None, "source": src}
+                return {"value": None, "source": src}, None
             # the flag may be in the --cfg that could not be read: not "absent" -- ask the
             # parameters file the search ran with, else NOT RECORDED
+            why += [f"{os.path.basename(logp)}: {u}" for u in unread]
+        else:
+            why.append(f"no DIA-NN log beside the report ({os.path.basename(logp)})" if not head
+                       else f"no DIA-NN command line in {os.path.basename(logp)}")
+    else:
+        why.append("no report was named")
     cands = [params_file] if params_file else (
         [prov.get("resolved_params_file"), prov.get("params_file")]
         if (prov.get("engine") or "diann").lower() == "diann" else [])
@@ -657,8 +697,11 @@ def diann_cont_quant_exclude(report=None, prov=None, params_file=None):
             continue
         vals = [v for f, v in groups if f == "--cont-quant-exclude"]
         return {"value": (vals[-1][0] if vals[-1] else None) if vals else None,
-                "source": os.path.basename(pf)}
-    return None
+                "source": os.path.basename(pf)}, None
+    why.append("no DIA-NN parameters file was found" if (prov.get("engine") or "diann").lower()
+               == "diann" else f"the search's parameters file is {prov.get('engine')}'s, not "
+               "DIA-NN's")
+    return None, "; ".join(why)
 
 
 def search_record(params=None, search_prov=None, manifest=None):
@@ -825,7 +868,7 @@ def search_record(params=None, search_prov=None, manifest=None):
         # {"value": None} when that was read and the flag is absent. The sidecar's
         # diann_cont_quant_exclude is only a recommendation, so it is never taken as proof that
         # the flag ran.
-        rec["cont_quant_exclude"] = diann_cont_quant_exclude(
+        rec["cont_quant_exclude"], rec["cont_quant_exclude_why"] = diann_cont_quant_exclude_why(
             (prov.get("result") or {}).get("report"), prov, pf)
         labelled = "--channels" in flags or any(m.get("label") for m in rec["mods"])
         rec["labelled"] = {"value": labelled, "source": where + (
@@ -1050,8 +1093,8 @@ def diann_contaminant_sentence(srec):
         return ""
     cq = srec.get("cont_quant_exclude")
     if cq is None:
-        return (f" Whether DIA-NN's --cont-quant-exclude was set: {NOT_RECORDED} (no DIA-NN "
-                f"parameters file was read).")
+        return (f" Whether DIA-NN's --cont-quant-exclude was set: {NOT_RECORDED} "
+                f"({srec.get('cont_quant_exclude_why') or 'no DIA-NN parameters file was read'}).")
     if not cq.get("value"):
         return (" DIA-NN's --cont-quant-exclude was not set, so contaminant peptides took part "
                 "in DIA-NN's own normalisation.")
@@ -1059,6 +1102,44 @@ def diann_contaminant_sentence(srec):
     return (f" In DIA-NN (--cont-quant-exclude {tag}), peptides of {tag}-tagged entries were "
             f"excluded from normalisation and from the quantification of protein groups "
             f"containing no {tag} entry.")
+
+
+def added_sequences_sentence(fmeta):
+    """The user's own target sequences (fetch_fasta.py --add-fasta: a bait, a tag), named with
+    the file and SHA-256 they came from, the contaminant entries removed because most of each is
+    an added protein, and those kept whose shared peptides are ambiguous
+    (fetch_fasta.ADDED_SEQUENCE_RULE). "" when none were added."""
+    files = fmeta.get("added_sequences") or []
+    names = [e.get("name") or e.get("accession") or "____"
+             for f in files for e in (f.get("entries") or [])]
+    if not names:
+        return ""
+    many = len(names) != 1
+    src = "; ".join(f"{os.path.basename(f.get('file') or '') or '____'}, SHA-256 "
+                    f"{f.get('sha256') or '____'}" for f in files)
+    sent = (f" {len(names)} user-supplied sequence{'s' if many else ''} ({', '.join(names)}) "
+            f"{'were' if many else 'was'} added to the database as target "
+            f"entr{'ies' if many else 'y'} ({src}).")
+    gone = fmeta.get("contaminants_dropped_for_added_sequences") or []
+    if gone:
+        one = len(gone) == 1
+        sent += (f" {len(gone)} contaminant entr{'y' if one else 'ies'} sharing most of "
+                 f"{'its' if one else 'their'} peptides with {'it' if not many else 'them'} ("
+                 + ", ".join(f"{r.get('cont_acc')} ({r.get('cont_entry') or r.get('cont_gene') or '____'})"
+                             for r in gone)
+                 + f") {'was' if one else 'were'} removed from the library, so the added "
+                   f"sequence{'s keep' if many else ' keeps'} those peptides.")
+    kept = fmeta.get("contaminants_sharing_peptides_with_added_sequences") or []
+    if kept:
+        one = len(kept) == 1
+        sent += (f" {len(kept)} contaminant entr{'y' if one else 'ies'} sharing fewer of "
+                 f"{'its' if one else 'their'} peptides with {'it' if not many else 'them'} "
+                 f"{'was' if one else 'were'} kept, and the peptides shared are ambiguous between "
+                 f"the contaminant and the added sequence: "
+                 + "; ".join(f"{r.get('cont_acc')} ({r.get('cont_entry') or r.get('cont_gene') or '____'}) "
+                             f"and {r.get('target_acc')}: {', '.join(r.get('shared_peptides') or [])}"
+                             for r in kept) + ".")
+    return sent
 
 
 def keratin_database_sentence(fmeta):
@@ -1238,6 +1319,12 @@ def de_block_sentence(prov):
            f"{levels} was fitted as a random blocking factor, with a consensus within-{col} "
            f"correlation of {rho_s} (limma duplicateCorrelation{over}) used in the linear-model "
            f"fit ({b.get('fit') or NOT_RECORDED}).")
+    tr = b.get("technical_replicates") if isinstance(b.get("technical_replicates"), dict) else None
+    if tr:
+        # run_de.R's Sample column: injections of one biological sample (--reinjections all)
+        out = (f"{tr.get('n_samples', NOT_RECORDED)} sample(s) were injected more than once "
+               f"({tr.get('n_runs', NOT_RECORDED)} runs); these technical replicates were not "
+               f"counted as independent samples. " + out)
     # Which fit reported each contrast (--block-scope): stated from the record, per contrast.
     model = b.get("contrast_model") if isinstance(b.get("contrast_model"), dict) else None
     if model is None:
@@ -1256,6 +1343,47 @@ def de_block_sentence(prov):
                   f"{col}-to-{col} variation.")
 
 
+def de_normalisation_sentence(prov):
+    """Which quantities the DE read and why, from run_de.R's record (`normalisation`, and the
+    normalization_check block normalization_check.py wrote): the experiment type, the default
+    applied for it, and whether the data check agreed -- or who chose otherwise, and why. A
+    record without the check says NOT RECORDED; one from before 2.10 says nothing was recorded."""
+    norm = prov.get("normalisation")
+    nc = prov.get("normalization_check") if isinstance(prov.get("normalization_check"), dict) else None
+    if not norm and not nc:
+        return f"Between-run normalisation of the quantities: {NOT_RECORDED} (a DE record from before skill 2.10)."
+    out = f"Between-run normalisation: {norm or NOT_RECORDED}."
+    if not nc or nc.get("status") != "decided":
+        return out + (f" Whether this suited the experiment was not checked {NOT_RECORDED} (no "
+                      "normalisation check was run).")
+    et_ = nc.get("experiment_type") or {}
+    d = nc.get("decision") or {}
+    # a person's decision, by role (normalization_check.statement); their name is staff-only
+    chose = d.get("statement") or (
+        f"{d.get('by') or NOT_RECORDED} chose "
+        f"{(d.get('quantities') or NOT_RECORDED).replace('raw', 'non-normalised')} "
+        f"quantities: {d.get('reason') or NOT_RECORDED}.")
+    if not et_.get("type"):
+        return out + (f" No experiment type was recorded, so no default applied; {chose}"
+                      + (" A check of the data found: " + "; ".join(nc.get("trips")) + "."
+                         if nc.get("trips") else ""))
+    out += (f" Experiment type: {et_.get('label') or NOT_RECORDED} (per "
+            f"{et_.get('source') or NOT_RECORDED}); the default for it is "
+            f"{((nc.get('default') or {}).get('quantities') or NOT_RECORDED).replace('raw', 'non-normalised')} "
+            "quantities" + (f" ({(nc.get('default') or {})['why']})"
+                            if (nc.get("default") or {}).get("why") else "") + ".")
+    if nc.get("tripped"):
+        out += (" A check of the data (normalisation factors against the groups, the fold-change "
+                "balance before normalisation, identifications per group, DIA-NN's normalisation "
+                "stability and the volcano's shape) did not agree with that default ("
+                + "; ".join(nc.get("trips") or []) + f"), and {chose}")
+    else:
+        out += (" A check of the data (normalisation factors against the groups, the fold-change "
+                "balance before normalisation, identifications per group, DIA-NN's normalisation "
+                "stability and the volcano's shape) agreed with it.")
+    return out
+
+
 def de_paragraph(prov):
     """The Differential-expression paragraph, from run_de.R's de_provenance.json. Significance
     is described exactly as run_de.R applied it: an adjusted-p cutoff, with |log2FC| only a
@@ -1270,6 +1398,7 @@ def de_paragraph(prov):
          f"{prov.get('display_label') or NOT_RECORDED}{fmt_pkgs(prov)}."]
     if prov.get("rollup_method"):
         s.append(f"Protein quantities: {prov['rollup_method']}.")
+    s.append(de_normalisation_sentence(prov))
     if prov.get("missing_policy"):
         s.append(prov["missing_policy"].rstrip(".") + ".")
     cols, cuts = prov.get("q_columns") or [], prov.get("q_cutoffs") or []
@@ -1405,6 +1534,24 @@ def acquisition_rows(rep, col, ser, n_files, record_source=None):
     return [(n, val, sc or "—") for n, val, sc in rows]
 
 
+def qc_lines(rec, path):
+    """The Instrument performance section: ONE fixed sentence about the Core's practice
+    (qc_bracket.METHODS_SENTENCE -- the record's own copy when it carries one), printed whenever
+    the project has a QC record, whatever it says. The verdict, and whether the check could run
+    at all, are staff-only (Brett, 2026-10-01): a sentence that came and went with the check's
+    outcome -- missing when STAN was unreachable or the record unreadable -- would tell the client
+    what the verdict does not (2.10 safety review)."""
+    readable = isinstance(rec, dict) and str(rec.get("schema", "")).startswith("qc_bracket/")
+    if not readable and path:
+        print(f"make_methods: {os.path.basename(path)} could not be read; the fixed Instrument "
+              f"performance sentence is printed anyway", file=sys.stderr)
+    sentence = rec.get("methods_sentence") if readable else None
+    if not sentence:
+        from qc_bracket import METHODS_SENTENCE     # the one wording
+        sentence = METHODS_SENTENCE
+    return ["## Instrument performance", "", sentence, ""]
+
+
 def sample_prep_lines(rec, sr):
     """The Sample preparation section, from the CoreOmics submission (`sr` is
     submission_report). Who prepared the samples is sr.prepared_by()'s reading of the form.
@@ -1469,6 +1616,9 @@ def main():
     ap.add_argument("--acquisition", help="DIA/DDA as the session recorded it (step 2 detection)")
     ap.add_argument("--submission", help="the session dir (or a record) holding its CoreOmics "
                                          "submission: writes the Sample preparation section")
+    ap.add_argument("--qc-bracket", help="qc_bracket.py's record (the session's "
+                                         "logs/qc_bracket.json): its one fixed Instrument "
+                                         "performance sentence -- the verdict stays staff-only")
     a = ap.parse_args()
 
     fmeta = None
@@ -1613,6 +1763,9 @@ def main():
         w("> One paragraph cannot describe every run as it stands — resolve before publication: "
           + "; ".join(notes) + ".")
     w("")
+    if a.qc_bracket:
+        for line in qc_lines(_load_json(a.qc_bracket), a.qc_bracket):
+            w(line)
 
     # Sequence database — journals require source, release, entry count, and how
     # contaminants were handled. Never invent these: if the sidecar wasn't passed,
@@ -1657,9 +1810,15 @@ def main():
                 sent += f". Database composition: ____ {NR_TAG}."
         elif content_phrase is None:
             # 'unknown' (--path) / 'as_staged' (--hive): we did not build this database,
-            # so we cannot describe its composition. Leave it tagged for the user.
-            sent = (f"Spectra were searched against a supplied sequence database "
-                    f"({os.path.basename(fmeta.get('fasta', '') ) or '____'}; "
+            # so we cannot describe its composition. Leave it tagged for the user. Its
+            # organism is the user's answer (fetch --organism/--taxid; organism_source says so).
+            org = fmeta.get("organism") or ""
+            none = (fmeta.get("organism_source") or "").startswith("user: no single organism")
+            tax = f"taxid {fmeta['taxid']}; " if fmeta.get("taxid") else ""
+            sent = (f"Spectra were searched against a supplied "
+                    f"{org + ' ' if org else ''}sequence database"
+                    f"{' with no single source organism' if none else ''} "
+                    f"({os.path.basename(fmeta.get('fasta', '') ) or '____'}; {tax}"
                     f"{n_p} sequences). Database composition and version: ____ {NR_TAG}.")
         else:
             sent = (f"Spectra were searched against the UniProt "
@@ -1697,12 +1856,15 @@ def main():
                          f"accessions.")
         else:
             sent += " No contaminant database was appended."
+        sent += added_sequences_sentence(fmeta)
         sent += keratin_database_sentence(fmeta)
         w(sent)
-        # The drop note is described in the sentence above -- it is a record, not
+        # The drop notes are described in the sentences above -- they are records, not
         # something to resolve before publication.
         build_warnings = [x for x in (fmeta.get("warnings") or [])
-                          if x != fmeta.get("contaminants_dropped_note")]
+                          if x not in (fmeta.get("contaminants_dropped_note"),
+                                       fmeta.get("contaminants_dropped_for_added_sequences_note"),
+                                       fmeta.get("contaminants_sharing_peptides_with_added_sequences_note"))]
         if build_warnings:
             w("")
             w(f"> Database build warnings (resolve before publication): "
@@ -1834,7 +1996,7 @@ def main():
 if __name__ == "__main__":
     if sys.argv[1:2] == ["cont-quant-exclude"]:
         # contaminants.R's question: make_methods.py cont-quant-exclude <report> -> JSON
-        rec = diann_cont_quant_exclude(sys.argv[2] if len(sys.argv) > 2 else None)
-        print(json.dumps(dict(rec or {}, recorded=rec is not None)))
+        rec, why = diann_cont_quant_exclude_why(sys.argv[2] if len(sys.argv) > 2 else None)
+        print(json.dumps(dict(rec or {"why": why}, recorded=rec is not None)))
         sys.exit(0)
     main()

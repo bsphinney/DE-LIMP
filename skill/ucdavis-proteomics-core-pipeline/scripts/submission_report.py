@@ -830,6 +830,57 @@ def _no_groups(rec, d):
     return len(bases) in (1, len(names))
 
 
+def locate_decisions(locate_json):
+    """locate.json -> what staff decided about the runs: the re-injection policy and its result
+    per sample, and each run chosen by --choose. File NAMES only -- this goes into a report a
+    collaborator reads. None when there is no locate.json."""
+    loc = _read_json(locate_json)
+    if not isinstance(loc, dict):
+        return None
+    base = lambda p: os.path.basename(cs._s(p).rstrip("/"))   # noqa: E731
+    acc = loc.get("accepted") if isinstance(loc.get("accepted"), dict) else {}
+    reinj, chosen = {}, []
+    for r in loc.get("samples") or []:
+        if not isinstance(r, dict):
+            continue
+        key = cs._s(r.get("sample_key")) or cs._s(r.get("unique_id"))
+        rec = r.get("reinjections") if isinstance(r.get("reinjections"), dict) else None
+        if rec:
+            reinj.setdefault(key, {"policy": rec.get("policy"),
+                                   "kept": [base(p) for p in rec.get("kept") or []],
+                                   "set_aside": [base(p) for p in rec.get("set_aside") or []]})
+        if cs._s(r.get("chosen_by")) and r.get("file"):
+            chosen.append({"sample": key, "file": base(r["file"]), "by": cs._s(r.get("chosen_by"))})
+    return {"reinjections_policy": acc.get("reinjections"), "reinjections": reinj,
+            "staff_choices": chosen, "accept_ambiguous": bool(acc.get("accept_ambiguous")),
+            "allow_partial": bool(acc.get("allow_partial"))}
+
+
+def _locate_notes(p):
+    d = _read_json(p["locate_decisions"]) if os.path.isfile(p["locate_decisions"]) else None
+    if not isinstance(d, dict):
+        return []
+    out = []
+    reinj = d.get("reinjections") or {}
+    if reinj:
+        pol = d.get("reinjections_policy")
+        each = "; ".join(f"{k}: kept {', '.join(v.get('kept') or [])}"
+                         + (f", set aside {', '.join(v['set_aside'])}" if v.get("set_aside") else "")
+                         for k, v in reinj.items())
+        out.append(("reinjections",
+                    f"Re-injections: {len(reinj)} sample(s) had several runs of their own, and staff "
+                    + ("chose the newest injection of each (--reinjections latest)" if pol == "latest"
+                       else "kept every injection as technical replicates (--reinjections all), "
+                            "which are not independent samples" if pol == "all"
+                       else f"decided --reinjections {pol}") + f" -- {each}."))
+    if d.get("staff_choices"):
+        out.append(("staff_run_choices",
+                    f"Run choices: staff said which run is the sample for {len(d['staff_choices'])} "
+                    f"sample(s) whose label named several runs ("
+                    + "; ".join(f"{c['sample']}: {c['file']}" for c in d["staff_choices"]) + ")."))
+    return out
+
+
 def quality_notes(rec, session=None):
     """[{"id", "text"}]: gaps in the submission, and places where it disagrees with what was
     analysed. Each is checked against the session's own files; a check with nothing to read
@@ -867,6 +918,7 @@ def quality_notes(rec, session=None):
     if p:
         notes += _sheet_vs_raw(rec, p)
         notes += _conditions_vs_analysed(rec, p)
+        notes += _locate_notes(p)
     pn = _pairing_note(rec, p)
     if pn:
         notes.append(pn)
@@ -1052,6 +1104,14 @@ def cmd_attach(a):
         return _emit({"error": "the record has no PROT number or CoreOmics id"}, 2)
     session = os.path.abspath(os.path.expanduser(a.session))
     paths = attach(session, rec, a.replace)
+    if a.record:
+        # locate writes locate.json beside the record (`locate --out` = the fetch folder): the
+        # staff decisions behind the file list come with it
+        dec = locate_decisions(os.path.join(os.path.dirname(path), "locate.json"))
+        if dec is not None:
+            lp = paths_for(session)["locate_decisions"]
+            _write_json(lp, dec)
+            paths["locate_decisions"] = lp
     who, why = prepared_by(rec)
     return _emit({"attached": label(rec), "source": rec["source"], "prepared_by": who,
                   "prepared_by_basis": why, "n_samples": len(rec["samples"]),

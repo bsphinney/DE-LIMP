@@ -1462,14 +1462,29 @@ TIMS_NAME = re.compile(r"^\d{8,9}_+[^_]*_(?:DIA|DDA)-(?P<field>.+?)_S\d+-[A-Za-z
                        re.I)
 
 
+# A plate position as the Core writes it into a run name: S<plate>-<row><column>, `_S5-A1_`.
+# It names a well of the CORE's plate, never a sample: a submitter whose tubes are labelled A1..A4
+# would otherwise get the runs in the Core's wells A1..A4 (2.10 review, HIGH 3).
+PLATE_POSITION = re.compile(r"(?<![A-Za-z0-9])S\d+-[A-Ha-h](?:[1-9]|1[0-2])(?![A-Za-z0-9])", re.I)
+
+
 def match_space(name: str) -> str:
     """The part of a raw filename a sample id may match: the DIA-<uid> field for names that
-    follow the timsTOF convention, the whole name otherwise."""
+    follow the timsTOF convention, the whole name otherwise -- and never a plate position
+    (PLATE_POSITION), which is blanked out."""
     m = TIMS_NAME.match(name)
-    return m.group("field") if m else name
+    return m.group("field") if m else PLATE_POSITION.sub("_", name)
 
 
 WELL = re.compile(r"^[A-Ha-h](?:[1-9]|1[0-2])$")
+
+
+def well_like(label) -> bool:
+    """A sample label that looks like a plate well (A1-H12) or a plate position (S5-A1): a run
+    name carrying it may be naming a WELL, not the sample, so a match on it is asked, never
+    taken."""
+    u = _s(label)
+    return bool(WELL.match(u) or PLATE_POSITION.fullmatch(u))
 
 
 def weak_reason(uid: str):
@@ -1481,6 +1496,8 @@ def weak_reason(uid: str):
         return "blank unique_id"
     if WELL.match(u):
         return "looks like a plate well (A1-H12)"
+    if PLATE_POSITION.fullmatch(u):
+        return "looks like a plate position (S5-A1)"
     alnum = re.sub(r"[^A-Za-z0-9]", "", u)
     if len(alnum) < 3:
         return "fewer than 3 letters/digits"
@@ -1557,6 +1574,39 @@ def ht_pattern(internal_id):
     return re.compile(r"^\d{8}_(?:PROT_?)?(?:" + "|".join(nums) + r")(?![A-Za-z0-9])", re.I)
 
 
+# An HT plate run: `<date>_[PROT_]<n>_<speed>_<sample name>_S<plate>-<well>_<n>_<acq#>.d`
+# (measured on a 96-well plate, 2026-10-01: every run's sample field equalled one of the
+# submission's sample_names, and none carried a unique_id). The tail is the plate position.
+HT_TAIL = re.compile(r"_S\d+-[A-Za-z]\d{1,2}_\d+_\d+(?:\.d)?$", re.I)
+
+
+def ht_sample_field(name: str, plate) -> str:
+    """The part of an HT plate run's name that carries its sample: after the plate token
+    (`plate`, ht_pattern) and before the plate position -- as match_space() keeps a timsTOF
+    name's DIA-<uid> field, so neither a unique_id nor a sample name can match the speed or the
+    well. A plate position anywhere in it is blanked out too (PLATE_POSITION)."""
+    m = plate.match(name)
+    return PLATE_POSITION.sub("_", HT_TAIL.sub("", name[m.end():] if m else name))
+
+
+def _acquired(path: str) -> str:
+    d, _src = acquisition_date(path)
+    return d.isoformat() if d else ""
+
+
+def name_universe(samples: list) -> list:
+    """id_universe() built from sample_name: an HT plate run carries the submitter's sample
+    name where other runs carry the unique_id. Same token patterns, same longest-wins rule."""
+    out = []
+    for smp in samples:
+        n = _s(smp.get("sample_name"))
+        pat, key = token_pattern(n), normkey(n)
+        if pat and key:
+            out.append({"uid": _s(smp.get("unique_id")), "label": n, "norm": key,
+                        "pattern": pat, "sub": "", "submitted": None, "ours": True, "sample": smp})
+    return out
+
+
 def _mtime(path: str) -> float:
     try:
         return os.stat(path).st_mtime
@@ -1569,7 +1619,7 @@ def _row(smp: dict, **kw) -> dict:
          "condition_name": smp.get("condition_name", ""), "file": "", "acquired": "",
          "date_source": "", "status": "", "alternates": [], "note": "",
          "instrument_folder": None, "ambiguous": [], "accepted_ambiguous": False,
-         "out_of_window": 0, "shadowed": []}
+         "out_of_window": 0, "shadowed": [], "chosen_by": ""}
     r.update(kw)
     return r
 
@@ -1607,8 +1657,162 @@ def file_owners(e: dict, universe: list, cache: dict, keep=None) -> list:
     return cache[e["path"]]
 
 
+def sample_keys(samples: list) -> dict:
+    """id(sample) -> the name a staff answer gives it: its unique_id, or `<unique_id>#<k>` when
+    other samples of this submission share that label (normkey) -- k is its place among them in
+    the sheet -- since the label alone cannot say which of them it is."""
+    groups, keys = {}, {}
+    for smp in samples:
+        groups.setdefault(normkey(smp.get("unique_id")), []).append(smp)
+    for v in groups.values():
+        for k, smp in enumerate(v, 1):
+            keys[id(smp)] = _s(smp.get("unique_id")) + (f"#{k}" if len(v) > 1 else "")
+    return keys
+
+
+def parse_choices(choose: list, choices_file, samples: list) -> dict:
+    """--choose UNIQUE_ID=FILE (repeatable) and --choices FILE (one UNIQUE_ID=FILE per line):
+    staff's answer to `choose_run` -- which run IS a sample's when several carry its label --
+    -> {sample key (sample_keys): {"unique_id", "sample_key", "file": absolute path, "source":
+    where the answer was given}}.
+
+    A label that names several runs (re-injections, a run another submission's label also
+    names) is a question about sample identity, and only staff can answer it: `locate` never
+    picks one (a staff search, 2026-09-30: a duplicate sample label was resolved by the agent
+    without the user, before a multi-hour search, and identity really was in doubt). The answer
+    is recorded in locate.json (`accepted.choices`) and on the sample's row (`chosen_by`)."""
+    given = [(x, "--choose") for x in choose or []]
+    if choices_file:
+        given += [(x, f"--choices {choices_file}") for x in read_file_list(choices_file)]
+    keys = sample_keys(samples)
+    by_key = {keys[id(smp)]: smp for smp in samples}
+    by_norm = {}
+    for smp in samples:
+        by_norm.setdefault(normkey(smp.get("unique_id")), []).append(smp)
+    out = {}
+    for text, src in given:
+        uid, sep, path = text.partition("=")
+        uid, path = uid.strip(), path.strip()
+        if not sep or not uid or not path:
+            raise Stop(EXIT_DECIDE, {"error": f"{src} {text!r}: expected UNIQUE_ID=FILE"})
+        # A label is one normalised key (EB_001 is eb-001); one that two samples share names
+        # neither, so those are answered by their key, KG1#1 / KG1#2 (duplicate_ids lists them).
+        smp = by_key.get(uid)
+        if smp is None:
+            same = by_norm.get(normkey(uid)) or []
+            if not same:
+                raise Stop(EXIT_DECIDE, {"error": f"{src} {uid}: no sample of this submission has "
+                                                  f"that unique_id"})
+            if len(same) > 1:
+                raise Stop(EXIT_DECIDE, {
+                    "error": f"{src} {uid}: {len(same)} samples share that unique_id, so it cannot "
+                             f"say which",
+                    "hint": "name each by its key: " + ", ".join(
+                        f"{keys[id(x)]} ({_s(x.get('sample_name'))}, {_s(x.get('condition_name'))})"
+                        for x in same)})
+            smp = same[0]
+        key = keys[id(smp)]
+        f = os.path.abspath(os.path.expanduser(path.rstrip("/")))
+        if not os.path.exists(f):
+            raise Stop(EXIT_DECIDE, {"error": f"{src} {uid}={path}: no such file"})
+        if key in out and out[key]["file"] != f:
+            raise Stop(EXIT_DECIDE, {"error": f"two different runs chosen for {key}: "
+                                              f"{out[key]['file']} and {f}"})
+        out[key] = {"unique_id": _s(smp.get("unique_id")), "sample_key": key, "file": f,
+                    "source": src}
+    return out
+
+
+# Re-injections: several runs of ONE sample (same identity, another injection). One explicit
+# decision covers all of them (team lead for Brett, 2026-10-01: a 96-well plate can have many,
+# and "repeated names are okay but flagged"): `ask` (default) stops at choose_run, as for a
+# collision; `latest` keeps the newest injection; `all` keeps every injection as technical
+# replicates of the sample. Never a collision -- different samples sharing a label always need
+# their own --choose.
+REINJECTION_POLICIES = ("ask", "latest", "all")
+_ACQ_COUNTER = re.compile(r"_(\d+)(?:\.[A-Za-z]+)?$")
+
+
+def acquisition_counter(name: str):
+    """The instrument's acquisition counter a run name ends with (`..._S3-A1_1_24376.d` ->
+    24376), or None: within one day it orders injections where the date cannot."""
+    m = _ACQ_COUNTER.search(os.path.basename(_s(name).rstrip("/")))
+    return int(m.group(1)) if m else None
+
+
+def read_stan_entries(path) -> dict:
+    """ht_manifest.json -> {resolved raw path: STAN entry} (needs_rerun, injection, well ...)."""
+    if not path:
+        return {}
+    m = load_json_file(path, "--ht-manifest")
+    return {os.path.realpath(_s(e.get("raw_path")).rstrip("/")): e
+            for e in m.get("entries") or [] if isinstance(e, dict) and _s(e.get("raw_path"))}
+
+
+def apply_reinjections(policy: str, runs: list, stan: dict) -> dict:
+    """`runs`: [(path, date or None, instrument folder or None)] of ONE sample's runs ->
+    {"policy", "runs", "kept", "set_aside", "reason"}, or {"policy", "runs", "undecided": True,
+    "reason"} when `latest` cannot tell which run is the newest. all: every run.
+
+    latest: the newest injection -- by acquisition date; on the same day, by the name's
+    acquisition counter, which counts ONE instrument's acquisitions, so it orders runs only on
+    one instrument (2.10 review: a counter compared across instruments says nothing). Same-day
+    runs on different instruments, or without counters, and a run with no date are UNDECIDED --
+    asked, never guessed (modification times are no evidence: a copy resets them). A run STAN
+    flags needs_rerun is never kept while another is not ("prefer the rerun")."""
+    order = sorted(runs, key=lambda t: (t[1] or dt.date.min, acquisition_counter(t[0]) or -1,
+                                        os.path.basename(t[0])), reverse=True)
+    paths = [t[0] for t in order]
+    if policy == "all":
+        return {"policy": "all", "runs": paths, "kept": paths, "set_aside": [],
+                "reason": f"all {len(paths)} runs kept as technical replicates of one sample"}
+    flagged = [p for p in paths if (stan.get(os.path.realpath(p)) or {}).get("needs_rerun")]
+    pool = [t for t in order if t[0] not in flagged] or order
+
+    def undecided(why):
+        return {"policy": "latest", "runs": paths, "undecided": True,
+                "reason": f"--reinjections latest cannot tell the newest: {why}"}
+    if any(d is None for _p, d, _i in pool):
+        return undecided("a run has no acquisition date")
+    top = max(d for _p, d, _i in pool)
+    tops = [t for t in pool if t[1] == top]
+    if len(tops) > 1:
+        insts = {i for _p, _d, i in tops}
+        counters = [acquisition_counter(p) for p, _d, _i in tops]
+        if len(insts) > 1 or None in insts:
+            return undecided(f"{len(tops)} runs on {top.isoformat()} were acquired on different "
+                             f"instruments ({', '.join(sorted(str(i) for i in insts))}), whose "
+                             f"acquisition counters do not compare")
+        if None in counters or len(set(counters)) < len(counters):
+            return undecided(f"{len(tops)} runs on {top.isoformat()} carry no acquisition counter "
+                             f"that orders them")
+        keep = max(tops, key=lambda t: acquisition_counter(t[0]))[0]
+    else:
+        keep = tops[0][0]
+    why = "the newest injection"
+    if flagged and keep != paths[0]:
+        why += f" STAN does not flag (needs_rerun: {', '.join(os.path.basename(f) for f in flagged)})"
+    return {"policy": "latest", "runs": paths, "kept": [keep],
+            "set_aside": [p for p in paths if p != keep],
+            "reason": f"{why}, of {len(paths)} runs"}
+
+
+def reinjection_note(rec: dict) -> str:
+    """One line for a sample's row, sample_files.tsv and SUBMISSION.md."""
+    if rec["policy"] == "all":
+        return f"re-injections (--reinjections all): {rec['reason']}"
+    return (f"re-injections (--reinjections latest): kept {os.path.basename(rec['kept'][0])}, "
+            f"{rec['reason']}; set aside: {', '.join(os.path.basename(p) for p in rec['set_aside'])}")
+
+
+def _same_file(a: str, b: str) -> bool:
+    return os.path.realpath(a) == os.path.realpath(b)
+
+
 def match_samples(samples: list, entries: list, neighbors: list, lo: dt.date, hi: dt.date,
-                  ours_label: str = "", accept_ambiguous: bool = False) -> list:
+                  ours_label: str = "", accept_ambiguous: bool = False,
+                  choices: dict | None = None, reinjections: str = "ask",
+                  stan: dict | None = None) -> list:
     """The deterministic core of `locate`: one row per sample.
 
     A file in the window is AMBIGUOUS when another submission -- older, same day or newer --
@@ -1642,14 +1846,45 @@ def match_samples(samples: list, entries: list, neighbors: list, lo: dt.date, hi
         end = min([d for d in others if d > start] + [before])
         return [e["path"] for e in owned if dated(e)[0] is not None and start <= dated(e)[0] < end]
 
+    keys = sample_keys(samples)
+    shared = Counter(normkey(smp.get("unique_id")) for smp in samples)
+    # a run staff chose for one sample is no other sample's candidate
+    taken = {os.path.realpath(c["file"]) for c in (choices or {}).values()}
+
+    def chosen(smp, pick, pool, cands=(), amb=(), amb_info=(), n_out=0, shadowed=()):
+        """Staff's answer (--choose) for this sample: one of `pool`, the runs whose name carries
+        its id -- in the window or not. Anything else is refused, never guessed at."""
+        hit = next((e for e in pool if _same_file(e["path"], pick["file"])), None)
+        if hit is None:
+            raise Stop(EXIT_DECIDE, {
+                "error": f"{pick['source']} {smp.get('unique_id')}={pick['file']}: not one of the "
+                         f"runs whose name carries {smp.get('unique_id')}",
+                "candidates": [e["path"] for e in pool][:20],
+                "hint": "a file whose name does not carry the id: --files-from a curated list"})
+        d, src = dated(hit)
+        return _row(smp, status="matched", file=hit["path"], acquired=d.isoformat() if d else "",
+                    sample_key=keys[id(smp)],
+                    date_source=src, instrument_folder=hit["instrument_folder"],
+                    alternates=[x[0]["path"] for x in cands if x[0] is not hit],
+                    ambiguous=list(amb_info), accepted_ambiguous=any(x[0] is hit for x in amb),
+                    out_of_window=n_out, shadowed=list(shadowed)[:5], chosen_by=pick["source"],
+                    note=f"chosen by staff ({pick['source']}) from "
+                         f"{len(cands) or len(pool)} candidate run(s)")
+
     rows = []
     for smp in samples:
         uid = smp.get("unique_id", "")
         pat, key = token_pattern(uid), normkey(uid)
         reason = weak_reason(uid)
+        skey = keys[id(smp)]
+        pick = (choices or {}).get(skey)
         if reason or not pat:
+            if pick and pat:
+                rows.append(chosen(smp, pick, [e for e in entries
+                                               if key in e["norm"] and pat.search(e["space"])]))
+                continue
             n = sum(1 for e in entries if key and key in e["norm"] and pat.search(e["space"])) if pat else 0
-            rows.append(_row(smp, status="weak",
+            rows.append(_row(smp, status="weak", sample_key=skey,
                              note=f"{reason}; {n} raw file(s) carry this token -- not auto-assigned"))
             continue
         hits = [e for e in entries if key in e["norm"] and pat.search(e["space"])]
@@ -1660,8 +1895,11 @@ def match_samples(samples: list, entries: list, neighbors: list, lo: dt.date, hi
                 owned.append(e)
             else:
                 shadowed.append({"file": e["path"], "owned_by": sorted({f"{o['uid']} ({o['sub']})" for o in owners})})
+        if len(owned) > WEAK_MAX_FILES and pick:
+            rows.append(chosen(smp, pick, owned, shadowed=shadowed))
+            continue
         if len(owned) > WEAK_MAX_FILES:
-            rows.append(_row(smp, status="weak", shadowed=shadowed[:5],
+            rows.append(_row(smp, status="weak", shadowed=shadowed[:5], sample_key=skey,
                              note=f"this id names {len(owned)} raw files across all instruments and "
                                   f"dates (more than {WEAK_MAX_FILES}) -- too common to pick out this "
                                   f"submission's runs; not auto-assigned"))
@@ -1689,15 +1927,60 @@ def match_samples(samples: list, entries: list, neighbors: list, lo: dt.date, hi
                                "label": o["uid"], "has_earlier_unambiguous_files": bool(earlier),
                                "earlier_files": len(earlier), "earlier_examples": earlier[:3]})
             amb_info.append({"file": e["path"], "acquired": d.isoformat(), "contenders": detail})
-        pool = free or (amb if accept_ambiguous else [])
-        if pool:
-            pool.sort(key=lambda t: (t[1], _mtime(t[0]["path"]), t[0]["name"]), reverse=True)
-            e, d, src, _ = pool[0]
+        if not pick:
+            free = [x for x in free if os.path.realpath(x[0]["path"]) not in taken]
+            amb = [x for x in amb if os.path.realpath(x[0]["path"]) not in taken]
+        cands = sorted(free + amb, key=lambda t: (t[1], _mtime(t[0]["path"]), t[0]["name"]),
+                       reverse=True)
+        # A COLLISION: another sample of ours has this label, or a run's label is another
+        # submission's too and staff have not accepted it as ours. Only staff can say which run is
+        # whose (--choose), whatever --reinjections says. Otherwise several runs are RE-INJECTIONS
+        # of this one sample, and the one policy decides.
+        collision = shared[key] > 1 or bool(amb and not accept_ambiguous)
+        rec = (apply_reinjections(reinjections, [(x[0]["path"], x[1], x[0]["instrument_folder"])
+                                                 for x in cands], stan or {})
+               if not pick and len(cands) > 1 and not collision and reinjections != "ask" else None)
+        if pick:
+            rows.append(chosen(smp, pick, owned, cands, amb, amb_info, n_out, shadowed))
+        elif rec and not rec.get("undecided"):
+            by_path = {x[0]["path"]: x for x in cands}
+            for path in rec["kept"]:
+                e, d, src, _cons = by_path[path]
+                rows.append(_row(smp, status="matched", file=path, acquired=d.isoformat(),
+                                 date_source=src, instrument_folder=e["instrument_folder"],
+                                 sample_key=skey, alternates=rec["set_aside"], ambiguous=amb_info,
+                                 accepted_ambiguous=any(x[0]["path"] == path for x in amb),
+                                 out_of_window=n_out,
+                                 shadowed=shadowed[:5], reinjections=rec,
+                                 note=reinjection_note(rec)))
+        elif (len(cands) > 1 or (cands and shared[key] > 1)) and (free or accept_ambiguous):
+            # Several runs carry this sample's label -- re-injections, or runs a label another
+            # submission also uses -- or another sample of ours has the label too. Which one IS
+            # this sample is a question for staff.
+            rows.append(_row(smp, status="needs_choice", sample_key=skey,
+                             choice_kind="collision" if collision else "reinjections",
+                             alternates=[x[0]["path"] for x in cands],
+                             candidates=[{"file": e["path"], "acquired": d.isoformat(),
+                                          "date_source": src,
+                                          "label_also_used_by": sorted({o["sub"] for o in cons})}
+                                         for e, d, src, cons in cands],
+                             ambiguous=amb_info, out_of_window=n_out, shadowed=shadowed[:5],
+                             note=(f"{len(cands)} run(s) carry this id"
+                                   + (f", which {shared[key] - 1} other sample(s) of this "
+                                      f"submission share" if shared[key] > 1 else "")
+                                   + (f"; staff choose: --choose {skey}=<file>" if collision
+                                      else f"; re-injections of this sample: --reinjections "
+                                           f"latest|all for every such sample, or --choose "
+                                           f"{skey}=<file>")
+                                   + (f" ({rec['reason']})" if rec else ""))))
+        elif len(cands) == 1 and (free or accept_ambiguous):
+            e, d, src, _ = cands[0]
             accepted = not free
             rows.append(_row(smp, status="matched", file=e["path"], acquired=d.isoformat(),
                              date_source=src, instrument_folder=e["instrument_folder"],
-                             alternates=[x[0]["path"] for x in pool[1:]], ambiguous=amb_info,
-                             accepted_ambiguous=accepted, out_of_window=n_out, shadowed=shadowed[:5],
+                             sample_key=skey,
+                             ambiguous=amb_info, accepted_ambiguous=accepted, out_of_window=n_out,
+                             shadowed=shadowed[:5],
                              note="ambiguous label accepted with --accept-ambiguous" if accepted else ""))
         elif amb:
             amb.sort(key=lambda t: (t[1], t[0]["name"]), reverse=True)
@@ -1705,6 +1988,7 @@ def match_samples(samples: list, entries: list, neighbors: list, lo: dt.date, hi
             subs = sorted({c["submission"] for i in amb_info for c in i["contenders"]})
             rows.append(_row(smp, status="ambiguous_label", file=e["path"], acquired=d.isoformat(),
                              date_source=src, instrument_folder=e["instrument_folder"],
+                             sample_key=skey,
                              ambiguous=amb_info, out_of_window=n_out, shadowed=shadowed[:5],
                              note=f"{', '.join(subs)} also use this label and were submitted before "
                                   f"these runs -- the label alone cannot say whose runs they are"))
@@ -1715,39 +1999,121 @@ def match_samples(samples: list, entries: list, neighbors: list, lo: dt.date, hi
             if shadowed:
                 bits.append(f"{len(shadowed)} file(s) carry it inside a longer id")
             rows.append(_row(smp, status="unmatched", out_of_window=n_out, shadowed=shadowed[:5],
-                             note="; ".join(bits) or "no raw file carries this id"))
+                             sample_key=skey, note="; ".join(bits) or "no raw file carries this id"))
     return rows
 
 
-def curated_rows(samples: list, paths: list, raw: str) -> list:
+def curated_rows(samples: list, paths: list, raw: str, choices: dict | None = None,
+                 internal_id=None, reinjections: str = "ask", stan: dict | None = None) -> list:
     """--files-from: staff chose the files. Map each back to the sample whose id is the
-    longest one it carries; a curated list makes even a weak id usable."""
+    longest one it carries, the way `locate` matches; a curated list makes even a weak id
+    usable. A run of this submission's HT plate (named for it, ht_pattern -- the test `locate`
+    exits 4 on) carries the submitter's sample_name instead of any unique_id, so it is matched
+    on sample_name, in its sample field (ht_sample_field), by the same rules. A file that names
+    several samples (a sample_name they share) is theirs to choose from: `needs_choice`. A
+    --choose answer assigns a listed file to a sample outright; it also settles the sample's
+    other listed runs, which are set aside. Several listed runs of ONE sample are re-injections:
+    --reinjections decides (ask: needs_choice; latest; all), as in auto mode."""
     universe = id_universe(samples, [], "", None)
-    by_sample, loose = {}, []
+    plate = ht_pattern(internal_id)
+    names = name_universe(samples) if plate else []
+    keys = sample_keys(samples)
+    by_key = {keys[id(smp)]: smp for smp in samples}
+    picked = {}
+    for key, c in (choices or {}).items():
+        hit = next((p for p in paths if _same_file(p, c["file"])), None)
+        if hit is None:
+            raise Stop(EXIT_DECIDE, {"error": f"{c['source']} {key}={c['file']}: that file is not in "
+                                              f"the --files-from list"})
+        picked[hit] = (by_key[key], c["source"])
+    by_sample, loose, wanted_by, well_kind = {}, [], {}, set()
     for p in paths:
-        e = prepare_entry({"path": p, "name": os.path.basename(p.rstrip("/"))})
-        owners = file_owners(e, universe, {})
-        who = {id(o["sample"]): o["sample"] for o in owners}
-        if len(who) == 1:
-            by_sample.setdefault(next(iter(who)), []).append(p)
+        if p in picked:
+            smp, src = picked[p]
+            by_sample.setdefault(id(smp), []).append((p, src, "staff choice"))
+            continue
+        name = os.path.basename(p.rstrip("/"))
+        if plate and plate.match(name):
+            # This submission's HT plate run: ids and names are matched ONLY in its sample field
+            # (after the plate token, before the plate position) -- a unique_id A1 must not take
+            # the run in the Core's well A1 (2.10 review, HIGH 3).
+            field = ht_sample_field(name, plate)
+            e = {"path": p, "name": name, "space": field, "norm": normkey(field)}
+            owners, on = file_owners(e, universe, {}), "unique_id (HT plate run)"
+            if not owners:
+                owners, on = file_owners(e, names, {}), "sample_name (HT plate run)"
         else:
-            loose.append((p, sorted({o["uid"] for o in owners})))
+            e = prepare_entry({"path": p, "name": name})
+            owners, on = file_owners(e, universe, {}), "unique_id"
+        who = {id(o["sample"]): o["sample"] for o in owners}
+        wells = [o for o in owners if well_like(o.get("label", o["uid"]))]
+        if len(who) == 1 and not wells:
+            by_sample.setdefault(next(iter(who)), []).append((p, "", on))
+        else:
+            # several samples, or a label that looks like a plate well: staff say whose run it is
+            loose.append((p, sorted({o["uid"] for o in owners}), on))
+            for k in who:
+                wanted_by.setdefault(k, []).append(p)
+            well_kind.update(id(o["sample"]) for o in wells)
     rows = []
     for smp in samples:
         files = by_sample.get(id(smp), [])
-        if not files:
-            rows.append(_row(smp, status="unmatched", note="no file in the curated list carries this id"))
-        for p in files:
-            d, src = acquisition_date(p)
+        cands = wanted_by.get(id(smp), [])
+        set_aside, rec = [], None
+        if any(src for _p, src, _on in files):
+            set_aside = [p for p, src, _on in files if not src]
+            files = [f for f in files if f[1]]
+        elif len(files) > 1 and reinjections != "ask":
+            rec = apply_reinjections(
+                reinjections, [(p, acquisition_date(p)[0],
+                                os.path.relpath(p, raw).split(os.sep)[0] if is_under(p, raw) else None)
+                               for p, _s2, _o in files], stan or {})
+            if not rec.get("undecided"):
+                set_aside = rec["set_aside"]
+                files = [f for f in files if f[0] in rec["kept"]]
+        if len(files) > 1 and (reinjections == "ask" or (rec or {}).get("undecided")):
+            rows.append(_row(smp, status="needs_choice", sample_key=keys[id(smp)],
+                             choice_kind="reinjections", alternates=[p for p, _s2, _o in files],
+                             candidates=[{"file": p, "acquired": _acquired(p)} for p, _s2, _o in files],
+                             note=f"{len(files)} listed runs of this sample (re-injections): "
+                                  f"--reinjections latest|all for every such sample, or --choose "
+                                  f"{keys[id(smp)]}=<file>"
+                                  + (f" ({rec['reason']})" if rec else "")))
+            continue
+        if not files and cands:
+            # The label this sample shares names several of the listed runs: which is its own
+            # is a question about identity, for staff (choose_run).
+            well = id(smp) in well_kind
+            rows.append(_row(smp, status="needs_choice", alternates=cands, sample_key=keys[id(smp)],
+                             candidates=[{"file": c, "acquired": _acquired(c)} for c in cands],
+                             choice_kind="well_like_label" if well else "collision",
+                             note=(f"its label looks like a plate well, so a run carrying it may be "
+                                   f"naming the well, not the sample; staff choose: --choose "
+                                   f"{keys[id(smp)]}=<file>" if well else
+                                   f"{len(cands)} listed run(s) carry a label or name other samples "
+                                   f"share; staff choose: --choose {keys[id(smp)]}=<file>")))
+        elif not files:
+            rows.append(_row(smp, status="unmatched", sample_key=keys[id(smp)],
+                             note="no file in the curated list carries this id"
+                                  + (" or sample name" if plate else "")))
+        for p, src, on in files:
+            d, dsrc = acquisition_date(p)
             folder = os.path.relpath(p, raw).split(os.sep)[0] if is_under(p, raw) else None
             rows.append(_row(smp, status="matched", file=p, acquired=d.isoformat() if d else "",
-                             date_source=src, instrument_folder=folder, note="curated"))
-    for p, cands in loose:
+                             date_source=dsrc, instrument_folder=folder, chosen_by=src,
+                             matched_on=on, sample_key=keys[id(smp)], alternates=set_aside,
+                             reinjections=rec,
+                             note=(f"curated; chosen by staff ({src})" if src
+                                   else "curated" + ("" if on == "unique_id" else f"; matched on {on}"))
+                             + (f"; {reinjection_note(rec)}" if rec else "")
+                             + (f"; set aside: {', '.join(os.path.basename(x) for x in set_aside)}"
+                                if set_aside and not rec else "")))
+    for p, cands, on in loose:
         d, src = acquisition_date(p)
         rows.append(_row({}, status="unassigned", file=p, acquired=d.isoformat() if d else "",
-                         date_source=src,
-                         note=("matches several samples: " + ", ".join(cands)) if cands
-                         else "matches no sample id"))
+                         date_source=src, matched_on=on,
+                         note=(f"matches several samples ({on}): " + ", ".join(cands)) if cands
+                         else "matches no sample id" + (" or sample name" if plate else "")))
     return rows
 
 
@@ -1760,12 +2126,39 @@ def _gate(name, status, detail="", **kw):
 
 
 def locate_gates(rows: list, files: list, allow_partial: bool, wanted_folder, unreadable: list,
-                 curated: bool, missing_paths: list, accept_ambiguous: bool = False) -> list:
+                 curated: bool, missing_paths: list, accept_ambiguous: bool = False,
+                 samples: list | None = None) -> list:
     """PASS/WARN/INFO/FAIL per check. Any FAIL is a hard gate: exit 2, nothing staged."""
     gates = []
     by = {}
     for r in rows:
         by.setdefault(r["status"], []).append(r)
+    # Two samples of this submission with one label: a run named by it cannot say which sample
+    # it is, so no run is assigned to them by the label -- staff name each run by the samples'
+    # keys (sample_keys: KG1#1, KG1#2). Settled once each of them has a staff choice, or was
+    # accepted as not run (--allow-partial).
+    keys = sample_keys(samples or [])
+    same = {}
+    for smp in samples or []:
+        if normkey(smp.get("unique_id")):
+            same.setdefault(normkey(smp.get("unique_id")), []).append(smp)
+    dup = [v for v in same.values() if len(v) > 1]
+    row_of = {r.get("sample_key"): r for r in rows if r.get("sample_key")}
+
+    def settled(smp):
+        r = row_of.get(keys[id(smp)]) or {}
+        return bool(r.get("chosen_by")) or (r.get("status") == "unmatched" and allow_partial)
+    open_ = [v for v in dup if not all(settled(x) for x in v)]
+    gates.append(_gate("duplicate_ids", "FAIL" if open_ else ("INFO" if dup else "PASS"),
+                       (f"{len(open_)} unique_id(s) are used by more than one sample of this "
+                        f"submission, so a run carrying one cannot say which sample it is. Ask staff "
+                        f"which run is which sample and answer with each sample's key: --choose "
+                        f"<key>=<file> (keys below); one that was not run: --allow-partial")
+                       if open_ else ("shared labels settled by staff choices" if dup else ""),
+                       samples=[[{"key": keys[id(x)], "unique_id": _s(x.get("unique_id")),
+                                  "sample_name": _s(x.get("sample_name")),
+                                  "condition_name": _s(x.get("condition_name"))} for x in v]
+                                for v in dup]))
     if unreadable:
         gates.append(_gate("listing", "WARN", f"{len(unreadable)} folder(s) could not be read",
                            examples=unreadable[:5]))
@@ -1780,7 +2173,8 @@ def locate_gates(rows: list, files: list, allow_partial: bool, wanted_folder, un
                        ("WARN" if allow_partial else "FAIL") if unmatched else "PASS",
                        (f"{len(unmatched)} sample(s) have no raw file"
                         + (" -- accepted with --allow-partial" if allow_partial else
-                           ". If staff confirm they were not run, re-run with --allow-partial"))
+                           ". If staff confirm they were not run, re-run with --allow-partial; if "
+                           "staff know a sample's run, --choose <unique_id>=<file>"))
                        if unmatched else "",
                        samples=[{"unique_id": r["unique_id"], "note": r["note"]} for r in unmatched]))
     if not curated:
@@ -1796,8 +2190,9 @@ def locate_gates(rows: list, files: list, allow_partial: bool, wanted_folder, un
             gates.append(_gate("ambiguous_label", "FAIL",
                                f"{len(amb)} sample(s) whose only candidate runs carry a label another "
                                f"submission (submitted on or before the run) also uses. Staff decide: "
-                               f"--files-from with the right files, or --accept-ambiguous if these runs "
-                               f"are this submission's",
+                               f"--choose <unique_id>=<file> for the run that is this submission's, "
+                               f"--accept-ambiguous if these runs are this submission's, or "
+                               f"--files-from with the right files",
                                samples=[{"unique_id": r["unique_id"], "files": r["ambiguous"]} for r in amb]))
         elif accepted:
             gates.append(_gate("ambiguous_label", "WARN",
@@ -1807,26 +2202,12 @@ def locate_gates(rows: list, files: list, allow_partial: bool, wanted_folder, un
                                          "files": r["ambiguous"]} for r in accepted]))
         else:
             gates.append(_gate("ambiguous_label", "PASS"))
-        partial = [r for r in by.get("matched", []) if r["ambiguous"] and not r["accepted_ambiguous"]]
-        if partial:
-            gates.append(_gate("ambiguous_files_excluded", "WARN",
-                               f"{len(partial)} sample(s) also have runs with a shared label; those were "
-                               f"set aside and an unambiguous run was chosen",
-                               samples=[{"unique_id": r["unique_id"], "chosen": r["file"],
-                                         "set_aside": r["ambiguous"]} for r in partial]))
         shadowed = [r for r in rows if r["shadowed"]]
         if shadowed:
             gates.append(_gate("shadowed_by_longer_id", "INFO",
                                f"{len(shadowed)} id(s) also appear inside a longer id's run names "
                                f"(DH1 inside DH1-1); those runs were left to the longer id",
                                samples=[{"unique_id": r["unique_id"], "files": r["shadowed"]} for r in shadowed]))
-        alts = [r for r in by.get("matched", []) if r["alternates"]]
-        if alts:
-            gates.append(_gate("alternates", "WARN",
-                               f"{len(alts)} sample(s) have several files (re-injections?); the most "
-                               f"recent was chosen", samples=[{"unique_id": r["unique_id"],
-                                                               "chosen": r["file"],
-                                                               "alternates": r["alternates"]} for r in alts]))
         n_out = sum(r["out_of_window"] for r in rows)
         if n_out:
             gates.append(_gate("out_of_window", "INFO",
@@ -1837,8 +2218,89 @@ def locate_gates(rows: list, files: list, allow_partial: bool, wanted_folder, un
         if loose:
             gates.append(_gate("unassigned_files", "WARN",
                                f"{len(loose)} curated file(s) map to no single sample; they are "
-                               f"searched, but `conditions` will ask which group they belong to",
+                               f"searched, but `conditions` will ask which group they belong to "
+                               f"(--choose <unique_id>=<file> assigns one to its sample)",
                                files=[{"file": r["file"], "note": r["note"]} for r in loose]))
+        ht = [r for r in rows if "HT plate run" in _s(r.get("matched_on"))]
+        if ht:
+            gates.append(_gate("ht_plate_runs", "INFO",
+                               f"{len(ht)} curated file(s) are this submission's HT plate runs "
+                               f"(named <date>_[PROT_]<n>_...): matched only in their sample field "
+                               f"(after the plate token, never the plate position), on the "
+                               f"unique_id or else the submitter's sample_name "
+                               f"({sum(1 for r in ht if 'sample_name' in _s(r.get('matched_on')))} "
+                               f"on sample_name)"))
+    # Several runs carry one sample's label (re-injections; runs a label another submission also
+    # uses; listed HT runs whose sample_name other samples share). `locate` used to take the most
+    # recent, or the unambiguous one, with a WARN; which run IS the sample is a question about
+    # sample identity, so staff answer it.
+    need = by.get("needs_choice", [])
+    reinj = [r for r in need if r.get("choice_kind") == "reinjections"]
+    clash = [r for r in need if r.get("choice_kind") != "reinjections"]
+    bits = []
+    if reinj:
+        bits.append(f"{len(reinj)} sample(s) have several runs of their own (re-injections): ONE "
+                    f"decision covers them all -- ask staff, then re-run with --reinjections latest "
+                    f"(the newest injection) or --reinjections all (every injection, as technical "
+                    f"replicates); --choose <key>=<file> still picks one sample's run")
+    if clash:
+        wl = sum(1 for r in clash if r.get("choice_kind") == "well_like_label")
+        bits.append(f"{len(clash)} sample(s) share a label with another sample or submission"
+                    + (f", or ({wl}) have a label that looks like a plate well (a run carrying it "
+                       f"may be naming the well)" if wl else "")
+                    + ", so which run is whose is for staff to say, one sample at a time: --choose "
+                      "<key>=<file> for each (or --choices <file>, one per line); --reinjections "
+                      "does not apply to them")
+    gates.append(_gate("choose_run", "FAIL" if need else "PASS", ". ".join(bits),
+                       samples=[{"unique_id": r["unique_id"], "key": r.get("sample_key"),
+                                 "sample_name": r["sample_name"], "kind": r.get("choice_kind"),
+                                 "candidates": r.get("candidates") or r["alternates"]}
+                                for r in need]))
+    # One policy for re-injections (--reinjections latest|all): every sample it applied to,
+    # named -- repeats are okay, but flagged.
+    applied = {}
+    for r in rows:
+        rec = r.get("reinjections")
+        if rec:
+            applied.setdefault(r.get("sample_key") or r["unique_id"], rec)
+    if applied:
+        pol = next(iter(applied.values()))["policy"]
+        gates.append(_gate("reinjections", "INFO",
+                           (f"--reinjections {pol}: {len(applied)} sample(s) have several runs of "
+                            f"their own; " + (f"the newest injection of each is used, "
+                                              f"{sum(len(x['set_aside']) for x in applied.values())} "
+                                              f"run(s) set aside" if pol == "latest" else
+                                              f"every injection is kept as a technical replicate "
+                                              f"({sum(len(x['kept']) for x in applied.values())} runs) "
+                                              f"-- not independent samples: `conditions` asks how "
+                                              f"the DE treats them")),
+                           samples=[{"key": k, **v} for k, v in applied.items()]))
+    picked = [r for r in rows if r.get("chosen_by")]
+    if picked:
+        gates.append(_gate("staff_choices", "INFO",
+                           f"{len(picked)} sample(s) use the run staff chose; recorded in "
+                           f"locate.json (accepted.choices) and on each row (chosen_by)",
+                           samples=[{"unique_id": r["unique_id"], "chosen": r["file"],
+                                     "chosen_by": r["chosen_by"], "other_candidates": r["alternates"]}
+                                    for r in picked]))
+    # Different files that share a run name (re-injections kept with --reinjections all, one name
+    # on two plates): kept and flagged here; the search stops before taking them as given
+    # (check_report_runs.names_stop -- an engine would merge them into one run).
+    try:
+        shared_names = sibling("check_report_runs").repeated_names(files)
+    except Stop:
+        shared_names = None
+    if shared_names is None:
+        gates.append(_gate("repeated_names", "WARN", "check_report_runs.py is missing from this "
+                                                     "copy of scripts/, so shared run names were "
+                                                     "not checked"))
+    elif shared_names:
+        gates.append(_gate("repeated_names", "WARN",
+                           f"{len(shared_names)} run name(s) are shared by different files, all kept: "
+                           + "; ".join(f"{r['run_name']}: {', '.join(r['paths'])}" for r in shared_names)
+                           + ". run_search.py stops before searching them as given (they would "
+                             "become one run): keep one (--reinjections latest), rename one, or "
+                             "search them separately", names=shared_names))
     counts = Counter(r["file"] for r in rows if r["status"] == "matched")
     dupes = sorted(f for f, c in counts.items() if c > 1)
     gates.append(_gate("duplicate_assignment", "FAIL" if dupes else "PASS",
@@ -1882,12 +2344,19 @@ def cmd_locate(a) -> int:
     outputs = {"files_txt": os.path.join(a.out, "files.txt"),
                "sample_files_tsv": os.path.join(a.out, "sample_files.tsv"),
                "locate_json": os.path.join(a.out, "locate.json")}
+    choices = parse_choices(a.choose, a.choices, samples)
+    stan = read_stan_entries(a.ht_manifest)
     result = {"internal_id": s.get("internal_id"), "id": s.get("id"),
               "window": {"from": lo.isoformat(), "to": hi.isoformat(), "max_days": a.max_days,
                          "neighbor_window_days": window},
               "mode": "files_from" if a.files_from else "auto", "raw_root": raw,
+              # every staff decision this file list rests on (stage copies it into its record)
               "accepted": {"allow_partial": bool(a.allow_partial),
-                           "accept_ambiguous": bool(a.accept_ambiguous)}}
+                           "accept_ambiguous": bool(a.accept_ambiguous),
+                           "choices": list(choices.values()),
+                           # the one decision for re-injections of one sample (ask = none taken)
+                           "reinjections": a.reinjections,
+                           "stan_manifest": os.path.abspath(a.ht_manifest) if a.ht_manifest else None}}
 
     if a.files_from:
         try:
@@ -1898,9 +2367,14 @@ def cmd_locate(a) -> int:
         paths = [os.path.abspath(os.path.expanduser(p.rstrip("/"))) for p in paths]
         missing = [p for p in paths if not os.path.exists(p)]
         existing = list(dict.fromkeys(p for p in paths if os.path.exists(p)))
-        rows = curated_rows(samples, existing, raw)
-        files = existing
-        gates = locate_gates(rows, files, a.allow_partial, wanted, [], True, missing)
+        rows = curated_rows(samples, existing, raw, choices, s.get("internal_id"),
+                            a.reinjections, stan)
+        # what is searched: every listed run but those set aside (another re-injection kept, or a
+        # staff choice) and those waiting for one (needs_choice)
+        files = [p for p in existing if any(r["file"] == p for r in rows
+                                            if r["status"] in ("matched", "unassigned"))]
+        gates = locate_gates(rows, files, a.allow_partial, wanted, [], True, missing,
+                             samples=samples)
     else:
         if not os.path.isdir(raw):
             raise Stop(EXIT_UNREACHABLE, {
@@ -1928,10 +2402,10 @@ def cmd_locate(a) -> int:
             emit(result)
             return EXIT_HT
         rows = match_samples(samples, entries, s.get("neighbors") or [], lo, hi,
-                             submission_label(s), a.accept_ambiguous)
+                             submission_label(s), a.accept_ambiguous, choices, a.reinjections, stan)
         files = list(dict.fromkeys(r["file"] for r in rows if r["status"] == "matched"))
         gates = locate_gates(rows, files, a.allow_partial, wanted, unreadable, False, [],
-                             a.accept_ambiguous)
+                             a.accept_ambiguous, samples=samples)
         if s.get("neighbors_truncated"):
             gates.append(_gate("neighbors", "WARN", "fetch stopped paging neighbours early; label "
                                                     "reuse may be under-reported"))
@@ -1939,10 +2413,17 @@ def cmd_locate(a) -> int:
     hard_fail = any(g["status"] == "FAIL" for g in gates)
     with open(outputs["files_txt"], "w") as fh:
         fh.write("".join(f + "\n" for f in files))
-    tsv_rows = [dict(r, alternates=";".join(r["alternates"])) for r in rows]
+    def reinj_cell(rec):
+        if not rec:
+            return ""
+        if rec["policy"] == "all":
+            return f"all ({len(rec['kept'])} runs kept as technical replicates)"
+        return f"latest (set aside: {', '.join(os.path.basename(p) for p in rec['set_aside'])})"
+    tsv_rows = [dict(r, alternates=";".join(r["alternates"]),
+                     reinjections=reinj_cell(r.get("reinjections"))) for r in rows]
     write_tsv(outputs["sample_files_tsv"],
               ["unique_id", "sample_name", "condition_name", "file", "acquired", "date_source",
-               "status", "alternates", "note"], tsv_rows)
+               "status", "alternates", "note", "chosen_by", "sample_key", "reinjections"], tsv_rows)
     result.update(counts=dict(Counter(r["status"] for r in rows), samples=len(samples), files=len(files)),
                   gates=gates, hard_fail=hard_fail, files=files, samples=rows, outputs=outputs)
     with open(outputs["locate_json"], "w") as fh:
@@ -2392,7 +2873,9 @@ def submission_md(s: dict, label: str, links: list, sample_rows_: list, work_dir
             L.append(f"| {_md_cell(r.get('unique_id'))} | {_md_cell(r.get('sample_name'))} | "
                      f"{_md_cell(r.get('condition_name'))} | "
                      f"{_md_cell(os.path.basename(_s(r.get('file'))))} | {_md_cell(r.get('acquired'))} | "
-                     f"{_md_cell(r.get('status'))} |")
+                     f"{_md_cell(r.get('status'))}"
+                     f"{' (staff choice: ' + _md_cell(r.get('chosen_by')) + ')' if _s(r.get('chosen_by')) else ''}"
+                     f"{' (re-injections: ' + _md_cell(r.get('reinjections')) + ')' if _s(r.get('reinjections')) else ''} |")
     else:
         for x in s.get("samples") or []:
             L.append(f"| {_md_cell(x.get('unique_id'))} | {_md_cell(x.get('sample_name'))} | "
@@ -2415,7 +2898,8 @@ def locate_gate_check(files_path: str, warnings: list) -> dict:
             "error": "locate hard-failed for this file list; staging it would search the wrong or partial files",
             "failing_gates": [g for g in loc.get("gates") or [] if g.get("status") == "FAIL"],
             "hint": "resolve with staff: locate --files-from <curated list>, or re-run locate with "
-                    "--allow-partial / --accept-ambiguous as they decide"})
+                    "--choose <unique_id>=<file> / --allow-partial / --accept-ambiguous as they "
+                    "decide"})
     return info
 
 
@@ -2551,6 +3035,12 @@ def cmd_stage(a) -> int:
               "coreomics_url": s.get("url"), "campus": campus, "service_dir": project, "group_dir": group,
               "work_dir": work_dir, "share_dir": share, "files": [p["target"] for p in plan],
               "links": plan, "created": (prior or {}).get("created") or now_utc(), "updated": now_utc(),
+              # the staff decisions the file list rests on (locate.json `accepted`), if checked,
+              # and what the re-injection policy did to each sample (sample_files.tsv)
+              "locate_accepted": gate_info.get("accepted"),
+              "reinjections": [{"unique_id": r.get("unique_id"), "file": r.get("file"),
+                                "reinjections": r.get("reinjections")}
+                               for r in rows if _s(r.get("reinjections"))],
               "skill_version": skill_version()}
     with open(marker, "w") as fh:
         json.dump(record, fh, indent=2)
@@ -2586,8 +3076,17 @@ def cmd_conditions(a) -> int:
         raise Stop(EXIT_DECIDE, {"error": "run names containing commas cannot be passed to "
                                           "collect_conditions.py --runs", "runs": bad})
     mapping = {run_name(r["file"]): _s(r.get("condition_name")) for r in matched if _s(r.get("condition_name"))}
+    intent = {"mapping": mapping}
+    # --reinjections all: several runs of one sample, kept as technical replicates. Counted as
+    # separate samples they would inflate the replicates of their group (2.10 review, MED 7), so
+    # each run's biological sample goes into conditions.csv's Sample column
+    # (collect_conditions TECH_REPLICATE_COLUMN), and run_de.R blocks on it.
+    if any(_s(r.get("reinjections")).startswith("all") for r in matched):
+        intent["technical_replicates"] = {
+            run_name(r["file"]): _s(r.get("sample_key")) or _s(r.get("unique_id")) for r in matched}
     cmd = [sys.executable, cc_script, "--map", a.out,
-           "--runs", ",".join(runs), "--mapping-json", json.dumps({"mapping": mapping})]
+           "--runs", ",".join(runs), "--mapping-json", json.dumps(intent),
+           "--replicate-labels", a.replicate_labels]
     p = subprocess.run(cmd, capture_output=True, text=True)
     try:
         cc = json.loads(p.stdout)
@@ -2601,6 +3100,16 @@ def cmd_conditions(a) -> int:
     per_sample = {}
     for r in matched:
         per_sample.setdefault(_s(r.get("unique_id")), _s(r.get("condition_name")))
+    # A condition column that names each REPLICATE (the Core LIMS: <sample>_mix_1 .. _5) is read
+    # by collect_conditions.py as conditions + replicate numbers when that is unambiguous, and
+    # otherwise returned as a question (collapse_replicates). The checks below then count the
+    # conditions it proposed, and its proposal is relayed, word for word, as the question.
+    rep = cc.get("replicate_labels") or {}
+    rep_amb = (cc.get("ambiguities") or {}).get("replicate_labels_ambiguous")
+    if rep.get("collapsed"):
+        to_cond = {lab: c for c, reps_ in (rep.get("conditions") or {}).items()
+                   for lab in reps_.values()}
+        per_sample = {u: to_cond.get(c, c) for u, c in per_sample.items()}
     with_cond = {u: c for u, c in per_sample.items() if c}
     groups = Counter(with_cond.values())
     findings, questions = {}, []
@@ -2623,7 +3132,21 @@ def cmd_conditions(a) -> int:
         findings["single_condition"] = only
         questions.append(f"Every sample's condition is '{only}', so there is nothing to compare. "
                          f"What are the groups?")
-    if len(with_cond) >= 2 and len(groups) == len(with_cond):
+    proposal = "; ".join(f"{c} ({len(v)}: {', '.join(v[k] for k in sorted(v, key=int))})"
+                         for c, v in (rep.get("conditions") or {}).items())
+    if rep.get("collapsed") and a.replicate_labels == "auto":
+        findings["replicate_labels"] = {k: rep.get(k) for k in ("conditions", "rule", "mode")}
+        questions.append(f"CoreOmics names each replicate, so the conditions were read as the "
+                         f"labels without their replicate numbers: {proposal}. Is that right? Yes: "
+                         f"re-run `conditions` with --replicate-labels collapse. No: "
+                         f"--replicate-labels keep, and say which samples are replicates.")
+    elif rep_amb:
+        findings["replicate_labels_ambiguous"] = rep_amb
+        questions.append("CoreOmics gives each sample its own condition; they may be replicates of: "
+                         + (proposal or "-") + ", but " + "; ".join(rep_amb.get("reasons") or [])
+                         + ". Are they? Yes: re-run `conditions` with --replicate-labels collapse. "
+                           "No: --replicate-labels keep, and say which samples are replicates.")
+    elif len(with_cond) >= 2 and len(groups) == len(with_cond):
         findings["all_unique"] = True
         questions.append("Every sample has its own condition -- that usually means sample names were "
                          "typed into the condition column. Which samples are replicates of each other?")
@@ -2643,10 +3166,15 @@ def cmd_conditions(a) -> int:
         if amb.get("conflicting_runs"):
             questions.append(f"These raw files matched two groups: {json.dumps(amb['conflicting_runs'])}. "
                              f"Which is right?")
+        # which run IS which sample: collect_conditions.py's own questions, word for word
+        questions += [d["question"] for d in cc.get("decisions_required") or []]
     needs = bool(findings)
     emit({"proposed_csv": cc.get("proposed_csv"), "needs_user_input": needs, "questions": questions,
           "findings": findings, "groups": dict(groups), "n_samples": len(per_sample), "n_runs": len(runs),
           "internal_id": s.get("internal_id"), "collect_conditions": cc,
+          # technical replicates: conditions.csv's Sample column, which run_de.R blocks on
+          **({"technical_replicates": cc["technical_replicates"]}
+             if cc.get("technical_replicates") else {}),
           "next_step": ("ask the staff member exactly the questions above, then fix the CSV and run "
                         "collect_conditions.py --validate") if needs else
                        "conditions come straight from CoreOmics; confirm the groups in the one compute confirmation"})
@@ -2674,9 +3202,14 @@ EXCLUDED_DIRS = {"xic", "report_xic", "temp", "tmp", ".tmp", "__pycache__", "raw
 # CORE-INTERNAL: internal paths, other projects, offhand remarks. logs/ is never delivered; this
 # keeps them out wherever a copy ends up (a Claude Code transcript is <uuid>.jsonl).
 INTERNAL_DIRS = {"conversation"}
+# qc_bracket.py's record, staff page and acknowledgements are staff-only too (Brett, 2026-10-01):
+# they live in logs/, and a copy anywhere else is still never delivered. So is every staff-only
+# record (staff.is_staff_only: who decided, by name and login), wherever it is.
 INTERNAL_FILES = re.compile(r"^(?:conversation\.(?:md|html)|decisions\.md|"
+                            r"qc_bracket(?:_ack)?\.(?:json|md)|qc_gate\.json|"
                             r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl)$")
 INTERNAL_REASON = "Core-internal: the analysis conversation is never delivered"
+STAFF_ONLY_REASON = "Core-internal: staff-only, never delivered"     # the QC record
 EXCLUDED_SUFFIXES = (".quant", ".speclib")
 
 
@@ -2718,6 +3251,7 @@ def _plan_share(output_dir: str) -> dict:
 
 
 def plan_delivery(output_dir: str) -> list:
+    staff_only = sibling("staff").is_staff_only
     items = [_plan_file(os.path.join(output_dir, n), n, req) for n, req in DELIVER_FILES]
     for d in DELIVER_DIRS:
         root = os.path.join(output_dir, d)
@@ -2754,8 +3288,13 @@ def plan_delivery(output_dir: str) -> list:
             dirnames[:] = keep
             for fn in sorted(filenames):
                 rel = os.path.join(rel_dir, fn)
-                if INTERNAL_FILES.match(fn):
-                    items.append({"name": rel, "status": "SKIPPED", "reason": INTERNAL_REASON,
+                # staff-only: a QC record by its marker, whatever it is called (--out), and
+                # staff.py's records of who decided (*.staff.json) -- both predicates
+                qc_only = sibling("qc_bracket").is_staff_only_file(os.path.join(dirpath, fn))
+                if INTERNAL_FILES.match(fn) or staff_only(fn) or qc_only:
+                    items.append({"name": rel, "status": "SKIPPED",
+                                  "reason": STAFF_ONLY_REASON if (qc_only or staff_only(fn))
+                                  else INTERNAL_REASON,
                                   "required": False})
                     continue
                 if fn.lower().endswith(EXCLUDED_SUFFIXES):
@@ -3381,6 +3920,35 @@ def cmd_deliver(a) -> int:
         plan["hint"] = "run step 9 (make_analysis_html.py) before delivering"
         emit(plan)
         return EXIT_DECIDE
+    # The instrument's QC around the project (qc_bracket.py, staff-only): a check or concern
+    # verdict -- or a check that never ran -- holds an analysis delivery, dry run included, until
+    # a staff member records an acknowledgement for this record. The rule is qc_bracket's.
+    if mode == "analysis" and session_dir:
+        qb = sibling("qc_bracket")
+        gate = qb.delivery_gate(session_dir)
+        # printed to the staff member running deliver; never into `warnings` or delivery.json,
+        # which others can read (2.10 safety review): logs/qc_gate.json keeps it, below
+        plan["qc_gate"] = gate
+        if not gate["proceed"]:
+            plan["error"] = f"held for staff review: {gate['reason']}"
+            plan["hint"] = ("re-run step 8e (qc_bracket.py --session <session>)"
+                            if gate.get("needs_rerun") else
+                            "a staff member reads logs/qc_bracket.md, then: python3 "
+                            "scripts/qc_bracket.py ack --session <session> --by <HIVE login> "
+                            "--note \"<what was reviewed and decided>\"")
+            emit(plan)
+            return EXIT_DECIDE
+        # The second gate, in the same form: the DE's quantities (normalization_check.py, step
+        # 8). A DE that ran without a decided normalisation check -- an IP read with normalised
+        # quantities, unchecked -- holds the delivery, dry run included, until step 8 is run.
+        # The rule is normalization_check's.
+        ngate = sibling("normalization_check").delivery_gate(session_dir)
+        plan["normalization_gate"] = ngate
+        if not ngate["proceed"]:
+            plan["error"] = f"held: {ngate['reason']}"
+            plan["hint"] = ngate["hint"]
+            emit(plan)
+            return EXIT_DECIDE
     record_dir = session_dir or (record or {}).get("work_dir")
     if total > a.max_gb * 1024 ** 3 and not a.no_size_guard:
         plan["deliver_job"] = write_deliver_job(a, session_dir, record_dir, label, total, warnings)
@@ -3395,6 +3963,9 @@ def cmd_deliver(a) -> int:
 
     # ---- apply. Everything below records what happened; nothing may leave a folder with no
     # MANIFEST, and any failure ends as verified:false with a non-zero exit.
+    if plan.get("qc_gate"):
+        # the gate this delivery passed, in full, where only staff read it
+        sibling("qc_bracket").write_gate_snapshot(session_dir, plan["qc_gate"])
     expected, fatal = set(), None
     raw_result = {"created": 0, "existing": 0, "replaced": 0, "skipped": 0}
     results_link = None
@@ -3535,6 +4106,16 @@ def cmd_deliver(a) -> int:
               "raw_links": raw_result, "raw_whitelist_unverified": bool(raw_plan), "results_link": results_link,
               "podcast": delivered_podcast(session_dir, expected),
               "verified": verified, "violations": violations, "failed_required": failed_required,
+              # whether the QC gate let it through, under which record and when acknowledged --
+              # never the verdict, the reason, who or their note: delivery.json sits in the
+              # service tree, which other HIVE users can read (logs/qc_gate.json has the rest).
+              # The normalisation gate the same way: proceed and status, never its reason, which
+              # names who decided.
+              "qc_gate": (sibling("qc_bracket").public_gate(plan["qc_gate"])
+                          if plan.get("qc_gate") else None),
+              "normalization_gate": ({k: plan["normalization_gate"].get(k)
+                                      for k in ("proceed", "status")}
+                                     if plan.get("normalization_gate") else None),
               "error": fatal, "errors": errors, "warnings": warnings}
     djson = os.path.join(record_dir, "delivery.json") if record_dir else None
     try:
@@ -3542,6 +4123,7 @@ def cmd_deliver(a) -> int:
             raise OSError("no session or work dir to write delivery.json into")
         with open(djson, "w") as fh:
             json.dump(result, fh, indent=2)
+        os.chmod(djson, 0o640)              # staff-side: the Core's group reads it, nobody else
         result["delivery_json"] = djson
     except OSError as e:
         result["delivery_json"] = None
@@ -3796,6 +4378,20 @@ def main(argv=None) -> int:
                          "submission's (recorded in locate.json)")
     lo.add_argument("--files-from", default=None,
                     help="staff-curated file list: skip matching, still validate and write the TSV")
+    lo.add_argument("--choose", action="append", default=[], metavar="UNIQUE_ID=FILE",
+                    help="staff's answer to choose_run (several runs carry a sample's label): this "
+                         "run IS that sample. Repeatable; recorded in locate.json and on the row")
+    lo.add_argument("--choices", default=None, metavar="FILE",
+                    help="the same answers as a file, one UNIQUE_ID=FILE per line")
+    lo.add_argument("--reinjections", choices=REINJECTION_POLICIES, default="ask",
+                    help="staff's ONE decision for every sample with several runs of its own "
+                         "(re-injections): ask (default) stops at choose_run; latest keeps the "
+                         "newest injection (never one STAN flags needs_rerun while another is "
+                         "not); all keeps every injection as technical replicates. Never applies "
+                         "to a label two samples or submissions share. Recorded in locate.json")
+    lo.add_argument("--ht-manifest", default=None, metavar="FILE",
+                    help="ht_manifest.json for the listed runs: STAN's needs_rerun flags for "
+                         "--reinjections latest")
     lo.set_defaults(func=cmd_locate)
 
     st = sub.add_parser("stage", help="ON HIVE: link the raw files into the service directory (dry run)")
@@ -3811,6 +4407,10 @@ def main(argv=None) -> int:
     co.add_argument("--summary", required=True)
     co.add_argument("--sample-files", required=True, help="sample_files.tsv from locate")
     co.add_argument("--out", required=True, help="conditions.csv to write")
+    co.add_argument("--replicate-labels", choices=("auto", "collapse", "keep"), default="auto",
+                    help="a condition per REPLICATE (<sample>_mix_1 .. _n): auto reads it as "
+                         "conditions + replicates only when unambiguous and asks; collapse / keep "
+                         "is the user's answer (collect_conditions.py --replicate-labels)")
     co.set_defaults(func=cmd_conditions)
 
     de = sub.add_parser("deliver", help="ON HIVE: copy deliverables into the Bioshare share dir (dry run)")

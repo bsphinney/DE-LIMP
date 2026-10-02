@@ -13,6 +13,8 @@ proteins shared between FragPipe and DIA-NN on the same raw files.
     FragPipe's own contaminant      contam_sp|O43790|KRT86_HUMAN   -> contam_O43790
                                     (its Protein ID, O43790, drops the tag)
     the skill's contaminant FASTA   sp|Cont_P00761|TRYP_PIG        -> Cont_P00761
+    a FragPipe group (fragpipe_group: Protein ID + Indistinguishable Proteins)
+                                    Q15582 + "sp|Cont_P55906|BGH3_BOVIN"  -> Q15582;Cont_P55906
     Sage proteins                   sp|P12345|ALBU_HUMAN;sp|...    -> P12345
     an isoform                      P12345-2                       -> P12345
 
@@ -61,6 +63,27 @@ def fragpipe_protein_id(protein, protein_id):
     m = _DB.match(str(protein or "").strip().split("|", 1)[0])
     tag = m.group("tag") if (m and "|" in str(protein or "")) else ""
     return pid if not tag or pid.startswith(tag) else tag + pid
+
+
+# How FragPipe's combined_protein.tsv separates the members of `Indistinguishable Proteins`:
+# ", " (FragPipe 24.0 on HIVE, 2026-09-30: "sp|Q9HAP6|LIN7B_HUMAN, sp|Q9NUP9|LIN7C_HUMAN").
+FRAGPIPE_INDISTINGUISHABLE_SEP = ","
+
+
+def fragpipe_group(protein, protein_id, indistinguishable=""):
+    """A FragPipe protein group written as DIA-NN writes Protein.Group: the leading protein
+    (fragpipe_protein_id), then every protein FragPipe lists under `Indistinguishable Proteins`
+    -- proteins with the same peptides, which DIA-NN would report in the same group -- each read
+    by header_accession() (keeping a `contam_` tag), each once. The DDA adapter wrote the leading
+    protein alone, so a Cont_/contam_ entry listed only there was never seen by the contaminant
+    rule (any accession of the group carries the tag), which the DIA-NN path applies to every
+    member. '' when there is no leading protein."""
+    lead = fragpipe_protein_id(protein, protein_id)
+    if not lead:
+        return ""
+    rest = [header_accession(t) for t in
+            str(indistinguishable or "").split(FRAGPIPE_INDISTINGUISHABLE_SEP)]
+    return ";".join(dict.fromkeys(a for a in [lead] + rest if a))
 
 
 def normalize_protein_id(group):

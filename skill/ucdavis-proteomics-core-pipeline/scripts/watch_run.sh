@@ -30,6 +30,24 @@ esac; done
 HERE="$(cd "$(dirname "$0")" && pwd)"
 run() { if $HIVE; then bash "$HERE/hive_exec.sh" "$*"; else bash -c "$*"; fi; }
 
+# sacct's JobID|State|ExitCode|NodeList rows for a job (every array task); the one query.
+NF_FORMAT="JobID,State,ExitCode,NodeList"
+# node_fault.py classify, from those rows of a failed job and its FAILED tasks' log tails (the
+# one definition of a node fault). Prints its JSON; empty when python3 cannot run it.
+node_fault_json() {
+  local rows="$1" tail="$2" st codes nodes
+  st="$(printf '%s\n' "$rows" | awk -F'|' 'NF>=4 && $2 !~ /COMPLETED|RUNNING|PENDING/{print $2; exit}')"
+  codes="$(printf '%s\n' "$rows" | awk -F'|' 'NF>=4 && $2 !~ /COMPLETED|RUNNING|PENDING/{print $3}' | paste -sd, -)"
+  nodes="$(printf '%s\n' "$rows" | awk -F'|' 'NF>=4 && $2 !~ /COMPLETED|RUNNING|PENDING/{print $4}' | sort -u | paste -sd, -)"
+  printf '%s' "$tail" | python3 "$HERE/node_fault.py" classify --state "$st" --exit-codes "$codes" --nodes "$nodes" 2>/dev/null | tr '\n' ' '
+}
+# What to run for one: on HIVE itself, or from a laptop through hive_exec.sh. The folder is
+# shell-quoted: service folders hold spaces.
+node_fault_fix() {
+  local o; o="$(printf %q "$1")"
+  echo "Retry it on another node: python3 $HERE/node_fault.py retry --out $o --job $2 (from a laptop: bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/node_fault.py retry --out $o --job $2'). It resubmits that step and the steps waiting on it with --exclude=<node>, at most twice per step (node_faults.json), and refuses when any failed task is not a node fault. Tell the user it was a node problem, not DIA-NN and not their data."
+}
+
 # mtime of a file, in the syntax of whichever kernel `run` will actually execute on.
 # GNU stat wants -c %Y, BSD/macOS stat wants -f %m. This CANNOT key off the local
 # uname alone: with --hive the command is sent to HIVE, which is Linux no matter what
@@ -45,13 +63,13 @@ state="unknown"; done=false; failed=false; q_failed=false; fix_qf=""
 # sat PENDING on a dependency that could never be satisfied, which reads as "still
 # running". jobs.txt is written by submit.sh with every id in the chain.
 if [ "$MODE" = "chain" ]; then
-  JT="$CHAINDIR/jobs.txt"
+  JT="$CHAINDIR/jobs.txt"; QD="$(printf %q "$CHAINDIR")"   # QD: the folder, quoted for run
   probe="$(run "echo __ok__" 2>&1)"
   if ! printf '%s' "$probe" | grep -q __ok__; then
     echo "{\"mode\":\"chain\",\"failed\":true,\"done\":true,\"err_class\":\"watcher_query_failed\",\"detail\":$(printf '%s' "$probe" | head -2 | python3 -c 'import sys,json;print(json.dumps(sys.stdin.read()))'),\"fix\":\"Cannot reach the cluster at all — this is NOT a job failure and NOT a missing file. Usually HIVE_USER/HIVE_KEY are unset: save them once to ~/.config/ucdavis-proteomics/hive.env. Re-run the watcher before drawing any conclusion about the run.\"}"
     exit 3
   fi
-  ids="$(run "cat $JT 2>/dev/null | tr '\n' ' '" 2>/dev/null)"
+  ids="$(run "cat $QD/jobs.txt 2>/dev/null | tr '\n' ' '" 2>/dev/null)"
   if [ -z "$ids" ]; then
     echo "{\"mode\":\"chain\",\"failed\":true,\"done\":true,\"err_class\":\"no_jobs_file\",\"fix\":\"Cluster is reachable but $JT does not exist — this chain was not submitted via submit.sh (older runs predate jobs.txt). Write it by hand with one job id per line, then re-run.\"}"
     exit 2
@@ -73,10 +91,41 @@ if [ "$MODE" = "chain" ]; then
   # not the Python reader, because with --hive this runs on HIVE, where the skill's scripts are
   # not at this path; the provenance is written with indent=2, so these are exact.
   fb=""
-  if [ "$(run "p=$CHAINDIR/search_provenance.json; if [ -f \$p ]; then grep -qE '\"mode\": \"fallback_|\"probe_fallback\": [{]' \$p && echo yes; else test -s $CHAINDIR/probe_fallback.json && echo yes; fi" 2>/dev/null)" = yes ]; then
+  if [ "$(run "p=$QD/search_provenance.json; if [ -f \"\$p\" ]; then grep -qE '\"mode\": \"fallback_|\"probe_fallback\": [{]' \"\$p\" && echo yes; else test -s $QD/probe_fallback.json && echo yes; fi" 2>/dev/null)" = yes ]; then
     fb=",\"probe_fallback\":true,\"caution\":\"CAUTION: step 1b FELL BACK -- the scan window (and any planned mass accuracy) was NOT measured; DIA-NN chooses it per run. Tell the user, with the reason in $CHAINDIR/probe_fallback.json, and re-run the search if the cause was transient.\""
   fi
   if $anyfail; then
+    # A NODE fault (node_fault.py): the node could not reach the storage -- the job's node check
+    # exited 75, SLURM said NODE_FAIL, or the job's log has a storage I/O error. Not the search.
+    nf_rows="$(run "sacct -j $worst -X --noheader -P -o $NF_FORMAT 2>/dev/null" 2>/dev/null)"
+    # the logs of the tasks that FAILED (an array's first task may have succeeded), at most 3
+    nf_tasks="$(printf '%s\n' "$nf_rows" | awk -F'|' 'NF>=4 && $2 !~ /COMPLETED|RUNNING|PENDING/{n=split($1,a,"_"); print (n>1 ? a[2] : "-")}' | head -3 | tr '\n' ' ')"
+    nf_tail=""
+    for t in $nf_tasks; do
+      if [ "$t" = "-" ]; then pat="*_${worst}.log"; else pat="*_${worst}_${t}.log"; fi
+      nf_tail="$nf_tail
+$(run "for f in $QD/$pat; do [ -f \"\$f\" ] && tail -n 100 \"\$f\"; done" 2>/dev/null)"
+    done
+    nf_json="$(node_fault_json "$nf_rows" "$nf_tail")"
+    if printf '%s' "$nf_json" | grep -q '"node_fault": true'; then
+      nf_say="$(printf '%s' "$nf_json" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("say",""))' 2>/dev/null | tr -d '"\\')"
+      # built by json.dumps: the fix quotes the folder for the shell (printf %q), and a backslash
+      # pasted into a hand-built JSON string is not JSON
+      NF_FIX="$nf_say $(node_fault_fix "$CHAINDIR" "$worst")" NF_DIR="$CHAINDIR" NF_WORST="$worst" \
+      NF_CHAIN="${summary# }" NF_JSON="$nf_json" NF_FB="$fb" python3 -c '
+import json, os
+o = {"mode": "chain", "dir": os.environ["NF_DIR"], "failed": True, "done": True,
+     "error_class": "node_fault", "first_failed_job": os.environ["NF_WORST"],
+     "chain": os.environ["NF_CHAIN"]}
+fb = os.environ.get("NF_FB") or ""
+if fb:
+    o.update(json.loads("{" + fb.lstrip(",") + "}"))
+o["node_fault"] = json.loads(os.environ["NF_JSON"])
+o["fix"] = os.environ["NF_FIX"]
+print(json.dumps(o))'
+
+      exit 0
+    fi
     echo "{\"mode\":\"chain\",\"dir\":\"$CHAINDIR\",\"failed\":true,\"done\":true,\"first_failed_job\":\"$worst\",\"chain\":\"${summary# }\"$fb,\"fix\":\"A step FAILED. Inspect it: watch_run.sh --slurm $worst --hive. Downstream steps will sit PENDING with DependencyNeverSatisfied forever until you fix and resubmit them.\"}"
     exit 0
   fi
@@ -138,12 +187,23 @@ fi
 tail_txt=""
 [ -n "$LOG" ] && tail_txt="$(run "tail -n 100 $(printf %q "$LOG") 2>/dev/null" 2>/dev/null)"
 
+# A NODE fault first (node_fault.py): a failed job whose node could not reach the storage. Only a
+# FAILED job -- an ESTALE that step 1b's probe absorbed sits in a job that succeeded -- and never
+# over OOM / TIMEOUT / CANCELLED, which classify() leaves to their own classes below.
+nf_json=""
+if $failed && [ "$MODE" = "slurm" ] && [ -n "$JOB" ] && ! $q_failed; then
+  nf_json="$(node_fault_json "$(run "sacct -j $JOB -X --noheader -P -o $NF_FORMAT 2>/dev/null" 2>/dev/null)" "$tail_txt")"
+fi
+
 # error signatures -> (class, fix). First match wins.
 err_class=""; fix=""
 hay="$tail_txt
 $state"
 m() { printf '%s' "$hay" | grep -qiE "$1"; }
-if   m "out.of.memory|oom-kill|OUT_OF_MEMORY|std::bad_alloc|cannot allocate";       then err_class="out_of_memory"; fix="Raise the sbatch --mem (e.g. 64G→128G) and resubmit; for DIA-NN try fewer threads or --min-corr.";
+if printf '%s' "$nf_json" | grep -q '"node_fault": true'; then
+  err_class="node_fault"
+  fix="$(printf '%s' "$nf_json" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("say",""))' 2>/dev/null) $(node_fault_fix "${OUTDIR:-<search out dir>}" "$JOB")"
+elif m "out.of.memory|oom-kill|OUT_OF_MEMORY|std::bad_alloc|cannot allocate";       then err_class="out_of_memory"; fix="Raise the sbatch --mem (e.g. 64G→128G) and resubmit; for DIA-NN try fewer threads or --min-corr.";
 elif m "TIMEOUT|DUE TO TIME LIMIT|CANCELLED.*TIME";                                  then err_class="timeout";       fix="Raise --time in the sbatch (or split the run) and resubmit.";
 elif m "dotnet: not found|dotnet: command not found";                               then err_class="diann_no_dotnet";fix="Wrong DIA-NN container (no .NET → .raw silently skipped). Use the HIVE native build (build_<v>/diann-<v>/diann-linux) or a .NET-enabled image.";
 elif m "Number of IDs at 0.01 FDR: 0";                                              then err_class="diann_zero_ids";  fix="DIA-NN completed but identified nothing - a SILENT null result, not a crash. PRESERVE report.log.txt before re-running; it is the only evidence. Check in order: (1) the library actually generated precursors, (2) the mzML really are DIA with isolation windows (detect_acquisition.py), (3) FASTA matches the organism, (4) mass accuracy. NOTE: DIA-NN warning about generating the predicted library in a separate step is BENIGN per its author - do not chase it.";
@@ -211,7 +271,7 @@ notes="$(python3 "$HERE/pipeline_notes.py" --stage "$stage" --index "$POLL" 2>/d
 STATE="$state" DONE="$done" FAILED="$failed" STALLED="$stalled" JOB="$JOB" MODE="$MODE" \
 ECLASS="$err_class" FIX="$fix" TAIL="$tail_txt" ATASKS="${array_summary:-}" \
 STAGE="$stage" NDONE="${n_done:-0}" NTOTAL="${n_total:-0}" NOTES="$notes" \
-REASON="${reason:-}" ATERM="${a_term:-0}" LFQ_REC="$lfq_rec" python3 - <<'PY'
+REASON="${reason:-}" ATERM="${a_term:-0}" LFQ_REC="$lfq_rec" NF_JSON="$nf_json" python3 - <<'PY'
 import os, json, re
 n_done, n_total = int(os.environ.get("NDONE") or 0), int(os.environ.get("NTOTAL") or 0)
 stage = os.environ.get("STAGE", "single")
@@ -251,6 +311,12 @@ if out["state"] == "PENDING" and not out["done"]:
     elif not n_total:
         progress["summary"] = f"{where}: partly done, remaining work queued ({reason or 'PENDING'})"
 out["progress"] = progress
+try:                                     # node_fault.py's verdict, when it is a node fault
+    nf = json.loads(os.environ.get("NF_JSON") or "null")
+    if isinstance(nf, dict) and nf.get("node_fault"):
+        out["node_fault"] = nf
+except ValueError:
+    pass
 try:
     out.update({k: v for k, v in json.loads(os.environ.get("NOTES") or "{}").items()
                 if k in ("doing", "why", "note", "note_source")})

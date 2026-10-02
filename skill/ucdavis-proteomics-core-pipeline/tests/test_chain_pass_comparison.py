@@ -267,7 +267,7 @@ class ChainScripts(unittest.TestCase):
             info = json.loads(p.stdout)
         first = os.path.join(out, dp.FIRST_PASS_REPORT)
         self.assertIn(f'"{first}" "{os.path.join(out, "step3_assembly.stats.tsv")}"', s3)
-        self.assertIn(f"--out {first}", s3)
+        self.assertIn(f'--out "{first}"', s3)   # quoted: a folder may hold a space
         line = next(ln for ln in s5.splitlines() if "pass_comparison.py" in ln)
         self.assertIn(f"--first-report {first}", line)
         self.assertIn(f"--final-report {os.path.join(out, 'report.parquet')}", line)
@@ -308,15 +308,15 @@ class ChainScripts(unittest.TestCase):
             s4x = read(os.path.join(xout, "step4_finalpass.sbatch"))
             s3 = read(os.path.join(out, "step3_assembly.sbatch"))
         task = "t${SLURM_ARRAY_TASK_ID}.parquet"
-        self.assertIn(f"mkdir -p {out}/firstpass", s2)
-        self.assertIn(f"--out {out}/firstpass/{task}", s2)
-        self.assertIn(f"mkdir -p {out}/finalpass", s4)
-        self.assertIn(f"--out {out}/finalpass/{task}", s4)
-        self.assertIn(f"--out {xout}/xic/{task}", s4x)
+        self.assertIn(f'mkdir -p "{out}/firstpass"', s2)
+        self.assertIn(f'--out "{out}/firstpass/{task}"', s2)
+        self.assertIn(f'mkdir -p "{out}/finalpass"', s4)
+        self.assertIn(f'--out "{out}/finalpass/{task}"', s4)
+        self.assertIn(f'--out "{xout}/xic/{task}"', s4x)
         self.assertNotIn(f"{xout}/finalpass", s4x)
         # steps 3 and 5 still read the per-file .quant folders, not the task reports
         self.assertIn("--use-quant", s3)
-        self.assertIn(f"--temp {out}/quant_step2", s3)
+        self.assertIn(f'--temp "{out}/quant_step2"', s3)
 
 
 # ------------------------------------------------------------------------------------------

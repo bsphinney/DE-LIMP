@@ -33,7 +33,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 from session import (paths_for, read_raw_list, raw_list_encoding_note,  # noqa: E402  one place
-                     params_file, NOT_RECORDED)
+                     params_file, NOT_RECORDED, reanalysis_of)
 import share_map                                    # noqa: E402
 import make_podcast                                 # noqa: E402  the optional audio discussion
 from fetch_fasta import CONT_TAG                    # noqa: E402  the contaminant tag, one place
@@ -71,7 +71,8 @@ QC_COLUMNS = {
 }
 # Group names that are, by name, the negative control of a pull-down / IP (IgG, beads-only).
 # Only ever used to POINT at contrasts against them; the user's design says what they are.
-IP_CONTROL_NAME = re.compile(r"(?i)(^|[_\-. ])(igg|beads?)($|[_\-. ])")
+from experiment_type import IP_CONTROL_NAME  # noqa: E402,F401  one definition, re-exported
+import experiment_type  # noqa: E402  the control groups (controls_in)
 
 
 # ---------------------------------------------------------------------------- reading
@@ -332,6 +333,7 @@ def gather(session_dir, registry=None, registry_note=None, pending=(), located_a
 
     # --- the study
     f["submission"] = submission_line(p)
+    f["reanalysis_of"] = reanalysis_of(sd)       # the analysis this one re-does, or None
     f["feedback"] = feedback(p)
     f["submission_facts"] = _submission_facts(p)
     f["organism"] = fm.get("organism") or None
@@ -367,7 +369,15 @@ def gather(session_dir, registry=None, registry_note=None, pending=(), located_a
     f["n_samples"] = de.get("n_samples") or (len(conds) if conds else None)
     f["contrasts"] = de.get("contrasts") or []
     f["sig"] = _sig_counts(de)
-    f["controls"] = sorted(g for g in groups if IP_CONTROL_NAME.search(g))
+    # the control groups as the analysis decides them (experiment_type.controls_in: the
+    # recorded --controls, else the IgG/beads names) -- the brief's own rule
+    try:
+        etype = experiment_type.load(session_dir)
+    except (OSError, ValueError) as e:
+        etype = None
+        print(f"[session_docs] the experiment-type record could not be read ({e}): control "
+              "groups taken from their names", file=sys.stderr)
+    f["controls"] = sorted(experiment_type.controls_in(list(groups), etype))
 
     # --- files that exist (links are only ever to these)
     out = p["output_dir"]
@@ -518,7 +528,11 @@ def summary_lines(f):
     org = (f"{f['organism']} (taxid {f['taxid']})" if f["organism"] else
            f"taxid {f['taxid']}" if f["taxid"] else NOT_RECORDED)
     eng = f"{f['engine']} {f['engine_version'] or ''}".strip() if f["engine"] else NOT_RECORDED
-    L = ([f"- {f['submission']}"] if f.get("submission") else []) + [
+    ro = f.get("reanalysis_of") or {}
+    L = ([f"- {f['submission']}"] if f.get("submission") else []) + (
+        [f"- Re-analysis of `{ro['session']}`"
+         + (f" (this is version {ro['version']})" if ro.get("version") else "")
+         + " — what changed: `DIFFERENCES.md`"] if ro.get("session") else []) + [
          f"- Organism: {org}",
          f"- Instrument / acquisition: {f['instrument'] or NOT_RECORDED} / "
          f"{f['acquisition'] or NOT_RECORDED}",

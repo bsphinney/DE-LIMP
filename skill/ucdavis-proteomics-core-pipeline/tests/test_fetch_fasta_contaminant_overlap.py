@@ -43,6 +43,14 @@ sys.path.insert(0, SCRIPTS)
 
 import fetch_fasta as ff  # noqa: E402
 
+
+def _organism(args):
+    """A --path database needs its organism named (fetch_fasta.user_organism); these tests are
+    about the contaminant rules, so they say "no single organism" unless they name one."""
+    named = {"--organism", "--taxid", "--ncbi-organism", "--ncbi-taxid"}
+    return ["--organism", "none"] if "--path" in args and not named & set(args) else []
+
+
 # Synthetic stand-ins, shaped like the real headers (>sp|Cont_P60712|ACTB_BOVIN ... GN=ACTB).
 ACTB = "MDDDIAALVVDNGSGMCKAGFAGDDAPRAVFPSIVGRPRHQGVMVGMGQKDSYVGDEAQSKRGILTLKYPIEHGIVTNWDDMEK"
 KRT8 = "MSIRVTQKSYKVSTSGPRAFSSRSYTSGPGSRISSSSFSRVGSSNFRGGLGGGYGGASGMGGITAVTVNQSLLSPLVLEVDPNIQAVRTQEKEQIKTLNNKFASFIDKVRFLEQQNKMLETKWSLLQQQKTARSNMDNMFESYINNLRRQLETLGQEKLKLEAELGNMQGLVEDFKNKYEDEINKRTEMENEFVLIKKDVDEAYMNKVELESRLEGLTDEINFLRQLYEEEIRELQSQISDTSVVLSMDNSRSLDMDSIIAEVKAQYEDIANRSRAEAESMYQIKYEELQSLAGKHGDDLRRTKTEISEMNRNISRLQAEIEGLKGQRASLEAAIADAEQRGELAIKDANAKLSELEAALQRAKQDMARQLREYQELMNVKLALDIEIATYRKLLEGEESRLESGMQNMSIHTKTTSGYAGGLSSAYGGLTSPGLSYSLGSSFGSGAGSSSFSRTSSSRAVVVKKIETRDGKLVSESSDVLPK"
@@ -242,7 +250,7 @@ class FetchSidecar(unittest.TestCase):
 
     def fetch(self, *args):
         out = os.path.join(self.root, "out", "search.fasta")
-        argv = ["fetch_fasta.py", "fetch", *args, "--out", out]
+        argv = ["fetch_fasta.py", "fetch", *args, *_organism(args), "--out", out]
         err = io.StringIO()
         with mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(io.StringIO()), \
                 contextlib.redirect_stderr(err):
@@ -381,7 +389,8 @@ class DigestionEnzymes(unittest.TestCase):
 
     def fetch(self, root, *args):
         out = os.path.join(root, "out", "search.fasta")
-        with mock.patch.object(sys, "argv", ["fetch_fasta.py", "fetch", *args, "--out", out]), \
+        with mock.patch.object(sys, "argv", ["fetch_fasta.py", "fetch", *args, *_organism(args),
+                                            "--out", out]), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(ff.main(), 0)
         with open(out + ".meta.json") as fh, open(out) as fa:
@@ -776,7 +785,8 @@ class KeepTargetContaminants(unittest.TestCase):
                 fh.write(CONT)
             out = os.path.join(root, "out", "search.fasta")
             argv = ["fetch_fasta.py", "fetch", "--path", tgt, "--contaminants", "universal",
-                    "--contaminants-path", cp, "--keep-target-contaminants", "--out", out]
+                    "--contaminants-path", cp, "--keep-target-contaminants", "--organism", "none",
+                    "--out", out]
             with mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(io.StringIO()), \
                     contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(ff.main(), 0)

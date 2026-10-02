@@ -250,6 +250,19 @@ class RunDeRemovesContaminants(unittest.TestCase):
                 self.assertEqual(rem["P00001"]["Removed.Entirely"], "FALSE")
                 self.assertIn("REMOVED before quantification", self.methods(key))
 
+    def test_a_diann_reports_rule_names_diann_as_its_origin(self):
+        """Both DIA-NN pipelines read DIA-NN's report: the rule's origin is DIA-NN's flag, said by
+        each descriptor (contaminant_rule_origin) -- an adapted report says its own engine."""
+        import make_methods
+        for key in ("dpc", "maxlfq"):
+            with self.subTest(method=key):
+                c = self.prov(key)["contaminants"]
+                self.assertEqual(c["rule_origin"],
+                                 "the rule of DIA-NN's --cont-quant-exclude, applied here")
+                self.assertTrue(c["rule"].endswith(c["rule_origin"]))
+                self.assertIn(c["rule"], make_methods._de_contaminant_sentence(self.prov(key)))
+                self.assertIn(c["rule"], " ".join(self.methods(key).split()))
+
     def test_shared_precursor_is_removed_from_the_limpa_input(self):
         rds = os.path.join(self.out("dpc"), "DE-LIMP_session.rds")
         out = rscript(f's <- readRDS("{rds}"); cat(nrow(s$raw_data$E), '

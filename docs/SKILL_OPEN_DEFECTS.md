@@ -13,19 +13,17 @@ reusable, add a row there instead. A shrinking file is the point.
 
 ## Status at a glance
 
-**Open (2.9 backlog):**
-- a Sage LFQ window that does not fit the MS1 mass error (detected and warned, not corrected);
+**Open (still, after 2.10):**
+- a Sage LFQ window that does not fit the MS1 mass error: gated in 2.10 with the corrected
+  re-run command; the automatic re-run is still backlog (below);
 - the protein rollup of a Sage report is max(peptide). Since 2.9 it is described as exactly
   that; a real rollup is still missing;
 - a multi-file `.raw` Radiant chain converts nothing;
 - Sage `.d`: no route gives LFQ on HIVE;
 - upstream Sage stores one LFQ q per target/decoy pair (issue text written, not filed);
-- the FragPipe DDA adapter tests only the leading protein for a contaminant tag (below);
 - AlphaDIA's and Radiant's protein ids are read as bare accessions without a real output to
-  confirm it (below);
-- make_methods' general contaminant sentence still cites "the rule of DIA-NN's
-  --cont-quant-exclude" for every engine (below).
-These three stay for 2.10. Details below.
+  confirm it (below).
+Details below.
 
 Also for 2.10, from sage-review's check of b1b94f5 (2026-09-30):
 - **N2: an adapted report made before 2.9 must be re-adapted before its DE is re-run.** It
@@ -35,12 +33,6 @@ Also for 2.10, from sage-review's check of b1b94f5 (2026-09-30):
   `run_search.py` command again with `--adapt-only` first (it takes the search's usual required
   arguments and only reads the existing output), then the DE. A guard that refuses an
   undeclared report whose folder holds no DIA-NN log would close it.
-- **"Not recorded" gives the wrong reason when a `--cfg` could not be read** (sage-review,
-  6d49ec3). `make_methods.diann_cont_quant_exclude()` returns only None when nothing answered. So
-  contaminants.R and record_run still say "no DIA-NN log beside the report …" even when the log
-  was found and names a `--cfg` that could not be read (a Windows path, a moved folder). The
-  verdict is right, NOT RECORDED; only the reason is wrong. **Fix (2.10):** have the reader
-  return why, e.g. "the log names --cfg <path>, which could not be read".
 - **N6: `Protein.Names` is not position-aligned with `Protein.Group`.**
   `protein_ids.group_entry_names()` (b1b94f5) drops repeated names, and members whose header
   has no `db|ACC|NAME` entry name. `group_accessions()` drops repeats separately. So name *i* is
@@ -51,13 +43,6 @@ Also for 2.10, from sage-review's check of b1b94f5 (2026-09-30):
   its first member. **Fix (2.10):** write one name per accession, "" where there is none, with no
   dedup, as DIA-NN's own `Protein.Names` does. Otherwise, document that the two lists are not
   aligned.
-
-And from sage-review's pass on 6d49ec3 (2026-09-30), non-blocking (its other note, the
-unreadable `--cfg`'s reason, is listed above):
-- **A relative `--cfg` can resolve to the wrong file.** Without a relative `--out` to anchor it,
-  `make_methods._diann_workdirs()` tries the log's folder, then its parent, so a cfg of the same
-  name in both is read from the log's folder even if DIA-NN ran in the parent. **Fix (2.10):**
-  when both exist and differ, report NOT RECORDED, naming both, instead of picking one.
 
 From keratin-fixer's real-data test of 979dfd5 (a Q Exactive Plus hair DDA set, 2026-09-30):
 - **A sample protein seen only through peptides it shares with a non-keratin contaminant is
@@ -114,7 +99,7 @@ Evidence: the SET28 test chain on HIVE (6 Exploris 480 DDA hair runs, DIA-NN 2.7
    first-pass precursors in 4 of 6 runs (`pass_comparison.py` now reports this); test whether
    `--fix-scoring` changes that.
 3. **F6 — the timsTOF DDA range from the precursors actually isolated.** A ddaPASEF run's
-   precursor range is now GlobalMetadata `MzAcqRangeLower/Upper` (99.99–1700 on NS27), much
+   precursor range is now GlobalMetadata `MzAcqRangeLower/Upper` (99.99–1700 on one of the SET1-28 runs), much
    wider than what was picked (PasefFrameMsMsInfo IsolationMz 273.75–1699.2). A tighter,
    data-derived bound from `PasefFrameMsMsInfo` would shrink the predicted library; measure the
    library size and IDs both ways first.
@@ -158,7 +143,26 @@ confirmation run of the #48 fix, and is fixed as of skill v2.1.1.
 
 ---
 
-## Sage LFQ with an MS1 offset near its ±5 ppm window: warned in 2.9, not corrected (backlog)
+## Different files that share a run name cannot be searched together (2.11)
+
+**Decided for 2.10 (option A):** the list stages (`ht_manifest.py`, `core_submission.py locate`)
+keep every file and flag the shared name (`repeated_names`, with each path), but the engine
+step stops before writing anything (`check_report_runs.names_stop`, in `run_search.py` for every
+engine, `diann_parallel.py` and `radiant_parallel.py`). Passed as given, DIA-NN names a run by
+its file name without the folder, so `/plate1/s1.d` and `/plate2/s1.d` become ONE run (two
+samples summed into one column; in the 5-step chain, two array tasks write one `.quant`), and
+Sage converts both to one mzML name. Ways out today: keep one (`locate --reinjections latest`
+for re-injections of one sample), rename one, or search them separately.
+
+**2.11 (option B):** search both under unique run names -- `run_search.py` links each under a
+name that cannot collide (`plate1__s1.d`), searches the links, and records the original path ->
+run name map in `search_provenance.json` and the analysis report; conditions and the report
+check then use the new names. Mind the container routes, whose bind mounts are derived from the
+input paths (the link and its target must both be bound). **`locate --reinjections all` with
+same-named re-injections needs this**: until it lands, such a list hits the clear stop above,
+never a merge.
+
+## Sage LFQ with an MS1 offset near its ±5 ppm window: gated in 2.10, not re-run automatically (backlog)
 
 **What.** Sage integrates MS1 for LFQ only within ±`quant.lfq_settings.ppm_tolerance` of the
 theoretical mass (default 5.0; Sage 0.14.7 `crates/sage/src/lfq.rs` `build_feature_map`).
@@ -174,6 +178,13 @@ MS1-peak count, and warns when a median + 2 ppm exceeds the window, or when the 
 under 10% of the target peptides. The warning names a window that would fit and changes
 nothing. It reaches `search_provenance.json`, `watch_run.sh --out`, `checkpoint.py status` and
 `audit_results.py --search-out` (AUDIT.md, and from there the report).
+
+**Done in 2.10: a gate with the way through.** When the check warns because of the mass error,
+it writes the corrected window into a copy of the config (`<out>/sage_config.lfq_ppm<N>.json`)
+and records the exact `run_search.py` command that repeats the search with it into
+`<out>_lfq_ppm<N>`. `--adapt-only`, an inline search and `run_de.R` then refuse the quantities
+until that re-run is used or the user accepts them (`--accept-lfq-window "<who, why>"`,
+recorded). Tests: `tests/test_sage_lfq_gate.py`.
 
 **Backlog: the automatic re-run.** When the check warns *because of the mass error* (not a
 low peak count with a fitting window, whose cause is unknown):
@@ -402,23 +413,10 @@ MSFragger's 14% there; her rollup for that is in `sessions/comparisons/harmonise
 
 ## Contaminant ids from the other adapters: what 2.9 checked and what it did not (open)
 
-- **FragPipe DDA: only the leading protein is read.** `adapt_fragpipe_dda` writes one accession
-  per `combined_protein.tsv` row, `Protein ID` (Cont_A2I7N3 for a skill contaminant; drift's
-  `protein_ids.fragpipe_protein_id` keeps FragPipe's `contam_`). DIA-NN's rule counts a precursor
-  as a contaminant when ANY accession names one, and a Cont_ entry listed only under
-  `Indistinguishable Proteins` of a sample-led row is not seen. On gabrig's HeL50 UnvPe
-  (2026-09-30) no row had one, so there is no measured loss. **Fix when seen:** add the
-  `Indistinguishable Proteins` accessions to the group.
 - **AlphaDIA and Radiant ids.** AlphaDIA's `pg` comes from alphabase's FASTA parsing (UniProt
   accessions), so `adapt_alphadia` is unchanged. `adapt_radiant` now passes Fulcrum's groups
   through `protein_ids.group_accessions`, which leaves a bare accession as it is. Neither has
   been checked on a real output whose FASTA carries `Cont_` entries.
-- **The rule's origin in the Methods.** The rule text is now defined once
-  (contaminants.R `contaminant_record()$rule`), and methods.txt and
-  `make_methods._de_contaminant_sentence` both quote it. For every engine it still ends "(the rule
-  of DIA-NN's --cont-quant-exclude, applied here)". That names where the rule comes from, not
-  something DIA-NN did, but a Sage or FragPipe reader may take it that way. **Fix (2.10):** word
-  the origin per pipeline from the descriptor, as the keratin lines now are.
 
 ## Multi-file `.raw` Radiant chain: no conversion at all (backlog)
 

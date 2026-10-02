@@ -309,11 +309,29 @@ class EveryEngineFiltersAndSaysWhatItDid(unittest.TestCase):
 
     def test_the_rule_is_quoted_without_nested_parentheses(self):
         rule = ("a peptide is a contaminant when any accession in Protein.Group starts with "
-                "'Cont_' or 'contam_' -- the rule of DIA-NN's --cont-quant-exclude, applied here")
+                "'Cont_' or 'contam_' -- applied here, in the DE step, to the Sage report")
         c = self.prov("sage", "plain")["contaminants"]
         self.assertEqual(c["rule"], rule)
         self.assertIn(f"({rule})", " ".join(self.methods("sage", "plain").split()))
-        self.assertNotIn("applied here))", " ".join(self.methods("sage", "plain").split()))
+        self.assertNotIn("report))", " ".join(self.methods("sage", "plain").split()))
+
+    def test_the_rules_origin_is_each_pipelines_never_diann_for_every_engine(self):
+        """make_methods' contaminant sentence ended "the rule of DIA-NN's --cont-quant-exclude,
+        applied here" for every engine (SKILL_OPEN_DEFECTS, 2.10), which a Sage or FragPipe reader
+        could take to mean DIA-NN had run. The origin is now the pipeline descriptor's
+        (contaminant_rule_origin): a DIA-NN report keeps those words (test_run_de_contaminants)."""
+        import make_methods
+        for engine, label in (("sage", "Sage"), ("fragpipe", "FragPipe IonQuant MaxLFQ")):
+            with self.subTest(engine=engine):
+                c = self.prov(engine, "plain")["contaminants"]
+                self.assertEqual(c["rule_origin"],
+                                 f"applied here, in the DE step, to the {label} report")
+                self.assertTrue(c["rule"].endswith(c["rule_origin"]))
+                para = make_methods._de_contaminant_sentence(self.prov(engine, "plain"))
+                self.assertIn(c["rule"], para)
+                self.assertNotIn("DIA-NN", para)
+                self.assertNotIn("DIA-NN", self.methods(engine, "plain").split("Contaminants")[1]
+                                 .split("Keratin")[0])
 
 
 @unittest.skipUnless(HAVE_ARROW, "needs pyarrow")

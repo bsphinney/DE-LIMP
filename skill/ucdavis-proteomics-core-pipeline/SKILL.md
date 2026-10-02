@@ -59,7 +59,9 @@ the spine.
    If you're unsure whether a step is heavy, submit it as a job. (No SLURM but a big
    dataset locally? Warn the user it may be slow rather than hammering a shared host.)
 4. **Organism decides the FASTA and nothing else**, and is **always asked, never
-   assumed** — not from a folder name, not "probably human". Resolve it with
+   assumed** — not from a folder name, not "probably human". The **sample type** (tissue,
+   cell line, biofluid, IP …) is likewise **asked, never inferred** — not from a file-name
+   token or abbreviation, a sample ID or a folder (step 3, `sample_type.py`). Resolve it with
    `fetch_fasta.py resolve` and have the user confirm the proteome. It does **not**
    affect a single search parameter: mass accuracy keys on instrument, and search
    behaviour on acquisition. Both are auto-detected and confirmed. So any organism
@@ -401,7 +403,16 @@ files*: `missing_paths` (runs STAN knows but has no path for — silently exclud
 list), `n_files` (nothing matched — usually a mistyped number), `paths_exist` (a resolved
 path the filesystem lacks — otherwise a 120-file array dies hours in). **Surface every
 non-PASS gate before committing compute**, warnings included: `plates` >2, `counts` <12
-samples, and `needs_rerun` (those samples ARE in the default set — say so).
+samples, `needs_rerun` (those samples ARE in the default set — say so), `repeated_paths` (STAN
+listed a file more than once; `files.txt` holds it once and it is searched once) and
+`repeated_names` (different files share a run name: all kept and flagged, but `run_search.py`
+stops before searching them as given — ask the operator to rename one or split the search).
+**A CoreOmics HT submission is then staged from that list**: `core_submission.py locate
+--files-from ~/ht0793/files.txt` (step 1c). HT run names carry the submitter's `sample_name`,
+not the `unique_id`, so `--files-from` matches this submission's plate runs on `sample_name`
+(gate `ht_plate_runs`; pass `--ht-manifest ~/ht0793/ht_manifest.json` so `--reinjections
+latest` knows STAN's `needs_rerun`); samples that share a name get `choose_run` — ask staff, then
+`--choose <unique_id>=<file>`. Never `--allow-partial` for samples that were run.
 
 Then continue with step 2 exactly as normal — nothing after this point is HT-specific.
 **Organism is still asked, never inferred**: STAN does not know it. Reuse a pre-staged
@@ -423,7 +434,9 @@ the old results by the earlier wording here.
 It is a **re-analysis** only when the user asks for one ("re-analyse", "redo that analysis
 with…", "compare with the earlier run"). Then pass that session to `session.py init
 --reanalysis-of` (step 3b), so the run nests under `<prior>/reanalysis/` and gets a
-`DIFFERENCES.md`, and run the Comparator at the end (step 11b).
+`DIFFERENCES.md`, and run the Comparator at the end (step 11b). When the earlier session is a
+delivered folder that must not be written to, add `--beside`: the run goes **beside** it as
+`<date>_<name>_v<N>` (never an existing folder), linked to it by `reanalysis.json`.
 
 ### 1c. CoreOmics submission (PROT_xxxx) — the Core service run
 When Core staff name a **CoreOmics submission** ("search the data from submission 807",
@@ -472,9 +485,26 @@ locally and on HIVE (`~/core/PROT_0807`).
 3. **Stage dry run — on HIVE:** `stage --summary ~/core/PROT_0807/submission_summary.json
    --files ~/core/PROT_0807/files.txt` names the service folder it would use.
 4. **ONE staff confirmation: the file list AND the service folder together** — sample → raw
-   file → acquired date, every non-PASS gate, and "staged under `<folder>`". Not a menu. An
-   `ambiguous_label` gate is a call only staff can make (another submission used the same
-   label before these runs): `--accept-ambiguous`, or `--files-from` their own list.
+   file → acquired date, every non-PASS gate, and "staged under `<folder>`". Not a menu.
+   **Which run IS a sample is a call only staff can make — never pick one yourself.**
+   `choose_run` lists each sample with its candidates and a `kind`:
+   - **`reinjections`** — several runs of ONE sample. Ask staff ONE question for all of them:
+     `--reinjections latest` (the newest injection; never one STAN flags `needs_rerun` while
+     another is not — pass `--ht-manifest <ht_manifest.json>` for an HT list) or
+     `--reinjections all` (every injection, kept as technical replicates — `conditions` writes
+     each run's sample into conditions.csv's `Sample` column, and `run_de.R` blocks on it, so
+     they are never counted as independent samples). `--choose` still picks one
+     sample's run. The policy and each sample's result go into `locate.json`, `sample_files.tsv`
+     (`reinjections`), `SUBMISSION.md`, the stage record and — through `submission_report.py
+     attach` — the report's Data Quality Notes (gate `reinjections` names every sample).
+   - **`collision`** — the label is another sample's or another submission's too: ask which run
+     is whose, one sample at a time, then `--choose <key>=<file>` (or `--choices <file>`, one
+     `KEY=FILE` per line); `--reinjections` never applies.
+   `ambiguous_label` (another submission used the same label before these
+   runs) → `--choose`, `--accept-ambiguous`, or `--files-from` their own list;
+   `duplicate_ids` (two samples of this submission share a label, so no run is assigned to
+   either by it) → ask which run is which, then `--choose <key>=<file>` with the keys the gate
+   lists (`KG1#1`, `KG1#2`); one that was not run → `--allow-partial`.
 5. **Stage `--apply` — on HIVE.** Relative raw links in `<folder>/PROT_0807/raw/`, a
    staff-facing `SUBMISSION.md`, and the compute `work_dir` it prints. It refuses a file list
    whose `locate` hard-failed.
@@ -492,12 +522,15 @@ locally and on HIVE (`~/core/PROT_0807`).
    - **Conditions (local):** `core_submission.py conditions --summary
      ~/core/PROT_0807/submission_summary.json --sample-files ~/core/PROT_0807/sample_files.tsv
      --out ~/core/PROT_0807/conditions.csv`. Ask **only** if `needs_user_input` — and then
-     exactly its `questions`. Put the final CSV back: `--put ~/core/PROT_0807/conditions.csv
-     "$S/input/"`.
+     exactly its `questions` (a condition per replicate is answered by re-running with
+     `--replicate-labels collapse|keep`). Put the final CSV back: `--put
+     ~/core/PROT_0807/conditions.csv "$S/input/"`.
    - **Organism:** `organism_as_submitted` is the submitter's free text. Put it to the staff
      member as the proposed answer and get it confirmed — golden rule #4 still applies.
-   - **On HIVE in `$S`:** search, DE, figures, audit, `sample_quality.py`, `make_methods.py
-     --submission "$S"` (it reads the raw metadata) and provenance — heavy steps as SLURM jobs.
+   - **On HIVE in `$S`:** search, DE, figures, audit, `sample_quality.py`, the QC check
+     (step 8e, staff-only: `qc_bracket.py --session "$S"`), `make_methods.py --submission "$S"
+     --qc-bracket "$S/logs/qc_bracket.json"` (it reads the raw metadata; the flag adds the one
+     fixed Instrument performance sentence) and provenance — heavy steps as SLURM jobs.
    - **Pull what the report needs:**
      ```
      mkdir -p ~/core/PROT_0807/session/output/search
@@ -506,7 +539,7 @@ locally and on HIVE (`~/core/PROT_0807`).
      for f in AUDIT.md SAMPLE_QUALITY.md methods.md; do bash scripts/hive_exec.sh --get "$S/output/$f" ~/core/PROT_0807/session/output/; done
      mkdir -p ~/core/PROT_0807/session/input
      bash scripts/hive_exec.sh --get "$S/session.json" ~/core/PROT_0807/session/
-     for f in submission.json samples.tsv raw_files.txt conditions.csv search.fasta.meta.json; do bash scripts/hive_exec.sh --get "$S/input/$f" ~/core/PROT_0807/session/input/; done
+     for f in submission.json samples.tsv raw_files.txt conditions.csv search.fasta.meta.json sample_type.json experiment_type.json locate_decisions.json; do bash scripts/hive_exec.sh --get "$S/input/$f" ~/core/PROT_0807/session/input/; done
      ```
    - **Step 8d always fires** — this is a collaborator deliverable.
    - **Step 9 (local):** write `AI_Analysis_Report.md`, then `make_analysis_html.py --session
@@ -536,7 +569,7 @@ locally and on HIVE (`~/core/PROT_0807`).
 | exit | meaning | what to do |
 |---|---|---|
 | **0** | ok | continue |
-| **2** | a human decision / hard gate — proposal files are still written | show the failing gates. `locate`: `unmatched_samples` (→ `--allow-partial` only if staff confirm those were not run), `ambiguous_label` (→ staff decide: `--accept-ambiguous` or `--files-from`), `weak_ids` / `duplicate_assignment` (→ staff pick the files, `--files-from`), `no_files`. `stage`: several folders, or one naming a different person or institution (→ `--service-dir`); a folder owned by another submission; `--apply` on a hard-failed locate. `deliver`: **not verified — do not share** (see 12b) |
+| **2** | a human decision / hard gate — proposal files are still written | show the failing gates. `locate`: `unmatched_samples` (→ `--allow-partial` only if staff confirm those were not run), `choose_run` (→ re-injections: ONE `--reinjections latest|all`; collisions: `--choose <key>=<file>` each), `ambiguous_label` (→ staff decide: `--choose`, `--accept-ambiguous` or `--files-from`), `weak_ids` (→ `--choose`, or `--files-from`), `duplicate_ids` (→ `--choose <key>=<file>`, keys `KG1#1`/`KG1#2` from the gate), `duplicate_assignment` (→ staff pick the files, `--files-from`), `no_files`. `stage`: several folders, or one naming a different person or institution (→ `--service-dir`); a folder owned by another submission; `--apply` on a hard-failed locate. `deliver`: **not verified — do not share** (see 12b); **held by `qc_gate`** (step 8e) → a staff member reads `logs/qc_bracket.md` and records `qc_bracket.py ack` (or re-runs 8e when it says so) |
 | **3** | CoreOmics or the filesystem unreachable, auth failed, or the scripts directory is incomplete | a key problem: `core_submission.py check` names it and the fix; run where the data is (`fetch`/`bioshare` local; `locate`/`stage`/`deliver` on HIVE); re-put the skill: `hive_exec.sh --put-skill` |
 | **4** | the files look like an **HT plate** | step 1a, `ht_manifest.py` |
 | **5** | delivery too big for the login node | `sbatch` the `deliver_job.sh` it wrote |
@@ -594,6 +627,11 @@ came from, or why not. At the top level:
   pass `--ms2-analyzer mixed` (Sage's ±0.4 Da ion-trap window also covers the Orbitrap
   fragments).
 A missing resolution never changes the acquisition, the range or `needs_confirmation`.
+Each file also gets **`acquired_at`** (the start of acquisition, UTC) with `acquired_at_source`
+and `acquired_at_note`, read in the same pass: from a `.d`'s `AcquisitionDateTime`, and from a
+`.raw`'s ThermoRawFileParser creation date, which records no time zone and is read as the Core's
+Pacific time (the note says so). Step 8e uses them. **Keep this step's JSON**: save it as
+`<session>/input/acquisition.json` at step 3b.
 Each `.raw` costs ~3–7 s of parser I/O (more on a busy mount). **On a cluster, run step 2 for more than 5 `.raw`
 on a compute node** (`srun --cpus-per-task=1 --mem=2G … python3 scripts/detect_acquisition.py …`,
 with the account/partition the user can submit to); on a login node the script refuses
@@ -660,11 +698,45 @@ python3 scripts/fetch_fasta.py resolve --organism "<what they said>"   # or --ta
   - `universal` — **default**, and what the UC Davis Core stages on HIVE. Use it
     unless the user has a reason not to.
   - sample-type matched: `cell_culture`, `mouse_tissue`, `rat_tissue`,
-    `neuron_culture`, `stem_cell_culture` — offer these if the sample type is known.
+    `neuron_culture`, `stem_cell_culture` — offer the one matching the sample type the user
+    gave (below), never one matched to a file name.
   - `none` — only if the user explicitly declines. Record it; the contaminant
     anomaly check in step 10 is meaningless without contaminants in the database.
-- **Sample type — is the tissue itself keratin?** Ask what the samples are (cell line,
-  tissue, plasma, IP, hair …). When they are **hair, wool, fur, feather, skin (epidermis /
+- **Experiment type — decided once, confirmed with the user, never inferred from file
+  names.** It decides the DE's quantities (step 8) and the pull-down analysis (8a, the brief).
+  With a CoreOmics submission attached (step 3b), `python3 scripts/experiment_type.py propose
+  --session <S>` reads its experiment type and proposes one; **confirm it with the user**.
+  Without one, ask: whole proteome / IP · AP-MS · pull-down with IgG or bead controls /
+  proximity labelling (TurboID · BioID · APEX) / secretome / fractionated for depth (offline
+  high-pH, fractions combined per sample) / separation or profiling fractions compared with each
+  other (SEC, density or sucrose gradient, BN-PAGE complexome, organelle or subcellular) / other.
+  A bare "fractions" is not enough: ask which. Each has a default for the DE's quantities
+  (`experiment_type.DEFAULTS`):
+  - **IP / AP-MS / pull-down:** **non-normalised** — the controls carry little protein and are
+    not loaded by amount, so normalisation would scale them up and hide the enrichment;
+  - **proximity labelling:** normalised — the controls carry plenty of signal and the samples
+    are usually loaded by equal protein;
+  - **separation / profiling fractions:** **non-normalised** — each fraction holds a different
+    part of the proteome; DIA-NN's README: for fractions from a separation technique such as SEC,
+    "normalisation should not be used";
+  - **whole proteome, fractionated for depth:** normalised; **secretome:** normalised, leaning on
+    the data check.
+  The default is applied only after step 8's data check, which runs for EVERY type and stops
+  to ask when the data disagree. Record the answer once the session exists (step 3b), with the
+  bait (the IP target or the TurboID fusion) and, for controls not named IgG/beads, `--controls`.
+  When the submission's "Normalization" answer (how the samples were loaded) contradicts the
+  default, `set` prints `ASK:` — ask before going on.
+- **Sample type — ask, for every analysis, and never infer it.** Ask what the samples are
+  (cell line, tissue — which one —, plasma, IP, hair …), in the user's words. **Never** take it
+  from file or folder names, sample IDs or abbreviations: a file-name abbreviation was once
+  written up as a tissue the data did not support. If the user does not know, record that; the report then names no tissue. The answer
+  is used at every step that depends on it: the contaminant set below, the keratin decision
+  below, the sample-quality panels (8c: a muscle panel is the analyte in a muscle sample;
+  hemolysis applies to plasma/serum), the analysis brief and report (9), and the SDRF's
+  organism part (`make_deposit.py`, still filled by the user). Record it once the session
+  exists (step 3b, `sample_type.py set`).
+- **Is the sample keratin?** Decide it from the sample type the user gave (above). When the
+  samples are **hair, wool, fur, feather, skin (epidermis /
   stratum corneum), nail, claw, hoof, horn, beak, baleen, quill or scale**, this is a
   **keratin sample**: keratin is the *analyte*, not handling contamination. Decide it here,
   once, and carry it through with `--keratin-sample`: `fetch_fasta.py fetch` (step 6) then
@@ -692,8 +764,9 @@ python3 scripts/fetch_fasta.py resolve --organism "<what they said>"   # or --ta
   want to measure.
 - **Conditions:** ask the user to either *tell you* the conditions in plain words
   ("the first three are control, the rest treated") **or** *upload a file* (any
-  CSV/TSV with a sample column and a group column, however named). Don't make them
-  hand-fill a template.
+  CSV/TSV with a sample column and a group column, however named, or an Excel `.xlsx` —
+  the Core's LIMS export `PROT_####.samples.<date>.xlsx` included, read without openpyxl).
+  Don't make them hand-fill a template.
 
 First get the real run names the conditions must map to:
 ```
@@ -713,15 +786,31 @@ python3 scripts/collect_conditions.py --map conditions.csv \
 Read the returned `ambiguities` and **confirm every one with the user** before
 proceeding — `unassigned_runs` (a raw file no condition matched), `conflicting_runs`
 (a file matched to two groups), `unmatched_identifiers` (the user named something
-with no matching file), `multi_match_identifiers` (one label hit several files —
-usually fine, e.g. a replicate prefix), and `singleton_groups` (<2 replicates → no
-within-group variance). Do **not** start a search while any run is unassigned or
-conflicting. A subject column (Mouse, Animal, Subject, Patient, Donor…) whose values look
+with no matching file), and `singleton_groups` (<2 replicates → no within-group variance).
+**`decisions_required` is a sample-identity question, and only the user answers it** — a label
+that names several runs (`multi_match_identifiers`: two runs numbered 61, re-injections) or
+that two samples share (`duplicate_identifiers`). Ask each one as its own question, with its
+runs listed, **before** the compute confirmation and never folded into it; never settle one
+yourself, not even by another key that looks safe (a plate well, a run number) — propose that
+key in the question instead. Those runs are written with **no group** until the answer comes,
+so `--validate` refuses the CSV: re-run `--map` with `--confirm-multi '<label>'` when the user
+says the label names every one of its runs (a group label such as `ctrl`), or with a mapping
+that names the one run. The answer is recorded in `<csv>.decisions.json` (copied with the CSV
+by `provenance.py`); also log it (`log_decision.py`). Do **not** start a search while any run is
+unassigned, conflicting or awaiting a decision. A subject column (Mouse, Animal, Subject, Patient, Donor…) whose values look
 like subjects (≥ 3, not the groups relabelled, recurring across groups) is kept under its
 own name; when the output has `"block_suggested": true`, run DE with
 `--block <block_column>` (step 8). A subject-named column whose values do not (Subject =
 M/F, Patient = Yes/No) stays a covariate and comes back as `subject_ambiguous` — ask, and
-re-run with `--subject-column <header>` only if the user confirms it. Finalize the CSV; it is
+re-run with `--subject-column <header>` only if the user confirms it. A condition column that
+names each **replicate** (the LIMS `condition_name`: `X_mix_1` … `X_mix_5`) is read as conditions
+plus replicate numbers in the proposed CSV (`replicate_labels`; `conditions.csv` keeps the label
+in `Label`) when that is unambiguous, and **always asked** (`replicate_labels_to_confirm`: the
+numbers may be time points or doses); a doubtful reading is not applied
+(`replicate_labels_ambiguous`, with why). Ask, then re-run with `--replicate-labels collapse` (yes)
+or `keep` (no). Two identifier columns naming as many runs (`sample_column_tie`) are asked too:
+re-run with `--sample-column <header>`.
+Finalize the CSV; it is
 checked against the search's own run names in step 8, once `report.parquet` exists.
 (Fallback: if the user has nothing yet, `--emit-template` writes a blank
 File.Name,Group sheet for them to fill.) → detail: `references/conditions.md`.
@@ -737,12 +826,13 @@ Then scaffold the session and route **everything** into it:
 ```
 # default — results live with the raw data:
 python3 scripts/session.py init --name "<short study name>" --raw /path/to/*.d \
-    [--reanalysis-of <prior session dir -- only when the user asked to re-analyse it, step 1b>]
+    [--reanalysis-of <prior session dir -- only when the user asked to re-analyse it, step 1b>
+     [--beside]]
 # or central, if the user chose one:
 python3 scripts/session.py init --name "<short study name>" --raw /path/to/*.d \
     --base ~/Documents/DataAnalysis
 ```
-**Core data with a CoreOmics submission (step 1)? Attach it now**, where the session lives:
+**Core data with a CoreOmics submission (step 1)? Attach it now -- BEFORE the experiment type below**, where the session lives (`experiment_type.py set --source submission` reads the attached record and refuses without one; set before attach, the submission's ASK never fired):
 ```
 python3 scripts/submission_report.py attach --session <session> --record ~/core/PROT_0756   # fetch's folder
 python3 scripts/submission_report.py attach --session <session> --given '{"internal_id": "PROT_0756", ...}'  # no token
@@ -757,6 +847,27 @@ UniProt, sheet IDs vs raw files, conditions vs the design analysed, and pairing 
 one mouse are not independent). Re-run `submission_report.py notes --session <S>` once the
 FASTA and `conditions.csv` exist.
 
+**Record the experiment type now** (step 3's confirmed answer):
+```
+python3 scripts/experiment_type.py set --session <session> --type <whole_proteome|ip|proximity|secretome|fractions_depth|fractions_separation|other> \
+    --source <submission|user> [--stated "<their words>"] [--bait <gene>] [--controls <group,...>]
+```
+The bait: a sequence the user added with `fetch_fasta.py --add-fasta` (EGFP, a tagged bait) is
+its candidate -- but only the user says which, if any, it is: **after step 6** (the database is
+built) run `experiment_type.py propose` and ask its `ask_bait` question, then record the answer
+with `experiment_type.py set-bait --bait <accession>` (or `--bait none`). The answer is kept as
+`bait_confirmed` in `input/experiment_type.json` (who, when). Never leave the one added sequence
+as an unconfirmed bait.
+**Record the sample type now** (step 3's answer, in the user's words — or that they did not
+say), so the brief and report never fill it in from file names:
+```
+python3 scripts/sample_type.py set --session <session> --stated "<what the user said the samples are>"
+python3 scripts/sample_type.py set --session <session> --not-stated     # asked; the user does not know
+```
+**Save step 2's JSON as `<session>/input/acquisition.json`** (the whole `detect_acquisition.py`
+output). Step 8e reads each file's instrument and acquisition time from it instead of reading
+every `.raw` again, and the run record takes its detection facts from it.
+
 `init` also records this conversation for the transcript hook, and from here on **log each
 decision** with `log_decision.py` (see "Keeping the record of the analysis" below).
 
@@ -767,7 +878,8 @@ every later step** — put
 reproducibility bundle in `paths.repro_dir`, the report in
 `paths.analysis_report`, and append commands to `paths.commands_log`. Raw files
 are recorded (in `input/raw_files.txt`), never copied. With `--reanalysis-of`, the
-session nests under `<prior>/reanalysis/<date>_<name>/`.
+session nests under `<prior>/reanalysis/<date>_<name>/`; with `--beside` too, it sits next to the
+prior as `<date>_<name>_v<N>` and nothing is written into the prior.
 → detail: `references/outputs.md`.
 
 ### 4. Resolve the defaults for this data type (then CONFIRM once)
@@ -827,9 +939,15 @@ and it is this one.
   silently substitute a different engine.
 - **`alternatives`** lists the other engines valid for this data type. Mention them
   in one clause; don't make the user adjudicate.
-- **Overrides are explicit.** `--ms1-ppm/--ms2-ppm` force a site SOP value and are
-  tagged as an override in the manifest, so a run record always distinguishes an SOP
-  value from the shipped default. Don't override without a stated reason.
+- **Overrides are explicit, and they are the user's.** `--ms1-ppm/--ms2-ppm` force a value
+  the user chose. Pass `--override-by "<who chose it>"` and `--override-reason "<why, in their
+  words>"` (e.g. "instrument ~20 ppm off calibration; user chose 25 ppm"): the manifest's
+  `ppm_source` and `overrides` record each as a **user override** with its value, "set by Core
+  staff", and why — never as an SOP, which the skill cannot know it is. The manifest and the cfg
+  sidecar reach the client, so who set it, by name, goes only into the staff-only
+  `<file>.staff.json` beside them. Without `--override-by` that is the login that ran it, and the
+  record says so. Without a reason the record says "reason not given". Don't override without
+  asking the user why, and keep names out of the reason.
 - Parameters come from the skill, so **record the skill version**, not a registry
   commit: `provenance.py` reads it from `.claude-plugin/plugin.json` into
   `reproducibility/environment/skill.txt` and `run_manifest.json` (`skill.version`).
@@ -982,6 +1100,40 @@ python3 scripts/fetch_fasta.py fetch --ncbi-accession GCF_007827085.1 \
   against 21,877 protein-coding genes. `fetch` counts them and warns; carry that
   into the methods rather than calling it a "reference proteome".
 
+**A database you supply (`--path`) needs its organism named** — nothing else reports it, and
+Methods, the report and FRAN read it from the sidecar: `--organism '<scientific name>' --taxid
+<taxid>` (the step-3 answer; `--ncbi-organism/--ncbi-taxid` work too), or `--organism none` for
+a database with no single organism (several species, synthetic). Without them `fetch` stops and
+asks. With `--proteome` the organism is UniProt's, and an organism flag there is refused.
+
+**The user's own sequences — a bait (EGFP, a BirA/TurboID construct), a tag — go in with
+`--add-fasta <file>`** (repeatable), on top of the usual `--proteome` build; never by
+concatenating files by hand, which bypasses the contaminant rules and loses the organism and
+release. They are TARGETS, written after the proteome. A contaminant entry **most of which is an
+added protein** — identical, contained, or with at least half of its own peptides in one
+(`fetch_fasta.ADDED_SEQUENCE_SHARED_FRACTION` = 0.5, the search's digest) — is removed, so the
+added sequence keeps those peptides: the Universal set's wild-type GFP (`Cont_P42212`) shares 21
+of its 28 peptides with EGFP (75%), and the ordinary 2-own-peptide rule had kept it. An entry
+sharing fewer **stays** — its own peptides are the evidence of real contamination with it — and
+the peptides it shares are flagged **by name** as ambiguous between the two
+(`contaminants_sharing_peptides_with_added_sequences`, the Methods and a report callout). The
+digestion enzymes in use stay. The sidecar records each file (path, sha256) and entry
+(`added_sequences`) and the removed entries (`contaminants_dropped_for_added_sequences`);
+`reproduce.sh` replays `--add-fasta`. An entry with a `Cont_` tag, an accession used twice or
+already in the proteome is refused. Tell the user which contaminant entries left, and which
+peptides of the added sequences are ambiguous.
+**Then ask about the bait — explicitly, once the database is built** (an enrichment with added
+sequences): put the FASTA sidecar in the session (`<session>/input/search.fasta.meta.json`), run
+`python3 scripts/experiment_type.py propose --session <session>`, ask its `ask_bait` question in
+its own words, and record the answer:
+```
+python3 scripts/experiment_type.py set-bait --session <session> --bait <accession>   # the bait
+python3 scripts/experiment_type.py set-bait --session <session> --bait none          # none is
+```
+It is kept as `bait_confirmed` (the answer, who, when) in `input/experiment_type.json`, and a
+re-recorded type keeps it. Without an answer the data check would take the ONE added sequence as
+the bait, unconfirmed -- never leave it there.
+
 **Read the returned JSON** (also written to `<out>.meta.json` for the repro
 bundle) and act on it:
 - `warnings` non-empty → tell the user before searching; a one-per-gene→full
@@ -1029,7 +1181,8 @@ python3 scripts/estimate_params.py --engine <diann|sage> \
     --acquisition <DIA|DDA> --instrument "<detected instrument>" \
     --precursor-mz-range <LO> <HI> \
     [--ms1-resolution <MS1> (--ms2-resolution <MS2> | --ms2-analyzer <ITMS|mixed>) [--resolution-source detected]] \
-    [--var-mods ox] [--overrides '<site SOP values as JSON>'] \
+    [--var-mods ox] [--overrides '<the user's values as JSON>' \
+     --override-by "<who chose them>" --override-reason "<why, in their words>"] \
     --fasta-meta ./search.fasta.meta.json \
     --out ./wf/params.<cfg|json>
 ```
@@ -1138,7 +1291,7 @@ right template by data type.
   DIA-NN value (e.g. a 15k MS2) keeps the vendor 20 ppm, and the provenance says which.
 - Mass tolerances otherwise keep the **vendor's** values: FragPipe already tunes them
   per data type, and DIA-NN's ppm table describes DIA-NN's matcher. Override only
-  with a stated SOP value (`--ms1-ppm/--ms2-ppm`).
+  with a value the user gives (`--ms1-ppm/--ms2-ppm`, with `--override-by`/`--override-reason`).
 
 `<out>.provenance.json` records every key changed and why — it feeds the methods text.
 
@@ -1219,6 +1372,10 @@ python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \
     --fasta ./search.fasta --out ./search_out --files /path/to/*.d --threads 16 \
     [--keratin-sample]
 ```
+- **On the 5-step chain `--threads` is a ceiling.** Each array task is sized to the queue's
+  per-user CPU cap so more files run at once (8 CPUs, 8 files at a time on
+  `genome-center-grp/high`); relay the `[diann_parallel] array steps 2 and 4: …` line.
+  `--threads-per-file N` pins it (`references/diann_parallel.md`, "CPUs per array task").
 - **Keratin sample (step 3) → `--keratin-sample`.** The search is then REFUSED, before
   anything is written or submitted, if `--fasta` still holds a keratin-family `Cont_` entry;
   the message prints the `fetch_fasta.py fetch … --keratin-sample` command to rebuild it. A
@@ -1345,7 +1502,8 @@ python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \
   ppm; Orbitrap Astral → 4/10 ppm; Orbitrap by resolution 240k→4, 120k→7, 60k→10,
   30k→15; an Orbitrap level outside that table is measured with DIA-NN before the
   search, never extrapolated).
-  Don't override these unless the user gives a validated SOP value.
+  Don't override these unless the user asks, and then record who and why
+  (`--override-by`, `--override-reason`): an override is the user's choice, recorded as such.
 - **DIA-NN parallel — AUTOMATIC above 5 files.** `run_search.py` routes to the **5-step
   parallel chain** by itself whenever the run is DIA-NN with **more than 5 files** on a
   machine that has SLURM and a `--cfg` with **fixed** mass accuracy. You don't decide
@@ -1436,7 +1594,8 @@ python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \
       accuracy; the environment (missing .NET, DIA-NN cannot start or will not optimise under
       these flags — every step 2–5 task would fail on it too); the probe's own arguments;
       runs DIA-NN **finished without logging** a radius (3 such runs: a wrong FASTA or
-      library, a large miscalibration, failed injections); a signal. The job log names which
+      library, a large miscalibration, failed injections); DIA-NN **out of memory** (raise
+      `--mem-per-file`; one run is enough to know); a signal. The job log names which
       (`probe_window.EXIT_*`). Steps 2–5 then sit `DependencyNeverSatisfied`, so after the
       fix resubmit step 1b **and** steps 2–5 (ids in `<out>/jobs.txt`; →
       `references/watcher.md`), not step 1b alone. An omitted `--window` therefore does **not**
@@ -1489,11 +1648,26 @@ python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \
     window (`quant.lfq_settings.ppm_tolerance`, default ±5 ppm). It also reads how many
     target MS1 peaks Sage kept at 5% FDR. A run whose MS1 is off by more than the window
     minus 2 ppm, or 0 or very few peaks, gives `[sage_lfq_check] WARNING:`. **Tell the
-    user before any DE:** the identifications stand, but the quantities do not. The
-    warning names the fix: re-run Sage with the suggested wider `lfq_settings.ppm_tolerance`,
-    then `--adapt-only`. Never re-run it without asking. The record is
-    `<out>/sage_lfq_check.json` (also in `search_provenance.json`), and `watch_run.sh --out`,
-    `checkpoint.py status` and `audit_results.py --search-out` report it.
+    user before any DE:** the identifications stand, but the quantities do not.
+    **Runs outside the window are a gate, not only a warning.** The check computes the
+    corrected window from the measured offsets (the worst run's median + 2 ppm, rounded up),
+    writes it into a copy of the search's config (`<out>/sage_config.lfq_ppm<N>.json`), and
+    records the exact `run_search.py` command that repeats the search with it into
+    `<out>_lfq_ppm<N>` (`rerun.command` in `sage_lfq_check.json` and `search_provenance.json`;
+    the job prints it). Until one of two things happens, `--adapt-only` (and an inline search)
+    **refuses** to build `report.parquet`, and `run_de.R` refuses a report beside such a record:
+    - **the user agrees to re-run:** submit that command as printed (it is a new search —
+      golden rule 1), then `--adapt-only` on the new folder. Compare its target MS1 peaks and
+      its target/decoy separation with the first search before using it: a wider window also
+      admits more interference. Above 20 ppm Sage warns, and recalibrating the mzML is the
+      better fix;
+    - **or the user accepts these quantities as they are** (e.g. only the identifications
+      matter): `--adapt-only --accept-lfq-window "<who accepted, and why>"`. That is recorded
+      (`accepted`), and AUDIT.md says it.
+    Never re-run, and never accept, without asking. A low peak count with a fitting window
+    stays a warning: its cause is unknown, so there is no corrected search to point to. The
+    record is `<out>/sage_lfq_check.json` (also in `search_provenance.json`), and
+    `watch_run.sh --out`, `checkpoint.py status` and `audit_results.py --search-out` report it.
   - **A DIA-NN search with no `--lib`** (library predicted from the FASTA — the usual case
     for ≤5 files) is **two jobs**, library then search, chained by **`bash
     <out>/submit.sh`**; `job.sh` itself is not written (a `job.sh` left from an earlier
@@ -1570,6 +1744,11 @@ flight does not. Common auto-fixes (→ `references/watcher.md` playbook):
 - **failed step in the 5-step chain:** resubmit from the earliest incomplete step,
   **reusing completed `.quant` and `step1.predicted.speclib`** — never restart the whole
   cohort; broken `afterok` after a killed task → resubmit steps 3→4→5 fresh.
+- **`node_fault`** (a node could not reach the storage: exit 75 from the job's node check,
+  `NODE_FAIL`, or `Transport endpoint is not connected` / `Stale file handle` in a failed
+  job): tell the user it is a **node problem, not DIA-NN and not their data**, and run
+  `node_fault.py retry --out <out> --job <id>` on HIVE — it resubmits that step and the steps
+  waiting on it with `--exclude=<node>`, at most twice per step (→ `references/watcher.md`).
 - OOM → raise `--mem`; timeout → raise `--time`; missing temp dir → `mkdir -p` first.
 - **A failed search is recorded in the Core run registry. When the chain dies before its last
   job, record it yourself.** A job that SLURM kills (OOM, TIMEOUT, node failure, `scancel`)
@@ -1710,10 +1889,72 @@ dropped file fails here, not halfway through the DE:
 ```
 python3 scripts/collect_conditions.py --validate conditions.csv --against ./search_out/report.parquet
 ```
+**Then check the normalisation before the final DE** — for every experiment type. Run the DE
+both ways into scratch folders (one job on HIVE), then the check:
+```
+Rscript scripts/run_de.R --input ./search_out/report.parquet --metadata conditions.csv \
+    --method <dpc|maxlfq> --fasta-meta ./search.fasta.meta.json [--block Mouse] \
+    --quantities normalised --check-input --outdir <S>/output/norm_check/normalised
+Rscript scripts/run_de.R ... (the same) --quantities raw --check-input --outdir <S>/output/norm_check/raw
+python3 scripts/normalization_check.py run --report ./search_out/report.parquet \
+    --conditions conditions.csv --de-normalised <S>/output/norm_check/normalised \
+    --de-raw <S>/output/norm_check/raw --session <S>
+```
+`--quantities normalised` reads DIA-NN's normalised quantities (dpc: `Precursor.Normalised`;
+maxlfq: `PG.MaxLFQ` + quantile normalisation); `raw` reads DIA-NN's non-normalised ones (dpc:
+`Precursor.Quantity`, through limpa's own quantity-column argument; maxlfq: only a report
+searched with `--no-norm` — `diann_parallel.py --no-norm`, or `--no-norm` in a single-shot
+cfg — with no quantile step; a normalised report is refused, since its `PG.MaxLFQ` is
+normalised). **maxlfq on a normal report: its `--quantities raw` DE is refused, so do one of
+these.** (1) Run all three DEs (both check inputs and the final DE) with `--method dpc`, which
+reads both quantities from this report, with no new search. (2) To keep MaxLFQ, search again
+with `--no-norm` (`diann_parallel.py --no-norm` writes `no_norm_report.parquet`), run the raw
+check DE on that report, and pass it to the check as `--report-raw
+<no_norm_report.parquet>`. B1–B4 still read `--report`, and a raw decision holds the final DE
+to the `--report-raw` report. The check reads the normalisation factors (`Precursor.Normalised /
+Precursor.Quantity` = DIA-NN's `Normalisation.Factor`) against the groups, the fold changes
+before normalisation, identifications per group, `Normalisation.Instability`, and each
+contrast's volcano both ways (centre, up:down, % significant, bait rank, p-value shape); for
+proximity labelling also how steady the biotinylated carboxylases are (a reference, never a
+normaliser). `--check-input` marks these two DEs as the check's inputs: in a session that
+records an experiment type, `run_de.R` refuses any DE that has neither it nor
+`--normalization-check`, and prints these exact commands (`normalization_check.py required
+--input <report> --metadata <conditions>` prints them too, and the chain's recovery step in
+`RECOVERY.md` / `checkpoint.py status` is this check, never the final DE alone). **Exit 0:** the
+data agree with the type's default — use it. **Exit 3 (TRIPPED, or no experiment type
+recorded): STOP before the final DE.** With no type recorded nothing is decided for the user:
+ask what the experiment is (step 3) and which quantities to use. Show the Core staff member
+`NORMALIZATION_CHECK.md` (side by side, normalised vs non-normalised, with a recommendation),
+ask which to use, and record their answer. **The decision is the person's, never Claude's.**
+Never choose, and never fill in `--by` yourself. `--by` is their HIVE login, never a full name.
+`decide` checks it against the Core's staff list (`staff.py`: `CORE_STAFF_FILE`, default
+`/quobyte/proteomics-grp/.config/core_staff.txt`, trusted only when a Core admin owns it). With
+the list, a login on it is accepted and any other is refused. With no list, a login that is an
+agent's name (claude, assistant, bot…) is refused, and any other passes with a NOT VERIFIED
+warning. Their name and login go only into the
+staff-only `logs/normalization_check.staff.json`. The Methods, AUDIT.md, `de_provenance.json` and
+the zip say "Core staff chose … because <reason>", so the reason must not name anyone:
+```
+python3 scripts/normalization_check.py decide --check <S>/output/norm_check/normalization_check.json \
+    --quantities <raw|normalised> --by <their HIVE login> --reason "<why, in their words>"
+```
+The recommendation keeps the type's default unless that default's own volcano is clearly the
+worse one; the checks that tripped are the questions to ask. Never switch silently, either way.
+The final DE is held to the decision AND to the data it was made on (it refuses any other
+`--quantities`, and any other report or conditions — their sha256 is in the check), and records
+it in `de_provenance.json` `normalization_check` and the Methods. A DE without a decided check is
+a WARN in AUDIT.md, and `core_submission.py deliver` holds the delivery until step 8 is done.
+A DE from **before 2.10** has no check record at all. Re-run step 8 on it, or, if Core staff
+decide it stands as it is, they record that with `python3 scripts/normalization_check.py
+ack-legacy --session <S> --by <their HIVE login> --note "<why this DE stands>"`. This is the
+same shape as the QC ack and goes through the same staff-list check. It is accepted only for a
+DE with no check record and is tied to that DE record. It is written to the staff-only
+`logs/normalization_check.staff.json`, and the gate then passes. The final DE:
 ```
 Rscript scripts/run_de.R --input ./search_out/report.parquet \
     --metadata conditions.csv --method <dpc|maxlfq> --outdir ./de_results \
-    --fasta-meta ./search.fasta.meta.json [--block Mouse]
+    --fasta-meta ./search.fasta.meta.json [--block Mouse] \
+    --quantities <decided> --normalization-check <S>/output/norm_check/normalization_check.json
 ```
 **Several samples from one animal / patient → `--block <column>`.** IPs cut from the same
 mouse brain, or before/after samples from one subject, are correlated; without `--block`
@@ -1735,6 +1976,9 @@ they are fitted as independent and the pairing is lost. Give the unit its own
   `--block-scope all`) carries a `CAUTION` — define age contrasts per bait instead.
 State n per group in mice, not IPs. run_de.R prints a note when a column looks like a
 block and `--block` is missing — ask the user.
+A `Sample` column whose value repeats (technical replicates from `locate --reinjections all`)
+is blocked by run_de.R itself — random effect, every contrast from that fit — so pass no
+`--block` for it; see `references/de-analysis.md`, "Technical replicates".
 → `references/de-analysis.md`, "Paired / repeated designs".
 **Keratin sample (step 3):** `run_de.R` reads it from the sidecar or `search_provenance.json`
 and keeps keratin as the analyte — nothing to pass. For a search that records neither (an older
@@ -1866,7 +2110,9 @@ Rscript scripts/run_sets.R --de-dir ./de_results [--sets go[,reactome]] \
 - **camera's power is measured per comparison** (random-set correlation across runs). In
   pulldowns it is low: its count of zero is then not a result, and "significant in both" is
   not the headline.
-- **Pulldowns**: add the control-vs-control contrast (e.g. `Old_IgG-Young_IgG`) to run_de's
+- **Pulldowns** — the experiment type says so (IP or proximity labelling, step 3); the brief
+  and AGENTS.md take the design from the same record (`experiment_type.pulldown_design`):
+  add the control-vs-control contrast (e.g. `Old_IgG-Young_IgG`) to run_de's
   `--contrasts` — the lysate-background question — and pass `--ip-map` (Group, Role
   bait|control, Bait, Condition, Bait_gene) for between-condition tests relative to each bait's
   complex: the interactome is chosen on the bait's enrichment over the control POOLED over
@@ -1923,9 +2169,20 @@ python3 scripts/audit_results.py --out AUDIT.md --conditions ./conditions.csv \
 Checks for the classic new-user pitfalls: too few/no replicates, imbalanced or
 **confounded** design, **mixed acquisition or mixed instruments** in one analysis,
 suspiciously low ID depth, very high missingness, contaminant dominance, DE
-results that are too-empty or implausibly-large (batch/normalization artefacts), and, for a
+results that are too-empty or implausibly-large (batch/normalization artefacts), for a
 Sage search (`--search-out`), an LFQ window that did not fit the runs' MS1 mass error
-(`sage_lfq`).
+(`sage_lfq`), and, for a DIA-NN report, DIA-NN's own per-run `Normalisation.Instability`
+(`normalisation_stability`, read from the `<report>.stats.tsv` beside the DE input).
+**A `normalisation_stability` WARN** names every run above 0.3 (DIA-NN documents no cutoff;
+the skill's is between cohorts measured at 0.04–0.07 and 0.67–1.00). The DE used DIA-NN's
+normalised quantities, so tell the user, and offer a sensitivity analysis on a
+re-quantification with the alternatives DIA-NN documents: `--global-norm` (one global factor
+per run instead of RT-dependent normalisation) or `--no-norm` (none; `Precursor.Normalised`
+and `PG.MaxLFQ` are then not normalised). `--global-norm` goes in the cfg on either route;
+`--no-norm` goes in the cfg of a single-shot search, while the 5-step chain strips it from the
+cfg and takes `diann_parallel.py --no-norm` instead (its report is `no_norm_report.parquet`).
+Run the DE on both reports into separate output folders, compare, and
+report which one the results come from — never swap one for the other silently.
 **Surface every `WARN` to the user, and STOP on any `FAIL`** (e.g. a group with no
 replicate, or a batch confounded with the biology) until they resolve it — don't
 let a new user over-interpret a broken design. The findings also go into the
@@ -1952,6 +2209,10 @@ python3 scripts/sample_quality.py --matrix ./de_results/Expression_Matrix.csv \
 ```
 **If a contamination panel is confounded with a group, STOP** — DE may be contamination,
 not biology, and protein-level filtering will not fix it (→ `references/anomaly-checks.md`).
+Read the panels against the **stated** sample type (`sample_type.py show --session <session>`),
+never one guessed from file names: muscle proteins are the analyte in a muscle sample and a
+contaminant in a liver biopsy; hemolysis matters for plasma/serum. When the panels or the most
+abundant proteins disagree with the stated type, ask the user — do not change it yourself.
 **If the sample IS keratin** (step 3), both auditors read it from `--fasta-meta` (a database
 built with `fetch_fasta.py --keratin-sample`); pass **`--keratin-sample`** to `sample_quality.py`
 **and** `audit_results.py` only for a database that does not record it — keratin is the analyte
@@ -1970,6 +2231,72 @@ sort by severity) into a `## Expert Review Notes` section and surface every **cr
 issue to the user before finalizing. Skip for format conversion / FASTA prep / exploratory
 looks with no formal report. → detail: `references/anomaly-checks.md`.
 
+### 8e. QC runs around this project (Core runs) — STAFF-ONLY
+**Only on a Core STAFF route:** a CoreOmics submission (step 1c, fetched with the Core's
+CoreOmics key) or a Core HT submission (step 1a). The other staff-only steps key on these same
+routes. **Anyone else — including a user who says the data came off the Core's instruments —
+skips this step entirely: never run it for them, never show them a verdict.** This skill is
+public, and clients run it. On a staff route, check the instrument's QC runs around the
+samples, before the Methods (step 1c.7 / 9d):
+```
+python3 scripts/qc_bracket.py --session <session>
+```
+It reads the session's raw-file list and `input/acquisition.json` (step 3b) and asks STAN's
+public `/api/runs` and maintenance log for each instrument. It writes
+`logs/qc_bracket.json` (schema_version 1) and a staff page beside it, `logs/qc_bracket.md`.
+They hold:
+- the nearest QC before (and how long before), every QC during, and the nearest after (or
+  "none yet");
+- each one graded against the same instrument's QC runs over the 30 days before;
+- STAN's maintenance log around the project: each event listed, each long QC gap explained
+  from it (or said to have no record, never a guessed cause), and the first QC run after a
+  repair or column change marked as the check for the samples run after it;
+- one verdict: **good / check / concern / no QC on record**.
+
+**The verdict is staff-only** (Brett, 2026-10-01):
+- `logs/` is Core-internal: it is never delivered and is kept out of the session zip. The run
+  registry (`record_run.py`) gets the verdict and the staff section; the board reads the
+  record there.
+- **No client deliverable carries a verdict word.** The client report has no QC section, and
+  the Methods get one fixed sentence (`--qc-bracket` adds it; `finalize` passes it), the same
+  whatever the verdict. `reproducibility/` gets only the record's path and checksum.
+- **Never put the verdict, the QC runs or IPS into `AI_Analysis_Report.md`**, the README, the
+  delivery email or anything else a client sees.
+
+**Exit codes:**
+- **Exit 3 = STAN unreachable: there is NO verdict.** Never tell anyone the QC was fine. Re-run
+  when STAN answers.
+- Exit 4: no file had both a readable time and an instrument (see `not_checked`).
+- Exit 2, with **no record written**: the session has no raw-file list (`input/raw_files.txt`,
+  or the search's record of its files) — write it and re-run. Or, on a login node, more than 5
+  `.raw` were missing from `acquisition.json` — save step 2's JSON there, or run under `srun`.
+
+**Tell the staff member the summary — only a staff member.** A **check** or **concern** HOLDS the client
+delivery (step 12b `deliver` refuses, dry run included). So does any file that could not be
+placed in time (`not_checked`), a check that could not run, or no record at all. The hold lasts
+until a staff member has read `logs/qc_bracket.md` (for a concern, the samples between the
+normal QC runs, which the record lists) and recorded an acknowledgement:
+```
+python3 scripts/qc_bracket.py ack --session <session> --by <their HIVE login> --note "<one line: what was reviewed and decided>"
+python3 scripts/qc_bracket.py gate --session <session>    # exit 0 = may go out, 2 = held
+```
+Record the acknowledgement only on a staff member's own words, **never in your own name**:
+`--by` must be a HIVE login on the Core staff list (`$CORE_STAFF_FILE`, default
+`/quobyte/proteomics-grp/.config/core_staff.txt`, trusted only when a Core admin owns it). With
+no list, agent-like names (`claude`, `assistant`, `agent`, `bot`…) are refused and the
+acknowledgement is marked NOT VERIFIED. This stops an agent acknowledging by accident; proof
+that a person did it comes later, with the board's Duo approval. With no QC record at all
+(the check could not run), `ack` also needs `--no-record-reason "<one line>"`; that
+acknowledgement never releases a record written later. It is tied to this record: a
+re-run needs a new one. The record is also tied to the session's raw-file list. **If files are
+added or removed after step 8e, the delivery is refused until step 8e is re-run**; no
+acknowledgement releases that. Verdicts of **good** and **no QC on record** go through; the
+instruments with no QC on record are noted in the staff output. Telling a client about a
+check or concern is a staff decision, made in plain words (the reference has wording).
+Not for data from other labs: STAN matches on instrument model, not serial number.
+
+→ detail: `references/qc-bracket.md`.
+
 ### 9. Analyze the data (you write the report)
 Generate the analysis brief (it lists the figures to embed), then **do the analysis
 yourself** — you are the consultant the brief addresses:
@@ -1978,8 +2305,11 @@ python3 scripts/analysis_prompt.py --out ANALYSIS_PROMPT.md \
   --de-dir ./de_results --report ./search_out/report.parquet \
   --conditions ./conditions.csv --figures-dir ./figures [--qc ./QC_Metrics.csv] \
   --engine <engine> --acquisition <DIA|DDA> --instrument "<name>" \
-  --workflow-manifest ./wf/workflow.manifest.json [--submission <session>]
+  --workflow-manifest ./wf/workflow.manifest.json --session <session> [--submission <session>]
 ```
+Always pass `--session <session>`: the brief then states the sample type as the user gave it
+(`sample_type.py`), or **NOT STATED** — in which case the report names no tissue, cell type or
+biofluid, and never takes one from file names.
 With a CoreOmics submission attached (step 3b), pass `--submission <session>`: the brief then
 quotes the record and its Data Quality Notes. Describe the samples in the submitter's words
 and add nothing they did not state ("cross-linked" must not become "chemically cross-linked").
@@ -2068,12 +2398,15 @@ python3 scripts/make_methods.py --raw /path/to/*.d \
     --search-prov <session>/output/search/search_provenance.json \
     --workflow-manifest <session>/input/wf/workflow.manifest.json \
     --out <session>/output/methods.md --de-dir <session>/output/tables \
-    [--submission <session>]
+    [--submission <session>] \
+    [--qc-bracket <session>/logs/qc_bracket.json]     # Core staff runs (step 8e)
 python3 scripts/to_docx.py --in <session>/output/methods.md \
     --out <session>/output/methods.docx
 ```
 (Step 12's `finalize` runs this for you when `output/methods.md` does not exist yet, passing
-`--submission` itself when one is attached.) `--submission` adds **Sample preparation** from
+`--submission` itself when one is attached, and `--qc-bracket <session>/logs/qc_bracket.json`
+when step 8e ran: an **Instrument performance** paragraph of ONE fixed sentence, the same
+whatever the verdict. The verdict itself is staff-only.) `--submission` adds **Sample preparation** from
 the CoreOmics record: when the lab sent peptides it says the submitting laboratory prepared
 them, with no Core-side placeholder; when the Core prepared them the protocol stays a tagged
 blank to fill.
@@ -2169,15 +2502,20 @@ python3 scripts/provenance.py --outdir ./reproducibility \
   --engine <engine> --de-method <dpc|maxlfq> --contrasts "<...>" \
   --q-cutoff 0.01 --logfc 1.0 --adjp 0.05 \
   --acquisition <DIA|DDA> --organism-taxid <taxid> --instrument "<name>" \
-  --commands ./commands.log --timestamp "$(date -u +%FT%TZ)"
+  --commands ./commands.log --timestamp "$(date -u +%FT%TZ)" \
+  [--qc-bracket <session>/logs/qc_bracket.json]     # step 8e: path + sha256 only, no verdict
 ```
 This writes `reproducibility/` with `run_manifest.json`, `reproduce.sh`,
 `REPRODUCE.md`, the conda lock + pip freeze + R sessionInfo + tool versions, a
 `skill.txt` recording **which skill produced this and how it was installed**, copies
 of the params and conditions, and sha256 checksums of inputs/outputs. This step is
-**mandatory and must always run** — code + versions are not optional. `provenance.py`
-auto-discovers the env and Rscript even if `--setup-json` is absent, so versions are
-always captured; still, **check the returned `skipped` count** and, if the conda
+**mandatory and must always run** — code + versions are not optional. The environment it
+captures is **the one the DE ran in**, from run_de.R's `runtime` record in `de_provenance.json`
+(R home, Rscript, library paths, conda env, container) and the DE's own `sessionInfo.txt` — not
+setup.json's, which names only the env setup.sh built. A `[NOTE]` in `MANIFEST.txt` says when
+setup.json names another env (e.g. a DE run in a separate R 4.6 env): relay it. A DE record with
+no `runtime` (before 2.10) falls back to setup.json / PATH and says so (`[SKIPPED] DE runtime`).
+Still, **check the returned `skipped` count** and, if the conda
 lock / R sessionInfo / checksums were skipped, fix the cause and re-run.
 
 ### 11. Output-files report
@@ -2369,7 +2707,9 @@ python3 scripts/core_submission.py email-draft --summary ~/core/PROT_0807/submis
   under the staged `work_dir`, and its `input/raw_files.txt` does not match the staged files;
   with no stage record at all, only `--force` after staff confirm), when the delivery folder
   already has files (→ a new `--label`), or when the path passes through a symlink or leaves
-  the Flinders root.
+  the Flinders root. **It also holds an analysis delivery** when the session's QC check (step
+  8e) says check or concern, could not run, or is missing, until a staff member records
+  `qc_bracket.py ack` (its `qc_gate` says why; `delivery.json` keeps it, staff-side).
 - An analysis delivery fills `<share>/PROT_0807_analysis_<date>/` with `Analysis_Report.html`
   (required), the reports (and its `.pdf`/`.md`), methods, `tables/`, `figures/`,
   `reproducibility/`, the search matrices and, when one was made, `podcast/` (the audio and

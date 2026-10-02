@@ -21,7 +21,9 @@ inline instead of shipping the prompt to an external API.
    `figures.json` are embedded. What must not depend on the writer is added by the page
    itself: Results at a glance, fixed callouts (inferred values, a contaminant-database
    risk, figures that could not be drawn), the top-protein tables and, as the last section,
-   *Appendix: p-value calibration* (`qc_pvalue_panel.png`). No Word copy of the report is made
+   *Appendix: p-value calibration* (`qc_pvalue_panel.png`). The instrument's QC around the
+   project (step 8e) is **staff-only** and never appears in the report: see
+   `references/qc-bracket.md`. No Word copy of the report is made
    any more (Word mangled the figures, 2026-09-24); the Methods stay in Word
    (`methods.docx`). An older session's `AI_Analysis_Report.docx` is left in place.
    The same call writes two twins beside it:

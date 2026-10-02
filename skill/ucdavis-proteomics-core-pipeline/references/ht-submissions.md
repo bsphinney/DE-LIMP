@@ -84,9 +84,29 @@ covering the wrong files**:
 * **`n_files`** — nothing matched. Usually a mistyped submission number.
 * **`paths_exist`** — a path STAN resolved that the filesystem does not have. Checked here
   because otherwise a 120-file SLURM array dies partway through, hours in.
+* **`repeated_paths` FAIL** — STAN lists one file more than once with *different* details
+  (well, run name, class, verdict): which sample it is cannot be read from the manifest.
 
 And the warnings, which need a human rather than a stop:
 
+**Repeats are okay, but they are flagged** (Brett, 2026-10-01) — never dropped silently, never a
+stop on their own:
+
+* **`repeated_paths` WARN** — STAN listed the same file more than once (a plate of 96 came back
+  as 100 lines, one run 4 times, all gates PASS). No engine can take a file twice, so
+  `files.txt` holds it **once**; `ht_manifest.json` records `n_files_listed`, `n_files` and
+  `repeated_paths` (each path with its count), and stderr flags each. Say so — STAN's `counts`
+  still include the repeats.
+* **`repeated_names` WARN** — different files share a run name (a rerun in another folder, one
+  name on two plates). **All are kept** in `files.txt` and listed under `repeated_names` (each
+  name with its paths). But a search cannot take them as given — DIA-NN names a run by its file
+  name without the folder, so they would become one run — so `run_search.py` stops before
+  searching, naming them. Ask the operator: give one another name (a link under another name
+  works), or search them separately.
+* Every search route follows the same rule (`check_report_runs`: `distinct_inputs`,
+  `repeated_names`, one wording): `run_search.py` for every engine, `diann_parallel.py`,
+  `radiant_parallel.py`. A repeated path is searched once and recorded in
+  `search_provenance.json` `repeated_paths`, which the analysis report shows.
 * **`plates`** — more than two trays. Confirm the extent; it is inferred, not recorded.
 * **`counts`** — fewer than 12 customer samples. A mistyped submission looks exactly like
   this. A genuinely small submission is legal, so this warns rather than blocks.

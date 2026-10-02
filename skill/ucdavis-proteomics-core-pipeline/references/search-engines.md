@@ -325,8 +325,13 @@ Every job is held to the same contract as the 5-step chain
   file shows: MS1/MS2 signal means DIA-NN **read** it and nothing passed the q-value filter (a
   blank or failed injection); all zeros or no row keeps both explanations, since two readable
   runs searched against an empty library also had 0 in every column.
-- **Inputs that share a run name are refused at generation.** DIA-NN names a run by its file
-  name without the folder, so `/plate1/s1.raw` and `/plate2/s1.raw` would be one `Run`.
+- **Repeats in the input list are flagged, for every engine** (`check_report_runs`). The same
+  file listed more than once is searched **once** and recorded in `search_provenance.json`
+  `repeated_paths` (with the count), which the analysis report shows. Different files that share
+  a run name are flagged (`repeated_names`) and **stop the search before it is written**: DIA-NN
+  names a run by its file name without the folder, so `/plate1/s1.raw` and `/plate2/s1.raw`
+  would be one `Run`, and Sage converts both to one mzML name. Give one another name, or search
+  them separately.
 - **The cfg is spliced into the search command by the chain's reader and quoting.** The
   library job hands DIA-NN the cfg with `--cfg`; the search job's flags come from
   `diann_parallel.cfg_tokens()` and `bash_flags()`, the same functions every chain step uses
@@ -347,7 +352,8 @@ Every job is held to the same contract as the 5-step chain
 
 **5-step chain resources from `run_search.py`.** `--libpred-cpus` (step 1, default 16),
 `--assembly-cpus` and `--assembly-mem` (steps 3 and 5, defaults 64 CPUs / 128 GB) and
-`--time-per-file` (hours per array task in steps 2 and 4, default 2) are forwarded to
+`--time-per-file` (hours per array task in steps 2 and 4; default 4 h at 16 CPUs, scaled up when
+the tasks get fewer) are forwarded to
 `diann_parallel.py` when given. Ask for less when a 64-CPU / 128 GB job would wait a long time
 on a busy preemptible queue. They size only the chain: when routing picks single-shot,
 `run_search.py` prints a NOTE saying they were ignored.
@@ -498,9 +504,18 @@ Apache-2.0 — the open-source alternative to DIA-NN for non-academic users. Lib
    confident target PSMs (`peptide_q` ≤ 0.01, rank 1). It also reads that MS1-peak count
    (the log, else `lfq.parquet` targets at `q_value` ≤ 0.05). It **warns** when a median + 2
    ppm exceeds the window, or when the count is 0 or under 10% of the target peptides at
-   1%. The warning names the fix (a wider `lfq_settings.ppm_tolerance`) and changes
-   nothing. Record: `<out>/sage_lfq_check.json` + `search_provenance.json`
-   `sage_lfq_check`.
+   1%. The warning names the fix (a wider `lfq_settings.ppm_tolerance`). Record:
+   `<out>/sage_lfq_check.json` + `search_provenance.json` `sage_lfq_check`.
+   **Runs outside the window are a gate (2.10).** The corrected window (the worst run's
+   median + 2 ppm, rounded up) goes into a copy of the config, `<out>/sage_config.lfq_ppm<N>.json`
+   (`corrected_params`), and `refusal()` records the exact `run_search.py` command that repeats
+   the search with it into `<out>_lfq_ppm<N>` (`rerun`, built from `search_provenance.json`'s
+   `tools`, `bundle`, `fasta`, `files`, `threads`, `queue`, `submitted_sbatch`). `--adapt-only`
+   and an inline search refuse to write `report.parquet`, and `run_de.R` refuses a report beside
+   such a record (`sage_lfq_check.py gate`), until the re-run is used or the user accepts the
+   quantities: `--adapt-only --accept-lfq-window "<who, why>"` (`accepted`; kept on a re-check
+   while the window and the runs outside it are unchanged). Nothing is re-run automatically. A
+   low peak count with a fitting window is not gated (its cause is unknown).
 4. **Adapter:** map `lfq.parquet` (one row per **peptide** × file: peptide, proteins,
    is_decoy, q_value, filename, intensity) → DIA-NN-shaped `report.parquet` with
    `Run, Protein.Group, PG.MaxLFQ`. **`lfq.parquet` is not filtered by Sage.** It holds

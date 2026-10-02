@@ -1391,6 +1391,7 @@ def methods_command(f, out):
                    "files, or at least their names")
     cmd = [sys.executable, os.path.join(HERE, "make_methods.py"), "--raw", *f["raws"],
            "--out", out]
+    qc = os.path.join(f["p"]["logs_dir"], "qc_bracket.json")     # qc_bracket.record_paths
     for flag, val in (("--fasta-meta", f["fasta_meta_path"]),
                       ("--de-dir", f["p"]["de_dir"] if f["de_prov"] else None),
                       ("--params", f["params"]), ("--search-prov", f["search_prov_path"]),
@@ -1399,7 +1400,9 @@ def methods_command(f, out):
                        or (f["run_manifest"].get("query") or {}).get("instrument")),
                       ("--acquisition", f["acquisition"]),
                       ("--submission", f["p"]["session_dir"]
-                       if os.path.isfile(f["p"]["submission_record"]) else None)):
+                       if os.path.isfile(f["p"]["submission_record"]) else None),
+                      # qc_bracket.py's record: its fixed Instrument performance sentence
+                      ("--qc-bracket", qc if os.path.isfile(qc) else None)):
         if val:
             cmd += [flag, str(val)]
     return cmd

@@ -320,15 +320,26 @@ class WarningReachesEveryReader(unittest.TestCase):
             with open(p, "w") as fh:
                 json.dump(v, fh)
         open(fasta, "w").close()
-        r = subprocess.run([sys.executable, RUN_SEARCH, "--tools", tools, "--bundle", bundle,
-                            "--params", cfg, "--fasta", fasta, "--out", self.out,
-                            "--files", "a.mzML", "--engine", "sage", "--adapt-only"],
-                           capture_output=True, text=True, timeout=120,
-                           env=job_env(self.d, PATH="/usr/bin:/bin"))
-        self.assertEqual(r.returncode, 0, r.stderr)
+        argv = [sys.executable, RUN_SEARCH, "--tools", tools, "--bundle", bundle,
+                "--params", cfg, "--fasta", fasta, "--out", self.out,
+                "--files", "a.mzML", "--engine", "sage", "--adapt-only"]
+        env = job_env(self.d, PATH="/usr/bin:/bin")
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=120, env=env)
+        # since 2.10 a window that does not fit the mass error is a gate, not only a warning:
+        # tests/test_sage_lfq_gate.py has the rest
+        self.assertNotEqual(r.returncode, 0, r.stderr)
         self.assertIn("[sage_lfq_check] WARNING:", r.stderr)
+        self.assertIn("REFUSED: report.parquet is not built from this Sage search", r.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.out, "report.parquet")))
+        with open(os.path.join(self.out, "search_provenance.json")) as fh:
+            self.assertEqual(json.load(fh)["sage_lfq_check"]["status"], "warn")
+        r = subprocess.run(argv + ["--accept-lfq-window", "core analyst: IDs only, quantities "
+                                   "not reported"], capture_output=True, text=True, timeout=120,
+                           env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
         res = json.loads(r.stdout[r.stdout.index("{"):])        # after adapt_sage's own line
         self.assertEqual(res["sage_lfq_check"]["status"], "warn")
+        self.assertIn("IDs only", res["sage_lfq_check"]["accepted"]["reason"])
         with open(os.path.join(self.out, "search_provenance.json")) as fh:
             self.assertEqual(json.load(fh)["sage_lfq_check"]["status"], "warn")
 

@@ -22,6 +22,7 @@ The orchestrator asks where results should live (SKILL.md step 3b):
   MANIFEST.txt              # every finalize part as [OK] / [SKIPPED] <reason> / [INFO]
   input/                    # conditions.csv, search.fasta, params.*, wf/workflow.manifest.json,
                             #   raw_files.txt (raw data is referenced, NOT copied — too large),
+                            #   acquisition.json (step 2's detect_acquisition.py output),
                             #   submission.json + samples.tsv (Core data: the CoreOmics record,
                             #   allowlisted — submission_report.py attach)
   session.json              # session metadata; `coreomics` names the submission (Core data)
@@ -68,13 +69,16 @@ The orchestrator asks where results should live (SKILL.md step 3b):
     OUTPUT_FILES.md         # catalog of every file
     comparison/             # (re-analyses) COMPARISON.md + concordance CSVs
   scripts/                  # a copy of the skill scripts that ran this analysis (self-contained)
-  logs/                     # commands.log + engine logs
+  logs/                     # commands.log + engine logs; Core-internal records (never delivered,
+                            #   not in the session zip): decisions.md, conversation/, and the
+                            #   staff-only QC check (qc_bracket.py, step 8e): qc_bracket.json
+                            #   (schema_version 1), qc_bracket.md, qc_bracket_ack.json
     decisions.md            #   the decisions log (log_decision.py): what was decided, and why
     conversation/           #   CORE-INTERNAL (save_transcript.py): <session-id>.jsonl (redacted
                             #   Claude Code transcripts), index.json, conversation.md
 ```
 
-- `session.py init --name "..." --raw <globs> [--base <path>] [--reanalysis-of <prior>]`
+- `session.py init --name "..." --raw <globs> [--base <path>] [--reanalysis-of <prior> [--beside]]`
   makes the folders and prints a `paths` map; **route every step's
   `--out`/`--outdir`/`--dest` into those paths**.
 - `session.py finalize --dir <session> [--zip]` ensures the Methods, writes the deposit package,
@@ -276,7 +280,17 @@ design) is common and must not clobber or be confused with the original.
   under it. It becomes a re-analysis only when the user asks for one.
 - **Placement:** with `--reanalysis-of <prior>`, the new run nests under
   `<prior>/reanalysis/<date>_<name>/` — same internal layout — so all re-analyses
-  live with their original.
+  live with their original. With `--beside` as well, it goes **next to** the prior, in the
+  prior's parent folder, as `<date>_<name>_v<N>`: N is one above the prior's version and every
+  `_v<M>` of that name already there, so an existing folder is never reused, and nothing is
+  written into the prior (a delivered, read-only-by-policy folder; a Core re-analysis, 2026-09-25).
+- **The link:** `.reanalysis_of` (the prior's path) and `reanalysis.json` (`reanalysis_of`,
+  `version`, `prior_version`, `placement`, and the prior's `search_provenance.json` /
+  `de_provenance.json` / README / raw list as they were). `session.reanalysis_of()` is the one
+  reader: finalize's `DIFFERENCES.md`, the README and AGENTS.md ("Re-analysis of … (this is
+  version N)") and the run log's entry use it.
+- **Finalize again** (to add a podcast, say): an unchanged analysis adds nothing to the Core run
+  log and is not posted to Slack a second time (`references/run-registry.md`).
 - **`DIFFERENCES.md`** (written at finalize) states exactly what changed vs the original:
   engine + version, DE method, q / logFC value and role / adj.P, contrasts, the design with its
   covariates, the blocking factor (column, effect, scope), the DE contaminant policy, the FASTA

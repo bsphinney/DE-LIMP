@@ -1,5 +1,47 @@
 # Changelog
 
+## [Skill 2.10.0] — 2026-10-01
+
+### Results
+- **IPs and pull-downs default to non-normalised quantities.** The experiment type is recorded once (from the submission, confirmed with the user) and gives the default; the normalisation check (step 8) tests the data for every type, and when they disagree it stops and shows normalised and non-normalised side by side for a person to choose (`experiment_type.py`, `normalization_check.py`, `run_de.R --quantities`).
+- **The normalisation check cannot be skipped:** with an experiment type recorded, `run_de.R` refuses a final DE without it (`--normalization-check`), and an analysis delivery is held until the check is decided. A DE from before 2.10 goes out once Core staff acknowledge it (`normalization_check.py ack-legacy`).
+- **Fractions are two kinds:** fractions combined for depth stay normalised; separation fractions compared with each other (SEC, gradients, complexome, organelles) default to non-normalised, as the DIA-NN README advises.
+- **Your own sequences can be added to the database** (`fetch_fasta.py --add-fasta`, e.g. an EGFP bait); a contaminant that is mostly the same protein is removed so it cannot take their peptides, and one that shares only a few is kept and flagged.
+- **An added sequence is the bait's candidate:** the user is asked which one is the bait (`experiment_type.py set-bait`); until they answer, the data check uses the one added sequence and says it is unconfirmed, and with several it uses none.
+- **DIA-NN's Normalisation.Instability is checked**; runs above 0.3 are flagged.
+- **A Sage LFQ window that misses the measured MS1 offset now stops** with the corrected re-run command, instead of only warning.
+- **FragPipe DDA writes the whole protein group**, so a contaminant anywhere in a group is found.
+- **The Methods name each pipeline's own contaminant rule**, not DIA-NN's for every engine.
+- **The sample type is asked and recorded**, never guessed from file names.
+- **A cut-short one-per-gene download stops** instead of quietly becoming the full proteome; downloads are retried and checked.
+- **A `--path` database records the organism you named**, so the Methods and FRAN have it.
+
+### Which file is which sample
+- **When a label matches several runs, or two samples share a label, staff decide which run is which** (`--choose`); the skill never picks.
+- **A file listed twice is searched once and flagged**; two different files with the same name stop the search with a clear message (searching both is 2.11).
+- **Re-injections get one decision** for the whole submission: `--reinjections latest|all|ask`.
+- **HT plates: `locate --files-from` matches runs by sample name**, the way the plate names them.
+- **The Core LIMS `.xlsx` sample sheet is read directly**; a condition per replicate (`<sample>_mix_1` … `_5`) becomes conditions plus replicate numbers, or is asked about, and `core_submission.py conditions` relays that question.
+
+### For Core staff
+- **The instrument's QC around each project is checked against STAN** (`qc_bracket.py`). It is staff-only: a "check" or "concern" verdict, a file that could not be placed in time, or a missing check holds an analysis delivery until a staff member acknowledges it. A check made for a different file list is refused until it is re-run. The acknowledgement names a HIVE login on the Core staff list (`CORE_STAFF_FILE`); agent-like names are refused.
+- **Sign-offs are a person's:** a normalisation decision, a QC acknowledgement and a pre-2.10 DE's acknowledgement need the HIVE login of someone on the Core staff list (`/quobyte/proteomics-grp/.config/core_staff.txt`, trusted only when a Core admin owns it); agent names are refused, and what reaches a client says "Core staff", never the name.
+- **No database credential is read from a group folder** (`fran_deposit.py`).
+
+### Running on HIVE
+- **The DIA-NN chain's array tasks are sized to the queue's per-user CPU cap**, from a measured floor of 8 CPUs per file; their wall clock is 4 h at 16 CPUs, scaled up with fewer (8 h at 8, 16 h at 4) — all but 32 of 6,182 real step-2 tasks (p99 160 min, p99.5 248 min; the slowest take `--time-per-file`) — and they keep 64 GB for steps 1b and 2 (48 GB for step 4). Both limits come from HIVE's own records of real Core runs (sacct) and a measured slowdown at fewer CPUs; `run_search.py --mem-per-file` / `--time-per-file` change them.
+- **A folder with a space in its path runs:** every path in the generated chain jobs is quoted.
+- **A node that cannot reach the storage is a node fault**, not DIA-NN's: `node_fault.py` judges each failed task and prints the command that resubmits them on other nodes (the retry is a command, not automatic; one at a time per search folder).
+- **With `--beside`, a re-analysis goes beside the earlier one as `_v2`, `_v3` …**; re-finalizing an unchanged analysis logs and posts nothing new.
+
+### Packaging
+- **The development sandbox (`ucdavis-proteomics-dev`) is no longer listed in the plugin marketplace**; the stable skill is the only plugin offered.
+
+### Records
+- **The reproducibility bundle records the environment the DE ran in**, not setup's.
+- **An override is recorded as the user's choice**, with who set it and why, never as an SOP.
+- **A relative `--cfg` is never read from a guessed file.**
+
 ## [Skill 2.9.1] — 2026-10-01
 
 - **STAN's database credential must never be shared.** `/quobyte/proteomics-grp/brett/.pgfarm_token`

@@ -66,6 +66,15 @@ diann_kept_quant <- function(cq, requantified) {
          cq$tag, cq$source),
        under_quantified = !requantified)
 }
+# Where the contaminant rule comes from, said by each pipeline's descriptor
+# (`contaminant_rule_origin`) and quoted at the end of the record's rule text. It ended "the rule
+# of DIA-NN's --cont-quant-exclude, applied here" for every engine, and a Sage or FragPipe reader
+# took that to mean DIA-NN had run. `engine`: NULL for a DIA-NN report (the rule IS the one that
+# flag uses), else the label the engine's report declares ("Sage", "FragPipe IonQuant MaxLFQ").
+contaminant_rule_origin <- function(engine = NULL) {
+  if (is.null(engine)) "the rule of DIA-NN's --cont-quant-exclude, applied here"
+  else sprintf("applied here, in the DE step, to the %s report", engine)
+}
 # Where a precursor's accessions are read from, most complete first. Protein.Ids lists
 # every protein the precursor matches; Protein.Group only the inferred group. Adapted
 # (protein-level) reports carry only Protein.Group.
@@ -399,7 +408,8 @@ diann_cont_quant_exclude <- function(report_path) {
   r <- a$res
   if (!isTRUE(r$recorded))
     return(list(recorded = FALSE, tag = NA_character_,
-                source = "no DIA-NN log beside the report and no DIA-NN parameters file was found"))
+                source = if (is.character(r$why) && length(r$why) == 1 && nzchar(r$why)) r$why
+                         else "no DIA-NN log beside the report and no DIA-NN parameters file was found"))
   list(recorded = TRUE, tag = if (length(r$value) && nzchar(r$value)) r$value else NA_character_,
        source = r$source)
 }
@@ -617,6 +627,8 @@ keratin_default_removed <- function(k, ids, flag, feature = NULL) {
 #           "kept"         --keep-contaminants: quantified and tested with the sample
 #           "none_present" no precursor maps to a tagged entry
 #           "not_checked"  the report has no accession column to test
+#   rule            the rule text, ending with where it comes from: `rule_origin`, the pipeline
+#                   descriptor's contaminant_rule_origin -- never one engine's for every engine
 #   keratin_sample  keratin_sample_status(), plus n_precursors_kept (precursors mapping only to
 #                   exempted keratin-family entries), requantified (the pipeline's descriptor:
 #                   are protein quantities re-derived from precursors here?), and for a sample
@@ -626,7 +638,7 @@ contaminant_record <- function(census, share, keep, id_column, intensity_column,
                                risk = NULL, fasta_meta = NULL,
                                share_table = "QC_contaminant_share.csv",
                                removed_table = "contaminants_removed.csv",
-                               keratin = NULL, tag = CONTAMINANT_TAG) {
+                               keratin = NULL, tag = CONTAMINANT_TAG, rule_origin = NULL) {
   ker <- if (!is.null(keratin)) {
     k <- keratin
     k$exempt_accessions <- as.list(k$exempt)     # always a JSON array
@@ -653,10 +665,13 @@ contaminant_record <- function(census, share, keep, id_column, intensity_column,
     pattern = contaminant_regex(),
     # what one counted item is (contaminant_unit): every count below is of distinct items
     unit = u$plural, unit_singular = u$singular, unit_level = u$level,
-    # THE rule text: methods.txt and make_methods.py both quote it
-    rule = sprintf(paste0("a %s is a contaminant when any accession in %s starts ",
-                          "with %s -- the rule of DIA-NN's --cont-quant-exclude, applied here"),
-                   u$singular, id_column, paste0("'", CONTAMINANT_TAGS, "'", collapse = " or ")),
+    # THE rule text: methods.txt and make_methods.py both quote it. Its origin is the pipeline's
+    # to say (rule 1); a pipeline that does not say gets a tag, not DIA-NN's words (rule 2).
+    rule = sprintf("a %s is a contaminant when any accession in %s starts with %s -- %s",
+                   u$singular, id_column, paste0("'", CONTAMINANT_TAGS, "'", collapse = " or "),
+                   if (is.null(rule_origin)) "applied here [origin not recorded -- confirm]"
+                   else rule_origin),
+    rule_origin = rule_origin,
     counted_after = "identification FDR filters, analysed runs only",
     n_precursors = n,
     n_precursors_total = census$n_precursors_total,

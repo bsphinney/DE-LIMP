@@ -98,8 +98,9 @@ BLOCKING_STATUS = {"staged", "ingested"}
 INGEST_DIRS = [os.environ.get("FRAN_INGEST_DIR"), f"{GROUP_ROOT}/brett/glendon/fran_ingest"]
 PY_CANDIDATES = [os.environ.get("FRAN_INGEST_PYTHON"),
                  f"{GROUP_ROOT}/brett/envs/alphadia2/bin/python"]
+# A database credential is the reader's own, never a file in a group folder (mirrors the stable
+# skill's 2.10 fix: the group path {GROUP_ROOT}/fran/.pgfarm_token is no longer tried).
 TOKEN_CANDIDATES = [os.environ.get("DELIMP_PG_TOKEN_FILE"),
-                    f"{GROUP_ROOT}/fran/.pgfarm_token",
                     os.path.expanduser("~/.pgfarm_token")]
 
 # What gets linked into the drop entry. A curated list, not the whole directory: the search dir

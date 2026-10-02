@@ -14,7 +14,8 @@ Detection per format (best-effort, with a confidence score):
               windows (<= 2 Da) with many distinct centers => DDA.
   Thermo .raw not natively readable here; read through ThermoRawFileParser
               (https://github.com/compomics/ThermoRawFileParser/releases, v1.4.0+).
-              Metadata JSON -> instrument model and scan counts; a `query` of a
+              Metadata JSON -> instrument model, scan counts and the creation date
+              (`acquired_at`, see acq_time.py); a `query` of a
               mid-run slice of scans -> isolation windows + the filter string's
               data-dependent flag -> DIA/DDA and the acquired bounds. Parser missing
               or failing => 'unknown'/low, a stated reason, and a stderr WARNING.
@@ -71,6 +72,8 @@ from estimate_params import PR_MZ_RANGE_BASIS  # noqa: E402
 from bruker_method import ms1_acq_range  # noqa: E402
 # The resolution reader runs as a subprocess; only its words are shared.
 from thermo_resolution import PYTHONNET_MISSING  # noqa: E402
+# When each run was acquired, and which time zone that is: the one reader (qc_bracket.py's too).
+import acq_time  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Instrument extraction (PLAN.md §7d) — mirrors DE-LIMP R/helpers_instrument.R.
@@ -1087,10 +1090,12 @@ def read_thermo_raw(path):
     """Everything detect_acquisition reports for one Thermo .raw, from at most two TRFP calls.
 
     Returns a dict: acquisition, confidence, reason, precursor_mz_range, instrument,
-    warnings (every read failure, in words), reader.
+    warnings (every read failure, in words), reader, and acq_time.result()'s acquired_at,
+    acquired_at_source, acquired_at_note (from the same metadata call).
     """
     out = {"acquisition": "unknown", "confidence": "low", "reason": "",
            "precursor_mz_range": None, "instrument": None, "warnings": [], "reader": None}
+    out.update(acq_time.result(note="not read: ThermoRawFileParser did not run (see warnings)"))
     cmd = find_trfp()
     if not cmd:
         out["reason"] = _trfp_not_found()
@@ -1112,7 +1117,9 @@ def read_thermo_raw(path):
     if meta is None:
         # Not fatal for DIA/DDA, but the instrument decides mass accuracy downstream.
         out["warnings"].append(f"instrument unknown: {meta_err}")
+        out.update(acq_time.result(note=f"not read: {meta_err}"))
     else:
+        out.update(thermo_acquired_at(meta, path))
         out["instrument"] = _cv(meta, "InstrumentProperties", CV_MODEL)
         if not out["instrument"]:
             out["warnings"].append("instrument unknown: ThermoRawFileParser metadata has no "
@@ -1162,6 +1169,17 @@ def read_thermo_raw(path):
     return out
 
 
+def thermo_acquired_at(meta, path):
+    """acq_time.result() for a .raw from its TRFP metadata, with the sanity check against the
+    file's modification time folded into the note (not a `warning`: the acquisition decision
+    stands either way, and qc_bracket.py is the step that uses the time)."""
+    rec = acq_time.from_thermo_value(acq_time.thermo_creation_text(meta))
+    bad = acq_time.check_against_mtime(rec, path)
+    if bad:
+        rec["acquired_at_note"] = "; ".join(x for x in (rec["acquired_at_note"], bad) if x)
+    return rec
+
+
 def detect_thermo_raw(path):
     """(kind, confidence, reason, precursor m/z range) -- the shape every detector returns."""
     t = read_thermo_raw(path)
@@ -1173,6 +1191,8 @@ def classify(path):
     low = p.lower()
     mz_range = None
     warnings, reader, instrument = [], None, None
+    acquired = acq_time.result(note="not read for this format (only a Bruker .d and a Thermo "
+                                    ".raw are)")
     if low.endswith(".d"):
         kind, conf, why, mz_range = detect_bruker_d(p); vendor = "Bruker"
     elif low.endswith((".mzml", ".mzml.gz")):
@@ -1188,12 +1208,15 @@ def classify(path):
                                      t["precursor_mz_range"])
         # instrument comes from the same metadata call -- do not run the parser twice
         instrument, warnings, reader = t["instrument"], t["warnings"], t["reader"]
+        acquired = {k: t[k] for k in ("acquired_at", "acquired_at_source", "acquired_at_note")}
     elif low.endswith((".wiff", ".wiff2")):
         kind, conf, why, vendor = "unknown", "low", "SCIEX .wiff: convert to mzML to classify", "SCIEX"
     else:
         kind, conf, why, vendor = "unknown", "low", "unrecognized extension", "?"
     if vendor != "Thermo":
         instrument = detect_instrument(p)
+    if vendor == "Bruker":
+        acquired = acq_time.read_bruker(p)
     # A .d whose analysis.tdf indexes only part of its tdf_bin is searched without an
     # error -- DIA-NN reads what the index points at. Nothing downstream can tell, so it
     # is checked here, before the engine is chosen. None for anything but a Bruker .d.
@@ -1221,6 +1244,10 @@ def classify(path):
             "warnings": warnings,
             # the external reader and its version, when one was needed (Thermo .raw)
             "reader": reader,
+            # When the run was acquired (start), as UTC ISO 8601 "...Z" -- or null, with
+            # acquired_at_note saying why. acquired_at_source names the field; for a .raw the
+            # note also states the time-zone assumption (acq_time.py). qc_bracket.py reads these.
+            **acquired,
             # Thermo Orbitrap only (else null): read from the scan trailer by main() in
             # batches -- see add_resolutions(). resolution_note says where from, or why not;
             # ms2_analyzer is "FTMS" (Orbitrap), "ITMS" (ion trap: no Orbitrap resolution) or

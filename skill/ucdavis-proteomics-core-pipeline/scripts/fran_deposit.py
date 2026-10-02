@@ -151,8 +151,11 @@ BLOCKING_STATUS = {"staged", "ingested"}
 INGEST_DIRS = [os.environ.get("FRAN_INGEST_DIR"), f"{GROUP_ROOT}/brett/glendon/fran_ingest"]
 PY_CANDIDATES = [os.environ.get("FRAN_INGEST_PYTHON"),
                  f"{GROUP_ROOT}/brett/envs/alphadia2/bin/python"]
+# A database credential is the reader's own: never a file in a group folder, where every member
+# could read it (2.10; the PG Farm service-account secret is long-lived and shared with STAN --
+# whoever reads it can act as the service account). 2.9 and earlier also tried
+# {GROUP_ROOT}/fran/.pgfarm_token; that file never existed, and the path is no longer tried.
 TOKEN_CANDIDATES = [os.environ.get("DELIMP_PG_TOKEN_FILE"),
-                    f"{GROUP_ROOT}/fran/.pgfarm_token",
                     os.path.expanduser("~/.pgfarm_token")]
 
 # What gets linked into the drop entry. A curated list, not the whole directory: the search dir

@@ -386,6 +386,9 @@ EXIT_NOT_MEASURED = 6    # DIA-NN ran and finished WITHOUT logging it (a wrong F
 EXIT_IO_ERROR = 7        # the probe's own log could not be read (io_error, e.g. ESTALE) on the
                          # runs that failed; none of them answered
 EXIT_TIMED_OUT = 8       # the runs that failed all hit the per-probe --timeout, or --budget ran
+EXIT_OOM = 9             # DIA-NN ran OUT OF MEMORY (the job cgroup's OOM killer, a SIGKILL, or
+                         # std::bad_alloc): the job's --mem is too small for this library and run,
+                         # and every run -- and every step 2-5 task -- would hit it too
                          # out; none of them answered
 # Retried once: a crash or an unreadable log can be a passing fault of the node or the storage.
 # Fallen back past (after the retry): those two, and a time limit -- DIA-NN still running when
@@ -406,7 +409,41 @@ EXIT_MEANING = {
     EXIT_NOT_MEASURED: "DIA-NN ran and finished without logging it (a wrong FASTA or library, a "
                        "large miscalibration, failed injections), too few runs logged it, or no "
                        "run could be probed",
+    EXIT_OOM: "DIA-NN ran OUT OF MEMORY before logging it -- not the data: the job's memory is too "
+              "small for this library and run (raise --mem-per-file: run_search.py / "
+              "diann_parallel.py) and resubmit; steps 2-5 ask for the same memory",
 }
+# DIA-NN's own words when an allocation fails (the OOM killer itself leaves no line)
+OOM_LINE_RE = re.compile(r"std::bad_alloc|cannot allocate memory|out of memory", re.I)
+
+
+def oom_kill_count():
+    """How many processes this process's memory cgroup has had killed for running out of memory
+    (SLURM's job cgroup on HIVE: cgroup v2 memory.events, v1 memory.oom_control), or None when it
+    cannot be read here -- never a guess."""
+    try:
+        with open("/proc/self/cgroup") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return None
+    for ln in lines:
+        parts = ln.split(":", 2)
+        if len(parts) != 3:
+            continue
+        if parts[1] == "":
+            path = os.path.join("/sys/fs/cgroup" + parts[2], "memory.events")
+        elif "memory" in parts[1].split(","):
+            path = os.path.join("/sys/fs/cgroup/memory" + parts[2], "memory.oom_control")
+        else:
+            continue
+        try:
+            with open(path) as fh:
+                m = re.search(r"^oom_kill (\d+)$", fh.read(), re.M)
+        except OSError:
+            continue
+        if m:
+            return int(m.group(1))
+    return None
 STOP_GRACE_S = 30     # SIGTERM -> SIGKILL, once a radius is in hand
 _HARD = getattr(signal, "SIGKILL", signal.SIGTERM)
 
@@ -997,6 +1034,8 @@ def failure_class(stopped, probes, refused):
     without logging it is the data answering, and the whole probe is then not measured."""
     if refused:
         return "refused", EXIT_REFUSED
+    if stopped == "oom":
+        return "oom", EXIT_OOM
     if stopped == "environment":
         return "environment", EXIT_ENVIRONMENT
     failed = [p for p in probes if p.get("missing")]
@@ -1226,7 +1265,7 @@ def run_probe(diann, raw, fasta, lib, threads, timeout, extra="", extra_args=(),
     reader = LogReader(measure, skip)
     res = {"radius": None, "found": reader.found, "missing": reader.missing(), "lines": [],
            "timed_out": False, "log": log_path, "environmental": False, "io_error": None,
-           "log_publish_error": None}
+           "log_publish_error": None, "exit": None, "oom": None}
     try:
         return _run_probe(cmd, live, res, reader, timeout, tag)
     finally:
@@ -1264,6 +1303,7 @@ def _run_probe(cmd, live, res, reader, timeout, tag):
     _LIVE.add(p)
     if _STOP:                       # a signal arrived while it was starting
         _signal_group(p, _HARD)
+    oom_before = oom_kill_count()
     src = _Tail(live)
     try:
         pending = b""
@@ -1290,6 +1330,8 @@ def _run_probe(cmd, live, res, reader, timeout, tag):
                 reader.feed(line)
                 if reader.done():
                     break              # got it all -- no need to finish the search
+            if exited:
+                res["exit"] = p.returncode      # it ended by itself: not stopped by the probe
             if reader.done() or exited or _STOP:
                 break
             if time.time() >= deadline:
@@ -1307,6 +1349,23 @@ def _run_probe(cmd, live, res, reader, timeout, tag):
             _kill_now(p)                    # timeout, signal, I/O error, or the leader gone
         _LIVE.discard(p)
     res["radius"], res["missing"] = reader.found.get("radius"), reader.missing()
+    # Out of memory, before it logged what was asked: the job cgroup counted an OOM kill, DIA-NN
+    # was SIGKILLed by nobody here (the kernel's OOM killer), or it said an allocation failed.
+    # Read as "finished without logging it" this blamed the data and tried two more runs that
+    # would die the same way (review of 2.10, the 32 GB request).
+    if res["missing"] and not (res["timed_out"] or _STOP or res["io_error"]):
+        oom_after = oom_kill_count()
+        said = next((ln for ln in res["lines"] if OOM_LINE_RE.search(ln)), None)
+        if oom_before is not None and oom_after is not None and oom_after > oom_before:
+            res["oom"] = (f"the job's memory cgroup counted {oom_after - oom_before} "
+                          "out-of-memory kill(s) during this run")
+        elif res["exit"] in (-_HARD, 128 + _HARD):
+            res["oom"] = (f"DIA-NN was killed by signal {_HARD} (exit {res['exit']}) that the "
+                          "probe did not send -- the out-of-memory killer, most often")
+        elif said:
+            res["oom"] = f"DIA-NN: {said.strip()[:200]}"
+        if res["oom"]:
+            note(f"[probe_window] OUT OF MEMORY: {res['oom']}")
     if res["timed_out"]:
         note(f"[probe_window] timeout: DIA-NN stopped after {timeout:.0f} s without logging "
              + describe_missing(res["missing"]))
@@ -1529,7 +1588,8 @@ def main():
         secs = round(time.time() - t0, 1)
         rec = dict(c, radius=r["radius"], seconds=secs, threads=a.threads,
                    timed_out=r["timed_out"], missing=r["missing"], log=r["log"],
-                   io_error=r["io_error"], log_publish_error=r["log_publish_error"])
+                   io_error=r["io_error"], log_publish_error=r["log_publish_error"],
+                   exit=r["exit"], oom=r["oom"])
         if "mass-acc" in measure:
             rec.update(ms2_ppm=r["found"].get("ms2_ppm"), ms1_ppm=r["found"].get("ms1_ppm"),
                        mass_acc_fixed_by_flags=bool(r["found"].get("fixed_mass_acc")),
@@ -1546,6 +1606,10 @@ def main():
              + (" (timed out)" if r["timed_out"] else "") + f" in {secs} s")
         if _STOP:
             stopped = "signal"
+            break
+        if r["oom"]:
+            # the same library, the same memory: every run -- and steps 2-5 -- would die alike
+            stopped = "oom"
             break
         if r["environmental"]:
             stopped = "environment"
@@ -1569,7 +1633,7 @@ def main():
     good = [p for p in probes if not p["missing"]]
     if stopped is None:
         stopped = "measured" if len(good) >= len(targets) else "no_more_runs"
-    pin = bool(good) and stopped not in ("environment", "signal")
+    pin = bool(good) and stopped not in ("environment", "signal", "oom")
     # Refusals that are NOT "no run answered": runs DID answer, and what they said must not be
     # pinned. They fail the probe exactly as a run that logged nothing does -- loudly, with the
     # evidence written -- because a wrong number pinned cohort-wide is worse than no number.

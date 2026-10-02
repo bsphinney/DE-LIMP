@@ -26,7 +26,8 @@ heavy work runs on compute nodes through the array — never the login node.
 Usage:
   python3 diann_parallel.py --diann '<diann binary | apptainer exec ... diann-linux>' \
       --raw /data/*.d --fasta /path/search.fasta --out ./diann_parallel \
-      --cfg params.cfg [--threads-per-file 16] [--mem-per-file 64] [--time-per-file 2] \
+      --cfg params.cfg [--threads-max 16 | --threads-per-file N] [--mem-per-file 32] \
+      [--time-per-file 2] \
       [--assembly-cpus 64] [--assembly-mem 128] [--assembly-time 12] \
       [--partition <auto>] [--account <auto>] [--max-simultaneous 20] [--no-norm]
 """
@@ -79,6 +80,10 @@ STRIP = ("--fasta-search", "--predictor", "--gen-spec-lib", "--matrices", "--rea
 # library), which step 5 compares its own report with (pass_comparison.py). The one name of it:
 # the comparison, the Methods (make_methods.py, when it is the deliverable) and SKILL.md use it.
 FIRST_PASS_REPORT = "step3_assembly.parquet"
+# Step 5's report under --no-norm: DIA-NN's quantities with no cross-run normalisation. Its name
+# is the record of that (normalization_check.searched_no_norm reads it, so run_de.R's MaxLFQ
+# says what ran without re-reading the report).
+NO_NORM_REPORT = "no_norm_report.parquet"
 
 # The per-task --out of the array steps. Without one, DIA-NN writes report.parquet,
 # report.stats.tsv, report-lib.parquet and report.log.txt into the WORKING directory -- <out>,
@@ -771,7 +776,7 @@ def window_flag(path):
     """Bash for the --window steps 2-5 pass: `--window N` from `path`, or nothing when it says
     `auto` (the probe's fallback: DIA-NN chooses the radius per run). needs_measured() has
     already refused anything else, a missing file included."""
-    return f"$(sed -n 's/^\\([1-9][0-9]*\\)$/--window \\1/p' {path}) "
+    return f"$(sed -n 's/^\\([1-9][0-9]*\\)$/--window \\1/p' \"{path}\") "
 
 
 def keep_attempt(workdir):
@@ -1184,6 +1189,92 @@ def refuse_unsafe_path(path, flag="--out", prog="diann_parallel"):
     return path
 
 
+# Wall clock per array task (steps 2 and 4), hours, for a task of TIME_REFERENCE_CPUS CPUs -- the
+# default every chain ran at before 2.10 -- and SCALED UP for fewer (array_task_hours). Real Core
+# runs (HIVE sacct, every brettsp step-2 task since 2026-07-01 at 16 CPUs, 6,182 completed):
+# median 20 min, p95 65 min, p99 160 min, p99.5 248 min; 414 over 60 min, 84 over 120 min, 54
+# over 180 min, 32 over 240 min (blank and failed injections are the slowest). The base is 4 h:
+# all but those 32 -- the 2 h of 2.9.1 killed ~1% of real files even at 16 CPUs -- and staff pass
+# --time-per-file for the rest. 2.10 sizes big arrays to 8 CPUs, measured 1.96x slower per file
+# than 16 (a 1.9 GB HT HeLa QC run, 2026-10-01), so the limit scales with them. One timed-out task
+# loses the whole chain (steps 3-5 DependencyNeverSatisfied), and a time limit costs no
+# throughput (it reserves nothing, at most some backfill), so it is never the thing to save on.
+TIME_PER_FILE_HOURS = 4
+TIME_REFERENCE_CPUS = 16
+
+
+def array_task_hours(cpus, base=TIME_PER_FILE_HOURS):
+    """Hours per array task of `cpus` CPUs: `base` at TIME_REFERENCE_CPUS, scaled by
+    TIME_REFERENCE_CPUS / cpus when the task has fewer (8 h at 8, 16 h at 4), never below `base`
+    (16 -> 32 CPUs is only 1.62x faster, so more CPUs earn no shorter limit)."""
+    return max(base, math.ceil(base * TIME_REFERENCE_CPUS / max(1, int(cpus))))
+# Memory per task, GB: steps 1b and 2 (the predicted library), and step 4 (the smaller empirical
+# one). From real Core runs, not the one QC file 2.10 first measured (7.4-9.7 GB RSS): HIVE's sacct
+# MaxRSS counts page cache, so the lower bound of a task's own memory is MaxRSS - MaxDiskRead -
+# MaxDiskWrite, and for every brettsp chain task since 2026-07-01 that bound is over 32 GB for 65
+# step-2 tasks and 9 step-1b jobs, up to 61 GB (a blank-like 1.2 GB .d against the standard human
+# library hit its 64 GB limit, 2026-10-01); step 4's stays under 32. 64 GB costs no concurrency on
+# genome-center-grp/high: 8 tasks x 64 GB = 512 GB, under the 1 TB per-user cap. --mem-per-file
+# sets all three.
+MEM_PER_FILE_GB = 64
+MEM_FINAL_PASS_GB = 48
+
+
+def task_memory(a):
+    """(GB for steps 1b and 2, GB for step 4): --mem-per-file for all three when given, else
+    MEM_PER_FILE_GB and MEM_FINAL_PASS_GB."""
+    return ((a.mem_per_file, a.mem_per_file) if a.mem_per_file
+            else (MEM_PER_FILE_GB, MEM_FINAL_PASS_GB))
+
+
+def size_cpus(a, n, array_queue, single_queue):
+    """Size the chain's jobs to their queues: a.threads_per_file becomes the array tasks' CPUs
+    (run_search.array_task_cpus, the one rule), and a.libpred_cpus / a.assembly_cpus are lowered
+    to what one job there can ever get (run_search.fit_to_queue) -- on a queue whose per-job or
+    per-user cap is below them they would wait for ever. Says what it chose on stderr. Returns
+    (the record for search_provenance.json `cpu_sizing`, step 1b's CPUs)."""
+    mem_first, mem_final = task_memory(a)
+    try:
+        from run_search import user_limits, array_task_cpus, fit_to_queue
+        lim = user_limits(*array_queue)
+        rec = array_task_cpus(n, a.threads_max, limits=lim, mem_per_task_gb=mem_first,
+                              max_simultaneous=a.max_simultaneous, pinned=a.threads_per_file)
+        single = user_limits(*single_queue) if single_queue != array_queue else lim
+        probe = fit_to_queue(a.threads_per_file or a.threads_max, single)
+        lowered = {}
+        for flag, attr in (("--libpred-cpus", "libpred_cpus"), ("--assembly-cpus", "assembly_cpus")):
+            v = fit_to_queue(getattr(a, attr), single)
+            if v < getattr(a, attr):
+                lowered[flag] = {"asked": getattr(a, attr), "used": v}
+                setattr(a, attr, v)
+        if lowered:
+            rec["single_jobs_lowered"] = lowered
+    except Exception as e:                     # said, never silent: the old fixed sizing stands
+        t = a.threads_per_file or a.threads_max
+        rec = {"cpus": t, "concurrent": None, "tasks": n, "requested": t,
+               "pinned": bool(a.threads_per_file),
+               "reason": f"not sized to the queue ({type(e).__name__}: {e}): {t} CPUs per task",
+               "summary": f"{t} CPUs per file (not sized to the queue: {e})"}
+        probe = t
+    a.threads_per_file = rec["cpus"]
+    rec["step1b_cpus"] = probe
+    if a.time_per_file is None:
+        a.time_per_file = array_task_hours(rec["cpus"])
+        rule = (f"{TIME_PER_FILE_HOURS} h at {TIME_REFERENCE_CPUS} CPUs per task, scaled to "
+                f"{rec['cpus']} (array_task_hours)")
+    else:
+        rule = "--time-per-file, as given"
+    rec["time_per_file_hours"] = {"hours": a.time_per_file, "rule": rule}
+    rec["mem_gb"] = {"step1b": mem_first, "step2": mem_first, "step4": mem_final,
+                     "rule": ("--mem-per-file, as given" if a.mem_per_file else
+                              "MEM_PER_FILE_GB / MEM_FINAL_PASS_GB (sacct, real Core runs)")}
+    sys.stderr.write(f"[diann_parallel] array steps 2 and 4: {rec['summary']}, "
+                     f"{a.time_per_file} h each. {rec['reason']}."
+                     + "".join(f" {f} lowered {v['asked']} -> {v['used']} to fit the queue."
+                               for f, v in (rec.get("single_jobs_lowered") or {}).items()) + "\n")
+    return rec, probe
+
+
 def needs_requeue(partition, qos):
     """Should a job on this queue carry `#SBATCH --requeue`?
 
@@ -1219,6 +1310,15 @@ def header(name, cpus, mem_gb, hours, partition, account, qos=None, array=None):
     return "\n".join(h)
 
 
+def step8_next(report, sess):
+    """The command a resumed session runs once the chain is COMPLETED: step 8's check
+    (normalization_check.step8_commands), never the final DE without it."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import normalization_check
+    return normalization_check.step8_commands(report, f"{sess}/input/conditions.csv", sess,
+                                              "dpc")["next"]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--diann", required=True, help="DIA-NN command (native binary path, or 'apptainer exec --bind … <sif> /diann-*/diann-linux')")
@@ -1227,9 +1327,21 @@ def main():
     ap.add_argument("--fasta", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--cfg", help="diann.cfg with the search params (estimate_params.py output)")
-    ap.add_argument("--threads-per-file", type=int, default=16)
-    ap.add_argument("--mem-per-file", type=int, default=64)
-    ap.add_argument("--time-per-file", type=int, default=2)
+    # CPUs per array task (steps 2 and 4): sized by run_search.array_task_cpus() to the queue's
+    # per-user cap unless pinned. 16 was the fixed default; it is now the ceiling.
+    ap.add_argument("--threads-per-file", type=int, default=None,
+                    help="PIN the CPUs of each array task (steps 2/4) and of step 1b. Default: "
+                         "sized to the queue's per-user CPU cap, at most --threads-max")
+    ap.add_argument("--threads-max", type=int, default=16,
+                    help="the most CPUs an array task is sized to (default 16); step 1b's CPUs")
+    ap.add_argument("--mem-per-file", type=int, default=None,
+                    help="GB per array task (steps 2/4) and step 1b. Default: MEM_PER_FILE_GB "
+                         "(64) for steps 1b and 2, MEM_FINAL_PASS_GB (48) for step 4 -- from "
+                         "real Core runs' sacct memory")
+    ap.add_argument("--time-per-file", type=int, default=None,
+                    help="hours per array task (steps 2/4). Default: TIME_PER_FILE_HOURS at "
+                         "TIME_REFERENCE_CPUS CPUs per task, scaled up for fewer "
+                         "(array_task_hours: 8 h at 8 CPUs)")
     ap.add_argument("--assembly-cpus", type=int, default=64)
     ap.add_argument("--assembly-mem", type=int, default=128)
     ap.add_argument("--assembly-time", type=int, default=12)
@@ -1270,6 +1382,15 @@ def main():
                      help="an instrument QC / standard run: never staged from a job")
     qcx.add_argument("--not-qc", action="store_true", help="not a QC run: passed on to stage")
     a = ap.parse_args()
+    # The cfg path is recorded (search_provenance.json, params.resolved.cfg's origin) and read by
+    # later jobs and readers in other working directories: absolute from here on, and it must
+    # exist now -- a relative one is otherwise resolved against whatever directory reads it.
+    if a.cfg:
+        given, a.cfg = a.cfg, os.path.abspath(a.cfg)
+        if not os.path.isfile(a.cfg):
+            sys.exit(f"[diann_parallel] cfg not found: {a.cfg}"
+                     + (f" (given as {given})" if given != a.cfg else "")
+                     + ". Nothing was generated.")
 
     raws = []
     if a.raw_list:
@@ -1278,6 +1399,14 @@ def main():
     for p in a.raw:
         raws.extend(sorted(glob.glob(p)) or [p])
     raws = [os.path.abspath(r.rstrip("/")) for r in raws]
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from check_report_runs import distinct_inputs, names_stop, repeated_names, repeats_note
+    # a file listed twice is searched once and flagged; different files sharing a run name are
+    # flagged and stop the generator (check_report_runs: the one rule, as in run_search.py)
+    raws, repeats = distinct_inputs(raws)
+    shared = repeated_names(raws)
+    if repeats or shared:
+        sys.stderr.write(repeats_note(repeats, "diann_parallel", shared))
 
     # DIA-NN names a run -- and this generator names its .quant -- by the file name alone, so
     # /plate1/s1.mzML and /plate2/s1.mzML are ONE Run in the report and TWO array tasks writing
@@ -1286,14 +1415,8 @@ def main():
     # to size the chain by hand), and that route had no check at all: the chain would be
     # generated, burn its SLURM hours and merge two samples into one column. Knowable from the
     # input list, so it stops here.
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from check_report_runs import duplicate_run_names
-    dupes = duplicate_run_names(raws)
-    if dupes:
-        sys.exit(f"[diann_parallel] inputs share a run name: {', '.join(dupes)}. DIA-NN names a "
-                 "run by its file name without the folder, so they would be merged into one Run "
-                 "in the report -- and their array tasks would write the same .quant. Rename "
-                 "them, or search them separately.")
+    if shared:
+        sys.exit(names_stop(shared, "diann_parallel"))
     refuse_unsafe_path(a.out)
     # run_search.py checks --dda against the bundle; the documented direct call -- and a
     # --seed-lib phase 2 -- never pass through it. So the generator checks it too, against the
@@ -1337,7 +1460,10 @@ def main():
         sys.exit("Parallel search needs >= 2 raw files (pass --raw or --raw-list); "
                  "use the single-shot run_search.py for 1.")
     out = os.path.abspath(a.out); os.makedirs(out, exist_ok=True)
-    fasta = os.path.abspath(a.fasta)
+    # Every path below is spliced into the job scripts in DOUBLE quotes (so an array task's $QUANT
+    # still expands, and a folder with a space -- 2,557 of them in the Core's service tree --
+    # stays one word): refused here if it holds what double quotes cannot carry.
+    fasta = refuse_unsafe_path(os.path.abspath(a.fasta), "--fasta")
     dnet = dotnet_prefix(raws)             # .NET 8 export prefix when inputs are Thermo .raw
     DN = dnet + a.diann
     # The chain is only valid with pinned mass accuracy AND a scan window that is the same
@@ -1379,7 +1505,7 @@ def main():
     flags = read_cfg_flags(a.cfg, drop=measured_flags)
     D = out  # all DIA-NN intermediate/output lives here (real paths; native binary reads them directly)
     from check_report_runs import stats_path   # one definition of <report>.stats.tsv
-    report = "no_norm_report.parquet" if a.no_norm else "report.parquet"
+    report = NO_NORM_REPORT if a.no_norm else "report.parquet"
     norm = "--no-norm" if a.no_norm else ""
     xic = xic_flag(a.cfg)          # step 4 only -- see xic_flag() docstring
 
@@ -1390,7 +1516,7 @@ def main():
     open(os.path.join(out, "file_list.txt"), "w").write("\n".join(raws) + "\n")
     all_f = " ".join(f"--f {shlex.quote(r)}" for r in raws)   # quote — data paths may contain spaces
     array = f"0-{n-1}%{a.max_simultaneous}"
-    seed = os.path.abspath(a.seed_lib) if a.seed_lib else None
+    seed = refuse_unsafe_path(os.path.abspath(a.seed_lib), "--seed-lib") if a.seed_lib else None
     predicted = seed if seed else f"{D}/step1.predicted.speclib"
     empirical = f"{D}/empirical.parquet"
     first_pass = f"{D}/{FIRST_PASS_REPORT}"
@@ -1409,11 +1535,12 @@ def main():
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from run_search import slurm_queue as _sq
         _pa, _aa, _qa = _sq(a.partition, a.account, a.qos,
-                            peak_cpus=a.threads_per_file, preemptible_ok=True)
+                            peak_cpus=a.threads_per_file or a.threads_max, preemptible_ok=True)
         _ps, _as_, _qs = _sq(a.partition, a.account, a.qos, peak_cpus=a.assembly_cpus)
     except Exception:
         _pa, _aa, _qa = a.partition, a.account, a.qos
         _ps, _as_, _qs = a.partition, a.account, a.qos
+    cpu_sizing, probe_cpus = size_cpus(a, n, (_pa, _aa, _qa), (_ps, _as_, _qs))
 
     # The job-end hook (notify_slack.wrap_job_script, the one definition: run log -> FRAN ->
     # Slack). Step 5 ends the search: it reports success and failure, and stages a finished
@@ -1421,6 +1548,13 @@ def main():
     # it with afterok and never starts, so step 5 would never get to say anything. An array
     # reports its first failing task only.
     import notify_slack
+    # Every job first checks that its node reaches the engine, the FASTA, the raw data and this
+    # folder (node_fault.py): a node whose /quobyte mount has dropped fails as a NODE fault (exit
+    # 75), which watch_run.sh and node_fault.py retry act on, never as "DIA-NN exited 0 but ...".
+    from node_fault import preflight_lines, chain_checks
+    node_check = preflight_lines(chain_checks(a.diann, out, fasta, raws)
+                                 + ([("-r", seed, "the seed library")]
+                                    if seed and os.path.exists(seed) else []))
 
     def write(name, body, stage=None, hours=None, final=False):
         if stage:
@@ -1431,12 +1565,13 @@ def main():
                                                 fran=not a.no_fran, fran_guarded=final,
                                                 fran_name=a.fran_name,
                                                 qc=(True if a.qc else
-                                                    False if a.not_qc else None)).rstrip("\n")
+                                                    False if a.not_qc else None),
+                                                preflight=node_check).rstrip("\n")
         p = os.path.join(out, name)
         open(p, "w").write(body + "\n"); os.chmod(p, 0o755); return name
 
     # array preamble: pick this task's raw file
-    pick = ('FILE=$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" ' + f'{D}/file_list.txt)\n'
+    pick = ('FILE=$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" ' + f'"{D}/file_list.txt")\n'
             'if [ -z "$FILE" ]; then echo "no file for task $SLURM_ARRAY_TASK_ID"; exit 1; fi\n'
             'echo "Processing: $FILE"\n')
 
@@ -1447,8 +1582,8 @@ def main():
             header("s1_libpred", a.libpred_cpus, a.libpred_mem, a.libpred_time, _ps, _as_, qos=_qs), "",
             f'echo "Step 1/5 library prediction"; date',
             clear_stale(predicted),       # see clear_stale(): a re-run must not pass on the old one
-            f'{DN} --fasta {fasta} --fasta-search --predictor --gen-spec-lib \\',
-            f'  --out-lib {D}/step1.speclib --out {D}/step1_lib.parquet \\',
+            f'{DN} --fasta "{fasta}" --fasta-search --predictor --gen-spec-lib \\',
+            f'  --out-lib "{D}/step1.speclib" --out "{D}/step1_lib.parquet" \\',
             f'  --threads {a.libpred_cpus} {flags}',
             must_exist(predicted, "the predicted spectral library")]),
             stage="step 1/5 library prediction", hours=a.libpred_time)
@@ -1498,7 +1633,7 @@ def main():
         failed_if = " || ".join(f'[ -z "${v}" ]' for m, v in (("window", "W"), ("mass-acc", "M"))
                                 if m in measure)
         s1b = write("step1b_window.sbatch", "\n".join([
-            header("s1b_window", a.threads_per_file, a.mem_per_file, PROBE_WALL_HOURS,
+            header("s1b_window", probe_cpus, task_memory(a)[0], PROBE_WALL_HOURS,
                    _ps, _as_, qos=_qs), "",
             f'echo "Step 1b/5 measuring {what} on representative runs"; date',
             # Every other step reaches DIA-NN through DN, which carries the .NET 8 exports a
@@ -1509,8 +1644,8 @@ def main():
             *([f"{dnet.strip()}   # .NET 8 for Thermo .raw, inherited by probe_window.py's DIA-NN"]
               if dnet else []),
             # A resubmitted step 1b must never find the previous run's answer and carry on.
-            f"rm -f {wtxt} {D}/window.json {D}/window.json.attempt1 {D}/{FALLBACK_RECORD} "
-            f"{q(resolved_cfg)} {q(tmp_cfg)}" + (f" {mtxt}" if mess else ""),
+            f'rm -f "{wtxt}" "{D}/window.json" "{D}/window.json.attempt1" "{D}/{FALLBACK_RECORD}" '
+            f"{q(resolved_cfg)} {q(tmp_cfg)}" + (f' "{mtxt}"' if mess else ""),
             f"rm -rf {q(probe_dir)} {q(probe_dir + '.attempt1')}",
             f"cp {q(base_cfg)} {q(tmp_cfg)}",
             # WHICH runs: not the first files of the listing. The probe gets the whole cohort
@@ -1529,7 +1664,7 @@ def main():
                 "python3 " + " \\\n    ".join([
                     f"{q(probe)} --diann {q(a.diann)}",
                     f"--raw-list {q(os.path.join(out, 'file_list.txt'))}",
-                    f"--fasta {fasta} --lib {predicted} --threads {a.threads_per_file}",
+                    f"--fasta {q(fasta)} --lib {q(predicted)} --threads {probe_cpus}",
                     f"--max-probes {PROBE_CANDIDATES} --max-failures {PROBE_MAX_FAILURES}",
                     f"--timeout {PROBE_TIMEOUT_S}"
                     + (f" --measure {' '.join(measure)}{doc_args}" if mess else ""),
@@ -1544,16 +1679,16 @@ def main():
                 fallback_out=f"{D}/{FALLBACK_RECORD}"),
             'if [ "$PROBE_RC" -eq 0 ]; then',
             *(['  W=$(python3 -c "import json,sys; w=json.load(open(sys.argv[1]))[\'window_radius\']; '
-               f'assert isinstance(w, int) and w > 0; print(w)" {D}/window.json)']
+               f'assert isinstance(w, int) and w > 0; print(w)" "{D}/window.json")']
               if "window" in measure else []),
             # the two flags, in exactly the shape steps 2-5's guard (needs_measured) accepts
             *(['  M=$(python3 -c "import json,re,sys; m=json.load(open(sys.argv[1]))[\'mass_acc\'][\'pin_as\']; '
-               f'assert re.fullmatch(sys.argv[2], m); print(m)" {D}/window.json '
+               f'assert re.fullmatch(sys.argv[2], m); print(m)" "{D}/window.json" '
                f'{q(MEASURED_FILE_RE["massacc.txt"])})'] if mess else []),
             'elif [ "$PROBE_FALLBACK" -eq 1 ]; then',
             # probe_fallback.py wrote window.txt / massacc.txt and the cfg's mass-acc flags
-            *([f'  W=$(cat {wtxt})'] if "window" in measure else []),
-            *([f'  M=$(cat {mtxt})'] if mess else []),
+            *([f'  W=$(cat "{wtxt}")'] if "window" in measure else []),
+            *([f'  M=$(cat "{mtxt}")'] if mess else []),
             "fi",
             f"if {failed_if}; then",
             f'  echo "FAILED: step 1b measured no {what} -- the reason and each probe\'s DIA-NN '
@@ -1575,17 +1710,17 @@ def main():
             'repeats step 1. See references/watcher.md (dependency_failed)." >&2',
             # window.json stays: it is the evidence. window.txt, massacc.txt and the resolved cfg
             # never exist.
-            f"  rm -f {q(tmp_cfg)} {wtxt}" + (f" {mtxt}" if mess else ""),
+            f'  rm -f {q(tmp_cfg)} "{wtxt}"' + (f' "{mtxt}"' if mess else ""),
             "  exit 1",
             "fi",
             # These are written by this script, not by DIA-NN, so must_exist()'s "DIA-NN exited
             # 0 but did not write" would name the wrong culprit. Say what actually failed.
-            *([f'if ! echo "$W" > {wtxt} || [ ! -f {wtxt} ] || [ ! -s {wtxt} ]; then',
+            *([f'if ! echo "$W" > "{wtxt}" || [ ! -f "{wtxt}" ] || [ ! -s "{wtxt}" ]; then',
                f'  echo "FAILED: radius $W was measured but could not be written to {wtxt} '
                '(disk full? permissions?)" >&2',
                "  exit 1",
                "fi"] if "window" in measure else []),
-            *([f'if ! echo "$M" > {mtxt} || [ ! -f {mtxt} ] || [ ! -s {mtxt} ]; then',
+            *([f'if ! echo "$M" > "{mtxt}" || [ ! -f "{mtxt}" ] || [ ! -s "{mtxt}" ]; then',
                f'  echo "FAILED: mass accuracy $M was measured but could not be written to {mtxt} '
                '(disk full? permissions?)" >&2',
                "  exit 1",
@@ -1617,7 +1752,7 @@ def main():
     # steps 2-5 read the measured values at RUNTIME so every pass uses the identical ones --
     # after checking they are there (needs_measured: a missing file expands to nothing)
     wflag = window_flag(wtxt) if "window" in measure else ''
-    mflag = f'$(cat {mtxt}) ' if "mass-acc" in measure else ''
+    mflag = f'$(cat "{mtxt}") ' if "mass-acc" in measure else ''
     measured_guard = (([needs_measured(wtxt, "a scan-window radius")]
                        if "window" in measure else [])
                       + ([needs_measured(mtxt, "the two mass-accuracy flags")]
@@ -1630,19 +1765,19 @@ def main():
     # step4_finalpass.sbatch` never goes through submit.sh. So each step makes its own: mkdir -p
     # is idempotent and free, and it means no step can be submitted into that error.
     def tmpguard(d):
-        return f'mkdir -p {D}/{d}   # DIA-NN will NOT create --temp and aborts without it'
+        return f'mkdir -p "{D}/{d}"   # DIA-NN will NOT create --temp and aborts without it'
 
     # Step 2 — first pass (array): predicted lib -> per-file .quant
     s2 = write("step2_firstpass.sbatch", "\n".join([
-        header("s2_firstpass", a.threads_per_file, a.mem_per_file, a.time_per_file, _pa, _aa, qos=_qa, array=array), "",
+        header("s2_firstpass", a.threads_per_file, task_memory(a)[0], a.time_per_file, _pa, _aa, qos=_qa, array=array), "",
         f'echo "Step 2/5 first pass, task ${{SLURM_ARRAY_TASK_ID}} of {n}"; date',
         *measured_guard, pick, tmpguard("quant_step2"),
-        f'mkdir -p {D}/{TASK_OUT_DIRS["step2"]}   # this task\'s report files (TASK_OUT_DIRS)',
+        f'mkdir -p "{D}/{TASK_OUT_DIRS["step2"]}"   # this task\'s report files (TASK_OUT_DIRS)',
         'QOUT="${FILE##*/}"; QOUT="${QOUT%.*}.quant"',
         clear_stale(f'{D}/quant_step2/$QOUT'),
-        f'{DN} --f "$FILE" --fasta {fasta} --lib {predicted} \\',
-        f'  --temp {D}/quant_step2 --rt-profiling --gen-spec-lib --quant-ori-names \\',
-        f'  --out {D}/{TASK_OUT_DIRS["step2"]}/t${{SLURM_ARRAY_TASK_ID}}.parquet \\',
+        f'{DN} --f "$FILE" --fasta "{fasta}" --lib "{predicted}" \\',
+        f'  --temp "{D}/quant_step2" --rt-profiling --gen-spec-lib --quant-ori-names \\',
+        f'  --out "{D}/{TASK_OUT_DIRS["step2"]}/t${{SLURM_ARRAY_TASK_ID}}.parquet" \\',
         f'  --threads {a.threads_per_file} {wflag}{mflag}{flags}',
         must_exist(f'{D}/quant_step2/$QOUT', "this file's .quant")]),
         stage="step 2/5 first pass (array)", hours=a.time_per_file)
@@ -1652,13 +1787,13 @@ def main():
         header("s3_assembly", a.assembly_cpus, a.assembly_mem, a.assembly_time, _ps, _as_, qos=_qs), "",
         f'echo "Step 3/5 empirical library assembly"; date', *measured_guard,
         tmpguard("quant_step2"),
-        f'cp -r {D}/quant_step2 {D}/quant_step2_orig 2>/dev/null || true   # backup for resume',
+        f'cp -r "{D}/quant_step2" "{D}/quant_step2_orig" 2>/dev/null || true   # backup for resume',
         # the first-pass report and its stats too: step 5 compares them with its own
         # (pass_comparison.py), and a previous run's must not stand in for this one's
         clear_stale(empirical, first_pass, stats_path(first_pass)),
-        f'{DN} {all_f} --fasta {fasta} --lib {predicted} --use-quant --quant-ori-names \\',
-        f'  --rt-profiling --gen-spec-lib --out-lib {empirical} \\',
-        f'  --temp {D}/quant_step2 --out {first_pass} \\',
+        f'{DN} {all_f} --fasta "{fasta}" --lib "{predicted}" --use-quant --quant-ori-names \\',
+        f'  --rt-profiling --gen-spec-lib --out-lib "{empirical}" \\',
+        f'  --temp "{D}/quant_step2" --out "{first_pass}" \\',
         f'  --threads {a.assembly_cpus} {wflag}{mflag}{flags}',
         must_exist(empirical, "the empirical spectral library")]),
         stage="step 3/5 empirical library assembly", hours=a.assembly_time)
@@ -1677,27 +1812,27 @@ def main():
     # With XICs off the task still gets its own --out (TASK_OUT_DIRS), for the same reason as
     # step 2: otherwise its report files land in <out> itself.
     out4_dir = "xic" if xic else TASK_OUT_DIRS["step4"]
-    task_out4 = f' --out {D}/{out4_dir}/t${{SLURM_ARRAY_TASK_ID}}.parquet'
+    task_out4 = f' --out "{D}/{out4_dir}/t${{SLURM_ARRAY_TASK_ID}}.parquet"'
 
     s4 = write("step4_finalpass.sbatch", "\n".join([
-        header("s4_finalpass", a.threads_per_file, a.mem_per_file, a.time_per_file, _pa, _aa, qos=_qa, array=array), "",
+        header("s4_finalpass", a.threads_per_file, task_memory(a)[1], a.time_per_file, _pa, _aa, qos=_qa, array=array), "",
         f'echo "Step 4/5 final pass, task ${{SLURM_ARRAY_TASK_ID}} of {n}"; date',
         *measured_guard, pick, tmpguard("quant_step4"),
         'QUANT="${FILE##*/}"; QUANT="${QUANT%.*}.quant"',
         # cleared BEFORE the skip: a skipped task must leave no .quant for step 5 to count
         clear_stale(f'{D}/quant_step4/$QUANT'),
         f'if [ ! -f "{D}/quant_step2/$QUANT" ]; then echo "SKIP: no step-2 quant for $QUANT"; exit 0; fi',
-        f'mkdir -p {D}/{out4_dir}',
+        f'mkdir -p "{D}/{out4_dir}"',
         # DIA-NN re-saves the library it is handed as "<lib>.skyline.speclib", written
         # NEXT TO --lib. With one shared path every concurrent array task writes the same
         # file; most win the race in seconds, the losers block until the wall clock kills
         # them. Give each task its own copy so there is nothing to contend on.
-        f'LIBPRIV={D}/libpriv/t${{SLURM_ARRAY_TASK_ID}}',
+        f'LIBPRIV="{D}/libpriv/t${{SLURM_ARRAY_TASK_ID}}"',
         'mkdir -p "$LIBPRIV"',
-        f'cp -f {empirical} "$LIBPRIV/lib.parquet"',
+        f'cp -f "{empirical}" "$LIBPRIV/lib.parquet"',
         'trap \'rm -rf "$LIBPRIV"\' EXIT',
-        f'{DN} --f "$FILE" --fasta {fasta} --lib "$LIBPRIV/lib.parquet" \\',
-        f'  --temp {D}/quant_step4 --quant-ori-names{xic_arg}{task_out4} \\',
+        f'{DN} --f "$FILE" --fasta "{fasta}" --lib "$LIBPRIV/lib.parquet" \\',
+        f'  --temp "{D}/quant_step4" --quant-ori-names{xic_arg}{task_out4} \\',
         f'  --threads {a.threads_per_file} {wflag}{mflag}{flags}',
         must_exist(f'{D}/quant_step4/$QUANT', "this file's final-pass .quant")]),
         stage="step 4/5 final pass (array)", hours=a.time_per_file)
@@ -1708,13 +1843,13 @@ def main():
         f'echo "Step 5/5 cross-run report"; date', *measured_guard, tmpguard("quant_step4"),
         # the report AND its stats file: check_report_runs.stats_path() names the latter
         clear_stale(f'{D}/{report}', stats_path(f'{D}/{report}')),
-        f'{DN} {all_f} --fasta {fasta} --lib {empirical} --use-quant --quant-ori-names \\',
-        f'  --temp {D}/quant_step4 --matrices --out {D}/{report} \\',
-        f'  --threads {a.assembly_cpus} {norm} {wflag}{mflag}{flags}',
-        must_exist(f'{D}/{report}', "the cross-run report"),
         # A step-4 task that failed silently leaves no .quant, and step 5 happily
         # reports on whatever survived. Count them: fewer quants than inputs means a
-        # sample was dropped, which must never pass as success.
+        # sample was dropped, which must never pass as success. BEFORE DIA-NN runs: counted
+        # after, a report from N-1 runs was already on disk when the job failed (review of
+        # 2.10: a node_fault retry that left out an OOM task), at the path run_de.R reads.
+        # step 5 is afterok on step 4, so this fires only on a chain resubmitted by hand or
+        # by a retry -- or a step-4 task that skipped its file.
         #
         # Count FILES, not input lines. This chain's names come from file_list.txt, not from
         # `ls quant_step4/*.quant` -- a previous search's .quant for another run would
@@ -1737,8 +1872,14 @@ def main():
         f'by its file name alone, so inputs that share one are merged into a single Run. '
         f'Rename them, or search them separately." >&2; exit 1; fi',
         f'if [ "$NQ" -ne {n} ]; then '
-        f'echo "FAILED: report built from $NQ of {n} runs -- a step-4 task produced no .quant." >&2; '
+        f'echo "FAILED: only $NQ of {n} runs have a final-pass .quant -- a step-4 task did not '
+        f'succeed, so no report was written. Resubmit the step-4 tasks of the runs listed '
+        f'MISSING above, then this step." >&2; '
         f'exit 1; fi',
+        f'{DN} {all_f} --fasta "{fasta}" --lib "{empirical}" --use-quant --quant-ori-names \\',
+        f'  --temp "{D}/quant_step4" --matrices --out "{D}/{report}" \\',
+        f'  --threads {a.assembly_cpus} {norm} {wflag}{mflag}{flags}',
+        must_exist(f'{D}/{report}', "the cross-run report"),
         f'echo "OK: report built from all {n} runs"',
         # Did the final pass keep what the first pass found? A table, a WARNING per run that
         # lost more than half its precursors, and the record in search_provenance.json -- see
@@ -1809,7 +1950,9 @@ def main():
         f'python3 "{ck}" record --session "{sess}" --stage search \\',
         f'  --jobs "{jobs}" --desc "DIA-NN 5-step parallel chain ({n} files)" \\',
         f'  --report "{D}/{report}" --watch-job "$jid5" --watch-log "{D}/s5_report_${{jid5}}.log" \\',
-        f'  --next "Rscript run_de.R --input {D}/{report} --metadata {sess}/input/conditions.csv --method dpc --outdir {sess}/output/tables" \\',
+        # what follows the chain is step 8's normalisation check, then the final DE held to it --
+        # never the final DE alone (normalization_check.step8_commands: the one wording)
+        f'  --next {shlex.quote(step8_next(f"{D}/{report}", sess))} \\',
         '  >/dev/null 2>&1 || true',
         'say "submitted: firstpass=$jid2 assembly=$jid3 finalpass=$jid4 report=$jid5"',
         f'say "final report will be {D}/{report}; watch with: watch_run.sh --slurm $jid5 --log {D}/s5_report_${{jid5}}.log"',
@@ -1900,6 +2043,8 @@ def main():
                             "by": s5, "first_pass_report": first_pass,
                             "final_report": f"{D}/{report}"},
         "seeded": bool(seed), "seed_lib": predicted if seed else None,
+        # CPUs per array task, how many run at once, and why (run_search.array_task_cpus)
+        "cpu_sizing": cpu_sizing,
         "scripts": [x for x in [s1, s1b, s2, s3, s4, s5, "submit.sh"] if x],
         "submit": f"bash {out}/submit.sh   (or: hive_exec.sh 'bash {out}/submit.sh')",
         "report_jobid_var": "jid5",

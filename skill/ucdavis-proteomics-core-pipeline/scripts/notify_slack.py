@@ -89,6 +89,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+try:                    # what a job exits with when its node check fails: the one definition
+    from node_fault import NODE_FAULT_EXIT
+except ImportError:     # piped in (no HERE), or an install without it: plain "exit N"
+    NODE_FAULT_EXIT = None
+
 WEBHOOK_ENV = "SKILL_SLACK_WEBHOOK"
 OPT_OUT_ENV = "SKILL_SLACK"
 USER_FILE = os.path.join("~", ".config", "ucdavis-proteomics", "slack_webhook")
@@ -483,6 +488,10 @@ def classify(exit_code, signal=None, job_seconds=None, time_limit_min=None):
         return "ok", None
     if exit_code == 137:
         return "failed", "killed (exit 137, SIGKILL) -- most often out of memory"
+    if exit_code == NODE_FAULT_EXIT:
+        return "failed", (f"exit {exit_code}: the compute node could not reach the storage -- a "
+                          "node problem, not the search; resubmit on another node "
+                          "(node_fault.py retry)")
     return "failed", f"exit {exit_code}"
 
 
@@ -1049,6 +1058,10 @@ def record_run(kind, *, out=None, session=None, status=None, exit_code=None):
     reason, detail = d.get("reason"), d.get("detail")
     res = {"logged": logged, "reason": reason, "detail": detail,
            "path": d.get("path") or d.get("file")}
+    if d.get("analysis_logged"):
+        # new / changed / unchanged (record_run.analysis_digest): finalize does not post an
+        # analysis the log already has, unchanged, a second time
+        res["analysis_logged"] = d["analysis_logged"]
     if logged is True:
         return res
     if reason == "disabled":
@@ -1149,6 +1162,8 @@ def slack_manifest(sent, detail):
         return "OK", "Slack notification (Core channel)", one_line(d or "sent")
     if d.startswith("--no-notify"):
         return "INFO", "Slack notification (Core channel)", "off (--no-notify)"
+    if d.startswith("not posted again"):       # session._finish_hooks: an unchanged re-finalize
+        return "INFO", "Slack notification (Core channel)", one_line(d)
     m = re.search(r"off: (SKILL_SLACK=\S+)", d)
     if m:
         return "INFO", "Slack notification (Core channel)", f"off ({m.group(1)})"
@@ -1423,7 +1438,8 @@ _HEADER_LINE = re.compile(r"^(#|\s*$)")
 
 
 def wrap_job_script(script, out, *, final, time_limit_h, stage, slack=True, fran=True,
-                    fran_guarded=False, fran_name=None, qc=None, py=None, scripts_dir=None):
+                    fran_guarded=False, fran_name=None, qc=None, py=None, scripts_dir=None,
+                    preflight=None):
     """A SLURM job script that runs the job-end hook (search_done: FRAN stage on success ->
     run log -> Slack) however it ends.
 
@@ -1449,6 +1465,9 @@ def wrap_job_script(script, out, *, final, time_limit_h, stage, slack=True, fran
     * The header is every LEADING comment or blank line (not only #SBATCH), so a comment between
       two #SBATCH lines cannot push the second below the hook, where SLURM would ignore it.
     * scripts_dir: where notify_slack.py and its helpers live (default: beside this file).
+    * preflight: bash lines run first, inside the work (node_fault.preflight_lines: can this node
+      reach the storage?), so a node check that fails ends the job through the same hook, with
+      its own exit status (node_fault.NODE_FAULT_EXIT).
     """
     lines = script.rstrip("\n").split("\n")
     n = 0
@@ -1501,7 +1520,7 @@ def wrap_job_script(script, out, *, final, time_limit_h, stage, slack=True, fran
         "(",
     ]
     tail = [")&", "_job_work=$!", 'wait "$_job_work"']
-    return "\n".join(head + hook + body + tail) + "\n"
+    return "\n".join(head + hook + list(preflight or []) + body + tail) + "\n"
 
 
 # ── CLI ──────────────────────────────────────────────────────────

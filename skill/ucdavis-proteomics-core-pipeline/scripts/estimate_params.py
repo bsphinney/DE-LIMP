@@ -48,9 +48,16 @@ Usage:
 
 Writes the engine params file to --out and prints a rationale JSON to stdout
 (one entry per setting: value + source). Pass --overrides '<json>' to force
-specific fields (e.g. a validated SOP value) — those are tagged "user-override".
+specific fields the user chose, with --override-by "<who chose them>" and
+--override-reason "<why, in their words>": each is tagged as a USER OVERRIDE with its
+value, set by Core staff, and why (override_source) -- never as a validated SOP, which the
+skill cannot know it is. Who, by name, goes only to the staff-only <out>.staff.json (staff.py):
+the sidecar travels to the client.
 """
 import sys, os, json, math, argparse
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import staff  # noqa: E402  the role client documents name, and the staff-only record
 
 # --- known-good mass accuracy by instrument class (DIA-NN README) ------------
 ORBITRAP_RES_PPM = {240000: 4, 120000: 7, 60000: 10, 30000: 15}
@@ -164,12 +171,13 @@ def instrument_ppm_summary():
 # How the mass accuracy of a DIA-NN cfg is settled. Written to the rationale sidecar
 # (<cfg>.rationale.json) as `mass_accuracy_plan`, which diann_parallel.mass_acc_measure_plan()
 # reads for both the 5-step chain and the single-shot search:
-#   pinned              -- --mass-acc/--mass-acc-ms1 are in the cfg (a documented value or an SOP)
+#   pinned              -- --mass-acc/--mass-acc-ms1 are in the cfg (a documented value, the
+#                          facility SOP's for a DDA level, or a user override)
 #   measure_with_diann  -- an Orbitrap with at least one level outside DIA-NN's table; the cfg
 #                          omits BOTH flags, and before the search DIA-NN is run on representative
 #                          runs (chain step 1b, or run_search.py's single-shot probe). The level
 #                          that has a documented tier is recorded under
-#                          `mass_accuracy_documented` and pinned as given. An SOP override of
+#                          `mass_accuracy_documented` and pinned as given. A user override of
 #                          one flag makes the plan pinned (the other level from the table) or
 #                          is refused (no table value for it: LoneMassAccOverride).
 #   auto                -- instrument not identified; flags omitted, DIA-NN optimises on its own
@@ -228,6 +236,62 @@ LONE_FLAG_NOTE = ("not written into the cfg on its own: DIA-NN 2.7.0 fixes BOTH 
 
 MASS_ACC_FLAGS = ("--mass-acc", "--mass-acc-ms1")        # the same pair as diann_parallel's
 MASS_ACC_LEVEL = {"--mass-acc": "MS2", "--mass-acc-ms1": "MS1"}
+
+
+# What a value forced with --overrides is: the USER's choice for this dataset, which may be a
+# validated method or a one-off workaround -- the skill cannot tell. Every override was tagged
+# "user-override (validated SOP)", so a 25 ppm chosen to cover a timsTOF ~20 ppm off calibration
+# went into the provenance, and on to the Methods, as a validated SOP (staff report, 2026-09-25).
+# The ONE wording, with the value, who set it and why; resolve_defaults.py --ms1-ppm/--ms2-ppm
+# uses it too. Who is said by role (staff.ROLE): the sidecar and the manifest reach the client
+# (reproducibility/inputs/, the session zip). The person -- --override-by when given, else the
+# login that ran the command, said so -- is in the staff-only record (record_override_setter).
+OVERRIDE_REASON_MISSING = "reason not given [ask the user -- confirm]"
+
+
+def override_setter(given=None):
+    """(who, how it is known): --override-by as given, else the login that ran this command --
+    which is who TYPED it, not necessarily who chose the value, so it says so."""
+    if given and str(given).strip():
+        return str(given).strip(), "given"
+    import getpass
+    try:
+        return getpass.getuser(), "login"
+    except (KeyError, OSError):          # no login name to read (no USER/LOGNAME, no pwd entry)
+        return None, "unknown"
+
+
+def override_source(flag, value, reason=None):
+    """The tag of one overridden setting: a user override, its value, by role, and why."""
+    shown = value if isinstance(value, (int, float, str)) and not isinstance(value, bool) \
+        else json.dumps(value)
+    return (f"user override: {flag} = {shown}, set by {staff.ROLE}; reason: "
+            f"{reason.strip() if reason and reason.strip() else OVERRIDE_REASON_MISSING}")
+
+
+def override_record(overrides, reason=None, staff_record=None):
+    """{setting: {value, set_by, reason, source, staff_record}} -- the sidecar's `overrides`, by
+    role; `staff_record` names the staff-only file that holds who, by name."""
+    return {k: {"value": v, "set_by": staff.ROLE,
+                "reason": reason.strip() if reason and reason.strip() else None,
+                "source": override_source(k, v, reason), "staff_record": staff_record}
+            for k, v in (overrides or {}).items()}
+
+
+def staff_record_name(path):
+    """The staff-only record beside `path` (a cfg, a manifest) -- its file name."""
+    return os.path.basename(path) + staff.STAFF_SUFFIX
+
+
+def record_override_setter(path, overrides, by, by_how, reason):
+    """Who set `overrides`, by name and how that is known ("given": --override-by; "login": the
+    login that ran the command, which is who TYPED it), into the staff-only record beside `path`.
+    -> its file name, for override_record()."""
+    staff.append(path + staff.STAFF_SUFFIX, {
+        "event": "override", "overrides": overrides, "by": by, "by_how": by_how,
+        "account": staff.login(), "at": staff.now(),
+        "reason": reason.strip() if reason and reason.strip() else None})
+    return staff_record_name(path)
 
 
 class LoneMassAccOverride(ValueError):
@@ -591,7 +655,7 @@ def tagged(value, source):
 
 # --- DIA-NN cfg --------------------------------------------------------------
 def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
-                cont_tag=None, mz_range=None, level_src=None):
+                cont_tag=None, mz_range=None, level_src=None, override_meta=None):
     UNIV = "universal trypsin/LFQ default"
     r = {}  # rationale
     lines = []
@@ -707,7 +771,7 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
     # DDA: the levels DIA would measure, pinned at the SOP instead ({} for DIA) -- dda_sop_levels
     sop_default = dda_sop_levels(instr_class, ms1, ms2, acq)
     documented, basis = {}, {}
-    # An SOP override of a mass-accuracy level (applied below, with the other overrides) is a
+    # A user override of a mass-accuracy level (applied below, with the other overrides) is a
     # value for that level. Both levels known -- overridden, or from the table -- means both are
     # written and nothing is measured. A one-flag override whose other level has NO value would
     # be a lone flag (LONE_FLAG_NOTE: the other level silently fixed at 20 ppm), so it is refused.
@@ -719,7 +783,7 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
         if missing:
             raise LoneMassAccOverride(lone_override_message(given[0], missing[0], instr_class,
                                                             label))
-        plan = PLAN_PINNED            # an SOP value wins; it must not be re-measured
+        plan = PLAN_PINNED            # the user's value wins; it must not be re-measured
     if plan == MEASURE_WITH_DIANN:
         # No curve fit for the level outside the table (see ppm_for_resolution): it is measured
         # with DIA-NN before the search -- chain step 1b, or run_search.py's single-shot probe --
@@ -792,9 +856,10 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
             f"contaminants ('{cont_tag}'-tagged) excluded from quant + normalisation "
             f"(DIA-NN README --cont-quant-exclude)")
 
-    # apply overrides (e.g. a validated SOP value) — re-render the file
+    # apply the user's overrides -- re-render the file; each tagged with who set it and why
+    om = override_meta or {}
     for k, v in (overrides or {}).items():
-        r[k] = tagged(v, "user-override (validated SOP)")
+        r[k] = tagged(v, override_source(k, v, om.get("reason")))
         lines = [ln for ln in lines if not (ln == k or ln.startswith(k + " "))]
         lines.append(k if v is True else f"{k} {v}")
     # The DDA levels pinned at the SOP, by flag -- what an export must call a default. A level
@@ -874,7 +939,7 @@ SAGE_ENZYME = {"missed_cleavages": 2, "min_len": 7, "max_len": 30,
                "cleave_at": "KR", "restrict": "P"}
 
 
-def build_sage(acq, instr_class, var_mods, overrides, ms2_analyzer=None):
+def build_sage(acq, instr_class, var_mods, overrides, ms2_analyzer=None, override_meta=None):
     prec_ppm, frag_ppm, ppm_src = sage_ppm(instr_class)
     ion_trap = ms2_in_ion_trap(ms2_analyzer)
     UNIV = "universal trypsin/LFQ default"
@@ -932,6 +997,15 @@ def build_sage(acq, instr_class, var_mods, overrides, ms2_analyzer=None):
         "enzyme": tagged("trypsin/P, 2 missed cleavages", UNIV),
         "lfq": tagged(True, "label-free quantification"),
     })
+    # The user's overrides, each tagged with who set it and why. A derived entry the override
+    # replaced (an overridden precursor_tol makes precursor_tol_ppm's derived value untrue) goes:
+    # the rationale says what the config holds. They used to be merged into the config with no
+    # rationale entry at all.
+    om = override_meta or {}
+    for k, v in (overrides or {}).items():
+        for stale in [x for x in rationale if x == k or x.startswith(k + "_")]:
+            del rationale[stale]
+        rationale[k] = tagged(v, override_source(k, v, om.get("reason")))
     return json.dumps(cfg, indent=2) + "\n", rationale
 
 
@@ -977,7 +1051,17 @@ def main():
     ap.add_argument("--acquisition", required=True, choices=["DIA", "DDA", "dia", "dda"])
     ap.add_argument("--instrument", default="")
     ap.add_argument("--var-mods", default="", help="comma list, e.g. 'ox' to add Ox(M)")
-    ap.add_argument("--overrides", default="", help="JSON of fields to force (validated SOP)")
+    ap.add_argument("--overrides", default="",
+                    help="JSON of fields to force, as the user chose them; each is recorded as a "
+                         "user override with its value, who set it and why -- never as an SOP")
+    ap.add_argument("--override-by", default=None,
+                    help="who chose the --overrides values (default: the login running this, "
+                         "recorded as such) -- in the staff-only <out>.staff.json only; the "
+                         "sidecar says Core staff")
+    ap.add_argument("--override-reason", default=None,
+                    help="why, in the user's words (e.g. 'instrument ~20 ppm off calibration; "
+                         "user chose 25 ppm'); without it the record says the reason was not "
+                         "given")
     add_resolution_args(ap)
     ap.add_argument("--from-mzml", default="",
                     help="read both resolutions straight out of this mzML")
@@ -1008,6 +1092,11 @@ def main():
             overrides = json.loads(a.overrides)
         except json.JSONDecodeError as e:
             sys.exit(f"--overrides is not valid JSON: {e}")
+    if (a.override_by or a.override_reason) and not overrides:
+        sys.exit("[estimate_params] --override-by/--override-reason describe --overrides, and "
+                 "none were given")
+    by, by_how = override_setter(a.override_by) if overrides else (None, "unknown")
+    override_meta = {"reason": a.override_reason}
 
     r1, r2, analyzer = a.ms1_resolution, a.ms2_resolution, a.ms2_analyzer
     bad = resolution_args_error(r2, analyzer)
@@ -1034,7 +1123,7 @@ def main():
         try:
             text, rationale = build_diann(a.acquisition, cls, ms1, ms2, label, src, var_mods,
                                           overrides, cont_tag, a.precursor_mz_range,
-                                          level_src=level_src)
+                                          level_src=level_src, override_meta=override_meta)
         except (LoneMassAccOverride, NoPrecursorRange) as e:
             # The message says "no cfg was written", so leave nothing at --out that contradicts
             # it. build_diann() raises BEFORE the write below, so THIS run wrote neither file --
@@ -1048,10 +1137,14 @@ def main():
                     pass
             sys.exit(f"[estimate_params] {e}")
     else:
-        text, rationale = build_sage(a.acquisition, cls, var_mods, overrides, analyzer)
+        text, rationale = build_sage(a.acquisition, cls, var_mods, overrides, analyzer,
+                                     override_meta=override_meta)
 
     with open(a.out, "w") as fh:
         fh.write(text)
+    # who set the overrides, by name: staff-only, beside the cfg (never in the sidecar)
+    staff_rec = (record_override_setter(a.out, overrides, by, by_how, a.override_reason)
+                 if overrides else None)
 
     out_payload = {
         "engine": a.engine, "acquisition": a.acquisition.upper(),
@@ -1069,6 +1162,8 @@ def main():
         # DEFAULT, not user-confirmed ({flag: ppm}; {} when nothing was defaulted)
         "mass_accuracy_default": (rationale.get("mass_accuracy_default") or {}).get("value"),
         "params_file": os.path.abspath(a.out),
+        # each --overrides value: who set it and why ({} when nothing was overridden)
+        "overrides": override_record(overrides, a.override_reason, staff_rec),
         "rationale": rationale,
         "note": "Every value is tagged with its provenance. Mass tolerances are the "
                 "data-type-dependent settings; the rest are standard trypsin/LFQ defaults.",

@@ -51,7 +51,8 @@ FRAGPIPE = [
 DIANN = ["P02768", "P60709;P63261", "A0A075B6S2", "P04637", "Q11111", "Cont_P00761"]
 
 
-def write_combined_protein(path):
+def write_combined_protein(path, rows=FRAGPIPE, indistinguishable=None):
+    """`indistinguishable`: {Protein: the Indistinguishable Proteins cell}, "" for the rest."""
     header = ["Protein", "Protein ID", "Entry Name", "Gene", "Protein Length", "Organism",
               "Protein Existence", "Description", "Protein Probability",
               "Top Peptide Probability", "Combined Total Peptides"]
@@ -60,10 +61,11 @@ def write_combined_protein(path):
     with open(path, "w", newline="") as fh:
         w = csv.writer(fh, delimiter="\t")
         w.writerow(header)
-        for i, (prot, p_id, entry, gene) in enumerate(FRAGPIPE):
+        for i, (prot, p_id, entry, gene) in enumerate(rows):
             lfq = [str(1000.0 * (i + 1) * (j + 1)) for j in range(len(RUNS))]
             w.writerow([prot, p_id, entry, gene, "500", "Homo sapiens", "1", "x", "1.0", "0.99",
-                        "5"] + ["3"] * len(RUNS) + lfq + lfq + [""])
+                        "5"] + ["3"] * len(RUNS) + lfq + lfq
+                       + [(indistinguishable or {}).get(prot, "")])
 
 
 def write_report_tsv(path, groups):
@@ -115,6 +117,21 @@ class TheReading(unittest.TestCase):
         self.assertEqual(pid.fragpipe_protein_id("sp|P1|X_HUMAN", ""), "P1",
                          "no Protein ID: read the accession out of Protein")
         self.assertEqual(pid.fragpipe_protein_id("", "P1"), "P1")
+
+    def test_a_fragpipe_group_is_every_member(self):
+        """Indistinguishable Proteins as FragPipe 24.0 writes them (", "-separated headers)."""
+        self.assertEqual(pid.fragpipe_group("sp|Q15582|BGH3_HUMAN", "Q15582",
+                                            "sp|Cont_P55906|BGH3_BOVIN"), "Q15582;Cont_P55906")
+        self.assertEqual(pid.fragpipe_group("sp|Q9HAP6|LIN7B_HUMAN", "Q9HAP6",
+                                            "sp|Q9NUP9|LIN7C_HUMAN, sp|O14910|LIN7A_HUMAN"),
+                         "Q9HAP6;Q9NUP9;O14910")
+        self.assertEqual(pid.fragpipe_group("sp|P1|A_HUMAN", "P1",
+                                            "contam_sp|P00761|TRYP_PIG, sp|P1|A_HUMAN"),
+                         "P1;contam_P00761", "a contam_ tag is kept; a repeat is written once")
+        self.assertEqual(pid.fragpipe_group("contam_sp|P00167|CYB5_HUMAN", "P00167", ""),
+                         "contam_P00167")
+        self.assertEqual(pid.fragpipe_group("", "", "sp|P2|B_HUMAN"), "")
+        self.assertEqual(pid.fragpipe_group("sp|P1|A_HUMAN", "P1", None), "P1")
 
     @unittest.skipUnless(shutil.which("Rscript"), "needs Rscript")
     def test_agrees_with_the_de_comparator_on_diann_and_fragpipe_ids(self):
@@ -171,6 +188,48 @@ class FragPipeAgainstDiann(unittest.TestCase):
         self.assertEqual(first["contam_P00167"], ("CYB5A", "CYB5_HUMAN"))
         self.assertEqual(sorted(set(t["Run"])), list(RUNS))
         self.assertEqual(len(t["Run"]), len(FRAGPIPE) * len(RUNS))
+
+    def test_a_contaminant_listed_only_as_indistinguishable_is_in_the_group(self):
+        """SKILL_OPEN_DEFECTS (2.10): the DDA adapter wrote the leading protein alone, so a
+        Cont_ entry FragPipe listed only under Indistinguishable Proteins of a sample-led row was
+        never seen. The group is now every member; its leading protein stays first, so
+        compare_searches.py still meets DIA-NN on it."""
+        write_combined_protein(
+            os.path.join(self.fp_out, "combined_protein.tsv"),
+            indistinguishable={"sp|P02768|ALBU_HUMAN": "sp|Cont_P02769|ALBU_BOVIN",
+                               "sp|P60709|ACTB_HUMAN": "sp|P63261|ACTG_HUMAN"})
+        t, report = self.adapt()
+        groups = list(dict.fromkeys(t["Protein.Group"]))
+        self.assertEqual(groups[:2], ["P02768;Cont_P02769", "P60709;P63261"])
+        first = {g: gn for g, gn in zip(t["Protein.Group"], t["Genes"])}
+        self.assertEqual(first["P02768;Cont_P02769"], "ALB", "the leading protein's gene")
+        j = compare(os.path.join(self.d, "cmp_ind"), ("DIA-NN", self.diann), ("FragPipe", report))
+        self.assertEqual(j["pairs"][0]["shared"], 5, j["pairs"][0])
+
+    @unittest.skipUnless(shutil.which("Rscript"), "needs Rscript")
+    def test_the_contaminant_rule_sees_every_member(self):
+        """contaminants.R's rule -- the one run_de.R applies on the DIA-NN path too -- flags the
+        sample-led group whose indistinguishable member is a Cont_ entry."""
+        write_combined_protein(
+            os.path.join(self.fp_out, "combined_protein.tsv"),
+            indistinguishable={"sp|P02768|ALBU_HUMAN": "sp|Cont_P02769|ALBU_BOVIN"})
+        t, _ = self.adapt()
+        groups = list(dict.fromkeys(t["Protein.Group"]))
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as fh:
+            fh.write("\n".join(groups) + "\n")
+        try:
+            r = subprocess.run(
+                ["Rscript", "-e", f"source({json.dumps(os.path.join(SCRIPTS, 'contaminants.R'))}); "
+                 f"g <- readLines({json.dumps(fh.name)}); "
+                 "cat(paste(g, is_contaminant(g), sep = '='), sep = '\\n')"],
+                capture_output=True, text=True, timeout=120)
+        finally:
+            os.unlink(fh.name)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        flags = dict(ln.rsplit("=", 1) for ln in r.stdout.split("\n") if "=" in ln)
+        self.assertEqual(flags["P02768;Cont_P02769"], "TRUE")
+        self.assertEqual(flags["P60709"], "FALSE")
+        self.assertEqual(flags["contam_P00167"], "TRUE")
 
     def test_compare_searches_finds_the_shared_proteins(self):
         _, report = self.adapt()

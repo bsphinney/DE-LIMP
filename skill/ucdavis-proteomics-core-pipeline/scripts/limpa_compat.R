@@ -33,13 +33,30 @@ limpa_annotation_default <- function(fn = limpa::readDIANN) {
 limpa_version <- function()
   tryCatch(as.character(utils::packageVersion("limpa")), error = function(e) NA_character_)
 
+# The name this limpa's readDIANN() gives the quantity column, or NA: limpa 1.4.x
+# intensity.column, 1.2.x qty.column (RELEASE_3_22 R/readDIANN.R; both default to
+# "Precursor.Normalised"). The non-normalised DE (run_de.R --quantities raw) reads DIA-NN's
+# Precursor.Quantity through it; limpa itself applies no between-run normalisation.
+LIMPA_INTENSITY_DEFAULT <- "Precursor.Normalised"
+limpa_intensity_arg <- function(fn = limpa::readDIANN)
+  intersect(c("intensity.column", "qty.column"), names(formals(fn)))[1]
+
 # readDIANN() with the annotation columns `annotation`, whatever this limpa calls the
 # argument. Returns list(dat, argument, path): `argument` is the name used (NA for the join)
-# and `path` one line for de_provenance.json.
+# and `path` one line for de_provenance.json. `intensity`: the quantity column, passed under
+# this limpa's name for it; a readDIANN() with no such argument can read only its default, so
+# any other column is refused rather than silently replaced by the default.
 read_diann_annotated <- function(file, format, q.cutoffs, q.columns, annotation,
-                                 fn = limpa::readDIANN) {
+                                 fn = limpa::readDIANN, intensity = LIMPA_INTENSITY_DEFAULT) {
   arg <- limpa_annotation_arg(fn)
   args <- list(file, format = format, q.cutoffs = q.cutoffs, q.columns = q.columns)
+  if (!identical(intensity, LIMPA_INTENSITY_DEFAULT)) {
+    iarg <- limpa_intensity_arg(fn)
+    if (is.na(iarg))
+      stop("this limpa's readDIANN() takes no quantity-column argument, so it cannot read ",
+           intensity, " (it reads only ", LIMPA_INTENSITY_DEFAULT, "). Install limpa >= 1.2.")
+    args[[iarg]] <- intensity
+  }
   if (!is.na(arg)) {
     args[[arg]] <- annotation
     return(list(dat = do.call(fn, args), argument = arg,

@@ -2,7 +2,8 @@
 # build_maxlfq.R  --  Port of DE-LIMP's build_maxlfq_pipeline() (R/helpers.R).
 # Reads a DIA-NN report, applies ID-FDR + optional QuantUMS filters, pivots
 # PG.MaxLFQ to a protein x run matrix, log2-transforms, and quantile-normalizes
-# with limma::normalizeBetweenArrays (the DE-LIMP default for the MaxLFQ path).
+# with limma::normalizeBetweenArrays (the DE-LIMP default for the MaxLFQ path) -- except with
+# quantities = "raw" (a --no-norm DIA-NN report), where nothing is normalised.
 # An adapted report that declares its own quantity (parquet metadata, declared_quantity()) is
 # described by what it declares -- a Sage report's rows are peptides, not DIA-NN's PG.MaxLFQ.
 #
@@ -69,6 +70,7 @@ maxlfq_descriptor <- function(declared = NULL, cq = NULL) {
         "keratin peptides count in it; %s was given no contaminant exclusion."),
         declared$label %||% "the search engine"),
       kept_keratin_under_quantified = FALSE,
+      contaminant_rule_origin = contaminant_rule_origin(declared$label %||% "search engine's"),
       rollup_method  = sprintf(paste("protein intensity = the highest %s per protein and run",
                                      "(one peptide carries each value; no protein rollup model)"),
                                declared$value %||% "peptide-level intensity"),
@@ -112,6 +114,7 @@ maxlfq_descriptor <- function(declared = NULL, cq = NULL) {
         "here); it was given no contaminant exclusion, and whether its protein inference moved",
         "peptides shared with those entries to another protein is not recorded."), label),
       kept_keratin_under_quantified = NA,
+      contaminant_rule_origin = contaminant_rule_origin(declared$label %||% "search engine's"),
       rollup_method  = sprintf(paste("protein intensity = %s, as the search engine reported it",
                                      "(one value per protein and run; no re-rollup here)"), value),
       identification_fdr = declared$identification,
@@ -138,6 +141,7 @@ maxlfq_descriptor <- function(declared = NULL, cq = NULL) {
     requantified_from_precursors = FALSE,
     kept_contaminant_quant = .dk$text,
     kept_keratin_under_quantified = .dk$under_quantified,
+    contaminant_rule_origin = contaminant_rule_origin(),
     rollup_method  = "DIA-NN PG.MaxLFQ",
     de_engine      = de_engine,
     missing_policy = missing_policy,
@@ -145,9 +149,26 @@ maxlfq_descriptor <- function(declared = NULL, cq = NULL) {
   )
 }
 
+# Is this DIA-NN report non-normalised -- searched with --no-norm, so its PG.MaxLFQ is too
+# (DIA-NN README: "if normalisation is disabled, these quantities are actually non-normalised")?
+# Read from the data, never assumed: every row's Precursor.Normalised equals its
+# Precursor.Quantity. -> TRUE / FALSE, or NA when the report has neither column.
+report_is_unnormalised <- function(ds, cols) {
+  if (!all(c("Precursor.Quantity", "Precursor.Normalised") %in% cols)) return(NA)
+  d <- dplyr::collect(dplyr::summarise(
+    dplyr::filter(dplyr::select(ds, Precursor.Quantity, Precursor.Normalised),
+                  Precursor.Quantity > 0, Precursor.Normalised > 0),
+    worst = max(abs(Precursor.Normalised / Precursor.Quantity - 1), na.rm = TRUE)))
+  isTRUE(d$worst[1] < 1e-6)
+}
+
+# `no_norm`: list(no_norm = TRUE / FALSE / NULL, source) -- whether the search ran with --no-norm,
+# from its provenance (run_de.R asks normalization_check.py searched_no_norm). NULL no_norm: not
+# recorded, and a normalised MaxLFQ then reads it from the data (report_is_unnormalised).
 build_maxlfq <- function(report_path, format = "parquet", q_cutoff = 0.01,
                          eq_cutoff = 0, pgq_cutoff = 0, keep_runs = NULL,
-                         drop_contaminants = TRUE, contaminant_exempt = NULL) {
+                         drop_contaminants = TRUE, contaminant_exempt = NULL,
+                         quantities = "normalised", no_norm = NULL) {
   stopifnot(requireNamespace("dplyr", quietly = TRUE),
             requireNamespace("tidyr", quietly = TRUE))
 
@@ -161,6 +182,48 @@ build_maxlfq <- function(report_path, format = "parquet", q_cutoff = 0.01,
   }
   declared <- if (identical(format, "parquet")) declared_quantity(ds) else NULL
   per_peptide <- identical(declared$level, "peptide")
+  # --quantities raw: no between-run normalisation anywhere. PG.MaxLFQ is DIA-NN's NORMALISED
+  # protein quantity unless the search ran with --no-norm, and an adapted report's engine
+  # quantities carry whatever their engine applied -- so only a non-normalised DIA-NN report
+  # qualifies, checked from its data. Otherwise refuse: never "raw" in name only.
+  if (identical(quantities, "raw")) {
+    if (!is.null(declared))
+      stop("--quantities raw on --method maxlfq needs a DIA-NN report; this one is ",
+           declared$label %||% "an adapted report", "'s, whose own normalisation is not known here.")
+    un <- report_is_unnormalised(ds, cols)
+    if (!isTRUE(un))
+      stop("--quantities raw on --method maxlfq: PG.MaxLFQ in this report is DIA-NN's ",
+           "NORMALISED protein quantity (",
+           if (is.na(un)) "the report has no Precursor.Quantity / Precursor.Normalised to check"
+           else "its Precursor.Normalised differs from Precursor.Quantity",
+           "). Next step, either: (1) --method dpc, which reads the non-normalised ",
+           "Precursor.Quantity from this same report, no new search -- for step 8's ",
+           "normalisation check, run its two DEs and the final DE with --method dpc; or (2) to ",
+           "keep MaxLFQ, search again with --no-norm (diann_parallel.py --no-norm writes ",
+           "no_norm_report.parquet), run this DE on that report, and give it to the check as ",
+           "normalization_check.py run ... --report-raw <no_norm_report.parquet> ",
+           "(SKILL.md step 8).", call. = FALSE)
+  }
+
+  # --quantities normalised on a DIA-NN report: what PG.MaxLFQ carries before the quantile step
+  # -- DIA-NN's cross-run normalisation, or none when the search ran with --no-norm. The search's
+  # provenance says which; only when it does not are the data read (a pass over two columns).
+  # Said in the descriptor, never assumed (the DE once described a --no-norm report's MaxLFQ as
+  # DIA-NN-normalised).
+  dia_nn_norm <- NULL
+  if (!identical(quantities, "raw") && is.null(declared)) {
+    nn <- no_norm$no_norm
+    src <- no_norm$source %||% "not recorded"
+    if (is.null(nn)) {
+      un <- report_is_unnormalised(ds, cols)
+      if (!is.na(un)) {
+        src <- paste0("read from the data: Precursor.Normalised ",
+                      if (un) "equals" else "differs from", " Precursor.Quantity (", src, ")")
+        nn <- un
+      }
+    }
+    dia_nn_norm <- list(no_norm = if (is.null(nn)) NA else nn, source = src)
+  }
 
   needed   <- c("Run", "Protein.Group", "PG.MaxLFQ", DIANN_FDR_REQUIRED)
   # DIANN_FDR_OPTIONAL is optional only because older reports lack those columns,
@@ -312,7 +375,12 @@ build_maxlfq <- function(report_path, format = "parquet", q_cutoff = 0.01,
   }
   if (ncol(E_pre) < 2) stop("MaxLFQ: fewer than 2 usable runs survived the filters.")
 
-  if (requireNamespace("limma", quietly = TRUE)) {
+  if (identical(quantities, "raw")) {
+    E <- E_pre                        # non-normalised: no between-run step at all
+    filters_applied <- c(filters_applied, paste(
+      "no between-run normalisation (--quantities raw: a --no-norm report's PG.MaxLFQ, no",
+      "quantile step)"))
+  } else if (requireNamespace("limma", quietly = TRUE)) {
     E <- limma::normalizeBetweenArrays(E_pre, method = "quantile")
   } else {
     cm <- apply(E_pre, 2, stats::median, na.rm = TRUE)
@@ -340,8 +408,23 @@ build_maxlfq <- function(report_path, format = "parquet", q_cutoff = 0.01,
     # reports lack PG.Q.Value / Global.*, and hard-coding them would emit a script
     # that filters on a column the run never had.
     q_columns = q_columns,
-    descriptor = maxlfq_descriptor(declared,
-                                   if (is.null(declared)) diann_cont_quant_exclude(report_path)),
+    descriptor = c(maxlfq_descriptor(declared,
+                                     if (is.null(declared)) diann_cont_quant_exclude(report_path)),
+                   list(quantities = quantities,
+                        normalisation = if (identical(quantities, "raw"))
+                          "none: PG.MaxLFQ of a DIA-NN report searched with --no-norm, no quantile step"
+                        else if (!is.null(declared))
+                          "quantile normalisation (limma::normalizeBetweenArrays) of the engine's quantities"
+                        else if (isTRUE(dia_nn_norm$no_norm))
+                          paste("quantile normalisation (limma::normalizeBetweenArrays) only: the",
+                                "DIA-NN search ran with --no-norm, so PG.MaxLFQ carries no DIA-NN",
+                                "cross-run normalisation")
+                        else if (isFALSE(dia_nn_norm$no_norm))
+                          "DIA-NN's cross-run normalisation (PG.MaxLFQ), then quantile normalisation (limma::normalizeBetweenArrays)"
+                        else paste("quantile normalisation (limma::normalizeBetweenArrays) of",
+                                   "PG.MaxLFQ; whether DIA-NN also normalised it is NOT RECORDED",
+                                   "[confirm]"),
+                        dia_nn_normalisation = dia_nn_norm)),
     # what the report declared about itself, verbatim, for the record
     declared_quantity = declared
   )

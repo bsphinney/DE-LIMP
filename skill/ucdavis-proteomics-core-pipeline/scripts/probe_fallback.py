@@ -74,7 +74,9 @@ STOPPED = {"environment": "a failure no other run could fix (DIA-NN could not st
            "budget": "the time budget ran out",
            "no_more_runs": "every eligible run was tried",
            "no_probeable_run": "no run could be probed",
-           "signal": "stopped by a signal"}
+           "signal": "stopped by a signal",
+           # never fallen back past (probe_window.EXIT_OOM fails the job); said if ever read
+           "oom": "DIA-NN ran out of memory"}
 
 
 def reason_from(evidence, exit_code, attempts):

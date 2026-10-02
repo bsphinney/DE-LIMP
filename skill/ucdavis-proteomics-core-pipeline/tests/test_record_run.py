@@ -723,20 +723,20 @@ class CoreOmics(Base):
         work = os.path.join(self.d, "work")
         sess, _ = make_session(work, quant_in_zip=False, name="2026-09-24_Mine")
         write(os.path.join(work, ".core_submission.json"), json.dumps(
-            {"schema": "core_submission/1", "internal_id": "PROT_0999", "id": "aaaaaaaaaaaa",
+            {"schema": "core_submission/1", "internal_id": "PROT_9999", "id": "aaaaaaaaaaaa",
              "session": os.path.join(work, "2026-09-24_Someone_Else")}))
         self.run_it("analysis-done", "--session", sess)
         log = self.read(self.only_folder())
         self.assertIn("**CoreOmics submission:** not recorded", log)
-        self.assertNotIn("PROT_0999", log)
+        self.assertNotIn("PROT_9999", log)
 
     def test_prot_is_never_guessed_from_a_folder_name(self):
-        sess, _ = make_session(self.d, quant_in_zip=False, name="2026-09-24_PROT_0999_Smith")
+        sess, _ = make_session(self.d, quant_in_zip=False, name="2026-09-24_PROT_9999_Smith")
         self.run_it("analysis-done", "--session", sess)
         log = self.read(self.only_folder())
         self.assertIn("**CoreOmics submission:** not recorded", log)
         self.assertIn("CoreOmics submission: not recorded", log)          # the DQ note
-        self.assertNotIn("PROT_0999 /", log)
+        self.assertNotIn("PROT_9999 /", log)
 
 
 class DataQuality(Base):
@@ -1483,6 +1483,78 @@ class ReviewFixes(Base):
                          ["findings"], [])
         dq = self.read(self.only_folder()).split("## Data Quality Notes", 1)[1].split("\n## ")[0]
         self.assertNotIn(".quant files", dq)
+
+
+class RefinalizeIsIdempotent(Base):
+    """Two finalize runs on one session (before and after the podcast link) left two identical
+    'analysis complete' blocks in data_analysis.md (2026-09-28): the marker was keyed on
+    MANIFEST.txt's time, which every finalize changes. It is keyed on what the entry says now."""
+
+    def test_the_same_analysis_finalized_again_logs_nothing_new(self):
+        out = make_search(self.d)
+        self.run_it("search-done", "--out", out, "--status", "completed", "--exit-code", "0")
+        sess, _ = make_session(self.d, quant_in_zip=False)
+        first = self.run_it("analysis-done", "--session", sess, "--out", out)
+        self.assertEqual(first["analysis_logged"], "new")
+        master1, (_, rows1) = self.master(), self.activity()
+        man = os.path.join(sess, "MANIFEST.txt")
+        later = time.time() + 120
+        os.utime(man, (later, later))                    # finalize rewrites MANIFEST.txt
+        again = self.run_it("analysis-done", "--session", sess, "--out", out)
+        self.assertEqual(again["analysis_logged"], "unchanged")
+        self.assertEqual(self.master(), master1)
+        _, rows2 = self.activity()
+        self.assertEqual([r[2] for r in rows2].count("analysis_completed"), 1)
+        self.assertEqual(len(rows2), len(rows1))
+
+    def test_a_changed_analysis_is_one_re_finalized_entry(self):
+        out = make_search(self.d)
+        self.run_it("search-done", "--out", out, "--status", "completed", "--exit-code", "0")
+        sess, _ = make_session(self.d, quant_in_zip=False)
+        self.run_it("analysis-done", "--session", sess, "--out", out)
+        prov = os.path.join(sess, "output", "tables", "de_provenance.json")
+        de = json.load(open(prov))
+        de["significant_per_contrast"] = {"B-A": 57}
+        write(prov, json.dumps(de))
+        res = self.run_it("analysis-done", "--session", sess, "--out", out)
+        self.assertEqual(res["analysis_logged"], "changed")
+        master = self.master()
+        self.assertEqual(master.count(": analysis complete"), 1, master)
+        self.assertEqual(master.count(": analysis re-finalized, changed"), 1, master)
+        self.assertIn("B-A = 57", master)
+        _, rows = self.activity()
+        done = [r for r in rows if r[2] == "analysis_completed"]
+        self.assertEqual(len(done), 2)
+        self.assertIn("re-finalized", done[1][6])
+        self.run_it("analysis-done", "--session", sess, "--out", out)      # and again: nothing
+        self.assertEqual(self.master(), master)
+
+    def test_a_growing_over_cap_zip_is_not_a_changed_analysis(self):
+        """The over-cap zip's reason quotes its size; a podcast added to the zip changes it."""
+        def rec(size):
+            why = f"{size} (without .quant ...) is over the 2.0 GB cap"
+            return {"name": "2026-10-01_X", "prot": None,
+                    "zip_copy": {"copied": False, "reason": why},
+                    "analysis": {"zip": {"exists": True, "path": "/s/x.zip", "reason": why},
+                                 "de": {"significant_per_contrast": {"B-A": 12}}}}
+        d = record_run.analysis_digest
+        self.assertEqual(d(rec("2.4 GB")), d(rec("2.5 GB")))
+        self.assertEqual(d(rec("512 MB")), d(rec("2.5 GB")))
+        changed = rec("2.4 GB")
+        changed["analysis"]["de"]["significant_per_contrast"]["B-A"] = 13
+        self.assertNotEqual(d(rec("2.4 GB")), d(changed))
+
+    def test_a_re_analysis_names_the_session_it_re_does(self):
+        out = make_search(self.d)
+        sess, _ = make_session(self.d, quant_in_zip=False)
+        write(os.path.join(sess, ".reanalysis_of"), "/data/2026-09-24_demo\n")
+        write(os.path.join(sess, "reanalysis.json"), json.dumps(
+            {"reanalysis_of": "/data/2026-09-24_demo", "version": 2}))
+        self.run_it("analysis-done", "--session", sess, "--out", out)
+        self.assertIn("- **Re-analysis of:** `/data/2026-09-24_demo` (version 2)", self.master())
+        rec = self.read(self.only_folder(), "run_record.json")
+        self.assertEqual(rec["analysis"]["reanalysis_of"],
+                         {"session": "/data/2026-09-24_demo", "version": 2})
 
 
 class ContQuantExcludeIsReadFromTheRun(Base):
