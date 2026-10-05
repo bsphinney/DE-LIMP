@@ -961,6 +961,16 @@ expands; a `$(...)` in `--out` would therefore be command substitution that runs
 **job** runs — inside the `rm -f --` the step performs before DIA-NN starts, so it would also
 choose what gets deleted.
 
+A `.` in a folder name (a re-injection's `S07_A01.01dup2`, a `v1.2`) is fine. DIA-NN names
+everything it writes beside an output — the predicted library, the log, the stats — by cutting
+the `--out` / `--out-lib` path at its **last** `.`, counted over the whole path. Every output
+file the skill names for DIA-NN therefore has an extension (`step1.speclib`,
+`diann_lib.speclib`, `report.parquet`), so the cut always falls in the file name
+(`diann_parallel.diann_output_path`). Before 2.10.1 the single-shot library job and the Radiant
+library step passed a bare `diann_lib`: on 2026-10-02 a search into `…/S07_A01.01dup2`
+wrote `S07_A01.predicted.speclib` and `S07_A01.log.txt` one folder up and its guard
+failed (reproduced on HIVE with DIA-NN 2.7.0, job 24560319).
+
 The **single-shot** search `run_search.py` writes for ≤ 5 files has the same contract: its
 library job deletes, then asserts, `diann_lib.predicted.speclib`, and its search job deletes
 `report.parquet` and `report.stats.tsv`, then asserts the report and runs

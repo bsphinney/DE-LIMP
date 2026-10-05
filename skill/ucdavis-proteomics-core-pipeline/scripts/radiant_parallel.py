@@ -174,9 +174,12 @@ def main():
     # writes <stem>.predicted.speclib (its compact binary format). Radiant reads .speclib
     # directly (FragLibReader accepts .fragLibFF/.tsv/.csv/.speclib), so no conversion is
     # needed -- but the filename must match what DIA-NN really produces or step 2 looks
-    # for a file that was never written.
-    lib_stem = os.path.join(D, "diann_predicted_lib")
-    lib = a.library or (lib_stem + ".predicted.speclib")
+    # for a file that was never written. The --out-lib has an extension: DIA-NN cuts the name
+    # it derives at the last '.' of the whole path, so a bare stem in a folder with a '.' in its
+    # name put the library one folder up (diann_parallel.diann_output_path).
+    from diann_parallel import predicted_speclib
+    out_lib = os.path.join(D, "diann_predicted_lib.speclib")
+    lib = a.library or predicted_speclib(out_lib)
     listing = os.path.join(D, "file_list.txt")
     with open(listing, "w") as fh:
         fh.write("\n".join(os.path.abspath(f) for f in files) + "\n")
@@ -245,7 +248,7 @@ def main():
             header("r1_libpred", a.libpred_cpus, a.libpred_mem, a.libpred_time, **q), "",
             'echo "Step 1/3 DIA-NN library prediction"; date',
             f'{a.diann} --fasta {shlex.quote(os.path.abspath(a.fasta))} --fasta-search '
-            f'--predictor --gen-spec-lib --out-lib {shlex.quote(lib_stem)} '
+            f'--predictor --gen-spec-lib --out-lib {shlex.quote(out_lib)} '
             f'--threads {a.libpred_cpus}',
             # Check for what DIA-NN ACTUALLY writes, and say what it did write if absent.
             f'if [ ! -s {shlex.quote(lib)} ]; then',

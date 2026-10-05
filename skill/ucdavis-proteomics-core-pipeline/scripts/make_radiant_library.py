@@ -31,6 +31,9 @@ Usage:
 """
 import sys, os, json, shlex, argparse, subprocess, csv
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from diann_parallel import diann_output_path  # noqa: E402  (how DIA-NN names its outputs)
+
 # DIA-NN parquet column -> the name Radiant's FragLibTsvReader looks for.
 # The reader accepts either spelling of the aliased ones (ProductMz|FragmentMz,
 # LibraryIntensity|RelativeIntensity, ModifiedPeptide|ModifiedPeptideSequence,
@@ -125,10 +128,14 @@ def main():
         if not speclib:
             if not a.fasta:
                 sys.exit("--fasta is required to predict a library.")
-            stem = os.path.join(a.out_dir, "diann_predicted_lib")
+            # Both --out-lib names carry an extension: DIA-NN cuts the name it writes at the
+            # last '.' of the whole path, so a bare stem in an --out-dir with a '.' in its name
+            # put the library one folder up (diann_parallel.diann_output_path).
+            out_lib = diann_output_path(os.path.join(a.out_dir, "diann_predicted_lib.speclib"),
+                                        "--out-lib")
             print("[1/3] DIA-NN: predicting the library from the FASTA")
             sh(f"{a.diann} --fasta {shlex.quote(a.fasta)} --fasta-search --predictor "
-               f"--gen-spec-lib --out-lib {shlex.quote(stem)} --threads {a.threads}")
+               f"--gen-spec-lib --out-lib {shlex.quote(out_lib)} --threads {a.threads}")
             speclib = find_written(a.out_dir, "diann_predicted_lib")
             if not speclib:
                 sys.exit(f"DIA-NN wrote no library into {a.out_dir}: "
@@ -136,8 +143,9 @@ def main():
         # Radiant rejects DIA-NN 2.x speclib (v-10/-11 < the v>=-3 it supports), so we
         # cannot hand the binary straight over -- convert it to a readable table.
         print("[2/3] DIA-NN: speclib -> parquet (it cannot write TSV; it writes parquet)")
-        stem2 = os.path.join(a.out_dir, "radiant_library_src")
-        sh(f"{a.diann} --lib {shlex.quote(speclib)} --out-lib {shlex.quote(stem2)} "
+        out_lib2 = diann_output_path(os.path.join(a.out_dir, "radiant_library_src.parquet"),
+                                     "--out-lib")
+        sh(f"{a.diann} --lib {shlex.quote(speclib)} --out-lib {shlex.quote(out_lib2)} "
            f"--gen-spec-lib --threads {a.threads}")
         parquet = find_written(a.out_dir, "radiant_library_src")
         if not parquet or not parquet.endswith(".parquet"):

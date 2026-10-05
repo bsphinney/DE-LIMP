@@ -892,10 +892,13 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
         and not getattr(a_globals, "one_step", False)
     dnet = dotnet_env_for(files)          # .NET 8 for reading Thermo .raw, if needed
 
-    lib = os.path.join(out, "diann_lib")
-    # DIA-NN ignores the extension asked of --out-lib for a PREDICTED library and always writes
-    # <name>.predicted.speclib (README, "Output library") -- the file the search job reads.
-    predicted = lib + ".predicted.speclib"
+    # With an extension, as the chain's step 1 names its own: DIA-NN cuts the name it derives at
+    # the last '.' of the whole path, so a bare `diann_lib` in a folder like `P2_X.01dup2` put the
+    # library and its log one folder up (dp.diann_output_path). It ignores the extension asked of
+    # --out-lib for a PREDICTED library and always writes <name>.predicted.speclib (README,
+    # "Output library") -- the file the search job reads.
+    lib = os.path.join(out, "diann_lib.speclib")
+    predicted = dp.predicted_speclib(lib)
     search_cfg = dp.bash_flags(groups, drop=SINGLE_SHOT_SEARCH_STRIP)
     lib_cmd = (f"{cmd} --cfg {shlex.quote(params)} --fasta {shlex.quote(fasta)} "
                f"--out-lib {shlex.quote(lib)} --threads {threads}")
@@ -904,7 +907,7 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
     # the --sbatch routes write search_provenance.json now, before the job runs, so a fallback
     # in the job records itself there; inline, it is written after the search, from ma_rec
     measure_lines, mflag, mass_acc, resolved_params = single_shot_mass_acc(
-        params, listing, fasta, lib + ".predicted.speclib", out, threads, cmd, libfree,
+        params, listing, fasta, predicted, out, threads, cmd, libfree,
         provenance=os.path.join(out, "search_provenance.json") if sbatch else None)
     # recorded only when there is something to say, so a pinned cfg's result is unchanged
     ma_rec = {} if mass_acc is None else {"mass_acc": mass_acc}
@@ -927,7 +930,7 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
         os.makedirs(quant_dir, exist_ok=True)           # DIA-NN aborts rather than create it
         tmp_arg = f" --temp {shlex.quote(quant_dir)}"
     search_cmd = (f"{cmd} {search_cfg}{mflag} {f_args} --fasta {shlex.quote(fasta)} "
-                  f"--lib {shlex.quote(lib)}.predicted.speclib --reanalyse --matrices "
+                  f"--lib {shlex.quote(predicted)} --reanalyse --matrices "
                   f"--out {shlex.quote(report)} --threads {threads}{tmp_arg}")
     onecmd = (f"{cmd} --cfg {shlex.quote(params)} {f_args} "
               f"--fasta {shlex.quote(fasta)} --out {shlex.quote(report)} "

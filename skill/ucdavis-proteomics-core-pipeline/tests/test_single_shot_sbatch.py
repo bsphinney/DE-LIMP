@@ -74,8 +74,10 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+# DIA-NN names the predicted library by cutting --out-lib at its last '.' (remove_extension;
+# tests/test_diann_output_names.py), which bash's ${x%.*} does too.
 if [ -n "$out_lib" ] && [ "${FAKE_WRITE_LIB:-0}" = 1 ]; then
-  printf 'predicted library bytes' > "${out_lib}.predicted.speclib"
+  printf 'predicted library bytes' > "${out_lib%.*}.predicted.speclib"
 fi
 if [ -n "$out" ] && [ "${FAKE_EMPTY_REPORT:-0}" = 1 ]; then
   : > "$out"                      # created the report, then died: 0 bytes, still exit 0

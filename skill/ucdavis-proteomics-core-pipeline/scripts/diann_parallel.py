@@ -1189,6 +1189,43 @@ def refuse_unsafe_path(path, flag="--out", prog="diann_parallel"):
     return path
 
 
+# DIA-NN names everything it writes beside an output -- `<name>.predicted.speclib`, `<name>.log.txt`,
+# `<name>.stats.tsv`, the matrices -- by cutting the --out / --out-lib path at its LAST '.', over
+# the WHOLE path (remove_extension(): find_last_of('.'), diann.cpp at tag 1.8, the last public
+# source). A file name with no extension is therefore cut inside a FOLDER whose name has a '.': on
+# 2026-10-02 (DIA-NN 2.7.0) `--out-lib .../species_check/S07_A01.01dup2/diann_lib` wrote
+# species_check/S07_A01.predicted.speclib and S07_A01.log.txt one folder up, and the job's
+# guard failed. Re-run on HIVE (DIA-NN 2.7.0, job 24560319): `--out-lib <dot folder>/diann_lib`
+# -> both one level up; `<dot folder>/diann_lib.speclib` -> diann_lib.predicted.speclib and
+# diann_lib.log.txt inside it; a conversion's `<dot folder>/conv.parquet` -> conv.parquet and
+# conv.log.txt inside it. So every output file this skill names for DIA-NN has an extension, and a
+# folder with a '.' in its name (a re-injection's `.01dup2`, a `v1.2`) is searched into as it is.
+def diann_output_path(path, flag="--out"):
+    """`path`, checked to be one DIA-NN derives names from inside its own folder: its file name
+    has an extension. Raises ValueError otherwise -- the file names are this skill's own, so that
+    is a bug in a generator, stopped before anything is written."""
+    name = re.split(r"[/\\]", path)[-1]
+    if "." not in name[1:]:
+        raise ValueError(
+            f"{flag} {path!r}: the file name has no extension, so DIA-NN would cut every name it "
+            f"derives from it (the predicted library, the log) at the last '.' of the whole path "
+            f"-- in a folder whose name has one, and write them outside it")
+    return path
+
+
+def diann_stem(path):
+    """DIA-NN's remove_extension(): `path` up to its last '.' (see diann_output_path)."""
+    i = path.rfind(".")
+    return path if i < 0 else path[:i]
+
+
+def predicted_speclib(out_lib):
+    """The file DIA-NN's predictor writes for `--out-lib <out_lib>`: `<stem>.predicted.speclib`,
+    whatever extension was asked for (README, "Output library": "the output file takes the
+    .predicted.speclib extension, with the name derived from the same template")."""
+    return diann_stem(diann_output_path(out_lib, "--out-lib")) + ".predicted.speclib"
+
+
 # Wall clock per array task (steps 2 and 4), hours, for a task of TIME_REFERENCE_CPUS CPUs -- the
 # default every chain ran at before 2.10 -- and SCALED UP for fewer (array_task_hours). Real Core
 # runs (HIVE sacct, every brettsp step-2 task since 2026-07-01 at 16 CPUs, 6,182 completed):
@@ -1517,7 +1554,8 @@ def main():
     all_f = " ".join(f"--f {shlex.quote(r)}" for r in raws)   # quote — data paths may contain spaces
     array = f"0-{n-1}%{a.max_simultaneous}"
     seed = refuse_unsafe_path(os.path.abspath(a.seed_lib), "--seed-lib") if a.seed_lib else None
-    predicted = seed if seed else f"{D}/step1.predicted.speclib"
+    step1_lib = f"{D}/step1.speclib"
+    predicted = seed if seed else predicted_speclib(step1_lib)
     empirical = f"{D}/empirical.parquet"
     first_pass = f"{D}/{FIRST_PASS_REPORT}"
     pass_cmp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pass_comparison.py")
@@ -1583,7 +1621,7 @@ def main():
             f'echo "Step 1/5 library prediction"; date',
             clear_stale(predicted),       # see clear_stale(): a re-run must not pass on the old one
             f'{DN} --fasta "{fasta}" --fasta-search --predictor --gen-spec-lib \\',
-            f'  --out-lib "{D}/step1.speclib" --out "{D}/step1_lib.parquet" \\',
+            f'  --out-lib "{step1_lib}" --out "{D}/step1_lib.parquet" \\',
             f'  --threads {a.libpred_cpus} {flags}',
             must_exist(predicted, "the predicted spectral library")]),
             stage="step 1/5 library prediction", hours=a.libpred_time)

@@ -308,7 +308,7 @@ Every job is held to the same contract as the 5-step chain
   2.7.0 (review srun 23512013), a re-run with no .NET logged `ERROR: cannot read .raw files`,
   exited 0, left the old `report.parquet`/`report.stats.tsv` byte-identical, and both checks
   passed on them. So job 1 removes, then requires, `<out>/diann_lib.predicted.speclib` (the
-  name 2.7.0 writes for `--out-lib <out>/diann_lib`); job 2 removes `report.parquet` and
+  name 2.7.0 writes for `--out-lib <out>/diann_lib.speclib`); job 2 removes `report.parquet` and
   `report.stats.tsv`, then requires the report and runs the check below. The inline
   (no `--sbatch`) path does the same. A failed re-run therefore leaves **no** report in `--out`.
 - **Job 2 fails unless the report holds every input run.** `scripts/check_report_runs.py`

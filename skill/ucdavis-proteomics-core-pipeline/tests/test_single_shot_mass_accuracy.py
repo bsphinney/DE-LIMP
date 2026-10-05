@@ -56,7 +56,7 @@ for a in "$@"; do
 done
 if [ -n "$outlib" ]; then
   [ -n "${FAKE_ARGV_LOG:-}" ] && echo "LIB $*" >> "$FAKE_ARGV_LOG"
-  echo lib > "$outlib.predicted.speclib"; exit 0
+  echo lib > "${outlib%.*}.predicted.speclib"; exit 0     # DIA-NN cuts at the last '.'
 fi
 if [ "$nf" -gt 1 ]; then
   [ -n "${FAKE_ARGV_LOG:-}" ] && echo "SEARCH $*" >> "$FAKE_ARGV_LOG"
