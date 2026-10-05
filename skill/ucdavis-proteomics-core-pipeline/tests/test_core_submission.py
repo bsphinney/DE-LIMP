@@ -642,6 +642,8 @@ class TestLocate(unittest.TestCase):
         self.assertEqual(rc, 4)
         self.assertTrue(out["ht_plate"])
         self.assertIn("ht_manifest.py", out["next_step"])
+        # the record goes with it, so ht_manifest checks STAN's list against its samples
+        self.assertIn(f"--summary {os.path.abspath(summary)}", out["next_step"])
 
     def test_an_ht_plate_named_with_prot_exits_4(self):
         """2.9.1: a plate named `<date>_PROT_<n>_...` went to sample matching and found 0 of 96."""

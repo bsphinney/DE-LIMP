@@ -451,7 +451,10 @@ listed runs.
 (`_PROT_08070_` is not 0807), because anywhere else it collides with run counters —
 Exploris `Ex08312026_380_JE21.raw` would otherwise impersonate submission 0380. Before 2.9.1
 the `PROT_` form was not recognised, so such a plate went to sample matching and found none
-of its samples.
+of its samples. Its `next_step` passes this summary to `ht_manifest.py` (`--summary`), which then
+checks STAN's list against the record: only runs named for the submission go into its
+`files.txt`, and a sample with no run, a run of no sample, or runs of another method stop it
+(`references/ht-submissions.md`).
 
 **Staging an HT plate: `locate --files-from <ht_manifest files.txt>`.** An HT run is named
 `<date>_[PROT_]<n>_<speed>_<sample name>_S<plate>-<well>_<n>_<acq#>.d`: it carries the

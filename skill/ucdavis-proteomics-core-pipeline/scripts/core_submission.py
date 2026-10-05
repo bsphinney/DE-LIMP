@@ -2561,7 +2561,10 @@ def cmd_locate(a) -> int:
             result.update(ht_plate=True, n_ht_files=len(ht), ht_examples=ht[:10],
                           next_step=("this is a high-throughput plate: get the file list from STAN -- "
                                      "python3 ~/proteomics-pipeline/scripts/ht_manifest.py fetch "
-                                     + re.sub(r"\D", "", _s(s.get("internal_id"))) + " --out <dir>"),
+                                     + re.sub(r"\D", "", _s(s.get("internal_id")))
+                                     # the record's sample list: ht_manifest's sample_list gate
+                                     + " --summary " + shlex.quote(os.path.abspath(a.summary))
+                                     + " --out <dir>"),
                           outputs={"locate_json": outputs["locate_json"]})
             with open(outputs["locate_json"], "w") as fh:
                 json.dump(result, fh, indent=2)

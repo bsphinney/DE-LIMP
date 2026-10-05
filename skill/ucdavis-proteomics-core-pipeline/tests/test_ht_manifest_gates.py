@@ -10,6 +10,7 @@ Stdlib only (unittest), matching the rest of the suite -- CI installs nothing.
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -36,23 +37,35 @@ def _fake_stan(tmp):
     return p
 
 
-def _run(tmp, manifest, extra=None):
+def _run(tmp, manifest, extra=None, ht=HT):
     env = dict(os.environ)
     env["FAKE_MANIFEST"] = json.dumps(manifest)
     env["PGPASSWORD"] = "not-a-real-token"          # skips the credential path entirely
-    argv = [sys.executable, HT, "--stan", _fake_stan(tmp), "fetch", "0793", "--out", tmp]
+    argv = [sys.executable, ht, "--stan", _fake_stan(tmp), "fetch", "9001", "--out", tmp]
     return subprocess.run(argv + (extra or []), capture_output=True, text=True, env=env)
+
+
+def _well(i):
+    return "ABCDEFGH"[i // 12 % 8] + str(i % 12 + 1)
+
+
+def _touch(tmp, name):
+    f = os.path.join(tmp, name)
+    open(f, "w").close()
+    return f
+
+
+def _plate_run(tmp, i, prefix="20260827_9001_100spd", plate="S5", inj=24000):
+    """One of the submission's own plate runs, named as the Core names them:
+    <date>_[PROT_]<n>_<speed>_<sample name>_S<plate>-<well>_1_<acquisition #>.d"""
+    return _touch(tmp, f"{prefix}_XY{i + 1}_{plate}-{_well(i)}_1_{inj + i}.d")
 
 
 def _ok(tmp, n=24):
     """A manifest that should pass every gate. Paths must really exist -- the paths_exist
     gate checks the filesystem, so the fixture creates them."""
-    files = []
-    for i in range(n):
-        f = os.path.join(tmp, f"run{i}.d")
-        open(f, "w").close()
-        files.append(f)
-    return {"submission": "0793", "include": "samples", "files": files, "n_files": n,
+    files = [_plate_run(tmp, i) for i in range(n)]
+    return {"submission": "9001", "include": "samples", "files": files, "n_files": n,
             "plates": ["S5", "S6"], "counts": {"sample": n, "standard": 8, "blank": 7},
             "n_needs_rerun": 0, "missing_paths": []}
 
@@ -89,8 +102,11 @@ class TestHardGates(unittest.TestCase):
         """Otherwise a 120-file array dies partway through, hours in."""
         with tempfile.TemporaryDirectory() as tmp:
             m = _ok(tmp)
-            m["files"].append(os.path.join(tmp, "never_written.d"))
+            m["files"].append(os.path.join(tmp, "20260827_9001_100spd_XY99_S6-A1_1_24999.d"))
             self.assertEqual(_run(tmp, m).returncode, 2)
+            g = {x["gate"]: x for x in
+                 json.load(open(os.path.join(tmp, "ht_manifest.json")))["gates"]}
+            self.assertEqual(g["paths_exist"]["status"], "FAIL")
 
     def test_stale_stan_exits_3_not_2(self):
         """A STAN too old to have ht-manifest must be distinguishable from a bad
@@ -98,7 +114,7 @@ class TestHardGates(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             env = dict(os.environ, PGPASSWORD="x", FAKE_MANIFEST="{}")
             fake = _fake_stan(tmp)
-            r = subprocess.run([sys.executable, HT, "--stan", fake, "fetch", "0793",
+            r = subprocess.run([sys.executable, HT, "--stan", fake, "fetch", "9001",
                                 "--out", tmp, "--include", "standards"],
                                capture_output=True, text=True,
                                env=dict(env, FAKE_MANIFEST=""))
@@ -248,13 +264,14 @@ class TestRepeatedRuns(unittest.TestCase):
             self.assertIn(twin, self.listed(tmp))
             self.assertIn(m["files"][2], self.listed(tmp))
             out = self.manifest(tmp)
-            self.assertEqual(out["repeated_names"], [{"run_name": "run2",
+            name = os.path.basename(twin)[:-2]
+            self.assertEqual(out["repeated_names"], [{"run_name": name,
                                                       "paths": [m["files"][2], twin]}])
             g = {x["gate"]: x for x in out["gates"]}
             self.assertEqual(g["repeated_names"]["status"], "WARN")
             self.assertIn("run_search.py stops before searching them as given",
                           g["repeated_names"]["detail"])
-            self.assertIn(f"FLAG: 1 run name(s) are shared by different files, all kept: run2: "
+            self.assertIn(f"FLAG: 1 run name(s) are shared by different files, all kept: {name}: "
                           f"{m['files'][2]}, {twin}", r.stderr)
 
     def test_a_mix_of_both_is_flagged_both_ways(self):
@@ -269,7 +286,8 @@ class TestRepeatedRuns(unittest.TestCase):
             out = self.manifest(tmp)
             self.assertEqual([(d["path"], d["times"]) for d in out["repeated_paths"]],
                              [(f[5], 2), (twin, 2)])
-            self.assertEqual([d["run_name"] for d in out["repeated_names"]], ["run2"])
+            self.assertEqual([d["run_name"] for d in out["repeated_names"]],
+                             [os.path.basename(twin)[:-2]])
             self.assertEqual(r.stderr.count("[ht_manifest] FLAG:"), 2)
 
     def test_a_symlink_to_a_listed_run_is_the_same_file(self):
@@ -308,6 +326,219 @@ class TestRepeatedRuns(unittest.TestCase):
             g = {x["gate"]: x for x in self.manifest(tmp)["gates"]}
             self.assertEqual((g["repeated_paths"]["status"], g["repeated_names"]["status"]),
                              ("PASS", "PASS"))
+
+
+def _summary(tmp, names, internal_id="PROT_9001"):
+    """core_submission.py fetch's submission_summary.json, as much of it as the check reads: the
+    CoreOmics record's own sample list (an HT plate run carries the sample_name)."""
+    p = os.path.join(tmp, "submission_summary.json")
+    with open(p, "w") as fh:
+        json.dump({"internal_id": internal_id, "id": "0123456789ab",
+                   "samples": [{"unique_id": f"U{i + 1:03d}", "sample_name": n,
+                                "condition_name": "b" if i % 2 else "a"}
+                               for i, n in enumerate(names)]}, fh)
+    return p
+
+
+class TheFilesAreThisSubmissions(unittest.TestCase):
+    """2026-10-05 (2.10.0): a 96-sample HT plate came back as 136 files with every gate PASS: 95
+    of its 96 runs (one real run missing) and 41 runs of OTHER projects that had used the same
+    tray on earlier days -- named another way, other dates, other methods, 5 of them DDA. STAN
+    assigns runs to a submission by tray and injection window, whoever's they are. Searched as
+    given, other clients' data enters the search, the report and FRAN, and a sample is silently
+    left out. Caught by hand. These assert on the exit code and on what files.txt holds."""
+
+    def gates(self, tmp):
+        with open(os.path.join(tmp, "ht_manifest.json")) as fh:
+            return {g["gate"]: g for g in json.load(fh)["gates"]}
+
+    def listed(self, tmp):
+        with open(os.path.join(tmp, "files.txt")) as fh:
+            return [l for l in fh.read().split("\n") if l]
+
+    def shared_tray(self, tmp, missing=68):
+        """The plate: 96 samples on tray S3, one of them never recorded by STAN; earlier on the
+        same tray, 36 DIA and 5 DDA runs of another project, named another way."""
+        dia = [_touch(tmp, f"09282026__60SPD_DIA-QZ{k + 1}_S3-{_well(k)}_1_{24700 + k}.d")
+               for k in range(36)]
+        dda = [_touch(tmp, f"09292026__30SPD_DDAQZ{k + 1}_S3-{_well(40 + k)}_1_{24800 + k}.d")
+               for k in range(5)]
+        own = [_plate_run(tmp, i, prefix="20261005_PROT_9001_100spd", plate="S3", inj=25000)
+               for i in range(96) if i != missing]
+        files = dia + dda + own
+        entries = [{"run_name": os.path.basename(f)[:-2], "raw_path": f, "class": "sample",
+                    "plate": "S3", "well": None, "injection": int(f[:-2].rsplit("_", 1)[1]),
+                    "needs_rerun": False, "verdict": "pass"} for f in files]
+        m = {"submission": "9001", "include": "samples", "files": files, "entries": entries,
+             "n_files": len(files), "plates": ["S3"], "counts": {"sample": len(files)},
+             "n_needs_rerun": 0, "missing_paths": []}
+        return m, own, dia + dda
+
+    def test_a_tray_shared_with_earlier_projects_stops_and_names_every_foreign_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m, own, foreign = self.shared_tray(tmp)
+            r = _run(tmp, m)
+            self.assertEqual(r.returncode, 2, r.stdout)
+            g = self.gates(tmp)
+            f = g["named_for_submission"]
+            self.assertEqual((f["status"], f["n"]), ("FAIL", 41))
+            self.assertEqual(sorted(x["file"] for x in f["files"]), sorted(foreign))
+            self.assertEqual({x["class"] for x in f["files"]}, {"sample"})
+            self.assertIn("STAN assigns runs to a submission by tray", f["detail"])
+            self.assertIn("41 of them ran before", f["detail"])
+            for x in foreign:
+                self.assertIn(x, r.stdout)                      # every one, not five examples
+            self.assertEqual(self.listed(tmp), own)             # never another project's run
+            self.assertEqual(g["n_files"]["n"], 95)
+            meth = g["one_method"]
+            self.assertEqual(meth["status"], "FAIL")
+            self.assertEqual({x["method"]: (x["n"], x["n_named_for_submission"])
+                              for x in meth["groups"]},
+                             {"100spd": (95, 95), "60spd DIA": (36, 0), "30spd": (5, 0)})
+            self.assertIn("files      : 95 (136 listed by STAN; 41 not named for submission 9001)",
+                          r.stdout)
+            self.assertIn("HARD GATE FAILED", r.stderr)
+
+    def test_the_records_sample_list_names_the_missing_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m, _own, _foreign = self.shared_tray(tmp)
+            s = _summary(tmp, [f"XY{i + 1}" for i in range(96)])
+            r = _run(tmp, m, ["--summary", s])
+            self.assertEqual(r.returncode, 2)
+            g = self.gates(tmp)["sample_list"]
+            self.assertEqual(g["status"], "FAIL")
+            self.assertEqual([(x["unique_id"], x["sample_name"]) for x in g["missing"]],
+                             [("U069", "XY69")])
+            self.assertEqual(g["extra"], [])
+            self.assertIn("U069 (XY69)", r.stdout)
+
+    def test_a_plate_that_is_all_its_own_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m = _ok(tmp)
+            r = _run(tmp, m, ["--summary", _summary(tmp, [f"XY{i + 1}" for i in range(24)])])
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            g = self.gates(tmp)
+            for k in ("named_for_submission", "one_method", "sample_list"):
+                self.assertEqual(g[k]["status"], "PASS", g[k])
+            self.assertEqual(self.listed(tmp), m["files"])
+
+    def test_a_run_of_no_sample_on_the_record_is_named(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m = _ok(tmp)
+            r = _run(tmp, m, ["--summary", _summary(tmp, [f"XY{i + 1}" for i in range(23)])])
+            self.assertEqual(r.returncode, 2)
+            g = self.gates(tmp)["sample_list"]
+            self.assertEqual((g["status"], g["missing"]), ("FAIL", []))
+            self.assertEqual([x["file"] for x in g["extra"]], [m["files"][23]])
+
+    def test_the_record_of_another_submission_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m = _ok(tmp)
+            s = _summary(tmp, [f"XY{i + 1}" for i in range(24)], internal_id="PROT_9002")
+            r = _run(tmp, m, ["--summary", s])
+            self.assertEqual(r.returncode, 2)
+            g = self.gates(tmp)["sample_list"]
+            self.assertEqual(g["status"], "FAIL")
+            self.assertIn("PROT_9002", g["detail"])
+
+    def test_without_the_record_the_sample_list_is_not_checked_and_says_so(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(_run(tmp, _ok(tmp)).returncode, 0)
+            g = self.gates(tmp)["sample_list"]
+            self.assertEqual(g["status"], "WARN")
+            self.assertIn("--summary", g["detail"])
+
+    def test_a_rerun_list_is_not_held_to_the_whole_sample_list(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m = dict(_ok(tmp, n=3), include="rerun")
+            s = _summary(tmp, [f"XY{i + 1}" for i in range(24)])
+            self.assertEqual(_run(tmp, m, ["--include", "rerun", "--summary", s]).returncode, 0)
+            self.assertEqual(self.gates(tmp)["sample_list"]["status"], "INFO")
+
+    def test_what_counts_as_named_for_the_submission(self):
+        """core_submission.ht_pattern, the one definition (2.9.1): the number right after the
+        leading date, bare or PROT_, any case, and ending there."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ours = [_touch(tmp, n) for n in (
+                "20260827_9001_100spd_XY1_S5-A1_1_24000.d",
+                "20260827_PROT_9001_100spd_XY2_S5-A2_1_24001.d",
+                "20260827_prot9001_100spd_XY3_S5-A3_1_24002.d",
+                "20260901_9001_rerun_XY4_S1-A1_1_24200.d")]
+            not_ours = [_touch(tmp, n) for n in (
+                "20260827_90010_100spd_XY5_S5-A5_1_24003.d",       # another submission
+                "20260828_100spd_XY6_S5-A6_1_29001.d")]            # 9001 only in the counter
+            m = dict(_ok(tmp, n=0), files=ours + not_ours, counts={"sample": 6})
+            self.assertEqual(_run(tmp, m).returncode, 2)
+            self.assertEqual(self.listed(tmp), ours)
+            self.assertEqual(sorted(x["file"] for x in self.gates(tmp)["named_for_submission"]["files"]),
+                             sorted(not_ours))
+
+    def test_runs_that_declare_different_methods_stop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m = _ok(tmp, n=12)
+            m["files"] += [_plate_run(tmp, i, prefix="20260828_9001_60SPD", inj=24100)
+                           for i in range(12, 16)]
+            r = _run(tmp, m)
+            self.assertEqual(r.returncode, 2)
+            g = self.gates(tmp)
+            self.assertEqual(g["named_for_submission"]["status"], "PASS")
+            self.assertEqual(g["one_method"]["status"], "FAIL")
+            self.assertEqual({x["method"]: x["n"] for x in g["one_method"]["groups"]},
+                             {"100spd": 12, "60spd": 4})
+
+    def test_dia_beside_dda_stops(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            files = [_touch(tmp, "20260827_9001_60SPD_DIA-XY1_S5-A1_1_24000.d"),
+                     _touch(tmp, "20260827_9001_60-spd-dda-XY2_S5-A2_1_24001.d")]
+            m = dict(_ok(tmp, n=0), files=files, counts={"sample": 2})
+            self.assertEqual(_run(tmp, m).returncode, 2)
+            g = self.gates(tmp)["one_method"]
+            self.assertEqual(g["status"], "FAIL")
+            self.assertEqual({x["method"] for x in g["groups"]}, {"60spd DIA", "60spd DDA"})
+
+    def test_a_run_whose_name_declares_no_method_is_flagged_not_stopped(self):
+        """A re-injection is named <date>_<n>_rerun_<sample>_...: no speed in the name."""
+        with tempfile.TemporaryDirectory() as tmp:
+            m = _ok(tmp)
+            rerun = _touch(tmp, "20260901_9001_rerun_XY1_S1-A1_1_24200.d")
+            m["files"].append(rerun)
+            r = _run(tmp, m)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            g = self.gates(tmp)["one_method"]
+            self.assertEqual(g["status"], "WARN")
+            self.assertEqual(g["undeclared"], [rerun])
+
+    def test_no_file_named_for_the_submission_points_at_a_curated_list(self):
+        """A continuation tray named without the number: STAN joined it by the acquisition
+        counter, and the name cannot say whose it is. Staff choose the files instead."""
+        with tempfile.TemporaryDirectory() as tmp:
+            files = [_touch(tmp, f"20260828_100spd_XY{i + 1}_S5-{_well(i)}_1_{24126 + i}.d")
+                     for i in range(4)]
+            m = dict(_ok(tmp, n=0), files=files, counts={"sample": 4})
+            r = _run(tmp, m)
+            self.assertEqual(r.returncode, 2)
+            g = self.gates(tmp)["n_files"]
+            self.assertEqual((g["status"], g["n"]), ("FAIL", 0))
+            self.assertIn("core_submission.py locate --files-from", g["detail"])
+            self.assertEqual(self.listed(tmp), [])
+
+    def test_without_the_name_rule_nothing_passes(self):
+        """A partial copy of scripts/ (no core_submission.py, no fran_deposit.py): the names cannot
+        be checked, so the check FAILS -- it never passes for want of its rule."""
+        with tempfile.TemporaryDirectory() as tmp:
+            part = os.path.join(tmp, "partial")
+            os.makedirs(part)
+            for f in ("ht_manifest.py", "check_report_runs.py"):
+                shutil.copy(os.path.join(SCRIPTS, f), part)
+            r = _run(tmp, _ok(tmp), ht=os.path.join(part, "ht_manifest.py"))
+            self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+            g = self.gates(tmp)
+            self.assertEqual(g["named_for_submission"]["status"], "FAIL")
+            self.assertIn("core_submission.py could not be imported",
+                          g["named_for_submission"]["detail"])
+            self.assertEqual(g["one_method"]["status"], "FAIL")
+            self.assertEqual(self.listed(tmp), [])
+
 
 if __name__ == "__main__":
     unittest.main()

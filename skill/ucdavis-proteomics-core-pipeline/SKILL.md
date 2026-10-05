@@ -421,8 +421,11 @@ contains well blanks and HeLa standards that must not be searched as samples; an
 already knows which samples want re-injecting. Globbing gets all of that wrong, silently.
 
 ```
-bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/ht_manifest.py fetch 0793 --out ~/ht0793'
+bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/ht_manifest.py fetch 0793 \
+    --summary ~/core/PROT_0793/submission_summary.json --out ~/ht0793'
 ```
+`--summary` is the CoreOmics record (`core_submission.py fetch`, put on HIVE as in step 1c):
+with it, every sample on the record must have a run and every run a sample.
 **If you are not the owner of STAN's Postgres token** (mode 0600 — i.e. almost everyone),
 that fails with *permission denied*, which reads exactly like "no such submission". Use the
 hosted dashboard instead, with a per-submission share token from the HT tab — the one auth
@@ -437,17 +440,28 @@ there. **Never put it on a command line or in `commands.log`**, and don't log th
 above. The run registry copies `commands.log` into a folder the whole Core can read, and a
 token on a command line is in the process list too. `ht_manifest.py` masks the token in
 everything it prints.
-Writes `files.txt` (absolute resolved paths → feed to `--raw`/`--files`) and
-`ht_manifest.json` (STAN's payload + gate results). `--include` = `samples` (**default**,
+Writes `files.txt` (absolute resolved paths → feed to `--raw`/`--files`; **only the runs named
+for the submission**) and `ht_manifest.json` (STAN's payload + gate results). `--include` = `samples` (**default**,
 excludes blanks/standards), `rerun`, `standards`, `all`. Both `0793` and `793` work.
 
 **Honour the exit code.** `0` proceed · **`2` HARD GATE FAILED — do not search** · `3` STAN
 unreachable or too old. A hard gate means the search would *succeed while covering the wrong
 files*: `missing_paths` (runs STAN knows but has no path for — silently excluded from the
 list), `n_files` (nothing matched — usually a mistyped number), `paths_exist` (a resolved
-path the filesystem lacks — otherwise a 120-file array dies hours in). **Surface every
+path the filesystem lacks — otherwise a 120-file array dies hours in). **STAN's list is
+checked, not trusted:** STAN assigns runs to a submission by *tray*, whoever's they are, and in
+2.10.0 a 96-sample plate came back as 136 files — 41 runs of other projects that used the tray
+earlier, at other methods (5 DDA), and one real run missing — with every gate PASS. So
+`named_for_submission` FAILS on any run whose name does not carry the number (`<date>_[PROT_]<n>_`)
+and lists every one; they are never in `files.txt`. `one_method` FAILS when the names declare
+different methods (`100spd` beside `60SPD DIA`, DIA beside DDA). `sample_list` (with `--summary`)
+FAILS naming each sample with no run and each run of no sample. When no listed run is named for
+the submission, `n_files` FAILS and says so. **The way past any of these is staff choosing the
+files**: write the confirmed list and stage it with `core_submission.py locate --files-from`
+(their choices are recorded) — never search STAN's list as given. **Surface every
 non-PASS gate before committing compute**, warnings included: `plates` >2, `counts` <12
-samples, `needs_rerun` (those samples ARE in the default set — say so), `repeated_paths` (STAN
+samples, `sample_list` not checked (no `--summary`), `one_method` for a name that declares no
+method (a `_rerun_` run), `needs_rerun` (those samples ARE in the default set — say so), `repeated_paths` (STAN
 listed a file more than once; `files.txt` holds it once and it is searched once) and
 `repeated_names` (different files share a run name: all kept and flagged, but `run_search.py`
 stops before searching them as given — ask the operator to rename one or split the search).
