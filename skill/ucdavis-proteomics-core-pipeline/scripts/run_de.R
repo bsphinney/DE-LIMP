@@ -1054,9 +1054,12 @@ utils::write.csv(data.frame(Protein.Group = expr_df$Protein.Group,
 # From det_n (Detection_Matrix.csv) -- the one definition of "measured". Per group in the
 # contrast: Detected_<group> = "k/n", the runs of that group in which the protein was
 # measured; Evidence = "measured in both" (every run of every group in the contrast),
-# "presence call" (never measured in one group: the difference there is the model's, not a
-# measurement), else "partly <inferred|missing>". The same words go in de_provenance.json.
+# "not measured in either group" (no run of any group in the contrast: measured only in other
+# groups of the study), "presence call" (never measured in one group but measured in another:
+# the difference there is the model's, not a measurement), else "partly <inferred|missing>".
+# The same words go in de_provenance.json. set_tests.R and analysis_prompt.py mirror them.
 EVIDENCE_LABELS <- c(all = "measured in both", none_in_a_group = "presence call",
+                     none_measured = "not measured in either group",
                      partial = paste("partly", detection_rec$zero_means))
 detection_columns <- function(prot, grp_names) {
   i <- match(prot, rownames(det_n))
@@ -1068,8 +1071,9 @@ detection_columns <- function(prot, grp_names) {
     k_all[[g]] <- k; n_all[[g]] <- length(cols)
   }
   kk <- do.call(cbind, k_all); nn <- matrix(unlist(n_all), nrow(kk), length(n_all), byrow = TRUE)
-  ev <- ifelse(rowSums(kk == 0) > 0, EVIDENCE_LABELS[["none_in_a_group"]],
-         ifelse(rowSums(kk == nn) == ncol(kk), EVIDENCE_LABELS[["all"]], EVIDENCE_LABELS[["partial"]]))
+  ev <- ifelse(rowSums(kk) == 0, EVIDENCE_LABELS[["none_measured"]],
+         ifelse(rowSums(kk == 0) > 0, EVIDENCE_LABELS[["none_in_a_group"]],
+         ifelse(rowSums(kk == nn) == ncol(kk), EVIDENCE_LABELS[["all"]], EVIDENCE_LABELS[["partial"]])))
   ev[rowSums(is.na(kk)) > 0] <- NA_character_
   out$Evidence <- unname(ev)
   as.data.frame(out, check.names = FALSE, stringsAsFactors = FALSE)
@@ -1079,10 +1083,48 @@ detection_rec$de_columns <- list(
                                       "measured (k; Detection_Matrix.csv > 0, 0 = %s)"),
                                detection_rec$zero_means),
   Evidence = sprintf(paste0("'%s' = measured in every run of every group in the contrast; '%s' = ",
-                            "never measured in at least one group, so the difference there is ",
-                            "the model's, not a measurement; '%s' = otherwise"),
+                            "never measured in at least one group but measured in another, so the ",
+                            "difference there is the model's, not a measurement; '%s' = measured in ",
+                            "no run of any group in the contrast (only in other groups), so not ",
+                            "tested in it: no logFC or p-value; '%s' = otherwise"),
                      EVIDENCE_LABELS[["all"]], EVIDENCE_LABELS[["none_in_a_group"]],
-                     EVIDENCE_LABELS[["partial"]]))
+                     EVIDENCE_LABELS[["none_measured"]], EVIDENCE_LABELS[["partial"]]))
+
+# ---- not measured in either group: not tested in that contrast -------------------
+# A protein with no measured value in any run of the groups a contrast compares (Evidence
+# "not measured in either group") carries no information about that contrast: on dpc both
+# sides are the detection model's inferred value (logFC ~ 0, p ~ 1; exactly 0 and 1 on synthetic
+# data), on maxlfq both are missing (no estimate). Testing it adds a null hypothesis nothing could reject to that
+# contrast's Benjamini-Hochberg correction -- 186 of the 249 proteins with p > 0.975 in one
+# contrast of a staff analysis (2026-10-03), and a spike at p = 1 in every p-value histogram.
+# The rule is a function of the detection counts summed over both groups, the same whatever the
+# group labels within the contrast, so dropping these from the correction is independent
+# filtering (Bourgon, Gentleman & Huber 2010 PNAS 107:9546). The row stays, labelled; its test
+# columns are NA and BH runs over the proteins tested. The fit itself (and eBayes' variance
+# prior) is the one model for every contrast and is not changed.
+NOT_MEASURED_NA_COLUMNS <- c("logFC", "t", "P.Value", "adj.P.Val", "B")
+not_measured_rec <- list(
+  label = EVIDENCE_LABELS[["none_measured"]],
+  rule = sprintf(paste0("a protein measured in no run of any group a contrast compares ",
+                        "(Detection_Matrix.csv = 0 in every one of those runs; 0 = %s) is not ",
+                        "tested in that contrast: its %s are NA in the DE table, it is left out of ",
+                        "that contrast's Benjamini-Hochberg adjustment and never counts as ",
+                        "significant; the row stays, with Evidence '%s'"),
+                 detection_rec$zero_means, paste(NOT_MEASURED_NA_COLUMNS, collapse = ", "),
+                 EVIDENCE_LABELS[["none_measured"]]),
+  columns_na = as.list(NOT_MEASURED_NA_COLUMNS),
+  why = paste("both sides are the detection model's inferred value (dpc) or missing (maxlfq), so",
+              "the test carries no information about the contrast; the rule does not depend on",
+              "which group is which, so leaving these out of BH is independent filtering",
+              "(Bourgon et al. 2010)"))
+untest_not_measured <- function(tt) {
+  nm <- !is.na(tt$Evidence) & tt$Evidence == not_measured_rec$label
+  if (any(nm)) {
+    tt[nm, intersect(NOT_MEASURED_NA_COLUMNS, names(tt))] <- NA
+    tt$adj.P.Val <- stats::p.adjust(tt$P.Value, method = "BH")   # NA p-values are left out
+  }
+  tt
+}
 
 all_sig <- list()
 de_tables <- list()   # per DE table: its file and which fit it was reported from
@@ -1098,17 +1140,27 @@ for (cn in forms) {
   }
   # the groups it compares, in the contrast's order: first side (coefficient > 0), then second
   .cg <- intersect(c(rownames(cmat)[cmat[, cn] > 0], rownames(cmat)[cmat[, cn] < 0]), levels(groups))
-  if (length(.cg)) tt <- cbind(tt, detection_columns(tt$Protein.Group, .cg))
+  if (length(.cg)) {
+    tt <- cbind(tt, detection_columns(tt$Protein.Group, .cg))
+    tt <- untest_not_measured(tt)
+  }
   tt <- tt[order(tt$adj.P.Val), ]
   fn <- file.path(outdir, sprintf("DE_%s_%s.csv", method, make.names(cn)))
   utils::write.csv(tt, fn, row.names = FALSE)
   sig <- subset(tt, !is.na(adj.P.Val) & adj.P.Val < adjp_thr)
   all_sig[[cn]] <- nrow(sig)
   n_beyond <- sum(abs(sig$logFC) >= logfc_ref, na.rm = TRUE)   # descriptive, not a filter
-  message(sprintf("[run_de] %-20s  %d proteins, %d significant (adj.P<%.2g); %d of those with |logFC|>=%.2g -> %s%s",
-                  cn, nrow(tt), nrow(sig), adjp_thr, n_beyond, logfc_ref, basename(fn),
+  n_tested <- sum(!is.na(tt$P.Value))
+  n_not_measured <- if ("Evidence" %in% names(tt))
+    sum(tt$Evidence %in% not_measured_rec$label) else 0L
+  message(sprintf("[run_de] %-20s  %d proteins, %d tested%s, %d significant (adj.P<%.2g); %d of those with |logFC|>=%.2g -> %s%s",
+                  cn, nrow(tt), n_tested,
+                  if (n_not_measured) sprintf(" (%d %s)", n_not_measured, not_measured_rec$label) else "",
+                  nrow(sig), adjp_thr, n_beyond, logfc_ref, basename(fn),
                   if (is.null(block)) "" else sprintf("  [%s fit]", contrast_model[[cn]])))
-  de_tables[[cn]] <- list(file = basename(fn), model = contrast_model[[cn]], n_significant = nrow(sig))
+  de_tables[[cn]] <- list(file = basename(fn), model = contrast_model[[cn]], n_significant = nrow(sig),
+                          n_proteins = nrow(tt), n_tested = n_tested,
+                          n_not_measured = as.integer(n_not_measured))
 }
 
 # ---- protein-set test inputs (run_sets.R) ----------------------------------------
@@ -1192,7 +1244,8 @@ if (is.null(.rs)) {
       contaminants = cont_rec, block = block_rec, contrast_model = contrast_model,
       dpc_annotation_columns = if (exists("dpc_ann")) dpc_ann else NULL,
       intensity_column = if (exists("dpc_intensity")) dpc_intensity else NULL,
-      quantile_normalise = !identical(quantities, "raw"))
+      quantile_normalise = !identical(quantities, "raw"),
+      not_measured = not_measured_rec)
     message(sprintf("[run_de] reproducibility_log.R: the analysis as %d lines of plain R (Rscript-runnable)",
                     length(repro_lines)))
   }, error = function(e) message("[run_de] reproducibility_log.R not written: ", e$message))
@@ -1292,6 +1345,12 @@ methods_txt <- c(
   "                H0: log2 fold change = 0. No fold-change filter is applied --",
   sprintf("                |log2FC| = %.3g is drawn on the volcano for reference only, so", logfc_ref),
   "                the reported error rate matches the hypothesis actually tested.",
+  "Not tested    : in each contrast, a protein measured in no run of the groups it compares",
+  sprintf("                (Evidence '%s') has no logFC or p-value and is left", not_measured_rec$label),
+  "                out of that contrast's Benjamini-Hochberg adjustment. Per contrast:",
+  sprintf("                %s.", paste(sprintf("%s %d", names(de_tables),
+                                               vapply(de_tables, function(t) t$n_not_measured, 0L)),
+                                       collapse = ", ")),
   "",
   sprintf("Citation      : %s", descriptor$citation),
   if (!is.null(descriptor$caveat)) c("", sprintf("Caveat        : %s", descriptor$caveat))
@@ -1460,8 +1519,11 @@ prov <- list(
   runs_left_out = runs_left_out_rec,
   significant_per_contrast = all_sig,
   # Each DE_*.csv and the fit it came from: "blocked", or "independent" (samples fitted as
-  # independent -- every table of an unblocked run, between-block ones under --block-scope within).
+  # independent -- every table of an unblocked run, between-block ones under --block-scope within);
+  # its rows (n_proteins), those with a p-value (n_tested) and those not tested because measured
+  # in neither compared group (n_not_measured -- the rule is `not_measured`).
   de_tables = de_tables,
+  not_measured = not_measured_rec,
   # Detection_Matrix.csv: what each 0 means depends on the pipeline -- say it here.
   detection_matrix = detection_rec,
   # Protein-set tests: the inputs file run_sets.R reads, and the contrasts it is suggested for

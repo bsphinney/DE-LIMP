@@ -599,10 +599,12 @@ class Tables:
     def counts(self, c):
         """(tested, up, down) at adj.P < adjp ONLY -- the only significance rule the DE applied.
         The page used to also require |log2FC| >= 1, the volcano reference line, re-imposing a
-        fold-change filter the DE never applied."""
-        rows = self.rows(c)
-        sig = [r for r in rows if r["_p"] is not None and r["_p"] < self.adjp]
-        return len(rows), sum(r["_lfc"] > 0 for r in sig), sum(r["_lfc"] < 0 for r in sig)
+        fold-change filter the DE never applied. Tested = the rows with an adjusted p-value: a
+        row without one (Evidence "not measured in either group", run_de.R 2.10.1; a maxlfq
+        group with no value) is listed in the table but was not tested."""
+        tested = [r for r in self.rows(c) if r["_p"] is not None]
+        sig = [r for r in tested if r["_p"] < self.adjp]
+        return len(tested), sum(r["_lfc"] > 0 for r in sig), sum(r["_lfc"] < 0 for r in sig)
 
     def top(self, c, k):
         """The k best by adj.P, ties broken by the raw p-value (topTable's order, as the brief
@@ -980,6 +982,7 @@ def glance_data(prov, tables, tables_dir, session=None):
     notes = [n for n in (search_measurement_note(prov, session), search_inputs_note(prov, session),
                          runs_left_out_note(prov),
                          added_sequences_note(session), inferred_note(prov, tables_dir),
+                         not_measured_note(prov),
                          database_note(prov, tables_dir, session), keratin_note(prov))
              if n]
     return {"tiles": tiles, "contrasts": rows, "adjp": tables.adjp, "adjp_src": tables.src,
@@ -1032,6 +1035,25 @@ def inferred_note(prov, tables_dir):
                        f"where one group was never measured is a detection event, not a measured "
                        f"magnitude"
                      + (" — `Detection_Matrix.csv` marks every value." if dm else "."))}
+
+
+def not_measured_note(prov):
+    """The fixed "not tested" callout, from run_de.R's record (2.10.1): in each contrast a protein
+    measured in no run of the compared groups is listed but not tested (`not_measured`), with each
+    contrast's count from `de_tables`. None when the record has no such rule or none was excluded."""
+    rec = prov.get("not_measured") if isinstance(prov.get("not_measured"), dict) else None
+    tabs = prov.get("de_tables") if isinstance(prov.get("de_tables"), dict) else {}
+    per = [(c, t["n_not_measured"]) for c, t in tabs.items()
+           if isinstance(t, dict) and isinstance(t.get("n_not_measured"), int) and t["n_not_measured"]]
+    if not rec or not per:
+        return None
+    return {"kind": "info",
+            "title": "Proteins measured only in other groups are not tested in a comparison",
+            "text": (f"In each comparison, a protein measured in no run of either group compared has "
+                     f"no fold change or p-value: its DE table row says `Evidence` = "
+                     f"*{rec.get('label') or 'not recorded'}*, and it is left out of that comparison's "
+                     f"multiple-testing correction and of the counts of tested proteins here. "
+                     + "; ".join(f"{contrast_label(c)} {n:,}" for c, n in per) + ".")}
 
 
 def database_note(prov, tables_dir, session=None):

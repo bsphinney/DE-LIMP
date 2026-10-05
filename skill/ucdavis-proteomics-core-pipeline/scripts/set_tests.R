@@ -43,6 +43,11 @@ SET_DEFAULTS <- list(
   camera_low_power = 0.05) # whole-run correlation of random sets above which camera has little power
 
 PRESENCE_CALL_LABEL <- "presence call"   # run_de.R EVIDENCE_LABELS[["none_in_a_group"]]
+NOT_MEASURED_LABEL <- "not measured in either group"   # run_de.R EVIDENCE_LABELS[["none_measured"]]
+# Never measured in at least one compared group -- in one (a presence call) or in all of them (not
+# tested in that contrast's DE table): either way the protein's difference is the detection
+# model's. A record written before 2.10.1 calls both "presence call".
+UNMEASURED_LABELS <- c(PRESENCE_CALL_LABEL, NOT_MEASURED_LABEL)
 
 `%||%` <- function(a, b) if (is.null(a)) b else a
 
@@ -62,9 +67,9 @@ SET_COLUMNS <- list(
   fry_Depth = "for a fry-significant set: 'holds' or 'lost'",
   fry_Reference_Stable = "for a fry-significant set: 'stable' when the call holds on every reference basis tried, else 'k of K'",
   Weak_Fraction = "Sets_baitnorm only: fraction of the set's proteins in the interactome's bottom quarter of pooled enrichment over the control",
-  Presence_Call_Fraction = "fraction of the set's proteins never measured in one of the compared groups (the DE table's Evidence = presence call)",
+  Presence_Call_Fraction = "fraction of the set's proteins never measured in at least one of the compared groups (the DE table's Evidence = presence call, or not measured in either group)",
   Mostly_Presence_Calls = "TRUE when that fraction is above one half",
-  "measured_*" = "both tests with presence-call proteins removed from the sets and the background (NA: too few measured proteins)",
+  "measured_*" = "both tests with the proteins never measured in a compared group (presence calls, and proteins measured in neither) removed from the sets and the background (NA: too few measured proteins)",
   "bait_* / interactome_*" = "Sets_baitnorm only: the same tests with the other reference (cross-check)",
   Reference_Robust = "Sets_baitnorm only: a significant set 'holds with the other reference' or 'depends on the reference'",
   Flags = "reasons to read the set with caution",
@@ -95,7 +100,7 @@ SET_READING <- c(
   paste("'fry call depends on the residual basis': fry's robust variance takes each protein's largest",
         "residual coordinate, which depends on an arbitrary reference basis; the call did not hold on every",
         "reference tried. Treat it as borderline. camera does not depend on the reference."),
-  paste("'mostly presence calls': most of the set's proteins were never measured in one of the compared",
+  paste("'mostly presence calls': most of the set's proteins were never measured in at least one of the compared",
         "groups, so its shift rests on the detection model -- read the measured_* columns."),
   paste("Pulldowns: a bait-vs-control set test is about what co-purifies with the bait, not abundance in the",
         "tissue; control-vs-control (e.g. IgG Old vs Young) is about the lysate background every IP carries."),
@@ -582,11 +587,14 @@ add_depth <- function(design, contrast, depth, role = NULL) {
 }
 
 # ---- presence calls (DPC) -------------------------------------------------------------
-# The fraction of a set's members that run_de's Evidence column calls a presence call for
-# this contrast: never measured in one of the compared groups, so that protein's difference
-# is the detection model's, not a measurement. One definition: the DE table's Evidence.
+# The fraction of a set's members that run_de's Evidence column calls a presence call (or not
+# measured in either group) for this contrast: never measured in at least one of the compared
+# groups, so that protein's difference is the detection model's, not a measurement. One
+# definition: the DE table's Evidence.
 presence_fraction <- function(index, evidence)
-  vapply(index, function(i) if (length(i)) mean(evidence[i] %in% PRESENCE_CALL_LABEL) else NA_real_, 0)
+  vapply(index, function(i) if (length(i)) mean(evidence[i] %in% UNMEASURED_LABELS) else NA_real_, 0)
+# The proteins measured in every compared group: the measured-only tests' rows.
+measured_rows <- function(evidence) which(!(evidence %in% UNMEASURED_LABELS))
 
 # ---- pulldowns: the interactome ----------------------------------------------------------
 # The bait's interactome is chosen on its enrichment over the control POOLED over conditions --

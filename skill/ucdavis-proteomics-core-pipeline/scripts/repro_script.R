@@ -72,6 +72,10 @@ write_repro_script <- function(path,
                                intensity_column = NULL,
                                # FALSE when the maxlfq run applied no quantile step (--quantities raw)
                                quantile_normalise = TRUE,
+                               # run_de.R's not_measured record: in each contrast a protein measured
+                               # in no run of the compared groups is not tested. NULL = the run
+                               # tested every protein (before 2.10.1), so nothing is emitted.
+                               not_measured = NULL,
                                timestamp = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
                                # TRUE only when this is being generated for a run that
                                # predates the feature, from that run's recorded provenance
@@ -120,6 +124,7 @@ write_repro_script <- function(path,
   two_fits <- blk_on && any(contrast_model == "independent")
   blk_fixed <- blk_on && identical(block$effect, "fixed")
   pgq_on  <- !is.na(pgq_cutoff) && pgq_cutoff > 0
+  nm_on   <- !is.null(not_measured)
 
   L <- c(
     "# =============================================================================",
@@ -407,6 +412,16 @@ write_repro_script <- function(path,
     "              by = 'Protein.Group', all.x = TRUE, sort = FALSE)",
     "write.csv(expr, file.path(outdir, 'Expression_Matrix.csv'), row.names = FALSE)",
     "",
+    if (nm_on) c(
+    "# Which runs measured each protein -- the rule below reads it.",
+    if (is_dpc) c(
+    "# dpc: at least one precursor observed in that run (0 = value inferred by the DPC model).",
+    "n_obs <- rowsum((!is.na(dat$E)) * 1L, as.character(dat$genes$Protein.Group))",
+    "measured <- n_obs[match(rownames(E), rownames(n_obs)), colnames(E), drop = FALSE] > 0")
+    else c(
+    "# maxlfq: a value in the protein matrix (NA = missing).",
+    "measured <- !is.na(E)"),
+    "") else NULL,
     sprintf("for (cn in %s) {", .rvec(forms)),
     if (two_fits)
     "  tt <- limma::topTable(if (contrast_model[[cn]] == 'blocked') fit else fit_independent,\n                        coef = cn, number = Inf, adjust.method = 'BH')"
@@ -416,6 +431,15 @@ write_repro_script <- function(path,
     "  miss <- setdiff(names(ann), c('Protein.Group', names(tt)))   # don't duplicate columns",
     "  if (length(miss)) tt <- merge(tt, ann[, c('Protein.Group', miss), drop = FALSE],",
     "                                by = 'Protein.Group', all.x = TRUE, sort = FALSE)") else NULL,
+    if (nm_on) c(
+    sprintf("  # Not measured in either group (Evidence '%s'): a protein measured in no run", not_measured$label),
+    "  # of the groups this contrast compares is not tested in it -- its test columns are NA and",
+    "  # Benjamini-Hochberg runs over the tested proteins only.",
+    "  compared <- intersect(rownames(contrast_matrix)[contrast_matrix[, cn] != 0], levels(groups))",
+    "  not_measured <- length(compared) > 0 &",
+    "    rowSums(measured[match(tt$Protein.Group, rownames(measured)), groups %in% compared, drop = FALSE]) %in% 0",
+    sprintf("  tt[not_measured, intersect(%s, names(tt))] <- NA", .rvec(unlist(not_measured$columns_na))),
+    "  tt$adj.P.Val <- p.adjust(tt$P.Value, method = 'BH')   # NA p-values are left out") else NULL,
     "  tt <- tt[order(tt$adj.P.Val), ]",
     sprintf("  write.csv(tt, file.path(outdir, sprintf('DE_%s_%%s.csv', make.names(cn))), row.names = FALSE)",
             method),

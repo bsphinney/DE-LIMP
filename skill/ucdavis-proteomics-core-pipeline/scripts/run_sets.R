@@ -363,7 +363,7 @@ run_contrast <- function(cn) {
   ev <- inp$evidence[[cn]][uni]
   tab$Presence_Call_Fraction <- round(presence_fraction(idx, ev), 3)
   tab$Mostly_Presence_Calls <- tab$Presence_Call_Fraction > SET_DEFAULTS$presence_majority
-  meas <- which(!(ev %in% PRESENCE_CALL_LABEL))
+  meas <- measured_rows(ev)
   mcols <- c("measured_NGenes", "measured_camera_Direction", "measured_camera_PValue",
              "measured_camera_FDR", "measured_fry_Direction", "measured_fry_PValue", "measured_fry_FDR")
   for (m in mcols) tab[[m]] <- NA
@@ -565,7 +565,9 @@ if (!is.null(ip_rec)) {
     rec$n_pooled_enriched_any <- sum(adj_e < fdr & enrich > 0)
     # context: what "enriched at every condition" would have taken, one condition at a time
     rec$n_enriched_per_condition <- as.list(setNames(vapply(vs_ctrl, function(cn) {
-      d <- read_de(cn); sum(d$logFC > 0 & d$adj.P.Val < fdr) }, 0L), vs_ctrl))
+      # na.rm: a row with no test (Evidence 'not measured in either group'; maxlfq presence
+      # calls) has NA there, and is not significant
+      d <- read_de(cn); sum(d$logFC > 0 & d$adj.P.Val < fdr, na.rm = TRUE) }, 0L), vs_ctrl))
     say("bait %s: interactome %d proteins (pooled enrichment over the control >= %g log2 at FDR %.2g; %d at any enrichment)",
         b, length(rows_b), ip_min_enr, fdr, rec$n_pooled_enriched_any)
     design_b <- inp$design[runs, , drop = FALSE]
@@ -778,7 +780,8 @@ methods_paragraph <- paste0(
                        ". ")
   else "The run-depth sensitivity analysis could not be run (design not estimable with depth). ",
   if (identical(inp$method, "dpc")) paste0("Because DPC-Quant gives every protein a value in every run, the fraction ",
-    "of each set's proteins never measured in one of the compared groups (presence calls) is reported, with both ",
+    "of each set's proteins never measured in at least one of the compared groups (presence calls, and proteins ",
+    "measured in neither) is reported, with both ",
     "tests repeated on measured proteins only. ") else "",
   if (!is.null(ip_rec)) sprintf(paste0("For the pulldown, each bait's IPs were offset by the median of the bait's ",
     "interactome -- proteins enriched over the control IP in the bait-vs-control comparison pooled over ",
@@ -860,9 +863,10 @@ prov <- list(
                per_run = as.list(setNames(as.numeric(dep$counts), names(dep$counts))),
                columns = as.list(ad$columns),
                rule = "a set significant (FDR) in the primary test is 'lost' when the same test is not significant in the same direction with depth in the design; the depth_* columns give that test's p-value, FDR and the set's effect with depth"),
-  presence_calls = list(label = PRESENCE_CALL_LABEL, source = "run_de's Evidence column for the contrast",
+  presence_calls = list(label = PRESENCE_CALL_LABEL, labels = as.list(UNMEASURED_LABELS),
+                        source = "run_de's Evidence column for the contrast",
                         mostly = sprintf("more than %.0f%% of the set's tested proteins", 100 * SET_DEFAULTS$presence_majority),
-                        measured_only = "both tests repeated with presence-call proteins removed from the sets and the background"),
+                        measured_only = "both tests repeated with the proteins never measured in a compared group (presence calls, and proteins measured in neither) removed from the sets and the background"),
   contrasts = contrast_rec,
   pulldown = ip_rec,
   # where the figures are, relative to this record's folder (the session moves as a whole)

@@ -2265,6 +2265,13 @@ needs `limma::treat()`'s interval null — McCarthy & Smyth 2009 — not a post-
 may report how many significant proteins also exceed the reference line, as a description
 of effect size.
 
+**A protein measured in neither group of a contrast is not tested in it.** With three or more
+groups, a protein seen only in other groups has `Evidence` = `not measured in either group`
+in that contrast's table, no `logFC` or p-value, and is left out of that contrast's BH
+correction (`references/de-analysis.md`). The row stays. Count *tested* proteins as the rows
+with a `P.Value` (`de_provenance.json` `de_tables` → `n_tested`), never as all rows, and never
+describe such a protein as a presence call or a hit.
+
 ### 8c. Audit the results for common mistakes (surface every issue)
 ```
 python3 scripts/audit_results.py --out AUDIT.md --conditions ./conditions.csv \

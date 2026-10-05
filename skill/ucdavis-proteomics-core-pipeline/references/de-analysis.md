@@ -39,6 +39,29 @@ fold-change threshold is ever wanted, use `limma::treat()` + `topTreat()`, whose
 null tests it properly; note that `treat` is far more stringent than the same cut applied
 post hoc, so limma recommends a *small* threshold there (fc 1.1–1.5, not 2).
 
+**A protein measured in neither group of a contrast is not tested in it (2.10.1).** With more
+than two groups, a protein can be measured only in groups a contrast does not compare (seen in
+C and D, never in A or B). For A vs B it has nothing to test: on dpc both sides are the
+detection model's inferred value (logFC ≈ 0, p ≈ 1), on maxlfq both are missing. Before
+2.10.1 such a protein was labelled `presence call`, tested, and counted in that contrast's
+Benjamini–Hochberg correction — one staff analysis had 186 of its 249 p > 0.975 proteins in
+one contrast from this, and a spike at p = 1 in every p-value histogram. Now, per contrast:
+- its `Evidence` is `not measured in either group` (`presence call` keeps its meaning:
+  measured in one compared group, never in another);
+- its `logFC`, `t`, `P.Value`, `adj.P.Val` and `B` are NA — the row stays, so nothing
+  disappears — and it is never significant;
+- BH runs over the proteins tested in that contrast. The rule depends only on the detection
+  counts of the two groups together, not on which group is which, so leaving these out is
+  independent filtering (Bourgon et al. 2010) and does not bias the error rate. The model fit
+  (and limma's variance prior) is one fit for all contrasts and is not changed;
+- `de_provenance.json` records the rule (`not_measured`) and, per DE table, `n_proteins`,
+  `n_tested` and `n_not_measured`; `methods.txt`, the Methods paragraph, the analysis page's
+  counts, the figure captions and `reproducibility_log.R` all follow it. It applies to every
+  `--method` and to blocked fits (technical replicates, `--block`).
+
+The DE-LIMP app recomputes its own tables from the session's model, which tests every protein
+in every contrast: its counts for such a contrast can differ slightly from the skill's tables.
+
 ## `--method dpc` (limpa DPC-Quant + limma) — DE-LIMP default, use with DIA-NN
 ```r
 dat <- limpa::readDIANN("report.parquet", format="parquet", q.cutoffs=0.01)

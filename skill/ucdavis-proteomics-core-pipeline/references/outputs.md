@@ -163,12 +163,22 @@ two kinds of detection column, from `Detection_Matrix.csv` (the one definition o
   On dpc the other runs' values were inferred by the detection-probability model; on maxlfq
   they are missing.
 - **`Evidence`**: `measured in both` (every run of every group in the contrast measured it) ·
-  `presence call` (never measured in at least one group — the difference there is the
-  model's, not a measurement: read it as present/absent) · `partly inferred` (dpc) /
-  `partly missing` (maxlfq) otherwise. Empty when the protein has no detection record.
+  `presence call` (never measured in at least one group but measured in another — the
+  difference there is the model's, not a measurement: read it as present/absent) ·
+  `not measured in either group` (measured only in other groups of the study: **not tested
+  in this contrast** — see below) · `partly inferred` (dpc) / `partly missing` (maxlfq)
+  otherwise. Empty when the protein has no detection record.
 
 The exact wording of both is in `de_provenance.json` → `detection_matrix.de_columns`, which
 AGENTS.md reads.
+
+**Rows without a p-value.** A `not measured in either group` row has `logFC`, `t`,
+`P.Value`, `adj.P.Val` and `B` empty (NA): it was not tested in that contrast and is not in
+its Benjamini–Hochberg adjustment, which runs over the tested proteins only (2.10.1;
+`references/de-analysis.md`). On maxlfq a protein with no value at all in one compared group
+has no p-value either (limma cannot estimate it). Proteins *tested* in a contrast are the rows
+with a `P.Value`; `de_provenance.json` → `de_tables` gives each table's `n_proteins`,
+`n_tested`, `n_not_measured` and `n_significant`, and `not_measured` the rule.
 
 ### The optional podcast (`output/podcast/`, `make_podcast.py`)
 An AI-generated audio discussion of the finished report, made only when the user asks

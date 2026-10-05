@@ -39,9 +39,10 @@ import csv  # noqa: E402
 # interactors (HGNC symbols; the mouse genes are the same names in title case).
 ER_BACKGROUND = ("HSPA5", "HSP90B1", "CANX", "CALR", "P4HB", "PDIA3", "PDIA4", "PDIA6")
 # The names of run_de.R's `Evidence` categories (its EVIDENCE_LABELS: every run of every group
-# measured / never measured in a group / otherwise, "partly" + the record's zero_means word).
+# measured / never measured in a group / otherwise, "partly" + the record's zero_means word /
+# measured in no compared group, so not tested -- 2.10.1).
 # They name the tiers; what they mean is quoted from de_provenance.json when the run recorded it.
-EVIDENCE = ("measured in both", "presence call", "partly")
+EVIDENCE = ("measured in both", "presence call", "partly", "not measured in either group")
 
 
 def submission_brief(w, source):
@@ -508,6 +509,11 @@ def main():
             f"change (the absent side is {zero_word});")
         w(f"  - **{ev_part}**" + ("" if recorded_ev else " (every other case)")
           + ": a measured ratio with gaps — give each group's k/n.")
+        if has_evidence and prov.get("not_measured"):
+            w(f"  - **{EVIDENCE[3]}**: measured only in other groups of the study, so NOT TESTED "
+              "in that comparison (no logFC or p-value; left out of its BH correction). Never a "
+              "hit, never a 'tested' protein: count tested proteins per comparison as the rows "
+              "with a P.Value (`de_provenance.json` de_tables n_tested).")
     w("")
     if pulldown:
         w("## Pull-down design — enrichment over a control")

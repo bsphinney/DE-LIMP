@@ -1411,6 +1411,28 @@ def de_normalisation_sentence(prov):
     return out
 
 
+def de_not_measured_sentence(prov):
+    """run_de.R's `not_measured` rule (2.10.1), with each contrast's count from `de_tables`: a
+    protein measured in no run of the groups a contrast compares was not tested in it. None for
+    a record without the rule -- that run tested every protein, which the BH sentence covers."""
+    rec = prov.get("not_measured") if isinstance(prov.get("not_measured"), dict) else None
+    if not rec:
+        return None
+    tabs = prov.get("de_tables") if isinstance(prov.get("de_tables"), dict) else {}
+
+    def count(t):
+        n, of = t.get("n_not_measured"), t.get("n_proteins")
+        if not isinstance(n, int):
+            return NOT_RECORDED
+        return f"{n:,} of {of:,}" if isinstance(of, int) else f"{n:,}"
+    per = "; ".join(f"{c}: {count(t)}" for c, t in tabs.items() if isinstance(t, dict))
+    return (f"In each contrast, a protein measured in no run of either compared group (DE "
+            f"table Evidence '{rec.get('label') or NOT_RECORDED}') was not tested in that "
+            f"contrast: it is listed without a fold change or p-value and was left out of that "
+            f"contrast's Benjamini–Hochberg adjustment"
+            + (f" ({per} proteins)." if per else f" (counts per contrast: {NOT_RECORDED})."))
+
+
 def de_paragraph(prov):
     """The Differential-expression paragraph, from run_de.R's de_provenance.json. Significance
     is described exactly as run_de.R applied it: an adjusted-p cutoff, with |log2FC| only a
@@ -1467,6 +1489,9 @@ def de_paragraph(prov):
     s.append((f"Moderated t-statistics ({eng}) were computed and p-values adjusted by the "
               f"Benjamini–Hochberg method; proteins with {sig} were called significant."
               if eng else f"Proteins with {sig} (Benjamini–Hochberg) were called significant."))
+    nm = de_not_measured_sentence(prov)
+    if nm:
+        s.append(nm)
     if prov.get("logfc_role") == "reference_line_only":
         lf = prov.get("logfc")
         s.append("No fold-change filter was applied"
