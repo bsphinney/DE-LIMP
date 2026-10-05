@@ -101,6 +101,10 @@ empirical-library round-trip.
   assigns `genome-center-grp-high-qos` by itself. `publicgrp/low` **does** need
   `--qos publicgrp-low-qos` named, and the generator adds it. Do not "fix" this by
   hardcoding the facility QOS — an account outside the group cannot submit with it.
+- **Bad nodes: `--exclude <node[,node...]>`** (here, or on `run_search.py`, which passes it
+  on) writes `#SBATCH --exclude=` into every step, so no step can start on them. sbatch
+  reads no `SBATCH_EXCLUDE` variable; `node_fault.py retry` keeps these nodes excluded
+  (→ `references/watcher.md`, "Keeping a search off nodes known to be bad").
 - **The `--temp` folders MUST pre-exist.** DIA-NN aborts immediately with
   `ERROR: cannot find the temp folder .../quant_step2. Specify an existing folder` if
   the `--temp` dir is missing — it will **not** create it, and it aborts *before* doing any
