@@ -69,7 +69,7 @@ def detect_queue(partition, account, qos, peak_cpus=None, preemptible_ok=False):
         return partition, account, qos
 
 
-def header(job, cpus, mem, hours, partition, account, qos, array=None):
+def header(job, cpus, mem, hours, partition, account, qos, array=None, exclude=None):
     L = ["#!/bin/bash -l", f"#SBATCH --job-name={job}",
          f"#SBATCH --cpus-per-task={cpus}", f"#SBATCH --mem={mem}G",
          f"#SBATCH --time={hours}:00:00",
@@ -83,6 +83,11 @@ def header(job, cpus, mem, hours, partition, account, qos, array=None):
         if qos.startswith("public") or qos == "low":
             # publicgrp/low is preemptible -- requeue rather than losing the task.
             L.append("#SBATCH --requeue")
+    if exclude:
+        # the nodes --exclude keeps every step off (node_fault.exclude_nodes)
+        sys.path.insert(0, HERE)
+        from node_fault import exclude_directive
+        L.append(exclude_directive(exclude))
     if array:
         L.append(f"#SBATCH --array={array}")
     return "\n".join(L)
@@ -115,6 +120,9 @@ def main():
     ap.add_argument("--libpred-mem", type=int, default=64)
     ap.add_argument("--libpred-time", type=int, default=4)
     ap.add_argument("--partition"); ap.add_argument("--account"); ap.add_argument("--qos")
+    ap.add_argument("--exclude", metavar="NODE[,NODE...]",
+                    help="SLURM nodes to keep every step off (names or ranges, e.g. "
+                         "hive-dc-7-4-[50-54]): #SBATCH --exclude in every step's script")
     ap.add_argument("--max-simultaneous", type=int, default=20)
     ap.add_argument("--fdr-thresh", type=float, default=0.01)
     # MBR ON by default. Seer's example TOML ships mbr=false, but our DIA-NN chain
@@ -138,6 +146,16 @@ def main():
                      help="an instrument QC / standard run: never staged from a job")
     qcx.add_argument("--not-qc", action="store_true", help="not a QC run: passed on to stage")
     a = ap.parse_args()
+    # it lands in a #SBATCH line of every step: checked first (node_fault.exclude_nodes)
+    exclude = None
+    if a.exclude is not None:
+        sys.path.insert(0, HERE)
+        from node_fault import exclude_nodes
+        try:
+            exclude = exclude_nodes(a.exclude)
+        except ValueError as e:
+            sys.exit(f"[radiant_parallel] REFUSING --exclude {a.exclude!r}: {e}. "
+                     "Nothing was generated.")
 
     files = [ln.strip() for ln in open(a.raw_list) if ln.strip()]
     if not files:
@@ -211,8 +229,8 @@ def main():
                                          preemptible_ok=True)      # array
     part, acct, qos = detect_queue(a.partition, a.account, a.qos,
                                    peak_cpus=a.fulcrum_cpus)       # single jobs
-    q = dict(partition=part, account=acct, qos=qos)
-    q_array = dict(partition=part_a, account=acct_a, qos=qos_a)
+    q = dict(partition=part, account=acct, qos=qos, exclude=exclude)
+    q_array = dict(partition=part_a, account=acct_a, qos=qos_a, exclude=exclude)
 
     # The job-end hook (notify_slack.wrap_job_script, the one definition: run log -> FRAN ->
     # Slack): step 3 ends the search and reports success or failure (and stages a finished
@@ -341,6 +359,8 @@ def main():
         "per_file_results": rdir,
         "toml": toml_path,
         "library": lib,
+        # the nodes every step's #SBATCH --exclude keeps it off (--exclude); None for none
+        "exclude": exclude,
         "queue": {"single_jobs": {"partition": part, "account": acct, "qos": qos},
                   "array_step2": {"partition": part_a, "account": acct_a, "qos": qos_a}},
         "submit": ("Submit with dependencies, e.g.:\n"

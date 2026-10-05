@@ -1837,6 +1837,12 @@ flight does not. Common auto-fixes (→ `references/watcher.md` playbook):
   job): tell the user it is a **node problem, not DIA-NN and not their data**, and run
   `node_fault.py retry --out <out> --job <id>` on HIVE — it resubmits that step and the steps
   waiting on it with `--exclude=<node>`, at most twice per step (→ `references/watcher.md`).
+- **Nodes already known to be bad** (the user says so, the HIVE status page, an earlier
+  failure): generate the search with `run_search.py ... --exclude <node[,node...]>` (ranges
+  like `hive-dc-7-4-[50-54]` work). Every job script then carries `#SBATCH --exclude`, so no
+  job can land there, and `search_provenance.json` records it. Do not `export SBATCH_EXCLUDE`:
+  sbatch ignores it. A later `node_fault.py retry` keeps these nodes excluded as well
+  (→ `references/watcher.md`).
 - OOM → raise `--mem`; timeout → raise `--time`; missing temp dir → `mkdir -p` first.
 - **A failed search is recorded in the Core run registry. When the chain dies before its last
   job, record it yourself.** A job that SLURM kills (OOM, TIMEOUT, node failure, `scancel`)

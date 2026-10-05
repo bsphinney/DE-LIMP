@@ -133,6 +133,99 @@ def say(rec):
             f"(node_fault.py retry, at most {MAX_NODE_RETRIES} times per step).")
 
 
+# ------------------------------------------------------------- nodes a search is kept off
+# `run_search.py --exclude` (and diann_parallel.py / radiant_parallel.py --exclude): nodes the user
+# knows are bad, written as `#SBATCH --exclude=` into every job a search generates. 2026-10-05: two
+# projects had to keep their jobs off nodes with storage faults by `scontrol update JobId=<id>
+# ExcNodeList=...` on every pending job (64 by hand), and `export SBATCH_EXCLUDE=...` did nothing.
+# sbatch reads no SBATCH_EXCLUDE: it is not among its INPUT ENVIRONMENT VARIABLES (man sbatch,
+# Slurm 26.05.4 on HIVE), and `SBATCH_EXCLUDE=<no such node> sbatch --test-only` was accepted where
+# `--exclude=<no such node>` was refused "Invalid node name specified". A node list is names and
+# ranges (`hive-dc-7-4-[50-54]`); one with a "/" is read as a FILE (man sbatch, --nodelist), and
+# it lands in a shell script, so anything else is refused. And a command-line --exclude REPLACES
+# the script's ("environment variables will override any options set in a batch script, and
+# command line options will override any environment variables"): retry() passes the union.
+_NODE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
+_NODE_RANGE = re.compile(r"\[(\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*)\]")
+_NODE_TOKEN = re.compile(r"(?:[A-Za-z0-9_.-]|\[\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*\])+\Z")
+MAX_EXCLUDED = 512            # far more than a search ever needs; a typo'd range is not a list
+
+
+def _expand(token):
+    """One hostlist token -> its node names (`n[01-03]` -> n01 n02 n03, zero padding kept)."""
+    m = _NODE_RANGE.search(token)
+    if not m:
+        return [token]
+    head, tail, names = token[:m.start()], token[m.end():], []
+    for part in m.group(1).split(","):
+        lo, _, hi = part.partition("-")
+        hi = hi or lo
+        if int(hi) < int(lo):
+            raise ValueError(f"the range [{part}] runs backwards")
+        if int(hi) - int(lo) >= MAX_EXCLUDED:
+            raise ValueError(f"the range [{part}] names more than {MAX_EXCLUDED} nodes")
+        for i in range(int(lo), int(hi) + 1):
+            names += _expand(f"{head}{str(i).zfill(len(lo))}{tail}")
+            if len(names) > MAX_EXCLUDED:
+                raise ValueError(f"{token!r} names more than {MAX_EXCLUDED} nodes")
+    return names
+
+
+def exclude_nodes(value):
+    """`value` -- comma-separated node names and SLURM ranges, as typed -- as a sorted list of
+    distinct node names. Raises ValueError, saying why, for anything that is not one."""
+    tokens, depth, cur = [], 0, ""
+    for ch in (value or ""):
+        depth += {"[": 1, "]": -1}.get(ch, 0)
+        if ch == "," and depth == 0:
+            tokens.append(cur.strip())
+            cur = ""
+        else:
+            cur += ch
+    tokens.append(cur.strip())
+    names = set()
+    for t in tokens:
+        if not t:
+            raise ValueError(f"{value!r} has an empty node name (give names separated by commas)")
+        if "/" in t:
+            raise ValueError(f"{t!r} has a '/': sbatch would read it as a FILE of node names")
+        if not _NODE_TOKEN.match(t):
+            raise ValueError(f"{t!r} is not a node name or a SLURM range like "
+                             "hive-dc-7-4-[50-54] (letters, digits, '-', '_', '.')")
+        for n in _expand(t):
+            if not _NODE_NAME.match(n):
+                raise ValueError(f"{n!r} is not a node name (it must start with a letter or digit)")
+            names.add(n)
+            if len(names) > MAX_EXCLUDED:
+                raise ValueError(f"{value!r} names more than {MAX_EXCLUDED} nodes")
+    return sorted(names)
+
+
+def exclude_directive(nodes):
+    """The `#SBATCH --exclude=` line for `nodes` (exclude_nodes' list), or None for none."""
+    return f"#SBATCH --exclude={','.join(nodes)}" if nodes else None
+
+
+def script_excludes(path):
+    """The nodes a job script's own `#SBATCH --exclude` / `-x` lines keep it off (the lines SLURM
+    reads: those before the first command). [] for a script that is not there -- sbatch says so
+    itself. Raises ValueError for a value that is not a node list (a hand-edited header)."""
+    names = set()
+    try:
+        fh = open(path)
+    except FileNotFoundError:
+        return []
+    with fh:
+        for ln in fh:
+            s = ln.strip()
+            if s and not s.startswith("#"):
+                break
+            m = re.match(r"#SBATCH\s+(?:--exclude(?:=|\s+)|-x\s*)(.*)$", s)
+            if m:
+                names |= set(exclude_nodes(m.group(1).strip()))
+    return sorted(names)
+
+
 # --------------------------------------------------------------------------- the node check
 def preflight_lines(checks, timeout_s=NODE_CHECK_S):
     """Bash for the start of a job: each (test flag, path, what) in `checks` must answer within
@@ -353,7 +446,8 @@ def _retry(out, job, node, dry_run, force):
     submit, jobs_txt = os.path.join(out, "submit.sh"), os.path.join(out, "jobs.txt")
     if not (os.path.isfile(submit) and os.path.isfile(jobs_txt)):
         _refuse(f"{out} has no submit.sh + jobs.txt: not a search submitted as a chain. "
-                f"Resubmit the one job with `sbatch --exclude=<node> <script>`.")
+                f"Resubmit the one job with `sbatch --exclude=<node> <script>`, adding the nodes "
+                f"its own #SBATCH --exclude line names: the command line replaces that line.")
     jobs, order, cd = parse_submit(submit)
     with open(jobs_txt) as fh:
         ids = [ln.strip() for ln in fh if ln.strip()]
@@ -466,15 +560,28 @@ def _retry(out, job, node, dry_run, force):
                     f"it waits on the failed {script}: retry by hand")
 
     plan = []
-    excl = f"--exclude={','.join(excluded)}" if excluded else None
     cwd = cd or out
+    # The nodes each script's own header keeps it off (run_search.py --exclude). The --exclude
+    # given to sbatch here REPLACES them, so every resubmission passes them with the failed nodes.
+    own = {}
+    for v in [failed_var] + downstream:
+        path = by_var[v]["script"]
+        try:
+            own[v] = script_excludes(path if os.path.isabs(path) else os.path.join(cwd, path))
+        except (OSError, ValueError) as e:
+            _refuse(f"cannot read the nodes {path} is kept off (its #SBATCH --exclude): {e}. "
+                    "Resubmitting it with only the failed node would put it back on them: fix "
+                    "that line, or retry by hand (references/watcher.md)")
+    excluded_by_search = own[failed_var]
+    excluded = sorted(set(excluded) | set(excluded_by_search))
 
     def argv(v, deps):
         a = ["sbatch", "--parsable"]
         if deps:
             a.append("--dependency=afterok:" + ":".join(deps))
+        excl = sorted(set(excluded) | set(own[v]))
         if excl:
-            a.append(excl)
+            a.append(f"--exclude={','.join(excl)}")
         if v == failed_var and is_array and tasks:
             a.append("--array=" + ",".join(tasks))
         return a + [by_var[v]["script"]]
@@ -520,7 +627,9 @@ def _retry(out, job, node, dry_run, force):
     os.replace(jobs_txt + ".tmp", jobs_txt)
     entry = {"at": _now(), "step": script, "attempt": len(done) + 1, "max": MAX_NODE_RETRIES,
              "failed_job": id_of[failed_var], "tasks": tasks or None, "nodes": nodes,
-             "excluded": excluded, "evidence": ev,
+             # every node the failed step was resubmitted without; excluded_by_search: those its
+             # own script already kept it off (run_search.py --exclude)
+             "excluded": excluded, "excluded_by_search": excluded_by_search, "evidence": ev,
              "evidence_per_task": {str(r["task"]): verdict[r["task"]] for r in retried
                                    if r["task"]} or None,
              "forced": bool(force and other), "resubmitted": resub,

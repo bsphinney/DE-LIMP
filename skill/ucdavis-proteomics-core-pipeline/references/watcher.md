@@ -109,6 +109,31 @@ failure is never reported as "DIA-NN exited 0 but did not write …". The job-en
 probe rereads its own log on `Stale file handle`, retries and falls back
 (`probe_fallback.py`) — that job succeeds, and only a failed job is classified.
 
+## Keeping a search off nodes known to be bad (`--exclude`)
+
+When the user, the HIVE status page or an earlier failure says which nodes are bad, keep the
+whole search off them **when it is generated**:
+`run_search.py ... --exclude hive-dc-7-4-50,hive-dc-7-4-[52-54]` (names, or SLURM ranges in
+brackets). Every job script it writes — both single-shot jobs, every step of the DIA-NN chain,
+every step of the Radiant chain, the one Sage/AlphaDIA/FragPipe job — gets
+`#SBATCH --exclude=<the nodes>`, so even a job that starts before anyone is watching cannot
+land on them. The list is checked first (anything that is not a node name or range is refused
+and nothing is written) and recorded in `search_provenance.json` as `queue.exclude`.
+`diann_parallel.py` and `radiant_parallel.py` take the same `--exclude` when run by hand.
+
+- **`export SBATCH_EXCLUDE=...` does nothing.** sbatch reads no such variable — it is not in the
+  list of input environment variables in `man sbatch` (Slurm 26.05.4 on HIVE) — so the jobs
+  show `ExcNodeList=(null)`. Checked on HIVE 2026-10-05: `SBATCH_EXCLUDE=<no such node> sbatch
+  --test-only` was accepted, `--exclude=<no such node>` was refused.
+- **A misspelt node name stops the submission.** sbatch refuses an unknown name ("Invalid node
+  name specified"), so `submit.sh` stops at its first job and nothing is queued.
+- **Jobs already queued** are not changed by a new `--exclude`: for those,
+  `scontrol update JobId=<id> ExcNodeList=<nodes>` while they are pending.
+- **It works with `node_fault.py retry`.** A `--exclude` on the sbatch command line *replaces*
+  the script's own line (the command line overrides the script), so the retry passes both: the
+  nodes the search was kept off and the node that failed, each once. `node_faults.json` records
+  them as `excluded`, with `excluded_by_search` for the ones from the script.
+
 ## Auto-recovery playbook (apply autonomously; log every action to `commands.log`)
 - **`node_fault`:** `node_fault.py retry --out <out> --job <id>` (above). Tell the user in one
   line that a compute node could not reach the storage and the step was resubmitted on another

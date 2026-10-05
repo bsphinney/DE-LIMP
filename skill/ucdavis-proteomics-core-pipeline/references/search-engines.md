@@ -303,6 +303,9 @@ Every job is held to the same contract as the 5-step chain
   `low` or a `public*` QOS (`diann_parallel.needs_requeue`, shared with the chain). Before
   this, the single-shot path dropped the flags and re-detected a queue over the user's choice
   (FRAN pilot: `genome-center-grp/high` in place of the requested `publicgrp/low`).
+  `--exclude <node[,node...]>` goes into both job headers the same way, as
+  `#SBATCH --exclude=` (→ `references/watcher.md`, "Keeping a search off nodes known to be
+  bad").
 - **Each job deletes its artefact before DIA-NN runs, then asserts it.** An existence check
   cannot tell this run's file from the previous search's in the same `--out`: reproduced on
   2.7.0 (review srun 23512013), a re-run with no .NET logged `ERROR: cannot read .raw files`,

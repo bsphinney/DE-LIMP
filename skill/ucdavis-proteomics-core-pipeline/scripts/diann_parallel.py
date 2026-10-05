@@ -1328,7 +1328,9 @@ def needs_requeue(partition, qos):
     return (qos or "").startswith("public") or partition == "low"
 
 
-def header(name, cpus, mem_gb, hours, partition, account, qos=None, array=None):
+def header(name, cpus, mem_gb, hours, partition, account, qos=None, array=None, exclude=None):
+    """A chain step's #SBATCH lines. `exclude`: the nodes --exclude keeps every step off
+    (node_fault.exclude_nodes)."""
     h = ["#!/bin/bash -l",
          f"#SBATCH --job-name={name}",
          f"#SBATCH --cpus-per-task={cpus}",
@@ -1338,6 +1340,9 @@ def header(name, cpus, mem_gb, hours, partition, account, qos=None, array=None):
          f"#SBATCH --account={account}"]
     if qos:
         h.append(f"#SBATCH --qos={qos}")
+    if exclude:
+        from node_fault import exclude_directive
+        h.append(exclude_directive(exclude))
     if needs_requeue(partition, qos):
         h.append("#SBATCH --requeue")
     h += [f"#SBATCH -o {name}_%j.log", f"#SBATCH -e {name}_%j.log"]
@@ -1396,6 +1401,9 @@ def main():
     ap.add_argument("--account")
     ap.add_argument("--qos", default=None, help="SLURM QOS. Needed for publicgrp/low "
                     "(publicgrp-low-qos); high/genome-center-grp uses its default.")
+    ap.add_argument("--exclude", metavar="NODE[,NODE...]",
+                    help="SLURM nodes to keep every step off (names or ranges, e.g. "
+                         "hive-dc-7-4-[50-54]): #SBATCH --exclude in every step's script")
     ap.add_argument("--max-simultaneous", type=int, default=20)
     ap.add_argument("--no-norm", action="store_true")
     ap.add_argument("--probe-window", action=argparse.BooleanOptionalAction, default=True,
@@ -1419,6 +1427,16 @@ def main():
                      help="an instrument QC / standard run: never staged from a job")
     qcx.add_argument("--not-qc", action="store_true", help="not a QC run: passed on to stage")
     a = ap.parse_args()
+    # checked here too: this generator is run by hand as well, and the value lands in a #SBATCH
+    # line of every step (node_fault.exclude_nodes, the one rule)
+    a.exclude_nodes = None
+    if a.exclude is not None:
+        from node_fault import exclude_nodes
+        try:
+            a.exclude_nodes = exclude_nodes(a.exclude)
+        except ValueError as e:
+            sys.exit(f"[diann_parallel] REFUSING --exclude {a.exclude!r}: {e}. "
+                     "Nothing was generated.")
     # The cfg path is recorded (search_provenance.json, params.resolved.cfg's origin) and read by
     # later jobs and readers in other working directories: absolute from here on, and it must
     # exist now -- a relative one is otherwise resolved against whatever directory reads it.
@@ -1617,7 +1635,8 @@ def main():
     s1 = None
     if not seed:
         s1 = write("step1_libpred.sbatch", "\n".join([
-            header("s1_libpred", a.libpred_cpus, a.libpred_mem, a.libpred_time, _ps, _as_, qos=_qs), "",
+            header("s1_libpred", a.libpred_cpus, a.libpred_mem, a.libpred_time, _ps, _as_, qos=_qs,
+                   exclude=a.exclude_nodes), "",
             f'echo "Step 1/5 library prediction"; date',
             clear_stale(predicted),       # see clear_stale(): a re-run must not pass on the old one
             f'{DN} --fasta "{fasta}" --fasta-search --predictor --gen-spec-lib \\',
@@ -1672,7 +1691,7 @@ def main():
                                 if m in measure)
         s1b = write("step1b_window.sbatch", "\n".join([
             header("s1b_window", probe_cpus, task_memory(a)[0], PROBE_WALL_HOURS,
-                   _ps, _as_, qos=_qs), "",
+                   _ps, _as_, qos=_qs, exclude=a.exclude_nodes), "",
             f'echo "Step 1b/5 measuring {what} on representative runs"; date',
             # Every other step reaches DIA-NN through DN, which carries the .NET 8 exports a
             # Thermo .raw needs. probe_window.py runs DIA-NN as its own subprocess (no shell),
@@ -1807,7 +1826,8 @@ def main():
 
     # Step 2 — first pass (array): predicted lib -> per-file .quant
     s2 = write("step2_firstpass.sbatch", "\n".join([
-        header("s2_firstpass", a.threads_per_file, task_memory(a)[0], a.time_per_file, _pa, _aa, qos=_qa, array=array), "",
+        header("s2_firstpass", a.threads_per_file, task_memory(a)[0], a.time_per_file, _pa, _aa, qos=_qa, array=array,
+               exclude=a.exclude_nodes), "",
         f'echo "Step 2/5 first pass, task ${{SLURM_ARRAY_TASK_ID}} of {n}"; date',
         *measured_guard, pick, tmpguard("quant_step2"),
         f'mkdir -p "{D}/{TASK_OUT_DIRS["step2"]}"   # this task\'s report files (TASK_OUT_DIRS)',
@@ -1822,7 +1842,8 @@ def main():
 
     # Step 3 — empirical library assembly (single job, --use-quant)
     s3 = write("step3_assembly.sbatch", "\n".join([
-        header("s3_assembly", a.assembly_cpus, a.assembly_mem, a.assembly_time, _ps, _as_, qos=_qs), "",
+        header("s3_assembly", a.assembly_cpus, a.assembly_mem, a.assembly_time, _ps, _as_, qos=_qs,
+               exclude=a.exclude_nodes), "",
         f'echo "Step 3/5 empirical library assembly"; date', *measured_guard,
         tmpguard("quant_step2"),
         f'cp -r "{D}/quant_step2" "{D}/quant_step2_orig" 2>/dev/null || true   # backup for resume',
@@ -1853,7 +1874,8 @@ def main():
     task_out4 = f' --out "{D}/{out4_dir}/t${{SLURM_ARRAY_TASK_ID}}.parquet"'
 
     s4 = write("step4_finalpass.sbatch", "\n".join([
-        header("s4_finalpass", a.threads_per_file, task_memory(a)[1], a.time_per_file, _pa, _aa, qos=_qa, array=array), "",
+        header("s4_finalpass", a.threads_per_file, task_memory(a)[1], a.time_per_file, _pa, _aa, qos=_qa, array=array,
+               exclude=a.exclude_nodes), "",
         f'echo "Step 4/5 final pass, task ${{SLURM_ARRAY_TASK_ID}} of {n}"; date',
         *measured_guard, pick, tmpguard("quant_step4"),
         'QUANT="${FILE##*/}"; QUANT="${QUANT%.*}.quant"',
@@ -1877,7 +1899,8 @@ def main():
 
     # Step 5 — cross-run report (single job, --use-quant --matrices)
     s5 = write("step5_report.sbatch", "\n".join([
-        header("s5_report", a.assembly_cpus, a.assembly_mem, a.assembly_time, _ps, _as_, qos=_qs), "",
+        header("s5_report", a.assembly_cpus, a.assembly_mem, a.assembly_time, _ps, _as_, qos=_qs,
+               exclude=a.exclude_nodes), "",
         f'echo "Step 5/5 cross-run report"; date', *measured_guard, tmpguard("quant_step4"),
         # the report AND its stats file: check_report_runs.stats_path() names the latter
         clear_stale(f'{D}/{report}', stats_path(f'{D}/{report}')),
@@ -2083,6 +2106,8 @@ def main():
         "seeded": bool(seed), "seed_lib": predicted if seed else None,
         # CPUs per array task, how many run at once, and why (run_search.array_task_cpus)
         "cpu_sizing": cpu_sizing,
+        # the nodes every step's #SBATCH --exclude keeps it off (--exclude); None for none
+        "exclude": a.exclude_nodes,
         "scripts": [x for x in [s1, s1b, s2, s3, s4, s5, "submit.sh"] if x],
         "submit": f"bash {out}/submit.sh   (or: hive_exec.sh 'bash {out}/submit.sh')",
         "report_jobid_var": "jid5",

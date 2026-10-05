@@ -596,6 +596,7 @@ def run_diann_parallel(cmd, params, files, fasta, out, threads, a, acquisition="
     # run_search.py and hand-run diann_parallel.py (FRAN pilot, publicgrp/low, 2026-09-16).
     for flag, val in (("--partition", a.partition), ("--account", a.account),
                       ("--qos", a.qos), ("--max-simultaneous", a.max_simultaneous),
+                      ("--exclude", _exclude_arg(a)),
                       # pins the array tasks' CPUs; without it diann_parallel.py sizes them to
                       # the queue's per-user cap, at most --threads (array_task_cpus)
                       ("--threads-per-file", getattr(a, "threads_per_file", None)),
@@ -1467,7 +1468,8 @@ def run_radiant_parallel(tools, params, files, fasta, out, threads, a, library=N
     elif tools.get("diann"):
         argv += ["--diann", tools["diann"]]
     for flag, val in (("--partition", a.partition), ("--account", a.account),
-                      ("--qos", a.qos), ("--max-simultaneous", a.max_simultaneous)):
+                      ("--qos", a.qos), ("--max-simultaneous", a.max_simultaneous),
+                      ("--exclude", _exclude_arg(a))):
         if val:
             argv += [flag, str(val)]
     if getattr(a, "mbr", False):
@@ -2956,6 +2958,13 @@ def _qc_choice(a):
     return True if getattr(a, "qc", False) else False if getattr(a, "not_qc", False) else None
 
 
+def _exclude_arg(a):
+    """--exclude for the chain generators (diann/radiant_parallel.py): the checked node list,
+    comma-joined (they check it again; it is their own option too), or None."""
+    nodes = getattr(a, "exclude_nodes", None)
+    return ",".join(nodes) if nodes else None
+
+
 def _job_end_argv(a):
     """The job-end choices as flags for the chain generators (diann/radiant_parallel.py)."""
     argv = (["--no-notify"] if getattr(a, "no_notify", False) else []) + \
@@ -2982,15 +2991,16 @@ def _job_end_plan(a, engine):
 def emit_sbatch(path, command, out, threads, job, preamble="",
                 partition=None, account=None, qos=None, mem="64G", hours=SEARCH_WALL_HOURS,
                 submit_hint=True, notify="final", stage="search", fran_guarded=False,
-                preflight=None):
+                preflight=None, exclude=None):
     """Emit a minimal SLURM script (login-node-safe). Orchestrator submits it.
     The queue is DETECTED from the submitting user's own SLURM associations — see
     slurm_queue() — unless the caller passes one, which then wins. Every caller must forward
     the command line's --partition/--account/--qos: on the 2026-09-16 FRAN pilot run_diann()
     did not, so `--partition low --account publicgrp --qos publicgrp-low-qos` came out as
     genome-center-grp/high in both job headers and had to be hand-edited before submission.
-    `preamble` runs before the command (e.g. the DOTNET_ROOT exports that let DIA-NN 2.6
-    read Thermo .raw).
+    `exclude`: the nodes --exclude keeps the search off (node_fault.exclude_nodes), carried in
+    the same queue dict. `preamble` runs before the command (e.g. the DOTNET_ROOT exports that
+    let DIA-NN 2.6 read Thermo .raw).
 
     `notify` is the job-end hook (notify_slack.wrap_job_script: run log -> FRAN -> Slack):
     "final" for the job that ends the search (success and failure; FRAN on success), "fail" for
@@ -3013,6 +3023,9 @@ def emit_sbatch(path, command, out, threads, job, preamble="",
     if part:  lines.append(f"#SBATCH --partition={part}")
     if acct:  lines.append(f"#SBATCH --account={acct}")
     if q:     lines.append(f"#SBATCH --qos={q}")
+    if exclude:
+        import node_fault
+        lines.append(node_fault.exclude_directive(exclude))
     # Preemptible queue: requeue a preempted search rather than lose it (HIVE's JobRequeue=1
     # does this by default; another cluster's may not). The rule is
     # diann_parallel.needs_requeue(), shared with the chain's step headers.
@@ -3091,6 +3104,12 @@ def main():
                     "single-shot --sbatch job(s) and the parallel chain); detected if omitted")
     ap.add_argument("--account", help="SLURM account for every job this writes")
     ap.add_argument("--qos", help="SLURM QOS for every job this writes")
+    ap.add_argument("--exclude", metavar="NODE[,NODE...]",
+                    help="SLURM nodes to keep every job of this search off, e.g. "
+                         "hive-dc-7-4-50,hive-dc-7-4-[52-54]: written as #SBATCH --exclude into "
+                         "every job script (both single-shot jobs, every step of the chain) and "
+                         "recorded in search_provenance.json (queue.exclude). sbatch reads no "
+                         "SBATCH_EXCLUDE variable, so exporting one does nothing")
     ap.add_argument("--max-simultaneous", type=int,
                     help="cap concurrent array tasks in the parallel chain")
     ap.add_argument("--threads-per-file", type=_positive_int,
@@ -3140,8 +3159,19 @@ def main():
 
     global a_globals
     a_globals = a
-    # The queue the user asked for, handed to every emit_sbatch() -- see emit_sbatch().
-    queue = {"partition": a.partition, "account": a.account, "qos": a.qos}
+    # Nodes to keep every job off: checked before anything is written, because the value lands
+    # on a #SBATCH line of every job (node_fault.exclude_nodes, the one rule for it).
+    exclude = None
+    if a.exclude is not None:
+        import node_fault
+        try:
+            exclude = node_fault.exclude_nodes(a.exclude)
+        except ValueError as e:
+            sys.exit(f"[run_search] REFUSING --exclude {a.exclude!r}: {e}. Nothing was written.")
+    a.exclude_nodes = exclude                  # for the chain generators (_exclude_arg)
+    # The queue the user asked for, handed to every emit_sbatch() -- see emit_sbatch() -- and
+    # recorded as search_provenance.json `queue`; `exclude` is in every job script's header.
+    queue = {"partition": a.partition, "account": a.account, "qos": a.qos, "exclude": exclude}
     tools = json.load(open(a.tools))
     bundle = json.load(open(a.bundle))
     engine = pick_engine(a, bundle)
@@ -3269,6 +3299,12 @@ def main():
         sys.stderr.write(f"[run_search] NOTE: {', '.join(chain_only)} size the 5-step chain "
                          f"only; this search is single-shot ({why}), so they are ignored. "
                          f"Its job(s) request --threads {a.threads} CPUs.\n")
+    # Radiant on SLURM with >1 file: a per-file array + one Fulcrum job (radiant_parallel.py)
+    radiant_chain = (engine == "radiant" and len(files) > 1 and slurm_available()
+                     and not a.no_parallel)
+    if exclude and not (use_parallel or radiant_chain or a.sbatch):
+        sys.stderr.write(f"[run_search] NOTE: --exclude keeps SLURM jobs off nodes; this search "
+                         f"runs here, inline, with no job script, so it changes nothing.\n")
     print(f"[run_search] engine={engine}  files={len(files)}  threads={a.threads}  "
           f"{'(5-step chain)' if use_parallel else '(emit sbatch)' if a.sbatch else '(inline)'}")
     sbatch_refused = None
@@ -3341,7 +3377,7 @@ def main():
         # On a cluster with >1 file, split the SERIAL search into a per-file array and
         # rescore once — Radiant's own backend cannot parallelise, but the search is
         # per-file independent, so this is the difference between N x t and ~t.
-        if (len(files) > 1 and slurm_available() and not a.no_parallel):
+        if radiant_chain:
             print(f"[run_search] radiant: {len(files)} files on SLURM -> per-file array "
                   f"+ one Fulcrum rescoring job (Radiant's own search is serial)")
             res = run_radiant_parallel(tools, a.params, files, a.fasta, a.out,

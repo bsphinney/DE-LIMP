@@ -541,6 +541,39 @@ class RetryTests(unittest.TestCase):
         self.assertEqual(st["watch_job"], "203")
         self.assertTrue(st["watch_log"].endswith("s5_report_203.log"))
 
+    def _scripts_exclude(self, value):
+        for s in ("step3_assembly.sbatch", "step4_finalpass.sbatch", "step5_report.sbatch"):
+            with open(os.path.join(self.out, s), "w") as fh:
+                fh.write("#!/bin/bash -l\n#SBATCH --job-name=x\n"
+                         f"#SBATCH --exclude={value}\nset -euo pipefail\necho hi\n")
+
+    def test_the_nodes_the_search_was_kept_off_stay_off(self):
+        """A command-line --exclude REPLACES the script's `#SBATCH --exclude` (man sbatch: the
+        command line overrides the environment, which overrides the script), so the retry passes
+        the union -- the nodes run_search.py --exclude kept the search off, and the failed one,
+        each once."""
+        self._scripts_exclude("hive-dc-7-4-[50-51],nU")
+        self.step3_failed_on("hive-dc-7-4-50")
+        r, out = self.retry()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(len(self.calls()), 3)
+        for c in self.calls():
+            ex = [a for a in c["argv"] if a.startswith("--exclude")]
+            self.assertEqual(ex, ["--exclude=hive-dc-7-4-50,hive-dc-7-4-51,nU"], c["argv"])
+        rec = json.loads(_read(os.path.join(self.out, "node_faults.json")))["retries"][0]
+        self.assertEqual(rec["nodes"], ["hive-dc-7-4-50"])
+        self.assertEqual(rec["excluded"], ["hive-dc-7-4-50", "hive-dc-7-4-51", "nU"])
+        self.assertEqual(rec["excluded_by_search"], ["hive-dc-7-4-50", "hive-dc-7-4-51", "nU"])
+        self.assertEqual(out["excluded"], rec["excluded"])
+
+    def test_a_script_whose_exclude_cannot_be_read_is_not_resubmitted_without_it(self):
+        self._scripts_exclude("n1 n2")
+        self.step3_failed_on("hive-dc-7-4-50")
+        r, out = self.retry()
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("--exclude", out["say"])
+        self.assertEqual(self.calls(), [])
+
     def test_the_two_job_search_is_understood_too(self):
         lib, srch = os.path.join(self.d, "job_1_lib.sh"), os.path.join(self.d, "job_2_search.sh")
         with open(os.path.join(self.out, "submit.sh"), "w") as fh:
