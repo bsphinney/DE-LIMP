@@ -130,5 +130,62 @@ class Decisions(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(bundle, "inputs", "conditions.csv.decisions.json")))
 
 
+def _well(i):
+    return "ABCDEFGH"[i // 12] + str(i % 12 + 1)
+
+
+class DelimitersAreTokenBoundaries(unittest.TestCase):
+    """2.9.1 (a staff search, 2026-10-02): --mapping-json identifiers 'DIA-XY1_' and 'DIA-XY2_',
+    meant for XY1 and XY2 only, matched every XY10..XY19 and XY20..XY24 run -- the trailing '_' was
+    normalised away and what was left matched as a prefix: 13 conflicting runs and a broken
+    conditions.csv. A delimiter in an identifier is a token boundary, by the one definition of a
+    delimited token (core_submission.token_pattern, which `locate` matches sample ids with), and a
+    run carrying the identifier as a whole token is preferred over runs that only extend it.
+    Anything still ambiguous is asked, never guessed."""
+
+    RUNS = [f"10012026__60SPD_DIA-XY{i + 1}_S3-{_well(i)}_1_{24001 + i}" for i in range(24)]
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, SCRIPTS)
+        import collect_conditions
+        cls.cc = collect_conditions
+
+    def test_a_trailing_delimiter_ends_the_identifier(self):
+        mapping = {"groups": {"ctrl": ["DIA-XY1_", "DIA-XY3_"], "trt": ["DIA-XY2_", "DIA-XY4_"]}}
+        with tempfile.TemporaryDirectory() as tmp:
+            res, groups, _ = run_map(tmp, self.RUNS, mapping=mapping)
+        r = self.RUNS
+        self.assertEqual(res["assigned"], {r[0]: "ctrl", r[2]: "ctrl", r[1]: "trt", r[3]: "trt"})
+        self.assertEqual(res["ambiguities"]["conflicting_runs"], {})
+        self.assertEqual(res["ambiguities"]["multi_match_identifiers"], {})
+        self.assertEqual([groups[x] for x in r[9:]], [""] * 15)      # XY10..XY24: no group
+
+    def test_the_one_definition_of_a_delimited_token(self):
+        import core_submission
+        self.assertIs(self.cc.token_pattern, core_submission.token_pattern)
+
+    def test_a_separator_between_letters_and_digits_is_optional_as_in_locate(self):
+        """token_pattern: LRS96 finds LRS-96 (measured on the Core share) -- and never LRS-960."""
+        m = self.cc.match_to_runs
+        self.assertEqual(m("XY-1", self.RUNS), [self.RUNS[0]])
+        self.assertEqual(m("dia xy 2_", self.RUNS), [self.RUNS[1]])
+
+    def test_a_whole_token_is_preferred_over_a_prefix(self):
+        m = self.cc.match_to_runs
+        runs = ["exp_Ctrl_1", "exp_Ctrl1", "exp_Ctrl2"]
+        self.assertEqual(m("Ctrl", runs), ["exp_Ctrl_1"])
+        self.assertEqual(m("Ctrl", runs[1:]), runs[1:])      # only a prefix: every one of them
+
+    def test_a_prefix_naming_several_runs_is_still_asked(self):
+        mapping = {"groups": {"ctrl": ["DIA-XY"], "trt": ["DIA-XY2_"]}}
+        with tempfile.TemporaryDirectory() as tmp:
+            res, groups, _ = run_map(tmp, self.RUNS, mapping=mapping)
+        self.assertTrue(res["needs_confirmation"])
+        self.assertEqual(len(res["ambiguities"]["multi_match_identifiers"]["DIA-XY"]), 24)
+        self.assertIn("label_names_several_runs", [q["kind"] for q in res["decisions_required"]])
+        self.assertEqual(groups[self.RUNS[0]], "")
+
+
 if __name__ == "__main__":
     unittest.main()

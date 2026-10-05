@@ -66,12 +66,20 @@ condition names to `--map`.
 ## How mapping works (`collect_conditions.py --map`)
 Matching is grounded in the actual run names (never guessed):
 1. exact match (case-insensitive, punctuation-insensitive), else
-2. whole words of the run name, in order (`LRS-96` names `..._DIA-LRS-96_S3`), or the run
-   name's words inside the identifier (a full file name names its run). Never a bare substring:
-   a word with digits matches only a whole word (`KG1` never names `KG12`, `A1` never `A10`); a
-   word of letters names that word plus digits (`Ctrl` names `Ctrl1..3`). **Never the plate
-   position**: the slot-well words of a run name (`_S3-A1_`) say where a tube sat on the Core's
-   plate, so a sample labelled `A1` does not match the run in well A1.
+2. the identifier as a whole **token** of the run name (`LRS-96` names `..._DIA-LRS-96_S3`), or
+   the run name inside the identifier (a full file name names its run). `-`, `_` and spaces are
+   token boundaries, so a delimiter in the identifier counts: `DIA-XY1_` names `DIA-XY1_S3…`
+   and never `DIA-XY10_…` (2.9.1 dropped the `_` and matched XY10–XY19 too). A separator may
+   come or go only where letters meet digits (`XY-1` names `XY1`, `LRS96` names `LRS-96`). This
+   is the same rule `core_submission.py locate` matches sample ids with. Only when no run carries
+   the identifier as a token:
+3. its words as whole words of the run name, where a word of letters also names that word plus
+   digits (`Ctrl` names `Ctrl1..3`, a prefix). A word with digits always matches only a whole
+   word (`KG1` never names `KG12`, `A1` never `A10`).
+
+Never a bare substring, and **never the plate position**: the slot-well words of a run name
+(`_S3-A1_`) say where a tube sat on the Core's plate, so a sample labelled `A1` does not match
+the run in well A1.
 
 It then reports, for confirmation:
 - `unassigned_runs` — a raw file no condition matched. **Blocking**: every run

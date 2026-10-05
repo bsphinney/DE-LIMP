@@ -45,9 +45,13 @@ Modes:
   python3 collect_conditions.py --validate conditions.csv --against report.parquet \
           --exclude <run> --reason "<why, in the user's words>" [--exclude ... --reason ...]
 """
-import sys, os, csv, glob, json, re, argparse, io, zipfile
+import sys, os, csv, glob, json, re, argparse, io, zipfile, functools
 import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# A delimited token has ONE definition: the one `core_submission.py locate` matches sample ids with.
+from core_submission import token_pattern  # noqa: E402
 
 COV_COLS = ["Batch", "Covariate1", "Covariate2"]
 # "unique id" / "sample id": the Core LIMS export (PROT_####.samples.<date>.xlsx: internal_id,
@@ -215,17 +219,38 @@ def _contains(seq, sub, eq):
                          for i in range(len(seq) - n + 1))
 
 
+# compiled once per label: --map tries every identifier against every run, both ways
+_token_re = functools.lru_cache(maxsize=None)(token_pattern)
+
+
+def _carries(text, label):
+    """`label` is a delimited token of `text` (core_submission.token_pattern)."""
+    pat = _token_re(label)
+    return bool(pat and pat.search(text))
+
+
 def match_to_runs(identifier, runs):
-    """Runs an identifier names: the whole name exactly (case and punctuation aside), else its
-    words as a run of whole words of the run name (or the run name's inside the identifier -- a
-    full file name names its run). Never a bare substring, never a plate position: 'A1' does not
-    name '..._S3-A1_...', and 'KG1' does not name 'KG12'."""
+    """Runs an identifier names, the first of these that names any:
+      1. the whole run name (case and punctuation aside);
+      2. the identifier as a delimited TOKEN of the run name, or the run name as one of the
+         identifier (a full file name names its run) -- core_submission.token_pattern, the rule
+         `locate` matches sample ids with: '-', '_' and space are token boundaries, so DIA-XY1_
+         names XY1 and never XY10 (2.9.1 normalised the '_' away and matched XY10..XY19), and a
+         separator may come or go only between letters and digits (XY-1 names XY1);
+      3. only when no run carries it as a token: its words as whole words of the run name, where
+         a word of letters only also names itself plus digits ('ctrl' names 'ctrl1') -- a prefix.
+    Never a bare substring, never a plate position: 'A1' does not name '..._S3-A1_...'. Several
+    runs named is a question for the user (do_map), never a choice made here."""
     idn = norm(identifier)
     if not idn:
         return []
     exact = [r for r in runs if norm(r) == idn]
     if exact:
         return exact
+    whole = [r for r in runs if _carries(PLATE_POSITION_RE.sub("_", r), identifier)
+             or _carries(identifier, r)]
+    if whole:
+        return whole
     want = tokens(identifier)
     return [r for r in runs
             if _contains(run_tokens(r), want, _token_eq)
