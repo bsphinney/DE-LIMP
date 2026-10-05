@@ -353,7 +353,7 @@ def declared_method(name: str):
 def submission_plate(submission):
     """The test a run name passes when it is named for `submission` (core_submission.ht_pattern),
     or None when there is none: the rule could not be imported, or `submission` is not a
-    submission number (normalize_submission: 0793, 793 and PROT_0793 are; a CoreOmics hex id is
+    submission number (normalize_submission: <n>, 0<n> and PROT_<n> are; a CoreOmics hex id is
     not -- plate runs never carry it)."""
     if _cs is None:
         return None
