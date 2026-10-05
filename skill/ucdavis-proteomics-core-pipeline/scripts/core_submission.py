@@ -38,9 +38,17 @@ WHERE EACH SUBCOMMAND RUNS
     stage        ON HIVE  symlinks the raw files into the Core service directory
     conditions   either   wraps collect_conditions.py
     deliver      ON HIVE  copies the deliverables into the submission's Bioshare folder
+<<<<<<< HEAD
                           (--mode raw-only for "I only require raw data" submissions)
     bioshare     KEY      status | ensure | send, through the CoreOmics Bioshare plugin
     email-draft  KEY      writes a draft to the submitter; never sends
+=======
+                          (--mode raw-only for "I only require raw data" submissions;
+                          --mode no-de for a report without differential expression)
+    bioshare     LOCAL    status | ensure | send, through the CoreOmics Bioshare plugin
+    email-draft  LOCAL    writes a draft to the submitter, saying where each address came from
+                          and flagging one that cannot be right; never sends
+>>>>>>> f0e9f95 (deliver --mode no-de: a report without differential expression; email draft follows the mode)
 
     python3 core_submission.py fetch 807 --out ~/core/PROT_0807
     bash hive_exec.sh --put ~/core/PROT_0807/hive/submission_summary.json '~/core/PROT_0807/'
@@ -3352,6 +3360,18 @@ def cmd_conditions(a) -> int:
 
 
 # ------------------------------------------------------------------------ deliver --
+# deliver's modes, defined once: the delivery folder's suffix (<id>_<suffix>_<date>), whether it
+# carries a differential expression, and what it is -- in delivery.json (`mode_description`),
+# `--mode`'s help and the README. A report without the DE (2026-10-05: a QC report delivered
+# while the DE waited on the study design) is its own mode, not raw-only with a report copied in.
+DELIVERY_MODES = {
+    "analysis": {"suffix": "analysis", "de": True,
+                 "what": "an analysis report with its differential expression"},
+    "no-de": {"suffix": "report", "de": False,
+              "what": "an analysis report delivered without differential expression: a QC report, "
+                      "an identification list, or results delivered before the statistics"},
+    "raw-only": {"suffix": "raw_data", "de": False, "what": "the raw instrument files only"},
+}
 # No AI_Analysis_Report.docx: Analysis_Report.html is the report of record, and an older
 # session's Word copy (Word mangled its figures) is kept there but never handed out.
 DELIVER_FILES = (("Analysis_Report.html", True), ("Analysis_Report.pdf", False),
@@ -3702,7 +3722,8 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
             if ".raw" in exts:
                 L.append("- `.raw` files are Thermo instrument files.")
     else:
-        L = [f"# {label} — results from the UC Davis Proteomics Core", ""]
+        de = DELIVERY_MODES[mode]["de"]
+        L = [f"# {label} — {'results' if de else 'report'} from the UC Davis Proteomics Core", ""]
         if pi_name:
             L += [f"Prepared for {pi_name}.", ""]
         L += opener
@@ -3715,6 +3736,11 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
                           "table per comparison in `tables/`.")
         L += [f"This folder holds what the UC Davis Proteomics Core prepared for CoreOmics submission "
               f"{label}{_submission_details(summary)}." + ("" if not claims else " " + " ".join(claims)), ""]
+        if not de:
+            L += ["**This delivery has no differential expression:** no statistical comparison "
+                  "between sample groups is in it. It is a report delivered without those "
+                  "statistics, or before them (for example a quality-control report, or a list of "
+                  "the proteins identified).", ""]
         if "Analysis_Report.html" in delivered:
             L += ["## Start here", "",
                   "**Open `Analysis_Report.html` first.** It is the whole report in one file — every figure "
@@ -3992,8 +4018,9 @@ def cmd_deliver(a) -> int:
     froot = flinders_root()
     mode = a.mode if a.mode != "auto" else ("raw-only" if s.get("raw_data_only") is True else "analysis")
     session_dir = os.path.abspath(a.session) if a.session else None
-    if mode == "analysis" and not session_dir:
-        raise Stop(EXIT_DECIDE, {"error": "--session is required for an analysis delivery",
+    if mode != "raw-only" and not session_dir:
+        raise Stop(EXIT_DECIDE, {"error": f"--session is required for {'an analysis' if mode == 'analysis' else 'a no-de'} "
+                                          f"delivery: it delivers the session's report",
                                  "hint": "a raw-data-only submission uses --mode raw-only"})
     if session_dir and not os.path.isdir(session_dir):
         raise Stop(EXIT_DECIDE, {"error": f"session dir not found: {session_dir}"})
@@ -4027,7 +4054,7 @@ def cmd_deliver(a) -> int:
         raise Stop(EXIT_DECIDE, {"error": f"raw data was requested but the staged service project cannot be found: {where}"})
 
     today = dt.date.today().isoformat()
-    suffix = safe_component(a.label) if a.label else (f"raw_data_{today}" if mode == "raw-only" else f"analysis_{today}")
+    suffix = safe_component(a.label) if a.label else f"{DELIVERY_MODES[mode]['suffix']}_{today}"
     folder = f"{label}_{suffix}"
     delivery = os.path.join(share, folder)
     share_raw = os.path.join(share, "raw")
@@ -4077,7 +4104,8 @@ def cmd_deliver(a) -> int:
         warnings.append(RAW_WHITELIST_WARNING)
     if not record and not want_raw:
         warnings.append(f"service project: {where}")
-    plan = {"applied": bool(a.apply), "mode": mode, "internal_id": s.get("internal_id"), "id": s.get("id"),
+    plan = {"applied": bool(a.apply), "mode": mode, "differential_expression": DELIVERY_MODES[mode]["de"],
+            "internal_id": s.get("internal_id"), "id": s.get("id"),
             "delivery_dir": delivery, "share_dir": server_share, "share_dir_local": share,
             "session": session_dir, "session_ownership": ownership,
             "n_files": len(ok), "bytes": total, "gb": round(total / 1024 ** 3, 3), "max_gb": a.max_gb,
@@ -4085,15 +4113,40 @@ def cmd_deliver(a) -> int:
             "raw": {"wanted": want_raw, "include_raw": a.include_raw, "links": raw_plan,
                     "service_project": where if record else None},
             "warnings": warnings}
+    # Whether the session has a DE decides between the two report modes, and never silently: an
+    # analysis delivery carries one (behind the normalisation gate below), and a no-de delivery
+    # carries none -- not the DE record (run_de.R's), and no file the DE wrote
+    # (report_files.is_de_output, the one definition), delivered or not.
+    if mode != "raw-only":
+        is_de_output = sibling("report_files").is_de_output
+        de_record = sibling("normalization_check").de_provenance_path(session_dir)
+        has_record = os.path.lexists(de_record)          # even one that does not resolve
+        de_output = sorted({i["name"] for i in items if is_de_output(i["name"])}
+                           | ({os.path.relpath(de_record, output_dir)} if has_record else set()))
+        if mode == "no-de" and de_output:
+            plan["de_output"] = de_output
+            plan["error"] = ("--mode no-de delivers a report without differential expression, but this "
+                             "session has differential expression output: " + ", ".join(de_output))
+            plan["hint"] = "deliver it with --mode analysis (the normalisation check applies)"
+            emit(plan)
+            return EXIT_DECIDE
+        if mode == "analysis" and not has_record:
+            plan["error"] = f"held: this session has no differential expression (no DE record: {de_record})"
+            plan["hint"] = ("if that is intended -- a QC report, an identification list, or results "
+                            "delivered before the statistics -- re-run with --mode no-de; otherwise run "
+                            "step 8 (the DE and its normalisation check) and deliver again")
+            emit(plan)
+            return EXIT_DECIDE
     if missing_required:
         plan["error"] = "required deliverable missing: " + ", ".join(missing_required)
         plan["hint"] = "run step 9 (make_analysis_html.py) before delivering"
         emit(plan)
         return EXIT_DECIDE
     # The instrument's QC around the project (qc_bracket.py, staff-only): a check or concern
-    # verdict -- or a check that never ran -- holds an analysis delivery, dry run included, until
-    # a staff member records an acknowledgement for this record. The rule is qc_bracket's.
-    if mode == "analysis" and session_dir:
+    # verdict -- or a check that never ran -- holds a delivery of the session's report (analysis
+    # or no-de), dry run included, until a staff member records an acknowledgement for this
+    # record. The rule is qc_bracket's.
+    if mode != "raw-only" and session_dir:
         qb = sibling("qc_bracket")
         gate = qb.delivery_gate(session_dir)
         # printed to the staff member running deliver; never into `warnings` or delivery.json,
@@ -4108,10 +4161,11 @@ def cmd_deliver(a) -> int:
                             "--note \"<what was reviewed and decided>\"")
             emit(plan)
             return EXIT_DECIDE
-        # The second gate, in the same form: the DE's quantities (normalization_check.py, step
-        # 8). A DE that ran without a decided normalisation check -- an IP read with normalised
-        # quantities, unchecked -- holds the delivery, dry run included, until step 8 is run.
-        # The rule is normalization_check's.
+    # The second gate, in the same form: the DE's quantities (normalization_check.py, step 8). A
+    # DE that ran without a decided normalisation check -- an IP read with normalised quantities,
+    # unchecked -- holds the delivery, dry run included, until step 8 is run. The rule is
+    # normalization_check's. Only an analysis delivery has a DE to check (no-de refused one above).
+    if mode == "analysis":
         ngate = sibling("normalization_check").delivery_gate(session_dir)
         plan["normalization_gate"] = ngate
         if not ngate["proceed"]:
@@ -4212,6 +4266,9 @@ def cmd_deliver(a) -> int:
     for r in raw_plan:
         manifest_lines.append(f"[OK] ../raw/{r['name']} -- linked to the raw instrument file"
                               if r["status"] == "OK" else f"[SKIPPED] ../raw/{r['name']} -- {r['reason']}")
+    if mode == "no-de":
+        manifest_lines.append("[SKIPPED] differential expression -- not part of this delivery "
+                              "(--mode no-de: a report without the statistics)")
     if not want_raw:
         manifest_lines.append(f"[SKIPPED] ../raw/ -- not requested (--include-raw {a.include_raw}"
                               + (", CoreOmics says the Core does the analysis)" if a.include_raw == "auto" else ")"))
@@ -4263,7 +4320,9 @@ def cmd_deliver(a) -> int:
         except OSError as e:
             warnings.append(f"could not remove {DELIVERY_MARKER}: {e.strerror}")
     files_now = [os.path.join(dp, f) for dp, _, fs in os.walk(delivery) for f in fs] if os.path.isdir(delivery) else []
-    result = {"applied": True, "mode": mode, "internal_id": s.get("internal_id"), "id": s.get("id"),
+    result = {"applied": True, "mode": mode, "mode_description": DELIVERY_MODES[mode]["what"],
+              "differential_expression": DELIVERY_MODES[mode]["de"],
+              "internal_id": s.get("internal_id"), "id": s.get("id"),
               "label": label, "delivered_at": now_utc(), "delivery_dir": delivery,
               "share_dir": server_share, "share_dir_local": share, "session": session_dir,
               "session_ownership": ownership, "resumed": resume,
@@ -4433,6 +4492,73 @@ def cmd_bioshare(a) -> int:
 
 
 # -------------------------------------------------------------------- email-draft --
+# Every address in the draft is one somebody typed into the CoreOmics submission form, and a typo
+# there once went into a delivery's draft unremarked (2026-10-05). So the draft
+# names each recipient and where the address came from, and flags one that cannot be right -- a
+# shape check only: a well-formed address can still be the wrong one.
+ADDRESS_SOURCE = "as typed on the CoreOmics submission form"
+CAMPUS_DOMAIN = "ucdavis.edu"              # a domain a letter or two from it is flagged as a typo
+_ADDRESS_LOCAL = re.compile(r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]$")
+_DOMAIN_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$")
+
+
+def _edits(a: str, b: str) -> int:
+    """Edit distance (insertions, deletions, substitutions) between two short strings."""
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def address_problem(addr):
+    """Why `addr` cannot be a working email address, or why it looks like a typo of the campus
+    domain, in plain words; None when it passes."""
+    a = _s(addr)
+    if any(c.isspace() for c in a):
+        return "it contains a space"
+    if a.count("@") != 1:
+        return "it has no @" if "@" not in a else "it has more than one @"
+    local, domain = a.split("@")
+    if not local:
+        return "nothing comes before the @"
+    bad = sorted({c for c in local if not _ADDRESS_LOCAL.match(c)}
+                 | {c for c in domain if not (c.isascii() and (c.isalnum() or c in ".-"))})
+    if bad:
+        return "it contains " + ", ".join(repr(c) for c in bad) + ", which an address cannot"
+    if local.startswith(".") or local.endswith(".") or ".." in local:
+        return "the part before the @ has a misplaced dot"
+    labels = domain.split(".")
+    if len(labels) < 2:
+        return "the part after the @ has no dot (an address ends in a domain such as .edu or .com)"
+    if not all(_DOMAIN_LABEL.match(x) for x in labels):
+        return "the part after the @ is malformed (an empty part, or one that starts or ends with '-')"
+    if not (labels[-1].isalpha() and len(labels[-1]) >= 2):
+        return f"it ends in '.{labels[-1]}', which is not a domain ending"
+    base = ".".join(labels[-2:]).lower()
+    if base != CAMPUS_DOMAIN and _edits(base, CAMPUS_DOMAIN) <= 2:
+        return f"'{domain}' looks like a typo of {CAMPUS_DOMAIN}"
+    return None
+
+
+def draft_recipients(summary: dict) -> list:
+    """To the submitter, Cc the PI (unless the same address), each with where its address came
+    from and, when it fails the shape check, why."""
+    sub, pi = summary.get("submitter") or {}, summary.get("pi") or {}
+    to, cc = _s(sub.get("email")), _s(pi.get("email"))
+    out = [{"field": "To", "who": "submitter", "name": sub.get("name"), "email": to or None,
+            "source": f"the submitter's address {ADDRESS_SOURCE} (submission_summary.json "
+                      "submitter.email)" if to else "none: the submission has no submitter address",
+            "problem": address_problem(to) if to else None}]
+    if cc and cc.lower() != to.lower():
+        out.append({"field": "Cc", "who": "PI", "name": pi.get("name"), "email": cc,
+                    "source": f"the PI's address {ADDRESS_SOURCE} (submission_summary.json pi.email)",
+                    "problem": address_problem(cc)})
+    return out
+
+
 def cmd_email_draft(a) -> int:
     s, _ = full_summary(a.summary)
     delivery = load_json_file(a.delivery, "delivery.json") if a.delivery else {}
@@ -4442,32 +4568,54 @@ def cmd_email_draft(a) -> int:
             if s.get("share_dir") and _s(sh.get("link_to_path")).rstrip("/") == _s(s["share_dir"]).rstrip("/"):
                 url = _s(sh.get("url"))
     label = submission_label(s)
-    sub, pi = s.get("submitter") or {}, s.get("pi") or {}
-    placeholders = []
-    to = _s(sub.get("email"))
-    if not to:
+    sub = s.get("submitter") or {}
+    placeholders, warnings = [], []
+    recipients = draft_recipients(s)
+    if not recipients[0]["email"]:
         placeholders.append("submitter email")
-    cc = _s(pi.get("email")) if _s(pi.get("email")).lower() != to.lower() else ""
+    problems = [f"{r['field']}: {r['email']} ({r['who']}, {ADDRESS_SOURCE}) -- {r['problem']}"
+                for r in recipients if r["problem"]]
     link = url or "[BIOSHARE LINK -- run `core_submission.py bioshare ensure` and paste the share URL]"
     if not url:
         placeholders.append("Bioshare link")
     contents = set(delivery.get("contents") or [])
     raw = delivery.get("raw_links") or {}
     n_raw = (raw.get("created") or 0) + (raw.get("existing") or 0) + (raw.get("replaced") or 0)
-    raw_only = delivery.get("mode") == "raw-only"
-    L = ["<!-- DRAFT -- not sent. Review it, then send it from your own mail client. -->", "",
-         f"To: {to or '[SUBMITTER EMAIL]'}"]
-    if cc:
-        L.append(f"Cc: {cc}")
+    # the wording follows what deliver delivered (its delivery.json `mode`), never a guess
+    mode = delivery.get("mode")
+    raw_only, no_de = mode == "raw-only", mode == "no-de"
+    if not a.delivery:
+        warnings.append("no --delivery: the draft cannot say what was delivered and is worded for an "
+                        "analysis with its report; pass the delivery.json deliver wrote")
+    L = ["<!-- DRAFT -- not sent. Review it, then send it from your own mail client.",
+         "Recipients, and where each address came from:"]
+    for r in recipients:
+        who = ", ".join(x for x in (_s(r["name"]), f"the {r['who']}") if x)
+        L.append(f"  {r['field']}: {r['email'] or '(none)'} -- {who}, "
+                 + (ADDRESS_SOURCE if r["email"] else "no address on the submission"))
+        if r["problem"]:
+            L.append(f"    CHECK BEFORE SENDING: {r['problem']}")
+    L += ["-->", ""]
+    for r in recipients:
+        addr = r["email"] or "[SUBMITTER EMAIL]"
+        L.append(f"{r['field']}: {addr}" + (f"  [CHECK THIS ADDRESS: {r['problem']}]" if r["problem"] else ""))
     samples = f" ({s['n_samples']} samples)" if s.get("n_samples") else ""
     if raw_only:
         L += [f"Subject: Raw data for {label} is ready", "", f"Hi {sub.get('first') or 'there'},", "",
               f"The raw instrument files for your submission {label}{samples} are ready on Bioshare:", "",
               link, "", "They are in the raw folder of the share. As requested, no search or analysis was run."]
     else:
-        L += [f"Subject: Proteomics results for {label} are ready", "", f"Hi {sub.get('first') or 'there'},", "",
-              f"The UC Davis Proteomics Core has finished the analysis for your submission {label}{samples}. "
-              f"Your results are on Bioshare:", "", link, ""]
+        if no_de:
+            L += [f"Subject: Proteomics report for {label} is ready", "", f"Hi {sub.get('first') or 'there'},", "",
+                  f"The UC Davis Proteomics Core has prepared a report for your submission {label}{samples}. "
+                  f"It is on Bioshare:", "", link, "",
+                  "This delivery does not include differential expression -- the statistical comparison "
+                  "between your sample groups. If your project includes that comparison, we will send it "
+                  "separately.", ""]
+        else:
+            L += [f"Subject: Proteomics results for {label} are ready", "", f"Hi {sub.get('first') or 'there'},", "",
+                  f"The UC Davis Proteomics Core has finished the analysis for your submission {label}{samples}. "
+                  f"Your results are on Bioshare:", "", link, ""]
         if not contents or "Analysis_Report.html" in contents:
             L.append("Please start with Analysis_Report.html. It is the whole report in one file and opens in "
                      "any web browser -- the quality-control panels come first, then the results.")
@@ -4499,10 +4647,22 @@ def cmd_email_draft(a) -> int:
         L += ["", feedback_line("email", core["prot"], bool(delivery.get("podcast")), fmt="text")]
     L += ["", "Best regards,", "UC Davis Proteomics Core", ""]
     os.makedirs(os.path.dirname(os.path.abspath(a.out)) or ".", exist_ok=True)
+<<<<<<< HEAD
     write_text(a.out, "\n".join(L), private=on_hive())     # names and emails: on HIVE, 600
     emit({"wrote": os.path.abspath(a.out), "to": to or None, "cc": cc or None, "share_url": url or None,
           "placeholders": placeholders, "sent": False})
     return EXIT_DECIDE if placeholders else EXIT_OK
+=======
+    with open(a.out, "w") as fh:
+        fh.write("\n".join(L))
+    emit({"wrote": os.path.abspath(a.out), "mode": mode, "recipients": recipients,
+          "to": recipients[0]["email"], "cc": recipients[1]["email"] if len(recipients) > 1 else None,
+          "share_url": url or None, "placeholders": placeholders, "address_problems": problems,
+          "warnings": warnings, "sent": False})
+    for p in problems:
+        note(f"CHECK THIS ADDRESS before sending -- {p}")
+    return EXIT_DECIDE if placeholders or problems else EXIT_OK
+>>>>>>> f0e9f95 (deliver --mode no-de: a report without differential expression; email draft follows the mode)
 
 
 # --------------------------------------------------------------------------- main --
@@ -4587,9 +4747,12 @@ def main(argv=None) -> int:
     de = sub.add_parser("deliver", help="ON HIVE: copy deliverables into the Bioshare share dir (dry run)")
     de.add_argument("--summary", required=True)
     de.add_argument("--session", default=None, help="the analysis session directory (optional for raw-only)")
-    de.add_argument("--mode", choices=["auto", "analysis", "raw-only"], default="auto",
-                    help="auto = raw-only when CoreOmics says 'I only require raw data', else analysis")
-    de.add_argument("--label", default=None, help="folder suffix instead of analysis_<date> / raw_data_<date>")
+    de.add_argument("--mode", choices=["auto", *DELIVERY_MODES], default="auto",
+                    help="auto = raw-only when CoreOmics says 'I only require raw data', else analysis "
+                         f"(held when the session has no DE). no-de = {DELIVERY_MODES['no-de']['what']}")
+    de.add_argument("--label", default=None,
+                    help="folder suffix instead of " + " / ".join(f"{m['suffix']}_<date>"
+                                                                  for m in DELIVERY_MODES.values()))
     de.add_argument("--include-raw", choices=["auto", "yes", "no"], default="auto",
                     help="auto = only when CoreOmics says the submitter wants raw data")
     de.add_argument("--service-project", default=None, help="staged service project (default: discovered)")

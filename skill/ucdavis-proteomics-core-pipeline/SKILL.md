@@ -2048,7 +2048,8 @@ worse one; the checks that tripped are the questions to ask. Never switch silent
 The final DE is held to the decision AND to the data it was made on (it refuses any other
 `--quantities`, and any other report or conditions — their sha256 is in the check), and records
 it in `de_provenance.json` `normalization_check` and the Methods. A DE without a decided check is
-a WARN in AUDIT.md, and `core_submission.py deliver` holds the delivery until step 8 is done.
+a WARN in AUDIT.md, and `core_submission.py deliver` holds the delivery until step 8 is done
+(a delivery meant to go without a DE — a QC report — is `deliver --mode no-de`, step 12b).
 A DE from **before 2.10** has no check record at all. Re-run step 8 on it, or, if Core staff
 decide it stands as it is, they record that with `python3 scripts/normalization_check.py
 ack-legacy --session <S> --by <their HIVE login> --note "<why this DE stands>"`. This is the
@@ -2806,6 +2807,10 @@ python3 ~/proteomics-pipeline/scripts/core_submission.py deliver \
 # "I only require raw data": no session needed (add one only to include its methods.md)
 python3 ~/proteomics-pipeline/scripts/core_submission.py deliver \
     --summary ~/core/PROT_0807/submission_summary.json --mode raw-only         # then --apply
+# A report WITHOUT differential expression: a QC report, an identification list, or results
+# delivered before the statistics (the DE waits on the study design, or there will be none)
+python3 ~/proteomics-pipeline/scripts/core_submission.py deliver \
+    --summary ~/core/PROT_0807/submission_summary.json --session "$S" --mode no-de   # then --apply
 ```
 **Then where the CoreOmics key is** (`coreomics_runs_on`, step 1c.1). Shown for this computer;
 with `hive`, run the same `core_submission.py` lines on HIVE through `hive_exec.sh`
@@ -2826,7 +2831,21 @@ python3 scripts/core_submission.py email-draft --summary ~/core/PROT_0807/submis
   already has files (→ a new `--label`), or when the path passes through a symlink or leaves
   the Flinders root. **It also holds an analysis delivery** when the session's QC check (step
   8e) says check or concern, could not run, or is missing, until a staff member records
-  `qc_bracket.py ack` (its `qc_gate` says why; `delivery.json` keeps it, staff-side).
+  `qc_bracket.py ack` (its `qc_gate` says why; `delivery.json` keeps it, staff-side); when its
+  DE ran without a decided normalisation check (step 8); and **when the session has no
+  differential expression at all** (no `output/tables/de_provenance.json`). That last hold
+  says so plainly: ask the staff member whether a delivery without the DE is intended. If it is
+  (a QC report, an identification list, results before the statistics), deliver with
+  `--mode no-de`; if not, run step 8 first. `deliver` never switches modes by itself.
+- **`--mode no-de`** delivers the session's report without differential expression into
+  `<share>/PROT_0807_report_<date>/`, with the same files and rules as an analysis delivery
+  (`Analysis_Report.html` required, raw links as asked). The QC check holds it exactly as it
+  holds an analysis delivery; there is no DE, so no normalisation check. It **refuses** (exit 2)
+  a session that has a DE record or any file the DE wrote (`DE_*.csv`, `Expression_Matrix.csv`,
+  volcano plots …, `report_files.is_de_output`): deliver that with `--mode analysis`. Its README
+  and MANIFEST say there is no differential expression, and `delivery.json` records
+  `mode: no-de`, `differential_expression: false`. When the DE is done later, the analysis
+  delivery goes beside it (`PROT_0807_analysis_<date>/`) in the same share.
 - An analysis delivery fills `<share>/PROT_0807_analysis_<date>/` with `Analysis_Report.html`
   (required), the reports (and its `.pdf`/`.md`), methods, `tables/`, `figures/`,
   `reproducibility/`, the search matrices and, when one was made, `podcast/` (the audio and
@@ -2853,7 +2872,14 @@ python3 scripts/core_submission.py email-draft --summary ~/core/PROT_0807/submis
   refuses a `delivery.json` that did not verify or belongs to another share. It grants view +
   download — outward-facing, and separate from the compute yes (golden rule #1). Silent by
   default; `--email` also has Bioshare notify them.
-- `email-draft` writes a draft and never sends. Give it to the staff member to send.
+- `email-draft` writes a draft and never sends. Give it to the staff member to send. Its wording
+  follows the delivery's `mode` (a no-de delivery: the report and the raw data, with the
+  statistics not included — never "raw data only" when a report went out). Its header names each
+  recipient and where the address came from: the submitter (To) and PI (Cc) addresses **as typed
+  on the CoreOmics form**, where a typo can go unnoticed. An address that cannot be right (no
+  `@`, a space, a comma, no domain ending) or looks like a typo of `ucdavis.edu` is marked
+  `[CHECK THIS ADDRESS: …]` and the draft exits 2 (`address_problems`): show the staff member
+  the address and the reason, and have them confirm the right one before sending.
 → detail: `references/core-submissions.md`.
 
 ## Keeping the record of the analysis: the decisions log and the conversation

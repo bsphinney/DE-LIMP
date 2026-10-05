@@ -658,6 +658,8 @@ python3 ~/proteomics-pipeline/scripts/core_submission.py deliver \
 # ... then the same with --apply
 python3 ~/proteomics-pipeline/scripts/core_submission.py deliver \
     --summary ~/core/PROT_0807/submission_summary.json --mode raw-only          # "raw data only"
+python3 ~/proteomics-pipeline/scripts/core_submission.py deliver \
+    --summary ~/core/PROT_0807/submission_summary.json --session "$S" --mode no-de   # report, no DE
 ```
 
 **The CoreOmics project tree (verified)** is `<flinders>/coreomics/projects/<YYYY>/<MM>/<id>/share/`,
@@ -689,7 +691,20 @@ submissions) have
   none. It is held until a staff member records `qc_bracket.py ack --session <S> --by <HIVE
   login> --note "<one line>"` for that record. The plan's `qc_gate` says why. Good and
   no-QC-on-record go through. A stray `qc_bracket*` file in a delivered folder is never
-  shipped. → `references/qc-bracket.md` "The delivery gate".
+  shipped. → `references/qc-bracket.md` "The delivery gate". The same gate holds a no-de
+  delivery.
+- **an analysis delivery's DE holds it** (step 8): it ran without a decided normalisation check
+  (`normalization_gate`, `normalization_check.delivery_gate`); a DE from before 2.10 goes once
+  staff record `normalization_check.py ack-legacy`.
+- **an analysis delivery has no DE at all** (no `output/tables/de_provenance.json`; `--mode auto`
+  resolves to analysis unless CoreOmics says raw data only). The hold says so: "this session has
+  no differential expression". If a delivery without the DE is intended — a QC report, an
+  identification list, results delivered before the statistics — re-run with `--mode no-de`;
+  otherwise run step 8 first. `deliver` never changes the mode by itself.
+- **a no-de delivery's session has a DE**: a DE record, or any file the DE wrote, delivered or not
+  (`de_output` lists them; the names are `report_files.is_de_output`: run_de.R's tables and
+  matrices, run_sets.R's protein-set tests, make_figures.R's figures). Deliver it with
+  `--mode analysis`.
 
 **Analysis mode** (`--mode analysis`, the default unless CoreOmics says raw data only) fills
 `<share>/<internal_id>_analysis_<YYYY-MM-DD>/` (`--label` replaces the suffix), copied
@@ -704,6 +719,18 @@ submissions) have
   `report.gg_matrix.tsv`, `report.unique_genes_matrix.tsv`, `report.stats.tsv`,
   `report.log.txt`, `search_provenance.json`
 - never: XIC folders, `.quant`, `.speclib`, temp folders, `output/raw_data`
+
+**No-DE mode** (`--mode no-de`) is an analysis report delivered **without differential
+expression**: a QC report, an identification list, or results delivered before the statistics
+(the DE waits on the study design, and some projects never have one). It fills
+`<share>/<internal_id>_report_<YYYY-MM-DD>/` with what analysis mode delivers, by the same rules
+(`Analysis_Report.html` required; raw links as `--include-raw` says), behind the same QC gate,
+with no normalisation gate (there is no DE to check). Its README opens "This delivery has no
+differential expression", its MANIFEST has `[SKIPPED] differential expression -- not part of this
+delivery`, and `delivery.json` records `mode: no-de`, `differential_expression: false` and
+`mode_description`. Once the DE is done, an analysis delivery of the same session goes beside it
+in `<internal_id>_analysis_<date>/`; the report folder is left as it was, and raw links already
+in `raw/` are reused.
 
 **Raw-only mode** (`--mode raw-only`, automatic for "I only require raw data") needs no session
 and no report: `<share>/<internal_id>_raw_data_<date>/` holds a README that says raw files
@@ -750,8 +777,9 @@ Links already in the share that this run did not create (PROT_0793's `search/ ->
 are listed as warnings and left untouched. Inside the delivery folder every file must be one this
 run delivered and readable by group and other. An error part-way still writes the MANIFEST,
 checksums and `delivery.json` with `verified: false`. **Exit 2 means do not share.**
-`delivery.json` (in the session dir; in the work dir for raw-only) records the folder, mode,
-file count, bytes, skipped items, raw links, the server-side `share_dir`, and `verified`.
+`delivery.json` (in the session dir; in the work dir for raw-only) records the folder, mode
+(with `mode_description` and `differential_expression`), file count, bytes, skipped items, raw
+links, the server-side `share_dir`, and `verified`.
 
 ## 7. `bioshare` — register and share (where the key is)
 
@@ -798,12 +826,31 @@ python3 scripts/core_submission.py email-draft --summary ~/core/PROT_0807/submis
 
 A plain, friendly draft to the submitter (cc the PI): the Bioshare link, "start with
 Analysis_Report.html" (or, for raw-only, where the raw files are), what is in the folder, the
-acknowledgment request, and, for an analysis delivery, one line before the sign-off asking how
+acknowledgment request, and, for a delivery with a report, one line before the sign-off asking how
 we did, with the Core's feedback survey (`feedback_line("email", ...)`: the address written out,
 pre-filled with the PROT number). The delivery README ends with the same question
 (`src=readme`); a raw-only delivery has no report to ask about and carries neither. Numbers
-appear only when they are in its inputs. It never sends; exit 2 means a placeholder is left (no
-link, or no submitter address).
+appear only when they are in its inputs.
+
+**The wording follows the delivery's `mode`** (from `delivery.json`): analysis, "finished the
+analysis"; no-de, "prepared a report", that the delivery does not include differential
+expression and that a planned comparison will follow separately, then the report and the raw
+folder; raw-only, the raw files only. Without `--delivery` it cannot know, says so in `warnings`,
+and is worded for an analysis.
+
+**Recipients:** To the submitter, Cc the PI (dropped when the same address). The draft's header
+and the printed `recipients` name each one and where the address came from: the submitter's or
+PI's address **as typed on the CoreOmics submission form** (`submission_summary.json`
+`submitter.email` / `pi.email`), where a typo can go unnoticed (one did). Each address gets a
+shape check (one `@`, no spaces or commas, a dotted domain with a real ending) and a typo check
+against `ucdavis.edu` (a domain one or two letters from it, e.g. `ucdavis.ed`). One that fails is
+marked `[CHECK THIS ADDRESS: <why>]` on its line, listed in `address_problems`, and the draft
+exits 2: show the staff member the address and the reason, and have them confirm the right one
+before sending. A well-formed address can still be the wrong one; the header is there so staff
+can see where each came from.
+
+It never sends; exit 2 means a placeholder is left (no link, or no submitter address) or an
+address failed its check.
 
 ## Troubleshooting by exit code
 
@@ -813,7 +860,8 @@ link, or no submitter address).
 | 2 | `locate` | `choose_run`, `weak_ids`, `ambiguous_label`, `duplicate_ids`, `duplicate_assignment`, `unmatched_samples`, `no_files`; `--max-days` wider than the neighbour window; a `--choose` that names no candidate | show the proposal; `--reinjections latest|all` for re-injections, `--choose <key>=<file>` for collisions, `--files-from` a corrected list, `--accept-ambiguous` or `--allow-partial` as staff decide; re-fetch with `--neighbor-days` |
 | 2 | `stage` | several candidate folders, or one naming someone else; project owned by another submission; `--apply` on a hard-failed locate | `--service-dir <folder>`; resolve the locate gates |
 | 2 | `conditions` | blank / case-variant / single / all-unique / singleton conditions | ask exactly the `questions` |
-| 2 | `deliver` | no `Analysis_Report.html`; session not this submission's; folder not empty; symlink in the path or the share; raw requested but no staged project; **held by `qc_gate`** (QC check, step 8e: check/concern, unplaced files, not run, or for another file list); any verification failure | finish step 9 and push it; use the right session (or `--force` with staff); `--label`; remove the offending link; `stage --apply`; for `qc_gate`, a staff member reads `logs/qc_bracket.md` and records `qc_bracket.py ack --by <login>` — or re-runs step 8e when it says so |
+| 2 | `deliver` | no `Analysis_Report.html`; session not this submission's; folder not empty; symlink in the path or the share; raw requested but no staged project; **held by `qc_gate`** (QC check, step 8e: check/concern, unplaced files, not run, or for another file list); **held by `normalization_gate`** (DE without a decided check); **"this session has no differential expression"** (auto/analysis); **no-de refused**: the session has DE output (`de_output`); any verification failure | finish step 9 and push it; use the right session (or `--force` with staff); `--label`; remove the offending link; `stage --apply`; for `qc_gate`, a staff member reads `logs/qc_bracket.md` and records `qc_bracket.py ack --by <login>` — or re-runs step 8e when it says so; for `normalization_gate`, step 8; no DE: `--mode no-de` if a delivery without it is intended, else step 8; no-de refused: `--mode analysis` |
+| 2 | `email-draft` | a placeholder (no Bioshare link, no submitter address); an address failed its check (`address_problems`) | paste the link; confirm the address with the staff member before sending |
 | 2 | `bioshare send` | no share linked; no or unverified `delivery.json`, or one for another share | `bioshare ensure --apply`; deliver again and `--get` the new `delivery.json` |
 | 3 | `check`, `fetch`, `bioshare` | no usable key, a rejected key, no Proteomics lab access; CoreOmics down; DRF validation error; a redirect or unexpected reply to a write | `core_submission.py check` names the problem and the fix (table above); read the detail |
 | 3 | `locate`, `stage`, `deliver`, `conditions` | not on a machine with the Flinders tree; incomplete scripts directory | run through `hive_exec.sh`; re-put the skill (`hive_exec.sh --put-skill`) |

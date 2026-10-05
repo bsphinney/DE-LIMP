@@ -194,8 +194,9 @@ unexplained.
 
 ## The delivery gate
 
-`core_submission.py deliver` (step 12b) asks `qc_bracket.delivery_gate()` before an analysis
-delivery, dry run included.
+`core_submission.py deliver` (step 12b) asks `qc_bracket.delivery_gate()` before every delivery
+of the session's report -- an analysis delivery or a no-de one (a report without differential
+expression) -- dry run included. A raw-only delivery has no session report and no gate.
 
 **What refuses the delivery outright:** a record for a different file list from the session's.
 The record stores the sha256 of the sorted list of files it checked (`files.list_sha256`), and

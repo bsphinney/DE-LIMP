@@ -1400,6 +1400,16 @@ class DeliverBase(unittest.TestCase):
             args += ["--include-raw", "no"]
         return run(args + list(extra), env or self.env)
 
+    def set_qc(self, *verdicts, **kw):
+        write(self.session, "logs/qc_bracket.json",
+              json.dumps(qc_record(*verdicts, session=self.session, **kw)))
+
+    def ack(self, note="reviewed the 2 runs after the failed QC; data stand"):
+        p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "qc_bracket.py"), "ack",
+                            "--session", self.session, "--by", "staffexample", "--note", note],
+                           capture_output=True, text=True, env=self.env)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+
 
 def qc_record(*verdicts, status="ok", session=None):
     """A minimal qc_bracket.py record (schema 1): one instrument per verdict, covering `session`'s
@@ -1419,16 +1429,6 @@ def qc_record(*verdicts, status="ok", session=None):
 class TestDeliverQcGate(DeliverBase):
     """Brett, 2026-10-01: the QC verdict is staff-only, and a check or concern holds the client
     delivery until a staff member records an acknowledgement (who, when, a one-line note)."""
-
-    def set_qc(self, *verdicts, **kw):
-        write(self.session, "logs/qc_bracket.json",
-              json.dumps(qc_record(*verdicts, session=self.session, **kw)))
-
-    def ack(self, note="reviewed the 2 runs after the failed QC; data stand"):
-        p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "qc_bracket.py"), "ack",
-                            "--session", self.session, "--by", "staffexample", "--note", note],
-                           capture_output=True, text=True, env=self.env)
-        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
 
     def test_check_or_concern_holds_the_delivery_dry_run_included(self):
         for verdicts in (("check",), ("good", "concern")):
@@ -1851,6 +1851,18 @@ class TestDeliver(DeliverBase):
         manifest = read(os.path.join(self.delivery, "MANIFEST.txt"))
         self.assertIn("[SKIPPED] tables/locked/ -- unreadable directory", manifest)
 
+    def test_an_analysis_delivery_says_it_carries_the_de(self):
+        rc, out, p = run(["deliver", "--summary", self.summary, "--session", self.session,
+                          "--include-raw", "no", "--apply"], self.env)
+        self.assertEqual(rc, 0, p.stdout + p.stderr)
+        self.assertEqual(out["delivery_dir"], os.path.join(
+            self.share, f"PROT_0807_analysis_{dt.date.today().isoformat()}"))
+        dj = load(os.path.join(self.session, "delivery.json"))
+        self.assertEqual((dj["mode"], dj["differential_expression"]), ("analysis", True))
+        self.assertTrue(dj["normalization_gate"]["proceed"])
+        self.assertNotIn("differential expression --",
+                         read(os.path.join(out["delivery_dir"], "MANIFEST.txt")))
+
     # -- live finding C
     def test_readme_claims_only_what_was_delivered(self):
         bare = cs.build_readme(self.s, {"Analysis_Report.html"}, [], "analysis")
@@ -1892,6 +1904,167 @@ class TestRawOnlyDelivery(DeliverBase):
         run(["email-draft", "--summary", self.summary, "--delivery",
              os.path.join(self.work, "delivery.json"), "--out", out_md], self.env)
         self.assertNotIn(SURVEY, read(out_md))
+
+
+class TestNoDeDelivery(DeliverBase):
+    """2026-10-05: a project's first deliverable was a QC report, with no differential expression
+    yet (it waits on the study design; some projects never have one). The normalisation gate held
+    it ("the DE record ... could not be read ([Errno 2] ..."), so staff delivered it as raw-only
+    and copied the report onto the share by hand, outside verification -- and the email draft
+    called it raw data only. --mode no-de delivers such a report behind the QC gate, and
+    refuses a session that has a DE."""
+
+    def setUp(self):
+        super().setUp()
+        # a QC-only session: the report, QC tables and figures, methods; nothing the DE writes
+        for rel in ("tables/DE_dpc_ctrl.vs.treat.csv", "tables/reproducibility_log.R",
+                    "tables/de_provenance.json", "figures/pca.png"):
+            os.remove(os.path.join(self.output, rel))
+        write(self.output, "tables/qc_pooled_standard.csv", "Run,Proteins\nQC1,4000\n")
+        write(self.output, "figures/qc_standard_trend.png", "png")
+        write(self.output, "methods.md", "# Methods\n")
+
+    def no_de(self, *extra):
+        return run(["deliver", "--summary", self.summary, "--session", self.session,
+                    "--mode", "no-de", *extra], self.env)
+
+    def folder(self, suffix):
+        return os.path.join(self.share, f"PROT_0807_{suffix}_{dt.date.today().isoformat()}")
+
+    def test_a_qc_report_goes_out_with_the_raw_data_and_says_it_has_no_de(self):
+        self.set_qc("concern")                     # the QC gate applies; an acknowledgement releases it
+        self.ack()
+        rc, out, p = self.no_de("--include-raw", "yes")
+        self.assertEqual(rc, 0, p.stdout + p.stderr)
+        self.assertTrue(out["qc_gate"]["proceed"])
+        self.assertNotIn("normalization_gate", out)
+        self.assertFalse(out["differential_expression"])
+        rc, out, p = self.no_de("--include-raw", "yes", "--apply")
+        self.assertEqual(rc, 0, p.stdout + p.stderr)
+        self.assertTrue(out["verified"], out)
+        d = self.folder("report")
+        self.assertEqual(out["delivery_dir"], d)
+        for rel in ("Analysis_Report.html", "methods.md", "tables/qc_pooled_standard.csv",
+                    "figures/qc_standard_trend.png", "README.html", "AGENTS.md"):
+            self.assertTrue(os.path.isfile(os.path.join(d, rel)), rel)
+        for f in self.raw_files:
+            self.assertTrue(os.path.islink(os.path.join(self.share, "raw", os.path.basename(f))))
+        readme = read(os.path.join(d, "README.md"))
+        self.assertIn("This delivery has no differential expression", readme)
+        self.assertNotIn("compared between sample groups", readme)
+        self.assertIn("../raw/", readme)
+        self.assertIn("[SKIPPED] differential expression -- not part of this delivery",
+                      read(os.path.join(d, "MANIFEST.txt")))
+        dj = load(os.path.join(self.session, "delivery.json"))
+        self.assertEqual((dj["mode"], dj["differential_expression"], dj["verified"]),
+                         ("no-de", False, True))
+        self.assertIn("without differential expression", dj["mode_description"])
+        self.assertIsNone(dj["normalization_gate"])
+        self.assertEqual(set(dj["qc_gate"]), {"proceed", "record_sha256", "ack_at"})
+
+    def test_a_session_with_a_de_record_is_refused(self):
+        rec = write(self.output, "tables/de_provenance.json", json.dumps(NORM_DECIDED))
+        for extra in ((), ("--apply",)):
+            rc, out, _ = self.no_de(*extra)
+            self.assertEqual(rc, 2, extra)
+            self.assertIn("this session has differential expression", out["error"])
+            self.assertIn("tables/de_provenance.json", out["de_output"])
+            self.assertIn("--mode analysis", out["hint"])
+        os.remove(rec)                             # a record that does not even resolve is one
+        os.symlink(os.path.join(self.tmp, "gone.json"), rec)
+        rc, out, _ = self.no_de("--apply")
+        self.assertEqual(rc, 2)
+        self.assertIn("tables/de_provenance.json", out["de_output"])
+        self.assertFalse(os.path.exists(self.share), "nothing may be delivered")
+
+    def test_any_de_output_is_refused(self):
+        for rel in ("tables/DE_dpc_ctrl.vs.treat.csv", "tables/Expression_Matrix.csv",
+                    "tables/Sets_ctrl.vs.treat.csv", "figures/volcano_ctrl.vs.treat.png",
+                    "figures/heatmap_top.png"):
+            with self.subTest(rel):
+                p = write(self.output, rel, "x")
+                rc, out, _ = self.no_de("--apply")
+                self.assertEqual(rc, 2)
+                self.assertEqual(out["de_output"], [rel])
+                self.assertIn(rel, out["error"])
+                os.remove(p)
+        self.assertFalse(os.path.exists(self.share))
+
+    def test_auto_or_analysis_with_no_de_holds_with_a_clear_message(self):
+        for mode in ((), ("--mode", "analysis")):
+            rc, out, _ = run(["deliver", "--summary", self.summary, "--session", self.session,
+                              *mode, "--apply"], self.env)
+            self.assertEqual(rc, 2, mode)
+            self.assertEqual(out["mode"], "analysis", "never switched silently")
+            self.assertIn("this session has no differential expression", out["error"])
+            self.assertNotIn("Errno", out["error"])
+            self.assertIn("--mode no-de", out["hint"])
+            self.assertIn("step 8", out["hint"])
+            self.assertNotIn("normalization_gate", out)
+        self.assertFalse(os.path.exists(self.share))
+
+    def test_the_qc_gate_still_holds_it(self):
+        for verdicts in (("concern",), ("good", "check")):
+            self.set_qc(*verdicts)
+            rc, out, _ = self.no_de("--apply")
+            self.assertEqual(rc, 2, verdicts)
+            self.assertIn("held for staff review", out["error"])
+            self.assertIn("qc_bracket.py ack", out["hint"])
+        os.remove(os.path.join(self.session, "logs", "qc_bracket.json"))
+        rc, out, _ = self.no_de("--apply")
+        self.assertEqual(rc, 2)
+        self.assertIn("were not checked", out["error"])
+        self.assertFalse(os.path.exists(self.share))
+
+    def test_it_needs_a_session_and_a_report(self):
+        rc, out, _ = run(["deliver", "--summary", self.summary, "--mode", "no-de"], self.env)
+        self.assertEqual(rc, 2)
+        self.assertIn("--session", out["error"])
+        os.remove(os.path.join(self.output, "Analysis_Report.html"))
+        rc, out, _ = self.no_de("--apply")
+        self.assertEqual(rc, 2)
+        self.assertIn("Analysis_Report.html", out["error"])
+
+    def test_a_later_analysis_delivery_goes_beside_it(self):
+        rc, out, p = self.no_de("--include-raw", "yes", "--apply")
+        self.assertEqual(rc, 0, p.stdout + p.stderr)
+        report = self.folder("report")
+        before = read(os.path.join(report, "checksums.sha256"))
+        # step 8 runs in the same session once the design is known
+        write(self.output, "tables/de_provenance.json", json.dumps(NORM_DECIDED))
+        write(self.output, "tables/DE_dpc_ctrl.vs.treat.csv", "Protein,logFC\nP1,1\n")
+        write(self.output, "figures/volcano_ctrl.vs.treat.png", "png")
+        rc, out, p = run(["deliver", "--summary", self.summary, "--session", self.session,
+                          "--include-raw", "yes", "--apply"], self.env)
+        self.assertEqual(rc, 0, p.stdout + p.stderr)
+        self.assertEqual(out["mode"], "analysis")
+        self.assertTrue(out["verified"], out)
+        analysis = self.folder("analysis")
+        self.assertEqual(out["delivery_dir"], analysis)
+        self.assertTrue(os.path.isfile(os.path.join(analysis, "tables", "DE_dpc_ctrl.vs.treat.csv")))
+        self.assertEqual(out["raw_links"]["existing"], len(self.raw_files))
+        self.assertEqual(read(os.path.join(report, "checksums.sha256")), before,
+                         "the earlier report is left as it was")
+        self.assertFalse(os.path.exists(os.path.join(report, "tables", "DE_dpc_ctrl.vs.treat.csv")))
+        rc, out, _ = self.no_de("--label", "again")      # and no-de now refuses this session
+        self.assertEqual(rc, 2)
+
+    def test_the_email_draft_says_report_and_raw_data_without_the_statistics(self):
+        rc, out, p = self.no_de("--include-raw", "yes", "--apply")
+        self.assertEqual(rc, 0, p.stdout + p.stderr)
+        md = os.path.join(self.tmp, "EMAIL_DRAFT.md")
+        rc, js, p = run(["email-draft", "--summary", self.summary, "--delivery",
+                         os.path.join(self.session, "delivery.json"), "--share-url",
+                         "https://bioshare.example/bsx/", "--out", md], self.env)
+        self.assertEqual(rc, 0, p.stdout + p.stderr)
+        self.assertEqual(js["mode"], "no-de")
+        text = read(md)
+        self.assertIn("Subject: Proteomics report for PROT_0807 is ready", text)
+        self.assertIn("does not include differential expression", text)
+        self.assertIn("Please start with Analysis_Report.html", text)
+        self.assertIn("Your raw instrument files are in the raw folder of the same share.", text)
+        for wrong in ("Raw data for", "no search or analysis was run", "has finished the analysis"):
+            self.assertNotIn(wrong, text)
 
 
 # ---------------------------------------------------------------------- bioshare --
@@ -2294,6 +2467,74 @@ class TestEmailDraft(unittest.TestCase):
             self.assertEqual(rc, 2)
             self.assertIn("Bioshare link", js["placeholders"])
             self.assertIn("[BIOSHARE LINK", read(out))
+
+    def draft(self, tmp, delivery, rec=None):
+        summary, _ = write_summary(tmp, rec)
+        dj = write(tmp, "delivery.json", json.dumps(delivery))
+        out = os.path.join(tmp, "EMAIL_DRAFT.md")
+        rc, js, p = run(["email-draft", "--summary", summary, "--delivery", dj, "--share-url",
+                         "https://bioshare.example/bsx/", "--out", out], child_env(tmp))
+        return rc, js, read(out) if os.path.exists(out) else "", p
+
+    def test_the_wording_follows_the_delivery_mode(self):
+        report = ["Analysis_Report.html", "tables", "figures", "MANIFEST.txt"]
+        for mode, contents, says, never in (
+                ("analysis", report, "has finished the analysis",
+                 ("does not include differential expression", "Raw data for")),
+                ("no-de", report, "does not include differential expression",
+                 ("has finished the analysis", "Raw data for", "no search or analysis")),
+                ("raw-only", ["MANIFEST.txt", "README.md"], "Raw data for",
+                 ("Analysis_Report.html", "differential expression"))):
+            with self.subTest(mode), tempfile.TemporaryDirectory() as tmp:
+                rc, js, text, p = self.draft(tmp, {"mode": mode, "contents": contents,
+                                                   "raw_links": {"created": 2}})
+                self.assertEqual(rc, 0, p.stdout + p.stderr)
+                self.assertEqual(js["mode"], mode)
+                self.assertIn(says, text)
+                for w in never:
+                    self.assertNotIn(w, text)
+
+    def test_the_draft_names_each_recipient_and_where_the_address_came_from(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, js, text, p = self.draft(tmp, {"mode": "analysis", "contents": ["Analysis_Report.html"]})
+            self.assertEqual(rc, 0, p.stdout + p.stderr)
+            got = {r["field"]: r for r in js["recipients"]}
+            self.assertEqual(got["To"]["email"], "ada.example@example.org")
+            self.assertEqual(got["To"]["who"], "submitter")
+            self.assertIn("CoreOmics submission form", got["To"]["source"])
+            self.assertEqual(got["Cc"]["email"], "pi.placeholder@example.org")
+            self.assertEqual(got["Cc"]["who"], "PI")
+            self.assertIsNone(got["To"]["problem"])
+            self.assertEqual(js["address_problems"], [])
+            head = text.split("-->")[0]
+            self.assertIn("To: ada.example@example.org -- Ada Example, the submitter, as typed "
+                          "on the CoreOmics submission form", head)
+            self.assertIn("To: ada.example@example.org\n", text)
+            self.assertNotIn("CHECK", text)
+
+    def test_a_malformed_or_typo_address_is_flagged_never_used_silently(self):
+        for sub, pi, field, why in (
+                ("ada.example@example,org", None, "To", "','"),
+                ("ada.example@ucdavis.ed", None, "To", "ucdavis.edu"),
+                ("ada.example example.org", None, "To", "space"),
+                (None, "pi.placeholder@@example.org", "Cc", "@")):
+            with self.subTest(sub or pi), tempfile.TemporaryDirectory() as tmp:
+                rec = record()
+                rec["email"] = sub or rec["email"]
+                rec["pi_email"] = pi or rec["pi_email"]
+                rc, js, text, p = self.draft(tmp, {"mode": "analysis",
+                                                   "contents": ["Analysis_Report.html"]}, rec)
+                self.assertEqual(rc, 2, "a decision is needed: fix the address first")
+                bad = sub or pi
+                self.assertEqual(len(js["address_problems"]), 1, js["address_problems"])
+                self.assertIn(bad, js["address_problems"][0])
+                self.assertIn(why, js["address_problems"][0])
+                line = [ln for ln in text.splitlines() if ln.startswith(f"{field}: {bad}")]
+                self.assertTrue(line and "[CHECK THIS ADDRESS:" in line[0], text)
+
+    def test_an_address_that_passes_is_not_flagged(self):
+        for good in ("first.last@ucdavis.edu", "a+b@health.ucdavis.edu", "x_y@lab.example.co.uk"):
+            self.assertIsNone(cs.address_problem(good), good)
 
 
 # ---------------------------------------------------------------------- identify --
