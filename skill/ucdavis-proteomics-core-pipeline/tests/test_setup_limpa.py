@@ -12,6 +12,14 @@ packageVersion("limpa") >= 1.4.0 last, reports it in setup.json, and exits 1 whe
 A stub micromamba and a stub Rscript stand in (no conda, no network): the Rscript stub keeps
 "the installed limpa version" in a file, answers the version check from it, and "installs"
 1.4.0 unless told the download fails.
+
+nanoparquet (2.8.0 report): limpa reads DIA-NN's report.parquet with it (EListFromLongFormatFile:
+"nanoparquet package required but is not installed (or can't be loaded)"), but it is only in
+limpa's Suggests, so installing limpa never brings it, and r-nanoparquet was in create_env from
+2.8.0 only -- which runs for a MISSING env. An older env never got it, `setup.sh --check` did not
+look, and CRAN's nanoparquet compiles C++, which a login node without a compiler cannot. setup.sh
+now checks it loads, installs conda-forge's r-nanoparquet into an existing env that lacks it, and
+says so with that fix. The Rscript stub answers the nanoparquet check from FAKE_NP_STATE.
 """
 import json
 import os
@@ -36,6 +44,9 @@ case "$*" in
     [ -n "${FAKE_LIMPA_INSTALL_FAIL:-}" ] && { echo "cannot open URL bioconductor.org" >&2; exit 1; }
     echo "1.4.0" > "$FAKE_LIMPA_STATE"; exit 0 ;;
   *"cat(tryCatch"*) printf '%s' "$v"; exit 0 ;;
+  *nanoparquet*)
+    [ -z "${FAKE_NP_STATE:-}" ] && exit 0
+    [ "$(cat "$FAKE_NP_STATE" 2>/dev/null)" = present ] && exit 0 || exit 1 ;;
   *requireNamespace*)
     case "$v" in 1.[4-9]*|1.[1-9][0-9]*|[2-9].*) exit 0 ;; *) exit 1 ;; esac ;;
 esac
@@ -43,12 +54,18 @@ exit 0
 '''
 
 
+# the stub micromamba, plus: installing r-nanoparquet makes the Rscript stub's check pass
+FAKE_MICROMAMBA_NP = FAKE_MICROMAMBA.replace(
+    "             pandas) ",
+    '             r-nanoparquet) echo present > "$FAKE_NP_STATE" ;;\n             pandas) ')
+
+
 class SetupLimpaGate(setup_t.SetupCheckHarness):
     def setUp(self):
         super().setUp()
         for tool in ("chmod", "ln"):
             os.symlink(shutil.which(tool), os.path.join(self.sys, tool))
-        _exe(os.path.join(self.sys, "micromamba"), FAKE_MICROMAMBA)
+        _exe(os.path.join(self.sys, "micromamba"), FAKE_MICROMAMBA_NP)
         self.ensure = _exe(os.path.join(self.d, "ensure_dotnet8_stub.sh"), FAKE_ENSURE)
         self.dotnet_root = fake_dotnet_root(os.path.join(self.d, ".proteomics-pipeline", "dotnet8"))
         self.mm_log = os.path.join(self.d, "mm.log")
@@ -74,7 +91,7 @@ class SetupLimpaGate(setup_t.SetupCheckHarness):
                "FAKE_MM_LOG": self.mm_log, "FAKE_PY": sys.executable, "FAKE_TRFP": trfp.FAKE,
                "PROTEOMICS_ENSURE_DOTNET8": self.ensure, "FAKE_ENSURE_LOG": os.path.join(self.d, "e.log"),
                "FAKE_ENSURE_ROOT": self.dotnet_root, "FAKE_R_LOG": self.r_log,
-               "FAKE_LIMPA_STATE": self.state}
+               "FAKE_LIMPA_STATE": self.state, "FAKE_NP_STATE": ""}
         env.update(extra)
         r = subprocess.run([self.bash, setup_t.SETUP, *args], capture_output=True, text=True,
                            env=env, timeout=300)
@@ -133,6 +150,57 @@ class SetupLimpaGate(setup_t.SetupCheckHarness):
             self.assertIn("--override-channels -c conda-forge -c bioconda", c)
         for pkg in ("bioconductor-limma", "r-statmod", "r-data.table", "r-nanoparquet"):
             self.assertIn(f" {pkg} ", f" {creates[0]} ")
+
+    # ---- nanoparquet -------------------------------------------------------------------------
+    def np_missing(self):
+        np_state = os.path.join(self.d, "nanoparquet_state")
+        with open(np_state, "w") as fh:
+            fh.write("missing")
+        return {"FAKE_NP_STATE": np_state}
+
+    def test_check_says_nanoparquet_is_missing_with_the_conda_forge_fix(self):
+        self.prebuilt_env("1.4.1")
+        r, s = self.run_setup("--check", **self.np_missing())
+        self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+        self.assertIs(s["nanoparquet"]["ok"], False)
+        self.assertIs(s["ready_for"]["de"], False)
+        note = [n for n in s["notes"] if "nanoparquet" in n]
+        self.assertEqual(len(note), 1, s["notes"])
+        self.assertIn("--override-channels -c conda-forge r-nanoparquet", note[0])
+        self.assertIn(self.prefix, note[0])
+        self.assertNotIn("install.packages", note[0][note[0].index("Fix: "):])   # never CRAN
+        self.assertEqual(s["nanoparquet"]["fix"], note[0][note[0].index("Fix: ") + 5:].rstrip("."))
+        self.assertFalse([c for c in _lines(self.mm_log) if c.startswith("install")])
+        self.assertIn("ERROR: nanoparquet", r.stderr)
+
+    def test_setup_installs_it_from_conda_forge_into_an_existing_env(self):
+        self.prebuilt_env("1.4.1")
+        r, s = self.run_setup(**self.np_missing())
+        self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+        installs = [c for c in _lines(self.mm_log) if c.startswith("install")]
+        self.assertEqual(len([c for c in installs if " r-nanoparquet" in f" {c} "]), 1, installs)
+        self.assertIn("--override-channels -c conda-forge", installs[0])
+        self.assertFalse(any("nanoparquet" in c and "install.packages" in c
+                             for c in _lines(self.r_log)))
+        self.assertIs(s["nanoparquet"]["ok"], True)
+        self.assertIs(s["ready_for"]["de"], True)
+        self.assertFalse([n for n in s["notes"] if "nanoparquet" in n], s["notes"])
+
+    def test_a_loadable_nanoparquet_is_left_alone(self):
+        self.prebuilt_env("1.4.1")
+        r, s = self.run_setup()
+        self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+        self.assertFalse(any("r-nanoparquet" in c for c in _lines(self.mm_log)))
+        self.assertIs(s["nanoparquet"]["ok"], True)
+
+    def test_when_it_cannot_be_installed_setup_fails_with_the_fix(self):
+        self.prebuilt_env("1.4.1")
+        r, s = self.run_setup(FAKE_MM_INSTALL_FAIL="1", **self.np_missing())
+        self.assertEqual(r.returncode, 1, r.stderr[-2000:])
+        self.assertIn("ERROR: nanoparquet", r.stderr)
+        self.assertIn("-c conda-forge r-nanoparquet", r.stderr)
+        self.assertIs(s["nanoparquet"]["ok"], False)
+        self.assertIs(s["ready_for"]["de"], False)
 
 
 if __name__ == "__main__":

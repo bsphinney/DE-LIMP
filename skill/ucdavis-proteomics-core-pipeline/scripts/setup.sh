@@ -184,15 +184,25 @@ fi
 # pandas (conda-forge) rides along: gabrig's follow-up (#15) found none in the HIVE env, and
 # ad-hoc analysis reaches for it first. Here, not in create_env, because create_env only runs
 # for a MISSING env -- this step is how an env that already exists gets it on a re-run.
+# r-nanoparquet (conda-forge) too, when R cannot load it. limpa reads DIA-NN's report.parquet
+# with it ("nanoparquet package required but is not installed", limpa's EListFromLongFormatFile),
+# but it is only in limpa's Suggests -- installing limpa never brings it -- and create_env lists
+# it from 2.8.0 only, so an env built before that never got it (2.8.0 report). CRAN's
+# nanoparquet compiles C++, which fails where there is no compiler; conda-forge's is a binary.
+# Loadable is the test, not a conda-meta record: an R-installed copy counts.
 trfp_in_env() { [ -x "$ENV_PREFIX/bin/ThermoRawFileParser" ] || [ -x "$ENV_PREFIX/bin/thermorawfileparser" ]; }
 in_env_meta() {     # in_env_meta PKG: conda's own record of an installed package
   local f; for f in "$ENV_PREFIX"/conda-meta/"$1"-[0-9]*.json; do [ -e "$f" ] && return 0; done
   return 1
 }
+nanoparquet_ok() {
+  "$ENV_PREFIX/bin/Rscript" -e "q(status = as.integer(!requireNamespace('nanoparquet', quietly = TRUE)))" >/dev/null 2>&1
+}
 EXTRA_PKGS=""       # a word list, not an array: bash 3.2 + set -u and empty arrays do not mix
 trfp_in_env           || EXTRA_PKGS="$EXTRA_PKGS thermorawfileparser"
 in_env_meta pythonnet || EXTRA_PKGS="$EXTRA_PKGS pythonnet"
 in_env_meta pandas    || EXTRA_PKGS="$EXTRA_PKGS pandas"
+if env_ready && ! nanoparquet_ok; then EXTRA_PKGS="$EXTRA_PKGS r-nanoparquet"; fi
 if [ -n "$CONDA" ] && env_ready && [ -n "$EXTRA_PKGS" ] && ! $CHECK_ONLY; then
   say "[setup] installing$EXTRA_PKGS into the env..."
   # shellcheck disable=SC2086  # $EXTRA_PKGS is meant to split into package names
@@ -202,6 +212,16 @@ if [ -n "$CONDA" ] && env_ready && [ -n "$EXTRA_PKGS" ] && ! $CHECK_ONLY; then
     *)           "$CONDA" install -y -p "$ENV_PREFIX" \
                    --override-channels -c conda-forge -c bioconda $EXTRA_PKGS >&2 ;;
   esac || NOTES+=("Could not install$EXTRA_PKGS into the env (the rest of the env is unaffected). Thermo .raw needs thermorawfileparser, and reading the Orbitrap resolution needs pythonnet: see thermo_raw_reader in setup.json.")
+fi
+NANOPARQUET_OK=false
+if env_ready && nanoparquet_ok; then NANOPARQUET_OK=true; fi
+case "$CONDA" in
+  *micromamba) NANOPARQUET_FIX="$CONDA install -y -r $MAMBA_ROOT -p $ENV_PREFIX --override-channels -c conda-forge r-nanoparquet" ;;
+  "")          NANOPARQUET_FIX="run setup.sh (it installs micromamba), or install conda-forge's r-nanoparquet into $ENV_PREFIX" ;;
+  *)           NANOPARQUET_FIX="$CONDA install -y -p $ENV_PREFIX --override-channels -c conda-forge r-nanoparquet" ;;
+esac
+if env_ready && ! $NANOPARQUET_OK; then
+  NOTES+=("nanoparquet cannot be loaded in $ENV_PREFIX: run_de.R reads DIA-NN's report.parquet with it (limpa needs it), so no DE can run. Not install.packages('nanoparquet') from CRAN -- it compiles C++ and fails without a compiler. Fix: $NANOPARQUET_FIX.")
 fi
 
 # ---- 2b2. protein-set annotation: GO, offline -----------------------------------
@@ -292,7 +312,8 @@ elif [ "$OS" = "darwin" ];       then DIANN_READY=false; DIANN_NOTE="macOS: DIA-
 fi
 
 # readiness per acquisition type (for the orchestrator to gate on)
-DE_READY=false; [ -n "$RSCRIPT" ] && DE_READY=true
+# DE reads every engine's report.parquet with nanoparquet (run_de.R, limpa_compat.R)
+DE_READY=false; [ -n "$RSCRIPT" ] && $NANOPARQUET_OK && DE_READY=true
 DDA_READY=false
 if [ -n "$SAGE" ] && [ -n "$RSCRIPT" ]; then DDA_READY=true; fi
 DIA_READY=false
@@ -351,6 +372,8 @@ j() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
   printf '  "dotnet8": {"root": "%s", "note": "%s"},\n' "$(j "$DOTNET8_ROOT")" "$(j "$DOTNET8_NOTE")"
   printf '  "limpa": {"version": "%s", "required": ">= %s", "ok": %s, "source": "Bioconductor %s"},\n' \
          "$(j "$LIMPA_VERSION")" "$LIMPA_MIN" "$($LIMPA_OK && echo true || echo false)" "$LIMPA_BIOC"
+  printf '  "nanoparquet": {"ok": %s, "fix": "%s"},\n' \
+         "$($NANOPARQUET_OK && echo true || echo false)" "$(j "$($NANOPARQUET_OK || printf '%s' "$NANOPARQUET_FIX")")"
   printf '  "set_annotation": {"ok": %s, "packages": "%s", "missing": "%s"},\n' \
          "$($SET_ANN_OK && echo true || echo false)" "$SET_ANN_PKGS" "$(j "$SET_ANN_MISSING")"
   printf '  "ready_for": {"de": %s, "dia": %s, "dda": %s, "thermo_raw": %s},\n' \
@@ -373,11 +396,20 @@ say ""
 say "[setup] activate with:  source $ACTIVATE"
 say "[setup] readiness report written to $SETUP_JSON"
 
-# The pinned R stack is part of a working setup: an env whose limpa is < 1.4.0 is a setup
-# failure, said plainly and with the fix -- not a note to be scrolled past.
+# The pinned R stack is part of a working setup: an env whose limpa is < 1.4.0, or whose R cannot
+# load nanoparquet, is a setup failure, said plainly and with the fix -- not a note to be
+# scrolled past. Both are said before setup.sh exits.
+R_STACK_OK=true
 if env_ready && ! $LIMPA_OK; then
   say ""
   say "[setup] ERROR: limpa ${LIMPA_VERSION:-(not installed)} in $ENV_PREFIX -- the skill needs limpa >= $LIMPA_MIN (Bioconductor $LIMPA_BIOC)."
   say "[setup]        Fix: $LIMPA_FIX"
-  $CHECK_ONLY || exit 1
+  R_STACK_OK=false
 fi
+if env_ready && ! $NANOPARQUET_OK; then
+  say ""
+  say "[setup] ERROR: nanoparquet cannot be loaded in $ENV_PREFIX -- run_de.R reads every report.parquet with it (limpa needs it)."
+  say "[setup]        Fix: $NANOPARQUET_FIX   (conda-forge's binary: CRAN's compiles C++ and needs a compiler)"
+  R_STACK_OK=false
+fi
+if ! $R_STACK_OK && ! $CHECK_ONLY; then exit 1; fi

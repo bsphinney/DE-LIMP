@@ -77,6 +77,16 @@ Container runtime preference: hpc→apptainer, mac→docker, linux→native.
   `notes` and stderr say `ERROR: limpa <v> ...` with the fix (an `install.packages()` line to
   run where there is internet — a login node), and `setup.sh` exits 1 (`--check` only
   reports).
+- **nanoparquet is checked too.** limpa reads DIA-NN's `report.parquet` with it (`nanoparquet
+  package required but is not installed`), but it is only in limpa's *Suggests*, so installing
+  limpa never brings it, and `create_env` lists `r-nanoparquet` only since 2.8.0 and only runs
+  for a missing env — an env built before that never got it (2.8.0 report). `setup.sh` now
+  checks that R can load it; if not, it installs **conda-forge's `r-nanoparquet`** into the
+  existing env. Not `install.packages("nanoparquet")` from CRAN: that compiles C++ and fails
+  where there is no compiler. `setup.json` → `nanoparquet` = `{ok, fix}`, `ready_for.de` is
+  false without it, and `notes` / stderr say `ERROR: nanoparquet ...` with the conda command;
+  `setup.sh` exits 1 (`--check` only reports). The limpa fix line above leaves nanoparquet
+  as it is.
 - **An env that is still on limpa 1.2.x** (an old `setup.sh`, no internet) is not a dead
   end: `run_de.R` passes the annotation columns under whichever name this limpa's
   `readDIANN()` has (`limpa_compat.R`) and records it — `de_provenance.json` →
