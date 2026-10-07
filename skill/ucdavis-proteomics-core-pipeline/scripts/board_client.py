@@ -392,7 +392,7 @@ def cmd_where(c: Client, a):
     body = {}
     if a.raw_data:
         body["raw_data"] = a.raw_data
-    for f in ("session_folder", "search_output", "report", "bioshare_url", "fran"):
+    for f in ("session_folder", "search_output", "report", "bioshare_url", "fran", "search_engine", "fran_handover"):
         if getattr(a, f):
             body[f] = getattr(a, f)
     if a.extra:
@@ -690,6 +690,8 @@ def build_parser() -> argparse.ArgumentParser:
     wh.add_argument("--report")
     wh.add_argument("--bioshare-url")
     wh.add_argument("--fran")
+    wh.add_argument("--search-engine", help="with --search-output: diann, spectronaut, fragpipe, radiant, sage, alphadia")
+    wh.add_argument("--fran-handover", help="with --search-output: the status in the search's fran_deposit.json")
     wh.add_argument("--extra", action="append", help="LABEL=PATH (repeatable)")
     q = sub.add_parser("qc", help="post qc_bracket.py's verdicts for the project")
     q.add_argument("thread", type=int)

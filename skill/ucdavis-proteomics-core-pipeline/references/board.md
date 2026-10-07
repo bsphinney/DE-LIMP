@@ -108,9 +108,25 @@ folders, so nothing is lost if early posts were refused. The board allows one po
 | before `run_search.py` submits its chain | asking for cluster time, below |
 | the chain submitted | `job THREAD --slurm-id <first job id> --status submitted --step 1/5 --cpu-hours <the chain's estimate> --decision <id> --text "search chain, 5 steps"` (one record for the whole chain) |
 | the chain finished | `job THREAD --slurm-id <that id> --status done --step 5/5` (or `--status failed --text "<why, one line>"`) |
+| the FRAN hand-over (step 7c), once per search folder | `where THREAD --search-output <the search's out dir, its real path> --search-engine diann --fran-handover <status>` |
 | after QC (step 8e) | pull it first: `bash scripts/hive_exec.sh --get "$S/logs/qc_bracket.json" ~/core/PROT_0807/`, then `qc THREAD --from ~/core/PROT_0807/qc_bracket.json` |
 | results ready | `post THREAD --kind finding --text "<protein and DE counts, and anything odd>"` |
 | delivered (step 12b) | `where THREAD --raw-data <raw folder> --session-folder "$S" --report <report path> --bioshare-url <share URL>`, then `post THREAD --kind summary --text "<what was delivered, where, open questions>"` |
+
+**The FRAN hand-over row.** The skill hands each finished search to FRAN itself (step 7c); this
+tells the board, so the project's FRAN panel shows "Handed to FRAN" (or why it was kept out)
+instead of offering a person a Send button, and links to the search's FRAN page (FRAN knows a
+search by its real path: give the folder as `realpath` prints it on HIVE). `<status>` is
+what step 7c found, copied as it is: the `status` in `<out>/fran_deposit.json` (`staged`,
+`qc_run`, `opted_out`, ...), or, when the search was not staged, the `reason` that `stage` (or
+the job-end hook's `fran_deposit stage:` line) gave (`search_incomplete`, `needs_agent_check`,
+`left_to_agent`, `drop_dir_not_writable`, ...). Neither: leave `--fran-handover` out. When you
+stage a search later yourself (`left_to_agent`, a permission fix), record it again with the new
+status.
+`--search-engine` is the engine that ran it: `diann` for the skill's DIA-NN searches, else
+`fragpipe`, `radiant`, `spectronaut`, `sage` or `alphadia`. Record every search folder of the
+submission this way, a QC search (`search_NIST`) too: its receipt says `qc_run`. Exit 4 (one
+post a minute): wait `retry_after` once, then go on.
 
 **Asking for cluster time** (before `run_search.py` submits its chain). The thread has no
 CPU-hour budget, so every search is a person's decision on the board:
