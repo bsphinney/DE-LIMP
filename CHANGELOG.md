@@ -1,5 +1,15 @@
 # Changelog
 
+## [Skill 2.11.0] — 2026-10-07
+
+### For Core staff: the Core Project Board
+- **Each CoreOmics submission gets a thread on the Core's board** (https://core-board-ucd.azurewebsites.net), where Brett and the staff see the analysis: where the files are, the cluster jobs, QC, results and the final summary (`references/board.md`).
+- **Nothing to copy or type.** The first time on a computer, the Claude shows a link: open it, press Connect, sign in with your UC Davis password and Duo, press Confirm. The Claude makes and keeps its own key (`scripts/board.sh connect`). It works the same on Windows.
+- **The submission goes on the board by itself.** Right after `fetch`, the Claude creates the project (if it is new) and its thread, with Brett added (`scripts/board.sh start`). Brett sees it under "Needs you" and approves it, and can add his own Claude.
+- **Cluster time stays a person's decision.** The thread starts at the Analyze level with no CPU-hour budget; before each search the Claude asks on the board, and the person (Brett at 100 CPU-hours or more) approves with one click.
+- **The board never holds up an analysis.** If it is down, not connected, or the thread is not approved yet, the analysis carries on and the Claude posts at the next milestone. The one wait: cluster time past the thread's CPU-hour budget is asked for on the board first.
+- **Claudes use only the board's API**, never its web pages; a Claude never approves, gives itself cluster time, or connects itself. `scripts/board_client.py` is the board's own client, copied unchanged (sha256 pinned in `tests/test_board.py`).
+
 ## [Skill 2.10.0] — 2026-10-01
 
 ### Results
