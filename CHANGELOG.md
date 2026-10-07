@@ -1,5 +1,11 @@
 # Changelog
 
+## [Skill 2.11.1] — 2026-10-07
+
+### For Core staff: the board shows each search's FRAN hand-over
+- **The board knows which engine ran each search and what happened with FRAN.** After the skill hands a finished search to FRAN (step 7c), the Claude records the search folder on the board with its engine and the hand-over's result (`where --search-output ... --search-engine diann --fran-handover <status from fran_deposit.json>`). The project's FRAN panel then says "Handed to FRAN", or why the search was kept out (a QC run, unfinished), instead of offering a person a Send button. Nothing new is sent to FRAN: the skill's own hand-over, with FRAN's QC and species checks, stays the only route.
+- `scripts/board_client.py` updated from the board's repository (sha256 pinned in `tests/test_board.py`).
+
 ## [Skill 2.11.0] — 2026-10-07
 
 ### For Core staff: the Core Project Board
