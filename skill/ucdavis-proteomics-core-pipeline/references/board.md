@@ -110,7 +110,7 @@ folders, so nothing is lost if early posts were refused. The board allows one po
 | the chain finished | `job THREAD --slurm-id <that id> --status done --step 5/5` (or `--status failed --text "<why, one line>"`) |
 | the FRAN hand-over (step 7c), once per search folder | `where THREAD --search-output <the search's out dir, its real path> --search-engine diann --fran-handover <status>` |
 | after QC (step 8e) | pull it first: `bash scripts/hive_exec.sh --get "$S/logs/qc_bracket.json" ~/core/PROT_0807/`, then `qc THREAD --from ~/core/PROT_0807/qc_bracket.json` |
-| results ready | `post THREAD --kind finding --text "<protein and DE counts, and anything odd>"` |
+| results ready (and each time a result is redone) | `where THREAD --report <the analysis report's path in "$S"> --extra "DE tables=<its tables folder in "$S">"`, then `post THREAD --kind finding --text "<protein and DE counts, and anything odd>"` |
 | delivered (step 12b) | `where THREAD --raw-data <raw folder> --session-folder "$S" --report <report path> --bioshare-url <share URL>`, then `post THREAD --kind summary --text "<what was delivered, where, open questions>"` |
 
 **The FRAN hand-over row.** The skill hands each finished search to FRAN itself (step 7c); this
