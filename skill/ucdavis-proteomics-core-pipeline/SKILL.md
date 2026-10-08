@@ -144,7 +144,7 @@ because the environment does not carry over from one command to the next.
   script runs ON HIVE through `hive_exec.sh` — the laptop needs no Python, R or engines.**
   On Windows, Git Bash + the key is enough: `python3` there is often the Microsoft Store
   stub (`check_access.sh` → `local_python3.usable: false` → never run a skill script
-  locally), rsync is absent (`--put/--get` fall back to scp by themselves), and
+  locally; the CoreOmics steps then run on HIVE too, `coreomics_runs_on: hive`, step 1c.1), rsync is absent (`--put/--get` fall back to scp by themselves), and
   `HIVE_USER` is the plain UC Davis id, never the Windows `DOMAIN+user` login. If
   `hive_ssh` is `failed`, relay `hive_ssh_error.kind` (host_key / permission_denied /
   timeout) as `references/access.md` describes. The search runs as **SLURM jobs**, never
@@ -344,9 +344,16 @@ it (a `find` over the Flinders NFS mount does not finish). Exit 3 (the laptop's 
 
 **Core data? Name its CoreOmics submission now — never guess it.** Every report carries the
 submission (PI, organism, sample sheet, who prepared the samples), so find it before step 2.
-On the user's computer:
+**The CoreOmics steps (`check`, `identify`, `fetch`, `bioshare`, `email-draft`) run where the
+CoreOmics key is** — step 0a's `check_access.sh` says `coreomics_runs_on`. `this_computer`: on
+the user's computer, as below. **`hive`** (hive_remote with `local_python3.usable: false`, the
+Windows Store stub — or the key is on HIVE only): the same subcommand ON HIVE, through
+`hive_exec.sh`, with HIVE paths (`hive_path.sh`) and the key in `~/.coreomics_token` there
+(step 1c.1 puts it there once):
 ```
 python3 scripts/core_submission.py identify <raw files and/or their folder> --text "<the user's message>"
+# coreomics_runs_on: hive -- --text only the words naming a submission, with no ' in them
+bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/core_submission.py identify <HIVE paths> --text "submission 807"'
 ```
 It reads a `PROT_####` or 12-character CoreOmics id in the paths or the message (and, with a
 token, checks the named submission's sample IDs are in the file names), else matches the
@@ -360,14 +367,15 @@ submission. Never `attach --given` a number for someone outside the Core: the at
 is what makes a run the Core's (its Submission section, its feedback survey). Exit **0** →
 confirm its `ask` in one line. Exit **2** → relay its `ask`: with evidence it asks which
 submission; with none (`status` `none`) it asks whether the Core ran the samples and, only if
-so, for the number. Exit **3** (no token, or CoreOmics refused it) → relay its `ask` the same
-way and `token_help`; only for Core data without a token, also ask the key facts (PI,
+so, for the number. Exit **3** (no token, or CoreOmics refused it) → set the key up first (step
+1c.1: on HIVE the agent does it) and run identify again; if that cannot be done now, relay its
+`ask` the same way and `token_help`; only for Core data without a token, also ask the key facts (PI,
 organism, UniProt, proteins or peptides and who prepared them, buffer, beads, sample sheet)
 and record them with `submission_report.py attach --given` (step 3b) — labelled "given by the
 user", never as the CoreOmics record. **Never search
 `/quobyte/proteomics-grp/coreomics/.submissions_db`**: a stale snapshot, where a search for
 0756 matched an unrelated 2019 record. No submission (not Core data) → carry on without.
-With the number, fetch the record on this computer (`core_submission.py fetch <number> --out ~/core/PROT_####`, as in step 1c) and attach it once the session exists (step 3b).
+With the number, fetch the record where the key is (`core_submission.py fetch <number> --out ~/core/PROT_####`, as in step 1c) and attach it once the session exists (step 3b).
 
 ### 1a. Core HT submission? Ask STAN for the file list — never glob a plate
 If the user gives a **submission number** instead of a folder ("search 0793", "run the HT
@@ -448,32 +456,54 @@ lab's runs. `scripts/core_submission.py` does the bookkeeping and hands every ju
 back as an exit code. It never runs an engine. Keep one folder per submission, the same path
 locally and on HIVE (`~/core/PROT_0807`).
 
-1. **Fetch — on the staff member's computer** (HIVE has no CoreOmics key). First
-   `python3 scripts/core_submission.py check --json`; go on only at `ok`, else relay its `say`
-   and `fix` and check again once the user has acted. `no_key` / `key_empty` / `key_malformed`
-   / `key_rejected` → they make a key in CoreOmics (Profile → "API Key" → Create) and save it
-   **in their own Git Bash window**, never in this chat, with this ONE line (it then waits,
-   silent, for the paste; macOS/Linux: a terminal, `F="$HOME/.coreomics_token"`). The key never
-   shows on screen or lands in the history, and pasted as one line it can never run as a command:
-   ```
-   read -rs TOK && [ -n "$TOK" ] && F="$(cygpath "$USERPROFILE")/.coreomics_token" && (umask 077; printf '%s\n' "$TOK" > "$F") && chmod 600 "$F"; unset TOK
-   ```
+1. **Fetch — where the CoreOmics key is** (`coreomics_runs_on`, step 0a). **`hive`** (no
+   usable local Python — Windows' `python3` is usually the Store stub — or the key is on HIVE
+   only): every CoreOmics step runs ON HIVE, `bash scripts/hive_exec.sh 'python3
+   ~/proteomics-pipeline/scripts/core_submission.py <subcommand> …'`, reading
+   `~/.coreomics_token` there; never ask staff to install Python for it. **`this_computer`**:
+   `python3 scripts/core_submission.py …` here. First `check --json` (there); go on only at `ok`,
+   else relay its `say` and `fix` and check again once the user has acted. It reports the key's
+   place and mode (`runs_on`, `key_source`, `key_mode`).
+   - **The key on HIVE — set up once BY YOU, the agent; staff type nothing on HIVE.** Follow
+     `check_access.sh`'s `coreomics_key_advice`. `coreomics_key_on_hive: true` → nothing to do.
+     A key saved on this computer (`coreomics_key_on_this_computer: true`, e.g. by the line
+     below) → run `bash scripts/coreomics_key_to_hive.sh` yourself: it sends that file to HIVE
+     as ssh's standard input (never printed, never on a command line, never a temporary file
+     here) into a new mode-600 `~/.coreomics_token`, and keeps the laptop copy (Brett's call;
+     `--remove-local` deletes it). No key anywhere → the user makes one in CoreOmics (Profile →
+     "API Key" → Create) and runs, **in their own Git Bash window**, the `bash '…/coreomics_key_to_hive.sh'
+     --paste` line from `coreomics_key_advice` (its full path): it waits, silent, for the paste
+     and saves the key only on HIVE. Then `check` on HIVE again. `key_mode_wrong` (HIVE only: other
+     accounts can read the file — HIVE home folders are open to every account, so the mode is
+     the key's only protection) → `bash scripts/hive_exec.sh 'chmod 600 ~/.coreomics_token'` and
+     check again; if it was readable for long, the user Regenerates the key and it is put there
+     again. `bash scripts/coreomics_key_to_hive.sh --status` re-checks the key on HIVE alone.
+   - **The key on this computer** — `no_key` / `key_empty` / `key_malformed` / `key_rejected` →
+     they make a key in CoreOmics (Profile → "API Key" → Create) and save it **in their own Git
+     Bash window**, never in this chat, with this ONE line (it then waits, silent, for the paste;
+     macOS/Linux: a terminal, `F="$HOME/.coreomics_token"`). The key never shows on screen or
+     lands in the history, and pasted as one line it can never run as a command:
+     ```
+     read -rs TOK && [ -n "$TOK" ] && F="$(cygpath "$USERPROFILE")/.coreomics_token" && (umask 077; printf '%s\n' "$TOK" > "$F") && chmod 600 "$F"; unset TOK
+     ```
    **Never ask for the key in the chat, echo it, or print the file**; a key pasted here anyway
    must be Regenerated in CoreOmics. `key_in_wrong_place` → the `mv` in `fix`. `no_lab_access`
-   → ask Brett (brettsp) to add their CoreOmics account to the Proteomics lab. No usable local
-   Python (step 0a's `local_python3.usable: false`, the Windows Store stub) → neither runs here,
-   and the key never goes to HIVE: carry on as step 1 does without a token (the key facts →
-   `attach --given`); a python.org Python 3, run as `py -3` where `python3` is still the Store
-   alias, makes the lookups work. → `references/core-submissions.md` "What staff need first".
+   → ask Brett (brettsp) to add their CoreOmics account to the Proteomics lab.
+   → `references/core-submissions.md` "What staff need first".
    ```
+   # coreomics_runs_on: this_computer
    python3 scripts/core_submission.py fetch 807 --out ~/core/PROT_0807
    bash scripts/hive_exec.sh 'mkdir -p ~/core/PROT_0807'
    bash scripts/hive_exec.sh --put ~/core/PROT_0807/hive/submission_summary.json '~/core/PROT_0807/'
    bash scripts/hive_exec.sh --put ~/core/PROT_0807/hive/submission.json '~/core/PROT_0807/'
+   # coreomics_runs_on: hive -- nothing to --put
+   bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/core_submission.py fetch 807 --out ~/core/PROT_0807'
    ```
-   **Only `hive/` goes to HIVE**: a summary with no email or contact, and the allowlisted
-   record. The raw `submission.json` and the full summary (emails, PPMS/billing) stay on this
-   computer, where `bioshare` and `email-draft` read them.
+   **HIVE's steps read only the HIVE copies** at `~/core/PROT_0807/`: a summary with no email
+   or contact, and the allowlisted record. The raw `submission.json` and the
+   full summary (emails, PPMS/billing) stay on this computer — or, when `fetch` ran on HIVE, in
+   `~/core/PROT_0807/private/` (mode 700, files 600) — where `bioshare` and `email-draft` read
+   them (given the HIVE copy's path, they find `private/` themselves).
 
    **Then put it on the Core Project Board** (a minute, and never a reason to wait): `bash
    scripts/board.sh connect --owner <their UC Davis sign-in email>` (exit 9 the first time on
@@ -578,7 +608,7 @@ locally and on HIVE (`~/core/PROT_0807`).
 |---|---|---|
 | **0** | ok | continue |
 | **2** | a human decision / hard gate — proposal files are still written | show the failing gates. `locate`: `unmatched_samples` (→ `--allow-partial` only if staff confirm those were not run), `choose_run` (→ re-injections: ONE `--reinjections latest|all`; collisions: `--choose <key>=<file>` each), `ambiguous_label` (→ staff decide: `--choose`, `--accept-ambiguous` or `--files-from`), `weak_ids` (→ `--choose`, or `--files-from`), `duplicate_ids` (→ `--choose <key>=<file>`, keys `KG1#1`/`KG1#2` from the gate), `duplicate_assignment` (→ staff pick the files, `--files-from`), `no_files`. `stage`: several folders, or one naming a different person or institution (→ `--service-dir`); a folder owned by another submission; `--apply` on a hard-failed locate. `deliver`: **not verified — do not share** (see 12b); **held by `qc_gate`** (step 8e) → a staff member reads `logs/qc_bracket.md` and records `qc_bracket.py ack` (or re-runs 8e when it says so) |
-| **3** | CoreOmics or the filesystem unreachable, auth failed, or the scripts directory is incomplete | a key problem: `core_submission.py check` names it and the fix; run where the data is (`fetch`/`bioshare` local; `locate`/`stage`/`deliver` on HIVE); re-put the skill: `hive_exec.sh --put-skill` |
+| **3** | CoreOmics or the filesystem unreachable, auth failed, or the scripts directory is incomplete | a key problem: `core_submission.py check` names it and the fix; run where the data is (`fetch`/`bioshare` where the key is — `coreomics_runs_on`; `locate`/`stage`/`deliver` on HIVE); re-put the skill: `hive_exec.sh --put-skill` |
 | **4** | the files look like an **HT plate** | step 1a, `ht_manifest.py` |
 | **5** | delivery too big for the login node | `sbatch` the `deliver_job.sh` it wrote |
 
@@ -2703,7 +2733,11 @@ python3 ~/proteomics-pipeline/scripts/core_submission.py deliver \
 python3 ~/proteomics-pipeline/scripts/core_submission.py deliver \
     --summary ~/core/PROT_0807/submission_summary.json --mode raw-only         # then --apply
 ```
-**Then locally:**
+**Then where the CoreOmics key is** (`coreomics_runs_on`, step 1c.1). Shown for this computer;
+with `hive`, run the same `core_submission.py` lines on HIVE through `hive_exec.sh`
+(`python3 ~/proteomics-pipeline/scripts/core_submission.py …`), with `--delivery` pointing at
+the `delivery.json` deliver printed (no `--get`), and hand the staff member the draft's text from
+HIVE (`hive_exec.sh --get` it, or `cat` it there):
 ```
 bash scripts/hive_exec.sh --get '<delivery_json printed by deliver>' ~/core/PROT_0807/delivery.json
 python3 scripts/core_submission.py bioshare ensure --summary ~/core/PROT_0807/submission_summary.json   # dry run, then --apply

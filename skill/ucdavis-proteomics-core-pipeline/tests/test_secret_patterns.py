@@ -31,6 +31,7 @@ import notify_slack as ns  # noqa: E402
 import record_run as rr  # noqa: E402
 
 FAKE_T = "Fk7" + "Ab3dEf6hIj9kLm2nOp5q"          # a fake STAN share token
+FAKE_CO = "c0reFAKE" + "a1b2c3d4e5f60718293a4b5c6d7e"   # a fake CoreOmics API key
 FAKE_JWT = "eyJhbGciOiJIUzI1NiJ9" + "." + "eyJzdWIiOiJmYWtlIn0" + "." + "fakesignaturefake"
 EXAMPLES = {
     "private key": "-----BEGIN " + "OPENSSH PRIVATE KEY-----\nAAAAfake\n-----END OPENSSH PRIVATE KEY-----",
@@ -63,6 +64,12 @@ EXAMPLES = {
     "share token argv, two spaces": "--share-token  " + FAKE_T,
     "share token argv, tab": "--share-token\t" + FAKE_T,
     "cookie argv, tab": "--cookie\tAppServiceAuthSession=" + FAKE_T,
+    # the CoreOmics key, which 2026-10-08 also keeps on HIVE (core_submission.py)
+    "coreomics env": "COREOMICS_TOKEN=" + FAKE_CO + " python3 scripts/core_submission.py fetch 807",
+    "coreomics export, quoted": "export COREOMICS_TOKEN='" + FAKE_CO + "'",
+    "coreomics powershell": '$env:COREOMICS_TOKEN = "' + FAKE_CO + '"',
+    "coreomics header, dict": "{'Authorization': 'Token " + FAKE_CO + "', 'Accept': 'application/json'}",
+    "coreomics header, json": '{"Authorization": "Token ' + FAKE_CO + '"}',
 }
 # Look-alikes that must pass: file NAMES (the documented forms), placeholders, prose.
 BENIGN = [
@@ -87,6 +94,14 @@ BENIGN = [
     "Bearer tokens are sent in a header",
     'eyJ is base64 for {"',
     "--share-token\t<tok>",
+    # the CoreOmics key's file NAME, variable name and placeholders, and the code that sends it
+    "the key is saved in ~/.coreomics_token: readable only by you",
+    "COREOMICS_TOKEN=$HOME/.coreomics_token",
+    "COREOMICS_TOKEN=<key>",
+    "unset COREOMICS_TOKEN; the COREOMICS_TOKEN variable wins over the file",
+    'headers = {"Authorization": f"Token {key}", "Accept": "application/json"}',
+    '"Authorization": "Token <key>"',
+    "COREOMICS_KEY=mode:600 COREOMICS_KEY_STORE=ok",
 ]
 
 
@@ -108,6 +123,18 @@ class OneListTests(unittest.TestCase):
             with self.subTest(benign=text):
                 self.assertFalse(ns.contains_secret(text))
                 self.assertEqual(ns.redact(text), text)
+
+    def test_the_coreomics_key_itself_is_blanked_not_just_flagged(self):
+        """The key on HIVE (2026-10-08) must never reach logs, provenance, run records or Slack:
+        every form it is written in loses the key and keeps the variable or header name."""
+        names = [n for n in EXAMPLES if n.startswith("coreomics")]
+        self.assertGreaterEqual(len(names), 5)
+        for name in names:
+            with self.subTest(name=name):
+                out = ns.redact(EXAMPLES[name])
+                self.assertNotIn(FAKE_CO, out)
+                self.assertNotIn(FAKE_CO[:12], out)
+                self.assertTrue("COREOMICS_TOKEN" in out or "Authorization" in out, out)
 
     def test_record_run_uses_that_list_and_keeps_none_of_its_own(self):
         self.assertFalse(hasattr(rr, "SECRET_TEXT_RE"))

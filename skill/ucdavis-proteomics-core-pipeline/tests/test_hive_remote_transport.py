@@ -63,7 +63,8 @@ SHIMS = {
                 'echo "$SHAREROOT$p"\n'),
     "ssh": RECORD.format(name="ssh") + (
         'case "${FAKE_SSH:-ok}" in\n'
-        '  ok) echo HAS_SBATCH; echo HAS_GRP ;;\n'
+        # FAKE_CK: what check_access.sh's probe of ~/.coreomics_token answers on "HIVE"
+        '  ok) echo HAS_SBATCH; echo HAS_GRP; [ -z "${FAKE_CK:-}" ] || echo "COREOMICS_KEY=$FAKE_CK" ;;\n'
         '  old_ls_d) echo HAS_SBATCH; echo /quobyte/proteomics-grp ;;\n'
         '  hostkey) echo "Warning: Permanently added x" >&2; echo "Host key verification failed." >&2; exit 255 ;;\n'
         '  denied) echo "UC Davis HPC -- authorised use only" >&2\n'
@@ -577,6 +578,83 @@ class CheckAccessTests(Harness):
         j = self.check(FAKE_KNOWN_FP=PUBLISHED_ED25519)
         self.assertIsNone(j["local_python3"]["path"])
         self.assertIs(j["local_python3"]["usable"], False)
+
+
+class CheckAccessCoreOmicsKeyTests(Harness):
+    """check_access.sh reports the CoreOmics key on HIVE -- asked in the SAME ssh call (HIVE
+    throttles new connections) -- and where the CoreOmics steps run (Michelle, 2026-10-08: a
+    Windows laptop whose python3 is the Store stub, the key on the laptop, none on HIVE)."""
+
+    FAKE_KEY = "c0reFAKE" + "00112233445566778899aabbccdd"
+
+    def check(self, store_stub=True, laptop_key=False, **env):
+        path = self.bin
+        if store_stub:                           # Windows: python3 is the Microsoft Store alias
+            apps = self._mk("WindowsApps")
+            _write_exe(os.path.join(apps, "python3"), "exit 9\n")
+            path = f"{apps}:{self.bin}"
+        if laptop_key:
+            with open(os.path.join(self.home, ".coreomics_token"), "w") as fh:
+                fh.write(self.FAKE_KEY + "\n")
+        r = self.run_script(CHECK_ACCESS, "tester", self.key,
+                            **{"PATH": path, "FAKE_KNOWN_FP": PUBLISHED_ED25519, **env})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn(self.FAKE_KEY, r.stdout + r.stderr)
+        return json.loads(r.stdout)
+
+    def test_the_key_is_asked_about_in_the_same_call_and_never_read(self):
+        j = self.check(FAKE_CK="mode:600")
+        (argv,) = self.calls("ssh")
+        probe = argv[-1]
+        self.assertIn('f="$HOME/.coreomics_token"', probe)
+        self.assertIn("COREOMICS_KEY=", probe)
+        for reader in ("cat ", "head ", "<\"$f\"", "< \"$f\""):
+            self.assertNotIn(reader, probe)
+        self.assertIs(j["coreomics_key_on_hive"], True)
+        self.assertIn("mode 600", j["coreomics_key_on_hive_detail"])
+        self.assertEqual(j["recommended_mode"], "hive_remote")
+
+    def test_michelle_before_setup_runs_on_hive_and_is_told_to_move_the_key(self):
+        j = self.check(laptop_key=True, FAKE_CK="absent")
+        self.assertIs(j["local_python3"]["usable"], False)
+        self.assertIs(j["coreomics_key_on_hive"], False)
+        self.assertIs(j["coreomics_key_on_this_computer"], True)
+        self.assertEqual(j["coreomics_runs_on"], "hive")
+        self.assertIn("bash scripts/coreomics_key_to_hive.sh", j["coreomics_key_advice"])
+        self.assertIn("standard input", j["coreomics_key_advice"])
+        self.assertNotIn("--paste", j["coreomics_key_advice"])
+
+    def test_after_setup_the_steps_run_on_hive(self):
+        j = self.check(laptop_key=True, FAKE_CK="mode:600")
+        self.assertEqual(j["coreomics_runs_on"], "hive")
+        self.assertIn("ON HIVE through hive_exec.sh", j["coreomics_key_advice"])
+        self.assertIn("core_submission.py check --json", j["coreomics_key_advice"])
+
+    def test_no_key_anywhere_is_the_users_paste(self):
+        j = self.check(FAKE_CK="absent")
+        self.assertIs(j["coreomics_key_on_this_computer"], False)
+        self.assertIn("coreomics_key_to_hive.sh' --paste", j["coreomics_key_advice"])
+        self.assertIn("own Git Bash window", j["coreomics_key_advice"])
+
+    def test_a_key_others_can_read_is_mode_wrong_with_the_fix(self):
+        for answer in ("mode:644", "mode:640", "notmine"):
+            with self.subTest(answer=answer):
+                j = self.check(laptop_key=True, FAKE_CK=answer)
+                self.assertEqual(j["coreomics_key_on_hive"], "mode-wrong")
+                self.assertIn("hive_exec.sh 'chmod 600 ~/.coreomics_token'", j["coreomics_key_advice"])
+                self.assertEqual(j["coreomics_runs_on"], "hive")
+
+    def test_a_working_local_python_keeps_the_laptop_route(self):
+        os.symlink(sys.executable, os.path.join(self.bin, "python3"))
+        j = self.check(store_stub=False, laptop_key=True, FAKE_CK="absent")
+        self.assertIs(j["local_python3"]["usable"], True)
+        self.assertEqual(j["coreomics_runs_on"], "this_computer")
+        self.assertIn("python3 scripts/core_submission.py check --json", j["coreomics_key_advice"])
+
+    def test_without_ssh_nothing_is_claimed_about_hive(self):
+        j = self.check(laptop_key=True, FAKE_SSH="denied")
+        self.assertIsNone(j["coreomics_key_on_hive"])
+        self.assertEqual((j["recommended_mode"], j["coreomics_runs_on"]), ("local", "this_computer"))
 
 
 class HiveLoginSavedTests(Harness):
