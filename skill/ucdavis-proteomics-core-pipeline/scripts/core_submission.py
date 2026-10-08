@@ -23,24 +23,32 @@ a human as an exit code plus the exact question. The search and DE in between ar
 ordinary skill flow -- nothing here runs an engine.
 
 WHERE EACH SUBCOMMAND RUNS
-    check        LOCAL    is there a CoreOmics API key here, and does CoreOmics accept it for
+    The five CoreOmics steps (KEY) run where the staff member's CoreOmics key is: on their
+    computer, or ON HIVE (~/.coreomics_token there, mode 600) in hive_remote when the computer has
+    no usable Python -- Windows' python3 is usually the Microsoft Store stub. check_access.sh says
+    which (coreomics_runs_on); coreomics_key_to_hive.sh puts the key on HIVE once, over ssh stdin.
+    check        KEY      is there a CoreOmics API key here, and does CoreOmics accept it for
                           the Proteomics lab? One diagnosis, in plain words, with the fix
-    identify     LOCAL    which submission is this data? PROT/hex ids in the names or the
+    identify     KEY      which submission is this data? PROT/hex ids in the names or the
                           user's message, else the sample ids in the file names (token)
-    fetch        LOCAL    the CoreOmics token lives on the staff member's computer
-                          (~/.coreomics_token); HIVE has none
+    fetch        KEY      the submission, its neighbours, its shares. On HIVE the full record
+                          (emails, billing) goes into <out>/private/ (mode 700), and <out>/ gets
+                          the HIVE copies the laptop route --puts there
     locate       ON HIVE  reads the Flinders raw_data tree
     stage        ON HIVE  symlinks the raw files into the Core service directory
     conditions   either   wraps collect_conditions.py
     deliver      ON HIVE  copies the deliverables into the submission's Bioshare folder
                           (--mode raw-only for "I only require raw data" submissions)
-    bioshare     LOCAL    status | ensure | send, through the CoreOmics Bioshare plugin
-    email-draft  LOCAL    writes a draft to the submitter; never sends
+    bioshare     KEY      status | ensure | send, through the CoreOmics Bioshare plugin
+    email-draft  KEY      writes a draft to the submitter; never sends
 
     python3 core_submission.py fetch 807 --out ~/core/PROT_0807
-    bash hive_exec.sh --put ~/core/PROT_0807/submission_summary.json '~/core/PROT_0807/'
+    bash hive_exec.sh --put ~/core/PROT_0807/hive/submission_summary.json '~/core/PROT_0807/'
     bash hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/core_submission.py locate \\
         --summary ~/core/PROT_0807/submission_summary.json --out ~/core/PROT_0807'
+    # no usable Python on the computer: fetch on HIVE instead (no --put)
+    bash hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/core_submission.py fetch 807 \\
+        --out ~/core/PROT_0807'
 
 Every subcommand prints ONE JSON object to stdout (`check` only with --json; without it, a
 few lines for a person); human notes go to stderr. `stage`, `deliver` and
@@ -55,7 +63,9 @@ CONFIGURATION (environment -- which is also how the tests point it at temp dirs)
     COREOMICS_BASE_URL   default https://ucdavis.coreomics.com/server/api
     COREOMICS_TOKEN      else the contents of ~/.coreomics_token -- Python's ~, which on
                          Windows is the profile folder (USERPROFILE), then Git Bash's $HOME
-                         when that is somewhere else (key_files)
+                         when that is somewhere else (key_files). On HIVE the file must be
+                         readable by its owner alone (key_mode_problem)
+    CORE_ON_HIVE         tests only: 1 treats this machine as HIVE, 0 as not (default: /quobyte)
     CORE_FLINDERS_ROOT   default: the Flinders share's HIVE path in hive_shares.tsv
                          (/nfs/lssc0/flinders/proteomics)  (local file work only)
     CORE_WORK_ROOT       default: the proteomics-grp share's SERVICE tree (hive_shares.tsv)
@@ -583,8 +593,13 @@ def local_share_dir(summary: dict, warnings: list) -> str:
 # Each staff member makes their own key in CoreOmics: Profile -> "API Key" -> show it -> Create
 # (or Regenerate). That is CoreOmics' own profile page (its web app, read 2026-09-30: the
 # users/get_token/ and users/create_token/ calls), and the API takes the key as
-# `Authorization: Token <key>`. The key lives on the staff member's computer; HIVE has none.
+# `Authorization: Token <key>`. The key lives where the CoreOmics steps run: on the staff
+# member's computer, or -- in hive_remote from a computer with no usable Python (the Windows
+# Store stub: Michelle, 2026-10-08) -- on HIVE, as ~/.coreomics_token with mode 600, put there
+# once by scripts/coreomics_key_to_hive.sh over ssh stdin.
 KEY_NAME = ".coreomics_token"
+KEY_TO_HIVE = "bash scripts/coreomics_key_to_hive.sh"
+ON_HIVE_ENV = "CORE_ON_HIVE"        # tests only: "1" is HIVE, "0" is not; unset = look for /quobyte
 # Typed into `read -s`, the key never reaches the screen, a command line (so neither the shell
 # history nor the process list: printf is a builtin) or the conversation. ONE line: pasted as two
 # into a terminal without bracketed paste (macOS bash 3.2, the old Windows console), `read` took
@@ -602,11 +617,36 @@ SAVE_KEY_LINE = {
                 "&& (umask 077; printf '%s\\n' \"$TOK\" > \"$F\") && chmod 600 \"$F\"; unset TOK"),
 }
 LAB_ADMIN = "a Core admin (Brett Phinney, brettsp)"
-CHECK_HINT = "run `python3 scripts/core_submission.py check` on this computer: it says what is wrong and how to fix it"
+CHECK_ON_HIVE = "bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/core_submission.py check'"
 
 
 def _windows() -> bool:
     return os.name == "nt"
+
+
+def on_hive() -> bool:
+    """Is this machine HIVE? There every home folder is drwxrwsr-x -- open to every account -- so a
+    key file's own mode is its only protection (key_mode_problem) and fetch keeps the full record
+    in a private folder. share_map.on_hive() is the skill's test (/quobyte)."""
+    forced = os.environ.get(ON_HIVE_ENV)
+    if forced in ("0", "1"):
+        return forced == "1"
+    if _windows():
+        return False
+    return share_map.on_hive() if share_map is not None else os.path.isdir("/quobyte")
+
+
+def here() -> str:
+    """Where this run is, in the words a person reads: "on HIVE" or "on this computer"."""
+    return "on HIVE" if on_hive() else "on this computer"
+
+
+def check_hint() -> str:
+    """What to run when CoreOmics refuses the key, where this run is."""
+    if on_hive():
+        return (f"run `python3 scripts/core_submission.py check` on HIVE (from the computer: "
+                f"{CHECK_ON_HIVE}): it says what is wrong and how to fix it")
+    return "run `python3 scripts/core_submission.py check` on this computer: it says what is wrong and how to fix it"
 
 
 def _drive_path(p: str) -> str:
@@ -699,21 +739,73 @@ def site_url() -> str:
 
 
 def save_key_steps() -> str:
-    """How to make a key and save it on this computer, for a person to follow."""
+    """How to make a key and save it where this run reads it, for a person to follow. On HIVE
+    nobody types anything on HIVE: the agent sends a key saved on the computer, or the person
+    pastes it at coreomics_key_to_hive.sh's hidden prompt in their own Git Bash."""
+    make = (f"1. In a web browser, sign in to CoreOmics ({site_url()}), open your Profile and find "
+            "\"API Key\". Click to show it; if there is none yet, click Create. Copy it.")
+    never = ("3. Never paste the key into the chat. If it was pasted there, Regenerate it in CoreOmics "
+             "and save the new one the same way.")
+    if on_hive():
+        return "\n".join([
+            make,
+            "2. Your Claude puts it on HIVE for you, from your computer. A key already saved on your "
+            f"computer (~/.coreomics_token, the skill's one-line save): Claude runs `{KEY_TO_HIVE}`, "
+            "which sends that file to HIVE over ssh -- never shown, never on a command line. None: "
+            "open Git Bash (Windows) or a terminal yourself, not this chat, run the "
+            f"`{KEY_TO_HIVE} --paste` line Claude gives you, paste the key at its prompt (nothing "
+            "shows) and press Enter.",
+            f"   It is saved on HIVE as {key_target()}, readable only by you (mode 600): HIVE home "
+            "folders are open to every account, so the scripts refuse a key file anyone else can read.",
+            never,
+        ])
     win = _windows()
     return "\n".join([
-        f"1. In a web browser, sign in to CoreOmics ({site_url()}), open your Profile and find "
-        "\"API Key\". Click to show it; if there is none yet, click Create. Copy it.",
+        make,
         f"2. Open {'Git Bash' if win else 'a terminal'} yourself (not this chat) and run this one "
         "line. It then waits, showing nothing, while you paste the key"
         f"{' (Shift+Insert, or right-click > Paste)' if win else ''}; then press Enter.",
         "       " + SAVE_KEY_LINE["windows" if win else "posix"],
         f"   That saves it as {key_target()}"
         f"{', in your own profile folder' if win else ', readable only by you (chmod 600)'}.",
-        "3. Never paste the key into the chat. If it was pasted there, Regenerate it in CoreOmics "
-        "and save the new one the same way.",
-        "HIVE has no CoreOmics key: CoreOmics lookups run on this computer.",
+        never,
+        # hive_remote without a usable Python here (on Windows usually the Microsoft Store stub):
+        # the CoreOmics steps run on HIVE instead, and the agent moves this saved key there.
+        ("Working through HIVE with no usable Python on this computer (the Microsoft Store stub)? "
+         if win else "Working through HIVE with no usable Python on this computer? ")
+        + f"Save it as above anyway: your Claude then moves it to HIVE for you (`{KEY_TO_HIVE}`, over "
+          "ssh, never shown) as ~/.coreomics_token, readable only by you (mode 600), and runs the "
+          "CoreOmics lookups there.",
     ])
+
+
+def key_mode_problem(path: str):
+    """On HIVE: why the key file at `path` is not private, or None. Every home folder there is
+    drwxrwsr-x, so any account can open a file in it that group or others may read: the file's
+    own mode is the key's only protection. Owner-only (600, 400) passes. Elsewhere None: a
+    laptop's home is its user's, and on Windows chmod does not reach NTFS permissions."""
+    if not on_hive():
+        return None
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None                     # it was just read; the read decides
+    if hasattr(os, "getuid") and st.st_uid != os.getuid():
+        return f"{path} belongs to another account"
+    mode = stat.S_IMODE(st.st_mode)
+    if mode & 0o077:
+        return f"{path} has mode {mode:03o}, so other HIVE accounts can read it"
+    return None
+
+
+def key_mode_fix(path: str) -> str:
+    q = shlex.quote(path)
+    return ("Make it readable by you alone, on HIVE:\n"
+            f"       chmod 600 {q}\n"
+            "   (from your computer: bash scripts/hive_exec.sh 'chmod 600 ~/.coreomics_token'), then "
+            "run check again. A file that is not yours: delete it (rm " + q + ") and put your own key "
+            f"there ({KEY_TO_HIVE}). If others could read it for a while, Regenerate the key in "
+            f"CoreOmics and put the new one on HIVE the same way.")
 
 
 def move_key_steps(src: str) -> str:
@@ -755,6 +847,12 @@ def find_key() -> tuple:
         elif why:
             malformed.append(f"{path} does not hold a usable key: {why}")
         else:
+            bad = key_mode_problem(path)
+            if bad:
+                raise KeyProblem("key_mode_wrong",
+                                 f"{bad}. HIVE home folders are open to every account, so the file's "
+                                 f"own mode is the key's only protection; the key was not used.",
+                                 key_mode_fix(path))
             return tok, path
     if malformed:
         raise KeyProblem("key_malformed", "; ".join(malformed) + ".",
@@ -772,7 +870,7 @@ def find_key() -> tuple:
                                       f"empty: the key was not saved into it.",
                          "Save the key again:\n" + save_key_steps())
     places = files + ["the COREOMICS_TOKEN variable"]
-    raise KeyProblem("no_key", f"There is no CoreOmics API key on this computer (looked in "
+    raise KeyProblem("no_key", f"There is no CoreOmics API key {here()} (looked in "
                                f"{', '.join(places[:-1]) + ' and ' if files else ''}{places[-1]}).",
                      save_key_steps())
 
@@ -782,10 +880,12 @@ def api_token() -> str:
 
 
 def token_help() -> str:
-    return (f"Looking a submission up needs YOUR CoreOmics API key, saved on THIS computer as "
-            f"~/.coreomics_token (here: {key_target()}; chmod 600) or exported as COREOMICS_TOKEN; "
-            f"HIVE has none. `python3 scripts/core_submission.py check` says what is wrong. To make "
-            f"and save a key:\n" + save_key_steps())
+    where = ("on HIVE, where this ran (the CoreOmics steps run on HIVE when your computer has no "
+             "usable Python)," if on_hive() else "on THIS computer, where this ran,")
+    return (f"Looking a submission up needs YOUR CoreOmics API key, saved {where} as "
+            f"~/.coreomics_token (here: {key_target()}; mode 600) or exported as COREOMICS_TOKEN. "
+            f"`python3 scripts/core_submission.py check` says what is wrong. To make and save a "
+            f"key:\n" + save_key_steps())
 
 
 # ------------------------------------------------------------------- CoreOmics API --
@@ -1120,10 +1220,11 @@ def load_json_file(path: str, what: str) -> dict:
 
 
 def hive_summary(summary: dict) -> dict:
-    """The summary as it may leave the staff member's computer: no email address, no contacts,
-    and free text scrubbed of anything shaped like an email or phone number. locate, stage and
-    deliver need none of those; `bioshare` and `email-draft` do, and they run locally on the
-    full summary. (The record's allowlist is submission_report.py's; this is the summary's.)"""
+    """The summary as locate, stage and deliver read it on HIVE: no email address, no contacts,
+    and free text scrubbed of anything shaped like an email or phone number. They need none of
+    those; `bioshare` and `email-draft` do, and read the full summary -- on the computer, or in
+    private/ when fetch ran on HIVE (full_summary). (The record's allowlist is
+    submission_report.py's; this is the summary's.)"""
     scrub = sibling("submission_report").scrub
 
     def walk(v):
@@ -1137,17 +1238,63 @@ def hive_summary(summary: dict) -> dict:
     return out
 
 
+PRIVATE_DIR = "private"     # fetch on HIVE: the full record, beside the HIVE copies
+
+
+def private_dir(out: str) -> str:
+    """<out>/private/, made (or made again) mode 700 and refused unless it is a real folder of
+    this account's: a group member can add entries to a HIVE home folder, and a folder of theirs
+    -- or a link to one -- here would hand them the submitter's emails and billing fields."""
+    d = os.path.join(out, PRIVATE_DIR)
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    st = os.lstat(d)
+    if (stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode)
+            or (hasattr(os, "getuid") and st.st_uid != os.getuid())):
+        raise Stop(EXIT_DECIDE, {"error": f"{d} is not a folder of this account's; the full CoreOmics "
+                                          f"record (emails, billing) is written only into one",
+                                 "hint": f"remove {d} and fetch again"})
+    os.chmod(d, 0o700)
+    return d
+
+
+def write_text(path: str, text: str, private: bool = False) -> None:
+    """`text` into `path`; with `private`, readable by this account alone from its first byte
+    (an existing file is made 600 too: O_CREAT keeps an old file's mode)."""
+    if not private:
+        with open(path, "w") as fh:
+            fh.write(text)
+        return
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        os.fchmod(fh.fileno(), 0o600)
+        fh.write(text)
+
+
 def load_summary(path: str) -> dict:
     try:
         with open(path) as fh:
             s = json.load(fh)
     except (OSError, ValueError) as e:
         raise Stop(EXIT_DECIDE, {"error": f"cannot read summary {path}: {e}",
-                                 "hint": "run `core_submission.py fetch` first (locally), then "
-                                         "--put the summary to HIVE"})
+                                 "hint": "run `core_submission.py fetch` first (where the CoreOmics "
+                                         "key is), then --put the HIVE copy to HIVE if it ran on "
+                                         "the computer"})
     if not isinstance(s, dict) or not s.get("id"):
         raise Stop(EXIT_DECIDE, {"error": f"{path} is not a submission_summary.json"})
     return s
+
+
+def full_summary(path: str) -> tuple:
+    """(summary, its path) for bioshare and email-draft, which need the emails and contacts: the
+    summary at `path`, or -- when that is the HIVE copy (redacted_for_hive) of a fetch that ran on
+    HIVE -- the full one fetch kept in private/ beside it. So the same --summary works on both."""
+    s = load_summary(path)
+    if s.get("redacted_for_hive"):
+        alt = os.path.join(os.path.dirname(os.path.abspath(path)), PRIVATE_DIR, "submission_summary.json")
+        if os.path.isfile(alt):
+            note(f"using the full summary {alt}: {path} is the HIVE copy, without emails or contacts")
+            return load_summary(alt), alt
+    return s, path
 
 
 def cmd_fetch(a) -> int:
@@ -1176,17 +1323,20 @@ def cmd_fetch(a) -> int:
     summary = build_summary(rec, neighbors, shares, shares_error, a.neighbor_days,
                             truncated, warnings)
     os.makedirs(a.out, exist_ok=True)
-    paths = {"submission_json": os.path.join(a.out, "submission.json"),
+    # The raw record and the full summary hold emails and billing (PPMS) fields. On a computer
+    # they sit in <out>/ and only hive/ goes to HIVE. ON HIVE -- every home folder open to every
+    # account -- they go into <out>/private/ (mode 700, files 600), where bioshare and email-draft
+    # find them, and <out>/ itself gets exactly what the computer route --puts there: the HIVE
+    # copies, the only files locate, stage and submission_report.py attach read.
+    private = on_hive()
+    full_dir = private_dir(a.out) if private else a.out
+    hive = a.out if private else os.path.join(a.out, "hive")
+    paths = {"submission_json": os.path.join(full_dir, "submission.json"),
              "samples_tsv": os.path.join(a.out, "samples.tsv"),
-             "summary": os.path.join(a.out, "submission_summary.json")}
-    with open(paths["submission_json"], "w") as fh:
-        json.dump(rec, fh, indent=2)
+             "summary": os.path.join(full_dir, "submission_summary.json")}
+    write_text(paths["submission_json"], json.dumps(rec, indent=2), private)
     write_tsv(paths["samples_tsv"], ["unique_id", "sample_name", "condition_name"], summary["samples"])
-    with open(paths["summary"], "w") as fh:
-        json.dump(summary, fh, indent=2)
-    # What goes to HIVE: only these two. The raw record and the full summary hold emails and
-    # billing (PPMS) fields and stay on this computer.
-    hive = os.path.join(a.out, "hive")
+    write_text(paths["summary"], json.dumps(summary, indent=2), private)
     os.makedirs(hive, exist_ok=True)
     paths["hive_summary"] = os.path.join(hive, "submission_summary.json")
     paths["hive_record"] = os.path.join(hive, "submission.json")
@@ -1197,6 +1347,7 @@ def cmd_fetch(a) -> int:
     for w in warnings:
         note(f"WARN {w}")
     emit({"internal_id": summary["internal_id"], "id": summary["id"],
+          "ran": "on HIVE" if private else "on this computer",
           "submitted_date": summary["submitted_date"], "campus": summary["campus"],
           "pi": summary["pi"]["name"], "institution": summary["pi"]["institution"],
           "n_samples": summary["n_samples"], "conditions": summary["conditions"],
@@ -1228,6 +1379,17 @@ def _page_summary(text: str) -> str:
     return html.unescape(words)[:160]
 
 
+def _file_mode(path):
+    """A key file's permission bits as octal text ("600"), for `check` to report; None for the
+    COREOMICS_TOKEN variable, a missing file, and on Windows (NTFS permissions are not modes)."""
+    if _windows() or not path or not os.path.isfile(path):
+        return None
+    try:
+        return f"{stat.S_IMODE(os.stat(path).st_mode):03o}"
+    except OSError:
+        return None
+
+
 def diagnose() -> dict:
     """check's one diagnosis: status, say (plain words), fix (steps; "" when nothing to do).
     The key is looked for as api_token() looks, then tried on a lab-scoped list query: a key
@@ -1235,12 +1397,16 @@ def diagnose() -> dict:
     401/403 is read only from CoreOmics' own JSON `detail`: an Apache or proxy page saying
     "permission" or "Access Denied" says nothing about the key or the lab."""
     out = {"server": base_url(), "platform": "windows" if _windows() else "posix",
-           "looked_in": key_files(), "key_source": None, "http_status": None, "detail": None}
+           "runs_on": "hive" if on_hive() else "this_computer",
+           "looked_in": key_files(), "key_source": None, "key_mode": None,
+           "http_status": None, "detail": None}
     try:
         key, where = find_key()
     except KeyProblem as e:
-        return dict(out, status=e.diagnosis, say=e.detail, fix=e.fix)
-    out["key_source"] = where
+        held = [p for p in out["looked_in"] if os.path.isfile(p)]
+        return dict(out, key_mode=_file_mode(held[0]) if held else None,
+                    status=e.diagnosis, say=e.detail, fix=e.fix)
+    out["key_source"], out["key_mode"] = where, _file_mode(where)
 
     def said(status, say, fix=""):
         return _redact(dict(out, status=status, say=say, fix=fix), key)
@@ -1335,7 +1501,8 @@ def diagnose() -> dict:
                     "submissions: it is not a member of the Proteomics lab.",
                     f"Ask {LAB_ADMIN} to add your CoreOmics account to the Proteomics lab. Nothing "
                     f"on this computer needs to change. {again}")
-    res = said("ok", f"CoreOmics accepts your key (from {where}) and your account can read the "
+    shown = where + (f" {here()}" if out["key_mode"] is None else f" {here()}, mode {out['key_mode']}")
+    res = said("ok", f"CoreOmics accepts your key (from {shown}) and your account can read the "
                      f"Proteomics lab's submissions.")
     res["submissions_visible"] = count
     first = key_target()
@@ -4194,7 +4361,7 @@ def delivery_gate(summary: dict, delivery_path, share: str) -> dict:
 
 
 def cmd_bioshare(a) -> int:
-    s = load_summary(a.summary)
+    s, summary_path = full_summary(a.summary)
     sid = _s(s.get("id"))
     share = server_share_dir(s)                         # never re-derived from a local root
     shares = list_shares(sid)
@@ -4231,7 +4398,7 @@ def cmd_bioshare(a) -> int:
         raise Stop(EXIT_DECIDE, {"error": f"no Bioshare share is linked to {share}",
                                  "hint": "run `bioshare ensure --apply` first"})
     pi, sub = s.get("pi") or {}, s.get("submitter") or {}
-    contacts, contacts_source = submission_contacts(s, a.summary)
+    contacts, contacts_source = submission_contacts(s, summary_path)
     recipients = {"submitter": {"name": sub.get("name"), "email": sub.get("email")},
                   "pi": {"name": pi.get("name"), "email": pi.get("email")},
                   "contacts": contacts, "contacts_source": contacts_source}
@@ -4264,7 +4431,7 @@ def cmd_bioshare(a) -> int:
 
 # -------------------------------------------------------------------- email-draft --
 def cmd_email_draft(a) -> int:
-    s = load_summary(a.summary)
+    s, _ = full_summary(a.summary)
     delivery = load_json_file(a.delivery, "delivery.json") if a.delivery else {}
     url = _s(a.share_url)
     if not url:
@@ -4329,8 +4496,7 @@ def cmd_email_draft(a) -> int:
         L += ["", feedback_line("email", core["prot"], bool(delivery.get("podcast")), fmt="text")]
     L += ["", "Best regards,", "UC Davis Proteomics Core", ""]
     os.makedirs(os.path.dirname(os.path.abspath(a.out)) or ".", exist_ok=True)
-    with open(a.out, "w") as fh:
-        fh.write("\n".join(L))
+    write_text(a.out, "\n".join(L), private=on_hive())     # names and emails: on HIVE, 600
     emit({"wrote": os.path.abspath(a.out), "to": to or None, "cc": cc or None, "share_url": url or None,
           "placeholders": placeholders, "sent": False})
     return EXIT_DECIDE if placeholders else EXIT_OK
@@ -4341,20 +4507,22 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    ck = sub.add_parser("check", help="LOCAL: is the CoreOmics API key here, and does CoreOmics "
-                                      "accept it for the Proteomics lab? (never prints the key)")
+    ck = sub.add_parser("check", help="WHERE THE KEY IS (this computer, or HIVE): is the CoreOmics "
+                                      "API key here, and does CoreOmics accept it for the "
+                                      "Proteomics lab? (never prints the key)")
     ck.add_argument("--json", action="store_true", help="one JSON object: status, say, fix, ...")
     ck.set_defaults(func=cmd_check)
 
-    f = sub.add_parser("fetch", help="LOCAL: fetch a submission + neighbours + Bioshare shares")
+    f = sub.add_parser("fetch", help="WHERE THE KEY IS: fetch a submission + neighbours + Bioshare "
+                                      "shares (on HIVE: the full record into <out>/private/)")
     f.add_argument("submission", help="807, 0807, PROT_0807, prot-807, #807, or the 12-hex CoreOmics id")
     f.add_argument("--out", required=True, help="directory for submission.json, samples.tsv, submission_summary.json")
     f.add_argument("--neighbor-days", type=int, default=NEIGHBOR_WINDOW_DAYS,
                    help=f"record submissions within +/- this many days (default {NEIGHBOR_WINDOW_DAYS})")
     f.set_defaults(func=cmd_fetch)
 
-    idn = sub.add_parser("identify", help="LOCAL: which submission is this data? (names first, "
-                                          "then sample ids; never guesses)")
+    idn = sub.add_parser("identify", help="WHERE THE KEY IS: which submission is this data? "
+                                          "(names first, then sample ids; never guesses)")
     idn.add_argument("paths", nargs="*", help="raw files and/or their folder, as the user gave them")
     idn.add_argument("--files-from", default=None, help="a file listing raw paths, one per line")
     idn.add_argument("--text", default="", help="the user's message, for 'PROT_0756' / 'submission 756'")
@@ -4430,7 +4598,7 @@ def main(argv=None) -> int:
     de.add_argument("--no-size-guard", action="store_true", help="used by deliver_job.sh itself")
     de.set_defaults(func=cmd_deliver)
 
-    bs = sub.add_parser("bioshare", help="LOCAL: status | ensure | send (ensure/send are dry runs)")
+    bs = sub.add_parser("bioshare", help="WHERE THE KEY IS: status | ensure | send (ensure/send are dry runs)")
     bs.add_argument("action", choices=["status", "ensure", "send"])
     bs.add_argument("--summary", required=True)
     bs.add_argument("--delivery", default=None,
@@ -4442,7 +4610,7 @@ def main(argv=None) -> int:
     g.add_argument("--no-email", dest="email", action="store_false", help="send: grant access silently (default)")
     bs.set_defaults(func=cmd_bioshare, email=False)
 
-    em = sub.add_parser("email-draft", help="LOCAL: draft the results email (never sends)")
+    em = sub.add_parser("email-draft", help="WHERE THE KEY IS: draft the results email (never sends)")
     em.add_argument("--summary", required=True)
     em.add_argument("--delivery", default=None, help="delivery.json from deliver")
     em.add_argument("--share-url", default=None)
@@ -4457,14 +4625,14 @@ def main(argv=None) -> int:
         note(e.payload.get("error", "stopped"))
         return e.code
     except KeyProblem as e:
-        emit({"error": "no usable CoreOmics API key on this computer", "diagnosis": e.diagnosis,
+        emit({"error": f"no usable CoreOmics API key {here()}", "diagnosis": e.diagnosis,
               "detail": e.detail, "fix": e.fix})
         note(f"CoreOmics: {e.detail}")
         return EXIT_UNREACHABLE
     except ApiError as e:
         out = {"error": "CoreOmics request failed", "status": e.status, "detail": e.detail, "url": e.url}
         if e.status in (401, 403):
-            out["hint"] = CHECK_HINT
+            out["hint"] = check_hint()
         emit(out)
         note(f"CoreOmics: {e}")
         return EXIT_UNREACHABLE

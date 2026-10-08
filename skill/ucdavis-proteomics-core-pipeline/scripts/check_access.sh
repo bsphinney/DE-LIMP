@@ -21,6 +21,12 @@
 #   hive_login_saved            once the SSH login works, it is saved (user + key PATH, mode
 #                               600) to $HIVE_ENV_FILE, default ~/.config/ucdavis-proteomics/
 #                               hive.env, for every later call
+#   coreomics_key_on_hive       ~/.coreomics_token on HIVE: true (there, mode 600) | false (none)
+#                               | "mode-wrong" (other accounts can read it) | null (not asked).
+#                               Asked in the same SSH call; the key itself is never read
+#   coreomics_runs_on           where core_submission.py check / identify / fetch / bioshare /
+#                               email-draft run: "hive" (hive_exec.sh) | "this_computer";
+#                               coreomics_key_advice says what to do about the key
 #
 # Model: Claude Code runs LOCALLY; HIVE work is driven over SSH with the user's
 # private key. So this tests SSH to HIVE using that key.
@@ -30,6 +36,11 @@
 # =============================================================================
 set -uo pipefail
 have() { command -v "$1" >/dev/null 2>&1; }
+# Where the CoreOmics steps run and the key's state on HIVE: one definition, in
+# coreomics_key_to_hive.sh (sourcing it runs nothing). A partial copy without it reports null.
+CK_LIB=false
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/coreomics_key_to_hive.sh" 2>/dev/null && CK_LIB=true
+CK_PROBE=""; $CK_LIB && CK_PROBE="; $COREOMICS_KEY_PROBE"
 js() {  # a JSON string literal
   local s="$1"
   s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; s="${s//$'\t'/\\t}"; s="${s//$'\r'/\\r}"; s="${s//$'\n'/\\n}"
@@ -74,7 +85,7 @@ case "$HU" in
     USER_WARN="HIVE user '$HU' looks like a Windows domain login, not a HIVE username; use the plain UC Davis login id (probably '$guess')." ;;
 esac
 
-HIVE_SSH="not_tested"; SSH_SBATCH=false; SSH_GRP=false; KEY_FOUND=true
+HIVE_SSH="not_tested"; SSH_SBATCH=false; SSH_GRP=false; KEY_FOUND=true; CK_OUT=""
 ERR_KIND=""; ERR_DETAIL=""
 KNOWN=null; FPS=""; FP_MATCH=null
 [ -n "$KEY" ] && [ ! -f "$KEY" ] && KEY_FOUND=false
@@ -138,14 +149,16 @@ elif ! $ON_HIVE && [ -n "$HU" ] && [ "$KEY_FOUND" = true ]; then
   # command -> no HAS_SBATCH, `bash -l -c` -> HAS_SBATCH.
   # HAS_GRP needs a LISTING, not `ls -d`: /quobyte is mode 777 and proteomics-grp is 2770
   # (checked 2026-09-23), so `ls -d` succeeds for every HIVE account, member or not.
+  # $CK_PROBE: one more line, COREOMICS_KEY=..., in the same connection (HIVE throttles new ones):
+  # whether ~/.coreomics_token is there and its mode -- never its contents.
   ERRF="$(mktemp "${TMPDIR:-/tmp}/check_access.XXXXXX")"
   out="$(${TMO[@]+"${TMO[@]}"} ssh ${KEY_OPT[@]+"${KEY_OPT[@]}"} \
         -o BatchMode=yes -o ConnectTimeout=12 -o IdentitiesOnly=yes -o StrictHostKeyChecking=$HKC \
         "$HU@$HIVE_HOST" \
-        "bash -l -c 'command -v sbatch >/dev/null 2>&1 && echo HAS_SBATCH; ls /quobyte/proteomics-grp >/dev/null 2>&1 && echo HAS_GRP'" 2>"$ERRF")"
+        "bash -l -c 'command -v sbatch >/dev/null 2>&1 && echo HAS_SBATCH; ls /quobyte/proteomics-grp >/dev/null 2>&1 && echo HAS_GRP$CK_PROBE'" 2>"$ERRF" </dev/null)"
   rc=$?
   if [ -n "$out" ]; then
-    HIVE_SSH="ok"
+    HIVE_SSH="ok"; CK_OUT="$out"
     echo "$out" | grep -q HAS_SBATCH && SSH_SBATCH=true
     echo "$out" | grep -q HAS_GRP && SSH_GRP=true
   else
@@ -218,6 +231,21 @@ if   $ON_HIVE;                  then MODE="hive_local"   # already on HIVE -> su
 elif [ "$SSH_SBATCH" = true ];  then MODE="hive_remote"  # local Claude Code -> drive HIVE over SSH (the intended HIVE mode)
 else                                 MODE="local"; fi     # run on the user's own machine
 
+# The CoreOmics key (Michelle, 2026-10-08: no Python on her Windows laptop, so the CoreOmics steps
+# could not run there, and HIVE had no key). Its state on HIVE -- read here when this IS HIVE --
+# then where the steps run and what to do: coreomics_key_to_hive.sh decides, for every caller.
+CK_JSON=null; CK_DETAIL_JSON=null; CK_HERE_KEY=false; CK_ROUTE=this_computer
+CK_ADVICE="coreomics_key_to_hive.sh is missing beside this script: re-install the skill."
+if $CK_LIB; then
+  $ON_HIVE && CK_OUT="$(bash -c "$COREOMICS_KEY_PROBE" 2>/dev/null)"
+  coreomics_key_state "$CK_OUT"
+  case "$CK_STATE" in mode-wrong) CK_JSON='"mode-wrong"' ;; *) CK_JSON="$CK_STATE" ;; esac
+  CK_DETAIL_JSON="$(js "$CK_DETAIL")"
+  coreomics_local_key >/dev/null && CK_HERE_KEY=true
+  CK_ROUTE="$(coreomics_route "$MODE" "$PY_OK" "$CK_HERE_KEY" "$CK_STATE")"
+  CK_ADVICE="$(coreomics_advice "$CK_ROUTE" "$CK_HERE_KEY" "$CK_STATE")"
+fi
+
 ERR_JSON=null
 [ -n "$ERR_KIND" ] && ERR_JSON="{\"kind\": $(js "$ERR_KIND"), \"detail\": $(js "$ERR_DETAIL")}"
 FP_JSON=""
@@ -240,6 +268,11 @@ cat <<JSON
   "hive_user_warning": $([ -n "$USER_WARN" ] && js "$USER_WARN" || echo null),
   "hive_login_saved": {"path": $(js "$ENV_FILE"), "saved": $ENV_SAVED, "note": $(js "$ENV_NOTE")},
   "local_python3": {"path": $([ -n "$PY" ] && js "$PY" || echo null), "usable": $PY_OK, "note": $(js "$PY_NOTE")},
+  "coreomics_key_on_hive": $CK_JSON,
+  "coreomics_key_on_hive_detail": $CK_DETAIL_JSON,
+  "coreomics_key_on_this_computer": $CK_HERE_KEY,
+  "coreomics_runs_on": "$CK_ROUTE",
+  "coreomics_key_advice": $(js "$CK_ADVICE"),
   "can_use_slurm": $HAS_SLURM,
   "facility_software_available": $FACILITY_SW,
   "recommended_mode": "$MODE",
@@ -249,7 +282,8 @@ cat <<JSON
     "HIVE users NOT in the Core must rebuild the toolchain in their own HIVE home — see references/access.md 'Rebuild on HIVE'.",
     "No HIVE + no Core is fine: the skill installs its own toolchain locally and uses public engines (DIA-NN Academia, Sage).",
     "hive_ssh='failed': hive_ssh_error says why. host_key = compare hive_host_key_fingerprints with references/access.md; permission_denied = wrong username or key (on Windows never the DOMAIN+user login name); timeout = VPN off, or HIVE's connection throttle after many quick connections (wait ~20 min).",
-    "local_python3.usable=false: run nothing in Python on this machine. In hive_remote every script runs on HIVE through hive_exec.sh, which needs no local Python."
+    "local_python3.usable=false: run nothing in Python on this machine. In hive_remote every script runs on HIVE through hive_exec.sh, which needs no local Python.",
+    "coreomics_runs_on='hive': run core_submission.py check / identify / fetch / bioshare / email-draft on HIVE through hive_exec.sh, with the key in ~/.coreomics_token there (mode 600). coreomics_key_advice says how to get it there (bash scripts/coreomics_key_to_hive.sh: stdin only, never shown) or fix its mode."
   ]
 }
 JSON
