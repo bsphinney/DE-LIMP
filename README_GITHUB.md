@@ -116,7 +116,7 @@ Requires [Claude Code](https://claude.com/claude-code).
 **Easiest, in a terminal** (one line; paste it whole):
 
 ```
-claude plugin marketplace add bsphinney/DE-LIMP && claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core
+claude plugin marketplace add https://github.com/bsphinney/DE-LIMP.git && claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core
 ```
 
 Then start Claude Code, or run `/reload-plugins` if it is already open.
@@ -125,7 +125,7 @@ Then start Claude Code, or run `/reload-plugins` if it is already open.
 at once does not work.
 
 ```
-/plugin marketplace add bsphinney/DE-LIMP
+/plugin marketplace add https://github.com/bsphinney/DE-LIMP.git
 ```
 
 ```
@@ -136,6 +136,18 @@ at once does not work.
 auto-update**. Automatic updates are off by default for marketplaces that are not Anthropic's.
 
 **Update later:** `claude plugin update ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core`, then `/reload-plugins`.
+If it says "already at the latest version" while a newer release is out, or warns that the
+marketplace was not refreshed (seen on a Windows laptop with no GitHub SSH key), refresh the
+catalogue over HTTPS first, then run the update again:
+
+```
+git -C ~/.claude/plugins/marketplaces/ucdavis-proteomics-core pull --ff-only
+```
+
+Inside the skill, Claude checks this for you at the start of every session.
+The marketplace is added by its HTTPS URL because Claude Code tries SSH first for the
+`bsphinney/DE-LIMP` shorthand. If you added it that way before, keep it: the refresh above
+works for it.
 
 Then just ask, in your own words:
 
@@ -388,7 +400,7 @@ It runs in **Claude Code** and **Claude Desktop**.
 **Easiest, in a terminal** (one line; paste it whole):
 
 ```
-claude plugin marketplace add bsphinney/DE-LIMP && claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core
+claude plugin marketplace add https://github.com/bsphinney/DE-LIMP.git && claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core
 ```
 
 Then start Claude Code, or run `/reload-plugins` if it is already open.
@@ -397,7 +409,7 @@ Then start Claude Code, or run `/reload-plugins` if it is already open.
 at once does not work.
 
 ```
-/plugin marketplace add bsphinney/DE-LIMP
+/plugin marketplace add https://github.com/bsphinney/DE-LIMP.git
 ```
 
 ```
@@ -408,6 +420,18 @@ at once does not work.
 auto-update**. Automatic updates are off by default for marketplaces that are not Anthropic's.
 
 **Update later:** `claude plugin update ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core`, then `/reload-plugins`.
+If it says "already at the latest version" while a newer release is out, or warns that the
+marketplace was not refreshed (seen on a Windows laptop with no GitHub SSH key), refresh the
+catalogue over HTTPS first, then run the update again:
+
+```
+git -C ~/.claude/plugins/marketplaces/ucdavis-proteomics-core pull --ff-only
+```
+
+Inside the skill, Claude checks this for you at the start of every session.
+The marketplace is added by its HTTPS URL because Claude Code tries SSH first for the
+`bsphinney/DE-LIMP` shorthand. If you added it that way before, keep it: the refresh above
+works for it.
 
 On **Claude Desktop**: click the **+** button beside the prompt box → *Plugins* →
 *Add plugin*, add the marketplace `bsphinney/DE-LIMP`, then install

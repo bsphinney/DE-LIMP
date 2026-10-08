@@ -354,7 +354,9 @@ def main():
         "repository": skill_meta.get("repository", "https://github.com/bsphinney/DE-LIMP"),
         "marketplace": "ucdavis-proteomics-core",
         "install": [
-            "claude plugin marketplace add bsphinney/DE-LIMP",
+            # by its HTTPS URL: for the owner/repo shorthand Claude Code tries SSH first, and a
+            # laptop with no GitHub SSH key then cannot refresh it (references/install.md)
+            "claude plugin marketplace add https://github.com/bsphinney/DE-LIMP.git",
             "claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core",
         ],
     }

@@ -148,14 +148,28 @@ three in one SSH call and prints one JSON object: `status`, `local`, `hive`, `re
     `jobs: null` and the error in `say`. Only a HIVE with no squeue at all puts without
     counting.
   - `jobs_total` is every job of the user, for the message.
-- **Updating the plugin** (checked on Claude Code 2.1.285): `/plugin` → **Installed** →
-  **ucdavis-proteomics-core-pipeline** → **Update now**, or in a terminal
-  `claude plugin update ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core`, then
-  `/reload-plugins`. `/plugin marketplace update ucdavis-proteomics-core` only refreshes the
-  catalogue: the installed plugin stays where it was. Automatic updates are **off** for this
-  marketplace until the user turns them on: `/plugin` → **Marketplaces** →
-  **ucdavis-proteomics-core** → **Enable auto-update**. That default is the likely reason staff
-  sat on 2.6.0. Claude Desktop: **+** → **Plugins** → **Manage plugins**.
+- **Updating the plugin**: `bash scripts/skill_version.sh --update`. Step 0 runs it once the user
+  agrees, when `--check-update` (this computer vs GitHub main, every mode) or `--check-hive`
+  (vs the Core's release) says this computer is behind. It refreshes the plugin catalogue (the
+  marketplace clone) over HTTPS when it is behind main:
+  `git -C ~/.claude/plugins/marketplaces/ucdavis-proteomics-core pull --ff-only`. A catalogue
+  with an SSH remote is pulled from `https://github.com/bsphinney/DE-LIMP.git` instead. Then it
+  runs `claude plugin update ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core` and
+  compares the version that landed with main. Exit 1 means the update did not happen, and it
+  never says "latest" while behind. Then `/reload-plugins`.
+  - Why: on 2026-10-07 (msalemi, Windows, Git Bash, no GitHub SSH key) `claude plugin update`
+    alone warned "marketplace not refreshed: SSH host key is not in your known_hosts", then
+    "SSH authentication failed", and said "already at the latest version (2.10.0)" while main
+    shipped 2.11.2. The catalogue's remote was HTTPS. The same `git pull` and update took it
+    to 2.11.2.
+  - Checked on Claude Code 2.1.285: `/plugin marketplace update ucdavis-proteomics-core` only
+    refreshes the catalogue, and the installed plugin stays where it was.
+  - Automatic updates are **off** for this marketplace until the user turns them on: `/plugin`
+    → **Marketplaces** → **ucdavis-proteomics-core** → **Enable auto-update**. That default is
+    the likely reason staff sat on 2.6.0.
+  - A new install adds the marketplace by its HTTPS URL (`references/install.md`); Claude Code
+    probes SSH only for the `bsphinney/DE-LIMP` shorthand. Claude Desktop: **+** → **Plugins**
+    → **Manage plugins**.
 
 Step 0 also reads the Core's notes, in `/quobyte/proteomics-grp/skill_notes/` (`references/notes.md`).
 
