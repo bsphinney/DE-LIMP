@@ -1343,6 +1343,33 @@ def de_block_sentence(prov):
                   f"{col}-to-{col} variation.")
 
 
+def de_runs_left_out_sentence(prov):
+    """The searched runs the DE left out, each with the reason the user gave, from run_de.R's
+    `runs_left_out` record (the reasons come from collect_conditions.py --validate --exclude). A
+    run with no recorded reason says NOT RECORDED -- never a reason supplied here. None when every
+    searched run was analysed, or the record predates it. The one wording: the Methods and the
+    report's callout (make_analysis_html.runs_left_out_note) both use it."""
+    r = prov.get("runs_left_out")
+    if not isinstance(r, dict) or not r.get("determined"):
+        return None
+    runs = [x for x in (r.get("runs") or []) if isinstance(x, dict) and x.get("run")]
+    if not runs:
+        return None
+
+    def one(x):
+        why = x.get("reason")
+        why = why.strip().rstrip(".") if isinstance(why, str) and why.strip() else None
+        return f"{x['run']} ({why if why else 'reason ' + NOT_RECORDED})"
+
+    n_rep, n_an = r.get("n_report_runs"), r.get("n_analysed")
+    n = len(runs)
+    tail = (f"{'was' if n == 1 else 'were'} left out of the differential-expression analysis: "
+            f"{'; '.join(one(x) for x in runs)}.")
+    if isinstance(n_rep, int) and isinstance(n_an, int):
+        return f"Of the {n_rep} runs searched, {n_an} were analysed and {n} {tail}"
+    return f"{n} searched run{'' if n == 1 else 's'} {tail}"
+
+
 def de_normalisation_sentence(prov):
     """Which quantities the DE read and why, from run_de.R's record (`normalisation`, and the
     normalization_check block normalization_check.py wrote): the experiment type, the default
@@ -1396,6 +1423,9 @@ def de_paragraph(prov):
         return f" ({', '.join(bits)})" if bits else ""
     s = [f"Differential expression was analysed with "
          f"{prov.get('display_label') or NOT_RECORDED}{fmt_pkgs(prov)}."]
+    left_out = de_runs_left_out_sentence(prov)
+    if left_out:
+        s.append(left_out)
     if prov.get("rollup_method"):
         s.append(f"Protein quantities: {prov['rollup_method']}.")
     s.append(de_normalisation_sentence(prov))

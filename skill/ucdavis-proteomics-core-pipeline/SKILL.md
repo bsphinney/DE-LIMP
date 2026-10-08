@@ -1897,6 +1897,23 @@ dropped file fails here, not halfway through the DE:
 ```
 python3 scripts/collect_conditions.py --validate conditions.csv --against ./search_out/report.parquet
 ```
+**A searched run left out of the DE on purpose** (a re-run whose first injection is analysed, a
+failed injection: PROT_0803 searched 13 runs and analysed 11) has no row, so `--validate` names it
+under "report runs missing from metadata" and exits 1. **Never go past that failure on your own
+judgment.** Ask the user; only when they decide the run is left out, record it, one `--exclude`
+per run, each with its own `--reason` in their words (it goes into the Methods and the report,
+so it names no person):
+```
+python3 scripts/collect_conditions.py --validate conditions.csv --against ./search_out/report.parquet \
+    --exclude <run> --reason "<why>" [--exclude <run> --reason "<why>" ...]
+```
+The excluded runs then pass and are written to `<csv>.decisions.json` (`excluded_runs`, copied
+into the bundle with the CSV). `run_de.R` copies each run and its reason into
+`de_provenance.json` (`runs_left_out`) and `methods.txt`, and the Methods and the report list
+them. A run left out with no recorded reason is listed as "not recorded", never given a reason
+afterwards. An excluded run must be one the report has, and must not keep a row: `run_de.R`
+analyses every row. A missing run without `--exclude` still fails. Also log the decision
+(`log_decision.py`).
 **Then check the normalisation before the final DE** — for every experiment type. Run the DE
 both ways into scratch folders (one job on HIVE), then the check:
 ```
