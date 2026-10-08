@@ -106,11 +106,11 @@ folders, so nothing is lost if early posts were refused. The board allows one po
 |---|---|
 | after `stage --apply` | `where THREAD --raw-data <raw folder> --session-folder "$S"` |
 | before `run_search.py` submits its chain | asking for cluster time, below |
-| the chain submitted | `job THREAD --slurm-id <first job id> --status submitted --step 1/5 --cpu-hours <the chain's estimate> --decision <id> --text "search chain, 5 steps"` (one record for the whole chain) |
+| the chain submitted | `job THREAD --slurm-id <first job id> --status submitted --step 1/5 --cpu-hours <the chain's estimate> --decision <id> --text "search chain, 5 steps"` (one record for the whole chain), then `where THREAD --search-output <the search's out dir, its real path> --search-engine diann --fran-handover running` |
 | the chain finished | `job THREAD --slurm-id <that id> --status done --step 5/5` (or `--status failed --text "<why, one line>"`) |
 | the FRAN hand-over (step 7c), once per search folder | `where THREAD --search-output <the search's out dir, its real path> --search-engine diann --fran-handover <status>` |
 | after QC (step 8e) | pull it first: `bash scripts/hive_exec.sh --get "$S/logs/qc_bracket.json" ~/core/PROT_0807/`, then `qc THREAD --from ~/core/PROT_0807/qc_bracket.json` |
-| results ready | `post THREAD --kind finding --text "<protein and DE counts, and anything odd>"` |
+| results ready (and each time a result is redone) | `where THREAD --report <the analysis report's path in "$S"> --extra "DE tables=<its tables folder in "$S">"`, then `post THREAD --kind finding --text "<protein and DE counts, and anything odd>"` |
 | delivered (step 12b) | `where THREAD --raw-data <raw folder> --session-folder "$S" --report <report path> --bioshare-url <share URL>`, then `post THREAD --kind summary --text "<what was delivered, where, open questions>"` |
 
 **The FRAN hand-over row.** The skill hands each finished search to FRAN itself (step 7c); this
@@ -125,8 +125,13 @@ stage a search later yourself (`left_to_agent`, a permission fix), record it aga
 status.
 `--search-engine` is the engine that ran it: `diann` for the skill's DIA-NN searches, else
 `fragpipe`, `radiant`, `spectronaut`, `sage` or `alphadia`. Record every search folder of the
-submission this way, a QC search (`search_NIST`) too: its receipt says `qc_run`. Exit 4 (one
-post a minute): wait `retry_after` once, then go on.
+submission this way, a QC search (`search_NIST`) and a comparison search kept out of FRAN
+(`opted_out`) too, one `where` per folder. Always as `--search-output`, never as `--extra`:
+only search folders appear in the FRAN panel. The board cannot see HIVE, so it knows a search
+is running only from the `running` record when the chain is submitted; without it the panel
+offers a person a Send button for an unfinished search. The folder you recorded LAST is the
+one the "Where everything is" panel shows as the search output: record the submission's main
+search last. Exit 4 (one post a minute): wait `retry_after` once, then go on.
 
 **Asking for cluster time** (before `run_search.py` submits its chain). The thread has no
 CPU-hour budget, so every search is a person's decision on the board:

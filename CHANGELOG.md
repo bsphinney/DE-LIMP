@@ -1,5 +1,12 @@
 # Changelog
 
+## [Skill 2.11.2] — 2026-10-07
+
+### For Core staff: the board knows which searches are still running
+- **When a search is submitted, the Claude records its folder on the board as running** (`where --search-output ... --search-engine diann --fran-handover running`), so the project's FRAN panel says "Search still running" instead of offering a Send button. The board cannot see HIVE; this is how it knows.
+- **Every search folder is recorded as a search** (`--search-output`, one per folder), including QC and comparison searches, so each appears in the FRAN panel with what happened to it.
+- **Results are on the board as soon as they exist**, not only at delivery: when the analysis report and DE tables are made (or redone), the Claude records where they are (`where --report ... --extra "DE tables=..."`) before posting the counts.
+
 ## [Skill 2.11.1] — 2026-10-07
 
 ### For Core staff: the board shows each search's FRAN hand-over
