@@ -370,6 +370,8 @@ class CheckHive(Harness):
                          ("in_step", "2.9.0", True))
         self.assertIn("current release is 2.9.0", j["say"])
         self.assertIn(UPDATE, j["say"])
+        # the update that also refreshes the catalogue over HTTPS and checks what landed
+        self.assertIn("bash scripts/skill_version.sh --update", j["say"])
         self.assertIn("Enable auto-update", j["say"])
         self.assertNotIn("marketplace update", j["say"])
 
@@ -773,7 +775,9 @@ class Documented(unittest.TestCase):
                     "skill/ucdavis-proteomics-core-pipeline/SKILL.md",
                     "skill/ucdavis-proteomics-core-pipeline/references/install.md",
                     "skill/ucdavis-proteomics-core-pipeline/references/access.md")
-    ONE_LINE = ("claude plugin marketplace add bsphinney/DE-LIMP && "
+    # By its HTTPS URL (2026-10-07): for the owner/repo shorthand Claude Code tries SSH first, and
+    # a Windows laptop with no GitHub SSH key could not refresh the catalogue.
+    ONE_LINE = ("claude plugin marketplace add https://github.com/bsphinney/DE-LIMP.git && "
                 "claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core")
 
     def install_docs(self):
@@ -826,6 +830,22 @@ class Documented(unittest.TestCase):
                                     for b in self.copy_blocks(rel, docs[rel])), rel)
         self.assertIn("press Enter, then the second", docs["README_GITHUB.md"])
         self.assertIn("Enable\nauto-update", docs["README_GITHUB.md"])
+
+    def test_no_copy_block_adds_the_marketplace_by_the_shorthand(self):
+        """Every command a reader copies adds the marketplace by its HTTPS URL, and the pages
+        that tell how to update give the HTTPS refresh of the catalogue."""
+        docs = self.install_docs()
+        if "README_GITHUB.md" not in docs:
+            self.skipTest("no repo docs beside this skill")
+        bad = [f"{rel}: {b.strip()}" for rel, text in docs.items()
+               for b in self.copy_blocks(rel, text) if "marketplace add bsphinney/DE-LIMP" in b]
+        self.assertEqual(bad, [])
+        pull = "git -C ~/.claude/plugins/marketplaces/ucdavis-proteomics-core pull --ff-only"
+        for rel in ("README_GITHUB.md", "README.md", "docs/skill-install.html",
+                    "docs/STUDENT_SETUP.md"):
+            with self.subTest(rel=rel):
+                self.assertTrue(any(b.strip() == pull for b in self.copy_blocks(rel, docs[rel])),
+                                rel)
 
 
 if __name__ == "__main__":
