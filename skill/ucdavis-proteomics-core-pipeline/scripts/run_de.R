@@ -440,6 +440,21 @@ cont_census <- NULL; cont_share <- NULL; cont_col <- NA_character_; cont_intensi
 cont_tag <- CONTAMINANT_TAG
 filters_applied <- character(0)
 
+# The report's run names, read once for both pipelines: dpc restricts its input to the
+# metadata's runs with them (below), and the record of the searched runs the design leaves out
+# (runs_left_out_record) needs them on every method. NULL when arrow/dplyr cannot read them.
+# arrow reads BOTH formats, so this is not parquet-only.
+.open_report <- function(path, fmt) {
+  if (identical(fmt, "parquet")) arrow::open_dataset(path)
+  else arrow::read_tsv_arrow(path, as_data_frame = FALSE)
+}
+.rep_runs_pre <- tryCatch({
+  if (requireNamespace("arrow", quietly = TRUE) &&
+      requireNamespace("dplyr", quietly = TRUE))
+    sort(unique(dplyr::collect(dplyr::select(.open_report(input, format), Run))$Run))
+  else NULL
+}, error = function(e) NULL)
+
 # limpa/DPC is the DEFAULT path. It needs PRECURSOR-level input: readDIANN() keys on
 # Precursor.Id + Precursor.Normalised. DIA-NN's native report.parquet has them; the
 # adapters for Sage/FragPipe/Radiant collapse to one protein x run row, so limpa
@@ -556,17 +571,8 @@ if (method == "dpc") {
   # keep_runs to the arrow query before collect(); dpc now matches it.
   # arrow reads BOTH formats, so the restriction is not parquet-only. A tsv left
   # on the post-hoc dat[, .keep] path would keep exactly the defect this block
-  # exists to remove -- and silently, since nothing errors.
-  .open_report <- function(path, fmt) {
-    if (identical(fmt, "parquet")) arrow::open_dataset(path)
-    else arrow::read_tsv_arrow(path, as_data_frame = FALSE)
-  }
-  .rep_runs_pre <- tryCatch({
-    if (requireNamespace("arrow", quietly = TRUE) &&
-        requireNamespace("dplyr", quietly = TRUE))
-      sort(unique(dplyr::collect(dplyr::select(.open_report(input, format), Run))$Run))
-    else NULL
-  }, error = function(e) NULL)
+  # exists to remove -- and silently, since nothing errors. (.open_report and
+  # .rep_runs_pre, the report's run names, are read once above both pipelines.)
   .restrict_runs <- !is.null(.rep_runs_pre) && length(setdiff(.rep_runs_pre, meta$File.Name)) > 0
 
   if (.restrict_runs || (!is.na(eq_cutoff) && eq_cutoff > 0) ||
@@ -1214,6 +1220,48 @@ norm_check_methods_lines <- function(r) {
     else sprintf("%sThe data check (normalisation factors vs groups, fold-change balance, IDs per group, normalisation stability, volcano shape) agreed.", pad),
     if (!isTRUE(r$tripped) && identical(d$source, "user")) paste0(pad, chose))
 }
+# The searched runs this design leaves out, and why. run_de.R analyses only the metadata's runs
+# (restricted before quantification, above); the WHY is the user's recorded decision --
+# collect_conditions.py --validate --exclude <run> --reason "<why>" writes it to
+# <conditions.csv>.decisions.json (collect_conditions.decisions_path) under `excluded_runs`.
+# A run left out with no recorded reason keeps reason = null: never a reason made up here
+# (rule 2); make_methods.de_runs_left_out_sentence says "not recorded" for it.
+runs_left_out_record <- function(report_runs, meta_runs, meta_path) {
+  if (is.null(report_runs))
+    return(list(determined = FALSE,
+                note = paste("the report's run names could not be read (arrow + dplyr), so which",
+                             "searched runs the design left out is not recorded")))
+  left <- sort(setdiff(report_runs, meta_runs))
+  rec <- list(determined = TRUE, n_report_runs = length(report_runs),
+              n_analysed = length(intersect(report_runs, meta_runs)))
+  why <- list()
+  if (length(left)) {
+    dec <- paste0(meta_path, ".decisions.json")
+    ex <- if (file.exists(dec) && requireNamespace("jsonlite", quietly = TRUE))
+      tryCatch(jsonlite::fromJSON(dec, simplifyVector = FALSE)$excluded_runs,
+               error = function(e) NULL)
+    for (x in ex$runs)
+      if (is.character(x$run) && is.character(x$reason) && nzchar(trimws(x$reason)))
+        why[[x$run]] <- x$reason
+    rec$reasons_from <- if (length(why)) normalizePath(dec)
+      else if (file.exists(dec)) paste(basename(dec), "records no excluded_runs reasons")
+      else paste("no decisions record beside the metadata: collect_conditions.py --validate",
+                 "--exclude was not used")
+  }
+  rec$runs <- lapply(left, function(r) list(run = r, reason = why[[r]] %||% NA_character_))
+  rec
+}
+runs_left_out_rec <- runs_left_out_record(.rep_runs_pre, meta$File.Name, meta_path)
+runs_left_out_methods_lines <- function(r) {
+  if (!isTRUE(r$determined) || !length(r$runs)) return(NULL)
+  c(sprintf("Runs          : %d of %d searched runs analysed; left out of the DE:",
+            r$n_analysed, r$n_report_runs),
+    vapply(r$runs, function(x)
+      sprintf("                %s -- %s", x$run,
+              if (is.na(x$reason)) "reason NOT RECORDED [confirm]" else x$reason), ""))
+}
+for (.l in runs_left_out_methods_lines(runs_left_out_rec)) message("[run_de] ", sub("^ +", "", .l))
+
 methods_txt <- c(
   "Differential expression — methods",
   strrep("=", 40), "",
@@ -1236,6 +1284,7 @@ methods_txt <- c(
                                 else "normalised (--quantities normalised)"),
   sprintf("Normalization : %s", descriptor$normalisation),
   norm_check_methods_lines(norm_check_rec),
+  runs_left_out_methods_lines(runs_left_out_rec),
   sprintf("Design        : %s", design_label),
   block_methods_lines(block_rec),
   sprintf("Contrasts     : %s", paste(forms, collapse = ", ")),
@@ -1406,6 +1455,9 @@ prov <- list(
   # as.list: one contrast must still serialise as a list -- auto_unbox made it a bare
   # string, which readers then iterated character by character ("B, -, A").
   contrasts = as.list(forms), n_samples = nrow(meta), groups = as.list(table(groups)),
+  # the searched runs the design left out, each with the reason the user recorded
+  # (collect_conditions.py --validate --exclude) or null -- runs_left_out_record()
+  runs_left_out = runs_left_out_rec,
   significant_per_contrast = all_sig,
   # Each DE_*.csv and the fit it came from: "blocked", or "independent" (samples fitted as
   # independent -- every table of an unblocked run, between-block ones under --block-scope within).

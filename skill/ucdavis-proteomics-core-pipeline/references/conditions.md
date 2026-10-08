@@ -111,7 +111,13 @@ subjects or were confirmed (`subject_confirmed`). Ambiguities add
 prints a note when a column recurs across groups and no `--block` was given.
 `File.Name` must equal the Run names in the search report. `--validate` checks
 column presence, blank groups, singleton groups, and that the report runs and
-metadata rows line up exactly.
+metadata rows line up exactly. A report run the user decided to leave out of the DE
+(a re-run, a failed injection) has no row; record it with `--validate ... --against
+<report> --exclude <run> --reason "<why>"` (one `--reason` right after each
+`--exclude`). It then passes and goes into `<csv>.decisions.json` under
+`excluded_runs`; `run_de.R` carries the reasons into `de_provenance.json`
+(`runs_left_out`), and the Methods and the report list them. An excluded run must be
+in the report and must not have a row. Any other missing run still fails.
 
 ## Why deterministic matching (not pure LLM)
 Filename↔condition matching is where an LLM can hallucinate (assigning a group to a
