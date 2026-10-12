@@ -1,15 +1,15 @@
 {
-  "generated_at": "2026-10-05 16:39:53",
+  "generated_at": "2026-10-12 17:12:09",
   "github": {
     "repo": null,
-    "stars": 19,
+    "stars": 20,
     "forks": 1,
-    "open_issues": 0,
+    "open_issues": 3,
     "traffic_14d": {
-      "clones": 758,
-      "clones_unique": 234,
-      "views": 255,
-      "views_unique": 76
+      "clones": 661,
+      "clones_unique": 221,
+      "views": 187,
+      "views_unique": 78
     },
     "release_downloads_all_time": 0,
     "per_release": []
@@ -21,7 +21,7 @@
   },
   "docker": {
     "image": null,
-    "pull_count": 459,
+    "pull_count": 465,
     "stars": 0
   }
 }
