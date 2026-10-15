@@ -47,8 +47,14 @@ COREOMICS_CHECK_ON_HIVE="bash scripts/hive_exec.sh 'python3 ~/proteomics-pipelin
 # --- its own single-quoted `bash -l -c '...'`) -----------------------------------------------
 # One line saying what ~/.coreomics_token is. Symlinks are followed, as Python's os.stat does.
 COREOMICS_KEY_PROBE='f="$HOME/.coreomics_token"; if [ ! -e "$f" ]; then echo COREOMICS_KEY=absent; elif [ ! -f "$f" ]; then echo COREOMICS_KEY=notfile; elif [ ! -O "$f" ]; then echo COREOMICS_KEY=notmine; elif [ ! -r "$f" ]; then echo COREOMICS_KEY=unreadable; elif [ ! -s "$f" ]; then echo COREOMICS_KEY=empty; else echo "COREOMICS_KEY=mode:$(stat -L -c %a "$f" 2>/dev/null || stat -L -f %Lp "$f" 2>/dev/null)"; fi'
-# Standard input -> a new mode-600 file -> renamed over ~/.coreomics_token; then the probe.
-COREOMICS_KEY_STORE='umask 077; t="$(mktemp "$HOME/.coreomics_token.XXXXXX")" || { echo COREOMICS_KEY_STORE=failed:mktemp; exit 3; }; trap "rm -f -- \"\$t\"" EXIT; cat > "$t" || { echo COREOMICS_KEY_STORE=failed:write; exit 3; }; if [ ! -s "$t" ]; then echo COREOMICS_KEY_STORE=empty; exit 2; fi; chmod 600 "$t" && mv -f -- "$t" "$HOME/.coreomics_token" || { echo COREOMICS_KEY_STORE=failed:rename; exit 3; }; echo COREOMICS_KEY_STORE=ok; '"$COREOMICS_KEY_PROBE"
+# Is the new file $t a usable key? core_submission.py decides -- read_key_file, then
+# key_shape_problem: the one definition of a usable key -- from the skill on HIVE, BEFORE the
+# rename, so a blank or malformed laptop file ("Authorization: Token ...") never replaces a
+# working key (2.12 review). python3 -I: a module a group member leaves in this (group-writable)
+# home folder is never imported. The answer is a fixed reason, never any part of the key.
+COREOMICS_KEY_SHAPE='s="$HOME/proteomics-pipeline/scripts"; if [ ! -f "$s/core_submission.py" ]; then echo COREOMICS_KEY_STORE=uncheckable:noskill; exit 3; fi; v="$(python3 -I -c "import sys; sys.path.insert(0, sys.argv[1]); import core_submission as c; k = c.read_key_file(sys.argv[2]); w = c.key_shape_problem(k) if k else \"it is blank: only spaces or line breaks\"; print(\"notakey:\" + w if w else \"keyok\")" "$s" "$t" 2>/dev/null)"; case "$v" in keyok) ;; notakey:*) echo "COREOMICS_KEY_STORE=$v"; exit 2 ;; *) echo COREOMICS_KEY_STORE=uncheckable:python; exit 3 ;; esac; '
+# Standard input -> a new mode-600 file -> checked -> renamed over ~/.coreomics_token; then the probe.
+COREOMICS_KEY_STORE='umask 077; t="$(mktemp "$HOME/.coreomics_token.XXXXXX")" || { echo COREOMICS_KEY_STORE=failed:mktemp; exit 3; }; trap "rm -f -- \"\$t\"" EXIT; cat > "$t" || { echo COREOMICS_KEY_STORE=failed:write; exit 3; }; if [ ! -s "$t" ]; then echo COREOMICS_KEY_STORE=empty; exit 2; fi; '"$COREOMICS_KEY_SHAPE"'chmod 600 "$t" && mv -f -- "$t" "$HOME/.coreomics_token" || { echo COREOMICS_KEY_STORE=failed:rename; exit 3; }; echo COREOMICS_KEY_STORE=ok; '"$COREOMICS_KEY_PROBE"
 
 ck_js() {  # a JSON string literal
   local s="$1"
@@ -89,25 +95,33 @@ EOF
   return 1
 }
 
+# The fix for a key file on HIVE that is not private: chmod -- unless another account owns it,
+# where chmod cannot work and the file is removed and the key sent again (core_submission.py's
+# key_mode_fix says the same on HIVE).
+COREOMICS_KEY_CHMOD_FIX="bash scripts/hive_exec.sh 'chmod 600 ~/.coreomics_token'"
+COREOMICS_KEY_NOTMINE_FIX="it belongs to another account, so chmod cannot fix it: remove it (bash scripts/hive_exec.sh 'rm -f ~/.coreomics_token') and send the key again (bash scripts/coreomics_key_to_hive.sh, or the user runs it with --paste in their own Git Bash window)"
+
 # coreomics_key_state <text holding the probe's line>: sets CK_STATE (true | false | mode-wrong |
-# null = not checked), CK_MODE (octal, or "") and CK_DETAIL (plain words).
+# null = not checked), CK_MODE (octal, or ""), CK_DETAIL (plain words) and CK_FIX (for
+# mode-wrong: one of the two fixes above; otherwise "").
 coreomics_key_state() {
   local line m
   line="$(printf '%s\n' "$1" | LC_ALL=C tr -d '\r' | grep -m1 '^COREOMICS_KEY=' || true)"
-  CK_MODE=""
+  CK_MODE=""; CK_FIX=""
   case "$line" in
     "") CK_STATE=null; CK_DETAIL="HIVE was not asked (no SSH login, or no answer)" ;;
     COREOMICS_KEY=absent) CK_STATE=false; CK_DETAIL="there is no ~/.coreomics_token on HIVE" ;;
     COREOMICS_KEY=empty) CK_STATE=false; CK_DETAIL="~/.coreomics_token on HIVE is empty" ;;
     COREOMICS_KEY=notfile) CK_STATE=false; CK_DETAIL="~/.coreomics_token on HIVE is not a file" ;;
     COREOMICS_KEY=unreadable) CK_STATE=false; CK_DETAIL="~/.coreomics_token on HIVE cannot be read, even by its owner" ;;
-    COREOMICS_KEY=notmine) CK_STATE=mode-wrong; CK_DETAIL="~/.coreomics_token on HIVE belongs to another account" ;;
+    COREOMICS_KEY=notmine) CK_STATE=mode-wrong; CK_FIX="$COREOMICS_KEY_NOTMINE_FIX"
+                           CK_DETAIL="~/.coreomics_token on HIVE belongs to another account" ;;
     COREOMICS_KEY=mode:*)
-      m="${line#COREOMICS_KEY=mode:}"; CK_MODE="$m"
+      m="${line#COREOMICS_KEY=mode:}"; CK_MODE="$m"; CK_FIX="$COREOMICS_KEY_CHMOD_FIX"
       case "$m" in
         ""|*[!0-7]*) CK_STATE=mode-wrong; CK_DETAIL="the mode of ~/.coreomics_token on HIVE could not be read" ;;
         # No permission for group or others: the last two octal digits are 0 (600, 400, 700).
-        *00) CK_STATE=true; CK_DETAIL="~/.coreomics_token on HIVE, mode $m: only this account can read it" ;;
+        *00) CK_STATE=true; CK_FIX=""; CK_DETAIL="~/.coreomics_token on HIVE, mode $m: only this account can read it" ;;
         *) CK_STATE=mode-wrong; CK_DETAIL="~/.coreomics_token on HIVE is mode $m: other HIVE accounts can read it" ;;
       esac ;;
     *) CK_STATE=null; CK_DETAIL="HIVE's answer was not understood" ;;
@@ -132,7 +146,7 @@ coreomics_route() {
 coreomics_advice() {
   local route="$1" here="$2" hive="$3" fix_mode="" out
   if [ "$hive" = mode-wrong ]; then
-    fix_mode="The CoreOmics key on HIVE is not private: bash scripts/hive_exec.sh 'chmod 600 ~/.coreomics_token' (core_submission.py refuses it until then). If other accounts could read it for long, the user Regenerates it in CoreOmics and it is put on HIVE again (bash scripts/coreomics_key_to_hive.sh). "
+    fix_mode="The CoreOmics key on HIVE is not private: ${CK_FIX:-$COREOMICS_KEY_CHMOD_FIX} (core_submission.py refuses it until then). If other accounts could read it for long, the user Regenerates it in CoreOmics and it is put on HIVE again (bash scripts/coreomics_key_to_hive.sh). "
   fi
   if [ "$route" = hive ]; then
     case "$hive" in
@@ -200,7 +214,7 @@ ck_main() {
       false) status=absent; state_json=false
              fix="bash scripts/coreomics_key_to_hive.sh (a key saved on this computer), or the user runs it with --paste in their own Git Bash window" ;;
       *) status=mode_wrong; state_json='"mode-wrong"'
-         fix="bash scripts/hive_exec.sh 'chmod 600 ~/.coreomics_token'; if other accounts could read it for long, Regenerate the key in CoreOmics and put the new one on HIVE" ;;
+         fix="${CK_FIX:-$COREOMICS_KEY_CHMOD_FIX}; if other accounts could read it for long, Regenerate the key in CoreOmics and put the new one on HIVE" ;;
     esac
     printf '{"status": %s, "coreomics_key_on_hive": %s, "hive_mode": %s, "say": %s, "fix": %s}\n' \
       "$(ck_js "$status")" "$state_json" "$([ -n "$CK_MODE" ] && ck_js "$CK_MODE" || echo null)" \
@@ -248,12 +262,31 @@ ck_main() {
       ck_fail 2 empty "Nothing arrived on HIVE, so nothing was saved there (a key already on HIVE is unchanged)." \
         "Save the key again on this computer, or use --paste."
     fi
+    # HIVE's key check (COREOMICS_KEY_SHAPE): its reason is fixed text, never part of the key
+    local why fix
+    why="$(printf '%s\n' "$out" | LC_ALL=C tr -d '\r' | sed -n 's/^COREOMICS_KEY_STORE=notakey://p' | head -1)"
+    if [ -n "$why" ]; then
+      if [ "$action" = send ]; then
+        fix="Save the key again on this computer -- only the key, on one line (python3 scripts/core_submission.py check --json says how) -- or the user runs this with --paste in their own Git Bash window: bash '$CK_HERE/coreomics_key_to_hive.sh' --paste"
+      else
+        fix="The user runs it again in their own Git Bash window and pastes only the key (CoreOmics: Profile > API Key), nothing before or after it: bash '$CK_HERE/coreomics_key_to_hive.sh' --paste"
+      fi
+      ck_fail 2 not_a_key "The key from $from is not a usable CoreOmics key: $why. It was not saved on HIVE; a key already there is unchanged." "$fix"
+    fi
+    if printf '%s\n' "$out" | grep -q '^COREOMICS_KEY_STORE=uncheckable:noskill'; then
+      ck_fail 3 not_checked "HIVE could not check the key, because the skill is not on HIVE (no ~/proteomics-pipeline/scripts/core_submission.py), so it was not saved; a key already there is unchanged." \
+        "bash scripts/hive_exec.sh --put-skill, then run this again."
+    fi
+    if printf '%s\n' "$out" | grep -q '^COREOMICS_KEY_STORE=uncheckable:'; then
+      ck_fail 3 not_checked "HIVE could not check the key: python3 there could not run the skill's key check (core_submission.py), so it was not saved; a key already there is unchanged." \
+        "bash scripts/hive_exec.sh --put-skill (the skill on HIVE may be partial or older than this one), then run this again."
+    fi
     ck_fail 3 not_saved "The key was not saved on HIVE: $(ck_why "$out") (exit $rc). A key already there is unchanged." \
       "Run check_access.sh to see whether the SSH login works, then try again."
   fi
   if [ "$CK_STATE" != true ]; then
     ck_fail 3 saved_not_private "The key reached HIVE but is not private there: $CK_DETAIL." \
-      "bash scripts/hive_exec.sh 'chmod 600 ~/.coreomics_token', then: bash scripts/coreomics_key_to_hive.sh --status"
+      "${CK_FIX:-$COREOMICS_KEY_CHMOD_FIX}; then: bash scripts/coreomics_key_to_hive.sh --status"
   fi
   local copy="none"
   if [ "$action" = send ]; then
