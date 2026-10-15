@@ -126,7 +126,10 @@ So:
   yourself. `--core-run` refuses a session that answers no CoreOmics submission
   (`submission_report.core_run`). For internal Core work that the staff member said yes to,
   pass `--core-run internal`; it refuses a session whose `session.json` does not say internal
-  work (`analysis_for`, from `session.py init --internal`). Never use either for anyone else's
+  work (`analysis_for`, from `session.py init --internal`), and a session for a CoreOmics
+  submission (attached, or named in `analysis_for`): a client's data is never labelled the
+  Core's own. A submission named in `session.json` but not attached is a `--core-run` refusal
+  that says to run `submission_report.py attach` first. Never use either for anyone else's
   data.
 - **Only Core staff can claim a Core run.** Every member of proteomics-grp can read the Core's
   key, but the approval is for Core staff. So `--core-run` also needs the person running it on
@@ -460,9 +463,11 @@ bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.t
   another member's before `sbatch` reads it, and the job would run as you. The script is written
   without following a link, and a link where it goes is refused. The job asks for 1 CPU, 2 GB
   and 2 hours, on the queue `run_search.slurm_queue` picks for this account (as every job the
-  skill writes; `--requeue` on a preemptible one). Its `--output` path is quoted, so a space in
-  it is fine. It is a login shell (`#!/bin/bash -l`), so it can `module load ffmpeg/7.0.2` for
-  the AAC. Then `render --tts gemini --core-run` (verify follows by itself), `link` and `share`;
+  skill writes; `--requeue` on a preemptible one, with `--open-mode=append` so a requeued job
+  adds to its log). Its `--output` path is in double quotes, so a space in it is fine (single
+  quotes leave no log in a real run). It is a login shell (`#!/bin/bash -l`), so it can
+  `module load ffmpeg/7.0.2` for the AAC; when no ffmpeg can be found, its log says so in a
+  `[WARN]` (the episode then stays a ~58 MB `podcast.wav`, and `share` cannot build). Then `render --tts gemini --core-run` (verify follows by itself), `link` and `share`;
   a failed step stops it there. Submitting it again resumes: finished chunks are cached. An
   episode takes minutes; rate limits can stretch that to an hour.
 - **Never run render, verify or share on the login node**: they are minutes of network calls.
@@ -557,6 +562,10 @@ bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.t
     (ratio, gaps, numbers_not_heard, segments_to_check, model). It WARNs when the ratio is
     below 0.93, or when there is a gap or a number not heard, and names the segments to
     listen to.
+  - Every render removes the last render's `verify.txt` and `verify_transcript.txt`, so an
+    old OK never stands beside new audio. When this render's verify does not run (it failed,
+    for example on a 429; `--no-verify`; an offline `say` render), `verify.txt` says `NOT RUN`
+    with the reason, and so does the `verify` block: nothing has heard the audio back.
   - It runs at the end of every `render --tts gemini` given consent (`--core-run` or
     `--cloud-ok`; `--no-verify` skips it). It never fails the render and never touches the
     report. It **sends the audio** to Google, so the same consent rules apply: nothing without
@@ -681,5 +690,6 @@ Listen card points at: the audio, the transcript, the script, `check.txt` and `p
   pronunciation rows that add content. It cannot catch the list under "What check cannot
   catch", so your own read against the report is the other half.
 
-`make_podcast.py verify --verify-model <model>[,<model>]` picks the Gemini text model(s) that
-transcribe the audio (the default is in `make_podcast.py`).
+`make_podcast.py verify --model <model>` (repeatable; `render --verify-model` for the verify a
+render runs) picks the Gemini text model(s) that transcribe the audio (the default is in
+`make_podcast.py`).

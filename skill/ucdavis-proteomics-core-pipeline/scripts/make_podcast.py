@@ -53,8 +53,8 @@ CHECKS the script, RENDERS it to audio and LINKS the audio into the outputs.
             where minutes of network calls must not run on the login node. Written only when
             what the job needs is here: a passing check, consent, a python with google-genai >=
             GENAI_MIN (setup.sh installs it) and a key; in a folder only you can change (a
-            group-writable session folder would let another member swap the script), never
-            through a link. Loads HIVE's ffmpeg module for the AAC.
+            group-writable session folder would let another member swap the script). Loads
+            HIVE's ffmpeg module for the AAC, and says so in its log when it cannot.
   key    [--core-run]
          -> where the Gemini key would come from, and whether the Core's shared key can be
             used; never the key. Exit 0 when there is one.
@@ -132,6 +132,7 @@ CORE_KEY_FILE = "/quobyte/proteomics-grp/.config/gemini_key"
 CORE_CLOUD_OK = ("Brett Phinney (Core director): standing approval for Core runs (2026-09-28; "
                  "podcast by default since 2026-10-15)")
 CORE_RUN_KINDS = ("submission", "internal")
+VERIFY_FILES = ("verify.txt", "verify_transcript.txt")      # what verify writes beside the audio
 # Gemini 3 TTS needs client.interactions (2.25.0 has it). setup.sh installs at least this into
 # the pipeline env (its GENAI_MIN; tests/test_make_podcast_hive.py keeps the two equal).
 GENAI_MIN = "2.25.0"
@@ -2112,14 +2113,26 @@ def core_run_consent(script_path, kind):
     Anyone else's data is never a Core run: they are asked, and --cloud-ok records the answer."""
     out = output_dir_of(script_path)
     session = _session_of(out) if out else None
+    work, got = None, None
+    if session:
+        try:
+            import session as session_mod
+            work = session_mod.analysis_for(session)
+        except ImportError:
+            work = None
+        try:
+            import submission_report
+            got = submission_report.core_run(session)
+        except ImportError:
+            got = None
+    named = [str(x) for x in ((work or {}).get("submissions") or [])] \
+        if isinstance(work, dict) else []
     if kind == "internal":
-        work = None
-        if session:
-            try:
-                import session as session_mod
-                work = session_mod.analysis_for(session)
-            except ImportError:
-                work = None
+        if got or named:              # a client's data is never labelled as the Core's own
+            which = (got or {}).get("prot") or ", ".join(named) or "a CoreOmics submission"
+            return None, None, (f"--core-run internal: this session is for {which}, a CoreOmics "
+                                "submission, so its podcast is that submission's: pass "
+                                "--core-run.")
         if not (isinstance(work, dict) and work.get("internal")):
             return None, None, ("--core-run internal: this session's session.json does not say "
                                 "it is internal Core work (analysis_for, written by session.py "
@@ -2128,13 +2141,12 @@ def core_run_consent(script_path, kind):
                                 "and pass --cloud-ok \"<who agreed, when>\".")
         rec = {"kind": "internal", "title": work["internal"]}
     else:
-        got = None
-        if session:
-            try:
-                import submission_report
-                got = submission_report.core_run(session)
-            except ImportError:
-                got = None
+        if not got and named:
+            return None, None, (f"--core-run: session.json says this session is for "
+                                f"{', '.join(named)}, but no submission record is attached: run "
+                                f"submission_report.py attach --session {session} --record "
+                                f"<the submission's folder> (SKILL.md step 1c.7), then --core-run "
+                                "again.")
         if not got:
             return None, None, ("--core-run: this session answers no CoreOmics submission "
                                 "(submission_report.core_run, asked of the session above the "
@@ -2348,6 +2360,9 @@ def cmd_render(a):
         "warnings": warnings,
         "made_by": "make_podcast.py (UC Davis Proteomics Core pipeline skill)",
     }
+    for name in VERIFY_FILES:                     # the last render's: never this audio's check
+        if os.path.exists(os.path.join(out, name)):
+            os.remove(os.path.join(out, name))
     with open(os.path.join(out, "podcast.json"), "w", encoding="utf-8") as fh:
         json.dump(man, fh, indent=2, ensure_ascii=False)
         fh.write("\n")
@@ -2364,15 +2379,44 @@ def cmd_render(a):
                       "warnings": warnings}, indent=2))
     # The ASR round trip. It sends the audio, so only under this render's cloud consent. It
     # never fails the render and never touches the report.
+    retry = (f"`make_podcast.py verify {script_copy} "
+             f"{'--core-run' if core_rec else '--cloud-ok ...'}`")
     if backend.cloud and consent and not getattr(a, "no_verify", False):
         try:
             run_verify(s.path if os.path.dirname(s.path) == out else script_copy, out,
                        getattr(a, "verify_model", None), consent, core=bool(core_rec))
         except Exception as e:
-            log(f"[WARN] verify skipped: {scrub(e)} (the render is fine; run "
-                f"`make_podcast.py verify {script_copy} "
-                f"{'--core-run' if core_rec else '--cloud-ok ...'}` to retry)")
+            why = scrub(e)
+            log(f"[WARN] verify skipped: {why} (the render is fine; run {retry} to retry)")
+            verify_not_run(out, f"verify failed: {why}", retry)
+    elif backend.cloud:
+        verify_not_run(out, "--no-verify was given", retry)
+    else:
+        verify_not_run(out, f"an offline render ({backend.name}) sends nothing",
+                       "`make_podcast.py verify` with consent (it sends the audio to Google)")
     return 0
+
+
+def verify_not_run(out, why, how):
+    """This render's audio has not been heard back: verify.txt says so and why, and podcast.json
+    gets a `verify` block with status NOT RUN -- never the last render's OK left in place
+    (record_run copies verify.txt). Never fails the render."""
+    try:
+        with open(os.path.join(out, "verify.txt"), "w", encoding="utf-8") as fh:
+            fh.write(f"Podcast audio check (ASR round trip): NOT RUN\nreason: {why}\n"
+                     f"checked: {now_iso()}\nNothing has heard this audio back. Listen to it "
+                     f"before it is shared, or run {how}.\n")
+        mpath = os.path.join(out, "podcast.json")
+        with open(mpath, encoding="utf-8") as fh:
+            man = json.load(fh)
+        man["verify"] = {"status": "NOT RUN", "reason": why, "created": now_iso(),
+                         "report": "verify.txt"}
+        with open(mpath + ".part", "w", encoding="utf-8") as fh:
+            json.dump(man, fh, indent=2, ensure_ascii=False)
+            fh.write("\n")
+        os.replace(mpath + ".part", mpath)
+    except (OSError, ValueError, AttributeError, TypeError) as e:
+        log(f"[WARN] could not record that verify did not run ({type(e).__name__}: {e})")
 
 
 def prune_cache(cache, used, model, explicit=False):
@@ -3858,28 +3902,6 @@ def private_dir(path):
     return None
 
 
-def write_private(path, text, mode=0o700):
-    """Write `path` so that only this account could have written it: a new file beside it
-    (O_CREAT|O_EXCL|O_NOFOLLOW, never through a link), fchmod, then renamed over `path`. A link
-    already at `path` is refused, not followed."""
-    if os.path.islink(path):
-        raise RenderError(f"{path} is a link: not writing through it. Remove it and run job again.")
-    tmp = os.path.join(os.path.dirname(path), f".{os.path.basename(path)}.{os.getpid()}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), mode)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(text)
-            fh.flush()
-            os.fchmod(fh.fileno(), mode)
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-
-
 def job_python(given=None):
     """The python the podcast job runs -> (path, its google-genai version, None), or (None, None,
     why). --python, else the skill's env here (setup.json's `python`, where setup.sh installs
@@ -3917,14 +3939,16 @@ def job_python(given=None):
 
 def write_job(path, py, script, out, consent_args, models, queue, log_path, name):
     """The job script: render --tts gemini (verify follows), link, share -> its text, written
-    by write_private. The log path is quoted: sbatch reads `--output="a b/c"` as one path
-    (checked on HIVE 2026-10-15) and an unquoted space ends the directive."""
+    mode 700 into the private jobs folder (private_dir). The log path is DOUBLE-quoted: sbatch
+    reads `--output="a b/c"` as one path in a real run (HIVE, 2026-10-15); an unquoted space
+    ends the directive, and single quotes pass --test-only but leave no log in a real run.
+    --open-mode=append: a requeued job adds to its log instead of starting it over."""
     if re.search(r'["\n]', log_path):
         raise RenderError(f"the job's log path cannot hold a quote or a line break: {log_path!r}")
     part, acct, qos, requeue = queue
     q = shlex.quote
     L = ["#!/bin/bash -l", f"#SBATCH --job-name=podcast_{name}",
-         f'#SBATCH --output="{log_path}"',
+         f'#SBATCH --output="{log_path}"', "#SBATCH --open-mode=append",
          "#SBATCH --cpus-per-task=1", f"#SBATCH --mem={JOB_MEM}", f"#SBATCH --time={JOB_HOURS}:00:00"]
     L += [f"#SBATCH --{k}={v}" for k, v in (("partition", part), ("account", acct), ("qos", qos))
           if v]
@@ -3937,14 +3961,22 @@ def write_job(path, py, script, out, consent_args, models, queue, log_path, name
           "set -uo pipefail",
           "# AAC needs ffmpeg, a module on HIVE (this is a login shell, so `module` exists)",
           f"if command -v module >/dev/null 2>&1; then module load {HIVE_FFMPEG_MODULE} >/dev/null "
-          "2>&1 || module load ffmpeg >/dev/null 2>&1 || true; fi",
+          "2>&1 || module load ffmpeg >/dev/null 2>&1; fi",
+          "command -v ffmpeg >/dev/null 2>&1 || command -v afconvert >/dev/null 2>&1 || echo "
+          f"\"[WARN] no ffmpeg here (module load {HIVE_FFMPEG_MODULE} failed): the episode stays "
+          "podcast.wav, about 58 MB for 20 min, and share cannot build the report with the "
+          "audio\" >&2",
           f"PY={q(py)}", f"MP={q(os.path.abspath(__file__))}",
           " ".join(['"$PY" "$MP" render', q(script), "--tts", "gemini"]
                    + [q(x) for x in consent_args + models]) + " || exit $?",
           f'"$PY" "$MP" link {q(out)} || exit $?',
           f'"$PY" "$MP" share {q(out)}', ""]
     text = "\n".join(L)
-    write_private(path, text)
+    if os.path.islink(path):
+        raise RenderError(f"{path} is a link: not writing through it. Remove it and run job again.")
+    with open(path, "w", encoding="utf-8") as fh:       # safe_write.write_file after the merge
+        fh.write(text)
+    os.chmod(path, 0o700)
     return text
 
 

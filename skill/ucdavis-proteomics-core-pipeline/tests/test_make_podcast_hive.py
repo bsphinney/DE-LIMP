@@ -31,6 +31,7 @@ import json
 import os
 import pwd
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -61,7 +62,7 @@ if [ "$1" = "-c" ]; then
   [ "${FAKE_GENAI_VERSION:-2.31.0}" = none ] && { echo "ModuleNotFoundError: google" >&2; exit 1; }
   echo "${FAKE_GENAI_VERSION:-2.31.0}"; exit 0
 fi
-echo "$2 ${*:3}" >> "$FAKE_PY_LOG"
+( IFS='|'; echo "$2|${*:3}" ) >> "$FAKE_PY_LOG"      # one field per argument
 case "$2" in
   render) exit "${FAKE_RENDER_RC:-0}" ;;
   link)   exit "${FAKE_LINK_RC:-0}" ;;
@@ -105,7 +106,11 @@ class CoreKeyFile(object):
                      key + "\n", mode)
 
     def internal_session(self, title="Astral HeLa gradient test"):
+        """session.json for internal Core work, and no submission record."""
         write(os.path.join(self.d, "session.json"), json.dumps({"analysis_for": {"internal": title}}))
+        rec = os.path.join(self.d, "input", "submission.json")
+        if os.path.exists(rec):
+            os.remove(rec)
 
 
 # ------------------------------------------------------------------------------- the key
@@ -315,6 +320,28 @@ class CoreRunConsent(CoreKeyFile, T.Workspace):
                          (mp.CORE_CLOUD_OK, "internal", "Astral HeLa gradient test", staff.ROLE))
         self.assertEqual(self.staff_record()[-1]["by"], ME)
 
+    # review E3: client data must never be labelled the Core's own
+    def test_internal_is_refused_on_a_submissions_session(self):
+        self.core_session()                                    # attached: PROT_0807
+        write(os.path.join(self.d, "session.json"),
+              json.dumps(dict(json.loads(T.read(os.path.join(self.d, "session.json"))),
+                              analysis_for={"internal": "looks internal"})))
+        rc, out, err, log, keys = self.render("--core-run", "internal")
+        self.assertEqual((rc, log["clients"]), (2, 0))
+        self.assertIn("this session is for PROT_0807, a CoreOmics submission", err)
+        self.assertIn("pass --core-run.", err)
+
+    def test_a_named_but_unattached_submission_says_attach(self):
+        write(os.path.join(self.d, "session.json"),
+              json.dumps({"analysis_for": {"submissions": ["PROT_0807"]}}))
+        rc, out, err, log, keys = self.render("--core-run", "internal")
+        self.assertEqual(rc, 2)
+        self.assertIn("this session is for PROT_0807", err)
+        rc, out, err, log, keys = self.render("--core-run")
+        self.assertEqual((rc, log["clients"]), (2, 0))
+        self.assertIn("no submission record is attached: run submission_report.py attach", err)
+        self.assertNotIn("--core-run internal", err)
+
     def test_a_laptop_asks_hive_about_the_account_its_key_reaches(self):
         self.core_session()
         calls = []
@@ -385,6 +412,67 @@ class CoreRunConsent(CoreKeyFile, T.Workspace):
         self.assertEqual(hits, [], "point at make_podcast.CORE_CLOUD_OK; never retype it")
 
 
+# ------------------------------------------------------------------------------- verify
+class StaleVerify(T.Workspace):
+    """Review E2: a re-render whose verify failed (ASR 429) left the previous render's verify.txt
+    saying OK beside the new audio, rc 0, and record_run copies verify.txt. Now render clears
+    both verify files when it writes podcast.json, and a verify that does not run says so."""
+
+    def setUp(self):
+        super().setUp()
+        for p in (mock.patch.dict(os.environ, {"GEMINI_API_KEY": T.FAKE_KEY}),
+                  mock.patch.object(mp, "_sleep", lambda s: None),
+                  mock.patch.object(mp, "encode_aac", return_value=(None, "test")),
+                  mock.patch.object(mp, "_verify_audio", return_value=(b"AAC", "audio/aac", "t"))):
+            p.start()
+            self.addCleanup(p.stop)
+        self.assertEqual(self.check()[0], 0)
+        self.heard = "\n".join(t.text for t in mp.parse_script(self.script).turns())
+
+    def render(self, transcribe, *extra):
+        mods, log = T.fake_genai(lambda m, c, k: T.pcm_for(c), transcribe=transcribe)
+        with mock.patch.dict(sys.modules, mods):
+            return T.run("render", self.script, "--tts", "gemini", "--cloud-ok", "PI, today",
+                         *extra)
+
+    def files(self):
+        verify = os.path.join(self.pod, "verify.txt")
+        man = json.loads(T.read(os.path.join(self.pod, "podcast.json")))
+        return (T.read(verify) if os.path.exists(verify) else None,
+                os.path.exists(os.path.join(self.pod, "verify_transcript.txt")), man.get("verify"))
+
+    def test_a_failed_verify_never_leaves_the_last_ok(self):
+        self.assertEqual(self.render(lambda m, c: self.heard)[0], 0)
+        txt, transcript, block = self.files()
+        self.assertIn("Podcast audio check (ASR round trip): OK", txt)
+        self.assertTrue(transcript)
+
+        def quota(m, c):
+            raise T.ApiError(429, "RESOURCE_EXHAUSTED GenerateRequestsPerDayPerProjectPerModel")
+        rc, out, err = self.render(quota)
+        self.assertEqual(rc, 0, err)                          # the render itself is fine
+        txt, transcript, block = self.files()
+        self.assertIn("Podcast audio check (ASR round trip): NOT RUN", txt)
+        self.assertIn("reason: verify failed:", txt)
+        self.assertNotIn(": OK", txt)
+        self.assertFalse(transcript, "the last render's transcript is gone")
+        self.assertEqual(block["status"], "NOT RUN")
+        self.assertNotIn(T.FAKE_KEY, txt + json.dumps(block))
+
+    def test_no_verify_and_offline_renders_say_it_was_not_run(self):
+        self.assertEqual(self.render(lambda m, c: self.heard)[0], 0)
+        self.assertEqual(self.render(lambda m, c: self.heard, "--no-verify")[0], 0)
+        txt, transcript, block = self.files()
+        self.assertIn("NOT RUN\nreason: --no-verify was given", txt)
+        self.assertEqual((transcript, block["status"]), (False, "NOT RUN"))
+        mp.BACKENDS["fake"] = T.FakeTTS
+        self.addCleanup(mp.BACKENDS.pop, "fake", None)
+        self.assertEqual(T.run("render", self.script, "--tts", "fake")[0], 0)
+        txt, transcript, block = self.files()
+        self.assertIn("reason: an offline render (fake) sends nothing", txt)
+        self.assertEqual(block["status"], "NOT RUN")
+
+
 # ------------------------------------------------------------------------------- the job
 class Job(CoreKeyFile, T.Workspace):
     QUEUE = ("high", "genome-center-grp", "genome-center-grp-high-qos")
@@ -416,7 +504,12 @@ class Job(CoreKeyFile, T.Workspace):
         e = job_env(self.d, FAKE_PY_LOG=self.py_log, **env)
         r = subprocess.run(["bash", self.job_path], capture_output=True, text=True, env=e,
                            timeout=60)
-        return r.returncode, [ln.split()[0] for ln in setup_limpa._lines(self.py_log)]
+        self.job_stderr = r.stderr
+        return r.returncode, [ln.split("|")[0] for ln in setup_limpa._lines(self.py_log)]
+
+    def job_args(self):
+        """What the job passed to each step, one list of arguments per call."""
+        return [ln.split("|") for ln in setup_limpa._lines(self.py_log)]
 
     def test_the_job_script(self):
         rc, out, err = self.job("--core-run")
@@ -430,7 +523,8 @@ class Job(CoreKeyFile, T.Workspace):
         text = T.read(self.job_path)
         lines = text.splitlines()
         self.assertEqual(lines[0], "#!/bin/bash -l", "a login shell: HIVE's `module` command")
-        for want in ("#SBATCH --cpus-per-task=1", "#SBATCH --mem=2G", "#SBATCH --time=2:00:00",
+        for want in ("#SBATCH --open-mode=append",              # a requeued job keeps its log
+                     "#SBATCH --cpus-per-task=1", "#SBATCH --mem=2G", "#SBATCH --time=2:00:00",
                      "#SBATCH --partition=high", "#SBATCH --account=genome-center-grp",
                      "#SBATCH --qos=genome-center-grp-high-qos",
                      f'#SBATCH --output="{self.log_path}"', "module load ffmpeg/7.0.2"):
@@ -491,6 +585,42 @@ class Job(CoreKeyFile, T.Workspace):
         text = T.read(got["job"])
         self.assertIn(f'#SBATCH --output="{os.path.join(home, "jobs")}/', text)
         self.assertIn("'", got["submit"], "the submit line quotes the path too")
+
+    # review E1: 2,557 Core service folders have a space in their names
+    def test_a_session_path_with_a_space(self):
+        sd = os.path.join(self.d, "Core service", "PROT 0807 session")
+        out = os.path.join(sd, "output")
+        T.write(os.path.join(out, "AI_Analysis_Report.md"), T.REPORT)
+        T.write(os.path.join(out, "Analysis_Report.html"), T.REPORT_HTML)
+        script = os.path.join(out, "podcast", "podcast_script.md")
+        T.write(script, T.script_text())
+        rc, o, e = T.run("check", script, "--source", os.path.join(out, "AI_Analysis_Report.md"))
+        self.assertEqual(rc, 0, e)
+        os.makedirs(os.path.join(sd, "input"))
+        submission_report.attach(sd, {"internal_id": "PROT_0807"})
+        home = os.path.join(self.d, "pipeline home")
+        with mock.patch.dict(os.environ, {"PROTEOMICS_PIPELINE_HOME": home}):
+            rc, o, err = T.run("job", script, "--core-run", "--python", self.py)
+        self.assertEqual(rc, 0, err)
+        got = json.loads(o)
+        self.assertEqual(got["submit"], "sbatch " + shlex.quote(got["job"]))
+        self.assertIn(f'#SBATCH --output="{os.path.join(home, "jobs")}/', T.read(got["job"]))
+        self.job_path = got["job"]
+        self.assertEqual(self.run_job(), (0, ["render", "link", "share"]))
+        render, link, share = self.job_args()
+        self.assertEqual(render[1:5], [script, "--tts", "gemini", "--core-run"])
+        self.assertEqual(link[1:], [os.path.realpath(out)])
+        self.assertEqual(share[1:], [os.path.realpath(out)])
+
+    # review E4: a failed module load used to ship a 58 MB podcast.wav without a word
+    def test_no_ffmpeg_is_said_in_the_log(self):
+        self.assertEqual(self.job("--core-run")[0], 0)
+        only_bash = os.path.join(self.d, "only_bash")                   # no ffmpeg, no afconvert
+        os.makedirs(only_bash)
+        os.symlink(shutil.which("bash"), os.path.join(only_bash, "bash"))
+        self.assertEqual(self.run_job(PATH=only_bash)[0], 0)
+        self.assertIn("[WARN] no ffmpeg here (module load ffmpeg/7.0.2 failed)", self.job_stderr)
+        self.assertIn("podcast.wav", self.job_stderr)
 
     def test_a_preemptible_queue_requeues(self):
         self.queue.stop()
@@ -569,8 +699,8 @@ class Job(CoreKeyFile, T.Workspace):
         self.assertEqual(json.loads(out)["key"], "GEMINI_API_KEY")
         self.job_path = json.loads(out)["job"]          # not a Core run: named for the session
         self.assertEqual(self.run_job()[0], 0)
-        render = setup_limpa._lines(self.py_log)[0]
-        self.assertIn(f"--cloud-ok {note} --model gemini-3.8-flash-tts", render)
+        render = self.job_args()[0]
+        self.assertEqual(render[-4:], ["--cloud-ok", note, "--model", "gemini-3.8-flash-tts"])
 
     def test_a_missing_script_is_one_line(self):
         rc, out, err = T.run("job", os.path.join(self.pod, "nope.md"), "--core-run")
