@@ -1274,7 +1274,9 @@ python3 scripts/experiment_type.py set-bait --session <session> --bait none     
 ```
 It is kept as `bait_confirmed` (the answer, who, when) in `input/experiment_type.json`, and a
 re-recorded type keeps it. Without an answer the data check would take the ONE added sequence as
-the bait, unconfirmed -- never leave it there.
+the bait, unconfirmed -- never leave it there. More than 10 added sequences (a whole proteome) are
+counted, not listed (`n_added_sequences`): ask for the bait by name, and `set-bait` takes its
+accession, entry name or gene.
 
 **Read the returned JSON** (also written to `<out>.meta.json` for the repro
 bundle) and act on it:

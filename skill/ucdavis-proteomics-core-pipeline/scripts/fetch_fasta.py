@@ -1263,6 +1263,11 @@ def drop_target_contaminants(contam_text, target_text, enzymes_used=None,
 # contained entry always goes (100% of its internal peptides), and the digestion enzymes in use
 # stay, as everywhere else.
 ADDED_SEQUENCE_SHARED_FRACTION = 0.5
+# At most this many sequences added with --add-fasta are a bait, a tag or a few constructs, and
+# are named one by one -- in the Methods (make_methods.added_sequences_sentence) and as the bait's
+# candidates (experiment_type.py's ask_bait). More is a whole proteome (a second organism's, 4,506
+# entries in a staff search, 2026-10-10): counted, with the file and its SHA-256, never listed.
+FEW_ADDED_SEQUENCES = 10
 ADDED_SEQUENCE_RULE = (f"an added sequence is a target: a contaminant entry identical to or "
                        f"contained in one, or with at least {ADDED_SEQUENCE_SHARED_FRACTION:.0%} of "
                        f"its own peptides (the search's digest, I = L) also in one, is removed and "

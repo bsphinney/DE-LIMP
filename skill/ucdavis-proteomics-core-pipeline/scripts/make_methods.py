@@ -48,7 +48,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # bruker_tdf.py for how a read-write open truncates a tdf (the state of 342 on HIVE).
 import bruker_method  # noqa: E402
 # the contaminant tag and the sidecar's keratin_sample reader: one definition each (rule 3)
-from fetch_fasta import CONT_TAG, keratin_sample_recorded  # noqa: E402
+from fetch_fasta import CONT_TAG, keratin_sample_recorded, FEW_ADDED_SEQUENCES  # noqa: E402
 
 ACK_SOURCE = "https://proteomics.ucdavis.edu/instrument-grant-acknowledgments"
 # (instrument-name substrings, facility filename prefixes, label, acknowledgment).
@@ -1105,10 +1105,10 @@ def diann_contaminant_sentence(srec):
 
 
 # At most this many added sequences (and contaminant entries removed or kept beside them) are
-# named one by one in the Methods: the bait / tag case. Above it, the count and the file with its
-# SHA-256 identify them -- an added second proteome of 4,506 entries once put a 145 KB line of
-# accessions into a client's Methods (staff report 2026-10-10).
-ADDED_SEQUENCES_NAMED_MAX = 10
+# named one by one in the Methods: the bait / tag case (fetch_fasta.FEW_ADDED_SEQUENCES). Above
+# it, the count and the file with its SHA-256 identify them -- an added second proteome of 4,506
+# entries once put a 145 KB line of accessions into a client's Methods (staff report 2026-10-10).
+ADDED_SEQUENCES_NAMED_MAX = FEW_ADDED_SEQUENCES
 
 
 def added_sequences_sentence(fmeta):
