@@ -178,7 +178,8 @@ annot[, Description := if (is.null(fd)) NA_character_ else fd$desc[match(first_a
 annot[, Label := {
   g <- if (is.null(fd)) rep(NA_character_, .N) else fd$gene[match(first_acc(Protein.Group), fd$acc)]
   ifelse(!is.na(g) & nzchar(g), g,
-         ifelse(!is.na(Description) & nzchar(Description), substr(sub(",.*$", "", Description), 1, 32),
+         ifelse(!is.na(Description) & nzchar(Description),
+                {x <- sub(",.*$", "", Description); ifelse(nchar(x) > 32, paste0(substr(x, 1, 31), "\u2026"), x)},
                 ifelse(!is.na(Genes) & nzchar(Genes), sub(";.*$", "", Genes), first_acc(Protein.Group))))
 }]
 

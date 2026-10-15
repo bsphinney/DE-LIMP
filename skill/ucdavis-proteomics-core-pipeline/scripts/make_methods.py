@@ -2206,7 +2206,7 @@ def main():
             if srec.get(key):
                 srows.append((label, _fmt_range(srec[key]["value"]), srec[key]["source"]))
         for m in srec["mods"]:
-            if m.get("label"):
+            if m.get("label") and (srec.get("labels") or {}).get("channels"):
                 continue                      # the SILAC label: the channel rows below say it
             srows.append((f"{m['type'].capitalize()} modification", mod_phrase(m), m["source"]))
         lab = srec.get("labels")
