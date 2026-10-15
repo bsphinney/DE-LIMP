@@ -101,6 +101,11 @@ def sample_type_brief(w, session):
           "panels (SAMPLE_QUALITY.md) point to a different tissue or biofluid (e.g. muscle, "
           "plasma or skin proteins dominating a sample stated as brain), say so in **Data "
           "Quality Notes** as a question for the user; do not resolve it either way yourself.")
+    elif rec and rec.get("source") == st.NOT_ASKED:
+        w("- Core staff were not asked (no step's choice depended on it). Describe the samples "
+          "as the attached submission record does, or by their groups only; do not name a "
+          f"tissue, cell type or biofluid it does not state; {st.NEVER_INFER}. Nothing about "
+          "the sample type goes in Data Quality Notes unless the data contradict the record.")
     else:
         w("- Do not name a tissue, cell type or biofluid anywhere in the report or Methods; "
           f"{st.NEVER_INFER}. Say in **Data Quality Notes** that the sample type was not stated, "

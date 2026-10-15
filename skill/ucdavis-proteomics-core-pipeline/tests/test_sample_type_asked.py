@@ -129,6 +129,16 @@ class TheBrief(unittest.TestCase):
             brief, _ = self.brief(tmp)                    # no session at all: the same rule
         self.assertIn("Sample type: NOT STATED", brief)
 
+    def test_core_staff_not_asked_adds_no_data_quality_note(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s = session(tmp)
+            st.record(s, not_asked=True)
+            brief, _ = self.brief(tmp, "--session", s)
+        self.assertIn("Core staff were not asked", brief)
+        self.assertIn("as the attached submission record does", brief)
+        self.assertIn("never infer it from file or folder names", brief)
+        self.assertNotIn("Say in **Data Quality Notes** that the sample type was not stated", brief)
+
     def test_the_submission_session_is_read_too(self):
         with tempfile.TemporaryDirectory() as tmp:
             s = session(tmp)
