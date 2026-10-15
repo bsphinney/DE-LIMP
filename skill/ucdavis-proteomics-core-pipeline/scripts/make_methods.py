@@ -2143,7 +2143,9 @@ def main():
         # it describes itself (DE-LIMP rule 1); run_de.R's record is described by de_paragraph()
         w(f"## {de_prov.get('methods_heading') or 'Differential expression'}")
         w("")
-        w(de_prov.get("methods_paragraph") or de_paragraph(de_prov))
+        own = de_prov.get("methods_paragraph")
+        left_out = de_runs_left_out_sentence(de_prov) if own else None
+        w(" ".join(x for x in (own, left_out) if x) if own else de_paragraph(de_prov))
         w("")
         cont = de_prov.get("contaminants") if isinstance(de_prov.get("contaminants"), dict) else {}
         if cont.get("database_risk") is True and cont.get("database_note"):

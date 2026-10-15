@@ -302,6 +302,35 @@ class Variants(unittest.TestCase):
             self.assertEqual(json.load(open(os.path.join(out, "de_provenance.json"))),
                              {"pipeline_id": "dpc"})
 
+    def test_a_run_left_out_is_the_users_recorded_decision(self):
+        with tempfile.TemporaryDirectory() as d:
+            report = fx.make_report(os.path.join(d, "report.parquet"), label_check_run="run_C1")
+            design = fx.write_design(os.path.join(d, "design.csv"))
+            p, _ = run_silac(d, ok=False)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn("report run(s) with no row: run_C1", p.stderr)
+            self.assertIn("--exclude <run> --reason", p.stderr)
+            r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "silac.py"), "design",
+                                "--validate", design, "--against", report, "--exclude", "run_C1",
+                                "--reason", "failed injection"], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            _, out = run_silac(d)
+            prov = json.load(open(os.path.join(out, "de_provenance.json")))
+            self.assertEqual(prov["runs_left_out"]["runs"],
+                             [{"run": "run_C1", "reason": "failed injection"}])
+            self.assertEqual(prov["runs_left_out"]["n_analysed"], 4)
+            m = os.path.join(d, "methods.md")
+            subprocess.run([sys.executable, os.path.join(SCRIPTS, "make_methods.py"), "--raw",
+                            os.path.join(d, "x.d"), "--instrument", "timsTOF HT", "--acquisition",
+                            "DIA", "--de-dir", out, "--out", m], check=True, capture_output=True)
+            self.assertIn("Of the 5 runs searched, 4 were analysed and 1 was left out",
+                          open(m, encoding="utf-8").read())
+            # an exclusion without a reason is refused
+            r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "silac.py"), "design",
+                                "--validate", design, "--against", report, "--exclude", "run_C1",
+                                "--reason", " "], capture_output=True, text=True)
+            self.assertNotEqual(r.returncode, 0)
+
     def test_a_bad_design_stops_with_the_reason(self):
         with tempfile.TemporaryDirectory() as d:
             fx.make_report(os.path.join(d, "report.parquet"))

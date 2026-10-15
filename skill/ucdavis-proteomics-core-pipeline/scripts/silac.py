@@ -428,7 +428,21 @@ def parse_comparisons(text):
     return out
 
 
-def read_design(path, channels=None, comparisons=None, report_runs=None):
+def recorded_exclusions(path):
+    """[(run, reason)] the user decided to leave out, as recorded beside the design
+    (<design>.decisions.json excluded_runs -- collect_conditions.py's record and key)."""
+    from collect_conditions import decisions_path, EXCLUDED_KEY
+    try:
+        with open(decisions_path(path), encoding="utf-8") as fh:
+            rec = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    ex = rec.get(EXCLUDED_KEY) if isinstance(rec, dict) else None
+    return [(x["run"], x.get("reason")) for x in (ex or {}).get("runs") or []
+            if isinstance(x, dict) and x.get("run")]
+
+
+def read_design(path, channels=None, comparisons=None, report_runs=None, excluded=None):
     """silac_design.csv -> the normalised design run_silac.R analyses, or SilacError naming
     every problem. One row per (run, channel) that holds a sample:
 
@@ -441,7 +455,10 @@ def read_design(path, channels=None, comparisons=None, report_runs=None):
     labelled channel only is a label-check run (incorporation is measured on it, never compared).
     `channels`: the search's channel names, lightest first (from the params; else the design's
     own, in L, M, H order). `comparisons`: 'A-B,...' or None for every pair, the group in the
-    heavier channel over the lighter (DEFAULT, said so). `report_runs`: the report's runs."""
+    heavier channel over the lighter (DEFAULT, said so). `report_runs`: the report's runs.
+    `excluded`: [(run, reason)] searched runs the user decided to leave out (a failed injection);
+    None reads the ones recorded beside the design (recorded_exclusions)."""
+    excluded = recorded_exclusions(path) if excluded is None else list(excluded)
     rows = _read_rows(path)
     probs = []
     if not rows:
@@ -487,16 +504,26 @@ def read_design(path, channels=None, comparisons=None, report_runs=None):
         rep_of[rep] = run
         if g not in groups:
             groups.append(g)
+    excl = {r for r, _ in excluded}
+    for r, why in excluded:
+        if r in runs:
+            probs.append(f"run {r} is excluded and still has rows: delete its rows, or drop the "
+                         "exclusion")
+        if not (why or "").strip():
+            probs.append(f"run {r} is excluded without a reason (--reason, in the user's words)")
     if report_runs is not None:
         rr = set(report_runs)
         for run in runs:
             if run not in rr:
                 probs.append(f"run {run!r} is not in the report (its runs: "
                              f"{', '.join(sorted(rr)[:6])}{' ...' if len(rr) > 6 else ''})")
-        left = sorted(rr - set(runs))
+        for r in sorted(excl - rr):
+            probs.append(f"excluded run {r!r} is not in the report")
+        left = sorted(rr - set(runs) - excl)
         if left:
-            probs.append(f"report run(s) with no row: {', '.join(left)} -- add them, or "
-                         "remove them from the search")
+            probs.append(f"report run(s) with no row: {', '.join(left)} -- add them; a run the "
+                         "user decided to leave out (a failed injection) is recorded with "
+                         "--exclude <run> --reason \"<why>\", only on their word")
     mixed = {r: e for r, e in runs.items() if len(e["channels"]) >= 2}
     checks = {r: e for r, e in runs.items() if len(e["channels"]) == 1
               and next(iter(e["channels"])) != order[0]}
@@ -547,6 +574,12 @@ def read_design(path, channels=None, comparisons=None, report_runs=None):
                                "DEFAULT, not user-confirmed: every pair of groups, the group in "
                                "the heavier channel over the lighter"),
         "label_check_runs": sorted(checks), "unused_runs": unused,
+        # run_de.R's runs_left_out shape: make_methods / the report word it (one description)
+        "runs_left_out": {"determined": report_runs is not None,
+                          "n_report_runs": len(set(report_runs)) if report_runs is not None else None,
+                          "n_analysed": len(set(report_runs) & set(runs)) if report_runs is not None else None,
+                          "runs": [{"run": r, "reason": why} for r, why in excluded],
+                          "reasons_from": "the design's decisions record (silac.py design --exclude)"},
         # the same, flat: one row per run and channel (what run_silac.R reads)
         "assignments": [{"Run": r, "Replicate": e["replicate"], "Channel": ch, "Group": g,
                          "role": "ratio" if r in mixed else
@@ -582,6 +615,11 @@ def main(argv=None):
     d.add_argument("--channels", help="the search's channels, lightest first, e.g. L,M,H")
     d.add_argument("--comparisons", help="'A-B,C-B' (A over B); default every pair")
     d.add_argument("--json", action="store_true", help="print the normalised design as JSON")
+    from collect_conditions import _ExcludeAction
+    d.add_argument("--exclude", "--reason", dest="exclude", action=_ExcludeAction, metavar="RUN",
+                   help="--exclude <run> --reason \"<why, in the user's words>\": a searched run "
+                        "the user decided to leave out (recorded in <design>.decisions.json, "
+                        "which run_silac.R reads); repeat the pair per run")
     a = ap.parse_args(argv)
 
     if a.cmd == "presets":
@@ -614,7 +652,18 @@ def main(argv=None):
                 [x.strip() for x in open(a.runs_file, encoding="utf-8") if x.strip()]
                 if a.runs_file else None)
         chans = [x.strip() for x in a.channels.split(",")] if a.channels else None
-        des = read_design(a.validate, chans, a.comparisons, runs)
+        excl = [(r, why) for r, why in a.exclude] if a.exclude else None
+        if excl is not None and runs is None:
+            raise SilacError("--exclude needs --against <report> (or --runs-file): an excluded "
+                             "run must be one the search reported")
+        des = read_design(a.validate, chans, a.comparisons, runs, excl)
+        if excl is not None and runs is not None:
+            # recorded beside the design, in collect_conditions.py's own record and key
+            from collect_conditions import _write_exclusions
+            _, problem = _write_exclusions(a.validate, a.against or a.runs_file, excl, set(runs),
+                                           {x["run"] for x in des["runs"]})
+            if problem:
+                raise SilacError(problem)
     except SilacError as e:
         if a.json:
             print(json.dumps({"ok": False, "error": str(e)}))

@@ -648,6 +648,9 @@ prov <- list(
   comparisons_source = des$comparisons_source,
   significant_per_contrast = sig_counts, de_tables = tables_rec,
   labels = labels, labels_source = labels_source,
+  # searched runs the user decided to leave out (silac.py design --exclude), in run_de.R's shape
+  runs_left_out = jsonlite::fromJSON(jsonlite::toJSON(des$runs_left_out, auto_unbox = TRUE, null = "null"),
+                                     simplifyVector = FALSE),
   design_record = list(file = normalizePath(design_path), channels = as.list(chan_order),
                        label_swapped_groups = des$label_swapped_groups %||% list(),
                        label_check_runs = des$label_check_runs %||% list(),
