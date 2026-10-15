@@ -285,7 +285,9 @@ folder in the home is kept this account's alone: the `mkdir` above makes it 700,
 HIVE makes any folder it creates between the home and `--out` (`~/core` the first time) 700, closes
 an existing `--out` others can read (saying so in its `warnings`), and refuses a folder or link
 another account put in the home. A folder outside the home (the Core's group storage) keeps its
-mode.
+mode. Every `core_submission.py` command run on HIVE also closes an existing `~/core` of this
+account's that others can read or enter (`made ~/core private: it holds CoreOmics records`, one
+line) -- never a `~/core` that is a link or another account's.
 
 **The API (verified).** Base `https://ucdavis.coreomics.com/server/api`, header
 `Authorization: Token <tok>`.
@@ -334,7 +336,10 @@ and `<out>/` itself gets exactly what the laptop route `--put`s there: the HIVE 
 files `locate`, `stage` and `submission_report.py attach` read. There is no `hive/` folder.
 `bioshare` and `email-draft` given `--summary <out>/submission_summary.json` (the HIVE copy,
 `redacted_for_hive`) read the full one from `private/` themselves and say so on stderr; the
-draft is written mode 600 there.
+draft is written mode 600 there. With no `private/` beside the HIVE copy, or one holding another
+submission's summary (a reused `--out` folder: its `id` / `internal_id` differ), they stop with
+exit 2 rather than draft from the copy without addresses or with someone else's: fetch the
+submission where the key is (SKILL.md step 1c.1) into its own folder.
 
 **The organism is not resolved here.** `organism_as_submitted` is the submitter's free text,
 labelled `confirmed: false`. Put it to the staff member as the proposed answer and confirm

@@ -1300,6 +1300,26 @@ def private_home_folder(out: str) -> list:
     return []
 
 
+def private_core_home() -> str:
+    """On HIVE, an EXISTING ~/core of this account's that other accounts can read or enter is made
+    700, and one plain line says so (security review, 2.12): it holds CoreOmics records, and an
+    earlier fetch or a staff member's own workaround may have left it, and files in it, readable
+    by every HIVE account. Never a ~/core that is a link or another account's. -> the line, or ""."""
+    core = os.path.join(os.path.expanduser("~"), "core")
+    try:
+        st = os.lstat(core)
+    except OSError:
+        return ""
+    if (not stat.S_ISDIR(st.st_mode) or (hasattr(os, "getuid") and st.st_uid != os.getuid())
+            or not stat.S_IMODE(st.st_mode) & 0o077):
+        return ""
+    try:
+        os.chmod(core, 0o700)
+    except OSError as e:                    # said, never silent; the command itself goes on
+        return f"could not make ~/core private ({e}): it holds CoreOmics records -- chmod 700 ~/core"
+    return "made ~/core private: it holds CoreOmics records"
+
+
 def write_text(path: str, text: str, private: bool = False) -> None:
     """`text` into `path`; with `private`, readable by this account alone from its first byte
     (an existing file is made 600 too: O_CREAT keeps an old file's mode)."""
@@ -1307,10 +1327,19 @@ def write_text(path: str, text: str, private: bool = False) -> None:
         with open(path, "w") as fh:
             fh.write(text)
         return
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as fh:
-        os.fchmod(fh.fileno(), 0o600)
-        fh.write(text)
+    # a new file, 600 from its first byte, then renamed over the old one: an old file of mode 644
+    # was truncated and rewritten while still readable by every account
+    tmp = f"{path}.{os.getpid()}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            os.fchmod(fh.fileno(), 0o600)
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
 
 
 def load_summary(path: str) -> dict:
@@ -1332,12 +1361,29 @@ def full_summary(path: str) -> tuple:
     summary at `path`, or -- when that is the HIVE copy (redacted_for_hive) of a fetch that ran on
     HIVE -- the full one fetch kept in private/ beside it. So the same --summary works on both."""
     s = load_summary(path)
-    if s.get("redacted_for_hive"):
-        alt = os.path.join(os.path.dirname(os.path.abspath(path)), PRIVATE_DIR, "submission_summary.json")
-        if os.path.isfile(alt):
-            note(f"using the full summary {alt}: {path} is the HIVE copy, without emails or contacts")
-            return load_summary(alt), alt
-    return s, path
+    if not s.get("redacted_for_hive"):
+        return s, path
+    alt = os.path.join(os.path.dirname(os.path.abspath(path)), PRIVATE_DIR, "submission_summary.json")
+    # The HIVE copy has no address: drafted from it, the email said the submitter had none and
+    # left the PI out of Cc (error-handling review, 2.12). Never fall back to it.
+    if not os.path.isfile(alt):
+        raise Stop(EXIT_DECIDE, {
+            "error": f"{path} is the HIVE copy, without contact details, and there is no full "
+                     f"summary beside it ({alt})",
+            "hint": "fetch where the CoreOmics key is (SKILL.md step 1c.1) and give that --summary: "
+                    "on a computer <out>/submission_summary.json, on HIVE the same folder after a "
+                    "fetch there (it keeps the full one in private/)"})
+    full = load_summary(alt)
+    # ... and the full one must be THIS submission's: a reused --out folder once drafted PROT_0000's
+    # email with another submission's addresses
+    differ = [k for k in ("id", "internal_id") if _s(full.get(k)) != _s(s.get(k))]
+    if differ:
+        raise Stop(EXIT_DECIDE, {
+            "error": f"{alt} is another submission's ({', '.join(f'{k} {full.get(k)!r}' for k in differ)}"
+                     f"; {path} has {', '.join(f'{k} {s.get(k)!r}' for k in differ)})",
+            "hint": f"fetch this submission again into its own folder (--out), or remove {alt}"})
+    note(f"using the full summary {alt}: {path} is the HIVE copy, without emails or contacts")
+    return full, alt
 
 
 def cmd_fetch(a) -> int:
@@ -4978,6 +5024,12 @@ def main(argv=None) -> int:
 
     a = ap.parse_args(argv)
     try:
+        if on_hive():
+            # every subcommand that runs on HIVE: fetch, locate, stage and conditions keep their
+            # records in ~/core
+            made = private_core_home()
+            if made:
+                note(made)
         return a.func(a)
     except Stop as e:
         emit(e.payload)
