@@ -1,9 +1,13 @@
 # CoreOmics submissions — from "search submission 807" to a shared Bioshare folder
 
-**When this applies:** a UC Davis Proteomics Core staff member names a **CoreOmics
-submission** — "search the data from submission 807", "analyze PROT_0807", "deliver the
-results to the collaborator", "put it in Bioshare". SKILL.md steps 1c and 12b are the short
-form; this is the runbook and the evidence behind it. Everything marked *measured* or
+**When this applies:** a UC Davis Proteomics Core staff member's analysis is for a **CoreOmics
+submission**. SKILL.md step 0a asks every staff member, as they start, which submission(s) the
+analysis is for, so step 1c follows from their answer (one number, or several: "Several
+submissions in one analysis" below) as well as from a request that names one: "search the
+data from submission 807", "analyze PROT_0807", "deliver the results to the collaborator",
+"put it in Bioshare". Internal work (their answer "none") skips this runbook and goes on the
+board's internal project (`references/board.md` section 2). SKILL.md steps 1c and 12b are the
+short form; this is the runbook and the evidence behind it. Everything marked *measured* or
 *verified* was checked live against CoreOmics, HIVE, the Flinders share or upstream source on
 2026-09-16.
 
@@ -851,6 +855,46 @@ can see where each came from.
 
 It never sends; exit 2 means a placeholder is left (no link, or no submitter address) or an
 address failed its check.
+
+## Several submissions in one analysis
+
+Staff sometimes want two or more submissions analysed together (asked for on 2026-10-08: two
+submissions of one study, one session). Every step of this runbook handles one submission at a
+time, so the supported way is one session that answers the **main** submission and names the
+others. The main one is the first staff named, unless they say another is; ask once when they
+named several and it is not clear which leads.
+
+1. **Steps 1–4 for each submission** (`fetch`, `locate`, `stage`, `conditions`), each in its own
+   `~/core/PROT_####` folder and staged in its own service folder. The one staff confirmation
+   (SKILL.md step 1c.4) shows every submission's files and folder together.
+2. **One session, under the main submission's work dir**, with every submission's files, and
+   the numbers recorded, the main one first:
+   ```
+   bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/session.py init \
+       --name PROT_0807_PROT_0811 --base <PROT_0807 work_dir> \
+       --raw $(cat ~/core/PROT_0807/files.txt ~/core/PROT_0811/files.txt) \
+       --submission PROT_0807 --submission PROT_0811'
+   ```
+3. **Attach the main submission's record only.** A session holds one record (`attach` refuses a
+   second: "already attached to"), and the report's Submission section, the Methods' Sample
+   preparation, the analysis brief, `experiment_type.py --source submission`, the Data Quality
+   Notes and the feedback survey all read that one record. Name the others yourself:
+   - in the decisions log, right after `init`:
+     `log_decision.py --session "$S" --what "PROT_0807 and PROT_0811 analysed together; PROT_0807 record attached" --why "<staff's words>" --step "1c. submissions"`;
+   - in `AI_Analysis_Report.md` (step 9): near the top, one sentence per other submission (its
+     number, its PI, the samples it brought), from its own `submission_summary.json`. Its
+     sample sheet against its files was checked by its own `locate`.
+4. **The design:** build each submission's conditions with `conditions` and combine them into
+   one `conditions.csv`, confirmed once with staff. A condition name both submissions use is one
+   group only if staff say so. Submissions prepared or run at different times are a likely
+   batch: ask staff whether it belongs in the design (SKILL.md step 3).
+5. **Delivery:** `deliver` takes the combined session into the **main** submission's share only.
+   For another submission it refuses (exit 2: the session sits under the main one's stage
+   record); never work around that. Ask staff how that submission's people get the results:
+   usually the main share's link (the same lab), and its raw data, when wanted, delivered on its
+   own (`deliver --summary ~/core/PROT_0811/submission_summary.json --mode raw-only`).
+6. **The board:** one thread per submission, the records in the main one's thread
+   (`references/board.md` section 2, "Several submissions in one analysis").
 
 ## Troubleshooting by exit code
 

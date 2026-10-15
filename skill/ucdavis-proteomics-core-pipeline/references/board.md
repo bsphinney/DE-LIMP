@@ -2,8 +2,11 @@
 
 The board (https://core-board-ucd.azurewebsites.net) keeps each Core project's work in one
 thread that every staff member can read: where the files are, the cluster jobs, QC, findings and
-the final summary. Brett, the Core director, is in each submission's thread and approves it; he
-can bring in his own Claude. Only Core staff are on the board. For anyone else, never mention it.
+the final summary. **Every analysis a Core staff member does goes on it**: a CoreOmics
+submission's in that submission's project, internal work (a method test, QC, training, a tool
+comparison) in the board's internal project, "Core internal work". Brett, the Core director, is
+in each thread and approves it; he can bring in his own Claude. Only Core staff are on the
+board. For anyone else, never mention it.
 
 You talk to it only through `bash scripts/board.sh <command>`. That runs `board_client.py`, the
 board's own client, copied unchanged (its sha256 is pinned in `tests/test_board.py`). Every
@@ -14,7 +17,7 @@ command prints JSON; nothing waits unless you pass `--wait`.
 1. **Only `scripts/board.sh`.** Never open the board's web pages in a browser, not even your
    person's signed-in one. Starting threads, approving, deciding, changing limits and
    connecting a Claude are for people. The board asks for their UC Davis password and Duo for
-   exactly those. You may put a submission on the board yourself (`start`, section 2), but
+   exactly those. You may put an analysis on the board yourself (`start`, section 2), but
    only a person gives a Claude cluster time.
 2. **The board never holds up the analysis when it is down or not ready.** A command that fails,
    a thread that does not exist yet, or `you.can_post: false`: carry on with the analysis, and
@@ -39,7 +42,10 @@ false`), run it on HIVE: `bash scripts/hive_exec.sh 'bash ~/proteomics-pipeline/
 <command>'`. The key then lives in their HIVE home, which is just as private. Inside those single
 quotes, keep apostrophes out of titles, goals and posts.
 
-## 1. Connect, once per computer (step 1c, right after `fetch`)
+## 1. Connect, once per computer (right before the first `start`)
+
+`connect` comes first in every analysis, right before `start` (section 2): in step 1c right
+after `fetch` for a submission, in step 1 for internal work. Once connected it answers at once.
 
 ```
 bash scripts/board.sh connect --owner <their UC Davis sign-in email>
@@ -59,9 +65,14 @@ bash scripts/board.sh connect --owner <their UC Davis sign-in email>
 - **Not on the board** (after signing in they see "not on the Project Board's list"): Brett adds
   staff. Tell your person, and carry on without the board.
 
-## 2. Put a CoreOmics submission on the board (step 1c, right after `connect`)
+## 2. Put the analysis on the board (right after `connect`)
 
-You do this yourself, once `connect` says connected:
+Every analysis by Core staff goes on the board before its long steps. Step 0a asked what it is
+for: one CoreOmics submission, several, or none (internal work). The answer picks the command
+below. You do this yourself, once `connect` says connected. Not on a resume: its thread exists
+(section 3 finds it).
+
+### One submission (step 1c, right after `fetch`)
 
 ```
 bash scripts/board.sh start --prot PROT_0807 \
@@ -89,18 +100,77 @@ bash scripts/board.sh start --prot PROT_0807 \
   your person's approval; tell them. **Exit 4**: the day's limit of new threads; carry on.
 - **No connection yet** (`connect` still waiting): carry on with step 1c and run `start` at the
   next milestone.
+- **`fetch` cannot run yet** (a CoreOmics key problem, step 1c.1): do not wait for it. Run
+  `start` now with what staff told you: `--project-title "<PI surname> lab: <what they say the
+  project is>"` (step 1 asks those facts when there is no key), or leave `--project-title` out
+  when they do not know: the board then shows the number. **What the first `start` writes is
+  kept.** Running it again returns the same thread and changes no title or goal, and a project's
+  title is set only when the project is new. So ask staff for the PI's surname first when you
+  do not have it.
+
+### Several submissions in one analysis
+
+Staff named more than one number: they want those submissions analysed together. The first one
+named is the **main** one, unless staff say another is. Its record is the one attached to the
+session (`references/core-submissions.md` "Several submissions in one analysis"), and its thread
+holds the analysis's records.
+
+- **`start` once for each submission**, each in its own project as above: the main one with
+  `--title "Search and DE"`, each other with `--title "Search and DE, with PROT_0807"` (the main
+  one's number), and a `--goal` that says which submissions the analysis combines.
+- **Every record in section 3 goes to the main thread only**: the cluster-time ask, the jobs,
+  the search folders, QC and the results. A job recorded in two threads counts its CPU-hours
+  twice, and a search recorded in two projects shows up in two FRAN panels.
+- **Each other thread gets three records** (THREAD is its own id): after its `stage --apply`,
+  `where THREAD --raw-data <its raw folder>`; at the first milestone where it can post,
+  `post THREAD --kind finding --text "Analysed together with PROT_0807 in one session: the search, QC and results are in the thread of PROT_0807."`;
+  and at delivery, the delivery row of section 3, its summary saying where the combined results
+  went. The post limits count per thread, so this costs the main thread nothing.
+
+### Internal work (staff said "none")
+
+```
+bash scripts/board.sh start --internal --title "<the analysis's short name>" \
+    --goal "<one paragraph in your words: the data, the question, what this analysis will produce>" \
+    --hours 336 --with bsphinney@ucdavis.edu
+```
+
+- It puts the analysis in the board's internal project, "Core internal work", in a thread of its
+  own. Its output and exit codes are those of the submission `start` above; there is no project
+  number or project title.
+- **The title is how the board finds the thread.** A `start` with a title already used returns
+  that thread, so a re-run of the same test lands in the same place. Give new work a new title
+  that says what was tested on which data (`Astral HeLa gradient test`, `DIA-NN 2.3 vs 2.2 on
+  the HeLa standard`): one line, no apostrophes.
+- `--with`, `--hours`, the exits and "no connection yet" are as above.
+
+### Record the answer in the session
+
+The same answer goes to `session.py init` (step 3b), so later steps and a resume know it without
+asking again. It lands in `session.json` as `analysis_for`, and `checkpoint.py status` prints it:
+
+```
+python3 scripts/session.py init ... --submission PROT_0807 [--submission PROT_0811]   # the main one first
+python3 scripts/session.py init ... --internal "<the title it has on the board>"
+```
+
+Thread ids are not recorded: `threads` finds the thread (section 3).
 
 (`start-link` still exists, for a person who wants to set the level and CPU-hours themselves
 on a filled-in form. The skill does not need it.)
 
 ## 3. While the analysis runs: a post at each milestone
 
-At each milestone, run `bash scripts/board.sh threads` and take the submission's thread (its
-`id` is THREAD below). Post only when `you.can_post` is true. Otherwise look at `blocked_message`
-once; if it needs your person ("Brett has not approved it yet"), say so in one line in your own
-words, then carry on. **Keep what you could not post**: the delivery post below repeats the
-folders, so nothing is lost if early posts were refused. The board allows one post a minute and
-30 per Claude per thread: milestones only, never progress chatter.
+At each milestone, run `bash scripts/board.sh threads` and take this analysis's thread (its `id`
+is THREAD below): the one whose `prot` is the (main) submission, or for internal work the one
+whose title (`untrusted.title`) is the one you started it with. On a resume, `checkpoint.py
+status` says which (`analysis_for`). No such thread (the board was down or not connected when it
+should have started): run section 2's `start` now. Post only when `you.can_post` is true.
+Otherwise look at `blocked_message` once; if it needs your person ("Brett has not approved it
+yet"), say so in one line in your own words, then carry on. **Keep what you could not post**:
+the delivery post below repeats the folders, so nothing is lost if early posts were refused. The
+board allows one post a minute and 30 per Claude per thread: milestones only, never progress
+chatter.
 
 | When | Command |
 |---|---|
@@ -112,6 +182,19 @@ folders, so nothing is lost if early posts were refused. The board allows one po
 | after QC (step 8e) | pull it first: `bash scripts/hive_exec.sh --get "$S/logs/qc_bracket.json" ~/core/PROT_0807/`, then `qc THREAD --from ~/core/PROT_0807/qc_bracket.json` |
 | results ready (and each time a result is redone) | `where THREAD --report <the analysis report's path in "$S"> --extra "DE tables=<its tables folder in "$S">"`, then `post THREAD --kind finding --text "<protein and DE counts, and anything odd>"` |
 | delivered (step 12b) | `where THREAD --raw-data <raw folder> --session-folder "$S" --report <report path> --bioshare-url <share URL>`, then `post THREAD --kind summary --text "<what was delivered, where, open questions>"` |
+
+**Internal work** has no stage and no delivery, and no QC row: step 8e runs only for a
+submission or an HT plate. Its first and last rows are these instead; the cluster-time ask, the
+job rows, the FRAN hand-over and the results row apply as they are (the results post says what
+the test found):
+
+| When | Command |
+|---|---|
+| after `session.py init` (step 3b) | `where THREAD --raw-data <raw folder> --session-folder "$S"` |
+| finished (step 12) | `where THREAD --session-folder "$S" --report <report path>`, then `post THREAD --kind summary --text "<what it found, where it is, open questions>"` |
+
+**Several submissions:** all of these rows go to the main submission's thread; the other
+threads get only the three records of section 2.
 
 **The FRAN hand-over row.** The skill hands each finished search to FRAN itself (step 7c); this
 tells the board, so the project's FRAN panel shows "Handed to FRAN" (or why it was kept out)
