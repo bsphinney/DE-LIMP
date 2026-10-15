@@ -26,11 +26,13 @@
 # 600) beside ~/.coreomics_token and renamed over it. HIVE home folders are drwxrwsr-x -- every
 # account can list them and group members can add entries -- so the file's own mode is the
 # key's only protection, and a rename replaces anything planted at that name (a link to someone
-# else's file) instead of writing the key through it.
+# else's file) instead of writing the key through it. Before that rename HIVE checks the new
+# file with core_submission.py's rule for a usable key; one that cannot be a key (only blanks,
+# "Authorization: Token ...") is refused and the key already there kept.
 #
 # One JSON object on stdout; notes on stderr. Exit 0 done (--status: on HIVE and private);
-# 2 nothing to send, or --status: absent / readable by others; 3 HIVE unreachable or the write
-# failed. The transport is hive_exec.sh beside this file (HIVE_EXEC overrides it, as in
+# 2 nothing to send, a key HIVE refuses, or --status: absent / readable by others; 3 HIVE
+# unreachable, the key could not be checked there, or the write failed. The transport is hive_exec.sh beside this file (HIVE_EXEC overrides it, as in
 # report_issue.sh), with the login check_access.sh saved.
 #
 # check_access.sh sources this file for COREOMICS_KEY_PROBE, coreomics_key_state,
