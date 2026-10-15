@@ -1248,6 +1248,10 @@ bundle) and act on it:
   (`contaminants_kept_despite_target_match`; a warning naming a protease dropped as "not in
   --enzyme" means: if that enzyme WAS used, re-run `fetch` with it in `--enzyme`). Tell the user those proteins — skin keratins
   included — are now quantified and count toward normalisation; step 8c flags them.
+  An entry with 2+ peptides of its own **stays**, even when the sample shows only the peptides it
+  shares with a target (horse myoglobin `Cont_P68082` has 9 of its own; in human heart its group
+  rested on human MB's peptides, one differing only by I/L): which peptides a sample shows only
+  the search can say, so step 8c's `contaminant_evidence` flags such a group.
 - A `--path` database that already contains `Cont_` entries cannot be fixed: `fetch` warns
   and lists them under `contaminants_identical_to_target_kept` — rebuild it with
   `--proteome` instead. The Core's Sep-2025 `MRS/UP000005640_9606_plus_universal_contam.fasta`
@@ -2311,9 +2315,12 @@ report's "Audit & caveats" section. → detail: `references/audit.md`.
 excluded. Name any that are significant in DE, and judge them by type: skin/hair keratins
 (KRT1/2/9/10, KRTAPs, FLG) are usually handling contamination; ACTB, EEF1A1, tubulins and
 KRT8/18/19/7 in epithelial cells are usually endogenous. `contaminant_overlap` means real
-proteins are missing from quant — rebuild the FASTA and re-search. `sample_quality.py`'s
-CONTAMINANT_IDENTICAL panel uses the same list; a group-confounded result there is a STOP
-like any other panel.
+proteins are missing from quant — rebuild the FASTA and re-search. `contaminant_evidence` names a
+contaminant protein group whose every peptide is also a sample protein's (shared, or the same but
+for I/L): probably the sample's own protein. Report it as that protein — never as
+contamination or an added standard — and tell the user it was removed with the contaminants.
+`sample_quality.py`'s CONTAMINANT_IDENTICAL panel uses the same list as `target_contaminants`; a
+group-confounded result there is a STOP like any other panel.
 
 Then run the **biological sample-quality** check (contamination that mimics biology —
 hemolysis, tissue cross-contamination, skin) — and **read `references/anomaly-checks.md`
