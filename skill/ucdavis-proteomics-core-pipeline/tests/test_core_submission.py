@@ -723,6 +723,150 @@ class TestLocate(unittest.TestCase):
         self.assertEqual(gates(out)["paths_exist"]["status"], "FAIL")
 
 
+class TestNumberAfterTheName(unittest.TestCase):
+    """Runs named for the person and numbered for the sample (a staff report, 2026-10-08): the sheet
+    says QP4 (<initials><N>), the run says `<date>_QPlaceholder_100spd_4_S4-A1_...` (<initial>
+    <surname>, then N). No run carries the id, so locate found none. Such a run is only PROPOSED --
+    the sample stays unmatched, every gate stands -- and staff confirm it with --choose. Near
+    misses are never proposed: the whole point of locate's gates is not to take another lab's
+    runs. PI here: Quinn Placeholder (record()'s default); submitter: Ada Example."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = self._tmp.name
+        self.env = child_env(self.tmp)
+        self.out = os.path.join(self.tmp, "loc")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def locate(self, summary, *extra):
+        return run(["locate", "--summary", summary, "--out", self.out, *extra], self.env)
+
+    def run_named(self, n, well, date="20250312", word="QPlaceholder", month="mar25", mid="100spd"):
+        return raw(self.tmp, "tTOF_HT", month, f"{date}_{word}_{mid}_{n}_S4-{well}_1_{24000 + n}.d")
+
+    def rows(self):
+        return {r["sample_key"]: r for r in load(os.path.join(self.out, "locate.json"))["samples"]}
+
+    def test_the_name_part_drops_the_plate_tail_and_keeps_bare_numbers(self):
+        self.assertEqual(cs.name_number_pairs("20250312_QPlaceholder_100spd_4_S4-A1_1_24001.d"),
+                         [("qplaceholder", ["4"])])
+        # the well (A4), the injection (1) and the counter (4) are never the sample's number
+        self.assertEqual(cs.name_number_pairs("20250312_QPlaceholder_100spd_S4-A4_1_4.d"),
+                         [("qplaceholder", [])])
+        self.assertEqual(cs.prefixed_id("QP-04"), ("qp", 4))
+        self.assertIsNone(cs.prefixed_id("Q4"))            # one letter: too loose to propose on
+        self.assertIsNone(cs.prefixed_id("QP4a"))
+
+    def test_runs_are_proposed_never_assigned(self):
+        runs = {"QP4": self.run_named(4, "A1"), "QP5": self.run_named(5, "A2"),
+                "QP13": self.run_named(13, "A3")}
+        rec = record(samples=[("QP4", "ctrl"), ("QP5", "ctrl"), ("QP13", "treat")])
+        summary, _ = write_summary(self.tmp, rec)
+        rc, out, p = self.locate(summary)
+        self.assertEqual(rc, 2, p.stderr)
+        g = gates(out)
+        self.assertEqual(g["unmatched_samples"]["status"], "FAIL")
+        self.assertEqual(g["no_files"]["status"], "FAIL")              # nothing was assigned
+        self.assertEqual(g["proposed_runs"]["status"], "INFO")
+        self.assertIn("NOT assigned", g["proposed_runs"]["detail"])
+        self.assertEqual({x["unique_id"]: [y["file"] for y in x["proposed"]]
+                          for x in g["proposed_runs"]["samples"]},
+                         {u: [f] for u, f in runs.items()})
+        self.assertEqual(read(os.path.join(self.out, "files.txt")), "")
+        r = self.rows()["QP4"]
+        self.assertEqual(r["status"], "unmatched")
+        self.assertIn("PROPOSED, not assigned", r["note"])
+        self.assertIn("--choose QP4=<file>", r["note"])
+        # --allow-partial would drop them as not run: still said, as a warning
+        rc, out, _ = self.locate(summary, "--allow-partial")
+        self.assertEqual(gates(out)["proposed_runs"]["status"], "WARN")
+        self.assertIn("NOT RUN", gates(out)["proposed_runs"]["detail"])
+
+    def test_staff_confirm_each_with_choose(self):
+        runs = {"QP4": self.run_named(4, "A1"), "QP5": self.run_named(5, "A2"),
+                "QP13": self.run_named(13, "A3")}
+        rec = record(samples=[("QP4", "ctrl"), ("QP5", "ctrl"), ("QP13", "treat")])
+        summary, _ = write_summary(self.tmp, rec)
+        rc, out, _ = self.locate(summary, "--choose", f"QP4={runs['QP5']}")
+        self.assertEqual(rc, 2)
+        self.assertIn("not one of the runs proposed for QP4 by name and number", out["error"])
+        rc, out, p = self.locate(summary, *[x for u, f in runs.items() for x in ("--choose", f"{u}={f}")])
+        self.assertEqual(rc, 0, p.stderr)
+        self.assertEqual(sorted(read(os.path.join(self.out, "files.txt")).split()), sorted(runs.values()))
+        rows = self.rows()
+        for u, f in runs.items():
+            self.assertEqual((rows[u]["status"], rows[u]["file"], rows[u]["chosen_by"]),
+                             ("matched", f, "--choose"))
+            self.assertIn("proposed by name and number", rows[u]["note"])
+        self.assertEqual(gates(out)["staff_choices"]["status"], "INFO")
+        self.assertNotIn("proposed_runs", gates(out))
+
+    def test_near_misses_are_never_proposed(self):
+        rec = record(samples=[("QP4", "ctrl"), ("A4", "ctrl"), ("QP5", "treat")])
+        self.run_named(14, "A1")                                    # 14, not 4
+        raw(self.tmp, "tTOF_HT", "mar25", "20250312_QPlaceholder_100spd4_S4-A2_1_24002.d")  # glued
+        raw(self.tmp, "tTOF_HT", "mar25", "20250312_QPlaceholder_4_2_S4-A3_1_24003.d")  # two numbers
+        self.run_named(4, "A4", word="XQPlaceholder")              # the letters do not start the word
+        self.run_named(4, "A5", word="QPeters")                    # another person's name
+        self.run_named(4, "A6", word="Placeholder")                # no initials
+        raw(self.tmp, "tTOF_HT", "mar25", "20250312_QPlaceholder_100spd_S4-A4_1_4.d")  # well/counter
+        self.run_named(4, "A7", date="20250201", month="feb25")    # before the submission
+        self.run_named(4, "A8", word="APlaceholder")               # A4 is a well-like id: weak
+        self.run_named(5, "A9")                                    # QP5's own: proposed
+        summary, _ = write_summary(self.tmp, rec)
+        rc, out, _ = self.locate(summary)
+        self.assertEqual(rc, 2)
+        rows = self.rows()
+        self.assertEqual(rows["QP4"]["status"], "unmatched")
+        self.assertNotIn("proposed", rows["QP4"])
+        self.assertEqual(rows["A4"]["status"], "weak")
+        self.assertNotIn("proposed", rows["A4"])
+        self.assertEqual([x["unique_id"] for x in gates(out)["proposed_runs"]["samples"]], ["QP5"])
+
+    def test_without_this_submissions_surname_nothing_is_proposed(self):
+        self.run_named(4, "A1")
+        rec = record(samples=[("QP4", "ctrl"), ("QP5", "treat")], pi_last="")
+        summary, _ = write_summary(self.tmp, rec)
+        rc, out, _ = self.locate(summary)
+        self.assertEqual(rc, 2)
+        self.assertNotIn("proposed_runs", gates(out))
+        self.assertNotIn("proposed", self.rows()["QP4"])
+
+    def test_another_submissions_id_that_fits_is_shown_on_the_proposal(self):
+        mine = self.run_named(4, "A1")
+        self.run_named(5, "A2")
+        neighbor = {"internal_id": "PROT_0810", "id": "aaaaaaaaaaaa",
+                    "submitted": "2025-02-20T09:00:00-08:00", "unique_ids": ["QP4", "ZZ5"]}
+        rec = record(samples=[("QP4", "ctrl"), ("QP5", "treat")])
+        summary, _ = write_summary(self.tmp, rec, neighbors=[neighbor])
+        rc, out, _ = self.locate(summary)
+        self.assertEqual(rc, 2)
+        rows = self.rows()
+        self.assertEqual(rows["QP4"]["proposed"][0]["contested_by"], ["QP4 (PROT_0810)"])
+        self.assertIn("another submission's id fits too: QP4 (PROT_0810)", rows["QP4"]["note"])
+        self.assertEqual(rows["QP5"]["proposed"][0]["contested_by"], [])
+        rc, out, p = self.locate(summary, "--choose", f"QP4={mine}", "--choose",
+                                 f"QP5={rows['QP5']['proposed'][0]['file']}")
+        self.assertEqual(rc, 0, p.stderr)
+        self.assertTrue(self.rows()["QP4"]["accepted_ambiguous"])
+
+    def test_a_run_two_of_our_samples_fit_names_both(self):
+        f = self.run_named(4, "A1")
+        rec = record(samples=[("QP4", "ctrl"), ("QPL4", "treat")])
+        summary, _ = write_summary(self.tmp, rec)
+        rc, out, _ = self.locate(summary)
+        self.assertEqual(rc, 2)
+        rows = self.rows()
+        self.assertEqual(rows["QP4"]["proposed"][0]["shared_with"], ["QPL4"])
+        self.assertEqual(rows["QPL4"]["proposed"][0]["shared_with"], ["QP4"])
+        self.assertIn("it also fits QPL4 of this submission", rows["QP4"]["note"])
+        rc, out, _ = self.locate(summary, "--choose", f"QP4={f}", "--choose", f"QPL4={f}")
+        self.assertEqual(rc, 2)
+        self.assertEqual(gates(out)["duplicate_assignment"]["status"], "FAIL")
+
+
 class TestHtFilesFrom(unittest.TestCase):
     """An HT plate's runs carry the submitter's sample_name, never the CoreOmics unique_id
     (a 96-well plate, 2026-10-01: --files-from with the plate's 96 runs left 96 samples

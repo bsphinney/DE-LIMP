@@ -983,7 +983,8 @@ def glance_data(prov, tables, tables_dir, session=None):
                          runs_left_out_note(prov),
                          added_sequences_note(session), inferred_note(prov, tables_dir),
                          not_measured_note(prov),
-                         database_note(prov, tables_dir, session), keratin_note(prov))
+                         database_note(prov, tables_dir, session), keratin_note(prov),
+                         covariate_note(prov))
              if n]
     return {"tiles": tiles, "contrasts": rows, "adjp": tables.adjp, "adjp_src": tables.src,
             "recorded": tables.src == "de_provenance.json", "notes": notes,
@@ -1184,6 +1185,23 @@ def runs_left_out_note(prov):
                            and x["reason"].strip()) for x in runs)
     return {"kind": "warning" if unexplained else "info",
             "title": "Searched runs left out of the analysis", "text": text}
+
+
+def covariate_note(prov):
+    """The fixed callout for a continuous covariate (run_de.R --numeric-covariates): every group
+    comparison is adjusted for it, worded by make_methods.de_covariate_sentence (the one
+    description). A warning when Group explains most of its variance (the record's `confounded`);
+    None when every covariate was a factor."""
+    from make_methods import de_covariate_sentence
+    text = de_covariate_sentence(prov)
+    if not text:
+        return None
+    terms = ((prov.get("covariates") or {}).get("terms") or []) \
+        if isinstance(prov.get("covariates"), dict) else []
+    warn = any(isinstance(t, dict) and t.get("confounded") is True for t in terms)
+    return {"kind": "warning" if warn else "info",
+            "title": ("Comparisons adjusted for a covariate that nearly matches the groups" if warn
+                      else "Comparisons adjusted for a continuous covariate"), "text": text}
 
 
 def keratin_note(prov):

@@ -32,10 +32,22 @@
 }
 .rvec <- function(x) paste0("c(", paste(vapply(x, .rq, ""), collapse = ", "), ")")
 
-# A named map, one entry per line, in DE-LIMP's reproducibility-log style.
-.rmap <- function(varname, names_vec, values_vec) {
+# A number written so it reads back as the same double: the shortest of 15-17 significant
+# digits that round-trips (a numeric covariate's values must reproduce exactly).
+.rnum_exact <- function(x) vapply(as.numeric(x), function(v) {
+  for (d in 15:17) {
+    s <- trimws(formatC(v, digits = d, format = "g"))
+    if (identical(as.numeric(s), v)) return(s)
+  }
+  s
+}, "")
+
+# A named map, one entry per line, in DE-LIMP's reproducibility-log style. `numeric`: the
+# values are written as numbers (a numeric covariate), not quoted strings.
+.rmap <- function(varname, names_vec, values_vec, numeric = FALSE) {
+  vals <- if (numeric) .rnum_exact(values_vec) else vapply(values_vec, .rq, "")
   c(sprintf("%s <- c(", varname),
-    paste0(sprintf("  %s = %s", vapply(names_vec, .rq, ""), vapply(values_vec, .rq, "")),
+    paste0(sprintf("  %s = %s", vapply(names_vec, .rq, ""), vals),
            c(rep(",", max(0, length(names_vec) - 1)), "")),
     ")")
 }
@@ -50,6 +62,9 @@ write_repro_script <- function(path,
                                cov_min_frac,     # maxlfq coverage filter
                                meta,             # design, already aligned to the matrix
                                covariates,       # covariate column names in `meta`
+                               # the covariates fitted as one numeric column each
+                               # (--numeric-covariates); every other covariate is a factor
+                               numeric_covariates = character(0),
                                formula_parts,
                                forms,            # contrast strings
                                adjp_thr, logfc_ref,
@@ -173,14 +188,16 @@ write_repro_script <- function(path,
   # ---- experimental design ----------------------------------------------------
   L <- c(L,
     .hdr(sprintf("Experimental design (%d samples%s%s)", nrow(meta),
-                 if (length(covariates)) sprintf(", covariates: %s", paste(covariates, collapse = ", ")) else "",
+                 if (length(covariates)) sprintf(", covariates: %s", paste(
+                   paste0(covariates, ifelse(covariates %in% numeric_covariates, " (numeric)", "")),
+                   collapse = ", ")) else "",
                  if (blk_on) sprintf(", block: %s", blk_col) else "")),
     .rmap("group_map", meta$File.Name, meta$Group))
 
   df_cols <- "Group = unname(group_map)"
   for (cv in covariates) {
     mapname <- paste0(tolower(cv), "_map")
-    L <- c(L, .rmap(mapname, meta$File.Name, meta[[cv]]))
+    L <- c(L, .rmap(mapname, meta$File.Name, meta[[cv]], numeric = cv %in% numeric_covariates))
     df_cols <- paste0(df_cols, sprintf(", %s = unname(%s)", cv, mapname))
   }
   L <- c(L,
@@ -327,7 +344,10 @@ write_repro_script <- function(path,
     "metadata <- metadata[match(colnames(E), metadata$File.Name), ]",
     "groups <- factor(metadata$Group)")
   for (cv in covariates)
-    L <- c(L, sprintf("%s <- factor(metadata$%s)", cv, cv))
+    L <- c(L, if (cv %in% numeric_covariates)
+      sprintf("%s <- as.numeric(metadata$%s)   # numeric (--numeric-covariates): one slope shared by all groups",
+              cv, cv)
+    else sprintf("%s <- factor(metadata$%s)", cv, cv))
   L <- c(L,
     sprintf("design <- model.matrix(~ 0 + %s)", paste(formula_parts, collapse = " + ")),
     "colnames(design) <- sub('^groups', '', colnames(design))",

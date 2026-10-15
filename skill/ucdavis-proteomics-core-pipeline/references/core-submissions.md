@@ -449,6 +449,30 @@ listed runs.
 `unmatched_samples` is a hard gate unless staff confirm those samples were never run
 (`--allow-partial`).
 
+**Runs named for the person, numbered for the sample: proposed, never assigned** (2.12). Some
+runs carry the submitter's name and the sample's number instead of the id: the sheet says `QP4`
+… `QP13` (`<initials><N>`), the runs say `<date>_QPlaceholder_100spd_4_S4-A1_1_<acq#>.d`
+(`<initial><surname>`, then `N`). No run carries the id, so before 2.12 every sample was
+`unmatched` (a staff report, 2026-10-08: 10 of 10). Now `locate` **proposes** such a run when
+all of these hold, and the sample stays `unmatched` until staff confirm it:
+- the id is letters (2 or more) then a number, is not weak, and no raw file carries it;
+- in the run name — its raw suffix, the `_S<n>-<well>_<n>_<acq#>` tail and any plate position
+  removed — exactly **one** word starts with the id's letters and ends with the **PI's or the
+  submitter's surname** (from the summary), and after that word exactly **one** bare number
+  appears, equal to the id's number (`_4_`; `100spd` or `4b` are not bare numbers, and the well,
+  injection number and acquisition counter are never read);
+- the run was acquired inside the window, and no sample id — ours or a neighbour's — owns it.
+
+The proposal is on the row (`proposed`: file, acquired date, `contested_by` — a neighbour id
+with the same number whose letters also start that word, submitted on or before the run —
+and `shared_with` — another sample of this submission it fits), in the note, and in gate
+`proposed_runs` (INFO; WARN under `--allow-partial`, which would leave those samples out as not
+run). Show each proposal to staff; for each one they confirm, re-run with `--choose
+<key>=<file>` (`--choose` accepts a proposed run for a sample no run names, and nothing else).
+The row then says "chosen by staff … from N run(s) proposed by name and number", and a contested
+run is recorded as `accepted_ambiguous`. With no surname in the summary nothing is proposed.
+`--files-from` is unchanged: a listed run that carries no id is `unassigned` until `--choose`.
+
 **HT plates.** If a file in the window is named `<8-digit date>_<num>_…` for this submission
 (`_807_`, `_0807_`, `_PROT_0807_` or `_PROT0807_`, any case), `locate` exits **4**: use
 `ht_manifest.py`. The number is matched only right after the leading date and must end there
@@ -901,7 +925,7 @@ named several and it is not clear which leads.
 | exit | from | usual cause | fix |
 |---|---|---|---|
 | 2 | `fetch` | no such number; garbage id | check the number; pass the 12-hex id |
-| 2 | `locate` | `choose_run`, `weak_ids`, `ambiguous_label`, `duplicate_ids`, `duplicate_assignment`, `unmatched_samples`, `no_files`; `--max-days` wider than the neighbour window; a `--choose` that names no candidate | show the proposal; `--reinjections latest|all` for re-injections, `--choose <key>=<file>` for collisions, `--files-from` a corrected list, `--accept-ambiguous` or `--allow-partial` as staff decide; re-fetch with `--neighbor-days` |
+| 2 | `locate` | `choose_run`, `weak_ids`, `ambiguous_label`, `duplicate_ids`, `duplicate_assignment`, `unmatched_samples` (with `proposed_runs`: runs proposed by name and number), `no_files`; `--max-days` wider than the neighbour window; a `--choose` that names no candidate | show the proposal; `--reinjections latest|all` for re-injections, `--choose <key>=<file>` for collisions and confirmed proposals, `--files-from` a corrected list, `--accept-ambiguous` or `--allow-partial` as staff decide; re-fetch with `--neighbor-days` |
 | 2 | `stage` | several candidate folders, or one naming someone else; project owned by another submission; `--apply` on a hard-failed locate | `--service-dir <folder>`; resolve the locate gates |
 | 2 | `conditions` | blank / case-variant / single / all-unique / singleton conditions | ask exactly the `questions` |
 | 2 | `deliver` | no `Analysis_Report.html`; session not this submission's; folder not empty; symlink in the path or the share; raw requested but no staged project; **held by `qc_gate`** (QC check, step 8e: check/concern, unplaced files, not run, or for another file list); **held by `normalization_gate`** (DE without a decided check); **"this session has no differential expression"** (auto/analysis); **no-de refused**: the session has DE output (`de_output`); any verification failure | finish step 9 and push it; use the right session (or `--force` with staff); `--label`; remove the offending link; `stage --apply`; for `qc_gate`, a staff member reads `logs/qc_bracket.md` and records `qc_bracket.py ack --by <login>` — or re-runs step 8e when it says so; for `normalization_gate`, step 8; no DE: `--mode no-de` if a delivery without it is intended, else step 8; no-de refused: `--mode analysis` |

@@ -1343,6 +1343,54 @@ def de_block_sentence(prov):
                   f"{col}-to-{col} variation.")
 
 
+def de_covariate_sentence(prov):
+    """How the covariates entered the linear model (run_de.R's `covariates` record), when one was
+    numeric (--numeric-covariates): its range, that one slope is shared by all groups, and -- when
+    Group explains most of its variance -- the caution run_de.R recorded. None when every covariate
+    was a factor (the design formula says it all), and for a record from before 2.12, which could
+    only fit factors. The one description: the Methods, the analysis brief and the report's
+    callout all read it."""
+    rec = prov.get("covariates")
+    terms = [t for t in (rec.get("terms") or []) if isinstance(t, dict)] if isinstance(rec, dict) else []
+    numeric = [t for t in terms if t.get("type") == "numeric"]
+    if not numeric:
+        return None
+
+    def rng(t):
+        lo, hi = t.get("min"), t.get("max")
+        return (f"values {lo:.4g} to {hi:.4g}" if isinstance(lo, (int, float))
+                and isinstance(hi, (int, float)) else f"range {NOT_RECORDED}")
+    names = [str(t.get("column") or NOT_RECORDED) for t in numeric]
+    one = len(names) == 1
+    out = (f"{' and '.join(names)} {'was' if one else 'were'} fitted as "
+           f"{'a continuous covariate' if one else 'continuous covariates'} ("
+           + (rng(numeric[0]) if one else
+              "; ".join(f"{n}: {rng(t)}" for n, t in zip(names, numeric)))
+           + ", as given in the conditions file), "
+           + ("with one slope shared by all groups, so each group comparison is adjusted for it "
+              "and compares the groups at the same covariate value." if one else
+              "each with one slope shared by all groups, so each group comparison is adjusted "
+              "for them and compares the groups at the same covariate values."))
+    factors = [t for t in terms if t.get("type") == "factor"]
+    if factors:
+        out += " " + "; ".join(
+            f"{t.get('column') or NOT_RECORDED} was a categorical factor"
+            + (f" ({t['n_levels']} levels)" if isinstance(t.get("n_levels"), int) else "")
+            for t in factors) + "."
+    for t in numeric:
+        if t.get("confounded") is True:
+            r2 = t.get("group_r2")
+            se = t.get("se_inflation") if isinstance(t.get("se_inflation"), dict) else {}
+            se_max = max((v for v in se.values() if isinstance(v, (int, float))), default=None)
+            out += (f" Group explained {r2 * 100:.0f}% of the variance of {t.get('column')}"
+                    if isinstance(r2, (int, float)) else
+                    f" {t.get('column')} was strongly confounded with Group")
+            out += (", so the adjusted group comparisons rest largely on its fitted slope"
+                    + (f" (standard errors up to {se_max:.1f}x those without it)"
+                       if se_max is not None else "") + ".")
+    return out
+
+
 def de_runs_left_out_sentence(prov):
     """The searched runs the DE left out, each with the reason the user gave, from run_de.R's
     `runs_left_out` record (the reasons come from collect_conditions.py --validate --exclude). A
@@ -1479,6 +1527,9 @@ def de_paragraph(prov):
         cons = [cons] if isinstance(cons, str) else (cons or [])
         s.append(f"The linear model was {prov['design']}"
                  + (f", with contrasts {', '.join(cons)}" if cons else "") + ".")
+    cov = de_covariate_sentence(prov)
+    if cov:
+        s.append(cov)
     blk = de_block_sentence(prov)
     if blk:
         s.append(blk)

@@ -1758,6 +1758,54 @@ def ht_sample_field(name: str, plate) -> str:
     return PLATE_POSITION.sub("_", HT_TAIL.sub("", name[m.end():] if m else name))
 
 
+# Runs named for the person, numbered for the sample: the sheet says QP4 .. QP13 (<initials><N>)
+# and the runs say `6oct26_QPlaceholder_100spd_4_S4-A1_1_1234.d` (<initial><surname>, then N). The id
+# never appears in such a name, so locate found none of the 10 samples (a staff report,
+# 2026-10-08). Such a run is only ever PROPOSED -- the sample stays unmatched and the gates stand
+# -- and staff confirm it with --choose. A run is proposed for a sample (prefix letters P, number
+# N) only when ALL of these hold, so another lab's runs are not offered:
+#   * the id is P + N (2+ letters, then a number) and not weak, and no raw file carries it;
+#   * the run's name part (raw suffix, HT tail -- plate position, injection, acquisition counter --
+#     and any plate position removed) has exactly ONE word token that starts with P and ends with
+#     the PI's or the submitter's surname (QPlaceholder), and after it exactly ONE bare-number token,
+#     equal to N (`_4_`; `100spd`, `4b` are not bare numbers);
+#   * the run was acquired inside the window, and no sample id (ours or a neighbour's) owns it.
+# A neighbour id P' + N whose P' also starts that word, submitted on or before the run, contests
+# it; a run proposed for two of our samples is shared. Both are shown on the proposal.
+PREFIXED_ID = re.compile(r"^([A-Za-z]{2,})[-_\s]*(\d{1,4})$")
+
+
+def prefixed_id(uid):
+    """(normalised letter prefix, number) of an id shaped <letters><number> (QP4, QP-04), or None."""
+    m = PREFIXED_ID.match(_s(uid))
+    return (normkey(m.group(1)), int(m.group(2))) if m else None
+
+
+def name_number_pairs(name: str) -> list:
+    """[(normalised word token, [bare-number tokens after it])] for each word token of a run name's
+    sample part: the raw suffix, the HT tail and any plate position removed first, so a well, an
+    injection number or an acquisition counter is never read as the sample's number."""
+    base = name
+    for suf in sorted(RAW_SUFFIXES, key=len, reverse=True):
+        if base.lower().endswith(suf):
+            base = base[:-len(suf)]
+            break
+    toks = [t for t in re.split(r"[-_\s.]+", PLATE_POSITION.sub("_", HT_TAIL.sub("", base))) if t]
+    return [(normkey(t), [x for x in toks[i + 1:] if x.isdigit()])
+            for i, t in enumerate(toks) if t.isalpha()]
+
+
+def name_number_fits(pairs: list, prefix: str, number: int, surnames=None) -> bool:
+    """The proposal rule on one run's name_number_pairs: exactly one word starts with `prefix`
+    (and is longer than it) -- and, when `surnames` are given, ends with one of them -- and after
+    it exactly one bare number, equal to `number`. surnames=None: a neighbour's id, whose PI is not
+    known here, contests on prefix and number alone."""
+    words = [(w, nums) for w, nums in pairs
+             if w.startswith(prefix) and len(w) > len(prefix)
+             and (surnames is None or any(w.endswith(s) for s in surnames))]
+    return len(words) == 1 and len(words[0][1]) == 1 and int(words[0][1][0]) == number
+
+
 def _acquired(path: str) -> str:
     d, _src = acquisition_date(path)
     return d.isoformat() if d else ""
@@ -1978,15 +2026,87 @@ def _same_file(a: str, b: str) -> bool:
     return os.path.realpath(a) == os.path.realpath(b)
 
 
+PROPOSAL_RULE = ("its number is the one bare number after a word that starts with its letters "
+                 "and ends with the PI's or submitter's surname")
+
+
+def propose_by_name_number(samples, entries, universe, hits_by, lo, hi, surnames, owner_cache,
+                           dated, taken, choices, keys) -> dict:
+    """id(sample) -> [{"entry", "acquired", "date_source", "contested_by", "shared_with"}]: the runs
+    PREFIXED_ID's rule proposes for each sample no run names (hits_by empty). Nothing without a
+    surname to check against. A run staff chose for another sample is not offered."""
+    sn = sorted({normkey(x) for x in surnames or () if len(normkey(x)) >= 2})
+    if not sn:
+        return {}
+    pairs_cache = {}
+
+    def pairs(e):
+        if e["path"] not in pairs_cache:
+            pairs_cache[e["path"]] = name_number_pairs(e["name"])
+        return pairs_cache[e["path"]]
+    neighbours = [(prefixed_id(u["uid"]), u) for u in universe if not u["ours"]]
+    neighbours = [(pid, u) for pid, u in neighbours if pid]
+    out, users = {}, {}
+    for smp in samples:
+        pid = prefixed_id(smp.get("unique_id"))
+        if not pid or id(smp) not in hits_by or hits_by[id(smp)]:
+            continue
+        own = (choices.get(keys[id(smp)]) or {}).get("file")
+        found = []
+        for e in entries:
+            if not name_number_fits(pairs(e), pid[0], pid[1], sn):
+                continue
+            d, src = dated(e)
+            if d is None or not lo <= d <= hi or file_owners(e, universe, owner_cache):
+                continue
+            if os.path.realpath(e["path"]) in taken and not (own and _same_file(own, e["path"])):
+                continue
+            found.append({"entry": e, "acquired": d.isoformat(), "date_source": src,
+                          "contested_by": sorted({f"{u['uid']} ({u['sub']})" for p, u in neighbours
+                                                  if p[1] == pid[1] and u["submitted"] is not None
+                                                  and u["submitted"] <= d
+                                                  and name_number_fits(pairs(e), p[0], p[1])}),
+                          "shared_with": []})
+            users.setdefault(e["path"], []).append(keys[id(smp)])
+        if found:
+            out[id(smp)] = found
+    for smp_id, found in out.items():
+        for x in found:
+            x["shared_with"] = [k for k in users[x["entry"]["path"]] if k != keys.get(smp_id)]
+    return out
+
+
+def proposal_view(x: dict) -> dict:
+    """A proposal as locate.json and the gate show it (no internal entry)."""
+    return {"file": x["entry"]["path"], "acquired": x["acquired"], "date_source": x["date_source"],
+            "contested_by": x["contested_by"], "shared_with": x["shared_with"]}
+
+
+def proposal_note(skey: str, props: list) -> str:
+    clean = [x for x in props if not x["contested_by"] and not x["shared_with"]]
+    names = ", ".join(os.path.basename(x["entry"]["path"]) for x in props[:3])
+    flags = sorted({c for x in props for c in x["contested_by"]})
+    also = sorted({k for x in props for k in x["shared_with"]})
+    return ("no raw file carries this id; "
+            + (f"PROPOSED, not assigned: {names} ({PROPOSAL_RULE})" if len(props) == 1 and clean else
+               f"{len(props)} run(s) fit by name and number, not assigned: {names} ({PROPOSAL_RULE})")
+            + (f"; another submission's id fits too: {', '.join(flags)}" if flags else "")
+            + (f"; it also fits {', '.join(also)} of this submission" if also else "")
+            + f" -- confirm with staff, then --choose {skey}=<file>")
+
+
 def match_samples(samples: list, entries: list, neighbors: list, lo: dt.date, hi: dt.date,
                   ours_label: str = "", accept_ambiguous: bool = False,
                   choices: dict | None = None, reinjections: str = "ask",
-                  stan: dict | None = None) -> list:
+                  stan: dict | None = None, surnames=()) -> list:
     """The deterministic core of `locate`: one row per sample.
 
     A file in the window is AMBIGUOUS when another submission -- older, same day or newer --
     uses the same label and was submitted on or before the file was acquired: either lab
-    could have sent that sample, and the label alone cannot say which."""
+    could have sent that sample, and the label alone cannot say which.
+
+    `surnames`: the PI's and the submitter's -- a sample no run names may get runs PROPOSED by
+    name and number (PREFIXED_ID's rule), never assigned without a staff --choose."""
     for e in entries:
         if "space" not in e:
             prepare_entry(e)
@@ -2019,15 +2139,24 @@ def match_samples(samples: list, entries: list, neighbors: list, lo: dt.date, hi
     shared = Counter(normkey(smp.get("unique_id")) for smp in samples)
     # a run staff chose for one sample is no other sample's candidate
     taken = {os.path.realpath(c["file"]) for c in (choices or {}).values()}
+    # the runs whose name carries each (usable) id: the ordinary rules decide those samples
+    hits_by = {}
+    for smp in samples:
+        pat, key = token_pattern(smp.get("unique_id", "")), normkey(smp.get("unique_id", ""))
+        if pat and not weak_reason(smp.get("unique_id", "")):
+            hits_by[id(smp)] = [e for e in entries if key in e["norm"] and pat.search(e["space"])]
+    proposals = propose_by_name_number(samples, entries, universe, hits_by, lo, hi, surnames,
+                                       owner_cache, dated, taken, choices or {}, keys)
 
-    def chosen(smp, pick, pool, cands=(), amb=(), amb_info=(), n_out=0, shadowed=()):
+    def chosen(smp, pick, pool, cands=(), amb=(), amb_info=(), n_out=0, shadowed=(), what=None):
         """Staff's answer (--choose) for this sample: one of `pool`, the runs whose name carries
-        its id -- in the window or not. Anything else is refused, never guessed at."""
+        its id -- in the window or not -- or, when none does, the runs proposed for it by name
+        and number (`what` says which). Anything else is refused, never guessed at."""
         hit = next((e for e in pool if _same_file(e["path"], pick["file"])), None)
         if hit is None:
             raise Stop(EXIT_DECIDE, {
                 "error": f"{pick['source']} {smp.get('unique_id')}={pick['file']}: not one of the "
-                         f"runs whose name carries {smp.get('unique_id')}",
+                         + (what or f"runs whose name carries {smp.get('unique_id')}"),
                 "candidates": [e["path"] for e in pool][:20],
                 "hint": "a file whose name does not carry the id: --files-from a curated list"})
         d, src = dated(hit)
@@ -2056,7 +2185,26 @@ def match_samples(samples: list, entries: list, neighbors: list, lo: dt.date, hi
             rows.append(_row(smp, status="weak", sample_key=skey,
                              note=f"{reason}; {n} raw file(s) carry this token -- not auto-assigned"))
             continue
-        hits = [e for e in entries if key in e["norm"] and pat.search(e["space"])]
+        hits = hits_by[id(smp)]
+        props = proposals.get(id(smp), [])
+        if not hits and props:
+            # No run carries the id; some carry its number after the PI's or submitter's name.
+            # Proposed only: taken when staff name one with --choose, otherwise left unmatched.
+            if pick:
+                row = chosen(smp, pick, [x["entry"] for x in props],
+                             what=f"runs proposed for {uid} by name and number ({PROPOSAL_RULE})")
+                hit = next(x for x in props if _same_file(x["entry"]["path"], row["file"]))
+                row.update(proposed=[proposal_view(x) for x in props],
+                           accepted_ambiguous=bool(hit["contested_by"]),
+                           note=f"chosen by staff ({pick['source']}) from {len(props)} run(s) "
+                                f"proposed by name and number (no run carries the id: "
+                                f"{PROPOSAL_RULE})")
+                rows.append(row)
+            else:
+                rows.append(_row(smp, status="unmatched", sample_key=skey,
+                                 proposed=[proposal_view(x) for x in props],
+                                 note=proposal_note(skey, props)))
+            continue
         owned, shadowed = [], []
         for e in hits:
             owners = file_owners(e, universe, owner_cache)
@@ -2371,6 +2519,20 @@ def locate_gates(rows: list, files: list, allow_partial: bool, wanted_folder, un
                                          "files": r["ambiguous"]} for r in accepted]))
         else:
             gates.append(_gate("ambiguous_label", "PASS"))
+        # Unmatched samples with runs proposed by name and number (PREFIXED_ID's rule): shown so
+        # staff can confirm them (--choose); --allow-partial would leave them out as not run.
+        proposed = [r for r in unmatched if r.get("proposed")]
+        if proposed:
+            gates.append(_gate("proposed_runs", "WARN" if allow_partial else "INFO",
+                               f"{len(proposed)} unmatched sample(s) have run(s) whose name carries "
+                               f"the sample's number after the PI's or submitter's name instead of "
+                               f"its id (<date>_<initial><surname>_<speed>_<N>_... for <letters><N>). "
+                               f"NOT assigned: show staff each proposal; for each they confirm, "
+                               f"re-run with --choose <key>=<file>"
+                               + (". --allow-partial leaves these samples out as NOT RUN -- "
+                                  "confirm that with staff" if allow_partial else ""),
+                               samples=[{"unique_id": r["unique_id"], "key": r.get("sample_key"),
+                                         "proposed": r["proposed"]} for r in proposed]))
         shadowed = [r for r in rows if r["shadowed"]]
         if shadowed:
             gates.append(_gate("shadowed_by_longer_id", "INFO",
@@ -2574,7 +2736,9 @@ def cmd_locate(a) -> int:
             emit(result)
             return EXIT_HT
         rows = match_samples(samples, entries, s.get("neighbors") or [], lo, hi,
-                             submission_label(s), a.accept_ambiguous, choices, a.reinjections, stan)
+                             submission_label(s), a.accept_ambiguous, choices, a.reinjections, stan,
+                             surnames=[(s.get(k) or {}).get("last") for k in ("pi", "submitter")
+                                       if isinstance(s.get(k), dict)])
         files = list(dict.fromkeys(r["file"] for r in rows if r["status"] == "matched"))
         gates = locate_gates(rows, files, a.allow_partial, wanted, unreadable, False, [],
                              a.accept_ambiguous, samples=samples)
