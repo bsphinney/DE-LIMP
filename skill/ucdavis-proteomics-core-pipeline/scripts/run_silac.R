@@ -4,7 +4,7 @@
 #
 # A SILAC run holds several samples, one per channel, so the comparison is a RATIO inside each
 # run, not a difference between runs: run_de.R's group-vs-group model does not apply. This is the
-# analysis a Core staff member had to write by hand for a triple-SILAC secretome (2026-10-14),
+# analysis a Core staff member had to write by hand for a triple-SILAC experiment (2026-10-14),
 # made the skill's own: the statistics are silac_ratios.R (see there for the method), and this
 # script reads the report and the channel design, writes the tables, figures, Methods and a
 # de_provenance.json that describes itself (pipeline_id silac_ratio), so the report, the Methods,
@@ -22,8 +22,9 @@
 #   File.Name,Replicate,Channel,Group      one row per run and channel that holds a sample
 # Outputs (in --outdir): DE_silac_<comparison>.csv, SILAC_channel_specific_detections.csv,
 #   SILAC_channel_summary.csv, SILAC_ratio_offsets.csv, SILAC_label_incorporation.csv (label-check
-#   runs only), de_provenance.json, methods.txt, sessionInfo.txt, reproducibility_log.R; figures
-#   and figures.json in --figures-dir.
+#   runs only), SILAC_sample_matrix.csv + SILAC_samples.csv (per replicate x channel, for
+#   sample_quality.py), de_provenance.json, methods.txt, sessionInfo.txt, reproducibility_log.R;
+#   figures and figures.json in --figures-dir.
 # =============================================================================
 
 for (p in c("limma", "data.table", "arrow", "jsonlite"))
@@ -266,7 +267,7 @@ samples_tab <- samples_tab[order(Replicate, match(Channel, chan_order))]
 EM <- dcast(em, Protein.Group ~ Sample, value.var = "v")
 setcolorder(EM, c("Protein.Group", samples_tab$File.Name))
 EM <- merge(annot[, .(Protein.Group, Genes, Protein.Names)], EM, by = "Protein.Group", all.y = TRUE)
-fwrite(EM, file.path(outdir, "Expression_Matrix.csv"))
+fwrite(EM, file.path(outdir, "SILAC_sample_matrix.csv"))
 fwrite(samples_tab, file.path(outdir, "SILAC_samples.csv"))
 if (length(incorp)) fwrite(rbindlist(incorp), file.path(outdir, "SILAC_label_incorporation.csv"))
 if (!length(incorp) && file.exists(file.path(outdir, "SILAC_label_incorporation.csv")))
@@ -527,8 +528,6 @@ brief_notes <- list(
                 "|log2 ratio| of about the first value to reach p < 0.05 before the multiple-testing adjustment,",
                 "and about the second to be significant after it when it is the only change: %s. A rough",
                 "reading of the power, not a rule."), det_txt))
-caveat <- if (nrow(off_band)) paste("Unbalanced channels: the centred ratios read relative to the typical",
-                                    "protein, and strong losses in the small channel show only as absences.") else NULL
 plain_language <- paste(
   "**SILAC ratios + limma**: each sample was grown with its own isotope label and the samples were mixed",
   "and measured together, so each protein is compared between labels inside the same run. The ratio is",
@@ -590,7 +589,7 @@ prov <- list(
   pipeline_id = "silac_ratio", method = "silac",
   display_label = "SILAC ratios + limma (one-sample moderated t, robust eBayes)",
   methods_heading = "SILAC ratio analysis", methods_paragraph = methods_paragraph,
-  plain_language = plain_language, caveat = caveat, brief_notes = brief_notes,
+  plain_language = plain_language, brief_notes = brief_notes,
   rollup_method = "median of the precursor log2 ratios (raw Precursor.Quantity) per protein group and replicate",
   de_engine = "limma::lmFit (intercept only, per comparison) -> eBayes(robust = TRUE) -> BH",
   missing_policy = sprintf(paste("A ratio needs both channels at Channel.Q.Value <= %g; a protein group is tested",
@@ -617,10 +616,28 @@ prov <- list(
   design = "an intercept-only (one-sample) model per comparison, one value per replicate (run)",
   n_samples = n_rep, n_replicates = n_rep,
   groups = setNames(lapply(loaded, length), names(loaded)),
-  expression_matrix = list(file = "Expression_Matrix.csv", samples = "SILAC_samples.csv", values = paste(
+  sample_matrix = list(file = "SILAC_sample_matrix.csv", samples = "SILAC_samples.csv", values = paste(
     "per sample (replicate x channel): log2 of the summed channel-passing raw precursor quantity,",
     "median-centred within the sample; for the sample-quality panels and depth checks, not what was tested")),
   report_sections = report_sections, high_significance_note = high_significance_note,
+  de_columns = list(
+    logFC = paste("the mean median-centred log2 ratio, numerator/denominator, over the replicates with a",
+                  "ratio (limma's estimate): relative to the typical protein of each replicate; positive =",
+                  "higher in the numerator (the first-named group); NA = not tested"),
+    t = "moderated one-sample t-statistic (limma eBayes, robust)",
+    P.Value = "raw p-value of the moderated one-sample t-test against a log2 ratio of 0; NA = not tested (Evidence says why)",
+    adj.P.Val = "Benjamini-Hochberg adjusted p-value within the comparison -- THE significance column (NA = not tested)",
+    Description = "the protein's description from the searched FASTA's header",
+    n_replicates = "replicates (runs) in which the protein group had a ratio",
+    `Detected_<group>` = paste("k/n: the replicates holding that group in which the protein group had at least",
+                               "one precursor passing the channel q-value in that group's channel"),
+    log2_ratio_uncentred_mean = paste("the mean UNCENTRED log2 ratio: amount per volume, carrying each",
+                                      "replicate's mixing offset (SILAC_ratio_offsets.csv)"),
+    Evidence = "tested, or why the protein group was not (a ratio in too few replicates)",
+    `centred_<replicate>` = "that replicate's median-centred log2 ratio (median of the precursor log2 ratios, minus the replicate's median)",
+    `uncentred_<replicate>` = "that replicate's log2 ratio before centring (the median of its precursor log2 ratios)",
+    `n_precursors_<replicate>` = "precursors with both channels passing, behind that replicate's ratio",
+    comparison = "the comparison, in words"),
   glance_tiles = list(list(n_rep, "replicates (runs)"), list(length(groups), "channels compared"),
                       list(nrow(specific), "channel-specific proteins")),
   q_columns = list("Q.Value", "PG.Q.Value", "Channel.Q.Value"), q_cutoffs = list(q_cut, pg_q_cut, ch_q_cut),

@@ -3,7 +3,7 @@
 The SILAC ratio analysis (run_silac.R + silac_ratios.R) on a synthetic plexDIA report
 (tests/silac_fixture.py: planted effects, a mixing offset, channel-specific proteins).
 
-The method was validated on a real triple-SILAC secretome (4 replicates, DIA-NN 2.7.0): it
+The method was validated on a real triple-SILAC experiment (4 replicates, DIA-NN 2.7.0): it
 reproduced the hand-made analysis's tables to floating-point precision (1,224 / 1,153 / 1,093
 proteins tested; 816 / 799 / 0 significant). These tests pin, on data whose answer is known:
   * the planted changes are found, in the right direction, and nothing else;
@@ -198,7 +198,7 @@ class Analysis(unittest.TestCase):
         self.assertIn("share the KO channel", scatter["caption"])
 
     def test_qc_matrix(self):
-        em = read(os.path.join(self.out, "Expression_Matrix.csv"))
+        em = read(os.path.join(self.out, "SILAC_sample_matrix.csv"))
         samples = read(os.path.join(self.out, "SILAC_samples.csv"))
         self.assertEqual([s["File.Name"] for s in samples][:3], ["Rep1_WT", "Rep1_KO", "Rep1_DKO"])
         col = [num(r["Rep1_KO"]) for r in em if r["Rep1_KO"] not in ("", "NA")]

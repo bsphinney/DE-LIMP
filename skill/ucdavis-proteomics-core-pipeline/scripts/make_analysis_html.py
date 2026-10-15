@@ -53,10 +53,13 @@ APPENDIX = "Appendix: p-value calibration"
 FIGURE_ORDER = [
     ("qc_detected_vs_inferred", "Quality control"),
     ("qc_protein_counts", "Quality control"),
+    ("silac_channel_composition", "Quality control"),   # run_silac.R's channel QC
+    ("silac_channel_detections", "Quality control"),
     ("pca", "Overview"),
     ("heatmap_top", "Overview"),
     ("volcano", "Differential expression"),
     ("violin_top", "Differential expression"),     # make_figures.R's top-protein plots
+    ("silac_scatter", "Differential expression"),  # run_silac.R: one comparison against another
     ("qc_pvalue_panel", APPENDIX),                 # every contrast's p-values, one panel (2.8.0)
     ("pvalue", APPENDIX),                          # one per contrast (sessions before 2.8.0)
 ]
@@ -930,6 +933,14 @@ def build_page(a, prov, tables, figs, md_text, used):
         sections.append({"anchor": anchor("Top proteins per contrast", used),
                          "title": "Top proteins per contrast", "kind": None,
                          "blocks": [("top", top)]})
+    # The pipeline's own sections (de_provenance.json `report_sections`: {title, markdown}; e.g.
+    # run_silac.R's channel mixing and channel-specific proteins) -- the report's own section of
+    # the same title wins, as for the set tests
+    for sec in prov.get("report_sections") or []:
+        if (isinstance(sec, dict) and sec.get("title") and sec.get("markdown")
+                and norm_title(sec["title"]) not in report_h2):
+            sections.append({"anchor": anchor(sec["title"], used), "title": sec["title"],
+                             "kind": None, "blocks": [("md", sec["markdown"])]})
     if md_text is not None:
         app = [fn for fn in a._listed if fn.startswith(APPENDIX_FIGURES) and fn not in referenced]
         if app:
@@ -968,9 +979,15 @@ def split_md_sections(md):
 
 def glance_data(prov, tables, tables_dir, session=None):
     tiles = []
-    if isinstance(prov.get("n_samples"), int):
+    # a pipeline that names its own units (run_silac.R: replicates, channels) says so in its
+    # record (`glance_tiles`: [[number, label], ...]); otherwise samples and groups
+    own = [t for t in prov.get("glance_tiles") or []
+           if isinstance(t, list) and len(t) == 2 and isinstance(t[0], int)]
+    if own:
+        tiles.extend((n, str(lab)) for n, lab in own)
+    if not own and isinstance(prov.get("n_samples"), int):
         tiles.append((prov["n_samples"], "samples"))
-    if isinstance(prov.get("groups"), dict):
+    if not own and isinstance(prov.get("groups"), dict):
         tiles.append((len(prov["groups"]), "groups"))
     rows = []
     for c in tables.contrasts:

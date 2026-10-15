@@ -2,7 +2,7 @@
 """
 silac.py -- SILAC (Lys/Arg) multiplexing with DIA-NN plexDIA: THE one definition in this skill.
 
-Why it exists (PROT_0807-type triple SILAC, 2026-10-14): the skill had no SILAC option, so the
+Why it exists (a triple-SILAC search, 2026-10-14): the skill had no SILAC option, so the
 labels went in as estimate_params.py --overrides and were recorded as a user override, the
 declaration that DIA-NN's README gives for a label-free library (`--lib-fixed-mod SILAC`) was
 applied on top of a FASTA digest that had already labelled the library -- the precursor ids read
@@ -76,7 +76,7 @@ FIXED_MOD = f"{LABEL_GROUP},0.0,{SITES},label"
 
 # The channel-normalisation question (README: "--channel-run-norm (pulsed SILAC, protein
 # turnover) or --channel-spec-norm (multiplexing of independent samples)"). Without one DIA-NN
-# 2.7.0 logs an ERROR and falls back to --channel-run-norm (PROT_0807-type search, 2026-10-14).
+# 2.7.0 logs an ERROR and falls back to --channel-run-norm (a triple-SILAC search, 2026-10-14).
 CHANNEL_NORM = {"spec": "--channel-spec-norm", "run": "--channel-run-norm"}
 CHANNEL_NORM_DESIGN = {
     "spec": "independent samples in each channel (different strains, treatments or cell lines, "

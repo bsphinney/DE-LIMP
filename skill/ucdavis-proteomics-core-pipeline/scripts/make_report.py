@@ -63,6 +63,31 @@ CATALOG = [
     (r".*\.png$", "Figures", "Publication-quality figure (volcano / PCA / heatmap / QC) embedded in the analysis report."),
     (r"^figures\.json$", "Figures", "Figure manifest: each figure's file, type, and caption."),
 
+    (r"^DE_silac_.*\.csv$", "Differential expression",
+     "SILAC ratios for one comparison (run_silac.R): logFC = the median-centred log2 ratio "
+     "(numerator/denominator), t, P.Value, adj.P.Val (BH), replicates with a ratio, "
+     "Detected_<group>, the uncentred mean, Evidence, then per replicate the centred and "
+     "uncentred ratios and precursor counts. Sorted by p-value; untested rows (too few "
+     "replicates) last."),
+    (r"^SILAC_channel_specific_detections\.csv$", "Differential expression",
+     "SILAC: protein groups present (channel q-value passed in at least the minimum number of "
+     "replicates) in some channels and absent from every replicate of another -- no ratio, so "
+     "not tested; the pattern and the replicates per group."),
+    (r"^SILAC_channel_summary\.csv$", "Differential expression",
+     "SILAC: per replicate and channel, the precursors and protein groups identified and the "
+     "channel's share of the precursor signal (the mixing balance)."),
+    (r"^SILAC_ratio_offsets\.csv$", "Differential expression",
+     "SILAC: per comparison and replicate, the median uncentred log2 ratio -- the mixing offset "
+     "the centred ratios remove -- and its fold."),
+    (r"^SILAC_label_incorporation\.csv$", "Differential expression",
+     "SILAC: label incorporation from label-check runs (one labelled channel injected alone): "
+     "the labelled share of each precursor's signal, a lower bound."),
+    (r"^SILAC_sample_matrix\.csv$", "Differential expression",
+     "SILAC: per sample (replicate x channel), log2 summed precursor quantity, median-centred "
+     "within the sample -- for the sample-quality panels; not what the ratios test."),
+    (r"^SILAC_samples\.csv$", "Differential expression",
+     "SILAC: the sample names of SILAC_sample_matrix.csv and their group, replicate, channel "
+     "and run."),
     (r"^DE_.*\.csv$", "Differential expression",
      "DE results for one comparison: Protein.Group, logFC, AveExpr, t, P.Value, adj.P.Val (BH), B, plus gene annotation. Sorted by adjusted p-value."),
     (r"^methods\.txt$", "Differential expression",

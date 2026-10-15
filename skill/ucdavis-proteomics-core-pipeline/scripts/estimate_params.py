@@ -1198,7 +1198,7 @@ def sage_fragment_mismatch(ms2_analyzer, sage_cfg):
 
 
 # The flags a SILAC search is declared with: set by --labels, never by --overrides. As overrides
-# (PROT_0807-type triple SILAC, 2026-10-14) they were recorded as one person's override rather than
+# (a triple-SILAC search, 2026-10-14) they were recorded as one person's override rather than
 # the study design, and --lib-fixed-mod went in with them and labelled the library twice.
 SILAC_OVERRIDE_FLAGS = ("--channels", "--lib-fixed-mod", "--original-mods",
                         *silac.CHANNEL_NORM.values())

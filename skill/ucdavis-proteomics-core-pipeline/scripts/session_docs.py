@@ -761,7 +761,22 @@ def agents_md(f, for_delivery=False):
         dcols = ((de.get("detection_matrix") or {}).get("de_columns") or {}) if isinstance(
             de.get("detection_matrix"), dict) else {}
 
+        # a pipeline that describes its own columns (de_provenance.json `de_columns`, e.g.
+        # run_silac.R: "centred_<replicate>") is read first -- its logFC is not run_de.R's
+        own = de.get("de_columns") if isinstance(de.get("de_columns"), dict) else {}
+
+        def _own(c):
+            if c in own:
+                return own[c]
+            for pat, d in own.items():
+                if "<" in pat and re.fullmatch(
+                        ".+".join(re.escape(x) for x in re.split(r"<[^>]+>", pat)), c):
+                    return d
+            return None
+
         def _desc(c):
+            if _own(c):
+                return _own(c)
             if c in COLUMNS:
                 return COLUMNS[c]
             if c.startswith("Detected_") and dcols.get("Detected_<group>"):

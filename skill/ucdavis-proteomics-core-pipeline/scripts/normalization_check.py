@@ -800,6 +800,12 @@ def delivery_gate(session):
         return {"proceed": True, "status": status, "hint": None,
                 "reason": f"{nc['decision']['quantities']} quantities, decided by "
                           f"{nc['decision'].get('by')}"}
+    # A pipeline whose quantities carry no between-run normalisation to check says so in its own
+    # record, with why (run_silac.R: a SILAC ratio is taken inside one run) -- never without one
+    if status == "not_applicable" and str(nc.get("reason") or "").strip():
+        return {"proceed": True, "status": status, "hint": None,
+                "reason": f"{prov.get('display_label') or 'this pipeline'}: not applicable -- "
+                          f"{nc['reason'].strip()}"}
     if "normalization_check" not in prov:
         try:
             acks = _legacy_acks(session, sha256(path))

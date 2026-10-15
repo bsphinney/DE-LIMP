@@ -5,14 +5,14 @@
 # reproducibility_log.R, so the replay runs the code that produced the tables -- not a second
 # description of it (DE-LIMP rule 3: one definition).
 #
-# The method, as validated on a triple-SILAC secretome (DIA-NN 2.7.0 plexDIA, 4 replicates,
+# The method, as validated on a triple-SILAC experiment (DIA-NN 2.7.0 plexDIA, 4 replicates,
 # 2026-10-14; references/silac.md):
 #   * precursors at Q.Value <= q and channel-specific PG.Q.Value <= pg_q, contaminants removed;
 #   * a precursor ratio needs both channels at Channel.Q.Value <= channel_q, with a non-zero raw
 #     quantity (Precursor.Quantity: DIA-NN's channel normalisation is not used);
 #   * per protein group and replicate, the median of its precursor log2 ratios;
 #   * per replicate, median-centring (the uncentred ratios are kept: they carry the mixing
-#     offset, e.g. a wild type that put 3-5 times more protein into a 1:1:1-by-volume mix);
+#     offset, e.g. one sample that put 3-5 times more protein into a 1:1:1-by-volume mix);
 #   * proteins with a ratio in >= min_reps replicates: moderated one-sample t-test against 0
 #     (limma lmFit, intercept only; eBayes(robust = TRUE)), Benjamini-Hochberg per comparison;
 #   * proteins detected in >= min_reps replicates of some channels and in none of another have
