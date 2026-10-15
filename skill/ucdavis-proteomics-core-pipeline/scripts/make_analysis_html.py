@@ -600,7 +600,7 @@ class Tables:
         """(tested, up, down) at adj.P < adjp ONLY -- the only significance rule the DE applied.
         The page used to also require |log2FC| >= 1, the volcano reference line, re-imposing a
         fold-change filter the DE never applied. Tested = the rows with an adjusted p-value: a
-        row without one (Evidence "not measured in either group", run_de.R 2.10.1; a maxlfq
+        row without one (Evidence "not measured in either group", run_de.R 2.12.0; a maxlfq
         group with no value) is listed in the table but was not tested."""
         tested = [r for r in self.rows(c) if r["_p"] is not None]
         sig = [r for r in tested if r["_p"] < self.adjp]
@@ -1039,7 +1039,7 @@ def inferred_note(prov, tables_dir):
 
 
 def not_measured_note(prov):
-    """The fixed "not tested" callout, from run_de.R's record (2.10.1): in each contrast a protein
+    """The fixed "not tested" callout, from run_de.R's record (2.12.0): in each contrast a protein
     measured in no run of the compared groups is listed but not tested (`not_measured`), with each
     contrast's count from `de_tables`. None when the record has no such rule or none was excluded."""
     rec = prov.get("not_measured") if isinstance(prov.get("not_measured"), dict) else None

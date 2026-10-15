@@ -174,7 +174,7 @@ AGENTS.md reads.
 
 **Rows without a p-value.** A `not measured in either group` row has `logFC`, `t`,
 `P.Value`, `adj.P.Val` and `B` empty (NA): it was not tested in that contrast and is not in
-its Benjamini–Hochberg adjustment, which runs over the tested proteins only (2.10.1;
+its Benjamini–Hochberg adjustment, which runs over the tested proteins only (2.12.0;
 `references/de-analysis.md`). On maxlfq a protein with no value at all in one compared group
 has no p-value either (limma cannot estimate it). Proteins *tested* in a contrast are the rows
 with a `P.Value`; `de_provenance.json` → `de_tables` gives each table's `n_proteins`,

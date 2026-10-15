@@ -313,7 +313,7 @@ contrast_display <- function(ct) {
 }
 
 # Proteins of a DE table measured in no run of the groups it compares: listed there but not
-# tested (run_de.R 2.10.1: de_provenance.json not_measured, and de_tables n_not_measured), so they
+# tested (run_de.R 2.12.0: de_provenance.json not_measured, and de_tables n_not_measured), so they
 # have no p-value and neither the volcano nor the p-value panel draws them. 0 for an older record.
 not_measured_n <- function(f) {
   for (t in or_else(prov$de_tables, list()))

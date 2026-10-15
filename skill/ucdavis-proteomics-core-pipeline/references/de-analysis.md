@@ -42,11 +42,11 @@ fold-change threshold is ever wanted, use `limma::treat()` + `topTreat()`, whose
 null tests it properly; note that `treat` is far more stringent than the same cut applied
 post hoc, so limma recommends a *small* threshold there (fc 1.1–1.5, not 2).
 
-**A protein measured in neither group of a contrast is not tested in it (2.10.1).** With more
+**A protein measured in neither group of a contrast is not tested in it (2.12.0).** With more
 than two groups, a protein can be measured only in groups a contrast does not compare (seen in
 C and D, never in A or B). For A vs B it has nothing to test: on dpc both sides are the
 detection model's inferred value (logFC ≈ 0, p ≈ 1), on maxlfq both are missing. Before
-2.10.1 such a protein was labelled `presence call`, tested, and counted in that contrast's
+2.12.0 such a protein was labelled `presence call`, tested, and counted in that contrast's
 Benjamini–Hochberg correction — one staff analysis had 186 of its 249 p > 0.975 proteins in
 one contrast from this, and a spike at p = 1 in every p-value histogram. Now, per contrast:
 - its `Evidence` is `not measured in either group` (`presence call` keeps its meaning:
