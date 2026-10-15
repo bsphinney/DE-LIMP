@@ -92,8 +92,7 @@ class ReferenceMatchesTheClient(unittest.TestCase):
 
     def test_commands_named_in_the_reference_exist(self):
         named = {argv[0] for _raw, argv in self._commands()}
-        self.assertTrue({"connect", "start", "threads", "where", "job", "ask", "qc", "post", "read"} <= named,
-                        named)
+        self.assertTrue({"connect", "start", "threads", "where", "job", "qc", "post"} <= named, named)
         self.assertLessEqual(named, self.commands)
 
     def _commands(self):
@@ -110,6 +109,7 @@ class ReferenceMatchesTheClient(unittest.TestCase):
                 continue                                  # a fragment, not a whole command
             raw = cmd
             cmd = re.sub(r"^bash scripts/board\.sh ", "", cmd)
+            cmd = re.sub(r"\s+<\s+\S+$", "", cmd)          # ` < post.txt`: standard input, not an argument
             cmd = re.sub(r"(--cpu-hours|--decision|--hours) <[^>]*>", r"\1 1", cmd)   # numbers
             cmd = re.sub(r"<[^>]*>", "X", cmd).replace('"$S"', "/hive/session").replace("THREAD", "1")
             cmd = re.sub(r"(?<![\w-])N(?![\w-])", "1", cmd)
@@ -135,6 +135,15 @@ class ReferenceMatchesTheClient(unittest.TestCase):
                     self.assertTrue(STEP_RE.fullmatch(args.step), f"the board refuses step {args.step!r}")
                 if args.cmd == "qc":
                     self.assertFalse(args.from_file.startswith("/hive"), "qc reads a LOCAL file: pull it first")
+                # 2.12 security review: text in double quotes is run by the shell (twice through
+                # hive_exec.sh); a post goes on standard input, never on the command line
+                self.assertNotRegex(raw, r'--(?:title|goal|project-title|text) "', "free text in double quotes")
+                if args.cmd == "post":
+                    self.assertEqual((args.text, args.body_file), (None, "-"), "a post goes on stdin")
+                # Brett, 2026-10-15: the go-ahead in the chat starts a search; nothing is asked first
+                if args.cmd == "job" and args.status == "submitted":
+                    self.assertEqual(getattr(args, "go_ahead", None), "chat", raw)
+                    self.assertIsNone(args.decision, raw)
 
     def test_the_rules_a_claude_must_keep_are_stated(self):
         for rule in ("Never open the board's web pages in a browser", "only a person gives a Claude cluster time",

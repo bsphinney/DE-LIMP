@@ -149,13 +149,40 @@ class TheDocsSayIt(unittest.TestCase):
 
     def test_step_0a_asks_core_staff_only(self):
         step = _flat(self.skill[self.skill.index("### 0a."):self.skill.index("### 0. ")])
-        self.assertIn("Core staff only, as soon as they say yes to 2: \"Which CoreOmics submission "
-                      "is this analysis for?\"", step)
+        self.assertIn("\"Do you work for the UC Davis Proteomics Core (staff)?\"", step)
+        self.assertIn("Core staff only — yes to 2 AND `check_access.sh` below says `core_member: "
+                      "true` — right after that check: \"Which CoreOmics submission is this "
+                      "analysis for?\"", step)
         self.assertIn("\"none\" for internal work", step)
         self.assertIn("on a resume (step 0c)", step)
-        self.assertIn("Anyone else: never ask it, and never mention the board", step)
+        self.assertIn("Anyone else (no to 2, or `core_member: false`): never ask it, skip every "
+                      "board step, and never mention the board, CoreOmics or a submission number",
+                      step)
         self.assertIn("--submission PROT_0807", step)
-        self.assertIn("--internal \"<its title on the board>\"", step)
+        self.assertIn("--internal '<its title on the board>'", step)
+
+    def test_outside_users_skip_the_submission_block(self):
+        """2.12 staff review: step 1 asked outside users for a PROT number."""
+        step = _flat(self.skill[self.skill.index("### 1. "):self.skill.index("### 1a.")])
+        self.assertIn("From here to step 1a: Core staff only (step 0a: yes to question 2 and "
+                      "`core_member: true`). Anyone else skips it: never run `identify`", step)
+        self.assertNotIn("Ask for a number only when there is evidence", step)
+        self.assertNotIn("whether the samples were run by the UC Davis Proteomics Core", step)
+        # a number staff gave at step 0a is not confirmed a second time
+        self.assertIn("Exit 0 → the files carry the number staff gave: go on to step 1c with no "
+                      "second confirmation", step)
+
+    def test_free_text_is_never_double_quoted_on_this_computer(self):
+        """2.12 security review: double-quoted text is run by the shell (twice via hive_exec)."""
+        step0a = _flat(self.skill[self.skill.index("### 0a."):self.skill.index("### 0. ")])
+        self.assertIn("inside a `hive_exec.sh` command use none of", step0a)
+        for text, where in ((self.skill, "SKILL.md"), (self.board, "board.md"), (self.core, "core-submissions.md")):
+            for line in text.splitlines():
+                local = line.strip()
+                if local.startswith(("bash scripts/board.sh", "python3 scripts/core_submission.py identify",
+                                     "python3 scripts/log_decision.py")):
+                    with self.subTest(where=where, line=local):
+                        self.assertNotRegex(local, r'--(?:title|goal|text|what|why|project-title) "')
 
     def test_a_resume_finds_its_thread_without_asking(self):
         step = _flat(self.skill[self.skill.index("### 0c."):self.skill.index("### 1. ")])
@@ -167,7 +194,9 @@ class TheDocsSayIt(unittest.TestCase):
         step = _flat(self.skill[self.skill.index("### 1. "):self.skill.index("### 1a.")])
         self.assertIn("None (internal work) → no `identify` and no submission. Put it on the board "
                       "now, before step 2", step)
-        self.assertIn("bash scripts/board.sh start --internal --title", step)
+        self.assertIn("bash scripts/board.sh start --internal --title '<the analysis short name>'", step)
+        self.assertIn("bash scripts/hive_exec.sh 'bash ~/proteomics-pipeline/scripts/board.sh start "
+                      "--internal --title \"<the analysis short name>\"", step)
         self.assertIn("--hours 336 --with bsphinney@ucdavis.edu", step)
 
     def test_the_core_session_records_its_submission(self):
@@ -183,13 +212,37 @@ class TheDocsSayIt(unittest.TestCase):
         self.assertIn("### One submission (step 1c, right after `fetch`)", self.board)
         self.assertIn("### Several submissions in one analysis", self.board)
         self.assertIn("### Internal work (staff said \"none\")", self.board)
-        self.assertIn("bash scripts/board.sh start --internal --title \"<the analysis's short name>\" "
+        self.assertIn("bash scripts/board.sh start --internal --title '<the analysis short name>' "
                       "--goal", ref)
         self.assertIn("What the first `start` writes is kept.", ref)
         self.assertIn("Every record in section 3 goes to the main thread only", ref)
         self.assertIn("Internal work has no stage and no delivery, and no QC row", ref)
         self.assertIn("--submission PROT_0807", ref)
-        self.assertIn("--internal \"<the title it has on the board>\"", ref)
+        self.assertIn("--internal '<the title it has on the board>'", ref)
+
+    def test_the_chat_go_ahead_starts_a_search(self):
+        """Brett, 2026-10-15: no board approval before a search; the job is recorded right after."""
+        ref = _flat(self.board)
+        self.assertNotIn("Asking for cluster time", self.board)
+        self.assertNotIn("ask THREAD", self.board)
+        self.assertIn("--go-ahead chat", ref)
+        self.assertIn("never work one out yourself", ref)
+        board_sec = _flat(self.skill[self.skill.index("## The Core Project Board"):
+                                     self.skill.index("## Working with other Claudes")])
+        self.assertIn("A search starts on your person's go-ahead in this conversation", board_sec)
+        self.assertNotIn("asked for on the board", self.skill)
+
+    def test_each_milestone_step_names_its_board_row(self):
+        rows = {"### 1c.": "session made", "### 3b.": "session made", "### 7. ": "search submitted",
+                "### 7b.": "search finished", "### 7c.": "FRAN hand-over", "### 8e.": "QC",
+                "### 9. ": "results ready", "### 12. ": "finished", "### 12b.": "delivered"}
+        heads = [m.start() for m in __import__("re").finditer(r"^### ", self.skill, __import__("re").M)]
+        for head, row in rows.items():
+            with self.subTest(step=head):
+                i = self.skill.index(head)
+                j = min([h for h in heads if h > i] + [len(self.skill)])
+                self.assertIn(f'board.md §3 row "{row}"', self.skill[i:j])
+                self.assertIn(f"| {row} |", self.board)
 
     def test_several_submissions_attach_the_main_record_only(self):
         sec = _flat(self.core[self.core.index("## Several submissions in one analysis"):
