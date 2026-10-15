@@ -173,8 +173,9 @@ class NotMeasuredInEitherGroup(unittest.TestCase):
 
     def test_the_delimp_session_leaves_them_untested(self):
         """2.12 review (M4): DE-LIMP draws its volcano and tables with topTable(session$fit), which
-        gave an untested protein its p-value back and counted it in BH. In the session's fit its t,
-        p-value and B are NA for that contrast, so topTable reproduces DE_*.csv."""
+        gave an untested protein its p-value back and counted it in BH. In the session's fit its
+        logFC, t, p-value and B are NA for that contrast, so topTable reproduces DE_*.csv -- the
+        same NA rows in every one of those columns, the same numbers elsewhere."""
         for key in ("dpc", "dpc_tr"):
             out = self.out(key)
             res = json.loads(rscript(f'''
@@ -183,7 +184,10 @@ class NotMeasuredInEitherGroup(unittest.TestCase):
                 tt <- topTable(s$fit, coef = cn, number = Inf)
                 de <- read.csv(file.path("{out}", sprintf("DE_dpc_%s.csv", make.names(cn))))
                 de <- de[match(rownames(tt), de$Protein.Group), ]
-                list(na_p = sum(is.na(tt$P.Value)), na_same = identical(is.na(tt$adj.P.Val), is.na(de$adj.P.Val)),
+                na_same <- all(vapply(c("logFC", "t", "P.Value", "adj.P.Val", "B"), function(k)
+                  identical(is.na(tt[[k]]), is.na(de[[k]])), TRUE))
+                list(na_p = sum(is.na(tt$P.Value)), na_same = na_same, na_lfc = sum(is.na(tt$logFC)),
+                     dlfc = max(abs(tt$logFC - de$logFC), na.rm = TRUE),
                      dp = max(abs(tt$P.Value - de$P.Value), na.rm = TRUE),
                      dadj = max(abs(tt$adj.P.Val - de$adj.P.Val), na.rm = TRUE),
                      na_t = sum(is.na(s$fit$t[, cn])), na_lods = sum(is.na(s$fit$lods[, cn])),
@@ -195,10 +199,10 @@ class NotMeasuredInEitherGroup(unittest.TestCase):
             n_nm = {c: t["n_not_measured"] for c, t in self.prov(key)["de_tables"].items()}
             self.assertEqual(n_nm["B-A"], 20, key)
             for cn, r in res["per"].items():
-                self.assertEqual((r["na_p"], r["na_t"], r["na_lods"], r["n_listed"]),
-                                 (n_nm[cn],) * 4, (key, cn))
-                self.assertTrue(r["na_same"], (key, cn))
-                self.assertLess(max(r["dp"], r["dadj"]), 1e-12, (key, cn))
+                self.assertEqual((r["na_p"], r["na_lfc"], r["na_t"], r["na_lods"], r["n_listed"]),
+                                 (n_nm[cn],) * 5, (key, cn))
+                self.assertTrue(r["na_same"], (key, cn))      # logFC, t, P.Value, adj.P.Val, B
+                self.assertLess(max(r["dlfc"], r["dp"], r["dadj"]), 1e-12, (key, cn))
             # F (all contrasts together): NA for a protein any contrast does not test
             self.assertEqual(res["na_F"], len(CD_ONLY | B_ONLY), key)
 
