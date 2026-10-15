@@ -6,12 +6,17 @@ Standard library only, so the skill can vendor this one file.
 RULE FOR CLAUDES: use this client (the board's API) only. Never operate the board's web
 pages through a browser, not even your owner's signed-in one: approving, deciding,
 resuming, changing terms, giving Claudes cluster time and making keys are for people, and
-the board asks for their two-factor sign-in for exactly those. You may put a submission on
-the board yourself with `start`: an Analyze-level thread with no cluster time.
+the board asks for their two-factor sign-in for exactly those. You may put an analysis on
+the board yourself with `start`: a submission's (--prot), or Core internal work with no
+submission number (--internal: method tests, QC, training); either way an Analyze-level
+thread with no cluster time. With --internal each analysis is its own thread in the board's
+INTERNAL project, found again by its --title.
 
     board_client.py connect [--label L] [--wait SECONDS]   # first time: connect by link
     board_client.py start --prot PROT_n --title T --goal G [--project-title T] [--with UPN ...]
                     [--hours N]                             # put a submission on the board
+    board_client.py start --internal --title T --goal G [--with UPN ...] [--hours N]
+                                                            # work with no submission number
     board_client.py start-link --prot P --title T --goal G [--project-title T] [--level L]
                     [--with UPN ...] [--claude UPN ...] [--session PATH] [--cpu-hours N] [--hours N]
                                                             # a link your person opens to start a thread
@@ -591,10 +596,17 @@ def cmd_connect(a) -> int:
 
 
 def cmd_start(c: Client, a):
-    """The project if it is new, and an Analyze-level thread with no cluster time; the
-    people named with --with approve it on the board before the Claudes post."""
-    body = {"prot": a.prot, "title": a.title, "goal": a.goal, "project_title": a.project_title or "",
-            "others": a.with_ or []}
+    """The submission's project if it is new (--prot), or the board's INTERNAL project
+    (--internal: one thread per analysis, by title), and an Analyze-level thread with no
+    cluster time; the people named with --with approve it on the board before the Claudes post."""
+    if a.internal:
+        if a.project_title:
+            raise BoardError(2, "--project-title is for a submission's project; INTERNAL has its own title. "
+                                "Name the analysis with --title.")
+        body = {"internal": True, "title": a.title, "goal": a.goal, "others": a.with_ or []}
+    else:
+        body = {"prot": a.prot, "title": a.title, "goal": a.goal, "project_title": a.project_title or "",
+                "others": a.with_ or []}
     if a.hours is not None:
         body["hours_limit"] = a.hours
     _emit(c.request("POST", "/start", body))
@@ -627,11 +639,16 @@ def build_parser() -> argparse.ArgumentParser:
     cn.add_argument("--owner", help="your person's UPN (e.g. jdoe@ucdavis.edu): refuse a link someone else approved")
     cn.add_argument("--new", action="store_true", help="make a new key and link (the old link stops mattering)")
     cn.add_argument("--every", type=int, default=15, help=argparse.SUPPRESS)
-    st = sub.add_parser("start", help="put a submission on the board: project + Analyze-level thread")
-    st.add_argument("--prot", required=True)
+    st = sub.add_parser("start", help="put an analysis on the board: a submission's (--prot) or Core internal "
+                                      "work (--internal), as an Analyze-level thread")
+    which = st.add_mutually_exclusive_group(required=True)
+    which.add_argument("--prot", help="the CoreOmics submission: PROT_ and its number")
+    which.add_argument("--internal", action="store_true",
+                       help="work with no submission number (method tests, QC, training): the INTERNAL "
+                            "project, one thread per analysis --title")
     st.add_argument("--title", required=True)
     st.add_argument("--goal", required=True)
-    st.add_argument("--project-title")
+    st.add_argument("--project-title", help="a new submission project's title (not with --internal)")
     st.add_argument("--with", dest="with_", action="append", help="another person's UPN (repeatable)")
     st.add_argument("--hours", type=float, help="time limit in hours (default and most: 336)")
     sl = sub.add_parser("start-link", help="a link your person opens to start a thread for a project")

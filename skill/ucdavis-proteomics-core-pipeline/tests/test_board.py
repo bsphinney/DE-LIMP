@@ -24,8 +24,8 @@ CLIENT = os.path.join(SCRIPTS, "board_client.py")
 BOARD_SH = os.path.join(SCRIPTS, "board.sh")
 REFERENCE = os.path.join(SKILL, "references", "board.md")
 
-# core-board main a42be74 (2026-10-07), client/board_client.py
-CLIENT_SHA256 = "f8b2b3ee18d4e446117dc27cb2ef7ba11628d11026dbfce1999a3c347a368b06"
+# core-board feat/internal-work (2026-10-15: start --internal), client/board_client.py
+CLIENT_SHA256 = "8f0e6b554badb3f56e50e88de34bc657d4bcea5981c7cc4c410576806571f8cf"
 # the board's rule for a job's step (core-board app/actions.py _STEP_RE)
 STEP_RE = re.compile(r"[0-9]{1,4}(/[0-9]{1,4})?")
 BOARD_URL = "https://core-board-ucd.azurewebsites.net"
