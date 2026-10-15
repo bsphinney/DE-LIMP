@@ -108,6 +108,90 @@ PANEL_ORTHOLOGS = {
 # Organisms whose names the panels are verified for: human symbols, and PANEL_ORTHOLOGS.
 PANEL_ORGANISMS = {9606: "Homo sapiens", 10090: "Mus musculus", 10116: "Rattus norvegicus"}
 
+# CYSTEINE. A search that fixes carbamidomethyl on C (estimate_params.py --cys-alkylation cam, the
+# default; DIA-NN --unimod4) identifies cysteine peptides only of a sample that was reduced and
+# alkylated. Identified peptides with a C: 7.8% on a Core S-Trap prep with DTT/IAA, 0.03-0.5% on
+# three on-bead pull-down projects searched that way (staff reports, 2026-10-09). The warning sits
+# at 1%, between them.
+CYS_MIN_FRACTION = 0.01
+CYS_TYPICAL = "about 8% (7.8% on a Core S-Trap prep with DTT/IAA)"
+
+
+def report_params(report):
+    """The params file the search beside `report` ran with, from its search_provenance.json
+    (resolved_params_file, else params_file), or None."""
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(report)),
+                               "search_provenance.json")) as fh:
+            prov = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    for key in ("resolved_params_file", "params_file"):
+        p = prov.get(key) if isinstance(prov, dict) else None
+        if p and os.path.isfile(p):
+            return p
+    return None
+
+
+def cys_check(report, params=None):
+    """The share of identified precursors (Q.Value <= 0.01) with a cysteine, and whether the
+    search fixed carbamidomethyl on it (estimate_params.cam_searched).
+
+    -> {"status": WARN | INFO | NOT_RUN, "message", "fraction", "n_cys", "n", "cam_searched",
+    "params"}. WARN when carbamidomethyl was fixed and under CYS_MIN_FRACTION of the precursors
+    hold a C: the samples were probably not reduced and alkylated."""
+    rec = {"status": "NOT_RUN", "message": None, "fraction": None, "n_cys": None, "n": None,
+           "cam_searched": None, "params": params or report_params(report),
+           "threshold": CYS_MIN_FRACTION}
+    try:
+        import pyarrow.parquet as pq
+    except ImportError:
+        rec["message"] = "cysteine check not run: pyarrow is not available to read the report"
+        return rec
+    names = pq.read_schema(report).names
+    if "Stripped.Sequence" not in names:
+        rec["message"] = ("cysteine check not run: the report has no Stripped.Sequence column "
+                          "(not a DIA-NN report)")
+        return rec
+    cols = ["Stripped.Sequence"] + [c for c in ("Precursor.Id", "Q.Value") if c in names]
+    t = pq.read_table(report, columns=cols)
+    seqs = t.column("Stripped.Sequence").to_pylist()
+    ids = t.column("Precursor.Id").to_pylist() if "Precursor.Id" in cols else seqs
+    qs = t.column("Q.Value").to_pylist() if "Q.Value" in cols else [0.0] * len(seqs)
+    found = {}
+    for seq, pid, q in zip(seqs, ids, qs):
+        if seq and (q is None or q <= 0.01):
+            found[pid] = "C" in str(seq)
+    if not found:
+        rec["message"] = "cysteine check not run: the report holds no identified precursor"
+        return rec
+    from estimate_params import cam_searched
+    rec.update(n=len(found), n_cys=sum(found.values()))
+    rec["fraction"] = rec["n_cys"] / rec["n"]
+    rec["cam_searched"] = cam_searched(rec["params"]) if rec["params"] else None
+    share = (f"{rec['fraction']:.2%} of the identified precursors contain a cysteine "
+             f"({rec['n_cys']} of {rec['n']})")
+    low = rec["fraction"] < CYS_MIN_FRACTION
+    if low and rec["cam_searched"]:
+        rec["status"] = "WARN"
+        rec["message"] = (
+            f"CYSTEINE: only {share}, and the search fixed carbamidomethyl on every C "
+            f"({os.path.basename(rec['params'])}). A reduced and alkylated sample gives "
+            f"{CYS_TYPICAL}. Under {CYS_MIN_FRACTION:.0%} usually means the samples were NOT "
+            "reduced and alkylated -- common for on-bead, IP and pull-down digests -- so no "
+            "cysteine peptide could be identified. Fix: confirm the prep with the lab; if it had no "
+            "reduction/alkylation, re-run estimate_params.py with --cys-alkylation none and "
+            "search again.")
+    else:
+        rec["status"] = "INFO"
+        how = {True: "the search fixed carbamidomethyl on C",
+               False: "the search left cysteine unmodified",
+               None: "the search parameters were not found, so whether carbamidomethyl was fixed "
+                     "is unknown (pass --params)"}[rec["cam_searched"]]
+        rec["message"] = (f"{share[0].upper()}{share[1:]}; {how}. A reduced and alkylated sample "
+                          f"searched with fixed carbamidomethyl gives {CYS_TYPICAL}.")
+    return rec
+
 
 def panel_genes(name, taxid=None):
     """The ONE place a panel's match set is built: its human symbols plus the organism's
@@ -575,7 +659,11 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--matrix", required=True, help="expression matrix CSV (proteins x samples; a gene/id column + numeric sample columns)")
     ap.add_argument("--conditions", help="conditions.csv (File.Name,Group) to test group-confounding")
-    ap.add_argument("--report", help="DIA-NN report.parquet for TRUE per-sample detected depth")
+    ap.add_argument("--report", help="DIA-NN report.parquet for TRUE per-sample detected depth, "
+                    "and the share of identified precursors with a cysteine")
+    ap.add_argument("--params", help="the search's parameters file (DIA-NN cfg / Sage JSON), for "
+                    "the cysteine check. Default: the one search_provenance.json beside --report "
+                    "names")
     ap.add_argument("--block", help="conditions.csv column naming the animal / subject each sample "
                     "came from (the confound test then respects it). Default: the block_column "
                     "run_de.R recorded in the de_provenance.json beside --matrix, if any")
@@ -779,8 +867,13 @@ def main():
             flags.append(lost_msg)
 
     depth, depth_note = (None, None)
+    cys = None
     if a.report and os.path.exists(a.report):
         depth, depth_note = detected_depth(a.report)
+        # fixed carbamidomethyl on samples that were never alkylated: no cysteine peptide found
+        cys = cys_check(a.report, a.params)
+        if cys["status"] == "WARN":
+            flags.append(cys["message"])
 
     # ---- write report ----
     with open(a.out, "w") as fh:
@@ -824,6 +917,9 @@ def main():
             if not r.get("confound_tests"):
                 fh.write(f"\n_group-confounding:_ {r['group_detail']}\n")
             fh.write("\n")
+        if cys:
+            fh.write(f"## Cysteine\n\n{'**WARN** ' if cys['status'] == 'WARN' else ''}"
+                     f"{cys['message']}\n\n")
         if tc_note:
             fh.write(f"## {TARGET_PANEL}\n\n_Proteins that are also common-contaminant "
                      f"sequences: {tc_note}._\n\n")
@@ -846,12 +942,15 @@ def main():
         json.dump({"samples": samples, "groups": gmap, "matrix_complete": complete,
                    "taxid": taxid, "panel_organisms_verified": taxid in PANEL_ORGANISMS,
                    "panels": results, "detected_depth": depth, "flags": flags,
+                   "cysteine": cys,
                    "fasta_meta": fasta_meta, "target_contaminants_note": tc_note,
                    "lost_to_contaminants": lost_msg}, jf, indent=2)
 
     print(json.dumps({"out": a.out, "flags": flags,
                       "group_confounded": [n for n, r in results.items() if r["group_confounded"]],
                       "not_run": not_run,
+                      "cysteine": cys and {k: cys[k] for k in ("status", "fraction",
+                                                               "cam_searched")},
                       "matrix_complete": complete}, indent=2))
 
 
