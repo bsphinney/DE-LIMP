@@ -731,8 +731,8 @@ what the runs said is checked for plausibility before it is pinned for the cohor
 | check | rule | why that number |
 |---|---|---|
 | band | MS2 **3–30 ppm**, MS1 **1.5–25 ppm** (`probe_window.MASS_ACC_BAND`) | all DIA-NN's own: its documented Orbitrap tiers span 4–15 ppm, it calibrates from `25 (MS1), 25 (MS2)`, and its runtime value for a 15k MS2 is 25. Ceiling = its widest number +20%; floor below its tightest tier (240k→4) |
-| agreement | per-run spread ≤ **50%** of the median (`MASS_ACC_MAX_SPREAD`) | the widest real disagreement measured here: the same three runs gave MS2 14/17/14 with the window auto (21%) and 12/17/14 with `--window 7` (36%), both reproducible. 35% would refuse the cohort this branch was validated on |
-| runs | at least **2** runs logged everything (`MASS_ACC_MIN_RUNS`) | one run is DIA-NN's own first-run auto mode — "use this mode for preliminary analyses only" — which measuring representative runs exists to replace, and a lone value agrees with itself |
+| agreement | per-run spread ≤ **50%** of the median (`MASS_ACC_MAX_SPREAD`) | the widest real disagreement measured here: the same three runs gave MS2 14/17/14 with the window auto (21%) and 12/17/14 with `--window 7` (36%), both reproducible. 35% would refuse the cohort this branch was validated on. **A wider spread only warns** (`mass_acc.warnings`, the job log) when the median is at or below the SOP floor and every run is inside the band: the floor is then pinned whatever the spread. 18 streptavidin pull-down runs measured MS2 20/24/10 (70%, median 20 = the floor) and were refused before 2.12; sparse controls of an enrichment cohort are a known benign cause, which the warning and the refusal both name |
+| runs | at least **2** runs logged everything (`MASS_ACC_MIN_RUNS`) | one run is DIA-NN's own first-run auto mode — "use this mode for preliminary analyses only" — which measuring representative runs exists to replace, and a lone value agrees with itself. **A cohort of one run** (a one-file single-shot search) pins its own measurement (`mass_acc_min_runs`, `mass_acc.single_run_cohort`), band and floor as usual: before 2.12 every one-file search on a 15k-MS2 Orbitrap failed here after its library was built |
 
 Failing the band or the agreement check is a **refusal**: nothing reaches the cfg or
 `massacc.txt`, `window.json` keeps every per-run value with the reason under
@@ -941,7 +941,7 @@ DIA-NN 2.7.0 (HIVE, review srun 23512013): a re-run with no .NET logged `ERROR: 
 | 2 | this task's `quant_step2/<run>.quant` | this task's `.quant` was written to `quant_step2/` |
 | 3 | `empirical.parquet` | the empirical spectral library exists |
 | 4 | this task's `quant_step4/<run>.quant` (before the no-step-2-quant skip) | this task's `.quant` was written to `quant_step4/` |
-| 5 | `report.parquet` and `report.stats.tsv` | `report.parquet` exists **and** every `.quant` the runs in `file_list.txt` map to is present and non-empty in `quant_step4/` |
+| 5 | `report.parquet` and `report.stats.tsv` | every `.quant` the runs in `file_list.txt` map to is present and non-empty in `quant_step4/` (before DIA-NN runs), `report.parquet` exists, **and** its `Run` column holds every run in `file_list.txt` (`check_report_runs.py`, the single-shot search's check) |
 
 Step 5's count check is the backstop: it is the only place that can notice a sample went
 missing several steps earlier. It counts the `.quant` **files** this chain's inputs map to —
@@ -954,10 +954,33 @@ so a collision makes the count fall short and the job fails. It names each missi
 (`MISSING: <run>.quant -- no step-4 task wrote it`), and reports a short count of distinct
 names separately (`N inputs map to only M distinct run names`).
 
+The `.quant` count says every run was searched; DIA-NN can still leave one out of the report
+(a run with nothing past the q-value filter, a path it could not parse) and exit 0. So after
+the report exists step 5 runs `check_report_runs.py --report <report> --files-list
+file_list.txt`, as the single-shot search job does, and fails naming each missing run and what
+`report.stats.tsv` shows about it. A blank or wash injection therefore fails step 5 too — leave
+it out of the inputs.
+
 Colliding run names are refused before any of that, at generation: `run_search.py` checks the
 input list it routes, and `diann_parallel.py` checks `--raw`/`--raw-list` in its own `main()`
 — the chain is run directly too, and that route used to generate a chain, spend its SLURM
 hours and merge two samples into one column.
+
+**A path with `--` in it.** DIA-NN joins its arguments with spaces and cuts the result at every
+`--`, quoted or not (`arguments()`, `diann.cpp` at tag 1.8), so `--f …_DIA--asp3_S3.d` becomes
+the file `…_DIA` (skipped: "invalid raw MS data format") and the option `--asp3_S3.d`
+("unrecognised option"); DIA-NN 2.7.0 did exactly that on a Core run and searched the others,
+and does it for a `--` in a folder too (HIVE srun 24807838: `plate--1/s1.mzML` became the file
+`plate` and the option `--1/s1.mzML`, while a link to the dashed run without `--` was read).
+Both generators (`diann_parallel.dashed_input_plan`, the one rule) search a run whose **folder**
+holds `--` through a link in `<out>/input_links/` with the same file name, so the run keeps its
+name; `file_list.txt` and every step then name the link, and `search_provenance.json`
+`input_links` (`diann_parallel.py`'s JSON output, when run directly) records each pair. A run
+whose **file name** holds `--` is refused, with the name it would be searched as, unless
+`--rename-dashed-runs` is given: then the link is named with each run of dashes made one
+(`a--b.d` → `a-b.d`) and the report and `conditions.csv` use that name. A new name that another
+input already has is refused. `--out`, `--fasta`, `--cfg` and `--seed-lib` with `--` are refused.
+A single `-` is harmless, and every path the skill passes is absolute.
 
 `--out` is refused if it contains `$`, a backtick, `"`, a backslash or a newline. Every guard
 above quotes its path with **double** quotes on purpose, so that an array task's `$QUANT`
