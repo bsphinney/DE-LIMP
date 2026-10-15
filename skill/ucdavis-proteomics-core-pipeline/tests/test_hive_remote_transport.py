@@ -66,6 +66,8 @@ SHIMS = {
         # FAKE_CK: what check_access.sh's probe of ~/.coreomics_token answers on "HIVE"
         '  ok) echo HAS_SBATCH; echo HAS_GRP; [ -z "${FAKE_CK:-}" ] || echo "COREOMICS_KEY=$FAKE_CK" ;;\n'
         '  old_ls_d) echo HAS_SBATCH; echo /quobyte/proteomics-grp ;;\n'
+        # a HIVE account outside the Core: sbatch, but proteomics-grp cannot be listed
+        '  not_core) echo HAS_SBATCH; [ -z "${FAKE_CK:-}" ] || echo "COREOMICS_KEY=$FAKE_CK" ;;\n'
         '  hostkey) echo "Warning: Permanently added x" >&2; echo "Host key verification failed." >&2; exit 255 ;;\n'
         '  denied) echo "UC Davis HPC -- authorised use only" >&2\n'
         '          echo "tester@hive.hpc.ucdavis.edu: Permission denied (publickey)." >&2; exit 255 ;;\n'
@@ -654,7 +656,30 @@ class CheckAccessCoreOmicsKeyTests(Harness):
     def test_without_ssh_nothing_is_claimed_about_hive(self):
         j = self.check(laptop_key=True, FAKE_SSH="denied")
         self.assertIsNone(j["coreomics_key_on_hive"])
-        self.assertEqual((j["recommended_mode"], j["coreomics_runs_on"]), ("local", "this_computer"))
+        # core_member then rests on this machine alone: on HIVE itself the group is readable
+        route = "this_computer" if j["core_member"] else "none"
+        self.assertEqual((j["recommended_mode"], j["coreomics_runs_on"]), ("local", route))
+
+    def test_outside_the_core_no_coreomics_step_is_routed_or_advised(self):
+        """2.12 staff review: someone outside the Core is never pointed at CoreOmics or its key
+        (SKILL.md steps 0a and 1). A HIVE account that cannot list proteomics-grp is not the Core,
+        whatever key files it has."""
+        if os.access("/quobyte/proteomics-grp", os.R_OK):
+            self.skipTest("this machine reads proteomics-grp itself, so it is the Core")
+        for laptop_key, ck in ((False, ""), (True, "mode:600")):
+            with self.subTest(laptop_key=laptop_key, hive_key=ck):
+                j = self.check(laptop_key=laptop_key, FAKE_SSH="not_core", FAKE_CK=ck)
+                self.assertIs(j["core_member"], False)
+                self.assertEqual(j["recommended_mode"], "hive_remote")
+                self.assertEqual(j["coreomics_runs_on"], "none")
+                self.assertIsNone(j["coreomics_key_advice"])
+                self.assertNotIn("coreomics_key_to_hive", json.dumps(j["coreomics_key_advice"]))
+
+    def test_the_core_still_gets_its_route(self):
+        j = self.check(laptop_key=True, FAKE_CK="mode:600")
+        self.assertIs(j["core_member"], True)
+        self.assertEqual(j["coreomics_runs_on"], "hive")
+        self.assertTrue(j["coreomics_key_advice"])
 
 
 class HiveLoginSavedTests(Harness):
