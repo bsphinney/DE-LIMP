@@ -2412,11 +2412,12 @@ excluded. Name any that are significant in DE, and judge them by type: skin/hair
 (KRT1/2/9/10, KRTAPs, FLG) are usually handling contamination; ACTB, EEF1A1, tubulins and
 KRT8/18/19/7 in epithelial cells are usually endogenous. `contaminant_overlap` means real
 proteins are missing from quant — rebuild the FASTA and re-search. `contaminant_evidence` names a
-contaminant protein group whose every peptide is also a sample protein's (shared, or the same but
-for I/L): probably the sample's own protein. Report it as that protein — never as
-contamination or an added standard — and tell the user it was removed with the contaminants.
-To quantify it as theirs (the user's call: a new search), rebuild the FASTA with the same `fetch`
-command plus the `--drop-contaminant` the finding names, and search again.
+contaminant protein group whose every peptide is also one of a sample protein's digest peptides
+(shared, or the same but for I/L): the data cannot attribute it to the contaminant's species.
+Report it as the sample organism's protein — its own, or handling contamination (skin keratin) —
+never as that species' signal or an added standard, and tell the user it was removed with the
+contaminants. To quantify it as the organism's (the user's call: a new search), rebuild the FASTA
+with the same `fetch` command plus the `--drop-contaminant` the finding names, and search again.
 `sample_quality.py`'s CONTAMINANT_IDENTICAL panel uses the same list as `target_contaminants`; a
 group-confounded result there is a STOP like any other panel. A `numeric_covariate` WARN (a
 covariate fitted as a number that the groups nearly determine) quotes run_de.R's caution: tell
