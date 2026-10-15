@@ -52,7 +52,7 @@ look a submission up at all (Gabriela 2026-10-02, Michelle 2026-10-08).
 | `conditions` | either | wraps `collect_conditions.py`; run it locally on the pulled `sample_files.tsv` |
 | search, DE, figures, audit, `make_methods.py` | **HIVE (SLURM)** | in the session under the printed `work_dir` — the session of record |
 | writing the report, `make_analysis_html.py`, `to_docx.py` (the Methods) | **local** (no usable local Python: **HIVE**) | local: on a pulled copy, the finished files pushed back; HIVE: `AI_Analysis_Report.md` put into `$S/output/`, both scripts run there (SKILL.md step 1c.7) |
-| the podcast (`make_podcast.py`, SKILL.md step 9e: made by default) | **local**, or **HIVE (SLURM)** | here when this computer runs the skill's Python, before the push; otherwise `check` on HIVE through `hive_exec.sh` and a SLURM job (`make_podcast.py job`) for render, verify, link and share, with the Core's shared Gemini key (`references/podcast.md`) |
+| the podcast (`make_podcast.py`, SKILL.md step 9e: made by default for a submission) | **local**, or **HIVE (SLURM)** | where the report was built: here before the push; on HIVE `check` through `hive_exec.sh` and a SLURM job (`make_podcast.py job`, submitted at once) for render, verify, link and share, with the Core's shared Gemini key; `--core-run` needs the staff member on the Core staff list (`references/podcast.md`) |
 | `deliver` | **HIVE** | copies into the Flinders share dir (big copies → `sbatch`) |
 | `bioshare`, `email-draft` | **KEY** | CoreOmics API again, on the full summary; drafts never send |
 
@@ -656,14 +656,16 @@ search.fasta.meta.json}` with the rest. Then locally: write `AI_Analysis_Report.
 attached record, never an email address); `to_docx.py` for the Methods only (no Word copy of the report). **Push the finished files back before delivering** — `deliver` copies from `$S`:
 ```
 L=~/core/PROT_0807/session/output
-for f in AI_Analysis_Report.md Analysis_Report.html Analysis_Report.md Analysis_Report.pdf methods.md methods.docx; do
+for f in AI_Analysis_Report.md Analysis_Report.html Analysis_Report.md Analysis_Report.pdf Analysis_Report_with_audio.html methods.md methods.docx; do
   [ -f "$L/$f" ] && bash scripts/hive_exec.sh --put "$L/$f" "$S/output/"; done
 [ -d "$L/podcast" ] && bash scripts/hive_exec.sh --put "$L/podcast" "$S/output/"   # when it was made here
 ```
-The podcast (SKILL.md step 9e) is made by default for a Core run. Made here, it goes back with the
-report; made on HIVE (no usable Python here), its job writes it into `$S` after the report is
-there, and the session is finished once that job has ended. It never holds up the delivery: a
-podcast that cannot be made is one line to the staff member.
+The podcast (SKILL.md step 9e) is made by default for a submission. Made here, it goes back with
+the report; made on HIVE (no usable Python here), its job writes it into `$S` after the report
+is there, submitted as soon as `job` writes it. It never holds up the delivery: a podcast that
+cannot be made is one line to the staff member, and a job still running when everything else
+is ready is cancelled (`scancel`), one line, and the audio added later
+(`references/podcast.md`, "When it is made").
 The PDF exists only where a headless browser printed it, so each file is put only if it is
 there. **Then finish the session on HIVE** before delivering — the output-files report (SKILL.md
 step 11) and `finalize` (step 12: README.html, AGENTS.md, the deposit package, MANIFEST.txt, the

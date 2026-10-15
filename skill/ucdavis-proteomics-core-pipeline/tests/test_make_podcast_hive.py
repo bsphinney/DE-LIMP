@@ -1,26 +1,38 @@
 #!/usr/bin/env python3
-"""The podcast by default for a Core run, made on HIVE (2.12.0).
+"""The podcast on HIVE and for Core runs (2.12.0).
 
-Brett, 2026-10-15: "It should also create the podcast by default." For a Core run the Claude
-makes it once the report is final, under the Core director's standing approval: --core-run
-records make_podcast.CORE_CLOUD_OK, the one place that text lives. Windows staff have no usable
-local Python, so their podcast runs on HIVE: check through hive_exec.sh, then a SLURM job
-(make_podcast.py job) that renders in Gemini voices, verifies, links and shares -- minutes of
+Brett, 2026-10-15: "It should also create the podcast by default" -- for a CoreOmics submission;
+internal Core work is offered it (round-2 decision). --core-run records the Core director's
+standing approval, make_podcast.CORE_CLOUD_OK, the one place that text lives. Windows staff have
+no usable local Python, so their podcast runs on HIVE: check through hive_exec.sh, then a SLURM
+job (make_podcast.py job) that renders in Gemini voices, verifies, links and shares -- minutes of
 network calls never run on the login node. On HIVE the key is the Core's shared one
 (/quobyte/proteomics-grp/.config/gemini_key: owner brettsp, group proteomics-grp, mode 640),
 read last, for a Core run only, and only while the Core's trust rule holds and accounts outside
 the group cannot read it. setup.sh puts google-genai >= GENAI_MIN in the pipeline env.
 
-Offline: google.genai is test_make_podcast's stand-in; the Core key is a temporary file put in
-place of CORE_KEY_FILE (the constant -- nothing in the environment can move it); the Core's
-admins are the account running the tests; SLURM's queue choice is patched; the job's python is
-a stub that logs what it is asked to run.
+Round 2 (2.12.0 reviews): every member of proteomics-grp can read that key, but only Core staff
+may use it, so --core-run needs the person on the Core staff list (CORE_STAFF_FILE, trusted by
+the Core's rule) -- checked by uid on HIVE, asked of HIVE from a laptop -- and `internal` needs
+session.json to say internal Core work. Their login goes to the staff-only
+logs/podcast.staff.json; podcast.json says "Core staff". On HIVE a personal key others can read
+is refused. The job script and its log live in ~/.proteomics-pipeline/jobs/, a folder only its
+owner can change (Core session folders are group-writable with no sticky bit: another member
+could swap the script before sbatch reads it), written without following a link, and its
+--output path is quoted.
+
+Offline: google.genai is test_make_podcast's stand-in; the Core key and the staff list are
+temporary files (CORE_KEY_FILE, the constant -- nothing in the environment can move it -- and
+CORE_STAFF_FILE); the Core's admins are the account running the tests; CORE_ON_HIVE says where we
+are; SLURM's queue choice is patched; the job's python is a stub that logs what it is asked to
+run, in job_env's environment.
 """
 import json
 import os
 import pwd
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -35,9 +47,11 @@ sys.path.insert(0, HERE)
 
 import make_podcast as mp                             # noqa: E402
 import slack_collab                                   # noqa: E402
+import staff                                          # noqa: E402
 import submission_report                              # noqa: E402
 import test_make_podcast as T                         # noqa: E402  helpers only (no classes run here)
 import test_setup_limpa as setup_limpa                # noqa: E402
+from job_env import job_env                           # noqa: E402
 
 ME = pwd.getpwuid(os.getuid()).pw_name
 CORE_KEY = "AIza" + "SyCOREfake0123456789abcdefghijklmn"     # shaped like a key; not one
@@ -64,27 +78,34 @@ def write(path, text, mode=None):
 
 
 class CoreKeyFile(object):
-    """The Core's shared key, as Brett installs it on HIVE, in a temporary folder: the folder
-    mode 750 (2750 on HIVE), the file 640, both the test runner's -- a Core admin here."""
+    """HIVE as the Core sets it up, in a temporary folder: the Core's .config folder (mode 750;
+    2750 on HIVE) with the shared key (640) and the Core staff list (644) naming the test runner,
+    all the test runner's -- a Core admin here. CORE_ON_HIVE=1: this is HIVE."""
 
-    def core_key_setup(self):
+    def core_key_setup(self, staff_logins=None):
         self.cfg = os.path.join(self.d, "proteomics-grp", ".config")
         os.makedirs(self.cfg)
         os.chmod(self.cfg, 0o750)
         self.core_file = write(os.path.join(self.cfg, "gemini_key"), CORE_KEY + "\n", 0o640)
+        self.staff_file = write(os.path.join(self.cfg, "core_staff.txt"),
+                                "\n".join(staff_logins or ["someone_else", ME]) + "\n", 0o644)
         self.home = os.path.join(self.d, "home")
         os.makedirs(self.home)
         env = {k: v for k, v in os.environ.items() if k != "GEMINI_API_KEY"}
-        env.update(HOME=self.home, PROTEOMICS_PIPELINE_HOME=os.path.join(self.home, "nope"))
+        env.update(HOME=self.home, PROTEOMICS_PIPELINE_HOME=os.path.join(self.home, "pp"),
+                   CORE_ON_HIVE="1", **{staff.STAFF_FILE_ENV: self.staff_file})
         for p in (mock.patch.dict(os.environ, env, clear=True),
                   mock.patch.object(mp, "CORE_KEY_FILE", self.core_file),
                   mock.patch.object(slack_collab, "core_admins", lambda: (ME,))):
             p.start()
             self.addCleanup(p.stop)
 
-    def user_key(self, key):
+    def user_key(self, key, mode=0o600):
         return write(os.path.join(self.home, ".config", "ucdavis-proteomics", "gemini_key"),
-                     key + "\n", 0o600)
+                     key + "\n", mode)
+
+    def internal_session(self, title="Astral HeLa gradient test"):
+        write(os.path.join(self.d, "session.json"), json.dumps({"analysis_for": {"internal": title}}))
 
 
 # ------------------------------------------------------------------------------- the key
@@ -164,6 +185,29 @@ class CoreKey(CoreKeyFile, unittest.TestCase):
         self.assertIn("used only for a Core run", got["note"])
         self.assertEqual(got["core_key"], "usable, for a Core run (--core-run)")
 
+    # review L4: on HIVE every home folder is open to every account
+    def test_on_hive_a_personal_key_others_can_read_is_refused(self):
+        for mode in (0o644, 0o640, 0o604):
+            with self.subTest(mode=oct(mode)):
+                self.user_key("user-key", mode)
+                key, src, why = mp.find_key(core=False)
+                self.assertEqual((key, src), (None, None))
+                self.assertIn(f"{mp.KEY_FILE} is not used", why)
+                self.assertIn("other HIVE accounts can read it", why)
+                self.assertIn("chmod 600", why)
+                msg = self.refused(core=True)                # never quietly the Core's key instead
+                self.assertIn("is not used", msg)
+                self.assertNotIn("user-key", msg)
+        self.user_key("user-key", 0o600)
+        self.assertEqual(mp.find_key(core=False)[:2], ("user-key", mp.KEY_FILE))
+
+    def test_on_a_laptop_it_is_still_only_a_warning(self):
+        self.user_key("user-key", 0o644)
+        with mock.patch.dict(os.environ, {"CORE_ON_HIVE": "0"}):
+            rc, out, err = T.run("key")
+        self.assertEqual((rc, json.loads(out)["source"]), (0, mp.KEY_FILE))
+        self.assertIn("[WARN]", err)
+
 
 # ------------------------------------------------------------------------------- consent
 class CoreRunConsent(CoreKeyFile, T.Workspace):
@@ -196,6 +240,9 @@ class CoreRunConsent(CoreKeyFile, T.Workspace):
     def manifest(self):
         return json.loads(T.read(os.path.join(self.pod, "podcast.json")))
 
+    def staff_record(self):
+        return staff.read(os.path.join(self.d, "logs", "podcast.staff.json"))
+
     def assert_no_key_in_files(self):
         for root, _, files in os.walk(self.d):
             for f in files:
@@ -210,7 +257,14 @@ class CoreRunConsent(CoreKeyFile, T.Workspace):
         self.assertEqual(keys, [CORE_KEY])
         man = self.manifest()
         self.assertEqual(man["cloud_tts_consent"], mp.CORE_CLOUD_OK)
-        self.assertEqual(man["core_run"], {"kind": "submission", "prot": "PROT_0807"})
+        self.assertEqual(man["core_run"], {"kind": "submission", "prot": "PROT_0807",
+                                           "by": staff.ROLE, "staff_check":
+                                           f"on the Core staff list ({self.staff_file})"})
+        self.assertNotIn(ME, json.dumps(man), "a login never goes in podcast.json")
+        rec = self.staff_record()
+        self.assertEqual([(e["event"], e["by"], e["kind"], e["prot"]) for e in rec],
+                         [("render", ME, "submission", "PROT_0807")])
+        self.assertTrue(staff.is_staff_only(os.path.join(self.d, "logs", "podcast.staff.json")))
         self.assert_no_key_in_files()
 
     def test_not_a_core_run_sends_nothing(self):
@@ -221,12 +275,78 @@ class CoreRunConsent(CoreKeyFile, T.Workspace):
         self.assertIn("--cloud-ok", err)
         self.assertFalse(os.path.exists(os.path.join(self.pod, "podcast.json")))
 
-    def test_an_internal_core_analysis_is_recorded_as_declared(self):
+    # review M3: the key is readable by all of proteomics-grp; the approval is for Core staff
+    def test_only_core_staff_may_claim_a_core_run(self):
+        self.core_session()
+        write(self.staff_file, "someone_else\nanother\n", 0o644)
+        for env in ({}, {"USER": "someone_else", "LOGNAME": "someone_else"}):   # $USER is no proof
+            with self.subTest(env=env), mock.patch.dict(os.environ, env):
+                rc, out, err, log, keys = self.render("--core-run")
+                self.assertEqual((rc, log["clients"], keys), (2, 0, []))
+                self.assertIn(f"--core-run is for Core staff: {ME} is not on the Core staff "
+                              f"list ({self.staff_file})", err)
+        self.assertFalse(os.path.exists(os.path.join(self.pod, "podcast.json")))
+
+    def test_an_untrusted_or_missing_staff_list_is_a_no(self):
+        self.core_session()
+        cases = [(lambda: os.chmod(self.staff_file, 0o666), "is not trusted"),
+                 (lambda: os.remove(self.staff_file), "does not exist")]
+        for spoil, why in cases:
+            with self.subTest(why=why):
+                spoil()
+                rc, out, err, log, keys = self.render("--core-run")
+                self.assertEqual((rc, log["clients"]), (2, 0))
+                self.assertIn("the Core staff list cannot be used", err)
+                self.assertIn(why, err)
+
+    def test_internal_work_needs_session_json_to_say_so(self):
+        rc, out, err, log, keys = self.render("--core-run", "internal")
+        self.assertEqual((rc, log["clients"]), (2, 0))
+        self.assertIn("does not say it is internal Core work", err)
+        write(os.path.join(self.d, "session.json"),
+              json.dumps({"analysis_for": {"submissions": ["PROT_0807"]}}))
+        self.assertEqual(self.render("--core-run", "internal")[0], 2)
+        self.internal_session()
         rc, out, err, log, keys = self.render("--core-run", "internal")
         self.assertEqual(rc, 0, err)
         man = self.manifest()
-        self.assertEqual((man["cloud_tts_consent"], man["core_run"]),
-                         (mp.CORE_CLOUD_OK, {"kind": "internal"}))
+        self.assertEqual((man["cloud_tts_consent"], man["core_run"]["kind"],
+                          man["core_run"]["title"], man["core_run"]["by"]),
+                         (mp.CORE_CLOUD_OK, "internal", "Astral HeLa gradient test", staff.ROLE))
+        self.assertEqual(self.staff_record()[-1]["by"], ME)
+
+    def test_a_laptop_asks_hive_about_the_account_its_key_reaches(self):
+        self.core_session()
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, stdout=self.hive_answer, stderr="")
+        answers = [
+            (json.dumps({"ok": True, "by": "brettsp", "checked": "on the Core staff list (/q)"}),
+             0, None),
+            (json.dumps({"ok": True, "by": "brettsp", "checked": "NOT VERIFIED: no list"}), 2,
+             "NOT VERIFIED"),
+            (json.dumps({"ok": False, "error": "--by 'x' is not on the Core staff list"}), 2,
+             "is not on the Core staff list"),
+            ("ssh: connect to host hive.hpc.ucdavis.edu port 22: timed out", 2,
+             "could not be asked from here"),
+        ]
+        for self.hive_answer, want_rc, said in answers:
+            with self.subTest(said=said), mock.patch.dict(os.environ, {"CORE_ON_HIVE": "0"}), \
+                    mock.patch.object(mp.subprocess, "run", fake_run), \
+                    mock.patch.dict(os.environ, {"GEMINI_API_KEY": "laptop-key"}):
+                mods, log = T.fake_genai(lambda m, c, k: T.pcm_for(c))
+                with mock.patch.dict(sys.modules, mods):
+                    rc, out, err = T.run("render", self.script, "--tts", "gemini", "--no-verify",
+                                         "--core-run")
+                self.assertEqual(rc, want_rc, err)
+                if said:
+                    self.assertIn(said, err)
+        self.assertEqual(calls[0][-1], 'python3 ~/proteomics-pipeline/scripts/staff.py check '
+                                       '--by "$(id -un)"')
+        self.assertTrue(calls[0][1].endswith("hive_exec.sh"))
+        self.assertEqual(self.staff_record()[0]["by"], "brettsp")
 
     def test_cloud_ok_never_reaches_the_core_key(self):
         self.core_session()
@@ -250,6 +370,7 @@ class CoreRunConsent(CoreKeyFile, T.Workspace):
             rc, out, err = T.run("verify", self.script, "--core-run")
         self.assertEqual(rc, 0, err)
         self.assertEqual(self.manifest()["verify"]["cloud_consent"], mp.CORE_CLOUD_OK)
+        self.assertEqual([e["event"] for e in self.staff_record()], ["verify"])
 
     def test_the_approval_text_lives_in_one_place(self):
         hits = []
@@ -282,14 +403,17 @@ class Job(CoreKeyFile, T.Workspace):
         self.addCleanup(self.queue.stop)
         self.assertEqual(self.check()[0], 0)
         self.rd = os.path.realpath(self.d)             # the job names the output folder's real path
-        self.job_path = os.path.join(self.rd, "logs", "podcast_job.sh")
+        self.jobs = os.path.join(os.environ["PROTEOMICS_PIPELINE_HOME"], "jobs")
+        sha = mp.sha256_bytes(self.rd.encode("utf-8"))[:8]
+        self.job_path = os.path.join(self.jobs, f"podcast_PROT_0807_{sha}.sh")
+        self.log_path = os.path.join(self.jobs, f"podcast_PROT_0807_{sha}_%j.log")
 
     def job(self, *extra, python=True):
         args = ["job", self.script] + list(extra) + (["--python", self.py] if python else [])
         return T.run(*args)
 
     def run_job(self, **env):
-        e = dict(os.environ, FAKE_PY_LOG=self.py_log, **env)
+        e = job_env(self.d, FAKE_PY_LOG=self.py_log, **env)
         r = subprocess.run(["bash", self.job_path], capture_output=True, text=True, env=e,
                            timeout=60)
         return r.returncode, [ln.split()[0] for ln in setup_limpa._lines(self.py_log)]
@@ -300,6 +424,7 @@ class Job(CoreKeyFile, T.Workspace):
         got = json.loads(out)
         self.assertEqual(got["job"], self.job_path)
         self.assertEqual(got["submit"], f"sbatch {self.job_path}")
+        self.assertEqual(got["log"], self.log_path.replace("%j", "<jobid>"))
         self.assertEqual((got["python"], got["google_genai"], got["key"]),
                          (self.py, "2.31.0", self.core_file))
         text = T.read(self.job_path)
@@ -308,8 +433,7 @@ class Job(CoreKeyFile, T.Workspace):
         for want in ("#SBATCH --cpus-per-task=1", "#SBATCH --mem=2G", "#SBATCH --time=2:00:00",
                      "#SBATCH --partition=high", "#SBATCH --account=genome-center-grp",
                      "#SBATCH --qos=genome-center-grp-high-qos",
-                     f"#SBATCH --output={os.path.join(self.rd, 'logs', 'podcast_job_%j.log')}",
-                     "module load ffmpeg/7.0.2"):
+                     f'#SBATCH --output="{self.log_path}"', "module load ffmpeg/7.0.2"):
             self.assertIn(want, text)
         self.assertNotIn("--requeue", text)
         steps = [ln for ln in lines if ln.startswith('"$PY" "$MP"')]
@@ -320,6 +444,53 @@ class Job(CoreKeyFile, T.Workspace):
         self.assertNotIn(mp.CORE_CLOUD_OK, text, "render records it; the job names --core-run")
         self.assertNotIn(CORE_KEY, text)
         self.assertEqual(subprocess.run(["bash", "-n", self.job_path]).returncode, 0)
+        self.assertFalse(os.listdir(os.path.join(self.d, "logs")), "nothing in the shared session")
+
+    # review M2: a group-writable session folder let another member swap the script
+    def test_the_job_is_private_and_never_written_through_a_link(self):
+        self.assertEqual(self.job("--core-run")[0], 0)
+        self.assertEqual(stat.S_IMODE(os.stat(self.jobs).st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(os.stat(self.job_path).st_mode), 0o700)
+        self.assertEqual([f for f in os.listdir(self.jobs) if f.endswith(".tmp")], [])
+        victim = write(os.path.join(self.d, "victim.txt"), "keep me\n", 0o600)
+        os.remove(self.job_path)
+        os.symlink(victim, self.job_path)
+        rc, out, err = self.job("--core-run")
+        self.assertEqual(rc, 2)
+        self.assertIn("is a link: not writing through it", err)
+        self.assertEqual(T.read(victim), "keep me\n")
+        self.assertTrue(os.path.islink(self.job_path))
+
+    def test_a_jobs_folder_others_could_change_is_refused_or_made_private(self):
+        os.makedirs(self.jobs)
+        os.chmod(self.jobs, 0o777)
+        self.assertEqual(self.job("--core-run")[0], 0)
+        self.assertEqual(stat.S_IMODE(os.stat(self.jobs).st_mode), 0o700)      # made private
+        shutil.rmtree(self.jobs)
+        os.symlink(self.d, self.jobs)                                       # a link: refused
+        rc, out, err = self.job("--core-run")
+        self.assertEqual(rc, 2)
+        self.assertIn("is not a folder (a link?)", err)
+        os.remove(self.jobs)
+        pp = os.environ["PROTEOMICS_PIPELINE_HOME"]
+        os.chmod(pp, 0o777)                                                 # its parent: refused
+        try:
+            rc, out, err = self.job("--core-run")
+        finally:
+            os.chmod(pp, 0o755)
+        self.assertEqual(rc, 2)
+        self.assertIn("can be changed by other accounts", err)
+
+    # review: an unquoted --output with a space ends the directive (sbatch --test-only, HIVE)
+    def test_the_log_path_is_quoted_for_sbatch(self):
+        home = os.path.join(self.d, "a home with spaces")
+        with mock.patch.dict(os.environ, {"PROTEOMICS_PIPELINE_HOME": home}):
+            rc, out, err = self.job("--core-run")
+        self.assertEqual(rc, 0, err)
+        got = json.loads(out)
+        text = T.read(got["job"])
+        self.assertIn(f'#SBATCH --output="{os.path.join(home, "jobs")}/', text)
+        self.assertIn("'", got["submit"], "the submit line quotes the path too")
 
     def test_a_preemptible_queue_requeues(self):
         self.queue.stop()
@@ -331,13 +502,23 @@ class Job(CoreKeyFile, T.Workspace):
         self.assertIn("#SBATCH --requeue", T.read(self.job_path))
 
     def test_it_runs_render_link_share_and_stops_at_a_failure(self):
-        self.assertEqual(self.job("--core-run", "internal")[0], 0)
+        self.internal_session()
+        rc, out, err = self.job("--core-run", "internal")
+        self.assertEqual(rc, 0, err)
+        self.job_path = json.loads(out)["job"]
         self.assertIn("--core-run internal ||", T.read(self.job_path))
         self.assertEqual(self.run_job(), (0, ["render", "link", "share"]))
         os.remove(self.py_log)
         self.assertEqual(self.run_job(FAKE_RENDER_RC="1"), (1, ["render"]))
         os.remove(self.py_log)
         self.assertEqual(self.run_job(FAKE_LINK_RC="3"), (3, ["render", "link"]))
+
+    def test_refuses_someone_not_on_the_staff_list(self):
+        write(self.staff_file, "someone_else\n", 0o644)
+        rc, out, err = self.job("--core-run")
+        self.assertEqual(rc, 2)
+        self.assertIn("--core-run is for Core staff", err)
+        self.assertFalse(os.path.exists(self.job_path))
 
     def test_refuses_a_script_whose_check_does_not_hold(self):
         T.write(self.script, T.read(self.script).replace("30 IPs", "31 IPs"))
@@ -386,9 +567,16 @@ class Job(CoreKeyFile, T.Workspace):
             rc, out, err = self.job("--cloud-ok", note, "--model", "gemini-3.8-flash-tts")
         self.assertEqual(rc, 0, err)
         self.assertEqual(json.loads(out)["key"], "GEMINI_API_KEY")
+        self.job_path = json.loads(out)["job"]          # not a Core run: named for the session
         self.assertEqual(self.run_job()[0], 0)
         render = setup_limpa._lines(self.py_log)[0]
         self.assertIn(f"--cloud-ok {note} --model gemini-3.8-flash-tts", render)
+
+    def test_a_missing_script_is_one_line(self):
+        rc, out, err = T.run("job", os.path.join(self.pod, "nope.md"), "--core-run")
+        self.assertEqual(rc, 2)
+        self.assertIn("is not there", err)
+        self.assertNotIn("Traceback", err)
 
     def test_the_script_must_sit_in_output_podcast(self):
         other = os.path.join(self.d, "elsewhere", "podcast_script.md")

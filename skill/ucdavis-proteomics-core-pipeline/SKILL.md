@@ -671,8 +671,10 @@ submission, the same path locally and on HIVE (`~/core/PROT_0807`).
      "$S/output/methods.docx"`. Nothing then needs pushing back but edits to the report text.
    - **Push the finished files back BEFORE deliver** — `deliver` copies from `$S`. The PDF
      exists only where a headless browser printed it. The podcast (step 9e, made by default for
-     these runs) goes back with them when it was made here; made on HIVE (Windows staff), it is
-     in `$S` already, and `finalize` runs once its job has ended:
+     a submission) goes back with them when it was made here; made on HIVE (Windows staff), it
+     is in `$S` already, its job submitted as soon as `job` wrote it. Never wait for it: if the
+     job has not ended when the delivery is otherwise ready, `scancel` it, say so in one line,
+     finalize and deliver without it, and add the audio later (`references/podcast.md`):
      ```
      L=~/core/PROT_0807/session/output
      for f in AI_Analysis_Report.md Analysis_Report.html Analysis_Report.md Analysis_Report.pdf Analysis_Report_with_audio.html methods.md methods.docx; do
@@ -2613,8 +2615,9 @@ rather than hidden.
 
 → detail: `references/analysis.md`.
 
-Once the report is final, the audio discussion (step 9e): **made by default for a Core run**;
-anyone else is offered it in one line.
+Once the report is final, the audio discussion (step 9e): **made by default for a CoreOmics
+submission**; offered in one line for internal Core work, and to anyone else when the results go
+to a collaborator or the lab.
 
 ### 9d. Publication-ready Methods section + acknowledgment
 Generate a drop-in LC-MS/MS Methods section from the facility raw data and the session's own
@@ -2678,48 +2681,57 @@ keep the acknowledgment exact** (confirm the wording at the source URL). This ca
 standalone — point `--raw` at facility data; no search or DE is needed. → detail:
 `references/methods.md`.
 
-### 9e. The audio discussion of the results (Core runs: by default)
+### 9e. The audio discussion of the results (CoreOmics submissions: by default)
 A ~20-min two-host episode, "Signal to Noise": Maya, a cell biologist, and Leo, a statistician.
 It is linked from a "Listen" card at the top of `Analysis_Report.html`. It is for the person who
 submitted the samples. It tells them what their data say and how their samples were measured and
 analysed, and it teaches how proteomics works (LC-MS/MS, DIA, FDR, inferred values, empirical
 Bayes) with their own data. **You write the script** from the final report; `make_podcast.py`
 checks it, renders it, verifies the audio and links it in.
-- **A Core run** (Core staff analysing a CoreOmics submission, or an internal analysis of the
-  Core's own samples): **make it by default** once the report is final, without asking. Tell
-  the staff member in one line; if they say no, skip it. The consent is the Core director's
-  standing approval, which `--core-run` records (`--core-run internal` without a submission).
-- **Anyone else:** offer it in one line when you deliver; make it only on a yes, with their
-  consent recorded: `--cloud-ok "<who agreed, when>"`.
+- **A CoreOmics submission** (Core staff analysing one): **make it by default** once the report
+  is final, without asking. Tell the staff member in one line; if they say no, skip it. The
+  consent is the Core director's standing approval, which `--core-run` records.
+- **Internal Core work** (no submission: a method test, QC): offer it in one line; on a yes,
+  `--core-run internal` (its `session.json` must say internal work). Both `--core-run` forms
+  need the person running it on the Core staff list.
+- **Anyone else:** offer it in one line when the results go to a collaborator or the lab; make
+  it only on a yes, with their consent recorded: `--cloud-ok "<who agreed, when>"`.
 - **It never holds up the report or the delivery.** No key, Gemini down or out of quota, a
-  failed render or job: one line to the user, then deliver without it.
+  failed render or job, a job still running when all else is ready (`scancel` it): one line to
+  the user, then deliver without it; the audio can be added later.
 
-**Here** (a Mac, or `local` mode). For a Core run, Gemini voices; with no key here
-(`make_podcast.py key --core-run`), `--tts say` (offline):
+**Make it where the report was built.** Built here (a Mac, `local` mode, or a pulled copy of a
+HIVE session, step 1c.7): make it here. With a session of record on HIVE, it then goes back with
+the finished files, `podcast/` and `Analysis_Report_with_audio.html` included (1c.7's push). For
+a Core run, Gemini voices; with no key here (`make_podcast.py key --core-run`), `--tts say`
+(offline):
 ```
 P=<session>/output/podcast
 python3 scripts/make_podcast.py check $P/podcast_script.md --source <session>/output/AI_Analysis_Report.md \
     <session>/output/methods.md <session>/output/AUDIT.md <session>/output/SAMPLE_QUALITY.md --forbid-name "<people>"
 python3 scripts/make_podcast.py render $P/podcast_script.md --tts gemini --core-run   # verify follows
+#   anyone else: --tts gemini --cloud-ok "<who agreed, when>", or --tts say
 python3 scripts/make_podcast.py link <session>/output
 python3 scripts/make_podcast.py share <session>/output
 ```
-**On HIVE** when this computer cannot run the skill's Python (Windows staff), in the session of
-record `$S`, once the finished report is in `$S/output`. You write the script here and put it
+Built **on HIVE** (Windows staff, who cannot run the skill's Python here, or any session whose
+report was made there): in the session of record `$S`. You write the script here and put it
 there. `check` runs through `hive_exec.sh`, then a SLURM job renders the episode in Gemini voices
-with the Core's shared key, verifies it, links it and shares it. Never render on the login node:
+(a Core run: the Core's shared key; anyone else: their own key on HIVE), verifies it, links it
+and shares it. Never render on the login node:
 ```
 bash scripts/hive_exec.sh "mkdir -p $S/output/podcast"
 bash scripts/hive_exec.sh --put <here>/podcast_script.md "$S/output/podcast/"
 bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py check $S/output/podcast/podcast_script.md \
     --source $S/output/AI_Analysis_Report.md $S/output/methods.md $S/output/AUDIT.md $S/output/SAMPLE_QUALITY.md --forbid-name '<people>'"
 bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py job $S/output/podcast/podcast_script.md --core-run"
-bash scripts/hive_exec.sh 'sbatch <the "job" it printed>'      # then watch it; finalize after it ends
+bash scripts/hive_exec.sh '<the "submit" line it printed>'      # at once; then watch its "log"
 ```
-`job` writes nothing until everything the job needs is there: a passing check, the consent,
-google-genai in the pipeline env (`setup.sh` installs it) and a key. Each gap is a one-line
-refusal. After the job, the report on HIVE carries the Listen card: never put a local copy over
-it.
+`job` writes nothing until everything the job needs is there: a passing check, the consent (and
+for `--core-run`, a staff member), google-genai in the pipeline env (`setup.sh` installs it) and
+a key. Each gap is a one-line refusal. The job and its log go in your private
+`~/.proteomics-pipeline/jobs/`, never the group-writable session. After the job, the report on
+HIVE carries the Listen card: never put a local copy over it.
 `share` writes `output/Analysis_Report_with_audio.html`, the report with the audio and transcript
 built in. It is the **one file to send** when someone wants the report with the audio, because
 the card's links are relative. It is checked by decoding the audio back out of the written file
@@ -2918,8 +2930,9 @@ version (`reproducibility/environment/skill.txt`), FASTA source, DE method, and 
   AI-generated, that you could not listen to it, and that someone should before it is shared.
   To send the report with the audio, they send `output/Analysis_Report_with_audio.html` alone
   (say its size; above ~18 MB, ~25 MB attached, Bioshare rather than email).
-  If none was made: a Core run's was skipped or failed (say which, in one line); anyone else
-  whose results go to a collaborator is offered it once (step 9e).
+  If none was made: a submission's was skipped, failed or left out (say which, in one line);
+  internal Core work, and anyone else whose results go to a collaborator or the lab, are
+  offered it once (step 9e).
 
 If anything was recorded with `report_issue.sh` this session, say so in one line and where
 it went (`report_issue.sh --where`), so the user knows the Core will see it.
