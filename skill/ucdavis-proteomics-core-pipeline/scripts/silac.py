@@ -354,6 +354,23 @@ def refusal(cfg_path, seed_lib=False, prog="run_search"):
             "estimate_params.py --labels (references/silac.md).")
 
 
+def step8_command(report, session, params, fasta=None):
+    """Step 8 for a SILAC search, as a resumed session reads it in the chain's recovery note
+    (diann_parallel.step8_next): the design check, then run_silac.R -- never run_de.R and the
+    normalisation check, which a SILAC ratio does not use."""
+    import shlex
+    here = os.path.dirname(os.path.abspath(__file__))
+    q = shlex.quote
+    design = os.path.join(session, "input", "silac_design.csv")
+    return (f"python3 {q(os.path.join(here, 'silac.py'))} design --validate {q(design)} "
+            f"--against {q(report)} && Rscript {q(os.path.join(here, 'run_silac.R'))} "
+            f"--input {q(report)} --design {q(design)} "
+            f"--outdir {q(os.path.join(session, 'output', 'tables'))} "
+            f"--figures-dir {q(os.path.join(session, 'output', 'figures'))} --params {q(params)}"
+            + (f" --fasta {q(fasta)}" if fasta else "")
+            + "  (references/silac.md; ask which comparisons first)")
+
+
 # --- the Methods ---------------------------------------------------------------------------------
 def _label_phrase(site):
     if not site or not site.get("delta"):

@@ -284,6 +284,10 @@ class Routes(unittest.TestCase):
                                 env=env, capture_output=True, text=True)
             self.assertEqual(s1.returncode, 0, s1.stdout + s1.stderr)
             self.assert_declared(_calls(env["ARGV_OUT"])[0], "step 1 (library prediction)")
+            # the recovery note's next step (checkpoint.py --next): the SILAC analysis, not run_de.R
+            sub = open(os.path.join(out, "submit.sh")).read()
+            self.assertIn("run_silac.R", sub)
+            self.assertNotIn("run_de.R", sub)
 
     def test_the_chain_refuses_a_seed_library(self):
         with tempfile.TemporaryDirectory() as d:

@@ -1484,10 +1484,18 @@ def header(name, cpus, mem_gb, hours, partition, account, qos=None, array=None, 
     return "\n".join(h)
 
 
-def step8_next(report, sess):
+def step8_next(report, sess, cfg=None, fasta=None):
     """The command a resumed session runs once the chain is COMPLETED: step 8's check
-    (normalization_check.step8_commands), never the final DE without it."""
+    (normalization_check.step8_commands), never the final DE without it -- or, for a cfg that
+    declares SILAC channels, the SILAC ratio analysis (silac.step8_command)."""
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import silac
+    try:
+        labelled = bool(cfg) and silac.cfg_labels(cfg)[0] is not None
+    except (CfgError, OSError):
+        labelled = False
+    if labelled:
+        return silac.step8_command(report, sess, cfg, fasta)
     import normalization_check
     return normalization_check.step8_commands(report, f"{sess}/input/conditions.csv", sess,
                                               "dpc")["next"]
@@ -2188,7 +2196,7 @@ def main():
         f'  --report "{D}/{report}" --watch-job "$jid5" --watch-log "{D}/s5_report_${{jid5}}.log" \\',
         # what follows the chain is step 8's normalisation check, then the final DE held to it --
         # never the final DE alone (normalization_check.step8_commands: the one wording)
-        f'  --next {shlex.quote(step8_next(f"{D}/{report}", sess))} \\',
+        f'  --next {shlex.quote(step8_next(f"{D}/{report}", sess, a.cfg, fasta))} \\',
         '  >/dev/null 2>&1 || true',
         'say "submitted: firstpass=$jid2 assembly=$jid3 finalpass=$jid4 report=$jid5"',
         f'say "final report will be {D}/{report}; watch with: watch_run.sh --slurm $jid5 --log {D}/s5_report_${{jid5}}.log"',
