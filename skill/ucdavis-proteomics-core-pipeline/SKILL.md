@@ -2168,7 +2168,7 @@ staff-only `logs/normalization_check.staff.json`. The Methods, AUDIT.md, `de_pro
 the zip say "Core staff chose … because <reason>", so the reason must not name anyone:
 ```
 python3 scripts/normalization_check.py decide --check <S>/output/norm_check/normalization_check.json \
-    --quantities <raw|normalised> --by <their HIVE login> --reason "<why, in their words>"
+    --quantities <raw|normalised> --by <their HIVE login> --reason '<why, in their words; no quote marks, $ or backticks>'
 ```
 The recommendation keeps the type's default unless that default's own volcano is clearly the
 worse one; the checks that tripped are the questions to ask. Never switch silently, either way.
