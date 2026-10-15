@@ -84,6 +84,8 @@ def child_env(tmp, base_url="http://127.0.0.1:9/server/api", **extra):
     # never the Core's real staff list (it exists on HIVE): qc_bracket.py ack falls back to
     # refusing agent-like names only
     e["CORE_STAFF_FILE"] = os.path.join(tmp, "no_core_staff.txt")
+    # a laptop, wherever the suite runs (on HIVE /quobyte exists): TestKeyOnHive sets "1"
+    e["CORE_ON_HIVE"] = "0"
     e.update(extra)
     return e
 
@@ -2779,7 +2781,7 @@ class TestCheck(unittest.TestCase):
 
     def assert_save_steps(self, fix):
         for s in ("Profile", '"API Key"', "Create", "read -rs TOK", 'chmod 600 "$F"',
-                  "Never paste the key into the chat", "HIVE has no CoreOmics key"):
+                  "Never paste the key into the chat", "coreomics_key_to_hive.sh", "mode 600"):
             self.assertIn(s, fix)
 
     def test_ok_asks_one_lab_scoped_page_with_the_key(self):
@@ -3071,11 +3073,229 @@ class TestKeyHelpElsewhere(unittest.TestCase):
             self.assertIn("read -rs TOK", out["fix"])
 
     def test_token_help_is_the_steps_not_ask_someone(self):
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"HOME": tmp, "CORE_ON_HIVE": "0"}):
             h = cs.token_help()
         self.assertNotIn("not documented", h)
-        for s in ("~/.coreomics_token", '"API Key"', "read -rs TOK", "HIVE has none", "check"):
+        for s in ("~/.coreomics_token", '"API Key"', "read -rs TOK", "on THIS computer", "check",
+                  "coreomics_key_to_hive.sh"):
             self.assertIn(s, h)
+        self.assertNotIn("HIVE has none", h)
+
+
+# ------------------------------------------------------- the CoreOmics key ON HIVE --
+@unittest.skipIf(os.name == "nt", "POSIX file modes")
+class TestKeyOnHive(unittest.TestCase):
+    """Michelle (2026-10-08, Windows, no Python) saved her key on her laptop, where nothing could
+    run the CoreOmics steps, and HIVE had no key. Now the steps run on HIVE from ~/.coreomics_token
+    -- in a home folder that is drwxrwsr-x there, open to every account, so the file's own mode is
+    the key's only protection: a key anyone else can read is refused, and never sent."""
+
+    def hive_env(self, tmp, base_url="http://127.0.0.1:9/server/api", **extra):
+        return key_env(tmp, base_url, CORE_ON_HIVE="1", **extra)
+
+    def keyfile(self, tmp, mode):
+        path = os.path.join(key_home(tmp, KEY + "\n"), ".coreomics_token")
+        os.chmod(path, mode)
+        return path
+
+    def check(self, env):
+        rc, out, p = run(["check", "--json"], env)
+        for part in (KEY, KEY[:20], KEY[20:]):
+            self.assertNotIn(part, p.stdout + p.stderr)
+        return rc, out, p
+
+    def test_a_key_others_can_read_is_refused_and_never_sent(self):
+        for mode in (0o644, 0o640, 0o604, 0o660):
+            with self.subTest(mode=oct(mode)), tempfile.TemporaryDirectory() as tmp, \
+                    FakeCoreOmics() as fake:
+                env = self.hive_env(tmp, fake.base)
+                path = self.keyfile(tmp, mode)
+                rc, out, p = self.check(env)
+                self.assertEqual((rc, out["status"]), (3, "key_mode_wrong"), p.stderr)
+                self.assertEqual(fake.requests, [], "a readable key is not used")
+                self.assertEqual((out["runs_on"], out["key_mode"]), ("hive", f"{mode:03o}"))
+                self.assertIn(f"mode {mode:03o}", out["say"])
+                self.assertIn(f"chmod 600 {shlex.quote(path)}", out["fix"])
+                self.assertIn("hive_exec.sh 'chmod 600 ~/.coreomics_token'", out["fix"])
+                self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), mode, "check changes nothing")
+
+    def test_owner_only_is_used_and_check_says_where_and_its_mode(self):
+        for mode in (0o600, 0o400):
+            with self.subTest(mode=oct(mode)), tempfile.TemporaryDirectory() as tmp, \
+                    FakeCoreOmics() as fake:
+                fake.routes[("GET", "/server/api/submissions/")] = \
+                    lambda q, b: (200, {"count": 3, "next": None, "results": [record()]})
+                env = self.hive_env(tmp, fake.base)
+                path = self.keyfile(tmp, mode)
+                rc, out, p = self.check(env)
+                self.assertEqual((rc, out["status"]), (0, "ok"), p.stderr)
+                self.assertEqual(out["key_source"], path)
+                self.assertEqual((out["runs_on"], out["key_mode"]), ("hive", f"{mode:03o}"))
+                self.assertIn(f"{path} on HIVE, mode {mode:03o}", out["say"])
+                self.assertEqual(fake.requests[0]["auth"], "Token " + KEY)
+
+    def test_fetch_and_identify_refuse_it_too(self):
+        with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
+            env = self.hive_env(tmp, fake.base)
+            self.keyfile(tmp, 0o644)
+            rc, out, p = run(["fetch", "807", "--out", os.path.join(tmp, "o")], env)
+            self.assertEqual((rc, out["diagnosis"]), (3, "key_mode_wrong"), p.stderr)
+            self.assertEqual(out["error"], "no usable CoreOmics API key on HIVE")
+            rc, out, p = run(["identify", "/x/run_KG1.d"], env)
+            # identify treats an unusable key as none, and its token_help points at check
+            self.assertEqual((rc, out["status"]), (3, "needs_token"), p.stderr)
+            self.assertIn("core_submission.py check", out["token_help"])
+            self.assertEqual(fake.requests, [])
+            self.assertNotIn(KEY, p.stdout + p.stderr)
+
+    def test_a_laptop_is_not_held_to_it(self):
+        """Off HIVE the home is the user's own (and Windows' chmod does not reach NTFS)."""
+        with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
+            fake.routes[("GET", "/server/api/submissions/")] = \
+                lambda q, b: (200, {"count": 3, "next": None, "results": [record()]})
+            self.keyfile(tmp, 0o644)
+            rc, out, p = self.check(key_env(tmp, fake.base))
+            self.assertEqual((rc, out["status"], out["runs_on"]), (0, "ok", "this_computer"), p.stderr)
+            self.assertIn("on this computer, mode 644", out["say"])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.keyfile(tmp, 0o644)
+            with mock.patch.dict(os.environ, {ON_HIVE: "0"}):
+                self.assertIsNone(cs.key_mode_problem(path))
+            with mock.patch.dict(os.environ, {ON_HIVE: "1"}):
+                self.assertIn("mode 644", cs.key_mode_problem(path))
+
+    def test_on_hive_is_quobyte_unless_forced(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(ON_HIVE, None)
+            with mock.patch.object(cs.os.path, "isdir", lambda p: p == "/quobyte"):
+                self.assertTrue(cs.on_hive())
+            with mock.patch.object(cs.os.path, "isdir", lambda p: False):
+                self.assertFalse(cs.on_hive())
+                with mock.patch.dict(os.environ, {ON_HIVE: "1"}):
+                    self.assertTrue(cs.on_hive())
+
+    def test_no_key_on_hive_names_the_agent_s_two_routes_not_a_typed_line(self):
+        """Nobody types anything on HIVE: the agent sends a laptop key, or the user pastes it at
+        coreomics_key_to_hive.sh's hidden prompt in their own Git Bash."""
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, out, _ = self.check(self.hive_env(tmp))
+            self.assertEqual((rc, out["status"]), (3, "no_key"))
+            self.assertIn("no CoreOmics API key on HIVE", out["say"])
+            for s in ("Profile", '"API Key"', "bash scripts/coreomics_key_to_hive.sh`",
+                      "coreomics_key_to_hive.sh --paste", "mode 600", "Never paste the key into the chat"):
+                self.assertIn(s, out["fix"])
+            self.assertNotIn("read -rs TOK", out["fix"])
+            rc, out, _ = run(["identify", "/x/run_KG1.d"], self.hive_env(tmp))
+            self.assertEqual(out["status"], "needs_token")
+            self.assertIn("on HIVE, where this ran", out["token_help"])
+
+    def test_windows_is_told_the_agent_puts_the_key_on_hive(self):
+        """The windows branch of the save steps (a Windows Python): the same one-line save, and
+        that in hive_remote with no usable Python the agent moves it to HIVE, mode 600."""
+        with mock.patch.dict(os.environ, dict(WIN_ENV, HOME="H:\\"), clear=True), \
+                mock.patch.object(cs.os, "name", "nt"), mock.patch.object(cs.os, "path", ntpath):
+            steps = cs.save_key_steps()
+            self.assertFalse(cs.on_hive())
+        self.assertIn(cs.SAVE_KEY_LINE["windows"], steps)
+        for s in ("Microsoft Store stub", "bash scripts/coreomics_key_to_hive.sh", "HIVE",
+                  "~/.coreomics_token", "mode 600", "never shown"):
+            self.assertIn(s, steps)
+        self.assertNotIn("HIVE has no CoreOmics key", steps)
+
+
+ON_HIVE = "CORE_ON_HIVE"
+
+
+@unittest.skipIf(os.name == "nt", "POSIX file modes")
+class TestFetchOnHive(unittest.TestCase):
+    """fetch run ON HIVE (a laptop with no Python): the record holds emails, phones and PPMS
+    billing fields, and HIVE home folders are open to every account. The full record goes into
+    <out>/private/ (700, files 600); <out>/ gets exactly what the laptop route --puts there."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = self._tmp.name
+        self.fake = FakeCoreOmics().__enter__()
+        rec = record()
+        rec["payment"] = {"display": {"PPMS Order Ref #": "PPMS-CANARY"}}
+        self.rec = rec
+        TestFetch.serve(self, self.fake, rec)
+        self.out_dir = os.path.join(self.tmp, "core", "PROT_0807")
+
+    def tearDown(self):
+        self.fake.__exit__(None, None, None)
+        self._tmp.cleanup()
+
+    def fetch(self):
+        rc, out, p = run(["fetch", "807", "--out", self.out_dir],
+                         child_env(self.tmp, self.fake.base, CORE_ON_HIVE="1"))
+        self.assertEqual(rc, 0, p.stderr)
+        return out
+
+    def test_the_full_record_is_private_and_the_top_holds_only_the_hive_copies(self):
+        out = self.fetch()
+        priv = os.path.join(self.out_dir, "private")
+        self.assertEqual(out["ran"], "on HIVE")
+        self.assertEqual(stat.S_IMODE(os.stat(priv).st_mode), 0o700)
+        for name in ("submission.json", "submission_summary.json"):
+            p = os.path.join(priv, name)
+            self.assertEqual(stat.S_IMODE(os.stat(p).st_mode), 0o600, name)
+            self.assertIn("ada.example@example.org", read(p), name)
+        self.assertIn("PPMS-CANARY", read(os.path.join(priv, "submission.json")))
+        self.assertEqual(out["outputs"]["summary"], os.path.join(priv, "submission_summary.json"))
+        # what locate / stage / attach read: the HIVE copies, where the laptop route --puts them
+        self.assertEqual(out["outputs"]["hive_summary"], os.path.join(self.out_dir, "submission_summary.json"))
+        self.assertEqual(out["outputs"]["hive_record"], os.path.join(self.out_dir, "submission.json"))
+        for name in ("submission_summary.json", "submission.json"):
+            text = read(os.path.join(self.out_dir, name))
+            for bad in ("@", "PPMS-CANARY", "Robin"):
+                self.assertNotIn(bad, text, f"{bad} in {name}")
+        self.assertTrue(load(os.path.join(self.out_dir, "submission_summary.json"))["redacted_for_hive"])
+        self.assertFalse(os.path.exists(os.path.join(self.out_dir, "hive")), "no hive/ on HIVE")
+
+    def test_a_second_fetch_keeps_it_private_and_a_planted_link_is_refused(self):
+        self.fetch()
+        priv = os.path.join(self.out_dir, "private")
+        os.chmod(priv, 0o755)
+        os.chmod(os.path.join(priv, "submission.json"), 0o644)
+        self.fetch()
+        self.assertEqual(stat.S_IMODE(os.stat(priv).st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.join(priv, "submission.json")).st_mode), 0o600)
+        shutil.rmtree(priv)
+        elsewhere = os.path.join(self.tmp, "someone_elses")
+        os.makedirs(elsewhere)
+        os.symlink(elsewhere, priv)
+        rc, out, p = run(["fetch", "807", "--out", self.out_dir],
+                         child_env(self.tmp, self.fake.base, CORE_ON_HIVE="1"))
+        self.assertEqual(rc, 2, p.stderr)
+        self.assertIn("not a folder of this account's", out["error"])
+        self.assertEqual(os.listdir(elsewhere), [], "nothing was written through the link")
+
+    def test_email_draft_and_bioshare_find_the_full_summary_from_the_hive_copy(self):
+        self.fetch()
+        hive_copy = os.path.join(self.out_dir, "submission_summary.json")
+        draft = os.path.join(self.out_dir, "EMAIL_DRAFT.md")
+        env = child_env(self.tmp, self.fake.base, CORE_ON_HIVE="1")
+        rc, js, p = run(["email-draft", "--summary", hive_copy, "--share-url",
+                         "https://bioshare.example/bsx/", "--out", draft], env)
+        self.assertEqual(rc, 0, p.stderr)
+        self.assertIn("To: ada.example@example.org", read(draft))
+        self.assertEqual(stat.S_IMODE(os.stat(draft).st_mode), 0o600, "names and emails, on HIVE")
+        self.assertIn("using the full summary", p.stderr)
+        linked = {"id": 41, "submission": HEX, "link_to_path": SERVER_SHARE + "/",
+                  "url": "https://bioshare.example/bsx/"}
+        self.fake.routes[("GET", SHARES)] = lambda q, b: (200, [linked])
+        rc, js, p = run(["bioshare", "send", "--summary", hive_copy], env)     # a dry run
+        self.assertEqual(rc, 0, p.stderr)
+        self.assertEqual(self.fake.posts(), [])
+        rec = js["recipients"]
+        self.assertEqual(rec["submitter"]["email"], "ada.example@example.org")
+        self.assertEqual(rec["pi"]["email"], "pi.placeholder@example.org")
+        self.assertEqual([c["email"] for c in rec["contacts"]], ["robin.contact@example.org"])
+        rc, js, p = run(["bioshare", "status", "--summary", hive_copy], env)
+        self.assertEqual(rc, 0, p.stderr)
+        self.assertEqual(js["url"], "https://bioshare.example/bsx/")
 
 
 if __name__ == "__main__":

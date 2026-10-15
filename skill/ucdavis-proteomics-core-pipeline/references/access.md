@@ -271,8 +271,14 @@ HPC support before connecting — it may have been rotated, or someone is in the
 ## Core staff — submission workflow prerequisites
 Searching and delivering a **CoreOmics submission** ("search the data from submission 807",
 SKILL.md steps 1c + 12b) splits across two machines, so it needs three things in place:
-- **Your own CoreOmics API key, saved on your own computer.** `check`, `fetch` and `bioshare`
-  run locally; HIVE has no CoreOmics key. Steps:
+- **Your own CoreOmics API key, where the CoreOmics steps run.** `check`, `identify`, `fetch`,
+  `bioshare` and `email-draft` run on your computer when it has a working Python, and **on HIVE**
+  (through `hive_exec.sh`, reading `~/.coreomics_token` there, mode 600) when it has none —
+  `check_access.sh` says which (`coreomics_runs_on`) and what to do (`coreomics_key_advice`).
+  On HIVE the agent sets the key up once: it sends a key saved on your computer with
+  `bash scripts/coreomics_key_to_hive.sh` (over ssh standard input, never shown), or you paste
+  one at that script's `--paste` prompt in your own Git Bash
+  (`references/core-submissions.md` "The key on HIVE"). Saving it on your computer:
   1. In CoreOmics (https://ucdavis.coreomics.com): **Profile → API Key**, click to show it,
      **Create** if there is none. Copy it.
   2. In your own terminal, never in the chat, run this ONE line. It then waits, showing
@@ -288,9 +294,9 @@ SKILL.md steps 1c + 12b) splits across two machines, so it needs three things in
      in `references/core-submissions.md` "Troubleshooting `check`". `no_lab_access` means the
      key works but the CoreOmics account is not in the Proteomics lab: ask Brett (brettsp).
 
-  Never paste the key into the chat. These run in Python on your computer, so they need a
-  working local Python 3 — not the Windows Store stub (`local_python3.usable: false`; see
-  "Python on this computer" there).
+  Never paste the key into the chat. With no working local Python 3 (the Windows Store stub:
+  `local_python3.usable: false`) they run on HIVE instead, with the key there — nothing to
+  install (see "Python on this computer" there).
 - **HIVE membership in `proteomics-grp`** — `locate`, `stage` and `deliver` read the Flinders
   raw data and write the service directory and Bioshare share (`/nfs/lssc0/flinders/proteomics`).
 - **The whole skill at `~/proteomics-pipeline/`** on HIVE (`hive_exec.sh --put-skill`, step 1

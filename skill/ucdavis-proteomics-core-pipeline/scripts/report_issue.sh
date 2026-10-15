@@ -123,6 +123,7 @@ sk-(proj|svcacct|admin)-[A-Za-z0-9_-]{20,}
 (^|[^A-Za-z0-9_])sk-[A-Za-z0-9]{32,}
 (^|[^A-Za-z0-9_])(AKIA|ASIA)[0-9A-Z]{16}([^A-Za-z0-9_]|$)
 (^|[^A-Za-z0-9_])eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*
+(^|[^A-Za-z0-9_.])COREOMICS_TOKEN['"]?[[:space:]]*[:=][[:space:]]*['"]?[^/~.$<[:space:]"'<>][^[:space:]"'<>]{7,}
 ERE
 read -r -d '' SECRET_CI <<'ERE'
 authorization:[[:space:]]*(token|bearer)[[:space:]]+[^[:space:]]+
@@ -135,6 +136,7 @@ key=[A-Za-z0-9_.-]{20,}
 share_token=['"]?[^/~.$[:space:]"'<>][^[:space:]"'<>]{7,}
 --cookie[[:space:]=]+['"]?[^/~.$[:space:]"'<>-][^[:space:]"'<>]{7,}
 (^|[^A-Za-z0-9_])bearer[[:space:]]+[A-Za-z0-9_.=+/-]{20,}
+authorization['"][[:space:]]*:[[:space:]]*['"](token|bearer)[[:space:]]+[^<{[:space:]'"][^[:space:]'"]*
 ERE
 looks_secret() {
   local p
