@@ -13,6 +13,7 @@ over-interpret anything. FAILs should stop interpretation; WARNs go in the repor
 | `group_balance` | — | group sizes very unequal (≥3× ratio) |
 | `confounding` | a covariate (Batch) perfectly confounded with Group — biology can't be separated from batch | — |
 | `acquisition_mix` | DIA and DDA files mixed in one analysis | — |
+| `numeric_covariate` | — | a covariate fitted as a number (`run_de.R --numeric-covariates`) that Group explains most of: de_provenance.json `covariates` marks it `confounded` (R² of covariate ~ Group at or above `confound_r2_threshold`, 0.8). The message is run_de.R's own caution, quoted (composed from the term when the record has none): the comparisons rest on its fitted slope, how much wider each contrast's standard error is (`se_inflation`), and that adjusting for something the groups themselves change removes part of the effect being tested. PASS for a numeric covariate below the threshold; nothing when every covariate is a factor (that is `confounding`'s) |
 | `instrument_mix` | — | >1 instrument model (batch effect) |
 | `id_depth` | — | suspiciously few proteins quantified (< `--min-proteins`, default 500) → check params / organism FASTA |
 | `missingness` | — | very high missing fraction (> `--max-missing`, default 0.5) |

@@ -2385,7 +2385,9 @@ contaminant protein group whose every peptide is also a sample protein's (shared
 for I/L): probably the sample's own protein. Report it as that protein — never as
 contamination or an added standard — and tell the user it was removed with the contaminants.
 `sample_quality.py`'s CONTAMINANT_IDENTICAL panel uses the same list as `target_contaminants`; a
-group-confounded result there is a STOP like any other panel.
+group-confounded result there is a STOP like any other panel. A `numeric_covariate` WARN (a
+covariate fitted as a number that the groups nearly determine) quotes run_de.R's caution: tell
+the user, and offer the DE without that covariate to compare.
 
 Then run the **biological sample-quality** check (contamination that mimics biology —
 hemolysis, tissue cross-contamination, skin) — and **read `references/anomaly-checks.md`

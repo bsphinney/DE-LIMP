@@ -242,6 +242,25 @@ class NumericCovariateEndToEnd(unittest.TestCase):
             self.assertIn("CAUTION: Covariate1 is strongly confounded with Group", fh.read())
         self.assertIn("Group explained 9", mm.de_covariate_sentence(prov))
 
+    def test_the_audit_surfaces_it(self):
+        """audit_results.py's numeric_covariate check quotes run_de.R's caution (WARN), and passes
+        the covariate that does not match the groups."""
+        def audit(key):
+            out = self.ok(key)
+            md = os.path.join(self.tmp, f"AUDIT_{key}.md")
+            p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "audit_results.py"),
+                                "--out", md, "--de-dir", out], capture_output=True, text=True,
+                               cwd=self.tmp, timeout=120)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            with open(md[:-3] + ".json") as fh:
+                return [f for f in json.load(fh)["findings"] if f["check"] == "numeric_covariate"]
+        (f,) = audit("conf")
+        self.assertEqual(f["status"], "WARN")
+        self.assertTrue(f["message"].startswith(self.prov("conf")["covariates"]["warnings"][0]))
+        (f,) = audit("ml")
+        self.assertEqual(f["status"], "PASS")
+        self.assertEqual(audit("nocov"), [])
+
     def test_technical_replicates_are_blocked_with_it_on_both_methods(self):
         for key in ("tech_ml", "tech_dpc"):
             prov = self.prov(key)
