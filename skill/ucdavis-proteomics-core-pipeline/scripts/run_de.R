@@ -1865,18 +1865,19 @@ if (method == "dpc" && exists("dat") && exists("y_protein")) {
 # DE-LIMP draws its volcano and tables from topTable(session$fit, coef = <contrast>), which would
 # give a protein measured in neither compared group its p-value back and count it in the BH
 # adjustment -- a session that disagreed with DE_*.csv. So in the session's fits that protein's
-# t, p-value and B (lods) are NA for that contrast, and its moderated F (all contrasts together)
-# is NA when it is not tested in at least one of them: topTable's p.adjust then runs over the tested
-# proteins only, exactly as DE_*.csv does. Its logFC (the model's estimate) is left as fitted.
-# DE-LIMP copes with NA p-values: its volcano drops them, its significance flags and counts treat
-# them as not significant (R/server_de.R).
+# logFC (coefficient), t, p-value and B (lods) are NA for that contrast, as in DE_*.csv, and its
+# moderated F (all contrasts together) is NA when it is not tested in at least one of them:
+# topTable's p.adjust then runs over the tested proteins only. A fold change between two groups
+# that never measured the protein is the model's inference on both sides -- noise -- so DE-LIMP's
+# GSEA, which ranks by logFC, rightly drops it. DE-LIMP copes with NA values: its volcano drops
+# them, its significance flags and counts treat them as not significant (R/server_de.R).
 untest_fit <- function(f, ids) {
   if (is.null(f) || is.null(f$p.value)) return(f)
   any_row <- integer(0)
   for (cn in intersect(names(ids), colnames(f$p.value))) {
     rows <- stats::na.omit(match(ids[[cn]], rownames(f$p.value)))
     if (!length(rows)) next
-    for (k in c("t", "p.value", "lods")) if (!is.null(f[[k]])) f[[k]][rows, cn] <- NA
+    for (k in c("coefficients", "t", "p.value", "lods")) if (!is.null(f[[k]])) f[[k]][rows, cn] <- NA
     any_row <- union(any_row, rows)
   }
   for (k in c("F", "F.p.value")) if (!is.null(f[[k]]) && length(any_row)) f[[k]][any_row] <- NA
@@ -1903,9 +1904,10 @@ if (method == "dpc" && exists("dat") && exists("y_protein")) {
       # which proteins each contrast does not test (NA t / p / B in the fits above) and why
       not_measured = list(label = not_measured_rec$label, rule = not_measured_rec$rule,
                           proteins = not_measured_ids,
-                          note = paste("t, p.value and lods are NA for these proteins in that",
-                                       "contrast (F where any contrast is untested), so",
-                                       "topTable's BH runs over the tested proteins, as in DE_*.csv")),
+                          note = paste("coefficients (logFC), t, p.value and lods are NA for these",
+                                       "proteins in that contrast (F where any contrast is",
+                                       "untested), so topTable matches DE_*.csv: BH runs over the",
+                                       "tested proteins only")),
       y_protein    = y_protein,
       dpc_fit      = if (exists("dpcfit")) dpcfit else NULL,
       design       = design,

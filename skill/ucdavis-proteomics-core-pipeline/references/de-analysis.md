@@ -64,10 +64,11 @@ one contrast from this, and a spike at p = 1 in every p-value histogram. Now, pe
 
 The DE-LIMP session (`DE-LIMP_session.rds`) follows the same rule (2.12): DE-LIMP draws its
 volcano and tables with `topTable()` from the session's fit, so in that fit an untested protein's
-`t`, `p.value` and `lods` are NA for the contrast (its moderated F too, when any contrast does not
-test it) and `not_measured` lists them. `topTable()`'s BH then runs over the tested proteins, as
-in `DE_*.csv`; DE-LIMP leaves NA p-values off the volcano and counts them as not significant.
-Its logFC stays as fitted.
+logFC (coefficient), `t`, `p.value` and `lods` are NA for the contrast (its moderated F too, when
+any contrast does not test it) and `not_measured` lists them. `topTable()` then matches
+`DE_*.csv`: the same NA rows, BH over the tested proteins. DE-LIMP leaves NA values off the
+volcano and counts them as not significant; its GSEA, which ranks by logFC, drops them -- a fold
+change between two groups that never measured the protein is the model's inference, not data.
 
 ## `--method dpc` (limpa DPC-Quant + limma) — DE-LIMP default, use with DIA-NN
 ```r
