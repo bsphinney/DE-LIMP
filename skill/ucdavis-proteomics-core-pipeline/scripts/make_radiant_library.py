@@ -33,6 +33,9 @@ import sys, os, json, shlex, argparse, subprocess, csv
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from diann_parallel import diann_output_path  # noqa: E402  (how DIA-NN names its outputs)
+# what each alkylating agent leaves on cysteine, and DIA-NN's flags for it: the one map
+from estimate_params import CYS_ALKYLATION_CHOICES, cys_diann_flags  # noqa: E402
+from safe_write import write_file  # noqa: E402
 
 # DIA-NN parquet column -> the name Radiant's FragLibTsvReader looks for.
 # The reader accepts either spelling of the aliased ones (ProductMz|FragmentMz,
@@ -113,12 +116,27 @@ def main():
     ap.add_argument("--from-parquet", help="skip DIA-NN entirely; convert this .parquet")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--threads", type=int, default=16)
+    ap.add_argument("--cys-alkylation", choices=CYS_ALKYLATION_CHOICES, default="cam",
+                    help="the fixed cysteine modification the predicted library carries "
+                         "(estimate_params.py's choices; default cam = carbamidomethyl). Radiant "
+                         "takes its modifications from the library")
     a = ap.parse_args()
 
     os.makedirs(a.out_dir, exist_ok=True)
     tsv = os.path.join(a.out_dir, "radiant_library.tsv")
-    if os.path.exists(tsv) and os.path.getsize(tsv) > 1_000_000:
-        print(json.dumps({"library": tsv, "reused": True}, indent=2)); return
+    # What the library was predicted with, beside it: a library is reused only for the same
+    # cysteine choice. One from before 2.12 has no record -- and fixed nothing on C, whatever the
+    # prep -- so it is rebuilt.
+    meta = tsv + ".meta.json"
+    try:
+        with open(meta) as fh:
+            built = json.load(fh).get("cys_alkylation")
+    except (OSError, ValueError, AttributeError):
+        built = None
+    if (os.path.exists(tsv) and os.path.getsize(tsv) > 1_000_000 and built == a.cys_alkylation
+            and not (a.from_speclib or a.from_parquet)):
+        print(json.dumps({"library": tsv, "reused": True, "cys_alkylation": built}, indent=2))
+        return
 
     parquet = a.from_parquet
     if not parquet:
@@ -134,8 +152,10 @@ def main():
             out_lib = diann_output_path(os.path.join(a.out_dir, "diann_predicted_lib.speclib"),
                                         "--out-lib")
             print("[1/3] DIA-NN: predicting the library from the FASTA")
+            cys = " ".join(shlex.quote(x) for x in cys_diann_flags(a.cys_alkylation))
             sh(f"{a.diann} --fasta {shlex.quote(a.fasta)} --fasta-search --predictor "
-               f"--gen-spec-lib --out-lib {shlex.quote(out_lib)} --threads {a.threads}")
+               f"--gen-spec-lib --out-lib {shlex.quote(out_lib)} --threads {a.threads}"
+               + (f" {cys}" if cys else ""))
             speclib = find_written(a.out_dir, "diann_predicted_lib")
             if not speclib:
                 sys.exit(f"DIA-NN wrote no library into {a.out_dir}: "
@@ -153,12 +173,16 @@ def main():
 
     print("[3/3] parquet -> Radiant TSV (renaming to the schema its reader keys on)")
     n, names = parquet_to_tsv(parquet, tsv)
+    # predicted here: the choice it was predicted with; converted from a given library: unknown
+    write_file(meta, json.dumps({"cys_alkylation": (None if (a.from_speclib or a.from_parquet)
+                                                    else a.cys_alkylation)}) + "\n")
     print(json.dumps({
         "library": tsv,
         "rows": n,
         "size_bytes": os.path.getsize(tsv),
         "columns": names,
         "source_parquet": parquet,
+        "cys_alkylation": None if (a.from_speclib or a.from_parquet) else a.cys_alkylation,
         "note": "Radiant reads .fragLibFF/.tsv/.csv/.speclib, but rejects DIA-NN 2.x "
                 ".speclib (format v-10/-11; it supports v>=-3) — hence the TSV.",
     }, indent=2))

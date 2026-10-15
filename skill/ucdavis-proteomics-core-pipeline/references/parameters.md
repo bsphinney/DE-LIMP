@@ -120,35 +120,52 @@ carbamidomethyl (C). Variable mods are **off by default** — the DIA-NN README
 notes variable mods don't improve depth for relative quant; pass `var_mods: "ox"`
 in the workflow (or `--var-mods ox`) to add Ox(M).
 
-## Cysteine: alkylated or not (`--cys-alkylation cam|none`)
-Fixed carbamidomethyl-C is right only for samples that were reduced and alkylated
-(iodoacetamide or chloroacetamide both leave it). On-bead, IP and pull-down digests often are
-not, and then no cysteine peptide can be identified: three on-bead Core searches had 0.03–0.5%
-of identified peptides with a C, against 7.8% on an S-Trap prep with DTT/IAA (staff reports,
-2026-10-09). `--overrides` cannot remove a flag, so the choice is its own option:
+## Cysteine: which alkylating agent, or none (`--cys-alkylation`)
+Each alkylating agent leaves its own fixed modification on C, and a search for the wrong one (or
+for one at all, on samples never alkylated) identifies almost no cysteine peptide: three on-bead
+Core searches had 0.03–0.5% of identified peptides with a C, against 7.8% on an S-Trap prep with
+DTT/IAA (staff reports, 2026-10-09). The choice is its own option (`--overrides` cannot remove a
+flag), one map in `estimate_params.CYS_REAGENTS`; masses and names are UniMod's (unimod.org,
+read 2026-10-15):
 
-| `--cys-alkylation` | DIA-NN cfg | Sage config | sidecar `cys_alkylation.source` |
-|---|---|---|---|
-| not given | `--unimod4` | `static_mods {"C": 57.0215}` | `DEFAULT, not user-confirmed: …` |
-| `cam` | `--unimod4` | `static_mods {"C": 57.0215}` | `given (--cys-alkylation cam) …` |
-| `none` | no `--unimod4` | `static_mods {}` | `given (--cys-alkylation none) …` |
+| `--cys-alkylation` | agent | fixed on C (UniMod) | DIA-NN cfg | Sage `static_mods` |
+|---|---|---|---|---|
+| not given | assumed iodo-/chloroacetamide, **DEFAULT** | Carbamidomethyl (4) +57.021464 | `--unimod4` | `{"C": 57.0215}` |
+| `cam` | iodoacetamide or chloroacetamide | Carbamidomethyl (4) +57.021464 | `--unimod4` | `{"C": 57.0215}` |
+| `none` | not reduced and alkylated | — | (nothing) | `{}` |
+| `propionamide` | acrylamide | Propionamide (24) +71.037114 | `--fixed-mod UniMod:24,71.037114,C` | `{"C": 71.037114}` |
+| `nem` | N-ethylmaleimide | Nethylmaleimide (108) +125.047679 | `--fixed-mod UniMod:108,125.047679,C` | `{"C": 125.047679}` |
+| `carboxymethyl` | iodoacetic acid | Carboxymethyl (6) +58.005479 | `--fixed-mod UniMod:6,58.005479,C` | `{"C": 58.005479}` |
+| `mmts` | S-methyl methanethiosulfonate | Methylthio (39) +45.987721 | `--fixed-mod UniMod:39,45.987721,C` | `{"C": 45.987721}` |
+| `pyridylethyl` | 4-vinylpyridine | Pyridylethyl (31) +105.057849 | `--fixed-mod UniMod:31,105.057849,C` | `{"C": 105.057849}` |
+
+DIA-NN's `--fixed-mod [name],[mass],[sites]` (README) applies the modification in the FASTA
+digest, so the predicted library carries it; how well DIA-NN's predictor handles a modification
+other than carbamidomethyl is not measured here. FragPipe (`make_presets.py --cys-alkylation`) sets
+MSFragger's fixed C row to the agent's mass (0 for `none`); Radiant's DIA-NN library is predicted
+with the same DIA-NN flags (`run_search.py`, `radiant_parallel.py`, `make_radiant_library.py`,
+which reuses a library only when it was built with the same choice).
 
 SKILL.md step 3 asks only for an enrichment experiment (IP / pull-down / proximity labelling, or
-an on-bead digest). `make_methods.py` lists carbamidomethylation only when the parameters fix it,
-and with `none` says cysteine was searched unmodified because the samples were not reduced and
-alkylated. `sample_quality.py --report` warns when carbamidomethyl was fixed and under 1% of the
-identified precursors hold a C (`sample_quality.CYS_MIN_FRACTION`), pooled **or in any run** with
-at least 100 identified precursors (`CYS_MIN_PRECURSORS_RUN`) -- a cohort half of whose samples
-were never alkylated stays above 1% pooled -- naming the fix.
+an on-bead digest), and then which agent. `make_methods.py` lists the fixed C modification only
+when the parameters fix it, with `none` says cysteine was searched unmodified because the samples
+were not reduced and alkylated, and with another agent names it. `sample_quality.py --report`
+warns when a fixed C modification was searched and under 1% of the identified precursors hold a C
+(`sample_quality.CYS_MIN_FRACTION`), pooled **or in any run** with at least 100 identified
+precursors (`CYS_MIN_PRECURSORS_RUN`) -- a cohort half of whose samples were never alkylated stays
+above 1% pooled. It names the causes and fixes: not alkylated (`none`), alkylated with another
+agent than searched (the matching choice), or a protein mix naturally poor in cysteine (histone
+or collagen-rich preps), which can fall under 1% though it was alkylated.
 
-**Another alkylating agent** leaves no carbamidomethyl-C either, and `none` is then the wrong fix:
-search with its fixed modification instead. UniMod (unimod.org, read 2026-10-15):
-N-ethylmaleimide `UniMod:108` +125.047679, MMTS (methylthio) `UniMod:39` +45.987721, iodoacetic
-acid (carboxymethyl) `UniMod:6` +58.005479, 4-vinylpyridine (pyridylethyl) `UniMod:31`
-+105.057849. For DIA-NN: `estimate_params.py --cys-alkylation none --overrides '{"--fixed-mod":
-"UniMod:39,45.987721,C"}'` (with `--override-by` / `--override-reason`). A protein mix naturally
-poor in cysteine (histone or collagen-rich preps) can fall under 1% though it was alkylated: the
-warning names both before anyone re-searches.
+## CPU-hours a search reserves (`cpu_hours_reserved`)
+Every search that writes job scripts states the most CPU-hours it can use: for each job it submits,
+CPUs per task × time limit (hours) × array tasks, summed (`scripts/cpu_hours.py`, the one rule),
+read from the `#SBATCH` lines actually written. It is an **upper bound** -- a job that finishes
+early uses less. `run_search.py` prints it (`[run_search] cpu_hours_reserved: …` and
+`cpu_hours_reserved` in its JSON and in `search_provenance.json`) for the single-shot, two-job,
+5-step chain, Radiant and FragPipe routes; `diann_parallel.py` and `radiant_parallel.py` print it
+in their JSON; each `submit.sh` has it in a header comment. The Core board approves a request
+under 10,000 CPU-hours automatically and sends 10,000 or more to a person.
 
 ## Provenance (DE-LIMP rule #2)
 Every emitted value is tagged in the `rationale`:

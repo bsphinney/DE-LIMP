@@ -298,21 +298,33 @@ def why_missing(name, stats, stats_file):
 
 # What to do about a run the report does not hold -- the same for the single-shot search job and
 # the 5-step chain's step 5, which both run verify() after DIA-NN has written the report.
-# Re-running the job does not help (a resubmitted step 5 searches the same file list and fails the
-# same way), and a run cannot be dropped by editing file_list.txt: the step's list and count are
-# fixed when the chain is generated.
+# Re-running the job does not help, and neither does dropping the run from file_list.txt and
+# resubmitting step 5 alone: the step's --f list and run count are fixed when the chain is
+# generated, so it fails "N inputs map to only N-1 distinct run names" (tested with the suite's fake
+# DIA-NN, 2026-10-15). The report on disk already holds every other run, so the cheap recovery is
+# to accept the missing run on the record (--accept-missing: re-checks that report, runs nothing).
 MISSING_RUN_WHAT_TO_DO = (
-    "What to do -- do NOT resubmit this job, it fails the same way. The report was written "
-    "without the run(s) above ({report}). If DIA-NN read a run and found nothing in it (a blank, "
-    "a wash, a failed injection) and the user or Core staff agree it is not a sample: leave it out "
-    "of conditions.csv, go on with this report, and record the decision (log_decision.py) -- or "
-    "search again without it (run_search.py without that file) to have a run record that "
-    "matches. If DIA-NN could not load a run, or it is a real sample: check the file (copied "
-    "completely? readable?) and search again, or ask Core staff before any DE.")
+    "What to do -- do NOT resubmit this job, and do not edit the file list: it fails the same way. "
+    "The report was written without the run(s) above ({report}). If DIA-NN read a run and found "
+    "nothing in it (a blank, a wash, a failed injection) and the user or Core staff agree it is not "
+    "a sample: record that -- python3 {script} --report {report} --files-list {listing} "
+    "--accept-missing <run> --reason \"<why, in their words>\" (it re-checks this report, runs "
+    "nothing, and writes the decision to {accepted}) -- then leave the run out of conditions.csv "
+    "and go on with this report. If DIA-NN could not load a run, or it is a real sample: check the "
+    "file (copied completely? readable?) and search again, or ask Core staff before any DE.")
+ACCEPTED_SUFFIX = ".accepted_missing.json"
 
 
-def verify(report, files, parquet_runs=runs_from_parquet):
-    """(ok, message). `parquet_runs` is injectable so the stdlib route can be tested."""
+def accepted_path(report):
+    """Where a decision to go on without runs the report lacks is recorded: beside the report."""
+    stem = next((report[:-len(e)] for e in (".parquet", ".tsv") if report.endswith(e)), report)
+    return stem + ACCEPTED_SUFFIX
+
+
+def verify(report, files, parquet_runs=runs_from_parquet, accepted=(), listing=None):
+    """(ok, message). `parquet_runs` is injectable so the stdlib route can be tested. `accepted`:
+    runs the user decided to go on without (--accept-missing); the report may lack exactly those.
+    `listing`: the input list's path, for the message."""
     files = distinct_inputs(files)[0]           # a file listed twice was searched once
     n = len(files)
     expected = [run_name(f) for f in files]
@@ -337,6 +349,20 @@ def verify(report, files, parquet_runs=runs_from_parquet):
     # inputs, so n distinct Runs from n distinctly named inputs means all are there even if
     # DIA-NN spells some format's name differently from run_name() -- a naming guess must not
     # fail a complete search.
+    accepted = set(accepted or ())
+    if accepted:
+        unknown = sorted(accepted - set(expected))
+        present = sorted(accepted & set(runs))
+        if unknown or present:
+            return False, ("FAILED: --accept-missing must name runs of the input list that the "
+                           "report lacks; " + "; ".join(
+                               x for x in ((f"not an input: {', '.join(unknown)}" if unknown
+                                            else ""),
+                                           (f"in the report: {', '.join(present)}" if present
+                                            else "")) if x))
+        if len(runs) == n - len(accepted) and set(expected) - set(runs) == accepted:
+            return True, (f"OK: report holds {len(runs)} of {n} runs ({source}); left out by "
+                          f"decision: {', '.join(sorted(accepted))}")
     if len(runs) != n:
         missing = [e for e in expected if e not in runs]
         which = f" Missing: {', '.join(missing)}." if missing else ""
@@ -346,7 +372,9 @@ def verify(report, files, parquet_runs=runs_from_parquet):
         lines += [why_missing(m, stats, os.path.basename(sp)) for m in missing]
         lines.append("DIA-NN exits 0 either way, so this job fails rather than hand the DE "
                      "step fewer samples than were acquired.")
-        lines.append(MISSING_RUN_WHAT_TO_DO.format(report=report))
+        lines.append(MISSING_RUN_WHAT_TO_DO.format(
+            report=report, listing=listing or "<the job's input list>",
+            accepted=accepted_path(report), script=os.path.abspath(__file__)))
         return False, "\n".join(lines)
     return True, f"OK: report holds all {n} runs ({source})"
 
@@ -356,13 +384,33 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--report", required=True)
     ap.add_argument("--files-list", required=True, help="one input path per line")
+    ap.add_argument("--accept-missing", action="append", default=[], metavar="RUN",
+                    help="a run the report lacks that the user or Core staff decided to go on "
+                         "without (a blank, a wash, a failed injection). Repeatable; needs "
+                         "--reason. Re-checks the report (runs nothing) and records the decision "
+                         "in <report>" + ACCEPTED_SUFFIX)
+    ap.add_argument("--reason", help="why, in their words (with --accept-missing)")
     a = ap.parse_args()
+    if a.accept_missing and not (a.reason or "").strip():
+        ap.error("--accept-missing needs --reason \"<why, in their words>\"")
     with open(a.files_list) as fh:
         files = [ln.strip() for ln in fh if ln.strip()]
     try:
-        ok, msg = verify(a.report, files)
+        ok, msg = verify(a.report, files, accepted=a.accept_missing, listing=a.files_list)
     except Exception as e:                        # an unreadable report is a failed search
         ok, msg = False, f"FAILED: could not read {a.report}: {type(e).__name__}: {e}"
+    if ok and a.accept_missing:
+        import datetime
+        import json
+        from safe_write import write_file
+        write_file(accepted_path(a.report), json.dumps({
+            "report": os.path.abspath(a.report), "files_list": os.path.abspath(a.files_list),
+            "runs": sorted(set(a.accept_missing)), "reason": a.reason.strip(),
+            "recorded_at": datetime.datetime.now(datetime.timezone.utc).isoformat(
+                timespec="seconds"),
+            "what": "runs the report lacks that the user or Core staff decided to go on without; "
+                    "the search was not re-run"}, indent=2) + "\n")
+        msg += f" -- recorded in {accepted_path(a.report)}"
     print(msg, file=sys.stdout if ok else sys.stderr)
     sys.exit(0 if ok else 1)
 

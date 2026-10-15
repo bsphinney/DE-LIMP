@@ -222,8 +222,175 @@ class MissingRunMessage(unittest.TestCase):
         self.assertIn("Missing: blank.", msg)
         self.assertIn("do NOT resubmit this job", msg)
         self.assertIn("The report was written without the run(s) above (/s/report.parquet)", msg)
-        self.assertIn("leave it out of conditions.csv, go on with this report", msg)
+        self.assertIn("--accept-missing <run> --reason", msg)
+        self.assertIn("leave the run out of conditions.csv and go on with this report", msg)
         self.assertIn("ask Core staff", msg)
+
+
+@unittest.skipUnless(HAVE_PYARROW, "the report is read with pyarrow")
+class FragPipeDiaReportRuns(unittest.TestCase):
+    """Review of 2.12 (P1): a run FragPipe's DIA-NN step left out fails the adapt, as on the
+    DIA-NN routes (check_report_runs.verify)."""
+
+    def out_with(self, d, runs_in_report, manifest=True):
+        import run_search  # noqa: F401
+        out = os.path.join(d, "fp_out")
+        dq = os.path.join(out, "group", "dia-quant-output")
+        os.makedirs(dq)
+        pq.write_table(pa.table({"Run": runs_in_report, "Protein.Group": ["P1"] * len(runs_in_report)}),
+                       os.path.join(dq, "report.parquet"))
+        if manifest:
+            stage = os.path.join(out, "diatracer_stage")
+            write(os.path.join(out, "fragpipe.fp-manifest"),
+                  f"{stage}/s1_diatracer.mzML\t\t\tDDA\n"
+                  + "".join(f"{stage}/s{i}.d\t\t\t{'DIA-Quant' if i == 1 else 'DIA'}\n"
+                            for i in (1, 2, 3)))
+        return out
+
+    def test_a_missing_run_fails_and_a_complete_report_passes(self):
+        import run_search
+        with tempfile.TemporaryDirectory() as d:
+            out = self.out_with(d, ["s1", "s3"])
+            with self.assertRaises(SystemExit) as cm:
+                run_search.adapt_fragpipe_dia(out)
+            self.assertIn("FragPipe DIA: FAILED: the report holds 2 of 3 runs", str(cm.exception))
+            self.assertIn("Missing: s2.", str(cm.exception))
+        with tempfile.TemporaryDirectory() as d:
+            out = self.out_with(d, ["s1", "s2", "s3"])
+            self.assertTrue(run_search.adapt_fragpipe_dia(out).endswith("report.parquet"))
+        with tempfile.TemporaryDirectory() as d:       # no manifest of ours: said, not checked
+            out = self.out_with(d, ["s1"], manifest=False)
+            self.assertTrue(run_search.adapt_fragpipe_dia(out).endswith("report.parquet"))
+
+
+@unittest.skipUnless(HAVE_PYARROW, "the report is read with pyarrow")
+class AcceptMissing(unittest.TestCase):
+    """Review of 2.12 (P5): dropping a blank from file_list.txt and resubmitting step 5 does NOT
+    work -- the step's --f list and run count are fixed at generation (tested below) -- so the
+    report already written, without the blank, is accepted on the record instead."""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.d = self._td.name
+        self.report = os.path.join(self.d, "report.parquet")
+        pq.write_table(pa.table({"Run": ["s0", "s2"]}), self.report)
+        self.listing = write(os.path.join(self.d, "file_list.txt"),
+                             "".join(f"/raw/s{i}.d\n" for i in range(3)))
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def crr(self, *more):
+        return subprocess.run([sys.executable, os.path.join(SCRIPTS, "check_report_runs.py"),
+                               "--report", self.report, "--files-list", self.listing, *more],
+                              capture_output=True, text=True)
+
+    def test_the_failure_gives_the_command_and_accepting_records_it(self):
+        p = self.crr()
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("do NOT resubmit this job, and do not edit the file list", p.stderr)
+        self.assertIn(f"--report {self.report} --files-list {self.listing} --accept-missing <run>",
+                      p.stderr)
+        p = self.crr("--accept-missing", "s1", "--reason", "wash injection, staff agreed")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("left out by decision: s1", p.stdout)
+        with open(crr.accepted_path(self.report)) as fh:
+            rec = json.load(fh)
+        self.assertEqual((rec["runs"], rec["reason"]), (["s1"], "wash injection, staff agreed"))
+
+    def test_only_a_missing_input_can_be_accepted_and_only_with_a_reason(self):
+        self.assertEqual(self.crr("--accept-missing", "s1").returncode, 2)
+        p = self.crr("--accept-missing", "s0", "--reason", "x")
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("in the report: s0", p.stderr)
+        p = self.crr("--accept-missing", "s9", "--reason", "x")
+        self.assertIn("not an input: s9", p.stderr)
+        self.assertFalse(os.path.exists(crr.accepted_path(self.report)))
+
+    def test_editing_file_list_and_resubmitting_step5_fails(self):
+        from job_env import job_env
+        from test_single_shot_sbatch import LIBFREE_CFG, _Workspace
+        w = _Workspace(self.d, cfg_lines=LIBFREE_CFG + ["--window 7"], n_runs=3, ext=".d")
+        out = os.path.join(self.d, "chain")
+        p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "diann_parallel.py"),
+                            "--diann", w.diann, "--fasta", w.fasta, "--out", out, "--cfg", w.cfg,
+                            "--partition", "high", "--account", "genome-center-grp",
+                            "--raw", *w.runs], capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        os.makedirs(os.path.join(out, "quant_step4"))
+        for i in range(3):
+            write(os.path.join(out, "quant_step4", f"sample_{i}.quant"), "q")
+        fl = os.path.join(out, "file_list.txt")
+        with open(fl) as fh:
+            kept = [x for x in fh.read().split() if "sample_1" not in x]
+        write(fl, "\n".join(kept) + "\n")
+        env = job_env(self.d, FAKE_PY=sys.executable, FAKE_REPORT_RUNS="sample_0,sample_2")
+        r = subprocess.run(["bash", os.path.join(out, "step5_report.sbatch")], cwd=out, env=env,
+                           capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("3 inputs map to only 2 distinct run names", r.stderr)
+        self.assertIn("check_report_runs.py --accept-missing", r.stderr)
+
+
+class ReplayAndChecks(unittest.TestCase):
+    def test_reproduce_sh_replays_rename_dashed_runs(self):
+        """Review of 2.12 (P6)."""
+        with tempfile.TemporaryDirectory() as d:
+            search = os.path.join(d, "search")
+            write(os.path.join(search, "report.parquet"))
+            for renamed, want in ((True, True), (False, False)):
+                write(os.path.join(search, "search_provenance.json"), json.dumps(
+                    {"engine": "diann", "input_links": [{"original": f"/r/{DASHED}.d",
+                                                         "link": f"/o/input_links/{RENAMED}.d",
+                                                         "run_name": RENAMED,
+                                                         "renamed": renamed}]}))
+                out = os.path.join(d, f"repro_{renamed}")
+                p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "provenance.py"),
+                                    "--outdir", out, "--engine", "diann", "--acquisition", "DIA",
+                                    "--report", os.path.join(search, "report.parquet")],
+                                   capture_output=True, text=True)
+                self.assertEqual(p.returncode, 0, p.stderr)
+                with open(os.path.join(out, "reproduce.sh")) as fh:
+                    line = next(ln for ln in fh if "--files" in ln)
+                self.assertEqual("--rename-dashed-runs" in line, want, line)
+
+    def test_a_cfg_value_with_dashes_is_refused(self):
+        """Review of 2.12 (P7): a --lib or --temp path in the cfg is read by DIA-NN like argv."""
+        from test_single_shot_sbatch import HIGH, LIBFREE_CFG, _Workspace
+        with tempfile.TemporaryDirectory() as d:
+            w = _Workspace(d, cfg_lines=LIBFREE_CFG + [f"--temp {d}/tmp--1"])
+            p = w.generate(*HIGH, check=False)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn(f"--temp '{d}/tmp--1'", p.stderr)
+            self.assertIn("reads a cfg like a command line", p.stderr)
+            self.assertFalse(os.path.exists(w.out))
+
+    def test_probe_window_by_hand_refuses_dashed_paths(self):
+        """Review of 2.12 (P7): probe_window.py run by hand (with --seed-lib, as documented)."""
+        with tempfile.TemporaryDirectory() as d:
+            raw = write(os.path.join(d, "plate--1", "s1.mzML"))
+            fasta = write(os.path.join(d, "db.fasta"), ">sp|P1|X\nPEPTIDEK\n")
+            lib = write(os.path.join(d, "lib.speclib"), "lib")
+            p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "probe_window.py"),
+                                "--diann", "/nonexistent/diann", "--raw", raw, "--fasta", fasta,
+                                "--lib", lib], capture_output=True, text=True)
+            import probe_window
+            self.assertEqual(p.returncode, probe_window.EXIT_CONFIG, p.stderr)
+            self.assertIn(f"run {raw}", p.stderr)
+            self.assertIn("Link each under a name and folder without '--'", p.stderr)
+
+    def test_the_node_check_looks_where_a_link_points(self):
+        """Error audit of 2.12 (E1): with '--' inputs the job got links, and its node check tested
+        <out>/input_links -- not the raw data's mount, which is what a node can lose."""
+        import node_fault
+        with tempfile.TemporaryDirectory() as d:
+            real = write(os.path.join(d, "raw--data", "s1.d"))
+            link = os.path.join(d, "out", "input_links", "s1.d")
+            os.makedirs(os.path.dirname(link))
+            os.symlink(real, link)
+            checks = node_fault.chain_checks("/x/diann", os.path.join(d, "out"), real, [link])
+            raw_dirs = [p for f, p, what in checks if what == "the raw data"]
+            self.assertEqual(raw_dirs, [os.path.dirname(os.path.realpath(real))])
 
 
 if __name__ == "__main__":

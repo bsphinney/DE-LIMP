@@ -180,12 +180,14 @@ class SampleQualityPerRun(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             rec = sq.cys_check(self.search(d, {"r1": [f"PEPTIDEK{i}" for i in range(200)]}))
             self.assertEqual(rec["status"], "WARN")
-            for words in ("N-ethylmaleimide (NEM) UniMod:108 +125.047679",
-                          "MMTS (methylthio) UniMod:39 +45.987721",
-                          "iodoacetic acid (carboxymethyl) UniMod:6 +58.005479",
-                          "4-vinylpyridine (pyridylethyl) UniMod:31 +105.057849",
-                          "--cys-alkylation none is the wrong fix", "histone or collagen"):
+            for words in ("the search fixed Carbamidomethyl (+57.0215) on every C",
+                          "NOT reduced and alkylated", "--cys-alkylation none",
+                          "alkylated with another agent than the one searched",
+                          "nem (N-ethylmaleimide (NEM))", "propionamide (acrylamide)",
+                          "carboxymethyl (iodoacetic acid)", "pyridylethyl (4-vinylpyridine)",
+                          "mmts (S-methyl methanethiosulfonate (MMTS))", "histone or collagen"):
                 self.assertIn(words, rec["message"])
+            self.assertNotIn("cam (", rec["message"], "the searched agent is not offered")
 
     def test_every_run_alkylated_is_info(self):
         alk = [f"PEPCTIDE{i}" for i in range(16)] + [f"PEPTIDE{i}" for i in range(184)]
@@ -256,6 +258,153 @@ class SampleQuality(unittest.TestCase):
             self.assertIn("## Cysteine", md)
             self.assertIn("- CYSTEINE: only 0.50% of the identified precursors", md)
             self.assertEqual(json.loads(p.stdout)["cysteine"]["status"], "WARN")
+
+
+class Reagents(unittest.TestCase):
+    """Review of 2.12 (proteomics, P3): one map of alkylating agents, each with its own fixed C
+    modification (UniMod, read 2026-10-15) -- the Core has seen acrylamide (propionamide)."""
+
+    def test_the_map_is_unimods(self):
+        want = {"cam": (4, 57.021464), "nem": (108, 125.047679), "carboxymethyl": (6, 58.005479),
+                "propionamide": (24, 71.037114), "mmts": (39, 45.987721),
+                "pyridylethyl": (31, 105.057849)}
+        self.assertEqual({k: (r["unimod"], r["mass"]) for k, r in ep.CYS_REAGENTS.items() if r},
+                         want)
+        self.assertIsNone(ep.CYS_REAGENTS["none"])
+
+    def test_each_engine_gets_the_agents_modification(self):
+        with tempfile.TemporaryDirectory() as d:
+            path, cfg, side = estimate(d, "diann", "--cys-alkylation", "propionamide")
+            self.assertIn("--fixed-mod UniMod:24,71.037114,C\n", cfg)
+            self.assertNotIn("--unimod4", cfg)
+            self.assertEqual(side["cys_alkylation"]["reagent"], "acrylamide")
+            self.assertIn("alkylated with acrylamide", side["cys_alkylation"]["source"])
+            self.assertEqual(ep.cys_searched(path), {"fixed": True, "choice": "propionamide",
+                                                     "mass": 71.037114, "mod": "Propionamide"})
+            self.assertFalse(ep.cam_searched(path), "another agent is not carbamidomethyl")
+            path, text, _ = estimate(d, "sage", "--cys-alkylation", "nem")
+            self.assertEqual(json.loads(text)["database"]["static_mods"], {"C": 125.047679})
+            self.assertEqual(ep.cys_searched(path)["choice"], "nem")
+            path, _, _ = estimate(d, "diann", "--cys-alkylation", "none")
+            self.assertEqual(ep.cys_searched(path), {"fixed": False})
+
+    def test_the_methods_name_the_agents_modification(self):
+        with tempfile.TemporaryDirectory() as d:
+            text = Methods().paragraph(d, "--cys-alkylation", "propionamide")
+            self.assertIn("Fixed modifications: Propionamide (C).", text)
+            self.assertIn("Cysteines were alkylated with acrylamide.", text)
+            self.assertNotIn("Carbamidomethyl", text)
+            self.assertNotIn("name not verified", text)
+
+    @unittest.skipUnless(HAVE_PYARROW, "the cysteine check reads report.parquet with pyarrow")
+    def test_a_search_for_the_wrong_agent_warns_with_the_others_offered(self):
+        with tempfile.TemporaryDirectory() as d:
+            params, _, _ = estimate(d, "diann", "--cys-alkylation", "nem")
+            report = os.path.join(d, "report.parquet")
+            write_report(report, [f"PEPTIDEK{i}" for i in range(200)])
+            rec = sq.cys_check(report, params)
+            self.assertEqual(rec["status"], "WARN")
+            self.assertIn("fixed Nethylmaleimide (+125.048) on every C", rec["message"])
+            self.assertIn("cam (iodoacetamide or chloroacetamide)", rec["message"])
+            self.assertNotIn("nem (", rec["message"])
+
+
+class UnreadableReport(unittest.TestCase):
+    """Error audit of 2.12: a damaged report.parquet made cys_check() and detected_depth() raise
+    with a traceback. Each now says, in one line, that it could not be read."""
+
+    def test_a_damaged_report_is_one_info_line(self):
+        with tempfile.TemporaryDirectory() as d:
+            rep = os.path.join(d, "report.parquet")
+            with open(rep, "wb") as fh:
+                fh.write(b"PAR1 this is not parquet")
+            rec = sq.cys_check(rep)
+            self.assertEqual(rec["status"], "INFO")
+            self.assertRegex(rec["message"], r"^cysteine check not run: report\.parquet could not "
+                                             r"be read \(\w+\)$")
+            depth, note = sq.detected_depth(rep)
+            self.assertIsNone(depth)
+            self.assertRegex(note, r"^report\.parquet could not be read \(\w+\)$")
+
+
+class OtherRoutes(unittest.TestCase):
+    """Review of 2.12 (proteomics, P2): Radiant never searched carbamidomethyl-C -- its DIA-NN
+    library was predicted without --unimod4 and its config has no modifications (HIVE, DIA-NN
+    2.7.0 job 24807967: 0 of 6,044 C-peptides carried UniMod:4) -- and FragPipe's presets fixed
+    carbamidomethyl whatever --cys-alkylation said."""
+
+    def presets(self, d, engine, *more):
+        out = os.path.join(d, "wf", f"x.{'workflow' if engine == 'fragpipe' else 'radiantConfig'}")
+        p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "make_presets.py"), "--engine",
+                            engine, "--instrument", "timsTOF HT" if engine == "fragpipe" else
+                            "Orbitrap Astral", "--out", out, *more],
+                           capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        with open(out) as fh:
+            return out, fh.read(), json.loads(p.stdout)
+
+    def test_fragpipe_fixes_the_agents_mass_on_c(self):
+        with tempfile.TemporaryDirectory() as d:
+            _, text, prov = self.presets(d, "fragpipe", "--cys-alkylation", "propionamide")
+            row = next(ln for ln in text.splitlines() if ln.startswith("msfragger.table.fix-mods="))
+            self.assertIn("; 71.037114,C (cysteine),true,-1;", row)
+            self.assertNotIn("57.02146,C (cysteine)", row)
+            self.assertEqual(prov["cys_alkylation"]["value"], "propionamide")
+            _, text, _ = self.presets(d, "fragpipe", "--cys-alkylation", "none")
+            self.assertIn("; 0.0,C (cysteine),true,-1;", text)
+            _, text, prov = self.presets(d, "fragpipe")
+            self.assertIn("57.02146,C (cysteine)", text, "cam keeps the vendor row as shipped")
+            self.assertFalse(prov["cys_alkylation"]["given"])
+
+    def test_radiant_libraries_carry_the_fixed_c(self):
+        import run_search
+        with tempfile.TemporaryDirectory() as d:
+            cfg, _, prov = self.presets(d, "radiant", "--cys-alkylation", "nem")
+            self.assertIn("--fixed-mod UniMod:108,125.047679,C",
+                          prov["keys_changed"]["cysteine (DIA-NN library prediction)"])
+            self.assertEqual(run_search.radiant_cys(cfg), "nem")
+            self.assertEqual(run_search.radiant_cys(os.path.join(d, "no_record.radiantConfig")),
+                             "cam")
+            lib, lines = run_search.radiant_library_job({"diann": "/opt/diann"}, "/x/db.fasta",
+                                                        os.path.join(d, "out"), 4, cfg)
+            self.assertIn("--cys-alkylation nem", " ".join(lines))
+            # the array chain's step 1 predicts with the flags
+            runs = [os.path.join(d, f"r{i}.mzML") for i in range(2)]
+            for r in runs:
+                open(r, "w").close()
+            listing = os.path.join(d, "list.txt")
+            with open(listing, "w") as fh:
+                fh.write("\n".join(runs) + "\n")
+            fasta = os.path.join(d, "db.fasta")
+            with open(fasta, "w") as fh:
+                fh.write(">sp|P1|X\nPEPTIDEK\n")
+            out = os.path.join(d, "rp")
+            p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "radiant_parallel.py"),
+                                "--runtime", "apptainer", "--image", "/x/r.sif", "--raw-list",
+                                listing, "--fasta", fasta, "--config", cfg, "--out", out,
+                                "--diann", "/opt/diann", "--cys-alkylation", "cam",
+                                "--partition", "high", "--account", "genome-center-grp"],
+                               capture_output=True, text=True)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            with open(os.path.join(out, "radiant_parallel", "step1_libpred.sbatch")) as fh:
+                self.assertIn("--threads 16 --unimod4", fh.read())
+
+    def test_a_radiant_library_is_reused_only_for_the_same_choice(self):
+        with tempfile.TemporaryDirectory() as d:
+            tsv = os.path.join(d, "radiant_library.tsv")
+            with open(tsv, "w") as fh:
+                fh.write("x" * 1_100_000)
+            argv = [sys.executable, os.path.join(SCRIPTS, "make_radiant_library.py"),
+                    "--out-dir", d, "--diann", "/nonexistent/diann", "--fasta", "/x.fasta"]
+            # no record: a pre-2.12 library, predicted with nothing fixed on C -- rebuilt
+            p = subprocess.run(argv, capture_output=True, text=True)
+            self.assertNotIn('"reused": true', p.stdout)
+            with open(tsv + ".meta.json", "w") as fh:
+                json.dump({"cys_alkylation": "cam"}, fh)
+            p = subprocess.run(argv, capture_output=True, text=True)
+            self.assertEqual(json.loads(p.stdout)["reused"], True)
+            p = subprocess.run(argv + ["--cys-alkylation", "none"], capture_output=True, text=True)
+            self.assertNotIn('"reused": true', p.stdout)
 
 
 if __name__ == "__main__":

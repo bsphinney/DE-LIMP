@@ -111,6 +111,9 @@ SAGE_CUT = {("KR", "P"): ("Trypsin", "MS:1001251"), ("KR", ""): ("Trypsin/P", "M
 UNIMOD = {1: ("Acetyl", 42.010565), 4: ("Carbamidomethyl", 57.021464),
           7: ("Deamidated", 0.984016), 21: ("Phospho", 79.966331),
           28: ("Gln->pyro-Glu", -17.026549), 35: ("Oxidation", 15.994915)}
+# ...and every cysteine alkylation estimate_params.py can search, from its one map (UniMod too)
+from estimate_params import CYS_REAGENTS  # noqa: E402
+UNIMOD.update({r["unimod"]: (r["mod"], r["mass"]) for r in CYS_REAGENTS.values() if r})
 
 
 def _num(x):
@@ -1075,10 +1078,14 @@ def search_paragraph(rec, de_prov=None):
     # The fixed list above comes from the parameters, so it never names carbamidomethylation that
     # was not searched; when the samples were not alkylated (estimate_params --cys-alkylation
     # none), say why cysteine carries none.
-    if (rec.get("cys_alkylation") or {}).get("value") == "none" and not any(
-            m["type"] == "fixed" and "C" in str(m.get("targets") or "") for m in rec["mods"]):
+    cys = rec.get("cys_alkylation") or {}
+    cys_fixed = [m for m in rec["mods"] if m["type"] == "fixed" and "C" in str(m.get("targets") or "")]
+    if cys.get("value") == "none" and not cys_fixed:
         s[-1] += ("Cysteine was searched unmodified (no carbamidomethylation), as the samples "
                   "were not reduced and alkylated. ")
+    elif cys.get("reagent") and cys.get("value") != "cam" and any(
+            m.get("unimod") == cys.get("unimod") for m in cys_fixed):
+        s[-1] += f"Cysteines were alkylated with {cys['reagent']}. "
     s[-1] += (("Variable modifications: " + "; ".join(var)
                + (f" (at most {rec['max_var_mods']['value']} per peptide)"
                   if rec.get("max_var_mods") else "") + ".") if var else

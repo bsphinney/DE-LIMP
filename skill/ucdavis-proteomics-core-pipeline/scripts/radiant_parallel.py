@@ -107,6 +107,10 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--library", help="DIA-NN .tsv library; generated in step 1 if omitted")
     ap.add_argument("--diann", help="DIA-NN command (needed only when --library is omitted)")
+    ap.add_argument("--cys-alkylation", default="cam",
+                    help="the fixed cysteine modification step 1's predicted library carries "
+                         "(estimate_params.CYS_ALKYLATION_CHOICES; default cam). Radiant takes "
+                         "its modifications from the library")
     # Memory defaults are MEASURED, not guessed (3-run HeLa, 9.9 GB TSV library,
     # 2026-08-03): each RadiantDIA task peaked at ~19 GB, Fulcrum at ~14 GB — roughly
     # 2x the library size plus overhead. Over-requesting is not free: asking 200 GB
@@ -253,6 +257,13 @@ def main():
         return write_file(os.path.join(D, name), text + "\n", 0o755)
 
     scripts = {}
+    # the fixed C modification (estimate_params.cys_diann_flags, the one map): Radiant's config has
+    # no modifications, it searches what the library carries
+    from estimate_params import CYS_ALKYLATION_CHOICES, cys_diann_flags
+    if a.cys_alkylation not in CYS_ALKYLATION_CHOICES:
+        sys.exit(f"--cys-alkylation {a.cys_alkylation!r}: one of "
+                 f"{', '.join(CYS_ALKYLATION_CHOICES)}")
+    cys_flags = cys_diann_flags(a.cys_alkylation)
 
     # ---- step 1: DIA-NN predicted library (skipped when --library is given) -----
     if not a.library:
@@ -265,7 +276,7 @@ def main():
             'echo "Step 1/3 DIA-NN library prediction"; date',
             f'{a.diann} --fasta {shlex.quote(os.path.abspath(a.fasta))} --fasta-search '
             f'--predictor --gen-spec-lib --out-lib {shlex.quote(out_lib)} '
-            f'--threads {a.libpred_cpus}',
+            f'--threads {a.libpred_cpus}' + "".join(f" {shlex.quote(x)}" for x in cys_flags),
             # Check for what DIA-NN ACTUALLY writes, and say what it did write if absent.
             f'if [ ! -s {shlex.quote(lib)} ]; then',
             f'  echo "expected {os.path.basename(lib)}; DIA-NN wrote:"; ls -la {shlex.quote(D)}',
@@ -347,10 +358,15 @@ def main():
         f'{prefix} fulcrum -v --toml-file {cres}/fulcrum_rescore.toml']),
         stage="step 3/3 Fulcrum rescoring", hours=a.fulcrum_time, final=True)
 
+    # the most the three steps can use (cpu_hours.py, the one rule), from the scripts written
+    from cpu_hours import reservation
+    cpu = reservation(list(scripts.values()))
     print(json.dumps({
         "mode": "radiant_parallel_3step",
         "n_files": n,
         "scripts": scripts,
+        "cpu_hours_reserved": cpu["cpu_hours_reserved"],
+        "cpu_hours_reservation": cpu,
         "results_dir": results,
         "per_file_results": rdir,
         "toml": toml_path,

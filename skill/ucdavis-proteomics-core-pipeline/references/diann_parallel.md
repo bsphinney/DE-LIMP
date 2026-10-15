@@ -162,6 +162,10 @@ python3 scripts/diann_parallel.py \
 # then submit the chain (on HIVE, over hive_exec.sh):
 bash scripts/hive_exec.sh 'bash <out>/submit.sh'
 ```
+Its JSON gives `cpu_hours_reserved`, the most the chain can use: every step's CPUs per task × time
+limit × array tasks, summed (`cpu_hours.py`; an upper bound, also the first comment line of
+`submit.sh`). E.g. 3 runs at 8 CPUs / 4 h per array task, steps 3 and 5 at 32 CPUs / 12 h, step 1
+at 16 CPUs / 4 h: 64 + 2 × 96 + 2 × 384 = 1,024.
 It writes `file_list.txt`, `step{1..5}_*.sbatch`, and `submit.sh` (which submits all
 five with dependencies and prints the job ids). **Watch the final job** with
 `watch_run.sh --all <out> --hive` (reads `jobs.txt`; covers all five steps — watching
@@ -960,11 +964,14 @@ the report exists step 5 runs `check_report_runs.py --report <report> --files-li
 file_list.txt`, as the single-shot search job does, and fails naming each missing run and what
 `report.stats.tsv` shows about it. A blank or wash injection therefore fails step 5 too. The
 message ends with what to do (`check_report_runs.MISSING_RUN_WHAT_TO_DO`): **not** a resubmission
-— step 5's file list and run count are fixed when the chain is generated, so it fails the same
-way, and editing `file_list.txt` does not drop a run. The report is on disk without the run: a
-blank the user or Core staff agree is not a sample is left out of `conditions.csv` and the report
-used (the decision logged), or the cohort is searched again without it; a run DIA-NN could not
-load, or a real sample, goes back to the file and Core staff.
+— step 5's `--f` list and run count are fixed when the chain is generated, so it fails the same
+way, and dropping the run from `file_list.txt` before resubmitting step 5 fails too ("3 inputs map
+to only 2 distinct run names"; tested with the suite's fake DIA-NN, 2026-10-15). The report is on
+disk without the run, so the cheap recovery for a blank the user or Core staff agree is not a
+sample is to accept it on the record: `check_report_runs.py --report <report> --files-list
+file_list.txt --accept-missing <run> --reason "<why>"` re-checks that report (runs nothing) and
+writes `<report stem>.accepted_missing.json`; the run is left out of `conditions.csv`. A run
+DIA-NN could not load, or a real sample, goes back to the file and Core staff.
 
 Colliding run names are refused before any of that, at generation: `run_search.py` checks the
 input list it routes, and `diann_parallel.py` checks `--raw`/`--raw-list` in its own `main()`

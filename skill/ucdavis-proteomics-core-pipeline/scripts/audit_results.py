@@ -52,7 +52,9 @@ Checks:
                     (DIA-NN) the scan window and/or mass accuracy the search was to measure on
                     these runs were NOT measured: the measurement failed and the search fell back
                     (search_provenance.json scan_window.mode fallback_auto / mass_acc.mode
-                    fallback_default) -- a CAUTION, worded by probe_fallback.caution() (WARN)
+                    fallback_default) -- a CAUTION, worded by probe_fallback.caution() (WARN);
+                    and a mass accuracy pinned at the SOP floor over probed runs that disagreed
+                    (the probe's warnings, probe_fallback.measurement_note) (WARN)
   quantification    the DE pipeline's own caveat about its protein quantities
                     (de_provenance.json `caveat`, e.g. a Sage DE's highest-peptide rollup),
                     quoted as the pipeline states it (WARN)
@@ -714,7 +716,8 @@ def audit_search_measurement(findings, de_prov, search_prov=None):
     path, sprov = load_search_prov(de_prov, search_prov)
     if not isinstance(sprov, dict):
         return                      # no search record here: not a question this audit can ask
-    from probe_fallback import fallback_modes, provenance_caution
+    from probe_fallback import fallback_modes, measurement_note, measurement_warnings, \
+        provenance_caution
     msg = provenance_caution(sprov)
     if msg:
         window, mass_acc = fallback_modes(sprov)
@@ -722,6 +725,11 @@ def audit_search_measurement(findings, de_prov, search_prov=None):
         add(findings, "search_measurement", "WARN", msg,
             {"scan_window_mode": window, "mass_acc_mode": mass_acc, "reason": fb.get("reason"),
              "search_provenance": path})
+    # ...and a measured mass accuracy pinned at the SOP floor over a spread the probe warned about
+    note = measurement_note(sprov)
+    if note:
+        add(findings, "search_measurement", "WARN", note,
+            {"warnings": measurement_warnings(sprov), "search_provenance": path})
 
 
 def audit_normalisation(findings, de_prov, rows=None, search_prov=None):

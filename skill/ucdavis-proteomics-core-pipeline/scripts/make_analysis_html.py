@@ -1163,12 +1163,14 @@ def search_measurement_note(prov, session=None):
     if not sprov:
         return None
     # provenance_caution() type-checks every piece: a malformed record never stops the page
-    from probe_fallback import provenance_caution
-    text = provenance_caution(sprov)
-    if not text:
+    from probe_fallback import measurement_note, provenance_caution
+    text, note = provenance_caution(sprov), measurement_note(sprov)
+    if not (text or note):
         return None
-    return {"kind": "warning", "title": "The search did not measure what it was to measure",
-            "text": text}
+    return {"kind": "warning",
+            "title": ("The search did not measure what it was to measure" if text else
+                      "The probed runs disagreed on the mass accuracy"),
+            "text": " ".join(x for x in (text, note) if x)}
 
 
 def runs_left_out_note(prov):

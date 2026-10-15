@@ -561,6 +561,18 @@ def main():
         _res_flags.append(f"--resolution-source {shlex.quote(str(_res['source']))}")
     res_repro = (" \\\n  " + " ".join(_res_flags)) if _res_flags else ""
     raw_arg = " ".join(f"'{f}'" for f in raw_files) or "/path/to/raw/*"
+    # A run whose file name holds '--' was searched under a new name (run_search.py
+    # --rename-dashed-runs; search_provenance.json `input_links`): the replay must rename it the
+    # same way, or it is refused before it starts -- and the design names the new run.
+    rename_repro = ""
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(a.report or "")),
+                               "search_provenance.json")) as fh:
+            _links = json.load(fh).get("input_links") or []
+        if any(isinstance(x, dict) and x.get("renamed") for x in _links):
+            rename_repro = " --rename-dashed-runs"
+    except (OSError, ValueError, AttributeError, TypeError):
+        pass
 
     # Rebuild the FASTA from what actually ran (fetch_fasta.py's output), falling back
     # to the bundle only if --fasta-info-file was not supplied. The bundle's proteome is the
@@ -749,7 +761,7 @@ python3 "$SKILL/scripts/fetch_fasta.py" fetch --proteome {fasta_repro_proteome} 
 # 5. Re-run the search (inputs from inputs/checksums; verify against checksums/checksums.json).{de_nonorm_note}
 python3 "$SKILL/scripts/run_search.py" --tools ~/.proteomics-pipeline/tools/tools.json \\
   --bundle ./wf/workflow.manifest.json --params ./wf/$(basename "$(ls wf | grep -vi manifest | head -n1)") \\
-  --fasta ./search.fasta --out ./search_out --files {raw_arg}{' --keratin-sample' if fasta_repro_keratin else ''}
+  --fasta ./search.fasta --out ./search_out --files {raw_arg}{' --keratin-sample' if fasta_repro_keratin else ''}{rename_repro}
 
 # 6. Re-run differential expression with identical settings.{de_where}
 Rscript "$SKILL/scripts/run_de.R" --input ./search_out/report.parquet \\
