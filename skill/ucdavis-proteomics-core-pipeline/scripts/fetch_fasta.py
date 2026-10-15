@@ -2547,6 +2547,15 @@ def cmd_fetch(a):
     if drop_names:
         found = {_bare_accession(r["cont_acc"]) for r in named_dropped}
         missing = [x for x in drop_names if _bare_accession(x) not in found]
+        if missing and not contam_text:
+            # nothing to drop from: say that, not that the accession is wrong (review, 2.12)
+            sys.exit(f"--drop-contaminant {', '.join(missing)}: no contaminant set was fetched for "
+                     f"this build ("
+                     + ("--contaminants none" if a.contaminants == "none" else
+                        f"the '{a.contaminants}' set could not be fetched")
+                     + (", and the supplied database's own contaminant entries do not include it"
+                        if getattr(a, "path", None) or getattr(a, "hive", False) else "")
+                     + "), so there is nothing to leave it out of")
         if missing:
             sys.exit(f"--drop-contaminant {', '.join(missing)}: no contaminant entry in this build "
                      f"has that accession (the '{a.contaminants}' contaminant set"

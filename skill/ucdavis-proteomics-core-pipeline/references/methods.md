@@ -74,8 +74,11 @@ on stderr and under the same key in its own JSON; `MANIFEST.txt`, which travels 
 only their count.
 
 No file path reaches `methods.md`: an absolute path from any record (`/quobyte/...`, `/nfs/...`,
-`/home/...`, `~/...`, `C:\...`) is cut to its file name as the file is written, and stderr says
-how many were cut.
+`/home/...`, `~/...`, `C:\...`) is cut to its file name as the file is written, and stderr shows
+each cut (`<path> -> <name>`). A path starts the text or follows a space or an opening quote or
+bracket, and starts with a file-system root (`make_methods.FS_ROOTS`), `~/` or a drive letter, or
+has three file-name segments, so prose such as `S-Trap (ProtiFi)/Trypsin/Lys-C` or
+`0.1%/80%/20%` is left alone.
 
 With `--params` / `--search-prov` / `--workflow-manifest`, it adds a **Database search**
 paragraph and a search-parameter table (engine, the version that ran, cleavage rule, missed

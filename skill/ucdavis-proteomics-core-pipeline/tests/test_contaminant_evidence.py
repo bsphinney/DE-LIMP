@@ -312,6 +312,41 @@ class AuditFlagsIt(unittest.TestCase):
         self.assertIn("Not assessed: the searched FASTA (search.fasta, sha256", f["message"])
         self.assertIn("is not readable here", f["message"])
 
+    def test_a_changed_fasta_is_said_to_have_changed(self):
+        with open(self.fasta, "a") as fh:
+            fh.write(">sp|Q90009|NEW_HUMAN new\nMKKK\n")
+        (f,), _ = self.audit(self.write_report("tsv"))
+        self.assertEqual(f["status"], "INFO")
+        self.assertIn("the FASTA (search.fasta) has changed since the search", f["message"])
+        self.assertNotIn("not readable here", f["message"])
+
+    def test_an_unreadable_report_is_info_not_a_traceback(self):
+        """Error-handling review (2.12): a damaged report.parquet raised, and no AUDIT.md was
+        written at all."""
+        bad = os.path.join(self.root, "report.parquet")
+        with open(bad, "wb") as fh:
+            fh.write(b"PAR1 this is not parquet")
+        (f,), md = self.audit(bad)
+        self.assertEqual(f["status"], "INFO")
+        self.assertIn("Not assessed: report.parquet could not be read", f["message"])
+        self.assertNotIn(self.root, f["message"])
+        self.assertIn("contaminant_evidence", md)
+
+    def test_no_group_left_after_the_filter_is_not_a_pass(self):
+        """Error-handling review (2.12): the DE counted contaminant groups, the rebuild found none
+        (here every row fails the q-value filter), and the check said PASS 'each of the 0'."""
+        path = self.write_report("tsv")
+        with open(path) as fh:
+            rows = fh.read().splitlines()
+        with open(path, "w") as fh:
+            fh.write("\n".join([rows[0]] + [r for r in rows[1:] if "Cont_" not in r.split("\t")[1]]
+                               + [r.rsplit("\t", 1)[0] + "\t0.5" for r in rows[1:]
+                                  if "Cont_" in r.split("\t")[1]]) + "\n")
+        (f,), _ = self.audit(path)
+        self.assertEqual(f["status"], "INFO", f["message"])
+        self.assertIn("the DE record counts 2 contaminant protein group(s), but none passes the "
+                      "DE's q-value filter", f["message"])
+
     def test_no_contaminant_group_no_finding(self):
         found, _ = self.audit(self.write_report("tsv"), n_groups=0)
         self.assertEqual(found, [])

@@ -131,6 +131,13 @@ class FastaInfoFromAFile(unittest.TestCase):
         self.assertIn("cannot read", self.refused("--fasta-info-file",
                                                   os.path.join(self.root, "nope.json")))
 
+    def test_an_empty_value_is_refused_not_taken_for_none(self):
+        """Error-handling review (2.12): --fasta-info-file "" (an empty variable) exited 0 and
+        rebuilt the workflow's default database."""
+        for args in (["--fasta-info-file", ""], ["--fasta-info", ""], ["--fasta-info", "  "]):
+            with self.subTest(args=args):
+                self.assertIn("is empty", self.refused(*args))
+
     def test_both_forms_at_once_is_refused(self):
         self.assertIn("give the FASTA sidecar once",
                       self.refused("--fasta-info-file", self.meta, "--fasta-info", "@" + self.meta))

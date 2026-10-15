@@ -268,12 +268,18 @@ def main():
     # The database record is checked before anything is written: a bundle whose database replay
     # silently fell back to the workflow defaults would reproduce a different database.
     fasta_info = None
-    if a.fasta_info_file and a.fasta_info:
+    # `is not None`: an empty value (`--fasta-info-file "$EMPTY_VAR"`) is a mistake to say, never
+    # "not given" -- that quietly replayed the workflow's default database (error-handling review)
+    if a.fasta_info_file is not None and a.fasta_info is not None:
         ap.error("give the FASTA sidecar once: --fasta-info-file <path> (or --fasta-info @<path>)")
-    if a.fasta_info_file or a.fasta_info:
+    if a.fasta_info_file is not None or a.fasta_info is not None:
+        flag = "--fasta-info-file" if a.fasta_info_file is not None else "--fasta-info"
+        if not (a.fasta_info_file if a.fasta_info_file is not None else a.fasta_info).strip():
+            ap.error(f"{flag} is empty: give fetch_fasta.py's <fasta>.meta.json (or leave the flag "
+                     f"out, and the bundle says the database was not recorded)")
         fasta_info, problem = read_fasta_info(a.fasta_info, a.fasta_info_file)
         if problem:
-            ap.error(f"{'--fasta-info-file' if a.fasta_info_file else '--fasta-info'}: {problem}")
+            ap.error(f"{flag}: {problem}")
         fasta_info = fasta_info_for_bundle(fasta_info)
 
     out = os.path.abspath(a.outdir)
