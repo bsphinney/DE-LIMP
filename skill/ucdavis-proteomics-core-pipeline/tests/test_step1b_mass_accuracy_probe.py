@@ -960,14 +960,16 @@ class MassAccPlausibilityTests(unittest.TestCase):
 
     def test_runs_that_disagree_about_a_level_are_not_pinned(self):
         """One acquisition method has one tolerance. A median that no run stands behind is not
-        one, however plausible the number looks on its own."""
-        split = probe_window.pin_mass_acc([{"ms2_ppm": 14.0, "ms1_ppm": 4.1},
-                                           {"ms2_ppm": 14.0, "ms1_ppm": 4.2},
-                                           {"ms2_ppm": 30.0, "ms1_ppm": 4.1}])
+        one, however plausible the number looks on its own. (A median at or below the SOP floor
+        only warns -- the floor is pinned whatever the spread: tests/test_mass_acc_one_run_and_
+        floor_spread.py -- so this cohort's median is above it.)"""
+        split = probe_window.pin_mass_acc([{"ms2_ppm": 24.0, "ms1_ppm": 4.1},
+                                           {"ms2_ppm": 24.0, "ms1_ppm": 4.2},
+                                           {"ms2_ppm": 10.0, "ms1_ppm": 4.1}])
         self.assertIsNone(split["pin_as"])
         self.assertTrue(any("disagree on MS2" in r for r in split["rejected"]),
                         split["rejected"])
-        self.assertAlmostEqual(split["spread"]["ms2_ppm"], 16 / 14.0)
+        self.assertAlmostEqual(split["spread"]["ms2_ppm"], 14 / 24.0)
         # the real HIVE cohort, both ways it was measured, still pins
         for per_run in ([14.0, 17.0, 14.0], [14.0, 17.0, 12.0]):
             pin = probe_window.pin_mass_acc([{"ms2_ppm": v} for v in per_run],
@@ -1169,9 +1171,10 @@ class SopFloorTests(unittest.TestCase):
                 self.assertFalse(pin["floored"]["ms2_ppm"], "an implausible value was floored up")
                 self.assertEqual(pin["pinned_ms2_ppm"], pin["measured_ms2_ppm"],
                                  "the SOP became a fallback for a refused measurement")
-        # ...and the same for a level refused on spread rather than magnitude
-        split = probe_window.pin_mass_acc([{"ms2_ppm": 4.0}, {"ms2_ppm": 4.0},
-                                           {"ms2_ppm": 14.0}], documented={"ms1_ppm": 7})
+        # ...and the same for a level refused on spread rather than magnitude (a median above
+        # the floor: at or below it a spread only warns, and the floor is what is pinned)
+        split = probe_window.pin_mass_acc([{"ms2_ppm": 24.0}, {"ms2_ppm": 24.0},
+                                           {"ms2_ppm": 10.0}], documented={"ms1_ppm": 7})
         self.assertIsNone(split["pin_as"])
         self.assertFalse(split["floored"]["ms2_ppm"])
 
