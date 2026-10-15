@@ -85,6 +85,10 @@ DEF = "[facility default — confirm]"
 # never replaced by a plausible default (DE-LIMP rule #2).
 NR_TAG = "[not recorded — confirm]"
 NOT_RECORDED = f"____ {NR_TAG}"
+# A run left out of the DE whose reason exists but could not be read: run_de.R's runs_left_out
+# record has `reasons_unreadable` (its decisions record was damaged), so "not recorded" would be
+# wrong -- the user did record one (2.12 review).
+REASON_NOT_READ = "reason not read: the decisions record could not be read [confirm]"
 # Evosep loads every sample from an Evotip; the tip type and the amount on it are the Core's
 # bench record, not the instrument's.
 EVOTIP_TAG = "[Evotip type, loading protocol and peptide amount — confirm]"
@@ -1461,10 +1465,12 @@ def de_covariate_sentence(prov):
 def de_runs_left_out_sentence(prov):
     """The searched runs the DE left out, each with the reason the user gave, from run_de.R's
     `runs_left_out` record (the reasons come from collect_conditions.py --validate --exclude). A
-    run with no recorded reason says NOT RECORDED -- never a reason supplied here. A run of the
-    design that had no quantities (`not_quantified`, 2.12) is said on its own, with run_de.R's
-    reason. None when every searched run was analysed, or the record predates it. The one wording: the Methods and the
-    report's callout (make_analysis_html.runs_left_out_note) both use it."""
+    run with no recorded reason says NOT RECORDED -- never a reason supplied here -- or, when
+    the record says its decisions file could not be read (`reasons_unreadable`),
+    REASON_NOT_READ. A run of the design that had no quantities (`not_quantified`, 2.12) is said
+    on its own, with run_de.R's reason. None when every searched run was analysed, or the record
+    predates it. The one wording: the Methods and the report's callout
+    (make_analysis_html.runs_left_out_note) both use it."""
     r = prov.get("runs_left_out")
     if not isinstance(r, dict):
         return None
@@ -1480,10 +1486,12 @@ def de_runs_left_out_sentence(prov):
     if not runs:
         return nq_text
 
+    unread = bool(r.get("reasons_unreadable"))
+
     def one(x):
         why = x.get("reason")
         why = why.strip().rstrip(".") if isinstance(why, str) and why.strip() else None
-        return f"{x['run']} ({why if why else 'reason ' + NOT_RECORDED})"
+        return f"{x['run']} ({why or (REASON_NOT_READ if unread else 'reason ' + NOT_RECORDED)})"
 
     n_rep, n_an = r.get("n_report_runs"), r.get("n_analysed")
     n = len(runs)

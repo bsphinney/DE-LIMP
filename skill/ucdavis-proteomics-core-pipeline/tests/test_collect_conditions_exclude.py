@@ -223,6 +223,28 @@ class TheMethodsAndTheReportSaySo(unittest.TestCase):
         self.assertEqual((n["kind"], n["text"]), ("info", mm.de_runs_left_out_sentence(prov)))
         self.assertEqual(mah.runs_left_out_note(left_out_prov({}))["kind"], "warning")
 
+    def test_a_record_that_could_not_be_read_says_not_read_not_not_recorded(self):
+        """2.12 review: run_de.R records `reasons_unreadable` when the decisions record exists but
+        cannot be read. The user DID record reasons, so "not recorded" would be wrong."""
+        prov = left_out_prov({})
+        prov["runs_left_out"]["reasons_unreadable"] = "/x/conditions.csv.decisions.json could not be read (parse error)"
+        s = mm.de_runs_left_out_sentence(prov)
+        for run in RERUNS:
+            self.assertIn(f"{run} (reason not read: the decisions record could not be read [confirm])", s)
+        self.assertEqual(mm.REASON_NOT_READ, "reason not read: the decisions record could not be read [confirm]")
+        self.assertNotIn(mm.NOT_RECORDED, s)
+        self.assertNotIn("/x/", s, "a path in the Methods")
+        self.assertIn(s, mm.de_paragraph(prov))
+        n = mah.runs_left_out_note(prov)
+        self.assertEqual((n["kind"], n["text"]), ("warning", s))
+        # a run whose reason WAS read keeps it; the flag only fills the missing ones
+        prov = left_out_prov({RERUNS[0]: REASONS[RERUNS[0]]})
+        prov["runs_left_out"]["reasons_unreadable"] = "x"
+        s = mm.de_runs_left_out_sentence(prov)
+        self.assertIn(f"{RERUNS[0]} ({REASONS[RERUNS[0]]})", s)
+        self.assertIn(f"{RERUNS[1]} ({mm.REASON_NOT_READ})", s)
+        self.assertEqual(mah.runs_left_out_note(prov)["kind"], "warning")
+
     def test_nothing_is_said_when_every_run_was_analysed_or_the_record_is_older(self):
         none_left = {"runs_left_out": {"determined": True, "n_report_runs": 11, "n_analysed": 11,
                                        "runs": []}}
