@@ -1634,6 +1634,12 @@ def main():
             why = None
         if why:
             sys.exit(f"[diann_parallel] REFUSING: {why} Nothing was generated.")
+        # SILAC (--channels): a declaration that would label twice or stop on channel
+        # normalisation, or a seed library the label cannot be applied to once (silac.py)
+        import silac
+        why = silac.refusal(a.cfg, seed_lib=bool(a.seed_lib), prog="diann_parallel")
+        if why:
+            sys.exit(why)
 
     # Detect the queue from the submitting user's SLURM associations rather than
     # assuming facility membership. genome-center-grp/high for members; publicgrp/low

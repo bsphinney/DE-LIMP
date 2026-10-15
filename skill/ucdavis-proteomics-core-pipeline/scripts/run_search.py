@@ -861,6 +861,11 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
     if not os.path.isfile(params):
         sys.exit(f"[run_diann] cfg not found: {params}")
     refuse_dda_mismatch(params, acquisition)
+    # SILAC (--channels): refused when it would label twice or stop on channel normalisation
+    import silac
+    why = silac.refusal(params, prog="run_diann")
+    if why:
+        sys.exit(why)
     os.makedirs(out, exist_ok=True)
     # The job's first lines check that its node reaches DIA-NN, --out, the FASTA and the raw
     # data (node_fault.py): a dropped mount is a node fault (exit 75), never "DIA-NN failed".
