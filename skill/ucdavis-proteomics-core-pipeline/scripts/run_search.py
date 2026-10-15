@@ -2087,6 +2087,63 @@ def refuse_fragpipe_contam_database(params, fasta):
                 f"  python3 scripts/make_presets.py --engine fragpipe ... --fasta ./search.fasta")
 
 
+# The FragPipe workflow key that runs DIA-NN as its quantification step (FragPipe 24.0's shipped
+# workflows: true in DIA_SpecLib_Quant*.workflow, false in LFQ-MBR and Stellar-DDA).
+FRAGPIPE_RUNS_DIANN = "diann.run-dia-nn"
+
+
+def fragpipe_runs_diann(params):
+    """True when the FragPipe workflow at `params` runs DIA-NN (FRAGPIPE_RUNS_DIANN=true)."""
+    try:
+        with open(params, encoding="utf-8", errors="replace") as fh:
+            return any(ln.split("=", 1)[0].strip() == FRAGPIPE_RUNS_DIANN
+                       and ln.split("=", 1)[1].strip().lower() == "true"
+                       for ln in fh if "=" in ln)
+    except OSError:
+        return False
+
+
+def refuse_fragpipe_dashed(params, files, fasta, out, acquisition):
+    """A FragPipe search whose DIA-NN step would be handed a path with '--' is REFUSED before
+    anything is written. FragPipe 24.0 (CmdDiann.java) writes each run as a `--f <absolute path>`
+    line of filelist_diann.txt and hands DIA-NN `--cfg <filelist>--`, and DIA-NN cuts a cfg's text
+    at every '--' exactly as it does its command line: on HIVE (srun 24807938) DIA-NN 2.7.0 and
+    FragPipe 24.0's bundled 1.8.2 beta 8 both logged "unrecognised option [--asp3_S3.mzML]" for a
+    `x_DIA--asp3_S3.mzML` in that list, skipped it, and searched the other run. The path DIA-NN
+    gets is the run's link in <out>/diatracer_stage/ on the diaTracer route (dia-PASEF .d,
+    run_fragpipe), so only its FILE NAME matters there; any other input goes in as given. The
+    --workdir (DIA-NN's --out and the filelist live under it) and the database it is given count
+    too. There is no renaming on this route: FragPipe names its own files after the run."""
+    if not fragpipe_runs_diann(params):
+        return
+    import check_report_runs as crr
+    staged = (acquisition or "").upper() == "DIA" and any(
+        f.rstrip("/").endswith(".d") for f in files)
+    seen = {f: (os.path.join(out, "diatracer_stage", os.path.basename(f.rstrip("/"))) if staged
+                else f) for f in files}
+    runs = [f for f in files if crr.dashed(seen[f])]
+    paths = [(flag, p) for flag, p in [("--out", out)] + [("database", d) for d in
+                                                         fragpipe_databases(params, fasta)]
+             if crr.dashed(p)]
+    if not (runs or paths):
+        return
+    lines = [f"  {flag} {p}" for flag, p in paths]
+    named = crr.dashed_file_names(runs)
+    lines += [ln for ln in crr.dashed_names_text(named).splitlines()]
+    lines += [f"  {f}  (a folder holds '--')" for f in runs if f not in {r["file"] for r in named}]
+    sys.exit(
+        f"[run_search] REFUSING: this FragPipe workflow runs DIA-NN ({FRAGPIPE_RUNS_DIANN}=true in "
+        f"{params}), and DIA-NN would be handed a path with '--' in it. FragPipe lists the runs "
+        f"for DIA-NN in a file DIA-NN reads like a command line, cutting it at every '--', so it "
+        f"would skip the run and search the others (DIA-NN 2.7.0 and FragPipe's bundled 1.8.2 "
+        f"both did, HIVE srun 24807938):\n" + "\n".join(lines) + "\n"
+        f"Ways out: search with DIA-NN directly (--engine diann, which links such inputs and, with "
+        f"{crr.RENAME_DASHED_FLAG}, renames a run whose file name holds '--' as shown); or link "
+        f"each file under a name and a folder without '--' and give FragPipe the links (use the "
+        f"same names in conditions.csv); a --workdir or database with '--' needs another path. "
+        f"Nothing was written or submitted.")
+
+
 # Sage's own output (its log lines are on stderr), teed here by the job and by an inline run:
 # sage_lfq_check.py reads its "discovered N target MS1 peaks at 5% FDR" from it.
 SAGE_LOG = "sage.log"
@@ -3237,6 +3294,7 @@ def main():
         refuse_sage_fragment_mismatch(bundle, a.params)
     if engine == "fragpipe":
         refuse_fragpipe_contam_database(a.params, a.fasta)
+        refuse_fragpipe_dashed(a.params, files, a.fasta, a.out, bundle.get("acquisition", ""))
     # DIA-NN cuts its command line at every '--', quoted or not (diann_parallel.DIANN_OPTION_MARK):
     # an output, database or cfg path holding one is refused here, and an input run is searched
     # through a link in <out>/input_links/ -- made just before the search is generated, once
