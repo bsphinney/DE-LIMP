@@ -1236,11 +1236,14 @@ class SkillDocAsksAtStep3(unittest.TestCase):
 
     def test_step3_asks_the_sample_type(self):
         s3 = self.section("### 3. Ask organism + experimental design")
-        # asked for every analysis since 2.10 (tests/test_sample_type_asked.py); keratin is
-        # decided from that answer
-        self.assertIn("**Sample type — ask, for every analysis, and never infer it.**", s3)
+        # asked since 2.10 -- of Core staff since 2.12 only when a choice depends on it
+        # (tests/test_sample_type_asked.py); keratin is decided from that answer, and Core staff
+        # get the one keratin question when the submission names a keratin tissue
+        self.assertIn("**Sample type — never infer it; ask outside users, and Core staff only "
+                      "when a choice\n  depends on it.**", s3)
         self.assertIn("**Is the sample keratin?** Decide it from the sample type the user gave",
                       s3)
+        self.assertIn("ask only \"are the samples keratin tissue", s3)
         for tissue in ("hair", "wool", "feather", "skin", "nail"):
             self.assertIn(tissue, s3)
         self.assertIn("Deciding it after the search is too late", s3)

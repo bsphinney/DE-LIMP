@@ -61,7 +61,8 @@ the spine.
 4. **Organism decides the FASTA and nothing else**, and is **always asked, never
    assumed** — not from a folder name, not "probably human". The **sample type** (tissue,
    cell line, biofluid, IP …) is likewise **asked, never inferred** — not from a file-name
-   token or abbreviation, a sample ID or a folder (step 3, `sample_type.py`). Resolve it with
+   token or abbreviation, a sample ID or a folder — though Core staff are asked it only when a
+   step depends on it (step 3, `sample_type.py`). Resolve the organism with
    `fetch_fasta.py resolve` and have the user confirm the proteome. It does **not**
    affect a single search parameter: mass accuracy keys on instrument, and search
    behaviour on acquisition. Both are auto-detected and confirmed. So any organism
@@ -814,16 +815,28 @@ python3 scripts/fetch_fasta.py resolve --organism "<what they said>"   # or --ta
   bait (the IP target or the TurboID fusion) and, for controls not named IgG/beads, `--controls`.
   When the submission's "Normalization" answer (how the samples were loaded) contradicts the
   default, `set` prints `ASK:` — ask before going on.
-- **Sample type — ask, for every analysis, and never infer it.** Ask what the samples are
-  (cell line, tissue — which one —, plasma, IP, hair …), in the user's words. **Never** take it
-  from file or folder names, sample IDs or abbreviations: a file-name abbreviation was once
-  written up as a tissue the data did not support. If the user does not know, record that; the report then names no tissue. The answer
-  is used at every step that depends on it: the contaminant set below, the keratin decision
-  below, the sample-quality panels (8c: a muscle panel is the analyte in a muscle sample;
-  hemolysis applies to plasma/serum), the analysis brief and report (9), and the SDRF's
+- **Sample type — never infer it; ask outside users, and Core staff only when a choice
+  depends on it.** **Never** take it from file or folder names, sample IDs or abbreviations: a
+  file-name abbreviation was once written up as a tissue the data did not support.
+  - **Outside users: ask**, with the other step-3 questions, what the samples are (cell line,
+    tissue — which one —, plasma, IP, hair …), in their words; "don't know" is an answer
+    (`--not-stated`, and the report then names no tissue). No submission record describes their
+    samples, and they are making the choices below without the Core's defaults.
+  - **Core staff (a CoreOmics submission, step 1c): do not ask it.** Record `--not-asked`
+    (step 3b) and go on; the submission record describes the samples for the report (step 9,
+    `--submission`). Ask only at a step whose choice depends on the answer: the keratin
+    question below (one yes/no, before the FASTA is built), and a flagged sample-quality panel
+    (8c). The contaminant set is the Core's `universal`, whatever the tissue.
+  The answer is used at every step that depends on it: the contaminant set below, the keratin
+  decision below, the sample-quality panels (8c: a muscle panel is the analyte in a muscle
+  sample; hemolysis applies to plasma/serum), the analysis brief and report (9), and the SDRF's
   organism part (`make_deposit.py`, still filled by the user). Record it once the session
   exists (step 3b, `sample_type.py set`).
-- **Is the sample keratin?** Decide it from the sample type the user gave (above). When the
+- **Is the sample keratin?** Decide it from the sample type the user gave (above). Core staff,
+  not asked the sample type: ask only "are the samples keratin tissue (hair, wool, skin, nail,
+  feather …)?" when the submission's description or anything they said names one of those
+  tissues; otherwise pass neither `--keratin-sample` nor `--no-keratin-sample` (step 6): the
+  sidecar then records the default, never an answer nobody gave. When the
   samples are **hair, wool, fur, feather, skin (epidermis /
   stratum corneum), nail, claw, hoof, horn, beak, baleen, quill or scale**, this is a
   **keratin sample**: keratin is the *analyte*, not handling contamination. Decide it here,
@@ -951,7 +964,9 @@ say), so the brief and report never fill it in from file names:
 ```
 python3 scripts/sample_type.py set --session <session> --stated "<what the user said the samples are>"
 python3 scripts/sample_type.py set --session <session> --not-stated     # asked; the user does not know
+python3 scripts/sample_type.py set --session <session> --not-asked      # Core staff: not asked (step 3)
 ```
+A later answer (a flagged panel in 8c) replaces it with `--stated`.
 **Save step 2's JSON as `<session>/input/acquisition.json`** (the whole `detect_acquisition.py`
 output). Step 8e reads each file's instrument and acquisition time from it instead of reading
 every `.raw` again, and the run record takes its detection facts from it.
@@ -2337,7 +2352,9 @@ not biology, and protein-level filtering will not fix it (→ `references/anomal
 Read the panels against the **stated** sample type (`sample_type.py show --session <session>`),
 never one guessed from file names: muscle proteins are the analyte in a muscle sample and a
 contaminant in a liver biopsy; hemolysis matters for plasma/serum. When the panels or the most
-abundant proteins disagree with the stated type, ask the user — do not change it yourself.
+abundant proteins disagree with the stated type, ask the user — do not change it yourself. With
+none stated (Core staff, `--not-asked`), ask what the samples are only when a panel flags
+something whose meaning depends on it, and record the answer (`sample_type.py set --stated`).
 **If the sample IS keratin** (step 3), both auditors read it from `--fasta-meta` (a database
 built with `fetch_fasta.py --keratin-sample`); pass **`--keratin-sample`** to `sample_quality.py`
 **and** `audit_results.py` only for a database that does not record it — keratin is the analyte
