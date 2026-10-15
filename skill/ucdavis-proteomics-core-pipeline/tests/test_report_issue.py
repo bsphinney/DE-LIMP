@@ -31,7 +31,7 @@ SCRIPT = os.path.join(os.path.dirname(HERE), "scripts", "report_issue.sh")
 FAKE_ROOT = "/nonexistent_hive_root_for_tests"     # never exists locally -> not "direct"
 
 
-class ReportIssue(unittest.TestCase):
+class Harness(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.d = self._tmp.name
@@ -51,7 +51,7 @@ class ReportIssue(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def run_it(self, *args, route="direct", extra_env=None):
+    def run_it(self, *args, route="direct", extra_env=None, stdin=None):
         env = {k: v for k, v in os.environ.items() if not k.startswith("HIVE_")}
         env.update(HOME=self.d, HIVE_ENV_FILE=os.path.join(self.d, "no-hive.env"),
                    SKILL_ISSUES_LOCAL_DIR=self.local, TMPDIR=self.d)
@@ -62,7 +62,8 @@ class ReportIssue(unittest.TestCase):
         if route == "ssh":
             env.update(HIVE_USER="gabrig", HIVE_KEY=self.key, HIVE_EXEC=self.fake_exec)
         env.update(extra_env or {})
-        return subprocess.run(["bash", SCRIPT, *args], capture_output=True, text=True, env=env)
+        return subprocess.run(["bash", SCRIPT, *args], capture_output=True, text=True, env=env,
+                              input=stdin)
 
     def files(self, d):
         return sorted(os.listdir(d)) if os.path.isdir(d) else []
@@ -73,6 +74,8 @@ class ReportIssue(unittest.TestCase):
         with open(os.path.join(d, names[0])) as fh:
             return names[0], fh.read()
 
+
+class ReportIssue(Harness):
     # ------------------------------------------------------------------ routes
     def test_each_entry_is_its_own_complete_file(self):
         os.makedirs(self.shared)
@@ -179,6 +182,111 @@ class ReportIssue(unittest.TestCase):
         self.assertEqual(self.run_it("--title", "t", "--what", "w", "--kind", "oops").returncode, 2)
         self.assertEqual(self.run_it("--title", "t", "--what", "w",
                                      "--severity", "urgent").returncode, 2)
+
+
+class TextFromAFile(Harness):
+    """2.12 security review: the exact error text went on the command line (--what "..."), where
+    bash runs anything in backticks or $(...) -- on this computer, and again on HIVE through
+    hive_exec.sh's `bash -l -c` (a backtick ran a command). The text now comes from a file or
+    standard input (--what-file F|-, and the same for the other text fields), read as data."""
+
+    def hostile(self):
+        """An error text that runs commands if a shell ever evaluates it."""
+        self.ran = [os.path.join(self.d, n) for n in ("RAN_BACKTICK", "RAN_DOLLAR")]
+        return (f'ls failed: `touch {self.ran[0]}` and $(touch {self.ran[1]})\n'
+                f'second line: "double" \'single\' $HOME ${{PATH}} \\ end\n')
+
+    def entry_field(self, text, label):
+        return text.split(f"- **{label}:** ", 1)[1].split("\n- **", 1)[0].rstrip("\n")
+
+    def test_the_exact_text_from_stdin_is_written_and_never_run(self):
+        os.makedirs(self.shared)
+        what = self.hostile()
+        p = self.run_it("--title", "t", "--what-file", "-", "--impact", "i", stdin=what)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        for f in self.ran:
+            self.assertFalse(os.path.exists(f), "the error text was run as a command")
+        _name, text = self.read_only_file(self.shared)
+        lines = what.rstrip("\n").split("\n")
+        self.assertEqual(self.entry_field(text, "What happened"),
+                         lines[0] + "\n  " + lines[1])     # verbatim, under its bullet
+
+    def test_over_ssh_too(self):
+        os.makedirs(os.path.join(self.remote, "skill_issues"))
+        what = self.hostile()
+        p = self.run_it("--title", "t", "--what-file", "-", stdin=what, route="ssh")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("recorded: gabrig@hive", p.stdout)
+        for f in self.ran:
+            self.assertFalse(os.path.exists(f))
+        _name, text = self.read_only_file(os.path.join(self.remote, "skill_issues"))
+        self.assertIn(what.split("\n")[0], text)
+
+    def test_every_text_field_can_come_from_a_file(self):
+        os.makedirs(self.shared)
+        paths = {}
+        for field in ("title", "what", "impact", "workaround", "fix"):
+            paths[field] = os.path.join(self.d, field + ".txt")
+            with open(paths[field], "w") as fh:
+                fh.write(f"the {field} `x` $(y)\r\nline two\n")
+        p = self.run_it(*[a for f, path in paths.items() for a in (f"--{f}-file", path)])
+        self.assertEqual(p.returncode, 0, p.stderr)
+        _name, text = self.read_only_file(self.shared)
+        self.assertIn("## the title `x` $(y) line two  [bug, medium]", text)    # a heading: one line
+        for field, label in (("what", "What happened"), ("impact", "Impact"),
+                             ("workaround", "Workaround used"), ("fix", "Proposed fix")):
+            self.assertEqual(self.entry_field(text, label), f"the {field} `x` $(y)\n  line two")
+        self.assertNotIn("\r", text)
+
+    def test_secrets_in_a_file_are_refused_too(self):
+        os.makedirs(self.shared)
+        for bad in ("ghp_" + "a" * 30, "line one\nAuthorization: Token 0123456789abcdef\n"):
+            p = self.run_it("--title", "t", "--what-file", "-", stdin=bad)
+            self.assertEqual(p.returncode, 2, bad)
+            self.assertIn("key, token, password or webhook", p.stderr)
+        self.assertEqual(self.files(self.shared), [])
+
+    def test_wrong_uses_are_refused(self):
+        os.makedirs(self.shared)
+        f = os.path.join(self.d, "w.txt")
+        with open(f, "w") as fh:
+            fh.write("w")
+        for args, said in ((("--what-file", "-", "--fix-file", "-"), "only one --...-file can be -"),
+                           (("--what", "w", "--what-file", f), "give --what or --what-file, not both"),
+                           (("--what-file", os.path.join(self.d, "nope.txt")), "not a readable file"),
+                           (("--what-file", self.d), "not a readable file")):
+            with self.subTest(args=args):
+                p = self.run_it("--title", "t", *args, stdin="x")
+                self.assertEqual(p.returncode, 2, p.stdout)
+                self.assertIn(said, p.stderr)
+        p = self.run_it("--title", "t", "--what-file", "-", stdin="")
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("are required", p.stderr)
+        self.assertEqual(self.files(self.shared), [])
+
+    def test_a_huge_text_is_cut_at_64_kib(self):
+        os.makedirs(self.shared)
+        p = self.run_it("--title", "t", "--what-file", "-", stdin="a" * 70000)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        _name, text = self.read_only_file(self.shared)
+        self.assertEqual(self.entry_field(text, "What happened"), "a" * 65536 + " [... cut at 64 KiB]")
+
+    def test_help_and_skill_md_give_the_stdin_route(self):
+        h = self.run_it("--help").stdout
+        self.assertIn("--what-file -", h)
+        self.assertIn("<<'EOF'", h)
+        self.assertTrue(h.rstrip().endswith("# " + "=" * 77), h[-200:])
+        skill = os.path.join(os.path.dirname(HERE), "SKILL.md")
+        with open(skill, encoding="utf-8") as fh:
+            doc = fh.read()
+        sec = doc[doc.index("## Recording skill problems"):]
+        sec = sec[:sec.index("\n## ", 5)]
+        block = sec.split("```")[1]                      # the command shown
+        self.assertIn("--what-file -", block)
+        self.assertIn("<<'EOF'", block)
+        self.assertNotRegex(block, r'--(title|what|impact|workaround|fix|step|session) "',
+                            "a report_issue.sh text argument in double quotes")
+        self.assertIn("never inside `--what \"...\"`", sec)
 
 
 if __name__ == "__main__":

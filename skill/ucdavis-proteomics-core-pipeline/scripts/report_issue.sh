@@ -12,13 +12,22 @@
 # the user happened to forward it. Most sessions end with nothing written down, and
 # whatever went wrong is lost with the conversation.
 #
-#   bash report_issue.sh --title "ThermoRawFileParser not found" \
-#        --what "detect_acquisition.py returned 'not found' for all 15 .raw" \
-#        --impact "two wasted srun jobs; search would have used the 380-980 fallback" \
-#        [--workaround "set THERMORAWFILEPARSER to the Core copy by hand"] \
-#        [--fix "setup.sh should find /quobyte/.../ThermoRawFileParser"] \
+#   bash report_issue.sh --title 'ThermoRawFileParser not found' --what-file - \
+#        --impact 'two wasted srun jobs; search would have used the 380-980 fallback' \
+#        [--workaround 'set THERMORAWFILEPARSER to the Core copy by hand'] \
+#        [--fix 'setup.sh should find /quobyte/.../ThermoRawFileParser'] \
 #        [--kind bug|docs|missing|agent_mistake] [--severity high|medium|low] \
-#        [--step "2 detect acquisition"] [--mode hive_remote] [--session <name>]
+#        [--step '2 detect acquisition'] [--mode hive_remote] [--session <name>] <<'EOF'
+#   detect_acquisition.py returned "not found" for all 15 .raw: <the exact error text>
+#   EOF
+#
+# The exact text goes in from a FILE, never inside "...": --what-file F, or --what-file - and
+# a heredoc quoted <<'EOF' (standard input; nothing in it is expanded). The same for
+# --title-file, --impact-file, --workaround-file and --fix-file; only one field can read
+# standard input. In --what "..." bash itself runs anything in backticks or $(...) -- on this
+# computer, and again on HIVE when the command goes through hive_exec.sh's `bash -l -c` (2.12
+# security review: a backtick in an error text ran a command). Short arguments: single quotes.
+# A file is read up to 64 KiB (mirrors board_client.py's --body-file).
 #   bash report_issue.sh --where        # where issues go from this machine, and nothing else
 #   bash report_issue.sh --list [N]     # the N newest issue files (default 20)
 #
@@ -50,6 +59,7 @@ if [ -z "${HIVE_USER:-}" ] && [ -f "$CFG" ]; then . "$CFG"; fi
 
 die() { echo "report_issue.sh: $*" >&2; exit 2; }
 TITLE="" WHAT="" IMPACT="" WORKAROUND="" FIX="" KIND="bug" SEV="medium" STEP="" MODE="" SESSION=""
+TITLE_F="" WHAT_F="" IMPACT_F="" WORKAROUND_F="" FIX_F=""
 ACTION="record" LIST_N=20
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -58,6 +68,11 @@ while [ $# -gt 0 ]; do
     --impact) IMPACT="${2:-}"; shift 2 ;;
     --workaround) WORKAROUND="${2:-}"; shift 2 ;;
     --fix) FIX="${2:-}"; shift 2 ;;
+    --title-file) TITLE_F="${2:-}"; shift 2 ;;
+    --what-file) WHAT_F="${2:-}"; shift 2 ;;
+    --impact-file) IMPACT_F="${2:-}"; shift 2 ;;
+    --workaround-file) WORKAROUND_F="${2:-}"; shift 2 ;;
+    --fix-file) FIX_F="${2:-}"; shift 2 ;;
     --kind) KIND="${2:-}"; shift 2 ;;
     --severity) SEV="${2:-}"; shift 2 ;;
     --step) STEP="${2:-}"; shift 2 ;;
@@ -65,7 +80,7 @@ while [ $# -gt 0 ]; do
     --session) SESSION="${2:-}"; shift 2 ;;
     --where) ACTION="where"; shift ;;
     --list) ACTION="list"; case "${2:-}" in ''|-*) shift ;; *) LIST_N="$2"; shift 2 ;; esac ;;
-    -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,/^# =====/p' "$0"; exit 0 ;;
     *) die "unknown argument: $1 (see --help)" ;;
   esac
 done
@@ -101,7 +116,34 @@ if [ "$ACTION" = "list" ]; then
   exit 0
 fi
 
-[ -n "$TITLE" ] && [ -n "$WHAT" ] || die "--title and --what are required"
+# The text fields given as files (--<field>-file F, or - for standard input): see the header
+TEXT_MAX=65536
+n_stdin=0
+for f in "$TITLE_F" "$WHAT_F" "$IMPACT_F" "$WORKAROUND_F" "$FIX_F"; do
+  if [ "$f" = "-" ]; then n_stdin=$((n_stdin + 1)); fi
+done
+[ "$n_stdin" -le 1 ] || die "only one --...-file can be - (standard input); put the others in files"
+text_from() {   # text_from VAR <option> <given on the command line> <file, or ->
+  local t
+  [ -n "$4" ] || return 0
+  [ -z "$3" ] || die "give ${2%-file} or $2, not both"
+  if [ "$4" = "-" ]; then t="$(head -c $((TEXT_MAX + 1)))" || die "$2 -: could not read standard input"
+  else
+    { [ -f "$4" ] && [ -r "$4" ]; } || die "$2 $4: not a readable file"
+    t="$(head -c $((TEXT_MAX + 1)) < "$4")" || die "$2 $4: could not be read"
+  fi
+  if [ "$(printf '%s' "$t" | wc -c | tr -d '[:space:]')" -gt "$TEXT_MAX" ]; then
+    t="$(printf '%s' "$t" | head -c "$TEXT_MAX") [... cut at 64 KiB]"
+  fi
+  printf -v "$1" '%s' "$t"
+}
+text_from TITLE --title-file "$TITLE" "$TITLE_F"
+text_from WHAT --what-file "$WHAT" "$WHAT_F"
+text_from IMPACT --impact-file "$IMPACT" "$IMPACT_F"
+text_from WORKAROUND --workaround-file "$WORKAROUND" "$WORKAROUND_F"
+text_from FIX --fix-file "$FIX" "$FIX_F"
+
+[ -n "$TITLE" ] && [ -n "$WHAT" ] || die "--title (or --title-file) and --what (or --what-file) are required"
 [ -n "$IMPACT" ] || IMPACT="(not stated)"
 
 # Secret-shaped text: the ERE mirror of notify_slack._SECRET_PATTERNS, the skill's one list.
@@ -185,6 +227,14 @@ if [ -z "$MODE" ]; then
   case "$(route)" in direct) MODE="hive_local" ;; ssh) MODE="hive_remote" ;; *) MODE="local" ;; esac
 fi
 
+# A field read from a file can hold several lines: they stay under their bullet (the title,
+# a heading, on one line)
+nl=$'\n'
+for v in TITLE WHAT IMPACT WORKAROUND FIX; do
+  t="${!v}"; t="${t//$'\r'/}"
+  if [ "$v" = TITLE ]; then t="${t//$nl/ }"; else t="${t//$nl/$nl  }"; fi
+  printf -v "$v" '%s' "$t"
+done
 ENTRY="$(mktemp "${TMPDIR:-/tmp}/report_issue.XXXXXX")" || die "cannot create a temp file"
 trap 'rm -f "$ENTRY"' EXIT
 {
