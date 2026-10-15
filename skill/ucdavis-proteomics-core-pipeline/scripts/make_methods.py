@@ -1754,18 +1754,34 @@ def database_build_warnings(fmeta):
 
 # An absolute path: /quobyte/..., /nfs/..., /home/<user>/..., ~/..., C:\Users\... -- a server's or
 # a laptop's file system, which means nothing to the Methods' reader and names internal storage.
-# Two or more segments, and not inside a word or URL (m/z, 1/K0, Trypsin/P and https://... pass).
-_PATH_CHARS = r"[^\s/\\'\"`<>|()\[\]{},;]"
-_ABS_PATH = re.compile(rf"(?<![\w.~:/\\-])(?:~|/{_PATH_CHARS}+)(?:/{_PATH_CHARS}+)+/?"
-                       rf"|(?<![\w])[A-Za-z]:\\{_PATH_CHARS}+(?:\\{_PATH_CHARS}+)*\\?")
+# It starts the text, or follows a space or an opening quote/bracket -- never a word, a ")" or a
+# "%": "S-Trap (ProtiFi)/Trypsin/Lys-C", "0.1%/80%/20%" and "(Biognosys)/DIA-NN/FragPipe" are
+# prose (error-handling review, 2.12), as are m/z, 1/K0, Trypsin/P and URLs. And it starts with a
+# root a file system has (FS_ROOTS), or ~/, or a drive letter -- or else has at least three
+# segments made of file-name characters (/a/b/c.d).
+FS_ROOTS = ("quobyte", "nfs", "home", "Users", "private", "tmp", "Volumes", "var", "mnt",
+            "scratch", "group", "share", "data", "opt", "srv", "media", "lustre", "gpfs", "work")
+_SEG = r"[^\s/\\'\"`<>|()\[\]{},;]+"
+_NAME = r"[\w.@+-]+"
+_ABS_PATH = re.compile(
+    r"(?<![^\s(\[{\"'`])(?:"
+    rf"/(?:{'|'.join(FS_ROOTS)})(?:/{_SEG})+/?"
+    rf"|~(?:/{_SEG})+/?"
+    rf"|/{_NAME}(?:/{_NAME}){{2,}}/?"
+    rf"|[A-Za-z]:\\{_SEG}(?:\\{_SEG})*\\?)")
 
 
 def client_text(text):
-    """-> (text with every absolute path cut to its file name, how many were cut). Applied to
-    the whole of methods.md as it is written, so no path from any record reaches the client."""
+    """-> (text with every absolute path cut to its file name, [(path, what it became)]).
+    Applied to the whole of methods.md as it is written, so no path from any record reaches the
+    client; the caller echoes each cut on stderr, so a wrong one is seen."""
+    cuts = []
+
     def base(m):
-        return re.split(r"[/\\]", m.group(0).rstrip("/\\"))[-1]
-    return _ABS_PATH.subn(base, text)
+        after = re.split(r"[/\\]", m.group(0).rstrip("/\\"))[-1]
+        cuts.append((m.group(0), after))
+        return after
+    return _ABS_PATH.sub(base, text), cuts
 
 
 def _write_text(path, text):
@@ -2166,10 +2182,10 @@ def main():
     w(f"*Acknowledgment source: {ACK_SOURCE} (confirm the exact current wording before publishing).*")
     w("")
 
-    text, n_paths = client_text("\n".join(L) + "\n")
-    if n_paths:
-        print(f"make_methods: {n_paths} file path(s) shortened to the file name in "
-              f"{os.path.basename(a.out)} (a server path is not for the client)", file=sys.stderr)
+    text, cuts = client_text("\n".join(L) + "\n")
+    for before, after in cuts:
+        print(f"make_methods: a file path cut to its name in {os.path.basename(a.out)} (a server "
+              f"path is not for the client): {before} -> {after}", file=sys.stderr)
     _write_text(a.out, text)
     for x in build_warnings:
         print(f"make_methods: database build warning (not in {os.path.basename(a.out)}): {x}",

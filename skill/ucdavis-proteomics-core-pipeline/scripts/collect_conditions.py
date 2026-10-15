@@ -954,7 +954,7 @@ def emit_template(out, names, covariates):
 
 
 # ------------------------------------------------------------------ validate --
-# A run the search reported but the design leaves out ON PURPOSE (PROT_0803: 13 runs searched,
+# A run the search reported but the design leaves out ON PURPOSE (PROT_0000: 13 runs searched,
 # two of them re-runs, 11 analysed). run_de.R already analyses only the metadata's runs, but
 # --validate failed on the two ("report runs missing from metadata"), so the agent went past a
 # failed check on its own judgment and the reason lived only in decisions.md. --exclude <run>

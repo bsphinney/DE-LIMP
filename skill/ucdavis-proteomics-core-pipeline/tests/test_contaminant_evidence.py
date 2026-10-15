@@ -14,7 +14,9 @@ its own. Horse myoglobin has 9 (checked on the UniProt sequences below), so it s
 a sample that does hold horse myoglobin. Which peptides a sample shows only the report can say:
 audit_results.py's contaminant_evidence check reads the DE's input report (rows kept as run_de.R
 keeps them) and flags each contaminant group whose every peptide is a target protein's -- shared,
-or the same with I = L.
+or the same with I = L. "A target's peptide" is one the search's digest makes from it -- the build's
+own rule (fetch_fasta.target_digest_peptides) -- never a string that merely occurs inside it
+(2.12 statistics review: BSA's LCVLHEK sits in human ALB after Q).
 """
 import hashlib
 import json
@@ -43,6 +45,11 @@ MYG_HUMAN = ("MGLSDGEWQLVLNVWGKVEADIPGHGQEVLIRLFKGHPETLEKFDKFKHLKSEDEMKASE"
 MYG_HORSE = ("MGLSDGEWQQVLNVWGKVEADIAGHGQEVLIRLFTGHPETLEKFDKFKHLKTEAEMKASE"
              "DLKKHGTVVLTALGGILKKKGHHEAELKPLAQSHATKHKIPIKYLEFISDAIIHVLHSKH"
              "PGDFGADAQGAMTKALELFRNDIAAKYKELGFQG")
+
+# UniProt P02768 (human ALB) and P02769 (BSA, as the Universal set holds it), 70 residues around
+# BSA's LCVLHEK: after Q in human ALB (not a trypsin site), after R in BSA.
+ALB_WINDOW = "LGKVGSKCCKHPEAKRMPCAEDYLSVVLNQLCVLHEKTPVSDRVTKCCTESLVNRRPCFSALEVDETYVP"
+BSA_WINDOW = "LGKVGTRCCTKPESERMPCTEDYLSLILNRLCVLHEKTPVSEKVTKCCTESLVNRRPCFSALTPDETYVP"
 
 # Synthetic: a target protein, and a contaminant with peptides of its own (MCDEQWNYK,
 # FNVWDTPGQEK, YLEFISDAIIHVLHSR), an I/L twin of the target's (GHHEAELK...) and a shared one.
@@ -109,9 +116,40 @@ class GroupsOnTargetPeptides(unittest.TestCase):
         self.assertEqual(self.flagged({"Cont_P00761": {"IVGGYTCAANSIPYQVSLNSGSHFCGGSLINSQWVVSAAHCYK":
                                                        {"Cont_P00761"}}}), {})
 
-    def test_a_target_substring_counts_even_when_the_report_names_only_the_contaminant(self):
+    def test_a_target_digest_peptide_counts_even_when_the_report_names_only_the_contaminant(self):
+        # ASEDLKK is one of TARGET's digest peptides (after K, one missed cleavage)
         g = self.flagged({"Cont_Q90002": {"ASEDLKK": {"Cont_Q90002"}}})["Cont_Q90002"]
         self.assertEqual(g["peptides"][0]["how"], "shared")
+
+    def test_a_string_inside_a_target_is_not_its_peptide(self):
+        """2.12 statistics review: the audit matched raw substrings while the build matches the
+        digest, so BSA's own LCVLHEK -- after R in BSA, after Q in human ALB -- was called ALB's,
+        and the fix offered (--drop-contaminant BSA) would have moved bovine signal into human
+        ALB. The windows are UniProt P02768 / P02769 around it, cleavage context intact."""
+        fasta = (f">sp|P02768|ALBU_HUMAN Albumin OS=Homo sapiens OX=9606 GN=ALB\n{ALB_WINDOW}\n"
+                 f">sp|Cont_P02769|ALBU_BOVIN Albumin OS=Bos taurus OX=9913 GN=ALB\n{BSA_WINDOW}\n")
+        self.assertIn("LNQLCVLHEK", ALB_WINDOW)
+        self.assertIn("LNRLCVLHEK", BSA_WINDOW)
+        self.assertEqual(self.flagged({"Cont_P02769": {"LCVLHEK": {"Cont_P02769"}}}, fasta), {})
+        # the same string after a K in the target IS its peptide
+        alb_k = ALB_WINDOW.replace("LNQLCVLHEK", "LNKLCVLHEK")
+        fasta_k = fasta.replace(ALB_WINDOW, alb_k)
+        g = self.flagged({"Cont_P02769": {"LCVLHEK": {"Cont_P02769"}}}, fasta_k)["Cont_P02769"]
+        self.assertEqual((g["peptides"][0]["how"], g["peptides"][0]["target_acc"]), ("shared", "P02768"))
+
+    def test_no_own_peptide_of_the_build_is_called_a_target_s(self):
+        """One definition: every peptide the build counts as the contaminant's own (peptide_overlap)
+        is, to the audit, not a target's -- measured 0 of 7,464 on the Universal set vs human
+        Swiss-Prot after the fix (99 of 221 kept entries had one called human's before)."""
+        cont, targ = ff._fasta_records(FASTA)[1:2], ff._fasta_records(FASTA)[:1]
+        shared = {ff.il_equal(p) for p in ff.peptide_overlap(cont, targ)[0]["shared_peptides"]}
+        seq = ff._record_seq(cont[0][1])
+        own = [seq[s:e] for s, e in ff.digest_spans(seq) if ff.il_equal(seq[s:e]) not in shared]
+        self.assertTrue(own)
+        for pep in own:
+            self.assertEqual(self.flagged({"Cont_Q90002": {pep: {"Cont_Q90002"}}}), {}, pep)
+        for pep in shared:
+            self.assertIn("Cont_Q90002", self.flagged({"Cont_Q90002": {pep: {"Cont_Q90002"}}}), pep)
 
     def test_a_peptide_shared_only_with_another_contaminant_is_not_the_sample_s(self):
         fasta = FASTA + f">sp|Cont_Q90003|OTHER_BOVIN o\nMKKWWPEPTIDEWWK\n"
@@ -206,14 +244,22 @@ class AuditFlagsIt(unittest.TestCase):
         self.assertEqual(f["status"], "WARN")
         msg = f["message"]
         self.assertIn("1 contaminant protein group(s) rest only on peptides of Homo sapiens "
-                      "proteins -- probably the sample's own protein, not a contaminant: "
+                      "proteins, so the data cannot attribute them to the contaminant's species: "
                       "Cont_Q90002 (TGT_HORSE; 2 peptides in 3 run(s)): ASEDLKK is also Q90001 TGT's, "
                       "GHHEAELKPLAQSHATK differs from Q90001 TGT's GHHEAEIKPLAQSHATK only by I/L "
                       "(the same mass and fragments).", msg)
         self.assertIn("removed with the contaminants", msg)
-        self.assertIn("never as contamination or an added standard", msg)
+        # the data cannot say whether it is the sample's own or handling contamination (a human
+        # keratin behind a sheep keratin entry): neither is asserted (2.12 statistics review)
+        self.assertIn("Report each as the Homo sapiens protein -- the sample's own, or handling "
+                      "contamination (skin and hair keratins) -- never as a signal of the "
+                      "contaminant species or an added standard.", msg)
+        self.assertNotIn("probably the sample's own protein", msg)
+        self.assertEqual(f["detail"]["digest_source"], "estimate_params.DIANN_DIGEST (the sidecar "
+                                                       "records no contaminant_digest)")
         self.assertTrue(msg.endswith("rebuild the FASTA with the same fetch_fasta.py command plus "
                                      "--drop-contaminant Cont_Q90002 and search again."), msg)
+        self.assertIn("To quantify it as the Homo sapiens protein, rebuild", msg)
         self.assertEqual(f["detail"]["drop_contaminant"], ["Cont_Q90002"])
         self.assertNotIn("Cont_P00761", msg)                 # trypsin has its own peptide
         self.assertNotIn(self.root, msg)
@@ -236,6 +282,20 @@ class AuditFlagsIt(unittest.TestCase):
         (f,), _ = self.audit(self.write_report("parquet"), removed=False)
         self.assertIn("quantified and tested as contaminant groups (--keep-contaminants)", f["message"])
 
+    def test_the_digest_is_the_one_the_sidecar_records(self):
+        """GHHEAEIKPLAQSHATK is a TARGET peptide only with a missed cleavage (GHHEAEIK|PLAQSHATK):
+        a build recorded with --missed-cleavages 0 never makes it, so the twin is the
+        contaminant's own there and the group is not flagged."""
+        with open(self.meta) as fh:
+            m = json.load(fh)
+        m["contaminant_digest"] = dict(ff.DIANN_DIGEST, missed_cleavages=0)
+        with open(self.meta, "w") as fh:
+            json.dump(m, fh)
+        (f,), _ = self.audit(self.write_report("tsv"))
+        self.assertEqual(f["status"], "PASS", f["message"])
+        self.assertEqual(f["detail"]["digest_source"], "the sidecar's contaminant_digest")
+        self.assertEqual(f["detail"]["digest"]["missed_cleavages"], 0)
+
     def test_an_own_peptide_that_passed_the_filter_clears_it(self):
         path = self.write_report("tsv")
         with open(path) as fh:
@@ -251,6 +311,41 @@ class AuditFlagsIt(unittest.TestCase):
         self.assertEqual(f["status"], "INFO")
         self.assertIn("Not assessed: the searched FASTA (search.fasta, sha256", f["message"])
         self.assertIn("is not readable here", f["message"])
+
+    def test_a_changed_fasta_is_said_to_have_changed(self):
+        with open(self.fasta, "a") as fh:
+            fh.write(">sp|Q90009|NEW_HUMAN new\nMKKK\n")
+        (f,), _ = self.audit(self.write_report("tsv"))
+        self.assertEqual(f["status"], "INFO")
+        self.assertIn("the FASTA (search.fasta) has changed since the search", f["message"])
+        self.assertNotIn("not readable here", f["message"])
+
+    def test_an_unreadable_report_is_info_not_a_traceback(self):
+        """Error-handling review (2.12): a damaged report.parquet raised, and no AUDIT.md was
+        written at all."""
+        bad = os.path.join(self.root, "report.parquet")
+        with open(bad, "wb") as fh:
+            fh.write(b"PAR1 this is not parquet")
+        (f,), md = self.audit(bad)
+        self.assertEqual(f["status"], "INFO")
+        self.assertIn("Not assessed: report.parquet could not be read", f["message"])
+        self.assertNotIn(self.root, f["message"])
+        self.assertIn("contaminant_evidence", md)
+
+    def test_no_group_left_after_the_filter_is_not_a_pass(self):
+        """Error-handling review (2.12): the DE counted contaminant groups, the rebuild found none
+        (here every row fails the q-value filter), and the check said PASS 'each of the 0'."""
+        path = self.write_report("tsv")
+        with open(path) as fh:
+            rows = fh.read().splitlines()
+        with open(path, "w") as fh:
+            fh.write("\n".join([rows[0]] + [r for r in rows[1:] if "Cont_" not in r.split("\t")[1]]
+                               + [r.rsplit("\t", 1)[0] + "\t0.5" for r in rows[1:]
+                                  if "Cont_" in r.split("\t")[1]]) + "\n")
+        (f,), _ = self.audit(path)
+        self.assertEqual(f["status"], "INFO", f["message"])
+        self.assertIn("the DE record counts 2 contaminant protein group(s), but none passes the "
+                      "DE's q-value filter", f["message"])
 
     def test_no_contaminant_group_no_finding(self):
         found, _ = self.audit(self.write_report("tsv"), n_groups=0)

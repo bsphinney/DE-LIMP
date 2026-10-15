@@ -278,12 +278,20 @@ one mouse are not independent, and the note says whether the design analysed car
 
 ```
 python3 scripts/core_submission.py fetch 807 --out ~/core/PROT_0807
-bash scripts/hive_exec.sh 'mkdir -p ~/core/PROT_0807'
+bash scripts/hive_exec.sh '(umask 077; mkdir -p ~/core/PROT_0807) && chmod 700 ~/core/PROT_0807'
 bash scripts/hive_exec.sh --put ~/core/PROT_0807/hive/submission_summary.json '~/core/PROT_0807/'
 bash scripts/hive_exec.sh --put ~/core/PROT_0807/hive/submission.json '~/core/PROT_0807/'
 # coreomics_runs_on: hive -- the same fetch on HIVE; nothing to --put
 bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/core_submission.py fetch 807 --out ~/core/PROT_0807'
 ```
+On HIVE every home folder is open to every account (drwxrwsr-x, umask 0002), so the submission's
+folder in the home is kept this account's alone: the `mkdir` above makes it 700, and `fetch` run on
+HIVE makes any folder it creates between the home and `--out` (`~/core` the first time) 700, closes
+an existing `--out` others can read (saying so in its `warnings`), and refuses a folder or link
+another account put in the home. A folder outside the home (the Core's group storage) keeps its
+mode. Every `core_submission.py` command run on HIVE also closes an existing `~/core` of this
+account's that others can read or enter (`made ~/core private: it holds CoreOmics records`, one
+line) -- never a `~/core` that is a link or another account's.
 
 **The API (verified).** Base `https://ucdavis.coreomics.com/server/api`, header
 `Authorization: Token <tok>`.
@@ -332,7 +340,10 @@ and `<out>/` itself gets exactly what the laptop route `--put`s there: the HIVE 
 files `locate`, `stage` and `submission_report.py attach` read. There is no `hive/` folder.
 `bioshare` and `email-draft` given `--summary <out>/submission_summary.json` (the HIVE copy,
 `redacted_for_hive`) read the full one from `private/` themselves and say so on stderr; the
-draft is written mode 600 there.
+draft is written mode 600 there. With no `private/` beside the HIVE copy, or one holding another
+submission's summary (a reused `--out` folder: its `id` / `internal_id` differ), they stop with
+exit 2 rather than draft from the copy without addresses or with someone else's: fetch the
+submission where the key is (SKILL.md step 1c.1) into its own folder.
 
 **The organism is not resolved here.** `organism_as_submitted` is the submitter's free text,
 labelled `confirmed: false`. Put it to the staff member as the proposed answer and confirm
@@ -907,16 +918,16 @@ named several and it is not clear which leads.
    the numbers recorded, the main one first:
    ```
    bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/session.py init \
-       --name PROT_0807_PROT_0811 --base <PROT_0807 work_dir> \
-       --raw $(cat ~/core/PROT_0807/files.txt ~/core/PROT_0811/files.txt) \
-       --submission PROT_0807 --submission PROT_0811'
+       --name PROT_0807_PROT_9001 --base <PROT_0807 work_dir> \
+       --raw $(cat ~/core/PROT_0807/files.txt ~/core/PROT_9001/files.txt) \
+       --submission PROT_0807 --submission PROT_9001'
    ```
 3. **Attach the main submission's record only.** A session holds one record (`attach` refuses a
    second: "already attached to"), and the report's Submission section, the Methods' Sample
    preparation, the analysis brief, `experiment_type.py --source submission`, the Data Quality
    Notes and the feedback survey all read that one record. Name the others yourself:
    - in the decisions log, right after `init`:
-     `log_decision.py --session "$S" --what 'PROT_0807 and PROT_0811 analysed together, PROT_0807 record attached' --why '<the staff words>' --step '1c. submissions'`
+     `log_decision.py --session "$S" --what 'PROT_0807 and PROT_9001 analysed together, PROT_0807 record attached' --why '<the staff words>' --step '1c. submissions'`
      (through `hive_exec.sh` without local Python: SKILL.md "Keeping the record of the analysis");
    - in `AI_Analysis_Report.md` (step 9): near the top, one sentence per other submission (its
      number, its PI, the samples it brought), from its own `submission_summary.json`. Its
@@ -929,7 +940,7 @@ named several and it is not clear which leads.
    For another submission it refuses (exit 2: the session sits under the main one's stage
    record); never work around that. Ask staff how that submission's people get the results:
    usually the main share's link (the same lab), and its raw data, when wanted, delivered on its
-   own (`deliver --summary ~/core/PROT_0811/submission_summary.json --mode raw-only`).
+   own (`deliver --summary ~/core/PROT_9001/submission_summary.json --mode raw-only`).
 6. **The board:** one thread per submission, the records in the main one's thread
    (`references/board.md` section 2, "Several submissions in one analysis").
 

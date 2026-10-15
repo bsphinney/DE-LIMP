@@ -125,6 +125,13 @@ class DropContaminant(unittest.TestCase):
                       "that accession", str(rc))
         self.assertFalse(os.path.exists(self.out))
 
+    def test_no_contaminant_set_is_said_as_such(self):
+        rc, m, _f, _e = self.fetch("--drop-contaminant", "Cont_P68082", contaminants=False)
+        self.assertIsNone(m)
+        self.assertIn("no contaminant set was fetched for this build (--contaminants none, and the "
+                      "supplied database's own contaminant entries do not include it)", str(rc))
+        self.assertNotIn("has that accession", str(rc))
+
     def test_a_target_accession_is_not_a_contaminant(self):
         rc, m, _f, _e = self.fetch("--drop-contaminant", "P02144")
         self.assertIn("no contaminant entry in this build has that accession", str(rc))

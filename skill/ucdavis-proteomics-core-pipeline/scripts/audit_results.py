@@ -33,10 +33,11 @@ Checks:
                     database used as-is -- excluded from quant, missing here (WARN)
   contaminant_evidence
                     (a DIA-NN report) contaminant protein groups whose every peptide in the
-                    DE's input report (after its q-value filter) is also a target protein's --
-                    shared with it, or the same but for I/L, which no spectrum tells apart
-                    (horse myoglobin on human heart): probably the sample's own protein, not
-                    a contaminant (WARN); INFO when it could not be checked
+                    DE's input report (after its q-value filter) is also one of a target
+                    protein's digest peptides (the build's rule) -- shared with it, or the same
+                    but for I/L, which no spectrum tells apart (horse myoglobin on human heart):
+                    not attributable to the contaminant's species -- the sample's own protein or
+                    handling contamination (WARN); INFO when it could not be checked
   de_signal         0 significant (WARN: underpowered) or >50% significant
                     (WARN: likely batch/normalization/confounding artefact)
   first_vs_final_pass
@@ -449,10 +450,26 @@ def report_contaminant_peptides(report, q_cutoff, q_columns=None):
     q-columns it recorded (else diann_q_columns.fdr_columns of the report), each at cutoff_for(),
     a row dropped only when a value exceeds its cutoff -- or (None, None, [], why not). Only rows
     naming a contaminant accession are read (a pyarrow filter), so a 400-run report is not loaded
-    whole."""
-    from diann_q_columns import fdr_columns, cutoff_for
+    whole. A report that cannot be read is a why-not, never a traceback that leaves no AUDIT.md
+    (error-handling review, 2.12)."""
     if not report or not os.path.isfile(report):
         return None, None, [], f"the DE's input report ({report}) is not readable here"
+    if report.endswith(".parquet"):
+        try:
+            import pyarrow  # noqa: F401
+        except ImportError:
+            return None, None, [], "pyarrow is not installed in this Python, so the report could not be read"
+    try:
+        return _contaminant_peptides(report, q_cutoff, q_columns)
+    except (OSError, ValueError, csv.Error) as e:          # pyarrow's ArrowInvalid is a ValueError
+        name = os.path.basename(report)
+        why = " ".join(str(e).replace(os.path.abspath(report), name).replace(report, name).split())
+        return None, None, [], (f"{name} could not be read ({type(e).__name__}: "
+                                f"{why[:200]}{'...' if len(why) > 200 else ''})")
+
+
+def _contaminant_peptides(report, q_cutoff, q_columns):
+    from diann_q_columns import fdr_columns, cutoff_for
     name = os.path.basename(report)
     groups, runs = defaultdict(dict), defaultdict(set)
 
@@ -462,12 +479,9 @@ def report_contaminant_peptides(report, q_cutoff, q_columns=None):
             runs[pg].add(run)
 
     if report.endswith(".parquet"):
-        try:
-            import pyarrow as pa
-            import pyarrow.compute as pc
-            import pyarrow.dataset as pads
-        except ImportError:
-            return None, None, [], "pyarrow is not installed in this Python, so the report could not be read"
+        import pyarrow as pa
+        import pyarrow.compute as pc
+        import pyarrow.dataset as pads
         d = pads.dataset(report, format="parquet")
         names = d.schema.names
     else:
@@ -511,6 +525,7 @@ def searched_fasta(meta, meta_path):
     cands = list(dict.fromkeys(p for p in ((meta or {}).get("fasta"),
                                            meta_path[:-len(".meta.json")] if meta_path and
                                            meta_path.endswith(".meta.json") else None) if p))
+    changed = []
     for p in cands:
         if os.path.isfile(p):
             if want:
@@ -520,9 +535,14 @@ def searched_fasta(meta, meta_path):
                     for chunk in iter(lambda: fh.read(1 << 20), b""):
                         h.update(chunk)
                 if h.hexdigest() != want:
+                    changed.append(p)
                     continue
             return p, None
     names = ", ".join(dict.fromkeys(os.path.basename(p) for p in cands))
+    if changed:
+        return None, (f"the FASTA ({', '.join(dict.fromkeys(os.path.basename(p) for p in changed))}) "
+                      f"has changed since the search (its sha256 is not the sidecar's "
+                      f"{want[:12]}...)")
     return None, (f"the searched FASTA ({names or 'no path in the sidecar'}"
                   f"{', sha256 ' + want[:12] + '...' if want else ''}) is not readable here")
 
@@ -560,10 +580,28 @@ def audit_contaminant_evidence(findings, de_prov, meta_path):
             f"Not assessed: {why}, so whether a contaminant group rests only on the sample's own "
             "peptides cannot be checked.")
         return
+    if not groups:
+        # the DE counted contaminant groups and this reading of its report finds none: something
+        # differs (the report, its filter) -- never a PASS over nothing (error-handling review)
+        add(findings, "contaminant_evidence", "INFO",
+            f"Not assessed: the DE record counts {cont.get('n_protein_groups')} contaminant protein "
+            f"group(s), but none passes the DE's q-value filter in {os.path.basename(inp)} as read "
+            f"here (q-columns {', '.join(qcols) or 'none'}), so their peptides could not be checked.",
+            {"report": inp, "q_columns": qcols})
+        return
+    # A target's peptides are those the build's digest makes from it (the sidecar's
+    # contaminant_digest: the rule that kept these entries), never any string inside it
+    from estimate_params import DIANN_DIGEST
+    dig = meta.get("contaminant_digest")
+    digest, digest_src = ((dig, "the sidecar's contaminant_digest") if isinstance(dig, dict) and
+                          {"cut", "missed_cleavages", "min_pep_len", "max_pep_len"} <= set(dig)
+                          else (DIANN_DIGEST, "estimate_params.DIANN_DIGEST (the sidecar records "
+                                              "no contaminant_digest)"))
     with open(fasta, encoding="utf-8", errors="replace") as fh:
-        flagged = contaminant_groups_on_target_peptides(groups, fh.read())
+        flagged = contaminant_groups_on_target_peptides(groups, fh.read(), digest)
     org = meta.get("organism") or "target-organism"
     detail = {"report": inp, "fasta": fasta, "q_columns": qcols, "n_groups_checked": len(groups),
+              "digest": dict(digest), "digest_source": digest_src,
               "groups": [dict(g, n_runs=len(runs.get(g["group"], ()))) for g in flagged]}
     if not flagged:
         add(findings, "contaminant_evidence", "PASS",
@@ -594,13 +632,18 @@ def audit_contaminant_evidence(findings, de_prov, meta_path):
             if cont.get("removed") else
             f"They were quantified and tested as contaminant groups (--keep-contaminants), beside "
             f"{', '.join(genes[:12])}.")
+    # What the data can say: these peptides are the sample organism's, so the group is not
+    # evidence of the contaminant's species. It may be the sample's own protein, or handling
+    # contamination of that organism (human skin keratin behind a sheep wool keratin group) -- the
+    # data cannot tell which (2.12 statistics review), so neither is asserted.
     add(findings, "contaminant_evidence", "WARN",
-        f"{len(flagged)} contaminant protein group(s) rest only on peptides of {org} proteins -- "
-        f"probably the sample's own protein, not a contaminant: "
+        f"{len(flagged)} contaminant protein group(s) rest only on peptides of {org} proteins, so "
+        f"the data cannot attribute them to the contaminant's species: "
         + "; ".join(group(g) for g in flagged[:12]) + (f"; +{len(flagged) - 12} more" if len(flagged) > 12 else "")
-        + f". {fate} Report each as the sample's own protein, never as contamination or an added "
-          f"standard. To quantify it as the sample's, rebuild the FASTA with the same "
-          f"fetch_fasta.py command plus "
+        + f". {fate} Report each as the {org} protein -- the sample's own, or handling "
+          f"contamination (skin and hair keratins) -- never as a signal of the contaminant species "
+          f"or an added standard. To quantify it as the {org} protein, rebuild the FASTA with the "
+          f"same fetch_fasta.py command plus "
         + " ".join(f"--drop-contaminant {a}" for a in drop)
         + " and search again.", dict(detail, drop_contaminant=drop))
 

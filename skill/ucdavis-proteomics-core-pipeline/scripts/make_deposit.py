@@ -1428,8 +1428,14 @@ def methods_build_warnings(r, man, md):
     (man.for_agent -> finalize's JSON); the MANIFEST line gets only their count. -> that note."""
     try:
         warns = [str(w) for w in json.loads(r.stdout or "{}").get("database_build_warnings") or []]
-    except (ValueError, AttributeError):
-        warns = []
+    except (ValueError, AttributeError) as e:
+        # never a silent "none": the warnings are unknown, and the agent is told so
+        why = (f"make_methods.py's output could not be read ({type(e).__name__}), so whether the "
+               f"database has build warnings is not known: run make_methods.py again and read its "
+               f"database_build_warnings")
+        man.for_agent.setdefault("database_build_warnings_unknown", []).append(why)
+        print(f"[make_deposit] {why}", file=sys.stderr)
+        return "; " + why
     if not warns:
         return ""
     man.for_agent.setdefault("database_build_warnings", []).extend(warns)
@@ -1438,6 +1444,39 @@ def methods_build_warnings(r, man, md):
               f"user): {w}", file=sys.stderr)
     return (f"; {len(warns)} database build warning{'s' if len(warns) != 1 else ''} left out of "
             f"the Methods, for you to tell the user (stderr; finalize's database_build_warnings)")
+
+
+# The block make_methods.py before 2.12 put into methods.md: build warnings, with server paths
+OLD_WARNINGS_BLOCK = "Database build warnings (resolve before publication)"
+
+
+def scrub_kept_methods(md, man):
+    """A methods.md kept as written (it may be hand-polished) still goes to the client: every
+    server path in it is cut to its file name (make_methods.client_text, each cut on stderr), and
+    an older make_methods.py's build-warnings block is pointed out for removal -- the agent's job,
+    since only a person can resolve those warnings. -> the note for the MANIFEST line."""
+    with open(md, encoding="utf-8") as fh:
+        text = fh.read()
+    new, cuts = mm.client_text(text)
+    note = ""
+    if cuts:
+        tmp = md + ".part"
+        with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(new)
+        os.replace(tmp, md)
+        for before, after in cuts:
+            print(f"[make_deposit] a file path cut to its name in {os.path.basename(md)} (a server "
+                  f"path is not for the client): {before} -> {after}", file=sys.stderr)
+        note += (f"; {len(cuts)} file path{'s' if len(cuts) != 1 else ''} cut to "
+                 f"{'their names' if len(cuts) != 1 else 'its name'} (stderr)")
+    if OLD_WARNINGS_BLOCK in new:
+        why = (f"{os.path.basename(md)} still has a \"{OLD_WARNINGS_BLOCK}\" block from an older "
+               f"make_methods.py: resolve those warnings with the user and remove the block before "
+               f"delivery")
+        man.for_agent.setdefault("methods_to_fix", []).append(why)
+        print(f"[make_deposit] {why}", file=sys.stderr)
+        note += f"; it still has an older \"{OLD_WARNINGS_BLOCK}\" block -- remove it"
+    return note
 
 
 def _has_text(path):
@@ -1470,18 +1509,19 @@ def ensure_methods(session_dir, man):
                 have = md_sections(fh.read())
             missing = [s for s in need if s not in have]
             chosen["path"] = md
+            kept = scrub_kept_methods(md, man)
             if not missing:
-                return "present -- kept as written"
+                return "present -- kept as written" + kept
             draft = os.path.join(p["output_dir"], "methods_complete_draft.md")
             try:
                 r = _run(methods_command(f, draft), "make_methods.py")
             except Skip as e:
                 return (f"present, kept as written, but it lacks: {', '.join(missing)}; a "
-                        f"complete draft could not be written ({e})")
+                        f"complete draft could not be written ({e})" + kept)
             chosen["path"] = draft
             return (f"present, kept as written, but it lacks: {', '.join(missing)} -- a "
                     f"complete draft is in output/methods_complete_draft.md"
-                    + methods_build_warnings(r, man, draft))
+                    + kept + methods_build_warnings(r, man, draft))
         r = _run(methods_command(f, md), "make_methods.py")
         chosen["path"] = md
         with open(md, encoding="utf-8") as fh:

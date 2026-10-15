@@ -1056,6 +1056,26 @@ def is_contaminant_accession(acc):
     return str(acc).strip().startswith(CONTAMINANT_TAGS)
 
 
+def target_digest_peptides(target_recs, digest=DIANN_DIGEST, pattern=None):
+    """-> (target index, its sequence, start, end, the peptide with I = L) for every peptide the
+    search's in-silico digest (digest_spans: cleavage sites, missed cleavages, length, Met
+    excision) makes from each target entry; Cont_-tagged records are not targets. THE reading of
+    "a target protein's peptide": the build's peptide rule (peptide_overlap) and the audit's
+    contaminant-evidence check (contaminant_groups_on_target_peptides) both use it. A string
+    that merely occurs inside a target is not one of its peptides: BSA's LCVLHEK follows R in
+    BSA but Q in human ALB (...LNQ|LCVLHEK), so the digest never makes it from ALB (2.12
+    statistics review)."""
+    pattern = pattern if pattern is not None else _cut_pattern(digest["cut"])
+    for ti, (header, lines) in enumerate(target_recs):
+        if CONT_TAG in header:
+            continue
+        seq = _record_seq(lines)
+        # Sites from the real sequence: a --cut rule may name I or L.
+        norm = il_equal(seq)
+        for s, e in digest_spans(seq, digest, pattern):
+            yield ti, seq, s, e, norm[s:e]
+
+
 def peptide_overlap(contam_recs, target_recs, digest=DIANN_DIGEST):
     """Digest every contaminant and target entry with the search's settings (I and L equal:
     the mass spectrometer cannot tell them apart) and return, per contaminant index,
@@ -1076,16 +1096,9 @@ def peptide_overlap(contam_recs, target_recs, digest=DIANN_DIGEST):
         for _s, _e, k in spans:
             index.setdefault(k, set()).add(ci)
     shared = {}                                  # ci -> {ti: set(shared peptides)}
-    for ti, (header, lines) in enumerate(target_recs):
-        if CONT_TAG in header:
-            continue
-        seq = _record_seq(lines)
-        # Sites from the real sequence: a --cut rule may name I or L.
-        norm = il_equal(seq)
-        for s, e in digest_spans(seq, digest, pattern):
-            k = norm[s:e]
-            for ci in index.get(k, ()):
-                shared.setdefault(ci, {}).setdefault(ti, set()).add(k)
+    for ti, _seq, _s, _e, k in target_digest_peptides(target_recs, digest, pattern):
+        for ci in index.get(k, ()):
+            shared.setdefault(ci, {}).setdefault(ti, set()).add(k)
     out = {}
     for ci, spans in enumerate(cont_spans):
         per_t = shared.get(ci, {})
@@ -1777,15 +1790,21 @@ def lost_to_contaminants_message(tc, seen=()):
     return msg
 
 
-def contaminant_groups_on_target_peptides(groups, fasta_text):
-    """The contaminant protein groups a search reported on peptides of the sample's own proteins
-    alone: very likely that protein, not a contaminant.
+def contaminant_groups_on_target_peptides(groups, fasta_text, digest=DIANN_DIGEST):
+    """The contaminant protein groups a search reported on peptides of the sample organism's
+    proteins alone: not evidence of the contaminant's species -- that protein, the sample's own or
+    handling contamination (a human keratin behind a sheep keratin entry); the data cannot tell.
 
     `groups`: {protein group: {peptide (stripped sequence): set of the accessions the report lists
     for it (Protein.Ids)}}, for groups naming a contaminant accession. A peptide is a target
-    protein's when its accessions name one ("shared"), or when it is in a target entry of
-    `fasta_text` (the searched database): as written ("shared"), or only with I and L equal
-    (il_equal: "il_twin", a different string to DIA-NN but the same spectrum). -> [{group,
+    protein's when its accessions name one ("shared"), or when it is one of the peptides the
+    search's digest makes from a target entry of `fasta_text` (the searched database;
+    target_digest_peptides, the build's own rule -- `digest` is the sidecar's contaminant_digest):
+    as written ("shared"), or only with I and L equal (il_equal: "il_twin", a different string to
+    DIA-NN but the same spectrum). A string that only occurs inside a target is not its peptide:
+    BSA's LCVLHEK sits in human ALB after Q, not K/R, and an audit that matched substrings called
+    BSA's own peptides ALB's -- and its fix would have moved bovine signal into human ALB.
+    -> [{group,
     cont_entries, peptides: [{peptide, how, target_acc, target_entry, gene, target_peptide}]}] for
     each group ALL of whose peptides are a target protein's, in the order given.
 
@@ -1796,34 +1815,31 @@ def contaminant_groups_on_target_peptides(groups, fasta_text):
     MB's GHHEAEIKPLAQSHATK with I/L, and ASEDLKK, which is human MB's too: the group, reported in
     every run above human MB, was the heart's own myoglobin, removed as a contaminant and read as
     an added horse standard. Which peptides a sample shows only the report can say."""
-    accs, recs = {}, []
+    accs, targets = {}, []
     for header, lines in _fasta_records(fasta_text or ""):
-        c = _contaminant_ids(header)
+        c = _contaminant_ids(header)          # either tag: never a target here
         if c:
             accs[c[1].upper()] = (c[2], c[3])
             continue
-        seq = _record_seq(lines)
-        if seq:
-            acc, entry, gene = _header_ids(header)
-            recs.append((seq, acc, entry, gene))
-            accs.setdefault(acc.upper(), (entry, gene))
-    joined = "\n".join(r[0] for r in recs)
-    joined_il = il_equal(joined)
-    starts, pos = [], 0
-    for r in recs:
-        starts.append(pos)
-        pos += len(r[0]) + 1
-
-    def in_target(pep):
-        for text, q, how in ((joined, pep.upper(), "shared"), (joined_il, il_equal(pep), "il_twin")):
-            at = text.find(q) if q else -1
-            if at >= 0:
-                i = bisect.bisect_right(starts, at) - 1
-                seq, acc, entry, gene = recs[i]
-                off = at - starts[i]
-                return {"how": how, "target_acc": acc, "target_entry": entry, "gene": gene,
-                        "target_peptide": seq[off:off + len(q)]}
-        return None
+        acc, entry, gene = _header_ids(header)
+        targets.append((header, lines))
+        accs.setdefault(acc.upper(), (entry, gene))
+    # One pass over the targets' digest, holding only the peptides asked about (as peptide_overlap
+    # holds only the contaminants'): the first target peptide equal to each as written, else the
+    # first equal with I = L.
+    asked = {il_equal(p): set() for peps in groups.values() for p in peps}
+    for peps in groups.values():
+        for p in peps:
+            asked[il_equal(p)].add(p.upper())
+    on_target = {}                             # peptide (upper) -> its target hit
+    for ti, seq, s, e, k in target_digest_peptides(targets, digest):
+        for pep in asked.get(k, ()):
+            how = "shared" if seq[s:e] == pep else "il_twin"
+            if pep in on_target and (on_target[pep]["how"] == "shared" or how == "il_twin"):
+                continue
+            acc, entry, gene = _header_ids(targets[ti][0])
+            on_target[pep] = {"how": how, "target_acc": acc, "target_entry": entry, "gene": gene,
+                              "target_peptide": seq[s:e]}
 
     out = []
     for group, peps in groups.items():
@@ -1835,7 +1851,7 @@ def contaminant_groups_on_target_peptides(groups, fasta_text):
                 hit = {"how": "shared", "target_acc": named[0], "target_entry": entry,
                        "gene": gene, "target_peptide": pep}
             else:
-                hit = in_target(pep)
+                hit = on_target.get(pep.upper())
             if hit is None:
                 break                       # a peptide of its own: evidence of the contaminant
             found.append(dict(hit, peptide=pep))
@@ -2531,6 +2547,15 @@ def cmd_fetch(a):
     if drop_names:
         found = {_bare_accession(r["cont_acc"]) for r in named_dropped}
         missing = [x for x in drop_names if _bare_accession(x) not in found]
+        if missing and not contam_text:
+            # nothing to drop from: say that, not that the accession is wrong (review, 2.12)
+            sys.exit(f"--drop-contaminant {', '.join(missing)}: no contaminant set was fetched for "
+                     f"this build ("
+                     + ("--contaminants none" if a.contaminants == "none" else
+                        f"the '{a.contaminants}' set could not be fetched")
+                     + (", and the supplied database's own contaminant entries do not include it"
+                        if getattr(a, "path", None) or getattr(a, "hive", False) else "")
+                     + "), so there is nothing to leave it out of")
         if missing:
             sys.exit(f"--drop-contaminant {', '.join(missing)}: no contaminant entry in this build "
                      f"has that accession (the '{a.contaminants}' contaminant set"

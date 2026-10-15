@@ -118,5 +118,80 @@ class BaitQuestion(unittest.TestCase):
         self.assertIn("the user added 4,506 sequences (--add-fasta, second_organism.fasta)", src)
 
 
+def bait_session(root, entries):
+    """A session whose FASTA record has the added entries [(accession, name, header)]."""
+    s = os.path.join(root, "bait_" + str(len(os.listdir(root))))
+    os.makedirs(os.path.join(s, "input"))
+    with open(os.path.join(s, et.FASTA_META), "w", encoding="utf-8") as fh:
+        json.dump({"added_sequences": [{"file": "/data/bait.fasta", "sha256": "1" * 64,
+                                        "n_entries": len(entries), "entries": [
+            {"accession": a, "name": n, "header": h, "length": 240, "sequence_sha256": "0" * 64}
+            for a, n, h in entries]}]}, fh)
+    return s
+
+
+TURBO = [("1000001", "IN|1000001|TurboID-Ryr2", "IN|1000001|TurboID-Ryr2 fusion GN=Ryr2"),
+         ("1000002", "IN|1000002|TAG", "IN|1000002|TAG synthetic tag")]
+
+
+class BaitAskedOnce(unittest.TestCase):
+    """Staff review (2.12): a TurboID study with its fusion added by --add-fasta was asked for the
+    bait at step 3 (`set --bait`) and again by `propose` after step 6. Now propose asks nothing
+    when the recorded bait names one of the added sequences or set-bait was answered."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d, True)
+
+    def propose(self, s):
+        p = run("propose", "--session", s)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return json.loads(p.stdout)
+
+    def test_a_step_3_bait_that_names_an_added_sequence_is_not_asked_again(self):
+        for told in ("Ryr2", "TurboID-Ryr2", "1000001"):
+            with self.subTest(told=told):
+                s = bait_session(self.d, TURBO)
+                et.record(s, "proximity", "user", bait=told)
+                out = self.propose(s)
+                self.assertIsNone(out["ask_bait"])
+                self.assertEqual(out["bait_recorded"]["accession"], "1000001")
+                self.assertEqual(out["bait_recorded"]["bait"], told)
+
+    def test_a_set_bait_answer_is_not_asked_again(self):
+        s = bait_session(self.d, TURBO)
+        et.record(s, "proximity", "user")
+        self.assertIsNotNone(self.propose(s)["ask_bait"])          # not asked yet: asked
+        et.record_bait(s, "1000001")
+        out = self.propose(s)
+        self.assertIsNone(out["ask_bait"])
+        self.assertEqual(out["bait_recorded"], {"bait": "1000001",
+                                                "source": "set-bait (asked after step 6)"})
+        et.record_bait(s, "none")
+        self.assertIsNone(self.propose(s)["ask_bait"])
+
+    def test_a_step_3_bait_that_names_no_added_sequence_is_confirmed_not_re_asked_blind(self):
+        s = bait_session(self.d, [TURBO[1]])
+        et.record(s, "ip", "user", bait="Ryr2")
+        out = self.propose(s)
+        self.assertTrue(out["ask_bait"].startswith(
+            "The bait was recorded at step 3 as Ryr2, which names none of the sequences the user "
+            "added. The search database has sequence(s) the user added: 1000002."), out["ask_bait"])
+        self.assertIsNone(out["bait_recorded"])
+
+    def test_no_type_recorded_asks_as_before(self):
+        out = self.propose(bait_session(self.d, TURBO))
+        self.assertIn("is one of them the bait?", out["ask_bait"])
+
+    def test_an_unreadable_record_is_said_and_the_bait_asked(self):
+        s = bait_session(self.d, TURBO)
+        with open(et.path_for(s), "w") as fh:
+            fh.write("{}")
+        p = run("propose", "--session", s)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("is not a experiment_type/1 record: the bait is asked", p.stderr)
+        self.assertIsNotNone(json.loads(p.stdout)["ask_bait"])
+
+
 if __name__ == "__main__":
     unittest.main()

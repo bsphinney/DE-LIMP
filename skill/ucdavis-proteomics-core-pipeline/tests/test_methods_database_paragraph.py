@@ -158,19 +158,53 @@ class NoWarningsOrServerPathsInMethods(unittest.TestCase):
 
 class ClientText(unittest.TestCase):
     def test_paths_are_cut_to_the_file_name(self):
-        for raw, want in (("from /quobyte/proteomics-grp/MRS/x.fasta.", "from x.fasta."),
-                          ("(/nfs/lssc0/flinders/Data/a.d)", "(a.d)"),
-                          ("/home/someone/core/PROT_0000/search.fasta", "search.fasta"),
-                          ("~/core/PROT_0000/in.fasta", "in.fasta"),
-                          ("C:\\Users\\someone\\bait.fasta", "bait.fasta")):
-            self.assertEqual(mm.client_text(raw), (want, 1), raw)
+        for raw, want, path, after in (
+                ("from /quobyte/proteomics-grp/MRS/x.fasta.", "from x.fasta.",
+                 "/quobyte/proteomics-grp/MRS/x.fasta.", "x.fasta."),
+                ("(/nfs/lssc0/flinders/Data/a.d)", "(a.d)", "/nfs/lssc0/flinders/Data/a.d", "a.d"),
+                ("/home/someone/core/PROT_0000/search.fasta", "search.fasta",
+                 "/home/someone/core/PROT_0000/search.fasta", "search.fasta"),
+                ("~/core/PROT_0000/in.fasta", "in.fasta", "~/core/PROT_0000/in.fasta", "in.fasta"),
+                ("C:\\Users\\someone\\bait.fasta", "bait.fasta", "C:\\Users\\someone\\bait.fasta",
+                 "bait.fasta"),
+                ("a /proj/lab/run/x.raw file", "a x.raw file", "/proj/lab/run/x.raw", "x.raw")):
+            self.assertEqual(mm.client_text(raw), (want, [(path, after)]), raw)
 
     def test_units_ratios_and_urls_are_not_paths(self):
         s = ("m/z 300-1200, 1/K0 0.6-1.6 V·s/cm², Trypsin/P, 300 nL/min, 0.1% (v/v), and/or, "
              "https://proteomics.ucdavis.edu/instrument-grant-acknowledgments, "
              "doi:10.1021/acs.jproteome.2c00145, ~20 min/sample, a / b")
-        self.assertEqual(mm.client_text(s), (s, 0))
+        self.assertEqual(mm.client_text(s), (s, []))
 
+    def test_prose_with_slashes_is_left_alone(self):
+        """Error-handling review (2.12): the first rule cut these to "S-Trap (ProtiFi)Lys-C",
+        "0.1%20%" and "(Biognosys)FragPipe". A path must start the text or follow a space or an
+        opening quote/bracket, and start with a file-system root, ~/ or a drive letter (or have
+        three file-name segments)."""
+        for s in ("digested on S-Trap (ProtiFi)/Trypsin/Lys-C",
+                  "a 50:50 (v/v) mixture; 0.1%/80%/20% FA/ACN/H2O",
+                  "Spectronaut 19.0 (Biognosys)/DIA-NN/FragPipe comparisons",
+                  "precursor charge 2+/3+/4+, FDR 1%/1%/1% (precursor/peptide/protein)"):
+            self.assertEqual(mm.client_text(s), (s, []), s)
+
+    def test_each_cut_is_echoed_on_stderr(self):
+        with tempfile.TemporaryDirectory() as d:
+            meta_path = os.path.join(d, "search.fasta.meta.json")
+            with open(meta_path, "w") as fh:
+                json.dump(meta(2), fh)
+            # a value given on the command line reaches the text as given: a path in it is cut
+            r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "make_methods.py"), "--raw",
+                                os.path.join(d, "FL_sample01.raw"), "--fasta-meta", meta_path,
+                                "--lc-column", "the column in /quobyte/proteomics-grp/lc/col1.txt",
+                                "--out", os.path.join(d, "methods.md")],
+                               capture_output=True, text=True, timeout=300)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            with open(os.path.join(d, "methods.md"), encoding="utf-8") as fh:
+                text = fh.read()
+        self.assertNotIn("/quobyte", text)
+        self.assertIn("the column in col1.txt", text)
+        self.assertIn("a file path cut to its name in methods.md (a server path is not for the "
+                      "client): /quobyte/proteomics-grp/lc/col1.txt -> col1.txt", r.stderr)
 
 if __name__ == "__main__":
     unittest.main()

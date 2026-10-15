@@ -2,15 +2,14 @@
 """collect_conditions.py --validate --exclude: a run left out of the DE on purpose is a recorded
 decision, not a failed check.
 
-PROT_0803 (msalemi, 2026-10-08; skill issue record
-2026-10-08_msalemi_PROT_0803+123523-CBS-GC1414-MICH-282-415932196.md): the search had 13 runs,
-two of them re-runs, and the DE analysed 11. conditions.csv listed the 11, so `--validate
+PROT_0000 (2026-10-08; skill issue record 2026-10-08_<user>_PROT_0000+….md): the search had
+13 runs, two of them re-runs, and the DE analysed 11. conditions.csv listed the 11, so `--validate
 --against report.parquet` exited 1 ("2 report runs missing from metadata"). run_de.R already
 analyses only the metadata's runs, and step 8 says the validation must pass, so the agent went
 past a failed check on its own judgment and the reason was written only in decisions.md.
 
 Guards:
-  * --exclude <run> --reason "<why>" (repeatable): the PROT_0803 case validates, and the runs and
+  * --exclude <run> --reason "<why>" (repeatable): the PROT_0000 case validates, and the runs and
     their reasons are written to <csv>.decisions.json (excluded_runs), keeping the record's other
     answers;
   * a run missing WITHOUT --exclude still fails, with the same problem as before;
@@ -44,11 +43,11 @@ from test_run_de_block import r_has, rscript  # noqa: E402
 SCRIPT = os.path.join(SCRIPTS, "collect_conditions.py")
 RUN_DE = os.path.join(SCRIPTS, "run_de.R")
 
-# PROT_0803's shape: 11 samples analysed, two of them injected again (13 runs searched).
-ANALYSED = [f"MICH_{i:02d}" for i in range(1, 12)]
-RERUNS = ["MICH_03_rerun", "MICH_07_rerun"]
-REASONS = {"MICH_03_rerun": "re-run of MICH_03 after a pressure fault; the first injection is analysed",
-           "MICH_07_rerun": "re-run of MICH_07; the first injection is analysed"}
+# PROT_0000's shape: 11 samples analysed, two of them injected again (13 runs searched).
+ANALYSED = [f"RUN_{i:02d}" for i in range(1, 12)]
+RERUNS = ["RUN_03_rerun", "RUN_07_rerun"]
+REASONS = {"RUN_03_rerun": "re-run of RUN_03 after a pressure fault; the first injection is analysed",
+           "RUN_07_rerun": "re-run of RUN_07; the first injection is analysed"}
 
 
 def write_report(tmp, runs):
@@ -146,11 +145,11 @@ class ExcludedRunsValidate(unittest.TestCase):
 
     def test_an_excluded_run_the_report_does_not_have_errors(self):
         p = validate(self.csv, self.report, *exclude_args(REASONS),
-                     "--exclude", "MICH_99_rerun", "--reason", "typo")
+                     "--exclude", "RUN_99_rerun", "--reason", "typo")
         self.assertEqual(p.returncode, 1)
         out = json.loads(p.stdout)
         self.assertFalse(out["valid"])
-        self.assertTrue(any("the report does not have: ['MICH_99_rerun']" in x for x in out["problems"]),
+        self.assertTrue(any("the report does not have: ['RUN_99_rerun']" in x for x in out["problems"]),
                         out["problems"])
         self.assertFalse(os.path.exists(self.dec))
 
@@ -210,13 +209,13 @@ class TheMethodsAndTheReportSaySo(unittest.TestCase):
     def test_the_methods_list_each_run_with_its_reason(self):
         para = mm.de_paragraph(left_out_prov(REASONS))
         self.assertIn("Of the 13 runs searched, 11 were analysed and 2 were left out of the "
-                      "differential-expression analysis: MICH_03_rerun (re-run of MICH_03 after a "
-                      "pressure fault; the first injection is analysed); MICH_07_rerun (re-run of "
-                      "MICH_07; the first injection is analysed).", para)
+                      "differential-expression analysis: RUN_03_rerun (re-run of RUN_03 after a "
+                      "pressure fault; the first injection is analysed); RUN_07_rerun (re-run of "
+                      "RUN_07; the first injection is analysed).", para)
 
     def test_a_run_with_no_recorded_reason_says_not_recorded(self):
         s = mm.de_runs_left_out_sentence(left_out_prov({RERUNS[0]: REASONS[RERUNS[0]]}))
-        self.assertIn(f"MICH_07_rerun (reason {mm.NOT_RECORDED})", s)
+        self.assertIn(f"RUN_07_rerun (reason {mm.NOT_RECORDED})", s)
 
     def test_the_report_callout_uses_the_same_words(self):
         prov = left_out_prov(REASONS)

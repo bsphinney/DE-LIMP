@@ -315,6 +315,38 @@ def ask_bait(cands):
             "set-bait --bait <accession> (or --bait none).")
 
 
+def matching_candidates(answer, cands):
+    """The added sequences `answer` names: by accession, entry name or gene (case-insensitive)."""
+    want = str(answer or "").strip().casefold()
+    return [c for c in cands if want and want in {
+        c["accession"].casefold(), (c.get("gene") or "").casefold(), c["name"].casefold(),
+        c["name"].rsplit("|", 1)[-1].casefold()} - {""}]
+
+
+def bait_question(rec, cands):
+    """(ask_bait or None, what the record already says about the bait or None). The bait is asked
+    ONCE (staff review, 2.12: a TurboID study with its fusion added by --add-fasta was asked at
+    step 3 for `set --bait`, then again by propose). Nothing is asked when set-bait was answered,
+    or when the `--bait` recorded at step 3 names exactly one of the added sequences; a recorded
+    bait that names none of them is put in the question, so it reads as a confirmation."""
+    if not cands:
+        return None, None
+    conf = (rec or {}).get("bait_confirmed")
+    if isinstance(conf, dict) and conf.get("answer"):
+        return None, {"bait": conf["answer"], "source": "set-bait (asked after step 6)"}
+    told = (rec or {}).get("bait")
+    if told:
+        hits = matching_candidates(told, cands)
+        if len(hits) == 1:
+            return None, {"bait": told, "accession": hits[0]["accession"],
+                          "source": "experiment_type.py set --bait (step 3): one of the added "
+                                    "sequences"}
+        return (f"The bait was recorded at step 3 as {told}, which names "
+                + ("several" if hits else "none") + " of the sequences the user added. "
+                + ask_bait(cands)), None
+    return ask_bait(cands), None
+
+
 def resolve_bait(answer, cands):
     """The added sequence the user named as the bait -> its accession. A few added sequences:
     the answer is one of their accessions, as listed. A whole added proteome: the accession, or
@@ -324,10 +356,7 @@ def resolve_bait(answer, cands):
     if not many_added(cands):
         raise ValueError(f"--bait {answer}: not one of the added sequences "
                          f"({', '.join(c['accession'] for c in cands)}); give one of them, or 'none'")
-    want = answer.casefold()
-    hits = [c for c in cands if want in {c["accession"].casefold(), c.get("gene", "").casefold(),
-                                         c["name"].casefold(),
-                                         c["name"].rsplit("|", 1)[-1].casefold()} - {""}]
+    hits = matching_candidates(answer, cands)
     if len(hits) == 1:
         return hits[0]["accession"]
     if hits:
@@ -458,6 +487,12 @@ def main():
         if a.cmd == "propose":
             t, answer = propose_from_submission((submission or {}).get("experiment_types"))
             cands = bait_candidates(a.session)
+            try:
+                rec_now = load(a.session)
+            except ValueError as e:          # said, and the bait is asked as if nothing were recorded
+                rec_now = None
+                print(f"[experiment_type] {e}: the bait is asked", file=sys.stderr)
+            question, known = bait_question(rec_now, cands)
             print(json.dumps({
                 "proposed": t, "from": answer,
                 "submission_types": (submission or {}).get("experiment_types"),
@@ -472,7 +507,9 @@ def main():
                 # counted, never listed (ask_bait)
                 "bait_candidates": [] if many_added(cands) else cands,
                 "n_added_sequences": len(cands),
-                "ask_bait": ask_bait(cands),
+                # asked once: None when set-bait was answered or step 3's --bait names one
+                "ask_bait": question,
+                "bait_recorded": known,
                 "types": {k: v[0] for k, v in DEFAULTS.items()}}, indent=2))
         elif a.cmd == "set-bait":
             path = record_bait(a.session, a.bait)

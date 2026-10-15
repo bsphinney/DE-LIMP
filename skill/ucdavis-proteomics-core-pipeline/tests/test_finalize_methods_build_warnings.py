@@ -63,5 +63,45 @@ class FinalizeSurfacesBuildWarnings(unittest.TestCase):
         self.assertNotIn("database build warning", r.stderr)
 
 
+class KeptMethodsAndUnreadableOutput(unittest.TestCase):
+    """Error-handling review (2.12): a methods.md kept as written (hand-polished, or written by an
+    older make_methods.py) shipped with its "Database build warnings" block and server path; and
+    make_methods output that could not be parsed dropped the build warnings without a word."""
+
+    def test_a_kept_methods_md_loses_its_paths_and_its_old_block_is_pointed_out(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        p = dia_session(tmp)
+        r = finalize(p["session_dir"])                 # writes output/methods.md
+        self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+        md = p["methods_md"]
+        with open(md, encoding="utf-8") as fh:
+            text = fh.read()
+        old = ("\n> Database build warnings (resolve before publication): added sequence A "
+               "(/nfs/lssc0/flinders/Data/lab/service/PROT_0000/x.fasta) is identical to B\n")
+        with open(md, "w", encoding="utf-8") as fh:
+            fh.write(text + old)
+        r = finalize(p["session_dir"])
+        self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+        res = json.loads(r.stdout)
+        with open(md, encoding="utf-8") as fh:
+            kept = fh.read()
+        self.assertNotIn("/nfs", kept)
+        self.assertIn("(x.fasta) is identical to B", kept)       # only the path was cut
+        self.assertIn("/nfs/lssc0/flinders/Data/lab/service/PROT_0000/x.fasta -> x.fasta", r.stderr)
+        self.assertTrue(any("Database build warnings" in w and "remove the block" in w
+                            for w in res["methods_to_fix"]), res)
+        (line,) = [ln for ln in manifest_lines(p) if "Publication methods (output/methods.md)" in ln]
+        self.assertIn("kept as written; 1 file path cut to its name (stderr)", line)
+        self.assertNotIn("/nfs", line)
+
+    def test_unreadable_make_methods_output_is_said(self):
+        import make_deposit as md
+        man = md.Manifest()
+        note = md.methods_build_warnings(type("R", (), {"stdout": "not json"})(), man, "methods.md")
+        self.assertIn("make_methods.py's output could not be read", note)
+        self.assertIn("database_build_warnings_unknown", man.for_agent)
+
+
 if __name__ == "__main__":
     unittest.main()

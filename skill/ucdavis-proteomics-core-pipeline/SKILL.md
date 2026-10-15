@@ -582,7 +582,7 @@ submission, the same path locally and on HIVE (`~/core/PROT_0807`).
    ```
    # coreomics_runs_on: this_computer
    python3 scripts/core_submission.py fetch 807 --out ~/core/PROT_0807
-   bash scripts/hive_exec.sh 'mkdir -p ~/core/PROT_0807'
+   bash scripts/hive_exec.sh '(umask 077; mkdir -p ~/core/PROT_0807) && chmod 700 ~/core/PROT_0807'
    bash scripts/hive_exec.sh --put ~/core/PROT_0807/hive/submission_summary.json '~/core/PROT_0807/'
    bash scripts/hive_exec.sh --put ~/core/PROT_0807/hive/submission.json '~/core/PROT_0807/'
    # coreomics_runs_on: hive -- nothing to --put
@@ -873,7 +873,9 @@ python3 scripts/fetch_fasta.py resolve --organism "<what they said>"   # or --ta
     the data check.
   The default is applied only after step 8's data check, which runs for EVERY type and stops
   to ask when the data disagree. Record the answer once the session exists (step 3b), with the
-  bait (the IP target or the TurboID fusion) and, for controls not named IgG/beads, `--controls`.
+  bait (the IP target or the TurboID fusion; asked ONCE — when its sequence will be added with
+  `--add-fasta`, ask it after step 6 instead, below) and, for controls not named IgG/beads,
+  `--controls`.
   When the submission's "Normalization" answer (how the samples were loaded) contradicts the
   default, `set` prints `ASK:` — ask before going on.
 - **Reduced and alkylated? Ask ONLY for an enrichment experiment** — IP / AP-MS / pull-down or
@@ -1024,12 +1026,12 @@ FASTA and `conditions.csv` exist.
 python3 scripts/experiment_type.py set --session <session> --type <whole_proteome|ip|proximity|secretome|fractions_depth|fractions_separation|other> \
     --source <submission|user> [--stated "<their words>"] [--bait <gene>] [--controls <group,...>]
 ```
-The bait: a sequence the user added with `fetch_fasta.py --add-fasta` (EGFP, a tagged bait) is
-its candidate -- but only the user says which, if any, it is: **after step 6** (the database is
-built) run `experiment_type.py propose` and ask its `ask_bait` question, then record the answer
-with `experiment_type.py set-bait --bait <accession>` (or `--bait none`). The answer is kept as
-`bait_confirmed` in `input/experiment_type.json` (who, when). Never leave the one added sequence
-as an unconfirmed bait.
+**Ask the bait once.** With sequences added by `fetch_fasta.py --add-fasta` (EGFP, a TurboID
+fusion), ask it **after step 6** (the database is built): `experiment_type.py propose`'s
+`ask_bait`, recorded with `experiment_type.py set-bait --bait <accession>` (or `--bait none`), kept
+as `bait_confirmed` (who, when). Otherwise ask it here, with `--bait`. `propose` asks nothing
+(`ask_bait` null, `bait_recorded` says why) when set-bait was answered or the `--bait` recorded
+here names one of the added sequences. Never leave the one added sequence as an unconfirmed bait.
 **Record the sample type now** (step 3's answer, in the user's words — or that they did not
 say), so the brief and report never fill it in from file names:
 ```
@@ -1297,10 +1299,10 @@ digestion enzymes in use stay. The sidecar records each file (path, sha256) and 
 `reproduce.sh` replays `--add-fasta`. An entry with a `Cont_` tag, an accession used twice or
 already in the proteome is refused. Tell the user which contaminant entries left, and which
 peptides of the added sequences are ambiguous.
-**Then ask about the bait — explicitly, once the database is built** (an enrichment with added
-sequences): put the FASTA sidecar in the session (`<session>/input/search.fasta.meta.json`), run
-`python3 scripts/experiment_type.py propose --session <session>`, ask its `ask_bait` question in
-its own words, and record the answer:
+**Then the bait, once the database is built** (an enrichment with added sequences): put the
+FASTA sidecar in the session (`<session>/input/search.fasta.meta.json`), run
+`python3 scripts/experiment_type.py propose --session <session>`, and when its `ask_bait` is not
+null (it is null when the bait is already answered) ask it in its own words and record the answer:
 ```
 python3 scripts/experiment_type.py set-bait --session <session> --bait <accession>   # the bait
 python3 scripts/experiment_type.py set-bait --session <session> --bait none          # none is
@@ -2104,7 +2106,7 @@ dropped file fails here, not halfway through the DE:
 python3 scripts/collect_conditions.py --validate conditions.csv --against ./search_out/report.parquet
 ```
 **A searched run left out of the DE on purpose** (a re-run whose first injection is analysed, a
-failed injection: PROT_0803 searched 13 runs and analysed 11) has no row, so `--validate` names it
+failed injection: one Core submission searched 13 runs and analysed 11) has no row, so `--validate` names it
 under "report runs missing from metadata" and exits 1. **Never go past that failure on your own
 judgment.** Ask the user; only when they decide the run is left out, record it, one `--exclude`
 per run, each with its own `--reason` in their words (it goes into the Methods and the report,
@@ -2444,11 +2446,12 @@ excluded. Name any that are significant in DE, and judge them by type: skin/hair
 (KRT1/2/9/10, KRTAPs, FLG) are usually handling contamination; ACTB, EEF1A1, tubulins and
 KRT8/18/19/7 in epithelial cells are usually endogenous. `contaminant_overlap` means real
 proteins are missing from quant — rebuild the FASTA and re-search. `contaminant_evidence` names a
-contaminant protein group whose every peptide is also a sample protein's (shared, or the same but
-for I/L): probably the sample's own protein. Report it as that protein — never as
-contamination or an added standard — and tell the user it was removed with the contaminants.
-To quantify it as theirs (the user's call: a new search), rebuild the FASTA with the same `fetch`
-command plus the `--drop-contaminant` the finding names, and search again.
+contaminant protein group whose every peptide is also one of a sample protein's digest peptides
+(shared, or the same but for I/L): the data cannot attribute it to the contaminant's species.
+Report it as the sample organism's protein — its own, or handling contamination (skin keratin) —
+never as that species' signal or an added standard, and tell the user it was removed with the
+contaminants. To quantify it as the organism's (the user's call: a new search), rebuild the FASTA
+with the same `fetch` command plus the `--drop-contaminant` the finding names, and search again.
 `sample_quality.py`'s CONTAMINANT_IDENTICAL panel uses the same list as `target_contaminants`; a
 group-confounded result there is a STOP like any other panel. A `numeric_covariate` WARN (a
 covariate fitted as a number that the groups nearly determine) quotes run_de.R's caution: tell

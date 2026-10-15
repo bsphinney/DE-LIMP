@@ -187,7 +187,7 @@ The same answer goes to `session.py init` (step 3b), so later steps and a resume
 asking again. It lands in `session.json` as `analysis_for`, and `checkpoint.py status` prints it:
 
 ```
-python3 scripts/session.py init ... --submission PROT_0807 [--submission PROT_0811]   # the main one first
+python3 scripts/session.py init ... --submission PROT_0807 [--submission PROT_9001]   # the main one first
 python3 scripts/session.py init ... --internal '<the title it has on the board>'
 ```
 

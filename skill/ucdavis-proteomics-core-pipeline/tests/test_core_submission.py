@@ -87,6 +87,10 @@ def child_env(tmp, base_url="http://127.0.0.1:9/server/api", **extra):
     # a laptop, wherever the suite runs (on HIVE /quobyte exists): TestKeyOnHive sets "1"
     e["CORE_ON_HIVE"] = "0"
     e.update(extra)
+    # run "on HIVE", core_submission makes ~/core private (private_core_home): never the real home's
+    if e["CORE_ON_HIVE"] == "1" and "HOME" not in extra:
+        e["HOME"] = os.path.join(tmp, "home")
+        os.makedirs(e["HOME"], exist_ok=True)
     return e
 
 
@@ -3683,6 +3687,176 @@ class TestFetchOnHive(unittest.TestCase):
         rc, js, p = run(["bioshare", "status", "--summary", hive_copy], env)
         self.assertEqual(rc, 0, p.stderr)
         self.assertEqual(js["url"], "https://bioshare.example/bsx/")
+
+
+
+@unittest.skipIf(os.name == "nt", "POSIX file modes")
+class TestFullSummaryIsThisSubmissions(unittest.TestCase):
+    """Error-handling review (2.12): with private/ missing, email-draft and bioshare used the HIVE
+    copy -- no addresses -- and the draft said the submitter had none and left the PI out of Cc;
+    and a private/ left by ANOTHER submission in a reused --out folder drafted this submission's
+    email with that one's addresses. Both now stop (exit 2), saying why and what to do."""
+    setUp, tearDown, fetch = TestFetchOnHive.setUp, TestFetchOnHive.tearDown, TestFetchOnHive.fetch
+
+    def draft(self):
+        env = child_env(self.tmp, self.fake.base, CORE_ON_HIVE="1")
+        return run(["email-draft", "--summary", os.path.join(self.out_dir, "submission_summary.json"),
+                    "--share-url", "https://bioshare.example/bsx/",
+                    "--out", os.path.join(self.out_dir, "EMAIL_DRAFT.md")], env)
+
+    def test_no_full_summary_is_a_stop_not_a_draft_without_addresses(self):
+        self.fetch()
+        shutil.rmtree(os.path.join(self.out_dir, "private"))
+        rc, js, p = self.draft()
+        self.assertEqual(rc, 2, p.stderr)
+        self.assertIn("is the HIVE copy, without contact details", js["error"])
+        self.assertIn("step 1c.1", js["hint"])
+        self.assertFalse(os.path.exists(os.path.join(self.out_dir, "EMAIL_DRAFT.md")))
+        env = child_env(self.tmp, self.fake.base, CORE_ON_HIVE="1")
+        rc, js, p = run(["bioshare", "status", "--summary",
+                         os.path.join(self.out_dir, "submission_summary.json")], env)
+        self.assertEqual(rc, 2, p.stderr)
+
+    def test_another_submissions_full_summary_is_refused(self):
+        self.fetch()
+        priv = os.path.join(self.out_dir, "private", "submission_summary.json")
+        other = load(priv)
+        other["id"], other["internal_id"] = "b" * 12, "PROT_0001"
+        with open(priv, "w") as fh:
+            json.dump(other, fh)
+        rc, js, p = self.draft()
+        self.assertEqual(rc, 2, p.stderr)
+        self.assertIn("is another submission's", js["error"])
+        self.assertIn("PROT_0001", js["error"])
+        self.assertFalse(os.path.exists(os.path.join(self.out_dir, "EMAIL_DRAFT.md")))
+
+    def test_the_private_files_are_replaced_whole(self):
+        self.fetch()
+        priv = os.path.join(self.out_dir, "private")
+        os.chmod(os.path.join(priv, "submission.json"), 0o644)
+        self.fetch()
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.join(priv, "submission.json")).st_mode), 0o600)
+        self.assertEqual([n for n in os.listdir(priv) if n.endswith(".tmp")], [])
+
+
+@unittest.skipIf(os.name == "nt", "POSIX file modes")
+class TestFetchFolderPrivateOnHive(unittest.TestCase):
+    """Security review (2.12): on HIVE every home is drwxrwsr-x and the umask 0002, so the fetch
+    folder ~/core/PROT_xxxx and its submission_summary.json / submission.json / samples.tsv (the
+    PI's and submitter's names, the description, sample names, neighbouring submissions) were
+    readable by every HIVE account. A fetch folder in the home is now this account's alone."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = os.path.realpath(self._tmp.name)
+        self.home = os.path.join(self.tmp, "home")
+        os.makedirs(self.home)
+        self.fake = FakeCoreOmics().__enter__()
+        TestFetch.serve(self, self.fake, record())
+        self.core = os.path.join(self.home, "core")
+        self.out_dir = os.path.join(self.core, "PROT_0807")
+
+    def tearDown(self):
+        self.fake.__exit__(None, None, None)
+        self._tmp.cleanup()
+
+    def fetch(self, on_hive="1", out=None, ok=True):
+        rc, js, p = run(["fetch", "807", "--out", out or self.out_dir],
+                        child_env(self.tmp, self.fake.base, CORE_ON_HIVE=on_hive, HOME=self.home))
+        if ok:
+            self.assertEqual(rc, 0, p.stderr)
+        return rc, js, p
+
+    def mode(self, path):
+        return stat.S_IMODE(os.stat(path).st_mode)
+
+    def test_a_new_folder_and_core_are_made_private(self):
+        _, js, _ = self.fetch()
+        self.assertEqual(self.mode(self.core), 0o700)
+        self.assertEqual(self.mode(self.out_dir), 0o700)
+        self.assertTrue(os.path.isfile(os.path.join(self.out_dir, "samples.tsv")))
+        self.assertFalse([w for w in js["warnings"] if "now 700" in w])
+
+    def test_an_open_existing_folder_is_closed_with_a_note(self):
+        os.makedirs(self.out_dir)
+        os.chmod(self.core, 0o775)
+        os.chmod(self.out_dir, 0o775)
+        _, js, p = self.fetch()
+        self.assertEqual(self.mode(self.out_dir), 0o700)
+        self.assertEqual(self.mode(self.core), 0o700)
+        (w,) = [w for w in js["warnings"] if "now 700" in w]
+        self.assertIn("was mode 775 -- readable by other HIVE accounts -- and is now 700", w)
+        self.assertIn("now 700", p.stderr)
+
+    def run_as(self, args, on_hive="1"):
+        return run(args, child_env(self.tmp, self.fake.base, CORE_ON_HIVE=on_hive, HOME=self.home))
+
+    def test_an_existing_open_core_is_made_private_by_any_subcommand_on_hive(self):
+        """An earlier fetch, or a staff member's own workaround, left ~/core (and a file in it)
+        readable by every HIVE account: the next core_submission run on HIVE closes it, with one
+        line, and nothing for the staff member to do."""
+        os.makedirs(os.path.join(self.core, "PROT_0000"))
+        with open(os.path.join(self.core, "PROT_0000", "submission_summary.json"), "w") as fh:
+            fh.write("{}")
+        os.chmod(self.core, 0o2775)
+        rc, js, p = self.run_as(["locate", "--summary", os.path.join(self.core, "PROT_0000",
+                                                                       "submission_summary.json"),
+                                 "--out", os.path.join(self.core, "PROT_0000")])
+        self.assertEqual(self.mode(self.core), 0o700)
+        self.assertEqual(p.stderr.count("made ~/core private: it holds CoreOmics records"), 1)
+        rc, js, p = self.run_as(["check", "--json"])
+        self.assertNotIn("made ~/core private", p.stderr, "said once, when it changed something")
+
+    def test_a_core_that_is_a_link_another_s_or_off_hive_is_never_touched(self):
+        group = os.path.join(self.tmp, "group_core")
+        os.makedirs(group)
+        os.chmod(group, 0o2775)
+        os.symlink(group, self.core)
+        _, _, p = self.run_as(["check", "--json"])
+        self.assertEqual(self.mode(group), 0o2775)
+        self.assertNotIn("made ~/core private", p.stderr)
+        os.remove(self.core)
+        os.makedirs(self.core)
+        os.chmod(self.core, 0o775)
+        self.run_as(["check", "--json"], on_hive="0")
+        self.assertEqual(self.mode(self.core), 0o775)
+        real_getuid = os.getuid
+        with mock.patch.dict(os.environ, {"HOME": self.home}), \
+                mock.patch.object(cs.os, "getuid", lambda: real_getuid() + 1):
+            self.assertEqual(cs.private_core_home(), "")
+        self.assertEqual(self.mode(self.core), 0o775)
+
+    def test_off_hive_and_outside_the_home_nothing_changes(self):
+        os.makedirs(self.out_dir)
+        os.chmod(self.out_dir, 0o775)
+        self.fetch(on_hive="0")
+        self.assertEqual(self.mode(self.out_dir), 0o775)
+        group = os.path.join(self.tmp, "group", "PROT_0807")     # the Core's storage, not the home
+        os.makedirs(group)
+        os.chmod(group, 0o2775)
+        self.fetch(out=group)
+        self.assertEqual(self.mode(group), 0o2775)
+
+    def test_an_entry_of_another_account_is_refused(self):
+        """A group member can add entries to a HIVE home. The record must never be written into
+        or through one: the owner check, run here as if another account owned it."""
+        os.makedirs(self.out_dir)
+        real_getuid = os.getuid
+        with mock.patch.dict(os.environ, {"HOME": self.home}), \
+                mock.patch.object(cs.os, "getuid", lambda: real_getuid() + 1):
+            with self.assertRaises(cs.Stop) as e:
+                cs.private_home_folder(self.out_dir)
+        self.assertIn("is not a folder of this account's", e.exception.payload["error"])
+
+    def test_this_account_s_own_link_out_of_the_home_is_followed_and_left_as_it_is(self):
+        os.makedirs(self.core)
+        group = os.path.join(self.tmp, "group", "PROT_0807")
+        os.makedirs(group)
+        os.chmod(group, 0o2775)
+        os.symlink(group, self.out_dir)
+        self.fetch()
+        self.assertTrue(os.path.isfile(os.path.join(group, "samples.tsv")))
+        self.assertEqual(self.mode(group), 0o2775)
 
 
 if __name__ == "__main__":
