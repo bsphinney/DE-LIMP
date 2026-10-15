@@ -237,7 +237,9 @@ report "needs to be used for all downstream analyses" of multiplexed data, where
 `GG.Q.Value` are channel-specific and `PG.MaxLFQ` is channel-specific only with QuantUMS and on
 the second MBR pass or without MBR. So build any per-protein, per-channel table from
 `report.parquet` (`Run` × `Channel`), and do not promise the client a DIA-NN matrix for a plexDIA
-search; note on the next plexDIA search whether the matrices appeared.
+search. A second plexDIA search (2026-10-15: the declaration `estimate_params.py --labels`
+writes, two-job route, `--matrices`) logged the same and wrote none either. For SILAC,
+`run_silac.R` builds the per-protein tables (`references/silac.md`).
 
 **A path with `--` in it cannot be given to DIA-NN.** Its reader joins the arguments with spaces
 and cuts the result at every `--`, quoted or not (`arguments()`, `diann.cpp` at tag 1.8), and

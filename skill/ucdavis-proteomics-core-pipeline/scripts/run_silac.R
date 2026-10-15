@@ -502,8 +502,9 @@ methods_paragraph <- paste0(
                 "detections. "), ch_q_cut, min_reps),
   if (length(incorp)) "Label incorporation was estimated from label-check runs as the labelled share of each precursor's signal (a lower bound). " else
     "Label incorporation was not measured from these data. ",
-  "Citations: plexDIA, Derks et al., Nat Biotechnol 2023;41:50-59; limma, Ritchie et al., Nucleic Acids Res 2015;43:e47; ",
-  "robust empirical Bayes, Phipson et al., Ann Appl Stat 2016;10:946-963; Benjamini and Hochberg, J R Stat Soc B 1995;57:289-300.")
+  "Citations: plexDIA, Derks et al., Nat Biotechnol 2023;41:50-59 (doi:10.1038/s41587-022-01389-w); limma, Ritchie et al., ",
+  "Nucleic Acids Res 2015;43:e47; robust empirical Bayes, Phipson et al., Ann Appl Stat 2016;10:946-963 ",
+  "(doi:10.1214/16-AOAS920); Benjamini and Hochberg, J R Stat Soc B 1995;57:289-300.")
 off_txt <- paste(vapply(names(tables_rec), function(ct) {
   o <- unlist(tables_rec[[ct]]$offset_log2)
   sprintf("%s %+.2f to %+.2f", ct, min(o), max(o))

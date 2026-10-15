@@ -873,6 +873,14 @@ python3 scripts/fetch_fasta.py resolve --organism "<what they said>"   # or --ta
     gave (below), never one matched to a file name.
   - `none` — only if the user explicitly declines. Record it; the contaminant
     anomaly check in step 10 is meaningless without contaminants in the database.
+- **SILAC (plexDIA) — only when the submission or the user says SILAC / labelled.** Ask three
+  things, never guess them: (1) the Lys/Arg labels of each labelled channel (`silac.py presets`:
+  K4R6, K6R6, K8R10); (2) which sample is in which channel of which run (label swaps are fine),
+  written as `input/silac_design.csv` (`File.Name,Replicate,Channel,Group`; a labelled-only
+  label-check injection is a run with that channel alone); (3) are the channels independent
+  samples (strains, treatments: `--channel-norm spec`, the default) or old and new protein of
+  one culture (pulsed SILAC / turnover: `run`, which the ratio analysis does not cover). Record
+  the answers (`log_decision.py`). Detail: `references/silac.md`.
 - **Experiment type — decided once, confirmed with the user, never inferred from file
   names.** It decides the DE's quantities (step 8) and the pull-down analysis (8a, the brief).
   With a CoreOmics submission attached (step 3b), `python3 scripts/experiment_type.py propose
@@ -1395,11 +1403,19 @@ python3 scripts/estimate_params.py --engine <diann|sage> \
     --acquisition <DIA|DDA> --instrument "<detected instrument>" \
     --precursor-mz-range <LO> <HI> \
     [--ms1-resolution <MS1> (--ms2-resolution <MS2> | --ms2-analyzer <ITMS|mixed>) [--resolution-source detected]] \
-    [--var-mods ox] [--cys-alkylation <agent>|none] [--overrides '<the user's values as JSON>' \
+    [--var-mods ox] [--cys-alkylation <agent>|none] \
+    [--labels silac2|silac3 --label-preset <K4R6,K8R10|K8R10|...> [--channel-norm spec|run]] \
+    [--overrides '<the user's values as JSON>' \
      --override-by "<who chose them>" --override-reason "<why, in their words>"] \
     --fasta-meta ./search.fasta.meta.json \
     --out ./wf/params.<cfg|json>
 ```
+**`--labels` for a SILAC sample** (step 3): writes DIA-NN's plexDIA declaration into the cfg
+(`--fixed-mod SILAC,0.0,KR,label`, `--channels`, `--original-mods`, the channel-normalisation
+flag) and the sidecar's `labels` record, the normalisation tagged DEFAULT unless given. Never
+pass these flags as `--overrides` (refused), and never add `--lib-fixed-mod`: on a library
+predicted from the FASTA it labels K and R twice (`K(SILAC)(SILAC)`); both search routes refuse
+such a cfg. DIA with DIA-NN only. → `references/silac.md`.
 **`--cys-alkylation`** carries step 3's answer: the agent's fixed modification on C (`cam`:
 `--unimod4`; another agent: `--fixed-mod UniMod:<n>,<mass>,C`; Sage: `static_mods C`), or `none`
 for cysteine unmodified, and the Methods name it. The sidecar's `cys_alkylation` records the
@@ -2138,6 +2154,22 @@ python3 scripts/fran_deposit.py health     # is FRAN's cron taking anything at a
 Core staff: board.md §3 row "FRAN hand-over", once per search folder.
 
 ### 8. Differential expression
+**A SILAC session (`--labels` in step 6b) does not use `run_de.R` or the normalisation check.**
+Its comparison is a ratio inside each run:
+```
+python3 scripts/silac.py design --validate input/silac_design.csv --against ./search_out/report.parquet
+Rscript scripts/run_silac.R --input ./search_out/report.parquet --design input/silac_design.csv \
+    --outdir <S>/output/tables --figures-dir <S>/output/figures --params ./wf/params.cfg \
+    --fasta ./search.fasta [--comparisons "KO-WT,DKO-WT"] [--min-replicates 3]
+```
+It writes the `DE_silac_*.csv` tables, the channel-specific detections, the figures and a
+`de_provenance.json` that the report, Methods, audit, delivery gate and reproducibility bundle
+read like any DE record (its normalisation check is recorded as not applicable, with why).
+Skip 8a (no set tests yet) and 8b (it drew its own figures); in 8c run the audit without
+`--conditions`, and `sample_quality.py` on `SILAC_sample_matrix.csv` + `SILAC_samples.csv`.
+Ask which comparisons the user wants (the default, every pair heavier/lighter, is tagged).
+→ `references/silac.md`, which also says how to read centred vs uncentred ratios.
+
 First check the design against the runs the search actually reported — every report run needs
 a row and every row a report run, every row a group, every group two samples — so a renamed or
 dropped file fails here, not halfway through the DE:
