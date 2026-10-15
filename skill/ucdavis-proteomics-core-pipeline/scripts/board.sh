@@ -4,7 +4,7 @@
 # Runs board_client.py, copied unchanged from the board's own repository (its sha256 is
 # pinned in tests/test_board.py), with the Core board's address filled in:
 #
-#   bash scripts/board.sh connect --owner <their UC Davis email> --wait 600
+#   bash scripts/board.sh connect --owner <their HIVE login>@ucdavis.edu --wait 600
 #   bash scripts/board.sh start-link --prot PROT_0807 --title ... --goal ...
 #   bash scripts/board.sh threads
 #

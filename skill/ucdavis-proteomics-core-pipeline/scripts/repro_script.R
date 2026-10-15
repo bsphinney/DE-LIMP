@@ -89,7 +89,7 @@ write_repro_script <- function(path,
                                quantile_normalise = TRUE,
                                # run_de.R's not_measured record: in each contrast a protein measured
                                # in no run of the compared groups is not tested. NULL = the run
-                               # tested every protein (before 2.10.1), so nothing is emitted.
+                               # tested every protein (before 2.12.0), so nothing is emitted.
                                not_measured = NULL,
                                timestamp = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
                                # TRUE only when this is being generated for a run that

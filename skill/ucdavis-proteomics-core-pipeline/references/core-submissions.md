@@ -38,7 +38,8 @@ call back as an **exit code plus the exact question**. It never runs a search en
 (`~/.coreomics_token`, mode 600) in hive_remote when the computer has no usable Python —
 Windows' `python3` is usually the Microsoft Store stub. `check_access.sh` says which
 (`coreomics_runs_on: hive | this_computer`); on HIVE every KEY step runs through `hive_exec.sh`
-(`python3 ~/proteomics-pipeline/scripts/core_submission.py …`). Until 2026-10-08 these were
+(`python3 ~/proteomics-pipeline/scripts/core_submission.py …`). `none` means the user is not
+Core staff (`core_member: false`): no CoreOmics step runs, and none is mentioned to them. Until 2026-10-08 these were
 "local" and HIVE deliberately had no key, so staff with no Python on their laptop could not
 look a submission up at all (Gabriela 2026-10-02, Michelle 2026-10-08).
 
@@ -214,11 +215,14 @@ refused, because urllib would send the `Authorization` header with it.
 
 ## 0. `identify` — which submission is this data? (where the key is)
 
-Every report carries its submission, so the number is settled at SKILL.md step 1 — for any
-Core data, not only a staff "search submission 807" run. Never guessed:
+Every report carries its submission, so the number is settled at the start: Core staff give it
+when SKILL.md step 0a asks, and step 1 checks it against the files. Never guessed. Only Core
+staff run this (`core_member: true`); for anyone else it never runs. `--text` carries only the
+words that name the submission, never a whole message: the shell reads it (single quotes here;
+through `hive_exec.sh`, double quotes and none of `$` `` ` `` `\` `"` `'`):
 
 ```
-python3 scripts/core_submission.py identify <raw files and/or their folder> --text "<the user's message>"
+python3 scripts/core_submission.py identify <raw files and/or their folder> --text 'submission 807'
 ```
 
 1. **Named ids.** A `PROT_####` token (`PROT_0756`, `prot-756`) or a 12-character CoreOmics id
@@ -239,7 +243,7 @@ python3 scripts/core_submission.py identify <raw files and/or their folder> --te
 
 | exit | status | what to do |
 |---|---|---|
-| 0 | `named`, `matched` | confirm in one line — the JSON's `ask` (it says how many file names carry the sample IDs) |
+| 0 | `named`, `matched` | the number staff gave at step 0a: go on, no second confirmation. Otherwise confirm in one line — the JSON's `ask` (it says how many file names carry the sample IDs) |
 | 2 | `none`, `ambiguous`, `weak`, `named_unconfirmed`, `not_found` | ask the user for the number — the JSON's `ask` |
 | 3 | `needs_token`, `lookup_failed` (CoreOmics refused or unreachable) | ask for the number, relay `token_help`; ask the key facts and `attach --given` (below) |
 
@@ -468,7 +472,8 @@ The proposal is on the row (`proposed`: file, acquired date, `contested_by` — 
 with the same number whose letters also start that word, submitted on or before the run —
 and `shared_with` — another sample of this submission it fits), in the note, and in gate
 `proposed_runs` (INFO; WARN under `--allow-partial`, which would leave those samples out as not
-run). Show each proposal to staff; for each one they confirm, re-run with `--choose
+run). Show the proposals in SKILL.md step 1c.4's one confirmation, beside the file list and the
+service folder, not as a separate question; for each one staff confirm, re-run with `--choose
 <key>=<file>` (`--choose` accepts a proposed run for a sample no run names, and nothing else).
 The row then says "chosen by staff … from N run(s) proposed by name and number", and a contested
 run is recorded as `accepted_ambiguous`. With no surname in the summary nothing is proposed.
@@ -911,7 +916,8 @@ named several and it is not clear which leads.
    preparation, the analysis brief, `experiment_type.py --source submission`, the Data Quality
    Notes and the feedback survey all read that one record. Name the others yourself:
    - in the decisions log, right after `init`:
-     `log_decision.py --session "$S" --what "PROT_0807 and PROT_0811 analysed together; PROT_0807 record attached" --why "<staff's words>" --step "1c. submissions"`;
+     `log_decision.py --session "$S" --what 'PROT_0807 and PROT_0811 analysed together, PROT_0807 record attached' --why '<the staff words>' --step '1c. submissions'`
+     (through `hive_exec.sh` without local Python: SKILL.md "Keeping the record of the analysis");
    - in `AI_Analysis_Report.md` (step 9): near the top, one sentence per other submission (its
      number, its PI, the samples it brought), from its own `submission_summary.json`. Its
      sample sheet against its files was checked by its own `locate`.

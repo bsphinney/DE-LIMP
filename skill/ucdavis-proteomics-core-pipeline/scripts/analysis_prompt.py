@@ -40,7 +40,7 @@ import csv  # noqa: E402
 ER_BACKGROUND = ("HSPA5", "HSP90B1", "CANX", "CALR", "P4HB", "PDIA3", "PDIA4", "PDIA6")
 # The names of run_de.R's `Evidence` categories (its EVIDENCE_LABELS: every run of every group
 # measured / never measured in a group / otherwise, "partly" + the record's zero_means word /
-# measured in no compared group, so not tested -- 2.10.1).
+# measured in no compared group, so not tested -- 2.12.0).
 # They name the tiers; what they mean is quoted from de_provenance.json when the run recorded it.
 EVIDENCE = ("measured in both", "presence call", "partly", "not measured in either group")
 

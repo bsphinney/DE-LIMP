@@ -25,8 +25,9 @@
 #                               | "mode-wrong" (other accounts can read it) | null (not asked).
 #                               Asked in the same SSH call; the key itself is never read
 #   coreomics_runs_on           where core_submission.py check / identify / fetch / bioshare /
-#                               email-draft run: "hive" (hive_exec.sh) | "this_computer";
-#                               coreomics_key_advice says what to do about the key
+#                               email-draft run: "hive" (hive_exec.sh) | "this_computer" |
+#                               "none" (core_member false: no CoreOmics step, ever);
+#                               coreomics_key_advice says what to do about the key (null for none)
 #
 # Model: Claude Code runs LOCALLY; HIVE work is driven over SSH with the user's
 # private key. So this tests SSH to HIVE using that key.
@@ -245,6 +246,10 @@ if $CK_LIB; then
   CK_ROUTE="$(coreomics_route "$MODE" "$PY_OK" "$CK_HERE_KEY" "$CK_STATE")"
   CK_ADVICE="$(coreomics_advice "$CK_ROUTE" "$CK_HERE_KEY" "$CK_STATE")"
 fi
+# Not the Core (proteomics-grp unreadable here and over SSH): no CoreOmics step runs for this user,
+# so none is routed or advised -- someone outside the Core is never pointed at CoreOmics or a key
+# (2.12 staff review: SKILL.md step 1 asked outside users for a submission number).
+if [ "$FACILITY_SW" != true ]; then CK_ROUTE=none; CK_ADVICE=""; fi
 
 ERR_JSON=null
 [ -n "$ERR_KIND" ] && ERR_JSON="{\"kind\": $(js "$ERR_KIND"), \"detail\": $(js "$ERR_DETAIL")}"
@@ -272,7 +277,7 @@ cat <<JSON
   "coreomics_key_on_hive_detail": $CK_DETAIL_JSON,
   "coreomics_key_on_this_computer": $CK_HERE_KEY,
   "coreomics_runs_on": "$CK_ROUTE",
-  "coreomics_key_advice": $(js "$CK_ADVICE"),
+  "coreomics_key_advice": $([ -n "$CK_ADVICE" ] && js "$CK_ADVICE" || echo null),
   "can_use_slurm": $HAS_SLURM,
   "facility_software_available": $FACILITY_SW,
   "recommended_mode": "$MODE",
@@ -283,6 +288,7 @@ cat <<JSON
     "No HIVE + no Core is fine: the skill installs its own toolchain locally and uses public engines (DIA-NN Academia, Sage).",
     "hive_ssh='failed': hive_ssh_error says why. host_key = compare hive_host_key_fingerprints with references/access.md; permission_denied = wrong username or key (on Windows never the DOMAIN+user login name); timeout = VPN off, or HIVE's connection throttle after many quick connections (wait ~20 min).",
     "local_python3.usable=false: run nothing in Python on this machine. In hive_remote every script runs on HIVE through hive_exec.sh, which needs no local Python.",
+    "coreomics_runs_on='none' (core_member false): no CoreOmics step runs; never mention CoreOmics, its key or a submission number to this user.",
     "coreomics_runs_on='hive': run core_submission.py check / identify / fetch / bioshare / email-draft on HIVE through hive_exec.sh, with the key in ~/.coreomics_token there (mode 600). coreomics_key_advice says how to get it there (bash scripts/coreomics_key_to_hive.sh: stdin only, never shown) or fix its mode."
   ]
 }

@@ -474,7 +474,8 @@ footer p { max-width: var(--col); }
       <code>ucdavis-proteomics-core</code> is the marketplace inside it that later commands refer
       to. The repository is added by its HTTPS address because Claude Code tries SSH first for the
       short form <code>bsphinney/DE-LIMP</code>, and many laptops have no GitHub SSH key. If you
-      added the short form before, keep it: the refresh above works for it.
+      added the short form before, keep it and refresh it as above. If that pull asks for SSH,
+      use <code>git -C ~/.claude/plugins/marketplaces/ucdavis-proteomics-core pull --ff-only https://github.com/bsphinney/DE-LIMP.git main</code>.
     </p>
   </div>
 </section>

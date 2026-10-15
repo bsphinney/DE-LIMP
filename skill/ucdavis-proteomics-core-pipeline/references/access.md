@@ -10,16 +10,21 @@ node ties up that node and the session **times out** mid-analysis. Keeping Claud
 on the laptop means it stays alive while the actual compute runs as detached **SLURM
 jobs** on HIVE — nothing depends on an interactive session staying open.
 
-## Step 0a asks two questions → pick a mode
+## Step 0a asks two questions (Core staff, three) → pick a mode
 1. **"Do you have access to UC Davis HIVE (account + SSH private key)?"**
    If yes, **ask where the private key is** (e.g. `~/.ssh/id_ed25519`).
-2. **"Are you a member of the UC Davis Proteomics Core?"**
+2. **"Do you work for the UC Davis Proteomics Core (staff)?"**
+3. **Core staff only** (yes to 2, and `check_access.sh` says `core_member: true`), right after
+   that check: **"Which CoreOmics submission is this analysis for?"** — a number, several, or
+   "none" for internal work (SKILL.md step 0a; `references/board.md` section 2). Anyone else is
+   never asked, and never hears of CoreOmics or the Core Project Board.
 
 Verify before trusting the answers:
 ```
 bash scripts/check_access.sh <hive_user> <private_key_path>
 ```
-Reads `recommended_mode` + `core_member` (= `facility_software_available`). If
+Reads `recommended_mode` + `core_member` (= `facility_software_available`). With
+`core_member: false`, `coreomics_runs_on` is `none` and there is no `coreomics_key_advice`. If
 `hive_ssh` is `"failed"`, `hive_ssh_error.kind` says why — relay it, don't guess:
 
 | `kind` | Meaning → what to tell the user |

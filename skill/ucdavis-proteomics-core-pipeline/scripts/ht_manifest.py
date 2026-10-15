@@ -164,8 +164,9 @@ def _env(token_path: str | None) -> dict:
         f"\n"
         f"  Use the hosted dashboard instead (works for every Core member, headless):\n"
         f"    --http https://ucd.stan-proteomics.org --share-token-file <file>\n"
-        f"  (a file holding the submission's share token from its HT tab, mode 600 -- never the\n"
-        f"  token on the command line). Your OWN credential, if you have one, can be given as\n"
+        f"  on the same command as --summary (without the CoreOmics record the sample list is\n"
+        f"  not checked). <file> holds the submission's share token from its HT tab, mode 600 --\n"
+        f"  never the token on the command line. Your OWN credential, if you have one, can be given as\n"
         f"  STAN_PG_TOKEN=<a file you own> or PGPASSWORD.")
 
 

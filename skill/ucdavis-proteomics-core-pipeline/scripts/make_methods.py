@@ -1515,7 +1515,7 @@ def de_normalisation_sentence(prov):
 
 
 def de_not_measured_sentence(prov):
-    """run_de.R's `not_measured` rule (2.10.1), with each contrast's count from `de_tables`: a
+    """run_de.R's `not_measured` rule (2.12.0), with each contrast's count from `de_tables`: a
     protein measured in no run of the groups a contrast compares was not tested in it. None for
     a record without the rule -- that run tested every protein, which the BH sentence covers."""
     rec = prov.get("not_measured") if isinstance(prov.get("not_measured"), dict) else None

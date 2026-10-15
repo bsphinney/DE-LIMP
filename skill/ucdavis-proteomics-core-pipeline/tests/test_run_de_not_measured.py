@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A protein measured in neither group of a contrast is not tested in that contrast (2.10.1).
+"""A protein measured in neither group of a contrast is not tested in that contrast (2.12.0).
 
 Staff report, 2026-10-03 (skill 2.9.1): in a several-group DE, proteins measured in 0 of n runs
 of BOTH groups of a contrast -- measured only in the other groups -- were labelled `presence
@@ -204,7 +204,7 @@ class NotMeasuredInEitherGroup(unittest.TestCase):
                             self.assertIsNone(num(r["adj.P.Val"]), r["Protein.Group"])
 
     def test_untested_proteins_would_have_inflated_bh(self):
-        # before 2.10.1 the 20 sat in B vs A's BH at p = 1 (dpc): every adjusted p-value of a
+        # before 2.12.0 the 20 sat in B vs A's BH at p = 1 (dpc): every adjusted p-value of a
         # tested protein is now no larger than it was with them in
         rows = self.table("dpc", "B.A")
         ps = [num(r["P.Value"]) for r in rows if num(r["P.Value"]) is not None]

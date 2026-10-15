@@ -48,7 +48,7 @@ were samples. Neither shows up as an error; the search just succeeds on the wron
 * **Tray labels repeat.** `S6` is a tray *position*, reused every month since December. It
   is not a submission identifier.
 
-Since 2.10.1 a tray named without the number (0793's S5 above) is **not** searched from STAN's
+Since 2.12.0 a tray named without the number (0793's S5 above) is **not** searched from STAN's
 list: `named_for_submission` fails and lists its runs, and the operator confirms them through a
 curated list (`core_submission.py locate --files-from`) — because a tray STAN joins by position
 can just as well be another project's (2026-10-05, below).
@@ -297,7 +297,8 @@ Every other Core member gets *permission denied* at (4). That is expected, and i
 ```
 printf '%s\n' '<tok>' | bash scripts/hive_exec.sh 'umask 077; mkdir -p ~/.stan && cat > ~/.stan/share_0793'
 bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/ht_manifest.py fetch 0793 \
-    --http https://ucd.stan-proteomics.org --share-token-file ~/.stan/share_0793 --out ~/ht0793'
+    --summary ~/core/PROT_0793/submission_summary.json --http https://ucd.stan-proteomics.org \
+    --share-token-file ~/.stan/share_0793 --out ~/ht0793'
 ```
 
 **The token goes in a file, never on a command line.** A token in argv is in the process list,

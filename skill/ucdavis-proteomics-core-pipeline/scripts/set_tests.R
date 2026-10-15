@@ -46,7 +46,7 @@ PRESENCE_CALL_LABEL <- "presence call"   # run_de.R EVIDENCE_LABELS[["none_in_a_
 NOT_MEASURED_LABEL <- "not measured in either group"   # run_de.R EVIDENCE_LABELS[["none_measured"]]
 # Never measured in at least one compared group -- in one (a presence call) or in all of them (not
 # tested in that contrast's DE table): either way the protein's difference is the detection
-# model's. A record written before 2.10.1 calls both "presence call".
+# model's. A record written before 2.12.0 calls both "presence call".
 UNMEASURED_LABELS <- c(PRESENCE_CALL_LABEL, NOT_MEASURED_LABEL)
 
 `%||%` <- function(a, b) if (is.null(a)) b else a

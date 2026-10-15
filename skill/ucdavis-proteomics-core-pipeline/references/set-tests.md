@@ -43,7 +43,7 @@ P-values are adjusted across the sets of each comparison (Benjamini–Hochberg),
 for each test. A set's `Call` joins the two BH lists; nothing is corrected across comparisons.
 Then, for every set: the same tests with log2 run depth in the model, the fraction of its
 proteins that are DPC presence calls (never measured in one compared group — or, labelled
-`not measured in either group` since 2.10.1, in any), both tests on proteins measured in every
+`not measured in either group` since 2.12.0, in any), both tests on proteins measured in every
 compared group only, and — for each
 fry call — whether it holds on other reference bases. Each comparison gets a **reading**, one
 generated sentence the report and the brief quote (below).
