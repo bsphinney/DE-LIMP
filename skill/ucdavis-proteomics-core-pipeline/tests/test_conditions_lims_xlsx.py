@@ -298,6 +298,25 @@ class WhichRunIsWhichSample(unittest.TestCase):
         self.assertEqual(m("/data/x/run1.raw", runs), ["run1"])   # a full file name
         self.assertEqual(m("dia-kg1", runs), [runs[0]])
 
+    def test_never_the_acquisition_counter_speed_or_date(self):
+        """2.12 review (L6): matched over the whole name, a numeric id named the run whose
+        acquisition counter it equals. Now an identifier is matched only in the sample part of a
+        run name (core_submission.match_space: a timsTOF name's DIA-<field>; other names without
+        their plate tail), as locate does."""
+        runs = ["03122025__60SPD_DIA-KG1_S3-A3_1_1234", "03122025__60SPD_DIA-1234_S3-A4_1_24004",
+                "20250312_QPlaceholder_100spd_7_S4-A1_1_5678", "Ex08312026_380_JE21"]
+        m = cc.match_to_runs
+        self.assertEqual(cc.match_text(runs[0]), "DIA-KG1")
+        self.assertEqual(cc.match_text(runs[2]), "20250312_QPlaceholder_100spd_7")
+        self.assertEqual(m("1234", runs), [runs[1]])              # its sample field, not run 0's counter
+        self.assertEqual(m("1234", runs[:1]), [])
+        self.assertEqual(m("5678", runs), [])                      # an HT-style tail's counter
+        self.assertEqual(m("24004", runs), [])
+        self.assertEqual(m("60SPD", runs), [])                     # the speed names every run: none
+        self.assertEqual(m("03122025", runs), [])                  # nor the date
+        self.assertEqual(m("DIA-KG1_", runs), [runs[0]])           # written with the tag: still found
+        self.assertEqual(m("JE21", runs), [runs[3]])               # other names: the name itself
+
     def test_a_letters_only_label_naming_several_runs_is_asked_not_assigned(self):
         """'Ctrl' names Ctrl1, Ctrl2 and Ctrl3 (a letters-only word names itself plus digits):
         that is a question -- every one of them, or one sample? -- never the first run, and no

@@ -51,7 +51,7 @@ from collections import Counter, defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # A delimited token has ONE definition: the one `core_submission.py locate` matches sample ids with.
-from core_submission import token_pattern  # noqa: E402
+from core_submission import HT_TAIL, TIMS_NAME, match_space, token_pattern  # noqa: E402
 
 COV_COLS = ["Batch", "Covariate1", "Covariate2"]
 # "unique id" / "sample id": the Core LIMS export (PROT_####.samples.<date>.xlsx: internal_id,
@@ -229,10 +229,25 @@ def _carries(text, label):
     return bool(pat and pat.search(text))
 
 
+def match_text(run):
+    """The part of a run name an identifier may match -- core_submission.match_space, the rule
+    `locate` matches sample ids with: a timsTOF name's sample field, with its DIA-/DDA- tag
+    (identifiers are written as 'DIA-XY1_'); any other name without its plate tail
+    (`_S3-A1_1_24376`: plate position, injection, acquisition counter) and with its plate
+    positions blanked. Matched over the whole name, a numeric id such as 1234 named the run whose
+    acquisition counter is 1234, and '60SPD' every run (review of 2.12)."""
+    run = str(run)
+    m = TIMS_NAME.match(run)
+    if m:      # match_space's field (TIMS_NAME's), with the 4-character DIA-/DDA- tag before it
+        return run[m.start("field") - 4:m.end("field")]
+    return PLATE_POSITION_RE.sub("_", match_space(HT_TAIL.sub("", run)))
+
+
 def match_to_runs(identifier, runs):
     """Runs an identifier names, the first of these that names any:
       1. the whole run name (case and punctuation aside);
-      2. the identifier as a delimited TOKEN of the run name, or the run name as one of the
+      2. the identifier as a delimited TOKEN of the run name's sample part (match_text: a
+         timsTOF name's DIA-<field>, never its acquisition counter), or the run name as one of the
          identifier (a full file name names its run) -- core_submission.token_pattern, the rule
          `locate` matches sample ids with: '-', '_' and space are token boundaries, so DIA-XY1_
          names XY1 and never XY10 (2.9.1 normalised the '_' away and matched XY10..XY19), and a
@@ -247,13 +262,12 @@ def match_to_runs(identifier, runs):
     exact = [r for r in runs if norm(r) == idn]
     if exact:
         return exact
-    whole = [r for r in runs if _carries(PLATE_POSITION_RE.sub("_", r), identifier)
-             or _carries(identifier, r)]
+    whole = [r for r in runs if _carries(match_text(r), identifier) or _carries(identifier, r)]
     if whole:
         return whole
     want = tokens(identifier)
     return [r for r in runs
-            if _contains(run_tokens(r), want, _token_eq)
+            if _contains(run_tokens(match_text(r)), want, _token_eq)
             or _contains(want, tokens(r), lambda a, b: a == b)]
 
 
