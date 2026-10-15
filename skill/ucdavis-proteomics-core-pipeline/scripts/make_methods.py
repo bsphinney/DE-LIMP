@@ -1161,6 +1161,22 @@ def added_sequences_sentence(fmeta):
     return sent
 
 
+def named_contaminants_sentence(fmeta):
+    """The contaminant entries the analyst left out by name (fetch_fasta.py --drop-contaminant),
+    named one by one up to ADDED_SEQUENCES_NAMED_MAX, else counted. "" when there were none -- the
+    paragraph is then what it was before the flag existed."""
+    gone = [r for r in (fmeta.get("contaminants_dropped_by_name") or []) if isinstance(r, dict)]
+    if not gone:
+        return ""
+    one = len(gone) == 1
+    return (f" {len(gone):,} contaminant entr{'y' if one else 'ies'}"
+            + (" (" + ", ".join(f"{r.get('cont_acc') or '____'} "
+                                f"({r.get('cont_entry') or r.get('cont_gene') or '____'})"
+                                for r in gone) + ")"
+               if len(gone) <= ADDED_SEQUENCES_NAMED_MAX else "")
+            + f" {'was' if one else 'were'} left out of the database by name.")
+
+
 def keratin_database_sentence(fmeta):
     """The FASTA sidecar's keratin-sample build (fetch_fasta.py --keratin-sample), or "" for any
     other database -- whose paragraph is then exactly what it was before keratin samples were
@@ -2009,6 +2025,7 @@ def main():
                          f"accessions.")
         else:
             sent += " No contaminant database was appended."
+        sent += named_contaminants_sentence(fmeta)
         sent += added_sequences_sentence(fmeta)
         sent += keratin_database_sentence(fmeta)
         w(sent)

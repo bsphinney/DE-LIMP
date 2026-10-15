@@ -585,6 +585,9 @@ def audit_contaminant_evidence(findings, de_prov, meta_path):
                 f"{len(runs.get(g['group'], ()))} run(s)): "
                 + ", ".join(pep(p) for p in ps[:5]) + (f", +{len(ps) - 5} more" if len(ps) > 5 else ""))
     genes = sorted({p.get("gene") or p["target_acc"] for g in flagged for p in g["peptides"]})
+    # the contaminant accessions of the flagged groups: what fetch_fasta.py --drop-contaminant takes
+    drop = list(dict.fromkeys(t.strip() for g in flagged for t in g["group"].split(";")
+                              if is_contaminant_accession(t)))
     fate = (f"Their precursors were removed with the contaminants (run_de.R's filter; DIA-NN's "
             f"--cont-quant-exclude too, when set), so {', '.join(genes[:12])} may be "
             f"under-quantified and the contaminant share overstated."
@@ -596,9 +599,10 @@ def audit_contaminant_evidence(findings, de_prov, meta_path):
         f"probably the sample's own protein, not a contaminant: "
         + "; ".join(group(g) for g in flagged[:12]) + (f"; +{len(flagged) - 12} more" if len(flagged) > 12 else "")
         + f". {fate} Report each as the sample's own protein, never as contamination or an added "
-          f"standard. To quantify it as the sample's, rebuild the FASTA without that contaminant "
-          f"entry (fetch_fasta.py --contaminants-path, a copy of the set without it) and search "
-          f"again.", detail)
+          f"standard. To quantify it as the sample's, rebuild the FASTA with the same "
+          f"fetch_fasta.py command plus "
+        + " ".join(f"--drop-contaminant {a}" for a in drop)
+        + " and search again.", dict(detail, drop_contaminant=drop))
 
 
 def audit_de(findings, de_dir, adjp, logfc):
