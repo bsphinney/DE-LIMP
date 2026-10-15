@@ -2157,7 +2157,8 @@ Core staff: board.md §3 row "FRAN hand-over", once per search folder.
 **A SILAC session (`--labels` in step 6b) does not use `run_de.R` or the normalisation check.**
 Its comparison is a ratio inside each run:
 ```
-python3 scripts/silac.py design --validate input/silac_design.csv --against ./search_out/report.parquet
+python3 scripts/silac.py design --validate input/silac_design.csv --against ./search_out/report.parquet \
+    [--exclude <run> --reason "<why, in the user's words>"]   # only on the user's decision
 Rscript scripts/run_silac.R --input ./search_out/report.parquet --design input/silac_design.csv \
     --outdir <S>/output/tables --figures-dir <S>/output/figures --params ./wf/params.cfg \
     --fasta ./search.fasta [--comparisons "KO-WT,DKO-WT"] [--min-replicates 3]

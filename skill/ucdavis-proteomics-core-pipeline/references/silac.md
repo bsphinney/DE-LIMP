@@ -44,7 +44,11 @@ Ask; never guess. Each answer goes into `logs/decisions.md` (`log_decision.py`).
    has no row. Group names: letters, digits, `_` or `.`, starting with a letter.
    `python3 scripts/silac.py design --validate input/silac_design.csv --against
    ./search_out/report.parquet` checks it (every report run needs rows and every row a run, no
-   group twice in a run, at least one run with two groups).
+   group twice in a run, at least one run with two groups). A searched run the user decides to
+   leave out (a failed injection) is recorded, never just dropped: add `--exclude <run> --reason
+   "<why>"` to that command. It goes into `<design>.decisions.json` (`excluded_runs`, the record
+   `collect_conditions.py --exclude` writes), which every later check and `run_silac.R` read; the
+   Methods and the report then list the run with its reason.
 3. **Independent samples or turnover?** The channel-normalisation question DIA-NN cannot
    answer from the data ("This is necessary as the raw data alone does not contain sufficient
    information", README):
