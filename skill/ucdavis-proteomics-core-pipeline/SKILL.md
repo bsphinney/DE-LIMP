@@ -61,8 +61,9 @@ the spine.
 4. **Organism decides the FASTA and nothing else**, and is **always asked, never
    assumed** — not from a folder name, not "probably human". The **sample type** (tissue,
    cell line, biofluid, IP …) is likewise **asked, never inferred** — not from a file-name
-   token or abbreviation, a sample ID or a folder — though Core staff are asked it only when a
-   step depends on it (step 3, `sample_type.py`). Resolve the organism with
+   token or abbreviation, a sample ID or a folder — though Core staff (any analysis: a
+   submission or internal work) are asked it only when a step depends on it (step 3,
+   `sample_type.py`). Resolve the organism with
    `fetch_fasta.py resolve` and have the user confirm the proteome. It does **not**
    affect a single search parameter: mass accuracy keys on instrument, and search
    behaviour on acquisition. Both are auto-detected and confirmed. So any organism
@@ -865,11 +866,13 @@ python3 scripts/fetch_fasta.py resolve --organism "<what they said>"   # or --ta
     tissue — which one —, plasma, IP, hair …), in their words; "don't know" is an answer
     (`--not-stated`, and the report then names no tissue). No submission record describes their
     samples, and they are making the choices below without the Core's defaults.
-  - **Core staff (a CoreOmics submission, step 1c): do not ask it.** Record `--not-asked`
-    (step 3b) and go on; the submission record describes the samples for the report (step 9,
-    `--submission`). Ask only at a step whose choice depends on the answer: the keratin
-    question below (one yes/no, before the FASTA is built), and a flagged sample-quality panel
-    (8c). The contaminant set is the Core's `universal`, whatever the tissue.
+  - **Core staff, any analysis (a CoreOmics submission or internal work): do not ask it.**
+    Record `--not-asked` (step 3b) — or `--stated` with what they already said ("HeLa digest
+    standard") — and go on; a submission record, when there is one, describes the samples for
+    the report (step 9, `--submission`). Ask only at a step whose choice depends on the answer:
+    the keratin question below (one yes/no, before the FASTA is built), and a flagged
+    sample-quality panel (8c). The contaminant set is the Core's `universal`, whatever the
+    tissue.
   The answer is used at every step that depends on it: the contaminant set below, the keratin
   decision below, the sample-quality panels (8c: a muscle panel is the analyte in a muscle
   sample; hemolysis applies to plasma/serum), the analysis brief and report (9), and the SDRF's
@@ -1010,7 +1013,7 @@ say), so the brief and report never fill it in from file names:
 ```
 python3 scripts/sample_type.py set --session <session> --stated "<what the user said the samples are>"
 python3 scripts/sample_type.py set --session <session> --not-stated     # asked; the user does not know
-python3 scripts/sample_type.py set --session <session> --not-asked      # Core staff: not asked (step 3)
+python3 scripts/sample_type.py set --session <session> --not-asked      # Core staff, any analysis: not asked (step 3)
 ```
 A later answer (a flagged panel in 8c) replaces it with `--stated`.
 **Save step 2's JSON as `<session>/input/acquisition.json`** (the whole `detect_acquisition.py`

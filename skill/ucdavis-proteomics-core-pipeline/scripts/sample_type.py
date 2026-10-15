@@ -18,7 +18,7 @@ that it was not asked (--not-asked), never that they were asked and did not say.
 
   python3 sample_type.py set  --session <session> --stated "mouse leg muscle, flash-frozen"
   python3 sample_type.py set  --session <session> --not-stated     # asked; the user does not know
-  python3 sample_type.py set  --session <session> --not-asked      # Core staff: not asked
+  python3 sample_type.py set  --session <session> --not-asked      # Core staff (any analysis): not asked
   python3 sample_type.py show --session <session>                  # JSON; exit 0
 
 The record is written only from what the user said; `--stated` refuses an empty answer.

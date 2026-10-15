@@ -103,7 +103,8 @@ def sample_type_brief(w, session):
           "Quality Notes** as a question for the user; do not resolve it either way yourself.")
     elif rec and rec.get("source") == st.NOT_ASKED:
         w("- Core staff were not asked (no step's choice depended on it). Describe the samples "
-          "as the attached submission record does, or by their groups only; do not name a "
+          "as the attached submission record does, when there is one, or else by their groups "
+          "only; do not name a "
           f"tissue, cell type or biofluid it does not state; {st.NEVER_INFER}. Nothing about "
           "the sample type goes in Data Quality Notes unless the data contradict the record.")
     else:
