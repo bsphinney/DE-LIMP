@@ -36,6 +36,9 @@ Usage:
 import sys, os, json, argparse, shlex
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+# Every step script, list and config is written without following a planted link (safe_write.py).
+from safe_write import write_file  # noqa: E402
 
 
 def _mounts_for(runtime, pairs):
@@ -199,8 +202,7 @@ def main():
     out_lib = os.path.join(D, "diann_predicted_lib.speclib")
     lib = a.library or predicted_speclib(out_lib)
     listing = os.path.join(D, "file_list.txt")
-    with open(listing, "w") as fh:
-        fh.write("\n".join(os.path.abspath(f) for f in files) + "\n")
+    write_file(listing, "\n".join(os.path.abspath(f) for f in files) + "\n")
 
     # Bind every distinct host dir the container must see. Mount parents rather than
     # copying so large mzML stay where they are.
@@ -248,11 +250,7 @@ def main():
                                                 fran=not a.no_fran, fran_name=a.fran_name,
                                                 qc=(True if a.qc else
                                                     False if a.not_qc else None)).rstrip("\n")
-        p = os.path.join(D, name)
-        with open(p, "w") as fh:
-            fh.write(text + "\n")
-        os.chmod(p, 0o755)
-        return p
+        return write_file(os.path.join(D, name), text + "\n", 0o755)
 
     scripts = {}
 
@@ -281,8 +279,7 @@ def main():
     # host->container paths in bash would need string substitution whose delimiter is
     # `/` -- the same character the paths are full of -- so we resolve it here instead.
     clisting = os.path.join(D, "file_list_container.txt")
-    with open(clisting, "w") as fh:
-        fh.write("\n".join(cp(f) for f in files) + "\n")
+    write_file(clisting, "\n".join(cp(f) for f in files) + "\n")
 
     pick = (f'FILE=$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" {shlex.quote(clisting)})\n'
             'if [ -z "$FILE" ]; then echo "no file for task $SLURM_ARRAY_TASK_ID"; exit 1; fi\n'
@@ -338,8 +335,7 @@ def main():
         '"spark.sql.shuffle.partitions" = "64"',
     ])
     toml_path = os.path.join(results, "fulcrum_rescore.toml")
-    with open(toml_path, "w") as fh:
-        fh.write(toml + "\n")
+    write_file(toml_path, toml + "\n")
 
     scripts["step3_fulcrum"] = write("step3_fulcrum.sbatch", "\n".join([
         header("r3_fulcrum", a.fulcrum_cpus, a.fulcrum_mem, a.fulcrum_time, **q), "",

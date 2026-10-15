@@ -52,6 +52,8 @@ from diann_q_columns import FDR_REQUIRED, PROTEIN_Q_PREFERENCE
 from protein_ids import fragpipe_group, group_accessions, group_entry_names
 # No Bruker .d is searched before its analysis.tdf has been checked -- see bruker_tdf.py.
 from bruker_tdf import STATUSES, integrity_warning, tdf_integrity
+# Every file a job runs or reads is written without following a planted link: see safe_write.py.
+from safe_write import open_text, write_file
 
 ALLOW_DAMAGED_TDF = "--allow-damaged-tdf"
 
@@ -545,15 +547,15 @@ def ensure_xic(params, out):
     os.makedirs(out, exist_ok=True)
     aug = os.path.join(out, "params_with_xic.cfg")
     extra = f"--xic {XIC_WINDOW_DEFAULT}" + ("" if "--mobilograms" in flags else " --mobilograms")
-    with open(aug, "w") as fh:
-        fh.write(txt.rstrip("\n") + f"\n{extra}\n")
+    write_file(aug, txt.rstrip("\n") + f"\n{extra}\n")
     # The copy is the same parameters plus XICs, so it keeps the cfg's estimate_params.py
     # rationale: without it the mass-accuracy plan (measure_with_diann) would be lost here and the
     # search would fall back to DIA-NN's first-run auto mode (diann_parallel.mass_acc_measure_plan).
     # A cfg with NO sidecar must not inherit one an earlier search left in the same --out: that
     # stale plan would have a hand-written cfg's missing mass accuracy measured instead of reported.
     if os.path.exists(params + ".rationale.json"):
-        shutil.copyfile(params + ".rationale.json", aug + ".rationale.json")
+        with open(params + ".rationale.json", encoding="utf-8") as fh:
+            write_file(aug + ".rationale.json", fh.read())
     elif os.path.lexists(aug + ".rationale.json"):
         os.remove(aug + ".rationale.json")
     print(f"[run_search] cfg had no --xic; using {aug} (added: {extra}). "
@@ -583,8 +585,7 @@ def run_diann_parallel(cmd, params, files, fasta, out, threads, a, acquisition="
     refuse_dda_mismatch(params, acquisition)
     os.makedirs(out, exist_ok=True)
     listing = os.path.join(out, "parallel_input_files.txt")
-    with open(listing, "w") as fh:                    # a list file survives spaces in paths
-        fh.write("\n".join(files) + "\n")
+    write_file(listing, "\n".join(files) + "\n")     # a list file survives spaces in paths
     argv = [sys.executable,
             os.path.join(os.path.dirname(os.path.abspath(__file__)), "diann_parallel.py"),
             "--diann", cmd, "--raw-list", listing, "--fasta", fasta,
@@ -860,8 +861,7 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
     # gets its own. The inline path keeps the old name; nothing outlives the process there.
     stem = os.path.splitext(os.path.basename(sbatch))[0] if sbatch else "search"
     listing = os.path.join(out, f"{stem}_input_files.txt")
-    with open(listing, "w") as fh:                    # a list file survives spaces in paths
-        fh.write("\n".join(files) + "\n")
+    write_file(listing, "\n".join(files) + "\n")     # a list file survives spaces in paths
     # DIA-NN 2.6 supports DDA via --dda (must NOT be used on DIA data). QuantUMS is
     # auto-disabled on DDA; for DDA quant DIA-NN recommends extra MS1 filtering on
     # Ms1.Global.Q.Value / Ms1.Global.Quality (see references/search-engines.md).
@@ -982,7 +982,7 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
         # jobs.txt, as the 5-step chain's submit.sh writes it: `watch_run.sh --all <out>`
         # reads it, and without one it answered failed/no_jobs_file for a healthy running
         # search -- which step 7b says to resubmit (HIVE e2e test 2026-09-23).
-        with open(submit, "w") as fh:
+        with open_text(submit, 0o755) as fh:
             fh.write("#!/bin/bash -l\nset -euo pipefail\n"
                      f"j1=$(sbatch --parsable {shlex.quote(lib_sh)})\n"
                      f"j2=$(sbatch --parsable --dependency=afterok:$j1 {shlex.quote(srch_sh)})\n"
@@ -991,7 +991,6 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
                      f'echo "both job ids -> {jobs_txt}  (watch both: watch_run.sh --all '
                      f'{os.path.abspath(out)})"\n'
                      f'echo "report will be {report}"\n')
-        os.chmod(submit, 0o755)
         print(f"  [sbatch] two-job chain: {lib_sh} -> {srch_sh}; submit with: bash {submit}")
         print(f"  [sbatch] --sbatch {sbatch} itself is NOT written for a library-free search: "
               f"submit.sh submits both jobs.")
@@ -1457,8 +1456,7 @@ def run_radiant_parallel(tools, params, files, fasta, out, threads, a, library=N
     chain. Emits scripts; the orchestrator submits them with dependencies."""
     os.makedirs(out, exist_ok=True)
     listing = os.path.join(out, "radiant_input_files.txt")
-    with open(listing, "w") as fh:
-        fh.write("\n".join(files) + "\n")
+    write_file(listing, "\n".join(files) + "\n")
     argv = [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                          "radiant_parallel.py"),
             "--runtime", tools.get("radiant_runtime") or "docker",
@@ -2451,9 +2449,7 @@ def run_fragpipe(cmd, bundle, params, files, fasta, out, threads, sbatch, queue=
         for n in info.get("notes", []):
             print(f"  [diatracer] {n}")
     else:
-        with open(manifest, "w") as fh:
-            for f in files:
-                fh.write(f"{os.path.abspath(f)}\t\t\t{dtype}\n")
+        write_file(manifest, "".join(f"{os.path.abspath(f)}\t\t\t{dtype}\n" for f in files))
     tools = os.environ.get("FRAGPIPE_TOOLS_FOLDER", "")
     tools_arg = f"--config-tools-folder {shlex.quote(tools)}" if tools else ""
     full = (f"{cmd} --headless --workflow {shlex.quote(params)} "
@@ -3074,7 +3070,10 @@ def emit_sbatch(path, command, out, threads, job, preamble="",
     lines = [
         "#!/bin/bash -l",
         f"#SBATCH --job-name={job}",
-        f"#SBATCH --output={os.path.join(out, job)}_%j.log",
+        # in double quotes: a session folder with a space made sbatch refuse the whole script
+        # ("Invalid directive found in batch script"); quoted, HIVE's SLURM accepts it and writes
+        # the log there (job 24808508, 2026-10-15). --out cannot hold a '"' (refuse_unsafe_path).
+        f'#SBATCH --output="{os.path.join(out, job)}_%j.log"',
         f"#SBATCH --cpus-per-task={threads}",
         f"#SBATCH --mem={mem}",
         f"#SBATCH --time={hours}:00:00",
@@ -3101,8 +3100,7 @@ def emit_sbatch(path, command, out, threads, job, preamble="",
             fran=not getattr(a_globals, "no_fran", False), fran_guarded=fran_guarded,
             fran_name=getattr(a_globals, "fran_name", None), qc=_qc_choice(a_globals),
             preflight=preflight)
-    with open(path, "w") as fh:
-        fh.write(script)
+    write_file(path, script, 0o755)
     print(f"  [sbatch] wrote {path} (partition={part or 'default'}, "
           f"account={acct or 'default'}, qos={q or 'default'}"
           f"{', requeue' if requeue else ''})"
@@ -3481,7 +3479,7 @@ def main():
     # always record what was run (engine + version + exact command) for reproducibility
     try:
         os.makedirs(a.out, exist_ok=True)
-        with open(os.path.join(a.out, "search_provenance.json"), "w") as fh:
+        with open_text(os.path.join(a.out, "search_provenance.json")) as fh:
             # Where the FULLY-resolved parameters are, and WHEN they exist -- as the generator
             # reports it, not assumed here. On the probe path the chain measures the scan
             # window at run time (step 1b) and only then writes the file, so recording it as

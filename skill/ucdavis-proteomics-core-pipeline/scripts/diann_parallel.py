@@ -44,6 +44,8 @@ from probe_window import RETRY_ON, FALLBACK_ON, EXIT_MEANING            # noqa: 
 # ONE definition of "this cfg searches DDA" (the flag estimate_params.py writes for DDA), and of
 # what an unset --window means under it.
 from estimate_params import DIANN_DDA_FLAG, DDA_WINDOW_NOTE, is_dda     # noqa: E402
+# Every step script, list and cfg is written without following a planted link (safe_write.py).
+from safe_write import write_file                                       # noqa: E402
 
 # The same SOP floor, keyed by the DIA-NN flag rather than by level, for the provenance records.
 SOP_MASS_ACC_FLAGS = {"--mass-acc": SOP_MASS_ACC["ms2_ppm"],
@@ -442,11 +444,9 @@ def write_cfg(cfg, dest, drop=()):
     reader treats quotes is not verified."""
     names = set(drop)
     special = re.compile(r"""[\s'"\\]|^#""")
-    with open(dest, "w") as fh:
-        for flag, vals in cfg_groups(cfg_tokens(cfg)):
-            if flag not in names:
-                fh.write(" ".join([flag] + [shlex.quote(v) if not v or special.search(v)
-                                            else v for v in vals]) + "\n")
+    write_file(dest, "".join(" ".join([flag] + [shlex.quote(v) if not v or special.search(v)
+                                                 else v for v in vals]) + "\n"
+                              for flag, vals in cfg_groups(cfg_tokens(cfg)) if flag not in names))
 
 
 def xic_flag(cfg):
@@ -1706,7 +1706,7 @@ def main():
     sys.stderr.write(input_links_note(links_plan, "diann_parallel"))
     originals, raws = raws, [linked.get(r, r) for r in raws]
     # file list (1 raw path per line) — array tasks index into it
-    open(os.path.join(out, "file_list.txt"), "w").write("\n".join(raws) + "\n")
+    write_file(os.path.join(out, "file_list.txt"), "\n".join(raws) + "\n")
     all_f = " ".join(f"--f {shlex.quote(r)}" for r in raws)   # quote — data paths may contain spaces
     array = f"0-{n-1}%{a.max_simultaneous}"
     seed = refuse_unsafe_path(os.path.abspath(a.seed_lib), "--seed-lib") if a.seed_lib else None
@@ -1764,7 +1764,7 @@ def main():
                                                     False if a.not_qc else None),
                                                 preflight=node_check).rstrip("\n")
         p = os.path.join(out, name)
-        open(p, "w").write(body + "\n"); os.chmod(p, 0o755); return name
+        write_file(p, body + "\n", 0o755); return name
 
     # array preamble: pick this task's raw file
     pick = ('FILE=$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" ' + f'"{D}/file_list.txt")\n'
