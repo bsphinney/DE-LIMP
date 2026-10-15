@@ -2141,9 +2141,14 @@ python3 scripts/normalization_check.py decide --check <S>/output/norm_check/norm
 The recommendation keeps the type's default unless that default's own volcano is clearly the
 worse one; the checks that tripped are the questions to ask. Never switch silently, either way.
 The final DE is held to the decision AND to the data it was made on (it refuses any other
-`--quantities`, and any other report or conditions — their sha256 is in the check), and records
-it in `de_provenance.json` `normalization_check` and the Methods. A DE without a decided check is
-a WARN in AUDIT.md, and `core_submission.py deliver` holds the delivery until step 8 is done
+`--quantities`, and any other report or conditions — their sha256 is in the check) AND to the
+model: all three DEs carry the same design flags (`--numeric-covariates`, `--block`,
+`--block-effect`, `--block-scope`, `--contrasts`). `normalization_check.py run` refuses two check
+DEs fitted with different designs or on other files and records their design (`check_design`);
+the final DE refuses another method, formula, numeric covariate or block (other contrasts: a
+warning; a check from before 2.12 records no design, said as NOT CHECKED — re-run the check to
+check it). It records all of it in `de_provenance.json` `normalization_check` and the Methods.
+A DE without a decided check is a WARN in AUDIT.md, and `core_submission.py deliver` holds the delivery until step 8 is done
 (a delivery meant to go without a DE — a QC report — is `deliver --mode no-de`, step 12b).
 A DE from **before 2.10** has no check record at all. Re-run step 8 on it, or, if Core staff
 decide it stands as it is, they record that with `python3 scripts/normalization_check.py
@@ -2185,7 +2190,7 @@ is blocked by run_de.R itself — random effect, every contrast from that fit �
 `--numeric-covariates Covariate1` to all three DEs (both check inputs and the final one): it is
 fitted as one slope shared by all groups, not a factor with a level per value. Never decided
 from the values; `Batch` is always a factor. A blank or non-number stops the run; a covariate
-that Group mostly explains is a `CAUTION` to raise with the user →
+that nearly matches the groups of a comparison is a `CAUTION`, naming it, to raise with the user →
 `references/de-analysis.md`, "Continuous covariates".
 **Keratin sample (step 3):** `run_de.R` reads it from the sidecar or `search_provenance.json`
 and keeps keratin as the analyte — nothing to pass. For a search that records neither (an older

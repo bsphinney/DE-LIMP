@@ -62,8 +62,12 @@ one contrast from this, and a spike at p = 1 in every p-value histogram. Now, pe
   counts, the figure captions and `reproducibility_log.R` all follow it. It applies to every
   `--method` and to blocked fits (technical replicates, `--block`).
 
-The DE-LIMP app recomputes its own tables from the session's model, which tests every protein
-in every contrast: its counts for such a contrast can differ slightly from the skill's tables.
+The DE-LIMP session (`DE-LIMP_session.rds`) follows the same rule (2.12): DE-LIMP draws its
+volcano and tables with `topTable()` from the session's fit, so in that fit an untested protein's
+`t`, `p.value` and `lods` are NA for the contrast (its moderated F too, when any contrast does not
+test it) and `not_measured` lists them. `topTable()`'s BH then runs over the tested proteins, as
+in `DE_*.csv`; DE-LIMP leaves NA p-values off the volcano and counts them as not significant.
+Its logFC stays as fitted.
 
 ## `--method dpc` (limpa DPC-Quant + limma) — DE-LIMP default, use with DIA-NN
 ```r
@@ -163,16 +167,25 @@ more distinct values, the error names the flag.
   block or technical replicates (`duplicateCorrelation` and the blocked fit use the same
   design). No group × covariate interaction is fitted: a slope that differs between groups is
   not modelled.
-- **Confounding is warned about.** When Group explains ≥ 80% of the covariate's variance
-  (R² of covariate ~ Group; variance-inflation factor ≥ 5), the run warns, `methods.txt` carries
-  a `CAUTION`, and the report a warning callout: the adjusted comparisons rest largely on the
-  fitted straight line, and if the covariate differs between groups *because of* the grouping,
-  adjusting for it removes part of the effect being tested. Ask whether it belongs in the model.
+- **Confounding is warned about, per contrast** (2.12). A comparison is flagged when, among the
+  samples of the groups it compares, the groups explain ≥ 80% of the covariate's variance (R² of
+  covariate ~ group within them; variance-inflation factor ≥ 5), when the design alone widens
+  its standard error ≥ √5 (2.24x, the same line), or when the compared groups' covariate values
+  do not overlap at all (the comparison is then an extrapolation along the slope). Per contrast,
+  not overall: with three or more groups a pair the covariate separates hides in a modest
+  overall R² (0.595 overall, 0.988 within the two compared groups, in the review's example). The
+  run warns, naming each flagged comparison and why; `methods.txt` carries a `CAUTION`, the report
+  a warning callout, the brief a Data Quality Note and AUDIT.md a WARN, all naming it: that
+  comparison rests largely on the fitted straight line, and if the covariate differs between the
+  groups *because of* the grouping, adjusting for it removes part of the effect being tested. Ask
+  whether it belongs in the model.
 - **Recorded** in `de_provenance.json` `covariates`: each term's `type` (`factor` with
   `n_levels`, or `numeric` with `source: --numeric-covariates`, `n_distinct`, `min`, `max`,
-  `group_r2`, `confounded`, and `se_inflation` — per contrast, the standard error with the
-  covariate over without it, from the design alone), `numeric_requested`, `absorbed_by_block`,
-  `model` and `warnings`. `methods.txt` has a `Covariates` line, the Methods paragraph and the
+  `group_r2` (overall), `confounded`, `confounded_contrasts`, `se_inflation` — per contrast, the
+  standard error with the covariate over without it, from the design alone — and `per_contrast`:
+  for each contrast the groups compared, `r2` within them, `overlap`, `se_inflation`,
+  `confounded` and `why`), `numeric_requested`, `absorbed_by_block`, `model`, the two thresholds
+  and `warnings`. `methods.txt` has a `Covariates` line, the Methods paragraph and the
   analysis brief a sentence (`make_methods.de_covariate_sentence`), the analysis page a callout,
   and `reproducibility_log.R` writes the values as numbers and fits `as.numeric(...)`.
 
@@ -402,7 +415,16 @@ turned into depletion. So the DE's input is a decision, made once and recorded:
    questions), a Core staff member chooses — never Claude (`decide --by <their HIVE login>
    --reason`, the login checked against the Core's staff list by `staff.py`) — and the final `run_de.R
    --normalization-check` refuses any other quantities, and any report or conditions other than
-   the ones checked (sha256 recorded). No silent switch in either direction. In a session that
+   the ones checked (sha256 recorded). It is held to the checked model too (2.12): run_de.R
+   records the design it was asked for before fitting (`design_request`: method, formula,
+   numeric covariates, block column/effect/scope, contrasts, the flags given) and the conditions'
+   sha256; `normalization_check.py run` refuses two check DEs whose designs differ or that read
+   another report or conditions file, and records `check_design`; the final DE passes its design
+   to `gate` (`--design-json`), which refuses another method, formula, numeric covariate or block
+   and warns on other contrasts (`normalization_check.design_match` in de_provenance.json). A
+   check from before 2.12 has no `check_design`: the final DE runs, says the design was NOT
+   CHECKED, and the Methods line carries `[confirm]`. The step-8 commands run_de.R prints carry
+   its design flags. No silent switch in either direction. In a session that
    records a type, `run_de.R` refuses a DE with neither `--normalization-check` nor
    `--check-input`; a DE without a decided check is a WARN in AUDIT.md and holds
    `core_submission.py deliver` (the second gate beside the QC one). A DE from before 2.10 (no

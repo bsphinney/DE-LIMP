@@ -13,9 +13,10 @@ Checks:
   replication       groups with <2 (FAIL) or <3 (WARN) replicates
   group_balance     very unequal group sizes (WARN)
   confounding       a covariate (Batch) perfectly confounded with Group (FAIL)
-  numeric_covariate a covariate fitted as a number (run_de.R --numeric-covariates) that Group
-                    explains most of (de_provenance.json `covariates`: its `confounded` flag and
-                    run_de.R's own caution, quoted) -- the comparisons are adjusted for it
+  numeric_covariate a covariate fitted as a number (run_de.R --numeric-covariates) that nearly
+                    matches the groups of a comparison (de_provenance.json `covariates`: its
+                    `confounded` flag, the comparisons in `confounded_contrasts`, and run_de.R's
+                    own caution naming them, quoted) -- those comparisons are adjusted for it
                     (WARN); PASS for one that is not; nothing without a numeric covariate
   acquisition_mix   DIA and DDA mixed in one analysis (FAIL)
   instrument_mix    >1 instrument model in one analysis — batch effect (WARN)
@@ -230,13 +231,23 @@ def audit_numeric_covariates(findings, prov):
         detail = {"column": col, "group_r2": t.get("group_r2"), "threshold": thr,
                   "se_inflation": t.get("se_inflation")}
         if t.get("confounded") is True:
-            # run_de.R's own caution, as it wrote it; composed from the term only when the
-            # record has none
+            # run_de.R's own caution, as it wrote it (naming each comparison whose groups the
+            # covariate nearly matches); composed from the term only when the record has none
+            pc = t.get("per_contrast") if isinstance(t.get("per_contrast"), dict) else {}
+            conf = [c for c in (t.get("confounded_contrasts") or []) if isinstance(pc.get(c), dict)]
+            detail["confounded_contrasts"] = conf
             caution = next((w for w in cautions if w.startswith(f"{col} ")), None) or (
-                f"{col} nearly matches the groups: Group explains {r2(t)} of its variance. The "
-                f"group comparisons are adjusted for it, so they rest largely on its fitted slope"
-                + (f", and their standard errors are up to {max(se.values()):.1f}x those without "
-                   f"it ({', '.join(f'{k} {v:.2f}x' for k, v in se.items())})" if se else "")
+                (f"{col} nearly matches the groups compared in "
+                 + ", and in ".join(f"{c} ({'; '.join(str(w) for w in pc[c].get('why') or [])})"
+                                    for c in conf)
+                 + f". {'That comparison is' if len(conf) == 1 else 'Those comparisons are'} "
+                   f"adjusted for it, so {'it rests' if len(conf) == 1 else 'they rest'} largely on "
+                   f"its fitted slope" if conf else
+                 f"{col} nearly matches the groups: Group explains {r2(t)} of its variance. The "
+                 f"group comparisons are adjusted for it, so they rest largely on its fitted slope"
+                 + (f", and the design alone widens their standard errors up to "
+                    f"{max(se.values()):.1f}x ({', '.join(f'{k} {v:.2f}x' for k, v in se.items())})"
+                    if se else ""))
                 + f". If {col} differs between the groups because of the grouping itself (a "
                   f"consequence of the treatment), adjusting for it removes part of the effect "
                   f"being tested: ask whether it belongs in the model.")
@@ -247,7 +258,7 @@ def audit_numeric_covariates(findings, prov):
             add(findings, "numeric_covariate", "PASS",
                 f"{col} was fitted as a number; Group explains {r2(t)} of its variance"
                 + (f" (cautioned from {thr * 100:.0f}%)" if isinstance(thr, (int, float)) else "")
-                + (f", and it widens the comparisons' standard errors by at most "
+                + (f", and the design alone widens the comparisons' standard errors by at most "
                    f"{max(se.values()):.2f}x" if se else "") + ".", detail)
 
 
