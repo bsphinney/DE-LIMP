@@ -44,6 +44,8 @@ from probe_window import RETRY_ON, FALLBACK_ON, EXIT_MEANING            # noqa: 
 # ONE definition of "this cfg searches DDA" (the flag estimate_params.py writes for DDA), and of
 # what an unset --window means under it.
 from estimate_params import DIANN_DDA_FLAG, DDA_WINDOW_NOTE, is_dda     # noqa: E402
+# Every step script, list and cfg is written without following a planted link (safe_write.py).
+from safe_write import write_file                                       # noqa: E402
 
 # The same SOP floor, keyed by the DIA-NN flag rather than by level, for the provenance records.
 SOP_MASS_ACC_FLAGS = {"--mass-acc": SOP_MASS_ACC["ms2_ppm"],
@@ -442,11 +444,9 @@ def write_cfg(cfg, dest, drop=()):
     reader treats quotes is not verified."""
     names = set(drop)
     special = re.compile(r"""[\s'"\\]|^#""")
-    with open(dest, "w") as fh:
-        for flag, vals in cfg_groups(cfg_tokens(cfg)):
-            if flag not in names:
-                fh.write(" ".join([flag] + [shlex.quote(v) if not v or special.search(v)
-                                            else v for v in vals]) + "\n")
+    write_file(dest, "".join(" ".join([flag] + [shlex.quote(v) if not v or special.search(v)
+                                                 else v for v in vals]) + "\n"
+                              for flag, vals in cfg_groups(cfg_tokens(cfg)) if flag not in names))
 
 
 def xic_flag(cfg):
@@ -1200,17 +1200,15 @@ def refuse_unsafe_path(path, flag="--out", prog="diann_parallel"):
 # "unrecognised option" for `--asp3_S3.mzML` and `--1/s1.mzML`, skipped `<d>/x_DIA` and
 # `<d>/plate`, and processed 1 file: the link. A '--' in a FOLDER is cut the same way. A single
 # '-' is harmless -- only '--' starts an option -- and every path this skill hands DIA-NN is
-# absolute, so a name that starts with one '-' never starts an argument. The other engines take
-# each path as one argument and are not affected.
-DIANN_OPTION_MARK = "--"
+# absolute, so a name that starts with one '-' never starts an argument. Sage, msconvert,
+# ThermoRawFileParser (-i=<path>), AlphaDIA and radiant_fulcrum take each path as one argument and
+# are not affected; FragPipe's own DIA-NN step is (run_search.refuse_fragpipe_dashed).
+# The mark, the flag and the renaming rule are defined once, in check_report_runs.py, beside the
+# other rules about run names; detect_acquisition.py and collect_conditions.py read them there.
+from check_report_runs import (DIANN_OPTION_MARK, RENAME_DASHED_FLAG, dashed,  # noqa: E402,F401
+                               dashed_names_text, renamed_dashed_name)
 # Inputs whose path holds '--' are searched through links in this folder of the search's --out.
 INPUT_LINKS_DIR = "input_links"
-RENAME_DASHED_FLAG = "--rename-dashed-runs"
-
-
-def dashed(path):
-    """True when DIA-NN would cut `path` into an option (see DIANN_OPTION_MARK)."""
-    return DIANN_OPTION_MARK in (path or "")
 
 
 def refuse_dashed_path(path, flag, prog="diann_parallel"):
@@ -1223,11 +1221,6 @@ def refuse_dashed_path(path, flag, prog="diann_parallel"):
                  f"happens). Use a path without '--': rename the folder, or link it under a name "
                  f"without one. Nothing was written or submitted.")
     return path
-
-
-def _undashed(name):
-    """A file name with every run of two or more '-' made one: 'a--b.d' -> 'a-b.d'."""
-    return re.sub(r"-{2,}", "-", name)
 
 
 def dashed_input_plan(files, out, rename=False):
@@ -1249,7 +1242,7 @@ def dashed_input_plan(files, out, rename=False):
         if not dashed(f):
             continue
         name = os.path.basename(f.rstrip("/"))
-        new = _undashed(name)
+        new = renamed_dashed_name(name)
         link = os.path.join(out, INPUT_LINKS_DIR, new)
         rec = {"original": f, "link": link, "run_name": run_name(link), "renamed": new != name}
         links.append(rec)
@@ -1270,8 +1263,8 @@ def dashed_input_plan(files, out, rename=False):
                    f"reads the rest of the name as an option and skips the run, then searches the "
                    f"others and exits 0 (DIA-NN 2.7.0: \"unrecognised option [--...]\", "
                    f"\"skipping ... - invalid raw MS data format\").\n"
-                   + "".join(f"  {r['original']}\n      would be searched as {r['run_name']}\n"
-                             for r in need_rename)
+                   + dashed_names_text([{"file": r["original"], "renamed_run_name": r["run_name"]}
+                                        for r in need_rename])
                    + f"The run has to be searched under another name, and conditions.csv names "
                      f"runs, so this is a choice to make: re-run with {RENAME_DASHED_FLAG} to "
                      f"search each one through a link under {os.path.join(out, INPUT_LINKS_DIR)} "
@@ -1713,7 +1706,7 @@ def main():
     sys.stderr.write(input_links_note(links_plan, "diann_parallel"))
     originals, raws = raws, [linked.get(r, r) for r in raws]
     # file list (1 raw path per line) — array tasks index into it
-    open(os.path.join(out, "file_list.txt"), "w").write("\n".join(raws) + "\n")
+    write_file(os.path.join(out, "file_list.txt"), "\n".join(raws) + "\n")
     all_f = " ".join(f"--f {shlex.quote(r)}" for r in raws)   # quote — data paths may contain spaces
     array = f"0-{n-1}%{a.max_simultaneous}"
     seed = refuse_unsafe_path(os.path.abspath(a.seed_lib), "--seed-lib") if a.seed_lib else None
@@ -1771,7 +1764,7 @@ def main():
                                                     False if a.not_qc else None),
                                                 preflight=node_check).rstrip("\n")
         p = os.path.join(out, name)
-        open(p, "w").write(body + "\n"); os.chmod(p, 0o755); return name
+        write_file(p, body + "\n", 0o755); return name
 
     # array preamble: pick this task's raw file
     pick = ('FILE=$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" ' + f'"{D}/file_list.txt")\n'

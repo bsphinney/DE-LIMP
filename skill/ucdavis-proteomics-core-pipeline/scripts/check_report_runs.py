@@ -32,6 +32,7 @@ Exit 0 when every input is present; 1 otherwise, with the missing runs named.
 import argparse
 import csv
 import os
+import re
 import sys
 
 # DIA-NN's main-report Run column is "raw file name without file path" (DIA-NN README,
@@ -44,6 +45,46 @@ def run_name(path):
     base = os.path.basename(str(path).replace("\\", "/").rstrip("/"))
     stem, ext = os.path.splitext(base)
     return stem if ext.lower() in _EXTS else base
+
+
+# DIA-NN reads '--' anywhere on its command line -- or in a --cfg file, which is how FragPipe hands
+# it the runs -- as the start of an option (the evidence is at diann_parallel.dashed_input_plan),
+# so an input whose FILE NAME holds one can be searched only under another name: a link named by
+# renamed_dashed_name(). THE rule, read by every step that names such a run: run_search.py /
+# diann_parallel.py --rename-dashed-runs name the link with it, detect_acquisition.py (step 2)
+# reports it, collect_conditions.py --rename-dashed-runs writes it into conditions.csv, and the
+# FragPipe route's refusal shows it.
+DIANN_OPTION_MARK = "--"
+RENAME_DASHED_FLAG = "--rename-dashed-runs"
+
+
+def dashed(path):
+    """True when DIA-NN would cut `path` into an option."""
+    return DIANN_OPTION_MARK in str(path or "")
+
+
+def renamed_dashed_name(name):
+    """A file (or run) name with every run of two or more '-' made one: 'a--b.d' -> 'a-b.d'."""
+    return re.sub(r"-{2,}", "-", name)
+
+
+def dashed_file_names(files):
+    """[{"file", "run_name", "renamed_run_name"}] for the inputs whose FILE NAME holds '--' -- the
+    run name each would get under --rename-dashed-runs (a '--' in a folder only is linked under
+    the same name, so it is not listed)."""
+    out = []
+    for f in files:
+        base = os.path.basename(str(f).replace("\\", "/").rstrip("/"))
+        if dashed(base):
+            out.append({"file": f, "run_name": run_name(f),
+                        "renamed_run_name": run_name(renamed_dashed_name(base))})
+    return out
+
+
+def dashed_names_text(recs):
+    """Each dashed input and the name it would be searched as, one pair per two lines."""
+    return "".join(f"  {r['file']}\n      would be searched as {r['renamed_run_name']}\n"
+                   for r in recs)
 
 
 def runs_from_parquet(report):
@@ -255,6 +296,21 @@ def why_missing(name, stats, stats_file):
     return f"  {name}: {seen} -- {load}, or it identified nothing in it."
 
 
+# What to do about a run the report does not hold -- the same for the single-shot search job and
+# the 5-step chain's step 5, which both run verify() after DIA-NN has written the report.
+# Re-running the job does not help (a resubmitted step 5 searches the same file list and fails the
+# same way), and a run cannot be dropped by editing file_list.txt: the step's list and count are
+# fixed when the chain is generated.
+MISSING_RUN_WHAT_TO_DO = (
+    "What to do -- do NOT resubmit this job, it fails the same way. The report was written "
+    "without the run(s) above ({report}). If DIA-NN read a run and found nothing in it (a blank, "
+    "a wash, a failed injection) and the user or Core staff agree it is not a sample: leave it out "
+    "of conditions.csv, go on with this report, and record the decision (log_decision.py) -- or "
+    "search again without it (run_search.py without that file) to have a run record that "
+    "matches. If DIA-NN could not load a run, or it is a real sample: check the file (copied "
+    "completely? readable?) and search again, or ask Core staff before any DE.")
+
+
 def verify(report, files, parquet_runs=runs_from_parquet):
     """(ok, message). `parquet_runs` is injectable so the stdlib route can be tested."""
     files = distinct_inputs(files)[0]           # a file listed twice was searched once
@@ -290,6 +346,7 @@ def verify(report, files, parquet_runs=runs_from_parquet):
         lines += [why_missing(m, stats, os.path.basename(sp)) for m in missing]
         lines.append("DIA-NN exits 0 either way, so this job fails rather than hand the DE "
                      "step fewer samples than were acquired.")
+        lines.append(MISSING_RUN_WHAT_TO_DO.format(report=report))
         return False, "\n".join(lines)
     return True, f"OK: report holds all {n} runs ({source})"
 

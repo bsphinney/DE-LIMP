@@ -3485,6 +3485,11 @@ def cmd_stage(a) -> int:
 # --------------------------------------------------------------------- conditions --
 def cmd_conditions(a) -> int:
     run_name = sibling("collect_conditions").run_name     # File.Name is defined in ONE place
+    if getattr(a, "rename_dashed_runs", False):
+        # the name a search with --rename-dashed-runs gives a run whose file name holds '--'
+        # (check_report_runs.renamed_dashed_name, the one rule), so the design matches the report
+        rename, raw_name = sibling("check_report_runs").renamed_dashed_name, run_name
+        run_name = lambda f: rename(raw_name(f))   # noqa: E731
     cc_script = os.path.join(HERE, "collect_conditions.py")
     s = load_summary(a.summary)
     try:
@@ -4982,6 +4987,10 @@ def main(argv=None) -> int:
                     help="a condition per REPLICATE (<sample>_mix_1 .. _n): auto reads it as "
                          "conditions + replicates only when unambiguous and asks; collapse / keep "
                          "is the user's answer (collect_conditions.py --replicate-labels)")
+    co.add_argument("--rename-dashed-runs", action="store_true",
+                    help="name each run whose file name holds '--' as run_search.py "
+                         "--rename-dashed-runs will search it (each run of dashes made one), so "
+                         "conditions.csv matches the report (detect_acquisition.py lists them)")
     co.set_defaults(func=cmd_conditions)
 
     de = sub.add_parser("deliver", help="ON HIVE: copy deliverables into the Bioshare share dir (dry run)")

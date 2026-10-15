@@ -30,6 +30,10 @@ Usage
 """
 import argparse, glob, json, os, shutil, sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# The job script and submit script are written without following a planted link (safe_write.py).
+from safe_write import write_file  # noqa: E402
+
 # documented defaults from `java -jar diatracer.jar --help` (diaTracer 2.2.1)
 DEFAULTS = {"-dI": "0.01", "-dR": "3", "-mC": "0.3",
             "-mF": "1", "-mO": "0.1", "-r": "0", "-rM": "500"}
@@ -71,8 +75,11 @@ def main():
                     help="cap concurrent tasks (0 = all at once)")
     a = ap.parse_args()
 
-    stage = os.path.abspath(a.stage)
-    out = os.path.abspath(a.out)
+    # both go into the job script inside double quotes (the log paths, `find "<stage>"`), so a
+    # `$(...)`, a backtick or a '"' in them is refused (diann_parallel.refuse_unsafe_path, the rule)
+    from diann_parallel import refuse_unsafe_path
+    stage = refuse_unsafe_path(os.path.abspath(a.stage), "--stage", "diatracer_parallel")
+    out = refuse_unsafe_path(os.path.abspath(a.out), "--out", "diatracer_parallel")
     os.makedirs(out, exist_ok=True)
 
     dfiles = sorted(glob.glob(os.path.join(stage, "*.d")))
@@ -128,8 +135,8 @@ def main():
 #SBATCH --cpus-per-task={a.threads}
 #SBATCH --mem={a.mem}G
 #SBATCH --time={a.time}:00:00
-{part}{acct}{qos}{rq}#SBATCH -o {out}/diatracer_%A_%a.log
-#SBATCH -e {out}/diatracer_%A_%a.log
+{part}{acct}{qos}{rq}#SBATCH -o "{out}/diatracer_%A_%a.log"
+#SBATCH -e "{out}/diatracer_%A_%a.log"
 set -uo pipefail
 
 mapfile -t DFILES < <(find "{stage}" -maxdepth 1 -name '*.d' | sort)
@@ -152,20 +159,13 @@ echo "=== finished $(date -u +%FT%TZ) exit=$rc ==="
 if [ -s "$OUT" ]; then ls -la "$OUT"; else echo "WARNING: expected output missing"; fi
 exit $rc
 """
-    sp = os.path.join(out, "diatracer_array.sbatch")
-    with open(sp, "w") as fh:
-        fh.write(script)
-    os.chmod(sp, 0o755)
-
-    sub = os.path.join(out, "submit_diatracer.sh")
-    with open(sub, "w") as fh:
-        fh.write(f"""#!/bin/bash
+    sp = write_file(os.path.join(out, "diatracer_array.sbatch"), script, 0o755)
+    sub = write_file(os.path.join(out, "submit_diatracer.sh"), f"""#!/bin/bash
 set -euo pipefail
 jid=$(sbatch --parsable "{sp}")
 echo "diatracer array = $jid"
 echo "watch: python3 checkpoint.py progress --session <session>"
-""")
-    os.chmod(sub, 0o755)
+""", 0o755)
 
     print(json.dumps({
         "stage": stage, "out": out, "jar": jar,

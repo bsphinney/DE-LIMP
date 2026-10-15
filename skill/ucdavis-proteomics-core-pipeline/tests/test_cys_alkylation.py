@@ -72,6 +72,18 @@ class EstimateParams(unittest.TestCase):
             self.assertIn("--unimod4\n", cfg)
             self.assertTrue(side["cys_alkylation"]["given"])
 
+    def test_a_yes_is_recorded_as_the_users_answer_not_a_default(self):
+        """Staff review of 2.12: step 3's "yes, reduced and alkylated" must be passed as
+        --cys-alkylation cam, and recorded as given -- only an unasked search is a DEFAULT."""
+        with tempfile.TemporaryDirectory() as d:
+            _, cfg, side = estimate(d, "diann", "--cys-alkylation", "cam")
+            self.assertIn("--unimod4\n", cfg)
+            self.assertEqual(side["cys_alkylation"]["value"], "cam")
+            self.assertTrue(side["cys_alkylation"]["given"])
+            self.assertTrue(side["cys_alkylation"]["source"].startswith("given (--cys-alkylation cam)"))
+            self.assertNotIn("DEFAULT", side["rationale"]["--unimod4"]["source"])
+            self.assertNotIn("DEFAULT", side["cys_alkylation"]["source"])
+
     def test_sage_none_has_no_static_cysteine(self):
         with tempfile.TemporaryDirectory() as d:
             path, text, side = estimate(d, "sage", "--cys-alkylation", "none")
@@ -123,6 +135,64 @@ def write_report(path, seqs):
     pq.write_table(pa.table({"Run": ["r1"] * len(seqs), "Protein.Group": ["P1"] * len(seqs),
                              "Precursor.Id": [f"{s}2" for s in seqs],
                              "Stripped.Sequence": seqs, "Q.Value": [0.001] * len(seqs)}), path)
+
+
+def write_runs_report(path, runs):
+    """{run: [sequences]} -> a DIA-NN-shaped report, every precursor at 1% FDR."""
+    rows = [(r, s) for r, seqs in runs.items() for s in seqs]
+    pq.write_table(pa.table({"Run": [r for r, _ in rows], "Protein.Group": ["P1"] * len(rows),
+                             "Precursor.Id": [f"{s}2" for _, s in rows],
+                             "Stripped.Sequence": [s for _, s in rows],
+                             "Q.Value": [0.001] * len(rows)}), path)
+
+
+@unittest.skipUnless(HAVE_PYARROW, "the cysteine check reads report.parquet with pyarrow")
+class SampleQualityPerRun(unittest.TestCase):
+    """Statistics review of 2.12: a cohort half of whose samples were never alkylated stays above
+    1% pooled, so each run is judged too."""
+
+    def search(self, d, runs):
+        params, _, _ = estimate(d, "diann", "--cys-alkylation", "cam")
+        report = os.path.join(d, "report.parquet")
+        write_runs_report(report, runs)
+        with open(os.path.join(d, "search_provenance.json"), "w") as fh:
+            json.dump({"engine": "diann", "params_file": params}, fh)
+        return report
+
+    def test_one_unalkylated_run_warns_though_the_pool_is_above_1pc(self):
+        alkylated = [f"PEPCTIDE{i}" for i in range(16)] + [f"PEPTIDE{i}" for i in range(184)]
+        not_alkylated = [f"PEPTIDEK{i}" for i in range(200)]
+        few = [f"PEPTIDER{i}" for i in range(20)]                  # no C, but only 20 IDs
+        with tempfile.TemporaryDirectory() as d:
+            rec = sq.cys_check(self.search(d, {"r1": alkylated, "r2": not_alkylated,
+                                               "blank": few}))
+            self.assertGreater(rec["fraction"], 0.01, "the pooled share hides it")
+            self.assertEqual(rec["status"], "WARN")
+            self.assertEqual(rec["low_runs"], ["r2"])
+            self.assertEqual(rec["too_few_to_judge"], ["blank"])
+            self.assertEqual(rec["per_run"]["r1"], {"n": 200, "n_cys": 16, "fraction": 0.08})
+            self.assertIn("1 of 3 runs have under 1%", rec["message"])
+            self.assertIn("r2 0.00% (0 of 200)", rec["message"])
+            self.assertIn("mixed prep", rec["message"])
+            self.assertIn("Not judged alone (under 100 identified precursors): blank", rec["message"])
+
+    def test_the_warning_names_other_agents_and_cysteine_poor_samples(self):
+        with tempfile.TemporaryDirectory() as d:
+            rec = sq.cys_check(self.search(d, {"r1": [f"PEPTIDEK{i}" for i in range(200)]}))
+            self.assertEqual(rec["status"], "WARN")
+            for words in ("N-ethylmaleimide (NEM) UniMod:108 +125.047679",
+                          "MMTS (methylthio) UniMod:39 +45.987721",
+                          "iodoacetic acid (carboxymethyl) UniMod:6 +58.005479",
+                          "4-vinylpyridine (pyridylethyl) UniMod:31 +105.057849",
+                          "--cys-alkylation none is the wrong fix", "histone or collagen"):
+                self.assertIn(words, rec["message"])
+
+    def test_every_run_alkylated_is_info(self):
+        alk = [f"PEPCTIDE{i}" for i in range(16)] + [f"PEPTIDE{i}" for i in range(184)]
+        with tempfile.TemporaryDirectory() as d:
+            rec = sq.cys_check(self.search(d, {"r1": alk, "r2": [x + "Z" for x in alk]}))
+            self.assertEqual(rec["status"], "INFO")
+            self.assertEqual(rec["low_runs"], [])
 
 
 @unittest.skipUnless(HAVE_PYARROW, "the cysteine check reads report.parquet with pyarrow")

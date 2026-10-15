@@ -731,7 +731,7 @@ what the runs said is checked for plausibility before it is pinned for the cohor
 | check | rule | why that number |
 |---|---|---|
 | band | MS2 **3–30 ppm**, MS1 **1.5–25 ppm** (`probe_window.MASS_ACC_BAND`) | all DIA-NN's own: its documented Orbitrap tiers span 4–15 ppm, it calibrates from `25 (MS1), 25 (MS2)`, and its runtime value for a 15k MS2 is 25. Ceiling = its widest number +20%; floor below its tightest tier (240k→4) |
-| agreement | per-run spread ≤ **50%** of the median (`MASS_ACC_MAX_SPREAD`) | the widest real disagreement measured here: the same three runs gave MS2 14/17/14 with the window auto (21%) and 12/17/14 with `--window 7` (36%), both reproducible. 35% would refuse the cohort this branch was validated on. **A wider spread only warns** (`mass_acc.warnings`, the job log) when the median is at or below the SOP floor and every run is inside the band: the floor is then pinned whatever the spread. 18 streptavidin pull-down runs measured MS2 20/24/10 (70%, median 20 = the floor) and were refused before 2.12; sparse controls of an enrichment cohort are a known benign cause, which the warning and the refusal both name |
+| agreement | per-run spread ≤ **50%** of the median (`MASS_ACC_MAX_SPREAD`) | the widest real disagreement measured here: the same three runs gave MS2 14/17/14 with the window auto (21%) and 12/17/14 with `--window 7` (36%), both reproducible. 35% would refuse the cohort this branch was validated on. **A wider spread only warns** (`mass_acc.warnings`, the job log) when the median is at or below the SOP floor, every run is inside the band and no run is above 1.5× the floor (`SPREAD_WARN_MAX_OVER_FLOOR`; MS2 30, MS1 10.5 ppm): the floor is then pinned whatever the spread. 18 streptavidin pull-down runs measured MS2 20/24/10 (70%, median 20 = the floor) and were refused before 2.12; sparse controls of an enrichment cohort are a known benign cause, which the warning and the refusal both name |
 | runs | at least **2** runs logged everything (`MASS_ACC_MIN_RUNS`) | one run is DIA-NN's own first-run auto mode — "use this mode for preliminary analyses only" — which measuring representative runs exists to replace, and a lone value agrees with itself. **A cohort of one run** (a one-file single-shot search) pins its own measurement (`mass_acc_min_runs`, `mass_acc.single_run_cohort`), band and floor as usual: before 2.12 every one-file search on a 15k-MS2 Orbitrap failed here after its library was built |
 
 Failing the band or the agreement check is a **refusal**: nothing reaches the cfg or
@@ -958,8 +958,13 @@ The `.quant` count says every run was searched; DIA-NN can still leave one out o
 (a run with nothing past the q-value filter, a path it could not parse) and exit 0. So after
 the report exists step 5 runs `check_report_runs.py --report <report> --files-list
 file_list.txt`, as the single-shot search job does, and fails naming each missing run and what
-`report.stats.tsv` shows about it. A blank or wash injection therefore fails step 5 too — leave
-it out of the inputs.
+`report.stats.tsv` shows about it. A blank or wash injection therefore fails step 5 too. The
+message ends with what to do (`check_report_runs.MISSING_RUN_WHAT_TO_DO`): **not** a resubmission
+— step 5's file list and run count are fixed when the chain is generated, so it fails the same
+way, and editing `file_list.txt` does not drop a run. The report is on disk without the run: a
+blank the user or Core staff agree is not a sample is left out of `conditions.csv` and the report
+used (the decision logged), or the cohort is searched again without it; a run DIA-NN could not
+load, or a real sample, goes back to the file and Core staff.
 
 Colliding run names are refused before any of that, at generation: `run_search.py` checks the
 input list it routes, and `diann_parallel.py` checks `--raw`/`--raw-list` in its own `main()`

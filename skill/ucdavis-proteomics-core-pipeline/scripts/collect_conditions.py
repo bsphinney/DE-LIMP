@@ -21,7 +21,8 @@ metadata CSV schema:  File.Name,Group[,Batch,Covariate1,Covariate2][,<subject co
   --map asks for confirmation (subject_ambiguous). --subject-column <header> confirms one.
 
 Modes:
-  # list the real run names the agent must map to
+  # list the real run names the agent must map to (add --rename-dashed-runs when the runs whose
+  # file name holds '--' will be searched that way: detect_acquisition.py's dashed_run_names)
   python3 collect_conditions.py --list-runs --from-dir /data --glob '*.d'
 
   # MAP an uploaded conditions file onto the real runs (CSV, TSV, or an Excel .xlsx such as
@@ -52,6 +53,8 @@ from collections import Counter, defaultdict
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # A delimited token has ONE definition: the one `core_submission.py locate` matches sample ids with.
 from core_submission import HT_TAIL, TIMS_NAME, match_space, token_pattern  # noqa: E402
+# The name a run whose file name holds '--' is searched under (run_search.py --rename-dashed-runs).
+from check_report_runs import RENAME_DASHED_FLAG, renamed_dashed_name  # noqa: E402
 
 COV_COLS = ["Batch", "Covariate1", "Covariate2"]
 # "unique id" / "sample id": the Core LIMS export (PROT_####.samples.<date>.xlsx: internal_id,
@@ -171,10 +174,14 @@ def runs_from_dir(d, pattern):
 
 
 def get_runs(a):
-    if a.from_report:  return runs_from_report(a.from_report)
-    if a.from_dir:     return runs_from_dir(a.from_dir, a.glob)
-    if a.runs:         return [r.strip() for r in a.runs.split(",") if r.strip()]
-    sys.exit("need --from-report, --from-dir, or --runs to know the real run names")
+    if a.from_report:  return runs_from_report(a.from_report)   # already the searched names
+    if a.from_dir:     runs = runs_from_dir(a.from_dir, a.glob)
+    elif a.runs:       runs = [r.strip() for r in a.runs.split(",") if r.strip()]
+    else: sys.exit("need --from-report, --from-dir, or --runs to know the real run names")
+    # --rename-dashed-runs: the names a search with that flag gives runs whose file name holds
+    # '--' (detect_acquisition.py lists them as dashed_run_names), so the design matches the report
+    return [renamed_dashed_name(r) for r in runs] if getattr(a, "rename_dashed_runs", False) \
+        else runs
 
 
 # ------------------------------------------------------------------ matching --
@@ -1072,6 +1079,16 @@ def validate(meta_path, report_path, excluded=()):
         extra = meta_runs - report_runs
         if missing: problems.append(f"{len(missing)} report runs missing from metadata: {sorted(missing)[:5]}...")
         if extra:   problems.append(f"{len(extra)} metadata rows not in report: {sorted(extra)[:5]}...")
+        # a design built from the raw names of runs searched with --rename-dashed-runs
+        renamed = sorted((m, renamed_dashed_name(m)) for m in extra
+                         if renamed_dashed_name(m) != m and renamed_dashed_name(m) in report_runs)
+        if renamed:
+            problems.append(f"{len(renamed)} metadata row(s) name a run whose file name holds "
+                            f"'--' by that name, but the search ran it as another ("
+                            f"{RENAME_DASHED_FLAG}): "
+                            + "; ".join(f"{m} -> {n}" for m, n in renamed)
+                            + f" -- set File.Name to the searched name (collect_conditions.py "
+                              f"--map ... {RENAME_DASHED_FLAG} writes it)")
         absent = sorted(excl - report_runs)
         if absent:
             problems.append(f"--exclude names {len(absent)} run(s) the report does not have: "
@@ -1126,6 +1143,10 @@ def main():
     ap.add_argument("--from-dir")
     ap.add_argument("--glob", default="*.raw")
     ap.add_argument("--runs", help="comma-separated run names (alternative to --from-*)")
+    ap.add_argument(RENAME_DASHED_FLAG, action="store_true",
+                    help="--from-dir/--runs: name each run whose file name holds '--' as a "
+                         "search with run_search.py --rename-dashed-runs will (each run of "
+                         "dashes made one), so conditions.csv matches the report")
     ap.add_argument("--covariates", default="", help="comma list for --emit-template, e.g. Batch,Covariate1")
     ap.add_argument("--sample-column", help="--map --from-file: the header the user said names the "
                     "samples, when two identifier columns name as many runs (sample_column_tie)")

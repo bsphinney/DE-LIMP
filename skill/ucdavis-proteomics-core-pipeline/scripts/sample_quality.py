@@ -115,6 +115,24 @@ PANEL_ORGANISMS = {9606: "Homo sapiens", 10090: "Mus musculus", 10116: "Rattus n
 # at 1%, between them.
 CYS_MIN_FRACTION = 0.01
 CYS_TYPICAL = "about 8% (7.8% on a Core S-Trap prep with DTT/IAA)"
+# ...per RUN too: a cohort half of whose samples were never alkylated stays above 1% pooled. A
+# run is judged only from this many identified precursors: at ~8% expected, 100 precursors with
+# no C at all happen by chance about once in 4,000 (0.92^100), 50 about once in 65.
+CYS_MIN_PRECURSORS_RUN = 100
+# Other cysteine alkylating agents, for which --cys-alkylation none is the WRONG fix: the C carries
+# their modification instead. Masses from UniMod (unimod.org/obo/unimod.obo, read 2026-10-15).
+CYS_OTHER_AGENTS = (("N-ethylmaleimide (NEM)", "UniMod:108", 125.047679),
+                    ("MMTS (methylthio)", "UniMod:39", 45.987721),
+                    ("iodoacetic acid (carboxymethyl)", "UniMod:6", 58.005479),
+                    ("4-vinylpyridine (pyridylethyl)", "UniMod:31", 105.057849))
+CYS_CAVEATS = (
+    "Before re-searching, check two things. Another alkylating agent -- "
+    + ", ".join(f"{n} {u} +{m}" for n, u, m in CYS_OTHER_AGENTS)
+    + " -- also leaves no carbamidomethyl-C, and there --cys-alkylation none is the wrong fix: "
+      "search with that fixed modification instead (DIA-NN: estimate_params.py --cys-alkylation "
+      "none --overrides '{\"--fixed-mod\": \"<UniMod:n>,<mass>,C\"}'). And a protein mix "
+      "naturally poor in cysteine (histone or collagen-rich preps) can fall under 1% when it was "
+      "alkylated.")
 
 
 def report_params(report):
@@ -134,15 +152,19 @@ def report_params(report):
 
 
 def cys_check(report, params=None):
-    """The share of identified precursors (Q.Value <= 0.01) with a cysteine, and whether the
-    search fixed carbamidomethyl on it (estimate_params.cam_searched).
+    """The share of identified precursors (Q.Value <= 0.01) with a cysteine -- over the whole
+    report and in each run -- and whether the search fixed carbamidomethyl on it
+    (estimate_params.cam_searched).
 
-    -> {"status": WARN | INFO | NOT_RUN, "message", "fraction", "n_cys", "n", "cam_searched",
+    -> {"status": WARN | INFO | NOT_RUN, "message", "fraction", "n_cys", "n", "per_run" {run:
+    {"n", "n_cys", "fraction"}}, "low_runs" [run], "too_few_to_judge" [run], "cam_searched",
     "params"}. WARN when carbamidomethyl was fixed and under CYS_MIN_FRACTION of the precursors
-    hold a C: the samples were probably not reduced and alkylated."""
+    hold a C, pooled or in any run with at least CYS_MIN_PRECURSORS_RUN of them: those samples
+    were probably not reduced and alkylated."""
     rec = {"status": "NOT_RUN", "message": None, "fraction": None, "n_cys": None, "n": None,
+           "per_run": {}, "low_runs": [], "too_few_to_judge": [],
            "cam_searched": None, "params": params or report_params(report),
-           "threshold": CYS_MIN_FRACTION}
+           "threshold": CYS_MIN_FRACTION, "min_precursors_per_run": CYS_MIN_PRECURSORS_RUN}
     try:
         import pyarrow.parquet as pq
     except ImportError:
@@ -153,35 +175,59 @@ def cys_check(report, params=None):
         rec["message"] = ("cysteine check not run: the report has no Stripped.Sequence column "
                           "(not a DIA-NN report)")
         return rec
-    cols = ["Stripped.Sequence"] + [c for c in ("Precursor.Id", "Q.Value") if c in names]
+    cols = ["Stripped.Sequence"] + [c for c in ("Precursor.Id", "Q.Value", "Run") if c in names]
     t = pq.read_table(report, columns=cols)
     seqs = t.column("Stripped.Sequence").to_pylist()
     ids = t.column("Precursor.Id").to_pylist() if "Precursor.Id" in cols else seqs
     qs = t.column("Q.Value").to_pylist() if "Q.Value" in cols else [0.0] * len(seqs)
-    found = {}
-    for seq, pid, q in zip(seqs, ids, qs):
+    runs = t.column("Run").to_pylist() if "Run" in cols else [None] * len(seqs)
+    found, by_run = {}, {}
+    for seq, pid, q, run in zip(seqs, ids, qs, runs):
         if seq and (q is None or q <= 0.01):
             found[pid] = "C" in str(seq)
+            if run is not None:
+                by_run.setdefault(str(run), {})[pid] = found[pid]
     if not found:
         rec["message"] = "cysteine check not run: the report holds no identified precursor"
         return rec
     from estimate_params import cam_searched
     rec.update(n=len(found), n_cys=sum(found.values()))
     rec["fraction"] = rec["n_cys"] / rec["n"]
+    for run, hits in sorted(by_run.items()):
+        rec["per_run"][run] = {"n": len(hits), "n_cys": sum(hits.values()),
+                               "fraction": sum(hits.values()) / len(hits)}
+        if len(hits) < CYS_MIN_PRECURSORS_RUN:
+            rec["too_few_to_judge"].append(run)
+        elif rec["per_run"][run]["fraction"] < CYS_MIN_FRACTION:
+            rec["low_runs"].append(run)
     rec["cam_searched"] = cam_searched(rec["params"]) if rec["params"] else None
     share = (f"{rec['fraction']:.2%} of the identified precursors contain a cysteine "
              f"({rec['n_cys']} of {rec['n']})")
-    low = rec["fraction"] < CYS_MIN_FRACTION
-    if low and rec["cam_searched"]:
+    low_runs = "; ".join(f"{r} {rec['per_run'][r]['fraction']:.2%} "
+                         f"({rec['per_run'][r]['n_cys']} of {rec['per_run'][r]['n']})"
+                         for r in rec["low_runs"])
+    pooled_low = rec["fraction"] < CYS_MIN_FRACTION
+    if (pooled_low or rec["low_runs"]) and rec["cam_searched"]:
         rec["status"] = "WARN"
-        rec["message"] = (
-            f"CYSTEINE: only {share}, and the search fixed carbamidomethyl on every C "
-            f"({os.path.basename(rec['params'])}). A reduced and alkylated sample gives "
-            f"{CYS_TYPICAL}. Under {CYS_MIN_FRACTION:.0%} usually means the samples were NOT "
-            "reduced and alkylated -- common for on-bead, IP and pull-down digests -- so no "
-            "cysteine peptide could be identified. Fix: confirm the prep with the lab; if it had no "
-            "reduction/alkylation, re-run estimate_params.py with --cys-alkylation none and "
-            "search again.")
+        fixed = (f"the search fixed carbamidomethyl on every C "
+                 f"({os.path.basename(rec['params'])})")
+        if pooled_low:
+            what = (f"only {share}, and {fixed}"
+                    + (f" (lowest runs: {low_runs})" if rec["low_runs"] else "")
+                    + f". A reduced and alkylated sample gives {CYS_TYPICAL}. Under "
+                      f"{CYS_MIN_FRACTION:.0%} usually means the samples were NOT reduced and "
+                      "alkylated -- common for on-bead, IP and pull-down digests -- so no "
+                      "cysteine peptide could be identified.")
+        else:
+            what = (f"{len(rec['low_runs'])} of {len(rec['per_run'])} runs have under "
+                    f"{CYS_MIN_FRACTION:.0%} of their identified precursors with a cysteine "
+                    f"({low_runs}), though {share} overall, and {fixed}. Those samples were "
+                    "probably NOT reduced and alkylated while the others were -- a mixed prep "
+                    "-- so their cysteine peptides could not be identified.")
+        rec["message"] = (f"CYSTEINE: {what} Fix: confirm the prep with the lab; if it had no "
+                          "reduction/alkylation, re-run estimate_params.py with --cys-alkylation "
+                          "none and search again (a mixed cohort: search the two preps "
+                          f"separately). {CYS_CAVEATS}")
     else:
         rec["status"] = "INFO"
         how = {True: "the search fixed carbamidomethyl on C",
@@ -189,7 +235,12 @@ def cys_check(report, params=None):
                None: "the search parameters were not found, so whether carbamidomethyl was fixed "
                      "is unknown (pass --params)"}[rec["cam_searched"]]
         rec["message"] = (f"{share[0].upper()}{share[1:]}; {how}. A reduced and alkylated sample "
-                          f"searched with fixed carbamidomethyl gives {CYS_TYPICAL}.")
+                          f"searched with fixed carbamidomethyl gives {CYS_TYPICAL}."
+                          + (f" Runs under {CYS_MIN_FRACTION:.0%}: {low_runs}." if rec["low_runs"]
+                             else ""))
+    if rec["too_few_to_judge"]:
+        rec["message"] += (f" Not judged alone (under {CYS_MIN_PRECURSORS_RUN} identified "
+                           f"precursors): {', '.join(rec['too_few_to_judge'])}.")
     return rec
 
 

@@ -74,6 +74,8 @@ from bruker_method import ms1_acq_range  # noqa: E402
 from thermo_resolution import PYTHONNET_MISSING  # noqa: E402
 # When each run was acquired, and which time zone that is: the one reader (qc_bracket.py's too).
 import acq_time  # noqa: E402
+# The name a run whose file name holds '--' is searched under: the one rule (run_search.py too).
+from check_report_runs import RENAME_DASHED_FLAG, dashed_file_names  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Instrument extraction (PLAN.md §7d) — mirrors DE-LIMP R/helpers_instrument.R.
@@ -1622,6 +1624,16 @@ def login_node_refusal(n_raw):
         f"({LOGIN_NODE_MAX_RAW} or fewer need no flag).")
 
 
+def dashed_warning(rec):
+    """The warning for an input whose file name holds '--' (check_report_runs.dashed_file_names)."""
+    return (f"its file name holds '--', which DIA-NN reads as the start of an option (quoted or "
+            f"not), so DIA-NN -- and FragPipe's DIA-NN step -- cannot search it under its own "
+            f"name: run_search.py {RENAME_DASHED_FLAG} searches it as "
+            f"'{rec['renamed_run_name']}' (Sage is not affected). Decide it now with the user or "
+            f"Core staff, build conditions.csv with that name (collect_conditions.py "
+            f"{RENAME_DASHED_FLAG}), and pass {RENAME_DASHED_FLAG} to run_search.py at step 7")
+
+
 def main(argv):
     usage = (f"usage: detect_acquisition.py [{ALLOW_LOGIN_NODE}] FILE [FILE ...]\n"
              f"       detect_acquisition.py {CHECK_READER}")
@@ -1690,6 +1702,13 @@ def main(argv):
     except Exception as e:
         res = resolution_failed(results, f"the resolution reader failed ({type(e).__name__}: "
                                          f"{e}), so it was not read")
+    # A '--' in a file name, said now, at step 2: the run is searched under another name, and
+    # conditions.csv (step 3) has to carry that name, not the one on disk.
+    dashed_runs = dashed_file_names([r["file"] for r in results])
+    by_file = {d["file"]: d for d in dashed_runs}
+    for r in results:
+        if r["file"] in by_file:
+            r.setdefault("warnings", []).append(dashed_warning(by_file[r["file"]]))
     for r in results:
         for w in r.get("warnings") or []:
             w = CANNOT_START_SEE_ABOVE if cannot_start and w == cannot_start else w
@@ -1747,6 +1766,10 @@ def main(argv):
         # null, or the Orbitrap files whose resolution could not be read: ASK the user before
         # step 6b (see RESOLUTION_ASK) -- an instruction, not a problem with the read
         "orbitrap_resolution_unknown": res["orbitrap_resolution_unknown"],
+        # [{file, run_name, renamed_run_name}]: inputs whose FILE NAME holds '--', which DIA-NN
+        # can search only under renamed_run_name (run_search.py --rename-dashed-runs); each also
+        # has a warning in files[]. Build conditions.csv with these names (step 3).
+        "dashed_run_names": dashed_runs,
         # No top-level list of problem files: files[].warnings is the one place a problem is
         # reported, whichever reader found it (a vendor-specific list reads "nothing wrong"
         # whenever the problem is another vendor's). tdf status: files[].tdf_integrity.
