@@ -530,6 +530,11 @@ def read_design(path, channels=None, comparisons=None, report_runs=None):
                                "DEFAULT, not user-confirmed: every pair of groups, the group in "
                                "the heavier channel over the lighter"),
         "label_check_runs": sorted(checks), "unused_runs": unused,
+        # the same, flat: one row per run and channel (what run_silac.R reads)
+        "assignments": [{"Run": r, "Replicate": e["replicate"], "Channel": ch, "Group": g,
+                         "role": "ratio" if r in mixed else
+                                 "label_check" if r in checks else "unused"}
+                        for r, e in runs.items() for ch, g in e["channels"].items()],
     }
 
 
@@ -556,6 +561,7 @@ def main(argv=None):
     d = sub.add_parser("design", help="validate silac_design.csv (one row per run and channel)")
     d.add_argument("--validate", required=True, metavar="CSV")
     d.add_argument("--against", help="the report: every run in it needs rows, and every row a run")
+    d.add_argument("--runs-file", help="the report's runs, one per line (instead of --against)")
     d.add_argument("--channels", help="the search's channels, lightest first, e.g. L,M,H")
     d.add_argument("--comparisons", help="'A-B,C-B' (A over B); default every pair")
     d.add_argument("--json", action="store_true", help="print the normalised design as JSON")
@@ -587,7 +593,9 @@ def main(argv=None):
         return 1 if probs else 0
     # design
     try:
-        runs = report_runs(a.against) if a.against else None
+        runs = (report_runs(a.against) if a.against else
+                [x.strip() for x in open(a.runs_file, encoding="utf-8") if x.strip()]
+                if a.runs_file else None)
         chans = [x.strip() for x in a.channels.split(",")] if a.channels else None
         des = read_design(a.validate, chans, a.comparisons, runs)
     except SilacError as e:
