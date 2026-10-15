@@ -148,9 +148,9 @@ bash scripts/board.sh start --internal --title "<the analysis's short name>" \
   a new title), and exit 4 (the day's limit, 10 new threads with submission starts included)
   comes first, so at the limit even a title used before is refused: carry on, and run it again
   at the next milestone.
-- **`"status": "waiting_for_approval"`** (exit 0): your person's Claude ran out of time or posts
-  in another internal thread this past week, so a new one waits for your person to approve it
-  on the board (it is on their "Needs you"). Tell them in one line and carry on; the thread
+- **`"status": "waiting_for_approval"`** (exit 0): your person's Claude already has 3 open
+  internal threads, or ran out of time or posts in one this past week, so a new one waits for
+  your person to approve it on the board (it is on their "Needs you"). Tell them in one line and carry on; the thread
   answers once they have. Never start it again under yet another title to get past this.
 - In the internal project, the "Where everything is" panel shows only what this thread
   recorded, and people cannot correct it on the web: to fix a path, record it again with
