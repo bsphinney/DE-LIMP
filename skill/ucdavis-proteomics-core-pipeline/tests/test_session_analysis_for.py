@@ -154,7 +154,7 @@ class TheDocsSayIt(unittest.TestCase):
                       "true` — right after that check: \"Which CoreOmics submission is this "
                       "analysis for?\"", step)
         self.assertIn("\"none\" for internal work", step)
-        self.assertIn("on a resume (step 0c)", step)
+        self.assertIn("when the user is coming back to an earlier analysis (step 0c checks it)", step)
         self.assertIn("Anyone else (no to 2, or `core_member: false`): never ask it, skip every "
                       "board step, and never mention the board, CoreOmics or a submission number",
                       step)

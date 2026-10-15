@@ -140,6 +140,8 @@ class ReferenceMatchesTheClient(unittest.TestCase):
                 self.assertNotRegex(raw, r'--(?:title|goal|project-title|text) "', "free text in double quotes")
                 if args.cmd == "post":
                     self.assertEqual((args.text, args.body_file), (None, "-"), "a post goes on stdin")
+                if args.cmd == "job":
+                    self.assertIsNone(args.text, "a job's note goes on stdin (--body-file -)")
                 # Brett, 2026-10-15: the go-ahead in the chat starts a search; nothing is asked first
                 if args.cmd == "job" and args.status == "submitted":
                     self.assertEqual(getattr(args, "go_ahead", None), "chat", raw)

@@ -134,13 +134,14 @@ Code on HIVE. Ask two questions, verify, and ask Core staff a third:
    after that check: "Which CoreOmics submission is this analysis for?"** A number (807 or
    PROT_0807), several numbers when the analysis combines submissions, or "none" for internal
    work (a method test, QC, training, a tool comparison). Skip it when they already said (the
-   request names a submission, or says it is a method test) and on a resume (step 0c). Every
-   analysis by Core staff goes on the Core Project Board before its long steps: a number → step
-   1c, internal work → step 1. Pass the answer to `session.py init` at step 3b: `--submission
-   PROT_0807` (once per number, the main one first) or `--internal '<its title on the board>'`.
-   → `references/board.md` section 2. **Anyone else (no to 2, or `core_member: false`): never
-   ask it, skip every board step, and never mention the board, CoreOmics or a submission
-   number** (`check_access.sh` then says `coreomics_runs_on: none`).
+   request names a submission, or says it is a method test) and when the user is coming back to
+   an earlier analysis (step 0c checks it). Every analysis by Core staff goes on the Core
+   Project Board before its long steps: a number → step 1c, internal work → step 1. Pass the
+   answer to `session.py init` at step 3b: `--submission PROT_0807` (once per number, the main
+   one first) or `--internal '<its title on the board>'`. → `references/board.md` section 2.
+   **Anyone else (no to 2, or `core_member: false`): never ask it, skip every board step, and
+   never mention the board, CoreOmics or a submission number** (`check_access.sh` then says
+   `coreomics_runs_on: none`).
 
 Verify (don't just trust the answers):
 ```
@@ -661,7 +662,8 @@ submission, the same path locally and on HIVE (`~/core/PROT_0807`).
      --out ~/core/PROT_0807/conditions.csv`. Ask **only** if `needs_user_input` — and then
      exactly its `questions` (a condition per replicate is answered by re-running with
      `--replicate-labels collapse|keep`). Put the final CSV back: `--put
-     ~/core/PROT_0807/conditions.csv "$S/input/"`.
+     ~/core/PROT_0807/conditions.csv "$S/input/"`. No usable local Python: the same on HIVE
+     through `hive_exec.sh`, with `--out "$S/input/conditions.csv"` and nothing to put back.
    - **Organism:** `organism_as_submitted` is the submitter's free text. Put it to the staff
      member as the proposed answer and get it confirmed — golden rule #4 still applies.
    - **On HIVE in `$S`:** search, DE, figures, audit, `sample_quality.py`, the QC check

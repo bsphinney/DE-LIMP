@@ -42,13 +42,13 @@ Microsoft Store alias). With no usable local Python at all (step 0a's `local_pyt
 false`), run it on HIVE: `bash scripts/hive_exec.sh 'bash ~/proteomics-pipeline/scripts/board.sh
 <command>'`. The key then lives in their HIVE home, which is just as private.
 
-**Text on a command line** (`--title`, `--goal`, a job's `--text`): the shell reads it, and over
+**Text on a command line** (`--title`, `--goal`, `--project-title`): the shell reads it, and over
 `hive_exec.sh` HIVE's shell reads it a second time, so a backtick or `$(...)` in it runs as a
 command. On this computer, put it in single quotes with no `'` in it. Through `hive_exec.sh`,
 where the whole command is already in single quotes, put it in double quotes and use none of
-`$` `` ` `` `\` `"` `'` in it (write "dollars"; leave quotation marks out). **A post never goes
-on the command line**: write it to a file with your file-writing tool, never through the shell,
-and send it on standard input with `--body-file -`:
+`$` `` ` `` `\` `"` `'` in it (write "dollars"; leave quotation marks out). **A post or a job's
+note never goes on the command line**: write it to a file with your file-writing tool, never
+through the shell, and send it on standard input with `--body-file -`:
 
 ```
 bash scripts/board.sh post THREAD --kind finding --body-file - < post.txt
@@ -216,8 +216,8 @@ SKILL.md names each row at the step where it happens ("Core staff: board.md §3 
 | Row | When | Command |
 |---|---|---|
 | session made | step 1c.7 (a submission) or 3b (internal work), right after `session.py init` | `where THREAD --raw-data <raw folder> --session-folder "$S"` |
-| search submitted | step 7, right after `submit.sh` or `sbatch` has submitted the search | `job THREAD --slurm-id <first job id> --status submitted --step 1/N --go-ahead chat --text '<what was submitted, one line>'`, then `where THREAD --search-output <the search's out dir, its real path> --search-engine diann --fran-handover running` |
-| search finished | step 7b, once its last job has ended | `job THREAD --slurm-id <the same first job id> --status done --step N/N` (or `--status failed --text '<why, one line>'`) |
+| search submitted | step 7, right after `submit.sh` or `sbatch` has submitted the search | `job THREAD --slurm-id <first job id> --status submitted --step 1/N --go-ahead chat --body-file - < note.txt` (the note: what was submitted, one line), then `where THREAD --search-output <the search's out dir, its real path> --search-engine diann --fran-handover running` |
+| search finished | step 7b, once its last job has ended | `job THREAD --slurm-id <the same first job id> --status done --step N/N`, or `job THREAD --slurm-id <the same first job id> --status failed --step N/N --body-file - < note.txt` (the note: why, one line) |
 | FRAN hand-over | step 7c, once per search folder | `where THREAD --search-output <the search's out dir, its real path> --search-engine diann --fran-handover <status>` |
 | QC | step 8e (a submission or an HT plate; internal work has none) | on HIVE, where the record is, with nothing to copy: `bash scripts/hive_exec.sh "bash ~/proteomics-pipeline/scripts/board.sh qc THREAD --from $S/logs/qc_bracket.json"`; with the board on this computer, pull it first: `bash scripts/hive_exec.sh --get "$S/logs/qc_bracket.json" ~/core/PROT_0807/`, then `qc THREAD --from ~/core/PROT_0807/qc_bracket.json` |
 | results ready | step 9, and each time a result is redone | `where THREAD --report <the analysis report's path in "$S"> --extra "DE tables=<its tables folder in "$S">"`, then `post THREAD --kind finding --body-file -` (the protein and DE counts, and anything odd; for internal work, what the test found) |
@@ -232,8 +232,8 @@ hand-over, "results ready" and "finished".
 threads get only the three records of section 2.
 
 **The "search submitted" row.** Your person's go-ahead in this conversation started the search
-(`--go-ahead chat`); the board asks nothing more. Send it right after `submit.sh` (or `sbatch`)
-has printed the job ids.
+(`--go-ahead chat`); the board asks nothing more, and writes that sentence on the job itself.
+Send it right after `submit.sh` (or `sbatch`) has printed the job ids.
 - `--slurm-id` is the first id in the search's `jobs.txt` (`submit.sh` writes every id there,
   one per line), or the id `sbatch` printed for a single `job.sh`. The later records of the
   same search name the same id.
@@ -241,10 +241,15 @@ has printed the job ids.
   to 6 for the parallel chain), 1 for a single `job.sh`. The finished record is `--step N/N`.
 - `--cpu-hours` only when a script printed a CPU-hour estimate for the search; never work one
   out yourself. None is printed today, so it is left out.
-- `--text`: what was submitted, in one line (`DIA-NN chain, 24 files`), under the command-line
-  text rule above.
-- If the board refuses the record, do not send that search's later statuses; mention the search
-  in the delivery summary instead.
+- The note (on standard input, at most 500 characters) says only what was submitted, in one
+  line (`DIA-NN chain, 24 files`).
+- `--go-ahead chat` goes on that first record only, never on a later status (exit 2). It is a
+  counted post, so the one-minute gap applies (exit 4). Later statuses only move forward; a note
+  on one sent within a minute of your last post is dropped (`text_dropped: true`) while the
+  status still goes in.
+- A thread at the Talk level refuses jobs (exit 3 `level_forbids_jobs`); the threads `start`
+  makes are at the Analyze level. If the board refuses the record, do not send that search's
+  later statuses; mention the search in the delivery summary instead.
 
 **The FRAN hand-over row.** The skill hands each finished search to FRAN itself (step 7c); this
 tells the board, so the project's FRAN panel shows "Handed to FRAN" (or why it was kept out)
