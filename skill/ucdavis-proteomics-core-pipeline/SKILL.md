@@ -710,6 +710,15 @@ Returns per-file `acquisition` (DIA/DDA/unknown) + `confidence`, plus an overall
 — mixed/unknown/low-confidence must not silently pick an engine.
 **Tell the user what every file's `warnings` say** (also printed to stderr; any warning
 sets `needs_confirmation`).
+**A file name with `--` in it (`dashed_run_names`).** DIA-NN reads `--` as the start of an
+option, quoted or not, so such a run can be searched only under another name, its
+`renamed_run_name` (each run of dashes made one; Sage is not affected). Decide it **now**, with
+the user (Core staff for a submission) — the run keeps its data, only its name changes. Then
+build `conditions.csv` with the new names: `collect_conditions.py … --rename-dashed-runs` (step 3),
+or `core_submission.py conditions … --rename-dashed-runs` for a submission (re-run it if step 1c
+already built the CSV); and pass `--rename-dashed-runs` to `run_search.py` at step 7.
+`collect_conditions.py --validate` names any row still holding the raw name. FragPipe's DIA-NN
+route cannot rename and refuses such a run.
 Thermo `.raw` is read through **ThermoRawFileParser**, looked for in this order:
 `$THERMORAWFILEPARSER` (a whole command, e.g. `"dotnet …/ThermoRawFileParser.dll"`), PATH,
 the pipeline env (`setup.sh` installs bioconda's self-contained build there), then
@@ -912,7 +921,8 @@ python3 scripts/fetch_fasta.py resolve --organism "<what they said>"   # or --ta
   the Core's LIMS export `PROT_####.samples.<date>.xlsx` included, read without openpyxl).
   Don't make them hand-fill a template.
 
-First get the real run names the conditions must map to:
+First get the real run names the conditions must map to (add `--rename-dashed-runs` here and to
+`--map` when step 2 listed `dashed_run_names`, so the CSV carries the names the search will use):
 ```
 python3 scripts/collect_conditions.py --list-runs --from-dir /path/to/raw --glob '*.d'
 ```
@@ -1544,11 +1554,13 @@ python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \
 - **A path with `--` in it (DIA-NN).** DIA-NN cuts its command line at every `--`, quoted or
   not, so such a run is skipped and the search goes on without it. A run whose *folder* holds
   `--` is searched through a link in `<out>/input_links/` with the same file name (nothing
-  changes downstream). A run whose *file name* holds `--` is **refused**, with the name it would
-  be searched as: tell the user, re-run with `--rename-dashed-runs`, and use that name as its
-  `File.Name` in `conditions.csv`. An `--out`/`--fasta`/`--params` with `--` is refused. Either
-  way, a DIA-NN search **fails** unless its report holds every input run (`check_report_runs.py`,
-  in the single-shot search job and the chain's step 5).
+  changes downstream). A run whose *file name* holds `--` is **refused** unless
+  `--rename-dashed-runs` is given — decided at step 2 (`dashed_run_names`), with `conditions.csv`
+  built on the new names. An `--out`/`--fasta`/`--params` with `--` is refused, and so is any
+  `--` path DIA-NN would get on the FragPipe route (no renaming there). A DIA-NN search
+  **fails** unless its report holds every input run (`check_report_runs.py`, in the single-shot
+  search job and the chain's step 5); **do not resubmit** it — the message says what to do (a
+  blank the user agrees to leave out: drop it from `conditions.csv` and use the report).
 - **Keratin sample (step 3) → `--keratin-sample`.** The search is then REFUSED, before
   anything is written or submitted, if `--fasta` still holds a keratin-family `Cont_` entry;
   the message prints the `fetch_fasta.py fetch … --keratin-sample` command to rebuild it. A

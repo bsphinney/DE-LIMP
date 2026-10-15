@@ -246,7 +246,18 @@ keeps its name; one whose **file name** holds `--` is refused with the name it w
 `--rename-dashed-runs` (the link is then named with each run of dashes made one, and
 `conditions.csv` must use that name). `--out`, `--fasta`, `--params`/`--cfg` and a library with
 `--` are refused. `search_provenance.json` keeps the inputs as given in `files` and each link in
-`input_links`. The other engines take each path as one argument and are not affected.
+`input_links`. `detect_acquisition.py` (step 2) already lists every input whose file name holds
+`--` (`dashed_run_names`, with the name it would get), so the rename is decided before
+`conditions.csv` is built (`collect_conditions.py` / `core_submission.py conditions
+--rename-dashed-runs`; the one rule is `check_report_runs.renamed_dashed_name`). Sage, AlphaDIA,
+Radiant and the converters take each path as one argument and are not affected. **FragPipe's own
+DIA-NN step is:** FragPipe 24.0 writes each run as a `--f <path>` line of `filelist_diann.txt` and
+hands DIA-NN `--cfg <filelist>--` (`CmdDiann.java`), and DIA-NN cuts that text at every `--` too —
+on HIVE (srun 24807938) DIA-NN 2.7.0 and FragPipe's bundled 1.8.2 beta 8 both skipped a
+`x_DIA--asp3_S3.mzML` listed that way. So when a FragPipe workflow runs DIA-NN
+(`diann.run-dia-nn=true`), `run_search.py` refuses any `--` in the path DIA-NN would get (on the
+diaTracer route that is the staged link in `<out>/diatracer_stage/`, so only the file name
+counts), in `--out` or in the database; there is no renaming on that route.
 
 **DDA data (DIA-NN 2.6+).** DIA-NN 2.3+ can search DDA / DDA-PASEF with **`--dda`**.
 `estimate_params.py --engine diann --acquisition DDA` writes it **into the cfg**, and every

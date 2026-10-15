@@ -958,8 +958,13 @@ The `.quant` count says every run was searched; DIA-NN can still leave one out o
 (a run with nothing past the q-value filter, a path it could not parse) and exit 0. So after
 the report exists step 5 runs `check_report_runs.py --report <report> --files-list
 file_list.txt`, as the single-shot search job does, and fails naming each missing run and what
-`report.stats.tsv` shows about it. A blank or wash injection therefore fails step 5 too — leave
-it out of the inputs.
+`report.stats.tsv` shows about it. A blank or wash injection therefore fails step 5 too. The
+message ends with what to do (`check_report_runs.MISSING_RUN_WHAT_TO_DO`): **not** a resubmission
+— step 5's file list and run count are fixed when the chain is generated, so it fails the same
+way, and editing `file_list.txt` does not drop a run. The report is on disk without the run: a
+blank the user or Core staff agree is not a sample is left out of `conditions.csv` and the report
+used (the decision logged), or the cohort is searched again without it; a run DIA-NN could not
+load, or a real sample, goes back to the file and Core staff.
 
 Colliding run names are refused before any of that, at generation: `run_search.py` checks the
 input list it routes, and `diann_parallel.py` checks `--raw`/`--raw-list` in its own `main()`
