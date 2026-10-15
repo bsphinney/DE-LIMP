@@ -183,7 +183,7 @@ milestones only, never progress chatter.
 
 | When | Command |
 |---|---|
-| after `stage --apply` | `where THREAD --raw-data <raw folder> --session-folder "$S"` |
+| after `stage --apply` and `session.py init` (step 1c.7) | `where THREAD --raw-data <raw folder> --session-folder "$S"` |
 | before `run_search.py` submits its chain | asking for cluster time, below |
 | the chain submitted | `job THREAD --slurm-id <first job id> --status submitted --step 1/5 --cpu-hours <the chain's estimate> --decision <id> --text "search chain, 5 steps"` (one record for the whole chain), then `where THREAD --search-output <the search's out dir, its real path> --search-engine diann --fran-handover running` |
 | the chain finished | `job THREAD --slurm-id <that id> --status done --step 5/5` (or `--status failed --text "<why, one line>"`) |
