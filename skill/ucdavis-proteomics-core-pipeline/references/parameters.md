@@ -22,7 +22,7 @@ trypsin/LFQ default:
 | Orbitrap by resolution, per level | 240k→4, 120k→7, 60k→10, 30k→15 ppm; between tiers interpolated (tagged) | both MS1 and MS2 resolution known and inside 30k–240k |
 | Bruker timsTOF (dia-PASEF / ddaPASEF) | 15 / 15 ppm | name contains "tims" |
 | SCIEX TripleTOF / ZenoTOF | 20 / 20 ppm | name contains tripletof/zenotof/sciex |
-| Orbitrap, **one level outside 30k–240k** (e.g. 15k MS2), the other inside | that level **measured with DIA-NN before the search**, refused unless it lands in a plausible band (MS2 3–30, MS1 1.5–25 ppm) over at least 2 agreeing runs, then **floored at the SOP** (`max(measured, SOP)`, `estimate_params.SOP_MASS_ACC` = MS2 20 / MS1 7 ppm): the measurement is used only where it is wider. The level with a tier keeps it and is never floored (both flags omitted from the cfg, plan `measure_with_diann`) | both resolutions known, one outside the table |
+| Orbitrap, **one level outside 30k–240k** (e.g. 15k MS2), the other inside | that level **measured with DIA-NN before the search**, refused unless it lands in a plausible band (MS2 3–30, MS1 1.5–25 ppm) over at least 2 agreeing runs (a one-file search: its one run; runs that disagree only warn when the median is at or below the SOP, which is then pinned either way), then **floored at the SOP** (`max(measured, SOP)`, `estimate_params.SOP_MASS_ACC` = MS2 20 / MS1 7 ppm): the measurement is used only where it is wider. The level with a tier keeps it and is never floored (both flags omitted from the cfg, plan `measure_with_diann`) | both resolutions known, one outside the table |
 | Orbitrap, **resolution unknown** | **automatic calibration** — *not* measured: with no resolution both levels would be, and a measured MS1 is what DIA-NN warns about. Pass `--ms1-resolution`/`--ms2-resolution`, or pin the two flags | generic orbitrap names with no resolution — since 2.5.1 only when step 2 could not read it from the `.raw` scan trailer (see below) or the input is an mzML without `MS:1000800` |
 | Instrument not detected | **automatic calibration** | fallback |
 
@@ -119,6 +119,25 @@ Trypsin/P, 1–2 missed cleavages, peptide length 7–30, charge 2–4, fixed
 carbamidomethyl (C). Variable mods are **off by default** — the DIA-NN README
 notes variable mods don't improve depth for relative quant; pass `var_mods: "ox"`
 in the workflow (or `--var-mods ox`) to add Ox(M).
+
+## Cysteine: alkylated or not (`--cys-alkylation cam|none`)
+Fixed carbamidomethyl-C is right only for samples that were reduced and alkylated
+(iodoacetamide or chloroacetamide both leave it). On-bead, IP and pull-down digests often are
+not, and then no cysteine peptide can be identified: three on-bead Core searches had 0.03–0.5%
+of identified peptides with a C, against 7.8% on an S-Trap prep with DTT/IAA (staff reports,
+2026-10-09). `--overrides` cannot remove a flag, so the choice is its own option:
+
+| `--cys-alkylation` | DIA-NN cfg | Sage config | sidecar `cys_alkylation.source` |
+|---|---|---|---|
+| not given | `--unimod4` | `static_mods {"C": 57.0215}` | `DEFAULT, not user-confirmed: …` |
+| `cam` | `--unimod4` | `static_mods {"C": 57.0215}` | `given (--cys-alkylation cam) …` |
+| `none` | no `--unimod4` | `static_mods {}` | `given (--cys-alkylation none) …` |
+
+SKILL.md step 3 asks only for an enrichment experiment (IP / pull-down / proximity labelling, or
+an on-bead digest). `make_methods.py` lists carbamidomethylation only when the parameters fix it,
+and with `none` says cysteine was searched unmodified because the samples were not reduced and
+alkylated. `sample_quality.py --report` warns when carbamidomethyl was fixed and under 1% of the
+identified precursors hold a C (`sample_quality.CYS_MIN_FRACTION`), naming the fix.
 
 ## Provenance (DE-LIMP rule #2)
 Every emitted value is tagged in the `rationale`:

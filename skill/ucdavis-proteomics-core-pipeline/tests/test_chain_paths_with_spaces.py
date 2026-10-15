@@ -47,7 +47,16 @@ if "--f" in a and val("--temp"):
 if val("--out-lib"):
     open(val("--out-lib"), "w").write("lib")
 if val("--out") and "--use-quant" in a:
-    open(val("--out"), "w").write("report")
+    # a report holding every --f run: step 5 checks the report's Run column (check_report_runs)
+    out = val("--out")
+    runs = [os.path.splitext(os.path.basename(a[i + 1]))[0] for i, x in enumerate(a) if x == "--f"]
+    try:
+        import pyarrow as pa, pyarrow.parquet as pq
+        pq.write_table(pa.table({"Run": runs}), out)
+    except ImportError:
+        open(out, "w").write("report")
+    with open(out[:-len(".parquet")] + ".stats.tsv", "w") as fh:
+        fh.write("File.Name\tPrecursors.Identified\n" + "".join(r + "\t100\n" for r in runs))
 """
 
 

@@ -226,6 +226,28 @@ command **+** an OS-appropriate path — not a HIVE/`/quobyte` path they can't r
 ```
 `report.parquet` is already the DE contract — `run_de.R` reads it directly.
 
+**plexDIA (`--channels`) writes no matrices.** A Core SILAC search with DIA-NN 2.7.0
+(`--channels`, `--channel-spec-norm`, `--matrices`; 2026-10-14) logged that expression matrices
+would be saved and wrote only `report.parquet`: no `report.pg_matrix.tsv`, `.pr_matrix.tsv` or
+`.gg_matrix.tsv`. The DIA-NN README says, in its PTM section, "the matrices also are currently
+not being produced when multiplexing is used (--channels)", and in its plexDIA section that the
+main `.parquet` report "needs to be used for all downstream analyses" of multiplexed data, where `PG.Q.Value` / `GG.Q.Value` are
+channel-specific and `PG.MaxLFQ` is channel-specific only with QuantUMS and on the second MBR
+pass or without MBR. So build any per-protein, per-channel table from `report.parquet`
+(`Run` × `Channel`), and do not promise the client a DIA-NN matrix for a plexDIA search.
+
+**A path with `--` in it cannot be given to DIA-NN.** Its reader joins the arguments with spaces
+and cuts the result at every `--`, quoted or not (`arguments()`, `diann.cpp` at tag 1.8), and
+2.7.0 behaves the same: a Core run named `…_DIA--asp3_<well>.d` logged `unrecognised option
+[--asp3_<well>.d]` and `skipping …_DIA - invalid raw MS data format`, and the search went on with
+the other runs; a `--` in a folder is cut the same way (HIVE srun 24807838). `run_search.py` (and `diann_parallel.py` run directly) search a run whose
+**folder** holds `--` through a link in `<out>/input_links/` under the same file name, so the run
+keeps its name; one whose **file name** holds `--` is refused with the name it would get, unless
+`--rename-dashed-runs` (the link is then named with each run of dashes made one, and
+`conditions.csv` must use that name). `--out`, `--fasta`, `--params`/`--cfg` and a library with
+`--` are refused. `search_provenance.json` keeps the inputs as given in `files` and each link in
+`input_links`. The other engines take each path as one argument and are not affected.
+
 **DDA data (DIA-NN 2.6+).** DIA-NN 2.3+ can search DDA / DDA-PASEF with **`--dda`**.
 `estimate_params.py --engine diann --acquisition DDA` writes it **into the cfg**, and every
 route reads it from there: the single-shot jobs and all five steps of the parallel chain.
@@ -314,7 +336,8 @@ Every job is held to the same contract as the 5-step chain
   name 2.7.0 writes for `--out-lib <out>/diann_lib.speclib`); job 2 removes `report.parquet` and
   `report.stats.tsv`, then requires the report and runs the check below. The inline
   (no `--sbatch`) path does the same. A failed re-run therefore leaves **no** report in `--out`.
-- **Job 2 fails unless the report holds every input run.** `scripts/check_report_runs.py`
+- **Job 2 fails unless the report holds every input run** (and so does the 5-step chain's
+  step 5, after its `.quant` count). `scripts/check_report_runs.py`
   counts distinct `Run` values against the inputs. Measured on 2.7.0: one readable `.raw`, one
   truncated `.raw` and one nonexistent path → `ERROR: DIA-NN tried but failed to load the
   following files: ...`, **exit 0**, a report holding **1 of 3** runs. It reads `Run` with

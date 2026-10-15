@@ -704,6 +704,17 @@ def diann_cont_quant_exclude_why(report=None, prov=None, params_file=None):
     return None, "; ".join(why)
 
 
+def _cys_alkylation(paths):
+    """estimate_params.py's `cys_alkylation` record (what was searched for cysteine, and on whose
+    word) from the first of these params files whose .rationale.json sidecar holds one, else None.
+    The resolved cfg step 1b writes has no sidecar, so the given params file is asked too."""
+    for path in paths:
+        side = _load_json(f"{path}.rationale.json") if path else None
+        if isinstance(side, dict) and isinstance(side.get("cys_alkylation"), dict):
+            return side["cys_alkylation"]
+    return None
+
+
 def search_record(params=None, search_prov=None, manifest=None):
     """What the database search ran with, each value with where it came from.
 
@@ -725,7 +736,7 @@ def search_record(params=None, search_prov=None, manifest=None):
            "max_var_mods": None, "met_excision": False, "ms1_tol": None, "ms2_tol": None,
            "tol_note": None, "precursor_fdr": None, "library": None, "mbr": None, "dda": None,
            "search_mode": prov.get("search_mode"),
-           "labelled": None, "cont_quant_exclude": None,
+           "labelled": None, "cont_quant_exclude": None, "cys_alkylation": None,
            "probe_fallback": probe_fallback_record(prov), "warnings": []}
     if prov.get("version"):
         rec["version"] = str(prov["version"])
@@ -756,6 +767,8 @@ def search_record(params=None, search_prov=None, manifest=None):
         rec["warnings"].append("no search parameters file could be found from here")
         return rec
     where = os.path.basename(pf)
+    # cysteine searched unmodified: the Methods say why (paragraph), from the params' sidecar
+    rec["cys_alkylation"] = _cys_alkylation([pf] + [c for c, _ in cands])
 
     if engine == "diann" or pf.endswith(".cfg"):
         # the cfg tokeniser every other DIA-NN reader uses (diann_parallel.cfg_tokens)
@@ -1055,6 +1068,13 @@ def search_paragraph(rec, de_prov=None):
     var = [mod_phrase(m) for m in rec["mods"] if m["type"] == "variable" and not m.get("label")]
     s.append(("Fixed modifications: " + "; ".join(fixed) + ". ") if fixed else
              "No fixed modifications were set. ")
+    # The fixed list above comes from the parameters, so it never names carbamidomethylation that
+    # was not searched; when the samples were not alkylated (estimate_params --cys-alkylation
+    # none), say why cysteine carries none.
+    if (rec.get("cys_alkylation") or {}).get("value") == "none" and not any(
+            m["type"] == "fixed" and "C" in str(m.get("targets") or "") for m in rec["mods"]):
+        s[-1] += ("Cysteine was searched unmodified (no carbamidomethylation), as the samples "
+                  "were not reduced and alkylated. ")
     s[-1] += (("Variable modifications: " + "; ".join(var)
                + (f" (at most {rec['max_var_mods']['value']} per peptide)"
                   if rec.get("max_var_mods") else "") + ".") if var else

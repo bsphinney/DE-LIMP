@@ -1189,6 +1189,128 @@ def refuse_unsafe_path(path, flag="--out", prog="diann_parallel"):
     return path
 
 
+# DIA-NN cannot be handed a path with '--' in it, quoted or not. Its command-line reader joins every
+# argument with a space and cuts the result at EVERY '--' (arguments(), diann.cpp at tag 1.8, the
+# last public source: `args += argv[i] + std::string(" ")`, then `next = args.find("--", start)`),
+# so the rest of the path becomes an "option" of its own. DIA-NN 2.7.0 does exactly that: a Core run
+# named `<date>__60SPD_DIA--asp3_<well>.d` logged "unrecognised option [--asp3_<well>.d]" and
+# "skipping .../<date>__60SPD_DIA - invalid raw MS data format", and searched the other runs (a
+# staff report, 2026-10-14). Re-run on HIVE (DIA-NN 2.7.0, srun 24807838): `--f <d>/x_DIA--asp3_S3
+# .mzML --f <d>/plate--1/s1.mzML --f <d>/x_DIA-asp3_S3.mzML` (the last a link to the first) logged
+# "unrecognised option" for `--asp3_S3.mzML` and `--1/s1.mzML`, skipped `<d>/x_DIA` and
+# `<d>/plate`, and processed 1 file: the link. A '--' in a FOLDER is cut the same way. A single
+# '-' is harmless -- only '--' starts an option -- and every path this skill hands DIA-NN is
+# absolute, so a name that starts with one '-' never starts an argument. The other engines take
+# each path as one argument and are not affected.
+DIANN_OPTION_MARK = "--"
+# Inputs whose path holds '--' are searched through links in this folder of the search's --out.
+INPUT_LINKS_DIR = "input_links"
+RENAME_DASHED_FLAG = "--rename-dashed-runs"
+
+
+def dashed(path):
+    """True when DIA-NN would cut `path` into an option (see DIANN_OPTION_MARK)."""
+    return DIANN_OPTION_MARK in (path or "")
+
+
+def refuse_dashed_path(path, flag, prog="diann_parallel"):
+    """Exit when a path DIA-NN is given that is not an input run (--out, --fasta, --cfg, a
+    library) holds '--'. Input runs are linked instead (dashed_input_plan). Returns `path`."""
+    if dashed(path):
+        sys.exit(f"[{prog}] REFUSING {flag} {path!r}: it contains '--'. DIA-NN cuts its command "
+                 f"line at every '--', quoted or not, so it would read the rest of this path as an "
+                 f"option of its own and go on without it (DIA-NN 2.7.0 exits 0 when that "
+                 f"happens). Use a path without '--': rename the folder, or link it under a name "
+                 f"without one. Nothing was written or submitted.")
+    return path
+
+
+def _undashed(name):
+    """A file name with every run of two or more '-' made one: 'a--b.d' -> 'a-b.d'."""
+    return re.sub(r"-{2,}", "-", name)
+
+
+def dashed_input_plan(files, out, rename=False):
+    """How each input whose path holds '--' reaches DIA-NN: through a link under
+    <out>/input_links/. Pure -- make_input_links() creates them, after every other refusal.
+
+    -> {"links": [{"original", "link", "run_name", "renamed"}], "refused": message or None}.
+
+    '--' in a FOLDER only: the link keeps the file name, so the run keeps its name (DIA-NN names
+    a run by its file name without the folder: check_report_runs.run_name) and nothing downstream
+    changes. '--' in the FILE NAME: the run cannot keep its name, and conditions.csv names runs,
+    so that is refused unless `rename` (the caller's --rename-dashed-runs); the link is then named
+    with each run of dashes made one ('a--b.d' -> 'a-b.d'). A new name that another input
+    already has is refused either way: DIA-NN would merge the two into one run."""
+    from check_report_runs import run_name
+    out = os.path.abspath(out)
+    links, need_rename = [], []
+    for f in files:
+        if not dashed(f):
+            continue
+        name = os.path.basename(f.rstrip("/"))
+        new = _undashed(name)
+        link = os.path.join(out, INPUT_LINKS_DIR, new)
+        rec = {"original": f, "link": link, "run_name": run_name(link), "renamed": new != name}
+        links.append(rec)
+        if rec["renamed"]:
+            need_rename.append(rec)
+    final = [run_name(f) for f in files if not dashed(f)] + [r["run_name"] for r in links]
+    clash = sorted({r["run_name"] for r in links if final.count(r["run_name"]) > 1})
+    refused = None
+    if clash:
+        refused = (f"input(s) whose path holds '--' would be searched under a run name another "
+                   f"input already has ({', '.join(clash)}), and DIA-NN would merge the two into "
+                   f"one run. DIA-NN cannot be given a path with '--' in it (it cuts its command "
+                   f"line at every '--', quoted or not), so give one of them another name -- a "
+                   f"link under a name of your choosing works -- or search them separately.")
+    elif need_rename and not rename:
+        refused = (f"{len(need_rename)} input file name(s) contain '--', and DIA-NN cannot be "
+                   f"given such a path: it cuts its command line at every '--', quoted or not, "
+                   f"reads the rest of the name as an option and skips the run, then searches the "
+                   f"others and exits 0 (DIA-NN 2.7.0: \"unrecognised option [--...]\", "
+                   f"\"skipping ... - invalid raw MS data format\").\n"
+                   + "".join(f"  {r['original']}\n      would be searched as {r['run_name']}\n"
+                             for r in need_rename)
+                   + f"The run has to be searched under another name, and conditions.csv names "
+                     f"runs, so this is a choice to make: re-run with {RENAME_DASHED_FLAG} to "
+                     f"search each one through a link under {os.path.join(out, INPUT_LINKS_DIR)} "
+                     f"with the name shown (nothing on disk is renamed or copied). The report, "
+                     f"conditions.csv and every table then use that name, so set File.Name in "
+                     f"conditions.csv to it.")
+    return {"links": links, "refused": refused}
+
+
+def make_input_links(plan):
+    """Create the links dashed_input_plan() planned, replacing a stale link of the same name.
+    -> {original: link}. Raises ValueError when something that is not a link has that name."""
+    made = {}
+    for r in plan["links"]:
+        os.makedirs(os.path.dirname(r["link"]), exist_ok=True)
+        if os.path.islink(r["link"]) and os.readlink(r["link"]) != r["original"]:
+            os.unlink(r["link"])
+        elif os.path.lexists(r["link"]) and not os.path.islink(r["link"]):
+            raise ValueError(f"{r['link']} exists and is not a link; move it, or search into "
+                             "another --out")
+        if not os.path.islink(r["link"]):
+            os.symlink(r["original"], r["link"])
+        made[r["original"]] = r["link"]
+    return made
+
+
+def input_links_note(plan, prog):
+    """The FLAG a search prints when it links inputs, one line per link ('' when none)."""
+    if not plan["links"]:
+        return ""
+    return (f"[{prog}] FLAG: {len(plan['links'])} input path(s) contain '--', which DIA-NN would "
+            f"cut into an option; each is searched through a link in "
+            f"{os.path.dirname(plan['links'][0]['link'])}:\n"
+            + "".join(f"[{prog}]   {r['original']} -> {os.path.basename(r['link'])}"
+                      + (f" (the run is named {r['run_name']})" if r["renamed"] else
+                         " (same file name: the run keeps its name)") + "\n"
+                      for r in plan["links"]))
+
+
 # DIA-NN names everything it writes beside an output -- `<name>.predicted.speclib`, `<name>.log.txt`,
 # `<name>.stats.tsv`, the matrices -- by cutting the --out / --out-lib path at its LAST '.', over
 # the WHOLE path (remove_extension(): find_last_of('.'), diann.cpp at tag 1.8, the last public
@@ -1426,6 +1548,11 @@ def main():
     qcx.add_argument("--qc", action="store_true",
                      help="an instrument QC / standard run: never staged from a job")
     qcx.add_argument("--not-qc", action="store_true", help="not a QC run: passed on to stage")
+    ap.add_argument(RENAME_DASHED_FLAG, action="store_true",
+                    help="search an input whose FILE NAME holds '--' through a link named with "
+                         "each run of dashes made one, so its run is renamed (DIA-NN cannot be "
+                         "given a path with '--'); without it such an input is refused. A '--' "
+                         "in a folder only is linked under the same file name either way")
     a = ap.parse_args()
     # checked here too: this generator is run by hand as well, and the value lands in a #SBATCH
     # line of every step (node_fault.exclude_nodes, the one rule)
@@ -1473,6 +1600,16 @@ def main():
     if shared:
         sys.exit(names_stop(shared, "diann_parallel"))
     refuse_unsafe_path(a.out)
+    # DIA-NN cuts its command line at every '--' (DIANN_OPTION_MARK): an output, database or cfg
+    # path holding one is refused; an input run is searched through a link (made below, once
+    # nothing is left to refuse) -- or refused, when the link would have to rename the run.
+    for flag, path in (("--out", a.out), ("--fasta", a.fasta), ("--cfg", a.cfg),
+                       ("--seed-lib", a.seed_lib)):
+        if path:
+            refuse_dashed_path(os.path.abspath(path), flag)
+    links_plan = dashed_input_plan(raws, a.out, rename=a.rename_dashed_runs)
+    if links_plan["refused"]:
+        sys.exit(f"[diann_parallel] REFUSING: {links_plan['refused']} Nothing was generated.")
     # run_search.py checks --dda against the bundle; the documented direct call -- and a
     # --seed-lib phase 2 -- never pass through it. So the generator checks it too, against the
     # acquisition estimate_params.py wrote the cfg for. An unreadable cfg is parallel_safe's to
@@ -1567,6 +1704,14 @@ def main():
     # Every refusal is behind us: an earlier search's probe outputs must not describe this one
     # (set aside, not deleted -- they are that search's evidence)
     set_aside_probe_outputs(out)
+    # ...so the '--' links can be made now; every step reads the runs from the file list
+    try:
+        linked = make_input_links(links_plan)
+    except (OSError, ValueError) as e:
+        sys.exit(f"[diann_parallel] could not link the inputs whose path holds '--': {e}. "
+                 "Nothing was submitted.")
+    sys.stderr.write(input_links_note(links_plan, "diann_parallel"))
+    originals, raws = raws, [linked.get(r, r) for r in raws]
     # file list (1 raw path per line) — array tasks index into it
     open(os.path.join(out, "file_list.txt"), "w").write("\n".join(raws) + "\n")
     all_f = " ".join(f"--f {shlex.quote(r)}" for r in raws)   # quote — data paths may contain spaces
@@ -1577,6 +1722,7 @@ def main():
     empirical = f"{D}/empirical.parquet"
     first_pass = f"{D}/{FIRST_PASS_REPORT}"
     pass_cmp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pass_comparison.py")
+    run_check = os.path.join(os.path.dirname(os.path.abspath(__file__)), "check_report_runs.py")
 
     # QUEUE CHOICE, ported from DE-LIMP's select_best_partition()
     # (R/helpers_search.R) + docs/QUEUE_SWITCHING.md:
@@ -1608,7 +1754,8 @@ def main():
     # folder (node_fault.py): a node whose /quobyte mount has dropped fails as a NODE fault (exit
     # 75), which watch_run.sh and node_fault.py retry act on, never as "DIA-NN exited 0 but ...".
     from node_fault import preflight_lines, chain_checks
-    node_check = preflight_lines(chain_checks(a.diann, out, fasta, raws)
+    # the raw data's own folders, not the links': a node that cannot reach them is the fault
+    node_check = preflight_lines(chain_checks(a.diann, out, fasta, originals)
                                  + ([("-r", seed, "the seed library")]
                                     if seed and os.path.exists(seed) else []))
 
@@ -1941,6 +2088,13 @@ def main():
         f'  --temp "{D}/quant_step4" --matrices --out "{D}/{report}" \\',
         f'  --threads {a.assembly_cpus} {norm} {wflag}{mflag}{flags}',
         must_exist(f'{D}/{report}', "the cross-run report"),
+        # ...and every input run IN it (check_report_runs.py, the single-shot search's check too).
+        # The .quant count above says every run was searched; DIA-NN can still leave one out of
+        # the report -- a path it cut at a '--', a run with nothing past the q-value filter --
+        # and it exits 0 either way. Under the generator's python, else python3, as below.
+        f'PY={shlex.quote(sys.executable)}; [ -x "$PY" ] || PY=python3; '
+        f'"$PY" {shlex.quote(run_check)} --report {shlex.quote(D + "/" + report)} '
+        f'--files-list {shlex.quote(D + "/file_list.txt")} || exit 1',
         f'echo "OK: report built from all {n} runs"',
         # Did the final pass keep what the first pass found? A table, a WARNING per run that
         # lost more than half its precursors, and the record in search_provenance.json -- see
@@ -2108,6 +2262,8 @@ def main():
         "cpu_sizing": cpu_sizing,
         # the nodes every step's #SBATCH --exclude keeps it off (--exclude); None for none
         "exclude": a.exclude_nodes,
+        # inputs whose path holds '--', searched through links (dashed_input_plan)
+        "input_links": links_plan["links"],
         "scripts": [x for x in [s1, s1b, s2, s3, s4, s5, "submit.sh"] if x],
         "submit": f"bash {out}/submit.sh   (or: hive_exec.sh 'bash {out}/submit.sh')",
         "report_jobid_var": "jid5",

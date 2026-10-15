@@ -119,6 +119,69 @@ def is_dda(acquisition):
     return (acquisition or "").strip().upper() == "DDA"
 
 
+# What the search assumes the sample prep did to cysteine. THE one definition: build_diann() and
+# build_sage() write it, the sidecar records it (`cys_alkylation`), cam_searched() reads it back
+# from a params file (sample_quality.py's cysteine check), and SKILL.md step 3 asks for it.
+#   cam   reduced and alkylated with iodoacetamide or chloroacetamide, both of which leave
+#         carbamidomethyl-C (+57.021464 Da, UniMod:4): searched as a FIXED modification -- DIA-NN
+#         --unimod4 (its README's recommended fixed modification), Sage static_mods C
+#   none  not reduced and alkylated: cysteine is searched unmodified
+# On-bead, IP and pull-down digests are often not reduced and alkylated, and a fixed
+# carbamidomethyl then leaves no cysteine peptide searchable. Staff reports (2026-10-09): 0.03-0.5%
+# of the identified peptides held a C on three such searches, against 7.8% on an S-Trap prep with
+# DTT/IAA; the only way out was to delete --unimod4 from params.cfg by hand.
+CYS_ALKYLATION_CHOICES = ("cam", "none")
+CYS_ALKYLATION_DEFAULT = "cam"
+SAGE_CAM = {"C": 57.0215}
+
+
+def cys_alkylation_record(choice=None):
+    """The sidecar's `cys_alkylation`: what was searched for cysteine, and on whose word. `choice`
+    is --cys-alkylation as given; None is the default, tagged as one (DE-LIMP rule 2)."""
+    value = choice or CYS_ALKYLATION_DEFAULT
+    if choice is None:
+        source = ("DEFAULT, not user-confirmed: the samples are assumed reduced and alkylated "
+                  "(iodoacetamide or chloroacetamide), the standard prep. Pass --cys-alkylation "
+                  "none for samples that were not -- on-bead, IP and pull-down digests often are not")
+    elif value == "cam":
+        source = "given (--cys-alkylation cam): the samples were reduced and alkylated"
+    else:
+        source = ("given (--cys-alkylation none): the samples were not reduced and alkylated, so "
+                  "cysteine is searched unmodified")
+    return {"value": value, "given": choice is not None,
+            "searched": ("carbamidomethyl (C), fixed" if value == "cam" else
+                         "cysteine unmodified (no fixed carbamidomethyl)"),
+            "source": source}
+
+
+def cam_searched(params):
+    """True when the params file fixes carbamidomethyl on C, False when it does not, None when it
+    cannot be read. A DIA-NN cfg: --unimod4, or a --fixed-mod of UniMod:4 / +57.02 on C; a Sage
+    config: database.static_mods C at +57.02."""
+    from diann_parallel import cfg_groups, cfg_tokens, CfgError   # here: it imports this module
+    try:
+        if str(params).lower().endswith(".json"):
+            with open(params) as fh:
+                mods = (json.load(fh).get("database") or {}).get("static_mods") or {}
+            return any("C" in str(k) and abs(float(v) - 57.0215) < 0.01 for k, v in mods.items())
+        groups = cfg_groups(cfg_tokens(params))
+    except (OSError, ValueError, TypeError, AttributeError, CfgError):
+        return None
+    for flag, vals in groups:
+        if flag == "--unimod4":
+            return True
+        if flag == "--fixed-mod" and vals:
+            parts = str(vals[0]).split(",")
+            try:
+                mass = float(parts[1]) if len(parts) > 1 else None
+            except ValueError:
+                mass = None
+            if parts[0] == "UniMod:4" or (mass is not None and abs(mass - 57.021464) < 0.01
+                                          and len(parts) > 2 and "C" in parts[2]):
+                return True
+    return False
+
+
 # What a precursor m/z range is, by acquisition. detect_acquisition.py reads DIA's from the
 # isolation windows and DDA's from the MS1 survey scans, and says which per file
 # (`precursor_mz_range_source`); build_diann() tags the cfg's --min/--max-pr-mz with the same words.
@@ -655,7 +718,7 @@ def tagged(value, source):
 
 # --- DIA-NN cfg --------------------------------------------------------------
 def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
-                cont_tag=None, mz_range=None, level_src=None, override_meta=None):
+                cont_tag=None, mz_range=None, level_src=None, override_meta=None, cys=None):
     UNIV = "universal trypsin/LFQ default"
     r = {}  # rationale
     lines = []
@@ -747,7 +810,14 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
     add("--max-fr-mz", 1800, UNIV)
     if DIANN_DIGEST["met_excision"]:
         add("--met-excision", True, UNIV)
-    add("--unimod4", True, "fixed carbamidomethyl (C); DIA-NN recommended fixed mod")
+    # cysteine: what the sample prep did to it (CYS_ALKYLATION_CHOICES), tagged with who said so
+    cys = cys or cys_alkylation_record()
+    if cys["value"] == "cam":
+        add("--unimod4", True, "fixed carbamidomethyl (C); DIA-NN recommended fixed mod -- "
+            + cys["source"])
+    else:
+        add("--unimod4", "not set (flag omitted): cysteine searched unmodified", cys["source"],
+            render=False)
 
     # variable mods: DIA-NN README says var mods don't help pure quant; default OFF.
     if var_mods and "ox" in var_mods:
@@ -939,8 +1009,11 @@ SAGE_ENZYME = {"missed_cleavages": 2, "min_len": 7, "max_len": 30,
                "cleave_at": "KR", "restrict": "P"}
 
 
-def build_sage(acq, instr_class, var_mods, overrides, ms2_analyzer=None, override_meta=None):
+def build_sage(acq, instr_class, var_mods, overrides, ms2_analyzer=None, override_meta=None,
+               cys=None):
     prec_ppm, frag_ppm, ppm_src = sage_ppm(instr_class)
+    cys = cys or cys_alkylation_record()
+    static = dict(SAGE_CAM) if cys["value"] == "cam" else {}
     ion_trap = ms2_in_ion_trap(ms2_analyzer)
     UNIV = "universal trypsin/LFQ default"
     variable = {"M": [15.9949]} if (var_mods and "ox" in var_mods) else {}
@@ -952,7 +1025,7 @@ def build_sage(acq, instr_class, var_mods, overrides, ms2_analyzer=None, overrid
             "fragment_min_mz": 200.0, "fragment_max_mz": 1800.0,
             "peptide_min_mass": 500.0, "peptide_max_mass": 5000.0,
             "ion_kinds": ["b", "y"], "min_ion_index": 2,
-            "static_mods": {"C": 57.0215},
+            "static_mods": static,
             "variable_mods": variable,
             "max_variable_mods": 2,
             "decoy_tag": "rev_", "generate_decoys": True,
@@ -990,7 +1063,8 @@ def build_sage(acq, instr_class, var_mods, overrides, ms2_analyzer=None, overrid
     rationale.update({
         "wide_window": tagged(cfg["wide_window"], f"{acq.upper()} acquisition"),
         "chimera": tagged(cfg["chimera"], f"{acq.upper()} acquisition"),
-        "static_mods": tagged({"C": 57.0215}, "fixed carbamidomethyl (standard)"),
+        "static_mods": tagged(static, ("fixed carbamidomethyl (C) -- " if static else
+                                       "none: cysteine searched unmodified -- ") + cys["source"]),
         "variable_mods": tagged(variable,
             "Ox(M) " + ("on (user requested)" if var_mods and "ox" in var_mods else "off (quant default)")
             + " + protein N-term acetyl"),
@@ -1051,6 +1125,12 @@ def main():
     ap.add_argument("--acquisition", required=True, choices=["DIA", "DDA", "dia", "dda"])
     ap.add_argument("--instrument", default="")
     ap.add_argument("--var-mods", default="", help="comma list, e.g. 'ox' to add Ox(M)")
+    ap.add_argument("--cys-alkylation", choices=CYS_ALKYLATION_CHOICES, default=None,
+                    help="what the sample prep did to cysteine. cam (the default): reduced and "
+                         "alkylated with iodoacetamide or chloroacetamide -- fixed carbamidomethyl "
+                         "C (DIA-NN --unimod4, Sage static_mods C). none: not alkylated (often so "
+                         "for on-bead, IP and pull-down digests) -- cysteine searched unmodified. "
+                         "Not given, cam is used and recorded as a DEFAULT")
     ap.add_argument("--overrides", default="",
                     help="JSON of fields to force, as the user chose them; each is recorded as a "
                          "user override with its value, who set it and why -- never as an SOP")
@@ -1119,11 +1199,13 @@ def main():
     level_src = ((ppm_for_resolution(r1)[1], ppm_for_resolution(r2)[1])
                  if cls in ("orbitrap_measured", "orbitrap_untabled") else None)
 
+    cys = cys_alkylation_record(a.cys_alkylation)
     if a.engine == "diann":
         try:
             text, rationale = build_diann(a.acquisition, cls, ms1, ms2, label, src, var_mods,
                                           overrides, cont_tag, a.precursor_mz_range,
-                                          level_src=level_src, override_meta=override_meta)
+                                          level_src=level_src, override_meta=override_meta,
+                                          cys=cys)
         except (LoneMassAccOverride, NoPrecursorRange) as e:
             # The message says "no cfg was written", so leave nothing at --out that contradicts
             # it. build_diann() raises BEFORE the write below, so THIS run wrote neither file --
@@ -1138,7 +1220,7 @@ def main():
             sys.exit(f"[estimate_params] {e}")
     else:
         text, rationale = build_sage(a.acquisition, cls, var_mods, overrides, analyzer,
-                                     override_meta=override_meta)
+                                     override_meta=override_meta, cys=cys)
 
     with open(a.out, "w") as fh:
         fh.write(text)
@@ -1164,6 +1246,9 @@ def main():
         "params_file": os.path.abspath(a.out),
         # each --overrides value: who set it and why ({} when nothing was overridden)
         "overrides": override_record(overrides, a.override_reason, staff_rec),
+        # what was searched for cysteine (fixed carbamidomethyl or unmodified), and whether the
+        # user said so or it is the DEFAULT -- read by make_methods.py
+        "cys_alkylation": cys,
         "rationale": rationale,
         "note": "Every value is tagged with its provenance. Mass tolerances are the "
                 "data-type-dependent settings; the rest are standard trypsin/LFQ defaults.",
