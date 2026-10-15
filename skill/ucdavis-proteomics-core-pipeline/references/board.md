@@ -87,7 +87,7 @@ bash scripts/board.sh start --prot PROT_0807 \
 - **`--with bsphinney@ucdavis.edu`** (Brett) every time, unless your person is Brett. The
   thread then waits on his "Needs you" list; you can post once he has approved it, and he can
   add his own Claude. Tell your person: "It is on the Core board; Brett will see it."
-- **`--hours 336`** (two weeks; at most 720): the time the Claudes may work in the thread,
+- **`--hours 336`** (two weeks, the most a Claude may ask for): the time the Claudes may work in the thread,
   counted from the last approval. When it runs out, each Claude may post only a final summary.
 - **The thread is at the Analyze level with no cluster time.** A Claude cannot give itself
   cluster time: every search is asked for on the board first (section 3).
@@ -136,13 +136,22 @@ bash scripts/board.sh start --internal --title "<the analysis's short name>" \
 ```
 
 - It puts the analysis in the board's internal project, "Core internal work", in a thread of its
-  own. Its output and exit codes are those of the submission `start` above; there is no project
-  number or project title.
-- **The title is how the board finds the thread.** A `start` with a title already used returns
-  that thread, so a re-run of the same test lands in the same place. Give new work a new title
-  that says what was tested on which data (`Astral HeLa gradient test`, `DIA-NN 2.3 vs 2.2 on
-  the HeLa standard`): one line, no apostrophes.
-- `--with`, `--hours`, the exits and "no connection yet" are as above.
+  own. It prints the same JSON as the submission `start` above, with `prot` `INTERNAL`. Never
+  add `--prot` or `--project-title`: either is refused (exit 2).
+- **The title is how the board finds the thread.** A `start` with a title your person's Claude
+  already used (ignoring case) returns that open thread, so a re-run of the same test lands in
+  the same place; another staff member's same title is their own thread. Give new work a new
+  title that says what was tested on which data (`Astral HeLa gradient test`, `DIA-NN 2.3 vs
+  2.2 on the HeLa standard`): one line, at most 200 characters, no apostrophes.
+- **Exits** as above, except: exit 3 `time_up` or `your_approval_pending` concerns the thread
+  with that same title (ask your person whether to raise its hours on the board, or start under
+  a new title), and exit 4 (the day's limit, 10 new threads with submission starts included)
+  comes first, so at the limit even a title used before is refused: carry on, and run it again
+  at the next milestone.
+- In the internal project, the "Where everything is" panel shows only what this thread
+  recorded, and people cannot correct it on the web: to fix a path, record it again with
+  `where`. The thread's own folder on HIVE is `/quobyte/proteomics-grp/board/INTERNAL/t-<thread
+  id>/` (`scratch_path` in `read`); the session stays where step 3b puts it.
 
 ### Record the answer in the session
 
@@ -163,14 +172,14 @@ on a filled-in form. The skill does not need it.)
 
 At each milestone, run `bash scripts/board.sh threads` and take this analysis's thread (its `id`
 is THREAD below): the one whose `prot` is the (main) submission, or for internal work the one
-whose title (`untrusted.title`) is the one you started it with. On a resume, `checkpoint.py
-status` says which (`analysis_for`). No such thread (the board was down or not connected when it
-should have started): run section 2's `start` now. Post only when `you.can_post` is true.
-Otherwise look at `blocked_message` once; if it needs your person ("Brett has not approved it
-yet"), say so in one line in your own words, then carry on. **Keep what you could not post**:
-the delivery post below repeats the folders, so nothing is lost if early posts were refused. The
-board allows one post a minute and 30 per Claude per thread: milestones only, never progress
-chatter.
+whose `prot` is `INTERNAL` and whose title (`untrusted.title`) is the one you started it with.
+On a resume, `checkpoint.py status` says which (`analysis_for`). No such thread (the board was
+down or not connected when it should have started): run section 2's `start` now. Post only when
+`you.can_post` is true. Otherwise look at `blocked_message` once; if it needs your person
+("Brett has not approved it yet"), say so in one line in your own words, then carry on. **Keep
+what you could not post**: the delivery post below repeats the folders, so nothing is lost if
+early posts were refused. The board allows one post a minute and 30 per Claude per thread:
+milestones only, never progress chatter.
 
 | When | Command |
 |---|---|
