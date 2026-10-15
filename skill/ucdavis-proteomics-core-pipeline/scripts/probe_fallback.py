@@ -203,6 +203,36 @@ def provenance_caution(prov):
                    else None, pin if isinstance(pin, str) else None)
 
 
+def measurement_warnings(prov):
+    """The WARNINGs a measured mass accuracy was pinned with (probe_window.pin_mass_acc
+    `warnings`: probed runs that disagreed while their median sat at or below the SOP floor, which
+    is then pinned whatever the spread), read from the evidence file the search record names
+    (mass_acc.evidence_file: the chain's window.json, the single-shot search's mass_acc.json).
+    [] when there are none, or no evidence can be read. Never raises."""
+    prov = _dict(prov)
+    ma = _dict(prov.get("mass_acc")) or _dict(_dict(prov.get("result")).get("mass_acc"))
+    ev = ma.get("evidence_file")
+    if not isinstance(ev, str):
+        return []
+    try:
+        with open(ev) as fh:
+            rec = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    w = _dict(_dict(rec).get("mass_acc")).get("warnings")
+    return [x for x in w if isinstance(x, str)] if isinstance(w, list) else []
+
+
+def measurement_note(prov):
+    """measurement_warnings() as one sentence for AUDIT.md and the report, or None -- the one
+    wording, beside the fallback CAUTION (caution())."""
+    w = measurement_warnings(prov)
+    if not w:
+        return None
+    return ("NOTE: the mass accuracy was pinned at the facility SOP floor although the probed "
+            "runs disagreed -- " + "; ".join(w) + ".")
+
+
 def caution_for(out_dir):
     """caution() for a search output directory, or None when nothing fell back there -- for the
     status views (checkpoint.py status, notify_slack.py) that have the directory. From its

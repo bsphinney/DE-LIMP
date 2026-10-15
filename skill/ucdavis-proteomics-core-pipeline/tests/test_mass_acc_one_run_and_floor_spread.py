@@ -155,5 +155,47 @@ class SpreadAtTheFloor(unittest.TestCase):
             self.assertNotIn("--mass-acc", cfg)
 
 
+class TheWarningReachesTheReport(unittest.TestCase):
+    """Review of 2.12 (P4): the SOP-floor spread warning reaches AUDIT.md and the analysis report,
+    as a probe fallback's CAUTION does (probe_fallback.measurement_note, the one wording)."""
+
+    def search(self, d, warnings):
+        search = os.path.join(d, "output", "search")
+        os.makedirs(search)
+        evidence = os.path.join(search, "window.json")
+        with open(evidence, "w") as fh:
+            json.dump({"mass_acc": {"pin_as": "--mass-acc 20 --mass-acc-ms1 7",
+                                    "warnings": warnings}}, fh)
+        prov = os.path.join(search, "search_provenance.json")
+        with open(prov, "w") as fh:
+            json.dump({"engine": "diann", "mass_acc": {"mode": "measured",
+                                                       "evidence_file": evidence}}, fh)
+        return {"input": os.path.join(search, "report.parquet")}, prov
+
+    def test_audit_and_report_carry_it(self):
+        import audit_results
+        import make_analysis_html
+        w = probe_window.pin_mass_acc([{"ms2_ppm": v} for v in (20.0, 24.0, 10.0)],
+                                      documented={"ms1_ppm": 7})["warnings"]
+        with tempfile.TemporaryDirectory() as d:
+            de_prov, prov = self.search(d, w)
+            findings = []
+            audit_results.audit_search_measurement(findings, de_prov)
+            self.assertEqual([(f["check"], f["status"]) for f in findings],
+                             [("search_measurement", "WARN")])
+            self.assertIn("pinned at the facility SOP floor although the probed runs disagreed",
+                          findings[0]["message"])
+            self.assertIn("disagree on MS2", findings[0]["message"])
+            note = make_analysis_html.search_measurement_note(de_prov)
+            self.assertEqual(note["title"], "The probed runs disagreed on the mass accuracy")
+            self.assertIn("disagree on MS2", note["text"])
+        with tempfile.TemporaryDirectory() as d:          # no warning: nothing is said
+            de_prov, prov = self.search(d, [])
+            findings = []
+            audit_results.audit_search_measurement(findings, de_prov)
+            self.assertEqual(findings, [])
+            self.assertIsNone(make_analysis_html.search_measurement_note(de_prov))
+
+
 if __name__ == "__main__":
     unittest.main()
