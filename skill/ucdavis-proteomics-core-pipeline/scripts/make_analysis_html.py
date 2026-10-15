@@ -978,6 +978,7 @@ def glance_data(prov, tables, tables_dir, session=None):
         tiles.append((len(rows), "contrasts"))
         tiles.append((max(r["tested"] for r in rows), "proteins tested"))
     notes = [n for n in (search_measurement_note(prov, session), search_inputs_note(prov, session),
+                         runs_left_out_note(prov),
                          added_sequences_note(session), inferred_note(prov, tables_dir),
                          database_note(prov, tables_dir, session), keratin_note(prov))
              if n]
@@ -1145,6 +1146,22 @@ def search_measurement_note(prov, session=None):
         return None
     return {"kind": "warning", "title": "The search did not measure what it was to measure",
             "text": text}
+
+
+def runs_left_out_note(prov):
+    """The fixed callout for runs the search reported that the DE left out (run_de.R's
+    `runs_left_out`; reasons from collect_conditions.py --validate --exclude), worded by
+    make_methods.de_runs_left_out_sentence (the one description). A warning when a run has no
+    recorded reason; None when every searched run was analysed."""
+    from make_methods import de_runs_left_out_sentence
+    text = de_runs_left_out_sentence(prov)
+    if not text:
+        return None
+    runs = (prov.get("runs_left_out") or {}).get("runs") or []
+    unexplained = any(not (isinstance(x, dict) and isinstance(x.get("reason"), str)
+                           and x["reason"].strip()) for x in runs)
+    return {"kind": "warning" if unexplained else "info",
+            "title": "Searched runs left out of the analysis", "text": text}
 
 
 def keratin_note(prov):

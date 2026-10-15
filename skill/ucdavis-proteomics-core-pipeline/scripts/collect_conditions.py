@@ -38,6 +38,12 @@ Modes:
 
   # validate a finished design against the search output
   python3 collect_conditions.py --validate conditions.csv --against report.parquet
+
+  # ... with runs the search reported that the USER decided to leave out of the DE (a re-run,
+  # a failed injection): one --exclude per run, each with its own --reason. They pass, and are
+  # recorded in <csv>.decisions.json (excluded_runs), which run_de.R and the Methods read.
+  python3 collect_conditions.py --validate conditions.csv --against report.parquet \
+          --exclude <run> --reason "<why, in the user's words>" [--exclude ... --reason ...]
 """
 import sys, os, csv, glob, json, re, argparse, io, zipfile
 import xml.etree.ElementTree as ET
@@ -923,7 +929,73 @@ def emit_template(out, names, covariates):
 
 
 # ------------------------------------------------------------------ validate --
-def validate(meta_path, report_path):
+# A run the search reported but the design leaves out ON PURPOSE (PROT_0803: 13 runs searched,
+# two of them re-runs, 11 analysed). run_de.R already analyses only the metadata's runs, but
+# --validate failed on the two ("report runs missing from metadata"), so the agent went past a
+# failed check on its own judgment and the reason lived only in decisions.md. --exclude <run>
+# --reason "<why>" makes it a recorded decision instead: the run passes, and it is written to
+# <csv>.decisions.json under EXCLUDED_KEY, which run_de.R copies into de_provenance.json
+# (runs_left_out) for the Methods and the report. A run missing WITHOUT --exclude fails exactly
+# as before.
+EXCLUDED_KEY = "excluded_runs"
+
+
+class _ExcludeAction(argparse.Action):
+    """--exclude <run> and --reason "<text>" fill ONE ordered list of [run, reason] pairs, so each
+    reason belongs to the --exclude right before it (two --exclude then one --reason cannot pair
+    the reason with the wrong run)."""
+    def __call__(self, parser, ns, value, option_string=None):
+        items = list(getattr(ns, self.dest, None) or [])
+        if option_string == "--exclude":
+            items.append([value, None])
+        elif not items or items[-1][1] is not None:
+            parser.error("--reason must follow the --exclude it explains: "
+                         "--exclude <run> --reason \"<why>\"")
+        else:
+            items[-1][1] = value
+        setattr(ns, self.dest, items)
+
+
+def _write_exclusions(meta_path, report_path, excluded, report_runs, meta_runs):
+    """Record (or clear) the excluded runs in <csv>.decisions.json, keeping every other answer in
+    it (--map's confirmed_multi_match, technical_replicates). -> (path or None, problem or None)."""
+    dpath = decisions_path(meta_path)
+    rec = {}
+    if os.path.exists(dpath):
+        try:
+            with open(dpath, encoding="utf-8") as fh:
+                rec = json.load(fh)
+            if not isinstance(rec, dict):
+                raise ValueError("not a JSON object")
+        except (OSError, ValueError) as e:
+            if not excluded:
+                return None, None          # nothing to record; leave the unreadable file alone
+            return None, (f"the decisions record {dpath} is unreadable ({e}), so the exclusions "
+                          f"cannot be added to it: re-run --map to rewrite it, then --validate")
+    if excluded:
+        rec[EXCLUDED_KEY] = {
+            "runs": [{"run": r, "reason": why} for r, why in excluded],
+            "against": os.path.abspath(report_path),
+            "n_report_runs": len(report_runs),
+            "n_analysed": len(report_runs & meta_runs),
+            "how": "collect_conditions.py --validate --exclude <run> --reason: runs the search "
+                   "reported that the user decided to leave out of the DE; run_de.R analyses only "
+                   "the metadata's runs"}
+    elif EXCLUDED_KEY in rec:
+        del rec[EXCLUDED_KEY]          # an older exclusion does not describe this design
+    else:
+        return (os.path.abspath(dpath) if rec else None), None
+    rest = {k: v for k, v in rec.items() if k != "conditions_csv"}
+    if not rest:
+        os.remove(dpath)
+        return None, None
+    with open(dpath, "w", encoding="utf-8") as fh:
+        json.dump(dict(rest, conditions_csv=os.path.abspath(meta_path)), fh, indent=2)
+    return os.path.abspath(dpath), None
+
+
+def validate(meta_path, report_path, excluded=()):
+    excluded = [(r.strip(), (why or "").strip()) for r, why in (excluded or [])]
     with io.StringIO(_read_text(meta_path)[0], newline="") as fh:
         rows = list(csv.DictReader(fh))
     problems = []
@@ -936,15 +1008,45 @@ def validate(meta_path, report_path):
     sizes = Counter(r["Group"].strip() for r in rows if r.get("Group", "").strip())
     singletons = [g for g, c in sizes.items() if c < 2]
     if singletons: problems.append(f"groups with <2 replicates (no within-group variance): {singletons}")
+    out = {}
     if report_path:
         report_runs = set(runs_from_report(report_path))
         meta_runs = {r["File.Name"] for r in rows}
-        missing = report_runs - meta_runs
+        excl = {r for r, _ in excluded}
+        missing = report_runs - meta_runs - excl
         extra = meta_runs - report_runs
         if missing: problems.append(f"{len(missing)} report runs missing from metadata: {sorted(missing)[:5]}...")
         if extra:   problems.append(f"{len(extra)} metadata rows not in report: {sorted(extra)[:5]}...")
+        absent = sorted(excl - report_runs)
+        if absent:
+            problems.append(f"--exclude names {len(absent)} run(s) the report does not have: "
+                            f"{absent} -- an excluded run must be one the search reported "
+                            f"(its exact name: --list-runs --from-report)")
+        kept = sorted(excl & meta_runs)
+        if kept:
+            problems.append(f"--exclude names {len(kept)} run(s) that still have a metadata row: "
+                            f"{kept} -- run_de.R analyses every row, so an excluded run must have "
+                            f"none: delete its row, or drop the --exclude")
+        if missing:
+            # the failure stays; this only says how a DELIBERATE exclusion is recorded
+            out["fix"] = ("every report run needs a metadata row. A run left out of the DE on "
+                          "purpose (a re-run, a failed injection) is recorded with --exclude <run> "
+                          "--reason \"<why>\" -- only when the user decided it, never on your own "
+                          "judgment")
+        if excluded:
+            out["excluded_runs"] = [{"run": r, "reason": why} for r, why in excluded]
+            out["n_report_runs"] = len(report_runs)
+            out["n_analysed"] = len(report_runs & meta_runs)
+        if not problems:
+            dpath, problem = _write_exclusions(meta_path, report_path, excluded, report_runs,
+                                               meta_runs)
+            if problem:
+                problems.append(problem)
+            elif dpath and excluded:
+                out["decisions_file"] = dpath
     ok = not problems
-    print(json.dumps({"valid": ok, "n_samples": len(rows), "groups": dict(sizes), "problems": problems}, indent=2))
+    print(json.dumps({"valid": ok, "n_samples": len(rows), "groups": dict(sizes), "problems": problems,
+                      **out}, indent=2))
     sys.exit(0 if ok else 1)
 
 
@@ -981,7 +1083,27 @@ def main():
                          "recorded in <csv>.decisions.json")
     ap.add_argument("--validate")
     ap.add_argument("--against", help="report to validate File.Name against")
+    ap.add_argument("--exclude", dest="excluded", action=_ExcludeAction, metavar="RUN",
+                    help="--validate --against: a run the report has that the USER decided to "
+                         "leave out of the DE (a re-run, a failed injection); it has no metadata "
+                         "row. Repeatable; each needs its own --reason right after it. Recorded "
+                         "in <csv>.decisions.json (excluded_runs)")
+    ap.add_argument("--reason", dest="excluded", action=_ExcludeAction, metavar="TEXT",
+                    help="why the --exclude before it was left out, in the user's words")
     a = ap.parse_args()
+    if a.excluded:
+        if not a.validate:
+            ap.error("--exclude only goes with --validate <conditions.csv> --against <report>")
+        if not a.against:
+            ap.error("--exclude needs --against <report>: an excluded run must be one the "
+                     "search reported")
+        no_reason = [r for r, why in a.excluded if not (why or "").strip()]
+        if no_reason:
+            ap.error(f"--exclude {', '.join(no_reason)} has no --reason: each excluded run needs "
+                     f"its own --reason \"<why>\" right after it")
+        twice = sorted(r for r, n in Counter(r.strip() for r, _ in a.excluded).items() if n > 1)
+        if twice:
+            ap.error(f"--exclude {', '.join(twice)} is given more than once")
 
     if a.list_runs:
         runs = get_runs(a)
@@ -1002,7 +1124,7 @@ def main():
         covs = [c.strip() for c in a.covariates.split(",") if c.strip()]
         emit_template(a.emit_template, names, covs)
     elif a.validate:
-        validate(a.validate, a.against)
+        validate(a.validate, a.against, a.excluded or ())
     else:
         ap.print_help(); sys.exit(2)
 
