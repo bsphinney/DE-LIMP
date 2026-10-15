@@ -159,7 +159,7 @@ for the whole cohort:
   * the per-run values of a measured level must span no more than MASS_ACC_MAX_SPREAD (50%) of
     that median -- one acquisition method has one tolerance, or none. A wider spread only WARNS
     when the median is at or below the SOP floor (below), which is then pinned whatever the
-    spread, and every run's value is inside the band;
+    spread, every run's value is inside the band, and none is above 1.5x the floor;
   * at least MASS_ACC_MIN_RUNS (2) runs must have logged everything asked; one run is DIA-NN's
     own first-run auto mode, which this probe exists to replace -- unless the cohort IS one run,
     whose own measurement is then pinned (mass_acc_min_runs).
@@ -318,6 +318,10 @@ MASS_ACC_MAX_SPREAD = 0.50
 # long as every run's value is inside MASS_ACC_BAND (an implausible run is still refused). Seen on
 # 18 Exploris 480 streptavidin pull-down runs (2026-10-08): MS2 20/24/10 ppm, 70% spread, median
 # 20 = the floor; refused, though 20 would have been pinned either way.
+# ...and only while no run measured more than this multiple of the floor: a run that needs a
+# window half again as wide as the SOP is not noise the floor can absorb (statistics review of
+# 2.12). MS2: every run <= 30 ppm (the band's top), MS1: <= 10.5 ppm.
+SPREAD_WARN_MAX_OVER_FLOOR = 1.5
 SPREAD_BENIGN = ("A spread like this has one known benign cause: an enrichment or pull-down "
                  "cohort (IP, TurboID, streptavidin) whose sparse runs -- the no-bait or "
                  "no-biotin controls -- identify few precursors, so their per-run value is noisy")
@@ -1149,12 +1153,15 @@ def pin_mass_acc(probes, documented=None):
                         f"{spread:.0%} of the median ({ppm_text(value)} ppm), over the "
                         f"{MASS_ACC_MAX_SPREAD:.0%} one acquisition method is allowed")
             floor = float(SOP_MASS_ACC[key])
-            if value <= floor and all(lo <= v <= hi for v in per_run):
+            ceiling = SPREAD_WARN_MAX_OVER_FLOOR * floor
+            if (value <= floor and all(lo <= v <= hi for v in per_run)
+                    and max(per_run) <= ceiling):
                 # the floor decides the pin whatever the spread (SPREAD_BENIGN, above)
                 out["warnings"].append(
                     f"{disagree} -- NOT refused: the median is at or below the "
                     f"{ppm_text(floor)} ppm SOP floor, so {ppm_text(floor)} ppm is pinned whatever "
-                    f"the spread, and every run's value is inside {band_text(key)}. "
+                    f"the spread, every run's value is inside {band_text(key)}, and none is above "
+                    f"{ppm_text(ceiling)} ppm ({SPREAD_WARN_MAX_OVER_FLOOR:g}x the floor). "
                     f"{SPREAD_BENIGN}; otherwise look at the per-run evidence before trusting "
                     "this cohort as one acquisition method")
             else:
@@ -1209,7 +1216,8 @@ def pin_mass_acc(probes, documented=None):
               f"{'; '.join(LEVEL_OF[k] + ' ' + band_text(k) for k in LEVEL_OF)} or the per-run "
               f"spread of a measured level exceeds {MASS_ACC_MAX_SPREAD:.0%} of it -- a spread "
               "only WARNS when the median is at or below the SOP floor (so the floor is pinned "
-              "either way) and every run is inside the band"))
+              "either way), every run is inside the band and none is above "
+              f"{SPREAD_WARN_MAX_OVER_FLOOR:g}x the floor"))
     return out
 
 

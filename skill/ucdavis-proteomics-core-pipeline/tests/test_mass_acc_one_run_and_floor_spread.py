@@ -121,6 +121,22 @@ class SpreadAtTheFloor(unittest.TestCase):
         self.assertIsNone(wild["pin_as"])
         self.assertTrue(any("disagree on MS2" in r for r in wild["rejected"]))
 
+    def test_no_run_may_be_above_one_and_a_half_times_the_floor(self):
+        """Statistics review of 2.12: the warn path also needs max(per-run) <= 1.5x the floor.
+        MS2's ceiling (30) is the band's top; MS1's (10.5) is not -- MS1 measured 4/4/12 with MS2
+        documented has its median under the 7 ppm floor and every run in band, and is refused."""
+        self.assertEqual(probe_window.SPREAD_WARN_MAX_OVER_FLOOR, 1.5)
+        over = probe_window.pin_mass_acc([{"ms1_ppm": v} for v in (4.0, 4.0, 12.0)],
+                                         documented={"ms2_ppm": 15})
+        self.assertIsNone(over["pin_as"])
+        self.assertTrue(any("disagree on MS1" in r for r in over["rejected"]), over["rejected"])
+        self.assertEqual(over["warnings"], [])
+        under = probe_window.pin_mass_acc([{"ms1_ppm": v} for v in (4.0, 4.0, 10.0)],
+                                          documented={"ms2_ppm": 15})
+        self.assertEqual(under["rejected"], [])
+        self.assertEqual(under["pin_as"], "--mass-acc 15 --mass-acc-ms1 7")
+        self.assertIn("none is above 10.5 ppm (1.5x the floor)", under["warnings"][0])
+
     def test_end_to_end_the_warning_is_in_the_job_log_and_the_floor_in_the_cfg(self):
         with tempfile.TemporaryDirectory() as d:
             p, out, cfg = probe(d, with_ms2(_cohort(d), [20, 24, 10]))
