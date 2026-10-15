@@ -3,7 +3,7 @@
 decision, not a failed check.
 
 PROT_0803 (msalemi, 2026-10-08; skill issue record
-2026-10-08_msalemi_PROT_0803+123523-CBS-GC1414-MICH-282-415932196.md): the search had 13 runs,
+2026-10-08_msalemi_PROT_0803+….md): the search had 13 runs,
 two of them re-runs, and the DE analysed 11. conditions.csv listed the 11, so `--validate
 --against report.parquet` exited 1 ("2 report runs missing from metadata"). run_de.R already
 analyses only the metadata's runs, and step 8 says the validation must pass, so the agent went
