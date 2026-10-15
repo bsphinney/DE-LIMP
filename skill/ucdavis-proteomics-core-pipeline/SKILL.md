@@ -1302,6 +1302,10 @@ bundle) and act on it:
   (`contaminants_kept_despite_target_match`; a warning naming a protease dropped as "not in
   --enzyme" means: if that enzyme WAS used, re-run `fetch` with it in `--enzyme`). Tell the user those proteins — skin keratins
   included — are now quantified and count toward normalisation; step 8c flags them.
+  An entry with 2+ peptides of its own **stays**, even when the sample shows only the peptides it
+  shares with a target (horse myoglobin `Cont_P68082` has 9 of its own; in human heart its group
+  rested on human MB's peptides, one differing only by I/L): which peptides a sample shows only
+  the search can say, so step 8c's `contaminant_evidence` flags such a group.
 - A `--path` database that already contains `Cont_` entries cannot be fixed: `fetch` warns
   and lists them under `contaminants_identical_to_target_kept` — rebuild it with
   `--proteome` instead. The Core's Sep-2025 `MRS/UP000005640_9606_plus_universal_contam.fasta`
@@ -2303,6 +2307,11 @@ Rscript scripts/run_sets.R --de-dir ./de_results [--sets go[,reactome]] \
   from run depth is said to be so, never picked apart into a named signature.
   One-test sets are not pathway findings.
 
+- **In one job with the final DE, the job must fail when `run_sets.R` does** (it exits non-zero,
+  e.g. when no annotation package loads): start the job script with `set -euo pipefail` (or join
+  the steps with `&&`), never `run_sets.R ...; echo DONE` — a DE job printed DONE after it failed.
+  `setup.sh --check` says whether the GO packages load (`setup.json` `set_annotation`).
+
 → why, how to read them, the simulations behind the defaults: `references/set-tests.md`.
 
 ### 8b. Generate figures
@@ -2371,9 +2380,12 @@ report's "Audit & caveats" section. → detail: `references/audit.md`.
 excluded. Name any that are significant in DE, and judge them by type: skin/hair keratins
 (KRT1/2/9/10, KRTAPs, FLG) are usually handling contamination; ACTB, EEF1A1, tubulins and
 KRT8/18/19/7 in epithelial cells are usually endogenous. `contaminant_overlap` means real
-proteins are missing from quant — rebuild the FASTA and re-search. `sample_quality.py`'s
-CONTAMINANT_IDENTICAL panel uses the same list; a group-confounded result there is a STOP
-like any other panel.
+proteins are missing from quant — rebuild the FASTA and re-search. `contaminant_evidence` names a
+contaminant protein group whose every peptide is also a sample protein's (shared, or the same but
+for I/L): probably the sample's own protein. Report it as that protein — never as
+contamination or an added standard — and tell the user it was removed with the contaminants.
+`sample_quality.py`'s CONTAMINANT_IDENTICAL panel uses the same list as `target_contaminants`; a
+group-confounded result there is a STOP like any other panel.
 
 Then run the **biological sample-quality** check (contamination that mimics biology —
 hemolysis, tissue cross-contamination, skin) — and **read `references/anomaly-checks.md`
@@ -2611,7 +2623,9 @@ What it extracts, and what it only defaults:
 
 What each input adds:
 - `--fasta-meta` writes the **Sequence database** paragraph: organism, proteome ID, UniProt
-  release, database type, entry count, and the contaminant library with its citation.
+  release, database type, entry count, and the contaminant library with its citation. The
+  database's build warnings are not in `methods.md`: tell the user the ones it prints under
+  `database_build_warnings`.
 - `--params` / `--search-prov` / `--workflow-manifest` write the **Database search** paragraph
   from the parameters the search actually ran with: engine, the version that ran, cleavage rule,
   missed cleavages, peptide/charge/m/z ranges, modifications, mass tolerances, precursor FDR,
@@ -2703,7 +2717,7 @@ python3 scripts/provenance.py --outdir ./reproducibility \
   --setup-json ~/.proteomics-pipeline/setup.json \
   --tools-json ~/.proteomics-pipeline/tools/tools.json \
   --params ./wf/<params_file> --conditions ./conditions.csv \
-  --fasta ./search.fasta --fasta-info "$(cat ./search.fasta.meta.json)" \
+  --fasta ./search.fasta --fasta-info-file ./search.fasta.meta.json \
   --raw /path/to/*.d --report ./search_out/report.parquet --de-dir ./de_results \
   --engine <engine> --de-method <dpc|maxlfq> --contrasts "<...>" \
   --q-cutoff 0.01 --logfc 1.0 --adjp 0.05 \

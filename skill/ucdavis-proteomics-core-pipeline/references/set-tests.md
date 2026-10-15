@@ -19,6 +19,19 @@ Rscript scripts/run_sets.R --de-dir <run_de outdir> [--sets go|reactome|go,react
 `run_de.R` suggests it for every comparison with fewer than 10 significant proteins
 (`--sets-trigger`; `de_provenance.json` `set_tests.suggested_for`), and it can always be run.
 
+**In the same job as the final DE, chain the steps so a failure fails the job.** `run_sets.R`
+exits non-zero when it cannot run (no annotation package loads, no `set_test_inputs.rds`, a bad
+argument). A job script that runs it after `;` and then `echo DONE` reports success anyway: a
+DE job did exactly that on 2026-10-08, and the missing GO packages surfaced only when someone
+looked for the tables. Start the job's script with `set -euo pipefail` (or join the steps with
+`&&`), so the job's exit status, and what its log ends with, are the first failure's:
+```
+set -euo pipefail
+Rscript scripts/run_de.R ... --outdir ./de_results
+Rscript scripts/run_sets.R --de-dir ./de_results
+echo DONE
+```
+
 **Per comparison, two tests side by side:**
 
 | | question | reference |
@@ -121,8 +134,14 @@ A-priori sets only.
 
 - **GO** BP, CC and MF from the organism's Bioconductor OrgDb, propagated to ancestor terms
   (`GO2ALLEGS`, as `limma::goana`), names from GO.db. Offline: `setup.sh` installs
-  AnnotationDbi, GO.db, org.Hs.eg.db and org.Mm.eg.db (bioconda, else the Bioconductor source
-  packages). The record names the GO release (`GOSOURCEDATE`) and package versions.
+  AnnotationDbi (bioconda) and GO.db, org.Hs.eg.db and org.Mm.eg.db from Bioconductor's
+  annotation repository for the env's own release — never conda's annotation builds, whose
+  3.2.x versions were installed into a HIVE env and did not load. `setup.sh --check` says which
+  load (`setup.json` `set_annotation`: each package's status, `organisms` human / mouse, the
+  release, the fix). The record names the GO release (`GOSOURCEDATE`) and package versions.
+  An organism whose own OrgDb does not load is matched to human gene symbols (recorded; a
+  package that is installed but does not load is also a warning). When neither loads,
+  `run_sets.R` stops before testing anything, exits non-zero and names each package and why.
 - **Reactome** (`--sets reactome`) when `reactome.db` is installed (about 2 GB; not by setup.sh).
 - **A GMT file** (`--gmt`), with `--gmt-origin` saying what it is and `--gmt-kind`:
   - `public` — a published collection named with its version (`--gmt-origin "MSigDB Hallmark

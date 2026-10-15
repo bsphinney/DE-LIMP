@@ -1037,6 +1037,21 @@ def _independent_count(spans):
     return n
 
 
+def il_equal(seq):
+    """A sequence as a spectrum sees it: I and L have the same mass and fragment the same, so
+    DIA-NN cannot tell GHHEAEIKPLAQSHATK from GHHEAELKPLAQSHATK. THE one reading of that, for the
+    peptide rule here and the audit's contaminant-evidence check
+    (contaminant_groups_on_target_peptides)."""
+    return seq.upper().replace("I", "L")
+
+
+def is_contaminant_accession(acc):
+    """An accession as a report carries it (Cont_P68082, FragPipe's contam_P68082) is a
+    contaminant entry's: it starts with one of CONTAMINANT_TAGS. contaminants.R's
+    is_tagged_accession() is the R side of the same rule."""
+    return str(acc).strip().startswith(CONTAMINANT_TAGS)
+
+
 def peptide_overlap(contam_recs, target_recs, digest=DIANN_DIGEST):
     """Digest every contaminant and target entry with the search's settings (I and L equal:
     the mass spectrometer cannot tell them apart) and return, per contaminant index,
@@ -1050,7 +1065,7 @@ def peptide_overlap(contam_recs, target_recs, digest=DIANN_DIGEST):
     cont_spans, cont_seqs, index = [], [], {}
     for ci, (_h, lines) in enumerate(contam_recs):
         seq = _record_seq(lines)
-        norm = seq.replace("I", "L")
+        norm = il_equal(seq)
         spans = [(s, e, norm[s:e]) for s, e in digest_spans(seq, digest, pattern)]
         cont_spans.append(spans)
         cont_seqs.append(seq)
@@ -1062,7 +1077,7 @@ def peptide_overlap(contam_recs, target_recs, digest=DIANN_DIGEST):
             continue
         seq = _record_seq(lines)
         # Sites from the real sequence: a --cut rule may name I or L.
-        norm = seq.replace("I", "L")
+        norm = il_equal(seq)
         for s, e in digest_spans(seq, digest, pattern):
             k = norm[s:e]
             for ci in index.get(k, ()):
@@ -1722,6 +1737,77 @@ def lost_to_contaminants_message(tc, seen=()):
         msg += (f" In these results they appear only as {CONT_TAG} groups: "
                 f"{', '.join(seen[:12])}{', ...' if len(seen) > 12 else ''}.")
     return msg
+
+
+def contaminant_groups_on_target_peptides(groups, fasta_text):
+    """The contaminant protein groups a search reported on peptides of the sample's own proteins
+    alone: very likely that protein, not a contaminant.
+
+    `groups`: {protein group: {peptide (stripped sequence): set of the accessions the report lists
+    for it (Protein.Ids)}}, for groups naming a contaminant accession. A peptide is a target
+    protein's when its accessions name one ("shared"), or when it is in a target entry of
+    `fasta_text` (the searched database): as written ("shared"), or only with I and L equal
+    (il_equal: "il_twin", a different string to DIA-NN but the same spectrum). -> [{group,
+    cont_entries, peptides: [{peptide, how, target_acc, target_entry, gene, target_peptide}]}] for
+    each group ALL of whose peptides are a target protein's, in the order given.
+
+    Why (staff report 2026-10-14, 23 human heart runs, the Universal set): horse myoglobin
+    (Cont_P68082) differs from human myoglobin at 18 of 154 residues and has 9 peptides of its
+    own in the search's digest, so the build keeps it (MIN_UNIQUE_PEPTIDES) -- rightly, for a
+    sample that holds horse myoglobin. The heart's peptides for it were GHHEAELKPLAQSHATK, human
+    MB's GHHEAEIKPLAQSHATK with I/L, and ASEDLKK, which is human MB's too: the group, reported in
+    every run above human MB, was the heart's own myoglobin, removed as a contaminant and read as
+    an added horse standard. Which peptides a sample shows only the report can say."""
+    accs, recs = {}, []
+    for header, lines in _fasta_records(fasta_text or ""):
+        c = _contaminant_ids(header)
+        if c:
+            accs[c[1].upper()] = (c[2], c[3])
+            continue
+        seq = _record_seq(lines)
+        if seq:
+            acc, entry, gene = _header_ids(header)
+            recs.append((seq, acc, entry, gene))
+            accs.setdefault(acc.upper(), (entry, gene))
+    joined = "\n".join(r[0] for r in recs)
+    joined_il = il_equal(joined)
+    starts, pos = [], 0
+    for r in recs:
+        starts.append(pos)
+        pos += len(r[0]) + 1
+
+    def in_target(pep):
+        for text, q, how in ((joined, pep.upper(), "shared"), (joined_il, il_equal(pep), "il_twin")):
+            at = text.find(q) if q else -1
+            if at >= 0:
+                i = bisect.bisect_right(starts, at) - 1
+                seq, acc, entry, gene = recs[i]
+                off = at - starts[i]
+                return {"how": how, "target_acc": acc, "target_entry": entry, "gene": gene,
+                        "target_peptide": seq[off:off + len(q)]}
+        return None
+
+    out = []
+    for group, peps in groups.items():
+        found = []
+        for pep, ids in sorted(peps.items()):
+            named = sorted(a for a in (ids or ()) if a and not is_contaminant_accession(a))
+            if named:
+                entry, gene = accs.get(named[0].upper(), ("", ""))
+                hit = {"how": "shared", "target_acc": named[0], "target_entry": entry,
+                       "gene": gene, "target_peptide": pep}
+            else:
+                hit = in_target(pep)
+            if hit is None:
+                break                       # a peptide of its own: evidence of the contaminant
+            found.append(dict(hit, peptide=pep))
+        else:
+            if found:
+                out.append({"group": group, "peptides": found,
+                            "cont_entries": [accs.get(t.strip().upper(), ("", ""))[0] or ""
+                                             for t in group.split(";")
+                                             if is_contaminant_accession(t)]})
+    return out
 
 
 def sidecar_state(meta):

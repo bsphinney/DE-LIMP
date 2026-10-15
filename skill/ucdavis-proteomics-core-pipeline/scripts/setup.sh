@@ -21,7 +21,8 @@
 #                         thermo_resolution.py read the Orbitrap resolution) + pandas
 #                         -- one separate, non-fatal install that an existing env gets too
 #   - AnnotationDbi + GO.db + org.Hs.eg.db + org.Mm.eg.db: offline GO sets for run_sets.R
-#                         (bioconda, else Bioconductor source; non-fatal)
+#                         (AnnotationDbi from bioconda; the annotation packages from Bioconductor's
+#                         annotation repository for the env's release; each must load; non-fatal)
 #   - .NET 8 (NETCore + AspNetCore) via ensure_dotnet8.sh, into ~/.proteomics-pipeline/dotnet8:
 #                         DIA-NN's .raw reader and the resolution reader both run on it
 #   - google-genai >= 2.25.0 (conda-forge): the podcast's Gemini voices (make_podcast.py, step
@@ -232,32 +233,128 @@ fi
 # release it used (the package's GOSOURCEDATE). org.Hs.eg.db also serves every organism
 # without its own package (human gene symbols; run_sets.R records that route). About 250 MB.
 # Not installed: reactome.db (about 2 GB); run_sets.R --sets reactome says how to add it.
-# bioconda first (its R 4.5 builds suit this env); an env whose R bioconda has no builds for
-# (R 4.6: HIVE's proteomics-pipeline-r46) gets the Bioconductor source packages instead --
-# AnnotationDbi's dependencies compile, which the env's own compilers do. Not fatal: DE runs
-# without them; setup.json's set_annotation says what is missing and the fix.
+# "Installed" is not enough: each package must LOAD. requireNamespace() said FALSE alike for a
+# missing package and for conda's bioconductor-org.mm.eg.db / go.db 3.2.x builds, which
+# `micromamba install --freeze-installed` resolved into a HIVE env and which did not load
+# (staff report 2026-10-08: run_sets.R stopped inside a DE job). So R reports each package as
+# ok / missing / broken (installed, does not load, with R's reason), and:
+#   - AnnotationDbi (software; its dependencies compile): conda's binary first, as for the env;
+#   - GO.db and the org.*.eg.db data packages -- and AnnotationDbi if conda could not -- from
+#     Bioconductor's own repositories for the env's release, never conda's annotation builds:
+#     install.packages(repos = https://bioconductor.org/packages/<release>/data/annotation) is
+#     what fixed that env. The release is the one whose AnnotationDbi the env has (release X's
+#     annotation packages need X's AnnotationDbi: GO.db 3.23 wants AnnotationDbi >= 1.73), else
+#     its limma's (the env's own Bioconductor), else BiocVersion's -- read from their DESCRIPTION
+#     (Repository: Bioconductor X.Y / git_branch RELEASE_X_Y), else $LIMPA_BIOC.
+# Not fatal: DE runs without them; setup.json's set_annotation says what loads and the fix, and
+# `setup.sh --check` reports it without installing anything.
 SET_ANN_PKGS="AnnotationDbi GO.db org.Hs.eg.db org.Mm.eg.db"
-set_ann_missing() {
-  "$ENV_PREFIX/bin/Rscript" -e "p <- strsplit('$SET_ANN_PKGS', ' ')[[1]]; cat(p[!vapply(p, requireNamespace, TRUE, quietly = TRUE)])" 2>/dev/null
+# R's answer, one line each: "<pkg> ok <version>" | "<pkg> missing" | "<pkg> broken <reason>", then
+# "bioc <X.Y> <package it was read from>" or "bioc -". (No single quote in it: bash quotes it.)
+SET_ANN_R='
+ok <- character(0)
+for (q in strsplit(Sys.getenv("SET_ANN_PKGS"), " ")[[1]]) {
+  if (!nzchar(system.file(package = q))) { cat(q, " missing\n", sep = ""); next }
+  e <- tryCatch({ loadNamespace(q); "" }, error = function(e) conditionMessage(e))
+  if (nzchar(e)) { cat(q, " broken ", gsub("[[:space:]]+", " ", e), "\n", sep = ""); next }
+  ok <- c(ok, q)
+  cat(q, " ok ", as.character(utils::packageVersion(q)), "\n", sep = "")
 }
-if env_ready && ! $CHECK_ONLY && [ -n "$(set_ann_missing)" ]; then
-  say "[setup] installing the GO annotation packages for protein-set tests ($SET_ANN_PKGS)..."
-  case "$CONDA" in
-    *micromamba) "$CONDA" install -y -r "$MAMBA_ROOT" -p "$ENV_PREFIX" --override-channels -c conda-forge -c bioconda \
-                   bioconductor-annotationdbi bioconductor-go.db bioconductor-org.hs.eg.db bioconductor-org.mm.eg.db >&2 ;;
-    "")          false ;;
-    *)           "$CONDA" install -y -p "$ENV_PREFIX" --override-channels -c conda-forge -c bioconda \
-                   bioconductor-annotationdbi bioconductor-go.db bioconductor-org.hs.eg.db bioconductor-org.mm.eg.db >&2 ;;
-  esac || say "[setup] conda could not install them; trying the Bioconductor $LIMPA_BIOC source packages"
-  if [ -n "$(set_ann_missing)" ]; then
-    "$ENV_PREFIX/bin/Rscript" -e "install.packages(strsplit('$(set_ann_missing)', ' ')[[1]], repos = c(BioCsoft = 'https://bioconductor.org/packages/$LIMPA_BIOC/bioc', BioCann = 'https://bioconductor.org/packages/$LIMPA_BIOC/data/annotation', CRAN = 'https://cloud.r-project.org'), dependencies = NA)" >&2 \
+rel <- function(q) {
+  d <- suppressWarnings(utils::packageDescription(q))
+  if (!is.list(d)) return(NA)
+  r <- sub("^Bioconductor ", "", if (is.null(d$Repository)) "" else d$Repository)
+  if (grepl("^[0-9]+[.][0-9]+$", r)) return(r)
+  b <- if (is.null(d$git_branch)) "" else d$git_branch
+  if (grepl("^RELEASE_[0-9]+_[0-9]+$", b)) return(sub("_", ".", sub("^RELEASE_", "", b)))
+  if (q == "BiocVersion") return(sub("^([0-9]+[.][0-9]+).*", "\\1", d$Version))
+  NA
+}
+for (q in c("AnnotationDbi", "limma", "BiocVersion")) {
+  if (q == "AnnotationDbi" && !(q %in% ok)) next
+  r <- rel(q)
+  if (!is.na(r)) { cat("bioc ", r, " ", q, "\n", sep = ""); quit(save = "no") }
+}
+cat("bioc -\n")
+'
+# -> SET_ANN_ANSWERED (did R answer), SET_ANN_MISSING (missing or broken, space-separated),
+#    SET_ANN_LOADS, SET_ANN_STATUS ("pkg|status" lines), SET_ANN_PROBLEMS (for the note), ENV_BIOC(_FROM)
+set_ann_check() {
+  SET_ANN_ANSWERED=false; SET_ANN_MISSING=""; SET_ANN_STATUS=""; SET_ANN_PROBLEMS=""
+  SET_ANN_LOADS=" "; ENV_BIOC=""; ENV_BIOC_FROM=""
+  local out line pkg st rest
+  out="$(SET_ANN_PKGS="$SET_ANN_PKGS" "$ENV_PREFIX/bin/Rscript" -e "$SET_ANN_R" 2>/dev/null)"
+  while IFS= read -r line; do
+    pkg="${line%% *}"; rest=""; case "$line" in *" "*) rest="${line#* }" ;; esac
+    st="${rest%% *}"; case "$rest" in *" "*) rest="${rest#* }" ;; *) rest="" ;; esac
+    if [ "$pkg" = "bioc" ]; then
+      SET_ANN_ANSWERED=true
+      [ "$st" != "-" ] && { ENV_BIOC="$st"; ENV_BIOC_FROM="$rest"; }
+      continue
+    fi
+    case " $SET_ANN_PKGS " in *" $pkg "*) ;; *) continue ;; esac
+    case "$st" in
+      ok)      SET_ANN_LOADS="$SET_ANN_LOADS$pkg "; rest="loads ($rest)" ;;
+      missing) rest="not installed" ;;
+      broken)  rest="installed but does not load: $rest" ;;
+      *)       continue ;;
+    esac
+    [ "$st" = ok ] || { SET_ANN_MISSING="$SET_ANN_MISSING${SET_ANN_MISSING:+ }$pkg"
+                        SET_ANN_PROBLEMS="$SET_ANN_PROBLEMS${SET_ANN_PROBLEMS:+; }$pkg $rest"; }
+    SET_ANN_STATUS="$SET_ANN_STATUS$pkg|$rest
+"
+  done <<SET_ANN_EOF
+$out
+SET_ANN_EOF
+}
+set_ann_loads() { case "$SET_ANN_LOADS" in *" $1 "*) return 0 ;; esac; return 1; }
+# SET_ANN_STATUS as JSON members, at setup.json time (j is defined there)
+set_ann_status_json() {
+  local line sep=""
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    printf '%s"%s": "%s"' "$sep" "$(j "${line%%|*}")" "$(j "${line#*|}")"; sep=", "
+  done <<SET_ANN_EOF
+$SET_ANN_STATUS
+SET_ANN_EOF
+}
+SET_ANN_ANSWERED=false; SET_ANN_MISSING=""; SET_ANN_STATUS=""; SET_ANN_PROBLEMS=""; SET_ANN_LOADS=" "
+ENV_BIOC=""; ENV_BIOC_FROM=""
+env_ready && set_ann_check
+if env_ready && ! $CHECK_ONLY && [ -n "$SET_ANN_MISSING" ]; then
+  if ! set_ann_loads AnnotationDbi; then
+    say "[setup] installing AnnotationDbi for the protein-set tests (conda)..."
+    case "$CONDA" in
+      *micromamba) "$CONDA" install -y -r "$MAMBA_ROOT" -p "$ENV_PREFIX" --override-channels \
+                     -c conda-forge -c bioconda bioconductor-annotationdbi >&2 ;;
+      "")          false ;;
+      *)           "$CONDA" install -y -p "$ENV_PREFIX" --override-channels \
+                     -c conda-forge -c bioconda bioconductor-annotationdbi >&2 ;;
+    esac || say "[setup] conda could not install AnnotationDbi; trying Bioconductor's source package"
+    set_ann_check
+  fi
+  if [ -n "$SET_ANN_MISSING" ]; then
+    SET_ANN_BIOC="${ENV_BIOC:-$LIMPA_BIOC}"
+    say "[setup] installing $SET_ANN_MISSING from Bioconductor $SET_ANN_BIOC (annotation repository)..."
+    "$ENV_PREFIX/bin/Rscript" -e "install.packages(strsplit('$SET_ANN_MISSING', ' ')[[1]], repos = c(BioCann = 'https://bioconductor.org/packages/$SET_ANN_BIOC/data/annotation', BioCsoft = 'https://bioconductor.org/packages/$SET_ANN_BIOC/bioc', CRAN = 'https://cloud.r-project.org'), dependencies = NA)" >&2 \
       || say "[setup] the annotation install failed (above)"
+    set_ann_check
   fi
 fi
-SET_ANN_MISSING=""; SET_ANN_OK=false
-if env_ready; then SET_ANN_MISSING="$(set_ann_missing)"; [ -z "$SET_ANN_MISSING" ] && SET_ANN_OK=true; fi
-if env_ready && ! $SET_ANN_OK; then
-  NOTES+=("Protein-set tests (run_sets.R) need $SET_ANN_MISSING. Fix: $ENV_PREFIX/bin/Rscript -e \"install.packages(c('$(printf '%s' "$SET_ANN_MISSING" | sed "s/ /','/g")'), repos = c('https://bioconductor.org/packages/$LIMPA_BIOC/bioc', 'https://bioconductor.org/packages/$LIMPA_BIOC/data/annotation', 'https://cloud.r-project.org'))\" where there is internet. DE does not need them.")
+SET_ANN_BIOC="${ENV_BIOC:-$LIMPA_BIOC}"
+if [ -z "$ENV_BIOC" ]; then
+  if $SET_ANN_ANSWERED; then ENV_BIOC_FROM="none of AnnotationDbi, limma or BiocVersion names one"
+  else ENV_BIOC_FROM="not known: R did not answer"; fi
+  ENV_BIOC_FROM="$ENV_BIOC_FROM -- the skill's pinned release (PROTEOMICS_LIMPA_BIOC) instead"
+fi
+SET_ANN_OK=false; $SET_ANN_ANSWERED && [ -z "$SET_ANN_MISSING" ] && SET_ANN_OK=true
+SET_ANN_FIX=""
+if env_ready && ! $SET_ANN_ANSWERED; then
+  SET_ANN_FIX="re-run bash setup.sh --check; if it says the same, run $ENV_PREFIX/bin/Rscript by hand to see R's error"
+  NOTES+=("Protein-set tests (run_sets.R): R in $ENV_PREFIX did not say whether the annotation packages ($SET_ANN_PKGS) load, so they are not known to work. DE does not need them.")
+elif env_ready && ! $SET_ANN_OK; then
+  SET_ANN_FIX="bash setup.sh where there is internet (a login node), or by hand: $ENV_PREFIX/bin/Rscript -e \"install.packages(c('$(printf '%s' "$SET_ANN_MISSING" | sed "s/ /','/g")'), repos = c('https://bioconductor.org/packages/$SET_ANN_BIOC/data/annotation', 'https://bioconductor.org/packages/$SET_ANN_BIOC/bioc', 'https://cloud.r-project.org'))\""
+  NOTES+=("Protein-set tests (run_sets.R) cannot run until these load: $SET_ANN_PROBLEMS. Fix: $SET_ANN_FIX. DE does not need them.")
 fi
 
 # ---- 2c. .NET 8 (ensure_dotnet8.sh) ------------------------------------------
@@ -426,8 +523,12 @@ j() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
          "$(j "$LIMPA_VERSION")" "$LIMPA_MIN" "$($LIMPA_OK && echo true || echo false)" "$LIMPA_BIOC"
   printf '  "nanoparquet": {"ok": %s, "fix": "%s"},\n' \
          "$($NANOPARQUET_OK && echo true || echo false)" "$(j "$($NANOPARQUET_OK || printf '%s' "$NANOPARQUET_FIX")")"
-  printf '  "set_annotation": {"ok": %s, "packages": "%s", "missing": "%s"},\n' \
-         "$($SET_ANN_OK && echo true || echo false)" "$SET_ANN_PKGS" "$(j "$SET_ANN_MISSING")"
+  printf '  "set_annotation": {"ok": %s, "packages": "%s", "missing": "%s", "status": {%s}, "organisms": {"human": %s, "mouse": %s}, "bioconductor": "%s", "bioconductor_from": "%s", "fix": "%s"},\n' \
+         "$($SET_ANN_OK && echo true || echo false)" "$SET_ANN_PKGS" "$(j "$SET_ANN_MISSING")" \
+         "$(set_ann_status_json)" \
+         "$(set_ann_loads AnnotationDbi && set_ann_loads GO.db && set_ann_loads org.Hs.eg.db && echo true || echo false)" \
+         "$(set_ann_loads AnnotationDbi && set_ann_loads GO.db && set_ann_loads org.Mm.eg.db && echo true || echo false)" \
+         "$(j "$SET_ANN_BIOC")" "$(j "$ENV_BIOC_FROM")" "$(j "$SET_ANN_FIX")"
   printf '  "ready_for": {"de": %s, "dia": %s, "dda": %s, "thermo_raw": %s},\n' \
          "$($DE_READY && echo true || echo false)" \
          "$($DIA_READY && echo true || echo false)" \

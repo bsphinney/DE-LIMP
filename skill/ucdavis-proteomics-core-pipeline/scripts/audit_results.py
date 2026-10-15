@@ -27,6 +27,12 @@ Checks:
                     real proteins present only as identical (or peptide-
                     indistinguishable) Cont_ entries in a
                     database used as-is -- excluded from quant, missing here (WARN)
+  contaminant_evidence
+                    (a DIA-NN report) contaminant protein groups whose every peptide in the
+                    DE's input report (after its q-value filter) is also a target protein's --
+                    shared with it, or the same but for I/L, which no spectrum tells apart
+                    (horse myoglobin on human heart): probably the sample's own protein, not
+                    a contaminant (WARN); INFO when it could not be checked
   de_signal         0 significant (WARN: underpowered) or >50% significant
                     (WARN: likely batch/normalization/confounding artefact)
   first_vs_final_pass
@@ -69,12 +75,13 @@ Usage:
                                               # default: beside de_provenance.json's input
       [--search-out search_out]               # the search's output dir (Sage LFQ check)
 """
-import sys, os, csv, json, glob, argparse
+import sys, os, re, csv, json, glob, argparse
 from collections import Counter, defaultdict
 
 # The list's ONE definition is the FASTA sidecar; the wording for lost proteins lives there too.
 from fetch_fasta import (target_contaminants, seen_only_as_cont, lost_to_contaminants_message,
-                         keratin_sample_recorded, CONT_TAG)
+                         keratin_sample_recorded, CONT_TAG, CONTAMINANT_TAGS,
+                         is_contaminant_accession, contaminant_groups_on_target_peptides)
 # What a subject / animal column is called: one definition, shared with --map.
 from collect_conditions import subject_header, subject_assessment
 
@@ -378,6 +385,171 @@ def audit_target_contaminants(findings, meta_path, em_path, de_dir, adjp, kerati
         {"fasta_meta": meta_path, "quantified": hits, "significant": sig})
 
 
+REPORT_PEPTIDE_COLUMNS = ("Run", "Protein.Group", "Protein.Ids", "Stripped.Sequence")
+
+
+def _split_ids(cell):
+    return {t.strip() for t in str(cell or "").split(";") if t.strip()}
+
+
+def report_contaminant_peptides(report, q_cutoff, q_columns=None):
+    """({contaminant protein group: {peptide: accessions (Protein.Ids)}}, {group: runs}, q-columns
+    applied, None) from a DIA-NN report (parquet or tsv), its rows kept as run_de.R keeps them: the
+    q-columns it recorded (else diann_q_columns.fdr_columns of the report), each at cutoff_for(),
+    a row dropped only when a value exceeds its cutoff -- or (None, None, [], why not). Only rows
+    naming a contaminant accession are read (a pyarrow filter), so a 400-run report is not loaded
+    whole."""
+    from diann_q_columns import fdr_columns, cutoff_for
+    if not report or not os.path.isfile(report):
+        return None, None, [], f"the DE's input report ({report}) is not readable here"
+    name = os.path.basename(report)
+    groups, runs = defaultdict(dict), defaultdict(set)
+
+    def take(run, pg, ids, pep):
+        if pep and pg and any(is_contaminant_accession(t) for t in _split_ids(pg)):
+            groups[pg].setdefault(pep, set()).update(_split_ids(ids))
+            runs[pg].add(run)
+
+    if report.endswith(".parquet"):
+        try:
+            import pyarrow as pa
+            import pyarrow.compute as pc
+            import pyarrow.dataset as pads
+        except ImportError:
+            return None, None, [], "pyarrow is not installed in this Python, so the report could not be read"
+        d = pads.dataset(report, format="parquet")
+        names = d.schema.names
+    else:
+        with open(report, newline="") as fh:
+            names = next(csv.reader(fh, delimiter="\t"), [])
+    missing = [c for c in REPORT_PEPTIDE_COLUMNS if c not in names]
+    if missing:
+        return None, None, [], (f"{name} has no {', '.join(missing)} column (not a DIA-NN "
+                                f"precursor report)")
+    qcols = [c for c in (q_columns or fdr_columns(names)) if c in names]
+    cuts = {c: cutoff_for(c, q_cutoff) for c in qcols}
+    if report.endswith(".parquet"):
+        tags = "|".join(re.escape(t) for t in CONTAMINANT_TAGS)
+        # cast: a dictionary-encoded column has no regex kernel (DIA-NN writes plain strings)
+        keep = pc.match_substring_regex(pads.field("Protein.Ids").cast(pa.string()),
+                                        f"(^|;)({tags})")
+        for c, cut in cuts.items():
+            keep = keep & ((pads.field(c) <= cut) | pads.field(c).is_null())
+        for b in d.to_batches(columns=list(REPORT_PEPTIDE_COLUMNS), filter=keep):
+            for row in zip(*(b.column(c).to_pylist() for c in REPORT_PEPTIDE_COLUMNS)):
+                take(*row)
+    else:
+        with open(report, newline="") as fh:
+            for r in csv.DictReader(fh, delimiter="\t"):
+                if not any(is_contaminant_accession(t) for t in _split_ids(r.get("Protein.Ids"))):
+                    continue
+                try:
+                    if any((r.get(c) or "").strip() not in ("", "NA", "NaN")
+                           and float(r[c]) > cut for c, cut in cuts.items()):
+                        continue
+                except ValueError:
+                    continue
+                take(*(r.get(c) for c in REPORT_PEPTIDE_COLUMNS))
+    return dict(groups), dict(runs), qcols, None
+
+
+def searched_fasta(meta, meta_path):
+    """(path, None) of the FASTA the sidecar describes, checked by its sha256 when the sidecar has
+    one -- or (None, why not)."""
+    want = (meta or {}).get("sha256")
+    cands = list(dict.fromkeys(p for p in ((meta or {}).get("fasta"),
+                                           meta_path[:-len(".meta.json")] if meta_path and
+                                           meta_path.endswith(".meta.json") else None) if p))
+    for p in cands:
+        if os.path.isfile(p):
+            if want:
+                import hashlib
+                h = hashlib.sha256()
+                with open(p, "rb") as fh:
+                    for chunk in iter(lambda: fh.read(1 << 20), b""):
+                        h.update(chunk)
+                if h.hexdigest() != want:
+                    continue
+            return p, None
+    names = ", ".join(dict.fromkeys(os.path.basename(p) for p in cands))
+    return None, (f"the searched FASTA ({names or 'no path in the sidecar'}"
+                  f"{', sha256 ' + want[:12] + '...' if want else ''}) is not readable here")
+
+
+def audit_contaminant_evidence(findings, de_prov, meta_path):
+    """Contaminant protein groups that rest only on peptides of the sample's own proteins
+    (fetch_fasta.contaminant_groups_on_target_peptides: shared with one, or the same with I = L)
+    in the report the DE read. The build keeps a contaminant entry with peptides of its own; which
+    of them a sample shows only the report can say (horse myoglobin in human heart, 2026-10-14)."""
+    cont = (de_prov or {}).get("contaminants")
+    inp = (de_prov or {}).get("input")
+    if not inp or not isinstance(cont, dict) or not cont.get("n_protein_groups"):
+        return                      # no DE record, or no contaminant group in it: nothing to check
+    meta_path = meta_path or cont.get("fasta_meta")
+    try:
+        with open(meta_path) as fh:
+            meta = json.load(fh)
+    except (OSError, TypeError, ValueError):
+        meta = None
+    if not isinstance(meta, dict):
+        add(findings, "contaminant_evidence", "INFO",
+            "Not assessed: no readable <fasta>.meta.json (pass --fasta-meta), so whether a "
+            "contaminant group rests only on the sample's own peptides cannot be checked.")
+        return
+    fasta, why = searched_fasta(meta, meta_path)
+    groups = runs = None
+    if fasta:
+        q = de_prov.get("q_cutoff")
+        from diann_q_columns import DEFAULT_Q_CUTOFF
+        groups, runs, qcols, why = report_contaminant_peptides(
+            inp, float(q) if isinstance(q, (int, float)) else DEFAULT_Q_CUTOFF,
+            de_prov.get("q_columns") or None)
+    if groups is None:
+        add(findings, "contaminant_evidence", "INFO",
+            f"Not assessed: {why}, so whether a contaminant group rests only on the sample's own "
+            "peptides cannot be checked.")
+        return
+    with open(fasta, encoding="utf-8", errors="replace") as fh:
+        flagged = contaminant_groups_on_target_peptides(groups, fh.read())
+    org = meta.get("organism") or "target-organism"
+    detail = {"report": inp, "fasta": fasta, "q_columns": qcols, "n_groups_checked": len(groups),
+              "groups": [dict(g, n_runs=len(runs.get(g["group"], ()))) for g in flagged]}
+    if not flagged:
+        add(findings, "contaminant_evidence", "PASS",
+            f"Each of the {len(groups)} contaminant protein group(s) in "
+            f"{os.path.basename(inp)} has a peptide that is not a {org} protein's (I = L).",
+            detail)
+        return
+
+    def pep(p):
+        who = f"{p['target_acc']}{' ' + p['gene'] if p.get('gene') else ''}"
+        return (f"{p['peptide']} differs from {who}'s {p['target_peptide']} only by I/L (the "
+                f"same mass and fragments)"
+                if p["how"] == "il_twin" else f"{p['peptide']} is also {who}'s")
+
+    def group(g):
+        ps = g["peptides"]
+        return (f"{g['group']} ({', '.join(e for e in g['cont_entries'] if e) or 'contaminant'}; "
+                f"{len(ps)} peptide{'s' if len(ps) != 1 else ''} in "
+                f"{len(runs.get(g['group'], ()))} run(s)): "
+                + ", ".join(pep(p) for p in ps[:5]) + (f", +{len(ps) - 5} more" if len(ps) > 5 else ""))
+    genes = sorted({p.get("gene") or p["target_acc"] for g in flagged for p in g["peptides"]})
+    fate = (f"Their precursors were removed with the contaminants (run_de.R's filter; DIA-NN's "
+            f"--cont-quant-exclude too, when set), so {', '.join(genes[:12])} may be "
+            f"under-quantified and the contaminant share overstated."
+            if cont.get("removed") else
+            f"They were quantified and tested as contaminant groups (--keep-contaminants), beside "
+            f"{', '.join(genes[:12])}.")
+    add(findings, "contaminant_evidence", "WARN",
+        f"{len(flagged)} contaminant protein group(s) rest only on peptides of {org} proteins -- "
+        f"probably the sample's own protein, not a contaminant: "
+        + "; ".join(group(g) for g in flagged[:12]) + (f"; +{len(flagged) - 12} more" if len(flagged) > 12 else "")
+        + f". {fate} Report each as the sample's own protein, never as contamination or an added "
+          f"standard. To quantify it as the sample's, rebuild the FASTA without that contaminant "
+          f"entry (fetch_fasta.py --contaminants-path, a copy of the set without it) and search "
+          f"again.", detail)
+
+
 def audit_de(findings, de_dir, adjp, logfc):
     for f in sorted(glob.glob(os.path.join(de_dir, "DE_*.csv"))):
         rows = read_csv(f)
@@ -669,6 +841,7 @@ def main():
         audit_matrix(findings, em, a.min_proteins, a.max_missing, keratin)
     if a.de_dir and os.path.isdir(a.de_dir):
         audit_target_contaminants(findings, fasta_meta, em, a.de_dir, a.adjp, keratin)
+        audit_contaminant_evidence(findings, prov, fasta_meta)
         audit_de(findings, a.de_dir, a.adjp, a.logfc)
     audit_search_measurement(findings, prov, a.search_prov)
     audit_passes(findings, prov, a.search_prov)

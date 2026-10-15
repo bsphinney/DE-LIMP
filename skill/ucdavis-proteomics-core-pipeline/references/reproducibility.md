@@ -96,7 +96,7 @@ incomplete. This is the skill's implementation of DE-LIMP architectural rules #1
    is fetched), re-resolves the engine, rebuilds the FASTA, and re-runs search + DE
    with identical arguments. `REPRODUCE.md` is the human-readable version.
 
-### The sequence database (`--fasta-info`)
+### The sequence database (`--fasta-info-file`)
 
 The database is the one input that can silently differ between a run and its
 "reproduction", so it is recorded explicitly rather than inferred. `fetch_fasta.py`
@@ -104,14 +104,19 @@ writes `<fasta>.meta.json` — sha256, source URL, organism + taxid, proteome ID
 database type (`content_used`), UniProt release — or, for a HIVE pre-staged copy, whose
 release is unknown, `staged_file` (path, sha256, file date) plus `content_inferred` /
 `content_check` — proteome vs contaminant sequence counts, contaminant set + citation, and
-any build warnings. **Always pass it as
-`provenance.py --fasta-info "$(cat search.fasta.meta.json)"`.**
+any build warnings. **Always pass it as a file:
+`provenance.py --fasta-info-file search.fasta.meta.json`** (`--fasta-info @search.fasta.meta.json`
+also works). Never `--fasta-info "$(cat search.fasta.meta.json)"`: a database with thousands of
+added sequences has a sidecar of megabytes, and the command then fails with "Argument list too
+long". A sidecar that is not valid JSON, or not in fetch_fasta.py's shape, stops provenance.py
+(exit 2) before it writes anything. The bundle records each `--add-fasta` file by path, sha256
+and entry count; the per-entry records stay in the sidecar.
 
 `reproduce.sh` then rebuilds the database from *what actually ran*, not from the
 workflow manifest's (`input/wf/`) default. This matters: the manifest holds the
 **default**, but the user confirms the organism at step 3 and may have chosen a
 different one — regenerating from the default would reproduce a different database and
-quietly invalidate the comparison. Without `--fasta-info`, `reproduce.sh` falls back to
+quietly invalidate the comparison. Without `--fasta-info-file`, `reproduce.sh` falls back to
 the manifest and labels that step as not recorded.
 
 The rebuild replays the flags the original database was built with, from its sidecar

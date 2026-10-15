@@ -1104,41 +1104,60 @@ def diann_contaminant_sentence(srec):
             f"containing no {tag} entry.")
 
 
+# At most this many added sequences (and contaminant entries removed or kept beside them) are
+# named one by one in the Methods: the bait / tag case. Above it, the count and the file with its
+# SHA-256 identify them -- an added second proteome of 4,506 entries once put a 145 KB line of
+# accessions into a client's Methods (staff report 2026-10-10).
+ADDED_SEQUENCES_NAMED_MAX = 10
+
+
 def added_sequences_sentence(fmeta):
     """The user's own target sequences (fetch_fasta.py --add-fasta: a bait, a tag), named with
     the file and SHA-256 they came from, the contaminant entries removed because most of each is
     an added protein, and those kept whose shared peptides are ambiguous
-    (fetch_fasta.ADDED_SEQUENCE_RULE). "" when none were added."""
+    (fetch_fasta.ADDED_SEQUENCE_RULE). Each list is named entry by entry only up to
+    ADDED_SEQUENCES_NAMED_MAX, else counted. "" when none were added."""
     files = fmeta.get("added_sequences") or []
     names = [e.get("name") or e.get("accession") or "____"
              for f in files for e in (f.get("entries") or [])]
-    if not names:
+    # the entry count each file records (an entries list trimmed from a copy of the sidecar
+    # still leaves n_entries)
+    n = max(len(names), sum(f.get("n_entries") or 0 for f in files))
+    if not n:
         return ""
-    many = len(names) != 1
+    many = n != 1
+    listed = len(names) == n and n <= ADDED_SEQUENCES_NAMED_MAX
     src = "; ".join(f"{os.path.basename(f.get('file') or '') or '____'}, SHA-256 "
                     f"{f.get('sha256') or '____'}" for f in files)
-    sent = (f" {len(names)} user-supplied sequence{'s' if many else ''} ({', '.join(names)}) "
-            f"{'were' if many else 'was'} added to the database as target "
-            f"entr{'ies' if many else 'y'} ({src}).")
+    sent = (f" {n:,} user-supplied sequence{'s' if many else ''}"
+            + (f" ({', '.join(names)})" if listed else "")
+            + f" {'were' if many else 'was'} added to the database as target "
+              f"entr{'ies' if many else 'y'} ({src}).")
     gone = fmeta.get("contaminants_dropped_for_added_sequences") or []
     if gone:
         one = len(gone) == 1
-        sent += (f" {len(gone)} contaminant entr{'y' if one else 'ies'} sharing most of "
-                 f"{'its' if one else 'their'} peptides with {'it' if not many else 'them'} ("
-                 + ", ".join(f"{r.get('cont_acc')} ({r.get('cont_entry') or r.get('cont_gene') or '____'})"
-                             for r in gone)
-                 + f") {'was' if one else 'were'} removed from the library, so the added "
+        sent += (f" {len(gone):,} contaminant entr{'y' if one else 'ies'} sharing most of "
+                 f"{'its' if one else 'their'} peptides with {'it' if not many else 'them'}"
+                 + (" (" + ", ".join(f"{r.get('cont_acc')} ({r.get('cont_entry') or r.get('cont_gene') or '____'})"
+                                     for r in gone) + ")"
+                    if len(gone) <= ADDED_SEQUENCES_NAMED_MAX else "")
+                 + f" {'was' if one else 'were'} removed from the library, so the added "
                    f"sequence{'s keep' if many else ' keeps'} those peptides.")
     kept = fmeta.get("contaminants_sharing_peptides_with_added_sequences") or []
     if kept:
         one = len(kept) == 1
-        sent += (f" {len(kept)} contaminant entr{'y' if one else 'ies'} sharing fewer of "
+        sent += (f" {len(kept):,} contaminant entr{'y' if one else 'ies'} sharing fewer of "
                  f"{'its' if one else 'their'} peptides with {'it' if not many else 'them'} "
                  f"{'was' if one else 'were'} kept, and the peptides shared are ambiguous between "
-                 f"the contaminant and the added sequence: "
-                 + "; ".join(f"{r.get('cont_acc')} ({r.get('cont_entry') or r.get('cont_gene') or '____'}) "
-                             f"and {r.get('target_acc')}: {', '.join(r.get('shared_peptides') or [])}"
-                             for r in kept) + ".")
+                 f"the contaminant and the added sequence")
+        if len(kept) <= ADDED_SEQUENCES_NAMED_MAX:
+            sent += (": " + "; ".join(
+                f"{r.get('cont_acc')} ({r.get('cont_entry') or r.get('cont_gene') or '____'}) "
+                f"and {r.get('target_acc')}: {', '.join(r.get('shared_peptides') or [])}"
+                for r in kept) + ".")
+        else:
+            n_pep = len({p for r in kept for p in (r.get("shared_peptides") or [])})
+            sent += f" ({n_pep:,} peptide{'' if n_pep == 1 else 's'})."
     return sent
 
 
@@ -1685,6 +1704,34 @@ def sample_prep_lines(rec, sr):
     return [f"Who prepared the samples is not recorded: {why} ({src}). {NOT_RECORDED}"]
 
 
+def database_build_warnings(fmeta):
+    """fetch_fasta.py's build warnings that the Sequence-database paragraph does not already
+    describe (its drop notes are records, written out in the sentences). They are for the agent
+    and the user to resolve -- printed on stderr and in the JSON -- never in methods.md: a client's
+    Methods once carried "Database build warnings (resolve before publication)" with a server path
+    in it (staff report 2026-10-10)."""
+    described = (fmeta.get("contaminants_dropped_note"),
+                 fmeta.get("contaminants_dropped_for_added_sequences_note"),
+                 fmeta.get("contaminants_sharing_peptides_with_added_sequences_note"))
+    return [str(x) for x in (fmeta.get("warnings") or []) if x and x not in described]
+
+
+# An absolute path: /quobyte/..., /nfs/..., /home/<user>/..., ~/..., C:\Users\... -- a server's or
+# a laptop's file system, which means nothing to the Methods' reader and names internal storage.
+# Two or more segments, and not inside a word or URL (m/z, 1/K0, Trypsin/P and https://... pass).
+_PATH_CHARS = r"[^\s/\\'\"`<>|()\[\]{},;]"
+_ABS_PATH = re.compile(rf"(?<![\w.~:/\\-])(?:~|/{_PATH_CHARS}+)(?:/{_PATH_CHARS}+)+/?"
+                       rf"|(?<![\w])[A-Za-z]:\\{_PATH_CHARS}+(?:\\{_PATH_CHARS}+)*\\?")
+
+
+def client_text(text):
+    """-> (text with every absolute path cut to its file name, how many were cut). Applied to
+    the whole of methods.md as it is written, so no path from any record reaches the client."""
+    def base(m):
+        return re.split(r"[/\\]", m.group(0).rstrip("/\\"))[-1]
+    return _ABS_PATH.subn(base, text)
+
+
 def _write_text(path, text):
     """UTF-8 whatever the platform's locale ("1/K₀" and "—" fail under Windows cp1252), and
     atomic: written to <path>.part and renamed, so a failure never leaves a 0-byte methods.md."""
@@ -1727,7 +1774,7 @@ def main():
                                          "performance sentence -- the verdict stays staff-only")
     a = ap.parse_args()
 
-    fmeta = None
+    fmeta, build_warnings = None, []
     if a.fasta_meta:
         try:
             with open(a.fasta_meta, encoding="utf-8") as fh:
@@ -1965,16 +2012,7 @@ def main():
         sent += added_sequences_sentence(fmeta)
         sent += keratin_database_sentence(fmeta)
         w(sent)
-        # The drop notes are described in the sentences above -- they are records, not
-        # something to resolve before publication.
-        build_warnings = [x for x in (fmeta.get("warnings") or [])
-                          if x not in (fmeta.get("contaminants_dropped_note"),
-                                       fmeta.get("contaminants_dropped_for_added_sequences_note"),
-                                       fmeta.get("contaminants_sharing_peptides_with_added_sequences_note"))]
-        if build_warnings:
-            w("")
-            w(f"> Database build warnings (resolve before publication): "
-              f"{'; '.join(build_warnings)}")
+        build_warnings = database_build_warnings(fmeta)
     else:
         w(f"Spectra were searched against {NOT_RECORDED} "
           f"(run `fetch_fasta.py` and pass `--fasta-meta <fasta>.meta.json` to fill "
@@ -2091,12 +2129,23 @@ def main():
     w(f"*Acknowledgment source: {ACK_SOURCE} (confirm the exact current wording before publishing).*")
     w("")
 
-    _write_text(a.out, "\n".join(L) + "\n")
+    text, n_paths = client_text("\n".join(L) + "\n")
+    if n_paths:
+        print(f"make_methods: {n_paths} file path(s) shortened to the file name in "
+              f"{os.path.basename(a.out)} (a server path is not for the client)", file=sys.stderr)
+    _write_text(a.out, text)
+    for x in build_warnings:
+        print(f"make_methods: database build warning (not in {os.path.basename(a.out)}): {x}",
+              file=sys.stderr)
     print(json.dumps({"methods": os.path.abspath(a.out), "instrument": instrument,
                       "acknowledgment_for": ack_label, "n_files": len(metas),
                       "params_json": os.path.splitext(a.out)[0] + "_params.json",
-                      "next": "Verify the draft against the params table, polish the prose, then "
-                              "convert to .docx with to_docx.py."}, indent=2))
+                      # for the agent, never the client's Methods: tell the user, resolve them
+                      "database_build_warnings": build_warnings,
+                      "next": ("Tell the user the database build warnings above and resolve "
+                               "them (they are not in methods.md). " if build_warnings else "")
+                              + "Verify the draft against the params table, polish the prose, "
+                                "then convert to .docx with to_docx.py."}, indent=2))
 
 
 if __name__ == "__main__":
