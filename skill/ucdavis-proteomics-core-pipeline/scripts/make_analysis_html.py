@@ -1175,7 +1175,8 @@ def runs_left_out_note(prov):
     """The fixed callout for runs the search reported that the DE left out (run_de.R's
     `runs_left_out`; reasons from collect_conditions.py --validate --exclude), worded by
     make_methods.de_runs_left_out_sentence (the one description). A warning when a run has no
-    recorded reason; None when every searched run was analysed."""
+    recorded reason, or its decisions record could not be read (`reasons_unreadable`: the
+    sentence then says "reason not read"); None when every searched run was analysed."""
     from make_methods import de_runs_left_out_sentence
     text = de_runs_left_out_sentence(prov)
     if not text:
@@ -1185,6 +1186,8 @@ def runs_left_out_note(prov):
                            and x["reason"].strip()) for x in runs)
     # a design run that had no quantities was meant to be analysed: always a warning
     unexplained = unexplained or bool((prov.get("runs_left_out") or {}).get("not_quantified"))
+    # the reasons exist but could not be read: never an info callout
+    unexplained = unexplained or bool((prov.get("runs_left_out") or {}).get("reasons_unreadable"))
     return {"kind": "warning" if unexplained else "info",
             "title": "Searched runs left out of the analysis", "text": text}
 
