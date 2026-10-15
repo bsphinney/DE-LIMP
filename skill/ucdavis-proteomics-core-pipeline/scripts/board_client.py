@@ -10,7 +10,10 @@ the board asks for their two-factor sign-in for exactly those. You may put an an
 the board yourself with `start`: a submission's (--prot), or Core internal work with no
 submission number (--internal: method tests, QC, training); either way an Analyze-level
 thread with no cluster time. With --internal each analysis is its own thread in the board's
-INTERNAL project, found again by its --title.
+INTERNAL project, found again by its --title. A cluster job starts on a person's decision on
+the board, or on your own person's go-ahead in your chat: then report the new job at once
+with `job ... --go-ahead chat`, and the board says on it that it started on their go-ahead in
+the chat, not a board decision.
 
     board_client.py connect [--label L] [--wait SECONDS]   # first time: connect by link
     board_client.py start --prot PROT_n --title T --goal G [--project-title T] [--with UPN ...]
@@ -25,7 +28,8 @@ INTERNAL project, found again by its --title.
     board_client.py read THREAD [--since ID] [--json]
     board_client.py post THREAD --kind finding|proposal|question|summary (--text T | --body-file F|-) [--file PATH ...]
     board_client.py ask THREAD (--text T | --body-file F|-) [--to UPN] [--cpu-hours N] [--file PATH ...]
-    board_client.py job THREAD --slurm-id ID --status S [--step 3/5] [--cpu-hours N] [--decision ID] [--text T]
+    board_client.py job THREAD --slurm-id ID --status S [--step 3/5] [--cpu-hours N]
+                    [--decision ID | --go-ahead chat] [--text T | --body-file F|-]
     board_client.py watch [--thread ID] [--since ID]      # one JSON line per new post, forever
     board_client.py stop THREAD [--reason T]
     board_client.py where THREAD [--raw-data P ...] [--session-folder P] [--search-output P]
@@ -226,6 +230,8 @@ def post_record(p: dict) -> dict:
               "job_status", "final_summary"):
         if p.get(k) not in (None, False):
             rec[k if k != "event" else "board_event"] = p[k]
+    if p.get("go_ahead") == "chat":             # a job its person said go to in their chat
+        rec["go_ahead"] = "chat"
     untrusted = False
     if p.get("body"):
         rec["untrusted_text"] = clean(p["body"])
@@ -253,6 +259,8 @@ def print_post_text(p: dict, out=sys.stdout) -> None:
         extra.append(f"{p['cpu_hours']} CPU-hours")
     if p.get("slurm_id"):
         extra.append(f"job {clean(p['slurm_id'])} {clean(p.get('job_status'))}")
+    if p.get("go_ahead") == "chat":
+        extra.append("on the chat go-ahead")
     if p.get("outcome"):
         extra.append(f"{p['outcome']} #{p.get('ref_post_id')}")
     if p.get("final_summary"):
@@ -383,12 +391,14 @@ def cmd_ask(c: Client, a):
 
 
 def cmd_job(c: Client, a):
-    body = {"slurm_id": a.slurm_id, "status": a.status, "body": a.text or ""}
+    body = {"slurm_id": a.slurm_id, "status": a.status, "body": _body(a) if a.text or a.body_file else ""}
     for k in ("step", "cpu_hours"):
         if getattr(a, k) is not None:
             body[k] = getattr(a, k)
     if a.decision is not None:
         body["decision_id"] = a.decision
+    if a.go_ahead:
+        body["go_ahead"] = a.go_ahead
     _emit(c.request("POST", f"/threads/{a.thread}/jobs", body))
 
 
@@ -693,8 +703,11 @@ def build_parser() -> argparse.ArgumentParser:
                    choices=["submitted", "pending", "running", "done", "failed", "cancelled"])
     j.add_argument("--step")
     j.add_argument("--cpu-hours", type=float)
-    j.add_argument("--decision", type=int, help="id of your approved decision request")
-    j.add_argument("--text")
+    why = j.add_mutually_exclusive_group()
+    why.add_argument("--decision", type=int, help="id of your approved decision request")
+    why.add_argument("--go-ahead", choices=["chat"],
+                     help="a new job your own person said go to in your chat (no board decision needed)")
+    text_args(j, required=False)
     w = sub.add_parser("watch")
     w.add_argument("--thread", type=int)
     w.add_argument("--since", type=int)
