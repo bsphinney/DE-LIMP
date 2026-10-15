@@ -57,6 +57,18 @@ def read_csv(path):
         return list(csv.DictReader(fh))
 
 
+def broken_lib(root, *pkgs):
+    """A library (first on R_LIBS) holding `pkgs` as installed-looking packages that do not load --
+    what conda's 3.2.x org.Mm.eg.db / GO.db builds were in a HIVE env (staff report 2026-10-08)."""
+    lib = os.path.join(root, "broken_lib")
+    for p in pkgs:
+        os.makedirs(os.path.join(lib, p), exist_ok=True)
+        with open(os.path.join(lib, p, "DESCRIPTION"), "w") as fh:
+            fh.write(f"Package: {p}\nVersion: 3.2.3\nTitle: x\nDescription: x\nLicense: Artistic-2.0\n"
+                     f"Built: R 3.2.2; ; 2015-10-01 00:00:00 UTC; unix\n")
+    return dict(os.environ, R_LIBS=lib)
+
+
 @unittest.skipUnless(r_has("limma", "statmod", "jsonlite"), "needs R with limma, statmod and jsonlite")
 class CameraIsCamera(unittest.TestCase):
     @classmethod
@@ -423,6 +435,34 @@ cat(jsonlite::toJSON(list(o = o$code, src = o$source, a = a$code, err = err), au
         self.assertEqual(r["a"], "Hs")
         self.assertIn("--organism", r["err"])
 
+    def test_an_annotation_package_that_does_not_load_is_named_with_why(self):
+        body = (PRE + 'o <- resolve_organism("mouse")\n'
+                'w <- NULL; r <- withCallingHandlers(tryCatch(annotation_route(o), error = function(e) e),\n'
+                '  warning = function(x) { w <<- conditionMessage(x); invokeRestart("muffleWarning") })\n'
+                'cat(jsonlite::toJSON(list(err = if (inherits(r, "error")) conditionMessage(r) else "",\n'
+                '  route = if (inherits(r, "error")) "" else r$route, note = if (inherits(r, "error")) "" else r$note,\n'
+                '  warn = if (is.null(w)) "" else w, go = pkg_load_problem("GO.db")), auto_unbox = TRUE))\n')
+
+        def run(*broken):
+            p = subprocess.run(["Rscript", "-e", body], capture_output=True, text=True,
+                               env=broken_lib(self.tmp, *broken) if broken else None)
+            self.assertEqual(p.returncode, 0, p.stderr[-1500:])
+            return json.loads(p.stdout.strip().splitlines()[-1])
+        if not r_has("org.Hs.eg.db", "org.Mm.eg.db", "GO.db"):
+            self.skipTest("needs org.Hs.eg.db, org.Mm.eg.db and GO.db")
+        self.assertEqual(run()["route"], "native")
+        r = run("org.Mm.eg.db")                       # mouse's own does not load: human's, warned
+        self.assertEqual(r["route"], "human symbol identity")
+        self.assertIn("(org.Mm.eg.db does not load)", r["note"])
+        self.assertIn("org.Mm.eg.db is installed but does not load", r["warn"])
+        self.assertIn("bash setup.sh", r["warn"])
+        r = run("org.Mm.eg.db", "org.Hs.eg.db", "GO.db")
+        self.assertIn("no annotation package can map the mouse gene symbols -- org.Mm.eg.db is "
+                      "installed but does not load", r["err"])
+        self.assertIn("org.Hs.eg.db is installed but does not load", r["err"])
+        self.assertIn("No set test was run. Fix: bash setup.sh", r["err"])
+        self.assertTrue(r["go"].startswith("is installed but does not load"))
+
 
 # A pulldown-shaped DIA-NN report: bait (B) and control (C) IPs from 6 mice, 3 Old + 3 Young;
 # each mouse gives one B and one C run. 80 interactors enriched in B; 15 of them (G1..G15) +1.2
@@ -730,6 +770,20 @@ class RunSetsEndToEnd(unittest.TestCase):
         self.assertNotEqual(p.returncode, 0)
         self.assertIn("re-run run_de.R", p.stderr)
 
+    def test_no_annotation_package_stops_it_with_the_reason_and_the_fix(self):
+        """The final-DE job of 2026-10-08 printed DONE after run_sets.R failed: it must exit
+        non-zero, before writing anything, naming each package and why."""
+        out = os.path.join(self.tmp, "sets_no_annotation")
+        p = subprocess.run(["Rscript", RUN_SETS, "--de-dir", self.de, "--sets", "go",
+                            "--organism", "mouse", "--outdir", out, "--figdir", out],
+                           capture_output=True, text=True, cwd=self.tmp,
+                           env=broken_lib(self.tmp, "org.Mm.eg.db", "org.Hs.eg.db"))
+        self.assertNotEqual(p.returncode, 0, p.stdout[-1500:])
+        self.assertIn("no annotation package can map the mouse gene symbols", p.stderr)
+        self.assertIn("org.Mm.eg.db is installed but does not load", p.stderr)
+        self.assertIn("Fix: bash setup.sh", p.stderr)
+        self.assertFalse(os.path.exists(os.path.join(out, "sets_provenance.json")))
+
 
 @unittest.skipUnless(r_has(*E2E_NEEDS), "needs R with " + "/".join(E2E_NEEDS))
 class RunSetsPairedAndMaxlfq(unittest.TestCase):
@@ -810,20 +864,40 @@ class RunSetsPairedAndMaxlfq(unittest.TestCase):
         self.assertEqual(rows["up"]["fry_Direction"], "Up")
 
 
-# setup.sh's GO-annotation step, with test_setup_limpa's stubs (no conda, no network): this
-# Rscript stub reports GO.db and org.Mm.eg.db missing until a Bioconductor annotation-repo
-# install.packages() "installs" them; the stub micromamba's install changes nothing, so the
-# conda-first attempt is followed by the Bioconductor fallback.
+# setup.sh's GO-annotation step, with test_setup_limpa's stubs (no conda, no network). Staff report
+# (2026-10-08): conda's bioconductor-org.mm.eg.db / go.db resolved to 3.2.x builds that did not
+# load, setup.sh's check (requireNamespace) could not tell them from missing ones, and run_sets.R
+# then failed inside a DE job. This Rscript stub answers setup.sh's probe from a state folder --
+# <pkg>.ok (its version), <pkg>.broken (installed, does not load), else missing -- and the env's
+# release from FAKE_BIOC; a Bioconductor annotation-repo install.packages() makes the named
+# packages load. The stub micromamba's bioconductor-annotationdbi install makes AnnotationDbi load.
 FAKE_RSCRIPT_ANN = r'''#!/bin/bash
 echo "$*" >> "$FAKE_R_LOG"
 case "$*" in
-  *"cat(p[!vapply"*) [ -f "$FAKE_ANN_STATE" ] || printf 'GO.db org.Mm.eg.db'; exit 0 ;;
-  *BioCann*) [ -n "${FAKE_ANN_INSTALL_FAIL:-}" ] && { echo "cannot open URL" >&2; exit 1; }
-             : > "$FAKE_ANN_STATE"; exit 0 ;;     # no touch on the stub PATH
+  *loadNamespace*)
+    [ -n "${FAKE_R_SILENT:-}" ] && exit 1
+    for p in $SET_ANN_PKGS; do
+      if [ -f "$FAKE_ANN_DIR/$p.ok" ]; then echo "$p ok $(cat "$FAKE_ANN_DIR/$p.ok")"
+      elif [ -f "$FAKE_ANN_DIR/$p.broken" ]; then echo "$p broken package '$p' does not have a namespace"
+      else echo "$p missing"; fi
+    done
+    if [ -n "${FAKE_BIOC:-}" ]; then echo "bioc $FAKE_BIOC limma"; else echo "bioc -"; fi
+    exit 0 ;;
+  *BioCann*)
+    # install.packages() warns and exits 0 when a download fails: the probe after it must tell
+    [ -n "${FAKE_ANN_INSTALL_FAIL:-}" ] && { echo "cannot open URL" >&2; exit 0; }
+    for p in AnnotationDbi GO.db org.Hs.eg.db org.Mm.eg.db; do
+      case "$*" in *"$p"*) rm -f "$FAKE_ANN_DIR/$p.broken"; echo "${FAKE_BIOC:-3.23}.0" > "$FAKE_ANN_DIR/$p.ok" ;; esac
+    done
+    exit 0 ;;
   *"cat(tryCatch"*) printf '1.4.0'; exit 0 ;;
 esac
 exit 0
 '''
+FAKE_MICROMAMBA_ANN = setup_limpa.FAKE_MICROMAMBA.replace(
+    "             pandas) ",
+    '             bioconductor-annotationdbi) echo 1.72.0 > "$FAKE_ANN_DIR/AnnotationDbi.ok" ;;\n'
+    "             pandas) ")
 
 
 class SetupInstallsGoAnnotation(setup_limpa.setup_t.SetupCheckHarness):
@@ -831,56 +905,116 @@ class SetupInstallsGoAnnotation(setup_limpa.setup_t.SetupCheckHarness):
 
     def setUp(self):            # SetupLimpaGate.setUp, whose super() needs that class
         super().setUp()
-        for tool in ("chmod", "ln"):
+        for tool in ("chmod", "ln", "rm"):
             os.symlink(shutil.which(tool), os.path.join(self.sys, tool))
-        setup_limpa._exe(os.path.join(self.sys, "micromamba"), setup_limpa.FAKE_MICROMAMBA)
+        setup_limpa._exe(os.path.join(self.sys, "micromamba"), FAKE_MICROMAMBA_ANN)
         self.ensure = setup_limpa._exe(os.path.join(self.d, "ensure_dotnet8_stub.sh"), setup_limpa.FAKE_ENSURE)
         self.dotnet_root = setup_limpa.fake_dotnet_root(os.path.join(self.d, ".proteomics-pipeline", "dotnet8"))
         self.mm_log = os.path.join(self.d, "mm.log")
         self.r_log = os.path.join(self.d, "r.log")
         self.state = os.path.join(self.d, "limpa_version")
         self.prefix = os.path.join(self.home, "micromamba", "envs", "proteomics-pipeline")
+        self.ann = os.path.join(self.d, "ann")
+        os.makedirs(self.ann)
 
-    def prebuilt_env(self):
+    def prebuilt_env(self, ok=(), broken=()):
         setup_limpa.SetupLimpaGate.prebuilt_env(self, "1.4.0")
         rs = os.path.join(self.prefix, "bin", "Rscript")
         os.remove(rs)
         setup_limpa._exe(rs, FAKE_RSCRIPT_ANN)
-        self.ann_state = os.path.join(self.d, "ann_installed")
+        for p, v in ok:
+            with open(os.path.join(self.ann, p + ".ok"), "w") as fh:
+                fh.write(v)
+        for p in broken:
+            open(os.path.join(self.ann, p + ".broken"), "w").close()
 
-    def test_missing_packages_conda_first_then_bioconductor(self):
-        self.prebuilt_env()
-        r, s = self.run_setup(FAKE_ANN_STATE=self.ann_state)
+    def go(self, *args, **env):
+        r, s = self.run_setup(*args, FAKE_ANN_DIR=self.ann, **env)
         self.assertEqual(r.returncode, 0, r.stderr[-2000:])
-        mm = [c for c in setup_limpa._lines(self.mm_log) if "bioconductor-go.db" in c]
-        self.assertEqual(len(mm), 1, setup_limpa._lines(self.mm_log))
-        self.assertIn("--override-channels -c conda-forge -c bioconda", mm[0])
-        for pkg in ("bioconductor-annotationdbi", "bioconductor-org.hs.eg.db", "bioconductor-org.mm.eg.db"):
-            self.assertIn(pkg, mm[0])
-        ann = [c for c in setup_limpa._lines(self.r_log) if "BioCann" in c]
-        self.assertEqual(len(ann), 1)
-        self.assertIn("strsplit('GO.db org.Mm.eg.db', ' ')", ann[0])      # only what is missing
-        self.assertIn("https://bioconductor.org/packages/3.23/data/annotation", ann[0])
-        self.assertEqual(s["set_annotation"]["ok"], True)
-        self.assertEqual(s["set_annotation"]["missing"], "")
+        return r, s
+
+    def r_installs(self):
+        return [c for c in setup_limpa._lines(self.r_log) if "BioCann" in c]
+
+    def conda_annotation_installs(self):
+        return [c for c in setup_limpa._lines(self.mm_log) if "bioconductor-" in c]
+
+    def test_conda_s_broken_builds_are_reinstalled_from_the_env_s_release(self):
+        """The staff case: AnnotationDbi loads, org.Mm.eg.db is a 3.2.x build that does not,
+        GO.db is missing, the env is Bioconductor 3.22."""
+        self.prebuilt_env(ok=[("AnnotationDbi", "1.72.0"), ("org.Hs.eg.db", "3.22.0")],
+                          broken=["org.Mm.eg.db"])
+        r, s = self.go(FAKE_BIOC="3.22")
+        self.assertEqual(self.conda_annotation_installs(), [])     # never conda's annotation builds
+        (inst,) = self.r_installs()
+        self.assertIn("strsplit('GO.db org.Mm.eg.db', ' ')", inst)
+        self.assertIn("https://bioconductor.org/packages/3.22/data/annotation", inst)
+        self.assertIn("https://bioconductor.org/packages/3.22/bioc", inst)
+        a = s["set_annotation"]
+        self.assertIs(a["ok"], True)
+        self.assertEqual(a["missing"], "")
+        self.assertEqual(a["status"]["org.Mm.eg.db"], "loads (3.22.0)")
+        self.assertEqual(a["organisms"], {"human": True, "mouse": True})
+        self.assertEqual((a["bioconductor"], a["bioconductor_from"]), ("3.22", "limma"))
+        self.assertFalse([n for n in s["notes"] if "run_sets.R" in n], s["notes"])
+
+    def test_a_missing_annotationdbi_comes_from_conda_first(self):
+        self.prebuilt_env()
+        r, s = self.go(FAKE_BIOC="3.22")
+        (mm,) = self.conda_annotation_installs()
+        self.assertIn("--override-channels -c conda-forge -c bioconda bioconductor-annotationdbi", mm)
+        self.assertNotIn("bioconductor-go.db", mm)
+        (inst,) = self.r_installs()
+        self.assertIn("strsplit('GO.db org.Hs.eg.db org.Mm.eg.db', ' ')", inst)
+        self.assertIs(s["set_annotation"]["ok"], True)
+
+    def test_check_reports_what_loads_and_installs_nothing(self):
+        self.prebuilt_env(ok=[("AnnotationDbi", "1.72.0"), ("GO.db", "3.22.0"),
+                              ("org.Hs.eg.db", "3.22.0")], broken=["org.Mm.eg.db"])
+        r, s = self.go("--check", FAKE_BIOC="3.22")
+        self.assertEqual(self.r_installs(), [])
+        self.assertEqual(self.conda_annotation_installs(), [])
+        a = s["set_annotation"]
+        self.assertIs(a["ok"], False)
+        self.assertEqual(a["missing"], "org.Mm.eg.db")
+        self.assertEqual(a["status"]["org.Mm.eg.db"],
+                         "installed but does not load: package 'org.Mm.eg.db' does not have a namespace")
+        self.assertEqual(a["status"]["GO.db"], "loads (3.22.0)")
+        self.assertEqual(a["organisms"], {"human": True, "mouse": False})
+        self.assertIn("install.packages(c('org.Mm.eg.db'), repos = "
+                      "c('https://bioconductor.org/packages/3.22/data/annotation'", a["fix"])
+        (note,) = [n for n in s["notes"] if "run_sets.R" in n]
+        self.assertIn("org.Mm.eg.db installed but does not load", note)
+        self.assertIn("DE does not need them", note)
 
     def test_a_failed_install_is_a_note_not_a_failure(self):
-        self.prebuilt_env()
-        r, s = self.run_setup(FAKE_ANN_STATE=self.ann_state, FAKE_ANN_INSTALL_FAIL="1")
-        self.assertEqual(r.returncode, 0, r.stderr[-2000:])
-        self.assertEqual(s["set_annotation"]["ok"], False)
-        self.assertEqual(s["set_annotation"]["missing"], "GO.db org.Mm.eg.db")
-        note = [n for n in s["notes"] if "run_sets.R" in n]
-        self.assertEqual(len(note), 1, s["notes"])
-        self.assertIn("c('GO.db','org.Mm.eg.db')", note[0])
-        self.assertIn("DE does not need them", note[0])
+        self.prebuilt_env(ok=[("AnnotationDbi", "1.72.0")])
+        r, s = self.go(FAKE_BIOC="3.22", FAKE_ANN_INSTALL_FAIL="1")
+        self.assertEqual(len(self.r_installs()), 1)
+        a = s["set_annotation"]
+        self.assertIs(a["ok"], False)
+        self.assertEqual(a["missing"], "GO.db org.Hs.eg.db org.Mm.eg.db")
+        self.assertEqual(a["organisms"], {"human": False, "mouse": False})
+        (note,) = [n for n in s["notes"] if "run_sets.R" in n]
+        self.assertIn("c('GO.db','org.Hs.eg.db','org.Mm.eg.db')", note)
 
-    def test_check_only_installs_nothing(self):
+    def test_no_release_named_falls_back_to_the_pinned_one_and_says_so(self):
+        self.prebuilt_env(ok=[("AnnotationDbi", "1.72.0")])
+        r, s = self.go()
+        (inst,) = self.r_installs()
+        self.assertIn("https://bioconductor.org/packages/3.23/data/annotation", inst)
+        self.assertEqual(s["set_annotation"]["bioconductor"], "3.23")
+        self.assertIn("PROTEOMICS_LIMPA_BIOC", s["set_annotation"]["bioconductor_from"])
+
+    def test_no_answer_from_r_is_not_ok(self):
         self.prebuilt_env()
-        r, s = self.run_setup("--check", FAKE_ANN_STATE=self.ann_state)
-        self.assertFalse(any("BioCann" in c for c in setup_limpa._lines(self.r_log)))
-        self.assertFalse(any("bioconductor-go.db" in c for c in setup_limpa._lines(self.mm_log)))
-        self.assertEqual(s["set_annotation"]["ok"], False)
+        r, s = self.go(FAKE_R_SILENT="1")
+        self.assertEqual(self.r_installs(), [])
+        a = s["set_annotation"]
+        self.assertIs(a["ok"], False)
+        self.assertEqual(a["status"], {})
+        self.assertTrue(any("did not say whether the annotation packages" in n for n in s["notes"]),
+                        s["notes"])
 
 
 @unittest.skipUnless(r_has("limma"), "needs R with limma")

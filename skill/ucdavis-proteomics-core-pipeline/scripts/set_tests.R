@@ -163,23 +163,47 @@ resolve_organism <- function(arg = NULL, fasta_meta = NULL) {
        "--fasta-meta so the search FASTA's taxid is on record.")
 }
 
-# Which OrgDb maps the gene symbols. The organism's own when installed; otherwise human's,
+# Why an annotation package cannot be used here: "" when it loads. requireNamespace() says FALSE
+# both for a package that is missing and for one that is installed but does not load -- the
+# 3.2.x conda builds of org.Mm.eg.db / GO.db in a HIVE env (staff report 2026-10-08), whose fix
+# is a reinstall, not an install -- so the reason is kept.
+pkg_load_problem <- function(p) {
+  if (!nzchar(system.file(package = p))) return("is not installed")
+  tryCatch({ loadNamespace(p); "" }, error = function(e)
+    paste("is installed but does not load:", gsub("\\s+", " ", conditionMessage(e))))
+}
+ANNOTATION_FIX <- paste(
+  "Fix: bash setup.sh -- it installs GO.db, org.Hs.eg.db and org.Mm.eg.db from Bioconductor's",
+  "annotation repository for the env's Bioconductor release; bash setup.sh --check says which load")
+
+# Which OrgDb maps the gene symbols. The organism's own when it loads; otherwise human's,
 # matching symbols by identity after upper-casing -- a proxy for 1:1 orthology that misses
 # renamed genes and lineage-specific families, so the route and its mapping rate are recorded.
+# An own package that is installed but does not load is a broken setup, said as a warning.
+# Neither: stop (run_sets.R exits non-zero), naming each package and why.
 annotation_route <- function(org) {
   own <- if (!is.na(org$code)) paste0("org.", org$code, ".eg.db") else NA_character_
-  if (!is.na(own) && requireNamespace(own, quietly = TRUE))
+  own_why <- if (is.na(own)) NA_character_ else pkg_load_problem(own)
+  if (!is.na(own) && !nzchar(own_why))
     return(list(package = own, route = "native", uppercase = FALSE,
                 note = sprintf("%s gene symbols -> Entrez Gene IDs (%s)", org$name, own)))
-  if (requireNamespace("org.Hs.eg.db", quietly = TRUE))
+  hs_why <- pkg_load_problem("org.Hs.eg.db")
+  if (!nzchar(hs_why)) {
+    if (!is.na(own) && startsWith(own_why, "is installed"))
+      warning("[run_sets] ", own, " ", own_why, " -- ", org$name, " gene symbols were matched to ",
+              "human's instead. ", ANNOTATION_FIX, call. = FALSE)
     return(list(package = "org.Hs.eg.db", route = "human symbol identity", uppercase = TRUE,
                 note = sprintf(paste0("%s has no annotation package here%s: its gene symbols, ",
                                       "upper-cased, were matched to HUMAN symbols (org.Hs.eg.db). ",
                                       "Symbol identity stands in for 1:1 orthology; renamed genes ",
                                       "and lineage-expanded families do not map"),
-                               org$name, if (is.na(own)) "" else paste0(" (", own, " not installed)"))))
-  stop("run_sets.R: no annotation package. Install ", if (is.na(own)) "" else paste0(own, " or "),
-       "org.Hs.eg.db (bash setup.sh installs org.Hs.eg.db, org.Mm.eg.db and GO.db).")
+                               org$name, if (is.na(own)) "" else
+                                 paste0(" (", own, if (startsWith(own_why, "is installed"))
+                                   " does not load" else " not installed", ")"))))
+  }
+  stop("run_sets.R: no annotation package can map the ", org$name, " gene symbols -- ",
+       if (is.na(own)) "" else paste0(own, " ", own_why, "; "), "org.Hs.eg.db ", hs_why,
+       ". No set test was run. ", ANNOTATION_FIX, ".", call. = FALSE)
 }
 
 reactome_info <- function() {
@@ -252,8 +276,10 @@ map_proteins_to_entrez <- function(genes, route) {
 # GO with ancestor propagation -- a gene annotated to a term belongs to every ancestor --
 # from the OrgDb's GO2ALLEGS map, the map limma::goana uses. Term names from GO.db.
 go_sets <- function(pkg, universe_entrez, ontologies = SET_DEFAULTS$ontologies) {
-  if (!requireNamespace("GO.db", quietly = TRUE))
-    stop("run_sets.R: GO.db is not installed (bash setup.sh installs it).")
+  go_why <- pkg_load_problem("GO.db")
+  if (nzchar(go_why))
+    stop("run_sets.R: GO.db ", go_why, ", so no GO set can be named. No set test was run. ",
+         ANNOTATION_FIX, ".", call. = FALSE)
   obj <- utils::getFromNamespace(paste0(sub("\\.db$", "", pkg), "GO2ALLEGS"), pkg)
   AnnotationDbi::Lkeys(obj) <- intersect(unique(universe_entrez), AnnotationDbi::Lkeys(obj))
   tab <- AnnotationDbi::toTable(obj)[, c("gene_id", "go_id", "Ontology")]

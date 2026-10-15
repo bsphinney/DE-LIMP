@@ -2247,6 +2247,11 @@ Rscript scripts/run_sets.R --de-dir ./de_results [--sets go[,reactome]] \
   from run depth is said to be so, never picked apart into a named signature.
   One-test sets are not pathway findings.
 
+- **In one job with the final DE, the job must fail when `run_sets.R` does** (it exits non-zero,
+  e.g. when no annotation package loads): start the job script with `set -euo pipefail` (or join
+  the steps with `&&`), never `run_sets.R ...; echo DONE` — a DE job printed DONE after it failed.
+  `setup.sh --check` says whether the GO packages load (`setup.json` `set_annotation`).
+
 → why, how to read them, the simulations behind the defaults: `references/set-tests.md`.
 
 ### 8b. Generate figures
