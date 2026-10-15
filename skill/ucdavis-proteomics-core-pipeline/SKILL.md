@@ -42,6 +42,14 @@ the spine.
 1. **Confirm before committing compute.** A search is multi-hour. Show the resolved
    defaults (engine + version, mass accuracy + source) with the organism/design and
    get an explicit "go" before running the engine. **One confirmation, not a menu.**
+   After that go, the jobs that carry out the confirmed plan need no further yes, so the
+   work can run unattended overnight: the chain's later steps, retries from the
+   `watch_run.sh` playbook, DE, set tests, figures, the podcast. A new search with settings
+   the user has not seen (another database, engine or parameters) needs their go again,
+   unless they told you to carry on yourself ("run it overnight, decide as you go"): then
+   log each such decision (`log_decision.py`) and go ahead. Core staff: each job is
+   recorded on the board, which approves anything under 10,000 CPU- or GPU-hours by itself;
+   10,000 or more waits for a person there (`references/board.md` section 3).
    Sharing results with a collaborator (`core_submission.py bioshare send`) is a **second,
    separate** explicit yes — never bundled into the compute confirmation.
 2. **Never fabricate parameters.** If a value isn't a shipped default or given by
