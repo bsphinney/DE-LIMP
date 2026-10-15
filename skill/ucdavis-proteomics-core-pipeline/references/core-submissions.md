@@ -911,16 +911,16 @@ named several and it is not clear which leads.
    the numbers recorded, the main one first:
    ```
    bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/session.py init \
-       --name PROT_0807_PROT_0811 --base <PROT_0807 work_dir> \
-       --raw $(cat ~/core/PROT_0807/files.txt ~/core/PROT_0811/files.txt) \
-       --submission PROT_0807 --submission PROT_0811'
+       --name PROT_0807_PROT_9001 --base <PROT_0807 work_dir> \
+       --raw $(cat ~/core/PROT_0807/files.txt ~/core/PROT_9001/files.txt) \
+       --submission PROT_0807 --submission PROT_9001'
    ```
 3. **Attach the main submission's record only.** A session holds one record (`attach` refuses a
    second: "already attached to"), and the report's Submission section, the Methods' Sample
    preparation, the analysis brief, `experiment_type.py --source submission`, the Data Quality
    Notes and the feedback survey all read that one record. Name the others yourself:
    - in the decisions log, right after `init`:
-     `log_decision.py --session "$S" --what "PROT_0807 and PROT_0811 analysed together; PROT_0807 record attached" --why "<staff's words>" --step "1c. submissions"`;
+     `log_decision.py --session "$S" --what "PROT_0807 and PROT_9001 analysed together; PROT_0807 record attached" --why "<staff's words>" --step "1c. submissions"`;
    - in `AI_Analysis_Report.md` (step 9): near the top, one sentence per other submission (its
      number, its PI, the samples it brought), from its own `submission_summary.json`. Its
      sample sheet against its files was checked by its own `locate`.
@@ -932,7 +932,7 @@ named several and it is not clear which leads.
    For another submission it refuses (exit 2: the session sits under the main one's stage
    record); never work around that. Ask staff how that submission's people get the results:
    usually the main share's link (the same lab), and its raw data, when wanted, delivered on its
-   own (`deliver --summary ~/core/PROT_0811/submission_summary.json --mode raw-only`).
+   own (`deliver --summary ~/core/PROT_9001/submission_summary.json --mode raw-only`).
 6. **The board:** one thread per submission, the records in the main one's thread
    (`references/board.md` section 2, "Several submissions in one analysis").
 

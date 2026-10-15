@@ -4,7 +4,7 @@ The documented skill update must reach GitHub main on a Windows laptop with no G
 and must never say "already latest" while the computer is behind main
 (skill_version.sh --check-update / --update, SKILL.md step 0).
 
-On 2026-10-07 (msalemi, PROT_0803, Git Bash) `claude plugin update
+On 2026-10-07 (a staff member, PROT_0000, Git Bash) `claude plugin update
 ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core` warned "marketplace not refreshed: SSH
 host key is not in your known_hosts", then "SSH authentication failed", and said "already at the
 latest version (2.10.0)" while main shipped 2.11.2: it compared against its own stale catalogue.

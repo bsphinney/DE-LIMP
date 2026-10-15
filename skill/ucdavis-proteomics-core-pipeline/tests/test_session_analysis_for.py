@@ -56,8 +56,8 @@ class AnalysisFor(unittest.TestCase):
             return json.load(fh)
 
     def test_submission_numbers_are_kept_in_order_the_first_the_main_one(self):
-        j = self.init("--submission", "807", "--submission", "PROT_0822", "--submission", "prot-807")
-        want = {"submissions": ["PROT_0807", "PROT_0822"]}
+        j = self.init("--submission", "807", "--submission", "PROT_9002", "--submission", "prot-807")
+        want = {"submissions": ["PROT_0807", "PROT_9002"]}
         self.assertEqual(j["analysis_for"], want)
         self.assertEqual(self.session_json(j["created"])["analysis_for"], want)
         self.assertEqual(session.analysis_for(j["created"]), want)
@@ -92,10 +92,10 @@ class AnalysisFor(unittest.TestCase):
         sj = self.session_json(s)
         self.assertEqual(sj["analysis_for"], {"submissions": ["PROT_0807"]})
         self.assertEqual(sj["coreomics"]["internal_id"], "PROT_0807")
-        self.init("--submission", "807", "--submission", "822")       # init again: same folder
+        self.init("--submission", "807", "--submission", "9002")       # init again: same folder
         sj = self.session_json(s)
         self.assertEqual(sj["coreomics"]["internal_id"], "PROT_0807")
-        self.assertEqual(sj["analysis_for"]["submissions"], ["PROT_0807", "PROT_0822"])
+        self.assertEqual(sj["analysis_for"]["submissions"], ["PROT_0807", "PROT_9002"])
 
     def test_a_damaged_session_json_is_not_overwritten(self):
         s = self.init()["created"]
@@ -195,7 +195,7 @@ class TheDocsSayIt(unittest.TestCase):
         sec = _flat(self.core[self.core.index("## Several submissions in one analysis"):
                               self.core.index("## Troubleshooting by exit code")])
         self.assertIn("Attach the main submission's record only.", sec)
-        self.assertIn("--submission PROT_0807 --submission PROT_0811", sec)
+        self.assertIn("--submission PROT_0807 --submission PROT_9001", sec)
         self.assertIn("deliver takes the combined session into the main submission's share only",
                       sec.replace("`", ""))
         self.assertIn("never work around that", sec)

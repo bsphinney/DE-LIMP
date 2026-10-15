@@ -2075,7 +2075,7 @@ dropped file fails here, not halfway through the DE:
 python3 scripts/collect_conditions.py --validate conditions.csv --against ./search_out/report.parquet
 ```
 **A searched run left out of the DE on purpose** (a re-run whose first injection is analysed, a
-failed injection: PROT_0803 searched 13 runs and analysed 11) has no row, so `--validate` names it
+failed injection: one Core submission searched 13 runs and analysed 11) has no row, so `--validate` names it
 under "report runs missing from metadata" and exits 1. **Never go past that failure on your own
 judgment.** Ask the user; only when they decide the run is left out, record it, one `--exclude`
 per run, each with its own `--reason` in their words (it goes into the Methods and the report,

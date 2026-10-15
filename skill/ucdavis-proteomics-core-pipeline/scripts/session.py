@@ -36,7 +36,7 @@ Subcommands:
   #   Core staff: what the analysis is for (SKILL.md step 0a), kept in session.json's
   #   "analysis_for" -- the CoreOmics submission(s), the first the main one, or internal work
   #   with its title on the Core Project Board (references/board.md section 2)
-  python3 session.py init --name PROT_0807 --raw ... --submission PROT_0807 [--submission 822]
+  python3 session.py init --name PROT_0807 --raw ... --submission PROT_0807 [--submission 9002]
   python3 session.py init --name "Astral HeLa gradient test" --raw ... --internal "Astral HeLa gradient test"
   #   -> prints JSON with every canonical path + "placement"; route later steps into them
 
@@ -108,7 +108,7 @@ def paths_for(session_dir):
 
 def analysis_for_block(submissions, internal):
     """session.json's "analysis_for" from init's --submission / --internal: {"submissions":
-    ["PROT_0807", "PROT_0822"]} (as staff named them, the first the main one) or {"internal":
+    ["PROT_0807", "PROT_9002"]} (as staff named them, the first the main one) or {"internal":
     "<its title on the Core Project Board>"}. None when neither was given: only Core staff are
     asked (SKILL.md step 0a). ValueError for anything that is not one or the other."""
     if submissions and internal is not None:
