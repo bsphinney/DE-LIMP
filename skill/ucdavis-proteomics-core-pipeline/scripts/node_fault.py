@@ -294,7 +294,10 @@ def chain_checks(diann, out, fasta, raws, max_dirs=8):
     add("-r", fasta, "the FASTA")
     dirs = []
     for r in raws:
-        d = os.path.dirname(os.path.abspath(r.rstrip("/")))
+        p = r.rstrip("/")
+        # a link -- the search's own input_links/ for a path with '--' (diann_parallel.
+        # dashed_input_plan) -- is checked where it points: that is the mount a node can lose
+        d = os.path.dirname(os.path.realpath(p) if os.path.islink(p) else os.path.abspath(p))
         if d not in dirs:
             dirs.append(d)
     for d in dirs[:max_dirs]:

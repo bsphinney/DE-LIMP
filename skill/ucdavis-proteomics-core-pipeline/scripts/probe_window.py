@@ -1550,6 +1550,18 @@ def main():
             raws += [ln.strip() for ln in fh if ln.strip()]
     if not raws:
         _fail(EXIT_CONFIG, "no runs given (--raw or --raw-list)")
+    # DIA-NN cuts its command line at every '--', quoted or not (check_report_runs.DIANN_OPTION_MARK):
+    # a run, FASTA, library or workdir path holding one would be lost. The chain hands this probe
+    # links without '--' (diann_parallel.dashed_input_plan); run by hand it has to be told.
+    from check_report_runs import dashed
+    bad = [f"{what} {p}" for what, ps in (("run", raws), ("--fasta", [a.fasta]), ("--lib", [a.lib]),
+                                          ("--workdir", [a.workdir or ""]))
+           for p in ps if dashed(p)]
+    if bad:
+        _fail(EXIT_CONFIG, "these paths hold '--', which DIA-NN cuts into an option, so the probe "
+                           "would measure nothing on them: " + "; ".join(bad) + ". Link each "
+                           "under a name and folder without '--' (run_search.py and "
+                           "diann_parallel.py do this for a search) and probe the links.")
     for f, what in ((a.fasta, "fasta"), (a.lib, "library")):
         if not os.path.exists(f):
             _fail(EXIT_CONFIG, f"{what} not found: {f}")

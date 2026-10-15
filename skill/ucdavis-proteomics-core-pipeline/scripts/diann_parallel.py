@@ -1223,6 +1223,23 @@ def refuse_dashed_path(path, flag, prog="diann_parallel"):
     return path
 
 
+def refuse_dashed_cfg(cfg, prog="diann_parallel"):
+    """Exit when a value in the cfg holds '--' -- a --lib, --temp or --out-lib path, a --var-mod:
+    DIA-NN reads the cfg's text as a command line (--cfg), cutting it at every '--' as it does
+    argv, so the rest of that value becomes an option and the value is lost. A flag that is
+    itself `--x` is read as one; only a value carrying '--' is the problem."""
+    try:
+        groups = cfg_groups(cfg_tokens(cfg))
+    except CfgError:
+        return                                   # parallel_safe / the routes report it
+    bad = [(flag, v) for flag, vals in groups for v in vals if dashed(v)]
+    if bad:
+        sys.exit(f"[{prog}] REFUSING {cfg}: " + "; ".join(f"{f} {v!r}" for f, v in bad)
+                 + " -- DIA-NN reads a cfg like a command line and cuts it at every '--', quoted "
+                   "or not, so that value would be lost and its tail read as an option. Use a "
+                   "path (or value) without '--'. Nothing was written or submitted.")
+
+
 def dashed_input_plan(files, out, rename=False):
     """How each input whose path holds '--' reaches DIA-NN: through a link under
     <out>/input_links/. Pure -- make_input_links() creates them, after every other refusal.
@@ -1600,6 +1617,8 @@ def main():
                        ("--seed-lib", a.seed_lib)):
         if path:
             refuse_dashed_path(os.path.abspath(path), flag)
+    if a.cfg:
+        refuse_dashed_cfg(a.cfg)
     links_plan = dashed_input_plan(raws, a.out, rename=a.rename_dashed_runs)
     if links_plan["refused"]:
         sys.exit(f"[diann_parallel] REFUSING: {links_plan['refused']} Nothing was generated.")
@@ -2071,7 +2090,10 @@ def main():
         f'if [ "$NNAMES" -ne {n} ]; then '
         f'echo "FAILED: {n} inputs map to only $NNAMES distinct run names -- DIA-NN names a run '
         f'by its file name alone, so inputs that share one are merged into a single Run. '
-        f'Rename them, or search them separately." >&2; exit 1; fi',
+        f'Rename them, or search them separately. (Or file_list.txt was edited after the chain was '
+        f'generated: its runs and their count are fixed then, so a run cannot be dropped that way '
+        f'-- to go on without one the report lacks, see check_report_runs.py --accept-missing.)" '
+        f'>&2; exit 1; fi',
         f'if [ "$NQ" -ne {n} ]; then '
         f'echo "FAILED: only $NQ of {n} runs have a final-pass .quant -- a step-4 task did not '
         f'succeed, so no report was written. Resubmit the step-4 tasks of the runs listed '
