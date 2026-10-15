@@ -137,15 +137,32 @@ def analysis_for_block(submissions, internal):
     return {"submissions": out}
 
 
+def read_analysis_for(session_dir):
+    """(the session's "analysis_for" or None, why it could not be read or None). The second is
+    set when session.json EXISTS but cannot be read -- damaged, not a JSON object, or its
+    "analysis_for" not an object -- so a resume (checkpoint.py status) says so instead of
+    silently losing which submission or board thread the analysis is for (2.12 review). No
+    session.json, or one without the key, is (None, None)."""
+    p = paths_for(session_dir)["session_json"]
+    try:
+        with open(p, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return None, None
+    except (OSError, ValueError) as e:              # UnicodeDecodeError is a ValueError
+        return None, f"{p} could not be read ({type(e).__name__}: {e})"
+    if not isinstance(data, dict):
+        return None, f"{p} is not a JSON object"
+    v = data.get(ANALYSIS_FOR)
+    if v is None or isinstance(v, dict):
+        return v, None
+    return None, f"{p} has an \"{ANALYSIS_FOR}\" that is not an object"
+
+
 def analysis_for(session_dir):
     """The session's "analysis_for" (see analysis_for_block), or None when it has none or
-    session.json cannot be read."""
-    try:
-        with open(paths_for(session_dir)["session_json"], encoding="utf-8") as fh:
-            v = json.load(fh).get(ANALYSIS_FOR)
-    except (OSError, ValueError, AttributeError):
-        return None
-    return v if isinstance(v, dict) else None
+    session.json cannot be read (read_analysis_for says why)."""
+    return read_analysis_for(session_dir)[0]
 
 
 def _record_analysis_for(p, block):

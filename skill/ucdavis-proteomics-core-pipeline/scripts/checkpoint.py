@@ -203,14 +203,24 @@ def cmd_status(a):
         if fell_back:
             out.setdefault("warnings", []).append(fell_back)
     # Core staff: the submission(s) or internal work the analysis is for (session.py init), so a
-    # resume finds its Core Project Board thread without asking again (SKILL.md step 0c)
+    # resume finds its Core Project Board thread without asking again (SKILL.md step 0c). Never
+    # a reason to fail a status query -- but a session.json that exists and cannot be read is
+    # said, not dropped: the resume would lose which submission it is for (2.12 review).
     try:
         import session as session_py
-        work = session_py.analysis_for(a.session)
-    except Exception:
-        work = None                 # never a reason to fail a status query
+        work, unread = session_py.read_analysis_for(a.session)
+    except Exception as e:                              # noqa: BLE001 -- said, never dropped
+        work, unread = None, None
+        if os.path.exists(os.path.join(a.session, "session.json")):
+            unread = f"session.json could not be checked ({type(e).__name__}: {e})"
     if work:
         out["analysis_for"] = work
+    if unread:
+        out.setdefault("warnings", []).append(
+            f"Which CoreOmics submission or Core Project Board thread this analysis is for is "
+            f"NOT KNOWN: {unread}. Do not guess it: ask staff, repair the file by hand (or move "
+            f"it aside), then record the answer again with session.py init ... --submission "
+            f"<PROT number> | --internal \"<its title on the board>\"")
     data["updated"] = datetime.datetime.now().isoformat(timespec="seconds")
     _save(a.session, data)
     out["next_commands"] = [s["next"] for s in data["stages"]
