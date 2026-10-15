@@ -86,8 +86,8 @@ ThermoRawFileParser and the resolution reader all use. It reuses a good root at 
 (`root`, `note`) says what happened.
 
 **google-genai ≥ 2.25.0** (conda-forge, noarch) gives the podcast its Gemini voices
-(`make_podcast.py`, SKILL.md step 9e; Gemini 3 TTS needs its `client.interactions`). A Core
-run makes the podcast by default, and on HIVE its job runs with this env's python. `setup.sh`
+(`make_podcast.py`, SKILL.md step 9e; Gemini 3 TTS needs its `client.interactions`). A
+CoreOmics submission gets the podcast by default, and on HIVE its job runs with this env's python. `setup.sh`
 installs it in its own step (not with `--check`), so a failure is a note that nothing else
 depends on. `setup.json`'s `podcast` (`google_genai`, `required`, `ok`) reports it.
 
