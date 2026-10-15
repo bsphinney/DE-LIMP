@@ -933,9 +933,15 @@ named several and it is not clear which leads.
    second: "already attached to"), and the report's Submission section, the Methods' Sample
    preparation, the analysis brief, `experiment_type.py --source submission`, the Data Quality
    Notes and the feedback survey all read that one record. Name the others yourself:
-   - in the decisions log, right after `init`:
-     `log_decision.py --session "$S" --what 'PROT_0807 and PROT_9001 analysed together, PROT_0807 record attached' --why '<the staff words>' --step '1c. submissions'`
-     (through `hive_exec.sh` without local Python: SKILL.md "Keeping the record of the analysis");
+   - in the decisions log, right after `init` (through `hive_exec.sh` without local Python:
+     SKILL.md "Keeping the record of the analysis"):
+```
+python3 scripts/log_decision.py --session "$S" --step '1c. submissions' --what-file - --why-file - <<'EOF'
+PROT_0807 and PROT_9001 analysed together; PROT_0807 record attached
+---
+<the staff member's words>
+EOF
+```
    - in `AI_Analysis_Report.md` (step 9): near the top, one sentence per other submission (its
      number, its PI, the samples it brought), from its own `submission_summary.json`. Its
      sample sheet against its files was checked by its own `locate`.

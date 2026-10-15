@@ -274,11 +274,13 @@ Then **ask whether to update now**:
   - exit 5, `unverified` → it ran, but the result could not be checked against `main`. Relay
     `say`: it is not a confirmation.
 - **No** → carry on. Once the session exists (step 3b), record that they declined:
-  ```
-  python3 scripts/log_decision.py --session <S> --step '0. skill version' \
-      --what 'Skill update declined: ran <local>, the Core release is <release>' \
-      --why '<the user words>'
-  ```
+```
+python3 scripts/log_decision.py --session <S> --step '0. skill version' --what-file - --why-file - <<'EOF'
+Skill update declined: ran <local>, the Core's release is <release>
+---
+<the user's words>
+EOF
+```
 
 Either way, **always recommend turning on auto-update**: `/plugin` → Marketplaces →
 ucdavis-proteomics-core → Enable auto-update. It is off by default for this marketplace, which
@@ -3090,11 +3092,23 @@ reproducibility check. Both stay in the session's `logs/`, and AGENTS.md's "Revi
 analysis" checklist reads them.
 
 - **The decisions log** — any agent, every analysis. At each decision point, one line:
-  ```
-  python3 scripts/log_decision.py --session <S> --what '<what was decided>' --why '<the user words, or the evidence>' [--step '3. design']
-  # no usable local Python: on HIVE (none of $ ` \ " ' in the text)
-  bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/log_decision.py --session $S --what '<what was decided>' --why '<the user words, or the evidence>'"
-  ```
+```
+python3 scripts/log_decision.py --session <S> --step '3. design' --what-file - --why-file - <<'EOF'
+<what was decided>
+---
+<the user's words, or the evidence>
+EOF
+# no usable local Python: the same on HIVE (the text goes over ssh on standard input)
+bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/log_decision.py --session <S> --step "3. design" --what-file - --why-file -' <<'EOF'
+<what was decided>
+---
+<the user's words, or the evidence>
+EOF
+```
+  The text goes in on **standard input** — the what, a line `---`, the why — in a heredoc
+  quoted `<<'EOF'` (`EOF` alone at the start of its line), where nothing is expanded: the
+  user's own words are full of quotes, and in `--what "…"` bash would run anything in
+  backticks or `$(…)`, here and again on HIVE.
   Log: submissions analysed together and which is the main one (step 1c), the conditions
   confirmed (step 3), the defaults confirmed or changed (step 4), the
   contrasts chosen (step 8), every override (`--unchecked`, `--force`, a gate accepted), and
