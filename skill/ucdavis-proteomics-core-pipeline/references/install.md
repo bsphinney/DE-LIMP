@@ -85,6 +85,12 @@ ThermoRawFileParser and the resolution reader all use. It reuses a good root at 
 (it needs internet the first time) is a note, not a stop; `setup.json`'s `dotnet8`
 (`root`, `note`) says what happened.
 
+**google-genai ≥ 2.25.0** (conda-forge, noarch) gives the podcast its Gemini voices
+(`make_podcast.py`, SKILL.md step 9e; Gemini 3 TTS needs its `client.interactions`). A Core
+run makes the podcast by default, and on HIVE its job runs with this env's python. `setup.sh`
+installs it in its own step (not with `--check`), so a failure is a note that nothing else
+depends on. `setup.json`'s `podcast` (`google_genai`, `required`, `ok`) reports it.
+
 **limpa ≥ 1.4.0** (`run_de.R` reads the report with its `readDIANN(annotation.columns =)`): step
 2a installs it into the env from the Bioconductor 3.23 source repository (`PROTEOMICS_LIMPA_BIOC`
 overrides the release; limpa is pure R, so no compiler). The env stays on R 4.5. The last check

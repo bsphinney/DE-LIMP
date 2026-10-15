@@ -79,7 +79,8 @@ class SetupLimpaGate(setup_t.SetupCheckHarness):
         os.makedirs(os.path.join(self.prefix, "conda-meta"))
         os.symlink(sys.executable, os.path.join(self.prefix, "bin", "python"))
         _exe(os.path.join(self.prefix, "bin", "Rscript"), FAKE_RSCRIPT)
-        for meta in ("pythonnet-3.1.0-pyhd8ed1ab_0.json", "pandas-2.3.2-py311h0000000_0.json"):
+        for meta in ("pythonnet-3.1.0-pyhd8ed1ab_0.json", "pandas-2.3.2-py311h0000000_0.json",
+                     "google-genai-2.31.0-pyh0000000_0.json"):     # setup.sh step 2d's
             with open(os.path.join(self.prefix, "conda-meta", meta), "w") as fh:
                 fh.write("{}")
         with open(self.state, "w") as fh:

@@ -24,6 +24,8 @@
 #                         (bioconda, else Bioconductor source; non-fatal)
 #   - .NET 8 (NETCore + AspNetCore) via ensure_dotnet8.sh, into ~/.proteomics-pipeline/dotnet8:
 #                         DIA-NN's .raw reader and the resolution reader both run on it
+#   - google-genai >= 2.25.0 (conda-forge): the podcast's Gemini voices (make_podcast.py, step
+#                         9e) -- its own, non-fatal install
 #
 # What stays special-cased (handled elsewhere / reported):
 #   - DIA-NN: license-gated, no conda. Linux -> binary (acquire_tools.sh);
@@ -283,6 +285,54 @@ if ! $CHECK_ONLY; then
   esac
 fi
 
+# ---- 2d. google-genai: the podcast's Gemini voices ---------------------------
+# A Core run makes the podcast by default (SKILL.md step 9e), and on HIVE its job runs with this
+# env's python (make_podcast.py job reads setup.json's `python`). Gemini 3 TTS needs
+# client.interactions: google-genai >= GENAI_MIN (make_podcast.GENAI_MIN;
+# tests/test_make_podcast_hive.py keeps the two equal). conda-forge's noarch build, in its own
+# install like 2b's: only the podcast needs it, so a failure is a note. Installed = its
+# conda-meta record (2b's rule); make_podcast.py job asks the python itself before it writes a job.
+GENAI_MIN="2.25.0"
+genai_version() {   # the version in google-genai's conda-meta record, or nothing
+  local f
+  for f in "$ENV_PREFIX"/conda-meta/google-genai-[0-9]*.json; do
+    [ -e "$f" ] || continue
+    f="${f##*/google-genai-}"; printf '%s' "${f%%-*}"; return 0
+  done
+  return 1
+}
+version_ge() {      # version_ge A B: is A >= B, on the first three numbers (bash 3.2: no sort -V)
+  local a="$1." b="$2." i x y
+  for i in 1 2 3; do
+    x="${a%%.*}"; y="${b%%.*}"; a="${a#*.}"; b="${b#*.}"
+    x="${x//[!0-9]/}"; y="${y//[!0-9]/}"
+    [ "${x:-0}" -gt "${y:-0}" ] && return 0
+    [ "${x:-0}" -lt "${y:-0}" ] && return 1
+  done
+  return 0
+}
+GENAI_VERSION="$(genai_version)"
+genai_ok() { [ -n "$GENAI_VERSION" ] && version_ge "$GENAI_VERSION" "$GENAI_MIN"; }
+case "$CONDA" in
+  *micromamba) GENAI_FIX="$CONDA install -y -r $MAMBA_ROOT -p $ENV_PREFIX --override-channels -c conda-forge -c bioconda 'google-genai>=$GENAI_MIN'" ;;
+  "")          GENAI_FIX="run setup.sh (it installs micromamba), or install conda-forge's google-genai>=$GENAI_MIN into $ENV_PREFIX" ;;
+  *)           GENAI_FIX="$CONDA install -y -p $ENV_PREFIX --override-channels -c conda-forge -c bioconda 'google-genai>=$GENAI_MIN'" ;;
+esac
+if [ -n "$CONDA" ] && env_ready && ! genai_ok && ! $CHECK_ONLY; then
+  say "[setup] installing google-genai >= $GENAI_MIN (the podcast's Gemini voices) into the env..."
+  case "$CONDA" in      # -p for the reason create_env gives
+    *micromamba) "$CONDA" install -y -r "$MAMBA_ROOT" -p "$ENV_PREFIX" \
+                   --override-channels -c conda-forge -c bioconda "google-genai>=$GENAI_MIN" >&2 ;;
+    *)           "$CONDA" install -y -p "$ENV_PREFIX" \
+                   --override-channels -c conda-forge -c bioconda "google-genai>=$GENAI_MIN" >&2 ;;
+  esac || say "[setup] the google-genai install failed (above); only the podcast needs it"
+  GENAI_VERSION="$(genai_version)"
+fi
+GENAI_OK=false; genai_ok && GENAI_OK=true
+if env_ready && ! $GENAI_OK; then
+  NOTES+=("google-genai ${GENAI_VERSION:-is not installed}${GENAI_VERSION:+ is older than $GENAI_MIN}: the podcast's Gemini voices (step 9e; on HIVE, make_podcast.py job) need google-genai >= $GENAI_MIN. Nothing else needs it. Fix: $GENAI_FIX.")
+fi
+
 # ---- 3. resolve tool paths --------------------------------------------------
 resolve() { [ -x "$ENV_PREFIX/bin/$1" ] && echo "$ENV_PREFIX/bin/$1" || (have "$1" && command -v "$1" || echo ""); }
 PY="$(resolve python)";     [ -z "$PY" ] && PY="$(command -v python3 || true)"
@@ -370,6 +420,8 @@ j() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
          "$($QUOBYTE && echo true || echo false)"
   printf '  "diann": {"ready": %s, "note": "%s"},\n' "$($DIANN_READY && echo true || echo false)" "$(j "$DIANN_NOTE")"
   printf '  "dotnet8": {"root": "%s", "note": "%s"},\n' "$(j "$DOTNET8_ROOT")" "$(j "$DOTNET8_NOTE")"
+  printf '  "podcast": {"google_genai": "%s", "required": ">= %s", "ok": %s},\n' \
+         "$(j "$GENAI_VERSION")" "$GENAI_MIN" "$($GENAI_OK && echo true || echo false)"
   printf '  "limpa": {"version": "%s", "required": ">= %s", "ok": %s, "source": "Bioconductor %s"},\n' \
          "$(j "$LIMPA_VERSION")" "$LIMPA_MIN" "$($LIMPA_OK && echo true || echo false)" "$LIMPA_BIOC"
   printf '  "nanoparquet": {"ok": %s, "fix": "%s"},\n' \

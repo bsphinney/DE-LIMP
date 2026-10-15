@@ -665,7 +665,9 @@ submission, the same path locally and on HIVE (`~/core/PROT_0807`).
      Submission section comes from the attached record), and `to_docx.py` for `methods.md` only
      (step 9: no Word copy of the report).
    - **Push the finished files back BEFORE deliver** — `deliver` copies from `$S`. The PDF
-     exists only where a headless browser printed it; the podcast (step 9e) only if one was made:
+     exists only where a headless browser printed it. The podcast (step 9e, made by default for
+     these runs) goes back with them when it was made here; made on HIVE (Windows staff), it is
+     in `$S` already, and `finalize` runs once its job has ended:
      ```
      L=~/core/PROT_0807/session/output
      for f in AI_Analysis_Report.md Analysis_Report.html Analysis_Report.md Analysis_Report.pdf Analysis_Report_with_audio.html methods.md methods.docx; do
@@ -2559,8 +2561,8 @@ rather than hidden.
 
 → detail: `references/analysis.md`.
 
-Once the report is final and the results are going to a collaborator, offer the optional
-audio discussion in one line (step 9e) — never make one by default.
+Once the report is final, the audio discussion (step 9e): **made by default for a Core run**;
+anyone else is offered it in one line.
 
 ### 9d. Publication-ready Methods section + acknowledgment
 Generate a drop-in LC-MS/MS Methods section from the facility raw data and the session's own
@@ -2621,23 +2623,48 @@ keep the acknowledgment exact** (confirm the wording at the source URL). This ca
 standalone — point `--raw` at facility data; no search or DE is needed. → detail:
 `references/methods.md`.
 
-### 9e. Optional: an audio discussion of the results
-When you deliver the final report to a collaborator, **offer** (never make by default) a ~20-min
-two-host audio discussion: Maya, a cell biologist, and Leo, a statistician, on "Signal to
-Noise". It is linked from a "Listen" card at the top of `Analysis_Report.html`. It is for the
-person who submitted the samples. It tells them what their data say and how their samples were
-measured and analysed, and it teaches how proteomics works (LC-MS/MS, DIA, FDR, inferred values,
-empirical Bayes) with their own data. **You write the script** from the report, then check it,
-render it and link it:
+### 9e. The audio discussion of the results (Core runs: by default)
+A ~20-min two-host episode, "Signal to Noise": Maya, a cell biologist, and Leo, a statistician.
+It is linked from a "Listen" card at the top of `Analysis_Report.html`. It is for the person who
+submitted the samples. It tells them what their data say and how their samples were measured and
+analysed, and it teaches how proteomics works (LC-MS/MS, DIA, FDR, inferred values, empirical
+Bayes) with their own data. **You write the script** from the final report; `make_podcast.py`
+checks it, renders it, verifies the audio and links it in.
+- **A Core run** (Core staff analysing a CoreOmics submission, or an internal analysis of the
+  Core's own samples): **make it by default** once the report is final, without asking. Tell
+  the staff member in one line; if they say no, skip it. The consent is the Core director's
+  standing approval, which `--core-run` records (`--core-run internal` without a submission).
+- **Anyone else:** offer it in one line when you deliver; make it only on a yes, with their
+  consent recorded: `--cloud-ok "<who agreed, when>"`.
+- **It never holds up the report or the delivery.** No key, Gemini down or out of quota, a
+  failed render or job: one line to the user, then deliver without it.
+
+**Here** (a Mac, or `local` mode). For a Core run, Gemini voices; with no key here
+(`make_podcast.py key --core-run`), `--tts say` (offline):
 ```
-python3 scripts/make_podcast.py check <session>/output/podcast/podcast_script.md \
-    --source <session>/output/AI_Analysis_Report.md <session>/output/methods.md \
-             <session>/output/AUDIT.md <session>/output/SAMPLE_QUALITY.md --forbid-name "<people>"
-python3 scripts/make_podcast.py render <session>/output/podcast/podcast_script.md --tts say
-python3 scripts/make_podcast.py verify <session>/output/podcast/podcast_script.md --cloud-ok "<who, when>"
+P=<session>/output/podcast
+python3 scripts/make_podcast.py check $P/podcast_script.md --source <session>/output/AI_Analysis_Report.md \
+    <session>/output/methods.md <session>/output/AUDIT.md <session>/output/SAMPLE_QUALITY.md --forbid-name "<people>"
+python3 scripts/make_podcast.py render $P/podcast_script.md --tts gemini --core-run   # verify follows
 python3 scripts/make_podcast.py link <session>/output
 python3 scripts/make_podcast.py share <session>/output
 ```
+**On HIVE** when this computer cannot run the skill's Python (Windows staff), in the session of
+record `$S`, once the finished report is in `$S/output`. You write the script here and put it
+there. `check` runs through `hive_exec.sh`, then a SLURM job renders the episode in Gemini voices
+with the Core's shared key, verifies it, links it and shares it. Never render on the login node:
+```
+bash scripts/hive_exec.sh "mkdir -p $S/output/podcast"
+bash scripts/hive_exec.sh --put <here>/podcast_script.md "$S/output/podcast/"
+bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py check $S/output/podcast/podcast_script.md \
+    --source $S/output/AI_Analysis_Report.md $S/output/methods.md $S/output/AUDIT.md $S/output/SAMPLE_QUALITY.md --forbid-name '<people>'"
+bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py job $S/output/podcast/podcast_script.md --core-run"
+bash scripts/hive_exec.sh 'sbatch <the "job" it printed>'      # then watch it; finalize after it ends
+```
+`job` writes nothing until everything the job needs is there: a passing check, the consent,
+google-genai in the pipeline env (`setup.sh` installs it) and a key. Each gap is a one-line
+refusal. After the job, the report on HIVE carries the Listen card: never put a local copy over
+it.
 `share` writes `output/Analysis_Report_with_audio.html`, the report with the audio and transcript
 built in. It is the **one file to send** when someone wants the report with the audio, because
 the card's links are relative. It is checked by decoding the audio back out of the written file
@@ -2647,7 +2674,7 @@ when a podcast exists, and `deliver` ships it while it is current.
 `verify` has Gemini transcribe the rendered audio and compares it with the script. It reports
 the word match ratio, dropped spans and numbers the voice misread, and names the segments to
 listen to. It runs by itself after a consented `--tts gemini` render, and it sends the audio,
-so it needs `--cloud-ok` too.
+so it needs the consent too.
 Sources are the delivered files in `output/` only: anything else (a Core note, a draft) is an
 `--extra-source <file> --label "<what>"`, and what comes only from it must be a named Claims
 bullet. The episode never advises tiering by PropObs; it points to README.html, the report and
@@ -2657,11 +2684,11 @@ missing AI disclosure, a host claiming a real specialty, and a forbidden name. I
 a true number attached to the wrong protein, a relational word ("higher", "the top hit") or a
 false sentence built from true tokens, so read the script against the report yourself. Render
 and link refuse until the check passes for the current script and sources. `--tts gemini` sends
-the transcript (never the report) to Google, and nothing without `--cloud-ok` (`--cloud-ok no`
-is a refusal). On a free-tier key Google may use the text, so use a paid-tier key or `--tts say`
-for unpublished data. The Core director's approval is the consent (Brett, 2026-09-28); record
-it with `--cloud-ok`.
-→ detail (the brief, the file format, privacy): `references/podcast.md`.
+the transcript (never the report) to Google, and nothing without consent: `--core-run` for a Core
+run, `--cloud-ok` for anyone else (`--cloud-ok no` is a refusal). On a free-tier key Google may use
+the text; for anyone else's unpublished data suggest a paid-tier key or `--tts say`. The Core's
+shared key on HIVE is used for a Core run only.
+→ detail (when and where, the brief, the file format, privacy, keys): `references/podcast.md`.
 
 ### 10. Reproducibility bundle (mandatory)
 Assemble the bundle that makes the whole analysis reproducible:
@@ -2836,7 +2863,8 @@ version (`reproducibility/environment/skill.txt`), FASTA source, DE method, and 
   AI-generated, that you could not listen to it, and that someone should before it is shared.
   To send the report with the audio, they send `output/Analysis_Report_with_audio.html` alone
   (say its size; above ~18 MB, ~25 MB attached, Bioshare rather than email).
-  If none was made and the results go to a collaborator, offer it once (step 9e).
+  If none was made: a Core run's was skipped or failed (say which, in one line); anyone else
+  whose results go to a collaborator is offered it once (step 9e).
 
 If anything was recorded with `report_issue.sh` this session, say so in one line and where
 it went (`report_issue.sh --where`), so the user knows the Core will see it.
