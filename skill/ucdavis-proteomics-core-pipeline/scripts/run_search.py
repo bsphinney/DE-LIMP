@@ -827,10 +827,12 @@ def single_shot_mass_acc(params, listing, fasta, predicted, out, threads, cmd, l
     return lines, f" $(cat {q(massacc)})", record, resolved_params
 
 
-def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", queue=None):
+def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", queue=None,
+              raw_files=None):
     """Single-shot DIA-NN. `queue` is {partition, account, qos} from the command line, handed
     to every emit_sbatch() call -- without it slurm_queue() re-detects a queue and overrides
-    the one the user chose."""
+    the one the user chose. `raw_files`: the inputs as given, when some of `files` are links to
+    them (diann_parallel.dashed_input_plan) -- the job's node check looks at their folders."""
     queue = queue or {}
     # `--cfg <params>` goes on the job's command line verbatim, and the job runs after
     # `cd <out>`: a relative path would be read there -- another file, or none -- and DIA-NN logs
@@ -846,7 +848,7 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
     if sbatch:
         import node_fault
         queue = dict(queue, preflight=node_fault.preflight_lines(
-            node_fault.chain_checks(cmd, os.path.abspath(out), fasta, files)))
+            node_fault.chain_checks(cmd, os.path.abspath(out), fasta, raw_files or files)))
     report = os.path.join(out, "report.parquet")
     f_args = " ".join(f"--f {shlex.quote(f)}" for f in files)
     # Named after the JOB, not fixed, because report_guard() bakes this path into the script
@@ -3151,6 +3153,11 @@ def main():
                          "--fasta that still holds keratin-family Cont_ entries (build it with "
                          "fetch_fasta.py fetch --keratin-sample). Also implied by a sidecar built "
                          "that way; recorded in search_provenance.json as keratin_sample")
+    ap.add_argument(_diann_parallel_mod().RENAME_DASHED_FLAG, action="store_true",
+                    help="DIA-NN: search an input whose FILE NAME holds '--' through a link "
+                         "named with each run of dashes made one, so its run is renamed (DIA-NN "
+                         "cannot be given a path with '--'); without it such an input is refused. "
+                         "A '--' in a folder only is linked under the same file name either way")
     ap.add_argument(ALLOW_DAMAGED_TDF, action="store_true",
                     help="search a Bruker .d whose analysis.tdf is not `ok` (truncated, "
                          "stale -wal/-journal beside it, WAL-mode header, unreadable) "
@@ -3230,6 +3237,21 @@ def main():
         refuse_sage_fragment_mismatch(bundle, a.params)
     if engine == "fragpipe":
         refuse_fragpipe_contam_database(a.params, a.fasta)
+    # DIA-NN cuts its command line at every '--', quoted or not (diann_parallel.DIANN_OPTION_MARK):
+    # an output, database or cfg path holding one is refused here, and an input run is searched
+    # through a link in <out>/input_links/ -- made just before the search is generated, once
+    # nothing is left to refuse -- or refused when the link would have to rename the run.
+    links_plan = {"links": [], "refused": None}
+    if engine == "diann":
+        dp = _diann_parallel_mod()
+        for flag, path in (("--out", a.out), ("--fasta", a.fasta), ("--params", a.params),
+                           ("--library", a.library)):
+            if path:
+                dp.refuse_dashed_path(path, flag, prog="run_search")
+        links_plan = dp.dashed_input_plan(files, a.out, rename=a.rename_dashed_runs)
+        if links_plan["refused"]:
+            sys.exit(f"[run_search] REFUSING: {links_plan['refused']} Nothing was written or "
+                     "submitted.")
 
     # Before anything is provisioned, submitted or run: no damaged .d gets searched here.
     # --adapt-only is above this on purpose -- it reads an engine's finished output and
@@ -3329,8 +3351,18 @@ def main():
                           "existing_file_moved_to": None,
                           "exit_status": SBATCH_NOT_WRITTEN,
                           "why": "routed to the 5-step chain, which submits itself via submit.sh"}
+    # The '--' links (planned above): DIA-NN is handed them, every record keeps the inputs as given
+    search_files = files
+    if links_plan["links"]:
+        try:
+            linked = _diann_parallel_mod().make_input_links(links_plan)
+        except (OSError, ValueError) as e:
+            sys.exit(f"[run_search] could not link the inputs whose path holds '--': {e}. "
+                     "Nothing was submitted.")
+        sys.stderr.write(_diann_parallel_mod().input_links_note(links_plan, "run_search"))
+        search_files = [linked.get(f, f) for f in files]
     if use_parallel:
-        res = run_diann_parallel(cmd, a.params, files, a.fasta, a.out, a.threads, a,
+        res = run_diann_parallel(cmd, a.params, search_files, a.fasta, a.out, a.threads, a,
                                  acquisition=bundle.get("acquisition", ""))
         if sbatch_refused:
             # Only now that the chain exists: a failed generation must leave the user's file
@@ -3339,8 +3371,8 @@ def main():
             moved = set_aside(a.sbatch)
             sbatch_refused["existing_file_moved_to"] = moved and os.path.abspath(moved)
     elif engine == "diann":
-        res = run_diann(cmd, a.params, files, a.fasta, a.out, a.threads, a.sbatch,
-                        acquisition=bundle.get("acquisition", ""), queue=queue)
+        res = run_diann(cmd, a.params, search_files, a.fasta, a.out, a.threads, a.sbatch,
+                        acquisition=bundle.get("acquisition", ""), queue=queue, raw_files=files)
         generated = {os.path.abspath(p) for p in (res.get("submitted"),) if p} \
             if isinstance(res, dict) else set()
         generated |= {os.path.splitext(os.path.abspath(a.sbatch or "x"))[0] + s
@@ -3428,6 +3460,9 @@ def main():
                        "keratin_sample_source": keratin_rec["sample_source"],
                        "keratin_sample_check": keratin_rec,
                        "n_files": len(files), "files": files,
+                       # inputs whose path holds '--', searched through links (DIA-NN cuts its
+                       # command line at every '--'): {original, link, run_name, renamed}
+                       "input_links": links_plan["links"],
                        # inputs listed more than once, each searched once, with the count
                        # (check_report_runs.distinct_inputs); the analysis report shows them
                        "repeated_paths": repeated_paths,

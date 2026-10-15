@@ -216,9 +216,10 @@ class Step5WritesNothingOnAnIncompleteFinalPass(unittest.TestCase):
     the path run_de.R reads, and then failed. It counts first now."""
 
     def chain(self, d):
+        # writes a report holding every --f run (FAKE_REPORT_RUNS): step 5 checks the report's runs
+        from test_single_shot_sbatch import FAKE_DIANN
         diann = os.path.join(d, "fake-diann")
-        _exe(diann, "#!/bin/sh\nwhile [ $# -gt 0 ]; do [ \"$1\" = --out ] && echo report > \"$2\"; "
-                    "shift; done\n")
+        _exe(diann, FAKE_DIANN)
         raws = []
         for i in range(3):
             raws.append(os.path.join(d, "raw", f"r{i}.d"))
@@ -230,7 +231,8 @@ class Step5WritesNothingOnAnIncompleteFinalPass(unittest.TestCase):
         with open(fasta, "w") as fh:
             fh.write(">sp|P1|X\nPEPTIDEK\n")
         out = os.path.join(d, "out")
-        env = job_env(d, PATH=os.environ["PATH"])
+        env = job_env(d, PATH=os.environ["PATH"], FAKE_PY=sys.executable,
+                      FAKE_REPORT_RUNS="r0,r1,r2")
         g = subprocess.run([sys.executable, os.path.join(SCRIPTS, "diann_parallel.py"),
                             "--diann", diann, "--raw", *raws, "--fasta", fasta, "--out", out,
                             "--cfg", cfg, "--no-probe-window", "--partition", "low",
