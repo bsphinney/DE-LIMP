@@ -38,17 +38,11 @@ WHERE EACH SUBCOMMAND RUNS
     stage        ON HIVE  symlinks the raw files into the Core service directory
     conditions   either   wraps collect_conditions.py
     deliver      ON HIVE  copies the deliverables into the submission's Bioshare folder
-<<<<<<< HEAD
-                          (--mode raw-only for "I only require raw data" submissions)
-    bioshare     KEY      status | ensure | send, through the CoreOmics Bioshare plugin
-    email-draft  KEY      writes a draft to the submitter; never sends
-=======
                           (--mode raw-only for "I only require raw data" submissions;
                           --mode no-de for a report without differential expression)
-    bioshare     LOCAL    status | ensure | send, through the CoreOmics Bioshare plugin
-    email-draft  LOCAL    writes a draft to the submitter, saying where each address came from
+    bioshare     KEY      status | ensure | send, through the CoreOmics Bioshare plugin
+    email-draft  KEY      writes a draft to the submitter, saying where each address came from
                           and flagging one that cannot be right; never sends
->>>>>>> f0e9f95 (deliver --mode no-de: a report without differential expression; email draft follows the mode)
 
     python3 core_submission.py fetch 807 --out ~/core/PROT_0807
     bash hive_exec.sh --put ~/core/PROT_0807/hive/submission_summary.json '~/core/PROT_0807/'
@@ -4647,14 +4641,7 @@ def cmd_email_draft(a) -> int:
         L += ["", feedback_line("email", core["prot"], bool(delivery.get("podcast")), fmt="text")]
     L += ["", "Best regards,", "UC Davis Proteomics Core", ""]
     os.makedirs(os.path.dirname(os.path.abspath(a.out)) or ".", exist_ok=True)
-<<<<<<< HEAD
     write_text(a.out, "\n".join(L), private=on_hive())     # names and emails: on HIVE, 600
-    emit({"wrote": os.path.abspath(a.out), "to": to or None, "cc": cc or None, "share_url": url or None,
-          "placeholders": placeholders, "sent": False})
-    return EXIT_DECIDE if placeholders else EXIT_OK
-=======
-    with open(a.out, "w") as fh:
-        fh.write("\n".join(L))
     emit({"wrote": os.path.abspath(a.out), "mode": mode, "recipients": recipients,
           "to": recipients[0]["email"], "cc": recipients[1]["email"] if len(recipients) > 1 else None,
           "share_url": url or None, "placeholders": placeholders, "address_problems": problems,
@@ -4662,7 +4649,6 @@ def cmd_email_draft(a) -> int:
     for p in problems:
         note(f"CHECK THIS ADDRESS before sending -- {p}")
     return EXIT_DECIDE if placeholders or problems else EXIT_OK
->>>>>>> f0e9f95 (deliver --mode no-de: a report without differential expression; email draft follows the mode)
 
 
 # --------------------------------------------------------------------------- main --
