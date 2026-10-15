@@ -570,7 +570,7 @@ submission, the same path locally and on HIVE (`~/core/PROT_0807`).
    ```
    # coreomics_runs_on: this_computer
    python3 scripts/core_submission.py fetch 807 --out ~/core/PROT_0807
-   bash scripts/hive_exec.sh 'mkdir -p ~/core/PROT_0807'
+   bash scripts/hive_exec.sh '(umask 077; mkdir -p ~/core/PROT_0807) && chmod 700 ~/core/PROT_0807'
    bash scripts/hive_exec.sh --put ~/core/PROT_0807/hive/submission_summary.json '~/core/PROT_0807/'
    bash scripts/hive_exec.sh --put ~/core/PROT_0807/hive/submission.json '~/core/PROT_0807/'
    # coreomics_runs_on: hive -- nothing to --put

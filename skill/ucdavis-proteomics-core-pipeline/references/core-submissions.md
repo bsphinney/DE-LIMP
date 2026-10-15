@@ -274,12 +274,18 @@ one mouse are not independent, and the note says whether the design analysed car
 
 ```
 python3 scripts/core_submission.py fetch 807 --out ~/core/PROT_0807
-bash scripts/hive_exec.sh 'mkdir -p ~/core/PROT_0807'
+bash scripts/hive_exec.sh '(umask 077; mkdir -p ~/core/PROT_0807) && chmod 700 ~/core/PROT_0807'
 bash scripts/hive_exec.sh --put ~/core/PROT_0807/hive/submission_summary.json '~/core/PROT_0807/'
 bash scripts/hive_exec.sh --put ~/core/PROT_0807/hive/submission.json '~/core/PROT_0807/'
 # coreomics_runs_on: hive -- the same fetch on HIVE; nothing to --put
 bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/core_submission.py fetch 807 --out ~/core/PROT_0807'
 ```
+On HIVE every home folder is open to every account (drwxrwsr-x, umask 0002), so the submission's
+folder in the home is kept this account's alone: the `mkdir` above makes it 700, and `fetch` run on
+HIVE makes any folder it creates between the home and `--out` (`~/core` the first time) 700, closes
+an existing `--out` others can read (saying so in its `warnings`), and refuses a folder or link
+another account put in the home. A folder outside the home (the Core's group storage) keeps its
+mode.
 
 **The API (verified).** Base `https://ucdavis.coreomics.com/server/api`, header
 `Authorization: Token <tok>`.

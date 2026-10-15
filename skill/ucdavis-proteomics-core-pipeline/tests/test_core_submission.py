@@ -3685,5 +3685,88 @@ class TestFetchOnHive(unittest.TestCase):
         self.assertEqual(js["url"], "https://bioshare.example/bsx/")
 
 
+
+@unittest.skipIf(os.name == "nt", "POSIX file modes")
+class TestFetchFolderPrivateOnHive(unittest.TestCase):
+    """Security review (2.12): on HIVE every home is drwxrwsr-x and the umask 0002, so the fetch
+    folder ~/core/PROT_xxxx and its submission_summary.json / submission.json / samples.tsv (the
+    PI's and submitter's names, the description, sample names, neighbouring submissions) were
+    readable by every HIVE account. A fetch folder in the home is now this account's alone."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = os.path.realpath(self._tmp.name)
+        self.home = os.path.join(self.tmp, "home")
+        os.makedirs(self.home)
+        self.fake = FakeCoreOmics().__enter__()
+        TestFetch.serve(self, self.fake, record())
+        self.core = os.path.join(self.home, "core")
+        self.out_dir = os.path.join(self.core, "PROT_0807")
+
+    def tearDown(self):
+        self.fake.__exit__(None, None, None)
+        self._tmp.cleanup()
+
+    def fetch(self, on_hive="1", out=None, ok=True):
+        rc, js, p = run(["fetch", "807", "--out", out or self.out_dir],
+                        child_env(self.tmp, self.fake.base, CORE_ON_HIVE=on_hive, HOME=self.home))
+        if ok:
+            self.assertEqual(rc, 0, p.stderr)
+        return rc, js, p
+
+    def mode(self, path):
+        return stat.S_IMODE(os.stat(path).st_mode)
+
+    def test_a_new_folder_and_core_are_made_private(self):
+        _, js, _ = self.fetch()
+        self.assertEqual(self.mode(self.core), 0o700)
+        self.assertEqual(self.mode(self.out_dir), 0o700)
+        self.assertTrue(os.path.isfile(os.path.join(self.out_dir, "samples.tsv")))
+        self.assertFalse([w for w in js["warnings"] if "now 700" in w])
+
+    def test_an_open_existing_folder_is_closed_with_a_note_and_core_left_alone(self):
+        os.makedirs(self.out_dir)
+        os.chmod(self.core, 0o775)
+        os.chmod(self.out_dir, 0o775)
+        _, js, p = self.fetch()
+        self.assertEqual(self.mode(self.out_dir), 0o700)
+        self.assertEqual(self.mode(self.core), 0o775, "an existing ~/core is not changed")
+        (w,) = [w for w in js["warnings"] if "now 700" in w]
+        self.assertIn("was mode 775 -- readable by other HIVE accounts -- and is now 700", w)
+        self.assertIn("now 700", p.stderr)
+
+    def test_off_hive_and_outside_the_home_nothing_changes(self):
+        os.makedirs(self.out_dir)
+        os.chmod(self.out_dir, 0o775)
+        self.fetch(on_hive="0")
+        self.assertEqual(self.mode(self.out_dir), 0o775)
+        group = os.path.join(self.tmp, "group", "PROT_0807")     # the Core's storage, not the home
+        os.makedirs(group)
+        os.chmod(group, 0o2775)
+        self.fetch(out=group)
+        self.assertEqual(self.mode(group), 0o2775)
+
+    def test_an_entry_of_another_account_is_refused(self):
+        """A group member can add entries to a HIVE home. The record must never be written into
+        or through one: the owner check, run here as if another account owned it."""
+        os.makedirs(self.out_dir)
+        real_getuid = os.getuid
+        with mock.patch.dict(os.environ, {"HOME": self.home}), \
+                mock.patch.object(cs.os, "getuid", lambda: real_getuid() + 1):
+            with self.assertRaises(cs.Stop) as e:
+                cs.private_home_folder(self.out_dir)
+        self.assertIn("is not a folder of this account's", e.exception.payload["error"])
+
+    def test_this_account_s_own_link_out_of_the_home_is_followed_and_left_as_it_is(self):
+        os.makedirs(self.core)
+        group = os.path.join(self.tmp, "group", "PROT_0807")
+        os.makedirs(group)
+        os.chmod(group, 0o2775)
+        os.symlink(group, self.out_dir)
+        self.fetch()
+        self.assertTrue(os.path.isfile(os.path.join(group, "samples.tsv")))
+        self.assertEqual(self.mode(group), 0o2775)
+
+
 if __name__ == "__main__":
     unittest.main()
