@@ -226,15 +226,18 @@ command **+** an OS-appropriate path — not a HIVE/`/quobyte` path they can't r
 ```
 `report.parquet` is already the DE contract — `run_de.R` reads it directly.
 
-**plexDIA (`--channels`) writes no matrices.** A Core SILAC search with DIA-NN 2.7.0
-(`--channels`, `--channel-spec-norm`, `--matrices`; 2026-10-14) logged that expression matrices
-would be saved and wrote only `report.parquet`: no `report.pg_matrix.tsv`, `.pr_matrix.tsv` or
-`.gg_matrix.tsv`. The DIA-NN README says, in its PTM section, "the matrices also are currently
-not being produced when multiplexing is used (--channels)", and in its plexDIA section that the
-main `.parquet` report "needs to be used for all downstream analyses" of multiplexed data, where `PG.Q.Value` / `GG.Q.Value` are
-channel-specific and `PG.MaxLFQ` is channel-specific only with QuantUMS and on the second MBR
-pass or without MBR. So build any per-protein, per-channel table from `report.parquet`
-(`Run` × `Channel`), and do not promise the client a DIA-NN matrix for a plexDIA search.
+**plexDIA (`--channels`): expect no protein or precursor matrices -- seen once.** One Core SILAC
+search with DIA-NN 2.7.0 (`--channels`, `--channel-spec-norm`, `--matrices`; 2026-10-14) logged
+that expression matrices would be saved and wrote only `report.parquet`: no
+`report.pg_matrix.tsv`, `.pr_matrix.tsv` or `.gg_matrix.tsv`. That is one run, not a tested
+rule. The DIA-NN README sentence "the matrices also are currently not being produced when
+multiplexing is used (--channels)" is about the **PTM site** matrices (its PTM section), so it
+does not settle the protein ones. What the README does say for plexDIA is that the main `.parquet`
+report "needs to be used for all downstream analyses" of multiplexed data, where `PG.Q.Value` /
+`GG.Q.Value` are channel-specific and `PG.MaxLFQ` is channel-specific only with QuantUMS and on
+the second MBR pass or without MBR. So build any per-protein, per-channel table from
+`report.parquet` (`Run` × `Channel`), and do not promise the client a DIA-NN matrix for a plexDIA
+search; note on the next plexDIA search whether the matrices appeared.
 
 **A path with `--` in it cannot be given to DIA-NN.** Its reader joins the arguments with spaces
 and cuts the result at every `--`, quoted or not (`arguments()`, `diann.cpp` at tag 1.8), and
@@ -245,19 +248,26 @@ the other runs; a `--` in a folder is cut the same way (HIVE srun 24807838). `ru
 keeps its name; one whose **file name** holds `--` is refused with the name it would get, unless
 `--rename-dashed-runs` (the link is then named with each run of dashes made one, and
 `conditions.csv` must use that name). `--out`, `--fasta`, `--params`/`--cfg` and a library with
-`--` are refused. `search_provenance.json` keeps the inputs as given in `files` and each link in
+`--` are refused, and so is a cfg **value** holding one (a `--lib` or `--temp` path in it: DIA-NN
+reads the cfg like a command line), and `probe_window.py` run by hand on a run, FASTA, library or
+workdir path holding one. `search_provenance.json` keeps the inputs as given in `files` and each link in
 `input_links`. `detect_acquisition.py` (step 2) already lists every input whose file name holds
 `--` (`dashed_run_names`, with the name it would get), so the rename is decided before
 `conditions.csv` is built (`collect_conditions.py` / `core_submission.py conditions
 --rename-dashed-runs`; the one rule is `check_report_runs.renamed_dashed_name`). Sage, AlphaDIA,
-Radiant and the converters take each path as one argument and are not affected. **FragPipe's own
-DIA-NN step is:** FragPipe 24.0 writes each run as a `--f <path>` line of `filelist_diann.txt` and
+Radiant's own search and the converters take each run's path as one argument, so a `--` in it
+does not affect them (Radiant's DIA-NN library step is given only the FASTA and an output folder).
+**FragPipe's own DIA-NN step is affected:** FragPipe 24.0 writes each run as a `--f <path>` line of `filelist_diann.txt` and
 hands DIA-NN `--cfg <filelist>--` (`CmdDiann.java`), and DIA-NN cuts that text at every `--` too —
 on HIVE (srun 24807938) DIA-NN 2.7.0 and FragPipe's bundled 1.8.2 beta 8 both skipped a
 `x_DIA--asp3_S3.mzML` listed that way. So when a FragPipe workflow runs DIA-NN
 (`diann.run-dia-nn=true`), `run_search.py` refuses any `--` in the path DIA-NN would get (on the
 diaTracer route that is the staged link in `<out>/diatracer_stage/`, so only the file name
-counts), in `--out` or in the database; there is no renaming on that route.
+counts), in `--out` or in the database; there is no renaming on that route. And as on the DIA-NN
+routes, a run missing from FragPipe's DIA-NN report fails the search: `--adapt-only` checks
+`dia-quant-output/report.parquet` against the manifest's DIA / DIA-Quant rows
+(`check_report_runs.verify`, the one rule; it counts runs, so FragPipe handing DIA-NN a Thermo
+`.raw` as `<name>_uncalibrated.mzML` does not matter).
 
 **DDA data (DIA-NN 2.6+).** DIA-NN 2.3+ can search DDA / DDA-PASEF with **`--dda`**.
 `estimate_params.py --engine diann --acquisition DDA` writes it **into the cfg**, and every
@@ -361,7 +371,9 @@ Every job is held to the same contract as the 5-step chain
   catches dropped runs, not poor ones. For each missing run the message says what the stats
   file shows: MS1/MS2 signal means DIA-NN **read** it and nothing passed the q-value filter (a
   blank or failed injection); all zeros or no row keeps both explanations, since two readable
-  runs searched against an empty library also had 0 in every column.
+  runs searched against an empty library also had 0 in every column. A run the user or Core
+  staff agree to go without (a blank) is accepted on the record, not by re-running:
+  `check_report_runs.py --accept-missing <run> --reason "<why>"` (→ `references/diann_parallel.md`).
 - **Repeats in the input list are flagged, for every engine** (`check_report_runs`). The same
   file listed more than once is searched **once** and recorded in `search_provenance.json`
   `repeated_paths` (with the count), which the analysis report shows. Different files that share

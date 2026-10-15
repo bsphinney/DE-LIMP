@@ -864,11 +864,12 @@ python3 scripts/fetch_fasta.py resolve --organism "<what they said>"   # or --ta
   proximity labelling (`experiment_type.ENRICHMENT`), or a submission that says on-bead
   digestion. On-bead digests are often not reduced and alkylated, and the default fixed
   carbamidomethyl-C then leaves no cysteine peptide searchable (0.03–0.5% of identified peptides
-  held a C on three such Core searches, against ~8%). Pass the answer to `estimate_params.py`
-  (step 6b) and log it (`log_decision.py`): **yes → `--cys-alkylation cam`** (recorded as the
-  user's answer); **no → `--cys-alkylation none`**; alkylated with another agent (NEM, MMTS,
-  iodoacetic acid, 4-vinylpyridine) → `none` plus that fixed modification
-  (`references/parameters.md`). For every other type do not ask and **omit the flag**: fixed
+  held a C on three such Core searches, against ~8%). **If yes, ask which agent.** Pass the
+  answer to `estimate_params.py` (step 6b; `make_presets.py` for FragPipe / Radiant, step 6c) and
+  log it (`log_decision.py`) as `--cys-alkylation`: iodoacetamide or chloroacetamide → `cam`;
+  acrylamide → `propionamide`; N-ethylmaleimide → `nem`; iodoacetic acid → `carboxymethyl`;
+  MMTS → `mmts`; 4-vinylpyridine → `pyridylethyl`; **not alkylated → `none`** — each recorded as
+  the user's answer. For every other experiment type do not ask and **omit the flag**: fixed
   carbamidomethyl stands, recorded in the sidecar as a DEFAULT.
 - **Sample type — never infer it; ask outside users, and Core staff only when a choice
   depends on it.** **Never** take it from file or folder names, sample IDs or abbreviations: a
@@ -1352,18 +1353,18 @@ python3 scripts/estimate_params.py --engine <diann|sage> \
     --acquisition <DIA|DDA> --instrument "<detected instrument>" \
     --precursor-mz-range <LO> <HI> \
     [--ms1-resolution <MS1> (--ms2-resolution <MS2> | --ms2-analyzer <ITMS|mixed>) [--resolution-source detected]] \
-    [--var-mods ox] [--cys-alkylation cam|none] [--overrides '<the user's values as JSON>' \
+    [--var-mods ox] [--cys-alkylation <agent>|none] [--overrides '<the user's values as JSON>' \
      --override-by "<who chose them>" --override-reason "<why, in their words>"] \
     --fasta-meta ./search.fasta.meta.json \
     --out ./wf/params.<cfg|json>
 ```
-**`--cys-alkylation`** carries step 3's answer: `cam` (reduced and alkylated) writes fixed
-carbamidomethyl-C, recorded as the user's answer; `none` searches cysteine unmodified (no
-`--unimod4`; Sage: no static C), and the Methods say why. The sidecar's `cys_alkylation` records
-the choice and who made it. Not asked → omit it: fixed carbamidomethyl-C, tagged DEFAULT.
-`sample_quality.py --report` (step 8c) warns when carbamidomethyl was fixed and under 1% of the
-identified precursors hold a C, pooled or in any one run: confirm the prep, then re-search with
-`none` (or with the agent the lab used).
+**`--cys-alkylation`** carries step 3's answer: the agent's fixed modification on C (`cam`:
+`--unimod4`; another agent: `--fixed-mod UniMod:<n>,<mass>,C`; Sage: `static_mods C`), or `none`
+for cysteine unmodified, and the Methods name it. The sidecar's `cys_alkylation` records the
+choice and who made it. Not asked → omit it: fixed carbamidomethyl-C, tagged DEFAULT.
+`sample_quality.py --report` (step 8c) warns when a fixed C modification was searched and under
+1% of the identified precursors hold a C, pooled or in any one run: confirm the prep, then
+re-search with `none` or the agent the lab used.
 **Always pass `--precursor-mz-range`**, taking `precursor_mz_range` straight from
 step 2's `detect_acquisition.py` output. Without it a DIA range falls back to
 380–980 — which on a timsTOF method acquiring 299.5–1200.5 silently discards both
@@ -1450,9 +1451,14 @@ These two are driven by a whole config file rather than flags, so
 ```
 python3 scripts/make_presets.py --engine <fragpipe|radiant> \
     --instrument "<detected instrument>" --acquisition DIA \
-    [--fasta ./search.fasta] [--threads N] --out ./wf/<engine>.<workflow|radiantConfig>
+    [--fasta ./search.fasta] [--threads N] [--cys-alkylation <agent>|none] \
+    --out ./wf/<engine>.<workflow|radiantConfig>
 ```
-Re-run it directly only if the FASTA or thread count changed after step 4.
+Re-run it directly if the FASTA or thread count changed after step 4, or with
+`--cys-alkylation` when step 3 asked about alkylation: FragPipe's presets fix carbamidomethyl-C
+(MSFragger's C row is set to the agent's mass, or 0 for `none`), and Radiant searches whatever
+fixed C modification its DIA-NN library carries (`run_search.py` builds that library with it, from
+`<out>.provenance.json`).
 
 It starts from the **vendor's own preset for that data type** and patches only what
 is run-specific. That matters: FragPipe's two DIA presets differ in **20 keys**, not
@@ -1563,8 +1569,11 @@ python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \
   built on the new names. An `--out`/`--fasta`/`--params` with `--` is refused, and so is any
   `--` path DIA-NN would get on the FragPipe route (no renaming there). A DIA-NN search
   **fails** unless its report holds every input run (`check_report_runs.py`, in the single-shot
-  search job and the chain's step 5); **do not resubmit** it — the message says what to do (a
-  blank the user agrees to leave out: drop it from `conditions.csv` and use the report).
+  search job and the chain's step 5); **do not resubmit** it, and do not edit `file_list.txt`
+  (step 5's list is fixed at generation) — the message says what to do: a blank the user or staff
+  agree to leave out is recorded with `check_report_runs.py … --accept-missing <run> --reason
+  "<why>"` (re-checks the report already written, runs nothing), dropped from `conditions.csv`,
+  and the report used.
 - **Keratin sample (step 3) → `--keratin-sample`.** The search is then REFUSED, before
   anything is written or submitted, if `--fasta` still holds a keratin-family `Cont_` entry;
   the message prints the `fetch_fasta.py fetch … --keratin-sample` command to rebuild it. A
