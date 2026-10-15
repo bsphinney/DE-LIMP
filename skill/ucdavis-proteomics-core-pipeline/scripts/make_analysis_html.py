@@ -1183,6 +1183,8 @@ def runs_left_out_note(prov):
     runs = (prov.get("runs_left_out") or {}).get("runs") or []
     unexplained = any(not (isinstance(x, dict) and isinstance(x.get("reason"), str)
                            and x["reason"].strip()) for x in runs)
+    # a design run that had no quantities was meant to be analysed: always a warning
+    unexplained = unexplained or bool((prov.get("runs_left_out") or {}).get("not_quantified"))
     return {"kind": "warning" if unexplained else "info",
             "title": "Searched runs left out of the analysis", "text": text}
 

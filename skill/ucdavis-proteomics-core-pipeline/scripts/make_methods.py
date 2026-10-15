@@ -1400,8 +1400,9 @@ def de_block_sentence(prov):
 
 def de_covariate_sentence(prov):
     """How the covariates entered the linear model (run_de.R's `covariates` record), when one was
-    numeric (--numeric-covariates): its range, that one slope is shared by all groups, and -- when
-    Group explains most of its variance -- the caution run_de.R recorded. None when every covariate
+    numeric (--numeric-covariates): its range, that one slope is shared by all groups, and -- for
+    each comparison whose groups it nearly matches (run_de.R's per_contrast, confounded_contrasts)
+    -- that comparison and why. None when every covariate
     was a factor (the design formula says it all), and for a record from before 2.12, which could
     only fit factors. The one description: the Methods, the analysis brief and the report's
     callout all read it."""
@@ -1433,31 +1434,51 @@ def de_covariate_sentence(prov):
             + (f" ({t['n_levels']} levels)" if isinstance(t.get("n_levels"), int) else "")
             for t in factors) + "."
     for t in numeric:
-        if t.get("confounded") is True:
-            r2 = t.get("group_r2")
-            se = t.get("se_inflation") if isinstance(t.get("se_inflation"), dict) else {}
-            se_max = max((v for v in se.values() if isinstance(v, (int, float))), default=None)
-            out += (f" Group explained {r2 * 100:.0f}% of the variance of {t.get('column')}"
-                    if isinstance(r2, (int, float)) else
-                    f" {t.get('column')} was strongly confounded with Group")
-            out += (", so the adjusted group comparisons rest largely on its fitted slope"
-                    + (f" (standard errors up to {se_max:.1f}x those without it)"
-                       if se_max is not None else "") + ".")
+        if t.get("confounded") is not True:
+            continue
+        pc = t.get("per_contrast") if isinstance(t.get("per_contrast"), dict) else {}
+        conf = [c for c in (t.get("confounded_contrasts") or []) if isinstance(pc.get(c), dict)]
+        if conf:
+            # per contrast (2.12): the comparisons whose groups the covariate separates, and why
+            out += " " + " ".join(
+                f"In {c}, {t.get('column')} nearly matched the groups compared ("
+                + "; ".join(str(w) for w in (pc[c].get("why") or [])) + "), so that comparison "
+                "rests largely on the fitted slope." for c in conf)
+            continue
+        # a record without per-contrast detail: the overall share
+        r2 = t.get("group_r2")
+        se = t.get("se_inflation") if isinstance(t.get("se_inflation"), dict) else {}
+        se_max = max((v for v in se.values() if isinstance(v, (int, float))), default=None)
+        out += (f" Group explained {r2 * 100:.0f}% of the variance of {t.get('column')}"
+                if isinstance(r2, (int, float)) else
+                f" {t.get('column')} was strongly confounded with Group")
+        out += (", so the adjusted group comparisons rest largely on its fitted slope"
+                + (f" (the design alone widens their standard errors up to {se_max:.1f}x)"
+                   if se_max is not None else "") + ".")
     return out
 
 
 def de_runs_left_out_sentence(prov):
     """The searched runs the DE left out, each with the reason the user gave, from run_de.R's
     `runs_left_out` record (the reasons come from collect_conditions.py --validate --exclude). A
-    run with no recorded reason says NOT RECORDED -- never a reason supplied here. None when every
-    searched run was analysed, or the record predates it. The one wording: the Methods and the
+    run with no recorded reason says NOT RECORDED -- never a reason supplied here. A run of the
+    design that had no quantities (`not_quantified`, 2.12) is said on its own, with run_de.R's
+    reason. None when every searched run was analysed, or the record predates it. The one wording: the Methods and the
     report's callout (make_analysis_html.runs_left_out_note) both use it."""
     r = prov.get("runs_left_out")
-    if not isinstance(r, dict) or not r.get("determined"):
+    if not isinstance(r, dict):
         return None
+    # design runs with no quantities (2.12): their own sentence, with run_de.R's reason
+    nq = [x for x in (r.get("not_quantified") or []) if isinstance(x, dict) and x.get("run")]
+    nq_text = (f"{len(nq)} run{' was' if len(nq) == 1 else 's were'} in the design but had no "
+               f"quantities, so {'it was' if len(nq) == 1 else 'they were'} not analysed: "
+               + "; ".join(f"{x['run']} ({str(x.get('reason') or 'reason ' + NOT_RECORDED).strip().rstrip('.')})"
+                           for x in nq) + ".") if nq else None
+    if not r.get("determined"):
+        return nq_text
     runs = [x for x in (r.get("runs") or []) if isinstance(x, dict) and x.get("run")]
     if not runs:
-        return None
+        return nq_text
 
     def one(x):
         why = x.get("reason")
@@ -1469,8 +1490,10 @@ def de_runs_left_out_sentence(prov):
     tail = (f"{'was' if n == 1 else 'were'} left out of the differential-expression analysis: "
             f"{'; '.join(one(x) for x in runs)}.")
     if isinstance(n_rep, int) and isinstance(n_an, int):
-        return f"Of the {n_rep} runs searched, {n_an} were analysed and {n} {tail}"
-    return f"{n} searched run{'' if n == 1 else 's'} {tail}"
+        out = f"Of the {n_rep} runs searched, {n_an} were analysed and {n} {tail}"
+    else:
+        out = f"{n} searched run{'' if n == 1 else 's'} {tail}"
+    return out + (f" {nq_text}" if nq_text else "")
 
 
 def de_normalisation_sentence(prov):

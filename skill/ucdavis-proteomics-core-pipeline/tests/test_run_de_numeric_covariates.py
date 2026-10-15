@@ -235,12 +235,16 @@ class NumericCovariateEndToEnd(unittest.TestCase):
         self.assertTrue(t["confounded"])
         self.assertGreater(t["group_r2"], 0.9)
         self.assertGreater(t["se_inflation"]["B-A"], 3)
-        self.assertIn("Covariate1 is strongly confounded with Group", p.stderr)
+        self.assertEqual(t["confounded_contrasts"], ["B-A"])
+        pc = t["per_contrast"]["B-A"]
+        self.assertEqual((pc["groups"], pc["overlap"], pc["confounded"]), (["B", "A"], False, True))
+        self.assertIn("Covariate1 is strongly confounded with the groups in B-A (", p.stderr)
+        self.assertIn("the design alone widens its standard error", p.stderr)
         self.assertEqual(len(prov["covariates"]["warnings"]), 1)
         self.assertIn("removes part of the effect being tested", prov["covariates"]["warnings"][0])
         with open(os.path.join(out, "methods.txt")) as fh:
-            self.assertIn("CAUTION: Covariate1 is strongly confounded with Group", fh.read())
-        self.assertIn("Group explained 9", mm.de_covariate_sentence(prov))
+            self.assertIn("CAUTION: Covariate1 is strongly confounded with the groups in B-A", fh.read())
+        self.assertIn("In B-A, Covariate1 nearly matched the groups compared (", mm.de_covariate_sentence(prov))
 
     def test_the_audit_surfaces_it(self):
         """audit_results.py's numeric_covariate check quotes run_de.R's caution (WARN), and passes
@@ -412,9 +416,11 @@ class TheWordsReadTheRecord(unittest.TestCase):
         t = dict(self.NUM, group_r2=0.93, confounded=True, se_inflation={"B-A": 3.8})
         prov = self.prov(t, warnings=["Covariate1 is strongly confounded with Group: ..."])
         sent = mm.de_covariate_sentence(prov)
+        # a record with no per-contrast detail: the overall share, the design-only factor said so
         self.assertTrue(sent.endswith("Group explained 93% of the variance of Covariate1, so the "
                                       "adjusted group comparisons rest largely on its fitted slope "
-                                      "(standard errors up to 3.8x those without it)."), sent)
+                                      "(the design alone widens their standard errors up to 3.8x)."),
+                        sent)
         self.assertEqual(mah.covariate_note(prov)["kind"], "warning")
         with tempfile.TemporaryDirectory() as tmp:
             de = os.path.join(tmp, "tables")
@@ -431,6 +437,105 @@ class TheWordsReadTheRecord(unittest.TestCase):
                       f"adjusted for it.", brief)
         self.assertIn("- **Covariate caveat (say this in Data Quality Notes):** Covariate1 is "
                       "strongly confounded with Group", brief)
+
+
+# Four groups x 4 runs; Covariate1 separates B from A completely but spreads C and D over the whole
+# range: overall R^2 0.595 -- below the caution -- yet 0.988 within A and B (the 2.12 review's
+# example, rev-stats/r2.R). Every protein has its own slope; P00001-P00010 are up 1 log2 in B.
+SYNTH4_R = r'''
+set.seed(3)
+grp <- rep(c("A", "B", "C", "D"), each = 4); runs <- sprintf("run%02d", seq_along(grp))
+cov <- c(0.0, 0.1, 0.2, 0.3,  2.0, 2.1, 2.2, 2.3,  0, 0.8, 1.5, 2.3,  0.1, 0.9, 1.6, 2.2)
+out <- list()
+for (i in 1:100) {
+  pg <- sprintf("P%05d", i); base <- runif(1, 14, 20); slope <- runif(1, -1, 1)
+  run_lv <- base + slope * cov + (grp == "B") * (if (i <= 10) 1 else 0) + rnorm(16, 0, 0.15)
+  for (j in 1:3) {
+    lv <- run_lv + rnorm(1, 0, 0.8) + rnorm(16, 0, 0.1)
+    out[[length(out) + 1]] <- data.frame(Run = runs, Precursor.Id = sprintf("PEP%dK%d2", i, j),
+      Protein.Group = pg, Protein.Ids = pg, Protein.Names = paste0("G", i, "_X"),
+      Genes = paste0("G", i), Proteotypic = 1L, Precursor.Normalised = 2^lv,
+      Precursor.Quantity = 2^lv, Q.Value = 0.001, Lib.Q.Value = 0.001, Lib.PG.Q.Value = 0.001,
+      PG.Q.Value = 0.001, Global.Q.Value = 0.001, Global.PG.Q.Value = 0.001,
+      stringsAsFactors = FALSE)
+  }
+}
+d <- do.call(rbind, out)
+pgm <- aggregate(Precursor.Normalised ~ Protein.Group + Run, d, sum)
+names(pgm)[3] <- "PG.MaxLFQ"
+arrow::write_parquet(merge(d, pgm, by = c("Protein.Group", "Run")), file.path(OUT, "report.parquet"))
+write.csv(data.frame(File.Name = runs, Group = grp, Covariate1 = cov), file.path(OUT, "conditions.csv"),
+          row.names = FALSE)
+'''
+
+
+@unittest.skipUnless(r_has("limma", "arrow", "dplyr", "tidyr", "jsonlite"),
+                     "needs R with limma/arrow/dplyr/tidyr/jsonlite")
+class ConfoundingIsPerContrast(unittest.TestCase):
+    """The 2.12 review (M2): the caution used the overall R^2 only, so with 3+ groups a pair the
+    covariate separates went unflagged. Now each contrast is judged on its own groups' samples
+    (R^2 within them, overlapping ranges, the design's standard-error inflation), and the
+    caution, methods.txt, the Methods, the page callout, the brief and the audit name it."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp()
+        rscript(f'OUT <- "{cls.tmp}"\n' + SYNTH4_R)
+        cls.p, cls.out = run_de(cls.tmp, "conditions.csv", "--method", "maxlfq", "--numeric-covariates",
+                                "Covariate1", "--contrasts", "B-A,C-A,D-A,C-D")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def prov(self):
+        self.assertEqual(self.p.returncode, 0, self.p.stderr[-2500:])
+        with open(os.path.join(self.out, "de_provenance.json")) as fh:
+            return json.load(fh)
+
+    def test_the_pair_it_separates_is_flagged_though_the_overall_share_is_modest(self):
+        t = self.prov()["covariates"]["terms"][0]
+        self.assertAlmostEqual(t["group_r2"], 0.595, places=2)          # under 0.8 overall
+        self.assertTrue(t["confounded"])
+        self.assertEqual(t["confounded_contrasts"], ["B-A"])
+        pc = t["per_contrast"]
+        self.assertAlmostEqual(pc["B-A"]["r2"], 0.988, places=2)
+        self.assertFalse(pc["B-A"]["overlap"])
+        self.assertAlmostEqual(pc["B-A"]["se_inflation"], 1.57, places=2)
+        self.assertEqual(len(pc["B-A"]["why"]), 2)                     # R^2 and no overlap; 1.57x < 2.24x
+        for cn in ("C-A", "D-A", "C-D"):
+            self.assertFalse(pc[cn]["confounded"], cn)
+            self.assertTrue(pc[cn]["overlap"], cn)
+        self.assertEqual(pc["C-D"]["groups"], ["C", "D"])
+
+    def test_every_reader_names_the_contrast(self):
+        prov = self.prov()
+        (w,) = prov["covariates"]["warnings"]
+        self.assertTrue(w.startswith("Covariate1 is strongly confounded with the groups in B-A (the "
+                                     "compared groups explain 99% of its variance among their samples"),
+                        w)
+        self.assertIn("their values do not overlap (B 2 to 2.3; A 0 to 0.3)", w)
+        self.assertIn("That comparison is adjusted", w)
+        self.assertNotIn("C-A", w)
+        self.assertIn(w, self.p.stderr.replace("\n", " "))
+        with open(os.path.join(self.out, "methods.txt")) as fh:
+            self.assertIn("CAUTION: " + w, " ".join(fh.read().split()))
+        sent = mm.de_covariate_sentence(prov)
+        self.assertIn("In B-A, Covariate1 nearly matched the groups compared (the compared groups "
+                      "explain 99% of its variance", sent)
+        self.assertNotIn("C-A", sent)
+        note = mah.covariate_note(prov)
+        self.assertEqual((note["kind"], note["text"]), ("warning", sent))
+        md = os.path.join(self.tmp, "AUDIT.md")
+        p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "audit_results.py"), "--out", md,
+                            "--de-dir", self.out], capture_output=True, text=True, cwd=self.tmp,
+                           timeout=120)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        with open(md[:-3] + ".json") as fh:
+            (f,) = [x for x in json.load(fh)["findings"] if x["check"] == "numeric_covariate"]
+        self.assertEqual(f["status"], "WARN")
+        self.assertTrue(f["message"].startswith(w), f["message"])
+        self.assertEqual(f["detail"]["confounded_contrasts"], ["B-A"])
 
 
 if __name__ == "__main__":

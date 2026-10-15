@@ -171,6 +171,37 @@ class NotMeasuredInEitherGroup(unittest.TestCase):
                 for pg, r in rows.items():
                     self.assertEqual(r["Evidence"] == LABEL, zeros(r), pg)
 
+    def test_the_delimp_session_leaves_them_untested(self):
+        """2.12 review (M4): DE-LIMP draws its volcano and tables with topTable(session$fit), which
+        gave an untested protein its p-value back and counted it in BH. In the session's fit its t,
+        p-value and B are NA for that contrast, so topTable reproduces DE_*.csv."""
+        for key in ("dpc", "dpc_tr"):
+            out = self.out(key)
+            res = json.loads(rscript(f'''
+              suppressMessages(library(limma)); s <- readRDS("{out}/DE-LIMP_session.rds")
+              r <- lapply(setNames(colnames(s$fit$p.value), colnames(s$fit$p.value)), function(cn) {{
+                tt <- topTable(s$fit, coef = cn, number = Inf)
+                de <- read.csv(file.path("{out}", sprintf("DE_dpc_%s.csv", make.names(cn))))
+                de <- de[match(rownames(tt), de$Protein.Group), ]
+                list(na_p = sum(is.na(tt$P.Value)), na_same = identical(is.na(tt$adj.P.Val), is.na(de$adj.P.Val)),
+                     dp = max(abs(tt$P.Value - de$P.Value), na.rm = TRUE),
+                     dadj = max(abs(tt$adj.P.Val - de$adj.P.Val), na.rm = TRUE),
+                     na_t = sum(is.na(s$fit$t[, cn])), na_lods = sum(is.na(s$fit$lods[, cn])),
+                     n_listed = length(s$not_measured$proteins[[cn]]))
+              }})
+              cat(jsonlite::toJSON(list(per = r, na_F = sum(is.na(s$fit$F)), label = s$not_measured$label),
+                                   auto_unbox = TRUE, digits = NA))'''))
+            self.assertEqual(res["label"], LABEL)
+            n_nm = {c: t["n_not_measured"] for c, t in self.prov(key)["de_tables"].items()}
+            self.assertEqual(n_nm["B-A"], 20, key)
+            for cn, r in res["per"].items():
+                self.assertEqual((r["na_p"], r["na_t"], r["na_lods"], r["n_listed"]),
+                                 (n_nm[cn],) * 4, (key, cn))
+                self.assertTrue(r["na_same"], (key, cn))
+                self.assertLess(max(r["dp"], r["dadj"]), 1e-12, (key, cn))
+            # F (all contrasts together): NA for a protein any contrast does not test
+            self.assertEqual(res["na_F"], len(CD_ONLY | B_ONLY), key)
+
     def test_presence_call_still_means_measured_in_one_group(self):
         for key, _, _ in self.RUNS:
             with self.subTest(run=key):
@@ -427,6 +458,105 @@ class OneVocabulary(unittest.TestCase):
         lab = self.labels()
         self.assertEqual(ap.EVIDENCE[:2], (lab["all"], lab["none_in_a_group"]))
         self.assertIn(lab["none_measured"], ap.EVIDENCE)
+
+
+# The set tests' primary universe (2.12 review, L1): the GMT's sets mix proteins tested in B vs A
+# with C/D-only ones (not measured in either group of B-A).
+SETS_GMT = "\n".join("\t".join([name, "synthetic"] + genes) for name, genes in (
+    ("b_up", [f"G{i}" for i in (1, 2, 3, 4, 5, 11, 12, 13, 14, 15)]),
+    ("cd_mix", [f"G{i}" for i in range(51, 61)] + [f"G{i}" for i in range(6, 11)]),
+    ("cd_only", [f"G{i}" for i in range(61, 71)]),
+    ("bg_a", [f"G{i}" for i in range(16, 31)]),
+    ("bg_b", [f"G{i}" for i in range(31, 46)]))) + "\n"
+
+
+@unittest.skipUnless(r_has("limpa", "limma", "statmod", "arrow", "dplyr", "tidyr", "jsonlite"),
+                     "needs R with limpa/limma/statmod/arrow/dplyr/tidyr/jsonlite")
+class SetTestsAndLostRuns(unittest.TestCase):
+    """L1: run_sets.R's primary tests leave out a contrast's untested proteins, as its DE table
+    does (they had t ~ 0 on dpc and joined camera's background). L2: a design run that has no
+    quantities (no precursor passed the identification filters) is recorded as not quantified,
+    with that reason -- not as a left-out run whose reason is missing."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp()
+        rscript(f'OUT <- "{cls.tmp}"\n' + SYNTH_R + r'''
+d <- arrow::read_parquet(file.path(OUT, "report.parquet"))
+d$Q.Value[d$Run == "run12"] <- 0.5        # nothing of run12 passes the identification filter
+arrow::write_parquet(d, file.path(OUT, "report_lost.parquet"))
+''')
+        with open(os.path.join(cls.tmp, "sets.gmt"), "w") as fh:
+            fh.write(SETS_GMT)
+        cls.de = os.path.join(cls.tmp, "de")
+        run = lambda *a: subprocess.run(["Rscript", *a], capture_output=True, text=True, cwd=cls.tmp)
+        cls.de_p = run(RUN_DE, "--input", "report.parquet", "--metadata", "conditions.csv",
+                       "--method", "dpc", "--outdir", cls.de)
+        cls.sets_p = run(os.path.join(SCRIPTS, "run_sets.R"), "--de-dir", cls.de, "--sets", "none",
+                         "--gmt", "sets.gmt", "--gmt-origin", "synthetic sets written before run_de",
+                         "--min-size", "5")
+        with open(os.path.join(cls.tmp, "cd_only.gmt"), "w") as fh:
+            fh.write("cd_only\tsynthetic\t" + "\t".join(f"G{i}" for i in range(61, 71)) + "\n")
+        cls.cd_p = run(os.path.join(SCRIPTS, "run_sets.R"), "--de-dir", cls.de, "--sets", "none",
+                       "--gmt", "cd_only.gmt", "--gmt-origin", "synthetic sets written before run_de",
+                       "--min-size", "5", "--contrasts", "B-A", "--outdir", os.path.join(cls.tmp, "cd"))
+        cls.lost = {m: (run(RUN_DE, "--input", "report_lost.parquet", "--metadata", "conditions.csv",
+                            "--method", m, "--outdir", os.path.join(cls.tmp, "lost_" + m)),
+                        os.path.join(cls.tmp, "lost_" + m)) for m in ("dpc", "maxlfq")}
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def sets(self, contrast):
+        self.assertEqual(self.de_p.returncode, 0, self.de_p.stderr[-2000:])
+        self.assertEqual(self.sets_p.returncode, 0, self.sets_p.stderr[-2000:])
+        return {r["Set_ID"]: r for r in read_csv(os.path.join(self.de, f"Sets_{contrast}.csv"))}
+
+    def test_set_tests_leave_out_what_the_de_table_does_not_test(self):
+        ba, ca = self.sets("B.A"), self.sets("C.A")
+        self.assertEqual(ba["cd_mix"]["NGenes"], "5")               # its 10 C/D-only proteins out
+        self.assertNotIn("cd_only", ba)                             # nothing of it tested in B-A
+        self.assertEqual((ca["cd_mix"]["NGenes"], ca["cd_only"]["NGenes"]), ("15", "10"))
+        with open(os.path.join(self.de, "sets_provenance.json")) as fh:
+            rec = json.load(fh)
+        c = rec["contrasts"]
+        self.assertEqual((c["B-A"]["n_not_measured_left_out"], c["B-A"]["n_sets_not_tested"]), (20, 1))
+        self.assertEqual(c["C-A"]["n_not_measured_left_out"], 5)    # B-only: untested in C vs A
+        self.assertEqual(c["B-A"]["n_proteins_tested"] + 20, c["C-A"]["n_proteins_tested"] + 5)
+        self.assertIn("proteins measured in neither compared group -- not tested in its "
+                      "differential-expression table -- were left out of both tests",
+                      " ".join(rec["methods_paragraph"].split()))
+
+    def test_a_comparison_that_tests_none_of_a_sets_proteins_stops_with_the_fix(self):
+        self.assertNotEqual(self.cd_p.returncode, 0)
+        self.assertIn("no set keeps 5 proteins tested in B-A", self.cd_p.stderr)
+        self.assertIn("leave it out with --contrasts, or lower --min-size", self.cd_p.stderr)
+
+    def test_a_design_run_with_no_quantities_is_not_a_left_out_run(self):
+        for m, (p, out) in self.lost.items():
+            with self.subTest(method=m):
+                self.assertEqual(p.returncode, 0, p.stderr[-2000:])
+                with open(os.path.join(out, "de_provenance.json")) as fh:
+                    r = json.load(fh)["runs_left_out"]
+                self.assertEqual(r["runs"], [])                 # nothing left out by the design
+                (nq,) = r["not_quantified"]
+                self.assertEqual(nq["run"], "run12")
+                self.assertIn("in the report, but", nq["reason"])
+                self.assertIn("no precursor of it passed" if m == "dpc" else "fewer than 2 of its proteins",
+                              nq["reason"])
+                self.assertEqual((r["n_report_runs"], r["n_analysed"]), (12, 11))
+                with open(os.path.join(out, "methods.txt")) as fh:
+                    methods = fh.read()
+                self.assertIn("Not quantified: runs in the design with no quantities, not analysed:", methods)
+                self.assertNotIn("NOT RECORDED [confirm]", methods)
+                self.assertIn("1 run(s) of the design have no quantities", p.stderr)
+                prov = {"runs_left_out": r}
+                sent = mm.de_runs_left_out_sentence(prov)
+                self.assertTrue(sent.startswith("1 run was in the design but had no quantities, so it "
+                                                "was not analysed: run12 (not quantified: in the report"),
+                                sent)
+                self.assertEqual(mah.runs_left_out_note(prov)["kind"], "warning")
 
 
 @unittest.skipUnless(r_has("limma", "jsonlite"), "needs R with limma and jsonlite")

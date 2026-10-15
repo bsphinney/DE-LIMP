@@ -135,7 +135,8 @@ class TheBrief(unittest.TestCase):
             st.record(s, not_asked=True)
             brief, _ = self.brief(tmp, "--session", s)
         self.assertIn("Core staff were not asked", brief)
-        self.assertIn("as the attached submission record does", brief)
+        self.assertIn("as the attached submission record does, when there is one, or else by "
+                      "their groups only", brief)
         self.assertIn("never infer it from file or folder names", brief)
         self.assertNotIn("Say in **Data Quality Notes** that the sample type was not stated", brief)
 
@@ -164,8 +165,14 @@ class SkillMdAsksIt(unittest.TestCase):
         self.assertIn("**Sample type — never infer it; ask outside users, and Core staff only when "
                       "a choice\n  depends on it.**", md)
         self.assertIn("**Outside users: ask**", md)
-        self.assertIn("**Core staff (a CoreOmics submission, step 1c): do not ask it.** Record "
-                      "`--not-asked`", md)
+        # any Core staff analysis, internal work too (staff review of 2.12): not asked, or what
+        # they already said recorded as stated
+        self.assertIn("**Core staff, any analysis (a CoreOmics submission or internal work): do "
+                      "not ask it.**\n    Record `--not-asked` (step 3b) — or `--stated` with what "
+                      "they already said (\"HeLa digest\n    standard\")", md)
+        self.assertIn("a submission record, when there is one, describes the samples", md)
+        self.assertIn("though Core staff (any analysis: a\n   submission or internal work) are "
+                      "asked it only when a step depends on it", md)
         self.assertIn("scripts/sample_type.py set --session <session> --stated", md)
         self.assertIn("scripts/sample_type.py set --session <session> --not-asked", md)
         self.assertIn("--workflow-manifest ./wf/workflow.manifest.json --session <session>", md)

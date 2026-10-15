@@ -61,8 +61,9 @@ the spine.
 4. **Organism decides the FASTA and nothing else**, and is **always asked, never
    assumed** — not from a folder name, not "probably human". The **sample type** (tissue,
    cell line, biofluid, IP …) is likewise **asked, never inferred** — not from a file-name
-   token or abbreviation, a sample ID or a folder — though Core staff are asked it only when a
-   step depends on it (step 3, `sample_type.py`). Resolve the organism with
+   token or abbreviation, a sample ID or a folder — though Core staff (any analysis: a
+   submission or internal work) are asked it only when a step depends on it (step 3,
+   `sample_type.py`). Resolve the organism with
    `fetch_fasta.py resolve` and have the user confirm the proteome. It does **not**
    affect a single search parameter: mass accuracy keys on instrument, and search
    behaviour on acquisition. Both are auto-detected and confirmed. So any organism
@@ -892,11 +893,13 @@ python3 scripts/fetch_fasta.py resolve --organism "<what they said>"   # or --ta
     tissue — which one —, plasma, IP, hair …), in their words; "don't know" is an answer
     (`--not-stated`, and the report then names no tissue). No submission record describes their
     samples, and they are making the choices below without the Core's defaults.
-  - **Core staff (a CoreOmics submission, step 1c): do not ask it.** Record `--not-asked`
-    (step 3b) and go on; the submission record describes the samples for the report (step 9,
-    `--submission`). Ask only at a step whose choice depends on the answer: the keratin
-    question below (one yes/no, before the FASTA is built), and a flagged sample-quality panel
-    (8c). The contaminant set is the Core's `universal`, whatever the tissue.
+  - **Core staff, any analysis (a CoreOmics submission or internal work): do not ask it.**
+    Record `--not-asked` (step 3b) — or `--stated` with what they already said ("HeLa digest
+    standard") — and go on; a submission record, when there is one, describes the samples for
+    the report (step 9, `--submission`). Ask only at a step whose choice depends on the answer:
+    the keratin question below (one yes/no, before the FASTA is built), and a flagged
+    sample-quality panel (8c). The contaminant set is the Core's `universal`, whatever the
+    tissue.
   The answer is used at every step that depends on it: the contaminant set below, the keratin
   decision below, the sample-quality panels (8c: a muscle panel is the analyte in a muscle
   sample; hemolysis applies to plasma/serum), the analysis brief and report (9), and the SDRF's
@@ -1037,7 +1040,7 @@ say), so the brief and report never fill it in from file names:
 ```
 python3 scripts/sample_type.py set --session <session> --stated "<what the user said the samples are>"
 python3 scripts/sample_type.py set --session <session> --not-stated     # asked; the user does not know
-python3 scripts/sample_type.py set --session <session> --not-asked      # Core staff: not asked (step 3)
+python3 scripts/sample_type.py set --session <session> --not-asked      # Core staff, any analysis: not asked (step 3)
 ```
 A later answer (a flagged panel in 8c) replaces it with `--stated`.
 **Save step 2's JSON as `<session>/input/acquisition.json`** (the whole `detect_acquisition.py`
@@ -2175,9 +2178,14 @@ python3 scripts/normalization_check.py decide --check <S>/output/norm_check/norm
 The recommendation keeps the type's default unless that default's own volcano is clearly the
 worse one; the checks that tripped are the questions to ask. Never switch silently, either way.
 The final DE is held to the decision AND to the data it was made on (it refuses any other
-`--quantities`, and any other report or conditions — their sha256 is in the check), and records
-it in `de_provenance.json` `normalization_check` and the Methods. A DE without a decided check is
-a WARN in AUDIT.md, and `core_submission.py deliver` holds the delivery until step 8 is done
+`--quantities`, and any other report or conditions — their sha256 is in the check) AND to the
+model: all three DEs carry the same design flags (`--numeric-covariates`, `--block`,
+`--block-effect`, `--block-scope`, `--contrasts`). `normalization_check.py run` refuses two check
+DEs fitted with different designs or on other files and records their design (`check_design`);
+the final DE refuses another method, formula, numeric covariate or block (other contrasts: a
+warning; a check from before 2.12 records no design, said as NOT CHECKED — re-run the check to
+check it). It records all of it in `de_provenance.json` `normalization_check` and the Methods.
+A DE without a decided check is a WARN in AUDIT.md, and `core_submission.py deliver` holds the delivery until step 8 is done
 (a delivery meant to go without a DE — a QC report — is `deliver --mode no-de`, step 12b).
 A DE from **before 2.10** has no check record at all. Re-run step 8 on it, or, if Core staff
 decide it stands as it is, they record that with `python3 scripts/normalization_check.py
@@ -2219,7 +2227,7 @@ is blocked by run_de.R itself — random effect, every contrast from that fit �
 `--numeric-covariates Covariate1` to all three DEs (both check inputs and the final one): it is
 fitted as one slope shared by all groups, not a factor with a level per value. Never decided
 from the values; `Batch` is always a factor. A blank or non-number stops the run; a covariate
-that Group mostly explains is a `CAUTION` to raise with the user →
+that nearly matches the groups of a comparison is a `CAUTION`, naming it, to raise with the user →
 `references/de-analysis.md`, "Continuous covariates".
 **Keratin sample (step 3):** `run_de.R` reads it from the sidecar or `search_provenance.json`
 and keeps keratin as the analyte — nothing to pass. For a search that records neither (an older

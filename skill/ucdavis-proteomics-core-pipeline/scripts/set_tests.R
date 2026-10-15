@@ -56,7 +56,7 @@ UNMEASURED_LABELS <- c(PRESENCE_CALL_LABEL, NOT_MEASURED_LABEL)
 SET_COLUMNS <- list(
   Set_ID = "the set's identifier in its source (GO ID, Reactome stable ID, GMT set name)",
   Set_Name = "the set's name", Source = "GO_BP / GO_CC / GO_MF / Reactome / GMT:<file>",
-  NGenes = "the set's proteins among those tested (protein groups; a group counts when any of its genes is in the set)",
+  NGenes = "the set's proteins among those this comparison tested -- proteins measured in neither compared group are left out, as in its DE table (protein groups; a group counts when any of its genes is in the set)",
   Mean_logFC = "the set's effect: mean log2 fold change of its proteins (Sets_baitnorm: relative to the reference)",
   Call = "'camera + fry', 'camera only', 'fry only', or empty: which test is significant (FDR)",
   camera_Direction = "Up / Down: the direction camera tested", camera_Correlation = "the inter-protein correlation camera used for the set",
@@ -67,7 +67,7 @@ SET_COLUMNS <- list(
   fry_Depth = "for a fry-significant set: 'holds' or 'lost'",
   fry_Reference_Stable = "for a fry-significant set: 'stable' when the call holds on every reference basis tried, else 'k of K'",
   Weak_Fraction = "Sets_baitnorm only: fraction of the set's proteins in the interactome's bottom quarter of pooled enrichment over the control",
-  Presence_Call_Fraction = "fraction of the set's proteins never measured in at least one of the compared groups (the DE table's Evidence = presence call, or not measured in either group)",
+  Presence_Call_Fraction = "fraction of the set's tested proteins never measured in one of the compared groups (the DE table's Evidence = presence call; proteins measured in neither group are not tested in this comparison)",
   Mostly_Presence_Calls = "TRUE when that fraction is above one half",
   "measured_*" = "both tests with the proteins never measured in a compared group (presence calls, and proteins measured in neither) removed from the sets and the background (NA: too few measured proteins)",
   "bait_* / interactome_*" = "Sets_baitnorm only: the same tests with the other reference (cross-check)",

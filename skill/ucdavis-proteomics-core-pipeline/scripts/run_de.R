@@ -232,10 +232,16 @@ covariates <- intersect(c("Batch", "Covariate1", "Covariate2"), names(meta))
 # Its values are used as given (not centred: centring moves the group coefficients, never a
 # difference between them, which is all a contrast reads).
 NUMERIC_COVARIATE_COLUMNS <- c("Covariate1", "Covariate2")
-# Group explaining at least this share of a numeric covariate's variance (R^2 of covariate ~
-# Group) is warned about: the variance-inflation factor 1/(1 - R^2) is then >= 5, the usual
-# collinearity line, and the group comparisons rest largely on the fitted slope.
+# A numeric covariate is warned about, per contrast, when the compared groups explain at least
+# this share of its variance among their samples (R^2 of covariate ~ group, within them): the
+# variance-inflation factor 1/(1 - R^2) is then >= 5, the usual collinearity line, and that
+# comparison rests largely on the fitted slope. Per contrast, not overall: with 3+ groups a pair
+# the covariate separates hides in a modest overall R^2 (review 2.12: 0.595 overall, 0.988 within
+# A and B). Also when the design alone widens the contrast's standard error by sqrt(5) or more
+# (the same VIF line), or the compared groups' covariate ranges do not overlap at all (the
+# comparison is then an extrapolation along the slope).
 COVARIATE_CONFOUND_R2 <- 0.8
+COVARIATE_SE_INFLATION_MAX <- sqrt(5)
 numeric_covs <- local({
   a <- getarg("--numeric-covariates", NULL)
   if (isTRUE(a)) stop("--numeric-covariates needs column names, e.g. --numeric-covariates Covariate1",
@@ -432,6 +438,34 @@ if (!is.null(block_col)) {
 check_design_rank(meta, covariates)
 check_residual_df(build_design(meta, covariates)$design, "in this design")
 
+# The contrasts, one definition: --contrasts, else every group against the first level.
+contrast_forms <- function(groups) {
+  if (!is.null(contrasts)) return(trimws(strsplit(contrasts, ",")[[1]]))
+  l <- levels(groups)
+  paste0(l[-1], "-", l[1])
+}
+# The design this DE asks for, known before anything is fitted: what normalization_check.py
+# compares between the two DEs its check reads and this DE (run() records it as check_design,
+# gate() refuses a final DE whose design differs). The formula is the requested one (a fixed
+# block is added, and a covariate it absorbs dropped, only after quantification); `flags` are the
+# design flags as given, which the printed step-8 commands carry.
+design_request <- local({
+  .flag <- function(f) { v <- getarg(f, NULL); if (is.null(v) || isTRUE(v)) NULL else c(f, v) }
+  list(method = method,
+       formula = paste0("~ 0 + ", paste(build_design(meta, covariates)$formula_parts, collapse = " + ")),
+       numeric_covariates = as.list(numeric_covs),
+       block_column = block_col,
+       block_effect = if (is.null(block_col)) NULL else block_effect_req,
+       block_scope = if (is.null(block_col)) NULL else block_scope,
+       contrasts = as.list(contrast_forms(factor(meta$Group))),
+       flags = as.list(c(.flag("--numeric-covariates"), .flag("--block"), .flag("--block-effect"),
+                         .flag("--block-scope"), .flag("--contrasts"))))
+})
+# handed to normalization_check.py (required, gate) as a file: one JSON, no shell quoting
+design_request_file <- tempfile("design_request_", fileext = ".json")
+if (requireNamespace("jsonlite", quietly = TRUE))   # without it python_json says so itself
+  writeLines(jsonlite::toJSON(design_request, auto_unbox = TRUE, null = "null"), design_request_file)
+
 # The search's own folder (search_provenance.json, its log): the report's, or its parent for
 # FragPipe's DIA route (<workdir>/dia-quant-output/report.*) -- contaminants.R search_folder().
 search_dir <- search_folder(input)
@@ -460,7 +494,7 @@ if (is.null(norm_check_path) && !check_input) {
   .rq <- python_json("normalization_check.py", "required",
                      c("--input", shQuote(normalizePath(input, mustWork = FALSE)),
                        "--metadata", shQuote(normalizePath(meta_path, mustWork = FALSE)),
-                       "--method", method),
+                       "--method", method, "--design-json", shQuote(design_request_file)),
                      "ask whether this session records an experiment type")
   if (is.null(.rq$res))
     stop("could not ask whether this DE's session records an experiment type (", .rq$why,
@@ -480,18 +514,24 @@ norm_check_rec <- if (is.null(norm_check_path)) {
   .ng <- python_json("normalization_check.py", "gate",
                      c("--check", shQuote(normalizePath(norm_check_path)), "--quantities", quantities,
                        "--report", shQuote(normalizePath(input, mustWork = FALSE)),
-                       "--conditions", shQuote(normalizePath(meta_path, mustWork = FALSE))),
+                       "--conditions", shQuote(normalizePath(meta_path, mustWork = FALSE)),
+                       "--design-json", shQuote(design_request_file)),
                      "read the normalisation decision")
   if (is.null(.ng$res))
     stop("the normalisation check ", norm_check_path, " could not be evaluated: ", .ng$why,
          call. = FALSE)
   if (!isTRUE(.ng$res$ok)) stop(.ng$res$message, call. = FALSE)
   message("[run_de] normalisation: ", .ng$res$message)
+  # this DE's design against the one the check's DEs used (normalization_check.design_check):
+  # a contrast difference is a warning; a check that recorded no design is NOT CHECKED, said
+  for (.w in .ng$res$warnings) warning("normalisation check: ", .w, call. = FALSE)
   # the record verbatim (simplifyVector = FALSE keeps every JSON array an array, so the block's
   # schema survives into de_provenance.json unchanged -- python_json simplifies)
   .r <- jsonlite::fromJSON(norm_check_path, simplifyVector = FALSE)
   .r$status <- "decided"
   .r$quantities_applied <- quantities
+  .r$design_match <- .ng$res$design_match %||% "not compared (normalization_check.py gave no answer)"
+  .r$design_warnings <- as.list(.ng$res$warnings)
   .r
 }
 # Keratin sample? Decided once, before either pipeline filters (contaminants.R). `cont_exempt`
@@ -946,6 +986,23 @@ if (isTRUE(cont_rec$removed))
   utils::write.csv(cont_census$groups, file.path(outdir, cont_rec$removed_table), row.names = FALSE)
 
 # ---- align metadata to the matrix columns -----------------------------------
+# A design run with no quantities is not a run the design left out: it is in the metadata, but
+# not in the report, or nothing of it passed the identification filters (dpc: no precursor;
+# maxlfq: fewer than 2 proteins, build_maxlfq). Recorded on its own (runs_left_out
+# `not_quantified`), with that reason -- never as a left-out run whose reason is missing.
+design_runs <- meta$File.Name
+not_quantified <- lapply(setdiff(design_runs, run_names), function(r) list(run = r, reason =
+  if (is.null(.rep_runs_pre)) "not quantified: not in the report, or nothing of it passed the identification filters"
+  else if (!r %in% .rep_runs_pre) "not quantified: not in the search report"
+  else if (method == "dpc") paste("not quantified: in the report, but no precursor of it passed the",
+                                  "identification filters (q-value, QuantUMS, contaminants)")
+  else paste("not quantified: in the report, but fewer than 2 of its proteins were quantified after",
+             "the identification filters (q-value, QuantUMS, contaminants)")))
+if (length(not_quantified))
+  warning(sprintf("%d run(s) of the design have no quantities and are not analysed: %s",
+                  length(not_quantified),
+                  paste(vapply(not_quantified, function(x) sprintf("%s (%s)", x$run, x$reason), ""),
+                        collapse = "; ")), call. = FALSE)
 meta <- meta[match(run_names, meta$File.Name), , drop = FALSE]
 if (any(is.na(meta$Group)))
   stop("Some report columns have no metadata row. Report runs:\n  ",
@@ -967,13 +1024,7 @@ if (!is.null(block_col)) {
 }
 
 # ---- contrasts --------------------------------------------------------------
-lvls <- levels(groups)
-if (is.null(contrasts)) {
-  ref  <- lvls[1]
-  forms <- paste0(lvls[-1], "-", ref)        # all groups vs first level
-} else {
-  forms <- trimws(strsplit(contrasts, ",")[[1]])
-}
+forms <- contrast_forms(groups)
 message("[run_de] contrasts: ", paste(forms, collapse = ", "))
 cmat <- limma::makeContrasts(contrasts = forms, levels = design)
 
@@ -1076,7 +1127,8 @@ set_weights <- list(
   independent = if (!is.null(fit_ind) && method == "dpc") fit_ind$EList$weights)
 if (!is.null(fit_ind)) fit_ind <- limma::eBayes(limma::contrasts.fit(fit_ind, cmat))
 # One fit object whose columns are each contrast's reporting fit (block_merge_fits), so the
-# DE tables and the DE-LIMP session read the same numbers.
+# DE tables and the DE-LIMP session read the same numbers (the session's copy with each
+# contrast's untested proteins set to NA: untest_fit, below).
 fit <- if (is.null(block)) fit_ind else block_merge_fits(.fit_blocked, fit_ind, contrast_model)
 
 # The fitted design as text: a fixed block is a design term, a random one is not.
@@ -1097,30 +1149,65 @@ covariate_record <- function(meta, covariates, numeric_covs, design, cmat, absor
     r <- sqrt(v(design, cmat) / v(design[, keep, drop = FALSE], cmat[keep, , drop = FALSE]))
     as.list(setNames(round(unname(r), 3), colnames(cmat)))
   }, error = function(e) paste("not computed:", conditionMessage(e)))
+  g <- as.character(meta$Group)
+  r2_of <- function(x, s) {            # R^2 of x ~ group among samples s; 0 when x is constant there
+    if (length(unique(g[s])) < 2 || stats::var(x[s]) == 0) return(if (length(unique(g[s])) < 2) NA_real_ else 0)
+    summary(stats::lm(x[s] ~ factor(g[s])))$r.squared
+  }
+  rng <- function(x, gs) sprintf("%s %s to %s", paste(gs, collapse = "+"),
+                                 format(min(x[g %in% gs]), digits = 3), format(max(x[g %in% gs]), digits = 3))
+  # each contrast: the groups it compares (first side, then second), R^2 within their samples,
+  # whether their covariate ranges overlap, the design's standard-error inflation -- and why
+  # it is confounded, if it is
+  per_contrast <- function(x, se) setNames(lapply(colnames(cmat), function(cn) {
+    w <- cmat[, cn]
+    pos <- intersect(names(w)[w > 0], unique(g)); neg <- intersect(names(w)[w < 0], unique(g))
+    r2 <- r2_of(x, g %in% c(pos, neg))
+    overlap <- if (length(pos) && length(neg))
+      max(min(x[g %in% pos]), min(x[g %in% neg])) <= min(max(x[g %in% pos]), max(x[g %in% neg]))
+    else NA
+    sei <- if (is.list(se) && is.numeric(se[[cn]])) se[[cn]] else NA_real_
+    why <- c(if (isTRUE(r2 >= COVARIATE_CONFOUND_R2))
+               sprintf("the compared groups explain %.0f%% of its variance among their samples (R^2 %.2f)",
+                       100 * r2, r2),
+             if (identical(overlap, FALSE))
+               sprintf("their values do not overlap (%s; %s)", rng(x, pos), rng(x, neg)),
+             if (isTRUE(sei >= COVARIATE_SE_INFLATION_MAX))
+               sprintf("the design alone widens its standard error %.1fx", sei))
+    list(groups = as.list(c(pos, neg)), r2 = if (is.na(r2)) NA_real_ else round(r2, 3),
+         overlap = overlap, se_inflation = sei, confounded = length(why) > 0, why = as.list(why))
+  }), colnames(cmat))
   terms <- lapply(covariates, function(cv) {
     if (!cv %in% numeric_covs)
       return(list(column = cv, type = "factor", n_levels = nlevels(factor(meta[[cv]])),
                   source = "default: a covariate column is a factor unless --numeric-covariates names it"))
     x <- as.numeric(meta[[cv]])
-    r2 <- summary(stats::lm(x ~ factor(meta$Group)))$r.squared
+    r2 <- r2_of(x, rep(TRUE, length(x)))
+    se <- se_inflation(cv)
+    pc <- per_contrast(x, se)
+    conf <- names(pc)[vapply(pc, function(p) isTRUE(p$confounded), TRUE)]
     list(column = cv, type = "numeric", source = "--numeric-covariates",
          n_distinct = length(unique(x)), min = min(x), max = max(x),
-         group_r2 = round(r2, 3), confounded = r2 >= COVARIATE_CONFOUND_R2,
-         se_inflation = se_inflation(cv))
+         group_r2 = round(r2, 3), confounded = r2 >= COVARIATE_CONFOUND_R2 || length(conf) > 0,
+         confounded_contrasts = as.list(conf), se_inflation = se, per_contrast = pc)
   })
   warn <- lapply(Filter(function(t) isTRUE(t$confounded), terms), function(t) {
-    se <- if (is.list(t$se_inflation)) unlist(t$se_inflation) else NULL
+    conf <- unlist(t$confounded_contrasts)
+    where <- if (length(conf))
+      paste0("in ", paste(vapply(conf, function(cn) sprintf("%s (%s)", cn,
+               paste(unlist(t$per_contrast[[cn]]$why), collapse = "; ")), ""), collapse = ", and in "))
+    else sprintf("overall: Group explains %.0f%% of its variance (R^2 %.2f)", 100 * t$group_r2, t$group_r2)
     sprintf(paste0(
-      "%s is strongly confounded with Group: Group explains %.0f%% of its variance (R^2 %.2f, ",
-      "warned from %.1f). The group comparisons are adjusted for a covariate that nearly ",
-      "coincides with the groups, so they rest largely on its fitted straight-line slope%s. If %s ",
-      "differs between the groups because of the grouping itself (a consequence of the ",
-      "treatment), adjusting for it removes part of the effect being tested: ask whether it ",
-      "belongs in the model."),
-      t$column, 100 * t$group_r2, t$group_r2, COVARIATE_CONFOUND_R2,
-      if (length(se)) sprintf(", and their standard errors are up to %.1fx those without it (%s)",
-                              max(se), paste(sprintf("%s %.2fx", names(se), se), collapse = ", "))
-      else "", t$column)
+      "%s is strongly confounded with the groups %s. %s adjusted for a covariate that nearly ",
+      "coincides with the groups compared, so %s largely on its fitted straight-line slope ",
+      "(warned from R^2 %.1f within the compared groups, a %.1fx standard error, or values that do ",
+      "not overlap). If %s differs between the groups because of the grouping itself (a ",
+      "consequence of the treatment), adjusting for it removes part of the effect being tested: ",
+      "ask whether it belongs in the model."),
+      t$column, where,
+      if (length(conf) == 1) "That comparison is" else "Those comparisons are",
+      if (length(conf) == 1) "it rests" else "they rest",
+      COVARIATE_CONFOUND_R2, COVARIATE_SE_INFLATION_MAX, t$column)
   })
   list(terms = terms, numeric_requested = as.list(numeric_covs),
        absorbed_by_block = as.list(absorbed),
@@ -1129,6 +1216,7 @@ covariate_record <- function(meta, covariates, numeric_covs, design, cmat, absor
          "covariate interaction), its values used as given (not centred); each contrast compares",
          "the groups at the same covariate value") else NULL,
        confound_r2_threshold = if (length(numeric_covs)) COVARIATE_CONFOUND_R2 else NULL,
+       confound_se_inflation_threshold = if (length(numeric_covs)) round(COVARIATE_SE_INFLATION_MAX, 3) else NULL,
        warnings = warn)
 }
 covariates_rec <- covariate_record(meta, covariates, numeric_covs, design, cmat,
@@ -1279,6 +1367,7 @@ untest_not_measured <- function(tt) {
 
 all_sig <- list()
 de_tables <- list()   # per DE table: its file and which fit it was reported from
+not_measured_ids <- list()   # per contrast: the proteins it does not test (the DE-LIMP session's NAs)
 for (cn in forms) {
   tt <- limma::topTable(fit, coef = cn, number = Inf, adjust.method = "BH")
   tt$Protein.Group <- rownames(tt)
@@ -1304,6 +1393,8 @@ for (cn in forms) {
   n_tested <- sum(!is.na(tt$P.Value))
   n_not_measured <- if ("Evidence" %in% names(tt))
     sum(tt$Evidence %in% not_measured_rec$label) else 0L
+  not_measured_ids[[cn]] <- if ("Evidence" %in% names(tt))
+    tt$Protein.Group[tt$Evidence %in% not_measured_rec$label] else character(0)
   message(sprintf("[run_de] %-20s  %d proteins, %d tested%s, %d significant (adj.P<%.2g); %d of those with |logFC|>=%.2g -> %s%s",
                   cn, nrow(tt), n_tested,
                   if (n_not_measured) sprintf(" (%d %s)", n_not_measured, not_measured_rec$label) else "",
@@ -1423,7 +1514,11 @@ norm_check_methods_lines <- function(r) {
       sprintf("%sThe data check did not agree (%s); %s", pad,
               paste(unlist(r$trips), collapse = "; "), chose)
     else sprintf("%sThe data check (normalisation factors vs groups, fold-change balance, IDs per group, normalisation stability, volcano shape) agreed.", pad),
-    if (!isTRUE(r$tripped) && identical(d$source, "user")) paste0(pad, chose))
+    if (!isTRUE(r$tripped) && identical(d$source, "user")) paste0(pad, chose),
+    # whether this DE's design is the one the check's DEs were fitted with (design_check)
+    if (!is.null(r$design_match) && !identical(r$design_match, "matches"))
+      sprintf("%sDesign vs the check's DEs: %s%s", pad, r$design_match,
+              if (identical(r$design_match, "not recorded")) " [confirm]" else ""))
 }
 # The searched runs this design leaves out, and why. run_de.R analyses only the metadata's runs
 # (restricted before quantification, above); the WHY is the user's recorded decision --
@@ -1431,14 +1526,18 @@ norm_check_methods_lines <- function(r) {
 # <conditions.csv>.decisions.json (collect_conditions.decisions_path) under `excluded_runs`.
 # A run left out with no recorded reason keeps reason = null: never a reason made up here
 # (rule 2); make_methods.de_runs_left_out_sentence says "not recorded" for it.
-runs_left_out_record <- function(report_runs, meta_runs, meta_path) {
+runs_left_out_record <- function(report_runs, meta_runs, meta_path, analysed_runs = meta_runs,
+                                 not_quantified = list()) {
   if (is.null(report_runs))
-    return(list(determined = FALSE,
+    return(list(determined = FALSE, not_quantified = not_quantified,
                 note = paste("the report's run names could not be read (arrow + dplyr), so which",
                              "searched runs the design left out is not recorded")))
   left <- sort(setdiff(report_runs, meta_runs))
   rec <- list(determined = TRUE, n_report_runs = length(report_runs),
-              n_analysed = length(intersect(report_runs, meta_runs)))
+              n_analysed = length(intersect(report_runs, analysed_runs)),
+              # design runs with no quantities (not in the report, or nothing passed the filters):
+              # analysed by no one, and never a left-out run with a missing reason
+              not_quantified = not_quantified)
   why <- list()
   if (length(left)) {
     dec <- paste0(meta_path, ".decisions.json")
@@ -1456,14 +1555,19 @@ runs_left_out_record <- function(report_runs, meta_runs, meta_path) {
   rec$runs <- lapply(left, function(r) list(run = r, reason = why[[r]] %||% NA_character_))
   rec
 }
-runs_left_out_rec <- runs_left_out_record(.rep_runs_pre, meta$File.Name, meta_path)
+runs_left_out_rec <- runs_left_out_record(.rep_runs_pre, design_runs, meta_path,
+                                          analysed_runs = meta$File.Name,
+                                          not_quantified = not_quantified)
 runs_left_out_methods_lines <- function(r) {
-  if (!isTRUE(r$determined) || !length(r$runs)) return(NULL)
+  nq <- if (length(r$not_quantified)) c("Not quantified: runs in the design with no quantities, not analysed:",
+    vapply(r$not_quantified, function(x) sprintf("                %s -- %s", x$run, x$reason), ""))
+  if (!isTRUE(r$determined) || !length(r$runs)) return(nq)
   c(sprintf("Runs          : %d of %d searched runs analysed; left out of the DE:",
             r$n_analysed, r$n_report_runs),
     vapply(r$runs, function(x)
       sprintf("                %s -- %s", x$run,
-              if (is.na(x$reason)) "reason NOT RECORDED [confirm]" else x$reason), ""))
+              if (is.na(x$reason)) "reason NOT RECORDED [confirm]" else x$reason), ""),
+    nq)
 }
 for (.l in runs_left_out_methods_lines(runs_left_out_rec)) message("[run_de] ", sub("^ +", "", .l))
 
@@ -1604,13 +1708,19 @@ jsonlite_or_manual <- function(x) {
   enc(x)
 }
 pkg_ver <- function(p) tryCatch(as.character(packageVersion(p)), error = function(e) NA_character_)
-input_sha256 <- tryCatch(
-  if (file.exists(input) && requireNamespace("digest", quietly = TRUE))
-    digest::digest(input, algo = "sha256", file = TRUE)
-  else if (file.exists(input) && nzchar(Sys.which("shasum")))
-    sub(" .*", "", system2("shasum", c("-a", "256", shQuote(input)), stdout = TRUE)[1])
+file_sha256 <- function(path) tryCatch(
+  if (!file.exists(path)) NA_character_
+  else if (requireNamespace("digest", quietly = TRUE))
+    digest::digest(path, algo = "sha256", file = TRUE)
+  else if (nzchar(Sys.which("sha256sum")))
+    sub(" .*", "", system2("sha256sum", shQuote(path), stdout = TRUE)[1])
+  else if (nzchar(Sys.which("shasum")))
+    sub(" .*", "", system2("shasum", c("-a", "256", shQuote(path)), stdout = TRUE)[1])
   else NA_character_,
   error = function(e) NA_character_)
+input_sha256 <- file_sha256(input)
+# the conditions file too: normalization_check.py run checks its two DEs read the check's own
+metadata_sha256 <- file_sha256(meta_path)
 # When DE results FIRST existed for this input in this outdir: carried forward from the earlier
 # record of the same input, so a re-run does not reset it. run_sets.R dates a user's own set
 # list (GMT) against it -- a list drawn up after the results must not look older than them.
@@ -1646,6 +1756,7 @@ prov <- list(
   # traceability -- it does not survive the file being moved, regenerated, or
   # shipped in a bundle without its input.
   input_sha256 = input_sha256,
+  metadata_sha256 = metadata_sha256,
   input_bytes = tryCatch(as.numeric(file.info(input)$size), error = function(e) NA_real_),
   written = format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC"),
   first_written = first_written,
@@ -1661,6 +1772,9 @@ prov <- list(
   logfc = logfc_ref, logfc_role = "reference_line_only", adjp = adjp_thr,
   significance_rule = "adj.P.Val < adjp (BH); no fold-change filter",
   design = design_label,
+  # the design as requested before fitting (formula, numeric covariates, block, contrasts, the
+  # flags given): normalization_check.py compares it between its DEs and the final DE
+  design_request = design_request,
   # How each covariate entered the model: a factor, or numeric (--numeric-covariates) with its
   # range, its R^2 with Group and its standard-error inflation per contrast -- covariate_record()
   covariates = covariates_rec,
@@ -1748,6 +1862,26 @@ if (method == "dpc" && exists("dat") && exists("y_protein")) {
 }
 
 # ---- DE-LIMP-loadable session ----------------------------------------------
+# DE-LIMP draws its volcano and tables from topTable(session$fit, coef = <contrast>), which would
+# give a protein measured in neither compared group its p-value back and count it in the BH
+# adjustment -- a session that disagreed with DE_*.csv. So in the session's fits that protein's
+# t, p-value and B (lods) are NA for that contrast, and its moderated F (all contrasts together)
+# is NA when it is not tested in at least one of them: topTable's p.adjust then runs over the tested
+# proteins only, exactly as DE_*.csv does. Its logFC (the model's estimate) is left as fitted.
+# DE-LIMP copes with NA p-values: its volcano drops them, its significance flags and counts treat
+# them as not significant (R/server_de.R).
+untest_fit <- function(f, ids) {
+  if (is.null(f) || is.null(f$p.value)) return(f)
+  any_row <- integer(0)
+  for (cn in intersect(names(ids), colnames(f$p.value))) {
+    rows <- stats::na.omit(match(ids[[cn]], rownames(f$p.value)))
+    if (!length(rows)) next
+    for (k in c("t", "p.value", "lods")) if (!is.null(f[[k]])) f[[k]][rows, cn] <- NA
+    any_row <- union(any_row, rows)
+  }
+  for (k in c("F", "F.p.value")) if (!is.null(f[[k]]) && length(any_row)) f[[k]][any_row] <- NA
+  f
+}
 # What wrote the session, as DE-LIMP shows it ("App version: ..."): the skill and its version,
 # read by skill_version.R -- the R mirror of skill_version.py, the one reader of plugin.json.
 run_de_version <- paste("ucdavis-proteomics-core-pipeline run_de.R",
@@ -1760,11 +1894,18 @@ if (method == "dpc" && exists("dat") && exists("y_protein")) {
     session_data <- list(
       raw_data     = dat,
       metadata     = meta,
-      fit          = fit,
+      fit          = untest_fit(fit, not_measured_ids),
       # --block-scope within: `fit` holds each contrast's reporting fit column by column
       # (fit$contrast_model); the independent fit whole, for anything needing a
       # consistent per-protein variance (s2.post) on its contrasts.
-      fit_independent = if (!is.null(block) && any(contrast_model == "independent")) fit_ind else NULL,
+      fit_independent = if (!is.null(block) && any(contrast_model == "independent"))
+        untest_fit(fit_ind, not_measured_ids) else NULL,
+      # which proteins each contrast does not test (NA t / p / B in the fits above) and why
+      not_measured = list(label = not_measured_rec$label, rule = not_measured_rec$rule,
+                          proteins = not_measured_ids,
+                          note = paste("t, p.value and lods are NA for these proteins in that",
+                                       "contrast (F where any contrast is untested), so",
+                                       "topTable's BH runs over the tested proteins, as in DE_*.csv")),
       y_protein    = y_protein,
       dpc_fit      = if (exists("dpcfit")) dpcfit else NULL,
       design       = design,
