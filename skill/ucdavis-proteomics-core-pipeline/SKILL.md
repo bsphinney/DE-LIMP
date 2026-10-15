@@ -949,6 +949,9 @@ python3 scripts/session.py init --name "<short study name>" --raw /path/to/*.d \
 python3 scripts/session.py init --name "<short study name>" --raw /path/to/*.d \
     --base ~/Documents/DataAnalysis
 ```
+**Core staff:** add step 0a's answer to either form: `--submission PROT_0807` (once per number,
+the main one first) or `--internal "<its title on the board>"`.
+
 **Core data with a CoreOmics submission (step 1)? Attach it now -- BEFORE the experiment type below**, where the session lives (`experiment_type.py set --source submission` reads the attached record and refuses without one; set before attach, the submission's ASK never fired):
 ```
 python3 scripts/submission_report.py attach --session <session> --record ~/core/PROT_0756   # fetch's folder
