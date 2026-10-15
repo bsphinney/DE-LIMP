@@ -62,7 +62,7 @@ The orchestrator asks where results should live (SKILL.md step 3b):
     SAMPLE_QUALITY.md       # biological sample-quality panels (contamination that mimics biology)
     DATA_SUBMISSION/        # PRIDE / MassIVE deposit package (finalize): HOW_TO_SUBMIT.md/.html,
                             #   sdrf.tsv, protocols.txt, files_to_upload.tsv, prepare_upload.sbatch
-    podcast/                # OPTIONAL audio discussion (make_podcast.py; references/podcast.md):
+    podcast/                # audio discussion (make_podcast.py; references/podcast.md), by default for a Core run:
                             #   podcast.m4a, podcast_script.md (with its claims ledger),
                             #   transcript.html, podcast.json, check.txt; .cache/ is scratch
     Analysis_Report_with_audio.html  # with a podcast: the report with the audio built in (send this one file)
@@ -180,9 +180,9 @@ has no p-value either (limma cannot estimate it). Proteins *tested* in a contras
 with a `P.Value`; `de_provenance.json` → `de_tables` gives each table's `n_proteins`,
 `n_tested`, `n_not_measured` and `n_significant`, and `not_measured` the rule.
 
-### The optional podcast (`output/podcast/`, `make_podcast.py`)
-An AI-generated audio discussion of the finished report, made only when the user asks
-(`references/podcast.md`). It is a **derivative, not a record**: README and AGENTS.md say so,
+### The podcast (`output/podcast/`, `make_podcast.py`)
+An AI-generated audio discussion of the finished report: made by default for a Core run, and
+only when the user asks for anyone else (`references/podcast.md`). It is a **derivative, not a record**: README and AGENTS.md say so,
 and the report and tables stay authoritative.
 - `podcast.m4a` (or `podcast.wav` when there is no AAC encoder): the episode.
 - `podcast_script.md`: the script, with its **"Claims beyond the report"** ledger.
