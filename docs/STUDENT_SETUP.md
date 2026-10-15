@@ -55,7 +55,8 @@ A *marketplace* is a catalog. Adding one lets you browse it; nothing is installe
 Use the full `https://` address, not the short form `bsphinney/DE-LIMP`: for the short form
 Claude Code tries SSH first, and a laptop with no GitHub SSH key can then fail to refresh the
 catalog later. If you already added the short form, keep it (removing a marketplace also
-uninstalls its plugins); the refresh under "Updating later" works for it.
+uninstalls its plugins) and refresh it as under "Updating later". If that pull asks for SSH,
+use `git -C ~/.claude/plugins/marketplaces/ucdavis-proteomics-core pull --ff-only https://github.com/bsphinney/DE-LIMP.git main`.
 
 ## 3. Install the plugin
 

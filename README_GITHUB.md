@@ -146,8 +146,9 @@ git -C ~/.claude/plugins/marketplaces/ucdavis-proteomics-core pull --ff-only
 
 Inside the skill, Claude checks this for you at the start of every session.
 The marketplace is added by its HTTPS URL because Claude Code tries SSH first for the
-`bsphinney/DE-LIMP` shorthand. If you added it that way before, keep it: the refresh above
-works for it.
+`bsphinney/DE-LIMP` shorthand. If you added it that way before, keep it, and refresh it as
+above; if that pull asks for SSH, use
+`git -C ~/.claude/plugins/marketplaces/ucdavis-proteomics-core pull --ff-only https://github.com/bsphinney/DE-LIMP.git main`.
 
 Then just ask, in your own words:
 
@@ -430,8 +431,9 @@ git -C ~/.claude/plugins/marketplaces/ucdavis-proteomics-core pull --ff-only
 
 Inside the skill, Claude checks this for you at the start of every session.
 The marketplace is added by its HTTPS URL because Claude Code tries SSH first for the
-`bsphinney/DE-LIMP` shorthand. If you added it that way before, keep it: the refresh above
-works for it.
+`bsphinney/DE-LIMP` shorthand. If you added it that way before, keep it, and refresh it as
+above; if that pull asks for SSH, use
+`git -C ~/.claude/plugins/marketplaces/ucdavis-proteomics-core pull --ff-only https://github.com/bsphinney/DE-LIMP.git main`.
 
 On **Claude Desktop**: click the **+** button beside the prompt box → *Plugins* →
 *Add plugin*, add the marketplace `bsphinney/DE-LIMP`, then install
