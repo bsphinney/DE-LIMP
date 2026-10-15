@@ -40,6 +40,10 @@ FAKE_RSCRIPT = r'''#!/bin/bash
 echo "$*" >> "$FAKE_R_LOG"
 v="$(cat "$FAKE_LIMPA_STATE" 2>/dev/null)"
 case "$*" in
+  *getRversion*) printf '%s' "${FAKE_R_VERSION:-}"; exit 0 ;;
+  *install.packages*nanoparquet*)
+    [ -n "${FAKE_NP_CRAN_FAIL:-}" ] && { echo "compilation failed for package 'nanoparquet'" >&2; exit 1; }
+    echo present > "$FAKE_NP_STATE"; exit 0 ;;
   *install.packages*)
     [ -n "${FAKE_LIMPA_INSTALL_FAIL:-}" ] && { echo "cannot open URL bioconductor.org" >&2; exit 1; }
     echo "1.4.0" > "$FAKE_LIMPA_STATE"; exit 0 ;;
@@ -51,6 +55,15 @@ case "$*" in
     case "$v" in 1.[4-9]*|1.[1-9][0-9]*|[2-9].*) exit 0 ;; *) exit 1 ;; esac ;;
 esac
 exit 0
+'''
+
+
+# conda's R names its compilers in its Makeconf (`R CMD config CC`): conda-forge's
+# x86_64-conda-linux-gnu-cc etc. Stand-ins: the names are answered here; whether they RUN depends
+# on the env's bin (compilers()).
+FAKE_R = r'''#!/bin/bash
+[ "$1 $2" = "CMD config" ] || exit 1
+case "$3" in CC) echo "fakecc -std=gnu23" ;; CXX) echo "fakecxx -std=gnu++20" ;; MAKE) echo make ;; *) exit 1 ;; esac
 '''
 
 
@@ -167,7 +180,8 @@ class SetupLimpaGate(setup_t.SetupCheckHarness):
         self.assertIs(s["ready_for"]["de"], False)
         note = [n for n in s["notes"] if "nanoparquet" in n]
         self.assertEqual(len(note), 1, s["notes"])
-        self.assertIn("--override-channels -c conda-forge r-nanoparquet", note[0])
+        self.assertIn("--freeze-installed --override-channels -c conda-forge -c bioconda "
+                      "r-nanoparquet", note[0])
         self.assertIn(self.prefix, note[0])
         self.assertNotIn("install.packages", note[0][note[0].index("Fix: "):])   # never CRAN
         self.assertEqual(s["nanoparquet"]["fix"], note[0][note[0].index("Fix: ") + 5:].rstrip("."))
@@ -179,8 +193,9 @@ class SetupLimpaGate(setup_t.SetupCheckHarness):
         r, s = self.run_setup(**self.np_missing())
         self.assertEqual(r.returncode, 0, r.stderr[-2000:])
         installs = [c for c in _lines(self.mm_log) if c.startswith("install")]
-        self.assertEqual(len([c for c in installs if " r-nanoparquet" in f" {c} "]), 1, installs)
-        self.assertIn("--override-channels -c conda-forge", installs[0])
+        (np,) = [c for c in installs if " r-nanoparquet" in f" {c} "]
+        self.assertIn("--freeze-installed --override-channels -c conda-forge", np)
+        self.assertTrue(np.endswith(" -c bioconda r-nanoparquet"), np)    # its own call
         self.assertFalse(any("nanoparquet" in c and "install.packages" in c
                              for c in _lines(self.r_log)))
         self.assertIs(s["nanoparquet"]["ok"], True)
@@ -199,9 +214,93 @@ class SetupLimpaGate(setup_t.SetupCheckHarness):
         r, s = self.run_setup(FAKE_MM_INSTALL_FAIL="1", **self.np_missing())
         self.assertEqual(r.returncode, 1, r.stderr[-2000:])
         self.assertIn("ERROR: nanoparquet", r.stderr)
-        self.assertIn("-c conda-forge r-nanoparquet", r.stderr)
+        self.assertIn("--freeze-installed --override-channels -c conda-forge -c bioconda r-nanoparquet",
+                      r.stderr)
         self.assertIs(s["nanoparquet"]["ok"], False)
         self.assertIs(s["ready_for"]["de"], False)
+
+
+    # ---- nanoparquet, 2.12 review: never a solve that can downgrade R; R 4.6 has no conda build --
+    def r46_env(self, compilers=True):
+        """An env with R 4.6.1 (FAKE_R_VERSION) and nanoparquet missing; its R names compilers that
+        run here only when `compilers`."""
+        self.prebuilt_env("1.4.1")
+        _exe(os.path.join(self.prefix, "bin", "R"), FAKE_R)
+        if compilers:
+            for c in ("fakecc", "fakecxx", "make"):
+                _exe(os.path.join(self.prefix, "bin", c), "#!/bin/sh\nexit 0\n")
+        return dict(self.np_missing(), FAKE_R_VERSION="4.6.1")
+
+    def test_the_frozen_install_is_the_fix_it_prints(self):
+        """NANOPARQUET_FIX is the command setup.sh runs: --check prints it, a run runs it."""
+        self.prebuilt_env("1.4.1")
+        env = dict(self.np_missing(), FAKE_MM_INSTALL_FAIL="1")
+        _r, s = self.run_setup("--check", **env)
+        fix = s["nanoparquet"]["fix"]
+        self.run_setup(**env)
+        (np,) = [c for c in _lines(self.mm_log) if " r-nanoparquet" in f" {c} "]
+        self.assertTrue(fix.endswith(" " + np), (fix, np))
+        self.assertNotIn("thermorawfileparser", np)
+
+    def test_r46_is_never_given_to_conda_and_compiles_from_cran(self):
+        r, s = self.run_setup(**self.r46_env())
+        self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+        self.assertFalse([c for c in _lines(self.mm_log) if "r-nanoparquet" in c],
+                         "an R 4.6 env was handed to conda for r-nanoparquet (R 4.6.1 -> 4.5.3)")
+        (cran,) = [c for c in _lines(self.r_log) if "install.packages('nanoparquet'" in c]
+        self.assertIn("repos = 'https://cloud.r-project.org', type = 'source'", cran)
+        self.assertIs(s["nanoparquet"]["ok"], True)
+        self.assertIs(s["ready_for"]["de"], True)
+        self.assertEqual(s["nanoparquet"]["fix"], "")
+
+    def test_r46_without_compilers_says_install_them_then_cran(self):
+        r, s = self.run_setup(**self.r46_env(compilers=False))
+        self.assertEqual(r.returncode, 1, r.stderr[-2000:])
+        self.assertFalse([c for c in _lines(self.mm_log) if "r-nanoparquet" in c])
+        self.assertFalse([c for c in _lines(self.r_log) if "install.packages('nanoparquet'" in c],
+                         "CRAN tried without a compiler (x86_64-conda-linux-gnu-c++: not found)")
+        fix = s["nanoparquet"]["fix"]
+        self.assertIn("--freeze-installed --override-channels -c conda-forge -c bioconda c-compiler "
+                      "cxx-compiler make && ", fix)
+        self.assertIn(f"{self.prefix}/bin/Rscript -e \"install.packages('nanoparquet', repos = "
+                      f"'https://cloud.r-project.org', type = 'source')\"", fix)
+        self.assertIn(f'PATH="{self.prefix}/bin:$PATH"', fix)
+        note = [n for n in s["notes"] if "nanoparquet" in n]
+        self.assertIn("R 4.6.1: conda-forge has no r-nanoparquet for it", note[0])
+        self.assertIn(fix, r.stderr)
+
+    def test_r46_check_prints_the_cran_line_when_compilers_run(self):
+        r, s = self.run_setup("--check", **self.r46_env())
+        self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+        self.assertTrue(s["nanoparquet"]["fix"].startswith(f'PATH="{self.prefix}/bin:$PATH" '),
+                        s["nanoparquet"]["fix"])
+        self.assertFalse([c for c in _lines(self.r_log) if "install.packages" in c])
+
+    def test_r45_falls_back_to_cran_when_conda_cannot_add_it(self):
+        env = dict(self.r46_env(), FAKE_R_VERSION="4.5.3", FAKE_MM_INSTALL_FAIL="1")
+        r, s = self.run_setup(**env)
+        self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+        self.assertTrue([c for c in _lines(self.mm_log) if "r-nanoparquet" in c])
+        self.assertTrue([c for c in _lines(self.r_log) if "install.packages('nanoparquet'" in c])
+        self.assertIs(s["nanoparquet"]["ok"], True)
+
+    # ---- ready_for: a search can run, the DE cannot -- and says why -------------------------
+    def test_no_env_with_a_search_ready_says_why_de_is_not(self):
+        for tool in ("Rscript", "sage"):            # outside the env: enough for a search
+            _exe(os.path.join(self.sys, tool), "#!/bin/sh\nexit 0\n")
+        r, s = self.run_setup("--check")
+        self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+        self.assertEqual((s["ready_for"]["dda"], s["ready_for"]["de"]), (True, False))
+        note = [n for n in s["notes"] if n.startswith("ready_for.de is false")]
+        self.assertEqual(len(note), 1, s["notes"])
+        self.assertIn(self.prefix, note[0])
+        self.assertIn("setup.sh (without --check)", note[0])
+
+    def test_a_ready_de_has_no_such_note(self):
+        self.prebuilt_env("1.4.1")
+        _r, s = self.run_setup("--check")
+        self.assertIs(s["ready_for"]["de"], True)
+        self.assertFalse([n for n in s["notes"] if n.startswith("ready_for.de is false")])
 
 
 if __name__ == "__main__":

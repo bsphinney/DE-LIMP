@@ -540,5 +540,120 @@ class TheFilesAreThisSubmissions(unittest.TestCase):
             self.assertEqual(self.listed(tmp), [])
 
 
+class Review212(unittest.TestCase):
+    """Skill 2.12 review (error handling): three ways a sound plate was stopped, or stopped with
+    the wrong advice."""
+
+    def gates(self, tmp):
+        with open(os.path.join(tmp, "ht_manifest.json")) as fh:
+            return {g["gate"]: g for g in json.load(fh)["gates"]}
+
+    # ---- runs that name several samples are staff's choice, not runs of no sample -----------
+    def two_runs_named_xy1(self, tmp):
+        """Two samples on the record share the sample_name XY1 (a submitter's duplicate), and
+        the plate has two runs named XY1."""
+        m = _ok(tmp, n=4)
+        new = m["files"][1].replace("_XY2_", "_XY1_")
+        os.rename(m["files"][1], new)
+        m["files"][1] = new
+        return m, _summary(tmp, ["XY1", "XY1", "XY3", "XY4"])
+
+    def test_runs_naming_two_samples_ask_staff_to_choose(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m, s = self.two_runs_named_xy1(tmp)
+            r = _run(tmp, m, ["--summary", s])
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            g = self.gates(tmp)["sample_list"]
+            self.assertEqual((g["status"], g["missing"], g["extra"]), ("INFO", [], []))
+            self.assertEqual(g["several_runs"], ["U001", "U002"])
+            self.assertEqual([(x["file"], x["samples"]) for x in g["runs_of_several_samples"]],
+                             [(f, ["U001", "U002"]) for f in m["files"][:2]])
+            self.assertIn("2 run(s) name several samples", g["detail"])
+            self.assertIn("core_submission.py locate --files-from", g["detail"])
+            self.assertIn("--choose <unique_id>=<file>", g["detail"])
+            self.assertNotIn("belong to no sample", g["detail"])
+            self.assertIn(f"several samples (U001, U002): {m['files'][0]}", r.stdout)
+
+    def test_a_run_of_no_sample_still_stops_beside_them(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m, _s = self.two_runs_named_xy1(tmp)
+            stray = _touch(tmp, "20260827_9001_100spd_QQ9_S5-A9_1_24008.d")
+            m["files"].append(stray)
+            r = _run(tmp, m, ["--summary", _summary(tmp, ["XY1", "XY1", "XY3", "XY4"])])
+            self.assertEqual(r.returncode, 2)
+            g = self.gates(tmp)["sample_list"]
+            self.assertEqual(g["status"], "FAIL")
+            self.assertEqual([x["file"] for x in g["extra"]], [stray])
+            self.assertEqual(len(g["runs_of_several_samples"]), 2)
+            self.assertIn("1 run(s) named for it belong to no sample", g["detail"])
+            self.assertIn("Separately, 2 run(s) name several samples", g["detail"])
+
+    # ---- the method is read right after the plate token, never in the sample name ------------
+    def test_a_timepoint_in_a_reinjected_sample_name_is_not_a_method(self):
+        """An aging study: `..._rerun_Liver_24m_3_...` declared method "24m" and the plate was
+        stopped as "2 acquisition methods (100spd, 24m)"."""
+        with tempfile.TemporaryDirectory() as tmp:
+            m = _ok(tmp, n=12)
+            rr = _touch(tmp, "20260901_9001_rerun_Liver_24m_3_S5-B2_1_24100.d")
+            m["files"].append(rr)
+            r = _run(tmp, m)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            g = self.gates(tmp)["one_method"]
+            self.assertEqual((g["status"], g["undeclared"]), ("WARN", [rr]))
+            self.assertEqual({x["method"]: x["n"] for x in g["groups"]}, {"100spd": 12})
+
+    def test_declared_method_reads_only_the_token_after_the_plate(self):
+        sys.path.insert(0, SCRIPTS)
+        import core_submission
+        import ht_manifest
+        plate = core_submission.ht_pattern("PROT_9001")
+        cases = {
+            "20260901_9001_rerun_Liver_24m_3_S5-B2_1_24100.d": None,
+            "20260901_0793_rerun_XY4_S5-A4_1_24100.d": None,               # another plate: whole name
+            "20261005_PROT_9001_100spd_XY1_S3-A1_1_25000.d": "100spd",
+            "20260827_9001_100spd_Liver_24m_3_S5-A1_1_24000.d": "100spd",
+            "20260827_9001_60SPD_DIA-XY1_S5-A1_1_24000.d": "60spd DIA",
+            "20260827_9001_60-spd-dda-XY2_S5-A2_1_24001.d": "60spd DDA",
+            "20260827_9001_Liver_90m_S5-A3_1_24002.d": None,               # a method in the sample
+            # not named for the submission: read anywhere (never searched; it only describes it)
+            "09282026__60SPD_DIA-QZ1_S3-A1_1_24700.d": "60spd DIA",
+            "20260827_9002_Liver_90m_S5-A3_1_24002.d": "90m",
+        }
+        for name, want in cases.items():
+            with self.subTest(name=name):
+                self.assertEqual(ht_manifest.declared_method(name, plate), want)
+
+    # ---- a missing --summary is a file to put on HIVE, not a question for the operator --------
+    def test_a_missing_summary_says_put_it_on_hive_not_ask_the_operator(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            r = _run(tmp, _ok(tmp, n=12), ["--summary", os.path.join(tmp, "nope", "s.json")])
+            self.assertEqual(r.returncode, 2)
+            g = self.gates(tmp)["sample_list"]
+            self.assertEqual((g["status"], g["summary_unreadable"]), ("FAIL", True))
+            self.assertIn("Put submission_summary.json on HIVE and pass --summary", g["detail"])
+            self.assertIn("~/core/PROT_9001/hive/submission_summary.json", g["detail"])
+            self.assertNotIn("operator", r.stderr)
+            self.assertIn("put submission_summary.json on HIVE and pass --summary", r.stderr)
+            self.assertNotIn("Once the operator has said", r.stderr)
+
+    def test_with_another_failed_gate_both_are_said(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m = _ok(tmp, n=12)
+            m["files"].append(_touch(tmp, "09282026__60SPD_DIA-QZ1_S3-A1_1_24700.d"))
+            r = _run(tmp, m, ["--summary", os.path.join(tmp, "nope.json")])
+            self.assertEqual(r.returncode, 2)
+            self.assertIn("Resolve the above with the operator first.", r.stderr)
+            self.assertIn("put submission_summary.json on HIVE and pass --summary", r.stderr)
+
+    def test_a_summary_path_given_with_a_tilde_is_read(self):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp:
+            s = _summary(tmp, [f"XY{i + 1}" for i in range(12)])
+            with mock.patch.dict(os.environ, {"HOME": tmp}):
+                r = _run(tmp, _ok(tmp, n=12), ["--summary", "~/" + os.path.basename(s)])
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(self.gates(tmp)["sample_list"]["status"], "PASS")
+
+
 if __name__ == "__main__":
     unittest.main()

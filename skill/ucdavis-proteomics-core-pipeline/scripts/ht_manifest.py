@@ -341,10 +341,25 @@ def _base(path: str) -> str:
     return os.path.basename(str(path).rstrip("/"))
 
 
-def declared_method(name: str):
+LEADING_SEPARATORS = re.compile(r"[-_]*")
+
+
+def declared_method(name: str, plate=None):
     """What a run name says about how it was acquired -- '100spd', '60spd DIA', '90m' -- or None
-    when it names no method (a re-injection: `<date>_<n>_rerun_<sample>_...`)."""
-    m = RUN_METHOD_RE.search(name)
+    when it names no method (a re-injection: `<date>_<n>_rerun_<sample>_...`).
+
+    A run named for the submission (`plate`, core_submission.ht_pattern) says it in ONE place:
+    the token right after the plate token, `<date>_[PROT_]<n>_<speed>_<sample name>_...`. What
+    follows is the submitter's sample name, free text, so it is never read: an aging study's
+    re-injection `<date>_<n>_rerun_Liver_24m_3_...` declares no method, not "24m" (2.12 review --
+    read anywhere in the name, it stopped the plate as "2 acquisition methods (100spd, 24m)").
+    Any other run (not named for the submission, so never searched from this list) is read
+    anywhere in its name: its method only describes it."""
+    head = plate.match(name) if plate is not None else None
+    if head:
+        m = RUN_METHOD_RE.match(name, LEADING_SEPARATORS.match(name, head.end()).end())
+    else:
+        m = RUN_METHOD_RE.search(name)
     if not m:
         return None
     mode = MODE_AFTER_METHOD.match(name, m.end())
@@ -401,8 +416,9 @@ def named_gate(a, files: list, own: list, foreign: list, entries: dict, plate) -
             "listed": [f"{x['file']}  (STAN class: {x['class'] or 'not given'})" for x in listed]}
 
 
-def method_gate(files: list, own: list) -> dict:
-    """`one_method`: the acquisition methods the file names declare, grouped. More than one is a
+def method_gate(files: list, own: list, plate=None) -> dict:
+    """`one_method`: the acquisition methods the file names declare (declared_method: for a run
+    named for the submission, only right after its plate token), grouped. More than one is a
     stop; a name declaring none (a re-injection) is flagged."""
     if RUN_METHOD_RE is None:
         return {"gate": "one_method", "status": "FAIL",
@@ -412,7 +428,7 @@ def method_gate(files: list, own: list) -> dict:
     mine = set(own)
     groups, undeclared = {}, []
     for f in files:
-        meth = declared_method(_base(f))
+        meth = declared_method(_base(f), plate)
         if meth is None:
             undeclared.append(f)
         else:
@@ -459,12 +475,21 @@ def sample_list_gate(a, own: list, entries: dict) -> dict:
         return dict(g, status="FAIL", detail=f"{CORE_UNAVAILABLE}, so the runs could not be "
                                              f"matched to the record's samples")
     try:
-        s = _cs.load_json_file(a.summary, "--summary")
         ours = _cs.normalize_submission(a.submission)
-    except _cs.Stop as e:
-        return dict(g, status="FAIL", detail=e.payload["error"])
     except ValueError as e:
         return dict(g, status="FAIL", detail=str(e))
+    try:
+        s = _cs.load_json_file(os.path.expanduser(a.summary), "--summary")
+    except _cs.Stop as e:
+        # Not a question for the operator: the record is simply not where --summary says
+        # (2.12 review: "Resolve the above with the operator" sent staff to the wrong person).
+        d = f"~/core/{ours[1]}" if ours[0] == "internal_id" else "~/core/<submission>"
+        return dict(g, status="FAIL", summary_unreadable=True,
+                    detail=f"{e.payload['error']}. Put submission_summary.json on HIVE and pass "
+                           f"--summary <its path there>: core_submission.py fetch writes it (run "
+                           f"on HIVE with --out {d}, or on a computer and then put there: bash "
+                           f"scripts/hive_exec.sh --put {d}/hive/submission_summary.json "
+                           f"'{d}/'), then re-run this fetch")
     try:
         theirs = _cs.normalize_submission(s.get("internal_id"))
     except ValueError:
@@ -483,13 +508,21 @@ def sample_list_gate(a, own: list, entries: dict) -> dict:
         return dict(g, status="FAIL", detail=e.payload["error"])
     missing = [{"unique_id": r["unique_id"], "sample_name": r["sample_name"]}
                for r in rows if r["status"] == "unmatched"]
-    # STAN's blanks and standards (--include all) are no sample's, by design
-    extra = [{"file": r["file"], "note": r["note"]} for r in rows if r["status"] == "unassigned"
+    loose = [r for r in rows if r["status"] == "unassigned"]
+    # A run of NO sample: names none of the record's samples. STAN's blanks and standards
+    # (--include all) are no sample's, by design.
+    extra = [{"file": r["file"], "note": r["note"]} for r in loose
+             if not r.get("candidate_samples")
              and ((entries.get(os.path.realpath(r["file"])) or {}).get("class") or "sample")
              == "sample"]
+    # A run naming SEVERAL samples (a sample_name they share), or one whose label looks like a
+    # plate well, is a sample's run -- which one is for staff to choose (locate --choose). It
+    # was counted as a run of no sample and stopped the plate (2.12 review).
+    shared = [{"file": r["file"], "samples": r["candidate_samples"]} for r in loose
+              if r.get("candidate_samples")]
     several = sorted({r["unique_id"] for r in rows if r["status"] == "needs_choice"})
     g.update(n_samples=len(samples), n_runs=len(own), missing=missing, extra=extra,
-             several_runs=several)
+             several_runs=several, runs_of_several_samples=shared)
     if missing or extra:
         return dict(g, status="FAIL",
                     listed=[f"no run: {x['unique_id']} ({x['sample_name']})" for x in missing]
@@ -501,12 +534,22 @@ def sample_list_gate(a, own: list, entries: dict) -> dict:
                            f"run (STAN may never have recorded it) and stage a curated list with "
                            f"core_submission.py locate --files-from <list> (--allow-partial there "
                            f"only if staff confirm it was not run). A run of no sample: ask the "
-                           f"operator whose it is")
-    if several:
+                           f"operator whose it is"
+                           + (f". Separately, {len(shared)} run(s) name several samples: staff "
+                              f"choose whose each is (core_submission.py locate --choose "
+                              f"<unique_id>=<file>)" if shared else ""))
+    if several or shared:
         return dict(g, status="INFO",
-                    detail=f"every sample has a run; {len(several)} sample(s) have several runs "
-                           f"or share a name, and core_submission.py locate --files-from asks "
-                           f"staff which run is which")
+                    listed=[f"several samples ({', '.join(x['samples'])}): {x['file']}"
+                            for x in shared],
+                    detail=f"every sample has a run, or a run that names it; "
+                           f"{len(several)} sample(s) have several runs or share a name"
+                           + (f", and {len(shared)} run(s) name several samples (a sample_name "
+                              f"they share, or a label that looks like a plate well)"
+                              if shared else "")
+                           + ". Which run is which sample is for staff: stage files.txt with "
+                             "core_submission.py locate --files-from <files.txt>, which asks, and "
+                             "answer with --choose <unique_id>=<file> for each")
     return dict(g, status="PASS")
 
 
@@ -588,7 +631,7 @@ def fetch(a) -> int:
 
     # --- HARD: one acquisition method across the list (100spd beside 60SPD DIA and 30SPD DDA,
     # 2026-10-05). Read from the names; DIA vs DDA is read again from the data at step 2.
-    method = method_gate(files, own)
+    method = method_gate(files, own, plate)
     gates.append(method)
     hard_fail = hard_fail or method["status"] == "FAIL"
 
@@ -699,9 +742,17 @@ def fetch(a) -> int:
     if repeats or shared:
         _say(repeats_note(repeats, "ht_manifest", shared).rstrip("\n"), file=sys.stderr)
     if hard_fail:
-        _say("\nHARD GATE FAILED — do not search. Resolve the above with the operator first.",
-              file=sys.stderr)
-        if plate and own and (others or samples_gate["status"] == "FAIL"):
+        # An unreadable --summary is a missing file, not a question for the operator
+        no_record = bool(samples_gate.get("summary_unreadable"))
+        for_operator = [g for g in gates if g["status"] == "FAIL" and not g.get("summary_unreadable")]
+        _say("\nHARD GATE FAILED — do not search."
+             + (" Resolve the above with the operator first." if for_operator else ""),
+             file=sys.stderr)
+        if no_record:
+            _say(f"  The CoreOmics record could not be read (sample_list): put "
+                 f"submission_summary.json on HIVE and pass --summary <its path there>, then "
+                 f"re-run this fetch.", file=sys.stderr)
+        if plate and own and (others or (samples_gate["status"] == "FAIL" and not no_record)):
             _say(f"  files.txt holds only the {len(own)} run(s) named for submission "
                  f"{a.submission}. Once the operator has said which runs are this submission's, "
                  f"stage that list with core_submission.py locate --files-from <list> (staff "

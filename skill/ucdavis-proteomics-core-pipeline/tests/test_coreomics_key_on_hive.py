@@ -69,6 +69,9 @@ class Harness(unittest.TestCase):
         self.sshkey = os.path.join(self.d, "id_test")
         open(self.sshkey, "w").close()
         self.hive_key = os.path.join(self.hive, ".coreomics_token")
+        # the skill on HIVE (hive_exec.sh --put-skill): its core_submission.py checks the key
+        os.makedirs(os.path.join(self.hive, "proteomics-pipeline"))
+        os.symlink(SCRIPTS, os.path.join(self.hive, "proteomics-pipeline", "scripts"))
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -139,7 +142,8 @@ class StdinTransferTests(Harness):
         self.assertEqual((j["laptop_copy"], j["sent_from"]), ("kept", src))
         self.assertTrue(os.path.isfile(src))
         self.assertIn("core_submission.py check --json", j["next"])
-        self.assertEqual(sorted(os.listdir(self.hive)), [".coreomics_token"], "no stray file on HIVE")
+        self.assertEqual(sorted(os.listdir(self.hive)), [".coreomics_token", "proteomics-pipeline"],
+                         "no stray file on HIVE")
 
     def test_remove_local_deletes_the_laptop_copy_only_after_hive_has_it(self):
         src = self.laptop_key()
@@ -223,6 +227,147 @@ class StdinTransferTests(Harness):
         self.assertIn('mv -f -- "$t" "$HOME/.coreomics_token"', store)
         self.assertIn("cat >", store)
         self.assertNotIn("'", r.stdout.split("COREOMICS_KEY_STORE=ok")[1], "probe must splice into '...'")
+
+
+class KeyShapeOnHiveTests(Harness):
+    """2.12 review: a blank or malformed laptop key file (only blanks; "Authorization: Token
+    <key>") replaced a WORKING ~/.coreomics_token on HIVE and the script said ok, exit 0. HIVE now
+    checks the new file with core_submission.key_shape_problem (the one definition of a usable
+    key) before the rename: on failure exit 2, the old key kept, and why -- never the key."""
+
+    def working_key_on_hive(self):
+        with open(self.hive_key, "w") as fh:
+            fh.write(KEY + "\n")
+        os.chmod(self.hive_key, 0o600)
+
+    def assert_kept(self, r, status="not_a_key", rc=2):
+        self.assertEqual(r.returncode, rc, r.stdout + r.stderr)
+        j = json.loads(r.stdout)
+        self.assertEqual(j["status"], status)
+        self.assertIn("a key already there is unchanged", j["say"])
+        self.assertEqual(self.read(self.hive_key), KEY + "\n", "the working key was replaced")
+        self.assertEqual(self.hive_mode(), 0o600)
+        self.assertEqual(sorted(os.listdir(self.hive)), [".coreomics_token", "proteomics-pipeline"],
+                         "a temporary file left on HIVE")
+        return j
+
+    def test_a_blank_laptop_file_never_replaces_a_working_key(self):
+        self.working_key_on_hive()
+        for text in ("   \n", "\n\n", " \t \r\n"):
+            with self.subTest(text=repr(text)):
+                self.laptop_key(text=text)
+                r = self.run_script()
+                j = self.assert_kept(r)
+                self.assertIn("it is blank", j["say"])
+                self.assertIn("--paste", j["fix"])
+                self.assert_never_exposed(r, KEY)
+
+    def test_a_header_line_or_quoted_key_is_refused_without_echoing_it(self):
+        other = "s3cretFAKE" + "77aa88bb99cc00dd11ee22ff"
+        self.working_key_on_hive()
+        for text, said in (("Authorization: Token " + other + "\n", "a space or a line break"),
+                           ("Token " + other + "\n", "begins with the word \"Token\""),
+                           ('"' + other + '"\n', "quote marks")):
+            with self.subTest(said=said):
+                self.laptop_key(text=text)
+                r = self.run_script()
+                j = self.assert_kept(r)
+                self.assertIn(said, j["say"])
+                self.assert_never_exposed(r, KEY, other)
+
+    def test_a_pasted_header_line_is_refused_too(self):
+        self.working_key_on_hive()
+        r = self.run_script("--paste", stdin="Token " + PASTED + "\n")
+        j = self.assert_kept(r)
+        self.assertIn("the hidden prompt", j["say"])
+        self.assertIn("pastes only the key", j["fix"])
+        self.assert_never_exposed(r, KEY, PASTED)
+
+    def test_without_the_skill_on_hive_nothing_is_saved(self):
+        """The check needs core_submission.py on HIVE; without it the key is not saved."""
+        self.working_key_on_hive()
+        os.remove(os.path.join(self.hive, "proteomics-pipeline", "scripts"))
+        self.laptop_key(text="anotherFAKE" + "0011223344556677\n")
+        r = self.run_script()
+        j = self.assert_kept(r, status="not_checked", rc=3)
+        self.assertIn("the skill is not on HIVE", j["say"])
+        self.assertIn("hive_exec.sh --put-skill", j["fix"])
+
+    def test_a_check_that_cannot_run_saves_nothing(self):
+        broken = os.path.join(self.d, "broken_scripts")
+        os.makedirs(broken)
+        with open(os.path.join(broken, "core_submission.py"), "w") as fh:
+            fh.write("raise ImportError('a partial copy')\n")
+        link = os.path.join(self.hive, "proteomics-pipeline", "scripts")
+        os.remove(link)
+        os.symlink(broken, link)
+        self.working_key_on_hive()
+        self.laptop_key(text="anotherFAKE" + "0011223344556677\n")
+        r = self.run_script()
+        j = self.assert_kept(r, status="not_checked", rc=3)
+        self.assertIn("could not run the skill's key check", j["say"])
+
+    def test_the_check_runs_python_isolated(self):
+        """HIVE home folders are group-writable: a json.py a group member leaves there must not
+        be imported by the process that reads the key."""
+        for where in (self.hive, self.d):      # the HIVE home, and the folder the command runs in
+            with open(os.path.join(where, "json.py"), "w") as fh:
+                fh.write("raise SystemExit('planted module imported')\n")
+        self.laptop_key()
+        r = self.run_script()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.read(self.hive_key), KEY + "\n")
+
+
+# A hive_exec.sh stand-in that answers with fixed lines: the probe cannot be made to see a file
+# owned by another account without root, so its answer is given.
+STUB_HIVE_EXEC = '#!/bin/bash\ncat >/dev/null\nprintf "%s\\n" "$STUB_HIVE_OUT"\n'
+
+
+class KeyOwnedByAnotherAccountTests(Harness):
+    """A ~/.coreomics_token another account owns cannot be chmod-ed by its user: the fix is to
+    remove it and send the key again (core_submission.key_mode_fix says the same on HIVE)."""
+
+    def setUp(self):
+        super().setUp()
+        self.stub = os.path.join(self.bin, "hive_exec_stub.sh")
+        _exe(self.stub, STUB_HIVE_EXEC)
+
+    def test_status_says_remove_and_send_again_not_chmod(self):
+        r = self.run_script("--status", HIVE_EXEC=self.stub, STUB_HIVE_OUT="COREOMICS_KEY=notmine")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        j = json.loads(r.stdout)
+        self.assertEqual((j["status"], j["coreomics_key_on_hive"]), ("mode_wrong", "mode-wrong"))
+        self.assertIn("belongs to another account", j["say"])
+        self.assertIn("hive_exec.sh 'rm -f ~/.coreomics_token'", j["fix"])
+        self.assertIn("coreomics_key_to_hive.sh", j["fix"])
+        self.assertNotIn("chmod 600", j["fix"])
+
+    def test_a_readable_key_still_gets_chmod(self):
+        r = self.run_script("--status", HIVE_EXEC=self.stub, STUB_HIVE_OUT="COREOMICS_KEY=mode:644")
+        self.assertIn("hive_exec.sh 'chmod 600 ~/.coreomics_token'", json.loads(r.stdout)["fix"])
+
+    def test_after_a_send_the_same_fix(self):
+        self.laptop_key()
+        r = self.run_script(HIVE_EXEC=self.stub,
+                            STUB_HIVE_OUT="COREOMICS_KEY_STORE=ok\nCOREOMICS_KEY=notmine")
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        j = json.loads(r.stdout)
+        self.assertEqual(j["status"], "saved_not_private")
+        self.assertIn("rm -f ~/.coreomics_token", j["fix"])
+        self.assertNotIn("chmod 600", j["fix"])
+
+    def test_check_access_advice_follows_the_probe(self):
+        def advice(line):
+            r = subprocess.run(["bash", "-c", f'. "{TO_HIVE}"; coreomics_key_state "$1"; '
+                                f'coreomics_advice hive true "$CK_STATE"', "_", line],
+                               capture_output=True, text=True, timeout=30)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return r.stdout
+        mine = advice("COREOMICS_KEY=notmine")
+        self.assertIn("rm -f ~/.coreomics_token", mine)
+        self.assertNotIn("chmod 600", mine)
+        self.assertIn("hive_exec.sh 'chmod 600 ~/.coreomics_token'", advice("COREOMICS_KEY=mode:640"))
 
 
 class PasteTests(Harness):

@@ -102,12 +102,20 @@ covering the wrong files**:
   none of them is written to `files.txt`.
 * **`one_method`** — the file names declare more than one acquisition method: another throughput
   (`100spd` beside `60SPD`) or another mode (`DIA` beside `DDA`), each group listed with its count
-  and how many of it are named for the submission. DIA vs DDA is read again from the data at
-  step 2 (`detect_acquisition.py`).
+  and how many of it are named for the submission. In a run named for the submission the method
+  is read **only right after the plate token** (`<date>_[PROT_]<n>_<speed>_…`), never in the
+  sample name after it: a re-injection `<date>_<n>_rerun_Liver_24m_3_…` declares no method (WARN
+  below), not `24m` (before 2.12 it stopped the plate as two methods). DIA vs DDA is read again
+  from the data at step 2 (`detect_acquisition.py`).
 * **`sample_list`** (with `--summary`) — a sample on the CoreOmics record with no run named for
-  the submission, or such a run that is no sample on the record. Each is named. Runs are matched to
-  samples by the rule `core_submission.py locate --files-from` applies (`sample_name` inside the
-  run's sample field), so the two never disagree. Not checked for `--include rerun|standards`.
+  the submission, or such a run that names no sample on the record. Each is named. Runs are
+  matched to samples by the rule `core_submission.py locate --files-from` applies (`sample_name`
+  inside the run's sample field), so the two never disagree. A run that names **several** samples
+  (two samples share a `sample_name`, or a label looks like a plate well) is not a run of no
+  sample: it is `sample_list` **INFO** (`runs_of_several_samples`), and staff say whose it is when
+  the list is staged (`locate --files-from … --choose <unique_id>=<file>`). Not checked for
+  `--include rerun|standards`. A `--summary` that cannot be read is a FAIL that says to put
+  `submission_summary.json` on HIVE and pass its path — nothing to ask the operator.
 
 ### Why STAN's list is checked, not trusted (2026-10-05)
 

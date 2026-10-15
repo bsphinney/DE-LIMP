@@ -149,11 +149,18 @@ in `~/.coreomics_token`. **The agent sets it up once; staff type nothing on HIVE
   `~/.coreomics_token` and renamed over it. HIVE home folders are `drwxrwsr-x` — every account
   can list them and group members can add entries — so the file's own mode is the key's only
   protection, and a rename replaces anything planted at that name (a link to someone else's
-  file) instead of writing the key through it.
+  file) instead of writing the key through it. **Before the rename HIVE checks the new file** with
+  `core_submission.py`'s own rule (`key_shape_problem`, run from the skill on HIVE with
+  `python3 -I`): a blank or malformed key — only blanks, `Authorization: Token …`, quotes — is
+  refused (exit 2, `not_a_key`, the reason but never the key), and the key already there is
+  kept. Without the skill on HIVE nothing is saved (exit 3, `not_checked`: `bash
+  scripts/hive_exec.sh --put-skill`, then send again).
 - **`core_submission.py` on HIVE refuses a key file anyone else can read** (`key_mode_wrong`:
   any group or other permission bit, or a file another account owns) and does not send it.
   Fix: `bash scripts/hive_exec.sh 'chmod 600 ~/.coreomics_token'`; if it was readable for long,
-  Regenerate the key in CoreOmics and put the new one there. On a laptop the mode is reported
+  Regenerate the key in CoreOmics and put the new one there. A file **another account owns**
+  cannot be chmod-ed by you: remove it (`bash scripts/hive_exec.sh 'rm -f ~/.coreomics_token'`)
+  and send the key again (`coreomics_key_to_hive.sh --status` and `check_access.sh` say which). On a laptop the mode is reported
   (`key_mode`) but not enforced: the home folder is the user's own, and Git Bash's `chmod` does
   not reach NTFS permissions.
 - **Re-check from the laptop:** `bash scripts/coreomics_key_to_hive.sh --status` (one JSON

@@ -3148,13 +3148,20 @@ maintainers read them. A report holds only what you write in it. The Slack post 
 the search or analysis counts them (`references/notifications.md`), so the Core sees them
 without anyone forwarding a file.
 ```
-bash scripts/report_issue.sh --title "<short name>" \
-    --what "<what happened: the exact command, the exact error text, the path>" \
-    --impact "<time, compute or storage lost, or what the result would have got wrong>" \
-    [--workaround "<what you did instead>"] [--fix "<what the skill should do>"] \
+bash scripts/report_issue.sh --title '<short name>' --what-file - \
+    --impact '<time, compute or storage lost, or what the result would have got wrong>' \
+    [--workaround '<what you did instead>'] [--fix '<what the skill should do>'] \
     [--kind bug|docs|missing|agent_mistake] [--severity high|medium|low] \
-    [--step "<SKILL.md step>"] --session "<session name>"
+    [--step '<SKILL.md step>'] --session '<session name>' <<'EOF'
+<what happened: the exact command, the exact error text, the path -- verbatim>
+EOF
 ```
+**The exact text goes in on standard input** (`--what-file -` and a heredoc quoted `<<'EOF'`,
+in which nothing is expanded), **never inside `--what "..."`**: in double quotes bash runs
+anything in backticks or `$(...)` — an error text full of them — on this computer, and again
+on HIVE when the command goes through `hive_exec.sh`. Every other argument in single quotes;
+one that holds a single quote, or a second long text, goes in a file (`--impact-file F`,
+`--workaround-file F`, `--fix-file F`, `--title-file F`; only one field reads standard input).
 It runs **locally** and needs only bash (Git Bash on Windows, no local Python): in
 `hive_remote` it writes to HIVE through `hive_exec.sh` by itself; on HIVE it writes directly;
 anywhere else — or if the account cannot write the Core folder — it keeps the file in

@@ -348,5 +348,114 @@ class RunDeRecordsTheExclusion(unittest.TestCase):
         self.assertIsNone(mm.de_runs_left_out_sentence(prov))
 
 
+class DecisionsRecordReview212(unittest.TestCase):
+    """2.12 review: run_de.R read an unreadable decisions.json as "no reasons" (tryCatch(error =
+    NULL)), so every run left out came out NOT RECORDED with nothing said; and collect_conditions
+    wrote the record in place, so an interrupted write left exactly such a file."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = self._tmp.name
+        self.meta = write_conditions(self.tmp, ANALYSED)
+        self.dec = cc.decisions_path(self.meta)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def leftovers(self):
+        return [f for f in os.listdir(self.tmp) if f.endswith(".tmp")]
+
+    # ---- collect_conditions: whole or not at all ---------------------------------------------
+    def test_an_interrupted_write_keeps_the_old_record(self):
+        from unittest import mock
+        old = {"technical_replicates": {"column": "Sample"}, "conditions_csv": self.meta}
+        cc.write_decisions(self.dec, old)
+
+        def half(obj, fh, **kw):
+            fh.write('{"excluded_runs": {"runs": [')
+            raise KeyboardInterrupt
+        with mock.patch.object(cc.json, "dump", side_effect=half):
+            with self.assertRaises(KeyboardInterrupt):
+                cc.write_decisions(self.dec, {"excluded_runs": {}})
+        with open(self.dec, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh), old)
+        self.assertEqual(self.leftovers(), [])
+
+    def test_validate_exclude_writes_through_the_atomic_writer(self):
+        report = write_report(self.tmp, ANALYSED + RERUNS)
+        p = validate(self.meta, report, *exclude_args(REASONS))
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        with open(self.dec, encoding="utf-8") as fh:
+            rec = json.load(fh)
+        self.assertEqual({x["run"]: x["reason"] for x in rec[cc.EXCLUDED_KEY]["runs"]}, REASONS)
+        self.assertEqual(self.leftovers(), [])
+        with open(SCRIPT, encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertNotIn('open(dpath, "w"', src, "a decisions record written in place")
+
+    def test_a_link_at_the_temporary_name_is_not_written_through(self):
+        theirs = os.path.join(self.tmp, "theirs.txt")
+        open(theirs, "w").close()
+        os.symlink(theirs, f"{self.dec}.{os.getpid()}.tmp")
+        with self.assertRaises(FileExistsError):
+            cc.write_decisions(self.dec, {"x": 1})
+        with open(theirs) as fh:
+            self.assertEqual(fh.read(), "")
+        self.assertFalse(os.path.exists(self.dec))
+
+    # ---- run_de.R: an unreadable record is said, on stderr and in the record -----------------
+    def record(self, dec_text):
+        """runs_left_out_record() from run_de.R (its function definitions only), on two report
+        runs the metadata leaves out; stderr is returned too."""
+        if dec_text is not None:
+            with open(self.dec, "w", encoding="utf-8") as fh:
+                fh.write(dec_text)
+        out = os.path.join(self.tmp, "rec.json")
+        code = f"""
+          for (e in parse({json.dumps(RUN_DE)})) if (is.call(e) && identical(e[[1]], as.name('<-')) &&
+              is.call(e[[3]]) && identical(e[[3]][[1]], as.name('function')) &&
+              as.character(e[[2]]) %in% c('runs_left_out_record', 'runs_left_out_methods_lines')) eval(e)
+          r <- runs_left_out_record(c({', '.join(json.dumps(x) for x in ANALYSED + RERUNS)}),
+                                    c({', '.join(json.dumps(x) for x in ANALYSED)}), {json.dumps(self.meta)})
+          r$methods <- runs_left_out_methods_lines(r)
+          jsonlite::write_json(r, {json.dumps(out)}, auto_unbox = TRUE, null = "null", na = "null")"""
+        p = subprocess.run(["Rscript", "-e", code], capture_output=True, text=True, timeout=120)
+        self.assertEqual(p.returncode, 0, p.stderr[-1500:])
+        with open(out) as fh:
+            return json.load(fh), p.stderr
+
+    @unittest.skipUnless(r_has("jsonlite"), "needs R with jsonlite")
+    def test_an_unreadable_record_is_said_not_read_as_no_reasons(self):
+        rec, err = self.record('{"excluded_runs": {"runs": [{"run": "MICH_03_rerun", "rea')
+        self.assertEqual([x["reason"] for x in rec["runs"]], [None, None])
+        self.assertIn(os.path.realpath(self.dec), rec["reasons_unreadable"])
+        self.assertIn("could not be read (", rec["reasons_unreadable"])
+        self.assertEqual(rec["reasons_from"], rec["reasons_unreadable"])
+        self.assertIn("[run_de] WARNING: ", err)
+        self.assertIn("could not be read", err)
+        self.assertIn("2 run(s) left out of the DE are not used", err)
+        self.assertTrue(all("reason NOT READ: the decisions record could not be read [confirm]" in m
+                            for m in rec["methods"][1:]), rec["methods"])
+
+    @unittest.skipUnless(r_has("jsonlite"), "needs R with jsonlite")
+    def test_a_readable_record_still_gives_its_reasons(self):
+        p = validate(self.meta, write_report(self.tmp, ANALYSED + RERUNS), *exclude_args(REASONS))
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        rec, err = self.record(None)
+        self.assertEqual({x["run"]: x["reason"] for x in rec["runs"]}, REASONS)
+        self.assertNotIn("reasons_unreadable", rec)
+        self.assertNotIn("WARNING", err)
+
+    @unittest.skipUnless(r_has("jsonlite"), "needs R with jsonlite")
+    def test_no_record_and_an_odd_one_are_not_reasons_and_never_crash(self):
+        rec, err = self.record(None)
+        self.assertIn("--exclude was not used", rec["reasons_from"])
+        self.assertNotIn("reasons_unreadable", rec)
+        self.assertTrue(all("reason NOT RECORDED [confirm]" in m for m in rec["methods"][1:]))
+        rec, err = self.record('{"excluded_runs": {"runs": ["MICH_03_rerun", 7]}}')
+        self.assertEqual([x["reason"] for x in rec["runs"]], [None, None])
+        self.assertNotIn("reasons_unreadable", rec)
+
+
 if __name__ == "__main__":
     unittest.main()

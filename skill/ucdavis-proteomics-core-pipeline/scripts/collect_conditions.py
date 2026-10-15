@@ -696,6 +696,24 @@ def decisions_path(out_path):
     return out_path + ".decisions.json"
 
 
+def write_decisions(dpath, record):
+    """Write the decisions record whole or not at all: a new file beside it (O_EXCL, so nothing
+    already at that name -- a link -- is written through), then os.replace. Written in place, an
+    interrupted write left half a record that run_de.R could not read (2.12 review)."""
+    tmp = f"{dpath}.{os.getpid()}.tmp"
+    fh = open(tmp, "x", encoding="utf-8")      # FileExistsError: not ours, left alone
+    try:
+        with fh:
+            json.dump(record, fh, indent=2)
+        os.replace(tmp, dpath)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def do_map(out_path, runs, intent, subject_col=None, subject_confirmed=False, columns=None,
            confirm_multi=(), replicate_mode="auto"):
     intent, replicates = collapse_replicates(intent, replicate_mode)
@@ -791,8 +809,7 @@ def do_map(out_path, runs, intent, subject_col=None, subject_confirmed=False, co
     if tech:
         record["technical_replicates"] = tech
     if record:
-        with open(dpath, "w", encoding="utf-8") as fh:
-            json.dump(dict(record, conditions_csv=os.path.abspath(out_path)), fh, indent=2)
+        write_decisions(dpath, dict(record, conditions_csv=os.path.abspath(out_path)))
     elif os.path.exists(dpath):
         os.remove(dpath)               # an older answer does not describe this mapping
 
@@ -1028,8 +1045,7 @@ def _write_exclusions(meta_path, report_path, excluded, report_runs, meta_runs):
     if not rest:
         os.remove(dpath)
         return None, None
-    with open(dpath, "w", encoding="utf-8") as fh:
-        json.dump(dict(rest, conditions_csv=os.path.abspath(meta_path)), fh, indent=2)
+    write_decisions(dpath, dict(rest, conditions_csv=os.path.abspath(meta_path)))
     return os.path.abspath(dpath), None
 
 

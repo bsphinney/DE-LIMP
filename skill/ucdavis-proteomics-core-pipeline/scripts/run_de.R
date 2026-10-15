@@ -1541,13 +1541,26 @@ runs_left_out_record <- function(report_runs, meta_runs, meta_path, analysed_run
   why <- list()
   if (length(left)) {
     dec <- paste0(meta_path, ".decisions.json")
-    ex <- if (file.exists(dec) && requireNamespace("jsonlite", quietly = TRUE))
-      tryCatch(jsonlite::fromJSON(dec, simplifyVector = FALSE)$excluded_runs,
-               error = function(e) NULL)
-    for (x in ex$runs)
-      if (is.character(x$run) && is.character(x$reason) && nzchar(trimws(x$reason)))
+    # A record that exists but cannot be read is SAID -- on stderr and in the record
+    # (reasons_unreadable) -- never read as "no reasons" (2.12 review; rule 4: no silent catch)
+    got <- if (!file.exists(dec)) list()
+      else if (!requireNamespace("jsonlite", quietly = TRUE))
+        list(err = "the R package jsonlite is not installed")
+      else tryCatch(list(ex = jsonlite::fromJSON(dec, simplifyVector = FALSE)$excluded_runs),
+                    error = function(e) list(err = conditionMessage(e)))
+    for (x in got$ex$runs)
+      if (is.list(x) && is.character(x$run) && is.character(x$reason) && nzchar(trimws(x$reason)))
         why[[x$run]] <- x$reason
+    if (!is.null(got$err)) {
+      rec$reasons_unreadable <- sprintf("%s could not be read (%s)", normalizePath(dec),
+                                        gsub("[[:space:]]+", " ", trimws(got$err)))
+      message("[run_de] WARNING: ", rec$reasons_unreadable, ": the reasons recorded for the ",
+              length(left), " run(s) left out of the DE are not used, so none is stated. Repair ",
+              "it, or write it again (collect_conditions.py --validate <metadata> --against ",
+              "<report> --exclude <run> --reason \"<why>\"), and re-run.")
+    }
     rec$reasons_from <- if (length(why)) normalizePath(dec)
+      else if (!is.null(got$err)) rec$reasons_unreadable
       else if (file.exists(dec)) paste(basename(dec), "records no excluded_runs reasons")
       else paste("no decisions record beside the metadata: collect_conditions.py --validate",
                  "--exclude was not used")
@@ -1566,7 +1579,10 @@ runs_left_out_methods_lines <- function(r) {
             r$n_analysed, r$n_report_runs),
     vapply(r$runs, function(x)
       sprintf("                %s -- %s", x$run,
-              if (is.na(x$reason)) "reason NOT RECORDED [confirm]" else x$reason), ""),
+              if (!is.na(x$reason)) x$reason
+              else if (!is.null(r$reasons_unreadable))
+                "reason NOT READ: the decisions record could not be read [confirm]"
+              else "reason NOT RECORDED [confirm]"), ""),
     nq)
 }
 for (.l in runs_left_out_methods_lines(runs_left_out_rec)) message("[run_de] ", sub("^ +", "", .l))

@@ -643,7 +643,12 @@ class CheckAccessCoreOmicsKeyTests(Harness):
             with self.subTest(answer=answer):
                 j = self.check(laptop_key=True, FAKE_CK=answer)
                 self.assertEqual(j["coreomics_key_on_hive"], "mode-wrong")
-                self.assertIn("hive_exec.sh 'chmod 600 ~/.coreomics_token'", j["coreomics_key_advice"])
+                if answer == "notmine":
+                    # another account's file: chmod cannot work; remove it and send again (2.12)
+                    self.assertIn("hive_exec.sh 'rm -f ~/.coreomics_token'", j["coreomics_key_advice"])
+                    self.assertNotIn("chmod 600", j["coreomics_key_advice"])
+                else:
+                    self.assertIn("hive_exec.sh 'chmod 600 ~/.coreomics_token'", j["coreomics_key_advice"])
                 self.assertEqual(j["coreomics_runs_on"], "hive")
 
     def test_a_working_local_python_keeps_the_laptop_route(self):

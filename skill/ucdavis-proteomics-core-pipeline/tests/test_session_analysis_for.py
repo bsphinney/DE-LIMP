@@ -125,6 +125,38 @@ class AnalysisFor(unittest.TestCase):
                 r = self.run_py("checkpoint.py", "status", "--session", s)
                 self.assertEqual(r.returncode, 0, r.stderr)
                 self.assertEqual(json.loads(r.stdout).get("analysis_for"), want)
+                self.assertFalse([w for w in json.loads(r.stdout).get("warnings", [])
+                                  if "NOT KNOWN" in w])
+
+    def test_a_damaged_session_json_is_said_on_resume_not_dropped(self):
+        """2.12 review: a damaged session.json dropped analysis_for from `status` without a word,
+        so a resume lost which submission and board thread it was."""
+        s = self.init("--submission", "807")["created"]
+        with open(os.path.join(s, ".recovery.json"), "w") as fh:
+            json.dump({"stages": [{"stage": "search", "jobs": [], "state": "submitted"}]}, fh)
+        sj = os.path.join(s, "session.json")
+        for text, said in (("{not json", "could not be read (JSONDecodeError"),
+                           ('["a list"]', "is not a JSON object"),
+                           ('{"analysis_for": "PROT_0807"}', "that is not an object")):
+            with self.subTest(text=text):
+                with open(sj, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+                self.assertIsNone(session.analysis_for(s))
+                self.assertIn(said, session.read_analysis_for(s)[1])
+                r = self.run_py("checkpoint.py", "status", "--session", s)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                out = json.loads(r.stdout)
+                self.assertNotIn("analysis_for", out)
+                (w,) = [w for w in out.get("warnings", []) if "NOT KNOWN" in w]
+                self.assertIn(sj, w)
+                self.assertIn(said, w)
+                self.assertIn("--submission <PROT number>", w)
+                with open(sj, encoding="utf-8") as fh:
+                    self.assertEqual(fh.read(), text, "status rewrote session.json")
+
+    def test_no_session_json_is_not_a_warning(self):
+        s = self.init()["created"]
+        self.assertEqual(session.read_analysis_for(s), (None, None))
 
 
 def _read(*parts):

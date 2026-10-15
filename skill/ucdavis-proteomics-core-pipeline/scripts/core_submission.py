@@ -2516,8 +2516,9 @@ def curated_rows(samples: list, paths: list, raw: str, choices: dict | None = No
                                 if set_aside and not rec else "")))
     for p, cands, on in loose:
         d, src = acquisition_date(p)
+        # candidate_samples: the unique_ids of the samples it names; [] for a run of no sample
         rows.append(_row({}, status="unassigned", file=p, acquired=d.isoformat() if d else "",
-                         date_source=src, matched_on=on,
+                         date_source=src, matched_on=on, candidate_samples=cands,
                          note=(f"matches several samples ({on}): " + ", ".join(cands)) if cands
                          else "matches no sample id" + (" or sample name" if plate else "")))
     return rows

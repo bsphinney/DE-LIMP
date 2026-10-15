@@ -187,12 +187,6 @@ fi
 # pandas (conda-forge) rides along: gabrig's follow-up (#15) found none in the HIVE env, and
 # ad-hoc analysis reaches for it first. Here, not in create_env, because create_env only runs
 # for a MISSING env -- this step is how an env that already exists gets it on a re-run.
-# r-nanoparquet (conda-forge) too, when R cannot load it. limpa reads DIA-NN's report.parquet
-# with it ("nanoparquet package required but is not installed", limpa's EListFromLongFormatFile),
-# but it is only in limpa's Suggests -- installing limpa never brings it -- and create_env lists
-# it from 2.8.0 only, so an env built before that never got it (2.8.0 report). CRAN's
-# nanoparquet compiles C++, which fails where there is no compiler; conda-forge's is a binary.
-# Loadable is the test, not a conda-meta record: an R-installed copy counts.
 trfp_in_env() { [ -x "$ENV_PREFIX/bin/ThermoRawFileParser" ] || [ -x "$ENV_PREFIX/bin/thermorawfileparser" ]; }
 in_env_meta() {     # in_env_meta PKG: conda's own record of an installed package
   local f; for f in "$ENV_PREFIX"/conda-meta/"$1"-[0-9]*.json; do [ -e "$f" ] && return 0; done
@@ -205,7 +199,6 @@ EXTRA_PKGS=""       # a word list, not an array: bash 3.2 + set -u and empty arr
 trfp_in_env           || EXTRA_PKGS="$EXTRA_PKGS thermorawfileparser"
 in_env_meta pythonnet || EXTRA_PKGS="$EXTRA_PKGS pythonnet"
 in_env_meta pandas    || EXTRA_PKGS="$EXTRA_PKGS pandas"
-if env_ready && ! nanoparquet_ok; then EXTRA_PKGS="$EXTRA_PKGS r-nanoparquet"; fi
 if [ -n "$CONDA" ] && env_ready && [ -n "$EXTRA_PKGS" ] && ! $CHECK_ONLY; then
   say "[setup] installing$EXTRA_PKGS into the env..."
   # shellcheck disable=SC2086  # $EXTRA_PKGS is meant to split into package names
@@ -216,15 +209,76 @@ if [ -n "$CONDA" ] && env_ready && [ -n "$EXTRA_PKGS" ] && ! $CHECK_ONLY; then
                    --override-channels -c conda-forge -c bioconda $EXTRA_PKGS >&2 ;;
   esac || NOTES+=("Could not install$EXTRA_PKGS into the env (the rest of the env is unaffected). Thermo .raw needs thermorawfileparser, and reading the Orbitrap resolution needs pythonnet: see thermo_raw_reader in setup.json.")
 fi
+
+# ---- 2b1. nanoparquet: its OWN install ----------------------------------------
+# limpa reads DIA-NN's report.parquet with it ("nanoparquet package required but is not
+# installed", limpa's EListFromLongFormatFile), but it is only in limpa's Suggests -- installing
+# limpa never brings it -- and create_env lists it from 2.8.0 only, so an env built before that
+# never got it (2.8.0 report). Loadable is the test, not a conda-meta record: an R-installed copy
+# counts.
+#   * conda-forge builds r-nanoparquet only for r-base < 4.6 (0.5.2; anaconda.org, 2026-10-15).
+#     Solved in 2b's call above, without --freeze-installed, an R 4.6.1 env got the plan
+#     "r-base 4.6.1 -> 4.5.3" (2.12 review; reproduced with a dry run on HIVE's
+#     proteomics-pipeline-r46): R downgraded under limpa and every Bioconductor package. So it is
+#     installed alone and --freeze-installed: conda may only add it, or fail (the same dry run
+#     frozen: "r-nanoparquet ... is not installable", nothing changed).
+#   * R >= 4.6 has no conda build, so it is CRAN's source package, compiled. 2.8.0 ruled CRAN out
+#     because install.packages("nanoparquet") failed with "x86_64-conda-linux-gnu-c++: not found":
+#     conda's R compiles with the compilers its Makeconf names (R CMD config CC / CXX), which an
+#     env has only with conda-forge's c-compiler + cxx-compiler. So CRAN is used only when those
+#     run here; otherwise the fix installs them (frozen) first. HIVE's proteomics-pipeline-r46 is
+#     built exactly so: conda-forge's c-compiler + cxx-compiler, nanoparquet 0.5.2 from CRAN.
+R_VERSION=""
+env_ready && R_VERSION="$("$ENV_PREFIX/bin/Rscript" -e 'cat(as.character(getRversion()))' 2>/dev/null)"
+NANOPARQUET_CONDA=true      # does conda-forge build r-nanoparquet for this R? (unknown R: try it)
+case "$R_VERSION" in ""|[0-3].*|4.[0-5]|4.[0-5].*) ;; *) NANOPARQUET_CONDA=false ;; esac
+r_compilers_ok() {          # can R's own C and C++ compilers and make run, the env's bin first?
+  local v c
+  for v in CC CXX MAKE; do
+    c="$(PATH="$ENV_PREFIX/bin:$PATH" "$ENV_PREFIX/bin/R" CMD config "$v" 2>/dev/null)"; c="${c%% *}"
+    [ -n "$c" ] && ( PATH="$ENV_PREFIX/bin:$PATH"; command -v "$c" >/dev/null 2>&1 ) || return 1
+  done
+}
+NANOPARQUET_CRAN_R="install.packages('nanoparquet', repos = 'https://cloud.r-project.org', type = 'source')"
+NANOPARQUET_CRAN="PATH=\"$ENV_PREFIX/bin:\$PATH\" $ENV_PREFIX/bin/Rscript -e \"$NANOPARQUET_CRAN_R\""
+case "$CONDA" in            # -p for the reason create_env gives
+  *micromamba) NANOPARQUET_CONDA_CMD="$CONDA install -y -r $MAMBA_ROOT -p $ENV_PREFIX --freeze-installed --override-channels -c conda-forge -c bioconda" ;;
+  "")          NANOPARQUET_CONDA_CMD="" ;;
+  *)           NANOPARQUET_CONDA_CMD="$CONDA install -y -p $ENV_PREFIX --freeze-installed --override-channels -c conda-forge -c bioconda" ;;
+esac
+if env_ready && ! nanoparquet_ok && ! $CHECK_ONLY; then
+  if $NANOPARQUET_CONDA && [ -n "$CONDA" ]; then
+    say "[setup] installing r-nanoparquet into the env (conda-forge; nothing already there changes)..."
+    case "$CONDA" in
+      *micromamba) "$CONDA" install -y -r "$MAMBA_ROOT" -p "$ENV_PREFIX" --freeze-installed \
+                     --override-channels -c conda-forge -c bioconda r-nanoparquet >&2 ;;
+      *)           "$CONDA" install -y -p "$ENV_PREFIX" --freeze-installed \
+                     --override-channels -c conda-forge -c bioconda r-nanoparquet >&2 ;;
+    esac || say "[setup] conda could not add r-nanoparquet without changing the env (above)"
+  fi
+  if ! nanoparquet_ok && r_compilers_ok; then
+    say "[setup] installing nanoparquet from CRAN's source package (R $R_VERSION, compiled with R's own compilers)..."
+    PATH="$ENV_PREFIX/bin:$PATH" "$ENV_PREFIX/bin/Rscript" -e "$NANOPARQUET_CRAN_R" >&2 \
+      || say "[setup] the nanoparquet install from CRAN failed (above)"
+  fi
+fi
 NANOPARQUET_OK=false
 if env_ready && nanoparquet_ok; then NANOPARQUET_OK=true; fi
-case "$CONDA" in
-  *micromamba) NANOPARQUET_FIX="$CONDA install -y -r $MAMBA_ROOT -p $ENV_PREFIX --override-channels -c conda-forge r-nanoparquet" ;;
-  "")          NANOPARQUET_FIX="run setup.sh (it installs micromamba), or install conda-forge's r-nanoparquet into $ENV_PREFIX" ;;
-  *)           NANOPARQUET_FIX="$CONDA install -y -p $ENV_PREFIX --override-channels -c conda-forge r-nanoparquet" ;;
-esac
+# The fix that works for THIS env (setup.json nanoparquet.fix, the note, the ERROR line)
+if $NANOPARQUET_CONDA; then
+  NANOPARQUET_WHY="conda-forge's binary, added without changing anything else in the env"
+  if [ -n "$CONDA" ]; then NANOPARQUET_FIX="$NANOPARQUET_CONDA_CMD r-nanoparquet"
+  else NANOPARQUET_FIX="run setup.sh (it installs micromamba), or install conda-forge's r-nanoparquet into $ENV_PREFIX with --freeze-installed"; fi
+elif env_ready && r_compilers_ok; then
+  NANOPARQUET_WHY="R $R_VERSION: conda-forge has no r-nanoparquet for it, so CRAN's source package, compiled with the env's own compilers"
+  NANOPARQUET_FIX="$NANOPARQUET_CRAN"
+else
+  NANOPARQUET_WHY="R $R_VERSION: conda-forge has no r-nanoparquet for it, and CRAN's source package needs the compilers this R names (R CMD config CC / CXX), which the env does not have -- conda-forge's c-compiler + cxx-compiler provide them"
+  if [ -n "$CONDA" ]; then NANOPARQUET_FIX="$NANOPARQUET_CONDA_CMD c-compiler cxx-compiler make && $NANOPARQUET_CRAN"
+  else NANOPARQUET_FIX="install conda-forge's c-compiler, cxx-compiler and make into $ENV_PREFIX (with --freeze-installed), then: $NANOPARQUET_CRAN"; fi
+fi
 if env_ready && ! $NANOPARQUET_OK; then
-  NOTES+=("nanoparquet cannot be loaded in $ENV_PREFIX: run_de.R reads DIA-NN's report.parquet with it (limpa needs it), so no DE can run. Not install.packages('nanoparquet') from CRAN -- it compiles C++ and fails without a compiler. Fix: $NANOPARQUET_FIX.")
+  NOTES+=("nanoparquet cannot be loaded in $ENV_PREFIX: run_de.R reads DIA-NN's report.parquet with it (limpa needs it), so no DE can run. The route that works here: $NANOPARQUET_WHY. Fix: $NANOPARQUET_FIX.")
 fi
 
 # ---- 2b2. protein-set annotation: GO, offline -----------------------------------
@@ -465,6 +519,12 @@ DDA_READY=false
 if [ -n "$SAGE" ] && [ -n "$RSCRIPT" ]; then DDA_READY=true; fi
 DIA_READY=false
 if $DIANN_READY && [ -n "$RSCRIPT" ]; then DIA_READY=true; fi
+# A search can run (an Rscript outside the env counts for it) while the DE cannot: say why, or
+# ready_for.de is false beside dia/dda true with no note (2.12 review). With the env built, the
+# nanoparquet note above says it.
+if ! $DE_READY && ! env_ready && { $DIA_READY || $DDA_READY; }; then
+  NOTES+=("ready_for.de is false although a search can run here: the DE runs in the skill's own env ($ENV_PREFIX), which is not built yet, so whether its R can read report.parquet (nanoparquet) is not known (the Rscript found, $RSCRIPT, is not that env's). Run bash setup.sh (without --check) to build it before the DE step.")
+fi
 
 # Thermo .raw: can step 2 read it HERE? Asked of detect_acquisition.py itself, so the parser
 # search (env var, PATH, the env, the Core's shared copy) and the .NET check are the ones step
@@ -562,7 +622,7 @@ fi
 if env_ready && ! $NANOPARQUET_OK; then
   say ""
   say "[setup] ERROR: nanoparquet cannot be loaded in $ENV_PREFIX -- run_de.R reads every report.parquet with it (limpa needs it)."
-  say "[setup]        Fix: $NANOPARQUET_FIX   (conda-forge's binary: CRAN's compiles C++ and needs a compiler)"
+  say "[setup]        Fix: $NANOPARQUET_FIX   ($NANOPARQUET_WHY)"
   R_STACK_OK=false
 fi
 if ! $R_STACK_OK && ! $CHECK_ONLY; then exit 1; fi
