@@ -82,11 +82,21 @@ Container runtime preference: hpc→apptainer, mac→docker, linux→native.
   limpa never brings it, and `create_env` lists `r-nanoparquet` only since 2.8.0 and only runs
   for a missing env — an env built before that never got it (2.8.0 report). `setup.sh` now
   checks that R can load it; if not, it installs **conda-forge's `r-nanoparquet`** into the
-  existing env. Not `install.packages("nanoparquet")` from CRAN: that compiles C++ and fails
-  where there is no compiler. `setup.json` → `nanoparquet` = `{ok, fix}`, `ready_for.de` is
-  false without it, and `notes` / stderr say `ERROR: nanoparquet ...` with the conda command;
-  `setup.sh` exits 1 (`--check` only reports). The limpa fix line above leaves nanoparquet
-  as it is.
+  existing env, **in its own call with `--freeze-installed`**: conda-forge builds it only for
+  R < 4.6, and solved together with the parser / pythonnet / pandas without the freeze, an R
+  4.6.1 env got the plan "r-base 4.6.1 → 4.5.3" (2.12 review; a dry run on HIVE's
+  `proteomics-pipeline-r46`). Frozen, conda can only add it or fail. **R ≥ 4.6 has no conda
+  build**, so there it is CRAN's source package, compiled — only when the compilers this R
+  names (`R CMD config CC` / `CXX`: conda's R names conda-forge's, e.g.
+  `x86_64-conda-linux-gnu-c++`) and `make` run; that is why a plain CRAN install once failed
+  with "x86_64-conda-linux-gnu-c++: not found". Without them the fix first installs
+  conda-forge's `c-compiler cxx-compiler make` (frozen), then the CRAN line — how HIVE's
+  `proteomics-pipeline-r46` got nanoparquet 0.5.2. `setup.json` → `nanoparquet` = `{ok, fix}`
+  (the fix is the command that works for THIS env's R), `ready_for.de` is false without it, and
+  `notes` / stderr say `ERROR: nanoparquet ...` with it; `setup.sh` exits 1 (`--check` only
+  reports). The limpa fix line above leaves nanoparquet as it is. With no env built yet,
+  `ready_for.dia` / `dda` can be true (an Rscript outside the env) while `de` is false, and a
+  note says why: the DE runs in the env, so run `setup.sh` before the DE step.
 - **An env that is still on limpa 1.2.x** (an old `setup.sh`, no internet) is not a dead
   end: `run_de.R` passes the annotation columns under whichever name this limpa's
   `readDIANN()` has (`limpa_compat.R`) and records it — `de_provenance.json` →
