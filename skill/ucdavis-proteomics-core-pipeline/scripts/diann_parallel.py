@@ -2188,6 +2188,11 @@ def main():
         f'say "final report will be {D}/{report}; watch with: watch_run.sh --slurm $jid5 --log {D}/s5_report_${{jid5}}.log"',
         f'say "all chain job ids -> {D}/jobs.txt  (watch the WHOLE chain: watch_run.sh --all {D})"',
         f'say "recovery notes written to {sess}/RECOVERY.md — you can safely close your terminal"']
+    # The most the chain can use (cpu_hours.py, the one rule): read from the step scripts just
+    # written, and said where the board and the person submitting see it.
+    from cpu_hours import reservation, submit_comment
+    cpu = reservation([os.path.join(out, x) for x in (s1, s1b, s2, s3, s4, s5) if x])
+    sub_lines.insert(1, submit_comment(cpu))
     write("submit.sh", "\n".join(sub_lines))
 
     # Describe what WILL run, not what the cfg says (CLAUDE.md rule 1). On the probe path the
@@ -2282,6 +2287,9 @@ def main():
         "scripts": [x for x in [s1, s1b, s2, s3, s4, s5, "submit.sh"] if x],
         "submit": f"bash {out}/submit.sh   (or: hive_exec.sh 'bash {out}/submit.sh')",
         "report_jobid_var": "jid5",
+        # the most this chain can use (cpu_hours.py): every step's CPUs x time limit x tasks
+        "cpu_hours_reserved": cpu["cpu_hours_reserved"],
+        "cpu_hours_reservation": cpu,
         "note": "5-step DIA-NN parallel chain. Submit with submit.sh, watch EVERY step with "
                 "watch_run.sh --all, then point run_de.R at the report.",
     }, indent=2))

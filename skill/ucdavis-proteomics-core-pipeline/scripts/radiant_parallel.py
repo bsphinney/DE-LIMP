@@ -358,10 +358,15 @@ def main():
         f'{prefix} fulcrum -v --toml-file {cres}/fulcrum_rescore.toml']),
         stage="step 3/3 Fulcrum rescoring", hours=a.fulcrum_time, final=True)
 
+    # the most the three steps can use (cpu_hours.py, the one rule), from the scripts written
+    from cpu_hours import reservation
+    cpu = reservation(list(scripts.values()))
     print(json.dumps({
         "mode": "radiant_parallel_3step",
         "n_files": n,
         "scripts": scripts,
+        "cpu_hours_reserved": cpu["cpu_hours_reserved"],
+        "cpu_hours_reservation": cpu,
         "results_dir": results,
         "per_file_results": rdir,
         "toml": toml_path,

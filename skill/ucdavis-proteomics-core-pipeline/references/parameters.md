@@ -157,6 +157,16 @@ above 1% pooled. It names the causes and fixes: not alkylated (`none`), alkylate
 agent than searched (the matching choice), or a protein mix naturally poor in cysteine (histone
 or collagen-rich preps), which can fall under 1% though it was alkylated.
 
+## CPU-hours a search reserves (`cpu_hours_reserved`)
+Every search that writes job scripts states the most CPU-hours it can use: for each job it submits,
+CPUs per task × time limit (hours) × array tasks, summed (`scripts/cpu_hours.py`, the one rule),
+read from the `#SBATCH` lines actually written. It is an **upper bound** -- a job that finishes
+early uses less. `run_search.py` prints it (`[run_search] cpu_hours_reserved: …` and
+`cpu_hours_reserved` in its JSON and in `search_provenance.json`) for the single-shot, two-job,
+5-step chain, Radiant and FragPipe routes; `diann_parallel.py` and `radiant_parallel.py` print it
+in their JSON; each `submit.sh` has it in a header comment. The Core board approves a request
+under 10,000 CPU-hours automatically and sends 10,000 or more to a person.
+
 ## Provenance (DE-LIMP rule #2)
 Every emitted value is tagged in the `rationale`:
 - `data-type-default` — chosen from the instrument/acquisition (e.g. Astral → 10 ppm)

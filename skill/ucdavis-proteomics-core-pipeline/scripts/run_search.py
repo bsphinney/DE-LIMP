@@ -373,6 +373,23 @@ def slurm_available():
     return shutil.which("sbatch") is not None
 
 
+def cpu_hours_mod():
+    """cpu_hours.py: THE reserved CPU-hours of a search (the most it can use)."""
+    import cpu_hours
+    return cpu_hours
+
+
+def search_cpu_hours(res):
+    """`res` with cpu_hours_reserved for a search that wrote ONE job script (every --sbatch route
+    but the two-job library-free search, the 5-step chain and the Radiant chain, which say it
+    themselves). Unchanged for an inline search: nothing was reserved."""
+    if (isinstance(res, dict) and "cpu_hours_reserved" not in res
+            and isinstance(res.get("submitted"), str) and os.path.isfile(res["submitted"])):
+        cpu = cpu_hours_mod().reservation([res["submitted"]])
+        res.update(cpu_hours_reserved=cpu["cpu_hours_reserved"], cpu_hours_reservation=cpu)
+    return res
+
+
 def _diann_parallel_mod():
     """Import the sibling generator so the parallel-safety rule has ONE definition."""
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -982,8 +999,10 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
         # jobs.txt, as the 5-step chain's submit.sh writes it: `watch_run.sh --all <out>`
         # reads it, and without one it answered failed/no_jobs_file for a healthy running
         # search -- which step 7b says to resubmit (HIVE e2e test 2026-09-23).
+        cpu = cpu_hours_mod().reservation([lib_sh, srch_sh])
         with open_text(submit, 0o755) as fh:
-            fh.write("#!/bin/bash -l\nset -euo pipefail\n"
+            fh.write("#!/bin/bash -l\n" + cpu_hours_mod().submit_comment(cpu)
+                     + "\nset -euo pipefail\n"
                      f"j1=$(sbatch --parsable {shlex.quote(lib_sh)})\n"
                      f"j2=$(sbatch --parsable --dependency=afterok:$j1 {shlex.quote(srch_sh)})\n"
                      f'printf "%s\\n" "$j1" "$j2" > {shlex.quote(jobs_txt)}\n'
@@ -996,7 +1015,9 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
               f"submit.sh submits both jobs.")
         return {"engine": "diann", "report": report, "submitted": submit,
                 "mode": "two_job_libfree", "library": predicted,
-                "ran": False, "dda": bool(dda), "raw_dotnet": bool(dnet), **ma_rec}
+                "ran": False, "dda": bool(dda), "raw_dotnet": bool(dnet),
+                "cpu_hours_reserved": cpu["cpu_hours_reserved"], "cpu_hours_reservation": cpu,
+                **ma_rec}
 
     if sbatch:                          # libfree + sbatch returned above, so this is onecmd
         emit_sbatch(sbatch, one_job, out, threads, job="diann_search", preamble=dnet,
@@ -3530,6 +3551,11 @@ def main():
     else:
         sys.exit(f"unknown engine {engine}")
 
+    # the most this search can use (cpu_hours.py), for every route that wrote job scripts
+    res = search_cpu_hours(res)
+    if isinstance(res, dict) and res.get("cpu_hours_reserved") is not None:
+        print(f"[run_search] cpu_hours_reserved: {res['cpu_hours_reserved']} -- "
+              f"{cpu_hours_mod().WHAT}")
     # always record what was run (engine + version + exact command) for reproducibility
     try:
         os.makedirs(a.out, exist_ok=True)
@@ -3584,6 +3610,10 @@ def main():
                            (res.get("submitted") if isinstance(res, dict) else None)
                            or a.sbatch or None),
                        "sbatch_refused": sbatch_refused, "result": res,
+                       # the most this search can use: CPUs x time limit x tasks, every job
+                       # (cpu_hours.py); null for a search run inline
+                       "cpu_hours_reserved": (res.get("cpu_hours_reserved")
+                                              if isinstance(res, dict) else None),
                        # an inline Sage search's LFQ mass-window check (sage_lfq_check.py) and
                        # which lfq.parquet rows the adapter kept; a Sage job's are merged in here
                        # by the job and by --adapt-only. probe_fallback: an inline search's

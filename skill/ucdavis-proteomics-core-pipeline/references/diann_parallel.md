@@ -162,6 +162,10 @@ python3 scripts/diann_parallel.py \
 # then submit the chain (on HIVE, over hive_exec.sh):
 bash scripts/hive_exec.sh 'bash <out>/submit.sh'
 ```
+Its JSON gives `cpu_hours_reserved`, the most the chain can use: every step's CPUs per task × time
+limit × array tasks, summed (`cpu_hours.py`; an upper bound, also the first comment line of
+`submit.sh`). E.g. 3 runs at 8 CPUs / 4 h per array task, steps 3 and 5 at 32 CPUs / 12 h, step 1
+at 16 CPUs / 4 h: 64 + 2 × 96 + 2 × 384 = 1,024.
 It writes `file_list.txt`, `step{1..5}_*.sbatch`, and `submit.sh` (which submits all
 five with dependencies and prints the job ids). **Watch the final job** with
 `watch_run.sh --all <out> --hive` (reads `jobs.txt`; covers all five steps — watching
