@@ -1,0 +1,492 @@
+#!/usr/bin/env python3
+"""The podcast by default for a Core run, made on HIVE (2.12.0).
+
+Brett, 2026-10-15: "It should also create the podcast by default." For a Core run the Claude
+makes it once the report is final, under the Core director's standing approval: --core-run
+records make_podcast.CORE_CLOUD_OK, the one place that text lives. Windows staff have no usable
+local Python, so their podcast runs on HIVE: check through hive_exec.sh, then a SLURM job
+(make_podcast.py job) that renders in Gemini voices, verifies, links and shares -- minutes of
+network calls never run on the login node. On HIVE the key is the Core's shared one
+(/quobyte/proteomics-grp/.config/gemini_key: owner brettsp, group proteomics-grp, mode 640),
+read last, for a Core run only, and only while the Core's trust rule holds and accounts outside
+the group cannot read it. setup.sh puts google-genai >= GENAI_MIN in the pipeline env.
+
+Offline: google.genai is test_make_podcast's stand-in; the Core key is a temporary file put in
+place of CORE_KEY_FILE (the constant -- nothing in the environment can move it); the Core's
+admins are the account running the tests; SLURM's queue choice is patched; the job's python is
+a stub that logs what it is asked to run.
+"""
+import json
+import os
+import pwd
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest import mock
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SKILL = os.path.dirname(HERE)
+SCRIPTS = os.path.join(SKILL, "scripts")
+sys.path.insert(0, SCRIPTS)
+sys.path.insert(0, HERE)
+
+import make_podcast as mp                             # noqa: E402
+import slack_collab                                   # noqa: E402
+import submission_report                              # noqa: E402
+import test_make_podcast as T                         # noqa: E402  helpers only (no classes run here)
+import test_setup_limpa as setup_limpa                # noqa: E402
+
+ME = pwd.getpwuid(os.getuid()).pw_name
+CORE_KEY = "AIza" + "SyCOREfake0123456789abcdefghijklmn"     # shaped like a key; not one
+JOB_PY = r'''#!/bin/bash
+# the job's python: answers job_python's google-genai probe, logs every other call
+if [ "$1" = "-c" ]; then
+  [ "${FAKE_GENAI_VERSION:-2.31.0}" = none ] && { echo "ModuleNotFoundError: google" >&2; exit 1; }
+  echo "${FAKE_GENAI_VERSION:-2.31.0}"; exit 0
+fi
+echo "$2 ${*:3}" >> "$FAKE_PY_LOG"
+case "$2" in
+  render) exit "${FAKE_RENDER_RC:-0}" ;;
+  link)   exit "${FAKE_LINK_RC:-0}" ;;
+  share)  exit "${FAKE_SHARE_RC:-0}" ;;
+esac
+'''
+
+
+def write(path, text, mode=None):
+    T.write(path, text)
+    if mode is not None:
+        os.chmod(path, mode)
+    return path
+
+
+class CoreKeyFile(object):
+    """The Core's shared key, as Brett installs it on HIVE, in a temporary folder: the folder
+    mode 750 (2750 on HIVE), the file 640, both the test runner's -- a Core admin here."""
+
+    def core_key_setup(self):
+        self.cfg = os.path.join(self.d, "proteomics-grp", ".config")
+        os.makedirs(self.cfg)
+        os.chmod(self.cfg, 0o750)
+        self.core_file = write(os.path.join(self.cfg, "gemini_key"), CORE_KEY + "\n", 0o640)
+        self.home = os.path.join(self.d, "home")
+        os.makedirs(self.home)
+        env = {k: v for k, v in os.environ.items() if k != "GEMINI_API_KEY"}
+        env.update(HOME=self.home, PROTEOMICS_PIPELINE_HOME=os.path.join(self.home, "nope"))
+        for p in (mock.patch.dict(os.environ, env, clear=True),
+                  mock.patch.object(mp, "CORE_KEY_FILE", self.core_file),
+                  mock.patch.object(slack_collab, "core_admins", lambda: (ME,))):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def user_key(self, key):
+        return write(os.path.join(self.home, ".config", "ucdavis-proteomics", "gemini_key"),
+                     key + "\n", 0o600)
+
+
+# ------------------------------------------------------------------------------- the key
+class CoreKey(CoreKeyFile, unittest.TestCase):
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.addCleanup(self._td.cleanup)
+        self.d = self._td.name
+        self.core_key_setup()
+
+    def refused(self, core=True):
+        with self.assertRaises(mp.RenderError) as cm:
+            mp.read_key(core=core)
+        msg = str(cm.exception)
+        self.assertNotIn(CORE_KEY, msg)
+        return msg
+
+    def test_a_core_run_reads_the_core_key_last(self):
+        self.assertEqual(mp.find_key(core=True)[:2], (CORE_KEY, self.core_file))
+        self.user_key("user-key")
+        self.assertEqual(mp.find_key(core=True)[:2], ("user-key", mp.KEY_FILE))
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "env-key"}):
+            self.assertEqual(mp.find_key(core=True)[:2], ("env-key", "GEMINI_API_KEY"))
+
+    def test_never_outside_a_core_run(self):
+        msg = self.refused(core=False)
+        self.assertIn(f"{self.core_file} is used only for a Core run (--core-run)", msg)
+
+    def test_group_readable_is_the_point_so_no_warning(self):
+        rc, out, err = T.run("key", "--core-run")
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("[WARN]", err)
+        got = json.loads(out)
+        self.assertEqual((got["found"], got["source"]), (True, self.core_file))
+        self.assertNotIn(CORE_KEY, out + err)
+
+    def test_not_used_when_others_could_read_or_replace_it(self):
+        cases = [
+            (lambda: os.chmod(self.core_file, 0o644), "accounts outside its group can read it"),
+            (lambda: os.chmod(self.core_file, 0o660), "people other than its owner can write it"),
+            (lambda: os.chmod(self.cfg, 0o770), "others can write in its folder"),
+            (lambda: setattr(slack_collab, "core_admins", lambda: ("someone",)),
+             "not to a Core admin"),
+        ]
+        for spoil, why in cases:
+            with self.subTest(why=why), \
+                    mock.patch.object(slack_collab, "core_admins", slack_collab.core_admins):
+                spoil()
+                self.assertIn(why, self.refused())
+                os.chmod(self.core_file, 0o640)
+                os.chmod(self.cfg, 0o750)
+        self.assertEqual(mp.read_key(core=True), CORE_KEY)              # restored: used again
+
+    def test_a_link_or_an_empty_file_is_not_a_key(self):
+        real = write(os.path.join(self.d, "elsewhere"), CORE_KEY, 0o640)
+        os.remove(self.core_file)
+        os.symlink(real, self.core_file)
+        self.assertIn("is not readable", self.refused())
+        os.remove(self.core_file)
+        write(self.core_file, "\n", 0o640)
+        self.assertIn("is empty", self.refused())
+
+    def test_no_file_is_no_core_key(self):
+        os.remove(self.core_file)
+        self.assertEqual(mp.core_key(), (None, None))
+        self.assertNotIn("Core", self.refused())
+
+    def test_the_core_key_is_scrubbed_once_read(self):
+        self.assertEqual(mp.read_key(core=True), CORE_KEY)
+        self.assertNotIn(CORE_KEY, mp.scrub(f"400 Bad Request for key {CORE_KEY} (x)"))
+
+    def test_key_without_a_core_run_says_why(self):
+        rc, out, err = T.run("key")
+        self.assertEqual(rc, 1)
+        got = json.loads(out)
+        self.assertEqual(got["found"], False)
+        self.assertIn("used only for a Core run", got["note"])
+        self.assertEqual(got["core_key"], "usable, for a Core run (--core-run)")
+
+
+# ------------------------------------------------------------------------------- consent
+class CoreRunConsent(CoreKeyFile, T.Workspace):
+    def setUp(self):
+        super().setUp()
+        self.core_key_setup()
+        for p in (mock.patch.object(mp, "_sleep", lambda s: None),
+                  mock.patch.object(mp, "encode_aac", return_value=(None, "test"))):
+            p.start()
+            self.addCleanup(p.stop)
+        self.assertEqual(self.check()[0], 0)
+
+    def core_session(self, prot="PROT_0807"):
+        os.makedirs(os.path.join(self.d, "input"), exist_ok=True)
+        submission_report.attach(self.d, {"internal_id": prot})
+
+    def render(self, *extra):
+        mods, log = T.fake_genai(lambda m, c, k: T.pcm_for(c))
+        keys = []
+
+        class Client(mods["google.genai"].Client):
+            def __init__(self, api_key):
+                keys.append(api_key)
+                super().__init__(api_key)
+        mods["google.genai"].Client = Client
+        with mock.patch.dict(sys.modules, mods):
+            rc, out, err = T.run("render", self.script, "--tts", "gemini", "--no-verify", *extra)
+        return rc, out, err, log, keys
+
+    def manifest(self):
+        return json.loads(T.read(os.path.join(self.pod, "podcast.json")))
+
+    def assert_no_key_in_files(self):
+        for root, _, files in os.walk(self.d):
+            for f in files:
+                if os.path.join(root, f) != self.core_file:
+                    with open(os.path.join(root, f), "rb") as fh:
+                        self.assertNotIn(CORE_KEY.encode(), fh.read(), f)
+
+    def test_a_submission_records_the_standing_approval_and_uses_the_core_key(self):
+        self.core_session()
+        rc, out, err, log, keys = self.render("--core-run")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(keys, [CORE_KEY])
+        man = self.manifest()
+        self.assertEqual(man["cloud_tts_consent"], mp.CORE_CLOUD_OK)
+        self.assertEqual(man["core_run"], {"kind": "submission", "prot": "PROT_0807"})
+        self.assert_no_key_in_files()
+
+    def test_not_a_core_run_sends_nothing(self):
+        rc, out, err, log, keys = self.render("--core-run")
+        self.assertEqual((rc, log["clients"], keys), (2, 0, []))
+        self.assertIn("answers no CoreOmics submission", err)
+        self.assertIn("--core-run internal", err)
+        self.assertIn("--cloud-ok", err)
+        self.assertFalse(os.path.exists(os.path.join(self.pod, "podcast.json")))
+
+    def test_an_internal_core_analysis_is_recorded_as_declared(self):
+        rc, out, err, log, keys = self.render("--core-run", "internal")
+        self.assertEqual(rc, 0, err)
+        man = self.manifest()
+        self.assertEqual((man["cloud_tts_consent"], man["core_run"]),
+                         (mp.CORE_CLOUD_OK, {"kind": "internal"}))
+
+    def test_cloud_ok_never_reaches_the_core_key(self):
+        self.core_session()
+        rc, out, err, log, keys = self.render("--cloud-ok", "the lab's PI, 2026-10-15")
+        self.assertEqual((rc, log["clients"]), (1, 0))
+        self.assertIn("used only for a Core run (--core-run)", err)
+
+    def test_one_consent_or_the_other(self):
+        with self.assertRaises(SystemExit):
+            T.run("render", self.script, "--tts", "gemini", "--core-run", "--cloud-ok", "x")
+
+    def test_verify_under_a_core_run(self):
+        self.core_session()
+        mp.BACKENDS["fake"] = T.FakeTTS
+        self.addCleanup(mp.BACKENDS.pop, "fake", None)
+        self.assertEqual(T.run("render", self.script, "--tts", "fake")[0], 0)
+        heard = "\n".join(t.text for t in mp.parse_script(self.script).turns())
+        mods, log = T.fake_genai(lambda m, c, k: T.pcm_for(c), transcribe=lambda m, c: heard)
+        with mock.patch.dict(sys.modules, mods), \
+                mock.patch.object(mp, "_verify_audio", return_value=(b"AAC", "audio/aac", "t")):
+            rc, out, err = T.run("verify", self.script, "--core-run")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.manifest()["verify"]["cloud_consent"], mp.CORE_CLOUD_OK)
+
+    def test_the_approval_text_lives_in_one_place(self):
+        hits = []
+        for root, _, files in os.walk(SKILL):
+            for f in files:
+                p = os.path.join(root, f)
+                if f.endswith((".md", ".py", ".sh", ".R")) and os.path.abspath(p) not in (
+                        os.path.abspath(mp.__file__), os.path.abspath(__file__)):
+                    with open(p, encoding="utf-8", errors="replace") as fh:
+                        if "standing approval for Core runs" in fh.read():
+                            hits.append(os.path.relpath(p, SKILL))
+        self.assertEqual(hits, [], "point at make_podcast.CORE_CLOUD_OK; never retype it")
+
+
+# ------------------------------------------------------------------------------- the job
+class Job(CoreKeyFile, T.Workspace):
+    QUEUE = ("high", "genome-center-grp", "genome-center-grp-high-qos")
+
+    def setUp(self):
+        super().setUp()
+        self.core_key_setup()
+        os.makedirs(os.path.join(self.d, "logs"))
+        os.makedirs(os.path.join(self.d, "input"))
+        submission_report.attach(self.d, {"internal_id": "PROT_0807"})
+        self.py = setup_limpa._exe(os.path.join(self.d, "bin", "py"), JOB_PY)
+        self.py_log = os.path.join(self.d, "py.log")
+        import run_search
+        self.queue = mock.patch.object(run_search, "slurm_queue", return_value=self.QUEUE)
+        self.queue.start()
+        self.addCleanup(self.queue.stop)
+        self.assertEqual(self.check()[0], 0)
+        self.rd = os.path.realpath(self.d)             # the job names the output folder's real path
+        self.job_path = os.path.join(self.rd, "logs", "podcast_job.sh")
+
+    def job(self, *extra, python=True):
+        args = ["job", self.script] + list(extra) + (["--python", self.py] if python else [])
+        return T.run(*args)
+
+    def run_job(self, **env):
+        e = dict(os.environ, FAKE_PY_LOG=self.py_log, **env)
+        r = subprocess.run(["bash", self.job_path], capture_output=True, text=True, env=e,
+                           timeout=60)
+        return r.returncode, [ln.split()[0] for ln in setup_limpa._lines(self.py_log)]
+
+    def test_the_job_script(self):
+        rc, out, err = self.job("--core-run")
+        self.assertEqual(rc, 0, err)
+        got = json.loads(out)
+        self.assertEqual(got["job"], self.job_path)
+        self.assertEqual(got["submit"], f"sbatch {self.job_path}")
+        self.assertEqual((got["python"], got["google_genai"], got["key"]),
+                         (self.py, "2.31.0", self.core_file))
+        text = T.read(self.job_path)
+        lines = text.splitlines()
+        self.assertEqual(lines[0], "#!/bin/bash -l", "a login shell: HIVE's `module` command")
+        for want in ("#SBATCH --cpus-per-task=1", "#SBATCH --mem=2G", "#SBATCH --time=2:00:00",
+                     "#SBATCH --partition=high", "#SBATCH --account=genome-center-grp",
+                     "#SBATCH --qos=genome-center-grp-high-qos",
+                     f"#SBATCH --output={os.path.join(self.rd, 'logs', 'podcast_job_%j.log')}",
+                     "module load ffmpeg/7.0.2"):
+            self.assertIn(want, text)
+        self.assertNotIn("--requeue", text)
+        steps = [ln for ln in lines if ln.startswith('"$PY" "$MP"')]
+        self.assertEqual([s.split()[2] for s in steps], ["render", "link", "share"])
+        self.assertIn(f"render {self.script} --tts gemini --core-run || exit $?", steps[0])
+        self.assertEqual(steps[1], f'"$PY" "$MP" link {os.path.join(self.rd, "output")} || exit $?')
+        self.assertIn(f"MP={os.path.join(SCRIPTS, 'make_podcast.py')}", text)
+        self.assertNotIn(mp.CORE_CLOUD_OK, text, "render records it; the job names --core-run")
+        self.assertNotIn(CORE_KEY, text)
+        self.assertEqual(subprocess.run(["bash", "-n", self.job_path]).returncode, 0)
+
+    def test_a_preemptible_queue_requeues(self):
+        self.queue.stop()
+        import run_search
+        with mock.patch.object(run_search, "slurm_queue",
+                               return_value=("low", "publicgrp", "publicgrp-low-qos")):
+            self.assertEqual(self.job("--core-run")[0], 0)
+        self.queue.start()
+        self.assertIn("#SBATCH --requeue", T.read(self.job_path))
+
+    def test_it_runs_render_link_share_and_stops_at_a_failure(self):
+        self.assertEqual(self.job("--core-run", "internal")[0], 0)
+        self.assertIn("--core-run internal ||", T.read(self.job_path))
+        self.assertEqual(self.run_job(), (0, ["render", "link", "share"]))
+        os.remove(self.py_log)
+        self.assertEqual(self.run_job(FAKE_RENDER_RC="1"), (1, ["render"]))
+        os.remove(self.py_log)
+        self.assertEqual(self.run_job(FAKE_LINK_RC="3"), (3, ["render", "link"]))
+
+    def test_refuses_a_script_whose_check_does_not_hold(self):
+        T.write(self.script, T.read(self.script).replace("30 IPs", "31 IPs"))
+        rc, out, err = self.job("--core-run")
+        self.assertEqual(rc, 2)
+        self.assertIn("the script changed after check.txt was written", err)
+        self.assertFalse(os.path.exists(self.job_path))
+
+    def test_refuses_without_consent(self):
+        rc, out, err = self.job()
+        self.assertEqual(rc, 2)
+        self.assertIn("--core-run for a Core run", err)
+        rc, out, err = self.job("--cloud-ok", "declined")
+        self.assertEqual(rc, 2)
+        self.assertIn("is a refusal", err)
+        self.assertFalse(os.path.exists(self.job_path))
+
+    def test_refuses_without_a_new_enough_google_genai(self):
+        for version, said in (("2.20.0", "google-genai 2.20.0"), ("none", "no google-genai")):
+            with self.subTest(version=version), \
+                    mock.patch.dict(os.environ, {"FAKE_GENAI_VERSION": version}):
+                rc, out, err = self.job("--core-run")
+                self.assertEqual(rc, 2)
+                self.assertIn(f"no python here has google-genai >= {mp.GENAI_MIN}", err)
+                self.assertIn(said, err)
+                self.assertIn("setup.sh", err)
+        self.assertFalse(os.path.exists(self.job_path))
+
+    def test_the_pipeline_env_is_the_default_python(self):
+        home = os.environ["PROTEOMICS_PIPELINE_HOME"]
+        write(os.path.join(home, "setup.json"), json.dumps({"python": self.py}))
+        rc, out, err = self.job("--core-run", python=False)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(out)["python"], self.py)
+
+    def test_refuses_without_a_key(self):
+        os.remove(self.core_file)
+        rc, out, err = self.job("--core-run")
+        self.assertEqual(rc, 2)
+        self.assertIn("no Gemini API key for the job", err)
+        self.assertFalse(os.path.exists(self.job_path))
+
+    def test_a_consent_note_is_quoted_for_the_shell(self):
+        note = "Dr O'Neil's lab; agreed 2026-10-15 $(id)"
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "env-key"}):
+            rc, out, err = self.job("--cloud-ok", note, "--model", "gemini-3.8-flash-tts")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(out)["key"], "GEMINI_API_KEY")
+        self.assertEqual(self.run_job()[0], 0)
+        render = setup_limpa._lines(self.py_log)[0]
+        self.assertIn(f"--cloud-ok {note} --model gemini-3.8-flash-tts", render)
+
+    def test_the_script_must_sit_in_output_podcast(self):
+        other = os.path.join(self.d, "elsewhere", "podcast_script.md")
+        T.write(other, T.read(self.script))
+        rc, out, err = T.run("job", other, "--core-run", "--python", self.py)
+        self.assertEqual(rc, 2)
+        self.assertIn("must be output/podcast/podcast_script.md", err)
+
+
+# ------------------------------------------------------------------------------- setup.sh
+class GenaiFloor(unittest.TestCase):
+    def test_setup_sh_installs_the_floor_make_podcast_needs(self):
+        with open(os.path.join(SCRIPTS, "setup.sh")) as fh:
+            got = re.search(r'(?m)^GENAI_MIN="([^"]+)"$', fh.read())
+        self.assertEqual(got and got.group(1), mp.GENAI_MIN)
+
+
+class SetupInstallsGenai(setup_limpa.setup_t.SetupCheckHarness):
+    """setup.sh step 2d with test_setup_limpa's stubs (no conda, no network)."""
+    run_setup = setup_limpa.SetupLimpaGate.run_setup
+    prebuilt_env = setup_limpa.SetupLimpaGate.prebuilt_env
+
+    def setUp(self):            # SetupLimpaGate.setUp, whose super() needs that class
+        super().setUp()
+        for tool in ("chmod", "ln", "rm"):
+            os.symlink(shutil.which(tool), os.path.join(self.sys, tool))
+        setup_limpa._exe(os.path.join(self.sys, "micromamba"), setup_limpa.FAKE_MICROMAMBA)
+        self.ensure = setup_limpa._exe(os.path.join(self.d, "ensure_dotnet8_stub.sh"),
+                                       setup_limpa.FAKE_ENSURE)
+        self.dotnet_root = setup_limpa.fake_dotnet_root(
+            os.path.join(self.d, ".proteomics-pipeline", "dotnet8"))
+        self.mm_log = os.path.join(self.d, "mm.log")
+        self.r_log = os.path.join(self.d, "r.log")
+        self.state = os.path.join(self.d, "limpa_version")
+        self.prefix = os.path.join(self.home, "micromamba", "envs", "proteomics-pipeline")
+
+    def genai_record(self, version=None):
+        meta = os.path.join(self.prefix, "conda-meta")
+        for f in os.listdir(meta):
+            if f.startswith("google-genai-"):
+                os.remove(os.path.join(meta, f))
+        if version:
+            write(os.path.join(meta, f"google-genai-{version}-pyh0000000_0.json"), "{}")
+
+    def genai_installs(self):
+        return [c for c in setup_limpa._lines(self.mm_log)
+                if c.startswith("install") and "google-genai" in c]
+
+    def test_an_env_without_it_gets_it_from_conda_forge(self):
+        self.prebuilt_env("1.4.1")
+        self.genai_record(None)
+        r, s = self.run_setup()
+        self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+        got = self.genai_installs()
+        self.assertEqual(len(got), 1, setup_limpa._lines(self.mm_log))
+        self.assertIn(f"-p {self.prefix} --override-channels -c conda-forge -c bioconda "
+                      f"google-genai>={mp.GENAI_MIN}", got[0])
+        self.assertEqual(s["podcast"], {"google_genai": "2.31.0",
+                                        "required": f">= {mp.GENAI_MIN}", "ok": True})
+        self.assertFalse([n for n in s["notes"] if "google-genai" in n], s["notes"])
+        r, s = self.run_setup()                                   # and never again
+        self.assertEqual(len(self.genai_installs()), 1)
+
+    def test_an_older_one_is_upgraded(self):
+        self.prebuilt_env("1.4.1")
+        self.genai_record("2.20.0")
+        r, s = self.run_setup()
+        self.assertEqual(len(self.genai_installs()), 1)
+        self.assertIs(s["podcast"]["ok"], True)
+
+    def test_check_reports_it_and_installs_nothing(self):
+        self.prebuilt_env("1.4.1")
+        self.genai_record("2.20.0")
+        r, s = self.run_setup("--check")
+        self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+        self.assertEqual(self.genai_installs(), [])
+        self.assertEqual(s["podcast"], {"google_genai": "2.20.0",
+                                        "required": f">= {mp.GENAI_MIN}", "ok": False})
+        note = [n for n in s["notes"] if "google-genai" in n]
+        self.assertEqual(len(note), 1, s["notes"])
+        self.assertIn(f"google-genai 2.20.0 is older than {mp.GENAI_MIN}", note[0])
+        self.assertIn(f"'google-genai>={mp.GENAI_MIN}'", note[0])
+
+    def test_a_failed_install_is_a_note_not_a_failure(self):
+        self.prebuilt_env("1.4.1")
+        self.genai_record(None)
+        r, s = self.run_setup(FAKE_MM_INSTALL_FAIL="1")
+        self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+        self.assertIs(s["podcast"]["ok"], False)
+        self.assertIn("only the podcast needs it", r.stderr)
+        self.assertTrue([n for n in s["notes"] if "google-genai is not installed" in n])
+
+    def test_a_current_one_is_left_alone(self):
+        self.prebuilt_env("1.4.1")
+        r, s = self.run_setup()
+        self.assertEqual(self.genai_installs(), [])
+        self.assertIs(s["podcast"]["ok"], True)
+
+
+if __name__ == "__main__":
+    unittest.main()

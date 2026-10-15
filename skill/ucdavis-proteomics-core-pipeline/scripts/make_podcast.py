@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-make_podcast.py -- an OPTIONAL audio discussion of a finished report: two synthetic hosts, a
-cell biologist and a statistician, talk through the results ("Signal to Noise").
+make_podcast.py -- an audio discussion of a finished report: two synthetic hosts, a cell
+biologist and a statistician, talk through the results ("Signal to Noise"). Made by default for
+a Core run (--core-run), on request for anyone else (references/podcast.md).
 
 The agent running the skill WRITES the script itself, from the finished report it has read,
 following references/podcast.md. This script never writes a word of the conversation: it
@@ -14,14 +15,15 @@ CHECKS the script, RENDERS it to audio and LINKS the audio into the outputs.
             "Claims beyond the report"; quantities in words fail; Pronunciation rows may only
             re-spell; the AI disclosure is in the first 3 turns; no host claims a specialty; no
             forbidden name appears anywhere shown or sent. check.txt lists what it cannot catch.
-  render SCRIPT.md [--out DIR] --tts gemini|say [--cloud-ok [NOTE]] [--model M] [--keep-wav]
+  render SCRIPT.md [--out DIR] --tts gemini|say [--cloud-ok [NOTE] | --core-run [internal]]
+         [--model M] [--keep-wav]
          -> DIR/podcast.m4a (podcast.wav when neither afconvert nor ffmpeg is present),
             transcript.html, podcast.json, podcast_script.md. Refuses unless check.txt says PASS
             for this exact script and unchanged sources (--unchecked overrides; podcast.json
             then says so). Every chunk is cached as DIR/.cache/<sha256>.wav, so a re-run resumes
             and editing one line re-synthesizes only its chunk; unused chunks are pruned after
             a successful render. --dry-run prints what would be spoken and exits.
-  verify SCRIPT.md --cloud-ok NOTE [--out DIR] [--model M]
+  verify SCRIPT.md (--cloud-ok NOTE | --core-run [internal]) [--out DIR] [--model M]
          -> the ASR round trip: Gemini transcribes the rendered audio (16 kHz AAC 32 kbps) and
             difflib compares it with the spoken script. verify.txt, verify_transcript.txt and a
             `verify` block in podcast.json: word match ratio, spans of 6+ words not heard,
@@ -45,12 +47,25 @@ CHECKS the script, RENDERS it to audio and LINKS the audio into the outputs.
             headless Chromium plays it when one is here. Warns above ~18 MB (~25 MB attached:
             email sends base64) with Bioshare as the way to send it. Refuses while the check
             does not hold, like link.
+  job    SCRIPT.md (--core-run [internal] | --cloud-ok NOTE) [--model M] [--python PY]
+         -> podcast_job.sh in the session's logs/: a SLURM job (1 CPU, 2 GB, 2 h) that runs
+            render --tts gemini (verify follows), link and share -- the route on HIVE, where
+            minutes of network calls must not run on the login node. Written only when what the
+            job needs is here: a passing check, consent, a python with google-genai >=
+            GENAI_MIN (setup.sh installs it) and a key. Loads HIVE's ffmpeg module for the AAC.
+  key    [--core-run]
+         -> where the Gemini key would come from, and whether the Core's shared key can be
+            used; never the key. Exit 0 when there is one.
 
 Privacy: only the final transcript (render: the turns, after pronunciation substitutions) and
 the rendered audio (verify, downsampled) ever leave the machine -- never the report -- and only
-with --cloud-ok (explicit consent, recorded in podcast.json). --tts say (macOS) is offline. The Gemini key is read from
-GEMINI_API_KEY or ~/.config/ucdavis-proteomics/gemini_key; it is never printed or logged and is
-scrubbed from every error message (notify_slack.redact: the skill's one list of secret patterns).
+with consent, recorded in podcast.json: --cloud-ok NOTE (the person whose data it is agreed), or
+--core-run for a Core run, which records CORE_CLOUD_OK (the Core director's standing approval;
+the one place that text lives). --tts say (macOS) is offline. The Gemini key is read from
+GEMINI_API_KEY, else ~/.config/ucdavis-proteomics/gemini_key, else -- for a Core run only -- the
+Core's shared key on HIVE (CORE_KEY_FILE, used only while the Core's trust rule holds and other
+accounts cannot read it). It is never printed or logged and is scrubbed from every error message
+(notify_slack.redact: the skill's one list of secret patterns).
 
 Stdlib only at import time: google-genai is imported by the gemini backend alone. No numpy and
 no ffmpeg requirement -- audio is assembled with array/wave; afconvert (macOS) or ffmpeg, when
@@ -71,6 +86,7 @@ import math
 import os
 import re
 import select
+import shlex
 import shutil
 import struct
 import subprocess
@@ -99,6 +115,25 @@ RATE_WAITS = 10                                     # per-minute 429 waits allow
 RATE_WAIT_BUDGET_MIN = 30.0                         # rate-limit waits allowed per render, minutes
 TERMS_URL = "https://ai.google.dev/gemini-api/terms"
 KEY_FILE = os.path.join("~", ".config", "ucdavis-proteomics", "gemini_key")
+# The Core's shared key on HIVE (Brett installs it: owner brettsp, group proteomics-grp, mode
+# 640). Read last, for a Core run only (--core-run), and only while slack_collab.trust_problem
+# holds (a Core admin owns it and its folder; nobody else can write either) and other accounts
+# cannot read it. Tests replace this constant; nothing in the environment can.
+CORE_KEY_FILE = "/quobyte/proteomics-grp/.config/gemini_key"
+# THE consent of record for a Core run (--core-run): Brett ruled on 2026-09-28 that the Core
+# director's approval is enough to send a Core run's transcript and audio to Gemini, and made
+# the podcast the default for Core runs on 2026-10-15. Docs point here; never retype it.
+CORE_CLOUD_OK = ("Brett Phinney (Core director): standing approval for Core runs (2026-09-28; "
+                 "podcast by default since 2026-10-15)")
+CORE_RUN_KINDS = ("submission", "internal")
+# Gemini 3 TTS needs client.interactions (2.25.0 has it). setup.sh installs at least this into
+# the pipeline env (its GENAI_MIN; tests/test_make_podcast_hive.py keeps the two equal).
+GENAI_MIN = "2.25.0"
+# The podcast job (job): one network-bound process; an episode renders in minutes, a rate-limited
+# one in up to an hour. HIVE's ffmpeg (verified 2026-10-15, AAC encoder present) is a module, so
+# the job is a login shell (#!/bin/bash -l), where `module` exists.
+JOB_HOURS, JOB_MEM = 2, "2G"
+HIVE_FFMPEG_MODULE = "ffmpeg/7.0.2"
 
 RATE = 24000                                        # Hz, 16-bit mono throughout
 WPM = 150                                           # spoken words per minute, for estimates
@@ -1484,7 +1519,7 @@ class GeminiTTS(object):
         except ImportError:
             raise RenderError("[INFO] the gemini backend needs the google-genai package: "
                               "python3 -m pip install google-genai (or use --tts say)")
-        self.key = read_key()
+        self.key = read_key(core=bool(getattr(a, "core_run", None)))
         self.types = types
         self.client = genai.Client(api_key=self.key)
         self.user_models = list(a.model or [])
@@ -1835,21 +1870,64 @@ def error_info(e):
     return dict(info, kind="transient")
 
 
-def read_key():
-    """The Gemini key: GEMINI_API_KEY, else ~/.config/ucdavis-proteomics/gemini_key. Never
-    printed."""
+def core_key():
+    """The Core's shared key (CORE_KEY_FILE) -> (key, None); (None, None) when there is no such
+    file here (a laptop, or not installed); (None, why it is not used). Used only while the
+    Core's rule for its files on HIVE holds (slack_collab.trust_problem: /quobyte/proteomics-grp
+    is group-writable and not sticky, so any member could put a folder with their own key in
+    its place, and every Core episode would then go to their Gemini project) and no account
+    outside the group can read it. Group-readable is the point of it, so that is no warning."""
+    path = CORE_KEY_FILE
+    if not os.path.lexists(path):
+        return None, None
+    try:
+        import slack_collab as sc                  # the Core's trust rule and its admins
+    except ImportError as e:
+        return None, f"{path} is not used: the Core's trust rule cannot be checked ({e})"
+    info = sc._look(path, True)
+    if info.get("error"):
+        return None, (f"{path} is not readable ({info['error']}): it is for members of "
+                      "proteomics-grp")
+    why = sc.trust_problem(info, sc._folder(path), sc.core_admins())
+    if why:
+        return None, f"{path} is not used: {why}"
+    if int(info.get("mode") or 0) & 0o007:
+        return None, f"{path} is not used: accounts outside its group can read it (chmod 640)"
+    key = (info.get("text") or "").strip()
+    return (key, None) if key else (None, f"{path} is empty")
+
+
+def find_key(core=False):
+    """-> (key, where it came from, why the Core's shared key was not used or None). The order:
+    GEMINI_API_KEY; ~/.config/ucdavis-proteomics/gemini_key; for a Core run only, the Core's
+    shared key (core_key). Never printed."""
     key = (os.environ.get("GEMINI_API_KEY") or "").strip()
+    if key:
+        return key, "GEMINI_API_KEY", None
     path = os.path.expanduser(KEY_FILE)
-    if not key and os.path.isfile(path):
+    if os.path.isfile(path):
         mode = os.stat(path).st_mode & 0o777
         if mode & 0o077:
             log(f"[WARN] {KEY_FILE} is readable by other accounts (mode {oct(mode)[2:]}): "
                 f"chmod 600 {KEY_FILE}")
         with open(path, encoding="utf-8") as fh:
             key = fh.read().strip()
+        if key:
+            return key, KEY_FILE, None
+    if not core:
+        return None, None, (f"{CORE_KEY_FILE} is used only for a Core run (--core-run)"
+                            if os.path.lexists(CORE_KEY_FILE) else None)
+    key, why = core_key()
+    return (key, CORE_KEY_FILE, None) if key else (None, None, why)
+
+
+def read_key(core=False):
+    """The Gemini key (find_key), remembered for scrub(). `core`: a Core run, which may use the
+    Core's shared key. Never printed."""
+    key, _src, why = find_key(core)
     if not key:
         raise RenderError(f"no Gemini API key: set GEMINI_API_KEY or put it in {KEY_FILE} "
-                          "(chmod 600)")
+                          "(chmod 600)" + (f"; {why}" if why else ""))
     _SECRETS.append(key)
     return key
 
@@ -1936,6 +2014,44 @@ def cache_key(backend, chunk, speak, model=None):
     return sha256_bytes(blob.encode("utf-8"))
 
 
+# ----------------------------------------------------------------------------- consent
+def core_run_consent(script_path, kind):
+    """--core-run: the consent of record for a Core run -> (CORE_CLOUD_OK, what kind of Core run,
+    None), or (None, None, why not). `submission` (the default): the session the script sits in
+    answers a CoreOmics submission (submission_report.core_run, the one test); `internal`: an
+    analysis of the Core's own samples, which no record can show, so it is recorded as declared.
+    Anyone else's data is never a Core run: they are asked, and --cloud-ok records the answer."""
+    if kind == "internal":
+        return CORE_CLOUD_OK, {"kind": "internal"}, None
+    out, got = output_dir_of(script_path), None
+    if out:
+        try:
+            import submission_report
+            got = submission_report.core_run(_session_of(out))
+        except ImportError:
+            got = None
+    if not got:
+        return None, None, ("--core-run: this session answers no CoreOmics submission "
+                            "(submission_report.core_run, asked of the session above the "
+                            "script's podcast/ folder). For an analysis of the Core's own "
+                            "samples pass --core-run internal; for anyone else's data, ask them "
+                            "and pass --cloud-ok \"<who agreed, when>\".")
+    return CORE_CLOUD_OK, {"kind": "submission", "prot": got.get("prot")}, None
+
+
+def consent_of(a):
+    """The consent a render, verify or job sends under -> (consent, the Core run or None, why
+    there is none or None): --core-run records CORE_CLOUD_OK; --cloud-ok a note (or True); a
+    refusal word ("no", "declined" ...) is no consent."""
+    kind = getattr(a, "core_run", None)
+    if kind:
+        return core_run_consent(a.script, kind)
+    consent = getattr(a, "cloud_ok", False)
+    if isinstance(consent, str) and consent.strip().lower() in NO_CONSENT:
+        return False, None, f"--cloud-ok {consent!r} is a refusal."
+    return consent, None, None
+
+
 # ----------------------------------------------------------------------------- render
 def cmd_render(a):
     s = parse_script(a.script)
@@ -1958,20 +2074,19 @@ def cmd_render(a):
             "report files>` and fix every flagged line first (or pass --unchecked, which "
             "podcast.json then records).")
         return 2
-    consent = a.cloud_ok
-    refused = isinstance(consent, str) and consent.strip().lower() in NO_CONSENT
-    if refused:
-        consent = False
+    consent, core_rec, refusal = consent_of(a) if backend_cls.cloud else (False, None, None)
     if backend_cls.cloud and not consent:
-        if refused:
-            log(f"[render] not sending anything: --cloud-ok {a.cloud_ok!r} is a refusal.")
-        log(f"[render] not sending anything. --tts {a.tts} sends the transcript -- {words:,} "
-            f"words of the turns, after pronunciation substitutions; never the report -- to "
-            f"Google's Gemini API, and verify then sends the rendered AUDIO (downsampled) for "
-            f"transcription. On a free-tier key Google may use both to improve its products "
-            f"and human reviewers may read it ({TERMS_URL}). Once the user has agreed, re-run "
-            f"with --cloud-ok (optionally --cloud-ok \"who agreed, when\"), or use --tts say "
-            f"(offline, macOS).")
+        if refusal:
+            log(f"[render] not sending anything: {refusal}")
+        if not getattr(a, "core_run", None):
+            log(f"[render] not sending anything. --tts {a.tts} sends the transcript -- "
+                f"{words:,} words of the turns, after pronunciation substitutions; never the "
+                f"report -- to Google's Gemini API, and verify then sends the rendered AUDIO "
+                f"(downsampled) for transcription. On a free-tier key Google may use both to "
+                f"improve its products and human reviewers may read it ({TERMS_URL}). Once the "
+                f"user has agreed, re-run with --cloud-ok \"who agreed, when\" (a Core run: "
+                f"--core-run, the Core director's standing approval), or use --tts say "
+                f"(offline, macOS).")
         return 2
     out = os.path.abspath(a.out or os.path.dirname(s.path))
     cache = os.path.join(out, ".cache")
@@ -2084,6 +2199,7 @@ def cmd_render(a):
                                   "rendered audio downsampled to 16 kHz; never the report"
                                   if backend.cloud else "nothing (offline)")},
         "cloud_tts_consent": (consent if backend.cloud else False),
+        "core_run": core_rec,
         "script": "podcast_script.md", "script_sha256": s.sha256,
         "script_author": s.author,
         "check": {"status": status or "not run", "file": "check.txt",
@@ -2115,10 +2231,11 @@ def cmd_render(a):
     if backend.cloud and consent and not getattr(a, "no_verify", False):
         try:
             run_verify(s.path if os.path.dirname(s.path) == out else script_copy, out,
-                       getattr(a, "verify_model", None), consent)
+                       getattr(a, "verify_model", None), consent, core=bool(core_rec))
         except Exception as e:
             log(f"[WARN] verify skipped: {scrub(e)} (the render is fine; run "
-                f"`make_podcast.py verify {script_copy} --cloud-ok ...` to retry)")
+                f"`make_podcast.py verify {script_copy} "
+                f"{'--core-run' if core_rec else '--cloud-ok ...'}` to retry)")
     return 0
 
 
@@ -2371,7 +2488,7 @@ class Transcriber(object):
     """A Gemini TEXT model transcribes the audio: gemini-2.5-flash, then the newest 3.x flash
     text model models.list offers. Same key, scrubbing and rate-limit handling as rendering."""
 
-    def __init__(self, models=None):
+    def __init__(self, models=None, core=False):
         try:
             from google import genai
             from google.genai import types
@@ -2379,7 +2496,7 @@ class Transcriber(object):
             raise VerifyError("the verify step needs the google-genai package: python3 -m pip "
                               "install google-genai")
         self.types = types
-        self.client = genai.Client(api_key=read_key())
+        self.client = genai.Client(api_key=read_key(core))
         self.candidates = list(models or []) or self.discover()
 
     def discover(self):
@@ -2461,10 +2578,11 @@ def verify_report(res, audio, how, size, model):
     return "\n".join(L) + "\n"
 
 
-def run_verify(script_path, out=None, models=None, consent=True):
+def run_verify(script_path, out=None, models=None, consent=True, core=False):
     """Transcribe the rendered audio and compare it with the spoken script. Writes
     verify.txt, verify_transcript.txt and a `verify` block in podcast.json. -> the result dict.
-    Raises VerifyError when it cannot run; never touches the report."""
+    `core`: a Core run, which may use the Core's shared key. Raises VerifyError when it cannot
+    run; never touches the report."""
     s = parse_script(script_path)
     out = os.path.abspath(out or os.path.dirname(s.path))
     mpath = os.path.join(out, "podcast.json")
@@ -2486,7 +2604,7 @@ def run_verify(script_path, out=None, models=None, consent=True):
         raise VerifyError(f"the downsampled audio is {len(data) / 1e6:.0f} MB, over the "
                           "inline limit")
     log(f"[verify] sending {len(data) / 1e6:.1f} MB ({how}) for transcription")
-    text, model = Transcriber(models).transcribe(data, mime)
+    text, model = Transcriber(models, core).transcribe(data, mime)
     res = compare_audio_text(s, pronouncer(s.pronunciation), text)
     res.update(model=model, audio_sent=how, created=now_iso(), cloud_consent=consent,
                report="verify.txt", transcript="verify_transcript.txt")
@@ -2511,17 +2629,19 @@ def run_verify(script_path, out=None, models=None, consent=True):
 
 
 def cmd_verify(a):
-    consent = a.cloud_ok
-    if isinstance(consent, str) and consent.strip().lower() in NO_CONSENT:
-        consent = False
+    consent, core_rec, refusal = consent_of(a)
     if not consent:
-        log(f"[verify] not sending anything. verify sends the rendered AUDIO (downsampled) to "
-            f"Google's Gemini API for transcription. On a free-tier key Google may use it to "
-            f"improve its products and human reviewers may hear it ({TERMS_URL}). Once the user "
-            f"has agreed, re-run with --cloud-ok \"who agreed, when\".")
+        if refusal:
+            log(f"[verify] not sending anything: {refusal}")
+        if not getattr(a, "core_run", None):
+            log(f"[verify] not sending anything. verify sends the rendered AUDIO (downsampled) "
+                f"to Google's Gemini API for transcription. On a free-tier key Google may use it "
+                f"to improve its products and human reviewers may hear it ({TERMS_URL}). Once "
+                f"the user has agreed, re-run with --cloud-ok \"who agreed, when\" (a Core run: "
+                f"--core-run).")
         return 2
     try:
-        res = run_verify(a.script, a.out, a.model, consent)
+        res = run_verify(a.script, a.out, a.model, consent, core=bool(core_rec))
     except (VerifyError, RenderError) as e:
         log(f"[verify] could not verify: {scrub(e)}")
         return 1
@@ -3560,6 +3680,163 @@ def cmd_share(a):
     return 0
 
 
+# ----------------------------------------------------------------------------- the job (HIVE)
+def _vtuple(v):
+    return tuple(int(x) for x in re.findall(r"\d+", str(v or ""))[:3])
+
+
+def job_python(given=None):
+    """The python the podcast job runs -> (path, its google-genai version, None), or (None, None,
+    why). --python, else the skill's env here (setup.json's `python`, where setup.sh installs
+    google-genai), else this python: the first whose google-genai is GENAI_MIN or newer. The
+    python that writes the job is often not it -- on HIVE `python3` is the system's."""
+    cands = [given]
+    if not given:
+        home = os.environ.get("PROTEOMICS_PIPELINE_HOME") or os.path.join(
+            os.path.expanduser("~"), ".proteomics-pipeline")
+        try:
+            with open(os.path.join(home, "setup.json"), encoding="utf-8") as fh:
+                cands = [json.load(fh).get("python")]
+        except (OSError, ValueError, AttributeError):
+            cands = []
+        cands.append(sys.executable)
+    tried, seen = [], set()
+    for py in cands:
+        if not (isinstance(py, str) and py) or py in seen:
+            continue
+        seen.add(py)
+        v = None
+        try:
+            r = subprocess.run([py, "-c", "import google.genai as g; print(g.__version__)"],
+                               capture_output=True, text=True, timeout=120)
+            if r.returncode == 0 and r.stdout.strip():
+                v = r.stdout.strip().splitlines()[-1]
+        except (OSError, subprocess.SubprocessError):
+            pass
+        if v and _vtuple(v) >= _vtuple(GENAI_MIN):
+            return py, v, None
+        tried.append(f"{py}: " + (f"google-genai {v}" if v else "no google-genai"))
+    return None, None, (f"no python here has google-genai >= {GENAI_MIN}, which Gemini 3 TTS "
+                        f"needs ({'; '.join(tried) or 'none found'}). `bash "
+                        f"{os.path.join(HERE, 'setup.sh')}` installs it into the pipeline env; "
+                        "or name a python with --python")
+
+
+def write_job(path, py, script, out, consent_args, models, queue, log_dir, name):
+    """The job script: render --tts gemini (verify follows), link, share. -> its text."""
+    part, acct, qos, requeue = queue
+    q = shlex.quote
+    L = ["#!/bin/bash -l", f"#SBATCH --job-name=podcast_{name}",
+         f"#SBATCH --output={os.path.join(log_dir, 'podcast_job_%j.log')}",
+         "#SBATCH --cpus-per-task=1", f"#SBATCH --mem={JOB_MEM}", f"#SBATCH --time={JOB_HOURS}:00:00"]
+    L += [f"#SBATCH --{k}={v}" for k, v in (("partition", part), ("account", acct), ("qos", qos))
+          if v]
+    if requeue:
+        L.append("#SBATCH --requeue")
+    L += ["# Written by make_podcast.py job: the episode in Gemini voices (render; verify, the ASR",
+          "# round trip, follows by itself), linked into the report (link) and built into",
+          "# Analysis_Report_with_audio.html (share). Minutes of network calls: a job, never the",
+          "# login node. Submitting it again resumes -- rendered chunks are cached in podcast/.cache.",
+          "set -uo pipefail",
+          "# AAC needs ffmpeg, a module on HIVE (this is a login shell, so `module` exists)",
+          f"if command -v module >/dev/null 2>&1; then module load {HIVE_FFMPEG_MODULE} >/dev/null "
+          "2>&1 || module load ffmpeg >/dev/null 2>&1 || true; fi",
+          f"PY={q(py)}", f"MP={q(os.path.abspath(__file__))}",
+          " ".join(['"$PY" "$MP" render', q(script), "--tts", "gemini"]
+                   + [q(x) for x in consent_args + models]) + " || exit $?",
+          f'"$PY" "$MP" link {q(out)} || exit $?',
+          f'"$PY" "$MP" share {q(out)}', ""]
+    text = "\n".join(L)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.chmod(path, 0o755)
+    return text
+
+
+def cmd_job(a):
+    """Write the SLURM job that renders a checked script in Gemini voices, then link and share.
+    What the job needs is checked here first -- the check, consent, google-genai, a key -- so a
+    missing piece is one line now, not a failed job later."""
+    s = parse_script(a.script)
+    if s.problems:
+        for line, msg in s.problems:
+            log(f"[FAIL] {'line %d: ' % line if line else ''}{msg}")
+        return 2
+    out = output_dir_of(a.script)
+    bad = output_dir_problem(out) if out else "the script is not in a podcast/ folder"
+    if bad:
+        log(f"[job] refusing: {bad}. The job links and shares into the session's output/, so "
+            "the script must be output/podcast/podcast_script.md.")
+        return 2
+    _status, _sources, why = read_check(s)
+    if why:
+        log(f"[job] refusing: {why}. Run `make_podcast.py check {a.script} --source <the report "
+            "files>` and fix every flagged line first.")
+        return 2
+    consent, core_rec, refusal = consent_of(a)
+    if not consent:
+        log("[job] refusing: " + (refusal or "the job sends the transcript and the audio to "
+                                  "Google, so it needs consent: --core-run for a Core run, or "
+                                  "--cloud-ok \"<who agreed, when>\" from the person whose data "
+                                  "it is."))
+        return 2
+    py, version, why = job_python(a.python)
+    if not py:
+        log(f"[job] refusing: {why}")
+        return 2
+    key, src, why = find_key(bool(core_rec))
+    if not key:
+        log(f"[job] refusing: no Gemini API key for the job: set GEMINI_API_KEY or put it in "
+            f"{KEY_FILE} (chmod 600)" + (f"; {why}" if why else ""))
+        return 2
+    del key                                          # only where it is was needed
+    try:
+        import diann_parallel                      # needs_requeue: the one rule
+        import run_search                          # slurm_queue: never a hard-coded queue
+    except ImportError as e:
+        log(f"[job] cannot choose a SLURM queue: {e}. The skill's scripts are incomplete here; "
+            "put them again (hive_exec.sh --put-skill).")
+        return 2
+    part, acct, qos = run_search.slurm_queue(peak_cpus=1, preemptible_ok=True)
+    requeue = diann_parallel.needs_requeue(part, qos)
+    session = _session_of(out)
+    log_dir = os.path.join(session, "logs")
+    if not os.path.isdir(log_dir):
+        log_dir = os.path.dirname(os.path.abspath(a.script))
+    path = os.path.join(log_dir, "podcast_job.sh")
+    name = re.sub(r"[^A-Za-z0-9_.-]+", "_", (core_rec or {}).get("prot")
+                  or os.path.basename(session))[:40]
+    if core_rec:
+        consent_args = ["--core-run"] + (["internal"] if core_rec["kind"] == "internal" else [])
+    else:
+        consent_args = ["--cloud-ok"] + ([consent] if isinstance(consent, str) else [])
+    models = [x for m in (a.model or []) for x in ("--model", m)]
+    write_job(path, py, os.path.abspath(a.script), out, consent_args, models,
+              (part, acct, qos, requeue), log_dir, name)
+    print(json.dumps({"job": path, "submit": f"sbatch {path}",
+                      "log": os.path.join(log_dir, "podcast_job_<jobid>.log"),
+                      "python": py, "google_genai": version, "key": src,
+                      "consent": (f"Core run ({core_rec['kind']}"
+                                  + (f", {core_rec['prot']}" if core_rec.get("prot") else "")
+                                  + "): CORE_CLOUD_OK") if core_rec else "--cloud-ok",
+                      "queue": {"partition": part, "account": acct, "qos": qos,
+                                "requeue": requeue},
+                      "steps": ["render --tts gemini (then verify)", "link", "share"]}, indent=2))
+    return 0
+
+
+def cmd_key(a):
+    """Where the Gemini key would come from, and whether the Core's shared key can be used.
+    Never the key."""
+    key, src, why = find_key(a.core_run)
+    core, core_why = core_key()
+    print(json.dumps({"found": bool(key), "source": src, "core_run": a.core_run,
+                      "core_key": ("usable, for a Core run (--core-run)" if core else
+                                   core_why or f"none here ({CORE_KEY_FILE})"),
+                      "note": why if not key else None}, indent=2))
+    return 0 if key else 1
+
+
 # ----------------------------------------------------------------------------- main
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
@@ -3577,13 +3854,22 @@ def main(argv=None):
     c.add_argument("--label", action="append", help="what the matching --extra-source is")
     c.add_argument("--forbid-name", nargs="+", default=[], action="extend",
                    help="names that must not appear (the PI, staff, collaborators)")
+    def consent_args(p, cloud_help):
+        g = p.add_mutually_exclusive_group()
+        g.add_argument("--cloud-ok", nargs="?", const=True, default=False, help=cloud_help)
+        g.add_argument("--core-run", nargs="?", const="submission", choices=CORE_RUN_KINDS,
+                       help="a Core run: the consent is the Core director's standing approval "
+                            "(CORE_CLOUD_OK, recorded in podcast.json), and the Core's shared "
+                            "key on HIVE may be used. 'submission' (the default) needs the "
+                            "session to answer a CoreOmics submission; 'internal' is an analysis "
+                            "of the Core's own samples")
+
     r = sub.add_parser("render", help="render a checked script to audio")
     r.add_argument("script")
     r.add_argument("--out", help="output folder (default: the script's folder)")
     r.add_argument("--tts", required=True, choices=sorted(BACKENDS))
-    r.add_argument("--cloud-ok", nargs="?", const=True, default=False,
-                   help="consent to send the transcript to the cloud TTS service; optionally a "
-                        "note of who agreed and when (recorded in podcast.json)")
+    consent_args(r, "consent to send the transcript to the cloud TTS service; optionally a "
+                    "note of who agreed and when (recorded in podcast.json)")
     r.add_argument("--model", action="append", help="Gemini TTS model(s) to use, in order "
                                                     "(default: read from the API)")
     r.add_argument("--rate-wait-budget", type=float, default=RATE_WAIT_BUDGET_MIN,
@@ -3607,8 +3893,7 @@ def main(argv=None):
                                       "spoken script (sends the audio to Google)")
     v.add_argument("script")
     v.add_argument("--out", help="the folder with podcast.json (default: the script's folder)")
-    v.add_argument("--cloud-ok", nargs="?", const=True, default=False,
-                   help="consent to send the audio to Gemini for transcription")
+    consent_args(v, "consent to send the audio to Gemini for transcription")
     v.add_argument("--model", action="append", help="text model(s) to transcribe with")
     k = sub.add_parser("link", help="link the podcast into the report, README and AGENTS.md")
     k.add_argument("outdir", help="the folder with Analysis_Report.html and podcast/")
@@ -3625,13 +3910,25 @@ def main(argv=None):
                    help="build it although the script's check no longer holds")
     h.add_argument("--no-browser", action="store_true",
                    help="skip the headless-browser playback test")
+    j = sub.add_parser("job", help="write the SLURM job (HIVE) that renders the checked script in "
+                                   "Gemini voices, verifies, links and shares it")
+    j.add_argument("script", help="<session>/output/podcast/podcast_script.md, checked")
+    consent_args(j, "consent to send the transcript and audio to Gemini: a note of who agreed "
+                    "and when (recorded in podcast.json)")
+    j.add_argument("--model", action="append", help="Gemini TTS model(s) for render, in order")
+    j.add_argument("--python", help="the python the job runs (default: the pipeline env's, from "
+                                    "setup.json, else this one; it needs google-genai >= "
+                                    + GENAI_MIN + ")")
+    y = sub.add_parser("key", help="say where the Gemini key would come from (never the key)")
+    y.add_argument("--core-run", action="store_true",
+                   help="for a Core run, which may use the Core's shared key on HIVE")
     a = ap.parse_args(argv)
     if not a.cmd:
         ap.print_help()
         return 2
     try:
         return {"check": cmd_check, "render": cmd_render, "verify": cmd_verify,
-                "link": cmd_link, "share": cmd_share}[a.cmd](a)
+                "link": cmd_link, "share": cmd_share, "job": cmd_job, "key": cmd_key}[a.cmd](a)
     except RenderError as e:
         log(f"[{a.cmd}] {e}")
         return 1
