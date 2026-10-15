@@ -623,6 +623,11 @@ def main():
     # a replay without them would quietly read the other ones
     de_quantities = (f" \\\n  --quantities {de_rec['quantities']}"
                      if de_rec.get("quantities") in ("normalised", "raw") else "")
+    # the covariates the DE fitted as numbers (run_de.R --numeric-covariates, its `covariates`
+    # record): replayed without them each would be a factor -- another model, or no fit at all
+    _cov = de_rec.get("covariates") if isinstance(de_rec.get("covariates"), dict) else {}
+    de_numeric = [c for c in (_cov.get("numeric_requested") or []) if c in ("Covariate1", "Covariate2")]
+    de_numeric_arg = f" \\\n  --numeric-covariates {','.join(de_numeric)}" if de_numeric else ""
     # maxlfq + raw read a --no-norm report's PG.MaxLFQ. run_search.py has no --no-norm, so the
     # replayed search below writes a NORMALISED report, on which run_de.R refuses --quantities raw:
     # said here plainly, with what to do, rather than left to fail at step 6.
@@ -688,7 +693,7 @@ Rscript "$SKILL/scripts/run_de.R" --input ./search_out/report.parquet \\
   --metadata inputs/{os.path.basename(a.conditions) if a.conditions else 'conditions.csv'} \\
   --method {a.de_method or '<method>'} --outdir ./de_results \\
   {('--contrasts "'+a.contrasts+'"') if a.contrasts else ''} \\
-  --q-cutoff {a.q_cutoff or '0.01'} --logfc {a.logfc or '1.0'} --adjp {a.adjp or '0.05'}{de_quantities}
+  --q-cutoff {a.q_cutoff or '0.01'} --logfc {a.logfc or '1.0'} --adjp {a.adjp or '0.05'}{de_quantities}{de_numeric_arg}
 
 echo "Done. Compare ./de_results against checksums/checksums.json to confirm reproduction."
 """

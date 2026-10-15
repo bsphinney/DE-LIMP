@@ -360,6 +360,15 @@ def main():
             w(f"- **Blocking caveat (say this in Data Quality Notes):** {warn}")
     elif blk.get("column") and blk.get("note"):
         w(f"- Blocking: none used — {blk['note']}")
+    # run_de.R's covariate record (--numeric-covariates): make_methods' sentence is its one
+    # description. Only a numeric covariate is said here; a factor is the design's term.
+    from make_methods import de_covariate_sentence
+    cov = de_covariate_sentence(prov)
+    if cov:
+        w(f"- Continuous covariate: {cov} Describe every group difference as adjusted for it.")
+        cov_rec = prov.get("covariates") if isinstance(prov.get("covariates"), dict) else {}
+        for warn in cov_rec.get("warnings") or []:
+            w(f"- **Covariate caveat (say this in Data Quality Notes):** {warn}")
     if adjp_rec is not None:
         w(f"- Significance rule: adj.P.Val < {adjp:g} (Benjamini-Hochberg within each contrast) "
           f"— the adjusted p-value ALONE (identification FDR: "

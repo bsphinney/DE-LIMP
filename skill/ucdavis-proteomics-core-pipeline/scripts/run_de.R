@@ -33,6 +33,11 @@
 # metadata CSV columns: File.Name,Group[,Batch,Covariate1,Covariate2][,<block column>]
 #   File.Name must match the Run / column names in the report.
 #
+# --numeric-covariates Covariate1[,Covariate2]: these covariates are continuous measurements (a
+#   centred log2 intensity, an age, a run depth), fitted as one numeric column each -- one slope
+#   shared by all groups -- instead of a factor with a level per value. Only on request: a batch
+#   labelled 1/2/3 is a factor, and Batch always is. See numeric_covariate_values() below.
+#
 # --block <column>: samples sharing a value of that column (the mouse several IPs came
 #   from, the patient several biopsies came from) are not treated as independent: a fixed
 #   subject effect or a random effect via limma's duplicateCorrelation (--block-effect).
@@ -217,6 +222,83 @@ if (!all(c("File.Name", "Group") %in% names(meta)))
   stop("metadata CSV must have at least File.Name and Group columns")
 covariates <- intersect(c("Batch", "Covariate1", "Covariate2"), names(meta))
 
+# ---- numeric (continuous) covariates: --numeric-covariates ---------------------
+# Every covariate column is a factor unless the user names it here. A continuous covariate as a
+# factor gets a level per distinct value: a staff analysis's centred log2 TurboID intensity (11
+# values) became an 11-level factor and "Design matrix is not full rank" (staff report 2026-10-08).
+# Never decided from the values -- a batch labelled 1/2/3 must stay a factor -- and never Batch.
+# A numeric covariate is one design column: one slope, shared by all groups (no group x
+# covariate interaction), so a contrast between groups compares them at the same covariate value.
+# Its values are used as given (not centred: centring moves the group coefficients, never a
+# difference between them, which is all a contrast reads).
+NUMERIC_COVARIATE_COLUMNS <- c("Covariate1", "Covariate2")
+# Group explaining at least this share of a numeric covariate's variance (R^2 of covariate ~
+# Group) is warned about: the variance-inflation factor 1/(1 - R^2) is then >= 5, the usual
+# collinearity line, and the group comparisons rest largely on the fitted slope.
+COVARIATE_CONFOUND_R2 <- 0.8
+numeric_covs <- local({
+  a <- getarg("--numeric-covariates", NULL)
+  if (isTRUE(a)) stop("--numeric-covariates needs column names, e.g. --numeric-covariates Covariate1",
+                      call. = FALSE)
+  v <- if (is.null(a)) character(0) else unique(trimws(strsplit(a, ",")[[1]]))
+  v[nzchar(v)]
+})
+# The values of numeric covariate `cv` as numbers, or stop: every sample needs a finite number,
+# and they must not all be the same.
+numeric_covariate_values <- function(meta, cv) {
+  if (identical(cv, "Batch"))
+    stop("--numeric-covariates Batch: Batch is a categorical label and is always fitted as a ",
+         "factor. Put a continuous measurement in Covariate1 or Covariate2 and name that column.",
+         call. = FALSE)
+  if (!cv %in% NUMERIC_COVARIATE_COLUMNS)
+    stop(sprintf(paste0("--numeric-covariates %s: only %s can be numeric covariates (the design's ",
+                        "covariate columns besides Batch)."),
+                 cv, paste(NUMERIC_COVARIATE_COLUMNS, collapse = " or ")), call. = FALSE)
+  if (!cv %in% names(meta))
+    stop(sprintf("--numeric-covariates %s: %s has no %s column (columns: %s).", cv, meta_path, cv,
+                 paste(names(meta), collapse = ", ")), call. = FALSE)
+  raw <- trimws(as.character(meta[[cv]]))
+  x <- suppressWarnings(as.numeric(raw))
+  bad <- which(is.na(x) | !is.finite(x))
+  if (length(bad))
+    stop(sprintf(paste0("--numeric-covariates %s: %d sample(s) have no number in %s: %s. A numeric ",
+                        "covariate needs a finite number for every sample -- fill them in (never a ",
+                        "made-up value), or drop --numeric-covariates %s to fit it as a factor."),
+                 cv, length(bad), cv,
+                 paste(sprintf("%s (%s)", meta$File.Name[utils::head(bad, 5)],
+                               ifelse(is.na(raw[utils::head(bad, 5)]) | !nzchar(raw[utils::head(bad, 5)]),
+                                      "blank", sprintf("'%s'", raw[utils::head(bad, 5)]))),
+                       collapse = ", "), cv), call. = FALSE)
+  if (length(unique(x)) < 2)
+    stop(sprintf("--numeric-covariates %s: every sample has the same value (%s), so it carries no ",
+                 "information. Drop the column, or check it.", cv, format(x[1])), call. = FALSE)
+  x
+}
+for (.cv in numeric_covs) meta[[.cv]] <- numeric_covariate_values(meta, .cv)
+if (length(numeric_covs))
+  message(sprintf("[run_de] numeric covariate(s) (--numeric-covariates): %s -- one slope each, shared by all groups",
+                  paste(sprintf("%s (%d distinct values, %s to %s)", numeric_covs,
+                                vapply(numeric_covs, function(cv) length(unique(meta[[cv]])), 0L),
+                                vapply(numeric_covs, function(cv) format(min(meta[[cv]]), digits = 4), ""),
+                                vapply(numeric_covs, function(cv) format(max(meta[[cv]]), digits = 4), "")),
+                        collapse = "; ")))
+# A covariate fitted as a factor whose values are all numbers, with 3 or more of them, may be a
+# continuous measurement: say how to fit it as one when the design fails (never switch it).
+numeric_hint <- function(meta, covariates) {
+  cand <- Filter(function(cv) {
+    if (cv %in% numeric_covs || !cv %in% NUMERIC_COVARIATE_COLUMNS) return(FALSE)
+    x <- suppressWarnings(as.numeric(trimws(as.character(meta[[cv]]))))
+    !anyNA(x) && length(unique(x)) >= 3
+  }, covariates)
+  if (!length(cand)) return("")
+  sprintf(paste0(" %s holds only numbers (%s distinct values) and is fitted as a factor, one ",
+                 "level per value. If it is a continuous measurement (an intensity, an age, a ",
+                 "depth), fit it as one: --numeric-covariates %s. A label numbered 1/2/3 stays a factor."),
+          paste(cand, collapse = " / "),
+          paste(vapply(cand, function(cv) length(unique(as.character(meta[[cv]]))), 0L), collapse = " / "),
+          paste(cand, collapse = ","))
+}
+
 # ---- technical replicates (the Sample column) ---------------------------------
 # core_submission.py locate --reinjections all keeps every injection of a sample, and
 # `conditions` names each run's biological sample in the Sample column (collect_conditions.py
@@ -272,13 +354,14 @@ if (TECH_REPLICATE_COLUMN %in% names(meta)) {
 
 # ~ 0 + groups [+ covariates]. A function because the design is built twice: from the
 # whole metadata up front, so a --block that cannot be fitted fails before quantification
-# (which can take an hour), and again from the runs that survived it.
+# (which can take an hour), and again from the runs that survived it. A covariate is a factor,
+# or one numeric column when --numeric-covariates names it (numeric_covs).
 build_design <- function(meta, covariates) {
   groups <- factor(meta$Group)
   ft <- list(groups = groups)
   formula_parts <- c("groups")
   for (cv in covariates) {
-    ft[[cv]] <- factor(meta[[cv]])
+    ft[[cv]] <- if (cv %in% numeric_covs) as.numeric(meta[[cv]]) else factor(meta[[cv]])
     formula_parts <- c(formula_parts, cv)
   }
   design <- stats::model.matrix(
@@ -299,7 +382,8 @@ check_design_rank <- function(meta, covariates) {
        if (length(nested)) sprintf(paste0(
          " %s is confounded with the groups but recurs across them: if it names the animal or ",
          "subject the samples came from, fit it as a random effect instead -- rename the column ",
-         "(e.g. Mouse) and pass --block Mouse."), nested[1]) else "", call. = FALSE)
+         "(e.g. Mouse) and pass --block Mouse."), nested[1]) else "",
+       numeric_hint(meta, covariates), call. = FALSE)
 }
 
 # Residual degrees of freedom: limma estimates each protein's variance from them. None (one
@@ -314,8 +398,9 @@ check_residual_df <- function(design, where) {
     "No residual degrees of freedom %s: %d samples, %d model coefficients. limma estimates ",
     "each protein's variance from replicates, and this design has none left%s. Add replicates ",
     "(>= 2 samples in at least one group), or drop a covariate; a single-sample comparison ",
-    "cannot give p-values."), where, nrow(design), qr(design)$rank,
-    if (length(single)) sprintf(" (one sample in: %s)", paste(single, collapse = ", ")) else ""),
+    "cannot give p-values.%s"), where, nrow(design), qr(design)$rank,
+    if (length(single)) sprintf(" (one sample in: %s)", paste(single, collapse = ", ")) else "",
+    numeric_hint(meta, covariates)),
     call. = FALSE)
 }
 
@@ -998,6 +1083,72 @@ fit <- if (is.null(block)) fit_ind else block_merge_fits(.fit_blocked, fit_ind, 
 design_label <- paste0("~ 0 + ", paste(c(formula_parts,
                        if (identical(block_rec$effect, "fixed")) block_col), collapse = " + "))
 
+# ---- the covariates, as fitted: the one record of how each entered the model -------------
+# de_provenance.json `covariates`; methods.txt, make_methods.de_covariate_sentence (Methods, the
+# analysis brief, the report's callout) and reproducibility_log.R read it. For a numeric one:
+# its range, how much of its variance Group explains (R^2 of covariate ~ Group), and per
+# contrast how much it widens the standard error -- sqrt of the contrast's unscaled variance in
+# the fitted design over that without the covariate's column (ordinary least squares; a random
+# block's correlation is left out of this ratio).
+covariate_record <- function(meta, covariates, numeric_covs, design, cmat, absorbed = character(0)) {
+  se_inflation <- function(cv) tryCatch({
+    keep <- setdiff(colnames(design), cv)
+    v <- function(X, C) diag(t(C) %*% solve(crossprod(X), C))
+    r <- sqrt(v(design, cmat) / v(design[, keep, drop = FALSE], cmat[keep, , drop = FALSE]))
+    as.list(setNames(round(unname(r), 3), colnames(cmat)))
+  }, error = function(e) paste("not computed:", conditionMessage(e)))
+  terms <- lapply(covariates, function(cv) {
+    if (!cv %in% numeric_covs)
+      return(list(column = cv, type = "factor", n_levels = nlevels(factor(meta[[cv]])),
+                  source = "default: a covariate column is a factor unless --numeric-covariates names it"))
+    x <- as.numeric(meta[[cv]])
+    r2 <- summary(stats::lm(x ~ factor(meta$Group)))$r.squared
+    list(column = cv, type = "numeric", source = "--numeric-covariates",
+         n_distinct = length(unique(x)), min = min(x), max = max(x),
+         group_r2 = round(r2, 3), confounded = r2 >= COVARIATE_CONFOUND_R2,
+         se_inflation = se_inflation(cv))
+  })
+  warn <- lapply(Filter(function(t) isTRUE(t$confounded), terms), function(t) {
+    se <- if (is.list(t$se_inflation)) unlist(t$se_inflation) else NULL
+    sprintf(paste0(
+      "%s is strongly confounded with Group: Group explains %.0f%% of its variance (R^2 %.2f, ",
+      "warned from %.1f). The group comparisons are adjusted for a covariate that nearly ",
+      "coincides with the groups, so they rest largely on its fitted straight-line slope%s. If %s ",
+      "differs between the groups because of the grouping itself (a consequence of the ",
+      "treatment), adjusting for it removes part of the effect being tested: ask whether it ",
+      "belongs in the model."),
+      t$column, 100 * t$group_r2, t$group_r2, COVARIATE_CONFOUND_R2,
+      if (length(se)) sprintf(", and their standard errors are up to %.1fx those without it (%s)",
+                              max(se), paste(sprintf("%s %.2fx", names(se), se), collapse = ", "))
+      else "", t$column)
+  })
+  list(terms = terms, numeric_requested = as.list(numeric_covs),
+       absorbed_by_block = as.list(absorbed),
+       model = if (length(numeric_covs)) paste(
+         "a numeric covariate is one design column: one slope shared by all groups (no group x",
+         "covariate interaction), its values used as given (not centred); each contrast compares",
+         "the groups at the same covariate value") else NULL,
+       confound_r2_threshold = if (length(numeric_covs)) COVARIATE_CONFOUND_R2 else NULL,
+       warnings = warn)
+}
+covariates_rec <- covariate_record(meta, covariates, numeric_covs, design, cmat,
+                                   absorbed = if (identical(block_rec$effect, "fixed")) .eff$absorbed
+                                              else character(0))
+for (.w in unlist(covariates_rec$warnings)) warning("covariate: ", .w, call. = FALSE)
+# methods.txt's lines: only when a covariate is numeric (a factor covariate is the design line's
+# term, as it always was)
+covariate_methods_lines <- function(r) {
+  if (!any(vapply(r$terms, function(t) identical(t$type, "numeric"), TRUE))) return(NULL)
+  pad <- strrep(" ", 16)
+  desc <- vapply(r$terms, function(t) if (identical(t$type, "numeric"))
+    sprintf("%s numeric (--numeric-covariates; %s to %s): one slope shared by all groups",
+            t$column, format(t$min, digits = 4), format(t$max, digits = 4))
+    else sprintf("%s factor (%d levels)", t$column, t$n_levels), "")
+  c(sprintf("Covariates    : %s", desc[1]), if (length(desc) > 1) paste0(pad, desc[-1]),
+    paste0(pad, "Each contrast compares the groups at the same covariate value."),
+    if (length(r$warnings)) paste0(pad, "CAUTION: ", unlist(r$warnings)))
+}
+
 # ---- write per-contrast results ---------------------------------------------
 gene_cols <- intersect(c("Genes", "Protein.Names"), names(genes))
 # limpa returns the protein identifier in rownames(genes), not as a column. Guarding
@@ -1239,6 +1390,7 @@ if (is.null(.rs)) {
       eq_cutoff = eq_cutoff, pgq_cutoff = pgq_cutoff,
       cov_min_frac = cov_min_frac,
       meta = meta, covariates = covariates, formula_parts = formula_parts,
+      numeric_covariates = intersect(numeric_covs, covariates),
       forms = forms, adjp_thr = adjp_thr, logfc_ref = logfc_ref,
       ann_cols = gene_cols, descriptor = descriptor,
       contaminants = cont_rec, block = block_rec, contrast_model = contrast_model,
@@ -1339,6 +1491,7 @@ methods_txt <- c(
   norm_check_methods_lines(norm_check_rec),
   runs_left_out_methods_lines(runs_left_out_rec),
   sprintf("Design        : %s", design_label),
+  covariate_methods_lines(covariates_rec),
   block_methods_lines(block_rec),
   sprintf("Contrasts     : %s", paste(forms, collapse = ", ")),
   sprintf("Significance  : adj.P.Val < %.3g (Benjamini-Hochberg), moderated t-test of", adjp_thr),
@@ -1508,6 +1661,9 @@ prov <- list(
   logfc = logfc_ref, logfc_role = "reference_line_only", adjp = adjp_thr,
   significance_rule = "adj.P.Val < adjp (BH); no fold-change filter",
   design = design_label,
+  # How each covariate entered the model: a factor, or numeric (--numeric-covariates) with its
+  # range, its R^2 with Group and its standard-error inflation per contrast -- covariate_record()
+  covariates = covariates_rec,
   # The random blocking factor (--block), if any: column, consensus correlation, how it
   # was estimated and fitted, and which contrasts are within vs between blocks.
   block = block_rec,

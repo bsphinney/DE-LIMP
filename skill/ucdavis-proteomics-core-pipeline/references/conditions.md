@@ -105,6 +105,12 @@ The agent confirms each with the user, finalizes `conditions.csv`, then runs
 ## The finished metadata
 `conditions.csv` columns: `File.Name,Group[,Batch,Covariate1,Covariate2][,<block column>]`.
 
+**Is a covariate a measurement?** `run_de.R` fits every covariate as a factor (one level per
+value) unless told otherwise. When `Covariate1`/`Covariate2` holds a continuous measurement (a
+bait intensity, an age, a run depth), ask the user, and run DE with `--numeric-covariates
+Covariate1` (`references/de-analysis.md`, "Continuous covariates"). Never decide it from the
+values: a batch numbered 1/2/3 is a factor. A numeric covariate needs a number for every sample.
+
 **Samples from the same animal / patient?** (five IPs from one mouse brain, paired
 before/after samples.) Ask. If so, keep that unit in its own column under its own name
 (`Mouse`, `Patient`) and run DE with `--block Mouse` (`references/de-analysis.md`,

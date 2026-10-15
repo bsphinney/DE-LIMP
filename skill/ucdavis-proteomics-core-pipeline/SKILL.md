@@ -2004,7 +2004,7 @@ analyses every row. A missing run without `--exclude` still fails. Also log the 
 both ways into scratch folders (one job on HIVE), then the check:
 ```
 Rscript scripts/run_de.R --input ./search_out/report.parquet --metadata conditions.csv \
-    --method <dpc|maxlfq> --fasta-meta ./search.fasta.meta.json [--block Mouse] \
+    --method <dpc|maxlfq> --fasta-meta ./search.fasta.meta.json [--block Mouse] [--numeric-covariates Covariate1] \
     --quantities normalised --check-input --outdir <S>/output/norm_check/normalised
 Rscript scripts/run_de.R ... (the same) --quantities raw --check-input --outdir <S>/output/norm_check/raw
 python3 scripts/normalization_check.py run --report ./search_out/report.parquet \
@@ -2065,7 +2065,7 @@ DE with no check record and is tied to that DE record. It is written to the staf
 ```
 Rscript scripts/run_de.R --input ./search_out/report.parquet \
     --metadata conditions.csv --method <dpc|maxlfq> --outdir ./de_results \
-    --fasta-meta ./search.fasta.meta.json [--block Mouse] \
+    --fasta-meta ./search.fasta.meta.json [--block Mouse] [--numeric-covariates Covariate1] \
     --quantities <decided> --normalization-check <S>/output/norm_check/normalization_check.json
 ```
 **Several samples from one animal / patient → `--block <column>`.** IPs cut from the same
@@ -2092,6 +2092,12 @@ A `Sample` column whose value repeats (technical replicates from `locate --reinj
 is blocked by run_de.R itself — random effect, every contrast from that fit — so pass no
 `--block` for it; see `references/de-analysis.md`, "Technical replicates".
 → `references/de-analysis.md`, "Paired / repeated designs".
+**A covariate that is a measurement** (a bait intensity, an age, a run depth) → ask, then pass
+`--numeric-covariates Covariate1` to all three DEs (both check inputs and the final one): it is
+fitted as one slope shared by all groups, not a factor with a level per value. Never decided
+from the values; `Batch` is always a factor. A blank or non-number stops the run; a covariate
+that Group mostly explains is a `CAUTION` to raise with the user →
+`references/de-analysis.md`, "Continuous covariates".
 **Keratin sample (step 3):** `run_de.R` reads it from the sidecar or `search_provenance.json`
 and keeps keratin as the analyte — nothing to pass. For a search that records neither (an older
 search, one run outside the skill), pass `--keratin-sample`: precursors that map only to

@@ -11,6 +11,7 @@ Rscript scripts/run_de.R --input report.parquet [--format parquet|tsv] \
         [--contrasts "B-A,C-A"] [--q-cutoff 0.01] [--eq-cutoff 0] [--pgq-cutoff 0] \
         [--coverage-min 0.5] [--logfc 1.0] [--adjp 0.05] \
         [--fasta-meta search.fasta.meta.json] [--keep-contaminants] \
+        [--numeric-covariates Covariate1[,Covariate2]] \
         [--block Mouse [--block-scope within|all] [--block-effect auto|fixed|random]]
 ```
 - `--q-cutoff` is the q-value filter on the report; `--eq-cutoff` / `--pgq-cutoff` the
@@ -22,6 +23,8 @@ Rscript scripts/run_de.R --input report.parquet [--format parquet|tsv] \
   proteins sat in the database only as `Cont_` entries, which the removal would then take out
   too. `--keep-contaminants` quantifies and tests `Cont_` entries with the sample proteins
   instead of removing them first; `de_provenance.json` records which.
+- `--numeric-covariates`: covariates that are continuous measurements, fitted as numbers
+  (below, "Continuous covariates").
 - `--block` / `--block-scope` / `--block-effect`: paired and repeated designs, below.
 `metadata` CSV: `File.Name,Group[,Batch,Covariate1,Covariate2][,<block column>]`. `File.Name` must
 match the `Run` / column names in the report. Default contrasts = every group vs
@@ -136,6 +139,42 @@ Protein.Names`). `run_search.py` produces this for non-DIA-NN engines.
 **Rank-checked before fitting** (`qr(design)$rank`); fails on confounded covariates
 or empty groups. Groups with <2 replicates have no within-group variance — warn the
 user at the design step (`collect_conditions.py --validate` flags singletons).
+
+### Continuous covariates — `--numeric-covariates Covariate1[,Covariate2]` (2.12)
+Every covariate column is a **factor** unless named here: one design column per level. A
+continuous measurement (a centred log2 bait intensity, an age, a run depth) as a factor gets a
+level per distinct value — a staff analysis's 11-value TurboID intensity became an 11-level
+factor and "not full rank". Named in `--numeric-covariates`, it is **one numeric column**: one
+slope, shared by all groups. Ask the user which covariates are continuous; never decide it from
+the values (a batch numbered 1/2/3 is a factor, and `Batch` always is — only `Covariate1` /
+`Covariate2` can be numeric). When a design fails and a covariate holds only numbers with 3 or
+more distinct values, the error names the flag.
+- **Values** are used as given, not centred, and must be a finite number for every sample: a
+  blank, `NA`, text or `Inf` stops the run before quantification, naming the samples (fill them
+  in — never a made-up value — or fit the column as a factor). A column with one value stops too.
+- **The contrasts stay between groups.** With `~ 0 + groups + Covariate1` the design's columns
+  are the group levels plus `Covariate1`; `makeContrasts("B-A", levels = design)` puts weight 0
+  on `Covariate1`, so each contrast is the difference between the group coefficients — the
+  groups compared at the same covariate value (ANCOVA's parallel slopes). Centring the
+  covariate would move the group coefficients, never their difference. The same holds for both
+  `--method`s (dpc: `dpcDE`, whose `voomaLmFitWithImputation` takes any design matrix; maxlfq:
+  `lmFit`), for a fixed `--block` (its columns are added to this design; a numeric covariate
+  constant within each block is absorbed and dropped, as a factor would be) and for a random
+  block or technical replicates (`duplicateCorrelation` and the blocked fit use the same
+  design). No group × covariate interaction is fitted: a slope that differs between groups is
+  not modelled.
+- **Confounding is warned about.** When Group explains ≥ 80% of the covariate's variance
+  (R² of covariate ~ Group; variance-inflation factor ≥ 5), the run warns, `methods.txt` carries
+  a `CAUTION`, and the report a warning callout: the adjusted comparisons rest largely on the
+  fitted straight line, and if the covariate differs between groups *because of* the grouping,
+  adjusting for it removes part of the effect being tested. Ask whether it belongs in the model.
+- **Recorded** in `de_provenance.json` `covariates`: each term's `type` (`factor` with
+  `n_levels`, or `numeric` with `source: --numeric-covariates`, `n_distinct`, `min`, `max`,
+  `group_r2`, `confounded`, and `se_inflation` — per contrast, the standard error with the
+  covariate over without it, from the design alone), `numeric_requested`, `absorbed_by_block`,
+  `model` and `warnings`. `methods.txt` has a `Covariates` line, the Methods paragraph and the
+  analysis brief a sentence (`make_methods.de_covariate_sentence`), the analysis page a callout,
+  and `reproducibility_log.R` writes the values as numbers and fits `as.numeric(...)`.
 
 ## Paired / repeated designs — `--block <column>`
 When several samples come from one source — the IPs cut from one mouse brain, the
