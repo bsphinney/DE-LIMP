@@ -206,20 +206,55 @@ Read `setup.json` and **gate on `ready_for`**:
 - `thermo_raw_reader.resolution_reader.ready` false only means step 2 cannot read the
   Orbitrap resolution and the user will be asked for it; its `note` is the fix.
 
-**In `hive_remote`, first check that HIVE runs this same skill** (one SSH call). Core staff once
+**Every mode, first: is this computer's skill behind GitHub `main`?** One HTTPS read of
+`main`'s `plugin.json` (bash and curl, which Git Bash has; no Python, no GitHub SSH key):
+```
+bash scripts/skill_version.sh --check-update
+```
+- `0` → this copy is what `main` ships, or newer (a test build). Say nothing.
+- `3` → `behind_main` true: the update question below, with `main` as the newer version.
+  `status: reload_needed` means the new version is installed already and only this session runs
+  the old one: ask the user to type `/reload-plugins` (or restart Claude Code), then start again.
+- `5` → `main` could not be read (offline, no curl) → relay `say` in one line and carry on.
+
+**Never tell the user the skill is up to date** unless `--check-update` exited 0, and never take
+it from `claude plugin update`. On 2026-10-07 a Windows laptop with no GitHub SSH key ran
+`claude plugin update ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core`: it warned
+"marketplace not refreshed: SSH host key is not in your known_hosts", then "SSH authentication
+failed", and printed "already at the latest version (2.10.0)" while `main` shipped 2.11.2. It
+had compared against its own stale catalogue (the marketplace clone).
+
+**In `hive_remote`, then check that HIVE runs this same skill** (one SSH call). Core staff once
 ran 2.6.0 on their laptops and on HIVE two releases after it, so none of the fixes in between
 ran, and a HIVE copy without `.claude-plugin/` wrote "v0.0.0" into sdrf.tsv:
 ```
 bash scripts/skill_version.sh --check-hive --mode hive_remote
 ```
-**`behind_release` true** means this computer's skill is older than the Core's current release.
-It can come with exit 0, 3, 4 or 6. **Relay it FIRST, before any other work**, in plain words:
-"Your copy of the skill is older than the Core's current release (you have `local`, the Core is
-on `release`). Updating takes a minute." Then **ask whether to update now**:
-- **Yes** → give the exact steps: `/plugin` → Installed → ucdavis-proteomics-core-pipeline →
-  Update now, or in a terminal:
-  `claude plugin update ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core`
-  then `/reload-plugins`. Continue after the update, starting again with this check.
+**`behind_main` true (above) or `behind_release` true** means this computer's skill is older
+than the Core's current release. `behind_release` can come with exit 0, 3, 4 or 6. **Relay it
+FIRST, before any other work**, in plain words: "Your copy of the skill is older than the Core's
+current release (you have `local`, the Core is on `main` / `release`). Updating takes a minute."
+Then **ask whether to update now**:
+- **Yes** → run the update yourself; the user types nothing:
+  ```
+  bash scripts/skill_version.sh --update
+  ```
+  When the catalogue is behind `main` it refreshes it over HTTPS:
+  `git -C ~/.claude/plugins/marketplaces/ucdavis-proteomics-core pull --ff-only`, the route that
+  worked on that laptop. A catalogue with an SSH remote is pulled from
+  `https://github.com/bsphinney/DE-LIMP.git` instead. Then it runs
+  `claude plugin update ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core` with
+  `CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1` (Claude Code's documented switch for machines without a
+  GitHub SSH key). Last, it reads the version that landed and compares it with `main`:
+  - exit 0, `updated` → ask the user to type `/reload-plugins` (or restart Claude Code), then
+    start again with `--check-update`. `current` or `reload_needed`: nothing, or only the
+    reload, was needed.
+  - exit 1, `not_updated` → **The update did NOT happen**. Say it in those words and relay `say`
+    (why, plus the by-hand line in `manual`), then record it (`report_issue.sh`). Never relay
+    claude's "already at the latest version" as the answer; `claude_said` keeps its words for
+    the record.
+  - exit 5, `unverified` → it ran, but the result could not be checked against `main`. Relay
+    `say`: it is not a confirmation.
 - **No** → carry on. Once the session exists (step 3b), record that they declined:
   ```
   python3 scripts/log_decision.py --session <S> --step "0. skill version" \
@@ -229,7 +264,8 @@ on `release`). Updating takes a minute." Then **ask whether to update now**:
 
 Either way, **always recommend turning on auto-update**: `/plugin` → Marketplaces →
 ucdavis-proteomics-core → Enable auto-update. It is off by default for this marketplace, which
-is how staff fell two releases behind.
+is how staff fell two releases behind. A new install should add the marketplace by its HTTPS
+URL, which Claude Code clones over HTTPS without probing SSH (`references/install.md`).
 
 Then, by exit code:
 - **exit 0** → carry on (after the update question above, when `behind_release` is true).
@@ -249,8 +285,8 @@ Then, by exit code:
   ask the user whether to put it now or after those jobs finish (`watch_run.sh` shows when);
   until then HIVE runs the older scripts.
 
-Only `hive_remote` runs it. Without `--mode hive_remote`, a computer with no HIVE login skips
-it silently; the release is compared only for Core accounts (→ `references/access.md`).
+Only `hive_remote` runs `--check-hive`. Without `--mode hive_remote`, a computer with no HIVE
+login skips it silently; the release is compared only for Core accounts (→ `references/access.md`).
 
 In `hive_remote` the toolchain lives on HIVE, so run it there instead (the laptop needs none
 of it): `bash scripts/hive_exec.sh 'bash ~/proteomics-pipeline/scripts/setup.sh'`, and read

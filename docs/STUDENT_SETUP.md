@@ -38,7 +38,7 @@ time.
 Claude Code, or run `/reload-plugins` if it is already open:
 
 ```
-claude plugin marketplace add bsphinney/DE-LIMP && claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core
+claude plugin marketplace add https://github.com/bsphinney/DE-LIMP.git && claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core
 ```
 
 Inside Claude Code, do them one at a time: paste the first command, press Enter, then the second.
@@ -49,8 +49,13 @@ Pasting both at once does not work.
 A *marketplace* is a catalog. Adding one lets you browse it; nothing is installed yet.
 
 ```
-/plugin marketplace add bsphinney/DE-LIMP
+/plugin marketplace add https://github.com/bsphinney/DE-LIMP.git
 ```
+
+Use the full `https://` address, not the short form `bsphinney/DE-LIMP`: for the short form
+Claude Code tries SSH first, and a laptop with no GitHub SSH key can then fail to refresh the
+catalog later. If you already added the short form, keep it (removing a marketplace also
+uninstalls its plugins); the refresh under "Updating later" works for it.
 
 ## 3. Install the plugin
 
@@ -113,6 +118,17 @@ claude plugin update ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core
 then `/reload-plugins` (or restart Claude Code). `/plugin marketplace update` alone only refreshes
 the catalog; the installed skill stays on its old version.
 
+If the update says "already at the latest version" while a newer release is out, or warns that
+the marketplace was not refreshed, Claude Code compared against its old copy of the catalog.
+Refresh that copy over HTTPS, then update again:
+
+```
+git -C ~/.claude/plugins/marketplaces/ucdavis-proteomics-core pull --ff-only
+```
+
+Inside the skill, Claude checks for a newer version at the start of a session and does this for
+you.
+
 If something in the pipeline seems fixed for everyone else but not for you, update first.
 
 ## Where everything lives
@@ -131,6 +147,7 @@ experimenting is cheap.
 | symptom | fix |
 |---|---|
 | `/plugin` isn't a recognized command | Your Claude Code is too old. `npm install -g @anthropic-ai/claude-code@latest`, or `brew upgrade claude-code`. Restart your terminal. |
+| Update says "already at the latest version", but a newer release is out | Your catalog copy did not refresh (seen without a GitHub SSH key): `git -C ~/.claude/plugins/marketplaces/ucdavis-proteomics-core pull --ff-only`, then update again. |
 | Marketplace added, but the plugin isn't found | Your catalog copy is stale: `/plugin marketplace update ucdavis-proteomics-core`, then retry the install. |
 | Installed, but the skill never triggers | `rm -rf ~/.claude/plugins/cache`, restart Claude Code, install again. |
 | On a Mac, with DIA data | DIA-NN has no native Mac build. You need Docker Desktop; the skill builds an image from DIA-NN's own official release. DDA data and all the statistics work without Docker. |

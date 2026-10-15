@@ -9,7 +9,8 @@
 # keeps it equal to the original, fixture for fixture.
 #   bash skill_version.sh                 # this copy's version, or the UNKNOWN tag
 #   . skill_version.sh                    # skill_version_of / skill_version / skill_label /
-#                                         # skill_version_core / skill_version_cmp
+#                                         # skill_version_core / skill_version_cmp /
+#                                         # skill_installed_version / skill_update_state
 #
 # DRIFT (SKILL.md step 0, hive_remote). On 2026-09-29 two Core staff were still on 2.6.0, on
 # their laptops AND in ~/proteomics-pipeline on HIVE, two releases behind: none of the 2.7/2.8
@@ -49,6 +50,31 @@
 # `stat -c %U`, BSD `stat -f %Su` as a fallback) who owns a path there. Tests point all three at
 # stand-ins.
 # No HIVE login here (hive.env, or HIVE_USER + HIVE_KEY) = no SSH at all.
+#
+# BEHIND GITHUB MAIN (SKILL.md step 0, every mode). On 2026-10-07 a Windows laptop (Git Bash, no
+# GitHub SSH key) ran `claude plugin update ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core`.
+# It warned "marketplace not refreshed: SSH host key is not in your known_hosts", then "SSH
+# authentication failed", and said "already at the latest version (2.10.0)" while main shipped
+# 2.11.2: it had compared against its own stale catalogue. The catalogue (the marketplace clone,
+# ~/.claude/plugins/marketplaces/ucdavis-proteomics-core) had an HTTPS remote, and
+# `git -C <clone> pull --ff-only` followed by the same update took it to 2.11.2.
+#   bash skill_version.sh --check-update     # read-only: this copy vs main's plugin.json
+#     0  this copy is what main ships (or newer: a test build). Say nothing.
+#     3  behind main -> the update question, then `next` (--update). status reload_needed: the
+#        new version is installed already, this session still runs the old one (/reload-plugins).
+#     5  main could not be read (offline, no curl) -> one line, carry on. Never "up to date".
+#   bash skill_version.sh --update           # does the update, and checks what landed
+#     0  updated (the installed plugin is now main's version), or nothing was needed
+#     1  the update did NOT happen: `say` says why and gives the by-hand route
+#     5  it ran, but could not be checked against main (main unreadable, or the installed
+#        version could not be read). Not a confirmation.
+#   main's version is read over HTTPS (curl, which Git Bash has; SKILL_MAIN_URL), never SSH, and
+#   no Python is needed. --update refreshes a catalogue behind main with
+#   `git pull --ff-only` over HTTPS (an SSH remote is pulled from SKILL_REPO_URL instead), runs
+#   `claude plugin update` (SKILL_CLAUDE) with CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1, and reads the
+#   installed version from `claude plugin list --json`, or installed_plugins.json beside the
+#   catalogue. SKILL_MARKETPLACE_DIR overrides where the catalogue is. Tests point all four at
+#   stand-ins (a file:// URL, local git repositories, a fake claude); no test uses the network.
 # =============================================================================
 
 # The tag for a version that cannot be read -- skill_version.py's UNKNOWN, character for
@@ -127,6 +153,53 @@ skill_is_core_admin() {
   [ -n "${1:-}" ] && skill_core_admins "${2:-}" | grep -qxF -- "$1"
 }
 
+# How `claude plugin` names this plugin and its marketplace.
+SKILL_PLUGIN_ID="ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core"
+SKILL_MARKETPLACE="ucdavis-proteomics-core"
+
+# The LOWEST version that the JSON text on stdin gives the plugin $1 (default SKILL_PLUGIN_ID):
+# every object that names it, read to the end of that object. That covers
+# `claude plugin list --json` ({"id": "<id>", "version": ...}) and installed_plugins.json
+# ("<id>": [{..., "version": ...}]), as Claude Code 2.1.295 writes them, pretty-printed or on one
+# line. The lowest, so that an install still behind never reads as current. Only plain versions
+# count. Prints nothing when no object names the plugin.
+skill_installed_version() {
+  local key="\"${1:-$SKILL_PLUGIN_ID}\"" rb='}' text chunk v low=""
+  text="$(LC_ALL=C tr -d '\r\n')"
+  while :; do
+    case "$text" in *"$key"*) ;; *) break ;; esac
+    text="${text#*"$key"}"
+    chunk="${text%%"$rb"*}"
+    v="$(printf '%s\n' "$chunk" \
+         | LC_ALL=C sed -nE 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -n1)"
+    skill_version_cmp "$(skill_version_core "$v")" 0 >/dev/null || continue
+    if [ -z "$low" ] || [ "$(skill_version_cmp "$(skill_version_core "$v")" \
+                                               "$(skill_version_core "$low")")" = -1 ]; then
+      low="$v"
+    fi
+  done
+  [ -z "$low" ] || printf '%s\n' "$low"
+}
+
+# Where this computer stands against GitHub main, for the running copy $1, main's version $2
+# and the installed plugin's $3 (may be blank):
+#   current        $1 is main's version, or newer (a test build)
+#   reload_needed  $1 is behind, but the installed plugin already is main's: this session still
+#                  runs the old copy
+#   behind         $1 is behind main
+#   unknown        $1 or $2 is not a plain version, so nothing can be said
+skill_update_state() {
+  local here main inst c
+  here="$(skill_version_core "$1")"; main="$(skill_version_core "$2")"
+  inst="$(skill_version_core "${3:-}")"
+  if ! c="$(skill_version_cmp "$here" "$main")"; then echo unknown; return 0; fi
+  if [ "$c" != -1 ]; then echo current; return 0; fi
+  if c="$(skill_version_cmp "$inst" "$main")" && [ "$c" != -1 ]; then
+    echo reload_needed; return 0
+  fi
+  echo behind
+}
+
 # ---- run as a command (not sourced) ------------------------------------------------------
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   set -uo pipefail
@@ -137,8 +210,14 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   HIVE_COPY="~/proteomics-pipeline"
   PUT_SKILL="bash scripts/hive_exec.sh --put-skill"
   # Checked on Claude Code 2.1.285: `/plugin marketplace update` refreshes the catalogue only;
-  # the installed plugin stays where it was. `claude plugin update` moves it.
-  UPDATE_HOW="/plugin -> Installed -> ucdavis-proteomics-core-pipeline -> Update now (or in a terminal: claude plugin update ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core), then /reload-plugins. To stop this recurring: /plugin -> Marketplaces -> ucdavis-proteomics-core -> Enable auto-update"
+  # the installed plugin stays where it was. `claude plugin update` moves it -- but only as far
+  # as its catalogue, which it may fail to refresh (over SSH, 2026-10-07), so --update does the
+  # refresh over HTTPS itself and checks the version that landed.
+  UPDATE_CMD="bash scripts/skill_version.sh --update"
+  UPDATE_HOW="$UPDATE_CMD, which refreshes the plugin catalogue over HTTPS when it is behind, runs claude plugin update $SKILL_PLUGIN_ID and checks the version that landed; then /reload-plugins. To stop this recurring: /plugin -> Marketplaces -> $SKILL_MARKETPLACE -> Enable auto-update"
+  SKILL_MAIN_URL="${SKILL_MAIN_URL:-https://raw.githubusercontent.com/bsphinney/DE-LIMP/main/skill/ucdavis-proteomics-core-pipeline/.claude-plugin/plugin.json}"
+  SKILL_REPO_URL="${SKILL_REPO_URL:-https://github.com/bsphinney/DE-LIMP.git}"
+  SKILL_CLAUDE="${SKILL_CLAUDE:-claude}"
   ROOT="$(cd "$SV_HERE/.." && pwd)"
 
   sv_die() { echo "skill_version.sh: $*" >&2; exit 2; }
@@ -429,6 +508,228 @@ SH
       "$main_checked"
   }
 
+  # ---- behind GitHub main: --check-update / --update ---------------------------------------
+
+  # The marketplace clone (the plugin catalogue `claude plugin update` reads): beside the
+  # plugin cache this copy runs from, else under CLAUDE_CONFIG_DIR or ~/.claude.
+  sv_marketplace_dir() {
+    if [ -n "${SKILL_MARKETPLACE_DIR:-}" ]; then printf '%s\n' "$SKILL_MARKETPLACE_DIR"; return; fi
+    case "$ROOT" in
+      */plugins/cache/"$SKILL_MARKETPLACE"/*)
+        printf '%s\n' "${ROOT%%/plugins/cache/*}/plugins/marketplaces/$SKILL_MARKETPLACE"; return ;;
+    esac
+    printf '%s\n' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/marketplaces/$SKILL_MARKETPLACE"
+  }
+  # A path as a user pastes it: "$HOME/..." when under the home folder (spaces in a Windows
+  # user name survive), else shell-quoted.
+  sv_show_path() {
+    case "$1" in
+      "$HOME"/*) printf '"$HOME/%s"' "${1#"$HOME"/}" ;;
+      *) printf '%q' "$1" ;;
+    esac
+  }
+  # The catalogue's version of the plugin, or "" (no clone, or no readable plugin.json in it).
+  sv_catalogue_version() {
+    local v
+    v="$(skill_version_of "$1/skill/ucdavis-proteomics-core-pipeline/.claude-plugin/plugin.json")"
+    [ "$v" = "$SKILL_VERSION_UNKNOWN" ] || printf '%s\n' "$v"
+  }
+  # PULL_TAIL: what `git pull --ff-only` pulls from. Nothing (the clone's own remote) unless that
+  # remote is SSH; then the repository's HTTPS URL and main. The clone Claude Code made on
+  # 2026-10-07 had an HTTPS remote, and a plain pull was the route that worked.
+  sv_pull_tail() {
+    PULL_TAIL=()
+    case "$(git -C "$1" remote get-url origin 2>/dev/null)" in
+      http://*|https://*|'') ;;
+      ssh://*|git@*|*@*:*) PULL_TAIL=("$SKILL_REPO_URL" main) ;;
+    esac
+  }
+  # The update by hand, as one line to paste in Git Bash or a terminal.
+  sv_manual() {
+    local t=""
+    sv_pull_tail "$1"
+    [ "${#PULL_TAIL[@]}" -eq 0 ] || t=" ${PULL_TAIL[*]}"
+    printf 'git -C %s pull --ff-only%s && claude plugin update %s' \
+      "$(sv_show_path "$1")" "$t" "$SKILL_PLUGIN_ID"
+  }
+
+  # MAIN: the version GitHub main ships, from its plugin.json over HTTPS. Else "" and MAIN_ERR.
+  sv_fetch_main() {
+    local tmp err
+    MAIN=""; MAIN_ERR=""
+    if ! command -v curl >/dev/null 2>&1; then MAIN_ERR="curl is not on PATH"; return 1; fi
+    tmp="$(mktemp "${TMPDIR:-/tmp}/skill_main.XXXXXX" 2>/dev/null)" \
+      || { MAIN_ERR="no temporary file could be made"; return 1; }
+    if err="$(curl -fsSL --max-time 20 --retry 1 -o "$tmp" "$SKILL_MAIN_URL" 2>&1)"; then
+      MAIN="$(skill_version_of "$tmp")"
+      sv_is_version "$(skill_version_core "$MAIN")" \
+        || { MAIN=""; MAIN_ERR="main's plugin.json has no readable version"; }
+    else
+      MAIN_ERR="$(printf '%s\n' "$err" | LC_ALL=C grep -av '^[[:space:]]*$' | tail -n1 | sv_ascii)"
+      MAIN_ERR="${MAIN_ERR:-curl failed}"
+    fi
+    rm -f "$tmp"
+    [ -n "$MAIN" ]
+  }
+
+  # The installed plugin's version: `claude plugin list --json`, else installed_plugins.json
+  # beside the catalogue (as Claude Code 2.1.295 writes it). "" when neither says.
+  sv_installed() {
+    local v="" f
+    if command -v "$SKILL_CLAUDE" >/dev/null 2>&1; then
+      v="$("$SKILL_CLAUDE" plugin list --json </dev/null 2>/dev/null | skill_installed_version)"
+    fi
+    f="$(dirname "$(dirname "$1")")/installed_plugins.json"
+    if [ -z "$v" ] && [ -f "$f" ]; then v="$(skill_installed_version <"$f")"; fi
+    printf '%s\n' "$v"
+  }
+
+  # Refresh the catalogue: fast-forward only, never a reset (a clone with local changes fails
+  # and says so). No prompt can hang it. REFRESH = ok | failed | no_clone, REFRESH_ERR = why.
+  sv_refresh() {
+    local out
+    REFRESH_ERR=""
+    if [ ! -e "$1/.git" ]; then
+      REFRESH=no_clone; REFRESH_ERR="there is no plugin catalogue (git clone) at $1"; return 1
+    fi
+    if ! command -v git >/dev/null 2>&1; then
+      REFRESH=failed; REFRESH_ERR="git is not on PATH"; return 1
+    fi
+    sv_pull_tail "$1"
+    if out="$(GIT_TERMINAL_PROMPT=0 git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 \
+                -C "$1" pull --ff-only ${PULL_TAIL[@]+"${PULL_TAIL[@]}"} </dev/null 2>&1)"; then
+      REFRESH=ok; return 0
+    fi
+    REFRESH=failed
+    REFRESH_ERR="$(printf '%s\n' "$out" | LC_ALL=C grep -aE '^(fatal|error):' | head -n1 | sv_ascii)"
+    [ -n "$REFRESH_ERR" ] || REFRESH_ERR="$(printf '%s\n' "$out" | LC_ALL=C grep -av '^[[:space:]]*$' \
+                                            | tail -n1 | sv_ascii)"
+    REFRESH_ERR="${REFRESH_ERR:-git pull failed}"
+    return 1
+  }
+
+  # `claude plugin update`, with Claude Code's documented switch for a machine without a GitHub
+  # SSH key (CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1: an owner/repo marketplace is cloned over HTTPS,
+  # no SSH probe). CLAUDE_RC is "" when claude is not on PATH; CLAUDE_SAID its output, on one line.
+  sv_claude_update() {
+    local out
+    CLAUDE_RC=""; CLAUDE_SAID=""
+    command -v "$SKILL_CLAUDE" >/dev/null 2>&1 || return 1
+    out="$(CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1 "$SKILL_CLAUDE" plugin update "$SKILL_PLUGIN_ID" \
+           </dev/null 2>&1)"
+    CLAUDE_RC=$?
+    CLAUDE_SAID="$(printf '%s\n' "$out" | LC_ALL=C tr -d '\r' | LC_ALL=C tr -d '\200-\377' \
+                   | awk 'NF { printf "%s%s", (n++ ? " / " : ""), $0 }' | cut -c1-500)"
+  }
+
+  sv_check_update() {
+    local here inst="" state say="" next="" behind=null status code mp
+    MAIN=""; MAIN_ERR=""
+    here="$(skill_version)"
+    mp="$(sv_marketplace_dir)"
+    if [ "$here" = "$SKILL_VERSION_UNKNOWN" ]; then
+      status=local_unknown; code=5; here=""
+      say="This copy of the skill has no readable .claude-plugin/plugin.json, so it cannot be compared with GitHub main. Reinstall it from the plugin marketplace (references/install.md)."
+    elif ! sv_fetch_main; then
+      status=main_unknown; code=5
+      say="Could not read the version GitHub main ships ($MAIN_ERR), so this computer's skill ($here) was not compared with it. That is not a confirmation that $here is current; carrying on."
+    else
+      state="$(skill_update_state "$here" "$MAIN")"
+      if [ "$state" = behind ]; then
+        inst="$(sv_installed "$mp")"
+        state="$(skill_update_state "$here" "$MAIN" "$inst")"
+      fi
+      case "$state" in
+        current) status=current; code=0; behind=false ;;
+        reload_needed)
+          status=reload_needed; code=3; behind=true
+          say="Skill $inst is installed on this computer, but this session still runs $here: type /reload-plugins (or restart Claude Code), then start again." ;;
+        behind)
+          status=behind; code=3; behind=true; next="$UPDATE_CMD"
+          say="This computer has skill $here; GitHub main ships $MAIN, so the fixes since $here do not run here yet. Updating takes a minute: $UPDATE_HOW." ;;
+        *) status=main_unknown; code=5
+           say="Could not compare this computer's skill ($here) with GitHub main ($MAIN). That is not a confirmation that it is current; carrying on." ;;
+      esac
+    fi
+    printf '{"status": %s, "local": %s, "main": %s, "installed": %s, "behind_main": %s, ' \
+      "$(sv_js "$status")" "$(sv_js "$here")" "$(sv_js "$MAIN")" "$(sv_js "$inst")" "$behind"
+    printf '"next": %s, "manual": %s, "say": %s}\n' \
+      "$(sv_js "$next")" "$(sv_js "$(sv_manual "$mp")")" "$(sv_js "$say")"
+    return "$code"
+  }
+
+  sv_update() {
+    local here mp inst0="" inst1="" cat0 cat1 state=unknown status code say="" why="" c lc
+    here="$(skill_version)"; [ "$here" != "$SKILL_VERSION_UNKNOWN" ] || here=""
+    mp="$(sv_marketplace_dir)"
+    sv_fetch_main
+    cat0="$(sv_catalogue_version "$mp")"
+    REFRESH=not_needed; REFRESH_ERR=""; CLAUDE_RC=""; CLAUDE_SAID=""
+    # the installed version only when this copy is not already main's (claude takes seconds)
+    if [ -n "$MAIN" ] && [ -n "$here" ]; then state="$(skill_update_state "$here" "$MAIN")"; fi
+    if [ "$state" != current ]; then
+      inst0="$(sv_installed "$mp")"
+      [ -z "$MAIN" ] || state="$(skill_update_state "${here:-$inst0}" "$MAIN" "$inst0")"
+    fi
+    case "$state" in
+      current)
+        status=current; code=0; inst1="$inst0"
+        say="This computer's skill (${here:-$inst0}) is what GitHub main ships ($MAIN): nothing to update." ;;
+      reload_needed)
+        status=reload_needed; code=0; inst1="$inst0"
+        say="Skill $inst0 is installed on this computer, but this session still runs ${here:-an older copy}: type /reload-plugins (or restart Claude Code), then start again." ;;
+      *)
+        # the catalogue first, over HTTPS, unless it already has main's version
+        if [ -n "$MAIN" ] && [ -n "$cat0" ] && c="$(skill_version_cmp "$(skill_version_core "$cat0")" \
+             "$(skill_version_core "$MAIN")")" && [ "$c" != -1 ]; then
+          REFRESH=not_needed
+        else
+          sv_refresh "$mp"
+        fi
+        sv_claude_update
+        inst1="$(sv_installed "$mp")"
+        # Why, in words staff can be told. claude's own "already at the latest version" is never
+        # repeated here (it is in claude_said): it compared against a stale catalogue.
+        lc="$(printf '%s' "$CLAUDE_SAID" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+        cat1="$(sv_catalogue_version "$mp")"
+        if [ -z "$CLAUDE_RC" ]; then
+          why="The claude command is not on PATH here, so claude plugin update could not run (in Claude Code: /plugin -> Installed -> ucdavis-proteomics-core-pipeline -> Update now)."
+        elif [ "$CLAUDE_RC" != 0 ]; then
+          why="claude plugin update failed (exit $CLAUDE_RC)."
+        else
+          case "$lc" in
+            *"not refreshed"*) why="claude plugin update could not refresh its own catalogue, so it compared against the old one (${cat1:-version unknown})." ;;
+            *"already at the latest"*) why="claude plugin update compared against its own catalogue, which is at ${cat1:-an unknown version}." ;;
+          esac
+        fi
+        case "$REFRESH" in
+          failed|no_clone) why="Refreshing the plugin catalogue over HTTPS failed: ${REFRESH_ERR%.}.${why:+ $why}" ;;
+        esac
+        if [ -z "$MAIN" ]; then
+          status=unverified; code=5
+          say="The update ran, but the version GitHub main ships could not be read ($MAIN_ERR), so it is not confirmed: the installed skill is now ${inst1:-unknown}. That is not a confirmation that it is current.${why:+ $why}"
+        elif [ -z "$inst1" ]; then
+          status=unverified; code=5
+          say="The update ran, but the installed version could not be read (claude plugin list --json), so it is not confirmed. Check with claude plugin list that ucdavis-proteomics-core-pipeline shows $MAIN.${why:+ $why}"
+        elif c="$(skill_version_cmp "$(skill_version_core "$inst1")" "$(skill_version_core "$MAIN")")" \
+             && [ "$c" != -1 ]; then
+          status=updated; code=0
+          say="Updated the skill from ${inst0:-${here:-an older version}} to $inst1, the version GitHub main ships. Type /reload-plugins (or restart Claude Code), then start again: this session still runs ${here:-the old copy}."
+        else
+          status=not_updated; code=1
+          say="The update did NOT happen: this computer still has skill $inst1, and GitHub main ships $MAIN.${why:+ $why} To do it by hand, in Git Bash or a terminal: $(sv_manual "$mp"), then /reload-plugins."
+        fi ;;
+    esac
+    cat1="$(sv_catalogue_version "$mp")"
+    printf '{"status": %s, "local": %s, "main": %s, "installed_before": %s, "installed": %s, ' \
+      "$(sv_js "$status")" "$(sv_js "$here")" "$(sv_js "$MAIN")" "$(sv_js "$inst0")" "$(sv_js "$inst1")"
+    printf '"catalogue_before": %s, "catalogue": %s, "refresh": %s, "refresh_error": %s, ' \
+      "$(sv_js "$cat0")" "$(sv_js "$cat1")" "$(sv_js "$REFRESH")" "$(sv_js "$REFRESH_ERR")"
+    printf '"claude_exit": %s, "claude_said": %s, "manual": %s, "say": %s}\n' \
+      "${CLAUDE_RC:-null}" "$(sv_js "$CLAUDE_SAID")" "$(sv_js "$(sv_manual "$mp")")" "$(sv_js "$say")"
+    return "$code"
+  }
+
   case "${1:-}" in
     "")                [ $# -eq 0 ] || sv_die "usage"; skill_version ;;
     --check-hive)      case "$*" in
@@ -438,12 +739,16 @@ SH
                          *) sv_die "usage: --check-hive [--mode hive_remote|local]" ;;
                        esac
                        exit $? ;;
+    --check-update)    [ $# -eq 1 ] || sv_die "usage: --check-update"
+                       sv_check_update; exit $? ;;
+    --update)          [ $# -eq 1 ] || sv_die "usage: --update"
+                       sv_update; exit $? ;;
     --publish-release) case "${2:-}" in
                          "") sv_publish 0 ;;
                          --allow-older) [ $# -eq 2 ] || sv_die "usage"; sv_publish 1 ;;
                          *) sv_die "unknown argument: $2" ;;
                        esac ;;
-    -h|--help)         sed -n '3,51p' "$0" ;;
+    -h|--help)         sed -n '3,77p' "$0" ;;
     *)                 sv_die "unknown argument: $1 (see --help)" ;;
   esac
 fi

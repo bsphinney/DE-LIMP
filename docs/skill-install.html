@@ -387,17 +387,17 @@ footer p { max-width: var(--col); }
         <p class="sub">The terminal version</p>
         <p><strong>Easiest, in a terminal:</strong> paste this one line whole, then start Claude
         Code (or run <code>/reload-plugins</code> if it is already open).</p>
-        <div class="cmd" data-copy="claude plugin marketplace add bsphinney/DE-LIMP &amp;&amp; claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core">
+        <div class="cmd" data-copy="claude plugin marketplace add https://github.com/bsphinney/DE-LIMP.git &amp;&amp; claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core">
           <button class="copy" type="button">Copy</button>
           <div class="cmd-label">Add the source and install, in one line</div>
-          <pre><code>claude plugin marketplace add bsphinney/DE-LIMP &amp;&amp; claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core</code></pre>
+          <pre><code>claude plugin marketplace add https://github.com/bsphinney/DE-LIMP.git &amp;&amp; claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core</code></pre>
         </div>
         <p><strong>Or inside Claude Code:</strong> paste the first command, press Enter, then the
         second. Pasting both at once does not work.</p>
-        <div class="cmd" data-copy="/plugin marketplace add bsphinney/DE-LIMP">
+        <div class="cmd" data-copy="/plugin marketplace add https://github.com/bsphinney/DE-LIMP.git">
           <button class="copy" type="button">Copy</button>
           <div class="cmd-label">Step one &mdash; add the source</div>
-          <pre><code>/plugin marketplace add bsphinney/DE-LIMP</code></pre>
+          <pre><code>/plugin marketplace add https://github.com/bsphinney/DE-LIMP.git</code></pre>
         </div>
         <div class="cmd" data-copy="/plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core">
           <button class="copy" type="button">Copy</button>
@@ -458,9 +458,23 @@ footer p { max-width: var(--col); }
       installed skill stays where it was.
     </p>
     <p>
-      Note the two different names: <code>bsphinney/DE-LIMP</code> is the GitHub repository you add,
-      while <code>ucdavis-proteomics-core</code> is the marketplace inside it that later commands
-      refer to.
+      <strong>If the update says &ldquo;already at the latest version&rdquo; while a newer release
+      is out</strong>, or warns that the marketplace was not refreshed (seen on a Windows laptop
+      with no GitHub SSH key), Claude Code could not refresh its copy of the catalogue and compared
+      against the old one. Refresh it over HTTPS, then run the update again. Inside the skill,
+      Claude does this for you at the start of a session.
+    </p>
+    <div class="cmd" data-copy="git -C ~/.claude/plugins/marketplaces/ucdavis-proteomics-core pull --ff-only">
+      <button class="copy" type="button">Copy</button>
+      <div class="cmd-label">Refresh the catalogue over HTTPS (Git Bash or a terminal)</div>
+      <pre><code>git -C ~/.claude/plugins/marketplaces/ucdavis-proteomics-core pull --ff-only</code></pre>
+    </div>
+    <p>
+      Note the two different names: <code>https://github.com/bsphinney/DE-LIMP.git</code> is the GitHub repository you add, while
+      <code>ucdavis-proteomics-core</code> is the marketplace inside it that later commands refer
+      to. The repository is added by its HTTPS address because Claude Code tries SSH first for the
+      short form <code>bsphinney/DE-LIMP</code>, and many laptops have no GitHub SSH key. If you
+      added the short form before, keep it: the refresh above works for it.
     </p>
   </div>
 </section>

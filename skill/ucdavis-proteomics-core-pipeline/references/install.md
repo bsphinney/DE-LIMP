@@ -6,15 +6,46 @@ genuine manual fallback.
 
 ## Installing the SKILL itself — marketplace only
 
-Install via the plugin marketplace. In a terminal, one line (then start Claude Code, or
-`/reload-plugins` if it is open):
+Install via the plugin marketplace, **added by its HTTPS URL**. In a terminal, one line (then
+start Claude Code, or `/reload-plugins` if it is open):
 ```
-claude plugin marketplace add bsphinney/DE-LIMP && claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core
+claude plugin marketplace add https://github.com/bsphinney/DE-LIMP.git && claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core
 ```
 Inside Claude Code the same is two commands, **entered one at a time** (pasted together they
-fail): `/plugin marketplace add bsphinney/DE-LIMP`, then `/plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core`. Automatic updates are off for this marketplace until the
+fail): `/plugin marketplace add https://github.com/bsphinney/DE-LIMP.git`, then `/plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core`. Automatic updates are off for this marketplace until the
 user turns them on: `/plugin` → Marketplaces → ucdavis-proteomics-core → Enable auto-update.
-To update now: `claude plugin update ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core`, then `/reload-plugins`.
+
+**Why the URL and not `bsphinney/DE-LIMP`.** Claude Code's documentation ("Host and maintain a
+marketplace", read 2026-10-08) says that for the `owner/repo` shorthand it probes
+`ssh -T git@github.com` and clones over SSH when the probe succeeds, and that an `https://…`
+URL is cloned over HTTPS. Its plugin-commands reference says an `https://` URL ending in
+`.git` is always cloned as a git repository. Without `.git`, only github.com and gitlab.com
+URLs are; any other URL is fetched as a `marketplace.json`. So the `.git` is kept.
+The marketplace name stays `ucdavis-proteomics-core`, so every other command is unchanged.
+On 2026-10-07 a Windows laptop (Git Bash, no GitHub SSH key) with the marketplace added by the
+shorthand could not refresh it: `claude plugin update` warned "marketplace not refreshed: SSH
+host key is not in your known_hosts", then "SSH authentication failed", and said "already at the
+latest version (2.10.0)" while main shipped 2.11.2. Its catalogue clone had an HTTPS remote all
+along. **Already added by the shorthand? Keep it.** Do not remove and re-add it:
+`claude plugin marketplace remove` also uninstalls the plugin. The update route below works
+for it.
+
+**To update now.** Inside the skill, step 0 does it: `bash scripts/skill_version.sh --update`
+refreshes the catalogue over HTTPS when it is behind GitHub main, runs the update, and checks the
+version that landed against main. It never says "up to date" while behind. By hand, in Git
+Bash or a terminal, one line at a time:
+```
+git -C ~/.claude/plugins/marketplaces/ucdavis-proteomics-core pull --ff-only
+claude plugin update ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core
+```
+then `/reload-plugins`. The `git pull` is what took that laptop from 2.10.0 to 2.11.2. Without
+it, when Claude Code cannot refresh the catalogue, `claude plugin update` compares against the
+old one, so its "already at the latest version" can be wrong. (With `CLAUDE_CONFIG_DIR` set, the
+catalogue is under that folder instead of `~/.claude`.) `--update` also sets
+`CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1`, which Claude Code documents for machines without a GitHub
+SSH key ("skip the probe and clone over HTTPS"). Whether that switch also covers the refresh of
+an existing catalogue is not documented and was not tested here. The `git pull` is the route
+that was seen to work.
 
 **Do not hand-copy this directory into
 `~/.claude/skills/<name>/` while the plugin is installed** — the plugin already owns
