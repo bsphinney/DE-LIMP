@@ -124,11 +124,21 @@ the scripts handle it.
 ### 0a. Access & environment — ASK THIS FIRST
 **Claude Code runs locally on the user's machine.** Heavy steps either run locally or
 are driven on **HIVE over SSH with the user's private key** — they do NOT run Claude
-Code on HIVE. Ask two questions, then verify and pick a mode:
+Code on HIVE. Ask two questions (Core staff, a third), then verify and pick a mode:
 
 1. **"Do you have access to UC Davis HIVE (an account + an SSH private key)?"**
    If yes, **ask where their private key is** (e.g. `~/.ssh/id_ed25519`).
 2. **"Are you a member of the UC Davis Proteomics Core?"**
+3. **Core staff only, as soon as they say yes to 2: "Which CoreOmics submission is this
+   analysis for?"** A number (807 or PROT_0807), several numbers when the analysis combines
+   submissions, or "none" for internal work (a method test, QC, training, a tool comparison).
+   Skip it when they already said (the request names a submission, or says it is a method
+   test) and on a resume (step 0c). Every analysis by Core staff goes on the Core Project Board
+   before its long steps: a number → step 1c, internal work → step 1. Pass the answer to
+   `session.py init` at step 3b: `--submission PROT_0807` (once per number, the main one first)
+   or `--internal "<its title on the board>"`. → `references/board.md` section 2. **Anyone
+   else: never ask it, and never mention the board** (step 1's rule for Core data still applies
+   to them).
 
 Verify (don't just trust the answers):
 ```
@@ -356,6 +366,11 @@ never resubmit one that is RUNNING without asking. A finished earlier analysis i
 - **FAILED or stalled** → apply the `watch_run.sh` playbook (step 7b) and resubmit only the
   incomplete steps; finished `.quant` files and the predicted library are reused.
 
+**Core staff: a resume asks no submission question.** `status` prints the session's
+`analysis_for` (the submissions or the internal work's board title, from `session.py init`);
+`bash scripts/board.sh threads` gives its thread for the next milestone's record
+(`references/board.md` section 3).
+
 `submit.sh` writes `RECOVERY.md` + `.recovery.json` into the session directory
 automatically, so this works even if the previous session ended mid-sentence. Tell the
 user, in plain words, that they can close their terminal and that the jobs will keep
@@ -377,6 +392,17 @@ it (a `find` over the Flinders NFS mount does not finish). Exit 3 (the laptop's 
   there does not mean HIVE lacks them. `R:` was `/nfs/lssc0/flinders/proteomics`, and 70 GB
   already on HIVE was uploaded (msalemi, 2026-09-24).
 → `references/access.md` "Data already on a network drive".
+
+**Core staff answered step 0a's question 3** (do not ask for a number again below):
+- **A number** → `identify` below with `--text "submission 807"` checks it against the file
+  names; then step 1c (fetch, then the board). **Several** → step 1c for each, the first named
+  the main one (`references/core-submissions.md` "Several submissions in one analysis").
+- **None (internal work)** → no `identify` and no submission. Put it on the board now, before
+  step 2: `bash scripts/board.sh connect --owner <their UC Davis sign-in email>` (exit 9: show
+  its `link` and `tell_your_person` word for word, and carry on), then `bash scripts/board.sh
+  start --internal --title "<the analysis's short name>" --goal "<what it is, in your words>"
+  --hours 336 --with bsphinney@ucdavis.edu`. Use the same title at `session.py init
+  --internal`. If the paths name a submission anyway, say so in one line; their answer stands.
 
 **Core data? Name its CoreOmics submission now — never guess it.** Every report carries the
 submission (PI, organism, sample sheet, who prepared the samples), so find it before step 2.
@@ -497,14 +523,14 @@ delivered folder that must not be written to, add `--beside`: the run goes **bes
 `<date>_<name>_v<N>` (never an existing folder), linked to it by `reanalysis.json`.
 
 ### 1c. CoreOmics submission (PROT_xxxx) — the Core service run
-When Core staff name a **CoreOmics submission** ("search the data from submission 807",
-"analyze PROT_0807"), the PI, sample sheet, conditions and delivery folder come from
-CoreOmics — but the raw files must be *found*: a submission records `unique_id`s, not paths.
-Those ids are short, reused by other submissions (BN1–6 in both PROT_0794 and PROT_0776) and
-collide with plate wells (`A3` matches hundreds of files), so a glob quietly searches another
-lab's runs. `scripts/core_submission.py` does the bookkeeping and hands every judgment call
-back as an exit code. It never runs an engine. Keep one folder per submission, the same path
-locally and on HIVE (`~/core/PROT_0807`).
+When Core staff answer step 0a's question with a **CoreOmics submission**, or name one ("search
+the data from submission 807", "analyze PROT_0807"), the PI, sample sheet, conditions and
+delivery folder come from CoreOmics — but the raw files must be *found*: a submission records
+`unique_id`s, not paths. Those ids are short, reused by other submissions (BN1–6 in both
+PROT_0794 and PROT_0776) and collide with plate wells (`A3` matches hundreds of files), so a
+glob quietly searches another lab's runs. `scripts/core_submission.py` does the bookkeeping and
+hands every judgment call back as an exit code. It never runs an engine. Keep one folder per
+submission, the same path locally and on HIVE (`~/core/PROT_0807`).
 
 1. **Fetch — where the CoreOmics key is** (`coreomics_runs_on`, step 0a). **`hive`** (no
    usable local Python — Windows' `python3` is usually the Store stub — or the key is on HIVE
@@ -561,7 +587,10 @@ locally and on HIVE (`~/core/PROT_0807`).
    scripts/board.sh start --prot PROT_0807 ... --with bsphinney@ucdavis.edu`: you create the
    project and its thread yourself, and Brett approves it on the board. Carry on. Later, one
    board post at each milestone (stage, the search, QC, results, delivery), and each search
-   asked for on the board once the thread is open. → `references/board.md`.
+   asked for on the board once the thread is open. **`fetch` cannot run yet** (a key problem):
+   `start` anyway, with the PI's surname and project as staff tell you; what the first `start`
+   writes is kept. **Several submissions:** fetch and `start` each; the milestones go to the
+   main one's thread only. → `references/board.md` section 2.
 2. **Locate the raw files — on HIVE** (writes `files.txt`, `sample_files.tsv`, `locate.json`),
    then pull the proposal back for the local steps:
    ```
@@ -602,7 +631,7 @@ locally and on HIVE (`~/core/PROT_0807`).
    session of record; the local copy exists only to write the report.
    ```
    bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/session.py init \
-       --name PROT_0807 --base <work_dir> --raw $(cat ~/core/PROT_0807/files.txt)'
+       --name PROT_0807 --base <work_dir> --raw $(cat ~/core/PROT_0807/files.txt) --submission PROT_0807'
    S=<the session dir it printed>
    bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/submission_report.py attach \
        --session $S --record ~/core/PROT_0807"
@@ -2897,7 +2926,8 @@ analysis" checklist reads them.
   ```
   python3 scripts/log_decision.py --session <S> --what "<what was decided>" --why "<the user's words, or the evidence>" [--step "3. design"]
   ```
-  Log: the conditions confirmed (step 3), the defaults confirmed or changed (step 4), the
+  Log: submissions analysed together and which is the main one (step 1c), the conditions
+  confirmed (step 3), the defaults confirmed or changed (step 4), the
   contrasts chosen (step 8), every override (`--unchecked`, `--force`, a gate accepted), and
   anything the user declined or asked for beyond the defaults. → `logs/decisions.md`. It is the
   quickest thing for a reviewer to read, so write it on Claude Code too.
@@ -2975,11 +3005,14 @@ Write it so someone who was not there can fix it: the exact command, the error t
 the paths, the numbers, and what you expected instead. **Never** a password, private key or
 token (the script refuses text that looks like one).
 
-## The Core Project Board (Core staff; CoreOmics submissions)
-Each submission's work goes into one thread on the Core's board, where Brett and the staff see
-it. **Read `references/board.md` before the first board command.** In short:
-- **Only `bash scripts/board.sh`.** Never the board's web pages in a browser. You may put a
-  submission on the board yourself (`start`); a Claude never approves, gives itself cluster
+## The Core Project Board (Core staff; every analysis)
+Every analysis a Core staff member does goes into one thread on the Core's board, where Brett and
+the staff see it: a submission's in its own project, internal work in "Core internal work". Step
+0a asks which; step 1c (a submission) or step 1 (internal work) starts the thread before the
+long steps; `session.py init --submission | --internal` records the answer. **Read
+`references/board.md` before the first board command.** In short:
+- **Only `bash scripts/board.sh`.** Never the board's web pages in a browser. You may put an
+  analysis on the board yourself (`start`); a Claude never approves, gives itself cluster
   time, or connects itself: its person approves, with Duo when the board asks.
 - **Never let the board hold up the analysis.** If it is down, not connected, or the thread is
   not approved yet, carry on and try again at the next milestone. The one wait: once the

@@ -202,6 +202,15 @@ def cmd_status(a):
                          "look for probe_fallback.json beside the report")
         if fell_back:
             out.setdefault("warnings", []).append(fell_back)
+    # Core staff: the submission(s) or internal work the analysis is for (session.py init), so a
+    # resume finds its Core Project Board thread without asking again (SKILL.md step 0c)
+    try:
+        import session as session_py
+        work = session_py.analysis_for(a.session)
+    except Exception:
+        work = None                 # never a reason to fail a status query
+    if work:
+        out["analysis_for"] = work
     data["updated"] = datetime.datetime.now().isoformat(timespec="seconds")
     _save(a.session, data)
     out["next_commands"] = [s["next"] for s in data["stages"]
