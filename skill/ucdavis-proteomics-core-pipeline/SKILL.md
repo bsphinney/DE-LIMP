@@ -665,10 +665,10 @@ submission, the same path locally and on HIVE (`~/core/PROT_0807`).
      Submission section comes from the attached record), and `to_docx.py` for `methods.md` only
      (step 9: no Word copy of the report). **No usable local Python** (step 0a,
      `local_python3.usable: false`, Windows staff): skip the pull above; write
-     `AI_Analysis_Report.md` here, `--put` it into `"$S/output/"`, and run both scripts on HIVE
-     with `--session "$S"` and `--out "$S/output/Analysis_Report.html"` (and `--in
-     "$S/output/methods.md"`) through `hive_exec.sh`. Nothing then needs pushing back but
-     edits to the report text.
+     `AI_Analysis_Report.md` here, `--put` it into `"$S/output/"`, then on HIVE through
+     `hive_exec.sh`: `make_analysis_html.py --session "$S" --out
+     "$S/output/Analysis_Report.html"` and `to_docx.py --in "$S/output/methods.md" --out
+     "$S/output/methods.docx"`. Nothing then needs pushing back but edits to the report text.
    - **Push the finished files back BEFORE deliver** — `deliver` copies from `$S`. The PDF
      exists only where a headless browser printed it. The podcast (step 9e, made by default for
      these runs) goes back with them when it was made here; made on HIVE (Windows staff), it is

@@ -51,7 +51,7 @@ look a submission up at all (Gabriela 2026-10-02, Michelle 2026-10-08).
 | `stage` | **HIVE** | writes links into the service directory |
 | `conditions` | either | wraps `collect_conditions.py`; run it locally on the pulled `sample_files.tsv` |
 | search, DE, figures, audit, `make_methods.py` | **HIVE (SLURM)** | in the session under the printed `work_dir` — the session of record |
-| writing the report, `make_analysis_html.py`, `to_docx.py` (the Methods) | **local** | on a pulled copy; the finished files are pushed back |
+| writing the report, `make_analysis_html.py`, `to_docx.py` (the Methods) | **local** (no usable local Python: **HIVE**) | local: on a pulled copy, the finished files pushed back; HIVE: `AI_Analysis_Report.md` put into `$S/output/`, both scripts run there (SKILL.md step 1c.7) |
 | the podcast (`make_podcast.py`, SKILL.md step 9e: made by default) | **local**, or **HIVE (SLURM)** | here when this computer runs the skill's Python, before the push; otherwise `check` on HIVE through `hive_exec.sh` and a SLURM job (`make_podcast.py job`) for render, verify, link and share, with the Core's shared Gemini key (`references/podcast.md`) |
 | `deliver` | **HIVE** | copies into the Flinders share dir (big copies → `sbatch`) |
 | `bioshare`, `email-draft` | **KEY** | CoreOmics API again, on the full summary; drafts never send |
