@@ -864,9 +864,12 @@ python3 scripts/fetch_fasta.py resolve --organism "<what they said>"   # or --ta
   proximity labelling (`experiment_type.ENRICHMENT`), or a submission that says on-bead
   digestion. On-bead digests are often not reduced and alkylated, and the default fixed
   carbamidomethyl-C then leaves no cysteine peptide searchable (0.03–0.5% of identified peptides
-  held a C on three such Core searches, against ~8%). No → `estimate_params.py
-  --cys-alkylation none` (step 6b); log the answer (`log_decision.py`). For every other type do
-  not ask: the default (fixed carbamidomethyl) stands, recorded in the sidecar as a default.
+  held a C on three such Core searches, against ~8%). Pass the answer to `estimate_params.py`
+  (step 6b) and log it (`log_decision.py`): **yes → `--cys-alkylation cam`** (recorded as the
+  user's answer); **no → `--cys-alkylation none`**; alkylated with another agent (NEM, MMTS,
+  iodoacetic acid, 4-vinylpyridine) → `none` plus that fixed modification
+  (`references/parameters.md`). For every other type do not ask and **omit the flag**: fixed
+  carbamidomethyl stands, recorded in the sidecar as a DEFAULT.
 - **Sample type — never infer it; ask outside users, and Core staff only when a choice
   depends on it.** **Never** take it from file or folder names, sample IDs or abbreviations: a
   file-name abbreviation was once written up as a tissue the data did not support.
@@ -1349,17 +1352,18 @@ python3 scripts/estimate_params.py --engine <diann|sage> \
     --acquisition <DIA|DDA> --instrument "<detected instrument>" \
     --precursor-mz-range <LO> <HI> \
     [--ms1-resolution <MS1> (--ms2-resolution <MS2> | --ms2-analyzer <ITMS|mixed>) [--resolution-source detected]] \
-    [--var-mods ox] [--cys-alkylation none] [--overrides '<the user's values as JSON>' \
+    [--var-mods ox] [--cys-alkylation cam|none] [--overrides '<the user's values as JSON>' \
      --override-by "<who chose them>" --override-reason "<why, in their words>"] \
     --fasta-meta ./search.fasta.meta.json \
     --out ./wf/params.<cfg|json>
 ```
-**`--cys-alkylation none`** when step 3 found the samples were not reduced and alkylated:
-cysteine is searched unmodified (no `--unimod4`; Sage: no static C), the sidecar's
-`cys_alkylation` records who said so, and the Methods say why. Without it fixed
-carbamidomethyl-C is written and tagged DEFAULT. `sample_quality.py --report` (step 8c) warns
-when carbamidomethyl was fixed and under 1% of identified precursors hold a C: confirm the prep,
-then re-search with `none`.
+**`--cys-alkylation`** carries step 3's answer: `cam` (reduced and alkylated) writes fixed
+carbamidomethyl-C, recorded as the user's answer; `none` searches cysteine unmodified (no
+`--unimod4`; Sage: no static C), and the Methods say why. The sidecar's `cys_alkylation` records
+the choice and who made it. Not asked → omit it: fixed carbamidomethyl-C, tagged DEFAULT.
+`sample_quality.py --report` (step 8c) warns when carbamidomethyl was fixed and under 1% of the
+identified precursors hold a C, pooled or in any one run: confirm the prep, then re-search with
+`none` (or with the agent the lab used).
 **Always pass `--precursor-mz-range`**, taking `precursor_mz_range` straight from
 step 2's `detect_acquisition.py` output. Without it a DIA range falls back to
 380–980 — which on a timsTOF method acquiring 299.5–1200.5 silently discards both
@@ -1407,8 +1411,8 @@ mass-accuracy flags (DIA-NN fixes both levels when either is given), the sidecar
 on representative runs before the search — step 1b of the parallel chain, or a probe
 inside the single-shot search job (step 7) — and the measurement is **refused unless it
 is plausible**: MS2 3–30 ppm, MS1 1.5–25 ppm, from at least 2 runs agreeing to within
-50% (a one-file search pins its one run; a disagreement whose median is at or below the SOP
-only warns, since the SOP is pinned either way). What is pinned is then **max(measured, SOP)** (`estimate_params.SOP_MASS_ACC`: MS2
+50% (a one-file search pins its one run; a disagreement whose median is at or below the SOP,
+with no run above 1.5× it, only warns, since the SOP is pinned either way). What is pinned is then **max(measured, SOP)** (`estimate_params.SOP_MASS_ACC`: MS2
 20 ppm, MS1 7 ppm) — the measurement is used only where it is WIDER than the SOP,
 because a tolerance tighter than the SOP costs identifications and buys nothing.
 Both numbers are recorded; a documented level is never floored. An Orbitrap whose **resolution is unknown** is *not* measured (both levels would be,
@@ -1717,8 +1721,8 @@ python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \
       more than 50%) **fails step 1b** rather than being pinned — never retried, never
       bypassed (it normally means the wrong FASTA, species or calibration); a value outside the
       band logged by **any** run, one that logged nothing else included, fails it too. A
-      disagreement whose median is at or below the SOP floor, every run inside the band, only
-      **warns** (the floor is pinned either way; sparse controls of a pull-down cohort are a
+      disagreement whose median is at or below the SOP floor, every run inside the band and none
+      above 1.5× the floor, only **warns** (the floor is pinned either way; sparse controls of a pull-down cohort are a
       known benign cause) — relay the warning. Fewer than 2 runs answering fails or falls back
       by why the others failed (below); a **one-file** search pins its one run's measurement,
       floored as usual. An Orbitrap of unknown resolution is not measured at all. That is the
