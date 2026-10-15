@@ -1388,18 +1388,34 @@ def _find_diann_library(stem_dir, stem):
     return None
 
 
+def radiant_cys(params):
+    """The --cys-alkylation choice for Radiant's DIA-NN library: Radiant takes every modification
+    from the library it searches (its config has none), so cysteine is fixed there, as
+    make_presets.py recorded it in <params>.provenance.json. A config without that record gets the
+    default, cam, said on stderr. Before 2.12 no Radiant library fixed anything on C: on HIVE
+    (DIA-NN 2.7.0, job 24807967) 0 of 6,044 C-peptides carried UniMod:4."""
+    try:
+        with open(f"{params}.provenance.json") as fh:
+            value = (json.load(fh).get("cys_alkylation") or {}).get("value")
+    except (OSError, ValueError, TypeError, AttributeError):
+        value = None
+    if value is None:
+        sys.stderr.write(f"[run_search] NOTE: {params} has no make_presets.py record of the "
+                         "cysteine alkylation, so Radiant's library fixes carbamidomethyl on C "
+                         "(the default, not user-confirmed); make the config with make_presets.py "
+                         "--cys-alkylation to choose\n")
+    return value or "cam"
+
+
 def radiant_library(tools, fasta, out, threads, params=None):
     """Build the spectral library Radiant searches against, from DIA-NN's predictor.
 
     NOT a straight hand-off: DIA-NN 2.x writes .predicted.speclib v-10/-11 and Radiant's
     reader only supports v>=-3, so its binary is rejected outright. The conversion lives
-    in make_radiant_library.py.
+    in make_radiant_library.py, which also decides whether a library already there can be reused
+    (only one built with the same cysteine modification).
     """
     libdir = os.path.join(out, "radiant_lib")
-    ready = os.path.join(libdir, "radiant_library.tsv")
-    if os.path.exists(ready) and os.path.getsize(ready) > 1_000_000:
-        print(f"  [radiant] reusing existing library {ready}")
-        return ready
     dn = tools.get("diann")
     if not dn:
         sys.exit("Radiant needs a spectral library, but tools.json has no DIA-NN command. "
@@ -1413,7 +1429,8 @@ def radiant_library(tools, fasta, out, threads, params=None):
     helper = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           "make_radiant_library.py")
     res = subprocess.run([sys.executable, helper, "--diann", dn, "--fasta", fasta,
-                          "--out-dir", libdir, "--threads", str(threads)],
+                          "--out-dir", libdir, "--threads", str(threads),
+                          "--cys-alkylation", radiant_cys(params)],
                          capture_output=True, text=True)
     sys.stderr.write(res.stderr)
     if res.returncode != 0:
@@ -1423,7 +1440,7 @@ def radiant_library(tools, fasta, out, threads, params=None):
     return info["library"]
 
 
-def radiant_library_job(tools, fasta, out, threads):
+def radiant_library_job(tools, fasta, out, threads, params=None):
     """radiant_library() for a --sbatch search: (the library path, the job lines that build it).
     The same helper writes the same file (make_radiant_library.py keeps its output name, and
     reuses one already there), but on the compute node: predicting a library is a DIA-NN run,
@@ -1441,7 +1458,7 @@ def radiant_library_job(tools, fasta, out, threads):
         'echo "building the Radiant spectral library (DIA-NN predictor) on this compute node"',
         _job_python(),
         f'"$_py" {q(helper)} --diann {q(dn)} --fasta {q(fasta)} --out-dir {q(libdir)} '
-        f"--threads {threads}",
+        f"--threads {threads} --cys-alkylation {q(radiant_cys(params))}",
         f"[ -s {q(tsv)} ] || {{ echo {q(f'FAILED: make_radiant_library.py wrote no {tsv}')} "
         ">&2; exit 1; }"]
 
@@ -1466,7 +1483,7 @@ def run_radiant_parallel(tools, params, files, fasta, out, threads, a, library=N
     if library:
         argv += ["--library", library]
     elif tools.get("diann"):
-        argv += ["--diann", tools["diann"]]
+        argv += ["--diann", tools["diann"], "--cys-alkylation", radiant_cys(params)]
     for flag, val in (("--partition", a.partition), ("--account", a.account),
                       ("--qos", a.qos), ("--max-simultaneous", a.max_simultaneous),
                       ("--exclude", _exclude_arg(a))):
@@ -1515,7 +1532,7 @@ def run_radiant(tools, params, files, fasta, out, threads, sbatch, library=None,
     if library:
         lib = library
     elif sbatch:
-        lib, lib_lines = radiant_library_job(tools, fasta, out, threads)
+        lib, lib_lines = radiant_library_job(tools, fasta, out, threads, params)
     else:
         lib = radiant_library(tools, fasta, out, threads, params)
 
@@ -2508,6 +2525,7 @@ def adapt_fragpipe_dia(out):
     if pq_path or tsv:
         warn_fragpipe_dia_contam(out)
     if pq_path:
+        fragpipe_dia_runs_check(out, pq_path)
         print(f"  [adapt] FragPipe DIA: DIA-NN output already meets the contract -> {pq_path}")
         return pq_path
     if not tsv:
@@ -2550,8 +2568,42 @@ def adapt_fragpipe_dia(out):
     })
     report = os.path.join(out, "report.parquet")
     pq.write_table(tbl, report)
+    fragpipe_dia_runs_check(out, report)
     print(f"  [adapt] FragPipe DIA: {os.path.basename(tsv)} -> {report}  ({n} rows)")
     return report
+
+
+# The manifest data types FragPipe hands its DIA-NN step: CmdDiann.java (FragPipe 24.0) drops DDA,
+# GPF-DIA, DIA-Lib and DDA+ rows -- on the diaTracer reuse form the pseudo-spectra mzML are DDA
+# rows and the .d the DIA-Quant ones.
+FRAGPIPE_DIANN_TYPES = ("DIA", "DIA-Quant")
+
+
+def fragpipe_dia_runs_check(out, report):
+    """Stop, naming them, when FragPipe's DIA-NN report leaves out runs of the manifest this
+    search wrote -- the check the DIA-NN routes run in their jobs (check_report_runs.verify, the
+    one rule). DIA-NN exits 0 when it skips a run, inside FragPipe too. It counts runs, so
+    FragPipe's renaming of a Thermo .raw (it hands DIA-NN <name>_uncalibrated.mzML) does not
+    matter. A FragPipe output without the skill's manifest is said, not checked."""
+    import check_report_runs
+    manifest = os.path.join(out, "fragpipe.fp-manifest")
+    try:
+        with open(manifest, encoding="utf-8") as fh:
+            rows = [ln.rstrip("\n").split("\t") for ln in fh if ln.strip()]
+    except OSError:
+        sys.stderr.write(f"[run_search] NOTE: no {manifest}, so the FragPipe DIA report's runs "
+                         "were not checked against the inputs\n")
+        return
+    inputs = [r[0] for r in rows if len(r) > 3 and r[3].strip() in FRAGPIPE_DIANN_TYPES]
+    if not inputs:
+        return
+    try:
+        ok, msg = check_report_runs.verify(report, inputs)
+    except Exception as e:                       # an unreadable report is a failed search
+        ok, msg = False, f"FAILED: could not read {report}: {type(e).__name__}: {e}"
+    if not ok:
+        sys.exit(f"[run_search] FragPipe DIA: {msg}")
+    print(f"  [adapt] FragPipe DIA: {msg}")
 
 
 def adapt_fragpipe(out):
@@ -3304,6 +3356,8 @@ def main():
                            ("--library", a.library)):
             if path:
                 dp.refuse_dashed_path(path, flag, prog="run_search")
+        if os.path.isfile(a.params):
+            dp.refuse_dashed_cfg(a.params, prog="run_search")
         links_plan = dp.dashed_input_plan(files, a.out, rename=a.rename_dashed_runs)
         if links_plan["refused"]:
             sys.exit(f"[run_search] REFUSING: {links_plan['refused']} Nothing was written or "

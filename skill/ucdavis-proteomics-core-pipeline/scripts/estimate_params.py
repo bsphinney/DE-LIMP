@@ -120,66 +120,134 @@ def is_dda(acquisition):
 
 
 # What the search assumes the sample prep did to cysteine. THE one definition: build_diann() and
-# build_sage() write it, the sidecar records it (`cys_alkylation`), cam_searched() reads it back
-# from a params file (sample_quality.py's cysteine check), and SKILL.md step 3 asks for it.
-#   cam   reduced and alkylated with iodoacetamide or chloroacetamide, both of which leave
-#         carbamidomethyl-C (+57.021464 Da, UniMod:4): searched as a FIXED modification -- DIA-NN
-#         --unimod4 (its README's recommended fixed modification), Sage static_mods C
-#   none  not reduced and alkylated: cysteine is searched unmodified
+# build_sage() write it, the sidecar records it (`cys_alkylation`), cys_searched() reads it back
+# from a params file (sample_quality.py's cysteine check), make_presets.py applies it to FragPipe
+# and to Radiant's DIA-NN library, make_methods.py names the modification, and SKILL.md step 3
+# asks for it. Each alkylating agent leaves its own FIXED modification on C; masses and names are
+# UniMod's (unimod.org/obo/unimod.obo, read 2026-10-15):
+#   cam            iodoacetamide or chloroacetamide -> Carbamidomethyl (the standard prep)
+#   none           not reduced and alkylated: cysteine is searched unmodified
+#   nem            N-ethylmaleimide                 -> Nethylmaleimide
+#   carboxymethyl  iodoacetic acid                  -> Carboxymethyl
+#   propionamide   acrylamide                       -> Propionamide (the Core has seen it)
+#   mmts           S-methyl methanethiosulfonate    -> Methylthio
+#   pyridylethyl   4-vinylpyridine                  -> Pyridylethyl
 # On-bead, IP and pull-down digests are often not reduced and alkylated, and a fixed
 # carbamidomethyl then leaves no cysteine peptide searchable. Staff reports (2026-10-09): 0.03-0.5%
 # of the identified peptides held a C on three such searches, against 7.8% on an S-Trap prep with
 # DTT/IAA; the only way out was to delete --unimod4 from params.cfg by hand.
-CYS_ALKYLATION_CHOICES = ("cam", "none")
+CYS_REAGENTS = {
+    "cam": {"reagent": "iodoacetamide or chloroacetamide", "mod": "Carbamidomethyl",
+            "unimod": 4, "mass": 57.021464},
+    "none": None,
+    "nem": {"reagent": "N-ethylmaleimide (NEM)", "mod": "Nethylmaleimide",
+            "unimod": 108, "mass": 125.047679},
+    "carboxymethyl": {"reagent": "iodoacetic acid", "mod": "Carboxymethyl",
+                      "unimod": 6, "mass": 58.005479},
+    "propionamide": {"reagent": "acrylamide", "mod": "Propionamide",
+                     "unimod": 24, "mass": 71.037114},
+    "mmts": {"reagent": "S-methyl methanethiosulfonate (MMTS)", "mod": "Methylthio",
+             "unimod": 39, "mass": 45.987721},
+    "pyridylethyl": {"reagent": "4-vinylpyridine", "mod": "Pyridylethyl",
+                     "unimod": 31, "mass": 105.057849},
+}
+CYS_ALKYLATION_CHOICES = tuple(CYS_REAGENTS)
 CYS_ALKYLATION_DEFAULT = "cam"
+# Sage's own carbamidomethyl value, as the config always carried it
 SAGE_CAM = {"C": 57.0215}
+
+
+def cys_diann_flags(choice):
+    """The DIA-NN flags for cysteine: --unimod4 (DIA-NN's own carbamidomethyl-C) for cam, nothing
+    for none, else `--fixed-mod UniMod:<n>,<mass>,C` (DIA-NN README: "--fixed-mod
+    [name],[mass],[sites]", applied during the FASTA digest)."""
+    r = CYS_REAGENTS[choice]
+    if r is None:
+        return []
+    if choice == "cam":
+        return ["--unimod4"]
+    return ["--fixed-mod", f"UniMod:{r['unimod']},{r['mass']},C"]
+
+
+def cys_sage_static(choice):
+    """Sage's database.static_mods for cysteine."""
+    r = CYS_REAGENTS[choice]
+    return {} if r is None else dict(SAGE_CAM) if choice == "cam" else {"C": r["mass"]}
 
 
 def cys_alkylation_record(choice=None):
     """The sidecar's `cys_alkylation`: what was searched for cysteine, and on whose word. `choice`
     is --cys-alkylation as given; None is the default, tagged as one (DE-LIMP rule 2)."""
     value = choice or CYS_ALKYLATION_DEFAULT
+    r = CYS_REAGENTS[value]
     if choice is None:
         source = ("DEFAULT, not user-confirmed: the samples are assumed reduced and alkylated "
                   "(iodoacetamide or chloroacetamide), the standard prep. Pass --cys-alkylation "
-                  "none for samples that were not -- on-bead, IP and pull-down digests often are not")
+                  "none for samples that were not -- on-bead, IP and pull-down digests often are "
+                  "not -- or the agent the lab used")
+    elif r is None:
+        source = ("given (--cys-alkylation none): the samples were not reduced and alkylated, so "
+                  "cysteine is searched unmodified")
     elif value == "cam":
         source = "given (--cys-alkylation cam): the samples were reduced and alkylated"
     else:
-        source = ("given (--cys-alkylation none): the samples were not reduced and alkylated, so "
-                  "cysteine is searched unmodified")
+        source = (f"given (--cys-alkylation {value}): the samples were alkylated with "
+                  f"{r['reagent']}, searched as fixed {r['mod']} (UniMod:{r['unimod']}, "
+                  f"+{r['mass']}) on C")
     return {"value": value, "given": choice is not None,
-            "searched": ("carbamidomethyl (C), fixed" if value == "cam" else
-                         "cysteine unmodified (no fixed carbamidomethyl)"),
+            "reagent": r and r["reagent"], "mod": r and r["mod"],
+            "unimod": r and r["unimod"], "mass": r and r["mass"],
+            "searched": (f"{r['mod'].lower()} (C), fixed" if r else
+                         "cysteine unmodified (no fixed modification)"),
             "source": source}
 
 
-def cam_searched(params):
-    """True when the params file fixes carbamidomethyl on C, False when it does not, None when it
-    cannot be read. A DIA-NN cfg: --unimod4, or a --fixed-mod of UniMod:4 / +57.02 on C; a Sage
-    config: database.static_mods C at +57.02."""
+def _cys_choice(mass):
+    """The CYS_REAGENTS key whose mass this is (within 0.01 Da), or None."""
+    return next((k for k, r in CYS_REAGENTS.items() if r and abs(r["mass"] - mass) < 0.01), None)
+
+
+def cys_searched(params):
+    """What the params file fixes on C: {"fixed": False} (unmodified), {"fixed": True, "choice":
+    a CYS_REAGENTS key or None for an unlisted one, "mod", "mass"}, or None when the file cannot
+    be read. A DIA-NN cfg: --unimod4, or a --fixed-mod on C; a Sage config: database.static_mods C."""
     from diann_parallel import cfg_groups, cfg_tokens, CfgError   # here: it imports this module
+
+    def fixed(mass, name=None):
+        choice = _cys_choice(mass)
+        r = CYS_REAGENTS.get(choice) if choice else None
+        return {"fixed": True, "choice": choice, "mass": mass,
+                "mod": r["mod"] if r else (name or f"+{mass:g} on C")}
     try:
         if str(params).lower().endswith(".json"):
             with open(params) as fh:
                 mods = (json.load(fh).get("database") or {}).get("static_mods") or {}
-            return any("C" in str(k) and abs(float(v) - 57.0215) < 0.01 for k, v in mods.items())
+            for k, v in mods.items():
+                if "C" in str(k) and float(v):
+                    return fixed(float(v))
+            return {"fixed": False}
         groups = cfg_groups(cfg_tokens(params))
     except (OSError, ValueError, TypeError, AttributeError, CfgError):
         return None
     for flag, vals in groups:
         if flag == "--unimod4":
-            return True
+            return fixed(CYS_REAGENTS["cam"]["mass"])
         if flag == "--fixed-mod" and vals:
-            parts = str(vals[0]).split(",")
+            parts = [x.strip() for x in ",".join(vals).split(",")]
             try:
                 mass = float(parts[1]) if len(parts) > 1 else None
             except ValueError:
                 mass = None
-            if parts[0] == "UniMod:4" or (mass is not None and abs(mass - 57.021464) < 0.01
-                                          and len(parts) > 2 and "C" in parts[2]):
-                return True
-    return False
+            if mass and len(parts) > 2 and "C" in parts[2] and len(parts) < 4:
+                return fixed(mass, parts[0])
+    return {"fixed": False}
+
+
+def cam_searched(params):
+    """True when the params file fixes carbamidomethyl on C, False when it does not (unmodified, or
+    another fixed C modification), None when it cannot be read (cys_searched)."""
+    r = cys_searched(params)
+    return None if r is None else (r["fixed"] and r["choice"] == "cam")
 
 
 # What a precursor m/z range is, by acquisition. detect_acquisition.py reads DIA's from the
@@ -810,14 +878,17 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
     add("--max-fr-mz", 1800, UNIV)
     if DIANN_DIGEST["met_excision"]:
         add("--met-excision", True, UNIV)
-    # cysteine: what the sample prep did to it (CYS_ALKYLATION_CHOICES), tagged with who said so
+    # cysteine: what the sample prep did to it (CYS_REAGENTS), tagged with who said so
     cys = cys or cys_alkylation_record()
+    cys_flags = cys_diann_flags(cys["value"])
     if cys["value"] == "cam":
         add("--unimod4", True, "fixed carbamidomethyl (C); DIA-NN recommended fixed mod -- "
             + cys["source"])
-    else:
+    elif not cys_flags:
         add("--unimod4", "not set (flag omitted): cysteine searched unmodified", cys["source"],
             render=False)
+    else:
+        add("--fixed-mod", cys_flags[1], f"fixed {cys['mod']} (C) -- {cys['source']}")
 
     # variable mods: DIA-NN README says var mods don't help pure quant; default OFF.
     if var_mods and "ox" in var_mods:
@@ -1013,7 +1084,7 @@ def build_sage(acq, instr_class, var_mods, overrides, ms2_analyzer=None, overrid
                cys=None):
     prec_ppm, frag_ppm, ppm_src = sage_ppm(instr_class)
     cys = cys or cys_alkylation_record()
-    static = dict(SAGE_CAM) if cys["value"] == "cam" else {}
+    static = cys_sage_static(cys["value"])
     ion_trap = ms2_in_ion_trap(ms2_analyzer)
     UNIV = "universal trypsin/LFQ default"
     variable = {"M": [15.9949]} if (var_mods and "ox" in var_mods) else {}
@@ -1063,7 +1134,7 @@ def build_sage(acq, instr_class, var_mods, overrides, ms2_analyzer=None, overrid
     rationale.update({
         "wide_window": tagged(cfg["wide_window"], f"{acq.upper()} acquisition"),
         "chimera": tagged(cfg["chimera"], f"{acq.upper()} acquisition"),
-        "static_mods": tagged(static, ("fixed carbamidomethyl (C) -- " if static else
+        "static_mods": tagged(static, (f"fixed {cys['mod'].lower()} (C) -- " if static else
                                        "none: cysteine searched unmodified -- ") + cys["source"]),
         "variable_mods": tagged(variable,
             "Ox(M) " + ("on (user requested)" if var_mods and "ox" in var_mods else "off (quant default)")
@@ -1130,7 +1201,10 @@ def main():
                          "alkylated with iodoacetamide or chloroacetamide -- fixed carbamidomethyl "
                          "C (DIA-NN --unimod4, Sage static_mods C). none: not alkylated (often so "
                          "for on-bead, IP and pull-down digests) -- cysteine searched unmodified. "
-                         "Not given, cam is used and recorded as a DEFAULT")
+                         "nem / carboxymethyl / propionamide / mmts / pyridylethyl: alkylated with "
+                         "N-ethylmaleimide / iodoacetic acid / acrylamide / MMTS / 4-vinylpyridine "
+                         "-- that fixed modification on C (UniMod). Not given, cam is used and "
+                         "recorded as a DEFAULT")
     ap.add_argument("--overrides", default="",
                     help="JSON of fields to force, as the user chose them; each is recorded as a "
                          "user override with its value, who set it and why -- never as an SOP")
