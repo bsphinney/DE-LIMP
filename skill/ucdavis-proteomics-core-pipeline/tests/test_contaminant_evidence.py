@@ -212,6 +212,9 @@ class AuditFlagsIt(unittest.TestCase):
                       "(the same mass and fragments).", msg)
         self.assertIn("removed with the contaminants", msg)
         self.assertIn("never as contamination or an added standard", msg)
+        self.assertTrue(msg.endswith("rebuild the FASTA with the same fetch_fasta.py command plus "
+                                     "--drop-contaminant Cont_Q90002 and search again."), msg)
+        self.assertEqual(f["detail"]["drop_contaminant"], ["Cont_Q90002"])
         self.assertNotIn("Cont_P00761", msg)                 # trypsin has its own peptide
         self.assertNotIn(self.root, msg)
         self.assertEqual(f["detail"]["n_groups_checked"], 2)

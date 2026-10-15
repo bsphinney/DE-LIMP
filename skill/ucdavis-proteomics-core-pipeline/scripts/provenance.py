@@ -652,6 +652,14 @@ def main():
     elif keratin_sample_recorded(fi) is False and fi.get("keratin_sample_source") == "user":
         # the user's "not keratin" is replayed as an answer, never left to the default
         fasta_repro_keep += " --no-keratin-sample"
+    # Contaminant entries the user left out by name (fetch --drop-contaminant), as given.
+    _named = [str(x) for x in (fi or {}).get("drop_contaminant_requested") or [] if x]
+    for acc in _named:
+        fasta_repro_keep += f" --drop-contaminant {shlex.quote(acc)}"
+    if _named:
+        fasta_repro_note += (f" Contaminant entr{'y' if len(_named) == 1 else 'ies'} "
+                             f"{', '.join(_named)} {'was' if len(_named) == 1 else 'were'} left "
+                             f"out by name (--drop-contaminant).")
     # The user's own target sequences (fetch --add-fasta), from the files the sidecar records.
     for f in (fi or {}).get("added_sequences") or []:
         fasta_repro_keep += f" --add-fasta {shlex.quote(f.get('file') or '<added sequences file>')}"

@@ -826,6 +826,9 @@ def do_finalize(a):
               "agents": docs["written"].get("agents"), "de_files": de_files,
               "methods": methods_md, "manifest": p["manifest_txt"],
               "deposit": deposit, "skipped": (man.n_skipped if man is not None else 1)}
+    # for the agent, never the zip: make_methods' database build warnings, when finalize built the
+    # Methods (make_deposit.methods_build_warnings) -- tell the user
+    result.update(getattr(man, "for_agent", None) or {})
 
     # re-analysis: write DIFFERENCES.md vs the parent (read, never written to)
     parent = a.reanalysis_of or (reanalysis_of(p["session_dir"]) or {}).get("session")

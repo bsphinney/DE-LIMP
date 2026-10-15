@@ -69,6 +69,9 @@ are at most 10 (`ADDED_SEQUENCES_NAMED_MAX`: a bait, a tag); more are given as a
 file name and SHA-256, and so are the contaminant entries removed or kept beside them. The
 database's build warnings never go into `methods.md`: they are printed on stderr and listed under
 `database_build_warnings` in the JSON the script prints, for you to tell the user and resolve.
+When `session.py finalize` writes the Methods itself (through `make_deposit.py`), it prints them
+on stderr and under the same key in its own JSON; `MANIFEST.txt`, which travels in the zip, gets
+only their count.
 
 No file path reaches `methods.md`: an absolute path from any record (`/quobyte/...`, `/nfs/...`,
 `/home/...`, `~/...`, `C:\...`) is cut to its file name as the file is written, and stderr says

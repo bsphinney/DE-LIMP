@@ -1274,7 +1274,9 @@ python3 scripts/experiment_type.py set-bait --session <session> --bait none     
 ```
 It is kept as `bait_confirmed` (the answer, who, when) in `input/experiment_type.json`, and a
 re-recorded type keeps it. Without an answer the data check would take the ONE added sequence as
-the bait, unconfirmed -- never leave it there.
+the bait, unconfirmed -- never leave it there. More than 10 added sequences (a whole proteome) are
+counted, not listed (`n_added_sequences`): ask for the bait by name, and `set-bait` takes its
+accession, entry name or gene.
 
 **Read the returned JSON** (also written to `<out>.meta.json` for the repro
 bundle) and act on it:
@@ -1305,7 +1307,10 @@ bundle) and act on it:
   An entry with 2+ peptides of its own **stays**, even when the sample shows only the peptides it
   shares with a target (horse myoglobin `Cont_P68082` has 9 of its own; in human heart its group
   rested on human MB's peptides, one differing only by I/L): which peptides a sample shows only
-  the search can say, so step 8c's `contaminant_evidence` flags such a group.
+  the search can say, so step 8c's `contaminant_evidence` flags such a group. `--drop-contaminant
+  <accession>` (repeatable) then leaves that entry out of a rebuild: recorded in the sidecar, named
+  in the Methods, replayed by `reproduce.sh`; an accession that matches no contaminant entry stops
+  the build.
 - A `--path` database that already contains `Cont_` entries cannot be fixed: `fetch` warns
   and lists them under `contaminants_identical_to_target_kept` — rebuild it with
   `--proteome` instead. The Core's Sep-2025 `MRS/UP000005640_9606_plus_universal_contam.fasta`
@@ -2384,8 +2389,12 @@ proteins are missing from quant — rebuild the FASTA and re-search. `contaminan
 contaminant protein group whose every peptide is also a sample protein's (shared, or the same but
 for I/L): probably the sample's own protein. Report it as that protein — never as
 contamination or an added standard — and tell the user it was removed with the contaminants.
+To quantify it as theirs (the user's call: a new search), rebuild the FASTA with the same `fetch`
+command plus the `--drop-contaminant` the finding names, and search again.
 `sample_quality.py`'s CONTAMINANT_IDENTICAL panel uses the same list as `target_contaminants`; a
-group-confounded result there is a STOP like any other panel.
+group-confounded result there is a STOP like any other panel. A `numeric_covariate` WARN (a
+covariate fitted as a number that the groups nearly determine) quotes run_de.R's caution: tell
+the user, and offer the DE without that covariate to compare.
 
 Then run the **biological sample-quality** check (contamination that mimics biology —
 hemolysis, tissue cross-contamination, skin) — and **read `references/anomaly-checks.md`
@@ -2625,7 +2634,8 @@ What each input adds:
 - `--fasta-meta` writes the **Sequence database** paragraph: organism, proteome ID, UniProt
   release, database type, entry count, and the contaminant library with its citation. The
   database's build warnings are not in `methods.md`: tell the user the ones it prints under
-  `database_build_warnings`.
+  `database_build_warnings` (step 12's `finalize`, when it writes the Methods, prints them under
+  the same key).
 - `--params` / `--search-prov` / `--workflow-manifest` write the **Database search** paragraph
   from the parameters the search actually ran with: engine, the version that ran, cleavage rule,
   missed cleavages, peptide/charge/m/z ranges, modifications, mass tolerances, precursor FDR,

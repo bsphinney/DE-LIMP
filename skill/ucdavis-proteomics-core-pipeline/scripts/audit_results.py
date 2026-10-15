@@ -13,6 +13,10 @@ Checks:
   replication       groups with <2 (FAIL) or <3 (WARN) replicates
   group_balance     very unequal group sizes (WARN)
   confounding       a covariate (Batch) perfectly confounded with Group (FAIL)
+  numeric_covariate a covariate fitted as a number (run_de.R --numeric-covariates) that Group
+                    explains most of (de_provenance.json `covariates`: its `confounded` flag and
+                    run_de.R's own caution, quoted) -- the comparisons are adjusted for it
+                    (WARN); PASS for one that is not; nothing without a numeric covariate
   acquisition_mix   DIA and DDA mixed in one analysis (FAIL)
   instrument_mix    >1 instrument model in one analysis — batch effect (WARN)
   id_depth          suspiciously few proteins quantified (WARN)
@@ -198,6 +202,53 @@ def audit_acquisition(findings, acq_json):
             "effect — account for it (add a Batch covariate) or analyze per instrument.")
     elif instr:
         add(findings, "instrument_mix", "PASS", f"Single instrument: {instr[0]}.")
+
+
+def audit_numeric_covariates(findings, prov):
+    """A covariate fitted as a number (run_de.R --numeric-covariates) that the groups nearly
+    determine: every comparison is adjusted for it, so they rest on its fitted slope, and if the
+    groups themselves change it, adjusting removes part of the effect being tested. Read from
+    de_provenance.json `covariates` -- `confounded` per term and run_de.R's caution in `warnings`,
+    quoted -- never re-judged here. Nothing to say without a numeric covariate (a factor covariate
+    is the `confounding` check's)."""
+    rec = prov.get("covariates") if isinstance(prov.get("covariates"), dict) else {}
+    terms = [t for t in (rec.get("terms") or []) if isinstance(t, dict) and t.get("type") == "numeric"]
+    if not terms:
+        return
+    thr = rec.get("confound_r2_threshold")
+    cautions = [str(w) for w in (rec.get("warnings") or []) if w]
+
+    def se_of(t):
+        se = t.get("se_inflation")
+        return {k: v for k, v in se.items() if isinstance(v, (int, float))} if isinstance(se, dict) else {}
+
+    def r2(t):
+        v = t.get("group_r2")
+        return f"{v * 100:.0f}%" if isinstance(v, (int, float)) else "an unrecorded share"
+    for t in terms:
+        col, se = t.get("column") or "?", se_of(t)
+        detail = {"column": col, "group_r2": t.get("group_r2"), "threshold": thr,
+                  "se_inflation": t.get("se_inflation")}
+        if t.get("confounded") is True:
+            # run_de.R's own caution, as it wrote it; composed from the term only when the
+            # record has none
+            caution = next((w for w in cautions if w.startswith(f"{col} ")), None) or (
+                f"{col} nearly matches the groups: Group explains {r2(t)} of its variance. The "
+                f"group comparisons are adjusted for it, so they rest largely on its fitted slope"
+                + (f", and their standard errors are up to {max(se.values()):.1f}x those without "
+                   f"it ({', '.join(f'{k} {v:.2f}x' for k, v in se.items())})" if se else "")
+                + f". If {col} differs between the groups because of the grouping itself (a "
+                  f"consequence of the treatment), adjusting for it removes part of the effect "
+                  f"being tested: ask whether it belongs in the model.")
+            add(findings, "numeric_covariate", "WARN",
+                f"{caution} Run the DE without {col} as well, and compare, before trusting the "
+                f"adjusted comparisons.", detail)
+        else:
+            add(findings, "numeric_covariate", "PASS",
+                f"{col} was fitted as a number; Group explains {r2(t)} of its variance"
+                + (f" (cautioned from {thr * 100:.0f}%)" if isinstance(thr, (int, float)) else "")
+                + (f", and it widens the comparisons' standard errors by at most "
+                   f"{max(se.values()):.2f}x" if se else "") + ".", detail)
 
 
 def audit_quantification(findings, prov):
@@ -534,6 +585,9 @@ def audit_contaminant_evidence(findings, de_prov, meta_path):
                 f"{len(runs.get(g['group'], ()))} run(s)): "
                 + ", ".join(pep(p) for p in ps[:5]) + (f", +{len(ps) - 5} more" if len(ps) > 5 else ""))
     genes = sorted({p.get("gene") or p["target_acc"] for g in flagged for p in g["peptides"]})
+    # the contaminant accessions of the flagged groups: what fetch_fasta.py --drop-contaminant takes
+    drop = list(dict.fromkeys(t.strip() for g in flagged for t in g["group"].split(";")
+                              if is_contaminant_accession(t)))
     fate = (f"Their precursors were removed with the contaminants (run_de.R's filter; DIA-NN's "
             f"--cont-quant-exclude too, when set), so {', '.join(genes[:12])} may be "
             f"under-quantified and the contaminant share overstated."
@@ -545,9 +599,10 @@ def audit_contaminant_evidence(findings, de_prov, meta_path):
         f"probably the sample's own protein, not a contaminant: "
         + "; ".join(group(g) for g in flagged[:12]) + (f"; +{len(flagged) - 12} more" if len(flagged) > 12 else "")
         + f". {fate} Report each as the sample's own protein, never as contamination or an added "
-          f"standard. To quantify it as the sample's, rebuild the FASTA without that contaminant "
-          f"entry (fetch_fasta.py --contaminants-path, a copy of the set without it) and search "
-          f"again.", detail)
+          f"standard. To quantify it as the sample's, rebuild the FASTA with the same "
+          f"fetch_fasta.py command plus "
+        + " ".join(f"--drop-contaminant {a}" for a in drop)
+        + " and search again.", dict(detail, drop_contaminant=drop))
 
 
 def audit_de(findings, de_dir, adjp, logfc):
@@ -831,6 +886,7 @@ def main():
         except (OSError, ValueError):
             pass            # audit_target_contaminants reports the unreadable sidecar
     audit_quantification(findings, prov)
+    audit_numeric_covariates(findings, prov)
     if a.search_out and os.path.isdir(a.search_out):
         audit_search(findings, a.search_out)
     elif a.search_out:

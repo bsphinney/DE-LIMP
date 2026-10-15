@@ -64,6 +64,10 @@ CONTAMINANTS
   peptides they share with the sample's keratins are excluded from quantification.
   run_search.py --keratin-sample refuses a database that still holds them.
 
+  A NAMED ENTRY: `fetch --drop-contaminant Cont_P68082` (repeatable) leaves that contaminant entry
+  out -- one audit_results.py's contaminant_evidence check found resting only on the sample's own
+  peptides. Recorded in the sidecar; reproduce.sh replays it.
+
   ADDED TARGET SEQUENCES (a bait such as EGFP, a tag): `fetch --add-fasta <file>` writes them
   after the proteome and removes a contaminant entry when most of it is the added protein (at
   least ADDED_SEQUENCE_SHARED_FRACTION of its peptides; the Universal set's wild-type GFP stays
@@ -1263,6 +1267,11 @@ def drop_target_contaminants(contam_text, target_text, enzymes_used=None,
 # contained entry always goes (100% of its internal peptides), and the digestion enzymes in use
 # stay, as everywhere else.
 ADDED_SEQUENCE_SHARED_FRACTION = 0.5
+# At most this many sequences added with --add-fasta are a bait, a tag or a few constructs, and
+# are named one by one -- in the Methods (make_methods.added_sequences_sentence) and as the bait's
+# candidates (experiment_type.py's ask_bait). More is a whole proteome (a second organism's, 4,506
+# entries in a staff search, 2026-10-10): counted, with the file and its SHA-256, never listed.
+FEW_ADDED_SEQUENCES = 10
 ADDED_SEQUENCE_RULE = (f"an added sequence is a target: a contaminant entry identical to or "
                        f"contained in one, or with at least {ADDED_SEQUENCE_SHARED_FRACTION:.0%} of "
                        f"its own peptides (the search's digest, I = L) also in one, is removed and "
@@ -1539,6 +1548,35 @@ def drop_keratin_contaminants(text):
     drop = {i for i, _ in hits}
     kept = "".join(h + "".join(lines) for i, (h, lines) in enumerate(recs) if i not in drop)
     return kept, [rec for _, rec in hits]
+
+
+def _bare_accession(acc):
+    """Cont_P68082 / contam_P68082 / P68082 -> P68082 (upper case): how --drop-contaminant names
+    are matched to a contaminant entry, whichever tag it carries (typed in any case)."""
+    acc = str(acc).strip().upper()
+    for t in CONTAMINANT_TAGS:
+        if acc.startswith(t.upper()):
+            return acc[len(t):]
+    return acc
+
+
+def drop_named_contaminants(text, accessions, source):
+    """-> (text without the contaminant entries --drop-contaminant names, [their records]). Only
+    contaminant entries (either tag) are matched, by accession with or without its tag; every
+    other record is written back byte-for-byte. record: cont_acc (as the report carries it),
+    cont_entry, cont_gene, source."""
+    want = {_bare_accession(x) for x in accessions}
+    recs = _fasta_records(text)
+    drop, out = set(), []
+    for i, (header, _lines) in enumerate(recs):
+        ids = _contaminant_ids(header)
+        if ids and _bare_accession(ids[1]) in want:
+            drop.add(i)
+            out.append({"cont_acc": ids[1], "cont_entry": ids[2], "cont_gene": ids[3],
+                        "source": source})
+    if not drop:
+        return text, []
+    return "".join(h + "".join(lines) for i, (h, lines) in enumerate(recs) if i not in drop), out
 
 
 def _fasta_headers(path):
@@ -2400,6 +2438,21 @@ def cmd_fetch(a):
             n_cont_in_base = sum(1 for ln in base_text.splitlines()
                                  if ln.startswith(">") and CONT_TAG in ln)
 
+    # --drop-contaminant <accession>: a contaminant entry the user leaves out by name -- most
+    # often one audit_results.py's contaminant_evidence check found resting only on the sample's
+    # own peptides (horse myoglobin Cont_P68082 in human heart, 2026-10-14). From a supplied
+    # database's own contaminant entries here, from the contaminant set below; a name matching
+    # neither stops the build (a misspelt accession must not pass as done).
+    drop_names = list(getattr(a, "drop_contaminant", None) or [])
+    named_dropped = []
+    if drop_names:
+        base_text, from_base = drop_named_contaminants(base_text, drop_names, "supplied_database")
+        if from_base:
+            named_dropped += from_base
+            n_base = _count(base_text)
+            n_cont_in_base = sum(1 for ln in base_text.splitlines()
+                                 if ln.startswith(">") and CONT_TAG in ln)
+
     # A database used as-is cannot have its contaminant entries removed, so the
     # target-identical ones found there stay -- and those real proteins will be reported
     # only as Cont_ groups and kept out of quant. Find them and say so, loudly.
@@ -2470,10 +2523,28 @@ def cmd_fetch(a):
             msg = f"could not fetch contaminants ({e}); proceeding WITHOUT them"
             _warn(msg)
             warnings.append(msg)
+    n_contam_fetched = n_contam
+    if drop_names and contam_text:
+        contam_text, from_set = drop_named_contaminants(contam_text, drop_names, "contaminant_set")
+        named_dropped += from_set
+        n_contam = _count(contam_text)
+    if drop_names:
+        found = {_bare_accession(r["cont_acc"]) for r in named_dropped}
+        missing = [x for x in drop_names if _bare_accession(x) not in found]
+        if missing:
+            sys.exit(f"--drop-contaminant {', '.join(missing)}: no contaminant entry in this build "
+                     f"has that accession (the '{a.contaminants}' contaminant set"
+                     + (" and the supplied database's own contaminant entries"
+                        if getattr(a, "path", None) or getattr(a, "hive", False) else "")
+                     + "). Give the accession as the report shows it (Cont_P68082) or "
+                     "bare (P68082)")
+        left_out = ", ".join(f"{r['cont_acc']} ({r['cont_entry'] or r['cont_gene'] or '?'}, "
+                             f"{r['source'].replace('_', ' ')})" for r in named_dropped)
+        sys.stderr.write(f"[fetch_fasta] --drop-contaminant: left out {left_out}\n")
 
     # Remove contaminant entries that ARE target proteins (see drop_target_contaminants).
     # Applies to every proteome source above: UniProt, --hive, NCBI and --path alike.
-    n_contam_in_set, dropped, dropped_note = n_contam, [], None
+    n_contam_in_set, dropped, dropped_note = n_contam_fetched, [], None
     keep_all = getattr(a, "keep_target_contaminants", False)
     if contam_text and keep_all:
         # Replaying a database built before the drop existed (provenance.py passes this for
@@ -2732,6 +2803,11 @@ def cmd_fetch(a):
         # so keratin_sample false is an assumption, and run_de.R tags it in the methods.
         "keratin_sample_source": keratin_sample_source,
         "keratin_family_rule": KERATIN_FAMILY_RULE,
+        # --drop-contaminant: the accessions as the user gave them (provenance.py replays them)
+        # and the entries they removed, each with its `source`
+        "drop_contaminant_requested": drop_names,
+        "n_contaminants_dropped_by_name": len(named_dropped),
+        "contaminants_dropped_by_name": named_dropped,
         "n_contaminants_dropped_keratin_sample": len(keratin_dropped),
         "contaminants_dropped_keratin_sample": keratin_dropped,
         "keratin_sample_note": keratin_note,
@@ -2847,6 +2923,13 @@ def main():
                         "keratin is quantified as the analyte instead of being excluded as a "
                         "contaminant; --no-keratin-sample when they are not. Recorded as "
                         "keratin_sample + keratin_sample_source (user); neither = source default")
+    f.add_argument("--drop-contaminant", action="append", default=[], metavar="ACCESSION",
+                   help="leave this contaminant entry out of the database (Cont_P68082 or "
+                        "P68082); repeatable. For an entry audit_results.py's contaminant_evidence "
+                        "found resting only on the sample's own peptides. Matched in the "
+                        "contaminant set and a supplied database's own contaminant entries; one "
+                        "that matches nothing stops the build. Recorded in the sidecar "
+                        "(contaminants_dropped_by_name) and replayed by reproduce.sh")
     f.add_argument("--add-fasta", action="append", default=[], metavar="FILE",
                    help="a FASTA of the user's own TARGET sequences to add (a bait such as EGFP, "
                         "a tag, a construct); repeatable. Written after the proteome and recorded "
