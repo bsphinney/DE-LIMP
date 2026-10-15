@@ -2549,7 +2549,9 @@ What it extracts, and what it only defaults:
 
 What each input adds:
 - `--fasta-meta` writes the **Sequence database** paragraph: organism, proteome ID, UniProt
-  release, database type, entry count, and the contaminant library with its citation.
+  release, database type, entry count, and the contaminant library with its citation. The
+  database's build warnings are not in `methods.md`: tell the user the ones it prints under
+  `database_build_warnings`.
 - `--params` / `--search-prov` / `--workflow-manifest` write the **Database search** paragraph
   from the parameters the search actually ran with: engine, the version that ran, cleavage rule,
   missed cleavages, peptide/charge/m/z ranges, modifications, mass tolerances, precursor FDR,

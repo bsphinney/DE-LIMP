@@ -63,6 +63,17 @@ part of a full analysis or **standalone** (just `--raw` at the facility data).
     When it is the only run, its values are tagged `[raw file not readable here — confirm]`.
   - The ddaPASEF precursor-selection settings are not extracted, and the text says so.
 
+With `--fasta-meta` (fetch_fasta.py's `<fasta>.meta.json`), it adds the **Sequence database**
+paragraph. Sequences added with `fetch_fasta.py --add-fasta` are named one by one only when there
+are at most 10 (`ADDED_SEQUENCES_NAMED_MAX`: a bait, a tag); more are given as a count with the
+file name and SHA-256, and so are the contaminant entries removed or kept beside them. The
+database's build warnings never go into `methods.md`: they are printed on stderr and listed under
+`database_build_warnings` in the JSON the script prints, for you to tell the user and resolve.
+
+No file path reaches `methods.md`: an absolute path from any record (`/quobyte/...`, `/nfs/...`,
+`/home/...`, `~/...`, `C:\...`) is cut to its file name as the file is written, and stderr says
+how many were cut.
+
 With `--params` / `--search-prov` / `--workflow-manifest`, it adds a **Database search**
 paragraph and a search-parameter table (engine, the version that ran, cleavage rule, missed
 cleavages, peptide length, charge and m/z range, fixed/variable modifications, mass tolerances,
