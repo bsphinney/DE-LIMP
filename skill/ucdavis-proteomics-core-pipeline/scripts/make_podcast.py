@@ -48,11 +48,13 @@ CHECKS the script, RENDERS it to audio and LINKS the audio into the outputs.
             email sends base64) with Bioshare as the way to send it. Refuses while the check
             does not hold, like link.
   job    SCRIPT.md (--core-run [internal] | --cloud-ok NOTE) [--model M] [--python PY]
-         -> podcast_job.sh in the session's logs/: a SLURM job (1 CPU, 2 GB, 2 h) that runs
-            render --tts gemini (verify follows), link and share -- the route on HIVE, where
-            minutes of network calls must not run on the login node. Written only when what the
-            job needs is here: a passing check, consent, a python with google-genai >=
-            GENAI_MIN (setup.sh installs it) and a key. Loads HIVE's ffmpeg module for the AAC.
+         -> ~/.proteomics-pipeline/jobs/podcast_<name>_<hash>.sh, a SLURM job (1 CPU, 2 GB, 2 h)
+            that runs render --tts gemini (verify follows), link and share -- the route on HIVE,
+            where minutes of network calls must not run on the login node. Written only when
+            what the job needs is here: a passing check, consent, a python with google-genai >=
+            GENAI_MIN (setup.sh installs it) and a key; in a folder only you can change (a
+            group-writable session folder would let another member swap the script), never
+            through a link. Loads HIVE's ffmpeg module for the AAC.
   key    [--core-run]
          -> where the Gemini key would come from, and whether the Core's shared key can be
             used; never the key. Exit 0 when there is one.
@@ -61,8 +63,11 @@ Privacy: only the final transcript (render: the turns, after pronunciation subst
 the rendered audio (verify, downsampled) ever leave the machine -- never the report -- and only
 with consent, recorded in podcast.json: --cloud-ok NOTE (the person whose data it is agreed), or
 --core-run for a Core run, which records CORE_CLOUD_OK (the Core director's standing approval;
-the one place that text lives). --tts say (macOS) is offline. The Gemini key is read from
-GEMINI_API_KEY, else ~/.config/ucdavis-proteomics/gemini_key, else -- for a Core run only -- the
+the one place that text lives). --core-run needs a CoreOmics submission (or, with `internal`,
+session.json saying internal Core work) and a person on the Core staff list; podcast.json says
+"Core staff", and their login goes to the staff-only logs/podcast.staff.json. --tts say (macOS) is offline. The Gemini key is read from
+GEMINI_API_KEY, else ~/.config/ucdavis-proteomics/gemini_key (on HIVE refused when others can
+read it), else -- for a Core run only -- the
 Core's shared key on HIVE (CORE_KEY_FILE, used only while the Core's trust rule holds and other
 accounts cannot read it). It is never printed or logged and is scrubbed from every error message
 (notify_slack.redact: the skill's one list of secret patterns).
@@ -88,6 +93,7 @@ import re
 import select
 import shlex
 import shutil
+import stat
 import struct
 import subprocess
 import sys
@@ -1897,15 +1903,32 @@ def core_key():
     return (key, None) if key else (None, f"{path} is empty")
 
 
+def _key_mode_problem(path):
+    """core_submission.key_mode_problem, the skill's one rule for a key file: on HIVE every home
+    folder is open to every account, so a key file others can read is refused, not used.
+    Elsewhere None (a laptop's home is its user's)."""
+    try:
+        from core_submission import key_mode_problem
+    except ImportError as e:
+        return f"its mode cannot be checked ({e})"
+    return key_mode_problem(path)
+
+
 def find_key(core=False):
     """-> (key, where it came from, why the Core's shared key was not used or None). The order:
-    GEMINI_API_KEY; ~/.config/ucdavis-proteomics/gemini_key; for a Core run only, the Core's
-    shared key (core_key). Never printed."""
+    GEMINI_API_KEY; ~/.config/ucdavis-proteomics/gemini_key (on HIVE refused, not used, when
+    other accounts can read it); for a Core run only, the Core's shared key (core_key). Never
+    printed."""
     key = (os.environ.get("GEMINI_API_KEY") or "").strip()
     if key:
         return key, "GEMINI_API_KEY", None
     path = os.path.expanduser(KEY_FILE)
     if os.path.isfile(path):
+        bad = _key_mode_problem(path)
+        if bad:
+            return None, None, (f"{KEY_FILE} is not used: {bad}. Make it yours alone: chmod 600 "
+                                f"{KEY_FILE}; if others could read it for a while, make a new "
+                                "key in Google AI Studio and save that one")
         mode = os.stat(path).st_mode & 0o777
         if mode & 0o077:
             log(f"[WARN] {KEY_FILE} is readable by other accounts (mode {oct(mode)[2:]}): "
@@ -2015,28 +2038,141 @@ def cache_key(backend, chunk, speak, model=None):
 
 
 # ----------------------------------------------------------------------------- consent
+def _on_hive():
+    """core_submission.on_hive, the skill's test (its CORE_ON_HIVE switch is for tests)."""
+    try:
+        from core_submission import on_hive
+    except ImportError:
+        return os.path.isdir("/quobyte")
+    return on_hive()
+
+
+def _uid_login():
+    """This account's login, by its uid: never $USER or $LOGNAME, which anyone can set."""
+    try:
+        import pwd
+        return pwd.getpwuid(os.getuid()).pw_name
+    except (ImportError, KeyError, AttributeError):
+        return None
+
+
+def _staff_check_on_hive():
+    """From a laptop: ask HIVE, through hive_exec.sh, whether the account this computer's HIVE
+    login reaches is on the Core staff list -- staff.py's own check, of `id -un` there (what the
+    ssh key proves), never a name this computer claims. -> (login, how, None) or (None, None,
+    why)."""
+    cmd = 'python3 ~/proteomics-pipeline/scripts/staff.py check --by "$(id -un)"'
+    try:
+        r = subprocess.run(["bash", os.path.join(HERE, "hive_exec.sh"), cmd],
+                           capture_output=True, text=True, timeout=120)
+        got = json.loads(r.stdout[r.stdout.find("{"):])      # past anything a login shell prints
+    except (OSError, subprocess.SubprocessError, ValueError) as e:
+        return None, None, ("the Core staff list is on HIVE and could not be asked from here "
+                            f"({type(e).__name__}): this computer needs its HIVE login "
+                            "(check_access.sh saves it) and the skill on HIVE "
+                            "(hive_exec.sh --put-skill)")
+    if not isinstance(got, dict):
+        return None, None, "HIVE's answer about the Core staff list was not readable"
+    checked = str(got.get("checked") or "")
+    if got.get("ok") and checked.startswith("on the Core staff list"):
+        return got.get("by"), checked + ", asked on HIVE", None
+    return None, None, str(got.get("error") or checked or "HIVE did not confirm it")
+
+
+def core_staff():
+    """Is the person running this on the Core staff list? -> (login, how it was checked, None)
+    or (None, None, why not). The Core's Gemini key is readable by every member of
+    proteomics-grp, but the standing approval and the key are for Core staff: on HIVE this
+    account (by uid) must be on the list staff.load_staff trusts (CORE_STAFF_FILE, owned by a
+    Core admin); on a laptop HIVE is asked about the account its key logs in as. Fails closed:
+    no usable list is no."""
+    if not _on_hive():
+        return _staff_check_on_hive()
+    try:
+        import staff
+    except ImportError as e:
+        return None, None, f"the Core staff list cannot be checked ({e})"
+    login = _uid_login()
+    logins, why = staff.load_staff()
+    if logins is None:
+        return None, None, f"the Core staff list cannot be used ({why})"
+    if not login or login not in logins:
+        return None, None, (f"{login or 'this account'} is not on the Core staff list "
+                            f"({staff.staff_file()}); a Core admin adds staff to it")
+    return login, f"on the Core staff list ({staff.staff_file()})", None
+
+
 def core_run_consent(script_path, kind):
-    """--core-run: the consent of record for a Core run -> (CORE_CLOUD_OK, what kind of Core run,
-    None), or (None, None, why not). `submission` (the default): the session the script sits in
-    answers a CoreOmics submission (submission_report.core_run, the one test); `internal`: an
-    analysis of the Core's own samples, which no record can show, so it is recorded as declared.
+    """--core-run: the consent of record for a Core run -> (CORE_CLOUD_OK, the Core run, None),
+    or (None, None, why not). `submission` (the default): the session the script sits in answers
+    a CoreOmics submission (submission_report.core_run, the one test); `internal`: its
+    session.json says it is internal Core work (analysis_for, from session.py init --internal).
+    Either way the person running it must be Core staff (core_staff). The Core run names the
+    ROLE; its "login" is for the staff-only record (record_core_run), never podcast.json.
     Anyone else's data is never a Core run: they are asked, and --cloud-ok records the answer."""
+    out = output_dir_of(script_path)
+    session = _session_of(out) if out else None
     if kind == "internal":
-        return CORE_CLOUD_OK, {"kind": "internal"}, None
-    out, got = output_dir_of(script_path), None
-    if out:
-        try:
-            import submission_report
-            got = submission_report.core_run(_session_of(out))
-        except ImportError:
-            got = None
-    if not got:
-        return None, None, ("--core-run: this session answers no CoreOmics submission "
-                            "(submission_report.core_run, asked of the session above the "
-                            "script's podcast/ folder). For an analysis of the Core's own "
-                            "samples pass --core-run internal; for anyone else's data, ask them "
-                            "and pass --cloud-ok \"<who agreed, when>\".")
-    return CORE_CLOUD_OK, {"kind": "submission", "prot": got.get("prot")}, None
+        work = None
+        if session:
+            try:
+                import session as session_mod
+                work = session_mod.analysis_for(session)
+            except ImportError:
+                work = None
+        if not (isinstance(work, dict) and work.get("internal")):
+            return None, None, ("--core-run internal: this session's session.json does not say "
+                                "it is internal Core work (analysis_for, written by session.py "
+                                "init --internal \"<its board title>\"). For a CoreOmics "
+                                "submission pass --core-run; for anyone else's data, ask them "
+                                "and pass --cloud-ok \"<who agreed, when>\".")
+        rec = {"kind": "internal", "title": work["internal"]}
+    else:
+        got = None
+        if session:
+            try:
+                import submission_report
+                got = submission_report.core_run(session)
+            except ImportError:
+                got = None
+        if not got:
+            return None, None, ("--core-run: this session answers no CoreOmics submission "
+                                "(submission_report.core_run, asked of the session above the "
+                                "script's podcast/ folder). For internal Core work pass "
+                                "--core-run internal; for anyone else's data, ask them and "
+                                "pass --cloud-ok \"<who agreed, when>\".")
+        rec = {"kind": "submission", "prot": got.get("prot")}
+    login, how, why = core_staff()
+    if not login:
+        return None, None, f"--core-run is for Core staff: {why}."
+    try:
+        from staff import ROLE
+    except ImportError:
+        ROLE = "Core staff"
+    rec.update(by=ROLE, staff_check=how, login=login)
+    return CORE_CLOUD_OK, rec, None
+
+
+def record_core_run(script_path, rec, event):
+    """Take the login out of a Core run (`rec`, as core_run_consent made it) and append who it
+    was to the session's staff-only record, logs/podcast.staff.json: names and logins stay with
+    the staff (staff.py), and podcast.json says "Core staff". -> `rec` without the login."""
+    rec = dict(rec or {})
+    login = rec.pop("login", None)
+    if not login:
+        return rec or None
+    out = output_dir_of(script_path)
+    where = os.path.join(_session_of(out) if out else os.path.dirname(os.path.abspath(
+        script_path)), "logs", "podcast.staff.json")
+    try:
+        import staff
+        staff.append(where, dict(event=event, by=login, staff_check=rec.get("staff_check"),
+                                 at=now_iso(), **{k: v for k, v in rec.items()
+                                                  if k in ("kind", "prot", "title")}))
+    except Exception as e:                      # the podcast never stops for its record
+        log(f"[WARN] the staff-only record of who made this Core run's podcast was not written "
+            f"({type(e).__name__}: {e})")
+    return rec
 
 
 def consent_of(a):
@@ -2199,7 +2335,7 @@ def cmd_render(a):
                                   "rendered audio downsampled to 16 kHz; never the report"
                                   if backend.cloud else "nothing (offline)")},
         "cloud_tts_consent": (consent if backend.cloud else False),
-        "core_run": core_rec,
+        "core_run": record_core_run(a.script, core_rec, "render") if core_rec else None,
         "script": "podcast_script.md", "script_sha256": s.sha256,
         "script_author": s.author,
         "check": {"status": status or "not run", "file": "check.txt",
@@ -2645,6 +2781,8 @@ def cmd_verify(a):
     except (VerifyError, RenderError) as e:
         log(f"[verify] could not verify: {scrub(e)}")
         return 1
+    if core_rec:
+        record_core_run(a.script, core_rec, "verify")
     print(json.dumps({k: res[k] for k in ("status", "ratio", "coverage", "words_script",
                                           "words_heard", "segments_to_check", "model")},
                      indent=2))
@@ -3685,6 +3823,63 @@ def _vtuple(v):
     return tuple(int(x) for x in re.findall(r"\d+", str(v or ""))[:3])
 
 
+def pipeline_home():
+    """The skill's per-user folder: $PROTEOMICS_PIPELINE_HOME (activate.sh), else
+    ~/.proteomics-pipeline -- setup.json and the private jobs/ folder live there."""
+    return os.environ.get("PROTEOMICS_PIPELINE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".proteomics-pipeline")
+
+
+def private_dir(path):
+    """Make `path` a folder only this account can use -> None, or why it cannot be. Core session
+    folders on HIVE are group-writable with no sticky bit, so a job script there could be
+    swapped for another member's before sbatch reads it (the job then runs as you), and a link
+    planted at its log's name would be written through. So the job and its log live here."""
+    try:
+        os.makedirs(path, mode=0o700, exist_ok=True)
+        st = os.lstat(path)
+        parent = os.lstat(os.path.dirname(os.path.abspath(path)))
+    except OSError as e:
+        return f"{path}: {e}"
+    uid = os.getuid() if hasattr(os, "getuid") else None
+    if not stat.S_ISDIR(st.st_mode):
+        return f"{path} is not a folder (a link?)"
+    if uid is not None and st.st_uid != uid:
+        return f"{path} belongs to another account"
+    if uid is not None and (parent.st_uid != uid or parent.st_mode & 0o002 or (
+            parent.st_mode & 0o020 and parent.st_gid != os.getgid())):
+        return (f"{os.path.dirname(os.path.abspath(path))} can be changed by other accounts, so "
+                f"{path} could be put back as theirs")
+    if stat.S_IMODE(st.st_mode) & 0o077:
+        try:
+            os.chmod(path, 0o700)
+        except OSError as e:
+            return f"{path}: cannot make it private ({e})"
+    return None
+
+
+def write_private(path, text, mode=0o700):
+    """Write `path` so that only this account could have written it: a new file beside it
+    (O_CREAT|O_EXCL|O_NOFOLLOW, never through a link), fchmod, then renamed over `path`. A link
+    already at `path` is refused, not followed."""
+    if os.path.islink(path):
+        raise RenderError(f"{path} is a link: not writing through it. Remove it and run job again.")
+    tmp = os.path.join(os.path.dirname(path), f".{os.path.basename(path)}.{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), mode)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fchmod(fh.fileno(), mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def job_python(given=None):
     """The python the podcast job runs -> (path, its google-genai version, None), or (None, None,
     why). --python, else the skill's env here (setup.json's `python`, where setup.sh installs
@@ -3692,10 +3887,8 @@ def job_python(given=None):
     python that writes the job is often not it -- on HIVE `python3` is the system's."""
     cands = [given]
     if not given:
-        home = os.environ.get("PROTEOMICS_PIPELINE_HOME") or os.path.join(
-            os.path.expanduser("~"), ".proteomics-pipeline")
         try:
-            with open(os.path.join(home, "setup.json"), encoding="utf-8") as fh:
+            with open(os.path.join(pipeline_home(), "setup.json"), encoding="utf-8") as fh:
                 cands = [json.load(fh).get("python")]
         except (OSError, ValueError, AttributeError):
             cands = []
@@ -3722,12 +3915,16 @@ def job_python(given=None):
                         "or name a python with --python")
 
 
-def write_job(path, py, script, out, consent_args, models, queue, log_dir, name):
-    """The job script: render --tts gemini (verify follows), link, share. -> its text."""
+def write_job(path, py, script, out, consent_args, models, queue, log_path, name):
+    """The job script: render --tts gemini (verify follows), link, share -> its text, written
+    by write_private. The log path is quoted: sbatch reads `--output="a b/c"` as one path
+    (checked on HIVE 2026-10-15) and an unquoted space ends the directive."""
+    if re.search(r'["\n]', log_path):
+        raise RenderError(f"the job's log path cannot hold a quote or a line break: {log_path!r}")
     part, acct, qos, requeue = queue
     q = shlex.quote
     L = ["#!/bin/bash -l", f"#SBATCH --job-name=podcast_{name}",
-         f"#SBATCH --output={os.path.join(log_dir, 'podcast_job_%j.log')}",
+         f'#SBATCH --output="{log_path}"',
          "#SBATCH --cpus-per-task=1", f"#SBATCH --mem={JOB_MEM}", f"#SBATCH --time={JOB_HOURS}:00:00"]
     L += [f"#SBATCH --{k}={v}" for k, v in (("partition", part), ("account", acct), ("qos", qos))
           if v]
@@ -3747,9 +3944,7 @@ def write_job(path, py, script, out, consent_args, models, queue, log_dir, name)
           f'"$PY" "$MP" link {q(out)} || exit $?',
           f'"$PY" "$MP" share {q(out)}', ""]
     text = "\n".join(L)
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(text)
-    os.chmod(path, 0o755)
+    write_private(path, text)
     return text
 
 
@@ -3757,6 +3952,10 @@ def cmd_job(a):
     """Write the SLURM job that renders a checked script in Gemini voices, then link and share.
     What the job needs is checked here first -- the check, consent, google-genai, a key -- so a
     missing piece is one line now, not a failed job later."""
+    if not os.path.isfile(a.script):
+        log(f"[job] refusing: {a.script} is not there: put podcast_script.md in the session's "
+            "output/podcast/ first.")
+        return 2
     s = parse_script(a.script)
     if s.problems:
         for line, msg in s.problems:
@@ -3800,21 +3999,28 @@ def cmd_job(a):
     part, acct, qos = run_search.slurm_queue(peak_cpus=1, preemptible_ok=True)
     requeue = diann_parallel.needs_requeue(part, qos)
     session = _session_of(out)
-    log_dir = os.path.join(session, "logs")
-    if not os.path.isdir(log_dir):
-        log_dir = os.path.dirname(os.path.abspath(a.script))
-    path = os.path.join(log_dir, "podcast_job.sh")
+    jobs = os.path.join(pipeline_home(), "jobs")
+    bad = private_dir(jobs)
+    if bad:
+        log(f"[job] refusing: {bad}. The job script must sit where only you can change it.")
+        return 2
     name = re.sub(r"[^A-Za-z0-9_.-]+", "_", (core_rec or {}).get("prot")
                   or os.path.basename(session))[:40]
+    stem = f"podcast_{name}_{sha256_bytes(os.path.realpath(session).encode('utf-8'))[:8]}"
+    path, log_path = os.path.join(jobs, stem + ".sh"), os.path.join(jobs, stem + "_%j.log")
     if core_rec:
         consent_args = ["--core-run"] + (["internal"] if core_rec["kind"] == "internal" else [])
     else:
         consent_args = ["--cloud-ok"] + ([consent] if isinstance(consent, str) else [])
     models = [x for m in (a.model or []) for x in ("--model", m)]
-    write_job(path, py, os.path.abspath(a.script), out, consent_args, models,
-              (part, acct, qos, requeue), log_dir, name)
-    print(json.dumps({"job": path, "submit": f"sbatch {path}",
-                      "log": os.path.join(log_dir, "podcast_job_<jobid>.log"),
+    try:
+        write_job(path, py, os.path.abspath(a.script), out, consent_args, models,
+                  (part, acct, qos, requeue), log_path, name)
+    except (RenderError, OSError) as e:
+        log(f"[job] refusing: {e}")
+        return 2
+    print(json.dumps({"job": path, "submit": f"sbatch {shlex.quote(path)}",
+                      "log": log_path.replace("%j", "<jobid>"),
                       "python": py, "google_genai": version, "key": src,
                       "consent": (f"Core run ({core_rec['kind']}"
                                   + (f", {core_rec['prot']}" if core_rec.get("prot") else "")
@@ -3861,8 +4067,9 @@ def main(argv=None):
                        help="a Core run: the consent is the Core director's standing approval "
                             "(CORE_CLOUD_OK, recorded in podcast.json), and the Core's shared "
                             "key on HIVE may be used. 'submission' (the default) needs the "
-                            "session to answer a CoreOmics submission; 'internal' is an analysis "
-                            "of the Core's own samples")
+                            "session to answer a CoreOmics submission; 'internal' needs its "
+                            "session.json to say internal Core work. Both need you on the Core "
+                            "staff list")
 
     r = sub.add_parser("render", help="render a checked script to audio")
     r.add_argument("script")
