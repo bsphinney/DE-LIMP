@@ -384,7 +384,7 @@ Refuses to proceed on 0 sequences, and warns if a full-set download comes back
 >5% short of UniProt's declared count (truncated stream). Writes
 `<out>.meta.json` alongside the FASTA — sha256, source URL, organism, taxid,
 content type, UniProt release, per-part sequence counts, contaminant set +
-citation, and any warnings. Pass it to `provenance.py --fasta-info` so
+citation, and any warnings. Pass it to `provenance.py --fasta-info-file` so
 `reproduce.sh` rebuilds the database that was *actually searched*.
 
 ## SLURM submission (hpc)

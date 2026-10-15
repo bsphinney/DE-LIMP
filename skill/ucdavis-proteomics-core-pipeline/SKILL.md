@@ -2616,7 +2616,7 @@ python3 scripts/provenance.py --outdir ./reproducibility \
   --setup-json ~/.proteomics-pipeline/setup.json \
   --tools-json ~/.proteomics-pipeline/tools/tools.json \
   --params ./wf/<params_file> --conditions ./conditions.csv \
-  --fasta ./search.fasta --fasta-info "$(cat ./search.fasta.meta.json)" \
+  --fasta ./search.fasta --fasta-info-file ./search.fasta.meta.json \
   --raw /path/to/*.d --report ./search_out/report.parquet --de-dir ./de_results \
   --engine <engine> --de-method <dpc|maxlfq> --contrasts "<...>" \
   --q-cutoff 0.01 --logfc 1.0 --adjp 0.05 \

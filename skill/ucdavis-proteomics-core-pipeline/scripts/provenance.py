@@ -20,7 +20,7 @@ Usage (the orchestrator fills these from earlier steps):
     --params       ./wf/diann.cfg \
     --conditions   ./conditions.csv \
     --fasta        ./search.fasta \
-    --fasta-info   "$(cat ./search.fasta.meta.json)" \
+    --fasta-info-file ./search.fasta.meta.json \
     --raw          /data/*.d \
     --report       ./search_out/report.parquet \
     --de-dir       ./de_results \
@@ -120,6 +120,45 @@ def load_json(path):
         return None
 
 
+def read_fasta_info(text=None, path=None):
+    """fetch_fasta.py's sidecar (<fasta>.meta.json) for the bundle -> (dict, None), or (None, the
+    problem). From --fasta-info-file <path> or --fasta-info @<path>, or --fasta-info '<JSON>' (the
+    older form). A file, because the JSON on a command line can exceed the system's argument limit:
+    a database with 8,685 added sequences has a 2 MB sidecar, and `--fasta-info "$(cat ...)"` failed
+    with "Argument list too long" (exit 126; staff report 2026-10-09)."""
+    if text and text.startswith("@"):
+        path, text = text[1:], None
+    if path:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+        except OSError as e:
+            return None, f"cannot read {path}: {e}"
+    try:
+        info = json.loads(text)
+    except (TypeError, ValueError) as e:
+        return None, f"not valid JSON ({e})"
+    if not isinstance(info, dict):
+        return None, f"a JSON {type(info).__name__}, not fetch_fasta.py's sidecar (a JSON object)"
+    added = info.get("added_sequences")
+    if added is not None and not (isinstance(added, list) and
+                                  all(isinstance(f, dict) for f in added)):
+        return None, ("added_sequences must be a list of objects, one per --add-fasta file "
+                      "({file, sha256, n_entries, entries}), as fetch_fasta.py writes it; got "
+                      f"{type(added).__name__}. Pass the sidecar fetch_fasta.py wrote, unedited")
+    return info, None
+
+
+def fasta_info_for_bundle(info):
+    """The sidecar as the bundle records it: each --add-fasta file by path, sha256 and entry count.
+    The per-entry records stay in the sidecar (thousands of them for an added proteome); the file's
+    sha256 already pins every entry."""
+    if not isinstance(info, dict) or not info.get("added_sequences"):
+        return info
+    return dict(info, added_sequences=[
+        {k: f.get(k) for k in ("file", "sha256", "n_entries")} for f in info["added_sequences"]])
+
+
 # PROT_0756 v2 (2026-09-28): identical inputs, software and flags on a zen4 and a zen2 HIVE node.
 CPU_FAMILY_EVIDENCE = ("|ΔlogFC| ≤ 0.0022 and |Δt| ≤ 0.0064 across 12 contrasts, no significance "
                        "call changed; each family reproduced its own tables exactly")
@@ -205,7 +244,11 @@ def main():
     ap.add_argument("--params")
     ap.add_argument("--conditions")
     ap.add_argument("--fasta")
-    ap.add_argument("--fasta-info", help="JSON from fetch_fasta.py")
+    ap.add_argument("--fasta-info-file", metavar="PATH",
+                    help="fetch_fasta.py's <fasta>.meta.json -- the database as it was built")
+    ap.add_argument("--fasta-info", help="the same, as @<path> or (older form) its JSON text; "
+                                         "use the file form: a big sidecar exceeds the "
+                                         "command-line limit")
     ap.add_argument("--raw", nargs="*")
     ap.add_argument("--report")
     ap.add_argument("--de-dir")
@@ -222,6 +265,16 @@ def main():
                                          "staff-only")
     ap.add_argument("--timestamp", default="", help="ISO timestamp (script can't call clock)")
     a = ap.parse_args()
+    # The database record is checked before anything is written: a bundle whose database replay
+    # silently fell back to the workflow defaults would reproduce a different database.
+    fasta_info = None
+    if a.fasta_info_file and a.fasta_info:
+        ap.error("give the FASTA sidecar once: --fasta-info-file <path> (or --fasta-info @<path>)")
+    if a.fasta_info_file or a.fasta_info:
+        fasta_info, problem = read_fasta_info(a.fasta_info, a.fasta_info_file)
+        if problem:
+            ap.error(f"{'--fasta-info-file' if a.fasta_info_file else '--fasta-info'}: {problem}")
+        fasta_info = fasta_info_for_bundle(fasta_info)
 
     out = os.path.abspath(a.outdir)
     for sub in ("environment", "inputs", "checksums"):
@@ -230,10 +283,6 @@ def main():
     setup = load_json(a.setup_json) if a.setup_json else None
     tools = load_json(a.tools_json) if a.tools_json else None
     wfman = load_json(a.workflow_manifest) if a.workflow_manifest else None
-    fasta_info = None
-    if a.fasta_info:
-        try: fasta_info = json.loads(a.fasta_info)
-        except json.JSONDecodeError: skip("fasta-info", "not valid JSON")
 
     # ---- environment capture -------------------------------------------------
     # The environment the DE RAN in, as run_de.R recorded it (de_provenance.json `runtime`):
@@ -508,7 +557,7 @@ def main():
     raw_arg = " ".join(f"'{f}'" for f in raw_files) or "/path/to/raw/*"
 
     # Rebuild the FASTA from what actually ran (fetch_fasta.py's output), falling back
-    # to the bundle only if --fasta-info was not supplied. The bundle's proteome is the
+    # to the bundle only if --fasta-info-file was not supplied. The bundle's proteome is the
     # workflow DEFAULT — the user may have confirmed a different organism in step 3, and
     # regenerating from the bundle would silently reproduce a different database.
     # `or {}` on every lookup, not just the outer one: a manifest with an explicit
@@ -549,7 +598,7 @@ def main():
                                  f"dated {(sf.get('mtime_utc') or '?')[:10]}, sha256 "
                                  f"{(sf.get('sha256') or '?')[:12]}...), release unknown.")
     else:
-        fasta_repro_note = ("NOT RECORDED — --fasta-info was not passed to provenance.py, "
+        fasta_repro_note = ("NOT RECORDED — --fasta-info-file was not passed to provenance.py, "
                             "so these values come from the workflow bundle's defaults and "
                             "may not be what was searched. Verify against checksums/.")
     # The digestion enzyme(s) decide which protease contaminant entries stay Cont_ when they
