@@ -172,6 +172,37 @@ silac_compare <- function(w, num, den, reps, min_reps, adjp = 0.05, mode_tol = 0
        mode_check = mode_check)
 }
 
+# The precursor's C-terminal residue (K or R for a tryptic peptide), from Precursor.Id: the
+# sequence with its modifications -- (...) and [...] -- and the charge removed.
+silac_cterm <- function(id) {
+  s <- sub("[0-9]+$", "", gsub("\\([^)]*\\)|\\[[^]]*\\]", "", id))
+  substr(s, nchar(s), nchar(s))
+}
+
+# A label that reads lysine and arginine differently: per run and protein group, the median log2
+# ratio num/den of its K-ending precursors minus that of its R-ending ones, over the replicates
+# `reps`. A deuterated lysine (Lys4, 2H(4)) elutes slightly earlier than its light partner, so
+# the two channels are not integrated over the same peak; a protein's ratio then depends on its
+# mix of K- and R-ending peptides (a triple-SILAC experiment, 2026-10-16: M/L K-ending 0.29 log2
+# below R-ending in every run). -> list(median (over protein-run pairs), per_run (named medians),
+# n_pairs, n_proteins).
+silac_residue_bias <- function(w, num, den, reps) {
+  r <- data.table::copy(w[Replicate %in% reps])
+  if (!all(c(num, den) %in% names(r)) || !nrow(r))
+    return(list(median = NA_real_, per_run = list(), n_pairs = 0L, n_proteins = 0L))
+  r[, lr := log2(get(num) / get(den))]
+  r <- r[is.finite(lr)]
+  r[, res := silac_cterm(Precursor.Id)]
+  pr <- r[res %in% c("K", "R"), .(k = stats::median(lr[res == "K"]), r = stats::median(lr[res == "R"])),
+          by = .(Run, Protein.Group)]
+  pr <- pr[is.finite(k) & is.finite(r)]
+  pr[, d := k - r]
+  per_run <- pr[, .(d = stats::median(d)), by = Run]
+  list(median = if (nrow(pr)) stats::median(pr$d) else NA_real_,
+       per_run = stats::setNames(as.list(per_run$d), per_run$Run),
+       n_pairs = nrow(pr), n_proteins = data.table::uniqueN(pr$Protein.Group))
+}
+
 # Detection of each protein group in each group's channel: the replicates where >= 1 of its
 # precursors passed the channel q-value. `loaded`: list(group = replicates that hold it).
 # -> one row per protein group: <group>_replicates, and the detection pattern -- every group

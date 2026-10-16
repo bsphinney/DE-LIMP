@@ -215,6 +215,9 @@ class Analysis(unittest.TestCase):
         self.assertEqual(by["silac_channel_balance"][0]["status"], "WARN")
         self.assertEqual(by["silac_label_incorporation"][0]["status"], "INFO")
         self.assertNotIn("silac_label_declaration", by)
+        # every precursor here ends in K: no K against R comparison, said so (#18)
+        self.assertEqual([c["status"] for c in by["silac_label_residue_bias"]], ["INFO"] * 3)
+        self.assertIn("not compared: 0 protein-run pairs", by["silac_label_residue_bias"][0]["message"])
         # the zero point: median and density peak agree here (a symmetric design)
         self.assertEqual([c["status"] for c in by["silac_zero_point"]], ["PASS"] * 3)
         # P04's KO ratio rests on one precursor in Rep1: counted, said
@@ -504,6 +507,51 @@ cat(jsonlite::toJSON(list(mc = res$mode_check, off = res$offsets), auto_unbox = 
             self.assertNotEqual(p.returncode, 0)
             self.assertIn("turnover", p.stderr)
             self.assertFalse(os.path.exists(os.path.join(out2, "de_provenance.json")))
+
+    def test_a_label_that_reads_lysine_and_arginine_differently_is_flagged(self):
+        """#18: in a triple-SILAC experiment the medium channel (K4R6: Lys4 is deuterated) read
+        K-ending precursors 0.29 log2 below R-ending ones of the same protein, in every run."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        def plant(report, shift):
+            # every other precursor ends in R; the KO channel (M) reads K-ending ones `shift` low
+            import re
+            t = pq.read_table(report).to_pydict()
+            for i, pid in enumerate(t["Precursor.Id"]):
+                m = re.match(r"^PEPTIDE\d\d([A-F])K\(", pid)
+                if not m:
+                    continue
+                if m.group(1) in "AD":                       # every protein has A and C
+                    t["Precursor.Id"][i] = pid.replace("K(SILAC)", "R(SILAC)")
+                elif t["Channel"][i] == "M":
+                    t["Precursor.Quantity"][i] *= 2 ** shift
+            pq.write_table(pa.table(t), report)
+
+        for shift, status in ((-0.3, "WARN"), (0.0, "PASS")):
+            with self.subTest(shift=shift), tempfile.TemporaryDirectory() as d:
+                rep = fx.make_report(os.path.join(d, "report.parquet"))
+                plant(rep, shift)
+                fx.write_design(os.path.join(d, "design.csv"))
+                cfg = os.path.join(d, "params.cfg")
+                open(cfg, "w").write("--fixed-mod SILAC,0.0,KR,label\n")
+                json.dump({"labels": silac.labels_record("silac3", "K4R6,K8R10")},
+                          open(cfg + ".rationale.json", "w"))
+                _, out = run_silac(d, "--params", cfg)
+                prov = json.load(open(os.path.join(out, "de_provenance.json")))
+                got = {c["message"].split(" ")[0].rstrip(":"): c for c in prov["checks"]
+                       if c["check"] == "silac_label_residue_bias"}
+                self.assertEqual(got["KO-WT"]["status"], status, got["KO-WT"]["message"])
+                kr = prov["de_tables"]["KO-WT"]["residue_bias"]
+                self.assertAlmostEqual(kr["median"], shift, delta=0.08)
+                self.assertGreaterEqual(kr["n_pairs"], 20)
+                if status == "WARN":
+                    m = got["KO-WT"]["message"]
+                    self.assertIn("channels M/L", m)
+                    self.assertIn("The M channel's lysine label is deuterated (Lys4, 2H(4))", m)
+                    self.assertIn("K6R6", m)
+                    self.assertEqual(got["DKO-WT"]["status"], "PASS", "H (K8R10) is not biased")
+                    self.assertEqual(got["DKO-KO"]["status"], "WARN")
 
     def test_another_pipelines_results_are_not_overwritten(self):
         with tempfile.TemporaryDirectory() as d:

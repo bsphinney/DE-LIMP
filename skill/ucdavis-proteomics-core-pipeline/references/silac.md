@@ -26,6 +26,11 @@ Ask; never guess. Each answer goes into `logs/decisions.md` (`log_decision.py`).
 
    `silac3` takes two presets, lightest first (`K4R6,K8R10`: M then H); `silac2` takes one
    (`K8R10`). A label not in the table is not guessed: say so, and do not search.
+   K4's lysine (Lys4, 2H(4)) is **deuterated**: deuterium makes a peptide elute slightly
+   earlier than its light partner, so the two channels are not measured over the same peak, and
+   a protein's ratio can depend on its mix of lysine- and arginine-ending peptides (check
+   `silac_label_residue_bias`, section 4). Search the data as they were labelled; for a **new**
+   design, suggest a non-deuterated medium label (K6R6: 13C(6) lysine and arginine).
 2. **Which sample is in which channel of which run.** Written as `input/silac_design.csv`, one
    row per run and channel that holds a sample:
 
@@ -241,6 +246,13 @@ run; 239 and 213 of the significant proteins rest on one precursor in at least o
   (`critical_log2_significant`), and the true |log2 ratio| found 80% of the time at that cutoff
   (`true_log2_80pct_power`). On the validation dataset: 0.28 / 0.32 / 0.42 for the largest
   comparison, 0.22 / 1.02 / 1.10 for the one with nothing significant.
+- **Lysine against arginine** (`silac_label_residue_bias`): per comparison, run and protein, the
+  median log2 ratio of its K-ending precursors minus that of its R-ending ones; the check warns
+  above 0.15 log2 (median over protein-run pairs, at least 20) and names a deuterated label in
+  the pair. On a triple-SILAC experiment with K4R6 as the medium label, M/L read K-ending
+  precursors 0.29 log2 below R-ending ones in every run (0.27–0.34; H/L −0.06): each protein's M
+  ratio moves by up to that much with its K/R peptide mix, the size of a modest effect. Say so in
+  the report next to any effect of that size in a comparison the check flags.
 - **The decoy channel.** DIA-NN models channel confidence against a heavier decoy channel; the
   Methods name its masses when the search log (`<report>.log.txt` or `report.log.txt` beside the
   report) has them.
