@@ -904,9 +904,10 @@ class SubagentEnv(Env):
         self.parent = os.path.join(self.claude, "projects", "-p", SID + ".jsonl")
         self.agent = os.path.join(self.claude, "projects", "-p", SID, "subagents",
                                   self.AGENT + ".jsonl")
-        p = mock.patch.object(st, "TRACE_WAIT", 0)
-        p.start()
-        self.addCleanup(p.stop)
+        for p in (mock.patch.object(st, "TRACE_WAIT", 0),
+                  mock.patch.object(st, "TRACE_CONFIRM", 0)):
+            p.start()
+            self.addCleanup(p.stop)
 
     def write(self, parent_pending=False, agent_pending=True, background=False, agent_tok=None,
               parent_tok=None):
@@ -1063,8 +1064,68 @@ class SubagentsTheReviewersRace(SubagentEnv):
         write_lines(self.agent, self.mine())
         got = st.trace_caller(SID, self.TOK)
         self.assertIsNone(got[1])
-        self.assertIn(f"--call-id {self.TOK}: 2 transcripts of this conversation hold a call "
-                      "naming it", got[2])
+        self.assertIn(f"--call-id {self.TOK}: 2 transcripts of this conversation hold a running "
+                      "call naming it", got[2])
+
+    def test_r1_r2_t4_a_finished_call_naming_the_token_is_never_this_one(self):
+        """Round 4 (R4-M1): a FINISHED call in the parent naming the token -- the same token
+        used an hour ago (R1, R2), or a `grep <token>` (T4) -- won at once, and the teammate's
+        save landed in the parent. Only a running call (no result yet) counts."""
+        for case, earlier in (("R1", self.SAVE + f"--remember --call-id {self.TOK}"),
+                              ("T4", f"grep -rn {self.TOK} notes/")):
+            with self.subTest(case=case):
+                self.lead(earlier, when=time.time() - 3600, background=False)
+                # the lead() helper leaves a foreground call running: give it its result
+                with open(self.parent, "a") as fh:
+                    fh.write(json.dumps({"type": "user", "message": {"role": "user", "content": [
+                        {"type": "tool_result", "tool_use_id": "toolu_b1", "content": "ok"}]}})
+                             + "\n")
+                write_lines(self.agent, [dict(msg(3, "Brief: PROT_0807."), isSidechain=True)])
+                self.own_call_later(self.agent, 0.5, self.mine())       # ours, written late
+                self.assertEqual(st.trace_caller(SID, self.TOK, wait=5)[:2],
+                                 (self.AGENT, self.agent))
+                self.assertEqual(st.trace_caller(SID, self.TOK)[:2], (self.AGENT, self.agent))   # R2
+
+    def test_g_the_same_token_running_in_two_transcripts_records_nothing(self):
+        """Round 3/4 scenario G: the parent runs the same command with the same token, and the
+        teammate's own call is written a moment later -- a lone match is believed only once it
+        has stayed alone for TRACE_CONFIRM s."""
+        self.lead(self.SAVE + f"--remember --call-id {self.TOK}", background=False)
+        write_lines(self.agent, [dict(msg(3, "Brief: PROT_0807."), isSidechain=True)])
+        self.own_call_later(self.agent, 0.3, self.mine())
+        with mock.patch.object(st, "TRACE_CONFIRM", 1.5):
+            got = st.trace_caller(SID, self.TOK, wait=5)
+        self.assertIsNone(got[1])
+        self.assertIn("2 transcripts", got[2])
+
+    def test_a_background_call_never_identifies_the_caller(self):
+        write_lines(self.parent, [msg(0, "Lead's work.")])
+        write_lines(self.agent, bash_call(6, self.SAVE + f"--remember --call-id {self.TOK}",
+                                          background=True))
+        got = st.trace_caller(SID, self.TOK)
+        self.assertIsNone(got[1])
+        self.assertIn("a background call is never counted", got[2])
+
+    def test_status_says_when_the_conversation_was_not_recorded(self):
+        """Round 4 (R4-S1): checkpoint.py status dropped remember()'s result."""
+        sess = os.path.join(self.d, "S")
+        os.makedirs(os.path.join(sess, "logs"))
+        ck = os.path.join(SCRIPTS, "checkpoint.py")
+        subprocess.run([PY, ck, "record", "--session", sess, "--stage", "search", "--jobs", "1",
+                        "--report", os.path.join(sess, "report.parquet")], check=True,
+                       capture_output=True, text=True, env=dict(os.environ), timeout=60)
+        write_lines(self.parent, [msg(0, "Lead's work.")])
+        write_lines(self.agent, self.mine())                    # a teammate is at work
+        for extra, want in (((), {"recorded": False}), (("--call-id", self.TOK), {"recorded": True})):
+            with self.subTest(extra=extra):
+                r = subprocess.run([PY, ck, "status", "--session", sess, "--resume", *extra],
+                                   capture_output=True, text=True, env=dict(os.environ),
+                                   timeout=60)
+                t = json.loads(r.stdout)["transcript"]
+                self.assertEqual(t["recorded"], want["recorded"], t)
+                if not want["recorded"]:
+                    self.assertIn("carries no --call-id", t["reason"])
+        self.assertEqual((st.lookup(SID), len(st.lookup(self.AGENT))), ([], 1))
 
     def test_init_says_when_the_conversation_was_not_recorded(self):
         """R2-S1: session.py init said a refusal only on stderr; its JSON carries it now --

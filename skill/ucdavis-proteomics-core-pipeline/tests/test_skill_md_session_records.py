@@ -47,6 +47,18 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class CallIdIsExplained(unittest.TestCase):
+    def test_step_3b_says_when_and_how_to_give_a_call_id(self):
+        """Review of 2.13.1, round 4: the token is needed whenever a subagent ran in the last
+        6 hours (finalize after 8d's reviewers too), typed literally, fresh, in the foreground."""
+        s = text()
+        b = s[s.index("### 3b."):s.index("**Core data with a CoreOmics submission")]
+        for want in ("`--call-id` whenever any subagent or teammate of this conversation ran in "
+                     "the last 6 hours", "never `$(uuidgen)`", "fresh for every call",
+                     "a background call is never counted"):
+            self.assertIn(want, " ".join(b.split()))
+
+
 class ReviewsAreKept(unittest.TestCase):
     def test_step_8d_reviewers_write_their_findings_to_logs(self):
         """2026-10: three step-8d reviewers, run from a teammate, all ended without handing

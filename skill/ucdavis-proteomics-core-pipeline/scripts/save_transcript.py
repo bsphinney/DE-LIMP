@@ -384,6 +384,7 @@ def _label(info):
 # token, the conversation's own id is used only while no subagent of it is at work.
 SUBAGENTS_ACTIVE = 6 * 3600     # a subagent transcript written this recently may be the caller
 TRACE_WAIT = 15                 # s to wait for the call to be written (~4 s seen)
+TRACE_CONFIRM = 3               # s a lone match must stay alone: a second (a reused token) refuses
 TRACE_TAIL = 1 << 20            # bytes of each transcript's end that are read
 CALL_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 
@@ -403,8 +404,11 @@ def active_subagents(parent):
 
 
 def calls_with(path, call_id):
-    """Does the transcript (its last TRACE_TAIL bytes) hold a Bash call whose command names
-    `call_id` as a word of its own?"""
+    """Does the transcript (its last TRACE_TAIL bytes) hold a RUNNING Bash call -- a tool_use
+    with no tool_result yet -- whose command names `call_id` as a word of its own? The caller's
+    own call is necessarily still running; a finished one (the same token used earlier, a
+    `grep <token>`) is never it (review of 2.13.1, round 4). A call run in the background gets
+    its result at once, so it never counts: a background save is refused, visibly."""
     try:
         with open(path, "rb") as fh:
             fh.seek(0, os.SEEK_END)
@@ -413,18 +417,23 @@ def calls_with(path, call_id):
     except OSError:
         return False
     rx = re.compile(r"(?<![A-Za-z0-9_-])" + re.escape(call_id) + r"(?![A-Za-z0-9_-])")
+    named, done = set(), set()
     for raw in data.split("\n"):
-        if call_id not in raw or '"tool_use"' not in raw:
+        if '"tool_use' not in raw and '"tool_result' not in raw:
             continue
         try:
             c = (json.loads(raw).get("message") or {}).get("content")
         except (ValueError, AttributeError):
             continue
         for blk in c if isinstance(c, list) else []:
-            if (isinstance(blk, dict) and blk.get("type") == "tool_use" and blk.get("name") == "Bash"
+            if not isinstance(blk, dict):
+                continue
+            if (blk.get("type") == "tool_use" and blk.get("name") == "Bash"
                     and rx.search(str((blk.get("input") or {}).get("command") or ""))):
-                return True
-    return False
+                named.add(blk.get("id"))
+            elif blk.get("type") == "tool_result":
+                done.add(blk.get("tool_use_id"))
+    return bool(named - done)
 
 
 def trace_caller(sid, call_id=None, wait=None):
@@ -453,19 +462,26 @@ def trace_caller(sid, call_id=None, wait=None):
         return sid, None, (f"--call-id {call_id[:70]!r}: give 8 to 64 letters, digits, '-' or "
                            f"'_', fresh for this call. Nothing was recorded; " + name_it)
     deadline = time.time() + (TRACE_WAIT if wait is None else wait)
+    seen = None                                # when the current lone match was first seen
     while True:
         hits = [p for p in [parent] + agents if calls_with(p, call_id)]
-        if len(hits) == 1:
-            return ((sid, parent, None) if hits[0] == parent else
-                    (os.path.splitext(os.path.basename(hits[0]))[0], hits[0], None))
-        if len(hits) > 1 or time.time() >= deadline:
+        if len(hits) > 1:
             break
-        time.sleep(0.5)
+        if len(hits) == 1:
+            seen = seen or time.time()
+            if time.time() - seen >= TRACE_CONFIRM:
+                return ((sid, parent, None) if hits[0] == parent else
+                        (os.path.splitext(os.path.basename(hits[0]))[0], hits[0], None))
+        else:
+            seen = None
+            if time.time() >= deadline:
+                break
+        time.sleep(min(0.5, TRACE_CONFIRM) if TRACE_CONFIRM else 0.0)
     return sid, None, (
         f"--call-id {call_id}: {'no' if not hits else len(hits)} transcript"
-        f"{'' if len(hits) == 1 else 's'} of this conversation hold a call naming it, so "
-        f"nothing was recorded. Run it again with a fresh --call-id written into the command, "
-        + name_it)
+        f"{'' if len(hits) == 1 else 's'} of this conversation hold a running call naming it, "
+        f"so nothing was recorded. Run it again in the foreground (a background call is never "
+        f"counted) with a fresh --call-id typed into the command, " + name_it)
 
 
 def whose(session_id=None, transcript=None, call_id=None):
@@ -545,6 +561,20 @@ def remember(session_dir=None, hive=None, session_id=None, transcript=None, swit
     if warn:
         sys.stderr.write(f"[save_transcript] {warn}\n")
     return dict(rec["sessions"][key], key=key), warn
+
+
+NOT_CLAUDE_CODE = ("not a Claude Code conversation here (in hive_remote mode, `save_transcript.py "
+                   "--hive \"$S\" --remember --call-id <token>` on the computer driving HIVE "
+                   "records it)")
+
+
+def remember_result(entry, warn):
+    """remember()'s outcome as the `transcript` field session.py init and checkpoint.py status
+    print, so a refusal reaches the agent, not only stderr: {"recorded": true[, "note"]} or
+    {"recorded": false, "reason"}."""
+    if entry:
+        return dict({"recorded": True}, **({"note": warn} if warn else {}))
+    return {"recorded": False, "reason": warn or NOT_CLAUDE_CODE}
 
 
 def _parts(sid, key):

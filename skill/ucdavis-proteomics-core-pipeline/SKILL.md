@@ -1057,11 +1057,14 @@ python3 scripts/session.py init --name "<short study name>" --raw /path/to/*.d \
 **Core staff:** add step 0a's answer to either form: `--submission PROT_0807` (once per number,
 the main one first) or `--internal '<its title on the board>'`. Its JSON's `transcript` says
 whether this conversation was recorded for the session; `recorded: false` with a `reason` other
-than "not a Claude Code conversation here": tell the user, and do what the reason says. **While
-subagents or teammates of this conversation are at work** (8d's reviewers, a team), add
-`--call-id <token>` -- a fresh token of 8+ letters and digits, new for each call -- to `init`,
-`finalize`, `checkpoint.py status` and `save_transcript.py`: it is how they tell whose
-conversation is calling.
+than "not a Claude Code conversation here": tell the user, and do what the reason says.
+**`--call-id` whenever any subagent or teammate of this conversation ran in the last 6 hours**
+(a team, or step 8d's reviewers -- so `finalize` after them too): add `--call-id <token>` to
+`init`, `finalize`, `checkpoint.py status` and `save_transcript.py`. It is how they tell whose
+conversation is calling. Type the token literally in the command (never `$(uuidgen)` or a
+variable from an earlier call), fresh for every call and unlikely to collide:
+`<your agent name, or main>-<6 random letters/digits>`, e.g. `main-k7f3x9`. Run the call in the
+foreground: a background call is never counted.
 
 **Core data with a CoreOmics submission (step 1)? Attach it now -- BEFORE the experiment type below**, where the session lives (`experiment_type.py set --source submission` reads the attached record and refuses without one; set before attach, the submission's ASK never fired):
 ```
@@ -3231,12 +3234,14 @@ EOF
   when the session ends — a no-op in any conversation not recorded for an analysis.
   No transcript (another agent), or none found: it says so and exits 0. It never fails a step.
 - **Run by a subagent or teammate** (an Agent call): it shares the parent's session id, and
-  nothing in its environment names it. While subagents of the conversation are at work, every
-  call takes `--call-id <token>` (a fresh token written into the command): the transcript whose
-  call carries it is saved -- a subagent's own (`agent-<id>.jsonl`), never the parent's, which
-  holds other work. Without a token, or with one found in no transcript or in two, it records
-  nothing and says so: re-run with a fresh `--call-id`, or name the transcript, as its message
-  says (a subagent's: `--transcript <…/subagents/agent-<id>.jsonl> --session-id agent-<id>`).
+  nothing in its environment names it. Whenever any subagent of the conversation ran in the last
+  6 hours, every call takes `--call-id <token>` (typed into the command, fresh each time, run in
+  the foreground; step 3b): the transcript whose RUNNING call carries it is saved -- a subagent's
+  own (`agent-<id>.jsonl`), never the parent's, which holds other work. Without a token, or with
+  one found in no running call or in two, it records nothing and says so (`init` and
+  `checkpoint.py status` put that in their JSON's `transcript`): re-run with a fresh
+  `--call-id`, or name the transcript, as its message says (a subagent's:
+  `--transcript <…/subagents/agent-<id>.jsonl> --session-id agent-<id>`).
   The hook saves only the main conversation, so a subagent saves its own before it reports back.
 - **One conversation, several analyses** (an orchestrator, or staff looking at another client's
   run): each analysis keeps only its own part.
