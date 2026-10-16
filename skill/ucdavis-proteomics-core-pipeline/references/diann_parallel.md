@@ -979,8 +979,8 @@ input list it routes, and `diann_parallel.py` checks `--raw`/`--raw-list` in its
 hours and merge two samples into one column.
 
 **A path with `--` in it.** DIA-NN joins its arguments with spaces and cuts the result at every
-`--`, quoted or not (`arguments()`, `diann.cpp` at tag 1.8), so `--f …_DIA--asp3_S3.d` becomes
-the file `…_DIA` (skipped: "invalid raw MS data format") and the option `--asp3_S3.d`
+`--`, quoted or not (`arguments()`, `diann.cpp` at tag 1.8), so `--f …_DIA--sampA_S3.d` becomes
+the file `…_DIA` (skipped: "invalid raw MS data format") and the option `--sampA_S3.d`
 ("unrecognised option"); DIA-NN 2.7.0 did exactly that on a Core run and searched the others,
 and does it for a `--` in a folder too (HIVE srun 24807838: `plate--1/s1.mzML` became the file
 `plate` and the option `--1/s1.mzML`, while a link to the dashed run without `--` was read).

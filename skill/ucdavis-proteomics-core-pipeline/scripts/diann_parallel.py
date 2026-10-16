@@ -1193,11 +1193,11 @@ def refuse_unsafe_path(path, flag="--out", prog="diann_parallel"):
 # argument with a space and cuts the result at EVERY '--' (arguments(), diann.cpp at tag 1.8, the
 # last public source: `args += argv[i] + std::string(" ")`, then `next = args.find("--", start)`),
 # so the rest of the path becomes an "option" of its own. DIA-NN 2.7.0 does exactly that: a Core run
-# named `<date>__60SPD_DIA--asp3_<well>.d` logged "unrecognised option [--asp3_<well>.d]" and
+# named `<date>__60SPD_DIA--sampA_<well>.d` logged "unrecognised option [--sampA_<well>.d]" and
 # "skipping .../<date>__60SPD_DIA - invalid raw MS data format", and searched the other runs (a
-# staff report, 2026-10-14). Re-run on HIVE (DIA-NN 2.7.0, srun 24807838): `--f <d>/x_DIA--asp3_S3
-# .mzML --f <d>/plate--1/s1.mzML --f <d>/x_DIA-asp3_S3.mzML` (the last a link to the first) logged
-# "unrecognised option" for `--asp3_S3.mzML` and `--1/s1.mzML`, skipped `<d>/x_DIA` and
+# staff report, 2026-10-14). Re-run on HIVE (DIA-NN 2.7.0, srun 24807838): `--f <d>/x_DIA--sampA_S3
+# .mzML --f <d>/plate--1/s1.mzML --f <d>/x_DIA-sampA_S3.mzML` (the last a link to the first) logged
+# "unrecognised option" for `--sampA_S3.mzML` and `--1/s1.mzML`, skipped `<d>/x_DIA` and
 # `<d>/plate`, and processed 1 file: the link. A '--' in a FOLDER is cut the same way. A single
 # '-' is harmless -- only '--' starts an option -- and every path this skill hands DIA-NN is
 # absolute, so a name that starts with one '-' never starts an argument. Sage, msconvert,

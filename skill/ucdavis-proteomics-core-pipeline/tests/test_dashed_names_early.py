@@ -40,8 +40,8 @@ try:
 except ImportError:
     HAVE_PYARROW = False
 
-DASHED = "x_DIA--asp3_S3-H1_1_23896"
-RENAMED = "x_DIA-asp3_S3-H1_1_23896"
+DASHED = "x_DIA--sampA_S3-H1_1_00001"
+RENAMED = "x_DIA-sampA_S3-H1_1_00001"
 
 
 def write(path, text=""):

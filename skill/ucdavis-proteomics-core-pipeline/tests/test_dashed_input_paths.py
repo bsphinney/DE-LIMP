@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """DIA-NN cannot be handed a path with '--' in it, and a run it cannot read must fail the search.
 
-A staff search (2026-10-14, DIA-NN 2.7.0): a run named `<date>__60SPD_DIA--asp3_<well>.d` logged
-"unrecognised option [--asp3_<well>.d]" and "skipping .../<date>__60SPD_DIA - invalid raw MS data
+A staff search (2026-10-14, DIA-NN 2.7.0): a run named `<date>__60SPD_DIA--sampA_<well>.d` logged
+"unrecognised option [--sampA_<well>.d]" and "skipping .../<date>__60SPD_DIA - invalid raw MS data
 format", and the search went on with the other runs. DIA-NN's reader joins every argument with a
 space and cuts the result at every '--' (arguments(), diann.cpp at tag 1.8), so no quoting helps.
 
@@ -96,14 +96,14 @@ class ThePlan(unittest.TestCase):
                                           "run_name": "s1", "renamed": False}])
 
     def test_a_dashed_file_name_is_refused_unless_renaming_is_asked_for(self):
-        files = ["/raw/x_DIA--asp3_S3.d", "/raw/y.d"]
+        files = ["/raw/x_DIA--sampA_S3.d", "/raw/y.d"]
         plan = dp.dashed_input_plan(files, "/out")
         self.assertIn("1 input file name(s) contain '--'", plan["refused"])
-        self.assertIn("would be searched as x_DIA-asp3_S3", plan["refused"])
+        self.assertIn("would be searched as x_DIA-sampA_S3", plan["refused"])
         self.assertIn(dp.RENAME_DASHED_FLAG, plan["refused"])
         plan = dp.dashed_input_plan(files, "/out", rename=True)
         self.assertIsNone(plan["refused"])
-        self.assertEqual(plan["links"][0]["link"], "/out/input_links/x_DIA-asp3_S3.d")
+        self.assertEqual(plan["links"][0]["link"], "/out/input_links/x_DIA-sampA_S3.d")
         self.assertTrue(plan["links"][0]["renamed"])
 
     def test_a_new_name_another_input_has_is_refused(self):
@@ -166,26 +166,26 @@ class SingleShot(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             w = _Workspace(d)
             w.generate(*HIGH)
-            dashed = os.path.join(d, "x_DIA--asp3_S3.mzML")
+            dashed = os.path.join(d, "x_DIA--sampA_S3.mzML")
             job = _read(w.search_job).replace(w.runs[1], dashed)
             listing = os.path.join(w.out, "diann_job_input_files.txt")
             _write(listing, f"{w.runs[0]}\n{dashed}\n")
             _write(w.search_job, job)
             parser_fake(w.diann)
             r = w.run_job(w.search_job)
-            self.assertIn("unrecognised option [--asp3_S3.mzML]", r.stdout)
+            self.assertIn("unrecognised option [--sampA_S3.mzML]", r.stdout)
             self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
             self.assertIn("1 of 2 runs", r.stderr)
-            self.assertIn("x_DIA--asp3_S3", r.stderr)
+            self.assertIn("x_DIA--sampA_S3", r.stderr)
 
     def test_a_dashed_file_name_is_refused_before_anything_is_written(self):
         with tempfile.TemporaryDirectory() as d:
             w = _Workspace(d)
-            w.runs = [w.runs[0], _write(os.path.join(d, "x_DIA--asp3_S3.mzML"), "")]
+            w.runs = [w.runs[0], _write(os.path.join(d, "x_DIA--sampA_S3.mzML"), "")]
             p = w.generate(*HIGH, check=False)
             self.assertNotEqual(p.returncode, 0)
             self.assertIn("REFUSING: 1 input file name(s) contain '--'", p.stderr)
-            self.assertIn("would be searched as x_DIA-asp3_S3", p.stderr)
+            self.assertIn("would be searched as x_DIA-sampA_S3", p.stderr)
             self.assertIn("--rename-dashed-runs", p.stderr)
             self.assertFalse(os.path.exists(w.out), "nothing may be written")
             self.assertFalse(os.path.exists(w.lib_job))
@@ -194,11 +194,11 @@ class SingleShot(unittest.TestCase):
     def test_rename_dashed_runs_searches_it_under_the_new_name(self):
         with tempfile.TemporaryDirectory() as d:
             w = _Workspace(d)
-            dashed = _write(os.path.join(d, "x_DIA--asp3_S3.mzML"), "")
+            dashed = _write(os.path.join(d, "x_DIA--sampA_S3.mzML"), "")
             w.runs = [w.runs[0], dashed]
             p = w.generate(*HIGH, "--rename-dashed-runs")
-            link = os.path.join(w.out, "input_links", "x_DIA-asp3_S3.mzML")
-            self.assertIn("(the run is named x_DIA-asp3_S3)", p.stderr)
+            link = os.path.join(w.out, "input_links", "x_DIA-sampA_S3.mzML")
+            self.assertIn("(the run is named x_DIA-sampA_S3)", p.stderr)
             self.assertEqual(search_f_args(w.search_job), [w.runs[0], link])
             parser_fake(w.diann)
             r = w.run_job(w.search_job)
