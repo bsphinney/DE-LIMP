@@ -195,6 +195,13 @@ local({
     stop("skill_version.R not found next to run_de.R -- it reads the skill version the session records.")
   source(f, encoding = "UTF-8")
 })
+# The R this DE runs in, for de_provenance.json `runtime` (one definition, shared with run_silac.R).
+local({
+  f <- .sibling("runtime_record.R")
+  if (is.null(f))
+    stop("runtime_record.R not found next to run_de.R -- it records the R the DE ran in.")
+  source(f)
+})
 # The protein-set tests' defaults and definitions (the trigger below; run_sets.R uses the rest).
 local({
   f <- .sibling("set_tests.R")
@@ -1690,26 +1697,11 @@ compute_record <- function() {
                     "families they differ in about the third decimal (references/reproducibility.md)"))
 }
 compute <- compute_record()
-# The R this DE ran in -- where it lives, the libraries it loaded packages from, the conda env
-# and the container around it -- as THIS process sees them. provenance.py builds the
+# The R this DE ran in (runtime_record.R, shared with run_silac.R): provenance.py builds the
 # reproducibility bundle's environment from this record (and sessionInfo.txt beside it); it used
 # to take setup.json's env, which was not the one a DE run in a separate R 4.6 env had used
-# (staff report, 2026-09-28: the bundle would have named the wrong limpa and R). The container
-# variables are the ones app.R checks (Apptainer/Singularity set them; Docker leaves /.dockerenv).
-runtime_record <- function() {
-  env1 <- function(...) { for (v in c(...)) { x <- Sys.getenv(v, ""); if (nzchar(x)) return(x) }; NULL }
-  rs <- file.path(R.home("bin"), "Rscript")
-  list(r_version = R.version.string, r_home = R.home(),
-       rscript = if (file.exists(rs)) rs else NULL,
-       lib_paths = as.list(.libPaths()),
-       conda_prefix = env1("CONDA_PREFIX"),
-       container = env1("APPTAINER_CONTAINER", "SINGULARITY_CONTAINER"),
-       container_name = env1("APPTAINER_NAME", "SINGULARITY_NAME"),
-       docker = file.exists("/.dockerenv"),
-       session_info = "sessionInfo.txt",
-       note = "recorded by run_de.R in the process that ran this DE")
-}
-runtime <- runtime_record()
+# (staff report, 2026-09-28: the bundle would have named the wrong limpa and R).
+runtime <- runtime_record("run_de.R")
 
 si <- file.path(outdir, "sessionInfo.txt")
 con <- file(si, "w"); sink(con)

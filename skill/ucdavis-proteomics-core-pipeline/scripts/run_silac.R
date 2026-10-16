@@ -97,6 +97,7 @@ source(.sibling("silac_ratios.R"))      # the statistics
 source(.sibling("contaminants.R"))      # the contaminant rule (one definition) + python_json()
 source(.sibling("diann_q_columns.R"))   # the q-value columns and cutoffs (one definition)
 source(.sibling("skill_version.R"))
+source(.sibling("runtime_record.R"))     # the R this ran in, as run_de.R records it
 version_label <- paste("run_silac.R, ucdavis-proteomics-core-pipeline",
                        skill_label(skill_version(.script_dir)))
 
@@ -898,9 +899,7 @@ prov <- list(
   written_by = version_label, R_version = as.character(getRversion()),
   packages = list(limma = pkg("limma"), data.table = pkg("data.table"), arrow = pkg("arrow"),
                   ggplot2 = pkg("ggplot2"), jsonlite = pkg("jsonlite")),
-  runtime = list(r_version = R.version.string, r_home = R.home(), lib_paths = as.list(.libPaths()),
-                 conda_prefix = if (nzchar(Sys.getenv("CONDA_PREFIX"))) Sys.getenv("CONDA_PREFIX") else NULL,
-                 session_info = "sessionInfo.txt", note = "recorded by run_silac.R in the process that ran it"))
+  runtime = runtime_record("run_silac.R"))
 writeLines(jsonlite::toJSON(prov, auto_unbox = TRUE, pretty = TRUE, null = "null", na = "null", digits = NA),
            file.path(outdir, "de_provenance.json"))
 writeLines(c("SILAC ratio analysis (run_silac.R)", "", strwrap(methods_paragraph, 100), "",

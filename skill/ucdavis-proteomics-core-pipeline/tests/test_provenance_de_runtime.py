@@ -136,3 +136,39 @@ class BundleDescribesTheDe(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AMissingValueIsNotADifference(unittest.TestCase):
+    """2026-10: a SILAC DE's record had no `rscript`, and MANIFEST.txt said "[NOTE] setup.json
+    names a different environment than the one the DE ran in (rscript: setup.json <env>/bin/
+    Rscript, DE None)" -- the DE had run in that same env, and SKILL.md relays the NOTE."""
+    setUp, de_dir, bundle = (BundleDescribesTheDe.setUp, BundleDescribesTheDe.de_dir,
+                             BundleDescribesTheDe.bundle)
+
+    def same_env_record(self, rscript):
+        de = self.de_dir()
+        with open(os.path.join(de, "de_provenance.json")) as fh:
+            rec = json.load(fh)
+        rec["runtime"]["r_home"] = os.path.join(self.setup_prefix, "lib", "R")
+        if rscript is None:
+            rec["runtime"].pop("rscript")
+        else:
+            rec["runtime"]["rscript"] = rscript
+        with open(os.path.join(de, "de_provenance.json"), "w") as fh:
+            json.dump(rec, fh)
+        return de
+
+    def test_an_unrecorded_rscript_is_not_compared(self):
+        man, _, manifest, _, _ = self.bundle(self.same_env_record(None))
+        self.assertIsNone(man["environment"]["setup_json_differs"])
+        self.assertNotIn("different environment", manifest)
+        self.assertIn("the DE's record has no rscript, so setup.json's is not compared", manifest)
+
+    def test_one_envs_two_rscripts_are_the_same_environment(self):
+        # R.home("bin") is <env>/lib/R/bin; setup.json names <env>/bin/Rscript
+        lib_rs = os.path.join(self.setup_prefix, "lib", "R", "bin", "Rscript")
+        os.makedirs(os.path.dirname(lib_rs))
+        shutil.copy(self.setup_rs, lib_rs)
+        man, _, manifest, _, _ = self.bundle(self.same_env_record(lib_rs))
+        self.assertIsNone(man["environment"]["setup_json_differs"])
+        self.assertNotIn("different environment", manifest)

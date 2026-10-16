@@ -208,6 +208,18 @@ def conda_prefix_of_r_home(r_home):
     return cand if os.path.isdir(os.path.join(cand, "conda-meta")) else None
 
 
+def env_of_rscript(path):
+    """The conda env an Rscript belongs to (<prefix>/bin/Rscript or <prefix>/lib/R/bin/Rscript),
+    or None."""
+    if not path:
+        return None
+    d = os.path.dirname(os.path.realpath(path))                    # .../bin
+    for cand in (os.path.dirname(d), os.path.dirname(os.path.dirname(os.path.dirname(d)))):
+        if os.path.isdir(os.path.join(cand, "conda-meta")):
+            return cand
+    return None
+
+
 def runtime_section(rec, rt, setup_env):
     """REPRODUCE.md's 'environment the DE ran in' section, from run_de.R's record."""
     head = "## The environment the DE ran in\n\n"
@@ -332,12 +344,23 @@ def main():
         env_prefix = rt.get("conda_prefix") or conda_prefix_of_r_home(rt.get("r_home"))
         env_source = ("de_provenance.json runtime: recorded by run_de.R in the process that ran "
                       "the DE")
-        ok(f"environment: the one the DE ran in ({rt.get('r_version')}, {rt.get('r_home')})")
-        def _same(x, y):
-            return bool(x and y) and os.path.realpath(x) == os.path.realpath(y)
-        diff = {k: (sv, dv) for k, sv, dv in (("rscript", setup_rscript, rscript),
-                                              ("env_prefix", setup_prefix, env_prefix))
-                if sv and not _same(sv, dv)}
+        # A value the DE's record does not carry is NOT RECORDED, never a difference: a SILAC
+        # record without `rscript` (run_silac.R before 2.13.1) had the user told the DE ran in
+        # another environment than setup.json's when it had not (2026-10).
+        pairs = (("rscript", setup_rscript, rscript), ("env_prefix", setup_prefix, env_prefix))
+        unrecorded = [k for k, sv, dv in pairs if sv and not dv]
+        ok(f"environment: the one the DE ran in ({rt.get('r_version')}, {rt.get('r_home')})"
+           + (f"; the DE's record has no {' / '.join(unrecorded)}, so setup.json's is not "
+              f"compared" if unrecorded else ""))
+
+        def _same(k, x, y):
+            if os.path.realpath(x) == os.path.realpath(y):
+                return True
+            # one conda env's two Rscripts: setup.json names <env>/bin/Rscript, R.home("bin")
+            # is <env>/lib/R/bin
+            return k == "rscript" and env_of_rscript(x) is not None and \
+                env_of_rscript(x) == env_of_rscript(y)
+        diff = {k: (sv, dv) for k, sv, dv in pairs if sv and dv and not _same(k, sv, dv)}
         if diff:
             setup_differs = {k: {"setup_json": sv, "de": dv} for k, (sv, dv) in diff.items()}
             note("setup.json names a different environment than the one the DE ran in ("

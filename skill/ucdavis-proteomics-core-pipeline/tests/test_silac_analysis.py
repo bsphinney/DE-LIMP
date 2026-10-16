@@ -269,6 +269,13 @@ class Analysis(unittest.TestCase):
         self.assertTrue(any("MEDIAN-CENTRED" in n for n in p["brief_notes"]))
         self.assertEqual([s["title"] for s in p["report_sections"]],
                          ["SILAC channels and mixing", "Channel-specific proteins"])
+        # the R it ran in, as run_de.R records it (runtime_record.R): its Rscript included, or
+        # provenance.py read the missing value as "a different environment" than setup.json's
+        rt = p["runtime"]
+        self.assertTrue(os.path.isfile(rt["rscript"]), rt)
+        self.assertEqual(rt["note"], "recorded by run_silac.R in the process that ran this DE")
+        for k in ("r_home", "lib_paths", "docker", "session_info"):
+            self.assertIn(k, rt)
 
     def test_figures_json_contract(self):
         from make_analysis_html import read_figures_json
