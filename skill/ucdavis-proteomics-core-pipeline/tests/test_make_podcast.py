@@ -1779,7 +1779,9 @@ class Verify(Workspace):
         self.assertEqual(rc, 0, err)                              # the render stands
         self.assertIn("[WARN] verify skipped", err)
         self.assertNotIn(FAKE_KEY, err)
-        self.assertNotIn("verify", json.loads(read(os.path.join(self.pod, "podcast.json"))))
+        v = json.loads(read(os.path.join(self.pod, "podcast.json")))["verify"]
+        self.assertEqual(v["status"], "NOT RUN")                  # said, never left stale
+        self.assertNotIn(FAKE_KEY, v["reason"])
 
         mods, log = fake_genai(lambda m, c, k: pcm_for(c), transcribe=ok)
         with mock.patch.dict(sys.modules, mods):
