@@ -861,6 +861,135 @@ class Segments(Env):
         self.assertIn("B from init.", got)
 
 
+def bash_call(i, command, done=True, sid=SID, agent=None, background=False):
+    """An assistant's Bash call (and, done, its result), as Claude Code writes them; `agent`:
+    a subagent's entry (isSidechain, agentId)."""
+    extra = {"isSidechain": True, "agentId": agent} if agent else {}
+    inp = {"command": command, "description": "run it"}
+    if background:
+        inp["run_in_background"] = True
+    out = [dict(extra, type="assistant", uuid=f"b{i}", sessionId=sid,
+                timestamp=f"2026-10-15T12:{i:02d}:00.000Z",
+                message={"role": "assistant", "content": [
+                    {"type": "tool_use", "id": f"toolu_b{i}", "name": "Bash", "input": inp}]})]
+    if done:
+        out.append(dict(extra, type="user", uuid=f"r{i}", sessionId=sid,
+                        timestamp=f"2026-10-15T12:{i:02d}:30.000Z",
+                        message={"role": "user", "content": [
+                            {"type": "tool_result", "tool_use_id": f"toolu_b{i}",
+                             "content": "ok"}]}))
+    return out
+
+
+class Subagents(Env):
+    """2026-10: a teammate ran `save_transcript.py --hive "$S" --remember`; with the parent's
+    CLAUDE_CODE_SESSION_ID it registered the LEAD's conversation (other clients' work) for its
+    client's session, and none of its own. A subagent's call is traced to its own transcript."""
+    AGENT = "agent-ateammate-0123456789abcdef"
+    SAVE = 'python3 /x/ucdavis-proteomics-core-pipeline/scripts/save_transcript.py --hive "$S" '
+
+    def setUp(self):
+        super().setUp()
+        self.parent = os.path.join(self.claude, "projects", "-p", SID + ".jsonl")
+        self.agent = os.path.join(self.claude, "projects", "-p", SID, "subagents",
+                                  self.AGENT + ".jsonl")
+        argv = mock.patch.object(sys, "argv", ["/x/scripts/save_transcript.py"])
+        wait = mock.patch.object(st, "TRACE_WAIT", 0)
+        for p in (argv, wait):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def write(self, parent_pending=False, agent_pending=True, background=False):
+        write_lines(self.parent, [msg(0, "Lead: PROT_0000 and PROT_9001 are both going."),
+                                  say(1, "assistant", "Lead's own work on PROT_0000.")]
+                    + bash_call(2, self.SAVE + "--remember", done=not parent_pending))
+        agent = [dict(msg(3, "Brief: redo PROT_0807 following the skill."), isSidechain=True,
+                      agentId=self.AGENT[6:]),
+                 {"type": "assistant", "uuid": "rd", "isSidechain": True, "sessionId": SID,
+                  "timestamp": "2026-10-15T12:04:00.000Z",
+                  "message": {"role": "assistant", "content": [
+                      {"type": "tool_use", "id": "rd", "name": "Read", "input": {
+                          "file_path": "/wt/skill/ucdavis-proteomics-core-pipeline/SKILL.md"}}]}},
+                 dict(say(5, "assistant", "Agent: the design for PROT_0807 is three channels."),
+                      isSidechain=True)]
+        write_lines(self.agent, agent + bash_call(6, self.SAVE + "--remember",
+                                                  done=not agent_pending, agent=self.AGENT[6:],
+                                                  background=background))
+
+    def test_a_subagents_remember_records_its_own_conversation(self):
+        self.write()
+        sess = os.path.join(self.d, "PROT_0807", "s")
+        os.makedirs(os.path.join(sess, "logs"))
+        rc, out = self.cli(sess, "--remember")
+        self.assertEqual(out["entry"]["key"], "local:" + os.path.abspath(sess))
+        self.assertEqual(st.lookup(SID), [], "the parent's conversation is not registered")
+        self.assertEqual(len(st.lookup(self.AGENT)), 1)
+        rc, out = self.cli(sess)
+        self.assertEqual(out["session_id"], self.AGENT)
+        with open(os.path.join(sess, "logs", "conversation", self.AGENT + ".jsonl")) as fh:
+            got = fh.read()
+        self.assertIn("the design for PROT_0807 is three channels", got)
+        self.assertIn("Brief: redo PROT_0807", got, "from the Read of SKILL.md (#8)")
+        self.assertNotIn("Lead's own work", got)
+        self.assertFalse(os.path.exists(os.path.join(sess, "logs", "conversation",
+                                                     SID + ".jsonl")))
+
+    def test_reading_the_skill_or_running_its_scripts_is_its_load(self):
+        """#8: an agent that follows the skill from a checkout makes no Skill call."""
+        def call(name, inp):
+            return json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "t", "name": name, "input": inp}]}})
+        chat = json.dumps(msg(0, "hello"))
+        for load in (call("Read", {"file_path": "/wt/ucdavis-proteomics-core-pipeline/SKILL.md"}),
+                     call("Bash", {"command": "python3 /wt/ucdavis-proteomics-core-pipeline/"
+                                              "scripts/detect_acquisition.py /raw"})):
+            self.assertEqual(st._skill_load([chat, load, chat]), 1)
+        for other in (call("Read", {"file_path": "/wt/ucdavis-proteomics-core-pipeline/"
+                                                 "references/silac.md"}),
+                      call("Grep", {"pattern": "x", "path": "/wt/ucdavis-proteomics-core-pipeline"})):
+            self.assertIsNone(st._skill_load([chat, other]))
+
+    def test_the_parents_id_is_refused_for_a_subagents_call(self):
+        self.write()
+        sess = os.path.join(self.d, "s")
+        os.makedirs(os.path.join(sess, "logs"))
+        rc, out = self.cli(sess, "--remember", "--session-id", SID)
+        self.assertEqual(rc, 0)
+        self.assertIn("is its parent's conversation", out["skipped"])
+        self.assertEqual(st.lookup(SID), [])
+        self.assertEqual(st.lookup(self.AGENT), [])
+
+    def test_an_untraceable_call_records_nothing(self):
+        for parent_pending, agent_pending in ((True, True), (False, False)):
+            with self.subTest(parent=parent_pending, agent=agent_pending):
+                self.write(parent_pending, agent_pending)
+                sess = os.path.join(self.d, f"s{parent_pending}")
+                os.makedirs(os.path.join(sess, "logs"), exist_ok=True)
+                rc, out = self.cli(sess, "--remember")
+                self.assertIn("could not be traced", out["skipped"])
+                self.assertIn("--transcript", out["skipped"])
+                rc, out = self.cli(sess)
+                self.assertIn("could not be traced", out["skipped"])
+                self.assertEqual(st.lookup(SID), [])
+                self.assertFalse(os.path.exists(os.path.join(sess, "logs", "conversation")))
+
+    def test_the_parents_own_call_is_the_parents(self):
+        self.write(parent_pending=True, agent_pending=False)
+        self.assertEqual(st.trace_caller(SID, wait=0), (SID, self.parent, None))
+        # a subagent's call run in the background has its result at once: still its own
+        self.write(parent_pending=False, agent_pending=False, background=True)
+        self.assertEqual(st.trace_caller(SID, wait=0)[:2], (self.AGENT, self.agent))
+        # a subagent that has not written for hours is not at work
+        os.utime(self.agent, (1, 1))
+        self.assertEqual(st.trace_caller(SID, wait=0), (SID, self.parent, None))
+
+    def test_another_script_named_alike_is_not_this_one(self):
+        self.write(parent_pending=False, agent_pending=False)
+        write_lines(self.parent, bash_call(2, "python3 -m pytest tests/test_save_transcript.py",
+                                           done=False))
+        self.assertIsNotNone(st.trace_caller(SID, wait=0)[2])
+
+
 class Hook(Env):
     def hook(self, payload, env=None):
         raw = payload if isinstance(payload, str) else json.dumps(payload)

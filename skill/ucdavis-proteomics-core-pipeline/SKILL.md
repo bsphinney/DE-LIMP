@@ -3210,6 +3210,12 @@ EOF
   plugin's hook (`hooks/hooks.json` → `transcript_hook.py`) saves it before a compaction and
   when the session ends — a no-op in any conversation not recorded for an analysis.
   No transcript (another agent), or none found: it says so and exits 0. It never fails a step.
+- **Run by a subagent or teammate** (an Agent call): it shares the parent's session id, so the
+  scripts trace each call to the transcript that makes it and save **the agent's own**
+  (`agent-<id>.jsonl`), never the parent's, which holds other work. When it cannot tell, it
+  records nothing and says so: then name the agent's file,
+  `save_transcript.py <S> --transcript <…/subagents/agent-<id>.jsonl> --session-id agent-<id>`.
+  The hook saves only the main conversation, so a subagent saves its own before it reports back.
 - **One conversation, several analyses** (an orchestrator, or staff looking at another client's
   run): each analysis keeps only its own part.
   - The first part starts at the user's request that loaded the skill (only when the skill call
