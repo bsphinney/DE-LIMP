@@ -43,6 +43,31 @@ Then:
 | **yes** | no | **hive_remote** | Drive HIVE over SSH, but you **rebuild the toolchain in your own HIVE home** (you can't read the Core group dir). See "Rebuild on HIVE" below. |
 | no | yes | **local** | The Core software is on HIVE; without HIVE access you can't reach it → run locally with public engines and tell the user to request a HIVE account. |
 
+## HPC@UCD's `ucd-hpc` skill (anyone on a UC Davis cluster)
+HPC@UCD (HPCCF) made its own agent skill mandatory on Farm, Franklin and Hive on 2026-10-16:
+"agents that do not follow it put the user's account at risk of suspension". On cluster policy
+(what may run on a login node, `--account`/`--partition`/`--time`/memory, software installs,
+home vs group storage, one writer per file on Quobyte) it supersedes this skill: where they
+disagree, follow `ucd-hpc`, tell the user which instruction you set aside, and record it
+(`report_issue.sh`).
+
+Claude reads a skill only from the computer Claude Code runs on, so it belongs on the laptop in
+`hive_remote` and on HIVE in `hive_local`. `check_access.sh` reports `ucd_hpc_skill`
+(`installed`, `required` = this user works on a UC Davis cluster, `install`, `note`). The
+install, from the ucd-hpc README (ask the user first; it goes in their own `~/.claude`):
+```
+git clone https://github.com/ucdavis/ucdhpc-cluster-skill ~/ucdhpc-cluster-skill
+mkdir -p ~/.claude/skills
+ln -s ~/ucdhpc-cluster-skill/ucd-hpc ~/.claude/skills/ucd-hpc
+```
+- **Windows (Git Bash):** the same lines, under the user's home. Where `ln -s` cannot make a
+  link, copy instead: `cp -r ~/ucdhpc-cluster-skill/ucd-hpc ~/.claude/skills/ucd-hpc`, and copy
+  again after each update.
+- Then `/reload-plugins` (or restart Claude Code), and load it (Skill `ucd-hpc`) before the
+  first command on the cluster.
+- **Updates:** HPCCF updates it on GitHub. `git -C ~/ucdhpc-cluster-skill pull --ff-only` every
+  few days.
+
 ## hive_remote runbook (Claude Code local → HIVE over SSH)
 Set the connection once, then everything HIVE-side goes through `hive_exec.sh`:
 ```

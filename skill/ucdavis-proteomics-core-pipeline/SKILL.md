@@ -67,6 +67,12 @@ the spine.
    submitting jobs, `squeue`/`sacct` polling (`watch_run.sh`), and small file moves.
    If you're unsure whether a step is heavy, submit it as a job. (No SLURM but a big
    dataset locally? Warn the user it may be slow rather than hammering a shared host.)
+   **On a UC Davis cluster (HIVE, Farm, Franklin), HPC@UCD's own `ucd-hpc` skill is
+   mandatory, and on cluster policy it wins over this skill**: what may run on a login node,
+   resource requests (`--account`/`--partition`/`--time`/memory), software installs and
+   storage. Load it (Skill `ucd-hpc`) before the first command on the cluster. Where the two
+   disagree, follow `ucd-hpc`, tell the user which instruction of this skill you set aside, and
+   record it (`report_issue.sh`). Step 0a checks that it is installed.
 4. **Organism decides the FASTA and nothing else**, and is **always asked, never
    assumed** — not from a folder name, not "probably human". The **sample type** (tissue,
    cell line, biofluid, IP …) is likewise **asked, never inferred** — not from a file-name
@@ -157,7 +163,11 @@ Verify (don't just trust the answers):
 ```
 bash scripts/check_access.sh <hive_user> <private_key_path>
 ```
-Read `recommended_mode` + `core_member`, then pick the mode below. Once the SSH login works,
+Read `recommended_mode` + `core_member`, then pick the mode below. **`ucd_hpc_skill`**: when
+`required` is true and `installed` is false, tell the user in one line that HPC@UCD requires its
+`ucd-hpc` skill for any agent on its clusters, ask, then run its `install` line here (it goes in
+their own `~/.claude/skills`; relay `note` for Windows) and ask them to type `/reload-plugins`.
+Until it loads, follow golden rule #3 to the letter. Once the SSH login works,
 `check_access.sh` saves the user and the key's path (never the key) to
 `~/.config/ucdavis-proteomics/hive.env` (`hive_login_saved`). Later calls read the login there,
 because the environment does not carry over from one command to the next.
