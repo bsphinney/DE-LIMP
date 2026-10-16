@@ -820,7 +820,7 @@ SAMPLE_PREP_TO_FILL = (f"[{TO_FILL}: sample preparation -- how proteins were ext
                        "time), cleaned up, and how much peptide was injected.]")
 
 
-def build_protocols(methods_md):
+def build_protocols(methods_md, de_prov=None):
     if not methods_md or not os.path.isfile(methods_md):
         raise Skip("no methods file (output/methods.md) to draw the protocols from -- see "
                    "the methods line above")
@@ -831,16 +831,18 @@ def build_protocols(methods_md):
     prep = _plain(sec["Sample preparation"]) if sec.get("Sample preparation") else SAMPLE_PREP_TO_FILL
     sample = [prep] + [_plain(sec[h]) for h in ("Liquid chromatography",
                                                 "Mass spectrometry") if h in sec]
-    data = [_plain(sec[h]) for h in ("Sequence database", "Database search",
-                                     "Differential expression") if h in sec]
+    # the DE section under the pipeline's own heading (make_methods.de_heading; run_silac.R:
+    # "SILAC ratio analysis") or the generic one -- the same pair missing_sections accepts
+    de = next((h for h in dict.fromkeys((mm.de_heading(de_prov), mm.DE_HEADING)) if h in sec), None)
+    data = [_plain(sec[h]) for h in ("Sequence database", "Database search", de) if h and h in sec]
     if not data:
         data = [f"[{TO_FILL}: how the data were searched and analysed -- methods.md has no "
                 "Sequence database / Database search sections]"]
     return "\n\n".join(x for x in sample if x), "\n\n".join(x for x in data if x)
 
 
-def write_protocols(out, methods_md, info):
-    sample, data = build_protocols(methods_md)
+def write_protocols(out, methods_md, info, de_prov=None):
+    sample, data = build_protocols(methods_md, de_prov)
     tag = re.compile(r"\[[^\]]*(confirm|TO-FILL)[^\]]*\]")
     blocks, warn = [], []
     for title, body in (("SAMPLE PROCESSING PROTOCOL", sample),
@@ -1673,7 +1675,7 @@ def build(session_dir, man, methods_md=None):
     man.section("Deposit: sdrf.tsv (SDRF-Proteomics v1.1.0)", write_sdrf, f, out, sdrf)
     man.section("Deposit: protocols.txt", write_protocols, out, methods_md
                 or (f["p"]["methods_md"] if _has_text(f["p"]["methods_md"]) else None),
-                prot)
+                prot, f["de_prov"])
     man.section("Deposit: files_to_upload.tsv", _list)
     man.section("Deposit: prepare_upload.sbatch (written, not run)", _prep)
     man.section("Deposit: HOW_TO_SUBMIT.md", write_howto, f, out, rows, sdrf, prot)

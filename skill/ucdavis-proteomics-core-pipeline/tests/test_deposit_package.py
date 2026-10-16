@@ -667,6 +667,23 @@ class MissingInputs(unittest.TestCase):
             self.assertEqual(md.missing_sections(["SILAC ratio analysis"], {"Methods"},
                                                  {"de_prov": silac}), ["SILAC ratio analysis"])
 
+    def test_the_data_protocol_carries_a_pipelines_own_de_section(self):
+        """Review of 2.13.1 (S2): the PRIDE data-processing protocol took the DE section only
+        as "Differential expression", so a SILAC analysis's "SILAC ratio analysis" was left
+        out of protocols.txt."""
+        silac = dict(DE_PROV, pipeline_id="silac_ratio", methods_heading="SILAC ratio analysis",
+                     methods_paragraph="SILAC ratios were analysed with run_silac.R.")
+        with tempfile.TemporaryDirectory() as tmp:
+            p = dia_session(tmp)
+            write(os.path.join(p["de_dir"], "de_provenance.json"), json.dumps(silac))
+            self.assertEqual(finalize(p["session_dir"]).returncode, 0)
+            with open(os.path.join(p["deposit_dir"], "protocols.txt"), encoding="utf-8") as fh:
+                self.assertIn("SILAC ratios were analysed with run_silac.R.", fh.read())
+            _s, data = md.build_protocols(p["methods_md"], silac)
+            self.assertIn("SILAC ratios were analysed", data)
+            _s, data = md.build_protocols(p["methods_md"])        # no record: generic only
+            self.assertNotIn("SILAC ratios were analysed", data)
+
     def test_no_deposit_flag(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = dia_session(tmp)
