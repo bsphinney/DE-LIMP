@@ -400,12 +400,10 @@ def main():
         cov_rec = prov.get("covariates") if isinstance(prov.get("covariates"), dict) else {}
         for warn in cov_rec.get("warnings") or []:
             w(f"- **Covariate caveat (say this in Data Quality Notes):** {warn}")
-    qcols, qcuts = prov.get("q_columns"), prov.get("q_cutoffs")
-    if (isinstance(qcols, list) and isinstance(qcuts, list) and qcols and len(qcols) == len(qcuts)
-            and all(isinstance(v, (int, float)) for v in qcuts)):
-        id_fdr = ", ".join(f"{c} ≤ {v:g}" for c, v in zip(qcols, qcuts))
-    else:
-        id_fdr = f"q ≤ {q_cut:g}" if q_cut is not None else "not recorded"
+    # make_methods' reading (one definition): the pipeline's own FDR statement, and the q-value
+    # columns only when they really filtered (never a Sage report's DIA-NN-shaped placeholders)
+    from make_methods import identification_filter
+    id_fdr = "; ".join(x for x in identification_filter(prov) if x) or "not recorded"
     if adjp_rec is not None:
         w(f"- Significance rule: adj.P.Val < {adjp:g} (Benjamini-Hochberg within each contrast) "
           f"— the adjusted p-value ALONE (identification FDR: {id_fdr}). "

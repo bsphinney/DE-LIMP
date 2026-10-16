@@ -418,6 +418,30 @@ def run_brief(test, d, prov):
     return read(out)
 
 
+class IdentificationFdrInTheBrief(unittest.TestCase):
+    def test_the_brief_names_what_filtered_the_identifications(self):
+        """Review of 2.13.1 (M2): the brief named a Sage DDA analysis's placeholder DIA-NN
+        q-columns as its identification FDR; make_methods' reading is now the one both use."""
+        sage = dict(MAXLFQ, pipeline_id="peptide_max", q_cutoff=0.01,
+                    q_columns=["Q.Value", "Lib.Q.Value", "Global.Q.Value"],
+                    q_cutoffs=[0.01, 0.01, 0.01], q_columns_role="placeholder",
+                    identification_fdr="Sage: 1% PSM/peptide/protein FDR applied by Sage")
+        real = dict(DPC, q_columns=["Q.Value", "Global.PG.Q.Value"], q_cutoffs=[0.01, 0.05])
+        for prov, want, never in (
+                (sage, "identification FDR: Sage: 1% PSM/peptide/protein FDR applied by Sage)",
+                 "Q.Value ≤"),
+                (real, "identification FDR: Q.Value ≤ 0.01, Global.PG.Q.Value ≤ 0.05)", None)):
+            with self.subTest(pipeline=prov.get("pipeline_id")), \
+                    tempfile.TemporaryDirectory() as d:
+                b = run_brief(self, d, prov)
+                self.assertIn(want, b)
+                if never:
+                    self.assertNotIn(never, b)
+        import make_methods
+        self.assertEqual(make_methods.identification_filter(sage),
+                         ("Sage: 1% PSM/peptide/protein FDR applied by Sage", None))
+
+
 class DatabaseCaveat(unittest.TestCase):
     """run_de.R's database_note (an older FASTA: legacy or identity rule only) is a caveat in the
     report brief and in AGENTS.md, as the block warnings are."""
