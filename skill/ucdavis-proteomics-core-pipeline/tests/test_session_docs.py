@@ -386,6 +386,27 @@ class Agents(unittest.TestCase):
             self.assertIn("| Treated-Control | 11 |", md)
 
 
+    def test_silac_counts_and_design_file(self):
+        """A SILAC record: README / AGENTS.md printed "{'up': 394, 'down': 417, 'total': 811}"
+        and said input/ holds conditions.csv, where the design is silac_design.csv."""
+        with tempfile.TemporaryDirectory() as d:
+            sig = {"sampB-sampA": {"up": 394, "down": 417, "total": 811}}
+            p = self.build(d, dict(DPC, contrasts=["sampB-sampA"], significant_per_contrast=sig,
+                                   metadata="/x/s/input/silac_design.csv"))
+            f = session_docs.gather(p["session_dir"])
+            md = session_docs.readme_md(f)
+            self.assertIn("| sampB-sampA | 811 (394 up, 417 down) |", md)
+            self.assertIn("silac_design.csv (the design)", md)
+            self.assertNotIn("conditions.csv (the design)", md)
+            agents = session_docs.agents_md(f)
+            self.assertIn("sampB-sampA = 811 (394 up, 417 down)", agents)
+            self.assertIn("`input/silac_design.csv`", agents)
+            for text in (md, agents):
+                self.assertNotIn("{'up'", text)
+        self.assertEqual(session_docs.sig_text({"up": 2, "down": 1}), "3 (2 up, 1 down)")
+        self.assertEqual(session_docs.sig_text(7), 7)
+
+
 def run_brief(test, d, prov):
     """analysis_prompt.py's brief for a DE folder holding `prov` as de_provenance.json."""
     with open(os.path.join(d, "de_provenance.json"), "w") as fh:

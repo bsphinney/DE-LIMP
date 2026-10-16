@@ -87,6 +87,17 @@ class Differences(unittest.TestCase):
             self.assertNotIn("workflow commit", md)
             self.assertNotIn("abc123", md)
 
+    def test_silac_counts_are_read_as_numbers_not_dicts(self):
+        """run_silac.R records {"up", "down", "total"} per comparison: DIFFERENCES.md printed
+        "{'up': 394, 'down': 417, 'total': 811}"."""
+        with tempfile.TemporaryDirectory() as d:
+            silac = {"sampB-sampA": {"up": 394, "down": 417, "total": 811}}
+            a, b = pair(d, dict(tdp.DE_PROV, significant_per_contrast={"sampB-sampA": 790}),
+                        dict(tdp.DE_PROV, significant_per_contrast=silac))
+            md = differences(a, b)
+            self.assertIn("| sampB-sampA | 790 | 811 (394 up, 417 down) |", md)
+            self.assertNotIn("{'up'", md)
+
     def test_what_neither_session_records_is_said_not_compared(self):
         with tempfile.TemporaryDirectory() as d:
             a, b = pair(d, tdp.DE_PROV, tdp.DE_PROV)
