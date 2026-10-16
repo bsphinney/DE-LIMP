@@ -2547,8 +2547,9 @@ Run the DE on both reports into separate output folders, compare, and
 report which one the results come from — never swap one for the other silently.
 **Surface every `WARN` to the user, and STOP on any `FAIL`** (e.g. a group with no
 replicate, or a batch confounded with the biology) until they resolve it — don't
-let a new user over-interpret a broken design. The findings also go into the
-report's "Audit & caveats" section. → detail: `references/audit.md`.
+let a new user over-interpret a broken design. The findings also become the
+report's "Audit & caveats" section, as a plain-language table (step 9). → detail:
+`references/audit.md`.
 `target_contaminants` lists quantified proteins whose sequence is also a common contaminant
 — **KEPT in quantification**: a possible contamination source, reported rather than
 excluded. Name any that are significant in DE, and judge them by type: skin/hair keratins
@@ -2705,10 +2706,18 @@ Then **read `ANALYSIS_PROMPT.md` and every data file + figure it lists, and writ
 complete `AI_Analysis_Report.md`** with ALL its OUTPUT sections (Overview, QC, Key
 Findings Per Comparison, Cross-Comparison Biomarkers, High-Confidence Biomarkers,
 Pathway/GSEA if present, Biological Interpretation, How This Analysis Works, Methods
-& Reproducibility) **plus an "Audit & caveats" section from `AUDIT.md`**, a **Data
+& Reproducibility), a **Data
 Quality Notes** section (the 5-part anomalies from steps 8c/8d + `SAMPLE_QUALITY.md`,
 even if "nothing anomalous observed"), and — if a review panel ran (8d) — an **Expert
-Review Notes** section. **Embed
+Review Notes** section. **Do not write an "Audit & caveats" section:** `make_analysis_html.py`
+adds it as a plain-language table from `AUDIT.json`, one row per check (what was checked, the
+result, what it means for the results), in words written beside each check
+(`audit_results.py`; a pipeline's own checks carry theirs). The technical `AUDIT.md` (check
+codes, thresholds, file names) stays the full record. A staff report: the raw AUDIT.md in the
+client report ("implausibly high ... not real biology") was unreadable to staff and clients
+alike. Discuss a WARN or FAIL that bears on a finding next to that finding and in Data Quality
+Notes. A report's own "Audit & caveats" section still replaces the table, so write one only
+when staff ask for it, and then in plain words. **Embed
 every figure** (`![caption](figures/<file>.png)`) with an expert interpretation of
 what it shows for THIS data. Compute significant proteins, up/down splits,
 cross-comparison overlaps, and lowest-CV proteins directly from the CSVs — cite

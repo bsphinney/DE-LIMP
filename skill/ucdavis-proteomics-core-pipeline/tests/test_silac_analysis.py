@@ -232,8 +232,10 @@ class Analysis(unittest.TestCase):
         self.assertIn("not a statistical test", pat)
         self.assertIn("not detected is not absent", pat)
         for c in self.prov["checks"]:
-            self.assertEqual(set(c), {"check", "status", "message", "detail"})
+            # plain + label: the client report's Audit & caveats row (audit_results.client_row)
+            self.assertEqual(set(c), {"check", "status", "message", "detail", "plain", "label"})
             self.assertIn(c["status"], ("PASS", "WARN", "FAIL", "INFO"))
+            self.assertTrue(c["plain"] and c["label"] and "_" not in c["label"], c)
 
     def test_record_describes_itself(self):
         p = self.prov

@@ -45,6 +45,7 @@ import report_style as rs  # noqa: E402  -- the ONE look shared by the skill's H
 import html_to_pdf  # noqa: E402  -- the PDF: the same page printed by a headless browser
 import make_podcast       # noqa: E402  -- an optional audio discussion keeps its Listen card
 from client_text import draft_history  # noqa: E402  -- the ONE draft-history list (podcast check too)
+import audit_results      # noqa: E402  -- the audit's plain words: the client's Audit & caveats
 from session_docs import IP_CONTROL_NAME  # noqa: E402  -- which groups are pull-down controls
 from fetch_fasta import CONTAMINANT_TAGS  # noqa: E402  -- Cont_ and FragPipe's contam_: one definition
 
@@ -888,6 +889,24 @@ def detection_note_fn(tables_dir, prov, conditions):
     return note
 
 
+def audit_plain(path):
+    """The client's Audit & caveats: audit_results' plain table, one row per check, from the
+    AUDIT.json beside AUDIT.md (or AUDIT.md's own lines, for a session without it). A staff
+    report: the raw AUDIT.md -- check codes, B1-B4 strings, "not real biology" -- was what clients
+    read here. None when there are no findings to read (the page then shows AUDIT.md as it is)."""
+    found = None
+    try:
+        with open(os.path.splitext(path)[0] + ".json", encoding="utf-8") as fh:
+            j = json.load(fh)
+        if isinstance(j, dict) and isinstance(j.get("findings"), list):
+            found = j["findings"]
+    except (OSError, ValueError):
+        pass
+    if found is None:
+        found = audit_results.findings_from_md(read_text(path))
+    return audit_results.client_section_md(found) or None
+
+
 def build_page(a, prov, tables, figs, md_text, used):
     """Assemble the page ONCE, as data. render_html() and render_md() draw this same list,
     so the HTML report and its Markdown twin cannot say different things (rule 3).
@@ -910,7 +929,8 @@ def build_page(a, prov, tables, figs, md_text, used):
             continue
         if report_h2 & (SUPERSEDED_BY[key] | {norm_title(title)}):
             continue                    # the report has its own -- never show it twice
-        extras.append((title, strip_h1(read_text(path))))
+        body = audit_plain(path) if key == "audit" else None
+        extras.append((title, body or strip_h1(read_text(path))))
     top = top_data(tables, a, prov)
     g = glance_data(prov, tables, a.tables, a.session)
     for n in (not_drawn_note(figs.failed, referenced), unreadable_note()):

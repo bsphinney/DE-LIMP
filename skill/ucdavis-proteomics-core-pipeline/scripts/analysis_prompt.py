@@ -891,6 +891,9 @@ def main():
       "Do not invent data, pathways, or citations you cannot ground in the attached files or "
       "established biology. After writing the report, it is rendered into "
       "Analysis_Report.html (the report of record).")
+    w("Do not write an \"Audit & caveats\" section: the HTML report adds it as a plain-language "
+      "table from AUDIT.json, one row per check. Discuss a caution that bears on a finding next "
+      "to that finding and in Data Quality Notes.")
     w("Write for a reader who sees only this finished report: never narrate drafts, earlier "
       "versions or corrections of it (\"the first draft\", \"was wrong ... corrected\", \"now "
       "says\"). An Expert Review Notes section states, in the present tense, what was checked "
