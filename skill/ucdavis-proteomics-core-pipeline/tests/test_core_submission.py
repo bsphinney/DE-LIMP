@@ -1249,6 +1249,24 @@ class TestTwoMethodsAreNotReinjections(unittest.TestCase):
                 self.assertEqual(sorted(read(os.path.join(self.out, "files.txt")).split()),
                                  sorted(self.dda.values()))
 
+    def test_a_samples_only_run_of_the_other_method_is_not_searched(self):
+        """--acquisition DIA: sampB's only run is DDA -- never matched into the DIA search."""
+        shutil.rmtree(self.dia["sampB"])
+        lst = os.path.join(self.tmp, "list.txt")
+        with open(lst, "w") as fh:
+            fh.write("\n".join([self.dia["sampA"]] + list(self.dda.values())) + "\n")
+        for mode in ((), ("--files-from", lst)):
+            with self.subTest(mode=mode or "auto"):
+                rc, out, p = self.locate(*mode, "--acquisition", "DIA")
+                self.assertEqual(rc, 2, p.stderr)              # sampB: unmatched_samples
+                self.assertEqual(read(os.path.join(self.out, "files.txt")).split(),
+                                 [self.dia["sampA"]])
+                loc = json.load(open(os.path.join(self.out, "locate.json")))
+                row = {r["unique_id"]: r for r in loc["samples"]}["sampB"]
+                self.assertEqual(row["status"], "unmatched")
+                self.assertTrue(row["note"].startswith("set aside, acquired by another method"))
+                self.assertEqual([x["file"] for x in row["other_method"]], [self.dda["sampB"]])
+
     def test_runs_of_one_method_are_still_reinjections(self):
         again = {u: tims(self.tmp, "03122025", u, 50 + i) for i, u in enumerate(self.IDS)}
         rc, out, p = self.locate("--acquisition", "DIA")

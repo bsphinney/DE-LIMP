@@ -2383,8 +2383,9 @@ def match_samples(samples: list, entries: list, neighbors: list, lo: dt.date, hi
         cands = sorted(free + amb, key=lambda t: (t[1], _mtime(t[0]["path"]), t[0]["name"]),
                        reverse=True)
         # Runs of this sample by another acquisition method are not re-injections (split_by_method)
+        # (with --acquisition, a sample's only run of the other method is set aside too)
         split = split_by_method([x[0]["path"] for x in cands], plate, acquisition) \
-            if len(cands) > 1 and not pick else None
+            if (len(cands) > 1 or (acquisition and cands)) and not pick else None
         if split and split["set_aside"]:
             cands = [x for x in cands if x[0]["path"] in split["kept"]]
             free = [x for x in free if x[0]["path"] in split["kept"]]
@@ -2470,9 +2471,12 @@ def match_samples(samples: list, entries: list, neighbors: list, lo: dt.date, hi
                 bits.append(f"{n_out} file(s) carry this id but were acquired outside the window")
             if shadowed:
                 bits.append(f"{len(shadowed)} file(s) carry it inside a longer id")
+            if other_method:
+                bits.insert(0, other_method_note(other_method, acquisition))
             rows.append(_row(smp, status="unmatched", out_of_window=n_out, shadowed=shadowed[:5],
-                             sample_key=skey, note="; ".join(bits) or "no raw file carries this id"))
-        for r in rows[start:] if other_method else []:
+                             sample_key=skey, other_method=other_method,
+                             note="; ".join(bits) or "no raw file carries this id"))
+        for r in [x for x in rows[start:] if x["status"] != "unmatched"] if other_method else []:
             r["other_method"] = other_method
             r["note"] = ((r["note"] + "; ") if r["note"] else "") + other_method_note(
                 other_method, acquisition)
@@ -2537,7 +2541,7 @@ def curated_rows(samples: list, paths: list, raw: str, choices: dict | None = No
         files = by_sample.get(id(smp), [])
         cands = wanted_by.get(id(smp), [])
         set_aside, rec, other_method = [], None, []
-        if not any(src for _p, src, _on in files) and len(files) > 1:
+        if not any(src for _p, src, _on in files) and (len(files) > 1 or (acquisition and files)):
             # runs of this sample by another acquisition method are not re-injections
             split = split_by_method([p for p, _s2, _o in files], plate, acquisition)
             other_method = split["set_aside"]
@@ -2586,7 +2590,9 @@ def curated_rows(samples: list, paths: list, raw: str, choices: dict | None = No
                                    f"share; staff choose: --choose {keys[id(smp)]}=<file>")))
         elif not files:
             rows.append(_row(smp, status="unmatched", sample_key=keys[id(smp)],
-                             note="no file in the curated list carries this id"
+                             other_method=other_method,
+                             note=other_method_note(other_method, acquisition) if other_method
+                             else "no file in the curated list carries this id"
                                   + (" or sample name" if plate else "")))
         for p, src, on in files:
             d, dsrc = acquisition_date(p)
