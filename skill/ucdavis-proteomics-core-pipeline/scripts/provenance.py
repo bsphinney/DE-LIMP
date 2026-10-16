@@ -106,6 +106,32 @@ def expand(patterns):
     return out
 
 
+def _copy_into(src, in_dir, said):
+    """Copy src into in_dir and return the name it has there. A file of that name already there
+    is never replaced: the same file or the same bytes are left as they are; a different file is
+    kept, and src gets a distinct name (<stem>.de_design<ext>, then .2, .3 ...), which is said."""
+    import filecmp
+    name = os.path.basename(src)
+    dest = os.path.join(in_dir, name)
+    if os.path.exists(dest):
+        if os.path.samefile(src, dest) or filecmp.cmp(src, dest, shallow=False):
+            said(f"the DE's design ({name}, de_provenance.json metadata) is already in inputs/")
+            return name
+        stem, ext = os.path.splitext(name)
+        n, cand = 1, f"{stem}.de_design{ext}"
+        while os.path.exists(os.path.join(in_dir, cand)) and not filecmp.cmp(
+                src, os.path.join(in_dir, cand), shallow=False):
+            n += 1
+            cand = f"{stem}.de_design.{n}{ext}"
+        shutil.copy2(src, os.path.join(in_dir, cand))
+        note(f"inputs/{name} is another file than the DE's design ({src}): both kept, the "
+             f"design as inputs/{cand}, which reproduce.sh step 6 reads")
+        return cand
+    shutil.copy2(src, dest)
+    said(f"copied the DE's design ({name}, de_provenance.json metadata)")
+    return name
+
+
 def _utc_now():
     """ISO-8601 UTC. Separate helper so the default is obvious and testable."""
     import datetime
@@ -454,12 +480,16 @@ def main():
             skip(label, f"not found: {src}")
     # The design the DE pipeline names in its own record (de_provenance.json `metadata`) when it
     # is not the conditions.csv given -- run_silac.R's channel design, for one: reproduce.sh's
-    # step 6 reads it from inputs/.
+    # step 6 reads it from inputs/<de_design_name>. The same file reached by another path (a
+    # symlink, a relative path) is not copied again; a DIFFERENT file whose name is already taken
+    # in inputs/ never replaces it -- it is kept beside it under a distinct name.
     de_design = de_rec.get("metadata")
-    if (isinstance(de_design, str) and os.path.isfile(de_design) and not
-            (a.conditions and os.path.abspath(de_design) == os.path.abspath(a.conditions))):
-        shutil.copy2(de_design, os.path.join(in_dir, os.path.basename(de_design)))
-        ok(f"copied the DE's design ({os.path.basename(de_design)}, de_provenance.json metadata)")
+    de_design_name = None
+    if isinstance(de_design, str) and os.path.isfile(de_design):
+        if a.conditions and os.path.isfile(a.conditions) and os.path.samefile(de_design, a.conditions):
+            de_design_name = os.path.basename(a.conditions)
+        else:
+            de_design_name = _copy_into(de_design, in_dir, ok)
 
     # ---- checksums -----------------------------------------------------------
     checks = {}
@@ -727,7 +757,9 @@ def main():
             "before step 6 (see the NOTE above)' >&2")
     # Step 5's parameters: step 2 re-derives the defaults for the data type, which cannot know a
     # study design recorded in the parameters themselves -- SILAC labels (estimate_params.py
-    # --labels) -- so then the recorded cfg (inputs/) is searched with, as it ran.
+    # --labels) -- so then the recorded cfg (inputs/) is searched with, as it ran. Its note is a
+    # comment on step 5's heading line: placed after a line's trailing backslash, a comment ends
+    # the continuation, and bash then runs the next line (--bundle ...) as a command of its own.
     side = load_json(a.params + ".rationale.json") if a.params else None
     search_params = './wf/$(basename "$(ls wf | grep -vi manifest | head -n1)")'
     search_params_note = ""
@@ -752,6 +784,9 @@ def main():
                 continue
             if flag in here:
                 val = here[flag]
+            elif (flag in ("--design", "--metadata") and de_design_name and
+                  (val == de_design or (os.path.isfile(val) and os.path.samefile(val, de_design)))):
+                val = f"inputs/{de_design_name}"
             elif flag in ("--design", "--metadata", "--params"):
                 val = f"inputs/{os.path.basename(val)}"
             words += [flag, val]
@@ -810,8 +845,8 @@ PIN_ENGINE={a.engine or '<engine>'} PIN_VERSION={(wfman or {}).get('engine',{}).
 python3 "$SKILL/scripts/fetch_fasta.py" fetch --proteome {fasta_repro_proteome} \\
   --content {fasta_repro_content} --contaminants {fasta_repro_contam} --enzyme {fasta_repro_enzyme}{fasta_repro_keep} --out ./search.fasta
 
-# 5. Re-run the search (inputs from inputs/checksums; verify against checksums/checksums.json).{de_nonorm_note}
-python3 "$SKILL/scripts/run_search.py" --tools ~/.proteomics-pipeline/tools/tools.json \\{search_params_note}
+# 5. Re-run the search (inputs from inputs/checksums; verify against checksums/checksums.json).{search_params_note}{de_nonorm_note}
+python3 "$SKILL/scripts/run_search.py" --tools ~/.proteomics-pipeline/tools/tools.json \\
   --bundle ./wf/workflow.manifest.json --params {search_params} \\
   --fasta ./search.fasta --out ./search_out --files {raw_arg}{' --keratin-sample' if fasta_repro_keratin else ''}{rename_repro}
 
