@@ -110,7 +110,7 @@ class ReferenceMatchesTheClient(unittest.TestCase):
             raw = cmd
             cmd = re.sub(r"^bash scripts/board\.sh ", "", cmd)
             cmd = re.sub(r"\s+<\s+\S+$", "", cmd)          # ` < post.txt`: standard input, not an argument
-            cmd = re.sub(r"(--cpu-hours|--decision|--hours) <[^>]*>", r"\1 1", cmd)   # numbers
+            cmd = re.sub(r"(--cpu-hours|--gpu-hours|--decision|--hours) <[^>]*>", r"\1 1", cmd)   # numbers
             cmd = re.sub(r"<[^>]*>", "X", cmd).replace('"$S"', "/hive/session").replace("THREAD", "1")
             cmd = re.sub(r"(?<![\w-])N(?![\w-])", "1", cmd)
             argv = shlex.split(cmd)
@@ -138,14 +138,18 @@ class ReferenceMatchesTheClient(unittest.TestCase):
                 # 2.12 security review: text in double quotes is run by the shell (twice through
                 # hive_exec.sh); a post goes on standard input, never on the command line
                 self.assertNotRegex(raw, r'--(?:title|goal|project-title|text) "', "free text in double quotes")
-                if args.cmd == "post":
-                    self.assertEqual((args.text, args.body_file), (None, "-"), "a post goes on stdin")
+                if args.cmd in ("post", "ask"):
+                    self.assertEqual((args.text, args.body_file), (None, "-"), "the text goes on stdin")
                 if args.cmd == "job":
                     self.assertIsNone(args.text, "a job's note goes on stdin (--body-file -)")
-                # Brett, 2026-10-15: the go-ahead in the chat starts a search; nothing is asked first
+                # Brett, 2026-10-15: a job starts on the go-ahead in the chat (the board approves it
+                # under 10,000 CPU- and GPU-hours) or on a person's decision; every new job carries
+                # the CPU-hours it reserves (core-board 1164632 refuses a new job without them)
                 if args.cmd == "job" and args.status == "submitted":
-                    self.assertEqual(getattr(args, "go_ahead", None), "chat", raw)
-                    self.assertIsNone(args.decision, raw)
+                    self.assertTrue(getattr(args, "go_ahead", None) == "chat" or args.decision, raw)
+                    self.assertIsNotNone(args.cpu_hours, f"a new job carries --cpu-hours: {raw}")
+                if args.cmd == "ask":
+                    self.assertIsNotNone(args.cpu_hours, f"asking for a job names its CPU-hours: {raw}")
 
     def test_the_rules_a_claude_must_keep_are_stated(self):
         for rule in ("Never open the board's web pages in a browser", "only a person gives a Claude cluster time",
