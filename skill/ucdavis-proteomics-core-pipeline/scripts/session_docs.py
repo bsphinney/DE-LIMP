@@ -102,19 +102,40 @@ def _csv_header(path):
         return []
 
 
-def _sig_counts(prov):
-    """significant_per_contrast as a dict. Older jsonlite-less de_provenance.json files carry it
-    as the Python repr of a dict; anything unreadable is {} (no counts shown, none invented)."""
-    v = (prov or {}).get("significant_per_contrast")
+def sig_text(v):
+    """One contrast's significant count as a reader sees it: run_de.R records a number,
+    run_silac.R {"up", "down", "total"} -> "811 (394 up, 417 down)". Never a Python dict."""
     if isinstance(v, dict):
-        return v
+        total, up, down = v.get("total"), v.get("up"), v.get("down")
+        if total is None and isinstance(up, int) and isinstance(down, int):
+            total = up + down
+        if total is None:
+            return NOT_RECORDED
+        return f"{total} ({up} up, {down} down)" if up is not None and down is not None \
+            else str(total)
+    return v
+
+
+def _sig_counts(prov):
+    """significant_per_contrast as {contrast: what a reader sees} (sig_text). Older
+    jsonlite-less de_provenance.json files carry it as the Python repr of a dict; anything
+    unreadable is {} (no counts shown, none invented)."""
+    v = (prov or {}).get("significant_per_contrast")
     if isinstance(v, str):
         try:
-            d = ast.literal_eval(v)
-            return d if isinstance(d, dict) else {}
+            v = ast.literal_eval(v)
         except (ValueError, SyntaxError):
             return {}
+    if isinstance(v, dict):
+        return {k: sig_text(x) for k, x in v.items()}
     return {}
+
+
+def design_file(de):
+    """The design file's name, from the DE's own record (`metadata`): conditions.csv for
+    run_de.R, silac_design.csv for run_silac.R."""
+    m = str((de or {}).get("metadata") or "").strip()
+    return os.path.basename(m) if m else "conditions.csv"
 
 
 def raw_record(p):
@@ -635,7 +656,8 @@ def readme_md(f, for_html=False):
     L += ["", "## Where this lives on HIVE", "", locations_table(f)]
     L += ["", "## Where everything is (in this folder)", "", "| Path | What it is |", "|---|---|"]
     for path, what in (
-            ("input", "conditions.csv (the design), the FASTA sidecar, the search parameters"
+            ("input", f"{design_file(f.get('de'))} (the design), the FASTA sidecar, "
+                      "the search parameters"
                       + (", raw_files.txt (where the raw data are)" if files.get("raw_list")
                          else "")),
             ("output/search", "the search output (report, engine logs, search_provenance.json)"),
@@ -970,7 +992,7 @@ def reviewing_lines(f):
                                      "conversation or commands.log is in this folder)")
             + ", then check:", "",
             "- **Groups and contrasts:** were the groups and contrasts analysed the ones the user "
-            "confirmed? Compare `input/conditions.csv` and the contrasts in "
+            f"confirmed? Compare `input/{design_file(f.get('de'))}` and the contrasts in "
             "`output/tables/de_provenance.json` with what the user agreed to.",
             "- **Every number traces to a command:** does each count, threshold and result in "
             "the report trace to a logged command (`logs/commands.log`) and a table in "

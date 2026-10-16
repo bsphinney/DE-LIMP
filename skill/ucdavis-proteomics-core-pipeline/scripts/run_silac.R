@@ -97,6 +97,7 @@ source(.sibling("silac_ratios.R"))      # the statistics
 source(.sibling("contaminants.R"))      # the contaminant rule (one definition) + python_json()
 source(.sibling("diann_q_columns.R"))   # the q-value columns and cutoffs (one definition)
 source(.sibling("skill_version.R"))
+source(.sibling("runtime_record.R"))     # the R this ran in, as run_de.R records it
 version_label <- paste("run_silac.R, ucdavis-proteomics-core-pipeline",
                        skill_label(skill_version(.script_dir)))
 
@@ -222,16 +223,46 @@ fasta_desc <- function(path) {
   if (is.null(path) || !file.exists(path)) return(NULL)
   h <- sub("^>", "", grep("^>", readLines(path, warn = FALSE), value = TRUE))
   first <- sub("\\s.*$", "", h); rest <- trimws(sub("^\\S+\\s*", "", h))
+  uniprot <- grepl("^(sp|tr)\\|[^|]+\\|", first) | grepl("\\bGN=\\S+", rest)
   acc <- ifelse(grepl("^[a-z]{2}\\|[^|]+\\|", first), sub("^[a-z]{2}\\|([^|]+)\\|.*$", "\\1", first), first)
-  gene <- ifelse(grepl("\\bGN=\\S+", rest), sub("^.*\\bGN=(\\S+).*$", "\\1", rest), NA_character_)
+  gene <- ifelse(grepl("\\bGN=\\S+", rest), sub("^.*\\bGN=(\\S+).*$", "\\1", rest),
+                 ifelse(grepl("\\[gene=[^]]+\\]", rest), sub("^.*\\[gene=([^]]+)\\].*$", "\\1", rest),
+                        NA_character_))
   desc <- sub("\\s+OS=.*$", "", rest)                     # UniProt: up to OS=
+  desc <- ifelse(grepl("\\[protein=[^]]+\\]", desc),      # NCBI CDS headers: [protein=...]
+                 sub("^.*\\[protein=([^]]+)\\].*$", "\\1", desc), desc)
   desc <- sub("\\s*\\[[^]]*\\]\\s*$", "", desc)            # NCBI: the trailing [organism]
   desc <- sub("^MULTISPECIES:\\s*", "", desc)
-  data.table(acc = c(acc, first), desc = c(desc, desc), gene = c(gene, gene))[!duplicated(acc)]
+  data.table(acc = c(acc, first), desc = c(desc, desc), gene = c(gene, gene),
+             uniprot = c(uniprot, uniprot))[!duplicated(acc)]
 }
 fd <- fasta_desc(fasta_path)
 first_acc <- function(pg) sub(";.*$", "", pg)
 annot <- unique(d_raw[, .(Protein.Group, Protein.Names, Genes)], by = "Protein.Group")
+# DIA-NN reads gene and entry names from UniProt headers (GN=, sp|ACC|ENTRY_ORG). On any other
+# header (NCBI: ">WP_000123.1 MULTISPECIES: hypothetical protein [Escherichia]") both columns hold
+# its guess, the description's first word ("MULTISPECIES:", "hypothetical", "30S"), which a reader
+# takes for a gene name. Those names are blanked -- a [gene=...] token is kept as the gene -- and
+# Description names the protein. Without the FASTA the guess shows itself as Genes equal to
+# Protein.Names, which a UniProt entry name (ALBU_HUMAN) never is for its gene (ALB).
+names_record <- local({
+  fa <- if (is.null(fd)) rep(NA_integer_, nrow(annot)) else match(first_acc(annot$Protein.Group), fd$acc)
+  by_fasta <- !is.na(fa)
+  if (any(by_fasta)) by_fasta[by_fasta] <- !fd$uniprot[fa[by_fasta]]
+  guessed <- !by_fasta & !is.na(annot$Genes) & nzchar(annot$Genes) &
+    !is.na(annot$Protein.Names) & annot$Genes == annot$Protein.Names
+  token <- if (any(by_fasta)) fd$gene[fa[by_fasta]] else character(0)
+  annot[by_fasta, `:=`(Genes = token, Protein.Names = NA_character_)]
+  annot[guessed, `:=`(Genes = NA_character_, Protein.Names = NA_character_)]
+  list(n_protein_groups = nrow(annot), n_not_uniprot = sum(by_fasta | guessed),
+       n_gene_from_token = sum(!is.na(token)),
+       source = if (!is.null(fd)) paste("the searched FASTA's headers (--fasta)", basename(fasta_path))
+                else "no --fasta: Genes equal to Protein.Names marks DIA-NN's guess",
+       rule = paste("Genes and Protein.Names are DIA-NN's, read from UniProt headers. For a protein whose",
+                    "header is not UniProt's they hold DIA-NN's guess (the description's first word), so",
+                    "they are left blank -- a [gene=...] token in the header is kept as the gene -- and",
+                    "Description names the protein."))
+})
 annot[, Description := if (is.null(fd)) NA_character_ else fd$desc[match(first_acc(Protein.Group), fd$acc)]]
 annot[, Label := {
   g <- if (is.null(fd)) rep(NA_character_, .N) else fd$gene[match(first_acc(Protein.Group), fd$acc)]
@@ -409,6 +440,56 @@ for (ct in names(tables_rec)) {
       "replicate (min_precursors = 1); limma's variance moderation treats them like the rest, so",
       "confirm the ones that matter."), ct, t$n_significant_one_precursor, t$n_significant))
 }
+# A label that reads K- and R-ending precursors of one protein differently (silac_residue_bias):
+# per CHANNEL pair, heavier over lighter, whatever groups they hold (a label swap must not cancel
+# it), judged on the median and run by run; a deuterated label is named, since its retention
+# shift is the known cause
+RESIDUE_BIAS_MAX <- 0.15            # |log2| between K- and R-ending precursors of one protein
+RESIDUE_BIAS_MIN_PAIRS <- 20        # protein-run pairs with both, before it is judged
+deuterated <- Filter(function(ch) any(grepl("2H", c(ch$K$composition %||% "", ch$R$composition %||% ""),
+                                           fixed = TRUE)), labels$channels %||% list())
+wc <- silac_wide_channels(dd)
+used_ch <- chan_order[chan_order %in% unique(ratio_asg$Channel)]
+residue_bias <- list()
+for (i in seq_along(used_ch)) for (j in seq_along(used_ch)) if (i < j) {
+  lo <- used_ch[i]; hi <- used_ch[j]; key <- paste0(hi, "/", lo)
+  kr <- silac_residue_bias(wc, hi, lo)
+  holds <- function(ch) paste(unique(ratio_asg[Channel == ch]$Group), collapse = " or ")
+  kr$groups <- sprintf("%s holds %s, %s holds %s", hi, holds(hi), lo, holds(lo))
+  kr$basis <- paste("per run and protein group: median log2 ratio", key, "of the K-ending precursors",
+                    "minus that of the R-ending ones; the median over protein-run pairs, and per run")
+  residue_bias[[key]] <- kr
+  if (kr$n_pairs < RESIDUE_BIAS_MIN_PAIRS) {
+    chk("silac_label_residue_bias", "INFO", sprintf(paste(
+      "%s: K- against R-ending precursors not compared: %d protein-run pairs hold both (fewer",
+      "than %d)."), key, kr$n_pairs, RESIDUE_BIAS_MIN_PAIRS), kr)
+    next
+  }
+  pr <- unlist(kr$per_run)
+  deut <- Filter(function(ch) ch$name %in% c(hi, lo), deuterated)
+  if (abs(kr$median) > RESIDUE_BIAS_MAX || stats::median(abs(pr)) > RESIDUE_BIAS_MAX)
+    chk("silac_label_residue_bias", "WARN", sprintf(paste(
+      "Channels %s (%s): lysine-ending precursors read %+.2f log2 against arginine-ending ones of",
+      "the same protein and run (median of %d protein-run pairs, %d protein groups; per run %+.2f",
+      "to %+.2f), above %.2f. A protein's ratio between these channels then depends on its mix of",
+      "K- and R-ending peptides, by up to that much: read effects of that size with care. %s"),
+      key, kr$groups, kr$median, kr$n_pairs, kr$n_proteins, min(pr), max(pr), RESIDUE_BIAS_MAX,
+      if (length(deut)) sprintf(paste(
+        "The %s channel's lysine label is deuterated (%s): deuterium shifts a peptide's retention",
+        "time against its light partner, so the channels are not measured over the same elution",
+        "-- the known cause. For a new design, a non-deuterated medium label (K6R6, 13C(6)",
+        "lysine and arginine) avoids it (references/silac.md)."),
+        paste(vapply(deut, function(ch) ch$name, ""), collapse = ", "),
+        paste(unique(vapply(deut, function(ch) sprintf("%s, %s", ch$K$label %||% "?",
+                                                         ch$K$composition %||% "?"), "")), collapse = "; "))
+      else paste("Neither channel's label is recorded as deuterated: check the labels used, the label",
+                 "incorporation and arginine-to-proline conversion (heavy arginine) before reading",
+                 "these ratios.")), kr)
+  else chk("silac_label_residue_bias", "PASS", sprintf(paste(
+    "Channels %s: lysine- and arginine-ending precursors of the same protein agree (median difference",
+    "%+.2f log2 over %d protein-run pairs, per run %+.2f to %+.2f; within %.2f)."), key, kr$median,
+    kr$n_pairs, min(pr), max(pr), RESIDUE_BIAS_MAX), kr)
+}
 if (length(incorp)) {
   low <- Filter(function(x) isTRUE(x$median_percent < INCORPORATION_MIN), incorp)
   txt <- paste(vapply(incorp, function(x) sprintf("%s %s %.1f%% (signal %.1f%%; %d precursors, %d with no light row)",
@@ -467,6 +548,8 @@ has_gg <- requireNamespace("ggplot2", quietly = TRUE)
 has_repel <- requireNamespace("ggrepel", quietly = TRUE)
 ink <- "#22302b"; muted <- "#5b6661"; up_c <- "#b0472a"; dn_c <- "#2f6db3"; ns_c <- "#b9c2be"
 q_short <- paste(sprintf("%s <= %g", names(cutoffs), cutoffs), collapse = ", ")
+# A subtitle as lines that fit an 8-inch figure: the seven q-value filters ran off its edge
+wrap_subtitle <- function(x, width = 90) paste(strwrap(x, width), collapse = "\n")
 # the scatter: two comparisons over the same reference by default (M/L against H/L), and the
 # correlation their shared channel builds in, with its sign
 scatter_pair <- function() {
@@ -516,9 +599,9 @@ if (!has_gg) {
         scale_x_continuous(limits = xl) +
         labs(x = sprintf("log2 %s/%s, relative to the median detected protein", a$numerator, a$denominator),
              y = "-log10 p-value", title = sprintf("%s vs %s", a$numerator, a$denominator),
-             subtitle = sprintf("%s tested (ratio in >= %d of %d replicates); %s significant at adj. p < %g",
+             subtitle = wrap_subtitle(sprintf("%s tested (ratio in >= %d of %d replicates); %s significant at adj. p < %g",
                                 format(a$n_tested, big.mark = ","), a$min_replicates, a$n_replicates_available,
-                                format(a$n_significant, big.mark = ","), adjp_thr)) + th
+                                format(a$n_significant, big.mark = ","), adjp_thr))) + th
       if (nrow(lab)) g <- g + (if (has_repel) ggrepel::geom_text_repel(data = lab, aes(label = Label), size = 2.7,
                                                                          colour = ink, max.overlaps = 20)
                                else geom_text(data = lab, aes(label = Label), size = 2.7, colour = ink,
@@ -558,7 +641,7 @@ if (!has_gg) {
       scale_fill_manual(values = setNames(c("#6b7a74", dn_c, up_c, "#8c6bb1")[seq_along(groups)], groups), name = NULL) +
       scale_y_continuous(labels = function(v) format(v, big.mark = ",")) +
       labs(x = NULL, y = "Precursors", title = "Precursors identified in each channel",
-           subtitle = sprintf("%s, channel q <= %g", q_short, ch_q_cut)) + th
+           subtitle = wrap_subtitle(sprintf("%s, channel q <= %g", q_short, ch_q_cut))) + th
     ggsave(file.path(figdir, f), g, width = 8, height = 4.6, dpi = 200, bg = "white")
     fig_ok(f, "silac_channel_detections", sprintf(paste(
       "Precursors identified per run and channel (%s, channel q <= %g, contaminants removed)."),
@@ -657,13 +740,22 @@ off_txt <- paste(vapply(names(tables_rec), function(ct) {
   o <- unlist(tables_rec[[ct]]$offset_log2)
   sprintf("%s %+.2f to %+.2f", ct, min(o), max(o))
 }, ""), collapse = "; ")
+# Precision, per comparison: a typical estimate's 95% interval, and the cutoff the correction
+# applied -- said for what it is. With no call it is BH's first step, its strictest, which is a
+# property of the cutoff and never set beside a comparison that had calls (silac_ratios.R).
 pow_txt <- paste(vapply(names(tables_rec), function(ct) {
   t <- tables_rec[[ct]]
   if (!is.finite(t$critical_log2_raw_p05 %||% NA_real_)) return(sprintf("%s: not estimated", ct))
-  sprintf("%s: observed %.2f for p < 0.05, %.2f to be called significant (p < %.2g, %s), true %.2f for 80%% power",
-          ct, t$critical_log2_raw_p05, t$critical_log2_significant, t$p_cutoff,
-          if (t$n_significant) "BH's realised cutoff" else "BH's first step, none significant",
-          t$true_log2_80pct_power)
+  sprintf("%s: a typical protein's estimate is within about \u00b1%.2f log2 (95%% interval; a change that size reaches raw p < 0.05); %s",
+          ct, t$critical_log2_raw_p05,
+          if (identical(t$p_cutoff_kind, "first_step"))
+            sprintf(paste("because no protein passed, the correction applied its strictest cutoff (p < %.2g),",
+                          "about %.2f log2 at typical variance for a protein changing alone -- a property of the",
+                          "cutoff, not of the replicates or the variance: proteins changing together would be",
+                          "called at a lower bar, so it is not comparable with a comparison that had calls"),
+                    t$p_cutoff, t$critical_log2_significant)
+          else sprintf("with %d protein groups called, the correction's cutoff was p < %.2g, about %.2f log2 at typical variance",
+                       t$n_significant, t$p_cutoff, t$critical_log2_significant))
 }, ""), collapse = "; ")
 one_prec_txt <- paste(vapply(names(tables_rec), function(ct) sprintf("%s %d of %d", ct,
   tables_rec[[ct]]$n_significant_one_precursor, tables_rec[[ct]]$n_significant), ""), collapse = "; ")
@@ -685,8 +777,14 @@ brief_notes <- list(
         "their agreement is not independent evidence."),
   sprintf(paste("Significant protein groups resting on a single precursor in at least one replicate: %s",
                 "(min_precursors = 1; confirm the ones that matter)."), one_prec_txt),
-  sprintf(paste("Not significant is not unchanged. From the median variance: %s. A rough reading of the power,",
-                "not a rule."), pow_txt))
+  sprintf(paste("Not significant is not unchanged. From the median variance, a rough reading of precision:",
+                "%s. These numbers rule nothing out: a protein not called may still have changed."), pow_txt),
+  if (names_record$n_not_uniprot)
+    sprintf(paste("%d of %d protein groups come from FASTA headers that are not UniProt's: their Genes and",
+                  "Protein.Names are blank (DIA-NN's value there is the description's first word, such as",
+                  "'MULTISPECIES:' or 'hypothetical') -- name them by Description."),
+            names_record$n_not_uniprot, names_record$n_protein_groups))
+brief_notes <- Filter(Negate(is.null), brief_notes)
 plain_language <- paste(
   "**SILAC ratios + limma**: each sample was grown with its own isotope label and the samples were mixed",
   "and measured together, so each protein is compared between labels inside the same run. The ratio is",
@@ -749,6 +847,19 @@ high_significance_note <- paste(
   "the channel assignment (a swapped label reverses a whole comparison) and the mixing (SILAC_channel_summary.csv);",
   "after median-centring, an even split of increases and decreases is built in.")
 sig_counts <- lapply(tables_rec, function(t) list(up = t$n_up, down = t$n_down, total = t$n_significant))
+# The contaminant step in run_de.R's record shape (contaminants.R contaminant_record): the brief,
+# AGENTS.md and the Methods' readers say what was removed from it, not "not recorded".
+n_cont_prec <- uniqueN(d_raw[is_cont & Run %in% ratio_asg$Run]$Precursor.Id)
+contaminants_rec <- list(
+  policy = if (n_cont_prec == 0) "none_present" else "removed", removed = n_cont_prec > 0,
+  tag = CONTAMINANT_TAG, tags = as.list(CONTAMINANT_TAGS), id_column = "Protein.Ids",
+  pattern = contaminant_regex(), unit = "precursors", unit_singular = "precursor",
+  unit_level = "precursor",
+  rule = sprintf("a precursor is a contaminant when any accession in Protein.Ids starts with %s -- applied by run_silac.R",
+                 paste0("'", CONTAMINANT_TAGS, "'", collapse = " or ")),
+  rule_origin = "applied by run_silac.R",
+  counted_after = "the runs in the design, before the q-value filters",
+  n_precursors = n_cont_prec, n_protein_groups = prep$counts$contaminant_protein_groups)
 input_sha256 <- tryCatch(if (requireNamespace("digest", quietly = TRUE))
   digest::digest(input, algo = "sha256", file = TRUE) else NA_character_, error = function(e) NA_character_)
 replay <- c("--input", normalizePath(input), "--design", normalizePath(design_path),
@@ -798,6 +909,26 @@ prov <- list(
     "median-centred within the sample; for the sample-quality panels and depth checks, not what was tested"),
     proteins_only_here = length(unlisted)),
   report_sections = report_sections, high_significance_note = high_significance_note,
+  contaminants = contaminants_rec,
+  # how the brief (analysis_prompt.py) tells the writer to read a hit -- in place of run_de.R's
+  # measured-versus-inferred tiers, CVs and next-step tiers, which do not apply to a ratio
+  evidence_reading = paste(
+    "Every tested protein group's logFC is a ratio measured inside each run, both channels",
+    "passing, in at least the comparison's minimum of replicates (`n_replicates`;",
+    "`Detected_<group>` gives k/n): there are no measured-versus-inferred tiers and no",
+    "missing-value model. A row whose `Evidence` reads 'ratio in k of n replicates: not tested'",
+    "has no p-value and is not a hit; count tested proteins as the rows with a P.Value. A protein",
+    "group detected in some channels and not in another has no ratio: it is in",
+    "`SILAC_channel_specific_detections.csv` as a detection pattern ('detected in X (k/n); not",
+    "detected in Y (0/n)') -- report it that way, never with a fold change or as a test result."),
+  next_steps = list(
+    "**Follow up first** -- significant, with at least two precursors behind every replicate's ratio (`min_precursors` >= 2).",
+    "**Check** -- significant but resting on a single precursor in at least one replicate (`min_precursors` = 1): confirm before quoting it.",
+    "**Confirm presence** -- the channel-specific detections: a detection pattern, not a test; confirm with an orthogonal method before calling a protein absent."),
+  spread = paste(
+    "a protein's reproducibility is the spread of its replicate ratios (the `centred_<replicate>`",
+    "columns), which limma's moderated variance summarises -- not a CV of intensities; do not",
+    "compute CVs from SILAC_sample_matrix.csv"),
   # the README's line for output/tables (session_docs.py reads it instead of run_de.R's)
   tables_summary = paste("one `DE_silac_*.csv` per comparison (median-centred log2 ratios, with the",
                          "uncentred ones), `SILAC_channel_specific_detections.csv`,",
@@ -809,6 +940,9 @@ prov <- list(
     t = "moderated one-sample t-statistic (limma eBayes, robust)",
     P.Value = "raw p-value of the moderated one-sample t-test against a log2 ratio of 0; NA = not tested (Evidence says why)",
     adj.P.Val = "Benjamini-Hochberg adjusted p-value within the comparison -- THE significance column (NA = not tested)",
+    Genes = paste("the gene name from a UniProt header (GN=; DIA-NN's) or a [gene=...] token; blank for",
+                  "other headers, where DIA-NN's value is the description's first word"),
+    Protein.Names = "the UniProt entry name (DIA-NN's); blank for a header that is not UniProt's",
     Description = "the protein's description from the searched FASTA's header",
     n_replicates = "replicates in which the protein group had a ratio",
     min_precursors = "the fewest precursors behind any one of its replicate ratios (1 = a single precursor)",
@@ -829,7 +963,8 @@ prov <- list(
   settings = settings,
   comparisons_source = des$comparisons_source, comparisons_sentence = cmp_sentence,
   significant_per_contrast = sig_counts, de_tables = tables_rec,
-  labels = labels, labels_source = labels_source,
+  labels = labels, labels_source = labels_source, protein_names = names_record,
+  label_residue_bias = residue_bias,
   decoy_channel = decoy_channel %||% list(masses = NULL, note = "no DIA-NN log beside the report named it"),
   # searched runs the user decided to leave out (silac.py design --exclude), in run_de.R's shape
   runs_left_out = jsonlite::fromJSON(jsonlite::toJSON(des$runs_left_out, auto_unbox = TRUE, null = "null"),
@@ -859,9 +994,7 @@ prov <- list(
   written_by = version_label, R_version = as.character(getRversion()),
   packages = list(limma = pkg("limma"), data.table = pkg("data.table"), arrow = pkg("arrow"),
                   ggplot2 = pkg("ggplot2"), jsonlite = pkg("jsonlite")),
-  runtime = list(r_version = R.version.string, r_home = R.home(), lib_paths = as.list(.libPaths()),
-                 conda_prefix = if (nzchar(Sys.getenv("CONDA_PREFIX"))) Sys.getenv("CONDA_PREFIX") else NULL,
-                 session_info = "sessionInfo.txt", note = "recorded by run_silac.R in the process that ran it"))
+  runtime = runtime_record("run_silac.R"))
 writeLines(jsonlite::toJSON(prov, auto_unbox = TRUE, pretty = TRUE, null = "null", na = "null", digits = NA),
            file.path(outdir, "de_provenance.json"))
 writeLines(c("SILAC ratio analysis (run_silac.R)", "", strwrap(methods_paragraph, 100), "",

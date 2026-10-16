@@ -2387,6 +2387,16 @@ def _conversation(session):
             "readable": first_existing([os.path.join(d, "conversation.md")])}
 
 
+def sig_cell(v):
+    """One contrast's significant count as text: session_docs.sig_text, the one rendering
+    (run_silac.R records {"up", "down", "total"}: "811 (394 up, 417 down)", never a dict)."""
+    try:
+        from session_docs import sig_text
+    except Exception:                    # its imports missing here: the count as recorded
+        return v
+    return sig_text(v)
+
+
 def render_analysis(rec, an):
     de = an.get("de") or {}
     L = ["", f"## Analysis -- finalized {an.get('finalized') or '?'}",
@@ -2400,7 +2410,7 @@ def render_analysis(rec, an):
         sig = de.get("significant_per_contrast") or {}
         if sig:
             L.append("- **Significant proteins per contrast:** "
-                     + ", ".join(f"{k} = {fmt_n(v)}" for k, v in sig.items()))
+                     + ", ".join(f"{k} = {fmt_n(sig_cell(v))}" for k, v in sig.items()))
         elif de.get("contrasts"):
             L.append(f"- **Contrasts:** {', '.join(de['contrasts'])}")
     if an.get("audit_overall"):
@@ -2699,7 +2709,7 @@ def analysis_body(rec):
     sig = (an.get("de") or {}).get("significant_per_contrast") or {}
     if sig:
         body.append("- **Significant proteins:** " + ", ".join(
-            f"{k} = {fmt_n(v)}" for k, v in sig.items()))
+            f"{k} = {fmt_n(sig_cell(v))}" for k, v in sig.items()))
     zc, z = rec.get("zip_copy") or {}, an.get("zip") or {}
     if z.get("exists"):
         body.append(f"- **Reproducibility / zip:** "
@@ -2857,7 +2867,7 @@ def activity_rows(rec, event, plan):
         again = (analysis_logged_before(rec)
                  or any(str(k).startswith("analysis:") for k in rec.get("activity_logged") or []))
         notes = "; ".join(x for x in (
-            ", ".join(f"{k}={v}" for k, v in sig.items()) or None,
+            ", ".join(f"{k}={sig_cell(v)}" for k, v in sig.items()) or None,
             ("zip copied" if zc.get("copied") else f"zip not copied: {zc.get('reason')}")
             if (an.get("zip") or {}).get("exists") else "no session zip",
             "re-finalized" if again else None) if x) + prot_note
@@ -3417,7 +3427,7 @@ def collect_rows(root):
             "median_precursors": res.get("median_precursors"),
             "median_proteins": res.get("median_proteins"), "organism": fa.get("organism"),
             "finalized": bool(an),
-            "significant": ";".join(f"{k}={v}" for k, v in sig.items()) or None,
+            "significant": ";".join(f"{k}={sig_cell(v)}" for k, v in sig.items()) or None,
             "fran": (s.get("fran") or {}).get("status"),
             "n_data_quality_notes": len(r.get("data_quality_notes") or []),
             "folder": os.path.dirname(p), "search_out": s.get("out_dir")})

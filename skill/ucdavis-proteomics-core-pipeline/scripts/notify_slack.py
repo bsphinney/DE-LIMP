@@ -808,7 +808,11 @@ def render(f):
                                                   else "as recorded by run_de.R")
             if f.get("adjp") is not None and "adjp" in rule:
                 rule += f"; adjp = {f['adjp']}"      # run_de.R's words, with its value
-            lines = [f"• {_esc(k)}: *{v}*" for k, v in list(sig.items())[:12]]
+            try:                         # session_docs.sig_text: the one rendering of a count
+                from session_docs import sig_text
+            except Exception:
+                sig_text = str
+            lines = [f"• {_esc(k)}: *{_esc(str(sig_text(v)))}*" for k, v in list(sig.items())[:12]]
             if len(sig) > 12:
                 lines.append(f"… and {len(sig) - 12} more contrasts")
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": _cut(

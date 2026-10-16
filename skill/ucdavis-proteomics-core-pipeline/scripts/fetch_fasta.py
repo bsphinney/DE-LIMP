@@ -691,7 +691,7 @@ def describe_staged(proteome, path, text, content_requested):
         api_error = f"{type(e).__name__}: {e}"
     if api and (api["organism"] or api["taxid"]):
         meta = {"organism": api["organism"], "taxid": api["taxid"],
-                "proteome_type": api["proteome_type"],
+                "proteome_type": api["proteome_type"], "superkingdom": api["superkingdom"],
                 "organism_source": f"uniprot_api:{proteome}"}
         gene_count = api["gene_count"]
         if name_taxid and api["taxid"] and name_taxid != api["taxid"]:
@@ -2746,6 +2746,9 @@ def cmd_fetch(a):
         # Where organism/taxid came from, so an offline fill is never mistaken for
         # UniProt's answer: uniprot_api:<UP>, filename_taxid+curated_table, ... or none.
         "organism_source": meta.get("organism_source", "none"),
+        # UniProt's superkingdom when the proteome came from it ("" otherwise): sample_quality.py
+        # scores its vertebrate blood/muscle/skin panels only where they can apply
+        "superkingdom": meta.get("superkingdom") or "",
         # Methods text must not call a strain assembly or a user-supplied file a
         # "reference proteome" -- record what it actually is.
         "proteome_type": meta.get("proteome_type", ""),

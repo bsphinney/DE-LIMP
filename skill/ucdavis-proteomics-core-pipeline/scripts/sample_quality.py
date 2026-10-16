@@ -108,6 +108,47 @@ PANEL_ORTHOLOGS = {
 # Organisms whose names the panels are verified for: human symbols, and PANEL_ORTHOLOGS.
 PANEL_ORGANISMS = {9606: "Homo sapiens", 10090: "Mus musculus", 10116: "Rattus norvegicus"}
 
+# The curated panels are vertebrate tissues -- red cells, skeletal muscle, skin. In any other
+# organism they measure nothing it has: on a bacterial culture supernatant the bacterium's own
+# catalase matched HEMOLYSIS, and "treat HEMOLYSIS proteins with care" reached the report
+# (2026-10). Whether the searched organism is a vertebrate: the FASTA sidecar's superkingdom
+# (fetch_fasta.py records UniProt's), else the taxa below, else not known -- and then the
+# panels run as they always did.
+VERTEBRATE_TAXIDS = {9606, 10090, 10116, 7955, 9913, 9823, 9031, 9615, 9541, 9544, 9598,
+                     9986, 10029, 10036, 9940, 9925, 9796, 9685, 8355, 8364, 8030, 9103}
+NOT_VERTEBRATE_SUPERKINGDOMS = ("bacteria", "archaea", "viruses")
+# Genera (the organism's first word) of the bacteria, fungi, plants, invertebrates and protists
+# the Core sees -- fetch_fasta.ORGANISM_TAXIDS's non-vertebrates first.
+NOT_VERTEBRATE_GENERA = frozenset("""
+    escherichia saccharomyces schizosaccharomyces drosophila arabidopsis caenorhabditis
+    trypanosoma mycobacterium plasmodium salmonella shigella klebsiella enterobacter citrobacter
+    yersinia vibrio pseudomonas acinetobacter burkholderia bordetella neisseria haemophilus
+    helicobacter campylobacter legionella listeria bacillus staphylococcus streptococcus
+    enterococcus lactobacillus lactococcus lacticaseibacillus limosilactobacillus bifidobacterium
+    bacteroides clostridium clostridioides corynebacterium streptomyces mycoplasma chlamydia
+    borrelia treponema francisella brucella rhizobium sinorhizobium agrobacterium caulobacter
+    synechocystis synechococcus prochlorococcus akkermansia faecalibacterium porphyromonas
+    candida cryptococcus aspergillus neurospora pichia komagataella kluyveromyces yarrowia
+    chlamydomonas dictyostelium tetrahymena toxoplasma leishmania giardia entamoeba
+    oryza zea triticum hordeum glycine solanum nicotiana medicago vitis populus brassica
+    physcomitrium marchantia anopheles aedes apis bombyx tribolium daphnia schistosoma
+    nematostella hydra strongylocentrotus ciona
+""".split())
+
+
+def panel_scope(taxid, organism, meta=None):
+    """Do the curated (vertebrate) panels apply to this organism? -> (True | False | None, why).
+    None: not known -- the panels run, as they did before this check."""
+    if taxid in VERTEBRATE_TAXIDS:
+        return True, f"taxid {taxid} is a vertebrate"
+    sk = str((meta or {}).get("superkingdom") or "").strip().lower()
+    if sk in NOT_VERTEBRATE_SUPERKINGDOMS:
+        return False, f"{organism or f'taxid {taxid}'} is in {sk.title()} (the FASTA sidecar)"
+    genus = (str(organism or "").split() or [""])[0].strip("[]").lower()
+    if genus in NOT_VERTEBRATE_GENERA:
+        return False, f"{organism} is not a vertebrate (genus {genus.title()})"
+    return None, "whether the organism is a vertebrate is not known"
+
 # CYSTEINE. A search that fixes carbamidomethyl on C (estimate_params.py --cys-alkylation cam, the
 # default; DIA-NN --unimod4) identifies cysteine peptides only of a sample that was reduced and
 # alkylated. Identified peptides with a C: 7.8% on a Core S-Trap prep with DTT/IAA, 0.03-0.5% on
@@ -778,6 +819,12 @@ def main():
             taxid = None
     org_name = (tc or {}).get("organism") or PANEL_ORGANISMS.get(taxid) or (
         f"taxid {taxid}" if taxid else "an unknown organism")
+    scope, scope_why = panel_scope(taxid, (tc or {}).get("organism") or meta.get("organism")
+                                   or PANEL_ORGANISMS.get(taxid), meta)
+    not_applicable = (f"not applicable to {org_name}: the panel's markers are vertebrate blood, "
+                      f"muscle and skin proteins, and {scope_why} (a sample that also holds a "
+                      f"vertebrate host's proteins: pass --taxid <the host's taxid> to score "
+                      f"them)") if scope is False else None
     panels = {name: panel_genes(name, taxid) for name in PANELS}
     if tc and (tc["genes"] or tc["accessions"]):
         # Genes AND accessions: the matrix's id column may be either, and an NCBI database
@@ -787,6 +834,15 @@ def main():
 
     results, flags = {}, []
     for name, genes in panels.items():
+        if not_applicable and name in PANELS:
+            # never scored: a bacterium's catalase is not haemolysis
+            results[name] = {"n_panel_proteins": 0, "matched_genes": [], "contaminant_matches": [],
+                             "z": {}, "elevated_samples": [], "group_confounded": False,
+                             "confound_caution": False, "confound_p": None,
+                             "group_detail": not_applicable, "expected_analyte": False,
+                             "confound_tests": [], "kept_in_quantification": False,
+                             "status": "not_applicable", "status_note": not_applicable}
+            continue
         per, nhit, matched, cont_hits = panel_scores(rows, samples, genes, removed)
         z = zscore(per, samples)
         elevated = sorted(s for s in samples if z.get(s) is not None and z[s] >= a.z)
@@ -875,6 +931,8 @@ def main():
     covered = taxid in PANEL_ORGANISMS
     for name in PANELS:
         r = results[name]
+        if r.get("status") == "not_applicable":
+            continue
         if r["n_panel_proteins"]:
             r["status"], r["status_note"] = "assessed", None
         elif not any_match:
@@ -949,7 +1007,14 @@ def main():
         fh.write("\n")
         if depth is None and depth_note and "could not be read" in depth_note:
             fh.write(f"_INFO: per-run detected depth not computed: {depth_note}._\n\n")
+        if not_applicable:
+            fh.write(f"_The contamination panels ({', '.join(PANELS)}) were not scored: "
+                     f"{not_applicable}._\n\n")
         for name, r in results.items():
+            if r.get("status") == "not_applicable":
+                fh.write(f"## {name}  (not applicable)\n\n_{r['status_note'][0].upper()}"
+                         f"{r['status_note'][1:]}._\n\n")
+                continue
             fh.write(f"## {name}  ({r['n_panel_proteins']} panel proteins detected)\n\n")
             if r.get("expected_analyte"):
                 fh.write("_This is the **analyte** for a keratin-matrix sample (nail/hair/wool/skin/"
@@ -1006,6 +1071,7 @@ def main():
              if False else a.out.replace(".md", ".json"), "w") as jf:
         json.dump({"samples": samples, "groups": gmap, "matrix_complete": complete,
                    "taxid": taxid, "panel_organisms_verified": taxid in PANEL_ORGANISMS,
+                   "panels_apply": scope, "panels_apply_why": scope_why,
                    "panels": results, "detected_depth": depth, "flags": flags,
                    "cysteine": cys, "detected_depth_note": depth_note,
                    "fasta_meta": fasta_meta, "target_contaminants_note": tc_note,
@@ -1014,6 +1080,8 @@ def main():
     print(json.dumps({"out": a.out, "flags": flags,
                       "group_confounded": [n for n, r in results.items() if r["group_confounded"]],
                       "not_run": not_run,
+                      "not_applicable": [n for n, r in results.items()
+                                         if r.get("status") == "not_applicable"],
                       "cysteine": cys and {k: cys[k] for k in ("status", "fraction",
                                                                "cam_searched")},
                       "matrix_complete": complete}, indent=2))

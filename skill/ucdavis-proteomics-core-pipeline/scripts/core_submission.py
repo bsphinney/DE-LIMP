@@ -2036,6 +2036,60 @@ def parse_choices(choose: list, choices_file, samples: list) -> dict:
 # replicates of the sample. Never a collision -- different samples sharing a label always need
 # their own --choose.
 REINJECTION_POLICIES = ("ask", "latest", "all")
+ACQUISITIONS = ("DIA", "DDA")
+
+
+def split_by_method(paths: list, plate=None, acquisition=None) -> dict:
+    """One sample's runs by the acquisition method their names declare (ht_manifest's
+    declared_method -- the one_method gate's reading). A sample's DDA run and its DIA run
+    (60SPD_DDA-<id> beside 60SPD_DIA-<id>, 2026-10) are two methods, not re-injections:
+    --reinjections all would have put the DDA run into a DIA search as a technical replicate.
+    `acquisition` (locate --acquisition DIA|DDA): a run declaring the other mode is set aside.
+    -> {"kept", "set_aside": [{"file", "method"}], "methods": {method: [paths]} when the kept
+    runs still declare more than one method, else {}}. A name declaring none (a re-injection,
+    <date>_<n>_rerun_...) is never a method of its own."""
+    try:
+        from ht_manifest import declared_method
+    except Exception as e:
+        if acquisition:                # never silently ignored: a DDA run could join a DIA search
+            raise Stop(EXIT_DECIDE, {"error": f"--acquisition {acquisition}: the run names' "
+                                              f"methods cannot be read here ({type(e).__name__}: "
+                                              f"{e})", "hint": "put the whole skill on this machine "
+                                              "again (hive_exec.sh --put-skill) and re-run"})
+        return {"kept": list(paths), "set_aside": [], "methods": {}}
+    meth = {p: declared_method(os.path.basename(p.rstrip("/")), plate) for p in paths}
+
+    def mode(m):
+        w = (m or "").split()
+        return w[-1].upper() if len(w) > 1 and w[-1].upper() in ACQUISITIONS else None
+    kept, aside, groups = [], [], {}
+    for p in paths:
+        if acquisition and mode(meth[p]) not in (None, acquisition.upper()):
+            aside.append({"file": p, "method": meth[p]})
+            continue
+        kept.append(p)
+        if meth[p] is not None:
+            groups.setdefault(meth[p], []).append(p)
+    return {"kept": kept, "set_aside": aside, "methods": groups if len(groups) > 1 else {}}
+
+
+def other_method_note(aside: list, acquisition) -> str:
+    return (f"set aside, acquired by another method than --acquisition {acquisition}: "
+            + ", ".join(f"{os.path.basename(x['file'])} ({x['method']})" for x in aside))
+
+
+def method_note(key: str, methods: dict) -> str:
+    """The choose_run note for a sample whose runs declare several acquisition methods. Runs
+    that differ by more than DIA vs DDA (a throughput, 60spd against 100spd) --acquisition
+    cannot separate: then only --choose can."""
+    modes = {(m.split() + [""])[1].upper() for m in methods}
+    how = (f"say which acquisition this analysis is for (--acquisition {'|'.join(ACQUISITIONS)}), "
+           f"or --choose {key}=<file>" if len(modes) == len(methods) and modes <= set(ACQUISITIONS)
+           else f"they differ by more than DIA vs DDA, so --acquisition cannot choose: staff "
+                f"choose one, --choose {key}=<file>")
+    return (f"{sum(len(v) for v in methods.values())} runs of this sample were acquired by "
+            f"different methods ({'; '.join(f'{m}: {len(v)}' for m, v in methods.items())}) -- "
+            f"not re-injections: {how}")
 _ACQ_COUNTER = re.compile(r"_(\d+)(?:\.[A-Za-z]+)?$")
 
 
@@ -2187,7 +2241,8 @@ def proposal_note(skey: str, props: list) -> str:
 def match_samples(samples: list, entries: list, neighbors: list, lo: dt.date, hi: dt.date,
                   ours_label: str = "", accept_ambiguous: bool = False,
                   choices: dict | None = None, reinjections: str = "ask",
-                  stan: dict | None = None, surnames=()) -> list:
+                  stan: dict | None = None, surnames=(), plate=None,
+                  acquisition: str | None = None) -> list:
     """The deterministic core of `locate`: one row per sample.
 
     A file in the window is AMBIGUOUS when another submission -- older, same day or newer --
@@ -2338,16 +2393,39 @@ def match_samples(samples: list, entries: list, neighbors: list, lo: dt.date, hi
             amb = [x for x in amb if os.path.realpath(x[0]["path"]) not in taken]
         cands = sorted(free + amb, key=lambda t: (t[1], _mtime(t[0]["path"]), t[0]["name"]),
                        reverse=True)
+        # Runs of this sample by another acquisition method are not re-injections (split_by_method)
+        # (with --acquisition, a sample's only run of the other method is set aside too)
+        split = split_by_method([x[0]["path"] for x in cands], plate, acquisition) \
+            if (len(cands) > 1 or (acquisition and cands)) and not pick else None
+        if split and split["set_aside"]:
+            cands = [x for x in cands if x[0]["path"] in split["kept"]]
+            free = [x for x in free if x[0]["path"] in split["kept"]]
+            amb = [x for x in amb if x[0]["path"] in split["kept"]]
         # A COLLISION: another sample of ours has this label, or a run's label is another
         # submission's too and staff have not accepted it as ours. Only staff can say which run is
         # whose (--choose), whatever --reinjections says. Otherwise several runs are RE-INJECTIONS
         # of this one sample, and the one policy decides.
         collision = shared[key] > 1 or bool(amb and not accept_ambiguous)
+        methods = (split or {}).get("methods") if not collision else None
+        other_method = (split or {}).get("set_aside") or []
         rec = (apply_reinjections(reinjections, [(x[0]["path"], x[1], x[0]["instrument_folder"])
                                                  for x in cands], stan or {})
-               if not pick and len(cands) > 1 and not collision and reinjections != "ask" else None)
+               if not pick and len(cands) > 1 and not collision and not methods
+               and reinjections != "ask" else None)
+        start = len(rows)
         if pick:
             rows.append(chosen(smp, pick, owned, cands, amb, amb_info, n_out, shadowed))
+        elif methods:
+            rows.append(_row(smp, status="needs_choice", sample_key=skey,
+                             choice_kind="acquisition_methods",
+                             alternates=[x[0]["path"] for x in cands],
+                             candidates=[{"file": e["path"], "acquired": d.isoformat(),
+                                          "date_source": src,
+                                          "method": next((m for m, v in methods.items()
+                                                          if e["path"] in v), None)}
+                                         for e, d, src, _cons in cands],
+                             ambiguous=amb_info, out_of_window=n_out, shadowed=shadowed[:5],
+                             note=method_note(skey, methods)))
         elif rec and not rec.get("undecided"):
             by_path = {x[0]["path"]: x for x in cands}
             for path in rec["kept"]:
@@ -2404,13 +2482,21 @@ def match_samples(samples: list, entries: list, neighbors: list, lo: dt.date, hi
                 bits.append(f"{n_out} file(s) carry this id but were acquired outside the window")
             if shadowed:
                 bits.append(f"{len(shadowed)} file(s) carry it inside a longer id")
+            if other_method:
+                bits.insert(0, other_method_note(other_method, acquisition))
             rows.append(_row(smp, status="unmatched", out_of_window=n_out, shadowed=shadowed[:5],
-                             sample_key=skey, note="; ".join(bits) or "no raw file carries this id"))
+                             sample_key=skey, other_method=other_method,
+                             note="; ".join(bits) or "no raw file carries this id"))
+        for r in [x for x in rows[start:] if x["status"] != "unmatched"] if other_method else []:
+            r["other_method"] = other_method
+            r["note"] = ((r["note"] + "; ") if r["note"] else "") + other_method_note(
+                other_method, acquisition)
     return rows
 
 
 def curated_rows(samples: list, paths: list, raw: str, choices: dict | None = None,
-                 internal_id=None, reinjections: str = "ask", stan: dict | None = None) -> list:
+                 internal_id=None, reinjections: str = "ask", stan: dict | None = None,
+                 acquisition: str | None = None) -> list:
     """--files-from: staff chose the files. Map each back to the sample whose id is the
     longest one it carries, the way `locate` matches; a curated list makes even a weak id
     usable. A run of this submission's HT plate (named for it, ht_pattern -- the test `locate`
@@ -2465,7 +2551,22 @@ def curated_rows(samples: list, paths: list, raw: str, choices: dict | None = No
     for smp in samples:
         files = by_sample.get(id(smp), [])
         cands = wanted_by.get(id(smp), [])
-        set_aside, rec = [], None
+        set_aside, rec, other_method = [], None, []
+        if not any(src for _p, src, _on in files) and (len(files) > 1 or (acquisition and files)):
+            # runs of this sample by another acquisition method are not re-injections
+            split = split_by_method([p for p, _s2, _o in files], plate, acquisition)
+            other_method = split["set_aside"]
+            files = [f for f in files if f[0] in split["kept"]]
+            if split["methods"]:
+                rows.append(_row(smp, status="needs_choice", sample_key=keys[id(smp)],
+                                 choice_kind="acquisition_methods",
+                                 alternates=[p for p, _s2, _o in files],
+                                 candidates=[{"file": p, "acquired": _acquired(p),
+                                              "method": next((m for m, v in split["methods"].items()
+                                                              if p in v), None)}
+                                             for p, _s2, _o in files],
+                                 note=method_note(keys[id(smp)], split["methods"])))
+                continue
         if any(src for _p, src, _on in files):
             set_aside = [p for p, src, _on in files if not src]
             files = [f for f in files if f[1]]
@@ -2500,7 +2601,9 @@ def curated_rows(samples: list, paths: list, raw: str, choices: dict | None = No
                                    f"share; staff choose: --choose {keys[id(smp)]}=<file>")))
         elif not files:
             rows.append(_row(smp, status="unmatched", sample_key=keys[id(smp)],
-                             note="no file in the curated list carries this id"
+                             other_method=other_method,
+                             note=other_method_note(other_method, acquisition) if other_method
+                             else "no file in the curated list carries this id"
                                   + (" or sample name" if plate else "")))
         for p, src, on in files:
             d, dsrc = acquisition_date(p)
@@ -2509,11 +2612,14 @@ def curated_rows(samples: list, paths: list, raw: str, choices: dict | None = No
                              date_source=dsrc, instrument_folder=folder, chosen_by=src,
                              matched_on=on, sample_key=keys[id(smp)], alternates=set_aside,
                              reinjections=rec,
+                             other_method=other_method,
                              note=(f"curated; chosen by staff ({src})" if src
                                    else "curated" + ("" if on == "unique_id" else f"; matched on {on}"))
                              + (f"; {reinjection_note(rec)}" if rec else "")
                              + (f"; set aside: {', '.join(os.path.basename(x) for x in set_aside)}"
-                                if set_aside and not rec else "")))
+                                if set_aside and not rec else "")
+                             + (f"; {other_method_note(other_method, acquisition)}"
+                                if other_method else "")))
     for p, cands, on in loose:
         d, src = acquisition_date(p)
         # candidate_samples: the unique_ids of the samples it names; [] for a run of no sample
@@ -2657,8 +2763,16 @@ def locate_gates(rows: list, files: list, allow_partial: bool, wanted_folder, un
     # sample identity, so staff answer it.
     need = by.get("needs_choice", [])
     reinj = [r for r in need if r.get("choice_kind") == "reinjections"]
-    clash = [r for r in need if r.get("choice_kind") != "reinjections"]
+    meth = [r for r in need if r.get("choice_kind") == "acquisition_methods"]
+    clash = [r for r in need if r.get("choice_kind") not in ("reinjections",
+                                                             "acquisition_methods")]
     bits = []
+    if meth:
+        bits.append(f"{len(meth)} sample(s) have runs acquired by different methods (e.g. a DDA "
+                    f"run beside the DIA run) -- not re-injections: ONE decision says which "
+                    f"acquisition this analysis is for -- re-run with --acquisition "
+                    f"{'|'.join(ACQUISITIONS)} -- or --choose <key>=<file> per sample; "
+                    f"--reinjections does not apply to them")
     if reinj:
         bits.append(f"{len(reinj)} sample(s) have several runs of their own (re-injections): ONE "
                     f"decision covers them all -- ask staff, then re-run with --reinjections latest "
@@ -2777,6 +2891,9 @@ def cmd_locate(a) -> int:
                            "choices": list(choices.values()),
                            # the one decision for re-injections of one sample (ask = none taken)
                            "reinjections": a.reinjections,
+                           # which acquisition the analysis is for, when a sample has runs by
+                           # several methods (None = not given)
+                           "acquisition": a.acquisition,
                            "stan_manifest": os.path.abspath(a.ht_manifest) if a.ht_manifest else None}}
 
     if a.files_from:
@@ -2789,7 +2906,7 @@ def cmd_locate(a) -> int:
         missing = [p for p in paths if not os.path.exists(p)]
         existing = list(dict.fromkeys(p for p in paths if os.path.exists(p)))
         rows = curated_rows(samples, existing, raw, choices, s.get("internal_id"),
-                            a.reinjections, stan)
+                            a.reinjections, stan, a.acquisition)
         # what is searched: every listed run but those set aside (another re-injection kept, or a
         # staff choice) and those waiting for one (needs_choice)
         files = [p for p in existing if any(r["file"] == p for r in rows
@@ -2828,7 +2945,8 @@ def cmd_locate(a) -> int:
         rows = match_samples(samples, entries, s.get("neighbors") or [], lo, hi,
                              submission_label(s), a.accept_ambiguous, choices, a.reinjections, stan,
                              surnames=[(s.get(k) or {}).get("last") for k in ("pi", "submitter")
-                                       if isinstance(s.get(k), dict)])
+                                       if isinstance(s.get(k), dict)],
+                             plate=pat, acquisition=a.acquisition)
         files = list(dict.fromkeys(r["file"] for r in rows if r["status"] == "matched"))
         gates = locate_gates(rows, files, a.allow_partial, wanted, unreadable, False, [],
                              a.accept_ambiguous, samples=samples)
@@ -3309,9 +3427,11 @@ def submission_md(s: dict, label: str, links: list, sample_rows_: list, work_dir
     return "\n".join(L) + "\n"
 
 
-def locate_gate_check(files_path: str, warnings: list) -> dict:
+def locate_gate_check(files_path: str, warnings: list, apply: bool = True) -> dict:
     """stage --apply refuses a file list whose locate run hard-failed: files.txt is written
-    even then (it is a proposal), and nothing else stops it being staged."""
+    even then (it is a proposal), and nothing else stops it being staged. The dry run checks the
+    same thing and says what --apply will do (2026-10: it said "checked on --apply" and exit 0,
+    so staff were shown a plan that --apply then refused)."""
     lj = os.path.join(os.path.dirname(os.path.abspath(files_path)), "locate.json")
     if not os.path.exists(lj):
         warnings.append(f"no locate.json next to {files_path}; its gates could not be checked")
@@ -3320,13 +3440,63 @@ def locate_gate_check(files_path: str, warnings: list) -> dict:
     info = {"checked": True, "locate_json": lj, "mode": loc.get("mode"), "hard_fail": bool(loc.get("hard_fail")),
             "accepted": loc.get("accepted")}
     if loc.get("hard_fail") and loc.get("mode") != "files_from":
-        raise Stop(EXIT_DECIDE, {
-            "error": "locate hard-failed for this file list; staging it would search the wrong or partial files",
-            "failing_gates": [g for g in loc.get("gates") or [] if g.get("status") == "FAIL"],
-            "hint": "resolve with staff: locate --files-from <curated list>, or re-run locate with "
-                    "--choose <unique_id>=<file> / --allow-partial / --accept-ambiguous as they "
-                    "decide"})
+        failing = [g for g in loc.get("gates") or [] if g.get("status") == "FAIL"]
+        hint = ("resolve with staff: locate --files-from <curated list>, or re-run locate with "
+                "--choose <unique_id>=<file> / --allow-partial / --accept-ambiguous as they decide")
+        if apply:
+            raise Stop(EXIT_DECIDE, {
+                "error": "locate hard-failed for this file list; staging it would search the wrong or partial files",
+                "failing_gates": failing, "hint": hint})
+        info.update(apply_will_refuse=True, failing_gates=failing, hint=hint,
+                    note=f"--apply will refuse: locate hard-failed "
+                         f"({', '.join(_s(g.get('gate')) or '?' for g in failing) or 'hard_fail'})")
     return info
+
+
+ADOPT_SHARE_PCT = 80          # % of the listed raw files a folder must hold to be adopted
+
+
+def folders_holding_submission(group: str, files: list, internal_id, skip: str) -> list:
+    """Folders under the PI's group folder that already hold this submission -- its raw files
+    (by name, in the folder, its raw/ or one level down), or an analysis session recorded for it
+    (session.json analysis_for, or the attached input/submission.json) -- other than `skip` (the
+    <label> folder stage would make). 2026-10: stage proposed a new PROT_<n> folder beside the one
+    where the submission's raw files and its delivered session already were.
+    -> [{"dir", "raw_files_there", "sessions"}]."""
+    names = {os.path.basename(f.rstrip("/")) for f in files}
+    out = []
+    for d in _subdirs(group):
+        if os.path.realpath(d) == os.path.realpath(skip):
+            continue
+        mk = os.path.join(d, MARKER)
+        if os.path.exists(mk):
+            try:
+                owner = load_json_file(mk, MARKER).get("internal_id")
+            except Stop:
+                owner = None
+            if _s(owner) and _s(owner) != _s(internal_id):
+                continue                                  # another submission's folder
+        here, sessions = set(), []
+        for sub in [d] + _subdirs(d):
+            try:
+                here |= names & set(os.listdir(sub))
+            except OSError:
+                pass
+            for sj in (os.path.join(sub, "session.json"),
+                       os.path.join(sub, "input", "submission.json")):
+                try:
+                    with open(sj, encoding="utf-8") as fh:
+                        rec = json.load(fh)
+                except (OSError, ValueError):
+                    continue
+                af = (rec.get("analysis_for") or {}) if isinstance(rec, dict) else {}
+                ids = (af.get("submissions") or []) if isinstance(af, dict) else []
+                if internal_id and (internal_id in ids or _s(rec.get("internal_id")) == internal_id):
+                    sessions.append(sub)
+        if here or sessions:
+            out.append({"dir": d, "raw_files_there": len(here),
+                        "sessions": sorted(set(sessions))})
+    return out
 
 
 def cmd_stage(a) -> int:
@@ -3351,9 +3521,15 @@ def cmd_stage(a) -> int:
     if not os.path.isdir(os.path.join(sroot, campus)):
         raise Stop(EXIT_UNREACHABLE, {"error": f"service directory not reachable: {os.path.join(sroot, campus)}",
                                       "hint": "stage runs ON HIVE (hive_exec.sh)"})
-    gate_info = locate_gate_check(a.files, warnings) if a.apply else {"checked": False, "note": "checked on --apply"}
+    gate_info = locate_gate_check(a.files, warnings, a.apply)
+    if gate_info.get("apply_will_refuse"):
+        warnings.append(gate_info["note"])
 
-    if a.service_dir:
+    if a.project_dir:                    # staff named the folder: no group to resolve
+        group = os.path.dirname(resolve_explicit_service_dir(a.project_dir, sroot, campus))
+        resolution = {"mode": "explicit (--project-dir)", "group_dir": group,
+                      "exists": os.path.isdir(group), "candidates": []}
+    elif a.service_dir:
         group = resolve_explicit_service_dir(a.service_dir, sroot, campus)
         resolution = {"mode": "explicit", "group_dir": group,
                       "exists": os.path.isdir(group), "candidates": []}
@@ -3369,6 +3545,44 @@ def cmd_stage(a) -> int:
         group = resolution["group_dir"]
 
     project = os.path.join(group, label)
+    existing = []
+    if a.project_dir:
+        project = resolve_explicit_service_dir(a.project_dir, sroot, campus)
+        if len(os.path.relpath(os.path.realpath(project), os.path.realpath(sroot)).split(os.sep)) < 3:
+            raise Stop(EXIT_DECIDE, {"error": f"--project-dir must be a folder inside a group "
+                                              f"folder (<campus>/<group>/<folder>), got {project}"})
+        group = os.path.dirname(project)
+        resolution = dict(resolution, project_dir=project, project_mode="explicit (--project-dir)")
+    elif not a.service_dir and not os.path.exists(os.path.join(project, MARKER)):
+        # the submission may already have a folder of its own here (an earlier analysis)
+        found = folders_holding_submission(group, files, _s(s.get("internal_id")), project)
+        # a folder is the submission's when it holds most of its listed raw files, or an analysis
+        # recorded for it -- never on one shared file name (a combined re-analysis of two
+        # submissions, review of 2.13.1); a partial overlap is said, not adopted
+        need = max(1, -(-len(files) * ADOPT_SHARE_PCT // 100))
+        existing = [x for x in found if x["raw_files_there"] >= need or x["sessions"]]
+        for x in found:
+            if x not in existing:
+                warnings.append(f"{os.path.basename(x['dir'])}/ holds {x['raw_files_there']} of the "
+                                f"{len(files)} listed raw files (by name), too few to be this "
+                                f"submission's folder: not used")
+        if len(existing) == 1:
+            project = existing[0]["dir"]
+            resolution = dict(resolution, project_dir=project, project_mode="existing",
+                              project_basis=existing[0])
+            warnings.append(f"{os.path.basename(project)}/ already holds this submission "
+                            f"({existing[0]['raw_files_there']} of its {len(files)} listed raw files"
+                            + (f", {len(existing[0]['sessions'])} analysis session(s)"
+                               if existing[0]["sessions"] else "")
+                            + f"): staging there, not in a new {label}/ -- for a new folder "
+                              f"instead, re-run with --service-dir {os.path.basename(group)!r}")
+        elif len(existing) > 1:
+            raise Stop(EXIT_DECIDE, {
+                "error": f"{len(existing)} folders under {group} already hold this submission's "
+                         f"raw files or sessions: which one is its folder is for staff to say",
+                "existing_folders": existing,
+                "hint": "re-run with --project-dir <folder> (one of them), or --service-dir "
+                        f"{os.path.basename(group)!r} for a new {label}/ folder"})
     marker = os.path.join(project, MARKER)
     prior = None
     if os.path.exists(marker):
@@ -3384,7 +3598,7 @@ def cmd_stage(a) -> int:
     froot = flinders_root()
     raw_dir = os.path.join(project, "raw")
     rel_root = os.path.relpath(os.path.realpath(group), os.path.realpath(sroot))
-    work_dir = os.path.join(work_root(), rel_root, label)
+    work_dir = os.path.join(work_root(), rel_root, os.path.basename(project))
     share = server_share_dir(s)
 
     plan = []
@@ -3426,13 +3640,16 @@ def cmd_stage(a) -> int:
            "links_created": 0, "links_existing": sum(p["action"] == "existing" for p in plan),
            "links_replaced": 0, "conflicts": conflicts, "locate_gates": gate_info, "warnings": warnings}
     if not a.apply:
+        refuse = gate_info.get("apply_will_refuse")
         out.update(would_create=sum(p["action"] == "create" for p in plan),
                    would_replace=sum(p["action"] == "replace" for p in plan), plan=plan,
-                   submission_md=md_path,
-                   next_step="show staff this folder together with the file list in ONE confirmation; "
+                   submission_md=md_path, apply_will_refuse=bool(refuse),
+                   next_step=(f"{gate_info['note']}: {gate_info['hint']} -- then run this dry run "
+                              f"again before showing staff the plan") if refuse else
+                             "show staff this folder together with the file list in ONE confirmation; "
                              "then re-run with --apply")
         emit(out)
-        return EXIT_OK
+        return EXIT_DECIDE if refuse else EXIT_OK
 
     make_shared_dirs(raw_dir, warnings)
     make_shared_dirs(work_dir, warnings)
@@ -3924,9 +4141,21 @@ def _submission_details(summary: dict) -> str:
     return f" ({'; '.join(extra)})" if extra else ""
 
 
-def _item(name: str) -> str:
-    """A delivered item as a link that works from README.html (and reads fine in README.md)."""
+def _item(name: str, link: bool = True) -> str:
+    """A delivered item: a link in README.html, a plain file name in README.md. Bioshare shows a
+    folder's README.md inside the folder page and rewrites only src=, never href= (bioshareX
+    views.py list_directory), so every relative link there opened "Unable to locate the files"
+    (2026-10); README.html is served from /download/, where its relative links work."""
+    if not link:
+        return f"`{name}`"
     return f"[`{name}`]({urllib.parse.quote(name, safe='/.')})"
+
+
+# README.md's first line in a delivery (the HTML twin has no such line): its file names are not
+# links, for the reason in _item
+README_MD_OPENER = ("**Open `README.html`** (double-click it, or click it in Bioshare's file "
+                    "list) — the same page, with working links. The file names below are not "
+                    "links: in Bioshare, open each file from the file list.")
 
 
 def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "analysis",
@@ -3938,13 +4167,14 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
     "Where this lives on HIVE" table (`hive_md`, session_docs' own), which every collaborator
     README carries so the Core can find the session and the raw data again.
     README.md is this text; README.html (`html_twin`) is the same text rendered, without the
-    line pointing a Markdown reader at the .html (`for_html`). `podcast`: the delivery carries
+    line pointing a Markdown reader at the .html (`for_html`). Only README.html links its files
+    (_item): Bioshare breaks every relative link in a README.md. `podcast`: the delivery carries
     the run's podcast (delivered_podcast), so the survey line asks about it too."""
     label = submission_label(summary)
     pi_name = (summary.get("pi") or {}).get("name")
     fixed = ("MANIFEST.txt", "checksums.sha256") + (("README.html",) if html_twin else ())
-    opener = (["**Open `README.html`** (double-click it) — the same page, with working links.", ""]
-              if html_twin and not for_html else [])
+    opener = ([README_MD_OPENER, ""] if html_twin and not for_html else [])
+    item = lambda name: _item(name, link=for_html)     # noqa: E731  links in README.html only
     if mode == "raw-only":
         L = [f"# {label} — raw data from the UC Davis Proteomics Core", ""]
         if pi_name:
@@ -3957,7 +4187,7 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
               f"{_submission_details(summary)}.{why}", "", "## What is here", "",
               "| item | what it is |", "|---|---|"]
         if raw_names:
-            L.append(f"| {_item('../raw/')} | {len(raw_names)} raw instrument file(s), in the `raw` folder next to this one |")
+            L.append(f"| {item('../raw/')} | {len(raw_names)} raw instrument file(s), in the `raw` folder next to this one |")
         for name, text in (("README.html", "this README as a web page, with working links"),
                            ("AGENTS.md", "a guide to this folder for an AI assistant: give it this file with the folder"),
                            ("methods.md", "a Methods section describing the acquisition, with the instrument acknowledgment"),
@@ -3966,7 +4196,7 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
                            ("checksums.sha256", "SHA-256 checksums of the files in this folder "
                                                 "(`shasum -a 256 -c checksums.sha256`)")):
             if name in delivered or name in fixed:
-                L.append(f"| {_item(name)} | {text} |")
+                L.append(f"| {item(name)} | {text} |")
         exts = {os.path.splitext(n.lower())[1] for n in raw_names}
         if exts & {".d", ".raw"}:
             L += ["", "## Opening the files", ""]
@@ -4034,9 +4264,9 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
             present = (name in delivered or name in fixed or
                        (name.endswith("/") and any(x.startswith(name) for x in delivered)))
             if present:
-                L.append(f"| {_item(name)} | {text} |")
+                L.append(f"| {item(name)} | {text} |")
         if raw_names:
-            L.append(f"| {_item('../raw/')} | your raw instrument files, in the `raw` folder next to this one |")
+            L.append(f"| {item('../raw/')} | your raw instrument files, in the `raw` folder next to this one |")
         methods = []
         if "methods.md" in delivered:
             methods.append("- **Methods text:** `methods.md`" + (" (and `methods.docx`)" if "methods.docx" in delivered
@@ -4970,6 +5200,11 @@ def main(argv=None) -> int:
                          "newest injection (never one STAN flags needs_rerun while another is "
                          "not); all keeps every injection as technical replicates. Never applies "
                          "to a label two samples or submissions share. Recorded in locate.json")
+    lo.add_argument("--acquisition", choices=ACQUISITIONS, default=None,
+                    help="which acquisition the analysis is for, when a sample has runs by "
+                         "several methods (a DDA run beside the DIA run, read from the names as "
+                         "ht_manifest's one_method gate reads them): runs declaring the other mode "
+                         "are set aside. Recorded in locate.json")
     lo.add_argument("--ht-manifest", default=None, metavar="FILE",
                     help="ht_manifest.json for the listed runs: STAN's needs_rerun flags for "
                          "--reinjections latest")
@@ -4981,6 +5216,11 @@ def main(argv=None) -> int:
     st.add_argument("--sample-files", default=None, help="sample_files.tsv (default: next to --files)")
     st.add_argument("--service-dir", default=None,
                     help="the group folder to use when resolution is ambiguous (under the service root)")
+    st.add_argument("--project-dir", default=None,
+                    help="the submission's own folder, when staff name one (an existing folder "
+                         "that already holds its raw files or an earlier analysis; under the "
+                         "service root). Default: <group>/<PROT_n>, or the one existing folder "
+                         "that holds this submission")
     st.add_argument("--apply", action="store_true", help="create the links and folders")
     st.set_defaults(func=cmd_stage)
 

@@ -1592,6 +1592,38 @@ def de_not_measured_sentence(prov):
             + (f" ({per} proteins)." if per else f" (counts per contrast: {NOT_RECORDED})."))
 
 
+DE_HEADING = "Differential expression"
+
+
+def de_heading(de_prov):
+    """The Methods' heading for the DE section: the pipeline's own (de_provenance.json
+    `methods_heading`; run_silac.R's is "SILAC ratio analysis"), else "Differential expression".
+    make_deposit.py checks a kept methods.md for this same heading -- one definition."""
+    return str((de_prov or {}).get("methods_heading") or "").strip() or DE_HEADING
+
+
+def identification_filter(prov):
+    """THE reading of how a DE record's identifications were filtered -> (the pipeline's own
+    FDR statement or None, the q-value filter it applied as text or None). A pipeline that
+    states its own FDR (build_maxlfq.R descriptor, from the report's declaration) is quoted;
+    its q-columns are named with their cutoffs only when they are real (q_columns_role) --
+    placeholder columns (a Sage or FragPipe report adapted to DIA-NN's shape) filter nothing,
+    and naming them would describe a filter that did not happen. The Methods and the analysis
+    brief both read it (one definition)."""
+    cols, cuts = prov.get("q_columns") or [], prov.get("q_cutoffs") or []
+    ident = prov.get("identification_fdr") or None
+    num = lambda x: f"{x:g}" if isinstance(x, (int, float)) else str(x)       # noqa: E731
+    if ident and prov.get("q_columns_role") != "real":
+        filt = None
+    elif cols and len(cols) == len(cuts):
+        filt = ", ".join(f"{c} ≤ {num(x)}" for c, x in zip(cols, cuts))
+    elif prov.get("q_cutoff") is not None:
+        filt = f"q ≤ {num(prov['q_cutoff'])}"
+    else:
+        filt = None
+    return ident, filt
+
+
 def de_paragraph(prov):
     """The Differential-expression paragraph, from run_de.R's de_provenance.json. Significance
     is described exactly as run_de.R applied it: an adjusted-p cutoff, with |log2FC| only a
@@ -1612,22 +1644,13 @@ def de_paragraph(prov):
     s.append(de_normalisation_sentence(prov))
     if prov.get("missing_policy"):
         s.append(prov["missing_policy"].rstrip(".") + ".")
-    cols, cuts = prov.get("q_columns") or [], prov.get("q_cutoffs") or []
-    ident = prov.get("identification_fdr")
+    ident, filt = identification_filter(prov)
     if ident:
-        # a pipeline that states its own FDR (build_maxlfq.R descriptor, from the report's
-        # declaration) is quoted; its q-columns are named with their cutoffs only when they are
-        # real (q_columns_role) -- placeholder columns filter nothing, and naming them would
-        # describe a filter that did not happen
         s.append(f"Identifications entering quantification: {ident}.")
     if ident and prov.get("q_columns_role") != "real":
         pass
-    elif cols and len(cols) == len(cuts):
-        s.append("Identifications entering quantification were filtered at "
-                 + ", ".join(f"{c} ≤ {x:g}" for c, x in zip(cols, cuts)) + ".")
-    elif prov.get("q_cutoff") is not None:
-        s.append(f"Identifications entering quantification were filtered at q ≤ "
-                 f"{prov['q_cutoff']:g}.")
+    elif filt:
+        s.append(f"Identifications entering quantification were filtered at {filt}.")
     else:
         s.append(f"Identification q-value filter: {NOT_RECORDED}.")
     s.append(de_contaminant_sentence(prov))
@@ -2141,7 +2164,7 @@ def main():
     if de_prov:
         # A pipeline that writes its own Methods paragraph (run_silac.R) is quoted as written:
         # it describes itself (DE-LIMP rule 1); run_de.R's record is described by de_paragraph()
-        w(f"## {de_prov.get('methods_heading') or 'Differential expression'}")
+        w(f"## {de_heading(de_prov)}")
         w("")
         own = de_prov.get("methods_paragraph")
         left_out = de_runs_left_out_sentence(de_prov) if own else None

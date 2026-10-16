@@ -411,6 +411,24 @@ class Layout(Base):
         self.assertIn("B-A = 42", log)
         self.assertIn("DATA_SUBMISSION", log)
 
+    def test_silac_counts_are_numbers_in_every_record(self):
+        """Review of 2.13.1 (S1): run_silac.R records {"up", "down", "total"} per comparison,
+        and the run log, the master log and the activity CSV printed it as a Python dict."""
+        out = make_search(self.d)
+        sess, _ = make_session(self.d, quant_in_zip=False)
+        dp = os.path.join(sess, "output", "tables", "de_provenance.json")
+        with open(dp) as fh:
+            de = json.load(fh)
+        de["significant_per_contrast"] = {"B-A": {"up": 394, "down": 417, "total": 811}}
+        write(dp, json.dumps(de))
+        self.run_it("analysis-done", "--session", sess, "--out", out)
+        folder = self.only_folder()
+        text, _rows = self.activity()
+        for where, body in (("run log", self.read(folder)), ("master log", self.master()),
+                            ("activity CSV", text)):
+            self.assertIn("811 (394 up, 417 down)", body, where)
+            self.assertNotIn("{'up'", body, where)
+
     def test_intermediate_failure_then_success_is_one_record(self):
         out = make_search(self.d, report=False,
                           log_extra="ERROR: DIA-NN tried but failed to load the following files\n")

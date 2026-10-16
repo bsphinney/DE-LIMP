@@ -215,7 +215,8 @@ Sourcing `activate.sh` makes every later step use those interpreters — **sourc
 in the same shell before running anything below** (or prefix later commands).
 
 Read `setup.json` and **gate on `ready_for`**:
-- `ready_for.de` false → DE can't run; re-run `setup.sh` and report any `notes`.
+- `ready_for.de` false → DE can't run; re-run `setup.sh` and report any `notes`. (A SILAC
+  ratio analysis, `run_silac.R`, needs only limma, data.table, arrow and jsonlite in that R.)
 - `limpa.ok` false (setup.sh then ends `ERROR: limpa ...` and exits 1) → the env's limpa is
   older than 1.4.0 (bioconda has only 1.2.5; setup.sh installs 1.4 from Bioconductor 3.23):
   run the fix it prints where there is internet. run_de.R still reads the report with limpa
@@ -422,13 +423,13 @@ Core's: its Submission section and feedback survey). Carry on to step 1b.
 
 Core staff answered step 0a's question 3 (never ask for a number again here):
 - **None (internal work)** → no `identify` and no submission. Put it on the board now, before
-  step 2 (`references/board.md` sections 1–2; `connect` exit 9: show its `link` and
-  `tell_your_person` word for word, and carry on):
+  step 2 (`references/board.md` sections 1–2: `whoami` first, its `owner.person` is the UPN;
+  `connect` exit 9: show its `link` and `tell_your_person` word for word, and carry on):
   ```
-  bash scripts/board.sh connect --owner <their HIVE login>@ucdavis.edu
+  bash scripts/board.sh connect --owner <their UPN>
   bash scripts/board.sh start --internal --title '<the analysis short name>' --goal '<what it is, in your words>' --hours 336 --with bsphinney@ucdavis.edu
   # no usable local Python: the same on HIVE (title and goal without $ ` \ " ')
-  bash scripts/hive_exec.sh 'bash ~/proteomics-pipeline/scripts/board.sh connect --owner <their HIVE login>@ucdavis.edu'
+  bash scripts/hive_exec.sh 'bash ~/proteomics-pipeline/scripts/board.sh connect --owner <their UPN>'
   bash scripts/hive_exec.sh 'bash ~/proteomics-pipeline/scripts/board.sh start --internal --title "<the analysis short name>" --goal "<what it is, in your words>" --hours 336 --with bsphinney@ucdavis.edu'
   ```
   Use the same title at `session.py init --internal`. If the paths name a submission anyway,
@@ -609,12 +610,14 @@ submission, the same path locally and on HIVE (`~/core/PROT_0807`).
    them (given the HIVE copy's path, they find `private/` themselves).
 
    **Then put it on the Core Project Board** (a minute, and never a reason to wait): `bash
-   scripts/board.sh connect --owner <their HIVE login>@ucdavis.edu` (exit 9 the first time on
+   scripts/board.sh whoami` first (when it answers, its `owner.person` is `--owner`: a HIVE
+   login is not always the UPN), then `bash scripts/board.sh connect --owner <their UPN>`
+   (exit 9 the first time on
    this computer: show its `link` and `tell_your_person` word for word), then `bash
    scripts/board.sh start --prot PROT_0807 ... --with bsphinney@ucdavis.edu` (the whole command,
    with its single-quoted titles and goal: `references/board.md` section 2). No usable local
    Python: each through HIVE, `bash scripts/hive_exec.sh 'bash
-   ~/proteomics-pipeline/scripts/board.sh connect --owner <their HIVE login>@ucdavis.edu'`, and
+   ~/proteomics-pipeline/scripts/board.sh connect --owner <their UPN>'`, and
    `start` the same way, its titles and goal in double quotes without `$` `` ` `` `\` `"` `'`.
    You create the project and its thread yourself, and Brett approves it on the board. Carry on.
    Later, one record at each milestone (`references/board.md` section 3); a search starts on
@@ -631,7 +634,10 @@ submission, the same path locally and on HIVE (`~/core/PROT_0807`).
    bash scripts/hive_exec.sh --get '~/core/PROT_0807/locate.json' ~/core/PROT_0807/
    ```
 3. **Stage dry run — on HIVE:** `stage --summary ~/core/PROT_0807/submission_summary.json
-   --files ~/core/PROT_0807/files.txt` names the service folder it would use.
+   --files ~/core/PROT_0807/files.txt` names the service folder it would use: a folder that
+   already holds the submission's raw files or an earlier analysis of it, else a new
+   `<group>/PROT_n` (`--project-dir` / `--service-dir` when staff say otherwise). Exit 2 with
+   `apply_will_refuse` means `locate` hard-failed: resolve that first, never show staff the plan.
 4. **ONE staff confirmation: the file list AND the service folder together** — sample → raw
    file → acquired date, every non-PASS gate, and "staged under `<folder>`". Not a menu.
    **Which run IS a sample is a call only staff can make — never pick one yourself.**
@@ -645,6 +651,10 @@ submission, the same path locally and on HIVE (`~/core/PROT_0807`).
      sample's run. The policy and each sample's result go into `locate.json`, `sample_files.tsv`
      (`reinjections`), `SUBMISSION.md`, the stage record and — through `submission_report.py
      attach` — the report's Data Quality Notes (gate `reinjections` names every sample).
+   - **`acquisition_methods`** — a sample's runs declare different methods (a DDA run beside the
+     DIA run): not re-injections. Ask which acquisition this analysis is for, then
+     `--acquisition DIA|DDA` (one decision; the other mode's runs are set aside, noted per row);
+     `--reinjections` never applies to them.
    - **`collision`** — the label is another sample's or another submission's too: ask which run
      is whose, one sample at a time, then `--choose <key>=<file>` (or `--choices <file>`, one
      `KEY=FILE` per line); `--reinjections` never applies.
@@ -1045,7 +1055,16 @@ python3 scripts/session.py init --name "<short study name>" --raw /path/to/*.d \
     --base ~/Documents/DataAnalysis
 ```
 **Core staff:** add step 0a's answer to either form: `--submission PROT_0807` (once per number,
-the main one first) or `--internal '<its title on the board>'`.
+the main one first) or `--internal '<its title on the board>'`. Its JSON's `transcript` says
+whether this conversation was recorded for the session; `recorded: false` with a `reason` other
+than "not a Claude Code conversation here": tell the user, and do what the reason says.
+**`--call-id` whenever any subagent or teammate of this conversation ran in the last 6 hours**
+(a team, or step 8d's reviewers -- so `finalize` after them too): add `--call-id <token>` to
+`init`, `finalize`, `checkpoint.py status` and `save_transcript.py`. It is how they tell whose
+conversation is calling. Type the token literally in the command (never `$(uuidgen)` or a
+variable from an earlier call), fresh for every call and unlikely to collide:
+`<your agent name, or main>-<6 random letters/digits>`, e.g. `main-k7f3x9`. Run the call in the
+foreground: a background call is never counted.
 
 **Core data with a CoreOmics submission (step 1)? Attach it now -- BEFORE the experiment type below**, where the session lives (`experiment_type.py set --source submission` reads the attached record and refuses without one; set before attach, the submission's ASK never fired):
 ```
@@ -2575,7 +2594,11 @@ Most analyses don't need a panel. If **any** trigger fires — a statistical cla
 collaborator; any `log2FC > 5` or `p < 1e-10`; a new organism/instrument/reagent; cross-tool
 discordance; or the user asks — spawn **three reviewers in parallel** (one message, three
 `Agent` calls; each gets the report + data paths + context): **proteomics**, **biology**
-("could contamination explain this?"), **statistics**. Consolidate their findings (dedupe,
+("could contamination explain this?"), **statistics**. Tell each to also write its findings to
+`<S>/logs/review_<proteomics|biology|statistics>.md` (hive_remote: locally, then `hive_exec.sh
+--put` it there) and to name that file in its answer: a
+review then survives a hand-back that fails (it has), and stays with the analysis record
+(`logs/` is Core-internal, never delivered). Consolidate their findings (dedupe,
 sort by severity) into a `## Expert Review Notes` section and surface every **critical**
 issue to the user before finalizing. Skip for format conversion / FASTA prep / exploratory
 looks with no formal report. → detail: `references/anomaly-checks.md`.
@@ -3130,8 +3153,9 @@ python3 scripts/core_submission.py email-draft --summary ~/core/PROT_0807/submis
   (required), the reports (and its `.pdf`/`.md`), methods, `tables/`, `figures/`,
   `reproducibility/`, the search matrices and, when one was made, `podcast/` (the audio and
   `transcript.html` only — never its script, checks or consent record), plus `README.html` +
-  `README.md` (every claim from a file actually delivered, every item a link, and the session's
-  "Where this lives on HIVE" table), `AGENTS.md` (the session's guide for an AI assistant, its
+  `README.md` (every claim from a file actually delivered, every item a link in README.html --
+  README.md names files without links, since Bioshare breaks relative links there -- and the
+  session's "Where this lives on HIVE" table), `AGENTS.md` (the session's guide for an AI assistant, its
   paths mapped onto the delivery), `MANIFEST.txt`
   (`[OK]` / `[SKIPPED] <name> -- <reason>`, architectural rule #4) and `checksums.sha256`, all
   group- and world-readable. A raw-only delivery holds README.html/.md, MANIFEST, checksums and any
@@ -3202,7 +3226,7 @@ EOF
   python3 scripts/save_transcript.py <S>                    # the session is on this computer
   python3 scripts/save_transcript.py --hive "$S"            # hive_remote: redacted here, then put on HIVE
   ```
-  In hive_remote mode run `save_transcript.py --hive "$S" --remember` right after
+  In hive_remote mode run `save_transcript.py --hive "$S" --remember [--call-id <token>]` right after
   `session.py init` (on HIVE), and the `--hive` save before `finalize`: `init` on HIVE cannot
   see this conversation. **No usable local Python** (Windows staff): skip it. It must redact
   the conversation here, before anything leaves this computer, so it has no HIVE route; the
@@ -3210,6 +3234,16 @@ EOF
   plugin's hook (`hooks/hooks.json` → `transcript_hook.py`) saves it before a compaction and
   when the session ends — a no-op in any conversation not recorded for an analysis.
   No transcript (another agent), or none found: it says so and exits 0. It never fails a step.
+- **Run by a subagent or teammate** (an Agent call): it shares the parent's session id, and
+  nothing in its environment names it. Whenever any subagent of the conversation ran in the last
+  6 hours, every call takes `--call-id <token>` (typed into the command, fresh each time, run in
+  the foreground; step 3b): the transcript whose RUNNING call carries it is saved -- a subagent's
+  own (`agent-<id>.jsonl`), never the parent's, which holds other work. Without a token, or with
+  one found in no running call or in two, it records nothing and says so (`init` and
+  `checkpoint.py status` put that in their JSON's `transcript`): re-run with a fresh
+  `--call-id`, or name the transcript, as its message says (a subagent's:
+  `--transcript <…/subagents/agent-<id>.jsonl> --session-id agent-<id>`).
+  The hook saves only the main conversation, so a subagent saves its own before it reports back.
 - **One conversation, several analyses** (an orchestrator, or staff looking at another client's
   run): each analysis keeps only its own part.
   - The first part starts at the user's request that loaded the skill (only when the skill call

@@ -931,6 +931,25 @@ class TestNotes(unittest.TestCase):
         r["submission_data"]["organism"] = ""
         self.assertIn("organism_missing", notes_by_id(sr.sanitize(r)))
 
+    def test_an_abbreviated_genus_is_the_same_organism(self):
+        """A form's "<abbreviated genus> <species> <strain> (<a remark>)" against the
+        database's spelled-out name read as "could not be matched automatically"."""
+        r = fixture()
+        r["submission_data"]["organism"] = "S. enterica serovar Typhimurium LT2 (attenuated)"
+        with tempfile.TemporaryDirectory() as tmp:
+            s = self.session(tmp, fasta=({"organism": "Salmonella enterica subsp. enterica "
+                                                      "serovar Typhimurium str. LT2",
+                                          "taxid": 99287},))
+            attach_fixture(s, r)
+            notes = notes_by_id(sr.load(s), s)
+            self.assertEqual(sr.load(s)["organism"],
+                             "S. enterica serovar Typhimurium LT2 (attenuated)")
+            self.assertNotIn("organism_unchecked", notes)
+            self.assertNotIn("organism_mismatch", notes)
+        self.assertTrue(sr.same_species("S. aureus", "Staphylococcus aureus USA300"))
+        self.assertFalse(sr.same_species("E. coli", "Enterococcus faecalis"))
+        self.assertFalse(sr.same_species("S. aureus", "Escherichia aureus"))
+
     def test_sample_ids_against_the_raw_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             raws = [v for k, v in RUNS.items() if k != "LRS125"] + ["08142026__60SPD_DIA-QC-HeLa_S3-A1_1_1"]

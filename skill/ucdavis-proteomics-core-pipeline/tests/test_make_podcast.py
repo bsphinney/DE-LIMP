@@ -777,6 +777,53 @@ class Gemini(Workspace):
         self.assertEqual([m for m, _, _ in log["calls"]], [first])
         self.assertIn("resuming with", err)
 
+    def test_a_hung_request_is_timed_out_asked_again_then_stops_with_the_resume_message(self):
+        """2026-10: one Gemini request hung for 20+ minutes with no log line, holding the HIVE
+        job until a person cancelled it. Each request is now waited for at most
+        --request-timeout seconds (a log line when sent and while it waits), asked once more,
+        and then the render stops: a clear failure the job and its watcher see."""
+        import threading
+        release = threading.Event()
+        self.addCleanup(release.set)                                # the hung threads end
+        state = {"n": 0, "hang": set()}
+
+        def hangs(model, contents, config):
+            state["n"] += 1
+            if state["n"] in state["hang"]:
+                release.wait(30)
+            return pcm_for(contents)
+        beat = mock.patch.object(mp, "HEARTBEAT", 0.05)
+        beat.start()
+        self.addCleanup(beat.stop)
+        model = ("--model", "gemini-3.8-flash-tts")
+        # chunk 2's first request hangs: timed out, asked once more, and the episode is made
+        state["hang"] = {2}
+        rc, out, err, log = self.render(hangs, "--cloud-ok", *model, "--request-timeout", "0.4")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("chunk 2/2 (segment", err)
+        self.assertIn("sent to gemini-3.8-flash-tts (an answer is waited for up to 0 s)", err)
+        self.assertIn("still waiting for gemini-3.8-flash-tts", err)
+        self.assertRegex(err, r"chunk 2/2 \(segment \d+\): no answer from gemini-3.8-flash-tts "
+                              r"in 0 s; asking once more")
+        self.assertEqual(len(log["calls"]), 3)
+        # every request of chunk 2 hangs: two waits, then the render stops, chunk 1 kept
+        shutil.rmtree(os.path.join(self.pod, ".cache"))
+        state.update(n=0, hang={2, 3})
+        rc, out, err, log = self.render(hangs, "--cloud-ok", *model, "--request-timeout", "0.4")
+        self.assertEqual(rc, 1)
+        self.assertIn("did not answer within 0 s, 2 times", err)
+        self.assertIn("re-run the same command to resume", err)
+        self.assertEqual(len([f for f in os.listdir(os.path.join(self.pod, ".cache"))
+                              if f.endswith(".wav")]), 1)
+        # the time lost to unanswered requests is capped per render, like the rate-limit waits
+        shutil.rmtree(os.path.join(self.pod, ".cache"))
+        state.update(n=0, hang={2})
+        rc, out, err, log = self.render(hangs, "--cloud-ok", *model, "--request-timeout", "0.4",
+                                        "--request-timeout-budget", "0.005")
+        self.assertEqual(rc, 1)
+        self.assertIn("unanswered requests have cost 0 min in this render "
+                      "(--request-timeout-budget 0.005 min)", err)
+
     def test_an_error_carrying_the_key_is_scrubbed_everywhere(self):
         def boom(model, contents, config):
             raise RuntimeError(f"500 INTERNAL upstream said x-goog-api-key={FAKE_KEY} {FAKE_KEY}")

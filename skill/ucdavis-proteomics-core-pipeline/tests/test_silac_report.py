@@ -167,6 +167,23 @@ class SilacSession(unittest.TestCase):
         self.assertIn("MEDIAN-CENTRED", b)
         self.assertIn("SILAC_channel_specific_detections.csv", b)
         self.assertIn("volcano_KO.WT.png", b)
+        # #11: the label-free text, wrong for a SILAC run, is gone -- the record's own instead
+        self.assertIn("- Contaminants: 1 precursor mapping to a Cont_ entry was removed", b)
+        self.assertNotIn("not recorded by this DE run", b)
+        self.assertIn("identification FDR: Q.Value ≤ 0.01, PG.Q.Value ≤ 0.05", b)
+        self.assertNotIn("identification FDR: not recorded", b)
+        for gone in ("AveExpr", "Expression_Matrix.csv", "Detection_Matrix", "Measured vs inferred",
+                     "coefficient of variation", "PCA", "presence call", "detection event;",
+                     "Say which are detection events"):
+            self.assertNotIn(gone, b, gone)
+        self.assertIn("- `n_replicates`: replicates in which the protein group had a ratio", b)
+        self.assertIn("`tables/SILAC_sample_matrix.csv` — per sample (replicate x channel)", b)
+        self.assertIn("## How to read a hit — as the pipeline records it", b)
+        self.assertIn("reproducibility: a protein's reproducibility is the spread of its "
+                      "replicate ratios", b)
+        self.assertIn("1. **Follow up first** -- significant, with at least two precursors", b)
+        self.assertRegex(b, r"Placement: each volcano in \*\*Key Findings Per Comparison\*\*; "
+                            r"the others \(`silac_channel_composition.png`")
 
     def test_delivery_gate_passes_on_the_records_own_reason(self):
         import normalization_check
@@ -210,6 +227,9 @@ class SilacSession(unittest.TestCase):
         self.assertIn("- `logFC` — the mean median-centred log2 ratio", a)
         self.assertIn("- `uncentred_Rep2` — that replicate's log2 ratio before centring", a)
         self.assertNotIn("no description recorded", a.split("## Table columns")[1].split("##")[0])
+        # run_silac.R records its contaminant step: never "this DE record predates it"
+        self.assertIn("1 precursor mapping to a Cont_-tagged contaminant entry was removed", a)
+        self.assertNotIn("predates it", a)
         r = open(os.path.join(self.s, "README.md"), encoding="utf-8").read()
         self.assertIn("one `DE_silac_*.csv` per comparison", r)
         self.assertNotIn("Expression_Matrix.csv", r)

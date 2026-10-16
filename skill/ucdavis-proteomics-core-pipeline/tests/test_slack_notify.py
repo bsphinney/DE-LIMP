@@ -272,6 +272,19 @@ class Payloads(unittest.TestCase):
             for leak in ("HeLa_ctrl_01", "HeLa_trt_01"):
                 self.assertNotIn(leak, body)
 
+    def test_silac_counts_are_numbers(self):
+        """Review of 2.13.1 (S1): a SILAC record's {"up", "down", "total"} went out as a dict."""
+        import test_deposit_package as tdp
+        with tempfile.TemporaryDirectory() as d:
+            p = tdp.dia_session(d)
+            prov = dict(tdp.DE_PROV, significant_per_contrast={
+                "sampB-sampA": {"up": 394, "down": 417, "total": 811}})
+            write(os.path.join(p["de_dir"], "de_provenance.json"), json.dumps(prov))
+            with env_patch(d, HIVE_USER="bob"):
+                body = json.dumps(ns.render(ns.analysis_facts(p["session_dir"], None)))
+        self.assertIn("*811 (394 up, 417 down)*", body)
+        self.assertNotIn("'up'", body)
+
     def test_issues_recorded_by_report_issue_are_counted(self):
         with tempfile.TemporaryDirectory() as d:
             _, out = search_session(d)

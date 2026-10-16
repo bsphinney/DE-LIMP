@@ -215,6 +215,9 @@ class Analysis(unittest.TestCase):
         self.assertEqual(by["silac_channel_balance"][0]["status"], "WARN")
         self.assertEqual(by["silac_label_incorporation"][0]["status"], "INFO")
         self.assertNotIn("silac_label_declaration", by)
+        # every precursor here ends in K: no K against R comparison, said so (#18)
+        self.assertEqual([c["status"] for c in by["silac_label_residue_bias"]], ["INFO"] * 3)
+        self.assertIn("not compared: 0 protein-run pairs", by["silac_label_residue_bias"][0]["message"])
         # the zero point: median and density peak agree here (a symmetric design)
         self.assertEqual([c["status"] for c in by["silac_zero_point"]], ["PASS"] * 3)
         # P04's KO ratio rests on one precursor in Rep1: counted, said
@@ -269,6 +272,13 @@ class Analysis(unittest.TestCase):
         self.assertTrue(any("MEDIAN-CENTRED" in n for n in p["brief_notes"]))
         self.assertEqual([s["title"] for s in p["report_sections"]],
                          ["SILAC channels and mixing", "Channel-specific proteins"])
+        # the R it ran in, as run_de.R records it (runtime_record.R): its Rscript included, or
+        # provenance.py read the missing value as "a different environment" than setup.json's
+        rt = p["runtime"]
+        self.assertTrue(os.path.isfile(rt["rscript"]), rt)
+        self.assertEqual(rt["note"], "recorded by run_silac.R in the process that ran this DE")
+        for k in ("r_home", "lib_paths", "docker", "session_info"):
+            self.assertIn(k, rt)
 
     def test_figures_json_contract(self):
         from make_analysis_html import read_figures_json
@@ -299,10 +309,23 @@ class Analysis(unittest.TestCase):
         self.assertIn("none of 52 tested significant", dk["p_cutoff_basis"])
         for t in (ko, dk):
             self.assertLess(t["critical_log2_raw_p05"], t["critical_log2_significant"])
-            self.assertLess(t["critical_log2_significant"], t["true_log2_80pct_power"])
+            self.assertNotIn("true_log2_80pct_power", t)       # #20: no power value
         self.assertNotIn("detectable_log2", ko)
-        self.assertTrue(any("80% power" in n and "BH's realised cutoff" in n
-                            for n in self.prov["brief_notes"]))
+        self.assertEqual((ko["p_cutoff_kind"], dk["p_cutoff_kind"]), ("realised", "first_step"))
+        note = next(n for n in self.prov["brief_notes"] if n.startswith("Not significant"))
+        # #20: the zero-call comparison's first-step cutoff is said for what it is, never as a
+        # property of the replicates or the variance, and nothing is "ruled out"
+        ko_txt, dk_txt = (note.split(f"{c}: ")[1].split("; DK")[0] for c in ("KO-WT", "DKO-KO"))
+        self.assertIn("a typical protein's estimate is within about \u00b1", ko_txt)
+        self.assertIn("with 20 protein groups called, the correction's cutoff was p < 0.019", ko_txt)
+        self.assertNotIn("strictest", ko_txt)
+        self.assertIn("because no protein passed, the correction applied its strictest cutoff "
+                      "(p < 0.00096)", dk_txt)
+        self.assertIn("for a protein changing alone", dk_txt)
+        self.assertIn("not comparable with a comparison that had calls", dk_txt)
+        self.assertIn("These numbers rule nothing out", note)
+        for gone in ("80% power", "power,", "rules out"):
+            self.assertNotIn(gone, note)
 
     def test_qc_matrix(self):
         em = read(os.path.join(self.out, "SILAC_sample_matrix.csv"))
@@ -498,6 +521,60 @@ cat(jsonlite::toJSON(list(mc = res$mode_check, off = res$offsets), auto_unbox = 
             self.assertIn("turnover", p.stderr)
             self.assertFalse(os.path.exists(os.path.join(out2, "de_provenance.json")))
 
+    def test_a_label_that_reads_lysine_and_arginine_differently_is_flagged(self):
+        """#18: in a triple-SILAC experiment the medium channel (K4R6: Lys4 is deuterated) read
+        K-ending precursors 0.29 log2 below R-ending ones of the same protein, in every run.
+        Review of 2.13.1 (M3): computed by GROUP, a label swap flipped its sign between runs and
+        the check said PASS; it is per CHANNEL pair, and judged run by run too."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        def plant(report, shift):
+            # every other precursor ends in R; channel M reads K-ending ones `shift` low,
+            # whichever group it holds
+            import re
+            t = pq.read_table(report).to_pydict()
+            for i, pid in enumerate(t["Precursor.Id"]):
+                m = re.match(r"^PEPTIDE\d\d([A-F])K\(", pid)
+                if not m:
+                    continue
+                if m.group(1) in "AD":                       # every protein has A and C
+                    t["Precursor.Id"][i] = pid.replace("K(SILAC)", "R(SILAC)")
+                elif t["Channel"][i] == "M":
+                    t["Precursor.Quantity"][i] *= 2 ** shift
+            pq.write_table(pa.table(t), report)
+
+        for shift, swap, status in ((-0.3, False, "WARN"), (-0.3, True, "WARN"),
+                                    (0.0, False, "PASS")):
+            with self.subTest(shift=shift, swap=swap), tempfile.TemporaryDirectory() as d:
+                rep = fx.make_report(os.path.join(d, "report.parquet"), swap=swap)
+                plant(rep, shift)
+                fx.write_design(os.path.join(d, "design.csv"), swap=swap)
+                cfg = os.path.join(d, "params.cfg")
+                open(cfg, "w").write("--fixed-mod SILAC,0.0,KR,label\n")
+                json.dump({"labels": silac.labels_record("silac3", "K4R6,K8R10")},
+                          open(cfg + ".rationale.json", "w"))
+                _, out = run_silac(d, "--params", cfg)
+                prov = json.load(open(os.path.join(out, "de_provenance.json")))
+                got = {c["detail"]["basis"].split(" ratio ")[1].split(" ")[0]: c
+                       for c in prov["checks"] if c["check"] == "silac_label_residue_bias"}
+                self.assertEqual(sorted(got), ["H/L", "H/M", "M/L"])
+                self.assertEqual(got["M/L"]["status"], status, got["M/L"]["message"])
+                kr = prov["label_residue_bias"]["M/L"]
+                self.assertAlmostEqual(kr["median"], shift, delta=0.08)
+                for r in kr["per_run"].values():                # every run, swapped or not
+                    self.assertAlmostEqual(r, shift, delta=0.1)
+                self.assertGreaterEqual(kr["n_pairs"], 20)
+                self.assertEqual(got["H/L"]["status"], "PASS", "H (K8R10) is not biased")
+                if status == "WARN":
+                    m = got["M/L"]["message"]
+                    self.assertTrue(m.startswith("Channels M/L (M holds KO"), m)
+                    if swap:
+                        self.assertIn("M holds KO or WT", m)
+                    self.assertIn("The M channel's lysine label is deuterated (Lys4, 2H(4))", m)
+                    self.assertIn("K6R6", m)
+                    self.assertEqual(got["H/M"]["status"], "WARN")
+
     def test_another_pipelines_results_are_not_overwritten(self):
         with tempfile.TemporaryDirectory() as d:
             fx.make_report(os.path.join(d, "report.parquet")); fx.write_design(os.path.join(d, "design.csv"))
@@ -550,6 +627,83 @@ cat(jsonlite::toJSON(list(mc = res$mode_check, off = res$offsets), auto_unbox = 
             self.assertIn("run_X9", p.stderr)
 
 
+def ncbi_names(report):
+    """The report as DIA-NN 2.7.0 writes it on an NCBI FASTA: Genes and Protein.Names both hold
+    the description's first word for P01-P30; P31 on keeps its UniProt-style names."""
+    import pyarrow.parquet as pq
+    import pyarrow as pa
+    t = pq.read_table(report).to_pydict()
+    words = ("MULTISPECIES:", "hypothetical", "30S", "fimbrial")
+    for i, pg in enumerate(t["Protein.Group"]):
+        if pg.startswith("P") and int(pg[1:]) <= 30:
+            t["Genes"][i] = t["Protein.Names"][i] = words[int(pg[1:]) % 4]
+    pq.write_table(pa.table(t), report)
+
+
+def write_ncbi_fasta(path):
+    """P01-P20 with NCBI headers (P01 a CDS-style one with [gene=...]); P31 a UniProt one."""
+    with open(path, "w") as fh:
+        fh.write(">P01 [gene=sampA] [locus_tag=X_0001] [protein=outer membrane porin A]\nMPEPTIDEK\n")
+        for i in range(2, 21):
+            fh.write(f">P{i:02d} MULTISPECIES: hypothetical protein {i} [Strain-X]\nMPEPTIDEK\n")
+        fh.write(">sp|P31|P31_TEST Test protein 31 OS=Strain-X OX=9 GN=G31 PE=1 SV=1\nMPEPTIDEK\n")
+    return path
+
+
+@unittest.skipUnless(HAVE_R, NEEDS)
+class NonUniprotNames(unittest.TestCase):
+    """On an NCBI database DIA-NN's Genes and Protein.Names hold the description's first word
+    ("MULTISPECIES:", "hypothetical"): a client read them as gene names in the tables and in
+    the report's Top proteins. They are blanked, a [gene=...] token kept, Description used."""
+
+    def check(self, out, with_fasta):
+        ko = {r["Protein.Group"]: r for r in read(os.path.join(out, "DE_silac_KO.WT.csv"))}
+        for pg in ("P02", "P12", "P21", "P30"):
+            self.assertEqual((ko[pg]["Genes"], ko[pg]["Protein.Names"]), ("", ""), pg)
+        self.assertEqual(ko["P31"]["Genes"], "G31")
+        self.assertEqual(ko["P31"]["Protein.Names"], "P31_TEST")
+        em = {r["Protein.Group"]: r for r in read(os.path.join(out, "SILAC_sample_matrix.csv"))}
+        self.assertEqual(em["P02"]["Genes"], "")
+        prov = json.load(open(os.path.join(out, "de_provenance.json")))
+        self.assertEqual(prov["protein_names"]["n_not_uniprot"], 30)
+        self.assertTrue(any("not UniProt's" in n for n in prov["brief_notes"]))
+        self.assertIn("Genes", prov["de_columns"])
+        if with_fasta:
+            self.assertEqual(ko["P01"]["Genes"], "sampA", "the [gene=...] token is the gene")
+            self.assertEqual(ko["P01"]["Description"], "outer membrane porin A")
+            self.assertEqual(ko["P02"]["Description"], "hypothetical protein 2")
+            self.assertEqual(prov["protein_names"]["n_gene_from_token"], 1)
+        else:
+            self.assertEqual(ko["P01"]["Genes"], "")
+        return ko
+
+    def test_names_from_an_ncbi_database_are_not_shown_as_genes(self):
+        for with_fasta in (True, False):
+            with self.subTest(with_fasta=with_fasta), tempfile.TemporaryDirectory() as d:
+                fx.make_report(os.path.join(d, "report.parquet"))
+                ncbi_names(os.path.join(d, "report.parquet"))
+                fx.write_design(os.path.join(d, "design.csv"))
+                more = ("--fasta", write_ncbi_fasta(os.path.join(d, "db.fasta"))) if with_fasta else ()
+                _, out = run_silac(d, *more)
+                self.check(out, with_fasta)
+                if not with_fasta:
+                    continue
+                # the report's Top proteins: a Description column, no first-word "genes"
+                html = os.path.join(d, "Analysis_Report.html")
+                p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "make_analysis_html.py"),
+                                    "--tables", out, "--figures", os.path.join(d, "out", "figures"),
+                                    "--out", html, "--no-pdf"], capture_output=True, text=True,
+                                   timeout=300)
+                self.assertEqual(p.returncode, 0, p.stdout[-2000:] + p.stderr[-2000:])
+                md = open(os.path.join(os.path.dirname(html), "Analysis_Report.md")).read()
+                top = md[md.index("## Top proteins per contrast"):]
+                self.assertIn("| Protein | Gene | Description | log2FC |", top)
+                self.assertIn("| P01 | sampA | outer membrane porin A |", top)
+                self.assertRegex(top, r"\| P02 \| \u2014 \| hypothetical protein 2 \|")
+                for w in ("MULTISPECIES:", "| hypothetical |", "| 30S |", "| fimbrial |"):
+                    self.assertNotIn(w, top)
+
+
 @unittest.skipUnless(r_has("limma", "jsonlite"), "needs Rscript with limma and jsonlite")
 class RunDeLeavesSilacResultsAlone(unittest.TestCase):
     """run_de.R refuses an --outdir holding SILAC results (as run_silac.R refuses run_de.R's):
@@ -581,6 +735,30 @@ class RunDeLeavesSilacResultsAlone(unittest.TestCase):
                 self.assertIn("holds another analysis", p.stderr)
                 self.assertIn("silac", p.stderr.lower())
                 self.assertEqual(sorted(os.listdir(out)), before, "nothing was written")
+
+
+@unittest.skipUnless(RSCRIPT, "needs Rscript")
+class FigureText(unittest.TestCase):
+    def test_a_long_subtitle_is_wrapped_to_the_figure(self):
+        """#13: silac_channel_detections.png listed seven q-value filters in one subtitle line,
+        cut off at the figure's right edge."""
+        import re
+        src = open(os.path.join(SCRIPTS, "run_silac.R"), encoding="utf-8").read()
+        fn = re.search(r"^wrap_subtitle <- function.*$", src, re.M).group(0)
+        self.assertEqual(len(re.findall(r"subtitle = wrap_subtitle\(", src)), 2)
+        long = ("Q.Value <= 0.01, PG.Q.Value <= 0.05, Lib.Q.Value <= 0.01, Lib.PG.Q.Value <= 0.01, "
+                "Global.Q.Value <= 0.01, Global.PG.Q.Value <= 0.01, channel q <= 0.01")
+        with tempfile.NamedTemporaryFile("w", suffix=".R", delete=False) as fh:
+            fh.write(fn + "\ncat(wrap_subtitle(" + json.dumps(long) + "))\n")
+        try:
+            r = subprocess.run([RSCRIPT, fh.name], capture_output=True, text=True, timeout=60)
+        finally:
+            os.unlink(fh.name)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = r.stdout.split("\n")
+        self.assertGreater(len(lines), 1)
+        self.assertTrue(all(len(x) <= 90 for x in lines), lines)
+        self.assertEqual(" ".join(lines), long)
 
 
 class DesignRules(unittest.TestCase):

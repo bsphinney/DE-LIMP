@@ -26,6 +26,11 @@ Ask; never guess. Each answer goes into `logs/decisions.md` (`log_decision.py`).
 
    `silac3` takes two presets, lightest first (`K4R6,K8R10`: M then H); `silac2` takes one
    (`K8R10`). A label not in the table is not guessed: say so, and do not search.
+   K4's lysine (Lys4, 2H(4)) is **deuterated**: deuterium makes a peptide elute slightly
+   earlier than its light partner, so the two channels are not measured over the same peak, and
+   a protein's ratio can depend on its mix of lysine- and arginine-ending peptides (check
+   `silac_label_residue_bias`, section 4). Search the data as they were labelled; for a **new**
+   design, suggest a non-deuterated medium label (K6R6: 13C(6) lysine and arginine).
 2. **Which sample is in which channel of which run.** Written as `input/silac_design.csv`, one
    row per run and channel that holds a sample:
 
@@ -235,12 +240,26 @@ run; 239 and 213 of the significant proteins rest on one precursor in at least o
   B's with opposite sign. Their agreement is not independent evidence (the scatter's caption says
   which channel is shared).
 - **Not significant is not unchanged.** The brief carries, per comparison, from the median
-  posterior variance (a rough reading): the observed |log2 ratio| that gives p < 0.05 before the
-  adjustment (`critical_log2_raw_p05`), the one that is called significant at Benjamini–Hochberg's
-  realised cutoff adjp × k / m with k significant of m tested, or adjp / m when none is
-  (`critical_log2_significant`), and the true |log2 ratio| found 80% of the time at that cutoff
-  (`true_log2_80pct_power`). On the validation dataset: 0.28 / 0.32 / 0.42 for the largest
-  comparison, 0.22 / 1.02 / 1.10 for the one with nothing significant.
+  posterior variance (a rough reading of precision): a typical protein's 95% interval, ±
+  `critical_log2_raw_p05` (a change that size reaches raw p < 0.05), and the cutoff the
+  correction applied with the change it needs (`p_cutoff`, `critical_log2_significant`). With
+  calls that is Benjamini–Hochberg's realised cutoff adjp × k / m (`p_cutoff_kind` realised).
+  **With none it is its first step, adjp / m, the strictest** (`first_step`): what one protein
+  changing alone needs. Say it that way, never as a property of the replicates or the variance,
+  and never beside another comparison's realised cutoff as like for like. On the validation
+  dataset the zero-call comparison's first-step bar (about 1 log2) read as four-fold less
+  sensitive than one with ~800 calls (0.32), though its variance was the lower and its 95%
+  interval the narrower (±0.21 against ±0.29). These numbers rule nothing out; no power value is
+  given (a change found 80% of the time is not a detection limit).
+- **Lysine against arginine** (`silac_label_residue_bias`): per CHANNEL pair (heavier over
+  lighter, whatever groups they hold, so a label swap cannot cancel it), run and protein, the
+  median log2 ratio of its K-ending precursors minus that of its R-ending ones
+  (`de_provenance.json` `label_residue_bias`); the check warns when the median over
+  protein-run pairs (at least 20) or the typical run's is above 0.15 log2, and names a
+  deuterated label in the pair. On a triple-SILAC experiment with K4R6 as the medium label, M/L read K-ending
+  precursors 0.29 log2 below R-ending ones in every run (0.27–0.34; H/L −0.06): each protein's M
+  ratio moves by up to that much with its K/R peptide mix, the size of a modest effect. Say so in
+  the report next to any effect of that size in a comparison between the channels it flags.
 - **The decoy channel.** DIA-NN models channel confidence against a heavier decoy channel; the
   Methods name its masses when the search log (`<report>.log.txt` or `report.log.txt` beside the
   report) has them.
@@ -276,7 +295,9 @@ says about itself (DE-LIMP rule 1).
 A statistician reviewed the method before 2.13.0 (no blockers). Applied: the experiment-wide
 q-values (with `--run-level-only` for the validated rule); a minimum of replicates that grows with
 n (`max(3, ceiling(n / 2))`); re-injections averaged, never counted; the zero-point check; the
-realised BH cutoff and an 80%-power value in the power reading; detection-pattern wording and
+realised BH cutoff in the precision reading (its 80%-power value was dropped in 2.13.1: it is not
+a detection limit, and a zero-call comparison's first-step cutoff is said for what it is);
+detection-pattern wording and
 intensity percentiles; `min_precursors`; every default tagged; the scatter's coupling sign; the
 decoy channel in the Methods. Kept by decision: median-centring (with the zero-point check), and
 the median model without a precursor-count variance trend (DEqMS-style); the single-precursor

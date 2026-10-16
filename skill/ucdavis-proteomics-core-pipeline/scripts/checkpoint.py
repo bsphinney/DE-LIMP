@@ -153,11 +153,14 @@ def cmd_status(a):
     # The transcript hook: --resume says this conversation now works on this analysis. Without
     # it, a status query is a peek -- it records only a conversation that runs no analysis yet,
     # and never moves one that runs another (save_transcript.remember).
+    # Whether it was recorded is in the JSON (`transcript`), as for session.py init: a refusal
+    # (subagents at work, no or an unmatched --call-id) must reach the agent.
     try:
         import save_transcript
-        save_transcript.remember(a.session, switch=a.resume)
-    except Exception:
-        pass                    # never a reason to fail a status query
+        transcript = save_transcript.remember_result(*save_transcript.remember(
+            a.session, switch=a.resume, call_id=getattr(a, "call_id", None)))
+    except Exception as e:      # never a reason to fail a status query
+        transcript = {"recorded": False, "reason": f"{type(e).__name__}: {e}"}
     data = _load(a.session)
     if not data:
         print(json.dumps({"error": "no %s in %s" % (REC_JSON, a.session)}))
@@ -225,6 +228,7 @@ def cmd_status(a):
     _save(a.session, data)
     out["next_commands"] = [s["next"] for s in data["stages"]
                             if s.get("next") and s["state"] == "COMPLETED"]
+    out["transcript"] = transcript
     print(json.dumps(out, indent=2))
 
 
@@ -260,6 +264,10 @@ def main():
 
     s = sub.add_parser("status", help="re-query SLURM and report what is left")
     s.add_argument("--session", required=True)
+    s.add_argument("--call-id", metavar="TOKEN",
+                   help="a fresh token (8+ letters and digits) written into this command line, "
+                        "for the transcript hook's record (save_transcript.py): it tells which "
+                        "conversation is running it while subagents are at work")
     s.add_argument("--resume", action="store_true",
                    help="this conversation now resumes this analysis (its transcript is saved "
                         "there); without it, a status query changes nothing")

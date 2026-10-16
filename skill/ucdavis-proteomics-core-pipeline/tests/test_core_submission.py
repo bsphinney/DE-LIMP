@@ -1193,6 +1193,105 @@ class TestReinjections(unittest.TestCase):
 
 
 # ------------------------------------------------------------------------- stage --
+class TestTwoMethodsAreNotReinjections(unittest.TestCase):
+    """2026-10: a sample's DDA run (for a FragPipe comparison) and its DIA run were offered as
+    `kind: reinjections`; --reinjections all would have put the DDA run into the DIA search as
+    a technical replicate. Runs that declare different methods are split (ht_manifest's
+    declared_method, the one_method gate's reading) and staff say which acquisition the analysis
+    is for: --acquisition DIA|DDA."""
+
+    IDS = ["sampA", "sampB"]
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = self._tmp.name
+        self.env = child_env(self.tmp)
+        self.out = os.path.join(self.tmp, "loc")
+        self.summary, _ = write_summary(self.tmp, record(samples=[(u, "ctrl") for u in self.IDS]))
+        self.dia = {u: tims(self.tmp, "03122025", u, 10 + i) for i, u in enumerate(self.IDS)}
+        self.dda = {u: raw(self.tmp, "tTOF_HT", "mar25",
+                           f"03122025__60SPD_DDA-{u}_S3-B{20 + i}_1_{24020 + i}.d")
+                    for i, u in enumerate(self.IDS)}
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def locate(self, *extra):
+        return run(["locate", "--summary", self.summary, "--out", self.out, *extra], self.env)
+
+    def test_a_dda_and_a_dia_run_are_two_methods_not_reinjections(self):
+        lst = os.path.join(self.tmp, "list.txt")
+        with open(lst, "w") as fh:
+            fh.write("\n".join(list(self.dia.values()) + list(self.dda.values())) + "\n")
+        for mode in ((), ("--files-from", lst)):
+            with self.subTest(mode=mode or "auto"):
+                for policy in ("ask", "all", "latest"):
+                    rc, out, p = self.locate(*mode, "--reinjections", policy)
+                    self.assertEqual(rc, 2, p.stderr)
+                    g = gates(out)["choose_run"]
+                    self.assertEqual({x["kind"] for x in g["samples"]}, {"acquisition_methods"})
+                    self.assertIn("not re-injections", g["detail"])
+                    self.assertIn("--acquisition DIA|DDA", g["detail"])
+                    self.assertNotIn("reinjections", gates(out))
+                    cand = g["samples"][0]["candidates"]
+                    self.assertEqual(sorted(c["method"] for c in cand), ["60spd DDA", "60spd DIA"])
+                rc, out, p = self.locate(*mode, "--acquisition", "DIA")
+                self.assertEqual(rc, 0, p.stderr)
+                files = read(os.path.join(self.out, "files.txt")).split()
+                self.assertEqual(sorted(files), sorted(self.dia.values()))
+                loc = json.load(open(os.path.join(self.out, "locate.json")))
+                self.assertEqual(loc["accepted"]["acquisition"], "DIA")
+                row = {r["unique_id"]: r for r in loc["samples"]}["sampA"]
+                self.assertEqual([x["file"] for x in row["other_method"]], [self.dda["sampA"]])
+                self.assertIn("set aside, acquired by another method than --acquisition DIA", row["note"])
+                rc, out, p = self.locate(*mode, "--acquisition", "DDA")
+                self.assertEqual(rc, 0, p.stderr)
+                self.assertEqual(sorted(read(os.path.join(self.out, "files.txt")).split()),
+                                 sorted(self.dda.values()))
+
+    def test_a_samples_only_run_of_the_other_method_is_not_searched(self):
+        """--acquisition DIA: sampB's only run is DDA -- never matched into the DIA search."""
+        shutil.rmtree(self.dia["sampB"])
+        lst = os.path.join(self.tmp, "list.txt")
+        with open(lst, "w") as fh:
+            fh.write("\n".join([self.dia["sampA"]] + list(self.dda.values())) + "\n")
+        for mode in ((), ("--files-from", lst)):
+            with self.subTest(mode=mode or "auto"):
+                rc, out, p = self.locate(*mode, "--acquisition", "DIA")
+                self.assertEqual(rc, 2, p.stderr)              # sampB: unmatched_samples
+                self.assertEqual(read(os.path.join(self.out, "files.txt")).split(),
+                                 [self.dia["sampA"]])
+                loc = json.load(open(os.path.join(self.out, "locate.json")))
+                row = {r["unique_id"]: r for r in loc["samples"]}["sampB"]
+                self.assertEqual(row["status"], "unmatched")
+                self.assertTrue(row["note"].startswith("set aside, acquired by another method"))
+                self.assertEqual([x["file"] for x in row["other_method"]], [self.dda["sampB"]])
+
+    def test_what_acquisition_cannot_settle_is_said(self):
+        """Review of 2.13.1 (notes 2, 3): runs differing by throughput only cannot be settled
+        by --acquisition; and --acquisition is never silently ignored when the run names'
+        methods cannot be read."""
+        note = cs.method_note("sampA", {"60spd DIA": ["a"], "100spd DIA": ["b"]})
+        self.assertIn("--acquisition cannot choose", note)
+        self.assertIn("--choose sampA=<file>", note)
+        self.assertIn("--acquisition DIA|DDA",
+                      cs.method_note("sampA", {"60spd DIA": ["a"], "60spd DDA": ["b"]}))
+        with mock.patch.dict(sys.modules, {"ht_manifest": None}):
+            self.assertEqual(cs.split_by_method(["x", "y"])["kept"], ["x", "y"])
+            with self.assertRaises(cs.Stop):
+                cs.split_by_method(["x", "y"], acquisition="DIA")
+
+    def test_runs_of_one_method_are_still_reinjections(self):
+        again = {u: tims(self.tmp, "03122025", u, 50 + i) for i, u in enumerate(self.IDS)}
+        rc, out, p = self.locate("--acquisition", "DIA")
+        self.assertEqual(rc, 2, p.stderr)
+        self.assertEqual({x["kind"] for x in gates(out)["choose_run"]["samples"]}, {"reinjections"})
+        rc, out, p = self.locate("--acquisition", "DIA", "--reinjections", "latest")
+        self.assertEqual(rc, 0, p.stderr)
+        self.assertEqual(sorted(read(os.path.join(self.out, "files.txt")).split()),
+                         sorted(again.values()))
+
+
 class TestStage(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -1324,13 +1423,79 @@ class TestStage(unittest.TestCase):
         locate_json = os.path.join(self.tmp, "locate.json")
         with open(locate_json, "w") as fh:
             json.dump({"mode": "auto", "hard_fail": True, "gates": [{"gate": "weak_ids", "status": "FAIL"}]}, fh)
-        self.assertEqual(self.stage(summary)[0], 0, "a dry run may still show the plan")
+        # the dry run still shows the plan, and says what --apply will do (2026-10: it said
+        # "checked on --apply" with exit 0, and staff were shown a plan --apply refused)
+        rc, out, _ = self.stage(summary)
+        self.assertEqual(rc, 2)
+        self.assertTrue(out["apply_will_refuse"])
+        self.assertEqual(out["would_create"], 2)
+        self.assertIn("--apply will refuse: locate hard-failed (weak_ids)", out["next_step"])
+        self.assertTrue(any("--apply will refuse" in w for w in out["warnings"]))
         rc, out, _ = self.stage(summary, "--apply")
         self.assertEqual(rc, 2)
         self.assertEqual(out["failing_gates"][0]["gate"], "weak_ids")
         with open(locate_json, "w") as fh:
             json.dump({"mode": "files_from", "hard_fail": True, "gates": []}, fh)
         self.assertEqual(self.stage(summary, "--apply")[0], 0)
+
+    def test_the_submissions_existing_folder_is_proposed_not_a_second_one(self):
+        """2026-10: stage proposed <group>/PROT_<n> while the submission's raw files and its
+        delivered session already lived in <group>/<a folder staff named by hand>."""
+        group = self.folder("on_campus", "Placeholder lab")
+        other = self.folder("on_campus", "Placeholder lab", "Other09012025")
+        os.makedirs(os.path.join(other, "raw", "unrelated_run.d"))
+        mine = self.folder("on_campus", "Placeholder lab", "Sampled03122025")
+        for f in self.files:
+            os.symlink(f, os.path.join(mine, os.path.basename(f)))
+        summary, _ = write_summary(self.tmp)
+        rc, out, p = self.stage(summary)
+        self.assertEqual(rc, 0, p.stderr)
+        self.assertEqual(out["service_dir"], mine)
+        self.assertEqual(out["group_resolution"]["project_mode"], "existing")
+        self.assertEqual(out["group_resolution"]["project_basis"]["raw_files_there"], 2)
+        self.assertTrue(any("already holds this submission" in w for w in out["warnings"]))
+        self.assertTrue(out["work_dir"].endswith(os.path.join("Placeholder lab", "Sampled03122025")))
+        # staff want a new folder after all: --service-dir keeps <group>/PROT_0807
+        rc, out, _ = self.stage(summary, "--service-dir", "Placeholder lab")
+        self.assertEqual((rc, out["service_dir"]), (0, os.path.join(group, "PROT_0807")))
+        # an earlier session recorded for it marks a folder too; two such folders: staff choose
+        sess = os.path.join(other, "2025-03-20_redo")
+        os.makedirs(sess)
+        with open(os.path.join(sess, "session.json"), "w") as fh:
+            json.dump({"analysis_for": {"submissions": ["PROT_0807"]}}, fh)
+        rc, out, _ = self.stage(summary)
+        self.assertEqual(rc, 2)
+        self.assertEqual(sorted(x["dir"] for x in out["existing_folders"]), [other, mine])
+        rc, out, p = self.stage(summary, "--project-dir", other, "--apply")
+        self.assertEqual(rc, 0, p.stderr)
+        self.assertEqual(out["service_dir"], other)
+        self.assertEqual(load(os.path.join(other, cs.MARKER))["internal_id"], "PROT_0807")
+        self.assertEqual(self.stage(summary, "--project-dir", group)[0], 2, "a group, not a folder")
+
+    def test_a_folder_holding_one_shared_raw_file_is_not_adopted(self):
+        """Review of 2.13.1 (S3): a folder holding even ONE of the listed raw file names (a
+        combined re-analysis of two submissions) was adopted as this submission's folder."""
+        group = self.folder("on_campus", "Placeholder lab")
+        combined = self.folder("on_campus", "Placeholder lab", "combined_2025")
+        os.symlink(self.files[0], os.path.join(combined, os.path.basename(self.files[0])))
+        summary, _ = write_summary(self.tmp)
+        rc, out, p = self.stage(summary)
+        self.assertEqual(rc, 0, p.stderr)
+        self.assertEqual(out["service_dir"], os.path.join(group, "PROT_0807"))
+        self.assertTrue(any("combined_2025/ holds 1 of the 2 listed raw files" in w
+                            for w in out["warnings"]), out["warnings"])
+
+    def test_project_dir_needs_no_group_resolution(self):
+        """Review of 2.13.1 (note 4): with two candidate group folders, --project-dir was
+        read only after the group, so stage stopped first."""
+        self.folder("on_campus", "Placeholder lab")
+        self.folder("on_campus", "Placeholder-old")
+        mine = self.folder("on_campus", "Placeholder-old", "Sampled03122025")
+        summary, _ = write_summary(self.tmp)
+        self.assertEqual(self.stage(summary)[0], 2)
+        rc, out, p = self.stage(summary, "--project-dir", mine)
+        self.assertEqual(rc, 0, p.stderr)
+        self.assertEqual(out["service_dir"], mine)
 
     def test_apply_records_the_staff_choices_the_file_list_rests_on(self):
         group = self.folder("on_campus", "Placeholder lab")
@@ -1733,7 +1898,7 @@ class TestDeliver(DeliverBase):
         readme = read(os.path.join(d2, "README.md"))
         self.assertIn(f"**To send the report on with its audio discussion, send `{mp.SHARE_NAME}`**",
                       readme)
-        self.assertIn(f"| [`{mp.SHARE_NAME}`]({mp.SHARE_NAME}) | the same report with that audio", readme)
+        self.assertIn(f"| `{mp.SHARE_NAME}` | the same report with that audio", readme)
         out_md = os.path.join(self.tmp, "EMAIL_DRAFT.md")
         rc, js, p = run(["email-draft", "--summary", self.summary, "--delivery",
                          os.path.join(self.session, "delivery.json"), "--out", out_md], self.env)
@@ -1795,9 +1960,14 @@ class TestDeliver(DeliverBase):
             self.assertTrue(os.path.exists(os.path.join(self.delivery, urllib.parse.unquote(h))), h)
         self.assertNotIn("Open `README.html`", page, "the HTML does not point at itself")
         readme = read(os.path.join(self.delivery, "README.md"))
-        self.assertIn("**Open `README.html`**", readme)
+        self.assertIn(cs.README_MD_OPENER, readme)
         self.assertIn("## Where this lives on HIVE", readme)
-        self.assertIn("[`AGENTS.md`](AGENTS.md)", readme)
+        self.assertIn("| `AGENTS.md` |", readme)
+        # 2026-10: Bioshare shows README.md inside the folder page and rewrites no href=, so a
+        # relative link there opens an error page: the delivered README.md links nothing but
+        # absolute URLs (the survey), while README.html keeps its working relative links
+        self.assertEqual(re.findall(r"\]\((?!https?://)[^)]*\)", readme), [])
+        self.assertIn('<a href="AGENTS.md">', page)
         agents = read(os.path.join(self.delivery, "AGENTS.md"))
         self.assertTrue(agents.startswith("# AGENTS.md"), "the delivery note sits under the title")
         self.assertIn("delivery copy of an analysis session", agents)
@@ -2041,7 +2211,8 @@ class TestRawOnlyDelivery(DeliverBase):
         self.assertTrue(load(os.path.join(self.work, "delivery.json"))["verified"])
         # README.html even here; AGENTS.md needs a session to describe, and says so
         self.assertTrue(os.path.isfile(os.path.join(delivery, "README.html")))
-        self.assertIn("[`README.html`](README.html)", readme)
+        self.assertIn("| `README.html` |", readme)
+        self.assertEqual(re.findall(r"\]\((?!https?://)[^)]*\)", readme), [])
         manifest = read(os.path.join(delivery, "MANIFEST.txt"))
         self.assertIn("[OK] README.html", manifest)
         self.assertIn("[SKIPPED] AGENTS.md -- no analysis session to describe (a raw-only delivery)",

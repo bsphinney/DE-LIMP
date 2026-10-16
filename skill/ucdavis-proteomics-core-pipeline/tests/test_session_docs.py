@@ -386,6 +386,27 @@ class Agents(unittest.TestCase):
             self.assertIn("| Treated-Control | 11 |", md)
 
 
+    def test_silac_counts_and_design_file(self):
+        """A SILAC record: README / AGENTS.md printed "{'up': 394, 'down': 417, 'total': 811}"
+        and said input/ holds conditions.csv, where the design is silac_design.csv."""
+        with tempfile.TemporaryDirectory() as d:
+            sig = {"sampB-sampA": {"up": 394, "down": 417, "total": 811}}
+            p = self.build(d, dict(DPC, contrasts=["sampB-sampA"], significant_per_contrast=sig,
+                                   metadata="/x/s/input/silac_design.csv"))
+            f = session_docs.gather(p["session_dir"])
+            md = session_docs.readme_md(f)
+            self.assertIn("| sampB-sampA | 811 (394 up, 417 down) |", md)
+            self.assertIn("silac_design.csv (the design)", md)
+            self.assertNotIn("conditions.csv (the design)", md)
+            agents = session_docs.agents_md(f)
+            self.assertIn("sampB-sampA = 811 (394 up, 417 down)", agents)
+            self.assertIn("`input/silac_design.csv`", agents)
+            for text in (md, agents):
+                self.assertNotIn("{'up'", text)
+        self.assertEqual(session_docs.sig_text({"up": 2, "down": 1}), "3 (2 up, 1 down)")
+        self.assertEqual(session_docs.sig_text(7), 7)
+
+
 def run_brief(test, d, prov):
     """analysis_prompt.py's brief for a DE folder holding `prov` as de_provenance.json."""
     with open(os.path.join(d, "de_provenance.json"), "w") as fh:
@@ -395,6 +416,30 @@ def run_brief(test, d, prov):
                         "--out", out, "--de-dir", d], capture_output=True, text=True)
     test.assertEqual(r.returncode, 0, r.stderr)
     return read(out)
+
+
+class IdentificationFdrInTheBrief(unittest.TestCase):
+    def test_the_brief_names_what_filtered_the_identifications(self):
+        """Review of 2.13.1 (M2): the brief named a Sage DDA analysis's placeholder DIA-NN
+        q-columns as its identification FDR; make_methods' reading is now the one both use."""
+        sage = dict(MAXLFQ, pipeline_id="peptide_max", q_cutoff=0.01,
+                    q_columns=["Q.Value", "Lib.Q.Value", "Global.Q.Value"],
+                    q_cutoffs=[0.01, 0.01, 0.01], q_columns_role="placeholder",
+                    identification_fdr="Sage: 1% PSM/peptide/protein FDR applied by Sage")
+        real = dict(DPC, q_columns=["Q.Value", "Global.PG.Q.Value"], q_cutoffs=[0.01, 0.05])
+        for prov, want, never in (
+                (sage, "identification FDR: Sage: 1% PSM/peptide/protein FDR applied by Sage)",
+                 "Q.Value ≤"),
+                (real, "identification FDR: Q.Value ≤ 0.01, Global.PG.Q.Value ≤ 0.05)", None)):
+            with self.subTest(pipeline=prov.get("pipeline_id")), \
+                    tempfile.TemporaryDirectory() as d:
+                b = run_brief(self, d, prov)
+                self.assertIn(want, b)
+                if never:
+                    self.assertNotIn(never, b)
+        import make_methods
+        self.assertEqual(make_methods.identification_filter(sage),
+                         ("Sage: 1% PSM/peptide/protein FDR applied by Sage", None))
 
 
 class DatabaseCaveat(unittest.TestCase):

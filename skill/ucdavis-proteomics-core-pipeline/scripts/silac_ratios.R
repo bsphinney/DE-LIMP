@@ -101,8 +101,8 @@ silac_compare <- function(w, num, den, reps, min_reps, adjp = 0.05, mode_tol = 0
                                 logFC = NA_real_, t = NA_real_, P.Value = NA_real_,
                                 adj.P.Val = NA_real_)
   fitrec <- list(df_prior = NA_real_, s2_prior = NA_real_, p_cutoff = NA_real_,
-                 p_cutoff_basis = NA_character_, critical_log2_raw_p05 = NA_real_,
-                 critical_log2_significant = NA_real_, true_log2_80pct_power = NA_real_)
+                 p_cutoff_kind = NA_character_, p_cutoff_basis = NA_character_,
+                 critical_log2_raw_p05 = NA_real_, critical_log2_significant = NA_real_)
   fit_bh <- function(mm) {
     k <- rowSums(!is.na(mm)) >= min_reps
     if (sum(k) < 2 || length(reps) < min_reps) return(NULL)
@@ -115,26 +115,30 @@ silac_compare <- function(w, num, den, reps, min_reps, adjp = 0.05, mode_tol = 0
     i <- match(rownames(tt), tab$Protein.Group)
     tab$logFC[i] <- tt$logFC; tab$t[i] <- tt$t
     tab$P.Value[i] <- tt$P.Value; tab$adj.P.Val[i] <- tt$adj.P.Val
-    # What the test can see, from the median posterior SD, df and replicates (a rough reading,
-    # never a rule). The raw p a protein needs: Benjamini-Hochberg's realised step-up cutoff
-    # adjp * k / m with k proteins significant of m tested -- or, with none, adjp / m (BH's first
-    # step: what a single change would need).
+    # The precision of a typical estimate, from the median posterior SD, df and replicates (a
+    # rough reading, never a rule), and the cutoff the correction applied: Benjamini-Hochberg's
+    # realised step-up cutoff adjp * k / m with k proteins significant of m tested -- or, with
+    # none, adjp / m, BH's first step, its STRICTEST: what one protein changing alone needs. That
+    # is a property of the cutoff, not of the replicates or the variance, and is never comparable
+    # with a realised cutoff (a zero-call comparison once read as four-fold less sensitive than
+    # one with ~800 calls, though its variance was the lower; statistics review 2026-10-16). No
+    # "power" value: a true change found 80% of the time is not a detection limit, and rules
+    # nothing out.
     se <- sqrt(stats::median(fit$s2.post)) / sqrt(stats::median(n_rep[keep]))
     dfm <- stats::median(fit$df.total)
     k_sig <- sum(tt$adj.P.Val < adjp)
     pst <- adjp * max(1, k_sig) / nrow(tt)
     fitrec <- list(
       df_prior = stats::median(fit$df.prior), s2_prior = stats::median(fit$s2.prior),
-      p_cutoff = pst,
+      p_cutoff = pst, p_cutoff_kind = if (k_sig) "realised" else "first_step",
       p_cutoff_basis = if (k_sig) sprintf("BH's realised cutoff adjp x k / m (%d significant of %d tested)",
                                           k_sig, nrow(tt))
                        else sprintf("adjp / m, BH's first step (none of %d tested significant)", nrow(tt)),
-      # the OBSERVED |log2| that gives p < 0.05 before the adjustment, and that is called significant
+      # the half-width of a typical estimate's 95% interval -- also the OBSERVED |log2| that gives
+      # p < 0.05 before the adjustment -- and the observed |log2| that passes p_cutoff
       critical_log2_raw_p05 = stats::qt(0.975, dfm) * se,
       # (upper tails with lower.tail = FALSE: a cutoff near 1e-50 is lost in 1 - p)
-      critical_log2_significant = stats::qt(pst / 2, dfm, lower.tail = FALSE) * se,
-      # the TRUE |log2| found 80% of the time at that cutoff
-      true_log2_80pct_power = (stats::qt(pst / 2, dfm, lower.tail = FALSE) + stats::qt(0.80, dfm)) * se)
+      critical_log2_significant = stats::qt(pst / 2, dfm, lower.tail = FALSE) * se)
   }
   # the zero point: per run, the median against the density peak (mode) of the uncentred ratios
   dm <- suppressWarnings(max(abs(off$offset - off$mode), na.rm = TRUE))
@@ -170,6 +174,46 @@ silac_compare <- function(w, num, den, reps, min_reps, adjp = 0.05, mode_tol = 0
   data.table::setorderv(tab, c("P.Value", "Protein.Group"), na.last = TRUE)
   list(table = tab, offsets = off, n_tested = sum(!is.na(tab$P.Value)), fit = fitrec,
        mode_check = mode_check)
+}
+
+# The precursor's C-terminal residue (K or R for a tryptic peptide), from Precursor.Id: the
+# sequence with its modifications -- (...) and [...] -- and the charge removed.
+silac_cterm <- function(id) {
+  s <- sub("[0-9]+$", "", gsub("\\([^)]*\\)|\\[[^]]*\\]", "", id))
+  substr(s, nchar(s), nchar(s))
+}
+
+# A label that reads lysine and arginine differently: per run and protein group, the median log2
+# ratio hi/lo of two CHANNELS (label-oriented, whatever group each holds in that run) of its
+# K-ending precursors minus that of its R-ending ones. A deuterated lysine (Lys4, 2H(4)) elutes
+# slightly earlier than its light partner, so the two channels are not integrated over the same
+# peak; a protein's ratio then depends on its mix of K- and R-ending peptides (a triple-SILAC
+# experiment, 2026-10-16: M/L K-ending 0.29 log2 below R-ending in every run). Computed by
+# group, a label swap flipped its sign between runs and the median read ~0 (review of 2.13.1).
+# `wc`: channel-passing precursor quantities, one column per channel (silac_wide_channels).
+# -> list(median (over protein-run pairs), per_run (named medians), n_pairs, n_proteins).
+silac_residue_bias <- function(wc, hi, lo) {
+  if (!all(c(hi, lo) %in% names(wc)) || !nrow(wc))
+    return(list(median = NA_real_, per_run = list(), n_pairs = 0L, n_proteins = 0L))
+  r <- data.table::copy(wc)
+  r[, lr := log2(get(hi) / get(lo))]
+  r <- r[is.finite(lr)]
+  r[, res := silac_cterm(Precursor.Id)]
+  pr <- r[res %in% c("K", "R"), .(k = stats::median(lr[res == "K"]), r = stats::median(lr[res == "R"])),
+          by = .(Run, Protein.Group)]
+  pr <- pr[is.finite(k) & is.finite(r)]
+  pr[, d := k - r]
+  per_run <- pr[, .(d = stats::median(d)), by = Run]
+  list(median = if (nrow(pr)) stats::median(pr$d) else NA_real_,
+       per_run = stats::setNames(as.list(per_run$d), per_run$Run),
+       n_pairs = nrow(pr), n_proteins = data.table::uniqueN(pr$Protein.Group))
+}
+
+# Precursor quantities side by side by CHANNEL (not group): one row per (Run, Replicate,
+# Protein.Group, Precursor.Id), from the channel-passing rows only.
+silac_wide_channels <- function(d) {
+  data.table::dcast(d[ok == TRUE], Run + Replicate + Protein.Group + Precursor.Id ~ Channel,
+                    value.var = "Precursor.Quantity", fun.aggregate = sum, fill = NA)
 }
 
 # Detection of each protein group in each group's channel: the replicates where >= 1 of its

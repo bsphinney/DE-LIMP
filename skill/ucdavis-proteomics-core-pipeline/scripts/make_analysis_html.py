@@ -619,13 +619,24 @@ class Tables:
                                            else float("inf")))[:k]
 
 
-def gene_label(r):
+def gene_label(r, describe=True):
     """THE name a DE row is shown by (top tables, figure summaries, the brief): its first gene,
     else its first UniProt entry name (DIA-NN's Protein.Names, e.g. HVM51_MOUSE for a gene-less
-    Ig V region), else its accession -- never the accession where a name exists."""
+    Ig V region), else -- with describe -- its FASTA Description, shortened (a SILAC table on an
+    NCBI database has no gene names: run_silac.R blanks DIA-NN's first-word guess), else its
+    accession -- never the accession where a name exists."""
     g = (r.get("Genes") or "").split(";")[0].strip()
     n = (r.get("Protein.Names") or "").split(";")[0].strip()
-    return g or n or (r.get("Protein.Group") or "?").split(";")[0]
+    d = short_description(r.get("Description")) if describe else ""
+    return g or n or d or (r.get("Protein.Group") or "?").split(";")[0]
+
+
+def short_description(text, width=60):
+    """A FASTA description as a table cell: one line, at most `width` characters."""
+    t = " ".join(str(text or "").split())
+    if t.upper() in ("NA", "NAN"):
+        return ""
+    return t if len(t) <= width else t[:width - 1].rstrip() + "…"
 
 
 def fmt_p(p):
@@ -1268,9 +1279,10 @@ def top_data(tables, a, prov):
             det = note(r.get("Protein.Group"), raw, r) if note else None
             if det is None and detected_columns(r, raw):
                 det = f"{word} {detected_columns(r, raw)}"
-            prot, name = (r.get("Protein.Group") or "?"), gene_label(r)
+            prot, name = (r.get("Protein.Group") or "?"), gene_label(r, describe=False)
             # the name column never repeats the accession: no gene and no entry name -> "—"
             rows.append({"protein": prot, "gene": "—" if name == prot.split(";")[0] else name,
+                         "desc": short_description(r.get("Description")),
                          "lfc": r["_lfc"], "p": r["_p"], "sig": r["_p"] < tables.adjp,
                          "det": det, "flag": background_flag(r.get("Genes"), r.get("Protein.Group"),
                                                              r.get("Protein.Names"), kept)})
@@ -1497,20 +1509,33 @@ def _ns_divider(t):
     return f"not significant below this line (adj.P ≥ {t['adjp']:g})"
 
 
+def top_name_columns(rows):
+    """-> (show the Gene column, show the Description column). A table whose rows carry a FASTA
+    description (run_silac.R's) shows it; the Gene column goes when no row has a gene or entry
+    name -- a database without them (NCBI) would fill it with dashes."""
+    desc = any(r.get("desc") for r in rows)
+    gene = not desc or any(r["gene"] != "—" for r in rows)
+    return gene, desc
+
+
 def top_html(top):
     out = [f"<p class='lead'>{md_inline(_top_lead())}</p>"]
     for t in top:
         tested, up, dn = t["counts"]
         det = any(r["det"] for r in t["rows"])
         flag = any(r["flag"] for r in t["rows"])
-        head = (["Protein", "Gene", "log2FC", "adj.P"] + (["Measured"] if det else [])
+        gene, desc = top_name_columns(t["rows"])
+        head = (["Protein"] + (["Gene"] if gene else []) + (["Description"] if desc else [])
+                + ["log2FC", "adj.P"] + (["Measured"] if det else [])
                 + (["Note"] if flag else []))
         body, prev_sig = [], True
         for r in t["rows"]:
             if prev_sig and not r["sig"]:
                 body.append({"divider": _ns_divider(t)})
             prev_sig = r["sig"]
-            body.append([rs.esc(r["protein"]), rs.esc(r["gene"]), f"{r['lfc']:+.2f}", fmt_p(r["p"])]
+            body.append([rs.esc(r["protein"])] + ([rs.esc(r["gene"])] if gene else [])
+                        + ([rs.esc(r.get("desc") or "")] if desc else [])
+                        + [f"{r['lfc']:+.2f}", fmt_p(r["p"])]
                         + ([rs.esc(r["det"] or "")] if det else [])
                         + ([f"<b>{rs.esc(r['flag'])}</b>" if r["flag"] else ""] if flag else []))
         # open: a closed <details> does not print, and the PDF must carry these tables
@@ -1623,18 +1648,24 @@ def top_md(top):
         tested, up, dn = t["counts"]
         det = any(r["det"] for r in t["rows"])
         flag = any(r["flag"] for r in t["rows"])
-        ncol = 4 + det + flag
+        gene, desc = top_name_columns(t["rows"])
+        ncol = 3 + gene + desc + det + flag
         rows = [f"### {t['contrast']}", "",
                 f"{up + dn:,} significant ({up:,} up, {dn:,} down) of {tested:,} tested.", "",
-                "| Protein | Gene | log2FC | adj.P |" + (" Measured |" if det else "")
+                "| Protein |" + (" Gene |" if gene else "") + (" Description |" if desc else "")
+                + " log2FC | adj.P |" + (" Measured |" if det else "")
                 + (" Note |" if flag else ""),
-                "|---|---|---:|---:|" + ("---|" if det else "") + ("---|" if flag else "")]
+                "|---|" + ("---|" if gene else "") + ("---|" if desc else "") + "---:|---:|"
+                + ("---|" if det else "") + ("---|" if flag else "")]
         prev_sig = True
         for r in t["rows"]:
             if prev_sig and not r["sig"]:
                 rows.append(f"| *{_ns_divider(t)}* |" + " |" * (ncol - 1))
             prev_sig = r["sig"]
-            rows.append(f"| {r['protein']} | {r['gene']} | {r['lfc']:+.2f} | {fmt_p(r['p'])} |"
+            cell = (r.get("desc") or "").replace("|", "/")
+            rows.append(f"| {r['protein']} |" + (f" {r['gene']} |" if gene else "")
+                        + (f" {cell} |" if desc else "")
+                        + f" {r['lfc']:+.2f} | {fmt_p(r['p'])} |"
                         + (f" {r['det'] or ''} |" if det else "")
                         + (f" **{r['flag']}** |" if r["flag"] else " |" if flag else ""))
         out.append("\n".join(rows))
