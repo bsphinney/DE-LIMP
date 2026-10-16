@@ -857,6 +857,7 @@ contaminants_rec <- list(
   unit_level = "precursor",
   rule = sprintf("a precursor is a contaminant when any accession in Protein.Ids starts with %s -- applied by run_silac.R",
                  paste0("'", CONTAMINANT_TAGS, "'", collapse = " or ")),
+  rule_origin = "applied by run_silac.R",
   counted_after = "the runs in the design, before the q-value filters",
   n_precursors = n_cont_prec, n_protein_groups = prep$counts$contaminant_protein_groups)
 input_sha256 <- tryCatch(if (requireNamespace("digest", quietly = TRUE))

@@ -642,9 +642,9 @@ def audit_contaminant_evidence(findings, de_prov, meta_path):
     # the contaminant accessions of the flagged groups: what fetch_fasta.py --drop-contaminant takes
     drop = list(dict.fromkeys(t.strip() for g in flagged for t in g["group"].split(";")
                               if is_contaminant_accession(t)))
-    # whose filter it was, in the DE record's own words (rule 1: never one pipeline's name for all)
-    rule = str(cont.get("rule") or "").strip()
-    owner = rule.rsplit(" -- ", 1)[1] if " -- " in rule else "the DE's contaminant filter"
+    # whose filter it was, in the DE record's own words (rule 1: never one pipeline's name for
+    # all): its rule_origin; never a "[... -- confirm]" tag cut out of the rule text
+    owner = str(cont.get("rule_origin") or "").strip() or "the DE's contaminant filter"
     fate = (f"Their precursors were removed with the contaminants ({owner}; DIA-NN's "
             f"--cont-quant-exclude too, when set), so {', '.join(genes[:12])} may be "
             f"under-quantified and the contaminant share overstated."

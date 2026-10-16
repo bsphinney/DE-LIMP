@@ -224,10 +224,12 @@ class AuditFlagsIt(unittest.TestCase):
                 fh.writelines("\t".join(str(x) for x in r) + "\n" for r in rows)
         return path
 
-    def audit(self, report, removed=True, n_groups=2, meta=True, rule=None):
+    def audit(self, report, removed=True, n_groups=2, meta=True, rule=None, origin=None):
         cont = {"n_protein_groups": n_groups, "removed": removed, "tag": "Cont_"}
         if rule:
             cont["rule"] = rule
+        if origin:
+            cont["rule_origin"] = origin
         with open(os.path.join(self.de, "de_provenance.json"), "w") as fh:
             json.dump({"input": report, "q_cutoff": 0.01, "q_columns": ["Q.Value"],
                        "contaminants": cont}, fh)
@@ -273,11 +275,15 @@ class AuditFlagsIt(unittest.TestCase):
         its precursors went through "run_de.R's filter" (rule 1)."""
         rep = self.write_report("tsv")
         (f,), _ = self.audit(rep, rule="a precursor is a contaminant when any accession in "
-                                       "Protein.Ids starts with 'Cont_' -- applied by run_silac.R")
+                                       "Protein.Ids starts with 'Cont_' -- applied by run_silac.R",
+                             origin="applied by run_silac.R")
         self.assertIn("removed with the contaminants (applied by run_silac.R; DIA-NN's", f["message"])
         self.assertNotIn("run_de.R", f["message"])
-        (f,), _ = self.audit(rep)                            # an older record: no name given
-        self.assertIn("(the DE's contaminant filter; DIA-NN's", f["message"])
+        for rule in (None, "a precursor is a contaminant when ... -- applied here [origin not "
+                           "recorded -- confirm]"):            # no origin recorded: no name
+            (f,), _ = self.audit(rep, rule=rule)
+            self.assertIn("(the DE's contaminant filter; DIA-NN's", f["message"])
+            self.assertNotIn("confirm]", f["message"])
 
     @unittest.skipUnless(HAVE_PYARROW, "needs pyarrow")
     def test_parquet_report(self):
