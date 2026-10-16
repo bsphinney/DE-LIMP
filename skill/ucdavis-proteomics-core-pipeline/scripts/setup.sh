@@ -464,17 +464,20 @@ version_ge() {      # version_ge A B: is A >= B, on the first three numbers (bas
 }
 GENAI_VERSION="$(genai_version)"
 genai_ok() { [ -n "$GENAI_VERSION" ] && version_ge "$GENAI_VERSION" "$GENAI_MIN"; }
+# --freeze-installed, as for nanoparquet (2b): the env is shared by every analysis on the account,
+# and the podcast's package must never move a package another analysis runs on (a dry run on
+# HIVE, 2026-10: 41 packages added, none changed)
 case "$CONDA" in
-  *micromamba) GENAI_FIX="$CONDA install -y -r $MAMBA_ROOT -p $ENV_PREFIX --override-channels -c conda-forge -c bioconda 'google-genai>=$GENAI_MIN'" ;;
-  "")          GENAI_FIX="run setup.sh (it installs micromamba), or install conda-forge's google-genai>=$GENAI_MIN into $ENV_PREFIX" ;;
-  *)           GENAI_FIX="$CONDA install -y -p $ENV_PREFIX --override-channels -c conda-forge -c bioconda 'google-genai>=$GENAI_MIN'" ;;
+  *micromamba) GENAI_FIX="$CONDA install -y -r $MAMBA_ROOT -p $ENV_PREFIX --freeze-installed --override-channels -c conda-forge -c bioconda 'google-genai>=$GENAI_MIN'" ;;
+  "")          GENAI_FIX="run setup.sh (it installs micromamba), or install conda-forge's google-genai>=$GENAI_MIN into $ENV_PREFIX with --freeze-installed" ;;
+  *)           GENAI_FIX="$CONDA install -y -p $ENV_PREFIX --freeze-installed --override-channels -c conda-forge -c bioconda 'google-genai>=$GENAI_MIN'" ;;
 esac
 if [ -n "$CONDA" ] && env_ready && ! genai_ok && ! $CHECK_ONLY; then
   say "[setup] installing google-genai >= $GENAI_MIN (the podcast's Gemini voices) into the env..."
   case "$CONDA" in      # -p for the reason create_env gives
-    *micromamba) "$CONDA" install -y -r "$MAMBA_ROOT" -p "$ENV_PREFIX" \
+    *micromamba) "$CONDA" install -y -r "$MAMBA_ROOT" -p "$ENV_PREFIX" --freeze-installed \
                    --override-channels -c conda-forge -c bioconda "google-genai>=$GENAI_MIN" >&2 ;;
-    *)           "$CONDA" install -y -p "$ENV_PREFIX" \
+    *)           "$CONDA" install -y -p "$ENV_PREFIX" --freeze-installed \
                    --override-channels -c conda-forge -c bioconda "google-genai>=$GENAI_MIN" >&2 ;;
   esac || say "[setup] the google-genai install failed (above); only the podcast needs it"
   GENAI_VERSION="$(genai_version)"
@@ -561,8 +564,14 @@ EOF
 fi
 
 j() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+# Which skill's setup.sh wrote this, and when: skill_version.sh --check-hive reads them on HIVE,
+# so a setup.json older than the skill there is visible (2026-10: one written for 2.12 said
+# ready_for.de true where 2.13's limpa and nanoparquet were missing)
+SETUP_SKILL_VERSION="$( (. "$SCRIPT_DIR/skill_version.sh" && skill_version) 2>/dev/null || true)"
 {
   printf '{\n'
+  printf '  "skill_version": "%s", "written": "%s", "check_only": %s,\n' \
+         "$(j "$SETUP_SKILL_VERSION")" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$($CHECK_ONLY && echo true || echo false)"
   printf '  "os": "%s", "arch": "%s",\n' "$OS" "$ARCH"
   printf '  "conda": "%s",\n' "$(j "${CONDA:-}")"
   printf '  "env_prefix": "%s",\n' "$(j "$ENV_PREFIX")"

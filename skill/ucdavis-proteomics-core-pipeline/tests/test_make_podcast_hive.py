@@ -762,8 +762,14 @@ class SetupInstallsGenai(setup_limpa.setup_t.SetupCheckHarness):
         self.assertEqual(r.returncode, 0, r.stderr[-2000:])
         got = self.genai_installs()
         self.assertEqual(len(got), 1, setup_limpa._lines(self.mm_log))
-        self.assertIn(f"-p {self.prefix} --override-channels -c conda-forge -c bioconda "
-                      f"google-genai>={mp.GENAI_MIN}", got[0])
+        # --freeze-installed: the env is shared, and the podcast's package moves nothing else
+        self.assertIn(f"-p {self.prefix} --freeze-installed --override-channels -c conda-forge "
+                      f"-c bioconda google-genai>={mp.GENAI_MIN}", got[0])
+        # setup.json says which skill's setup.sh wrote it, and when (skill_version.sh
+        # --check-hive reads them on HIVE)
+        # (a copy of setup.sh without plugin.json beside it: skill_version.sh's tagged unknown)
+        self.assertRegex(s["skill_version"], r"^(\d+\.\d+\.\d+|\(unknown)")
+        self.assertIn("written", s)               # (this harness's PATH has no `date`)
         self.assertEqual(s["podcast"], {"google_genai": "2.31.0",
                                         "required": f">= {mp.GENAI_MIN}", "ok": True})
         self.assertFalse([n for n in s["notes"] if "google-genai" in n], s["notes"])
@@ -789,6 +795,8 @@ class SetupInstallsGenai(setup_limpa.setup_t.SetupCheckHarness):
         self.assertEqual(len(note), 1, s["notes"])
         self.assertIn(f"google-genai 2.20.0 is older than {mp.GENAI_MIN}", note[0])
         self.assertIn(f"'google-genai>={mp.GENAI_MIN}'", note[0])
+        self.assertIn("--freeze-installed", note[0])
+        self.assertIs(s["check_only"], True)
 
     def test_a_failed_install_is_a_note_not_a_failure(self):
         self.prebuilt_env("1.4.1")

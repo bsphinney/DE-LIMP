@@ -293,6 +293,15 @@ LIST
   fi
   [ "$EF" = /dev/null ] || rm -f "$EF"
 fi
+# HIVE's setup.json (setup.sh's readiness record): its ready_for, and which skill's setup.sh
+# wrote it -- one read of a small file; setup.sh itself is not run here
+SJ="$HOME/.proteomics-pipeline/setup.json"
+if [ -r "$SJ" ]; then
+  echo "SKILLCHECK setup=yes"
+  echo "SKILLCHECK setup_ready_for=$(grep -m1 '"ready_for"' "$SJ" | sed -e 's/^[[:space:]]*"ready_for":[[:space:]]*//' -e 's/,[[:space:]]*$//')"
+  echo "SKILLCHECK setup_skill_version=$(grep -m1 '"skill_version"' "$SJ" | sed -n 's/.*"skill_version":[[:space:]]*"\([^"]*\)".*/\1/p')"
+  echo "SKILLCHECK setup_written=$(grep -m1 '"written"' "$SJ" | sed -n 's/.*"written":[[:space:]]*"\([^"]*\)".*/\1/p')"
+else echo "SKILLCHECK setup=no"; fi
 G="$(dirname "$D")"
 # who owns a path -- the link itself, never what it points to (no -L): a member's symlink to an
 # admin's file is still the member's
@@ -341,6 +350,7 @@ SH
       "$(sv_js "$1")" "$(sv_js "$2")" "$(sv_js "$3")" "$(sv_js "$HIVE_COPY")" "$(sv_js "$4")"
     printf '"release_state": %s, "behind_release": %s, "jobs": %s, "jobs_total": %s, ' \
       "$(sv_js "$5")" "${6:-null}" "${7:-null}" "${JOBS_TOTAL:-null}"
+    printf '"hive_setup": %s, ' "${HIVE_SETUP:-null}"
     printf '"next": %s, "say": %s}\n' "$(sv_js "$8")" "$(sv_js "$9")"
   }
 
@@ -431,6 +441,16 @@ LIST
       else
         next="$PUT_SKILL"
         say="$say Putting this computer's $here there."
+      fi
+    fi
+    # HIVE's setup.json: relayed; one written by another skill's setup.sh may be out of date
+    if [ "$(sv_field setup)" = yes ]; then
+      local s_rf s_sv
+      s_rf="$(sv_field setup_ready_for)"; s_sv="$(sv_field setup_skill_version)"
+      printf '%s' "$s_rf" | LC_ALL=C grep -Eq '^\{("[a-z_]+": (true|false)(, )?)+\}$' || s_rf=null
+      HIVE_SETUP="{\"ready_for\": $s_rf, \"skill_version\": $(sv_js "$s_sv"), \"written\": $(sv_js "$(sv_field setup_written)")}"
+      if [ -n "$hive" ] && [ "$s_sv" != "$hive" ]; then
+        say="${say:+$say }HIVE's setup.json (its ready_for) was written by ${s_sv:+the setup.sh of skill $s_sv}${s_sv:-a setup.sh that did not record its version (before 2.13.1)}, not that of HIVE's skill $hive, so it may be out of date (a limpa or nanoparquet the skill now needs). Refresh it, installing nothing: bash scripts/hive_exec.sh 'bash ~/proteomics-pipeline/scripts/setup.sh --check', then read its ready_for and notes."
       fi
     fi
     if [ "$behind" = true ] && [ "$status" != hive_ahead ]; then

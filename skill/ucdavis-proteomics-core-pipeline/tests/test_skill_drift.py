@@ -192,6 +192,32 @@ class CheckHive(Harness):
         self.assertEqual(j["hive_path"], "~/proteomics-pipeline")
         self.assertEqual(self.n_calls(), 1)
 
+    def test_hives_setup_json_is_relayed_and_an_old_one_is_said(self):
+        """2026-10: HIVE's setup.json, written for an older skill, said ready_for.de true where
+        the current skill's limpa and nanoparquet were missing; --check-hive said in_step."""
+        self.plugin(self.laptop, "2.13.1")
+        self.hive_copy("2.13.1")
+        self.release("2.13.1\n")
+        sj = os.path.join(self.hive_home, ".proteomics-pipeline", "setup.json")
+        os.makedirs(os.path.dirname(sj))
+        rf = '  "ready_for": {"de": true, "dia": true, "dda": true, "thermo_raw": false},\n'
+        with open(sj, "w") as fh:                      # written before setup.sh recorded it
+            fh.write('{\n  "os": "linux", "arch": "x86_64",\n' + rf + '  "notes": []\n}\n')
+        j = self.check(0, "--mode", "hive_remote")
+        self.assertEqual(j["status"], "in_step")
+        self.assertEqual(j["hive_setup"], {"ready_for": {"de": True, "dia": True, "dda": True,
+                                                         "thermo_raw": False},
+                                           "skill_version": None, "written": None})
+        self.assertIn("did not record its version", j["say"])
+        self.assertIn("setup.sh --check", j["say"])
+        self.assertEqual(self.n_calls(), 1, "one call to HIVE, setup.sh not run")
+        with open(sj, "w") as fh:
+            fh.write('{\n  "skill_version": "2.13.1", "written": "2026-10-16T08:00:00Z", '
+                     '"check_only": true,\n' + rf + '  "notes": []\n}\n')
+        j = self.check(0, "--mode", "hive_remote")
+        self.assertEqual((j["hive_setup"]["skill_version"], j["hive_setup"]["written"], j["say"]),
+                         ("2.13.1", "2026-10-16T08:00:00Z", None))
+
     def test_a_hive_copy_without_claude_plugin_is_put_again(self):
         """msalemi's HIVE copy: scripts/ but no .claude-plugin/ -- every record said 'unknown'."""
         self.plugin(self.laptop, "2.9.0")
