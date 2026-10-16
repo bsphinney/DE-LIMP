@@ -17,6 +17,7 @@ one, which would carry other projects and internal paths):
   * the decisions log, AGENTS.md's reviewer checklist, the registry pointer.
 """
 import base64
+import datetime
 import contextlib
 import io
 import json
@@ -861,15 +862,20 @@ class Segments(Env):
         self.assertIn("B from init.", got)
 
 
-def bash_call(i, command, done=True, sid=SID, agent=None, background=False):
-    """An assistant's Bash call (and, done, its result), as Claude Code writes them; `agent`:
-    a subagent's entry (isSidechain, agentId)."""
+def iso(epoch):
+    return datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def bash_call(i, command, done=True, sid=SID, agent=None, background=False, when=None):
+    """An assistant's Bash call (and, done, its result), as Claude Code writes them, made at
+    `when` (epoch seconds; default now); `agent`: a subagent's entry (isSidechain, agentId)."""
     extra = {"isSidechain": True, "agentId": agent} if agent else {}
     inp = {"command": command, "description": "run it"}
     if background:
         inp["run_in_background"] = True
     out = [dict(extra, type="assistant", uuid=f"b{i}", sessionId=sid,
-                timestamp=f"2026-10-15T12:{i:02d}:00.000Z",
+                timestamp=iso(time.time() if when is None else when),
                 message={"role": "assistant", "content": [
                     {"type": "tool_use", "id": f"toolu_b{i}", "name": "Bash", "input": inp}]})]
     if done:
@@ -881,21 +887,25 @@ def bash_call(i, command, done=True, sid=SID, agent=None, background=False):
     return out
 
 
-class Subagents(Env):
+class SubagentEnv(Env):
     """2026-10: a teammate ran `save_transcript.py --hive "$S" --remember`; with the parent's
     CLAUDE_CODE_SESSION_ID it registered the LEAD's conversation (other clients' work) for its
-    client's session, and none of its own. A subagent's call is traced to its own transcript."""
+    client's session, and none of its own. A subagent's call is traced to its own transcript:
+    a Bash call made since this process started, still running, naming this script and its
+    flags -- the only one once our own has had time to be written; else nothing is recorded."""
     AGENT = "agent-ateammate-0123456789abcdef"
     SAVE = 'python3 /x/ucdavis-proteomics-core-pipeline/scripts/save_transcript.py --hive "$S" '
+    ARGV = ["/x/scripts/save_transcript.py", "--hive", "/hive/S", "--remember"]
 
     def setUp(self):
         super().setUp()
         self.parent = os.path.join(self.claude, "projects", "-p", SID + ".jsonl")
         self.agent = os.path.join(self.claude, "projects", "-p", SID, "subagents",
                                   self.AGENT + ".jsonl")
-        argv = mock.patch.object(sys, "argv", ["/x/scripts/save_transcript.py"])
-        wait = mock.patch.object(st, "TRACE_WAIT", 0)
-        for p in (argv, wait):
+        self.t0 = time.time() - 60                    # this process started a minute ago
+        for p in (mock.patch.object(sys, "argv", list(self.ARGV)),
+                  mock.patch.object(st, "TRACE_WAIT", 0),
+                  mock.patch.object(st, "process_start", lambda: self.t0)):
             p.start()
             self.addCleanup(p.stop)
 
@@ -916,6 +926,9 @@ class Subagents(Env):
                                                   done=not agent_pending, agent=self.AGENT[6:],
                                                   background=background))
 
+
+
+class Subagents(SubagentEnv):
     def test_a_subagents_remember_records_its_own_conversation(self):
         self.write()
         sess = os.path.join(self.d, "PROT_0807", "s")
@@ -944,6 +957,9 @@ class Subagents(Env):
                      call("Bash", {"command": "python3 /wt/ucdavis-proteomics-core-pipeline/"
                                               "scripts/detect_acquisition.py /raw"})):
             self.assertEqual(st._skill_load([chat, load, chat]), 1)
+        # a conversation that loads the skill too starts at the load, not at an earlier Read
+        loaded = json.dumps(dict(LOAD, uuid="L"))
+        self.assertEqual(st._skill_load([chat, load, chat, loaded]), 3)
         for other in (call("Read", {"file_path": "/wt/ucdavis-proteomics-core-pipeline/"
                                                  "references/silac.md"}),
                       call("Grep", {"pattern": "x", "path": "/wt/ucdavis-proteomics-core-pipeline"})):
@@ -988,6 +1004,67 @@ class Subagents(Env):
         write_lines(self.parent, bash_call(2, "python3 -m pytest tests/test_save_transcript.py",
                                            done=False))
         self.assertIsNotNone(st.trace_caller(SID, wait=0)[2])
+
+
+class SubagentsTheReviewersRace(SubagentEnv):
+    """Review of 2.13.1 (M1): the first version took the first lone match at once. The caller's
+    own call is written a few seconds after it starts, so an hour-old background call naming
+    the same script in the PARENT's transcript was taken for it, and the lead's conversation
+    would have been copied into the teammate's client session."""
+
+    def lead(self, when, command=None):
+        write_lines(self.parent, [msg(0, "Lead: PROT_0000 and PROT_9001 are both going.")]
+                    + bash_call(1, command or ("bash scripts/hive_exec.sh 'python3 ~/proteomics-"
+                                               "pipeline/scripts/save_transcript.py --hive S1 "
+                                               "--remember'"), background=True, when=when))
+
+    def test_a_stale_background_call_in_the_parent_is_never_this_one(self):
+        import threading
+        self.lead(time.time() - 3600)                 # an hour old, its result long written
+        write_lines(self.agent, [dict(msg(3, "Brief: PROT_0807."), isSidechain=True)])
+
+        def flush():                                  # our own call, written 1 s after start
+            time.sleep(1.0)
+            with open(self.agent, "a") as fh:
+                for e in bash_call(6, self.SAVE + "--remember", done=False):
+                    fh.write(json.dumps(e) + "\n")
+        threading.Thread(target=flush).start()
+        with mock.patch.object(st, "TRACE_SETTLE", 2.0):
+            got = st.trace_caller(SID, argv=self.ARGV[1:], wait=6, start=time.time())
+        self.assertEqual(got[:2], (self.AGENT, self.agent), got)
+
+    def test_a_lone_match_before_ours_could_be_written_is_refused(self):
+        self.lead(time.time())                        # the lead's own, running now
+        write_lines(self.agent, [dict(msg(3, "Brief: PROT_0807."), isSidechain=True)])
+        with mock.patch.object(st, "TRACE_SETTLE", 5.0):
+            got = st.trace_caller(SID, argv=self.ARGV[1:], wait=0.6, start=time.time())
+        self.assertIsNone(got[1])
+        self.assertIn("could not be traced", got[2])
+
+    def test_a_call_with_other_flags_is_not_this_one(self):
+        # the lead runs save_transcript.py too, but not with --from-now
+        self.lead(time.time(), "python3 scripts/save_transcript.py --hive S1 --remember")
+        write_lines(self.agent, bash_call(6, self.SAVE + "--remember --from-now", done=False))
+        got = st.trace_caller(SID, argv=["--hive", "/hive/S2", "--remember", "--from-now"],
+                              wait=0)
+        self.assertEqual(got[:2], (self.AGENT, self.agent))
+        # both naming every flag: two transcripts could be the caller -- nothing recorded
+        write_lines(self.agent, bash_call(6, self.SAVE + "--remember", done=False))
+        got = st.trace_caller(SID, argv=["--hive", "/hive/S2", "--remember"], wait=0)
+        self.assertIsNone(got[1])
+        self.assertIn("2 found running save_transcript.py --hive --remember", got[2])
+
+    def test_no_start_time_is_a_refusal(self):
+        self.write()
+        with mock.patch.object(st, "process_start", lambda: None):
+            got = st.trace_caller(SID, wait=0)
+        self.assertIsNone(got[1])
+        self.assertIn("when this process started could not be read", got[2])
+
+    def test_this_process_start_is_read(self):
+        t = st.process_start()
+        self.assertIsNotNone(t)
+        self.assertLessEqual(t, time.time())
 
 
 class Hook(Env):
