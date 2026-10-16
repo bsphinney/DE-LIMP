@@ -736,13 +736,22 @@ off_txt <- paste(vapply(names(tables_rec), function(ct) {
   o <- unlist(tables_rec[[ct]]$offset_log2)
   sprintf("%s %+.2f to %+.2f", ct, min(o), max(o))
 }, ""), collapse = "; ")
+# Precision, per comparison: a typical estimate's 95% interval, and the cutoff the correction
+# applied -- said for what it is. With no call it is BH's first step, its strictest, which is a
+# property of the cutoff and never set beside a comparison that had calls (silac_ratios.R).
 pow_txt <- paste(vapply(names(tables_rec), function(ct) {
   t <- tables_rec[[ct]]
   if (!is.finite(t$critical_log2_raw_p05 %||% NA_real_)) return(sprintf("%s: not estimated", ct))
-  sprintf("%s: observed %.2f for p < 0.05, %.2f to be called significant (p < %.2g, %s), true %.2f for 80%% power",
-          ct, t$critical_log2_raw_p05, t$critical_log2_significant, t$p_cutoff,
-          if (t$n_significant) "BH's realised cutoff" else "BH's first step, none significant",
-          t$true_log2_80pct_power)
+  sprintf("%s: a typical protein's estimate is within about \u00b1%.2f log2 (95%% interval; a change that size reaches raw p < 0.05); %s",
+          ct, t$critical_log2_raw_p05,
+          if (identical(t$p_cutoff_kind, "first_step"))
+            sprintf(paste("because no protein passed, the correction applied its strictest cutoff (p < %.2g),",
+                          "about %.2f log2 at typical variance for a protein changing alone -- a property of the",
+                          "cutoff, not of the replicates or the variance: proteins changing together would be",
+                          "called at a lower bar, so it is not comparable with a comparison that had calls"),
+                    t$p_cutoff, t$critical_log2_significant)
+          else sprintf("with %d protein groups called, the correction's cutoff was p < %.2g, about %.2f log2 at typical variance",
+                       t$n_significant, t$p_cutoff, t$critical_log2_significant))
 }, ""), collapse = "; ")
 one_prec_txt <- paste(vapply(names(tables_rec), function(ct) sprintf("%s %d of %d", ct,
   tables_rec[[ct]]$n_significant_one_precursor, tables_rec[[ct]]$n_significant), ""), collapse = "; ")
@@ -764,8 +773,8 @@ brief_notes <- list(
         "their agreement is not independent evidence."),
   sprintf(paste("Significant protein groups resting on a single precursor in at least one replicate: %s",
                 "(min_precursors = 1; confirm the ones that matter)."), one_prec_txt),
-  sprintf(paste("Not significant is not unchanged. From the median variance: %s. A rough reading of the power,",
-                "not a rule."), pow_txt),
+  sprintf(paste("Not significant is not unchanged. From the median variance, a rough reading of precision:",
+                "%s. These numbers rule nothing out: a protein not called may still have changed."), pow_txt),
   if (names_record$n_not_uniprot)
     sprintf(paste("%d of %d protein groups come from FASTA headers that are not UniProt's: their Genes and",
                   "Protein.Names are blank (DIA-NN's value there is the description's first word, such as",

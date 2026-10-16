@@ -240,12 +240,17 @@ run; 239 and 213 of the significant proteins rest on one precursor in at least o
   B's with opposite sign. Their agreement is not independent evidence (the scatter's caption says
   which channel is shared).
 - **Not significant is not unchanged.** The brief carries, per comparison, from the median
-  posterior variance (a rough reading): the observed |log2 ratio| that gives p < 0.05 before the
-  adjustment (`critical_log2_raw_p05`), the one that is called significant at Benjamini–Hochberg's
-  realised cutoff adjp × k / m with k significant of m tested, or adjp / m when none is
-  (`critical_log2_significant`), and the true |log2 ratio| found 80% of the time at that cutoff
-  (`true_log2_80pct_power`). On the validation dataset: 0.28 / 0.32 / 0.42 for the largest
-  comparison, 0.22 / 1.02 / 1.10 for the one with nothing significant.
+  posterior variance (a rough reading of precision): a typical protein's 95% interval, ±
+  `critical_log2_raw_p05` (a change that size reaches raw p < 0.05), and the cutoff the
+  correction applied with the change it needs (`p_cutoff`, `critical_log2_significant`). With
+  calls that is Benjamini–Hochberg's realised cutoff adjp × k / m (`p_cutoff_kind` realised).
+  **With none it is its first step, adjp / m, the strictest** (`first_step`): what one protein
+  changing alone needs. Say it that way, never as a property of the replicates or the variance,
+  and never beside another comparison's realised cutoff as like for like. On the validation
+  dataset the zero-call comparison's first-step bar (about 1 log2) read as four-fold less
+  sensitive than one with ~800 calls (0.32), though its variance was the lower and its 95%
+  interval the narrower (±0.21 against ±0.29). These numbers rule nothing out; no power value is
+  given (a change found 80% of the time is not a detection limit).
 - **Lysine against arginine** (`silac_label_residue_bias`): per comparison, run and protein, the
   median log2 ratio of its K-ending precursors minus that of its R-ending ones; the check warns
   above 0.15 log2 (median over protein-run pairs, at least 20) and names a deuterated label in

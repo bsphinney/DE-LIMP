@@ -309,10 +309,23 @@ class Analysis(unittest.TestCase):
         self.assertIn("none of 52 tested significant", dk["p_cutoff_basis"])
         for t in (ko, dk):
             self.assertLess(t["critical_log2_raw_p05"], t["critical_log2_significant"])
-            self.assertLess(t["critical_log2_significant"], t["true_log2_80pct_power"])
+            self.assertNotIn("true_log2_80pct_power", t)       # #20: no power value
         self.assertNotIn("detectable_log2", ko)
-        self.assertTrue(any("80% power" in n and "BH's realised cutoff" in n
-                            for n in self.prov["brief_notes"]))
+        self.assertEqual((ko["p_cutoff_kind"], dk["p_cutoff_kind"]), ("realised", "first_step"))
+        note = next(n for n in self.prov["brief_notes"] if n.startswith("Not significant"))
+        # #20: the zero-call comparison's first-step cutoff is said for what it is, never as a
+        # property of the replicates or the variance, and nothing is "ruled out"
+        ko_txt, dk_txt = (note.split(f"{c}: ")[1].split("; DK")[0] for c in ("KO-WT", "DKO-KO"))
+        self.assertIn("a typical protein's estimate is within about \u00b1", ko_txt)
+        self.assertIn("with 20 protein groups called, the correction's cutoff was p < 0.019", ko_txt)
+        self.assertNotIn("strictest", ko_txt)
+        self.assertIn("because no protein passed, the correction applied its strictest cutoff "
+                      "(p < 0.00096)", dk_txt)
+        self.assertIn("for a protein changing alone", dk_txt)
+        self.assertIn("not comparable with a comparison that had calls", dk_txt)
+        self.assertIn("These numbers rule nothing out", note)
+        for gone in ("80% power", "power,", "rules out"):
+            self.assertNotIn(gone, note)
 
     def test_qc_matrix(self):
         em = read(os.path.join(self.out, "SILAC_sample_matrix.csv"))
