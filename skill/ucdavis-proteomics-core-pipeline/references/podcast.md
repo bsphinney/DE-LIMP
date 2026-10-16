@@ -304,6 +304,16 @@ Claims section):
   of the written form (`Ryr2 → Gapdh`) fails too. Every row is listed in `check.txt`. Write phonetic respellings in lowercase ("teck R").
 - **The disclosure** ("AI-generated") is in one of the first 3 turns, and **no host claims a
   real specialty**.
+- **No draft history.** The listener never saw a draft of the report, so no host says what an
+  earlier draft said, got wrong or fell for, or that something "was corrected". A staff report:
+  "the first draft of this report fell for it" passed `check` and reached a podcast script.
+  The hosts talk about what the report finds and what was checked, in the present tense: "the
+  review checked whether a loading difference could explain this, and it does not", never "the
+  first draft fell for it, and we corrected that". `check` FAILS on the phrases in
+  `client_text.py` (first / earlier / previous draft or version of the report, "we corrected
+  ...", "was wrong ... corrected", "fell for it", "honest correction" and close variants), and
+  never on the science words that look like them ("p-values were corrected for multiple
+  testing", "batch-corrected", "fixed modification", "a draft genome", "previously reported").
 
 ### What check cannot catch
 
@@ -316,7 +326,8 @@ Read the script against the report for these; a PASS says nothing about them:
 - lowercase symbols ("gapdh") and lowercase respellings in the Pronunciation table;
 - a capitalised word that starts a sentence ("Gapdh went up."): the INFO line lists them;
 - numbers with a unit other than %, fold, ×, k, M and B ("3 kDa", "2 µg");
-- meaning: a caveat the report makes can be dropped, and speculation can be spoken as fact.
+- meaning: a caveat the report makes can be dropped, and speculation can be spoken as fact;
+- draft history in words the phrase list does not have ("we had that backwards before").
 
 ## The script file (`<session>/output/podcast/podcast_script.md`)
 

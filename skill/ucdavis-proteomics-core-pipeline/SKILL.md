@@ -2267,7 +2267,11 @@ the list, a login on it is accepted and any other is refused. With no list, a lo
 agent's name (claude, assistant, bot…) is refused, and any other passes with a NOT VERIFIED
 warning. Their name and login go only into the
 staff-only `logs/normalization_check.staff.json`. The Methods, AUDIT.md, `de_provenance.json` and
-the zip say "Core staff chose … because <reason>", so the reason must not name anyone:
+the zip say "Core staff chose … because <reason>", so the reason must not name anyone. A
+second `decide` replaces the first: its sentence has no history, and the report, the audit and
+the podcast state only the decision that stands -- never the earlier reason, nor that it was
+"corrected" (the change and why go in `logs/decisions.md`; both decisions stay in the staff-only
+record):
 ```
 python3 scripts/normalization_check.py decide --check <S>/output/norm_check/normalization_check.json \
     --quantities <raw|normalised> --by <their HIVE login> --reason '<why, in their words; no quote marks, $ or backticks>'
@@ -2602,6 +2606,17 @@ review then survives a hand-back that fails (it has), and stays with the analysi
 sort by severity) into a `## Expert Review Notes` section and surface every **critical**
 issue to the user before finalizing. Skip for format conversion / FASTA prep / exploratory
 looks with no formal report. → detail: `references/anomaly-checks.md`.
+**The client never saw a draft, so the deliverables carry no draft history.** Expert Review
+Notes state, in the present tense, what was checked and where the report deals with each
+point ("The review checked the protein names against UniProt (Key Findings) and whether a
+loading difference explains the shift (Data Quality Notes)"), never "checked the first draft",
+"two names were wrong ... corrected", "an earlier version" or "now". The same holds for every
+section, the audit and the podcast. The review → fix history (what a reviewer found and what
+changed) goes in `logs/decisions.md` (staff only), with `log_decision.py`. A staff report: a
+changelog-style Expert Review Notes, an audit line saying an earlier reason was "corrected" and
+a podcast saying "the first draft of this report fell for it" nearly reached a client.
+`make_analysis_html.py` warns on these phrases in `AI_Analysis_Report.md` and `make_podcast.py
+check` fails on them (one list: `scripts/client_text.py`); rewrite every one it names.
 
 ### 8e. QC runs around this project (Core runs) — STAFF-ONLY
 **Only on a Core STAFF route:** a CoreOmics submission (step 1c, fetched with the Core's

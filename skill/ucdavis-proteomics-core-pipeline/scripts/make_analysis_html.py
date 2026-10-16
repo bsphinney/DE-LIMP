@@ -44,6 +44,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import report_style as rs  # noqa: E402  -- the ONE look shared by the skill's HTML pages
 import html_to_pdf  # noqa: E402  -- the PDF: the same page printed by a headless browser
 import make_podcast       # noqa: E402  -- an optional audio discussion keeps its Listen card
+from client_text import draft_history  # noqa: E402  -- the ONE draft-history list (podcast check too)
 from session_docs import IP_CONTROL_NAME  # noqa: E402  -- which groups are pull-down controls
 from fetch_fasta import CONTAMINANT_TAGS  # noqa: E402  -- Cont_ and FragPipe's contam_: one definition
 
@@ -1747,6 +1748,16 @@ def main():
         import core_submission            # ... and its survey + star lines (the twin's): added below
         md_text = md_orig = core_submission.strip_feedback(
             make_podcast.strip_block(read_text(a.report)))  # its Listen line: the card is below
+        # The client never saw a draft: Expert Review Notes and the audit state what was checked,
+        # in the present tense; the review -> fix history is logs/decisions.md's (staff only).
+        # A warning, not a stop -- the phrases are a lint, and a staff member reads the report.
+        hist = draft_history(md_orig)
+        if hist:
+            print(f"[make_analysis_html] WARNING: draft history in {os.path.basename(a.report)} "
+                  f"({len(hist)} place(s)): " + " | ".join(f"\"{h}\"" for h in hist[:8])
+                  + " -- the client never saw a draft: say what was checked and where the report "
+                    "deals with it, in the present tense; the review history goes in "
+                    "logs/decisions.md (SKILL.md step 8d)", file=sys.stderr)
         # The one source both renderers draw from, so the HTML, .md and PDF all lose it.
         md_text, gone, n_par = drop_suppressed(md_text, figs.suppress)
         figs.suppressed += [g for g in gone if g not in figs.suppressed]

@@ -109,6 +109,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 from notify_slack import REDACTED, redact as _redact    # noqa: E402  the ONE secret list
 from report_files import SHARE_NAME, SHARE_STALE    # noqa: E402  names defined once
+from client_text import draft_history                # noqa: E402  the ONE draft-history list
 
 SHOW = "Signal to Noise"
 HOSTS = (("Maya", "cell biologist"), ("Leo", "statistician"))
@@ -293,6 +294,8 @@ CANNOT_CATCH = (
     "numbers with a unit or suffix other than %, fold, x, k, M and B (\"3 kDa\", \"2 µg\") are "
     "matched as plain numbers, and a count of 10 or less with one is not checked",
     "meaning: a caveat the report makes can be dropped, and speculation can be spoken as fact",
+    "draft history in words client_text.py's phrase list does not have (\"we had that "
+    "backwards before\")",
 )
 # --cloud-ok with one of these means no.
 NO_CONSENT = {"", "false", "no", "n", "0", "none", "null", "off", "declined", "decline",
@@ -1002,6 +1005,11 @@ def check(s, sources, forbid=(), core=False):
             fails.append(f"{where}: '{m.group(0)}' -- a host must not claim a real research "
                          "specialty (it lends a synthetic voice false authority); say \"I'm the "
                          "biologist of the pair\" or \"I'm the statistician\"")
+        for snip in draft_history(t.text):
+            fails.append(f"{where}: draft history '{snip}' -- the listener never saw a draft: "
+                         "say what the report finds and what was checked, in the present tense, "
+                         "never what an earlier draft said, got wrong or corrected "
+                         "(references/podcast.md)")
 
     seen = {}
     for i, t in enumerate(turns, 1):
@@ -1168,7 +1176,8 @@ def check_report(s, res, sources, forbid):
                   "symbol-like token and every capitalised word mid-sentence in the transcript was "
                   "found in the sources or is listed under Claims beyond the report; the AI "
                   "disclosure is spoken early; no forbidden name appears; every pronunciation row "
-                  "only re-spells its written form. It does NOT mean the script is right."]
+                  "only re-spells its written form; no turn narrates an earlier draft "
+                  "(client_text.draft_history). It does NOT mean the script is right."]
     L += ["", "What check cannot catch -- read the script against the report for these:"]
     L += [f"- {x}" for x in CANNOT_CATCH]
     return "\n".join(L) + "\n"

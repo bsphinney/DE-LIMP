@@ -891,6 +891,10 @@ def main():
       "Do not invent data, pathways, or citations you cannot ground in the attached files or "
       "established biology. After writing the report, it is rendered into "
       "Analysis_Report.html (the report of record).")
+    w("Write for a reader who sees only this finished report: never narrate drafts, earlier "
+      "versions or corrections of it (\"the first draft\", \"was wrong ... corrected\", \"now "
+      "says\"). An Expert Review Notes section states, in the present tense, what was checked "
+      "and where the report deals with it; the review history goes in logs/decisions.md.")
     w("")
 
     if _UNREADABLE:
