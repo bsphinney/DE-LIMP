@@ -56,6 +56,30 @@ node_fault_fix() {
 # detection below just never fires.
 if $HIVE || [ "$(uname -s)" = "Linux" ]; then STAT_MTIME="stat -c %Y"; else STAT_MTIME="stat -f %m"; fi
 
+# ---- real progress (outdir_progress: both modes) ----------------------------
+# Counted from what the 5-step chain actually leaves on disk, not guessed from the log:
+# every finished file drops a .quant, so "34 of 66" is a fact. Runs through run() so it
+# works over SSH on HIVE exactly as it does locally.
+outdir_progress() {
+stage="single"; n_total=0; n_done=0
+if [ -n "$OUTDIR" ]; then
+  q() { run "$*" 2>/dev/null | tr -dc 0-9; }
+  n_total="$(q "wc -l < $(printf %q "$OUTDIR/file_list.txt")")"
+  q2="$(q "ls -1 $(printf %q "$OUTDIR/quant_step2")/*.quant 2>/dev/null | wc -l")"
+  q4="$(q "ls -1 $(printf %q "$OUTDIR/quant_step4")/*.quant 2>/dev/null | wc -l")"
+  has() { [ "$(run "test -s $(printf %q "$1") && echo 1 || echo 0" 2>/dev/null | tr -dc 0-9)" = "1" ]; }
+  : "${n_total:=0}"; : "${q2:=0}"; : "${q4:=0}"
+  if [ "$n_total" -gt 0 ]; then                       # a 5-step chain lives here
+    if   has "$OUTDIR/report.parquet";     then stage="step5"; n_done="$n_total"
+    elif has "$OUTDIR/empirical.parquet";  then stage="step4"; n_done="$q4"
+    elif [ "$q2" -ge "$n_total" ];         then stage="step3"; n_done="$n_total"
+    elif has "$OUTDIR/step1.predicted.speclib"; then stage="step2"; n_done="$q2"
+    else stage="step1"; n_done=0
+    fi
+  fi
+fi
+}
+
 state="unknown"; done=false; failed=false; q_failed=false; fix_qf=""
 
 # --all <dir>: watch the WHOLE chain, not just its last link. Watching only the final
@@ -131,9 +155,58 @@ print(json.dumps(o))'
   fi
   if $allterm; then
     echo "{\"mode\":\"chain\",\"dir\":\"$CHAINDIR\",\"failed\":false,\"done\":true,\"chain\":\"${summary# }\"$fb}"
-  else
-    echo "{\"mode\":\"chain\",\"dir\":\"$CHAINDIR\",\"failed\":false,\"done\":false,\"chain\":\"${summary# }\"$fb}"
+    exit 0
   fi
+  # Still running: what the chain is doing, as single mode says it (SKILL.md: relay
+  # progress.summary, doing and note on every poll) -- a 66-minute two-job search once had
+  # nothing to say but RUNNING. Files done from the output folder (outdir_progress), else the
+  # running job's own log: DIA-NN's "File #k/N" line.
+  # (a chain of two jobs -- library, then search: the two-job route -- has no step folders)
+  OUTDIR="${OUTDIR:-$CHAINDIR}"; stage="single"; n_total=0; n_done=0
+  set -- $ids; [ "$#" -gt 2 ] && outdir_progress
+  rid=""
+  for x in $summary; do case "$x" in *=*RUNNING*) rid="${x%%=*}"; break ;; esac; done
+  rlog=""; rfile=""
+  if [ -n "$rid" ]; then
+    rlog="$(run "for f in $QD/*_$rid.log; do [ -f \"\$f\" ] && echo \"\${f##*/}\"; done" 2>/dev/null | head -n1)"
+    rfile="$(run "for f in $QD/*_$rid.log; do [ -f \"\$f\" ] && tail -n 3000 \"\$f\"; done" 2>/dev/null \
+             | grep -aoE 'File #[0-9]+/[0-9]+' | tail -n1)"
+  fi
+  notes="$(python3 "$HERE/pipeline_notes.py" --stage "$stage" --index "$POLL" 2>/dev/null)"
+  CDIR="$CHAINDIR" CHAIN="${summary# }" FB="$fb" STAGE="$stage" NDONE="${n_done:-0}" \
+  NTOTAL="${n_total:-0}" RID="$rid" RLOG="$rlog" RFILE="$rfile" NOTES="$notes" python3 - <<'PY'
+import json, os, re
+o = {"mode": "chain", "dir": os.environ["CDIR"], "failed": False, "done": False,
+     "chain": os.environ["CHAIN"]}
+fb = os.environ.get("FB") or ""
+if fb:
+    o.update(json.loads("{" + fb.lstrip(",") + "}"))
+stage = os.environ.get("STAGE") or "single"
+n_done, n_total = int(os.environ.get("NDONE") or 0), int(os.environ.get("NTOTAL") or 0)
+step = stage[4:] if stage.startswith("step") else None
+where = f"step {step}/5" if step else "search"
+p = {"stage": stage, "files_done": n_done, "files_total": n_total}
+m = re.match(r"File #(\d+)/(\d+)", os.environ.get("RFILE") or "")
+if n_total and step:
+    p["percent"] = round(100.0 * n_done / n_total, 1)
+    p["summary"] = f"{where}: {n_done}/{n_total} files done ({p['percent']:.0f}%)"
+elif m:
+    k, n = int(m.group(1)), int(m.group(2))
+    p.update(file=k, files=n, source=os.environ.get("RLOG") or "the running job's log")
+    p["summary"] = (f"job {os.environ.get('RID')} ({os.environ.get('RLOG') or 'its log'}): "
+                    f"DIA-NN is on file {k} of {n}")
+elif os.environ.get("RID"):
+    p["summary"] = f"job {os.environ['RID']} running; its log names no file yet"
+else:
+    p["summary"] = "waiting in the SLURM queue"
+o["progress"] = p
+try:
+    o.update({k: v for k, v in json.loads(os.environ.get("NOTES") or "{}").items()
+              if k in ("doing", "why", "note", "note_source")})
+except ValueError:
+    pass
+print(json.dumps(o))
+PY
   exit 0
 fi
 if [ "$MODE" = "slurm" ] && [ -n "$JOB" ]; then
@@ -235,27 +308,7 @@ if [ -z "$err_class" ] && [ -n "$LOG" ] && printf '%s' "$state" | grep -qiE "RUN
 fi
 
 # ---- real progress ----------------------------------------------------------
-# Counted from what the 5-step chain actually leaves on disk, not guessed from the log:
-# every finished file drops a .quant, so "34 of 66" is a fact. Runs through run() so it
-# works over SSH on HIVE exactly as it does locally.
-stage="single"; n_total=0; n_done=0
-if [ -n "$OUTDIR" ]; then
-  q() { run "$*" 2>/dev/null | tr -dc 0-9; }
-  n_total="$(q "wc -l < $(printf %q "$OUTDIR/file_list.txt")")"
-  q2="$(q "ls -1 $(printf %q "$OUTDIR/quant_step2")/*.quant 2>/dev/null | wc -l")"
-  q4="$(q "ls -1 $(printf %q "$OUTDIR/quant_step4")/*.quant 2>/dev/null | wc -l")"
-  has() { [ "$(run "test -s $(printf %q "$1") && echo 1 || echo 0" 2>/dev/null | tr -dc 0-9)" = "1" ]; }
-  : "${n_total:=0}"; : "${q2:=0}"; : "${q4:=0}"
-  if [ "$n_total" -gt 0 ]; then                       # a 5-step chain lives here
-    if   has "$OUTDIR/report.parquet";     then stage="step5"; n_done="$n_total"
-    elif has "$OUTDIR/empirical.parquet";  then stage="step4"; n_done="$q4"
-    elif [ "$q2" -ge "$n_total" ];         then stage="step3"; n_done="$n_total"
-    elif has "$OUTDIR/step1.predicted.speclib"; then stage="step2"; n_done="$q2"
-    else stage="step1"; n_done=0
-    fi
-  fi
-fi
-
+outdir_progress
 # ---- Sage LFQ: a finished search can still have unusable quantities -------------------
 # sage_lfq_check.py (run in the Sage job and by run_search.py --adapt-only) records whether the
 # LFQ window fits the runs' MS1 mass error. A WARNING there is not a failure -- the job succeeded
