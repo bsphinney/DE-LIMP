@@ -645,6 +645,10 @@ submission, the same path locally and on HIVE (`~/core/PROT_0807`).
      sample's run. The policy and each sample's result go into `locate.json`, `sample_files.tsv`
      (`reinjections`), `SUBMISSION.md`, the stage record and — through `submission_report.py
      attach` — the report's Data Quality Notes (gate `reinjections` names every sample).
+   - **`acquisition_methods`** — a sample's runs declare different methods (a DDA run beside the
+     DIA run): not re-injections. Ask which acquisition this analysis is for, then
+     `--acquisition DIA|DDA` (one decision; the other mode's runs are set aside, noted per row);
+     `--reinjections` never applies to them.
    - **`collision`** — the label is another sample's or another submission's too: ask which run
      is whose, one sample at a time, then `--choose <key>=<file>` (or `--choices <file>`, one
      `KEY=FILE` per line); `--reinjections` never applies.

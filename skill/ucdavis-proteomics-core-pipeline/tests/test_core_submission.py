@@ -1193,6 +1193,73 @@ class TestReinjections(unittest.TestCase):
 
 
 # ------------------------------------------------------------------------- stage --
+class TestTwoMethodsAreNotReinjections(unittest.TestCase):
+    """2026-10: a sample's DDA run (for a FragPipe comparison) and its DIA run were offered as
+    `kind: reinjections`; --reinjections all would have put the DDA run into the DIA search as
+    a technical replicate. Runs that declare different methods are split (ht_manifest's
+    declared_method, the one_method gate's reading) and staff say which acquisition the analysis
+    is for: --acquisition DIA|DDA."""
+
+    IDS = ["sampA", "sampB"]
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = self._tmp.name
+        self.env = child_env(self.tmp)
+        self.out = os.path.join(self.tmp, "loc")
+        self.summary, _ = write_summary(self.tmp, record(samples=[(u, "ctrl") for u in self.IDS]))
+        self.dia = {u: tims(self.tmp, "03122025", u, 10 + i) for i, u in enumerate(self.IDS)}
+        self.dda = {u: raw(self.tmp, "tTOF_HT", "mar25",
+                           f"03122025__60SPD_DDA-{u}_S3-B{20 + i}_1_{24020 + i}.d")
+                    for i, u in enumerate(self.IDS)}
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def locate(self, *extra):
+        return run(["locate", "--summary", self.summary, "--out", self.out, *extra], self.env)
+
+    def test_a_dda_and_a_dia_run_are_two_methods_not_reinjections(self):
+        lst = os.path.join(self.tmp, "list.txt")
+        with open(lst, "w") as fh:
+            fh.write("\n".join(list(self.dia.values()) + list(self.dda.values())) + "\n")
+        for mode in ((), ("--files-from", lst)):
+            with self.subTest(mode=mode or "auto"):
+                for policy in ("ask", "all", "latest"):
+                    rc, out, p = self.locate(*mode, "--reinjections", policy)
+                    self.assertEqual(rc, 2, p.stderr)
+                    g = gates(out)["choose_run"]
+                    self.assertEqual({x["kind"] for x in g["samples"]}, {"acquisition_methods"})
+                    self.assertIn("not re-injections", g["detail"])
+                    self.assertIn("--acquisition DIA|DDA", g["detail"])
+                    self.assertNotIn("reinjections", gates(out))
+                    cand = g["samples"][0]["candidates"]
+                    self.assertEqual(sorted(c["method"] for c in cand), ["60spd DDA", "60spd DIA"])
+                rc, out, p = self.locate(*mode, "--acquisition", "DIA")
+                self.assertEqual(rc, 0, p.stderr)
+                files = read(os.path.join(self.out, "files.txt")).split()
+                self.assertEqual(sorted(files), sorted(self.dia.values()))
+                loc = json.load(open(os.path.join(self.out, "locate.json")))
+                self.assertEqual(loc["accepted"]["acquisition"], "DIA")
+                row = {r["unique_id"]: r for r in loc["samples"]}["sampA"]
+                self.assertEqual([x["file"] for x in row["other_method"]], [self.dda["sampA"]])
+                self.assertIn("set aside, acquired by another method than --acquisition DIA", row["note"])
+                rc, out, p = self.locate(*mode, "--acquisition", "DDA")
+                self.assertEqual(rc, 0, p.stderr)
+                self.assertEqual(sorted(read(os.path.join(self.out, "files.txt")).split()),
+                                 sorted(self.dda.values()))
+
+    def test_runs_of_one_method_are_still_reinjections(self):
+        again = {u: tims(self.tmp, "03122025", u, 50 + i) for i, u in enumerate(self.IDS)}
+        rc, out, p = self.locate("--acquisition", "DIA")
+        self.assertEqual(rc, 2, p.stderr)
+        self.assertEqual({x["kind"] for x in gates(out)["choose_run"]["samples"]}, {"reinjections"})
+        rc, out, p = self.locate("--acquisition", "DIA", "--reinjections", "latest")
+        self.assertEqual(rc, 0, p.stderr)
+        self.assertEqual(sorted(read(os.path.join(self.out, "files.txt")).split()),
+                         sorted(again.values()))
+
+
 class TestStage(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

@@ -2036,6 +2036,49 @@ def parse_choices(choose: list, choices_file, samples: list) -> dict:
 # replicates of the sample. Never a collision -- different samples sharing a label always need
 # their own --choose.
 REINJECTION_POLICIES = ("ask", "latest", "all")
+ACQUISITIONS = ("DIA", "DDA")
+
+
+def split_by_method(paths: list, plate=None, acquisition=None) -> dict:
+    """One sample's runs by the acquisition method their names declare (ht_manifest's
+    declared_method -- the one_method gate's reading). A sample's DDA run and its DIA run
+    (60SPD_DDA-<id> beside 60SPD_DIA-<id>, 2026-10) are two methods, not re-injections:
+    --reinjections all would have put the DDA run into a DIA search as a technical replicate.
+    `acquisition` (locate --acquisition DIA|DDA): a run declaring the other mode is set aside.
+    -> {"kept", "set_aside": [{"file", "method"}], "methods": {method: [paths]} when the kept
+    runs still declare more than one method, else {}}. A name declaring none (a re-injection,
+    <date>_<n>_rerun_...) is never a method of its own."""
+    try:
+        from ht_manifest import declared_method
+    except Exception:                  # its reader missing: nothing is split, as before 2.13.1
+        return {"kept": list(paths), "set_aside": [], "methods": {}}
+    meth = {p: declared_method(os.path.basename(p.rstrip("/")), plate) for p in paths}
+
+    def mode(m):
+        w = (m or "").split()
+        return w[-1].upper() if len(w) > 1 and w[-1].upper() in ACQUISITIONS else None
+    kept, aside, groups = [], [], {}
+    for p in paths:
+        if acquisition and mode(meth[p]) not in (None, acquisition.upper()):
+            aside.append({"file": p, "method": meth[p]})
+            continue
+        kept.append(p)
+        if meth[p] is not None:
+            groups.setdefault(meth[p], []).append(p)
+    return {"kept": kept, "set_aside": aside, "methods": groups if len(groups) > 1 else {}}
+
+
+def other_method_note(aside: list, acquisition) -> str:
+    return (f"set aside, acquired by another method than --acquisition {acquisition}: "
+            + ", ".join(f"{os.path.basename(x['file'])} ({x['method']})" for x in aside))
+
+
+def method_note(key: str, methods: dict) -> str:
+    """The choose_run note for a sample whose runs declare several acquisition methods."""
+    return (f"{sum(len(v) for v in methods.values())} runs of this sample were acquired by "
+            f"different methods ({'; '.join(f'{m}: {len(v)}' for m, v in methods.items())}) -- "
+            f"not re-injections: say which acquisition this analysis is for (--acquisition "
+            f"{'|'.join(ACQUISITIONS)}), or --choose {key}=<file>")
 _ACQ_COUNTER = re.compile(r"_(\d+)(?:\.[A-Za-z]+)?$")
 
 
@@ -2187,7 +2230,8 @@ def proposal_note(skey: str, props: list) -> str:
 def match_samples(samples: list, entries: list, neighbors: list, lo: dt.date, hi: dt.date,
                   ours_label: str = "", accept_ambiguous: bool = False,
                   choices: dict | None = None, reinjections: str = "ask",
-                  stan: dict | None = None, surnames=()) -> list:
+                  stan: dict | None = None, surnames=(), plate=None,
+                  acquisition: str | None = None) -> list:
     """The deterministic core of `locate`: one row per sample.
 
     A file in the window is AMBIGUOUS when another submission -- older, same day or newer --
@@ -2338,16 +2382,38 @@ def match_samples(samples: list, entries: list, neighbors: list, lo: dt.date, hi
             amb = [x for x in amb if os.path.realpath(x[0]["path"]) not in taken]
         cands = sorted(free + amb, key=lambda t: (t[1], _mtime(t[0]["path"]), t[0]["name"]),
                        reverse=True)
+        # Runs of this sample by another acquisition method are not re-injections (split_by_method)
+        split = split_by_method([x[0]["path"] for x in cands], plate, acquisition) \
+            if len(cands) > 1 and not pick else None
+        if split and split["set_aside"]:
+            cands = [x for x in cands if x[0]["path"] in split["kept"]]
+            free = [x for x in free if x[0]["path"] in split["kept"]]
+            amb = [x for x in amb if x[0]["path"] in split["kept"]]
         # A COLLISION: another sample of ours has this label, or a run's label is another
         # submission's too and staff have not accepted it as ours. Only staff can say which run is
         # whose (--choose), whatever --reinjections says. Otherwise several runs are RE-INJECTIONS
         # of this one sample, and the one policy decides.
         collision = shared[key] > 1 or bool(amb and not accept_ambiguous)
+        methods = (split or {}).get("methods") if not collision else None
+        other_method = (split or {}).get("set_aside") or []
         rec = (apply_reinjections(reinjections, [(x[0]["path"], x[1], x[0]["instrument_folder"])
                                                  for x in cands], stan or {})
-               if not pick and len(cands) > 1 and not collision and reinjections != "ask" else None)
+               if not pick and len(cands) > 1 and not collision and not methods
+               and reinjections != "ask" else None)
+        start = len(rows)
         if pick:
             rows.append(chosen(smp, pick, owned, cands, amb, amb_info, n_out, shadowed))
+        elif methods:
+            rows.append(_row(smp, status="needs_choice", sample_key=skey,
+                             choice_kind="acquisition_methods",
+                             alternates=[x[0]["path"] for x in cands],
+                             candidates=[{"file": e["path"], "acquired": d.isoformat(),
+                                          "date_source": src,
+                                          "method": next((m for m, v in methods.items()
+                                                          if e["path"] in v), None)}
+                                         for e, d, src, _cons in cands],
+                             ambiguous=amb_info, out_of_window=n_out, shadowed=shadowed[:5],
+                             note=method_note(skey, methods)))
         elif rec and not rec.get("undecided"):
             by_path = {x[0]["path"]: x for x in cands}
             for path in rec["kept"]:
@@ -2406,11 +2472,16 @@ def match_samples(samples: list, entries: list, neighbors: list, lo: dt.date, hi
                 bits.append(f"{len(shadowed)} file(s) carry it inside a longer id")
             rows.append(_row(smp, status="unmatched", out_of_window=n_out, shadowed=shadowed[:5],
                              sample_key=skey, note="; ".join(bits) or "no raw file carries this id"))
+        for r in rows[start:] if other_method else []:
+            r["other_method"] = other_method
+            r["note"] = ((r["note"] + "; ") if r["note"] else "") + other_method_note(
+                other_method, acquisition)
     return rows
 
 
 def curated_rows(samples: list, paths: list, raw: str, choices: dict | None = None,
-                 internal_id=None, reinjections: str = "ask", stan: dict | None = None) -> list:
+                 internal_id=None, reinjections: str = "ask", stan: dict | None = None,
+                 acquisition: str | None = None) -> list:
     """--files-from: staff chose the files. Map each back to the sample whose id is the
     longest one it carries, the way `locate` matches; a curated list makes even a weak id
     usable. A run of this submission's HT plate (named for it, ht_pattern -- the test `locate`
@@ -2465,7 +2536,22 @@ def curated_rows(samples: list, paths: list, raw: str, choices: dict | None = No
     for smp in samples:
         files = by_sample.get(id(smp), [])
         cands = wanted_by.get(id(smp), [])
-        set_aside, rec = [], None
+        set_aside, rec, other_method = [], None, []
+        if not any(src for _p, src, _on in files) and len(files) > 1:
+            # runs of this sample by another acquisition method are not re-injections
+            split = split_by_method([p for p, _s2, _o in files], plate, acquisition)
+            other_method = split["set_aside"]
+            files = [f for f in files if f[0] in split["kept"]]
+            if split["methods"]:
+                rows.append(_row(smp, status="needs_choice", sample_key=keys[id(smp)],
+                                 choice_kind="acquisition_methods",
+                                 alternates=[p for p, _s2, _o in files],
+                                 candidates=[{"file": p, "acquired": _acquired(p),
+                                              "method": next((m for m, v in split["methods"].items()
+                                                              if p in v), None)}
+                                             for p, _s2, _o in files],
+                                 note=method_note(keys[id(smp)], split["methods"])))
+                continue
         if any(src for _p, src, _on in files):
             set_aside = [p for p, src, _on in files if not src]
             files = [f for f in files if f[1]]
@@ -2509,11 +2595,14 @@ def curated_rows(samples: list, paths: list, raw: str, choices: dict | None = No
                              date_source=dsrc, instrument_folder=folder, chosen_by=src,
                              matched_on=on, sample_key=keys[id(smp)], alternates=set_aside,
                              reinjections=rec,
+                             other_method=other_method,
                              note=(f"curated; chosen by staff ({src})" if src
                                    else "curated" + ("" if on == "unique_id" else f"; matched on {on}"))
                              + (f"; {reinjection_note(rec)}" if rec else "")
                              + (f"; set aside: {', '.join(os.path.basename(x) for x in set_aside)}"
-                                if set_aside and not rec else "")))
+                                if set_aside and not rec else "")
+                             + (f"; {other_method_note(other_method, acquisition)}"
+                                if other_method else "")))
     for p, cands, on in loose:
         d, src = acquisition_date(p)
         # candidate_samples: the unique_ids of the samples it names; [] for a run of no sample
@@ -2657,8 +2746,16 @@ def locate_gates(rows: list, files: list, allow_partial: bool, wanted_folder, un
     # sample identity, so staff answer it.
     need = by.get("needs_choice", [])
     reinj = [r for r in need if r.get("choice_kind") == "reinjections"]
-    clash = [r for r in need if r.get("choice_kind") != "reinjections"]
+    meth = [r for r in need if r.get("choice_kind") == "acquisition_methods"]
+    clash = [r for r in need if r.get("choice_kind") not in ("reinjections",
+                                                             "acquisition_methods")]
     bits = []
+    if meth:
+        bits.append(f"{len(meth)} sample(s) have runs acquired by different methods (e.g. a DDA "
+                    f"run beside the DIA run) -- not re-injections: ONE decision says which "
+                    f"acquisition this analysis is for -- re-run with --acquisition "
+                    f"{'|'.join(ACQUISITIONS)} -- or --choose <key>=<file> per sample; "
+                    f"--reinjections does not apply to them")
     if reinj:
         bits.append(f"{len(reinj)} sample(s) have several runs of their own (re-injections): ONE "
                     f"decision covers them all -- ask staff, then re-run with --reinjections latest "
@@ -2777,6 +2874,9 @@ def cmd_locate(a) -> int:
                            "choices": list(choices.values()),
                            # the one decision for re-injections of one sample (ask = none taken)
                            "reinjections": a.reinjections,
+                           # which acquisition the analysis is for, when a sample has runs by
+                           # several methods (None = not given)
+                           "acquisition": a.acquisition,
                            "stan_manifest": os.path.abspath(a.ht_manifest) if a.ht_manifest else None}}
 
     if a.files_from:
@@ -2789,7 +2889,7 @@ def cmd_locate(a) -> int:
         missing = [p for p in paths if not os.path.exists(p)]
         existing = list(dict.fromkeys(p for p in paths if os.path.exists(p)))
         rows = curated_rows(samples, existing, raw, choices, s.get("internal_id"),
-                            a.reinjections, stan)
+                            a.reinjections, stan, a.acquisition)
         # what is searched: every listed run but those set aside (another re-injection kept, or a
         # staff choice) and those waiting for one (needs_choice)
         files = [p for p in existing if any(r["file"] == p for r in rows
@@ -2828,7 +2928,8 @@ def cmd_locate(a) -> int:
         rows = match_samples(samples, entries, s.get("neighbors") or [], lo, hi,
                              submission_label(s), a.accept_ambiguous, choices, a.reinjections, stan,
                              surnames=[(s.get(k) or {}).get("last") for k in ("pi", "submitter")
-                                       if isinstance(s.get(k), dict)])
+                                       if isinstance(s.get(k), dict)],
+                             plate=pat, acquisition=a.acquisition)
         files = list(dict.fromkeys(r["file"] for r in rows if r["status"] == "matched"))
         gates = locate_gates(rows, files, a.allow_partial, wanted, unreadable, False, [],
                              a.accept_ambiguous, samples=samples)
@@ -4970,6 +5071,11 @@ def main(argv=None) -> int:
                          "newest injection (never one STAN flags needs_rerun while another is "
                          "not); all keeps every injection as technical replicates. Never applies "
                          "to a label two samples or submissions share. Recorded in locate.json")
+    lo.add_argument("--acquisition", choices=ACQUISITIONS, default=None,
+                    help="which acquisition the analysis is for, when a sample has runs by "
+                         "several methods (a DDA run beside the DIA run, read from the names as "
+                         "ht_manifest's one_method gate reads them): runs declaring the other mode "
+                         "are set aside. Recorded in locate.json")
     lo.add_argument("--ht-manifest", default=None, metavar="FILE",
                     help="ht_manifest.json for the listed runs: STAN's needs_rerun flags for "
                          "--reinjections latest")
