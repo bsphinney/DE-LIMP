@@ -2289,6 +2289,7 @@ def main():
         "report_jobid_var": "jid5",
         # the most this chain can use (cpu_hours.py): every step's CPUs x time limit x tasks
         "cpu_hours_reserved": cpu["cpu_hours_reserved"],
+        "gpu_hours_reserved": cpu["gpu_hours_reserved"],
         "cpu_hours_reservation": cpu,
         "note": "5-step DIA-NN parallel chain. Submit with submit.sh, watch EVERY step with "
                 "watch_run.sh --all, then point run_de.R at the report.",

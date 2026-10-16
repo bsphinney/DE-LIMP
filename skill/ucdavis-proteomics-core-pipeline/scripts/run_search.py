@@ -386,7 +386,8 @@ def search_cpu_hours(res):
     if (isinstance(res, dict) and "cpu_hours_reserved" not in res
             and isinstance(res.get("submitted"), str) and os.path.isfile(res["submitted"])):
         cpu = cpu_hours_mod().reservation([res["submitted"]])
-        res.update(cpu_hours_reserved=cpu["cpu_hours_reserved"], cpu_hours_reservation=cpu)
+        res.update(cpu_hours_reserved=cpu["cpu_hours_reserved"],
+                   gpu_hours_reserved=cpu["gpu_hours_reserved"], cpu_hours_reservation=cpu)
     return res
 
 
@@ -1016,7 +1017,8 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
         return {"engine": "diann", "report": report, "submitted": submit,
                 "mode": "two_job_libfree", "library": predicted,
                 "ran": False, "dda": bool(dda), "raw_dotnet": bool(dnet),
-                "cpu_hours_reserved": cpu["cpu_hours_reserved"], "cpu_hours_reservation": cpu,
+                "cpu_hours_reserved": cpu["cpu_hours_reserved"],
+                "gpu_hours_reserved": cpu["gpu_hours_reserved"], "cpu_hours_reservation": cpu,
                 **ma_rec}
 
     if sbatch:                          # libfree + sbatch returned above, so this is onecmd
@@ -3554,8 +3556,8 @@ def main():
     # the most this search can use (cpu_hours.py), for every route that wrote job scripts
     res = search_cpu_hours(res)
     if isinstance(res, dict) and res.get("cpu_hours_reserved") is not None:
-        print(f"[run_search] cpu_hours_reserved: {res['cpu_hours_reserved']} -- "
-              f"{cpu_hours_mod().WHAT}")
+        print(f"[run_search] cpu_hours_reserved: {res['cpu_hours_reserved']}  "
+              f"gpu_hours_reserved: {res.get('gpu_hours_reserved')} -- {cpu_hours_mod().WHAT}")
     # always record what was run (engine + version + exact command) for reproducibility
     try:
         os.makedirs(a.out, exist_ok=True)
@@ -3613,6 +3615,8 @@ def main():
                        # the most this search can use: CPUs x time limit x tasks, every job
                        # (cpu_hours.py); null for a search run inline
                        "cpu_hours_reserved": (res.get("cpu_hours_reserved")
+                                              if isinstance(res, dict) else None),
+                       "gpu_hours_reserved": (res.get("gpu_hours_reserved")
                                               if isinstance(res, dict) else None),
                        # an inline Sage search's LFQ mass-window check (sage_lfq_check.py) and
                        # which lfq.parquet rows the adapter kept; a Sage job's are merged in here

@@ -366,6 +366,7 @@ def main():
         "n_files": n,
         "scripts": scripts,
         "cpu_hours_reserved": cpu["cpu_hours_reserved"],
+        "gpu_hours_reserved": cpu["gpu_hours_reserved"],
         "cpu_hours_reservation": cpu,
         "results_dir": results,
         "per_file_results": rdir,
