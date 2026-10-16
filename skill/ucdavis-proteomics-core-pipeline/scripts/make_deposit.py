@@ -585,8 +585,18 @@ def build_sdrf(f):
     # name and differ in comment[label]), from the search's channels and the channel design
     import silac
     sdrf_terms = silac.sdrf_labels(srec.get("labels"))
-    design = silac.design_for_session(f["p"]["session_dir"], f.get("de_prov")) if sdrf_terms else None
+    design_problems = []
+    design = (silac.design_for_session(f["p"]["session_dir"], f.get("de_prov"), design_problems)
+              if sdrf_terms else None)
+    if sdrf_terms and design is None:
+        # the search had channels, but the sample in each could not be read: one row per run,
+        # its label left to fill -- said, never a silent fallback
+        why = ("SILAC search, but the channel design could not be used, so each run has one row "
+               "and its label is TO-FILL: " + "; ".join(design_problems))
+        notes.append(("comment[label]", TO_FILL, why))
+        print(f"[make_deposit] {why}", file=sys.stderr)
     channels_of = {}
+    reinjected = bool((design or {}).get("reinjected_replicates"))
     for r in (design or {}).get("runs") or []:
         chans = [(ch, g) for ch, g in r["channels"].items() if ch in sdrf_terms]
         if chans:
@@ -619,7 +629,10 @@ def build_sdrf(f):
     cols += ["comment[sdrf annotation tool]", f"factor value[{TO_FILL}]"]
 
     skill_ver = skill_version()
-    rows, rep_n = [], {}
+    # a SILAC sample (<replicate>_<group>) injected more than once -- runs sharing a Replicate in
+    # the channel design, re-injections of one mix -- is ONE biological replicate, its runs
+    # numbered as technical replicates
+    rows, rep_n, bio_of, tech_n = [], {}, {}, {}
     for i, (path, base) in enumerate(items):
         if path:
             run = _run_name(path)
@@ -636,19 +649,26 @@ def build_sdrf(f):
         else:
             samples = [(run, group, label_val)]
         for source, group, lab_v in samples:
+            silac_row = run in channels_of
+            bio = None
             if group:
-                rep_n[group] = rep_n.get(group, 0) + 1
+                if silac_row and (group, source) in bio_of:
+                    bio = bio_of[(group, source)]
+                else:
+                    rep_n[group] = rep_n.get(group, 0) + 1
+                    bio = bio_of[(group, source)] = rep_n[group]
+            tech_n[source] = tech_n.get(source, 0) + 1 if silac_row else 1
             row = [source, org_val or TO_FILL, TO_FILL, TO_FILL, TO_FILL]
             if human:
                 row += [TO_FILL, TO_FILL]
-            row += [str(rep_n[group]) if group else TO_FILL, run,
+            row += [str(bio) if group else TO_FILL, run,
                     "proteomic profiling by mass spectrometry",
                     acq_val or TO_FILL, lab_v or TO_FILL, instr or TO_FILL, enz or TO_FILL]
             row += [v or TO_FILL for v, _ in mod_vals]
             row += [f"{mm._g(t['value'])} {t['unit']}" for _, t in tol_cols]
             if ms1_range:
                 row.append(ms1_range)
-            row += ["1", "1", safe_name(base) if base else TO_FILL, SDRF_VERSION]
+            row += ["1", str(tech_n[source]), safe_name(base) if base else TO_FILL, SDRF_VERSION]
             row += [f"{t} {TEMPLATE_VERSION}" for t in templates]
             row += [f"ucdavis-proteomics-core-pipeline {label(skill_ver, ascii=True)}",
                     group or TO_FILL]
@@ -672,7 +692,8 @@ def build_sdrf(f):
                 ("characteristics[age]", TO_FILL, "not in any session record")]
     src += [("characteristics[biological replicate]",
              "1..n per group" if conds or channels_of else TO_FILL,
-             "numbered within each group of the SILAC channel design, one per run and channel"
+             "numbered within each group of the SILAC channel design, one per replicate and "
+             "channel (a re-injection of one mix keeps its sample's number)"
              if channels_of else
              "numbered within each conditions.csv Group, one per raw file -- the DE design "
              "treated each run as a separate biological sample; correct it if some runs are "
@@ -723,8 +744,11 @@ def build_sdrf(f):
                     "(GlobalMetadata MzAcqRange)"))
     src += [("comment[fraction identifier]", "1", "assumed unfractionated: one raw file per "
              "sample in the DE design -- change it if you fractionated"),
-            ("comment[technical replicate]", "1", "no technical replicates recorded -- change "
-             "it if some runs are repeat injections"),
+            ("comment[technical replicate]", "1..n per SILAC sample" if reinjected else "1",
+             "the runs of one SILAC replicate (re-injections of one mix, the channel design's "
+             "shared Replicate) numbered 1, 2 ...; each sample is one biological replicate"
+             if reinjected else "no technical replicates recorded -- change it if some runs "
+             "are repeat injections"),
             ("comment[data file]", "raw file name", "input/raw_files.txt (a .d folder is "
              "named directly, per the SDRF spec)"),
             ("comment[sdrf version]", SDRF_VERSION, "SDRF-Proteomics spec version"),

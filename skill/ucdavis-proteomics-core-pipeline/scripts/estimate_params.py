@@ -1207,8 +1207,11 @@ def sage_fragment_mismatch(ms2_analyzer, sage_cfg):
 # The flags a SILAC search is declared with: set by --labels, never by --overrides. As overrides
 # (a triple-SILAC search, 2026-10-14) they were recorded as one person's override rather than
 # the study design, and --lib-fixed-mod went in with them and labelled the library twice.
-SILAC_OVERRIDE_FLAGS = ("--channels", "--lib-fixed-mod", "--original-mods",
-                        *silac.CHANNEL_NORM.values())
+# --channels and the channel normalisations exist only for plexDIA: refused as overrides always.
+# --original-mods and --lib-fixed-mod also have label-free uses: refused only beside SILAC (with
+# --labels, --channels or a label --fixed-mod in the same request).
+SILAC_OVERRIDE_FLAGS = ("--channels", *silac.CHANNEL_NORM.values())
+SILAC_SHARED_FLAGS = ("--lib-fixed-mod", "--original-mods")
 
 
 def silac_labels(a, overrides):
@@ -1223,8 +1226,11 @@ def silac_labels(a, overrides):
             except OSError:
                 pass
         sys.exit(f"[estimate_params] {msg} No cfg was written.")
-    pass_as = [k for k in overrides or {} if k in SILAC_OVERRIDE_FLAGS
-               or (k == "--fixed-mod" and ",label" in str(overrides[k]))]
+    label_mod = lambda k: k == "--fixed-mod" and ",label" in str(overrides[k])  # noqa: E731
+    silac_request = bool(a.labels) or any(k in SILAC_OVERRIDE_FLAGS or label_mod(k)
+                                          for k in overrides or {})
+    pass_as = [k for k in overrides or {} if k in SILAC_OVERRIDE_FLAGS or label_mod(k)
+               or (k in SILAC_SHARED_FLAGS and silac_request)]
     if pass_as:
         refuse(f"{', '.join(pass_as)} in --overrides: SILAC is declared with --labels "
                "silac2|silac3 --label-preset ... [--channel-norm spec|run], which records it as "

@@ -128,7 +128,10 @@ class EstimateParams(unittest.TestCase):
     def test_refusals_leave_no_cfg(self):
         cases = [
             (["--overrides", json.dumps({"--channels": TRIPLE})], "--channels in --overrides"),
-            (["--overrides", json.dumps({"--lib-fixed-mod": "SILAC"})], "--lib-fixed-mod"),
+            (["--overrides", json.dumps({"--lib-fixed-mod": "SILAC",
+                                         "--fixed-mod": "SILAC,0.0,KR,label"})], "--lib-fixed-mod"),
+            (["--overrides", json.dumps({"--original-mods": True}), "--labels", "silac2",
+              "--label-preset", "K8R10"], "--original-mods in --overrides"),
             (["--overrides", json.dumps({"--fixed-mod": "SILAC,0.0,KR,label"})], "--labels"),
             (["--labels", "silac3"], "--label-preset"),
             (["--label-preset", "K8R10"], "describe --labels"),
@@ -143,6 +146,18 @@ class EstimateParams(unittest.TestCase):
                 self.assertNotEqual(p.returncode, 0)
                 self.assertIn(said, p.stderr)
                 self.assertFalse(os.path.exists(cfg), "a stale cfg must not survive a refusal")
+
+    def test_label_free_overrides_of_shared_flags_stay_allowed(self):
+        # --original-mods and --lib-fixed-mod are SILAC flags only beside --channels or a label:
+        # a label-free search may set them as overrides
+        with tempfile.TemporaryDirectory() as d:
+            cfg, p = estimate(d, "--overrides", json.dumps({"--original-mods": True,
+                                                            "--lib-fixed-mod": "UniMod:4"}))
+            f = cfg_flags(cfg)
+            self.assertIn("--original-mods", f)
+            self.assertEqual(f["--lib-fixed-mod"], ["UniMod:4"])
+            side = json.load(open(cfg + ".rationale.json"))
+            self.assertIn("--original-mods", side["overrides"])
 
     def test_another_cysteine_agent_and_the_label_are_both_declared(self):
         with tempfile.TemporaryDirectory() as d:
@@ -206,12 +221,73 @@ class CfgProblems(unittest.TestCase):
         # label-free: nothing to say
         self.assertEqual(silac.cfg_problems(self.groups("--fasta-search --unimod4\n")), [])
 
+    def test_a_label_free_cfg_is_refused_in_label_free_words(self):
+        # run_search.py / diann_parallel.py refuse these through silac.refusal(): a label-free
+        # cfg with a stray plexDIA or library-mod flag is not "a SILAC sample"
+        for extra, said in (("--channel-spec-norm", "no channels to normalise"),
+                            ("--lib-fixed-mod UniMod:4", "apply it a second time")):
+            with self.subTest(extra=extra), tempfile.TemporaryDirectory() as d:
+                p = os.path.join(d, "x.cfg")
+                open(p, "w").write(f"--fasta-search --unimod4 {extra}\n")
+                why = silac.refusal(p, prog="run_search")
+                self.assertIn(said, why)
+                self.assertIn("a label-free search must not carry", why)
+                self.assertNotIn("SILAC (plexDIA) sample", why)
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "x.cfg")
+            open(p, "w").write(self.BASE + "--lib-fixed-mod SILAC\n")
+            self.assertIn("would not search a SILAC (plexDIA) sample", silac.refusal(p))
+
     def test_labels_read_back_from_any_cfg(self):
         rec = silac.labels_from_cfg(self.groups(self.BASE + "--lib-fixed-mod SILAC\n"))
         self.assertEqual([c["preset"] for c in rec["channels"]], ["K0R0", "K4R6", "K8R10"])
         self.assertEqual(rec["channels"][1]["K"]["unimod"], 481)
         self.assertIsNone(rec["channel_norm"])
         self.assertTrue(rec["lib_fixed_mod"])
+
+
+class Sdrf(unittest.TestCase):
+    """make_deposit.py's SDRF for a SILAC search, from the session's channel design: a
+    re-injected mix is one biological replicate with numbered technical replicates, and a design
+    that cannot be read is said, never silently replaced by one row per run."""
+
+    def session(self, d, design_text):
+        for sub in ("input/wf", "output/search"):
+            os.makedirs(os.path.join(d, sub))
+        cfg, _ = estimate(os.path.join(d, "input", "wf"), "--labels", "silac2", "--label-preset",
+                          "K8R10", "--channel-norm", "spec")
+        with open(os.path.join(d, "output", "search", "search_provenance.json"), "w") as fh:
+            json.dump({"engine": "diann", "version": "2.7.0", "params_file": cfg}, fh)
+        with open(os.path.join(d, "input", "raw_files.txt"), "w") as fh:
+            fh.write("# raw\n/data/r1.d\n/data/r1b.d\n/data/r2.d\n")
+        with open(os.path.join(d, "input", "silac_design.csv"), "w") as fh:
+            fh.write(design_text)
+        sys.path.insert(0, SCRIPTS)
+        import make_deposit as md
+        return md.build_sdrf(md.gather(d))
+
+    def test_a_reinjection_is_one_biological_replicate(self):
+        with tempfile.TemporaryDirectory() as d:
+            cols, rows, _, _ = self.session(d, "File.Name,Replicate,Channel,Group\n"
+                                               "r1,R1,L,WT\nr1,R1,H,KO\nr1b,R1,L,WT\nr1b,R1,H,KO\n"
+                                               "r2,R2,L,WT\nr2,R2,H,KO\n")
+        c = {n: i for i, n in reversed(list(enumerate(cols)))}
+        got = [(r[c["source name"]], r[c["assay name"]], r[c["characteristics[biological replicate]"]],
+                r[c["comment[technical replicate]"]]) for r in rows if r[-1] == "KO"]
+        self.assertEqual(got, [("R1_KO", "r1", "1", "1"), ("R1_KO", "r1b", "1", "2"),
+                               ("R2_KO", "r2", "2", "1")])
+
+    def test_a_design_that_cannot_be_read_is_said(self):
+        import contextlib
+        import io
+        err = io.StringIO()
+        with tempfile.TemporaryDirectory() as d, contextlib.redirect_stderr(err):
+            _, rows, sources, _ = self.session(d, "File.Name,Channel\nr1,L\n")
+        self.assertEqual(len(rows), 3, "one row per run, its label to fill")
+        why = next(w for col, _, w in sources if col == "comment[label]" and "could not" in w)
+        for said in (why, err.getvalue()):
+            self.assertIn("the channel design could not be used", said)
+            self.assertIn("input/silac_design.csv could not be read (missing column(s) Group", said)
 
 
 class Routes(unittest.TestCase):

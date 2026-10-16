@@ -288,11 +288,15 @@ def cfg_problems(groups, seed_lib=False):
     probs = []
     norms = [fl for fl in CHANNEL_NORM.values() if fl in f]
     if "--channels" not in f:
+        # a label-free cfg: worded as one (refusal() names no SILAC sample for it)
         if norms:
-            probs.append(f"{' and '.join(norms)} without --channels: no channels to normalise")
+            probs.append(f"{' and '.join(norms)} without --channels: a channel normalisation "
+                         "with no channels to normalise (it is a plexDIA flag)")
         if "--lib-fixed-mod" in f and "--fasta-search" in f:
-            probs.append("--lib-fixed-mod with --fasta-search applies the fixed mod twice: "
-                         + LIB_FIXED_MOD_NOTE)
+            probs.append("--lib-fixed-mod with --fasta-search: the library is predicted from the "
+                         "FASTA, where --fixed-mod already applies the modification, so "
+                         "--lib-fixed-mod would apply it a second time (DIA-NN's README: "
+                         "--lib-fixed-mod is for a library made without the modification)")
         return probs
     try:
         chans = parse_channels(" ".join(str(v) for v in (f["--channels"][-1] or [])))
@@ -349,6 +353,11 @@ def refusal(cfg_path, seed_lib=False, prog="run_search"):
     probs = cfg_problems(groups, seed_lib=seed_lib)
     if not probs:
         return None
+    if "--channels" not in _flags(groups):
+        return (f"[{prog}] {cfg_path} has a flag a label-free search must not carry: "
+                + "; ".join(probs) + ". Nothing was written or submitted. Remove it from the "
+                "parameters (a SILAC search is declared with estimate_params.py --labels, "
+                "references/silac.md).")
     return (f"[{prog}] {cfg_path} would not search a SILAC (plexDIA) sample correctly: "
             + "; ".join(probs) + ". Nothing was written or submitted. Build the parameters with "
             "estimate_params.py --labels (references/silac.md).")
@@ -371,20 +380,30 @@ def sdrf_labels(rec):
     return dict(zip(names, terms)) if terms else {}
 
 
-def design_for_session(session_dir, de_prov=None):
+def design_for_session(session_dir, de_prov=None, problems=None):
     """The session's SILAC channel design (read_design), from the path the analysis recorded
-    (de_provenance.json `metadata`), else input/silac_design.csv; None when there is none."""
+    (de_provenance.json `metadata`), else input/silac_design.csv; None when there is none. Why
+    each candidate could not be used -- unreadable, or no file at all -- goes into `problems` (a
+    list), so a caller that falls back (make_deposit.py's SDRF) can say why."""
     cands = []
     md = (de_prov or {}).get("metadata")
     if isinstance(md, str) and md:
         cands += [md, os.path.join(session_dir, "input", os.path.basename(md))]
     cands.append(os.path.join(session_dir, "input", "silac_design.csv"))
-    for c in cands:
+    def shown(c):                       # inside the session: relative, as the notes print it
+        r = os.path.relpath(os.path.abspath(c), os.path.abspath(session_dir))
+        return c if r.startswith("..") else r
+    tried = []
+    for c in dict.fromkeys(cands):
         if os.path.isfile(c) and c.endswith(".csv"):
             try:
                 return read_design(c)
-            except SilacError:
-                continue
+            except SilacError as e:
+                why = str(e).split(": ", 1)[1] if str(e).startswith(f"{c}: ") else str(e)
+                tried.append(f"{shown(c)} could not be read ({why})")
+    if problems is not None:
+        problems.extend(tried or ["no channel design file ("
+                                  + ", ".join(shown(c) for c in dict.fromkeys(cands)) + ")"])
     return None
 
 
