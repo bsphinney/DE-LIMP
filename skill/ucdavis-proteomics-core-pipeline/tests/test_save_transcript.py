@@ -891,29 +891,30 @@ def bash_call(i, command, done=True, sid=SID, agent=None, background=False, when
 class SubagentEnv(Env):
     """2026-10: a teammate ran `save_transcript.py --hive "$S" --remember`; with the parent's
     CLAUDE_CODE_SESSION_ID it registered the LEAD's conversation (other clients' work) for its
-    client's session, and none of its own. A subagent's call is traced to its own transcript:
-    a Bash call made since this process started, still running, naming this script and its
-    flags -- the only one once our own has had time to be written; else nothing is recorded."""
+    client's session, and none of its own. Nothing in a subagent's environment names it, and
+    three rounds of timing heuristics each left a way into the wrong transcript (review of
+    2.13.1), so the call names itself: --call-id <token>, written into the command. The one
+    transcript whose Bash call carries the token is the caller's; none or several: nothing."""
     AGENT = "agent-ateammate-0123456789abcdef"
     SAVE = 'python3 /x/ucdavis-proteomics-core-pipeline/scripts/save_transcript.py --hive "$S" '
-    ARGV = ["/x/scripts/save_transcript.py", "--hive", "/hive/S", "--remember"]
+    TOK = "k7f3x9q2"
 
     def setUp(self):
         super().setUp()
         self.parent = os.path.join(self.claude, "projects", "-p", SID + ".jsonl")
         self.agent = os.path.join(self.claude, "projects", "-p", SID, "subagents",
                                   self.AGENT + ".jsonl")
-        self.t0 = time.time() - 60                    # this process started a minute ago
-        for p in (mock.patch.object(sys, "argv", list(self.ARGV)),
-                  mock.patch.object(st, "TRACE_WAIT", 0),
-                  mock.patch.object(st, "process_start", lambda: self.t0)):
-            p.start()
-            self.addCleanup(p.stop)
+        p = mock.patch.object(st, "TRACE_WAIT", 0)
+        p.start()
+        self.addCleanup(p.stop)
 
-    def write(self, parent_pending=False, agent_pending=True, background=False):
+    def write(self, parent_pending=False, agent_pending=True, background=False, agent_tok=None,
+              parent_tok=None):
+        tok = lambda t: f" --call-id {t}" if t else ""                 # noqa: E731
         write_lines(self.parent, [msg(0, "Lead: PROT_0000 and PROT_9001 are both going."),
                                   say(1, "assistant", "Lead's own work on PROT_0000.")]
-                    + bash_call(2, self.SAVE + "--remember", done=not parent_pending))
+                    + bash_call(2, self.SAVE + "--remember" + tok(parent_tok),
+                                done=not parent_pending))
         agent = [dict(msg(3, "Brief: redo PROT_0807 following the skill."), isSidechain=True,
                       agentId=self.AGENT[6:]),
                  {"type": "assistant", "uuid": "rd", "isSidechain": True, "sessionId": SID,
@@ -923,11 +924,9 @@ class SubagentEnv(Env):
                           "file_path": "/wt/skill/ucdavis-proteomics-core-pipeline/SKILL.md"}}]}},
                  dict(say(5, "assistant", "Agent: the design for PROT_0807 is three channels."),
                       isSidechain=True)]
-        write_lines(self.agent, agent + bash_call(6, self.SAVE + "--remember",
-                                                  done=not agent_pending, agent=self.AGENT[6:],
-                                                  background=background,
-                                                  when=self.t0 + 2 if background else None))
-
+        write_lines(self.agent, agent + bash_call(
+            6, self.SAVE + "--remember" + tok(self.TOK if agent_tok is None else agent_tok),
+            done=not agent_pending, agent=self.AGENT[6:], background=background))
 
 
 class Subagents(SubagentEnv):
@@ -935,11 +934,11 @@ class Subagents(SubagentEnv):
         self.write()
         sess = os.path.join(self.d, "PROT_0807", "s")
         os.makedirs(os.path.join(sess, "logs"))
-        rc, out = self.cli(sess, "--remember")
+        rc, out = self.cli(sess, "--remember", "--call-id", self.TOK)
         self.assertEqual(out["entry"]["key"], "local:" + os.path.abspath(sess))
         self.assertEqual(st.lookup(SID), [], "the parent's conversation is not registered")
         self.assertEqual(len(st.lookup(self.AGENT)), 1)
-        rc, out = self.cli(sess)
+        rc, out = self.cli(sess, "--call-id", self.TOK)
         self.assertEqual(out["session_id"], self.AGENT)
         with open(os.path.join(sess, "logs", "conversation", self.AGENT + ".jsonl")) as fh:
             got = fh.read()
@@ -971,161 +970,129 @@ class Subagents(SubagentEnv):
         self.write()
         sess = os.path.join(self.d, "s")
         os.makedirs(os.path.join(sess, "logs"))
-        rc, out = self.cli(sess, "--remember", "--session-id", SID)
+        rc, out = self.cli(sess, "--remember", "--session-id", SID, "--call-id", self.TOK)
         self.assertEqual(rc, 0)
         self.assertIn("is its parent's conversation", out["skipped"])
         self.assertEqual(st.lookup(SID), [])
         self.assertEqual(st.lookup(self.AGENT), [])
 
-    def test_an_untraceable_call_records_nothing(self):
-        for parent_pending, agent_pending in ((True, True), (False, False)):
-            with self.subTest(parent=parent_pending, agent=agent_pending):
-                self.write(parent_pending, agent_pending)
-                sess = os.path.join(self.d, f"s{parent_pending}")
-                os.makedirs(os.path.join(sess, "logs"), exist_ok=True)
-                rc, out = self.cli(sess, "--remember")
-                self.assertIn("could not be traced", out["skipped"])
-                self.assertIn("--transcript", out["skipped"])
-                rc, out = self.cli(sess)
-                self.assertIn("could not be traced", out["skipped"])
-                self.assertEqual(st.lookup(SID), [])
-                self.assertFalse(os.path.exists(os.path.join(sess, "logs", "conversation")))
+    def test_without_a_call_id_or_a_matching_one_nothing_is_recorded(self):
+        self.write()
+        sess = os.path.join(self.d, "s")
+        os.makedirs(os.path.join(sess, "logs"))
+        for extra, why in (((), "carries no --call-id"),
+                           (("--call-id", "zz99zz99"), "no transcripts of this conversation"),
+                           (("--call-id", "short"), "give 8 to 64 letters")):
+            with self.subTest(extra=extra):
+                rc, out = self.cli(sess, "--remember", *extra)
+                self.assertIn(why, out["skipped"])
+                self.assertIn(f"--transcript {self.parent} --session-id {SID}", out["skipped"])
+                rc, out = self.cli(sess, *extra)
+                self.assertIn(why, out["skipped"])
+        self.assertEqual((st.lookup(SID), st.lookup(self.AGENT)), ([], []))
+        self.assertFalse(os.path.exists(os.path.join(sess, "logs", "conversation")))
 
-    def test_the_parents_own_call_is_the_parents(self):
-        self.write(parent_pending=True, agent_pending=False)
-        self.assertEqual(st.trace_caller(SID, wait=0), (SID, self.parent, None))
-        # a subagent's call run in the background has its result at once: still its own
-        self.write(parent_pending=False, agent_pending=False, background=True)
-        self.assertEqual(st.trace_caller(SID, wait=0)[:2], (self.AGENT, self.agent))
-        # a subagent that has not written for hours is not at work
+    def test_the_main_conversations_own_call_is_its_own(self):
+        self.write(parent_pending=True, agent_pending=False, parent_tok="m4in0001")
+        self.assertEqual(st.trace_caller(SID, "m4in0001"), (SID, self.parent, None))
+        # no subagent at work (none written for hours): no token needed, as before 2.13.1
         os.utime(self.agent, (1, 1))
-        self.assertEqual(st.trace_caller(SID, wait=0), (SID, self.parent, None))
+        self.assertEqual(st.trace_caller(SID), (SID, self.parent, None))
 
-    def test_another_script_named_alike_is_not_this_one(self):
-        self.write(parent_pending=False, agent_pending=False)
-        write_lines(self.parent, bash_call(2, "python3 -m pytest tests/test_save_transcript.py",
-                                           done=False))
-        self.assertIsNotNone(st.trace_caller(SID, wait=0)[2])
+    def test_the_token_is_a_word_of_its_own(self):
+        self.write(agent_tok=self.TOK + "5")
+        self.assertIsNone(st.trace_caller(SID, self.TOK)[1])
 
 
 class SubagentsTheReviewersRace(SubagentEnv):
-    """Review of 2.13.1. M1: the first version took the first lone match at once; the caller's
-    own call is written a few seconds after it starts, so an hour-old background call naming
-    the same script in the PARENT's transcript was taken for it. R2-S1: the second refused the
-    main conversation's own save when its permission prompt was approved over 2 minutes after
-    the call was written, or when the process start could not be read (Windows)."""
+    """Review of 2.13.1: the scenarios each timing heuristic got wrong. With a token they route
+    to the right transcript or refuse -- never to another conversation."""
 
-    def lead(self, when, command=None, background=True):
+    def lead(self, command, when=None, background=True, mid=None):
         write_lines(self.parent, [msg(0, "Lead: PROT_0000 and PROT_9001 are both going.")]
-                    + bash_call(1, command or ("bash scripts/hive_exec.sh 'python3 ~/proteomics-"
-                                               "pipeline/scripts/save_transcript.py --hive S1 "
-                                               "--remember'"), background=background,
-                                done=background, when=when))
+                    + [dict(e, message=dict(e["message"], id=mid)) if mid and "message" in e else e
+                       for e in bash_call(1, command, background=background, done=background,
+                                          when=when)])
 
-    def own_call_later(self, path, delay, **kw):
+    def own_call_later(self, path, delay, entries):
         import threading
 
         def flush():
             time.sleep(delay)
             with open(path, "a") as fh:
-                for e in bash_call(6, self.SAVE + "--remember", done=False, **kw):
+                for e in entries:
                     fh.write(json.dumps(e) + "\n")
         threading.Thread(target=flush).start()
 
-    def test_a_stale_background_call_in_the_parent_is_never_this_one(self):
-        for age in (3600, 30):                        # an hour old; half a minute old (E)
-            with self.subTest(age=age):
-                start = time.time()
-                self.lead(start - age)                # its result long written
+    def mine(self, i=6, **kw):
+        return bash_call(i, self.SAVE + f"--remember --call-id {self.TOK}", done=False, **kw)
+
+    LEAD_BG = ("bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/save_transcript.py"
+               " --hive S1 --remember'")
+
+    def test_scenarios_a_b_e_a_background_call_in_the_parent_is_never_this_one(self):
+        for age, delay in ((3600, 0.5), (30, 0.5), (30, 2.0)):        # A, B, E (written late)
+            with self.subTest(age=age, delay=delay):
+                self.lead(self.LEAD_BG, when=time.time() - age)
                 write_lines(self.agent, [dict(msg(3, "Brief: PROT_0807."), isSidechain=True)])
-                self.own_call_later(self.agent, 1.0)  # ours, written 1 s after start
-                with mock.patch.object(st, "TRACE_SETTLE", 2.0):
-                    got = st.trace_caller(SID, argv=self.ARGV[1:], wait=6, start=start)
+                self.own_call_later(self.agent, delay, self.mine())
+                got = st.trace_caller(SID, self.TOK, wait=6)
                 self.assertEqual(got[:2], (self.AGENT, self.agent), got)
 
-    def test_the_main_conversations_call_approved_late_is_its_own(self):
-        """Scenario D: the lead's own call, written 150 s before it ran (a permission prompt),
-        with a teammate's transcript written recently."""
-        start = time.time()
-        write_lines(self.agent, [dict(msg(3, "Brief: PROT_0807."), isSidechain=True)])
-        write_lines(self.parent, [msg(0, "Save it.")])
-        self.own_call_later(self.parent, 0.5, when=start - 150)
-        with mock.patch.object(st, "TRACE_SETTLE", 1.5):
-            got = st.trace_caller(SID, argv=self.ARGV[1:], wait=5, start=start)
-        self.assertEqual(got, (SID, self.parent, None))
+    def test_scenarios_c_d_the_main_conversations_call_whatever_its_age(self):
+        for age in (3, 150):                                          # C; D (approved late)
+            with self.subTest(age=age):
+                write_lines(self.agent, [dict(msg(3, "Brief: PROT_0807."), isSidechain=True)])
+                self.lead(self.SAVE + f"--remember --call-id {self.TOK}", when=time.time() - age,
+                          background=False)
+                self.assertEqual(st.trace_caller(SID, self.TOK), (SID, self.parent, None))
 
-    def test_with_no_start_time_the_running_call_still_decides(self):
-        """Windows: no /proc, and Git Bash's ps reads no Windows PID -- process_start is None.
-        The running call decides; a background call (bounded by the start) cannot."""
-        self.write()                                  # the agent's call is running
-        with mock.patch.object(st, "process_start", lambda: None), \
-                mock.patch.object(st, "TRACE_SETTLE", 0):
-            self.assertEqual(st.trace_caller(SID, wait=0)[:2], (self.AGENT, self.agent))
-            self.write(agent_pending=False, background=True)
-            got = st.trace_caller(SID, wait=0)
+    def test_k2_a_save_inside_a_parallel_batch_while_the_parent_runs_the_same(self):
+        """Round 3 (R3-M1): Claude Code writes each call of a parallel batch on its own line
+        under one message.id; the save was not the batch's last call, and the parent was
+        running the same command: it went to the PARENT."""
+        self.lead(self.SAVE + "--remember --call-id p4r3nt01", background=False)
+        batch = [dict(e, message=dict(e["message"], id="msg_batch1"))
+                 for e in self.mine(6, agent=self.AGENT[6:]) + bash_call(7, "ls", done=False)]
+        write_lines(self.agent, batch)
+        self.assertEqual(st.trace_caller(SID, self.TOK)[:2], (self.AGENT, self.agent))
+        self.assertEqual(st.trace_caller(SID, "p4r3nt01")[:2], (SID, self.parent))
+
+    def test_a_token_in_two_transcripts_records_nothing(self):
+        self.lead(self.SAVE + f"--remember --call-id {self.TOK}", background=False)
+        write_lines(self.agent, self.mine())
+        got = st.trace_caller(SID, self.TOK)
         self.assertIsNone(got[1])
-
-    def test_a_lone_match_before_ours_could_be_written_is_refused(self):
-        self.lead(time.time(), background=False)      # the lead's own, running now
-        write_lines(self.agent, [dict(msg(3, "Brief: PROT_0807."), isSidechain=True)])
-        with mock.patch.object(st, "TRACE_SETTLE", 5.0):
-            got = st.trace_caller(SID, argv=self.ARGV[1:], wait=0.6, start=time.time())
-        self.assertIsNone(got[1])
-        self.assertIn("could not be traced", got[2])
-
-    def test_two_running_candidates_record_nothing(self):
-        # the lead runs save_transcript.py too, but not with --from-now: not a candidate
-        self.lead(time.time(), "python3 scripts/save_transcript.py --hive S1 --remember",
-                  background=False)
-        write_lines(self.agent, bash_call(6, self.SAVE + "--remember --from-now", done=False))
-        got = st.trace_caller(SID, argv=["--hive", "/hive/S2", "--remember", "--from-now"],
-                              wait=0)
-        self.assertEqual(got[:2], (self.AGENT, self.agent))
-        # both running with every flag: two transcripts could be the caller -- nothing recorded
-        write_lines(self.agent, bash_call(6, self.SAVE + "--remember", done=False))
-        got = st.trace_caller(SID, argv=["--hive", "/hive/S2", "--remember"], wait=0)
-        self.assertIsNone(got[1])
-        self.assertIn("2 found running save_transcript.py --hive --remember", got[2])
-        # the advice serves either caller: the main conversation's own, or a subagent's
-        self.assertIn(f"the main conversation's is --transcript {self.parent} --session-id {SID}",
-                      got[2])
-        self.assertIn("a subagent's or teammate's is --transcript", got[2])
-
-    def test_an_older_call_of_the_same_message_is_not_running(self):
-        """Only the last tool-call message's calls can be running now: an earlier call left
-        without a result (an interrupted one) is not this one."""
-        write_lines(self.parent, bash_call(1, self.SAVE + "--remember", done=False)
-                    + bash_call(2, "ls", done=False))
-        write_lines(self.agent, bash_call(6, self.SAVE + "--remember", done=False))
-        self.assertEqual(st.trace_caller(SID, argv=self.ARGV[1:], wait=0)[:2],
-                         (self.AGENT, self.agent))
+        self.assertIn(f"--call-id {self.TOK}: 2 transcripts of this conversation hold a call "
+                      "naming it", got[2])
 
     def test_init_says_when_the_conversation_was_not_recorded(self):
-        """R2-S1: session.py init said a refusal only on stderr; its JSON carries it now."""
+        """R2-S1: session.py init said a refusal only on stderr; its JSON carries it now --
+        and init passes --call-id through."""
         import session
         import test_deposit_package as tdp
         raw = os.path.join(self.d, "raw")
         os.makedirs(raw)
         tdp.make_d(os.path.join(raw, "r1.d"))
-        argv = ["/x/scripts/session.py", "init", "--name", "b", "--date", "2026-09-28",
-                "--raw", os.path.join(raw, "*.d"), "--base", self.d]
-        cmd = "python3 scripts/session.py init --name b --date 2026-09-28 --raw /r/*.d --base /b"
-        write_lines(self.parent, bash_call(1, cmd, done=False))       # both running: refused
-        write_lines(self.agent, bash_call(6, cmd, done=False))
-        buf = io.StringIO()
-        with mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(buf), \
-                contextlib.redirect_stderr(io.StringIO()):
-            session.main()
-        t = json.loads(buf.getvalue())["transcript"]
-        self.assertIs(t["recorded"], False)
-        self.assertIn("could not be traced to one transcript (2 found running session.py",
-                      t["reason"])
-        self.assertEqual((st.lookup(SID), st.lookup(self.AGENT)), ([], []))
+        cmd = "python3 scripts/session.py init --name b --raw /r/*.d --call-id {}"
+        write_lines(self.parent, bash_call(1, "ls", done=False))
+        write_lines(self.agent, bash_call(6, cmd.format(self.TOK), done=False))
 
-    def test_this_process_start_is_read(self):
-        t = st.process_start()
-        self.assertIsNotNone(t)
-        self.assertLessEqual(t, time.time())
+        def init(*extra):
+            buf = io.StringIO()
+            argv = ["/x/scripts/session.py", "init", "--name", "b", "--date", "2026-09-28",
+                    "--raw", os.path.join(raw, "*.d"), "--base", self.d, *extra]
+            with mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(buf), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                session.main()
+            return json.loads(buf.getvalue())["transcript"]
+        t = init()                                         # no token, a teammate at work
+        self.assertIs(t["recorded"], False)
+        self.assertIn("carries no --call-id", t["reason"])
+        self.assertEqual((st.lookup(SID), st.lookup(self.AGENT)), ([], []))
+        t = init("--call-id", self.TOK)
+        self.assertIs(t["recorded"], True)
+        self.assertEqual((st.lookup(SID), len(st.lookup(self.AGENT))), ([], 1))
 
 
 class Hook(Env):

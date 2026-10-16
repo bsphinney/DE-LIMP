@@ -373,27 +373,19 @@ def _label(info):
 # ------------------------------------------------------------------- whose conversation is it
 # Claude Code gives a subagent (an Agent call, a teammate) its parent's CLAUDE_CODE_SESSION_ID,
 # and keeps the agent's own transcript at <config>/projects/<project>/<session id>/subagents/
-# agent-<agent id>.jsonl. Going by the id alone, a teammate registered the PARENT conversation
-# for its client's session (2026-10): the hook would have copied the lead's work -- other
-# clients' -- into that client's logs, and none of the agent's own. So while a conversation
-# has subagents at work, a call is traced to the transcript that is making it, and with two
-# candidates NOTHING is recorded: saving nothing is safe, saving the wrong conversation is not.
-#
-# A transcript holds this process's call when it names this script and every --flag and the
-# subcommand this process was given, and either
-#   * it is RUNNING NOW: a Bash call of the transcript's last tool-call message with no result
-#     yet -- whatever its age (a permission prompt approved minutes after the call was written
-#     must not refuse the main conversation's save; review of 2.13.1), or
-#   * it was run in the background (its result comes at once) within BACKGROUND_SLACK seconds
-#     of this process's start -- only when that start can be read.
-# The caller's own call is written a few seconds after the command starts (~4 s seen), so a
-# lone candidate is believed only once that time has passed (TRACE_SETTLE): an hour-old
-# background call in the parent once won the race (review of 2.13.1, M1).
+# agent-<agent id>.jsonl; nothing in a subagent's environment names it (2.1.300: the same
+# CLAUDE_* variables as the main conversation). Going by the id alone, a teammate registered the
+# PARENT conversation for its client's session (2026-10): the hook would have copied the lead's
+# work -- other clients' -- into that client's logs, and none of the agent's own. Three rounds
+# of timing heuristics (which call is running, how old, which message) each left a way into the
+# wrong transcript (review of 2.13.1), so the call names itself instead: `--call-id <token>`, a
+# fresh token the agent writes into the command line. The transcript whose tool call carries
+# that token, literally, is the caller's; none, or more than one, records nothing. Without a
+# token, the conversation's own id is used only while no subagent of it is at work.
 SUBAGENTS_ACTIVE = 6 * 3600     # a subagent transcript written this recently may be the caller
-TRACE_WAIT = 15                 # s to wait for the caller's call to be written
-TRACE_SETTLE = 8                # s after start before a lone candidate is believed
-BACKGROUND_SLACK = 10           # s between a background call being written and this start
-TRACE_TAIL = 1 << 18            # bytes of each transcript's end that are read
+TRACE_WAIT = 15                 # s to wait for the call to be written (~4 s seen)
+TRACE_TAIL = 1 << 20            # bytes of each transcript's end that are read
+CALL_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 
 
 def active_subagents(parent):
@@ -410,131 +402,73 @@ def active_subagents(parent):
     return sorted(out)
 
 
-def process_start():
-    """When this process started (epoch seconds), or None: /proc on Linux, else `ps` (macOS).
-    None (Windows) leaves only the running-call rule."""
-    try:
-        with open("/proc/self/stat") as fh:
-            ticks = int(fh.read().rsplit(")", 1)[1].split()[19])      # field 22, starttime
-        with open("/proc/uptime") as fh:
-            up = float(fh.read().split()[0])
-        return time.time() - (up - ticks / float(os.sysconf("SC_CLK_TCK")))
-    except (OSError, ValueError, IndexError, AttributeError):
-        pass
-    if os.name == "nt":
-        return None
-    try:
-        r = subprocess.run(["ps", "-o", "etime=", "-p", str(os.getpid())], capture_output=True,
-                           text=True, timeout=10)
-        m = re.fullmatch(r"(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)", (r.stdout or "").strip())
-        if m:
-            d, h, mi, se = (int(x or 0) for x in m.groups())
-            return time.time() - (((d * 24 + h) * 60 + mi) * 60 + se)
-    except (OSError, subprocess.SubprocessError, ValueError):
-        pass
-    return None
-
-
-def _epoch(ts):
-    try:
-        return datetime.datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
-    except (TypeError, ValueError):
-        return None
-
-
-def candidate_calls(path, start=None):
-    """The commands in the transcript (its last TRACE_TAIL bytes) that may be this process's
-    call: the Bash calls of its last tool-call message that have no result yet, and -- with
-    `start` known -- the background Bash calls written within BACKGROUND_SLACK s of it."""
+def calls_with(path, call_id):
+    """Does the transcript (its last TRACE_TAIL bytes) hold a Bash call whose command names
+    `call_id` as a word of its own?"""
     try:
         with open(path, "rb") as fh:
             fh.seek(0, os.SEEK_END)
             fh.seek(max(0, fh.tell() - TRACE_TAIL))
             data = fh.read().decode("utf-8", "replace")
     except OSError:
-        return []
-    last, done, background = [], set(), []
+        return False
+    rx = re.compile(r"(?<![A-Za-z0-9_-])" + re.escape(call_id) + r"(?![A-Za-z0-9_-])")
     for raw in data.split("\n"):
-        if '"tool_use' not in raw and '"tool_result' not in raw:
+        if call_id not in raw or '"tool_use"' not in raw:
             continue
         try:
-            e = json.loads(raw)
-            c = (e.get("message") or {}).get("content")
+            c = (json.loads(raw).get("message") or {}).get("content")
         except (ValueError, AttributeError):
             continue
-        uses = [blk for blk in (c if isinstance(c, list) else [])
-                if isinstance(blk, dict) and blk.get("type") == "tool_use"]
-        if uses:
-            last = []                                     # a newer tool-call message
-            when = _epoch(e.get("timestamp"))
-            for blk in uses:
-                if blk.get("name") != "Bash":
-                    continue
-                inp = blk.get("input") if isinstance(blk.get("input"), dict) else {}
-                cmd = str(inp.get("command") or "")
-                last.append((blk.get("id"), cmd))
-                if (inp.get("run_in_background") is True and start is not None
-                        and when is not None and abs(when - start) <= BACKGROUND_SLACK):
-                    background.append(cmd)
         for blk in c if isinstance(c, list) else []:
-            if isinstance(blk, dict) and blk.get("type") == "tool_result":
-                done.add(blk.get("tool_use_id"))
-    return [cmd for k, cmd in last if k not in done] + background
+            if (isinstance(blk, dict) and blk.get("type") == "tool_use" and blk.get("name") == "Bash"
+                    and rx.search(str((blk.get("input") or {}).get("command") or ""))):
+                return True
+    return False
 
 
-def call_words(script, argv):
-    """What a command must name to be this process's call: the script, and every --flag and the
-    subcommand it was given (values are often shell variables -- "$S" -- so not required)."""
-    words = [a.split("=", 1)[0] for a in argv if a.startswith("--") and len(a) > 2]
-    if argv and re.fullmatch(r"[a-z][a-z_-]*", argv[0] or ""):
-        words.append(argv[0])
-    return [script] + list(dict.fromkeys(words))
-
-
-def _names(cmd, words):
-    return all(re.search(r"(?:^|[\s/\\\"'=(])" + re.escape(w) + r"(?![\w.-])", cmd)
-               for w in words)
-
-
-def trace_caller(sid, script=None, argv=None, wait=None, start=None):
-    """-> (session id, transcript, problem): whose conversation is making this call. With no
-    subagent at work: the conversation's own (sid). Else the one transcript -- the parent's or
-    a subagent's (its id is its file's name, agent-<agent id>) -- holding this process's call
-    (see above). None, or two or more: a problem, and the caller saves and records nothing."""
+def trace_caller(sid, call_id=None, wait=None):
+    """-> (session id, transcript, problem): whose conversation is making this call. With
+    `call_id`: the one transcript -- the parent's, or a subagent's (its id is its file's name,
+    agent-<agent id>) -- holding a Bash call that names it; none (after TRACE_WAIT s) or several
+    is a problem. Without: the conversation's own, while no subagent of it is at work; else a
+    problem. A problem records nothing."""
     parent = find_transcript(sid)
     if not parent:
         return sid, None, None
     agents = active_subagents(parent)
-    if not agents:
-        return sid, parent, None
-    me = script or os.path.basename(sys.argv[0] or "") or "save_transcript.py"
-    words = call_words(me, sys.argv[1:] if argv is None else list(argv))
-    t0 = process_start() if start is None else start
-    began = time.time()
-    settled_at = (t0 if t0 is not None else began) + TRACE_SETTLE
-    deadline = began + (TRACE_WAIT if wait is None else wait)
+    sub = f"{os.path.splitext(parent)[0]}/subagents/"
+    name_it = (f"or name the transcript yourself: the main conversation's is --transcript {parent} "
+               f"--session-id {sid}; a subagent's or teammate's is --transcript "
+               f"{sub}agent-<id>.jsonl --session-id agent-<id>")
+    if not call_id:
+        if not agents:
+            return sid, parent, None
+        return sid, None, (
+            "this conversation has subagents at work, and this call carries no --call-id, so "
+            "which conversation is making it cannot be told: nothing was recorded, so that no "
+            "other conversation's work reaches this session. Run it again with --call-id <a "
+            "fresh token of 8 or more letters and digits, written into the command>, " + name_it)
+    if not CALL_ID.match(call_id):
+        return sid, None, (f"--call-id {call_id[:70]!r}: give 8 to 64 letters, digits, '-' or "
+                           f"'_', fresh for this call. Nothing was recorded; " + name_it)
+    deadline = time.time() + (TRACE_WAIT if wait is None else wait)
     while True:
-        hits = [p for p in [parent] + agents
-                if any(_names(c, words) for c in candidate_calls(p, t0))]
-        if len(hits) > 1:
-            break
-        if len(hits) == 1 and time.time() >= settled_at:
+        hits = [p for p in [parent] + agents if calls_with(p, call_id)]
+        if len(hits) == 1:
             return ((sid, parent, None) if hits[0] == parent else
                     (os.path.splitext(os.path.basename(hits[0]))[0], hits[0], None))
-        if time.time() >= deadline:
+        if len(hits) > 1 or time.time() >= deadline:
             break
         time.sleep(0.5)
-    sub = f"{os.path.splitext(parent)[0]}/subagents/"
     return sid, None, (
-        f"this conversation has subagents at work, and this call could not be traced to one "
-        f"transcript ({len(hits)} found running {' '.join(words)}), so nothing was recorded: "
-        f"no other conversation's work may reach this session. Run it again on its own (not "
-        f"beside another call that runs the same command), or name the transcript yourself: "
-        f"the main conversation's is --transcript {parent} --session-id {sid}; a subagent's "
-        f"or teammate's is --transcript {sub}agent-<id>.jsonl --session-id agent-<id>")
+        f"--call-id {call_id}: {'no' if not hits else len(hits)} transcript"
+        f"{'' if len(hits) == 1 else 's'} of this conversation hold a call naming it, so "
+        f"nothing was recorded. Run it again with a fresh --call-id written into the command, "
+        + name_it)
 
 
-def whose(session_id=None, transcript=None):
+def whose(session_id=None, transcript=None, call_id=None):
     """-> (session id, transcript or None, problem or None) for a save or a remember. A given
     transcript (the hook's, or one a subagent names) is used as it is. Else this process's own
     conversation (trace_caller); a parent's id given for a subagent's call is refused."""
@@ -542,7 +476,7 @@ def whose(session_id=None, transcript=None):
     sid = session_id or env_sid
     if transcript or not sid or not _SAFE_ID.match(sid) or sid != env_sid:
         return sid, transcript, None
-    got, path, problem = trace_caller(sid)
+    got, path, problem = trace_caller(sid, call_id)
     if problem:
         return sid, None, problem
     if session_id and got != session_id:
@@ -554,7 +488,7 @@ def whose(session_id=None, transcript=None):
 
 
 def remember(session_dir=None, hive=None, session_id=None, transcript=None, switch=True,
-             from_now=False):
+             from_now=False, call_id=None):
     """Record that this Claude Code conversation (CLAUDE_CODE_SESSION_ID) is now working on the
     analysis in `session_dir` (or the HIVE session `hive`), so the hook saves it there.
 
@@ -566,7 +500,7 @@ def remember(session_dir=None, hive=None, session_id=None, transcript=None, swit
     --resume, a save): never a switch -- only a conversation that runs no session yet is
     recorded. from_now: the session starts HERE (a new segment, or the active one restarted).
     -> (the session's entry or None, a warning or None); (None, None) outside Claude Code."""
-    sid, transcript, problem = whose(session_id, transcript)
+    sid, transcript, problem = whose(session_id, transcript, call_id)
     if problem:
         sys.stderr.write(f"[save_transcript] {problem}\n")
         return None, problem
@@ -1021,7 +955,7 @@ def saved_count(session_dir):
 
 
 def save(session_dir=None, transcript=None, session_id=None, hive=None, quiet=True,
-         from_now=False):
+         from_now=False, call_id=None):
     """The one entry point (CLI, hook, session.py finalize). -> {"saved": ...} or
     {"skipped": why}; never raises for a missing transcript."""
     sid = session_id or os.environ.get("CLAUDE_CODE_SESSION_ID")
@@ -1029,7 +963,7 @@ def save(session_dir=None, transcript=None, session_id=None, hive=None, quiet=Tr
         return emit({"skipped": f"not a session id: {sid[:40]!r}"}, quiet)
     if not hive and not (session_dir and os.path.isdir(session_dir)):
         return emit({"skipped": f"no session folder {session_dir!r}"}, quiet)
-    sid, transcript, problem = whose(session_id, transcript)     # a subagent saves its own
+    sid, transcript, problem = whose(session_id, transcript, call_id)   # a subagent: its own
     if problem:
         return emit({"skipped": problem}, quiet)
     if not transcript:
@@ -1302,6 +1236,10 @@ def main(argv=None):
     ap.add_argument("--remember", action="store_true",
                     help="only record that this conversation now works on this session (a "
                          "switch, when it was working on another)")
+    ap.add_argument("--call-id", metavar="TOKEN",
+                    help="a fresh token (8+ letters and digits) written into this command line: "
+                         "it tells which conversation -- the main one or a subagent's -- is "
+                         "making the call. Needed while subagents of the conversation are at work")
     ap.add_argument("--from-now", action="store_true",
                     help="this session's part of the conversation starts HERE, not at the "
                          "skill's first load: for a conversation about several clients")
@@ -1316,7 +1254,7 @@ def main(argv=None):
     try:
         if a.remember:
             got, warn = remember(a.session, a.hive, a.session_id, a.transcript,
-                                 from_now=a.from_now)
+                                 from_now=a.from_now, call_id=a.call_id)
             out = ({"remembered": True, "entry": got} if got else
                    {"skipped": warn or "not a Claude Code session (CLAUDE_CODE_SESSION_ID is "
                                        "not set)"})
@@ -1325,7 +1263,7 @@ def main(argv=None):
             emit(out, a.quiet)
             return 0
         save(a.session, a.transcript, a.session_id, a.hive, quiet=a.quiet,
-             from_now=a.from_now)
+             from_now=a.from_now, call_id=a.call_id)
     except Exception as e:                    # never fail a step over this
         emit({"skipped": f"{type(e).__name__}: {e}"}, a.quiet)
     return 0

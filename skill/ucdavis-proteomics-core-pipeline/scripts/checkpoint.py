@@ -155,7 +155,7 @@ def cmd_status(a):
     # and never moves one that runs another (save_transcript.remember).
     try:
         import save_transcript
-        save_transcript.remember(a.session, switch=a.resume)
+        save_transcript.remember(a.session, switch=a.resume, call_id=getattr(a, "call_id", None))
     except Exception:
         pass                    # never a reason to fail a status query
     data = _load(a.session)
@@ -260,6 +260,10 @@ def main():
 
     s = sub.add_parser("status", help="re-query SLURM and report what is left")
     s.add_argument("--session", required=True)
+    s.add_argument("--call-id", metavar="TOKEN",
+                   help="a fresh token (8+ letters and digits) written into this command line, "
+                        "for the transcript hook's record (save_transcript.py): it tells which "
+                        "conversation is running it while subagents are at work")
     s.add_argument("--resume", action="store_true",
                    help="this conversation now resumes this analysis (its transcript is saved "
                         "there); without it, a status query changes nothing")

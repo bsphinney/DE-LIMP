@@ -492,7 +492,8 @@ def do_init(a):
     try:
         import save_transcript
         entry, warn = save_transcript.remember(session_dir,
-                                               from_now=getattr(a, "transcript_from_now", False))
+                                               from_now=getattr(a, "transcript_from_now", False),
+                                               call_id=getattr(a, "call_id", None))
         if entry:
             transcript = dict({"recorded": True}, **({"note": warn} if warn else {}))
         elif warn:
@@ -758,7 +759,7 @@ def podcast_share_step(p, man):
         {"OK": man.ok, "SKIPPED": man.skip}.get(got[0], man.info)(name, got[1])
 
 
-def conversation_step(p, man):
+def conversation_step(p, man, call_id=None):
     """The analysis conversation (save_transcript.py): this Claude Code conversation saved,
     redacted, into logs/conversation/ beside any saved earlier (a resume, a new chat, a HIVE
     session saved from the laptop). Core-internal: deliver never ships it and the zip leaves it
@@ -770,7 +771,7 @@ def conversation_step(p, man):
     name = "Analysis conversation (logs/conversation)"
     try:
         import save_transcript
-        got = save_transcript.save(p["session_dir"])
+        got = save_transcript.save(p["session_dir"], call_id=call_id)
         n = save_transcript.saved_count(p["session_dir"])
     except Exception as e:                      # recorded, never swallowed
         man.skip(name, f"{type(e).__name__}: {e}")
@@ -853,7 +854,7 @@ def do_finalize(a):
                 man.skip("Deposit package (output/DATA_SUBMISSION)", f"{type(e).__name__}: {e}")
         report_pdf_step(p, man)
         podcast_share_step(p, man)             # before the README, which lists it
-        conversation_step(p, man)
+        conversation_step(p, man, getattr(a, "call_id", None))
     registry, registry_note = _registry_lookup(p["session_dir"])
     docs = _write_docs(session_docs, p, man, registry, registry_note,
                        pending=("manifest",))        # MANIFEST.txt is written right below
@@ -1231,6 +1232,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
     i = sub.add_parser("init", help="scaffold a session directory and print canonical paths")
+    i.add_argument("--call-id", metavar="TOKEN",
+                   help="a fresh token (8+ letters and digits) written into this command line, "
+                        "for save_transcript.py: it tells which conversation -- the main one or "
+                        "a subagent's -- is running it. Needed while subagents are at work")
     i.add_argument("--transcript-from-now", action="store_true",
                    help="this analysis's part of the conversation starts now, not at the "
                         "skill's first load (a conversation about several clients)")
@@ -1260,6 +1265,10 @@ def main():
     f.add_argument("--dir", required=True, help="the session directory")
     f.add_argument("--reanalysis-of", default="", help="prior session dir to diff against (auto-detected if omitted)")
     f.add_argument("--zip", action="store_true", help="also produce <session>.zip")
+    f.add_argument("--call-id", metavar="TOKEN",
+                   help="a fresh token (8+ letters and digits) written into this command line, "
+                        "for save_transcript.py: it tells which conversation -- the main one or "
+                        "a subagent's -- is running it. Needed while subagents are at work")
     f.add_argument("--no-deposit", action="store_true",
                    help="skip the repository-deposit package (output/DATA_SUBMISSION); the "
                         "publication Methods are still ensured")
