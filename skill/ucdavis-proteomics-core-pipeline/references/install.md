@@ -38,7 +38,11 @@ Bash or a terminal, one line at a time:
 git -C ~/.claude/plugins/marketplaces/ucdavis-proteomics-core pull --ff-only
 claude plugin update ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core
 ```
-then `/reload-plugins`. The `git pull` is what took that laptop from 2.10.0 to 2.11.2. Without
+then `/reload-plugins`. The `git pull` is what took that laptop from 2.10.0 to 2.11.2.
+**A computer on 2.11.2 or older needs these two lines once, by hand.** Its own step 0 offers
+only `claude plugin update` (`--update` arrived in 2.12.0), which on a laptop without a GitHub
+SSH key compares against the old catalogue and stays put: staff were still on 2.11.2 on
+2026-10-16, two releases later. Without
 it, when Claude Code cannot refresh the catalogue, `claude plugin update` compares against the
 old one, so its "already at the latest version" can be wrong. (With `CLAUDE_CONFIG_DIR` set, the
 catalogue is under that folder instead of `~/.claude`.) `--update` also sets

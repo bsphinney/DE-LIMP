@@ -198,41 +198,13 @@ because the environment does not carry over from one command to the next.
 
 Tell the user which mode you're using and why. → full runbook: `references/access.md`.
 
-### 0. One-time setup (install everything that's missing)
-```
-bash scripts/setup.sh
-source ~/.proteomics-pipeline/activate.sh        # puts R, python, sage on PATH
-```
-`setup.sh` installs micromamba (no admin), then a conda env with R + limpa +
-limma + arrow + Sage + Python/pyarrow, and writes `~/.proteomics-pipeline/setup.json`.
-It also provisions **.NET 8** (`scripts/ensure_dotnet8.sh`, Linux and macOS: one root in
-`~/.proteomics-pipeline/dotnet8` with Microsoft.NETCore.App ≥ 8.0.17 + AspNetCore, which
-DIA-NN's `.raw` reader, the Core's ThermoRawFileParser and the resolution reader all use)
-and installs `thermorawfileparser`, `pythonnet` and `pandas` into the env in their own step,
-so an existing env gets them on a re-run. Neither step is fatal — `setup.json`'s
-`dotnet8.note` and `notes` say what did not happen.
-Sourcing `activate.sh` makes every later step use those interpreters — **source it
-in the same shell before running anything below** (or prefix later commands).
-
-Read `setup.json` and **gate on `ready_for`**:
-- `ready_for.de` false → DE can't run; re-run `setup.sh` and report any `notes`. (A SILAC
-  ratio analysis, `run_silac.R`, needs only limma, data.table, arrow and jsonlite in that R.)
-- `limpa.ok` false (setup.sh then ends `ERROR: limpa ...` and exits 1) → the env's limpa is
-  older than 1.4.0 (bioconda has only 1.2.5; setup.sh installs 1.4 from Bioconductor 3.23):
-  run the fix it prints where there is internet. run_de.R still reads the report with limpa
-  1.2.x and records that it did (`references/environment.md`).
-- `ready_for.dia` false → on macOS this means Docker is missing. Run
-  `bash scripts/build_diann_docker.sh` and relay its instructions (install Docker
-  Desktop, open it once), then continue. Don't silently fall back to a DDA engine.
-- `ready_for.dda` false → Sage/R not ready, or (macOS) msconvert is unavailable for
-  `.d`/`.raw` → mzML; tell the user and, if their data is DIA, route to DIA-NN.
-- `ready_for.thermo_raw` false **and the input has Thermo `.raw`** → fix it before step 2:
-  do exactly what `thermo_raw_reader.note` says (usually re-run `setup.sh`, or `bash
-  scripts/ensure_dotnet8.sh` where there is internet), then `setup.sh --check` until it is
-  true. `ready_for.dia` does not cover this: without a working parser every `.raw` is
-  `unknown` and a DIA search falls back to 380–980. Irrelevant for `.d`/mzML-only input.
-- `thermo_raw_reader.resolution_reader.ready` false only means step 2 cannot read the
-  Orbitrap resolution and the user will be asked for it; its `note` is the fix.
+### 0. Is this skill current? Then one-time setup — EVERY conversation, start AND resume
+**The version check comes first, in every conversation: also when this computer is already set up
+(the setup below then only verifies), also on a resume (0c), and again before step 7 and step 12
+(below).** Staff reports of 2026-10-16 still came from 2.11.2, the day after 2.12.0 and
+2.13.0 were released: conversations begun before a release ran on into the next day without
+checking again, and the check sat in the middle of a step titled "One-time setup", easy to skip
+on a computer already set up.
 
 **Every mode, first: is this computer's skill behind GitHub `main`?** One HTTPS read of
 `main`'s `plugin.json` (bash and curl, which Git Bash has; no Python, no GitHub SSH key):
@@ -318,6 +290,42 @@ Then, by exit code:
 Only `hive_remote` runs `--check-hive`. Without `--mode hive_remote`, a computer with no HIVE
 login skips it silently; the release is compared only for Core accounts (→ `references/access.md`).
 
+**Then the one-time setup (install everything that's missing):**
+```
+bash scripts/setup.sh
+source ~/.proteomics-pipeline/activate.sh        # puts R, python, sage on PATH
+```
+`setup.sh` installs micromamba (no admin), then a conda env with R + limpa +
+limma + arrow + Sage + Python/pyarrow, and writes `~/.proteomics-pipeline/setup.json`.
+It also provisions **.NET 8** (`scripts/ensure_dotnet8.sh`, Linux and macOS: one root in
+`~/.proteomics-pipeline/dotnet8` with Microsoft.NETCore.App ≥ 8.0.17 + AspNetCore, which
+DIA-NN's `.raw` reader, the Core's ThermoRawFileParser and the resolution reader all use)
+and installs `thermorawfileparser`, `pythonnet` and `pandas` into the env in their own step,
+so an existing env gets them on a re-run. Neither step is fatal — `setup.json`'s
+`dotnet8.note` and `notes` say what did not happen.
+Sourcing `activate.sh` makes every later step use those interpreters — **source it
+in the same shell before running anything below** (or prefix later commands).
+
+Read `setup.json` and **gate on `ready_for`**:
+- `ready_for.de` false → DE can't run; re-run `setup.sh` and report any `notes`. (A SILAC
+  ratio analysis, `run_silac.R`, needs only limma, data.table, arrow and jsonlite in that R.)
+- `limpa.ok` false (setup.sh then ends `ERROR: limpa ...` and exits 1) → the env's limpa is
+  older than 1.4.0 (bioconda has only 1.2.5; setup.sh installs 1.4 from Bioconductor 3.23):
+  run the fix it prints where there is internet. run_de.R still reads the report with limpa
+  1.2.x and records that it did (`references/environment.md`).
+- `ready_for.dia` false → on macOS this means Docker is missing. Run
+  `bash scripts/build_diann_docker.sh` and relay its instructions (install Docker
+  Desktop, open it once), then continue. Don't silently fall back to a DDA engine.
+- `ready_for.dda` false → Sage/R not ready, or (macOS) msconvert is unavailable for
+  `.d`/`.raw` → mzML; tell the user and, if their data is DIA, route to DIA-NN.
+- `ready_for.thermo_raw` false **and the input has Thermo `.raw`** → fix it before step 2:
+  do exactly what `thermo_raw_reader.note` says (usually re-run `setup.sh`, or `bash
+  scripts/ensure_dotnet8.sh` where there is internet), then `setup.sh --check` until it is
+  true. `ready_for.dia` does not cover this: without a working parser every `.raw` is
+  `unknown` and a DIA search falls back to 380–980. Irrelevant for `.d`/mzML-only input.
+- `thermo_raw_reader.resolution_reader.ready` false only means step 2 cannot read the
+  Orbitrap resolution and the user will be asked for it; its `note` is the fix.
+
 In `hive_remote` the toolchain lives on HIVE, so run it there instead (the laptop needs none
 of it): `bash scripts/hive_exec.sh 'bash ~/proteomics-pipeline/scripts/setup.sh'`, and read
 `~/.proteomics-pipeline/setup.json` on HIVE the same way.
@@ -348,6 +356,11 @@ any); carry on.
   unread, and writes nothing then: exit 2, relay its `say`.
 - **Check again** (one line each) just before step 7 submits a search and just before step 12
   finalizes: notes can arrive during a long session. → `references/notes.md`.
+  **The version too**, at the same two points: `bash scripts/skill_version.sh --check-update`
+  (a release can land during a long session). Exit 3 → say in one line which version GitHub
+  `main` ships and ask whether to update before going on; on yes, `--update`, then
+  `/reload-plugins`, then pick the analysis up as a resume (0c), where `--check-hive` puts the
+  new copy on HIVE. Never update without asking. Exit 0 or 5 → carry on (5: one line).
 
 This step is idempotent — on a machine that's already set up it just verifies and
 returns in seconds. → detail: `references/install.md`.
@@ -363,8 +376,9 @@ decides how tools are acquired and whether to submit via SLURM.
 ### 0c. Is this a RESUME? — CHECK THIS BEFORE STARTING ANYTHING
 A cluster search runs for hours and the user **will** close their laptop. The SLURM
 jobs survive that; the conversation does not. So before doing any work, check whether
-an earlier session already submitted something (step 0's notes check runs on a resume
-too, with `--session <dir>` once the session is found):
+an earlier session already submitted something (step 0's version check,
+`skill_version.sh --check-update` and in `hive_remote` `--check-hive`, runs on a resume too,
+first; then its notes check, with `--session <dir>` once the session is found):
 ```
 python3 scripts/checkpoint.py find --base <where results live>   # e.g. ~ or the project dir
 python3 scripts/checkpoint.py status --session <session dir> --resume   # live sacct re-query
