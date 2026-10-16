@@ -43,6 +43,8 @@ ER_BACKGROUND = ("HSPA5", "HSP90B1", "CANX", "CALR", "P4HB", "PDIA3", "PDIA4", "
 # measured in no compared group, so not tested -- 2.12.0).
 # They name the tiers; what they mean is quoted from de_provenance.json when the run recorded it.
 EVIDENCE = ("measured in both", "presence call", "partly", "not measured in either group")
+# figures.json types the brief places by name; any other is placed by its caption
+PLACED_TYPES = ("volcano", "pca", "qc", "heatmap", "violin", "pvalue")
 
 
 def submission_brief(w, source):
@@ -275,6 +277,14 @@ def main():
     zero_word = ("missing" if (prov.get("detection_matrix") or {}).get("zero_means") == "missing"
                  else "inferred")
 
+    # A pipeline whose rows are not run_de.R's (run_silac.R: ratios measured in both channels)
+    # says how to read them; the brief then leaves out the measured-vs-inferred tiers, the CVs
+    # and the tiered next steps, which describe run_de.R's tables (rule 1: from the record).
+    own_reading = prov.get("evidence_reading") if isinstance(prov.get("evidence_reading"), str) else None
+    own_steps = [x for x in (prov.get("next_steps") or []) if isinstance(x, str) and x.strip()]
+    spread = prov.get("spread") if isinstance(prov.get("spread"), str) else None
+    de_cols_rec = prov.get("de_columns") if isinstance(prov.get("de_columns"), dict) else {}
+    smx = prov.get("sample_matrix") if isinstance(prov.get("sample_matrix"), dict) else {}
     desc_line = prov.get("display_label") or "the configured quantification + limma pipeline"
     rollup = prov.get("rollup_method", "")
     de_engine = prov.get("de_engine", "")
@@ -306,6 +316,10 @@ def main():
     embed = [f for f in figs if f not in appendix]
     legacy_pv = [f for f in embed if f["file"].startswith("pvalue_")]
 
+    # the QC figures this run drew, by type -- never one it did not (a SILAC run has no PCA)
+    types = {f.get("type") for f in embed}
+    qc_named = (["PCA"] if "pca" in types else []) + (
+        [("detected-vs-inferred" if complete else "per-sample counts")] if "qc" in types else [])
     has_qc = bool(a.qc and os.path.exists(a.qc))
     has_gsea = bool(a.gsea and os.path.exists(a.gsea))
     is_dia = acq == "DIA" or engine == "diann"
@@ -344,7 +358,8 @@ def main():
         n_items, were = _count_of(cont.get("n_precursors"), cont)
         w(f"- Contaminants: {n_items} mapping to a {cont.get('tag')} "
           f"entry {were} removed before quantification ({cont.get('n_protein_groups')} contaminant "
-          f"protein groups); they are NOT in the DE tables or the expression matrix.")
+          f"protein groups); they are NOT in the DE tables or "
+          + (f"`{smx['file']}`." if smx.get("file") else "the expression matrix."))
     elif cont.get("policy") == "kept":
         w(f"- Contaminants: KEPT (--keep-contaminants) — {cont.get('n_protein_groups')} "
           f"{cont.get('tag')} protein groups are in the DE tables; call any that are "
@@ -385,10 +400,15 @@ def main():
         cov_rec = prov.get("covariates") if isinstance(prov.get("covariates"), dict) else {}
         for warn in cov_rec.get("warnings") or []:
             w(f"- **Covariate caveat (say this in Data Quality Notes):** {warn}")
+    qcols, qcuts = prov.get("q_columns"), prov.get("q_cutoffs")
+    if (isinstance(qcols, list) and isinstance(qcuts, list) and qcols and len(qcols) == len(qcuts)
+            and all(isinstance(v, (int, float)) for v in qcuts)):
+        id_fdr = ", ".join(f"{c} ≤ {v:g}" for c, v in zip(qcols, qcuts))
+    else:
+        id_fdr = f"q ≤ {q_cut:g}" if q_cut is not None else "not recorded"
     if adjp_rec is not None:
         w(f"- Significance rule: adj.P.Val < {adjp:g} (Benjamini-Hochberg within each contrast) "
-          f"— the adjusted p-value ALONE (identification FDR: "
-          + (f"q ≤ {q_cut:g}" if q_cut is not None else "not recorded") + "). "
+          f"— the adjusted p-value ALONE (identification FDR: {id_fdr}). "
           "**No fold-change filter is applied.**"
           + (f" |log2FC| = {lfc:g} ({2 ** float(lfc):.3g}-fold) is drawn on the volcano as a "
              f"reference line only." if lfc is not None else ""))
@@ -436,18 +456,29 @@ def main():
     de_col_desc = dm_rec.get("de_columns") if isinstance(dm_rec.get("de_columns"), dict) else {}
     for f in de_files:
         own = [c for c in heads[f] if c.startswith("Detected_")]
+        if de_cols_rec:              # the pipeline's own columns (run_silac.R de_columns)
+            w(f"- `tables/{f}` — DE results for one comparison; its columns are described below.")
+            continue
         w(f"- `tables/{f}` — DE results for one comparison: Protein.Group, logFC, "
           "AveExpr, t, P.Value, adj.P.Val (BH within the contrast), B, gene annotation"
           + (", PropObs/NPeptides (limpa)" if "PropObs" in heads[f] else "")
           + (f", per-group detection {', '.join(f'`{c}`' for c in own)} (k/n samples measured)"
              if own else "")
           + (", `Evidence`" if "Evidence" in heads[f] else "") + ".")
+    if de_cols_rec:
+        w("  The DE tables' columns, as recorded in `de_provenance.json` (`de_columns`):")
+        for col, desc in de_cols_rec.items():
+            w(f"  - `{col}`: {desc}")
     for col, desc in (("Detected_<group>", de_col_desc.get("Detected_<group>")),
                       ("Evidence", de_col_desc.get("Evidence"))):
         if desc and (det_cols if col.startswith("Detected_") else has_evidence):
             w(f"  - `{col}`: {desc} (as recorded in `de_provenance.json`).")
-    w("- `tables/Expression_Matrix.csv` — log2 protein abundance per sample"
-      + (" (complete: every cell has a value, measured OR inferred)." if complete else "."))
+    if os.path.exists(os.path.join(a.de_dir, "Expression_Matrix.csv")) or not smx:
+        w("- `tables/Expression_Matrix.csv` — log2 protein abundance per sample"
+          + (" (complete: every cell has a value, measured OR inferred)." if complete else "."))
+    if smx.get("file"):
+        w(f"- `tables/{smx['file']}` — {smx.get('values') or 'per-sample values'}"
+          + (f" (the samples: `tables/{smx['samples']}`)" if smx.get("samples") else "") + ".")
     if has_detmat:
         w(f"- `tables/Detection_Matrix.csv` — per protein x sample: precursors observed; "
           f"**0 = {zero_word}** (not measured in that sample). Same rows and columns as the "
@@ -489,56 +520,70 @@ def main():
     w("Compute everything you cite directly from these files:")
     w(f"- significant proteins per contrast (adj.P.Val < {adjp_txt} only) and the up/down split;")
     w("- the top up/down proteins per contrast **ranked by adj.P.Val (ties by P.Value) — never "
-      "by |logFC|**: where a group was never measured, the largest fold changes are detection "
-      "events set by the missing-value model, not the strongest effects;")
+      "by |logFC|**" + (";" if own_reading else
+                        ": where a group was never measured, the largest fold changes are "
+                        "detection events set by the missing-value model, not the strongest "
+                        "effects;"))
     w("- proteins significant in ≥2 contrasts;")
-    w("- reproducibility (CV) per group — on the **linear** scale (2^value), from **measured "
-      "values only** (Detection_Matrix.csv > 0 for that protein and sample); skip a group with "
-      "fewer than 2 measured values, and call a protein with no measured value in a group "
-      "*all-inferred* there. Never compute a CV from inferred values: a group never measured "
-      "gets near-identical model values, which reads as CV ≈ 0 — \"most stable\" — when nothing "
-      "was measured"
-      + ("." if has_detmat else ". **Detection_Matrix.csv is not attached, so you cannot tell "
-                                "measured from inferred: do not report CVs as reproducibility.**"))
+    if spread:
+        w(f"- reproducibility: {spread}.")
+    else:
+        w("- reproducibility (CV) per group — on the **linear** scale (2^value), from **measured "
+          "values only** (Detection_Matrix.csv > 0 for that protein and sample); skip a group "
+          "with fewer than 2 measured values, and call a protein with no measured value in a "
+          "group *all-inferred* there. Never compute a CV from inferred values: a group never "
+          "measured gets near-identical model values, which reads as CV ≈ 0 — \"most stable\" — "
+          "when nothing was measured"
+          + ("." if has_detmat else ". **Detection_Matrix.csv is not attached, so you cannot "
+                                    "tell measured from inferred: do not report CVs as "
+                                    "reproducibility.**"))
     w("Use gene names where available; a protein with no gene name goes by its UniProt entry "
-      "name (`Protein.Names`, e.g. HVM51_MOUSE), not its accession, as the HTML report's "
+      "name (`Protein.Names`, e.g. HVM51_MOUSE)"
+      + (", and with neither (a database that is not UniProt's) by its `Description`"
+         if "Description" in de_cols else "")
+      + ", not its accession, as the HTML report's "
       "tables do. **Never fabricate a value, protein, pathway, or citation you cannot ground "
       "in the data or established biology.**")
     w("")
-    # measured vs inferred: how to tier, and what PropObs is NOT
-    w("## Measured vs inferred — how to tier hits")
-    if "PropObs" in de_cols:
-        w(f"- `PropObs`: {DE_COLUMNS['PropObs']}. It is limpa's rowMeans(n.observations) / "
-          "NPeptides over **all runs of the study** — study-wide, not per comparison. **Never "
-          "tier hits by PropObs and never describe it as detection in either group of a "
-          "comparison.**")
+    # measured vs inferred: how to tier, and what PropObs is NOT -- or, for a pipeline that
+    # records its own rule (run_silac.R evidence_reading), that rule
     ev_all, ev_none, ev_part = EVIDENCE[0], EVIDENCE[1], f"{EVIDENCE[2]} {zero_word}"
-    source = ("the DE tables' `Evidence` column" if has_evidence else
-              "the DE tables' `Detected_<group>` columns (k/n samples measured)" if det_cols else
-              "Detection_Matrix.csv + conditions.csv (count each group's runs with the protein "
-              "measured, > 0)" if has_detmat else None)
-    recorded_ev = has_evidence and bool(de_col_desc.get("Evidence"))
-    if source is None:
-        w("- Per-group detection is not available in this run — say so rather than guessing, "
-          "and do not sort hits into measured and detection-event tiers.")
+    if own_reading:
+        w("## How to read a hit — as the pipeline records it")
+        w(f"- {own_reading}")
     else:
-        w(f"- Tier each hit by **per-group detection**, from {source}"
-          + ("" if has_evidence else
-             ", sorted into the three categories run_de.R writes as `Evidence`") + ":")
-        w(f"  - **{ev_all}**"
-          + ("" if recorded_ev else " (measured in every run of every group in the contrast)")
-          + ": the fold change is a measured ratio;")
-        w(f"  - **{ev_none}**"
-          + ("" if recorded_ev else " (never measured in at least one group)")
-          + ": a detection event — present vs absent. Report presence, not the size of the fold "
-            f"change (the absent side is {zero_word});")
-        w(f"  - **{ev_part}**" + ("" if recorded_ev else " (every other case)")
-          + ": a measured ratio with gaps — give each group's k/n.")
-        if has_evidence and prov.get("not_measured"):
-            w(f"  - **{EVIDENCE[3]}**: measured only in other groups of the study, so NOT TESTED "
-              "in that comparison (no logFC or p-value; left out of its BH correction). Never a "
-              "hit, never a 'tested' protein: count tested proteins per comparison as the rows "
-              "with a P.Value (`de_provenance.json` de_tables n_tested).")
+        w("## Measured vs inferred — how to tier hits")
+        if "PropObs" in de_cols:
+            w(f"- `PropObs`: {DE_COLUMNS['PropObs']}. It is limpa's rowMeans(n.observations) / "
+              "NPeptides over **all runs of the study** — study-wide, not per comparison. **Never "
+              "tier hits by PropObs and never describe it as detection in either group of a "
+              "comparison.**")
+        source = ("the DE tables' `Evidence` column" if has_evidence else
+                  "the DE tables' `Detected_<group>` columns (k/n samples measured)" if det_cols else
+                  "Detection_Matrix.csv + conditions.csv (count each group's runs with the protein "
+                  "measured, > 0)" if has_detmat else None)
+        recorded_ev = has_evidence and bool(de_col_desc.get("Evidence"))
+        if source is None:
+            w("- Per-group detection is not available in this run — say so rather than guessing, "
+              "and do not sort hits into measured and detection-event tiers.")
+        else:
+            w(f"- Tier each hit by **per-group detection**, from {source}"
+              + ("" if has_evidence else
+                 ", sorted into the three categories run_de.R writes as `Evidence`") + ":")
+            w(f"  - **{ev_all}**"
+              + ("" if recorded_ev else " (measured in every run of every group in the contrast)")
+              + ": the fold change is a measured ratio;")
+            w(f"  - **{ev_none}**"
+              + ("" if recorded_ev else " (never measured in at least one group)")
+              + ": a detection event — present vs absent. Report presence, not the size of the fold "
+                f"change (the absent side is {zero_word});")
+            w(f"  - **{ev_part}**" + ("" if recorded_ev else " (every other case)")
+              + ": a measured ratio with gaps — give each group's k/n.")
+            if has_evidence and prov.get("not_measured"):
+                w(f"  - **{EVIDENCE[3]}**: measured only in other groups of the study, so NOT TESTED "
+                  "in that comparison (no logFC or p-value; left out of its BH correction). Never a "
+                  "hit, never a 'tested' protein: count tested proteins per comparison as the rows "
+                  "with a P.Value (`de_provenance.json` de_tables n_tested).")
     w("")
     if pulldown:
         w("## Pull-down design — enrichment over a control")
@@ -578,11 +623,22 @@ def main():
         for fig in embed:
             w(f"- `{fdir_rel}/{fig['file']}` ({fig['type']}) — {fig['caption']}")
         w("")
-        w("Placement: each volcano in **Key Findings Per Comparison**; PCA + "
-          + ("detected-vs-inferred" if complete else "per-sample counts")
-          + " in **QC Assessment**; the heatmap in "
-          + ("**Specificity**" if pulldown else "**Cross-Comparison Biomarkers**")
-          + " or **Biological Interpretation**.")
+        # where each figure goes, for the figures this run drew (figures.json types)
+        place = []
+        if "volcano" in types:
+            place.append("each volcano in **Key Findings Per Comparison**")
+        if qc_named:
+            place.append(" + ".join(qc_named) + " in **QC Assessment**")
+        if "heatmap" in types:
+            place.append("the heatmap in "
+                         + ("**Specificity**" if pulldown else "**Cross-Comparison Biomarkers**")
+                         + " or **Biological Interpretation**")
+        others = [f["file"] for f in embed if f["type"] not in PLACED_TYPES]
+        if others:
+            place.append("the others (" + ", ".join(f"`{x}`" for x in others) + ") where their "
+                         "captions say they belong: a channel, mixing or QC figure in **QC "
+                         "Assessment**, a comparison's figure with that comparison")
+        w("Placement: " + "; ".join(place) + ".")
         if any(f["type"] == "violin" for f in embed):
             w(f"Place each `{fdir_rel}/violin_top_<contrast>.png` in that comparison's section, "
               "right after its volcano. Call it the **top-protein plot**: a group with few runs "
@@ -630,19 +686,24 @@ def main():
       "the experiment's quality, depth (proteins measured, not merely quantified), and scope.")
     w("")
     w("### QC Assessment")
-    w("Evaluate technical quality. Use the PCA and "
-      + ("detected-vs-inferred (per-sample depth)" if complete else "per-sample protein-count")
-      + " figures, and "
-      "the QC metrics if present. Comment on consistency of identifications across "
-      "replicates and groups, whether replicates cluster, and flag any outlier samples or "
+    qc_figs = [f["file"] for f in embed if f["type"] in ("pca", "qc")
+               or (f["type"] not in PLACED_TYPES and "channel" in f["type"])]
+    w("Evaluate technical quality. Use "
+      + (("the " + ", ".join(f"`{x}`" for x in qc_figs) + " figure(s), and ") if qc_figs
+         else "")
+      + "the QC metrics if present. Comment on consistency of identifications across "
+      "replicates and groups"
+      + (", whether replicates cluster" if "pca" in types else "")
+      + ", and flag any outlier samples or "
       "systematic biases (e.g. a group quantifying far fewer proteins). State clearly "
       "whether the data are fit for differential analysis.")
     w("")
     w("### Key Findings Per Comparison")
     w("For each comparison: embed its volcano plot, then highlight the top up- and "
       "down-regulated proteins **ranked by adj.P** (use gene names; give logFC, adj.P and each "
-      "group's detection, k/n measured). Say which are detection events. Note any comparison "
-      "with unusually few or many hits"
+      "group's detection, k/n measured)."
+      + ("" if own_reading else " Say which are detection events.")
+      + " Note any comparison with unusually few or many hits"
       + (f", and name it if its p-value histogram (*{APPENDIX}*) looks miscalibrated — no "
          "p-value figure in this section." if appendix or legacy_pv else "."))
     w("")
@@ -666,11 +727,16 @@ def main():
           "so.)")
         w("")
         w("### High-Confidence Findings")
-        w("Pick the strongest findings by the tier rule above — significant AND measured in "
-          "both groups first — not by fold change. Where you quote reproducibility, use the CV "
-          "from measured values only. Discuss known functions and pathway involvement of the "
-          "genes you recognize, and state for each whether it is a measured change or a "
-          "detection event.")
+        if own_reading:
+            w("Pick the strongest findings by the reading rule above, not by fold change"
+              + (f"; where you quote reproducibility, {spread}" if spread else "")
+              + ". Discuss known functions and pathway involvement of the genes you recognize.")
+        else:
+            w("Pick the strongest findings by the tier rule above — significant AND measured in "
+              "both groups first — not by fold change. Where you quote reproducibility, use the "
+              "CV from measured values only. Discuss known functions and pathway involvement of "
+              "the genes you recognize, and state for each whether it is a measured change or a "
+              "detection event.")
         w("")
     if has_gsea:
         w("### Pathway & Gene Set Enrichment Analysis")
@@ -771,8 +837,11 @@ def main():
       "problem with an intuitive coin-flip example.")
     w("  - **volcano plot**: why it's volcano-shaped and how to read it (x = effect size, "
       "y = significance).")
-    w("  - **coefficient of variation (CV)**: SD / mean on the linear scale, from measured "
-      "values only — lower is more reproducible; an inferred value is not a measurement.")
+    if spread:
+        w(f"  - **reproducibility**: {spread}.")
+    else:
+        w("  - **coefficient of variation (CV)**: SD / mean on the linear scale, from measured "
+          "values only — lower is more reproducible; an inferred value is not a measurement.")
     w("  - **normalization**: why raw intensities need correcting (sample loading differences) "
       "and, briefly, how this pipeline normalizes.")
     w("Keep the tone approachable and encouraging; define jargon when unavoidable.")
@@ -793,17 +862,23 @@ def main():
       "bundle (see `reproducibility/REPRODUCE.md`).")
     w("")
     w("### Next steps")
-    w("Close with what to do next, using this explicit tier rule (the detection categories "
-      "above), and name the proteins in each tier (top few by adj.P):")
-    w(f"1. **Follow up first** — significant and *{ev_all}*: a measured ratio.")
-    w(f"2. **Check the counts** — significant and *{ev_part}*: give each group's k/n; those "
-      "measured in most runs of both groups come first.")
-    w(f"3. **Confirm presence** — significant with a *{ev_none}*: a detection event; confirm "
-      "with an orthogonal method (western, targeted MS) before quoting a fold change"
-      + (" — for a pull-down, these are the interactor candidates, those seen in most bait "
-         "runs first." if pulldown else "."))
-    w("Whatever its tier, a hit measured in fewer than half the runs of every group is a lead "
-      "only.")
+    if own_steps:
+        w("Close with what to do next, using the pipeline's own tiers (as recorded in "
+          "`de_provenance.json`), and name the proteins in each (top few by adj.P):")
+        for i, step in enumerate(own_steps, 1):
+            w(f"{i}. {step.strip()}")
+    else:
+        w("Close with what to do next, using this explicit tier rule (the detection categories "
+          "above), and name the proteins in each tier (top few by adj.P):")
+        w(f"1. **Follow up first** — significant and *{ev_all}*: a measured ratio.")
+        w(f"2. **Check the counts** — significant and *{ev_part}*: give each group's k/n; those "
+          "measured in most runs of both groups come first.")
+        w(f"3. **Confirm presence** — significant with a *{ev_none}*: a detection event; confirm "
+          "with an orthogonal method (western, targeted MS) before quoting a fold change"
+          + (" — for a pull-down, these are the interactor candidates, those seen in most bait "
+             "runs first." if pulldown else "."))
+        w("Whatever its tier, a hit measured in fewer than half the runs of every group is a "
+          "lead only.")
     w("Then point the reader to `README.html` at the top of the results folder for where every "
       "file is and how to reuse them.")
     if a.instrument:

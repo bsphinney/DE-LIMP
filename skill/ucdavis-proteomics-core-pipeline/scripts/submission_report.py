@@ -619,6 +619,19 @@ def _binomial(name):
     return " ".join(cs._s(name).casefold().replace("(", " ").split()[:2])
 
 
+def same_species(a, b):
+    """Two organism names for one species: the same first two words, an abbreviated genus
+    ("S. enterica serovar Typhimurium LT2 (attenuated)") matching a spelled-out one
+    ("Salmonella enterica ... LT2") -- a form and its database once read as different organisms
+    for that."""
+    x, y = _binomial(a).split(), _binomial(b).split()
+    if len(x) < 2 or len(y) < 2 or x[1] != y[1]:
+        return False
+    abbr = lambda g: len(g) <= 2 and g.endswith(".")              # noqa: E731
+    return x[0] == y[0] or (abbr(x[0]) and y[0].startswith(x[0][0])) \
+        or (abbr(y[0]) and x[0].startswith(y[0][0]))
+
+
 def _organism_note(rec, p):
     org = rec.get("organism")
     if org is None:
@@ -639,7 +652,8 @@ def _organism_note(rec, p):
     taxa = {t for t in (fetch_fasta.alias_taxid(x) for x in parts) if t}
     names = {_binomial(fetch_fasta.ORGANISM_TAXIDS[t][0]) for t in taxa if t in fetch_fasta.ORGANISM_TAXIDS}
     if (f_tax and f_tax in taxa) or (f_org and (_binomial(f_org) in names
-                                                or _binomial(f_org) in _binomial(org))):
+                                                or _binomial(f_org) in _binomial(org)
+                                                or same_species(f_org, org))):
         return None
     db = f"{f_org or '?'}" + (f" (taxid {f_tax})" if f_tax else "")
     if taxa:

@@ -832,6 +832,18 @@ high_significance_note <- paste(
   "the channel assignment (a swapped label reverses a whole comparison) and the mixing (SILAC_channel_summary.csv);",
   "after median-centring, an even split of increases and decreases is built in.")
 sig_counts <- lapply(tables_rec, function(t) list(up = t$n_up, down = t$n_down, total = t$n_significant))
+# The contaminant step in run_de.R's record shape (contaminants.R contaminant_record): the brief,
+# AGENTS.md and the Methods' readers say what was removed from it, not "not recorded".
+n_cont_prec <- uniqueN(d_raw[is_cont & Run %in% ratio_asg$Run]$Precursor.Id)
+contaminants_rec <- list(
+  policy = if (n_cont_prec == 0) "none_present" else "removed", removed = n_cont_prec > 0,
+  tag = CONTAMINANT_TAG, tags = as.list(CONTAMINANT_TAGS), id_column = "Protein.Ids",
+  pattern = contaminant_regex(), unit = "precursors", unit_singular = "precursor",
+  unit_level = "precursor",
+  rule = sprintf("a precursor is a contaminant when any accession in Protein.Ids starts with %s -- applied by run_silac.R",
+                 paste0("'", CONTAMINANT_TAGS, "'", collapse = " or ")),
+  counted_after = "the runs in the design, before the q-value filters",
+  n_precursors = n_cont_prec, n_protein_groups = prep$counts$contaminant_protein_groups)
 input_sha256 <- tryCatch(if (requireNamespace("digest", quietly = TRUE))
   digest::digest(input, algo = "sha256", file = TRUE) else NA_character_, error = function(e) NA_character_)
 replay <- c("--input", normalizePath(input), "--design", normalizePath(design_path),
@@ -881,6 +893,26 @@ prov <- list(
     "median-centred within the sample; for the sample-quality panels and depth checks, not what was tested"),
     proteins_only_here = length(unlisted)),
   report_sections = report_sections, high_significance_note = high_significance_note,
+  contaminants = contaminants_rec,
+  # how the brief (analysis_prompt.py) tells the writer to read a hit -- in place of run_de.R's
+  # measured-versus-inferred tiers, CVs and next-step tiers, which do not apply to a ratio
+  evidence_reading = paste(
+    "Every tested protein group's logFC is a ratio measured inside each run, both channels",
+    "passing, in at least the comparison's minimum of replicates (`n_replicates`;",
+    "`Detected_<group>` gives k/n): there are no measured-versus-inferred tiers and no",
+    "missing-value model. A row whose `Evidence` reads 'ratio in k of n replicates: not tested'",
+    "has no p-value and is not a hit; count tested proteins as the rows with a P.Value. A protein",
+    "group detected in some channels and not in another has no ratio: it is in",
+    "`SILAC_channel_specific_detections.csv` as a detection pattern ('detected in X (k/n); not",
+    "detected in Y (0/n)') -- report it that way, never with a fold change or as a test result."),
+  next_steps = list(
+    "**Follow up first** -- significant, with at least two precursors behind every replicate's ratio (`min_precursors` >= 2).",
+    "**Check** -- significant but resting on a single precursor in at least one replicate (`min_precursors` = 1): confirm before quoting it.",
+    "**Confirm presence** -- the channel-specific detections: a detection pattern, not a test; confirm with an orthogonal method before calling a protein absent."),
+  spread = paste(
+    "a protein's reproducibility is the spread of its replicate ratios (the `centred_<replicate>`",
+    "columns), which limma's moderated variance summarises -- not a CV of intensities; do not",
+    "compute CVs from SILAC_sample_matrix.csv"),
   # the README's line for output/tables (session_docs.py reads it instead of run_de.R's)
   tables_summary = paste("one `DE_silac_*.csv` per comparison (median-centred log2 ratios, with the",
                          "uncentred ones), `SILAC_channel_specific_detections.csv`,",
