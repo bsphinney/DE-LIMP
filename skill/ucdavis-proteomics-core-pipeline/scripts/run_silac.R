@@ -544,6 +544,8 @@ has_gg <- requireNamespace("ggplot2", quietly = TRUE)
 has_repel <- requireNamespace("ggrepel", quietly = TRUE)
 ink <- "#22302b"; muted <- "#5b6661"; up_c <- "#b0472a"; dn_c <- "#2f6db3"; ns_c <- "#b9c2be"
 q_short <- paste(sprintf("%s <= %g", names(cutoffs), cutoffs), collapse = ", ")
+# A subtitle as lines that fit an 8-inch figure: the seven q-value filters ran off its edge
+wrap_subtitle <- function(x, width = 90) paste(strwrap(x, width), collapse = "\n")
 # the scatter: two comparisons over the same reference by default (M/L against H/L), and the
 # correlation their shared channel builds in, with its sign
 scatter_pair <- function() {
@@ -593,9 +595,9 @@ if (!has_gg) {
         scale_x_continuous(limits = xl) +
         labs(x = sprintf("log2 %s/%s, relative to the median detected protein", a$numerator, a$denominator),
              y = "-log10 p-value", title = sprintf("%s vs %s", a$numerator, a$denominator),
-             subtitle = sprintf("%s tested (ratio in >= %d of %d replicates); %s significant at adj. p < %g",
+             subtitle = wrap_subtitle(sprintf("%s tested (ratio in >= %d of %d replicates); %s significant at adj. p < %g",
                                 format(a$n_tested, big.mark = ","), a$min_replicates, a$n_replicates_available,
-                                format(a$n_significant, big.mark = ","), adjp_thr)) + th
+                                format(a$n_significant, big.mark = ","), adjp_thr))) + th
       if (nrow(lab)) g <- g + (if (has_repel) ggrepel::geom_text_repel(data = lab, aes(label = Label), size = 2.7,
                                                                          colour = ink, max.overlaps = 20)
                                else geom_text(data = lab, aes(label = Label), size = 2.7, colour = ink,
@@ -635,7 +637,7 @@ if (!has_gg) {
       scale_fill_manual(values = setNames(c("#6b7a74", dn_c, up_c, "#8c6bb1")[seq_along(groups)], groups), name = NULL) +
       scale_y_continuous(labels = function(v) format(v, big.mark = ",")) +
       labs(x = NULL, y = "Precursors", title = "Precursors identified in each channel",
-           subtitle = sprintf("%s, channel q <= %g", q_short, ch_q_cut)) + th
+           subtitle = wrap_subtitle(sprintf("%s, channel q <= %g", q_short, ch_q_cut))) + th
     ggsave(file.path(figdir, f), g, width = 8, height = 4.6, dpi = 200, bg = "white")
     fig_ok(f, "silac_channel_detections", sprintf(paste(
       "Precursors identified per run and channel (%s, channel q <= %g, contaminants removed)."),

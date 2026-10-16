@@ -715,6 +715,30 @@ class RunDeLeavesSilacResultsAlone(unittest.TestCase):
                 self.assertEqual(sorted(os.listdir(out)), before, "nothing was written")
 
 
+@unittest.skipUnless(RSCRIPT, "needs Rscript")
+class FigureText(unittest.TestCase):
+    def test_a_long_subtitle_is_wrapped_to_the_figure(self):
+        """#13: silac_channel_detections.png listed seven q-value filters in one subtitle line,
+        cut off at the figure's right edge."""
+        import re
+        src = open(os.path.join(SCRIPTS, "run_silac.R"), encoding="utf-8").read()
+        fn = re.search(r"^wrap_subtitle <- function.*$", src, re.M).group(0)
+        self.assertEqual(len(re.findall(r"subtitle = wrap_subtitle\(", src)), 2)
+        long = ("Q.Value <= 0.01, PG.Q.Value <= 0.05, Lib.Q.Value <= 0.01, Lib.PG.Q.Value <= 0.01, "
+                "Global.Q.Value <= 0.01, Global.PG.Q.Value <= 0.01, channel q <= 0.01")
+        with tempfile.NamedTemporaryFile("w", suffix=".R", delete=False) as fh:
+            fh.write(fn + "\ncat(wrap_subtitle(" + json.dumps(long) + "))\n")
+        try:
+            r = subprocess.run([RSCRIPT, fh.name], capture_output=True, text=True, timeout=60)
+        finally:
+            os.unlink(fh.name)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = r.stdout.split("\n")
+        self.assertGreater(len(lines), 1)
+        self.assertTrue(all(len(x) <= 90 for x in lines), lines)
+        self.assertEqual(" ".join(lines), long)
+
+
 class DesignRules(unittest.TestCase):
     def write(self, d, text):
         p = os.path.join(d, "design.csv")
