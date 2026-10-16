@@ -384,7 +384,7 @@ jobs survive that; the conversation does not. So before doing any work, check wh
 an earlier session already submitted something (step 0's notes check runs on a resume
 too, with `--session <dir>` once the session is found):
 ```
-python3 scripts/checkpoint.py find --base <where results live>   # e.g. ~ or the project dir
+python3 scripts/checkpoint.py find --base <the project folder>   # never ~ or a whole share
 python3 scripts/checkpoint.py status --session <session dir> --resume   # live sacct re-query
 ```
 `status` returns each stage's real state, whether the expected output file exists, and
@@ -764,7 +764,7 @@ submission, the same path locally and on HIVE (`~/core/PROT_0807`).
 | **2** | a human decision / hard gate — proposal files are still written | show the failing gates. `locate`: `unmatched_samples` (→ `--allow-partial` only if staff confirm those were not run), `choose_run` (→ re-injections: ONE `--reinjections latest|all`; collisions: `--choose <key>=<file>` each), `ambiguous_label` (→ staff decide: `--choose`, `--accept-ambiguous` or `--files-from`), `weak_ids` (→ `--choose`, or `--files-from`), `duplicate_ids` (→ `--choose <key>=<file>`, keys `KG1#1`/`KG1#2` from the gate), `duplicate_assignment` (→ staff pick the files, `--files-from`), `no_files`. `stage`: several folders, or one naming a different person or institution (→ `--service-dir`); a folder owned by another submission; `--apply` on a hard-failed locate. `deliver`: **not verified — do not share** (see 12b); **held by `qc_gate`** (step 8e) → a staff member reads `logs/qc_bracket.md` and records `qc_bracket.py ack` (or re-runs 8e when it says so) |
 | **3** | CoreOmics or the filesystem unreachable, auth failed, or the scripts directory is incomplete | a key problem: `core_submission.py check` names it and the fix; run where the data is (`fetch`/`bioshare` where the key is — `coreomics_runs_on`; `locate`/`stage`/`deliver` on HIVE); re-put the skill: `hive_exec.sh --put-skill` |
 | **4** | the files look like an **HT plate** | step 1a, `ht_manifest.py` |
-| **5** | delivery too big for the login node | `sbatch` the `deliver_job.sh` it wrote |
+| **5** | delivery too big for one interactive step (`--max-gb`, 5 GB) | `sbatch` the `deliver_job.sh` it wrote |
 
 → detail: `references/core-submissions.md`.
 
@@ -3119,7 +3119,9 @@ relative raw-data links inside the Flinders tree. **Links already in a share are
 touched** — `deliver` lists them as warnings.
 
 **On HIVE — always the dry run first** (file list, size, and any refusal), then the same
-command with `--apply`:
+command with `--apply`. `locate`, `stage` and `deliver` walk the shares, so on HIVE's login node
+each runs itself on a compute node (one blocking `srun`, its line printed first; HPC@UCD's
+`ucd-hpc` rules): it takes a minute longer to start, and you wait for it:
 ```
 python3 ~/proteomics-pipeline/scripts/core_submission.py deliver \
     --summary ~/core/PROT_0807/submission_summary.json --session "$S"

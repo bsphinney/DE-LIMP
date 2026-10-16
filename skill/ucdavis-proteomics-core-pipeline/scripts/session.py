@@ -1277,6 +1277,15 @@ def main():
                         "'Where this lives on HIVE' table is then about that location)")
     d.set_defaults(func=do_docs)
     a = ap.parse_args()
+    if a.cmd == "finalize":
+        # Methods, the Word copy, the PDF and a zip of the whole session: a compute node's work.
+        # On a cluster login node it runs itself again there (on_compute.py; HPC@UCD's ucd-hpc rules).
+        try:
+            import on_compute
+            on_compute.ensure_compute_node("session.py finalize builds the documents and zips the "
+                                           "session", minutes=60, mem="8G")
+        except ImportError:
+            pass                          # a partial scripts/ without on_compute.py: as before
     a.func(a)
 
 

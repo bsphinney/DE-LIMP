@@ -21,8 +21,10 @@ Usage
   # on reconnect — queries SLURM live and says what is left
   checkpoint.py status --session <dir>
 
-  # find interrupted runs anywhere under a directory
-  checkpoint.py find --base ~/            (or --base /quobyte/proteomics-grp/...)
+  # find interrupted runs under a directory: a project folder, never a whole share. It walks
+  # at most --max-depth (default 6) folders down, skips a search's per-run, raw-data and hidden
+  # folders, and on a cluster login node runs itself on a compute node (on_compute.py)
+  checkpoint.py find --base <project dir> [--max-depth N]
 """
 import argparse, json, os, subprocess, sys, glob, datetime
 
@@ -232,9 +234,31 @@ def cmd_status(a):
     print(json.dumps(out, indent=2))
 
 
+# Folders a session's .recovery.json is never in, and that hold thousands of entries: a search's
+# per-run files (quant, quant_step2/4, *_xic), raw data (raw/, *.d), temp, and hidden folders
+# (.cache, a conda root) -- which the recursive glob this replaced skipped as well.
+def _never_a_session(name):
+    n = name.lower()
+    return (name.startswith(".") or n in ("raw", "temp", "tmp", "xic") or n.startswith("quant")
+            or n.endswith(("_xic", ".d", ".raw")))
+
+
+def _recovery_files(base, max_depth):
+    """Every .recovery.json at most `max_depth` folders below `base` (base itself is depth 0)."""
+    base = os.path.abspath(os.path.expanduser(base))
+    top = base.rstrip(os.sep).count(os.sep)
+    for root, dirs, files in os.walk(base):
+        if REC_JSON in files:
+            yield os.path.join(root, REC_JSON)
+        if root.rstrip(os.sep).count(os.sep) - top >= max_depth:
+            dirs[:] = []
+        else:
+            dirs[:] = sorted(d for d in dirs if not _never_a_session(d))
+
+
 def cmd_find(a):
     hits = []
-    for p in glob.glob(os.path.join(a.base, "**", REC_JSON), recursive=True):
+    for p in _recovery_files(a.base, a.max_depth):
         try:
             with open(p) as fh:
                 d = json.load(fh)
@@ -274,10 +298,20 @@ def main():
     s.set_defaults(func=cmd_status)
 
     f = sub.add_parser("find", help="find interrupted runs under a directory")
-    f.add_argument("--base", required=True)
+    f.add_argument("--base", required=True, help="a project folder, never a whole share")
+    f.add_argument("--max-depth", type=int, default=6,
+                   help="how many folders below --base to look (default 6)")
     f.set_defaults(func=cmd_find)
 
     a = ap.parse_args()
+    if a.cmd == "find":
+        # a walk: on a cluster login node, run it on a compute node (HPC@UCD's ucd-hpc rules)
+        try:
+            import on_compute
+            on_compute.ensure_compute_node("checkpoint.py find walks " + a.base, minutes=15,
+                                           mem="2G")
+        except ImportError:
+            pass                          # a partial scripts/ without on_compute.py: as before
     a.func(a)
 
 

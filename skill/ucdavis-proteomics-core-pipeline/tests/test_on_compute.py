@@ -38,6 +38,8 @@ with open(os.environ["FAKE_SRUN_LOG"], "a") as fh:
 args = sys.argv[1:]
 while args and args[0].startswith("--"):
     args.pop(0)
+if os.environ.get("FAKE_SRUN_NORUN"):          # record the call only
+    sys.exit(0)
 if os.environ.get("FAKE_SRUN_FAIL"):
     sys.stderr.write("srun: error: Unable to allocate resources: Invalid account\n")
     sys.exit(1)
