@@ -493,6 +493,15 @@ def mass_acc_provenance(engine, params, res):
         return {"mode": "unknown", "fixed": None, "reason": f"unknown -- {e}"}
 
 
+def protein_inference_provenance(engine, params):
+    """DIA-NN's protein inference as the cfg set it, for search_provenance.json
+    `protein_inference` (diann_parallel.protein_inference_record: the one reading, which the
+    Methods use too). None for another engine."""
+    if engine != "diann":
+        return None
+    return _diann_parallel_mod().protein_inference_record(params)
+
+
 def ensure_temp_dirs(params, out):
     """Create any `--temp` directory the DIA-NN cfg names. Returns the list created.
 
@@ -3597,6 +3606,8 @@ def main():
                        # (diann_parallel.SCAN_WINDOW_MODES / MASS_ACC_MODES)
                        "scan_window": scan_window_record(engine, a.params, res),
                        "mass_acc": mass_acc_provenance(engine, a.params, res),
+                       # --pg-level / --no-prot-inf as the cfg set them, or DIA-NN's default
+                       "protein_inference": protein_inference_provenance(engine, a.params),
                        "fasta": a.fasta, "threads": a.threads,
                        # read by run_de.R (contaminants.R): keratin kept as the analyte
                        "keratin_sample": keratin_rec["value"],

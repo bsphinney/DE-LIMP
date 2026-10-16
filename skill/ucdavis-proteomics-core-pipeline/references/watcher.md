@@ -86,6 +86,21 @@ message. It names the fix (a wider `quant.lfq_settings.ppm_tolerance`, then
 `--adapt-only`). Re-run Sage only once they agree: a changed LFQ setting is a changed
 search.
 
+## Warnings that are not failures: protein inference in step 5
+
+Every 5-step chain's step 5 log (and its `report.log.txt`) prints, on DIA-NN 2.7.0:
+`WARNING: protein inference is enabled while empirical library is used; make sure the library
+does not contain already inferred protein groups or disable protein inference`.
+**It is expected and does not matter here; do not pass `--no-prot-inf`.** Checked on HIVE on a
+real chain (srun 24827735, read-only): step 3's `empirical.parquet` keeps each precursor's full
+`Protein.Ids`, the same as the first-pass report for all 65,597 precursors both hold, and 2,986
+of 3,000 sampled precursors map to exactly those proteins in the FASTA (the other 14 also match,
+as a bare string, proteins the library does not list: a string search ignores where trypsin
+cuts; not checked one by one). Its `Protein.Group` column is the inferred group, but the
+library has not lost the mapping step 5 infers from. Step 5 run with `--no-prot-inf` instead
+gave each precursor the same protein group but a different protein-level FDR (9,486 rows in
+the protein-group matrix against 9,414). Tell staff it is benign, in one line, if they ask.
+
 ## SLURM specifics (HIVE)
 - State comes from `sacct -j <jobid> -o State` (falls back to `squeue`). Terminal
   states: COMPLETED (done), FAILED / TIMEOUT / OUT_OF_MEMORY / NODE_FAIL / CANCELLED

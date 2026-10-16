@@ -627,6 +627,57 @@ def mass_acc_record(ma, cfg=None):
     return rec
 
 
+# DIA-NN's protein inference: --pg-level N sets the "implicit protein grouping" (DIA-NN's log:
+# it "determines which peptides are considered 'proteotypic' and thus affects protein FDR
+# calculation"); --no-prot-inf switches inference off. Neither is in a cfg the skill writes; a
+# user sets one with estimate_params.py --overrides, and it reaches every step (not in STRIP).
+# Measured on HIVE, DIA-NN 2.7.0 (srun 24827755: a 6,752-entry transcriptome FASTA with GN= gene
+# tags, one timsTOF run, a library predicted at each level, then searched):
+#   * no --pg-level gives the same Protein.Group as --pg-level 2 on all 12,190 precursors, and
+#     its log counts "genes" -- the default is genes; 0 and 1 regroup 242 of them;
+#   * at every level, a gene whose ORFs carry peptides of their own keeps one protein group per
+#     ORF (35 genes): GN= tags do not merge them -- the gene level is the gg_matrix / Genes;
+#   * step 5 re-run at 0, 1 and 2 on one search's .quant files and empirical library (srun
+#     24827735): identical groups. A level other than the default must be set from step 1.
+PG_LEVELS = {0: "isoform IDs", 1: "protein names", 2: "genes"}
+PG_LEVEL_DEFAULT = 2
+PG_LEVEL_MEASURED = ("measured on DIA-NN 2.7.0 (HIVE srun 24827755): with no --pg-level the "
+                     "protein groups equal --pg-level 2's on every precursor")
+
+
+def protein_inference(groups):
+    """{inference, pg_level, basis, passed, source, default_measured}: the protein inference a
+    DIA-NN search ran with, from its cfg's groups (cfg_groups) -- for search_provenance.json and
+    the Methods (make_methods.py), one reading. `passed` is the flag as given, None when the cfg
+    carries neither, and then the level is DIA-NN's default as measured (PG_LEVEL_MEASURED)."""
+    flags = {f: v for f, v in groups}
+    rec = {"inference": True, "pg_level": PG_LEVEL_DEFAULT, "basis": PG_LEVELS[PG_LEVEL_DEFAULT],
+           "passed": None, "source": "DIA-NN's default: the cfg has no --pg-level",
+           "default_measured": PG_LEVEL_MEASURED}
+    if "--no-prot-inf" in flags:
+        return dict(rec, inference=False, pg_level=None, basis=None, passed="--no-prot-inf",
+                    source="--no-prot-inf in the cfg: no protein inference")
+    if "--pg-level" in flags:
+        v = (flags["--pg-level"] or [""])[0]
+        try:
+            n = int(v)
+        except ValueError:
+            n = None
+        return dict(rec, pg_level=n, basis=PG_LEVELS.get(n), passed=f"--pg-level {v}".strip(),
+                    source=f"--pg-level {v} in the cfg" + (
+                        "" if n in PG_LEVELS else " (not a level DIA-NN documents: 0, 1 or 2)"))
+    return rec
+
+
+def protein_inference_record(cfg):
+    """protein_inference() for a cfg file; {"source": "unknown -- <why>"} when it cannot be read."""
+    try:
+        return protein_inference(cfg_groups(cfg_tokens(cfg)))
+    except CfgError as e:
+        return {"inference": None, "pg_level": None, "basis": None, "passed": None,
+                "source": f"unknown -- {e}"}
+
+
 def window_record(ma):
     """What the cfg hands DIA-NN for --window, for provenance -- exactly what was passed, and
     "unverified" wherever DIA-NN's behaviour has not been measured. Used for the chain when it
