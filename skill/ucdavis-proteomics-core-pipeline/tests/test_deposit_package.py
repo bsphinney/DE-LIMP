@@ -240,10 +240,12 @@ class ReleaseReview280(unittest.TestCase):
                 md.build(p["session_dir"], man, md.ensure_methods(p["session_dir"], man))
                 man.write(p["manifest_txt"], "t")
             writes = {n: k for n, m, k in calls if "w" in m and "b" not in m}
-            for n in ("prepare_upload.sbatch", "MANIFEST.txt", "sdrf.tsv", "files_to_upload.tsv",
+            for n in ("MANIFEST.txt", "sdrf.tsv", "files_to_upload.tsv",
                       "HOW_TO_SUBMIT.md", "HOW_TO_SUBMIT.html", "protocols.txt"):
                 self.assertEqual(writes[n].get("encoding"), "utf-8", n)
-            self.assertEqual(writes["prepare_upload.sbatch"].get("newline"), "\n")
+            # the job script goes through safe_write.write_file (os.open, never builtins.open):
+            # UTF-8 with "\n" line ends on every platform, which the bytes show
+            self.assertNotIn("prepare_upload.sbatch", writes)
             with real(os.path.join(p["deposit_dir"], "prepare_upload.sbatch"), "rb") as fh:
                 self.assertNotIn(b"\r", fh.read())
 

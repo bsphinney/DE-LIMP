@@ -832,12 +832,15 @@ def write_prep_script(f, out, rows):
     bad = [i for i in items if "\t" in i[1] or "\n" in i[1]]
     if bad:
         raise Skip(f"a path contains a tab/newline: {bad[0][1]!r}")
+    if re.search(r'["\n]', out):
+        raise Skip(f"the package folder holds a quote or a line break, which the job's #SBATCH "
+                   f"--output cannot carry: {out!r}")
     qlines, qsrc = queue_lines()
     skill_ver = skill_version()
     listing = "\n".join("\t".join(i) for i in items)
     script = f"""#!/bin/bash -l
 #SBATCH --job-name=deposit_prep
-#SBATCH --output={out}/prepare_upload_%j.log
+#SBATCH --output="{out}/prepare_upload_%j.log"
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=8G
 #SBATCH --time=24:00:00
@@ -940,11 +943,12 @@ echo "Globus submission (the PRIDE Submission Tool writes its own)."
 [ "$missing" -eq 0 ]
 """
     path = os.path.join(out, "prepare_upload.sbatch")
-    # newline="\n": text mode on Windows writes CRLF, and sbatch refuses the script ("Batch script
-    # contains DOS line breaks").
-    with open(path, "w", encoding="utf-8", newline="\n") as fh:
-        fh.write(script)
-    os.chmod(path, 0o755)
+    # safe_write.write_file: never through a planted link, and "\n" line ends on every platform
+    # (text mode on Windows writes CRLF, and sbatch refuses the script: "Batch script contains DOS
+    # line breaks"). The log path above is double-quoted: an unquoted space makes sbatch refuse the
+    # script ("Invalid directive"; HIVE, 2026-10-15).
+    from safe_write import write_file
+    write_file(path, script, 0o755)
     n_dir = sum(1 for i in items if i[0] == "dir")
     return f"{len(items)} file(s), {n_dir} .d run(s) to archive; queue: {qsrc}"
 

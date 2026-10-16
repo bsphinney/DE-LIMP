@@ -4239,8 +4239,14 @@ def write_deliver_job(a, session_dir, where_dir: str, label: str, total: int, wa
         argv += ["--service-project", os.path.abspath(a.service_project)]
     if a.force:
         argv += ["--force"]
+    log = os.path.join(logs if os.path.isdir(logs) else where_dir, "deliver_%j.log")
+    if re.search(r'["\n]', log):
+        raise Stop(EXIT_DECIDE, {"error": f"the delivery job's log path holds a quote or a line "
+                                          f"break, which #SBATCH --output cannot carry: {log!r}"})
+    # the log path double-quoted: an unquoted space makes sbatch refuse the script ("Invalid
+    # directive"); quoted, HIVE's SLURM writes the log there (job 24808508, 2026-10-15)
     L = ["#!/bin/bash", f"#SBATCH --job-name=deliver_{label}",
-         f"#SBATCH --output={os.path.join(logs if os.path.isdir(logs) else where_dir, 'deliver_%j.log')}",
+         f'#SBATCH --output="{log}"',
          "#SBATCH --cpus-per-task=1", "#SBATCH --mem=2G", "#SBATCH --time=24:00:00"]
     if part:
         L.append(f"#SBATCH --partition={part}")
@@ -4258,9 +4264,8 @@ def write_deliver_job(a, session_dir, where_dir: str, label: str, total: int, wa
         if os.environ.get(var):
             L.append(f"export {var}={shlex.quote(os.environ[var])}")
     L.append(" ".join(shlex.quote(x) for x in argv))
-    with open(path, "w") as fh:
-        fh.write("\n".join(L) + "\n")
-    os.chmod(path, 0o755)
+    # never through a planted link: the service folders are group-writable (safe_write.py)
+    sibling("safe_write").write_file(path, "\n".join(L) + "\n", 0o755)
     return path
 
 

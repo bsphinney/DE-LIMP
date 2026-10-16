@@ -3074,10 +3074,15 @@ def write_backfill_sbatch(a):
     cmd = " ".join(shlex.quote(x) for x in ["python3", os.path.abspath(__file__)] + args)
     report = os.path.join(d, "fran_backfill_${SLURM_JOB_ID}.json")
     path = os.path.join(d, f"fran_backfill_{stamp}.sbatch")
+    if re.search(r'["\n]', d):
+        jout({"action": "backfill", "error": f"--sbatch-dir {d!r} holds a quote or a line break, "
+                                             "which the job's #SBATCH --output cannot carry"}, 2)
     script = "\n".join([
         "#!/bin/bash -l",
         "#SBATCH --job-name=fran_backfill",
-        f"#SBATCH --output={d}/fran_backfill_%j.log",
+        # double-quoted: an unquoted space makes sbatch refuse the script ("Invalid directive");
+        # quoted, HIVE's SLURM writes the log there (job 24808508, 2026-10-15)
+        f'#SBATCH --output="{d}/fran_backfill_%j.log"',
         "#SBATCH --cpus-per-task=1",
         "#SBATCH --mem=2G",
         f"#SBATCH --time={minutes}",
@@ -3088,9 +3093,9 @@ def write_backfill_sbatch(a):
         "set -uo pipefail",
         f'{cmd} --report {shlex.quote(d)}/"fran_backfill_${{SLURM_JOB_ID}}.json"',
         ""])
-    with open(path, "w") as fh:
-        fh.write(script)
-    os.chmod(path, 0o755)
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from safe_write import write_file      # never through a planted link (group-writable folders)
+    write_file(path, script, 0o755)
     return {"action": "backfill", "sbatch": path, "mode": "apply" if a.apply else "dry_run",
             "report_will_be": report.replace("${SLURM_JOB_ID}", "<jobid>"),
             "queue": qlines, "queue_source": qsrc,
