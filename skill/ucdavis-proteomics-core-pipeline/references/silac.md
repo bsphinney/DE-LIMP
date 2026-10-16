@@ -96,8 +96,13 @@ FASTA digest", README `--fixed-mod`). Measured on DIA-NN 2.7.0 (HIVE srun 248085
 `K(SILAC)(SILAC)`, the search step applied the label again (`K(SILAC)(SILAC)(SILAC)`), and DIA-NN
 logged "contains more than one channel family label, this is not supported". Every later step
 reads a library that already carries the label (README Scenario 4: "--lib-fixed-mod must not be
-supplied"). The cfg as written here, run through the two-job route on that dataset, logged no
-such error, registered the three channels, and its library reads `K(SILAC)` once.
+supplied"). The cfg as written here, run through the two-job route on that dataset (HIVE
+2026-10-15), logged no such error, registered the three channels, and its precursor ids carry the
+label once (0%, against 99.8% doubled before). The doubled label had been cosmetic: 20,980 vs
+21,049 precursors and 2,003 vs 1,990 protein groups at 1% global FDR, protein log2 ratios
+r = 0.99 between the two searches, 828 vs 816 significant in the largest comparison, about 89% of
+them shared and all in the same direction. DIA-NN also reads `--channels` (with its `;`) from a
+`--cfg` file, which the library job and `--one-step` rely on.
 
 **Which step gets which flag.** The whole declaration is in the cfg, so it reaches every step:
 
