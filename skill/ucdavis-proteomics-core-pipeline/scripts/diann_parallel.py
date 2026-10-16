@@ -2178,8 +2178,19 @@ def main():
     # Record the submission so a disconnected session can pick the run back up.
     # SLURM keeps the jobs alive after the user closes their terminal; without this
     # the next session has no idea what was submitted or what is still outstanding.
-    # <out> is normally <session>/output/search, so the session is two levels up.
+    # <out> is normally <session>/output/search, so the session is two levels up -- but only a
+    # folder that IS a session gets the notes (session.is_session_dir): an --out elsewhere put
+    # RECOVERY.md and .recovery.json two folders up, once into a home directory. Then they go
+    # beside --out, and the generator and submit.sh say so.
     sess = os.path.dirname(os.path.dirname(out))
+    from session import is_session_dir
+    rec_dir = sess if is_session_dir(sess) else out
+    rec_where = (f"{rec_dir}/RECOVERY.md" if rec_dir == sess else
+                 f"{rec_dir}/RECOVERY.md (beside --out: {sess} is not an analysis session folder)")
+    if rec_dir != sess:
+        sys.stderr.write(f"[diann_parallel] {sess} is not an analysis session folder (no "
+                         "session.json, no input/ + output/): the recovery notes (RECOVERY.md, "
+                         f".recovery.json) will be written beside --out, in {out}\n")
     ck = os.path.join(os.path.dirname(os.path.abspath(__file__)), "checkpoint.py")
     # $jid1b belongs here too. It is an afterok link like any other, so if it dies the whole
     # chain stalls forever on a dependency that will never fire -- and left out of jobs.txt
@@ -2191,7 +2202,7 @@ def main():
     sub_lines += [
         # the record first: nothing may be printed between the last sbatch and these two
         f'printf "%s\\n" {jobs.replace(",", " ")} > "{D}/jobs.txt"',
-        f'python3 "{ck}" record --session "{sess}" --stage search \\',
+        f'python3 "{ck}" record --session "{rec_dir}" --stage search \\',
         f'  --jobs "{jobs}" --desc "DIA-NN 5-step parallel chain ({n} files)" \\',
         f'  --report "{D}/{report}" --watch-job "$jid5" --watch-log "{D}/s5_report_${{jid5}}.log" \\',
         # what follows the chain is step 8's normalisation check, then the final DE held to it --
@@ -2201,7 +2212,7 @@ def main():
         'say "submitted: firstpass=$jid2 assembly=$jid3 finalpass=$jid4 report=$jid5"',
         f'say "final report will be {D}/{report}; watch with: watch_run.sh --slurm $jid5 --log {D}/s5_report_${{jid5}}.log"',
         f'say "all chain job ids -> {D}/jobs.txt  (watch the WHOLE chain: watch_run.sh --all {D})"',
-        f'say "recovery notes written to {sess}/RECOVERY.md — you can safely close your terminal"']
+        f'say "recovery notes written to {rec_where} — you can safely close your terminal"']
     # The most the chain can use (cpu_hours.py, the one rule): read from the step scripts just
     # written, and said where the board and the person submitting see it.
     from cpu_hours import reservation, submit_comment
@@ -2301,6 +2312,7 @@ def main():
         "scripts": [x for x in [s1, s1b, s2, s3, s4, s5, "submit.sh"] if x],
         "submit": f"bash {out}/submit.sh   (or: hive_exec.sh 'bash {out}/submit.sh')",
         "report_jobid_var": "jid5",
+        "recovery_notes": os.path.join(rec_dir, "RECOVERY.md"),
         # the most this chain can use (cpu_hours.py): every step's CPUs x time limit x tasks
         "cpu_hours_reserved": cpu["cpu_hours_reserved"],
         "gpu_hours_reserved": cpu["gpu_hours_reserved"],

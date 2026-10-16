@@ -63,6 +63,17 @@ SUBDIRS = ["input", "output", "output/search", "output/tables", "output/figures"
            "output/reproducibility", "scripts", "logs"]
 
 
+def is_session_dir(path):
+    """THE test of "this folder is an analysis session", for a writer that must put session files
+    (RECOVERY.md, .recovery.json) only in one: it has session.json (init --submission/--internal,
+    submission_report.py attach), or the layout init always makes -- input/ and output/ (SUBDIRS).
+    A chain whose --out sat outside a session once wrote its recovery notes into a home folder."""
+    p = paths_for(path)
+    return (os.path.isfile(p["session_json"])
+            or (os.path.isdir(p["input_dir"]) and os.path.isdir(os.path.join(p["session_dir"],
+                                                                            "output"))))
+
+
 def slugify(name):
     s = re.sub(r"[^A-Za-z0-9]+", "_", name.strip()).strip("_")
     return s or "proteomics_run"

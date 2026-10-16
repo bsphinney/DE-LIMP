@@ -754,6 +754,7 @@ class SubmitShSurvivesAClosedStdout(unittest.TestCase):
             _, cfg = estimate(d, "DDA", *SET28, *SURVEY)
             sess = os.path.join(d, "sess")
             out = os.path.join(sess, "output", "search")
+            os.makedirs(os.path.join(sess, "input"))      # a session, as session.py init lays it out
             p = generate(d, cfg, out)
             self.assertEqual(p.returncode, 0, p.stderr)
             fake = os.path.join(d, "fakebin")
