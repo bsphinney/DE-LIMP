@@ -72,6 +72,12 @@ read_de_dir <- function(dir) {
       names(df)[names(df) == idc[1]] <- "Protein.Group"
     }
     df$protein_id <- normalize_protein_id(df$Protein.Group)
+    # TESTED = a row with a P.Value. A table may also list proteins it did not test (run_de.R
+    # 2.12 "not measured in either group", run_silac.R "ratio in k of n replicates: not
+    # tested"): they are no part of the universe or the concordance (SKILL.md: count tested
+    # proteins as the rows with a P.Value). A table with no P.Value column: every row.
+    df$tested <- if ("P.Value" %in% names(df)) is.finite(suppressWarnings(as.numeric(df$P.Value)))
+                 else rep(TRUE, nrow(df))
     out[[contrast_key(f)]] <- df
   }
   out
@@ -83,12 +89,15 @@ labels <- vapply(loaded, function(x) x$label, "")
 universe_rows <- list()
 for (a in loaded) {
   all_ids <- unique(unlist(lapply(a$de, function(df) df$protein_id)))
+  tested_ids <- unique(unlist(lapply(a$de, function(df) df$protein_id[df$tested])))
   n_sig <- length(unique(unlist(lapply(names(a$de), function(k) {
     df <- a$de[[k]]
-    df$protein_id[classify_de(df$logFC, df$adj.P.Val, adjp_thr, logfc_thr) != "NS"]
+    df$protein_id[df$tested & classify_de(df$logFC, df$adj.P.Val, adjp_thr, logfc_thr) != "NS"]
   }))))
+  # n_proteins: every protein the tables list; n_tested: those with a P.Value in any of them
   universe_rows[[a$label]] <- data.frame(Analysis = a$label,
                                          n_proteins = length(all_ids),
+                                         n_tested = length(tested_ids),
                                          n_significant = n_sig)
 }
 universe_df <- do.call(rbind, universe_rows)
@@ -103,10 +112,12 @@ md <- c(sprintf("# Analysis comparison — %s", paste(labels, collapse = " vs ")
                 length(loaded), adjp_thr, logfc_thr),
         "",
         "## Protein universe", "",
-        "| Analysis | Proteins | Significant |", "|---|---|---|")
+        "| Analysis | Proteins listed | Tested (with a P.Value) | Significant |",
+        "|---|---|---|---|")
 for (i in seq_len(nrow(universe_df)))
-  md <- c(md, sprintf("| %s | %d | %d |", universe_df$Analysis[i],
-                      universe_df$n_proteins[i], universe_df$n_significant[i]))
+  md <- c(md, sprintf("| %s | %d | %d | %d |", universe_df$Analysis[i],
+                      universe_df$n_proteins[i], universe_df$n_tested[i],
+                      universe_df$n_significant[i]))
 md <- c(md, "", "## Pairwise concordance (shared contrasts)", "")
 
 for (pr in pairs) {
@@ -120,8 +131,9 @@ for (pr in pairs) {
   }
   for (ct in shared_contrasts) {
     da <- A$de[[ct]]; db <- B$de[[ct]]
-    m <- merge(da[, c("protein_id", "logFC", "adj.P.Val")],
-               db[, c("protein_id", "logFC", "adj.P.Val")],
+    # proteins TESTED in both: an untested row is not "not significant"
+    m <- merge(da[da$tested, c("protein_id", "logFC", "adj.P.Val")],
+               db[db$tested, c("protein_id", "logFC", "adj.P.Val")],
                by = "protein_id", suffixes = c("_A", "_B"))
     if (!nrow(m)) next
     m$status_A <- classify_de(m$logFC_A, m$adj.P.Val_A, adjp_thr, logfc_thr)
@@ -151,7 +163,7 @@ for (pr in pairs) {
 
     md <- c(md,
       sprintf("### %s — %s vs %s", ct, A$label, B$label),
-      sprintf("- shared proteins: %d; significant: %s=%d, %s=%d, both=%d",
+      sprintf("- proteins tested in both: %d; significant: %s=%d, %s=%d, both=%d",
               nrow(m), A$label, sig_A, B$label, sig_B, sig_shared),
       sprintf("- direction concordance (co-significant): %s",
               ifelse(is.na(dir_agree), "n/a", sprintf("%.1f%%", 100*dir_agree))),
