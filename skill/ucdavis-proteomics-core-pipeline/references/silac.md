@@ -112,6 +112,12 @@ them shared and all in the same direction. DIA-NN also reads `--channels` (with 
 | one step (`--one-step`) | one DIA-NN command reads the cfg | the same command |
 | 5-step chain (> 5 files) | step 1 | steps 1b (probes), 2, 3, 4, 5 |
 
+Both shapes ran on the 4-run validation dataset (HIVE, 2026-10-15): the two-job route, and the
+5-step chain forced with `--parallel-threshold 3`. No step of either logged a label or
+normalisation error; the chain's report gave the same 20,980 precursors and 2,003 protein groups
+at 1% global FDR as the two-job route, and the ratio analysis the same results (828 / 802 / 0
+significant against 828 / 801 / 0).
+
 `run_search.py` (both single-shot shapes) and `diann_parallel.py` refuse a cfg that would
 mis-search a multiplexed sample: `--lib-fixed-mod` on a FASTA-predicted library; `--channels`
 without a normalisation flag (DIA-NN 2.7.0 stops with "channel normalisation strategy must be
