@@ -540,6 +540,11 @@ bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.t
     min), after which it stops with the resume message, as it does at once for a daily quota
     (`…PerDay…`).
   - **Pacing.** Requests to one model are spaced at least 20 s apart (`--min-interval`).
+  - **A request that does not answer.** Each request logs `[render] chunk k/N ...: sent to
+    <model>` and, while it waits, `still waiting for <model> (Ns)` every minute. With no answer
+    in `--request-timeout` seconds (default 600; a chunk takes about 3 minutes) it is asked once
+    more, then render stops with the resume message, so the job fails where its watcher sees it
+    instead of hanging until its time limit. Re-running resumes from the cached chunks.
   - An episode is one request per segment (a segment over 500 words is split at turn
     boundaries), so about 8–12 requests, and at least 3–4 minutes with pacing. Google does not
     publish the free-tier TTS limits. They are per Cloud project and shown at

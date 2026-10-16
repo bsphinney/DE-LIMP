@@ -98,6 +98,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 import urllib.parse
@@ -119,6 +120,12 @@ HOST_STYLES = ("curious and energetic", "calm, precise and dryly funny")   # fir
 MIN_INTERVAL = 20.0                                 # s between requests to one Gemini model
 RATE_WAITS = 10                                     # per-minute 429 waits allowed per chunk
 RATE_WAIT_BUDGET_MIN = 30.0                         # rate-limit waits allowed per render, minutes
+# One TTS request's answer is waited for at most this long, then asked once more, then the
+# render stops with the resume message: a request once hung for 20+ minutes with no log line,
+# holding the job until a person cancelled it (2026-10; a chunk takes about 3 minutes).
+REQUEST_TIMEOUT = 600.0                             # s
+REQUEST_TIMEOUTS = 2                                # unanswered requests allowed per chunk
+HEARTBEAT = 60.0                                    # s between "still waiting" log lines
 TERMS_URL = "https://ai.google.dev/gemini-api/terms"
 KEY_FILE = os.path.join("~", ".config", "ucdavis-proteomics", "gemini_key")
 # The Core's shared key on HIVE (Brett installs it: owner brettsp, group proteomics-grp, mode
@@ -1487,6 +1494,10 @@ class EmptyAudio(RenderError):
     """A response with no audio in it: retried once, unlike an unreadable one."""
 
 
+class RequestTimeout(Exception):
+    """A TTS request with no answer within --request-timeout seconds."""
+
+
 class GeminiTTS(object):
     """Gemini multi-speaker TTS, one request per chunk. Model names are read from the API
     (models.list), never assumed. Default order: a pro TTS model, then gemini-3.8-flash-tts,
@@ -1533,6 +1544,7 @@ class GeminiTTS(object):
         self.candidates = self.user_models or self.discover()
         self.model = self.candidates[0]
         self.min_interval = float(getattr(a, "min_interval", MIN_INTERVAL))
+        self.request_timeout = float(getattr(a, "request_timeout", None) or REQUEST_TIMEOUT)
         self.wait_budget = 60.0 * float(getattr(a, "rate_wait_budget", RATE_WAIT_BUDGET_MIN))
         self.waited = 0.0
         self.pinned = False                  # set by prepare() / --redo: no model hand-over
@@ -1683,6 +1695,36 @@ class GeminiTTS(object):
         return (self.interaction_audio(r) if self.api(self.model) == "interactions" else
                 self.audio(r))
 
+    def timed_request(self, chunk, speak, label):
+        """request() in a worker thread, waited for at most request_timeout seconds, with a log
+        line when it is sent and every HEARTBEAT seconds while it is out: a hung request shows in
+        the log and ends as RequestTimeout, never an endless wait. The abandoned thread is a
+        daemon, so it cannot keep the process alive."""
+        box = {}
+
+        def work():
+            try:
+                box["r"] = self.request(chunk, speak)
+            except BaseException as e:            # handed to the caller as it was raised
+                box["e"] = e
+        t = threading.Thread(target=work, name="tts-request", daemon=True)
+        start = _now()
+        log(f"[render] {label}: sent to {self.model} (an answer is waited for up to "
+            f"{self.request_timeout:.0f} s)")
+        t.start()
+        while True:
+            left = self.request_timeout - (_now() - start)
+            t.join(max(0.0, min(HEARTBEAT, left)))
+            if not t.is_alive():
+                break
+            waited = _now() - start
+            if waited >= self.request_timeout:
+                raise RequestTimeout(f"no answer from {self.model} in {waited:.0f} s")
+            log(f"[render] {label}: still waiting for {self.model} ({waited:.0f} s)")
+        if "e" in box:
+            raise box["e"]
+        return box["r"]
+
     def _has_next(self):
         return (self.model in self.candidates
                 and self.candidates.index(self.model) + 1 < len(self.candidates))
@@ -1711,11 +1753,20 @@ class GeminiTTS(object):
             "models, so one episode never mixes them).")
 
     def synth(self, chunk, speak, label):
-        errors, waits, empty, retried_len = 0, 0, 0, False
+        errors, waits, empty, retried_len, timeouts = 0, 0, 0, False, 0
         while True:
             self._pace()
             try:
-                r = self.request(chunk, speak)
+                r = self.timed_request(chunk, speak, label)
+            except RequestTimeout as e:
+                timeouts += 1
+                if timeouts >= REQUEST_TIMEOUTS:
+                    raise RenderError(
+                        f"{label}: {self.model} did not answer within {self.request_timeout:.0f} s, "
+                        f"{timeouts} times ({e}). The chunks already made are cached: re-run the "
+                        "same command to resume (--request-timeout to wait longer)")
+                log(f"[render] {label}: {e}; asking once more")
+                continue
             except Exception as e:
                 err = error_info(e)
                 kind = err["kind"]
@@ -4118,6 +4169,9 @@ def main(argv=None):
                                        "%(default)s)")
     r.add_argument("--min-interval", type=float, default=MIN_INTERVAL,
                    help="seconds between requests to one Gemini model (default %(default)s)")
+    r.add_argument("--request-timeout", type=float, default=REQUEST_TIMEOUT, metavar="SEC",
+                   help="seconds one TTS request's answer is waited for; asked once more, then "
+                        "the render stops with the resume message (default %(default)s)")
     r.add_argument("--keep-wav", action="store_true")
     r.add_argument("--unchecked", action="store_true",
                    help="render without a passing check.txt (recorded in podcast.json)")
