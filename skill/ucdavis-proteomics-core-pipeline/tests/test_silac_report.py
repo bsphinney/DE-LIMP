@@ -26,7 +26,7 @@ sys.path.insert(0, SCRIPTS)
 sys.path.insert(0, HERE)
 
 import silac_fixture as fx  # noqa: E402
-from test_silac_analysis import HAVE_R, RSCRIPT  # noqa: E402
+from test_silac_analysis import HAVE_R, NEEDS, RSCRIPT  # noqa: E402
 
 PROT = "PROT_0807"
 
@@ -38,7 +38,7 @@ def run(args, ok=True, **kw):
     return p
 
 
-@unittest.skipUnless(HAVE_R, "needs Rscript with limma, data.table, arrow and jsonlite")
+@unittest.skipUnless(HAVE_R, NEEDS)
 class SilacSession(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

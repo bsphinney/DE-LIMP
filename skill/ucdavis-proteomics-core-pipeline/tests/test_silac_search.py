@@ -144,6 +144,22 @@ class EstimateParams(unittest.TestCase):
                 self.assertIn(said, p.stderr)
                 self.assertFalse(os.path.exists(cfg), "a stale cfg must not survive a refusal")
 
+    def test_another_cysteine_agent_and_the_label_are_both_declared(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg, _ = estimate(d, "--labels", "silac2", "--label-preset", "K8R10",
+                              "--cys-alkylation", "nem")
+            mods = [v[0] for f, v in dp.cfg_groups(dp.cfg_tokens(cfg)) if f == "--fixed-mod"]
+            self.assertEqual(sorted(mods), ["SILAC,0.0,KR,label", "UniMod:108,125.047679,C"])
+            rat = json.load(open(cfg + ".rationale.json"))["rationale"]
+            self.assertIn("--fixed-mod (SILAC label)", rat)
+            self.assertNotIn("SILAC", rat["--fixed-mod"]["value"])
+            self.assertEqual(silac.cfg_problems(dp.cfg_groups(dp.cfg_tokens(cfg))), [])
+            _, p = estimate(d, "--labels", "silac2", "--label-preset", "K8R10", "--overrides",
+                            json.dumps({"--fixed-mod": "UniMod:4,57.021464,C"}),
+                            name="o.cfg", ok=False)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn("--cys-alkylation", p.stderr)
+
     def test_sage_and_dda_are_refused(self):
         with tempfile.TemporaryDirectory() as d:
             for args in (["--engine", "sage"], ["--acquisition", "DDA"]):
@@ -168,7 +184,7 @@ class CfgProblems(unittest.TestCase):
     BASE = ("--fasta-search --gen-spec-lib --predictor --fixed-mod SILAC,0.0,KR,label "
             f"--channels {TRIPLE} --original-mods ")
 
-    def test_the_prot_0807_type_declaration_is_refused(self):
+    def test_the_hand_set_declaration_is_refused(self):
         # as it ran: --lib-fixed-mod in the cfg, and no normalisation flag
         probs = silac.cfg_problems(self.groups(self.BASE + "--lib-fixed-mod SILAC\n"))
         self.assertTrue(any("--lib-fixed-mod" in p for p in probs), probs)

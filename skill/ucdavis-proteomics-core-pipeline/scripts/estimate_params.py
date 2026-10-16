@@ -1002,7 +1002,14 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
     # SILAC (--labels): the plexDIA declaration, from silac.py -- the one definition of it
     if labels:
         for flag, value, source, render in silac.diann_cfg_lines(labels):
-            add(flag, value, source, render=None if render else False)
+            if flag in r:
+                # a flag the cfg already carries -- --fixed-mod for a cysteine agent other than
+                # iodoacetamide (CYS_REAGENTS): both lines are written, each with its own rationale
+                r[f"{flag} (SILAC label)"] = tagged(value, source)
+                if render:
+                    lines.append(f"{flag} {value}")
+            else:
+                add(flag, value, source, render=None if render else False)
 
     # apply the user's overrides -- re-render the file; each tagged with who set it and why
     om = override_meta or {}
@@ -1222,6 +1229,9 @@ def silac_labels(a, overrides):
         refuse(f"{', '.join(pass_as)} in --overrides: SILAC is declared with --labels "
                "silac2|silac3 --label-preset ... [--channel-norm spec|run], which records it as "
                "the study design and declares the label once (references/silac.md).")
+    if a.labels and "--fixed-mod" in (overrides or {}):
+        refuse("--fixed-mod in --overrides with --labels: it would replace the SILAC label's "
+               "--fixed-mod line. A cysteine agent goes in --cys-alkylation.")
     if not a.labels:
         if a.label_preset or a.channel_norm:
             refuse("--label-preset/--channel-norm describe --labels, and it was not given.")

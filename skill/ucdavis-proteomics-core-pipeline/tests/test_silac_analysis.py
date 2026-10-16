@@ -48,7 +48,18 @@ def r_has(*pkgs):
     return subprocess.run([RSCRIPT, "-e", code], capture_output=True).returncode == 0
 
 
-HAVE_R = r_has("limma", "data.table", "arrow", "jsonlite")
+def py_has(mod):
+    try:
+        __import__(mod)
+        return True
+    except ImportError:
+        return False
+
+
+# R runs the analysis; the synthetic report (silac_fixture.make_report) is written with pyarrow.
+# CI's unittest stage has neither, and skips these.
+HAVE_R = r_has("limma", "data.table", "arrow", "jsonlite") and py_has("pyarrow")
+NEEDS = "needs Rscript with limma, data.table, arrow and jsonlite, and Python's pyarrow"
 
 
 def read(path):
@@ -71,7 +82,7 @@ def run_silac(d, *more, report=None, design=None, ok=True, outdir=None):
     return p, outdir
 
 
-@unittest.skipUnless(HAVE_R, "needs Rscript with limma, data.table, arrow and jsonlite")
+@unittest.skipUnless(HAVE_R, NEEDS)
 class Analysis(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -218,7 +229,7 @@ class Analysis(unittest.TestCase):
                 os.unlink(os.path.join(self.out, f))
 
 
-@unittest.skipUnless(HAVE_R, "needs Rscript with limma, data.table, arrow and jsonlite")
+@unittest.skipUnless(HAVE_R, NEEDS)
 class Variants(unittest.TestCase):
     def test_min_replicates_is_a_recorded_parameter(self):
         with tempfile.TemporaryDirectory() as d:
