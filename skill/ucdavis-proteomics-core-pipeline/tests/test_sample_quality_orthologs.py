@@ -181,6 +181,50 @@ class DidTheCheckRun(Base):
         self.assertFalse(res["panel_organisms_verified"])
 
 
+class NotAVertebrate(Base):
+    """2026-10: on a bacterial culture supernatant (an NCBI database) HEMOLYSIS matched the
+    bacterium's own catalase and raised "complete separation between groups ... treat HEMOLYSIS
+    proteins with care", which reached the report. The panels are vertebrate tissues."""
+    # the separation the caution was raised on: one group's samples above the other's
+    CONDS = "File.Name,Group\n" + "".join(f"{s},{'A' if i < 3 else 'B'}\n"
+                                           for i, s in enumerate(SAMPLES))
+    ROWS = [["WP_000001.1", "catalase", "catalase"] + [20, 20, 20, 14, 14, 14],
+            ["WP_000002.1", "", ""] + FLAT]
+
+    def run_with(self, meta):
+        conds = os.path.join(self.root, "conditions.csv")
+        with open(conds, "w") as fh:
+            fh.write(self.CONDS)
+        sidecar = os.path.join(self.root, "search.fasta.meta.json")
+        with open(sidecar, "w") as fh:
+            json.dump(meta, fh)
+        return self.run_sq(self.ROWS, "--conditions", conds, "--fasta-meta", sidecar)
+
+    def test_a_bacterium_is_not_scored_for_blood_muscle_or_skin(self):
+        for meta in ({"organism": "Salmonella enterica serovar Typhimurium LT2", "taxid": 99287},
+                     {"organism": "Strain-X sp. 1", "taxid": 999999, "superkingdom": "bacteria"}):
+            with self.subTest(organism=meta["organism"]):
+                res, md = self.run_with(meta)
+                self.assertFalse(res["panels_apply"])
+                for name in sq.PANELS:
+                    self.assertEqual(res["panels"][name]["status"], "not_applicable", name)
+                    self.assertIn(f"## {name}  (not applicable)", md)
+                self.assertEqual(res["flags"], [], "no caution, no 'could not run'")
+                self.assertNotIn("HEMOLYSIS: complete separation", md)
+                self.assertIn("vertebrate blood, muscle and skin", md)
+
+    def test_a_vertebrate_or_an_unknown_organism_is_scored_as_before(self):
+        for meta in ({"organism": "Homo sapiens", "taxid": 9606},
+                     {"organism": "Strain-X", "taxid": 999999}):
+            with self.subTest(organism=meta["organism"]):
+                res, md = self.run_with(meta)
+                self.assertEqual(res["panels_apply"], True if meta["taxid"] == 9606 else None)
+                self.assertTrue(any(f.startswith("HEMOLYSIS: complete separation")
+                                    for f in res["flags"]), res["flags"])
+        self.assertEqual(sq.panel_scope(None, "Saccharomyces cerevisiae")[0], False)
+        self.assertEqual(sq.panel_scope(10090, "Mus musculus")[0], True)
+
+
 class ConfoundTest(unittest.TestCase):
     """Silva08172026 (10 groups x 3) flagged all three panels "CONFOUNDED WITH GROUP": the old
     rule compared the highest and lowest of 10 noisy group means, whose spread grows with the
