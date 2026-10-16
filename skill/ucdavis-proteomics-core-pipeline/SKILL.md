@@ -873,14 +873,17 @@ python3 scripts/fetch_fasta.py resolve --organism "<what they said>"   # or --ta
     gave (below), never one matched to a file name.
   - `none` — only if the user explicitly declines. Record it; the contaminant
     anomaly check in step 10 is meaningless without contaminants in the database.
-- **SILAC (plexDIA) — only when the submission or the user says SILAC / labelled.** Ask three
+- **SILAC (plexDIA) — only when the submission or the user says SILAC / labelled.** Ask four
   things, never guess them: (1) the Lys/Arg labels of each labelled channel (`silac.py presets`:
   K4R6, K6R6, K8R10); (2) which sample is in which channel of which run (label swaps are fine),
   written as `input/silac_design.csv` (`File.Name,Replicate,Channel,Group`; a labelled-only
   label-check injection is a run with that channel alone); (3) are the channels independent
   samples (strains, treatments: `--channel-norm spec`, the default) or old and new protein of
-  one culture (pulsed SILAC / turnover: `run`, which the ratio analysis does not cover). Record
-  the answers (`log_decision.py`). Detail: `references/silac.md`.
+  one culture (pulsed SILAC / turnover: `run`, which the ratio analysis does not cover); (4) is
+  each replicate a separate culture and mix, or are some runs re-injections of one mix (those
+  share a `Replicate` and are averaged, never counted twice; confirmed separate →
+  `--replicates biological` in step 8). Record the answers (`log_decision.py`). Detail:
+  `references/silac.md`.
 - **Experiment type — decided once, confirmed with the user, never inferred from file
   names.** It decides the DE's quantities (step 8) and the pull-down analysis (8a, the brief).
   With a CoreOmics submission attached (step 3b), `python3 scripts/experiment_type.py propose
@@ -2161,7 +2164,8 @@ python3 scripts/silac.py design --validate input/silac_design.csv --against ./se
     [--exclude <run> --reason "<why, in the user's words>"]   # only on the user's decision
 Rscript scripts/run_silac.R --input ./search_out/report.parquet --design input/silac_design.csv \
     --outdir <S>/output/tables --figures-dir <S>/output/figures --params ./wf/params.cfg \
-    --fasta ./search.fasta [--comparisons "KO-WT,DKO-WT"] [--min-replicates 3]
+    --fasta ./search.fasta [--comparisons "KO-WT,DKO-WT"] [--replicates biological] \
+    [--min-replicates N] [--run-level-only]
 ```
 It writes the `DE_silac_*.csv` tables, the channel-specific detections, the figures and a
 `de_provenance.json` that the report, Methods, audit, delivery gate and reproducibility bundle
@@ -2169,7 +2173,10 @@ read like any DE record (its normalisation check is recorded as not applicable, 
 Skip 8a (no set tests yet) and 8b (it drew its own figures); in 8c run the audit without
 `--conditions`, and `sample_quality.py` on `SILAC_sample_matrix.csv` + `SILAC_samples.csv`.
 Ask which comparisons the user wants (the default, every pair heavier/lighter, is tagged).
-→ `references/silac.md`, which also says how to read centred vs uncentred ratios.
+It filters on every q-value column the report has, like the label-free path; `--run-level-only`
+(recorded) keeps the run-specific two only. Unset minimum replicates = max(3, half), tagged.
+→ `references/silac.md`, which also says how to read centred vs uncentred ratios and the
+detection patterns ("detected in X (k/n); not detected in Y (0/n)" — not a test).
 
 First check the design against the runs the search actually reported — every report run needs
 a row and every row a report run, every row a group, every group two samples — so a renamed or
