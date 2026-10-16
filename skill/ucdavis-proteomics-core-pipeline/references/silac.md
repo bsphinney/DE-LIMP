@@ -217,6 +217,8 @@ says about itself (DE-LIMP rule 1).
 | audit (`audit_results.py`) | its `checks` (channel balance, replicates, incorporation, a label declared twice, a defaulted normalisation, channel-specific count); `normalization_check` not applicable, quoted; normalisation stability not relevant (`quantities: raw`); a high share significant read with its `high_significance_note` |
 | brief (`analysis_prompt.py`) | `brief_notes` and the not-applicable normalisation check |
 | delivery (`core_submission.py deliver`) | `normalization_check.status: not_applicable` with a reason passes the gate; one without a reason does not |
+| deposit (`make_deposit.py`) | the SDRF has one row per run and channel: `comment[label]` SILAC light / medium / heavy (PRIDE), source name `<replicate>_<group>`, the run as the shared assay name, the group as the factor value |
+| README (`session_docs.py`) | its `tables_summary` names the SILAC tables |
 | reproducibility (`provenance.py`) | step 5 searches with the recorded cfg (it holds the labels); step 6 is its `replay` (`run_silac.R` with the bundle's paths); the design file is copied into `inputs/` |
 | figures, set tests | `make_figures.R` leaves its figures alone (`figures.written_by`); `run_sets.R` stops with `set_tests.reason` |
 
