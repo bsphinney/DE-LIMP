@@ -134,9 +134,6 @@ class BundleDescribesTheDe(unittest.TestCase):
             self.assertIn("The DE ran inside the container /containers/delimp-r.sif", fh.read())
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class AMissingValueIsNotADifference(unittest.TestCase):
     """2026-10: a SILAC DE's record had no `rscript`, and MANIFEST.txt said "[NOTE] setup.json
@@ -172,3 +169,7 @@ class AMissingValueIsNotADifference(unittest.TestCase):
         man, _, manifest, _, _ = self.bundle(self.same_env_record(lib_rs))
         self.assertIsNone(man["environment"]["setup_json_differs"])
         self.assertNotIn("different environment", manifest)
+
+
+if __name__ == "__main__":
+    unittest.main()

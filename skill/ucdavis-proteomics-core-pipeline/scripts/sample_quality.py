@@ -822,7 +822,9 @@ def main():
     scope, scope_why = panel_scope(taxid, (tc or {}).get("organism") or meta.get("organism")
                                    or PANEL_ORGANISMS.get(taxid), meta)
     not_applicable = (f"not applicable to {org_name}: the panel's markers are vertebrate blood, "
-                      f"muscle and skin proteins, and {scope_why}") if scope is False else None
+                      f"muscle and skin proteins, and {scope_why} (a sample that also holds a "
+                      f"vertebrate host's proteins: pass --taxid <the host's taxid> to score "
+                      f"them)") if scope is False else None
     panels = {name: panel_genes(name, taxid) for name in PANELS}
     if tc and (tc["genes"] or tc["accessions"]):
         # Genes AND accessions: the matrix's id column may be either, and an NCBI database

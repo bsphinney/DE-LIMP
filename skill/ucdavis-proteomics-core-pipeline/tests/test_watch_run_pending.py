@@ -86,9 +86,6 @@ class PendingIsNotRunning(unittest.TestCase):
         self.assertIn("HELD", out["progress"]["summary"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class ChainModeSaysWhatItIsDoing(unittest.TestCase):
     """2026-10: `watch_run.sh --all <out>` on a two-job search printed only
@@ -128,6 +125,14 @@ class ChainModeSaysWhatItIsDoing(unittest.TestCase):
         self.assertTrue(out["doing"])
         self.assertTrue(out["note"])
 
+    def test_an_array_jobs_task_log_is_read(self):
+        """Review of 2.13.1 (note 7): an array task logs to <job>_<id>_<task>.log."""
+        with tempfile.TemporaryDirectory() as o:
+            with open(os.path.join(o, "search_202_3.log"), "w") as fh:
+                fh.write("[0:17] File #2/6\n")
+            out = self.watch(o, {"201": "COMPLETED", "202": "RUNNING"})
+        self.assertEqual((out["progress"]["file"], out["progress"]["files"]), (2, 6))
+
     def test_a_five_step_chain_counts_finished_files(self):
         with tempfile.TemporaryDirectory() as o:
             with open(os.path.join(o, "file_list.txt"), "w") as fh:
@@ -147,3 +152,7 @@ class ChainModeSaysWhatItIsDoing(unittest.TestCase):
             out = self.watch(o, {"401": "COMPLETED", "402": "COMPLETED"})
         self.assertTrue(out["done"])
         self.assertNotIn("progress", out)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -212,6 +212,7 @@ class NotAVertebrate(Base):
                 self.assertEqual(res["flags"], [], "no caution, no 'could not run'")
                 self.assertNotIn("HEMOLYSIS: complete separation", md)
                 self.assertIn("vertebrate blood, muscle and skin", md)
+                self.assertIn("pass --taxid <the host's taxid>", md)       # a host + pathogen
 
     def test_a_vertebrate_or_an_unknown_organism_is_scored_as_before(self):
         for meta in ({"organism": "Homo sapiens", "taxid": 9606},

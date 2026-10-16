@@ -55,3 +55,4 @@ class ReviewsAreKept(unittest.TestCase):
         d8 = s[s.index("### 8d."):s.index("### 8e.")]
         self.assertIn("<S>/logs/review_<proteomics|biology|statistics>.md", d8)
         self.assertIn("never delivered", d8)
+        self.assertIn("hive_remote: locally, then `hive_exec.sh\n--put`", d8)

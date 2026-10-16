@@ -2586,7 +2586,8 @@ collaborator; any `log2FC > 5` or `p < 1e-10`; a new organism/instrument/reagent
 discordance; or the user asks — spawn **three reviewers in parallel** (one message, three
 `Agent` calls; each gets the report + data paths + context): **proteomics**, **biology**
 ("could contamination explain this?"), **statistics**. Tell each to also write its findings to
-`<S>/logs/review_<proteomics|biology|statistics>.md` and to name that file in its answer: a
+`<S>/logs/review_<proteomics|biology|statistics>.md` (hive_remote: locally, then `hive_exec.sh
+--put` it there) and to name that file in its answer: a
 review then survives a hand-back that fails (it has), and stays with the analysis record
 (`logs/` is Core-internal, never delivered). Consolidate their findings (dedupe,
 sort by severity) into a `## Expert Review Notes` section and surface every **critical**

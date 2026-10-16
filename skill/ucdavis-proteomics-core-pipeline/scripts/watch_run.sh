@@ -168,8 +168,9 @@ print(json.dumps(o))'
   for x in $summary; do case "$x" in *=*RUNNING*) rid="${x%%=*}"; break ;; esac; done
   rlog=""; rfile=""
   if [ -n "$rid" ]; then
-    rlog="$(run "for f in $QD/*_$rid.log; do [ -f \"\$f\" ] && echo \"\${f##*/}\"; done" 2>/dev/null | head -n1)"
-    rfile="$(run "for f in $QD/*_$rid.log; do [ -f \"\$f\" ] && tail -n 3000 \"\$f\"; done" 2>/dev/null \
+    # (an array job's tasks log to <job>_<id>_<task>.log)
+    rlog="$(run "for f in $QD/*_$rid.log $QD/*_${rid}_*.log; do [ -f \"\$f\" ] && echo \"\${f##*/}\"; done" 2>/dev/null | head -n1)"
+    rfile="$(run "for f in $QD/*_$rid.log $QD/*_${rid}_*.log; do [ -f \"\$f\" ] && tail -n 3000 \"\$f\"; done" 2>/dev/null \
              | grep -aoE 'File #[0-9]+/[0-9]+' | tail -n1)"
   fi
   notes="$(python3 "$HERE/pipeline_notes.py" --stage "$stage" --index "$POLL" 2>/dev/null)"
