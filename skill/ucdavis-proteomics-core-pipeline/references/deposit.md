@@ -42,7 +42,7 @@ enter and why it is empty. `[... — confirm]` tags from `make_methods.py` are c
 | organism | `input/search.fasta.meta.json` organism (the organism the user confirmed; strain text in parentheses removed, flagged) |
 | biological replicate | numbered within each `conditions.csv` Group (the DE treated each run as a sample) |
 | acquisition method | workflow manifest (step 2 detection); diaPASEF noted but written as the parent DIA term (see below) |
-| label | `label free sample` only when the search parameters show no `--channels`/label mods (DIA-NN) or no TMT (Sage); otherwise `TO-FILL` |
+| label | `label free sample` only when the search parameters show no `--channels`/label mods (DIA-NN) or no TMT (Sage). A SILAC search with a channel design (`input/silac_design.csv`): one row per run and channel, `SILAC light` / `SILAC medium` / `SILAC heavy` (PRIDE:0000326 / 0000327 / 0000325), source name `<replicate>_<group>`, the run's assay name shared (SDRF-Proteomics: a multiplexed run's samples differ in `comment[label]`). Otherwise `TO-FILL` |
 | instrument | raw metadata / manifest, mapped to a PSI-MS term from a table verified in OLS4 (2026-09-24); unmapped → `TO-FILL` with the recorded name |
 | cleavage agent | the search's in-silico rule: DIA-NN `--cut K*,R*` → Trypsin/P (MS:1001313), `K*,R*,!*P` → Trypsin (MS:1001251); Sage `cleave_at`/`restrict` likewise. Flagged "confirm it matches the wet-lab enzyme" |
 | modification parameters | the search parameters; Unimod names/accessions only for ids verified in `unimod.xml` (1, 4, 7, 21, 28, 35); others `TO-FILL` |

@@ -35,6 +35,20 @@ cli_adjp <- getone("--adjp")    # fallbacks only -- see "significance cutoff" be
 cli_logfc<- getone("--logfc")
 top_n    <- as.integer(getone("--top", "50"))
 violin_n <- as.integer(getone("--violin-top", "8"))   # proteins per violin_top_<contrast>.png
+# A pipeline that draws its own figures says so (de_provenance.json figures.written_by, e.g.
+# run_silac.R): its figures and figures.json are the ones the report reads, and this script must
+# neither remove them nor replace the list -- so this is asked before anything is touched.
+local({
+  pj <- file.path(de_dir, "de_provenance.json")
+  if (!file.exists(pj)) return(invisible(NULL))
+  txt <- paste(readLines(pj, warn = FALSE), collapse = " ")
+  m <- regmatches(txt, regexec('"figures"\\s*:\\s*\\{[^}]*"written_by"\\s*:\\s*"([^"]*)"', txt))[[1]]
+  if (length(m) == 2 && nzchar(m[2]) && m[2] != "make_figures.R") {
+    message(sprintf("[figures] nothing drawn: %s draws this analysis's figures and wrote their list; %s",
+                    m[2], "this script would remove and replace them."))
+    quit(save = "no", status = 0)
+  }
+})
 dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
 
 suppressWarnings(suppressMessages({

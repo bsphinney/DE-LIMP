@@ -56,6 +56,16 @@ say <- function(...) message("[run_sets] ", sprintf(...))
 de_dir <- getarg("--de-dir")
 if (is.null(de_dir) || isTRUE(de_dir)) stop("Required: --de-dir <run_de.R outdir>")
 inp_path <- file.path(de_dir, "set_test_inputs.rds")
+# A DE pipeline without set tests says so, and why, in its record (de_provenance.json set_tests
+# available = false, e.g. run_silac.R): stop with its reason, not with a missing file.
+local({
+  dp <- file.path(de_dir, "de_provenance.json")
+  st <- if (file.exists(dp)) tryCatch(jsonlite::fromJSON(dp, simplifyVector = FALSE)$set_tests,
+                                      error = function(e) NULL) else NULL
+  if (isFALSE(st$available))
+    stop("run_sets.R: no protein-set tests for this analysis -- ",
+         st$reason %||% "its DE record says they are not available", call. = FALSE)
+})
 if (!file.exists(inp_path))
   stop("run_sets.R: ", inp_path, " not found. run_de.R writes it (the skill version that has run_sets.R); re-run run_de.R ",
        "on this analysis first -- the set tests must use the model run_de fitted.")

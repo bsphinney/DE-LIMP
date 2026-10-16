@@ -12,7 +12,8 @@ its dependencies, so a partial copy of scripts/ still catalogues.
 SHARE_NAME = "Analysis_Report_with_audio.html"
 SHARE_STALE = "Analysis_Report_with_audio.stale.html"
 
-# The differential expression's output, by name: what run_de.R writes into its --outdir (the
+# The differential expression's output, by name: what run_de.R (or, for SILAC, run_silac.R)
+# writes into its --outdir (the
 # session's output/tables/: the DE tables, the matrices it ran on, its record and methods, and
 # contaminants.R's tables), what run_sets.R's protein-set tests on its model write beside them,
 # and what make_figures.R and run_sets.R draw from them into output/figures/. A delivery without
@@ -26,11 +27,16 @@ DE_OUTPUT_NAMES = frozenset((
     "QC_detected_vs_inferred.csv", "QC_contaminant_share.csv", "contaminants_removed.csv",
     "sets_members.csv", "sets_methods.txt", "sets_provenance.json",
     "figures.json", "sample_labels.csv", "pca.png", "heatmap_top.png", "qc_pvalue_panel.png",
-    "qc_protein_counts.png", "qc_detected_vs_inferred.png"))
+    "qc_protein_counts.png", "qc_detected_vs_inferred.png",
+    # run_silac.R (a SILAC session's ratio analysis, in the same folders)
+    "SILAC_channel_specific_detections.csv", "SILAC_channel_summary.csv", "SILAC_ratio_offsets.csv",
+    "SILAC_label_incorporation.csv", "SILAC_sample_matrix.csv", "SILAC_samples.csv",
+    "silac_channel_composition.png", "silac_channel_detections.png"))
 # One file per contrast, (prefix, suffix): DE_<method>_<contrast>.csv, Sets_[baitnorm_]<contrast>.csv,
 # volcano_ / violin_top_ / sets_[baitnorm_]<contrast>.png, and pvalue_<contrast>.png (before 2.8.0).
 DE_OUTPUT_PATTERNS = (("DE_", ".csv"), ("Sets_", ".csv"), ("volcano_", ".png"),
-                      ("violin_top_", ".png"), ("sets_", ".png"), ("pvalue_", ".png"))
+                      ("violin_top_", ".png"), ("sets_", ".png"), ("pvalue_", ".png"),
+                      ("silac_scatter_", ".png"))
 DE_OUTPUT_DIRS = ("tables", "figures")            # output/<dir>/, where they are written
 
 

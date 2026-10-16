@@ -722,6 +722,17 @@ def _cys_alkylation(paths):
     return None
 
 
+def _labels(paths):
+    """estimate_params.py's `labels` record (SILAC channels, masses and the channel-normalisation
+    answer with its given/DEFAULT tag) from the first of these params files whose sidecar holds
+    one, else None."""
+    for path in paths:
+        side = _load_json(f"{path}.rationale.json") if path else None
+        if isinstance(side, dict) and isinstance(side.get("labels"), dict):
+            return side["labels"]
+    return None
+
+
 def search_record(params=None, search_prov=None, manifest=None):
     """What the database search ran with, each value with where it came from.
 
@@ -743,7 +754,7 @@ def search_record(params=None, search_prov=None, manifest=None):
            "max_var_mods": None, "met_excision": False, "ms1_tol": None, "ms2_tol": None,
            "tol_note": None, "precursor_fdr": None, "library": None, "mbr": None, "dda": None,
            "search_mode": prov.get("search_mode"),
-           "labelled": None, "cont_quant_exclude": None, "cys_alkylation": None,
+           "labelled": None, "labels": None, "cont_quant_exclude": None, "cys_alkylation": None,
            "probe_fallback": probe_fallback_record(prov), "warnings": []}
     if prov.get("version"):
         rec["version"] = str(prov["version"])
@@ -894,6 +905,10 @@ def search_record(params=None, search_prov=None, manifest=None):
         rec["labelled"] = {"value": labelled, "source": where + (
             " (--channels / label mods present)" if labelled else
             " (no --channels or label modifications)")}
+        # SILAC (plexDIA): the channels and the normalisation answer -- the params' sidecar (with
+        # its given/DEFAULT tags), else as the cfg itself declares them (a search before 2.13)
+        import silac
+        rec["labels"] = _labels([pf] + [c for c, _ in cands]) or silac.labels_from_cfg(groups)
     elif engine == "sage" or pf.endswith(".json"):
         cfg = _load_json(pf) or {}
         db = cfg.get("database") or {}
@@ -1090,6 +1105,9 @@ def search_paragraph(rec, de_prov=None):
                + (f" (at most {rec['max_var_mods']['value']} per peptide)"
                   if rec.get("max_var_mods") else "") + ".") if var else
               "No variable modifications were searched.")
+    if rec.get("labels"):
+        import silac
+        s.append(silac.methods_search_sentence(rec["labels"]))
     tol = []
     for key, lvl in (("ms1_tol", "precursor (MS1)"), ("ms2_tol", "fragment (MS2)")):
         t = rec.get(key)
@@ -2121,9 +2139,13 @@ def main():
     # search engine ("Raw files were searched and quantified with DPC-Quant + limma") and to
     # state "|log2FC| >= 1" as a significance threshold that run_de.R never applies.
     if de_prov:
-        w("## Differential expression")
+        # A pipeline that writes its own Methods paragraph (run_silac.R) is quoted as written:
+        # it describes itself (DE-LIMP rule 1); run_de.R's record is described by de_paragraph()
+        w(f"## {de_prov.get('methods_heading') or 'Differential expression'}")
         w("")
-        w(de_paragraph(de_prov))
+        own = de_prov.get("methods_paragraph")
+        left_out = de_runs_left_out_sentence(de_prov) if own else None
+        w(" ".join(x for x in (own, left_out) if x) if own else de_paragraph(de_prov))
         w("")
         cont = de_prov.get("contaminants") if isinstance(de_prov.get("contaminants"), dict) else {}
         if cont.get("database_risk") is True and cont.get("database_note"):
@@ -2186,7 +2208,17 @@ def main():
             if srec.get(key):
                 srows.append((label, _fmt_range(srec[key]["value"]), srec[key]["source"]))
         for m in srec["mods"]:
+            if m.get("label") and (srec.get("labels") or {}).get("channels"):
+                continue                      # the SILAC label: the channel rows below say it
             srows.append((f"{m['type'].capitalize()} modification", mod_phrase(m), m["source"]))
+        lab = srec.get("labels")
+        if lab and lab.get("channels"):
+            srows.append(("SILAC channels (plexDIA)", "; ".join(
+                f"{c['name']} {c.get('preset') or 'K/R +' + '/'.join(str(c.get(x, {}).get('delta')) for x in 'KR')}"
+                for c in lab["channels"]), lab.get("source") or "the search parameters"))
+            cn = lab.get("channel_norm") or {}
+            srows.append(("Channel normalisation", cn.get("flag") or NOT_RECORDED,
+                          cn.get("source") or "not in the search parameters"))
         for key, label in (("ms1_tol", "Precursor (MS1) tolerance"),
                            ("ms2_tol", "Fragment (MS2) tolerance")):
             t = srec.get(key)

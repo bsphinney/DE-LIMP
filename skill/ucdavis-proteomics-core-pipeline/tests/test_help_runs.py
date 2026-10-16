@@ -19,7 +19,7 @@ SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
 TOUCHED = ["fetch_fasta.py", "core_submission.py", "collect_conditions.py", "ht_manifest.py",
            "run_search.py", "diann_parallel.py", "radiant_parallel.py", "check_report_runs.py",
            "make_methods.py", "make_analysis_html.py", "provenance.py", "session.py",
-           "submission_report.py", "experiment_type.py"]
+           "submission_report.py", "experiment_type.py", "silac.py", "estimate_params.py"]
 _SUBS = re.compile(r"^\s*\{([A-Za-z0-9_,-]+)\}", re.M)
 # fetch_fasta.py reads a bare flag as its old flat CLI (= `fetch`), so its top-level --help is
 # fetch's and lists no subcommands: named here.

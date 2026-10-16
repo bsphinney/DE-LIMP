@@ -1193,11 +1193,11 @@ def refuse_unsafe_path(path, flag="--out", prog="diann_parallel"):
 # argument with a space and cuts the result at EVERY '--' (arguments(), diann.cpp at tag 1.8, the
 # last public source: `args += argv[i] + std::string(" ")`, then `next = args.find("--", start)`),
 # so the rest of the path becomes an "option" of its own. DIA-NN 2.7.0 does exactly that: a Core run
-# named `<date>__60SPD_DIA--asp3_<well>.d` logged "unrecognised option [--asp3_<well>.d]" and
+# named `<date>__60SPD_DIA--sampA_<well>.d` logged "unrecognised option [--sampA_<well>.d]" and
 # "skipping .../<date>__60SPD_DIA - invalid raw MS data format", and searched the other runs (a
-# staff report, 2026-10-14). Re-run on HIVE (DIA-NN 2.7.0, srun 24807838): `--f <d>/x_DIA--asp3_S3
-# .mzML --f <d>/plate--1/s1.mzML --f <d>/x_DIA-asp3_S3.mzML` (the last a link to the first) logged
-# "unrecognised option" for `--asp3_S3.mzML` and `--1/s1.mzML`, skipped `<d>/x_DIA` and
+# staff report, 2026-10-14). Re-run on HIVE (DIA-NN 2.7.0, srun 24807838): `--f <d>/x_DIA--sampA_S3
+# .mzML --f <d>/plate--1/s1.mzML --f <d>/x_DIA-sampA_S3.mzML` (the last a link to the first) logged
+# "unrecognised option" for `--sampA_S3.mzML` and `--1/s1.mzML`, skipped `<d>/x_DIA` and
 # `<d>/plate`, and processed 1 file: the link. A '--' in a FOLDER is cut the same way. A single
 # '-' is harmless -- only '--' starts an option -- and every path this skill hands DIA-NN is
 # absolute, so a name that starts with one '-' never starts an argument. Sage, msconvert,
@@ -1484,10 +1484,18 @@ def header(name, cpus, mem_gb, hours, partition, account, qos=None, array=None, 
     return "\n".join(h)
 
 
-def step8_next(report, sess):
+def step8_next(report, sess, cfg=None, fasta=None):
     """The command a resumed session runs once the chain is COMPLETED: step 8's check
-    (normalization_check.step8_commands), never the final DE without it."""
+    (normalization_check.step8_commands), never the final DE without it -- or, for a cfg that
+    declares SILAC channels, the SILAC ratio analysis (silac.step8_command)."""
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import silac
+    try:
+        labelled = bool(cfg) and silac.cfg_labels(cfg)[0] is not None
+    except (CfgError, OSError):
+        labelled = False
+    if labelled:
+        return silac.step8_command(report, sess, cfg, fasta)
     import normalization_check
     return normalization_check.step8_commands(report, f"{sess}/input/conditions.csv", sess,
                                               "dpc")["next"]
@@ -1634,6 +1642,12 @@ def main():
             why = None
         if why:
             sys.exit(f"[diann_parallel] REFUSING: {why} Nothing was generated.")
+        # SILAC (--channels): a declaration that would label twice or stop on channel
+        # normalisation, or a seed library the label cannot be applied to once (silac.py)
+        import silac
+        why = silac.refusal(a.cfg, seed_lib=bool(a.seed_lib), prog="diann_parallel")
+        if why:
+            sys.exit(why)
 
     # Detect the queue from the submitting user's SLURM associations rather than
     # assuming facility membership. genome-center-grp/high for members; publicgrp/low
@@ -2164,8 +2178,19 @@ def main():
     # Record the submission so a disconnected session can pick the run back up.
     # SLURM keeps the jobs alive after the user closes their terminal; without this
     # the next session has no idea what was submitted or what is still outstanding.
-    # <out> is normally <session>/output/search, so the session is two levels up.
+    # <out> is normally <session>/output/search, so the session is two levels up -- but only a
+    # folder that IS a session gets the notes (session.is_session_dir): an --out elsewhere put
+    # RECOVERY.md and .recovery.json two folders up, once into a home directory. Then they go
+    # beside --out, and the generator and submit.sh say so.
     sess = os.path.dirname(os.path.dirname(out))
+    from session import recovery_dir
+    rec_dir = recovery_dir(out)
+    rec_where = (f"{rec_dir}/RECOVERY.md" if rec_dir == sess else
+                 f"{rec_dir}/RECOVERY.md (beside --out: {sess} is not an analysis session folder)")
+    if rec_dir != sess:
+        sys.stderr.write(f"[diann_parallel] {sess} is not an analysis session folder (no "
+                         "session.json, no input/ + output/): the recovery notes (RECOVERY.md, "
+                         f".recovery.json) will be written beside --out, in {out}\n")
     ck = os.path.join(os.path.dirname(os.path.abspath(__file__)), "checkpoint.py")
     # $jid1b belongs here too. It is an afterok link like any other, so if it dies the whole
     # chain stalls forever on a dependency that will never fire -- and left out of jobs.txt
@@ -2177,17 +2202,17 @@ def main():
     sub_lines += [
         # the record first: nothing may be printed between the last sbatch and these two
         f'printf "%s\\n" {jobs.replace(",", " ")} > "{D}/jobs.txt"',
-        f'python3 "{ck}" record --session "{sess}" --stage search \\',
+        f'python3 "{ck}" record --session "{rec_dir}" --stage search \\',
         f'  --jobs "{jobs}" --desc "DIA-NN 5-step parallel chain ({n} files)" \\',
         f'  --report "{D}/{report}" --watch-job "$jid5" --watch-log "{D}/s5_report_${{jid5}}.log" \\',
         # what follows the chain is step 8's normalisation check, then the final DE held to it --
         # never the final DE alone (normalization_check.step8_commands: the one wording)
-        f'  --next {shlex.quote(step8_next(f"{D}/{report}", sess))} \\',
+        f'  --next {shlex.quote(step8_next(f"{D}/{report}", sess, a.cfg, fasta))} \\',
         '  >/dev/null 2>&1 || true',
         'say "submitted: firstpass=$jid2 assembly=$jid3 finalpass=$jid4 report=$jid5"',
         f'say "final report will be {D}/{report}; watch with: watch_run.sh --slurm $jid5 --log {D}/s5_report_${{jid5}}.log"',
         f'say "all chain job ids -> {D}/jobs.txt  (watch the WHOLE chain: watch_run.sh --all {D})"',
-        f'say "recovery notes written to {sess}/RECOVERY.md — you can safely close your terminal"']
+        f'say "recovery notes written to {rec_where} — you can safely close your terminal"']
     # The most the chain can use (cpu_hours.py, the one rule): read from the step scripts just
     # written, and said where the board and the person submitting see it.
     from cpu_hours import reservation, submit_comment
@@ -2287,6 +2312,7 @@ def main():
         "scripts": [x for x in [s1, s1b, s2, s3, s4, s5, "submit.sh"] if x],
         "submit": f"bash {out}/submit.sh   (or: hive_exec.sh 'bash {out}/submit.sh')",
         "report_jobid_var": "jid5",
+        "recovery_notes": os.path.join(rec_dir, "RECOVERY.md"),
         # the most this chain can use (cpu_hours.py): every step's CPUs x time limit x tasks
         "cpu_hours_reserved": cpu["cpu_hours_reserved"],
         "gpu_hours_reserved": cpu["gpu_hours_reserved"],

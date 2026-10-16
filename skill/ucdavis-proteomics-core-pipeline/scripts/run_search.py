@@ -861,6 +861,11 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
     if not os.path.isfile(params):
         sys.exit(f"[run_diann] cfg not found: {params}")
     refuse_dda_mismatch(params, acquisition)
+    # SILAC (--channels): refused when it would label twice or stop on channel normalisation
+    import silac
+    why = silac.refusal(params, prog="run_diann")
+    if why:
+        sys.exit(why)
     os.makedirs(out, exist_ok=True)
     # The job's first lines check that its node reaches DIA-NN, --out, the FASTA and the raw
     # data (node_fault.py): a dropped mount is a node fault (exit 75), never "DIA-NN failed".
@@ -2146,8 +2151,8 @@ def refuse_fragpipe_dashed(params, files, fasta, out, acquisition):
     anything is written. FragPipe 24.0 (CmdDiann.java) writes each run as a `--f <absolute path>`
     line of filelist_diann.txt and hands DIA-NN `--cfg <filelist>--`, and DIA-NN cuts a cfg's text
     at every '--' exactly as it does its command line: on HIVE (srun 24807938) DIA-NN 2.7.0 and
-    FragPipe 24.0's bundled 1.8.2 beta 8 both logged "unrecognised option [--asp3_S3.mzML]" for a
-    `x_DIA--asp3_S3.mzML` in that list, skipped it, and searched the other run. The path DIA-NN
+    FragPipe 24.0's bundled 1.8.2 beta 8 both logged "unrecognised option [--sampA_S3.mzML]" for a
+    `x_DIA--sampA_S3.mzML` in that list, skipped it, and searched the other run. The path DIA-NN
     gets is the run's link in <out>/diatracer_stage/ on the diaTracer route (dia-PASEF .d,
     run_fragpipe), so only its FILE NAME matters there; any other input goes in as given. The
     --workdir (DIA-NN's --out and the filelist live under it) and the database it is given count

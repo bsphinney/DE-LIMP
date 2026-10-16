@@ -27,7 +27,8 @@ def source(script):
 class DeOutputNames(unittest.TestCase):
     def test_every_file_the_de_scripts_write_is_de_output(self):
         for script, d in (("run_de.R", "tables"), ("contaminants.R", "tables"),
-                          ("run_sets.R", "tables"), ("make_figures.R", "figures")):
+                          ("run_sets.R", "tables"), ("make_figures.R", "figures"),
+                          ("run_silac.R", "tables")):
             src = source(script)
             # file.path(outdir, "x.csv"), and names given through a variable
             names = re.findall(r'file\.path\((?:outdir|figdir),\s*"(' + NAME + r')"\)', src)
@@ -41,6 +42,9 @@ class DeOutputNames(unittest.TestCase):
             for prefix, ext in per_contrast:
                 self.assertTrue(rf.is_de_output(f"{d}/{prefix}A.vs.B.{ext}"),
                                 f"{script} writes {prefix}<contrast>.{ext}")
+        # run_silac.R's figures: named by a variable (f <- "x.png") and drawn into figdir
+        for n in re.findall(r'\bf <- "(' + NAME + r')"', source("run_silac.R")):
+            self.assertTrue(rf.is_de_output(f"figures/{n}"), f"run_silac.R draws {n}")
         # make_figures.R removes, as its own, the per-contrast p-value plots of sessions before 2.8.0
         self.assertIn("pvalue_.+", source("make_figures.R"))
         self.assertTrue(rf.is_de_output("figures/pvalue_A.vs.B.png"))

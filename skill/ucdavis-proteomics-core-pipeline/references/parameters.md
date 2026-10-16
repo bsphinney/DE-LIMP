@@ -120,6 +120,14 @@ carbamidomethyl (C). Variable mods are **off by default** — the DIA-NN README
 notes variable mods don't improve depth for relative quant; pass `var_mods: "ox"`
 in the workflow (or `--var-mods ox`) to add Ox(M).
 
+## SILAC labels (`--labels silac2|silac3 --label-preset ... [--channel-norm spec|run]`)
+
+DIA-NN plexDIA for SILAC samples (DIA only): writes `--fixed-mod SILAC,0.0,KR,label`,
+`--channels` (masses from UniMod), `--original-mods` and the channel-normalisation flag, each
+tagged, and the sidecar's `labels` record; never `--lib-fixed-mod` (it would label a
+FASTA-predicted library twice). SILAC flags in `--overrides` are refused. The presets, the design
+question and why: `references/silac.md`.
+
 ## Cysteine: which alkylating agent, or none (`--cys-alkylation`)
 Each alkylating agent leaves its own fixed modification on C, and a search for the wrong one (or
 for one at all, on samples never alkylated) identifies almost no cysteine peptide: three on-bead

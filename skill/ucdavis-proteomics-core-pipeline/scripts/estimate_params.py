@@ -58,6 +58,7 @@ import sys, os, json, math, argparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import staff  # noqa: E402  the role client documents name, and the staff-only record
+import silac  # noqa: E402  SILAC labels (--labels): the one definition of the plexDIA declaration
 
 # --- known-good mass accuracy by instrument class (DIA-NN README) ------------
 ORBITRAP_RES_PPM = {240000: 4, 120000: 7, 60000: 10, 30000: 15}
@@ -786,7 +787,8 @@ def tagged(value, source):
 
 # --- DIA-NN cfg --------------------------------------------------------------
 def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
-                cont_tag=None, mz_range=None, level_src=None, override_meta=None, cys=None):
+                cont_tag=None, mz_range=None, level_src=None, override_meta=None, cys=None,
+                labels=None):
     UNIV = "universal trypsin/LFQ default"
     r = {}  # rationale
     lines = []
@@ -997,6 +999,18 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
             f"contaminants ('{cont_tag}'-tagged) excluded from quant + normalisation "
             f"(DIA-NN README --cont-quant-exclude)")
 
+    # SILAC (--labels): the plexDIA declaration, from silac.py -- the one definition of it
+    if labels:
+        for flag, value, source, render in silac.diann_cfg_lines(labels):
+            if flag in r:
+                # a flag the cfg already carries -- --fixed-mod for a cysteine agent other than
+                # iodoacetamide (CYS_REAGENTS): both lines are written, each with its own rationale
+                r[f"{flag} (SILAC label)"] = tagged(value, source)
+                if render:
+                    lines.append(f"{flag} {value}")
+            else:
+                add(flag, value, source, render=None if render else False)
+
     # apply the user's overrides -- re-render the file; each tagged with who set it and why
     om = override_meta or {}
     for k, v in (overrides or {}).items():
@@ -1190,6 +1204,53 @@ def sage_fragment_mismatch(ms2_analyzer, sage_cfg):
     return None
 
 
+# The flags a SILAC search is declared with: set by --labels, never by --overrides. As overrides
+# (a triple-SILAC search, 2026-10-14) they were recorded as one person's override rather than
+# the study design, and --lib-fixed-mod went in with them and labelled the library twice.
+# --channels and the channel normalisations exist only for plexDIA: refused as overrides always.
+# --original-mods and --lib-fixed-mod also have label-free uses: refused only beside SILAC (with
+# --labels, --channels or a label --fixed-mod in the same request).
+SILAC_OVERRIDE_FLAGS = ("--channels", *silac.CHANNEL_NORM.values())
+SILAC_SHARED_FLAGS = ("--lib-fixed-mod", "--original-mods")
+
+
+def silac_labels(a, overrides):
+    """--labels/--label-preset/--channel-norm -> silac.labels_record(), or None. Exits with the
+    reason for a request this skill cannot search: not DIA-NN DIA, a preset without --labels, or
+    SILAC flags passed as --overrides. Like the other refusals, it leaves no cfg at --out from an
+    earlier run to contradict "no cfg was written"."""
+    def refuse(msg):
+        for stale in (a.out, a.out + ".rationale.json"):
+            try:
+                os.unlink(stale)
+            except OSError:
+                pass
+        sys.exit(f"[estimate_params] {msg} No cfg was written.")
+    label_mod = lambda k: k == "--fixed-mod" and ",label" in str(overrides[k])  # noqa: E731
+    silac_request = bool(a.labels) or any(k in SILAC_OVERRIDE_FLAGS or label_mod(k)
+                                          for k in overrides or {})
+    pass_as = [k for k in overrides or {} if k in SILAC_OVERRIDE_FLAGS or label_mod(k)
+               or (k in SILAC_SHARED_FLAGS and silac_request)]
+    if pass_as:
+        refuse(f"{', '.join(pass_as)} in --overrides: SILAC is declared with --labels "
+               "silac2|silac3 --label-preset ... [--channel-norm spec|run], which records it as "
+               "the study design and declares the label once (references/silac.md).")
+    if a.labels and "--fixed-mod" in (overrides or {}):
+        refuse("--fixed-mod in --overrides with --labels: it would replace the SILAC label's "
+               "--fixed-mod line. A cysteine agent goes in --cys-alkylation.")
+    if not a.labels:
+        if a.label_preset or a.channel_norm:
+            refuse("--label-preset/--channel-norm describe --labels, and it was not given.")
+        return None
+    if a.engine != "diann" or is_dda(a.acquisition):
+        refuse("--labels is DIA-NN plexDIA: DIA data searched with --engine diann. SILAC with "
+               "Sage or DIA-NN's DDA mode is not supported (references/silac.md).")
+    try:
+        return silac.labels_record(a.labels, a.label_preset, a.channel_norm)
+    except silac.SilacError as e:
+        refuse(str(e).rstrip(".") + ".")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--engine", required=True, choices=["diann", "sage"])
@@ -1205,6 +1266,16 @@ def main():
                          "N-ethylmaleimide / iodoacetic acid / acrylamide / MMTS / 4-vinylpyridine "
                          "-- that fixed modification on C (UniMod). Not given, cam is used and "
                          "recorded as a DEFAULT")
+    ap.add_argument("--labels", choices=sorted(silac.SCHEMES), default=None,
+                    help="SILAC multiplexing (DIA-NN plexDIA, DIA only): silac2 = L/H, silac3 = "
+                         "L/M/H on Lys and Arg. Needs --label-preset; references/silac.md")
+    ap.add_argument("--label-preset", default=None,
+                    help="the labelled channels' Lys/Arg labels, lightest first, e.g. K4R6,K8R10 "
+                         "(silac3) or K8R10 (silac2); `silac.py presets` lists them")
+    ap.add_argument("--channel-norm", choices=sorted(silac.CHANNEL_NORM), default=None,
+                    help="with --labels: spec = independent samples in each channel (the "
+                         "default, recorded as one); run = old and new protein of one culture "
+                         "(pulsed SILAC / turnover)")
     ap.add_argument("--overrides", default="",
                     help="JSON of fields to force, as the user chose them; each is recorded as a "
                          "user override with its value, who set it and why -- never as an SOP")
@@ -1251,6 +1322,7 @@ def main():
                  "none were given")
     by, by_how = override_setter(a.override_by) if overrides else (None, "unknown")
     override_meta = {"reason": a.override_reason}
+    labels = silac_labels(a, overrides)
 
     r1, r2, analyzer = a.ms1_resolution, a.ms2_resolution, a.ms2_analyzer
     bad = resolution_args_error(r2, analyzer)
@@ -1279,7 +1351,7 @@ def main():
             text, rationale = build_diann(a.acquisition, cls, ms1, ms2, label, src, var_mods,
                                           overrides, cont_tag, a.precursor_mz_range,
                                           level_src=level_src, override_meta=override_meta,
-                                          cys=cys)
+                                          cys=cys, labels=labels)
         except (LoneMassAccOverride, NoPrecursorRange) as e:
             # The message says "no cfg was written", so leave nothing at --out that contradicts
             # it. build_diann() raises BEFORE the write below, so THIS run wrote neither file --
@@ -1323,6 +1395,9 @@ def main():
         # what was searched for cysteine (fixed carbamidomethyl or unmodified), and whether the
         # user said so or it is the DEFAULT -- read by make_methods.py
         "cys_alkylation": cys,
+        # SILAC channels, their masses and the channel-normalisation answer (silac.labels_record);
+        # absent for a label-free search -- read by make_methods.py, run_silac.R and the audit
+        **({"labels": labels} if labels else {}),
         "rationale": rationale,
         "note": "Every value is tagged with its provenance. Mass tolerances are the "
                 "data-type-dependent settings; the rest are standard trypsin/LFQ defaults.",

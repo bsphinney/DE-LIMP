@@ -106,6 +106,32 @@ def expand(patterns):
     return out
 
 
+def _copy_into(src, in_dir, said):
+    """Copy src into in_dir and return the name it has there. A file of that name already there
+    is never replaced: the same file or the same bytes are left as they are; a different file is
+    kept, and src gets a distinct name (<stem>.de_design<ext>, then .2, .3 ...), which is said."""
+    import filecmp
+    name = os.path.basename(src)
+    dest = os.path.join(in_dir, name)
+    if os.path.exists(dest):
+        if os.path.samefile(src, dest) or filecmp.cmp(src, dest, shallow=False):
+            said(f"the DE's design ({name}, de_provenance.json metadata) is already in inputs/")
+            return name
+        stem, ext = os.path.splitext(name)
+        n, cand = 1, f"{stem}.de_design{ext}"
+        while os.path.exists(os.path.join(in_dir, cand)) and not filecmp.cmp(
+                src, os.path.join(in_dir, cand), shallow=False):
+            n += 1
+            cand = f"{stem}.de_design.{n}{ext}"
+        shutil.copy2(src, os.path.join(in_dir, cand))
+        note(f"inputs/{name} is another file than the DE's design ({src}): both kept, the "
+             f"design as inputs/{cand}, which reproduce.sh step 6 reads")
+        return cand
+    shutil.copy2(src, dest)
+    said(f"copied the DE's design ({name}, de_provenance.json metadata)")
+    return name
+
+
 def _utc_now():
     """ISO-8601 UTC. Separate helper so the default is obvious and testable."""
     import datetime
@@ -452,6 +478,18 @@ def main():
                 ok("copied conditions decisions (labels the user said name several runs)")
         elif src:
             skip(label, f"not found: {src}")
+    # The design the DE pipeline names in its own record (de_provenance.json `metadata`) when it
+    # is not the conditions.csv given -- run_silac.R's channel design, for one: reproduce.sh's
+    # step 6 reads it from inputs/<de_design_name>. The same file reached by another path (a
+    # symlink, a relative path) is not copied again; a DIFFERENT file whose name is already taken
+    # in inputs/ never replaces it -- it is kept beside it under a distinct name.
+    de_design = de_rec.get("metadata")
+    de_design_name = None
+    if isinstance(de_design, str) and os.path.isfile(de_design):
+        if a.conditions and os.path.isfile(a.conditions) and os.path.samefile(de_design, a.conditions):
+            de_design_name = os.path.basename(a.conditions)
+        else:
+            de_design_name = _copy_into(de_design, in_dir, ok)
 
     # ---- checksums -----------------------------------------------------------
     checks = {}
@@ -717,6 +755,46 @@ def main():
             "step 6's --input at that report.\n"
             "echo 'reproduce.sh: the DE read a --no-norm report: re-quantify with --no-norm "
             "before step 6 (see the NOTE above)' >&2")
+    # Step 5's parameters: step 2 re-derives the defaults for the data type, which cannot know a
+    # study design recorded in the parameters themselves -- SILAC labels (estimate_params.py
+    # --labels) -- so then the recorded cfg (inputs/) is searched with, as it ran. Its note is a
+    # comment on step 5's heading line: placed after a line's trailing backslash, a comment ends
+    # the continuation, and bash then runs the next line (--bundle ...) as a command of its own.
+    side = load_json(a.params + ".rationale.json") if a.params else None
+    search_params = './wf/$(basename "$(ls wf | grep -vi manifest | head -n1)")'
+    search_params_note = ""
+    if isinstance(side, dict) and isinstance(side.get("labels"), dict):
+        search_params = f"./inputs/{os.path.basename(a.params)}"
+        search_params_note = ("\n#    The recorded parameters are searched with: they carry the SILAC labels "
+                              "(estimate_params.py --labels),\n#    which step 2's defaults for the data "
+                              "type do not.")
+    # Step 6: a DE pipeline that records its own command (de_provenance.json `replay`, e.g.
+    # run_silac.R) is replayed with it -- its paths pointed at this bundle's -- else run_de.R.
+    rp = de_rec.get("replay") if isinstance(de_rec.get("replay"), dict) else None
+    if rp and rp.get("script") and isinstance(rp.get("args"), list):
+        here = {"--input": "./search_out/report.parquet", "--outdir": "./de_results",
+                "--figures-dir": "./de_results/figures", "--fasta": "./search.fasta"}
+        words, args, i = [], [str(x) for x in rp["args"]], 0
+        while i < len(args):
+            flag = args[i]
+            val = args[i + 1] if i + 1 < len(args) and not args[i + 1].startswith("--") else None
+            if val is None:
+                words.append(flag)
+                i += 1
+                continue
+            if flag in here:
+                val = here[flag]
+            elif (flag in ("--design", "--metadata") and de_design_name and
+                  (val == de_design or (os.path.isfile(val) and os.path.samefile(val, de_design)))):
+                val = f"inputs/{de_design_name}"
+            elif flag in ("--design", "--metadata", "--params"):
+                val = f"inputs/{os.path.basename(val)}"
+            words += [flag, val]
+            i += 2
+        de_step = (f'Rscript "$SKILL/scripts/{os.path.basename(rp["script"])}" '
+                   + " ".join(shlex.quote(w) for w in words))
+    else:
+        de_step = None
     # where the DE ran (run_de.R's runtime record), so the re-run can be put in the same place
     de_where = ""
     if rt and rt.get("container"):
@@ -725,6 +803,15 @@ def main():
     elif rt:
         de_where = (f"\n#    The DE ran in {rt.get('r_version')} at {rt.get('r_home')}"
                     + (f" (conda env {env_prefix})" if env_prefix else "") + ".")
+    # the run_de.R replay, exactly as reproduce.sh has always written it
+    contrasts_arg = ('--contrasts "' + a.contrasts + '"') if a.contrasts else ""
+    run_de_step = ('Rscript "$SKILL/scripts/run_de.R" --input ./search_out/report.parquet \\\n'
+                   "  --metadata inputs/"
+                   + (os.path.basename(a.conditions) if a.conditions else "conditions.csv") + " \\\n"
+                   "  --method " + (a.de_method or "<method>") + " --outdir ./de_results \\\n"
+                   "  " + contrasts_arg + " \\\n"
+                   "  --q-cutoff " + (a.q_cutoff or "0.01") + " --logfc " + (a.logfc or "1.0")
+                   + " --adjp " + (a.adjp or "0.05") + de_quantities + de_numeric_arg)
     repro = f"""#!/usr/bin/env bash
 # Auto-generated by provenance.py — re-creates this exact analysis.
 # Requires: this skill's scripts/ on $SKILL, and internet for the registry + UniProt.
@@ -758,17 +845,13 @@ PIN_ENGINE={a.engine or '<engine>'} PIN_VERSION={(wfman or {}).get('engine',{}).
 python3 "$SKILL/scripts/fetch_fasta.py" fetch --proteome {fasta_repro_proteome} \\
   --content {fasta_repro_content} --contaminants {fasta_repro_contam} --enzyme {fasta_repro_enzyme}{fasta_repro_keep} --out ./search.fasta
 
-# 5. Re-run the search (inputs from inputs/checksums; verify against checksums/checksums.json).{de_nonorm_note}
+# 5. Re-run the search (inputs from inputs/checksums; verify against checksums/checksums.json).{search_params_note}{de_nonorm_note}
 python3 "$SKILL/scripts/run_search.py" --tools ~/.proteomics-pipeline/tools/tools.json \\
-  --bundle ./wf/workflow.manifest.json --params ./wf/$(basename "$(ls wf | grep -vi manifest | head -n1)") \\
+  --bundle ./wf/workflow.manifest.json --params {search_params} \\
   --fasta ./search.fasta --out ./search_out --files {raw_arg}{' --keratin-sample' if fasta_repro_keratin else ''}{rename_repro}
 
 # 6. Re-run differential expression with identical settings.{de_where}
-Rscript "$SKILL/scripts/run_de.R" --input ./search_out/report.parquet \\
-  --metadata inputs/{os.path.basename(a.conditions) if a.conditions else 'conditions.csv'} \\
-  --method {a.de_method or '<method>'} --outdir ./de_results \\
-  {('--contrasts "'+a.contrasts+'"') if a.contrasts else ''} \\
-  --q-cutoff {a.q_cutoff or '0.01'} --logfc {a.logfc or '1.0'} --adjp {a.adjp or '0.05'}{de_quantities}{de_numeric_arg}
+{de_step or run_de_step}
 
 echo "Done. Compare ./de_results against checksums/checksums.json to confirm reproduction."
 """

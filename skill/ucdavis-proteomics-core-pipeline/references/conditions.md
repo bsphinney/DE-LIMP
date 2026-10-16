@@ -65,13 +65,13 @@ condition names to `--map`.
 
 ## A run whose file name holds `--`
 DIA-NN cannot be given such a path, so `run_search.py --rename-dashed-runs` searches the run
-under a new name, each run of dashes made one (`x_DIA--asp3_S3` → `x_DIA-asp3_S3`), and that is
+under a new name, each run of dashes made one (`x_DIA--sampA_S3` → `x_DIA-sampA_S3`), and that is
 its `Run` in the report. `detect_acquisition.py` lists these runs at step 2 (`dashed_run_names`).
 Build the design with the same names: `--rename-dashed-runs` on `--list-runs`, `--map` and
 `--emit-template` (with `--from-dir` or `--runs`; a `--from-report` already has them), or on
 `core_submission.py conditions`. Matching ignores punctuation, so a user's file naming the raw
 name still finds the run. `--validate --against <report>` names any row that still holds the raw
-name (`x_DIA--asp3_S3 -> x_DIA-asp3_S3`).
+name (`x_DIA--sampA_S3 -> x_DIA-sampA_S3`).
 
 ## How mapping works (`collect_conditions.py --map`)
 Matching is grounded in the actual run names (never guessed):

@@ -127,7 +127,12 @@ def normalisation_brief(w, prov, etype, etype_err, design):
     w(f"- **Pull-down design:** {'yes' if design['pulldown'] else 'no'} ({design['source']})"
       + (f". **Raise with the user:** {design['note']}" if design.get("note") else ""))
     w(f"- **Quantities the DE read:** {prov.get('normalisation') or 'NOT RECORDED'}")
-    if nc.get("status") != "decided":
+    from normalization_check import not_applicable_reason
+    na_reason = not_applicable_reason(nc)
+    if na_reason:
+        # the pipeline's own record of why there is no between-run normalisation to check
+        w(f"- **Normalisation check:** not applicable to this pipeline -- {na_reason}")
+    elif nc.get("status") != "decided":
         w("- **Normalisation check: NOT RUN.** Say in Data Quality Notes that whether "
           "normalisation suited this experiment was not checked.")
     else:
@@ -327,6 +332,11 @@ def main():
         w(f"- Missing values: {missing_policy}")
     if citation:
         w(f"- Citation: {citation}")
+    # what the pipeline itself says a reader must know about its numbers (de_provenance.json
+    # `brief_notes`; run_silac.R: centred vs uncentred ratios, the presence/absence caveat ...)
+    for note in prov.get("brief_notes") or []:
+        if isinstance(note, str) and note.strip():
+            w(f"- **Read the numbers this way:** {note.strip()}")
     # run_de.R's contaminant record -- stated as recorded, never assumed.
     cont = prov.get("contaminants") if isinstance(prov.get("contaminants"), dict) else {}
     if cont.get("policy") == "removed":

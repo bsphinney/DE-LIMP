@@ -55,6 +55,9 @@ Checks:
                     fallback_default) -- a CAUTION, worded by probe_fallback.caution() (WARN);
                     and a mass accuracy pinned at the SOP floor over probed runs that disagreed
                     (the probe's warnings, probe_fallback.measurement_note) (WARN)
+  pipeline checks   the DE pipeline's own checks, as de_provenance.json `checks` records them
+                    (run_silac.R: silac_channel_balance, silac_replicates,
+                    silac_label_incorporation, silac_label_declaration, ...), quoted
   quantification    the DE pipeline's own caveat about its protein quantities
                     (de_provenance.json `caveat`, e.g. a Sage DE's highest-peptide rollup),
                     quoted as the pipeline states it (WARN)
@@ -661,7 +664,18 @@ def audit_contaminant_evidence(findings, de_prov, meta_path):
         + " and search again.", dict(detail, drop_contaminant=drop))
 
 
-def audit_de(findings, de_dir, adjp, logfc):
+def audit_pipeline_checks(findings, prov):
+    """The DE pipeline's own checks, as it recorded them (de_provenance.json `checks`: {check,
+    status, message, detail}) -- quoted; this audit knows no pipeline by name (run_silac.R's channel
+    balance, label incorporation and declaration are its own, for example)."""
+    for c in prov.get("checks") or []:
+        if isinstance(c, dict) and c.get("check") and c.get("status") in ("PASS", "WARN", "FAIL",
+                                                                         "INFO") and c.get("message"):
+            add(findings, str(c["check"]), c["status"], str(c["message"]),
+                c.get("detail") if isinstance(c.get("detail"), dict) else {})
+
+
+def audit_de(findings, de_dir, adjp, logfc, prov=None):
     for f in sorted(glob.glob(os.path.join(de_dir, "DE_*.csv"))):
         rows = read_csv(f)
         ct = os.path.basename(f)
@@ -688,9 +702,12 @@ def audit_de(findings, de_dir, adjp, logfc):
                 f"{ct}: 0 proteins significant (adj.P<{adjp}). The experiment may be "
                 "underpowered, the effect small, or the groups mislabeled.")
         elif frac > 0.5:
+            note = (prov or {}).get("high_significance_note")
             add(findings, "de_signal", "WARN",
-                f"{ct}: {sig}/{n} ({frac*100:.0f}%) proteins significant — implausibly high. This usually "
-                "means a batch effect, a normalization problem, or confounded/mislabeled groups, not real biology.")
+                f"{ct}: {sig}/{n} ({frac*100:.0f}%) proteins significant — " + (
+                    f"a high share. {note}" if note else
+                    "implausibly high. This usually means a batch effect, a normalization problem, or "
+                    "confounded/mislabeled groups, not real biology."))
         else:
             add(findings, "de_signal", "PASS",
                 f"{ct}: {sig}/{n} proteins significant at adj.P<{adjp} ({frac*100:.0f}%); "
@@ -741,6 +758,11 @@ def audit_normalisation(findings, de_prov, rows=None, search_prov=None):
     inp = (de_prov or {}).get("input")
     if not inp:
         return                      # no DE record of its input: nothing to read
+    if (de_prov or {}).get("quantities") == "raw":
+        add(findings, "normalisation_stability", "INFO",
+            "Not relevant: the DE read DIA-NN's non-normalised quantities (de_provenance.json "
+            "quantities: raw), so DIA-NN's cross-run normalisation does not enter it.")
+        return
     from check_report_runs import (normalisation_instability, stats_path,
                                    NORM_INSTABILITY_COLUMN)
     runs = [r["File.Name"] for r in rows or [] if (r.get("File.Name") or "").strip()]
@@ -796,6 +818,14 @@ def audit_normalization_check(findings, de_prov):
     nc = (de_prov or {}).get("normalization_check")
     if not isinstance(nc, dict):
         return                      # a DE record from before 2.10: nothing to quote
+    from normalization_check import not_applicable_reason
+    na_reason = not_applicable_reason(nc)
+    if na_reason:
+        # the pipeline's own record of why there is no between-run normalisation to check
+        add(findings, "normalization_check", "PASS",
+            f"Not applicable to {(de_prov or {}).get('display_label') or 'this pipeline'}: "
+            f"{na_reason}", {"status": "not_applicable"})
+        return
     if nc.get("status") != "decided":
         # a WARN, and core_submission.py deliver holds the delivery (normalization_check.
         # delivery_gate): an IP read with normalised quantities must not pass as a footnote
@@ -948,6 +978,7 @@ def main():
         except (OSError, ValueError):
             pass            # audit_target_contaminants reports the unreadable sidecar
     audit_quantification(findings, prov)
+    audit_pipeline_checks(findings, prov)
     audit_numeric_covariates(findings, prov)
     if a.search_out and os.path.isdir(a.search_out):
         audit_search(findings, a.search_out)
@@ -960,7 +991,7 @@ def main():
     if a.de_dir and os.path.isdir(a.de_dir):
         audit_target_contaminants(findings, fasta_meta, em, a.de_dir, a.adjp, keratin)
         audit_contaminant_evidence(findings, prov, fasta_meta)
-        audit_de(findings, a.de_dir, a.adjp, a.logfc)
+        audit_de(findings, a.de_dir, a.adjp, a.logfc, prov)
     audit_search_measurement(findings, prov, a.search_prov)
     audit_passes(findings, prov, a.search_prov)
     audit_normalization_check(findings, prov)

@@ -780,6 +780,16 @@ def _legacy_acks(session, prov_sha):
             and prov_sha and e.get("de_provenance_sha256") == prov_sha]
 
 
+def not_applicable_reason(nc):
+    """THE test of "this pipeline's record says the normalisation check does not apply to it, and
+    why" (de_provenance.json normalization_check: status not_applicable with a reason): the reason,
+    stripped, or None -- also for not_applicable WITHOUT a reason, which is never accepted. The
+    delivery gate, the audit (audit_results.py) and the brief (analysis_prompt.py) read it here."""
+    if isinstance(nc, dict) and nc.get("status") == "not_applicable":
+        return str(nc.get("reason") or "").strip() or None
+    return None
+
+
 def delivery_gate(session):
     """Hold an analysis delivery whose DE did not run under a decided normalisation check -- the
     second gate core_submission.py deliver applies, beside qc_bracket.delivery_gate, in the same
@@ -800,6 +810,13 @@ def delivery_gate(session):
         return {"proceed": True, "status": status, "hint": None,
                 "reason": f"{nc['decision']['quantities']} quantities, decided by "
                           f"{nc['decision'].get('by')}"}
+    # A pipeline whose quantities carry no between-run normalisation to check says so in its own
+    # record, with why (run_silac.R: a SILAC ratio is taken inside one run) -- never without one
+    na_reason = not_applicable_reason(nc)
+    if na_reason:
+        return {"proceed": True, "status": status, "hint": None,
+                "reason": f"{prov.get('display_label') or 'this pipeline'}: not applicable -- "
+                          f"{na_reason}"}
     if "normalization_check" not in prov:
         try:
             acks = _legacy_acks(session, sha256(path))

@@ -237,12 +237,14 @@ report "needs to be used for all downstream analyses" of multiplexed data, where
 `GG.Q.Value` are channel-specific and `PG.MaxLFQ` is channel-specific only with QuantUMS and on
 the second MBR pass or without MBR. So build any per-protein, per-channel table from
 `report.parquet` (`Run` × `Channel`), and do not promise the client a DIA-NN matrix for a plexDIA
-search; note on the next plexDIA search whether the matrices appeared.
+search. A second plexDIA search (2026-10-15: the declaration `estimate_params.py --labels`
+writes, two-job route, `--matrices`) logged the same and wrote none either. For SILAC,
+`run_silac.R` builds the per-protein tables (`references/silac.md`).
 
 **A path with `--` in it cannot be given to DIA-NN.** Its reader joins the arguments with spaces
 and cuts the result at every `--`, quoted or not (`arguments()`, `diann.cpp` at tag 1.8), and
-2.7.0 behaves the same: a Core run named `…_DIA--asp3_<well>.d` logged `unrecognised option
-[--asp3_<well>.d]` and `skipping …_DIA - invalid raw MS data format`, and the search went on with
+2.7.0 behaves the same: a Core run named `…_DIA--sampA_<well>.d` logged `unrecognised option
+[--sampA_<well>.d]` and `skipping …_DIA - invalid raw MS data format`, and the search went on with
 the other runs; a `--` in a folder is cut the same way (HIVE srun 24807838). `run_search.py` (and `diann_parallel.py` run directly) search a run whose
 **folder** holds `--` through a link in `<out>/input_links/` under the same file name, so the run
 keeps its name; one whose **file name** holds `--` is refused with the name it would get, unless
@@ -260,7 +262,7 @@ does not affect them (Radiant's DIA-NN library step is given only the FASTA and 
 **FragPipe's own DIA-NN step is affected:** FragPipe 24.0 writes each run as a `--f <path>` line of `filelist_diann.txt` and
 hands DIA-NN `--cfg <filelist>--` (`CmdDiann.java`), and DIA-NN cuts that text at every `--` too —
 on HIVE (srun 24807938) DIA-NN 2.7.0 and FragPipe's bundled 1.8.2 beta 8 both skipped a
-`x_DIA--asp3_S3.mzML` listed that way. So when a FragPipe workflow runs DIA-NN
+`x_DIA--sampA_S3.mzML` listed that way. So when a FragPipe workflow runs DIA-NN
 (`diann.run-dia-nn=true`), `run_search.py` refuses any `--` in the path DIA-NN would get (on the
 diaTracer route that is the staged link in `<out>/diatracer_stage/`, so only the file name
 counts), in `--out` or in the database; there is no renaming on that route. And as on the DIA-NN
