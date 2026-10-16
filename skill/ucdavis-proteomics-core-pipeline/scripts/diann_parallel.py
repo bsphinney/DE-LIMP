@@ -2183,8 +2183,8 @@ def main():
     # RECOVERY.md and .recovery.json two folders up, once into a home directory. Then they go
     # beside --out, and the generator and submit.sh say so.
     sess = os.path.dirname(os.path.dirname(out))
-    from session import is_session_dir
-    rec_dir = sess if is_session_dir(sess) else out
+    from session import recovery_dir
+    rec_dir = recovery_dir(out)
     rec_where = (f"{rec_dir}/RECOVERY.md" if rec_dir == sess else
                  f"{rec_dir}/RECOVERY.md (beside --out: {sess} is not an analysis session folder)")
     if rec_dir != sess:

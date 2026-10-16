@@ -392,7 +392,9 @@ never resubmit one that is RUNNING without asking. A finished earlier analysis i
 record (`references/board.md` section 3).
 
 `submit.sh` writes `RECOVERY.md` + `.recovery.json` into the session directory
-automatically, so this works even if the previous session ended mid-sentence. Tell the
+automatically (a search whose `--out` is not inside a session gets them beside `--out`, and
+`submit.sh` says where; `node_fault.py retry` updates them in the same place), so this works
+even if the previous session ended mid-sentence. Tell the
 user, in plain words, that they can close their terminal and that the jobs will keep
 going — they do not need `tmux` or `screen` for this.
 

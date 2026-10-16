@@ -529,19 +529,43 @@ class RetryTests(unittest.TestCase):
         self.assertEqual(self.calls(), [])
         self.assertFalse(os.path.exists(os.path.join(self.out, "node_faults.json")))
 
-    def test_the_recovery_checkpoint_follows_the_new_ids(self):
+    def _chain_checkpoint(self, where):
         import checkpoint
-        checkpoint._save(self.sess, {"session": self.sess, "stages": [{
+        checkpoint._save(where, {"session": where, "stages": [{
             "stage": "search", "jobs": ["101", "102", "103", "104", "105"], "desc": "chain",
             "state": "submitted", "next": None, "watch_job": "105",
             "watch_log": f"{self.out}/s5_report_105.log"}]})
-        self.step3_failed_on("n1")
-        r, out = self.retry()
-        self.assertEqual(r.returncode, 0, r.stdout)
-        st = json.loads(_read(os.path.join(self.sess, ".recovery.json")))["stages"][0]
+
+    def _assert_follows(self, rec_json):
+        st = json.loads(_read(rec_json))["stages"][0]
         self.assertEqual(st["jobs"], ["101", "102", "201", "202", "203"])
         self.assertEqual(st["watch_job"], "203")
         self.assertTrue(st["watch_log"].endswith("s5_report_203.log"))
+
+    def test_the_recovery_checkpoint_follows_the_new_ids(self):
+        # a session (input/ + output/): the chain wrote its notes there, and the retry updates them
+        os.makedirs(os.path.join(self.sess, "input"))
+        self._chain_checkpoint(self.sess)
+        self.step3_failed_on("n1")
+        r, out = self.retry()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self._assert_follows(os.path.join(self.sess, ".recovery.json"))
+        self.assertEqual(out["checkpoint"], os.path.join(self.sess, ".recovery.json"))
+
+    def test_outside_a_session_the_notes_beside_out_follow_and_nothing_above_is_touched(self):
+        # no session two levels up (diann_parallel.py wrote the notes beside --out): the retry
+        # updates those, and an unrelated .recovery.json two folders up stays as it was
+        self._chain_checkpoint(self.out)
+        with open(os.path.join(self.sess, ".recovery.json"), "w") as fh:
+            fh.write('{"session": "another run", "stages": [{"jobs": ["103"]}]}')
+        before = _read(os.path.join(self.sess, ".recovery.json"))
+        self.step3_failed_on("n1")
+        r, out = self.retry()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self._assert_follows(os.path.join(self.out, ".recovery.json"))
+        self.assertEqual(_read(os.path.join(self.sess, ".recovery.json")), before)
+        self.assertFalse(os.path.exists(os.path.join(self.sess, "RECOVERY.md")))
+        self.assertEqual(out["checkpoint"], os.path.join(self.out, ".recovery.json"))
 
     def _scripts_exclude(self, value):
         for s in ("step3_assembly.sbatch", "step4_finalpass.sbatch", "step5_report.sbatch"):

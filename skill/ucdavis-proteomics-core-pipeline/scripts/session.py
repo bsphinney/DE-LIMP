@@ -74,6 +74,16 @@ def is_session_dir(path):
                                                                             "output"))))
 
 
+def recovery_dir(out):
+    """THE folder a search's recovery notes (checkpoint.py: RECOVERY.md, .recovery.json) live in,
+    for every writer and reader (diann_parallel.py's submit.sh, node_fault.py's retry): the
+    session two levels above the search's --out (<session>/output/search) when that folder IS a
+    session (is_session_dir), else beside --out -- never a home folder that happens to sit there."""
+    out = os.path.abspath(out)
+    sess = os.path.dirname(os.path.dirname(out))
+    return sess if is_session_dir(sess) else out
+
+
 def slugify(name):
     s = re.sub(r"[^A-Za-z0-9]+", "_", name.strip()).strip("_")
     return s or "proteomics_run"

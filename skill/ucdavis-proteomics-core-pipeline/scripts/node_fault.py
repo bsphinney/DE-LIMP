@@ -670,12 +670,15 @@ def _record_in_provenance(out, retries):
 
 
 def _update_checkpoint(out, new_ids):
-    """The session's .recovery.json (checkpoint.py) lists the job ids a resumed session checks:
-    the old ones would read FAILED for ever. Replaced in place; None when there is none."""
-    session = os.path.dirname(os.path.dirname(out))
+    """The search's .recovery.json (checkpoint.py) lists the job ids a resumed session checks:
+    the old ones would read FAILED for ever. Replaced in place, where the chain wrote it
+    (session.recovery_dir: the session, or beside --out when the search sits outside one);
+    None when there is none."""
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     try:
         import checkpoint
+        from session import recovery_dir
+        session = recovery_dir(out)
         data = checkpoint._load(session)
     except (ImportError, OSError, ValueError) as e:
         return f"not updated: {type(e).__name__}: {e}"
