@@ -1267,6 +1267,20 @@ class TestTwoMethodsAreNotReinjections(unittest.TestCase):
                 self.assertTrue(row["note"].startswith("set aside, acquired by another method"))
                 self.assertEqual([x["file"] for x in row["other_method"]], [self.dda["sampB"]])
 
+    def test_what_acquisition_cannot_settle_is_said(self):
+        """Review of 2.13.1 (notes 2, 3): runs differing by throughput only cannot be settled
+        by --acquisition; and --acquisition is never silently ignored when the run names'
+        methods cannot be read."""
+        note = cs.method_note("sampA", {"60spd DIA": ["a"], "100spd DIA": ["b"]})
+        self.assertIn("--acquisition cannot choose", note)
+        self.assertIn("--choose sampA=<file>", note)
+        self.assertIn("--acquisition DIA|DDA",
+                      cs.method_note("sampA", {"60spd DIA": ["a"], "60spd DDA": ["b"]}))
+        with mock.patch.dict(sys.modules, {"ht_manifest": None}):
+            self.assertEqual(cs.split_by_method(["x", "y"])["kept"], ["x", "y"])
+            with self.assertRaises(cs.Stop):
+                cs.split_by_method(["x", "y"], acquisition="DIA")
+
     def test_runs_of_one_method_are_still_reinjections(self):
         again = {u: tims(self.tmp, "03122025", u, 50 + i) for i, u in enumerate(self.IDS)}
         rc, out, p = self.locate("--acquisition", "DIA")
@@ -1457,6 +1471,31 @@ class TestStage(unittest.TestCase):
         self.assertEqual(out["service_dir"], other)
         self.assertEqual(load(os.path.join(other, cs.MARKER))["internal_id"], "PROT_0807")
         self.assertEqual(self.stage(summary, "--project-dir", group)[0], 2, "a group, not a folder")
+
+    def test_a_folder_holding_one_shared_raw_file_is_not_adopted(self):
+        """Review of 2.13.1 (S3): a folder holding even ONE of the listed raw file names (a
+        combined re-analysis of two submissions) was adopted as this submission's folder."""
+        group = self.folder("on_campus", "Placeholder lab")
+        combined = self.folder("on_campus", "Placeholder lab", "combined_2025")
+        os.symlink(self.files[0], os.path.join(combined, os.path.basename(self.files[0])))
+        summary, _ = write_summary(self.tmp)
+        rc, out, p = self.stage(summary)
+        self.assertEqual(rc, 0, p.stderr)
+        self.assertEqual(out["service_dir"], os.path.join(group, "PROT_0807"))
+        self.assertTrue(any("combined_2025/ holds 1 of the 2 listed raw files" in w
+                            for w in out["warnings"]), out["warnings"])
+
+    def test_project_dir_needs_no_group_resolution(self):
+        """Review of 2.13.1 (note 4): with two candidate group folders, --project-dir was
+        read only after the group, so stage stopped first."""
+        self.folder("on_campus", "Placeholder lab")
+        self.folder("on_campus", "Placeholder-old")
+        mine = self.folder("on_campus", "Placeholder-old", "Sampled03122025")
+        summary, _ = write_summary(self.tmp)
+        self.assertEqual(self.stage(summary)[0], 2)
+        rc, out, p = self.stage(summary, "--project-dir", mine)
+        self.assertEqual(rc, 0, p.stderr)
+        self.assertEqual(out["service_dir"], mine)
 
     def test_apply_records_the_staff_choices_the_file_list_rests_on(self):
         group = self.folder("on_campus", "Placeholder lab")

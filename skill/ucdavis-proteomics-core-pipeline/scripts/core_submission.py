@@ -2050,7 +2050,12 @@ def split_by_method(paths: list, plate=None, acquisition=None) -> dict:
     <date>_<n>_rerun_...) is never a method of its own."""
     try:
         from ht_manifest import declared_method
-    except Exception:                  # its reader missing: nothing is split, as before 2.13.1
+    except Exception as e:
+        if acquisition:                # never silently ignored: a DDA run could join a DIA search
+            raise Stop(EXIT_DECIDE, {"error": f"--acquisition {acquisition}: the run names' "
+                                              f"methods cannot be read here ({type(e).__name__}: "
+                                              f"{e})", "hint": "put the whole skill on this machine "
+                                              "again (hive_exec.sh --put-skill) and re-run"})
         return {"kept": list(paths), "set_aside": [], "methods": {}}
     meth = {p: declared_method(os.path.basename(p.rstrip("/")), plate) for p in paths}
 
@@ -2074,11 +2079,17 @@ def other_method_note(aside: list, acquisition) -> str:
 
 
 def method_note(key: str, methods: dict) -> str:
-    """The choose_run note for a sample whose runs declare several acquisition methods."""
+    """The choose_run note for a sample whose runs declare several acquisition methods. Runs
+    that differ by more than DIA vs DDA (a throughput, 60spd against 100spd) --acquisition
+    cannot separate: then only --choose can."""
+    modes = {(m.split() + [""])[1].upper() for m in methods}
+    how = (f"say which acquisition this analysis is for (--acquisition {'|'.join(ACQUISITIONS)}), "
+           f"or --choose {key}=<file>" if len(modes) == len(methods) and modes <= set(ACQUISITIONS)
+           else f"they differ by more than DIA vs DDA, so --acquisition cannot choose: staff "
+                f"choose one, --choose {key}=<file>")
     return (f"{sum(len(v) for v in methods.values())} runs of this sample were acquired by "
             f"different methods ({'; '.join(f'{m}: {len(v)}' for m, v in methods.items())}) -- "
-            f"not re-injections: say which acquisition this analysis is for (--acquisition "
-            f"{'|'.join(ACQUISITIONS)}), or --choose {key}=<file>")
+            f"not re-injections: {how}")
 _ACQ_COUNTER = re.compile(r"_(\d+)(?:\.[A-Za-z]+)?$")
 
 
@@ -3442,6 +3453,9 @@ def locate_gate_check(files_path: str, warnings: list, apply: bool = True) -> di
     return info
 
 
+ADOPT_SHARE_PCT = 80          # % of the listed raw files a folder must hold to be adopted
+
+
 def folders_holding_submission(group: str, files: list, internal_id, skip: str) -> list:
     """Folders under the PI's group folder that already hold this submission -- its raw files
     (by name, in the folder, its raw/ or one level down), or an analysis session recorded for it
@@ -3511,7 +3525,11 @@ def cmd_stage(a) -> int:
     if gate_info.get("apply_will_refuse"):
         warnings.append(gate_info["note"])
 
-    if a.service_dir:
+    if a.project_dir:                    # staff named the folder: no group to resolve
+        group = os.path.dirname(resolve_explicit_service_dir(a.project_dir, sroot, campus))
+        resolution = {"mode": "explicit (--project-dir)", "group_dir": group,
+                      "exists": os.path.isdir(group), "candidates": []}
+    elif a.service_dir:
         group = resolve_explicit_service_dir(a.service_dir, sroot, campus)
         resolution = {"mode": "explicit", "group_dir": group,
                       "exists": os.path.isdir(group), "candidates": []}
@@ -3537,13 +3555,23 @@ def cmd_stage(a) -> int:
         resolution = dict(resolution, project_dir=project, project_mode="explicit (--project-dir)")
     elif not a.service_dir and not os.path.exists(os.path.join(project, MARKER)):
         # the submission may already have a folder of its own here (an earlier analysis)
-        existing = folders_holding_submission(group, files, _s(s.get("internal_id")), project)
+        found = folders_holding_submission(group, files, _s(s.get("internal_id")), project)
+        # a folder is the submission's when it holds most of its listed raw files, or an analysis
+        # recorded for it -- never on one shared file name (a combined re-analysis of two
+        # submissions, review of 2.13.1); a partial overlap is said, not adopted
+        need = max(1, -(-len(files) * ADOPT_SHARE_PCT // 100))
+        existing = [x for x in found if x["raw_files_there"] >= need or x["sessions"]]
+        for x in found:
+            if x not in existing:
+                warnings.append(f"{os.path.basename(x['dir'])}/ holds {x['raw_files_there']} of the "
+                                f"{len(files)} listed raw files (by name), too few to be this "
+                                f"submission's folder: not used")
         if len(existing) == 1:
             project = existing[0]["dir"]
             resolution = dict(resolution, project_dir=project, project_mode="existing",
                               project_basis=existing[0])
             warnings.append(f"{os.path.basename(project)}/ already holds this submission "
-                            f"({existing[0]['raw_files_there']} of its raw files"
+                            f"({existing[0]['raw_files_there']} of its {len(files)} listed raw files"
                             + (f", {len(existing[0]['sessions'])} analysis session(s)"
                                if existing[0]["sessions"] else "")
                             + f"): staging there, not in a new {label}/ -- for a new folder "
