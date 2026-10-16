@@ -214,6 +214,28 @@ local({
 limpa_read <- NULL      # dpc: which readDIANN() path ran (limpa_compat.R), for the record
 if (!method %in% c("dpc", "maxlfq"))
   stop("--method must be 'dpc' or 'maxlfq'")
+# An --outdir holding another pipeline's results is refused before anything is written: a DE here
+# would sit beside them, and the audit, the report and the delivery read every DE_*.csv in the
+# folder -- a SILAC ratio table (run_silac.R: DE_silac_*.csv, SILAC_*.csv) must never pass as a
+# label-free result. Another pipeline's record names its own script (`replay`); run_silac.R
+# refuses the other way round.
+local({
+  other <- NULL
+  prev <- file.path(outdir, "de_provenance.json")
+  if (file.exists(prev) && requireNamespace("jsonlite", quietly = TRUE)) {
+    o <- tryCatch(jsonlite::fromJSON(prev, simplifyVector = FALSE), error = function(e) NULL)
+    s <- if (is.list(o) && is.list(o$replay)) o$replay$script else NULL
+    if (is.character(s) && length(s) == 1 && !identical(basename(s), "run_de.R"))
+      other <- sprintf("%s (de_provenance.json, written by %s)",
+                       if (is.character(o$pipeline_id)) o$pipeline_id else "another pipeline", s)
+  }
+  silac <- list.files(outdir, pattern = "^(DE_silac_.*|SILAC_.*)\\.csv$")
+  if (is.null(other) && length(silac))
+    other <- sprintf("SILAC ratio tables (%s)", paste(utils::head(silac, 3), collapse = ", "))
+  if (!is.null(other))
+    stop(outdir, " holds another analysis: ", other, ". Write this DE to its own --outdir, or ",
+         "move that one first. Nothing was written.", call. = FALSE)
+})
 dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
 
 # ---- read experimental design -----------------------------------------------

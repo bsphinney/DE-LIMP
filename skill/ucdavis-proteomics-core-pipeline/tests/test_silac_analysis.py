@@ -550,6 +550,39 @@ cat(jsonlite::toJSON(list(mc = res$mode_check, off = res$offsets), auto_unbox = 
             self.assertIn("run_X9", p.stderr)
 
 
+@unittest.skipUnless(r_has("limma", "jsonlite"), "needs Rscript with limma and jsonlite")
+class RunDeLeavesSilacResultsAlone(unittest.TestCase):
+    """run_de.R refuses an --outdir holding SILAC results (as run_silac.R refuses run_de.R's):
+    the audit, report and delivery read every DE_*.csv there, and DE_silac_*.csv must never pass
+    as a label-free result."""
+
+    def run_de(self, outdir):
+        d = os.path.dirname(outdir)
+        for f in ("report.parquet", "conditions.csv"):
+            open(os.path.join(d, f), "w").write("File.Name,Group\n")
+        return subprocess.run([RSCRIPT, os.path.join(SCRIPTS, "run_de.R"), "--input",
+                               os.path.join(d, "report.parquet"), "--metadata",
+                               os.path.join(d, "conditions.csv"), "--outdir", outdir],
+                              capture_output=True, text=True, timeout=300)
+
+    def test_a_silac_record_or_silac_tables_stop_it_before_anything_is_written(self):
+        for case in ("record", "tables"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as d:
+                out = os.path.join(d, "tables")
+                os.makedirs(out)
+                if case == "record":
+                    rec = {"pipeline_id": "silac_ratio", "replay": {"script": "run_silac.R"}}
+                    json.dump(rec, open(os.path.join(out, "de_provenance.json"), "w"))
+                else:
+                    open(os.path.join(out, "DE_silac_KO.WT.csv"), "w").write("Protein.Group\n")
+                before = sorted(os.listdir(out))
+                p = self.run_de(out)
+                self.assertNotEqual(p.returncode, 0)
+                self.assertIn("holds another analysis", p.stderr)
+                self.assertIn("silac", p.stderr.lower())
+                self.assertEqual(sorted(os.listdir(out)), before, "nothing was written")
+
+
 class DesignRules(unittest.TestCase):
     def write(self, d, text):
         p = os.path.join(d, "design.csv")
