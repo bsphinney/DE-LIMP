@@ -193,6 +193,40 @@ class OnComputeCommandLine(Harness):
         self.assertFalse(os.path.exists(self.out))
 
 
+class SbatchHeader(Harness):
+    """--header: the top of a job script the skill does not generate (a DE, set tests). The DE
+    jobs of 2026-10 were written by hand each time; the header gives them the skill's queue rule
+    and ucd-hpc's canonical lines."""
+
+    def header(self, *args, **env):
+        r = subprocess.run([sys.executable, ON_COMPUTE, "--header", os.path.join(self.d, "logs"),
+                            "--name", "de_final", *args], capture_output=True, text=True,
+                           env=self.env(**env), timeout=60)
+        return r
+
+    def test_every_request_is_explicit_and_the_log_is_per_job(self):
+        r = self.header("--time", "120", "--mem", "48G", "--cpus", "8")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = r.stdout.splitlines()
+        self.assertEqual(lines[0], "#!/bin/bash -l")
+        for want in ("#SBATCH --account=genome-center-grp", "#SBATCH --partition=high",
+                     "#SBATCH --qos=genome-center-grp-high-qos", "#SBATCH --time=120",
+                     "#SBATCH --ntasks=1", "#SBATCH --cpus-per-task=8", "#SBATCH --mem=48G",
+                     f'#SBATCH --output="{self.d}/logs/de_final_%j.log"', "set -euo pipefail"):
+            self.assertIn(want, lines)
+        self.assertNotIn("#SBATCH --requeue", lines)
+        self.assertFalse([ln for ln in lines if "--exclusive" in ln])
+        self.assertEqual(self.srun_calls(), [])
+
+    def test_a_preemptible_queue_is_requeued(self):
+        r = self.header(FAKE_ASSOC=PUBLIC)
+        self.assertIn("#SBATCH --requeue", r.stdout.splitlines())
+        self.assertIn("#SBATCH --partition=low", r.stdout.splitlines())
+
+    def test_a_size_without_a_unit_is_refused(self):
+        self.assertEqual(self.header("--mem", "48").returncode, 2)
+
+
 # a script that moves itself: ensure_compute_node() first, then its work
 MOVER = r'''import os, sys
 sys.path.insert(0, {scripts!r})

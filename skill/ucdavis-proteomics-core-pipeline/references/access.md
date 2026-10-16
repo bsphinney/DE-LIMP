@@ -117,8 +117,9 @@ bash scripts/hive_exec.sh 'hostname; sbatch --version | head -1'   # confirm
    A DIA-NN search that predicts its library from the FASTA is two jobs (library, then
    search) chained by `<out>/submit.sh`, and writes no `job.sh`; a search routed to the
    5-step chain (>5 files) also writes none, and exits 3.
-5. **DE + figures + report:** run on HIVE (`run_de.R`, `make_figures.R`, …) or pull
-   `report.parquet` back and run them locally (DE/figures are light).
+5. **DE + figures + report:** run on HIVE as a job (`run_de.R`, `make_figures.R`, …; the job's
+   top from `on_compute.py --header`, SKILL.md step 8), never on the login node, or pull
+   `report.parquet` back and run them locally.
 6. **Retrieve results** into the session folder on the user's machine:
    ```
    bash scripts/hive_exec.sh --get '~/proteomics-pipeline/out' ./<session>/output/
@@ -389,8 +390,10 @@ your own copy in your HIVE home. Run all of this **on HIVE** (via `hive_exec.sh`
 ## Notes
 - **Never run computationally intensive work on the login/head node** — the search
   and any heavy DE/figure/conversion step go through `sbatch`. The login node is only
-  for submitting jobs, `squeue`/`sacct` polling, and small file moves. Holds on HIVE
-  and any other cluster/scheduler.
+  for submitting jobs, `squeue`/`sacct` polling, small file moves and the bookkeeping
+  scripts SKILL.md step 0a lists; anything else runs on a compute node through
+  `hive_exec.sh --job` (one blocking `srun`) or a job. Holds on HIVE and any other
+  cluster/scheduler; on HIVE, Farm and Franklin HPC@UCD's `ucd-hpc` skill is the rule.
 - "Core member" = read access to `/quobyte/proteomics-grp`, reported by `check_access.sh`
   as `core_member` (readable locally — `local_proteomics_grp_access` — or over SSH —
   `hive_ssh_has_proteomics_grp`). `local_proteomics_grp_access: false` on a laptop is

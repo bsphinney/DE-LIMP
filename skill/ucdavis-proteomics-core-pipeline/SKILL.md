@@ -64,7 +64,9 @@ the spine.
    SLURM instead routes to the 5-step chain, exits 3 without writing `--sbatch`, and is
    submitted with `bash <out>/submit.sh`), not inline on the login node. Login nodes are shared; running compute there gets the user flagged/killed.
    The **only** things allowed on the login node are tiny orchestration commands —
-   submitting jobs, `squeue`/`sacct` polling (`watch_run.sh`), and small file moves.
+   submitting jobs, `squeue`/`sacct` polling (`watch_run.sh`), small file moves and the
+   bookkeeping scripts step 0a lists. Everything else runs on a compute node:
+   `hive_exec.sh --job '<cmd>'` (one blocking `srun`) or an sbatch job (step 0a, "On HIVE").
    If you're unsure whether a step is heavy, submit it as a job. (No SLURM but a big
    dataset locally? Warn the user it may be slow rather than hammering a shared host.)
    **On a UC Davis cluster (HIVE, Farm, Franklin), HPC@UCD's own `ucd-hpc` skill is
@@ -194,6 +196,24 @@ because the environment does not carry over from one command to the next.
   `~/proteomics-pipeline/`; the latter carries the version every record states). Step 0's
   `skill_version.sh --check-hive` says when that is needed. HIVE gives **compute**; the Core
   software is separate (next).
+- **On HIVE: the login node or a compute node** (golden rule #3, HPC@UCD's `ucd-hpc` rules).
+  A plain `hive_exec.sh '<cmd>'` runs on HIVE's shared login node, where only seconds of light
+  work belong: `sbatch`/`squeue`/`sacct`/`scancel`, `watch_run.sh`, `ls`/`cat` of one folder or
+  a small file, `mkdir`, `--put`/`--get`, writing a job (`run_search.py --sbatch`,
+  `diann_parallel.py`, `make_podcast.py check`/`job`), and the bookkeeping scripts (`board.sh`,
+  `notes.py`, `log_decision.py`, `report_issue.sh`, `skill_version.sh`, `session.py init`,
+  `checkpoint.py status`, `submission_report.py attach`, `core_submission.py check`/`identify`/
+  `fetch`/`bioshare`/`email-draft`, `node_fault.py retry`, `cpu_hours.py`). **Everything else
+  goes to a compute node** — whatever reads `report.parquet` or raw files, runs R, walks a
+  share, installs, renders or zips: `bash scripts/hive_exec.sh --job [--time MIN] [--mem SIZE]
+  [--cpus N] '<cmd>'` (one blocking `srun` with the queue spelled out; defaults 30 min, 4G, 1
+  CPU; its output and exit status are the command's) for minutes of work, or an sbatch job for
+  longer work and anything that must survive a closed laptop (step 8: `on_compute.py --header`).
+  These move themselves when started on the login node: `setup.sh`, `ensure_dotnet8.sh`,
+  `fetch_fasta.py fetch`/`check-db`, `core_submission.py locate`/`stage`/`deliver`,
+  `provenance.py`, `session.py finalize`, `checkpoint.py find`. Unsure → `--job`. In
+  `hive_local` (Claude Code on HIVE) the same split, with `python3 scripts/on_compute.py [--time
+  MIN] [--mem SIZE] -- <cmd>` for `--job`.
 - **Core member = yes (with HIVE) → reuse the installed software** in
   `/quobyte/proteomics-grp/`: `acquire_tools.sh` finds the Core's DIA-NN builds,
   `fetch_fasta.py --hive` reuses pre-staged FASTAs. No rebuilding.
@@ -833,10 +853,12 @@ and `acquired_at_note`, read in the same pass: from a `.d`'s `AcquisitionDateTim
 `.raw`'s ThermoRawFileParser creation date, which records no time zone and is read as the Core's
 Pacific time (the note says so). Step 8e uses them. **Keep this step's JSON**: save it as
 `<session>/input/acquisition.json` at step 3b.
-Each `.raw` costs ~3–7 s of parser I/O (more on a busy mount). **On a cluster, run step 2 for more than 5 `.raw`
-on a compute node** (`srun --cpus-per-task=1 --mem=2G … python3 scripts/detect_acquisition.py …`,
-with the account/partition the user can submit to); on a login node the script refuses
-such a cohort before reading anything and prints that `srun` line. Do not add
+Each `.raw` costs ~3–7 s of parser I/O (more on a busy mount). **On a cluster, run step 2 on
+a compute node whenever there is a `.raw`**: `bash scripts/hive_exec.sh --job --time 30 --mem 2G
+'python3 ~/proteomics-pipeline/scripts/detect_acquisition.py …'` (`hive_local`: `python3
+scripts/on_compute.py --time 30 --mem 2G -- python3 scripts/detect_acquisition.py …`). A
+`.d`-only input is an SQLite lookup per file and may stay on the login node. On a login node the
+script itself refuses more than 5 `.raw` before reading anything and prints the `srun` line. Do not add
 `--allow-login-node` yourself to get past the refusal; it is for a user who chooses that.
 For a Bruker `.d` the
 `warnings` come from `tdf_integrity`: `truncated` means `analysis.tdf` indexes only
@@ -2035,7 +2057,9 @@ a hang.** Give them one short line from `progress.summary` plus `doing`, and pas
 Keep it to a couple of lines; don't dump the JSON. Never present the note as a finding
 about **their** data — it is general background, and it must not be mistaken for a result.
 It returns `{state, done, failed, stalled, error_class, fix}`. While `done` is false,
-keep polling (sleep ~60s between polls; for long SLURM jobs use a scheduled wake-up).
+keep polling: about every minute for a local run; **on SLURM every 5 minutes or more**, or a
+scheduled wake-up (each `--hive` poll is several logins and `sacct` calls on HIVE's shared login
+node, and a stall is only called after 15 minutes anyway).
 Pass `--log` so it can also catch **stalls** — a job stuck in `RUNNING` with its log
 frozen (a hung file; `sacct` will show RUNNING forever). **If `failed` OR `stalled` is
 true, apply the `fix` and resubmit AUTONOMOUSLY — do not wait for the user.** Starting
@@ -2242,7 +2266,12 @@ afterwards. An excluded run must be one the report has, and must not keep a row:
 analyses every row. A missing run without `--exclude` still fails. Also log the decision
 (`log_decision.py`).
 **Then check the normalisation before the final DE** — for every experiment type. Run the DE
-both ways into scratch folders (one job on HIVE), then the check:
+both ways into scratch folders (one job on HIVE), then the check. **A DE, set-test or figure job
+on HIVE** starts from `python3 ~/proteomics-pipeline/scripts/on_compute.py --header <S>/logs
+--name <short name> --time <minutes> --mem <size>G --cpus <n>`: the queue the skill's rule
+picks, `--time`/`--mem`/`--cpus` explicit, one log per job (`%j`), `set -euo pipefail`. Append
+the commands, `sbatch` it, and when the `ucd-hpc` skill is installed here, lint it first:
+`bash scripts/hive_exec.sh 'bash -s -- <job file>' < ~/.claude/skills/ucd-hpc/scripts/lint-jobscript.sh`.
 ```
 Rscript scripts/run_de.R --input ./search_out/report.parquet --metadata conditions.csv \
     --method <dpc|maxlfq> --fasta-meta ./search.fasta.meta.json [--block Mouse] [--numeric-covariates Covariate1] \

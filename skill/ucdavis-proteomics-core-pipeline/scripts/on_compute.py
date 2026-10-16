@@ -22,6 +22,10 @@ command to a compute node (a walk of a share, an install, a zip of a session, ha
   * --print: print the srun line on stdout and run nothing.
   * --no-preempt: the command must not be killed half way (an install): the queue rule is asked
     for a non-preemptible queue when it has the choice.
+  * --header LOGDIR (no command): print the top of a job script the skill does not generate (a
+    DE, set tests, figures): the same queue, --time/--mem/--cpus, one log per job
+    (LOGDIR/NAME_%j.log) and `set -euo pipefail`. Append the commands, then sbatch it. A step
+    that must survive a closed laptop, or runs past ~10 minutes, is such a job, not an srun.
 
 From a laptop, `bash hive_exec.sh --job [--time MIN] [--mem SIZE] [--cpus N] '<command>'` runs
 this on HIVE. A script that does heavy work calls ensure_compute_node() first, which re-runs it
@@ -111,22 +115,51 @@ def _usage(msg):
     sys.stderr.write(f"on_compute.py: {msg}\n"
                      "usage: on_compute.py [--time MIN] [--mem SIZE] [--cpus N] [--name NAME] "
                      "[--no-preempt] [--partition P] [--account A] [--qos Q] [--why TEXT] "
-                     "[--print] -- COMMAND [ARG ...]\n")
+                     "[--print] -- COMMAND [ARG ...]\n"
+                     "       on_compute.py --header LOGDIR --name NAME [--time MIN] [--mem SIZE] "
+                     "[--cpus N] [--no-preempt]\n")
     return 2
 
 
+def sbatch_header(name, log_dir, minutes=DEFAULT_MINUTES, mem=DEFAULT_MEM, cpus=1,
+                  preemptible_ok=True, partition=None, account=None, qos=None):
+    """The top of a job script the skill does not generate (a DE, set tests, figures): the queue
+    from run_search.slurm_queue written out, --time, --mem with its unit, --ntasks=1,
+    --cpus-per-task, one log per job (%j) in log_dir -- ucd-hpc's canonical job script -- and
+    `set -euo pipefail`. A preemptible queue (low) gets --requeue: a preempted job starts over."""
+    check_size(mem)
+    minutes, cpus = int(minutes), int(cpus)
+    if minutes < 1 or cpus < 1:
+        raise ValueError("--time and --cpus must be at least 1")
+    if not re.match(r"^[A-Za-z0-9_.-]+$", name or ""):
+        raise ValueError("--name: letters, digits, _ . - only")
+    log = os.path.join(os.path.abspath(log_dir), f"{name}_%j.log")
+    if re.search(r'["\n]', log):
+        raise ValueError(f"the log folder holds a quote or a line break, which #SBATCH --output "
+                         f"cannot carry: {log_dir!r}")
+    import run_search
+    part, acct, q = run_search.slurm_queue(partition, account, qos, peak_cpus=cpus,
+                                           preemptible_ok=preemptible_ok)
+    L = ["#!/bin/bash -l", f"#SBATCH --job-name={name}"]
+    L += [f"#SBATCH --account={acct}"] if acct else []
+    L += [f"#SBATCH --partition={part}"] if part else []
+    L += [f"#SBATCH --qos={q}"] if q else []
+    L += [f"#SBATCH --time={minutes}", "#SBATCH --ntasks=1", f"#SBATCH --cpus-per-task={cpus}",
+          f"#SBATCH --mem={mem}", f'#SBATCH --output="{log}"', f'#SBATCH --error="{log}"']
+    L += ["#SBATCH --requeue"] if part == "low" else []
+    L += ["# written by on_compute.py --header (the skill's queue rule; HPC@UCD's ucd-hpc job script)",
+          "set -euo pipefail"]
+    return L
+
+
 def main(args):
-    if "--" not in args and ("-h" in args or "--help" in args):
+    i = args.index("--") if "--" in args else len(args)
+    opts, cmd = args[:i], args[i + 1:]
+    if "-h" in opts or "--help" in opts:
         print(__doc__.strip())
         return 0
-    if "--" not in args:
-        return _usage("no command: put it after --")
-    i = args.index("--")
-    opts, cmd = args[:i], args[i + 1:]
-    if not cmd:
-        return _usage("no command after --")
     o = {"time": DEFAULT_MINUTES, "mem": DEFAULT_MEM, "cpus": 1, "name": None, "partition": None,
-         "account": None, "qos": None, "why": None}
+         "account": None, "qos": None, "why": None, "header": None}
     flags = {"print": False, "no-preempt": False}
     k = 0
     while k < len(opts):
@@ -139,6 +172,16 @@ def main(args):
             k += 2
         else:
             return _usage(f"unknown or incomplete option {f!r}")
+    if o["header"] is not None:
+        try:
+            print("\n".join(sbatch_header(o["name"] or "pp_job", o["header"], o["time"], o["mem"],
+                                           o["cpus"], not flags["no-preempt"], o["partition"],
+                                           o["account"], o["qos"])))
+        except ValueError as e:
+            return _usage(str(e))
+        return 0
+    if not cmd:
+        return _usage("no command: put it after --")
     try:
         check_size(o["mem"])
         if int(o["time"]) < 1 or int(o["cpus"]) < 1:
