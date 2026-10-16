@@ -222,16 +222,46 @@ fasta_desc <- function(path) {
   if (is.null(path) || !file.exists(path)) return(NULL)
   h <- sub("^>", "", grep("^>", readLines(path, warn = FALSE), value = TRUE))
   first <- sub("\\s.*$", "", h); rest <- trimws(sub("^\\S+\\s*", "", h))
+  uniprot <- grepl("^(sp|tr)\\|[^|]+\\|", first) | grepl("\\bGN=\\S+", rest)
   acc <- ifelse(grepl("^[a-z]{2}\\|[^|]+\\|", first), sub("^[a-z]{2}\\|([^|]+)\\|.*$", "\\1", first), first)
-  gene <- ifelse(grepl("\\bGN=\\S+", rest), sub("^.*\\bGN=(\\S+).*$", "\\1", rest), NA_character_)
+  gene <- ifelse(grepl("\\bGN=\\S+", rest), sub("^.*\\bGN=(\\S+).*$", "\\1", rest),
+                 ifelse(grepl("\\[gene=[^]]+\\]", rest), sub("^.*\\[gene=([^]]+)\\].*$", "\\1", rest),
+                        NA_character_))
   desc <- sub("\\s+OS=.*$", "", rest)                     # UniProt: up to OS=
+  desc <- ifelse(grepl("\\[protein=[^]]+\\]", desc),      # NCBI CDS headers: [protein=...]
+                 sub("^.*\\[protein=([^]]+)\\].*$", "\\1", desc), desc)
   desc <- sub("\\s*\\[[^]]*\\]\\s*$", "", desc)            # NCBI: the trailing [organism]
   desc <- sub("^MULTISPECIES:\\s*", "", desc)
-  data.table(acc = c(acc, first), desc = c(desc, desc), gene = c(gene, gene))[!duplicated(acc)]
+  data.table(acc = c(acc, first), desc = c(desc, desc), gene = c(gene, gene),
+             uniprot = c(uniprot, uniprot))[!duplicated(acc)]
 }
 fd <- fasta_desc(fasta_path)
 first_acc <- function(pg) sub(";.*$", "", pg)
 annot <- unique(d_raw[, .(Protein.Group, Protein.Names, Genes)], by = "Protein.Group")
+# DIA-NN reads gene and entry names from UniProt headers (GN=, sp|ACC|ENTRY_ORG). On any other
+# header (NCBI: ">WP_000123.1 MULTISPECIES: hypothetical protein [Escherichia]") both columns hold
+# its guess, the description's first word ("MULTISPECIES:", "hypothetical", "30S"), which a reader
+# takes for a gene name. Those names are blanked -- a [gene=...] token is kept as the gene -- and
+# Description names the protein. Without the FASTA the guess shows itself as Genes equal to
+# Protein.Names, which a UniProt entry name (ALBU_HUMAN) never is for its gene (ALB).
+names_record <- local({
+  fa <- if (is.null(fd)) rep(NA_integer_, nrow(annot)) else match(first_acc(annot$Protein.Group), fd$acc)
+  by_fasta <- !is.na(fa)
+  if (any(by_fasta)) by_fasta[by_fasta] <- !fd$uniprot[fa[by_fasta]]
+  guessed <- !by_fasta & !is.na(annot$Genes) & nzchar(annot$Genes) &
+    !is.na(annot$Protein.Names) & annot$Genes == annot$Protein.Names
+  token <- if (any(by_fasta)) fd$gene[fa[by_fasta]] else character(0)
+  annot[by_fasta, `:=`(Genes = token, Protein.Names = NA_character_)]
+  annot[guessed, `:=`(Genes = NA_character_, Protein.Names = NA_character_)]
+  list(n_protein_groups = nrow(annot), n_not_uniprot = sum(by_fasta | guessed),
+       n_gene_from_token = sum(!is.na(token)),
+       source = if (!is.null(fd)) paste("the searched FASTA's headers (--fasta)", basename(fasta_path))
+                else "no --fasta: Genes equal to Protein.Names marks DIA-NN's guess",
+       rule = paste("Genes and Protein.Names are DIA-NN's, read from UniProt headers. For a protein whose",
+                    "header is not UniProt's they hold DIA-NN's guess (the description's first word), so",
+                    "they are left blank -- a [gene=...] token in the header is kept as the gene -- and",
+                    "Description names the protein."))
+})
 annot[, Description := if (is.null(fd)) NA_character_ else fd$desc[match(first_acc(Protein.Group), fd$acc)]]
 annot[, Label := {
   g <- if (is.null(fd)) rep(NA_character_, .N) else fd$gene[match(first_acc(Protein.Group), fd$acc)]
@@ -686,7 +716,13 @@ brief_notes <- list(
   sprintf(paste("Significant protein groups resting on a single precursor in at least one replicate: %s",
                 "(min_precursors = 1; confirm the ones that matter)."), one_prec_txt),
   sprintf(paste("Not significant is not unchanged. From the median variance: %s. A rough reading of the power,",
-                "not a rule."), pow_txt))
+                "not a rule."), pow_txt),
+  if (names_record$n_not_uniprot)
+    sprintf(paste("%d of %d protein groups come from FASTA headers that are not UniProt's: their Genes and",
+                  "Protein.Names are blank (DIA-NN's value there is the description's first word, such as",
+                  "'MULTISPECIES:' or 'hypothetical') -- name them by Description."),
+            names_record$n_not_uniprot, names_record$n_protein_groups))
+brief_notes <- Filter(Negate(is.null), brief_notes)
 plain_language <- paste(
   "**SILAC ratios + limma**: each sample was grown with its own isotope label and the samples were mixed",
   "and measured together, so each protein is compared between labels inside the same run. The ratio is",
@@ -809,6 +845,9 @@ prov <- list(
     t = "moderated one-sample t-statistic (limma eBayes, robust)",
     P.Value = "raw p-value of the moderated one-sample t-test against a log2 ratio of 0; NA = not tested (Evidence says why)",
     adj.P.Val = "Benjamini-Hochberg adjusted p-value within the comparison -- THE significance column (NA = not tested)",
+    Genes = paste("the gene name from a UniProt header (GN=; DIA-NN's) or a [gene=...] token; blank for",
+                  "other headers, where DIA-NN's value is the description's first word"),
+    Protein.Names = "the UniProt entry name (DIA-NN's); blank for a header that is not UniProt's",
     Description = "the protein's description from the searched FASTA's header",
     n_replicates = "replicates in which the protein group had a ratio",
     min_precursors = "the fewest precursors behind any one of its replicate ratios (1 = a single precursor)",
@@ -829,7 +868,7 @@ prov <- list(
   settings = settings,
   comparisons_source = des$comparisons_source, comparisons_sentence = cmp_sentence,
   significant_per_contrast = sig_counts, de_tables = tables_rec,
-  labels = labels, labels_source = labels_source,
+  labels = labels, labels_source = labels_source, protein_names = names_record,
   decoy_channel = decoy_channel %||% list(masses = NULL, note = "no DIA-NN log beside the report named it"),
   # searched runs the user decided to leave out (silac.py design --exclude), in run_de.R's shape
   runs_left_out = jsonlite::fromJSON(jsonlite::toJSON(des$runs_left_out, auto_unbox = TRUE, null = "null"),

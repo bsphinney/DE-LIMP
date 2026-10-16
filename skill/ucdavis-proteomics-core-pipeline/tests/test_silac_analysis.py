@@ -550,6 +550,83 @@ cat(jsonlite::toJSON(list(mc = res$mode_check, off = res$offsets), auto_unbox = 
             self.assertIn("run_X9", p.stderr)
 
 
+def ncbi_names(report):
+    """The report as DIA-NN 2.7.0 writes it on an NCBI FASTA: Genes and Protein.Names both hold
+    the description's first word for P01-P30; P31 on keeps its UniProt-style names."""
+    import pyarrow.parquet as pq
+    import pyarrow as pa
+    t = pq.read_table(report).to_pydict()
+    words = ("MULTISPECIES:", "hypothetical", "30S", "fimbrial")
+    for i, pg in enumerate(t["Protein.Group"]):
+        if pg.startswith("P") and int(pg[1:]) <= 30:
+            t["Genes"][i] = t["Protein.Names"][i] = words[int(pg[1:]) % 4]
+    pq.write_table(pa.table(t), report)
+
+
+def write_ncbi_fasta(path):
+    """P01-P20 with NCBI headers (P01 a CDS-style one with [gene=...]); P31 a UniProt one."""
+    with open(path, "w") as fh:
+        fh.write(">P01 [gene=sampA] [locus_tag=X_0001] [protein=outer membrane porin A]\nMPEPTIDEK\n")
+        for i in range(2, 21):
+            fh.write(f">P{i:02d} MULTISPECIES: hypothetical protein {i} [Strain-X]\nMPEPTIDEK\n")
+        fh.write(">sp|P31|P31_TEST Test protein 31 OS=Strain-X OX=9 GN=G31 PE=1 SV=1\nMPEPTIDEK\n")
+    return path
+
+
+@unittest.skipUnless(HAVE_R, NEEDS)
+class NonUniprotNames(unittest.TestCase):
+    """On an NCBI database DIA-NN's Genes and Protein.Names hold the description's first word
+    ("MULTISPECIES:", "hypothetical"): a client read them as gene names in the tables and in
+    the report's Top proteins. They are blanked, a [gene=...] token kept, Description used."""
+
+    def check(self, out, with_fasta):
+        ko = {r["Protein.Group"]: r for r in read(os.path.join(out, "DE_silac_KO.WT.csv"))}
+        for pg in ("P02", "P12", "P21", "P30"):
+            self.assertEqual((ko[pg]["Genes"], ko[pg]["Protein.Names"]), ("", ""), pg)
+        self.assertEqual(ko["P31"]["Genes"], "G31")
+        self.assertEqual(ko["P31"]["Protein.Names"], "P31_TEST")
+        em = {r["Protein.Group"]: r for r in read(os.path.join(out, "SILAC_sample_matrix.csv"))}
+        self.assertEqual(em["P02"]["Genes"], "")
+        prov = json.load(open(os.path.join(out, "de_provenance.json")))
+        self.assertEqual(prov["protein_names"]["n_not_uniprot"], 30)
+        self.assertTrue(any("not UniProt's" in n for n in prov["brief_notes"]))
+        self.assertIn("Genes", prov["de_columns"])
+        if with_fasta:
+            self.assertEqual(ko["P01"]["Genes"], "sampA", "the [gene=...] token is the gene")
+            self.assertEqual(ko["P01"]["Description"], "outer membrane porin A")
+            self.assertEqual(ko["P02"]["Description"], "hypothetical protein 2")
+            self.assertEqual(prov["protein_names"]["n_gene_from_token"], 1)
+        else:
+            self.assertEqual(ko["P01"]["Genes"], "")
+        return ko
+
+    def test_names_from_an_ncbi_database_are_not_shown_as_genes(self):
+        for with_fasta in (True, False):
+            with self.subTest(with_fasta=with_fasta), tempfile.TemporaryDirectory() as d:
+                fx.make_report(os.path.join(d, "report.parquet"))
+                ncbi_names(os.path.join(d, "report.parquet"))
+                fx.write_design(os.path.join(d, "design.csv"))
+                more = ("--fasta", write_ncbi_fasta(os.path.join(d, "db.fasta"))) if with_fasta else ()
+                _, out = run_silac(d, *more)
+                self.check(out, with_fasta)
+                if not with_fasta:
+                    continue
+                # the report's Top proteins: a Description column, no first-word "genes"
+                html = os.path.join(d, "Analysis_Report.html")
+                p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "make_analysis_html.py"),
+                                    "--tables", out, "--figures", os.path.join(d, "out", "figures"),
+                                    "--out", html, "--no-pdf"], capture_output=True, text=True,
+                                   timeout=300)
+                self.assertEqual(p.returncode, 0, p.stdout[-2000:] + p.stderr[-2000:])
+                md = open(os.path.join(os.path.dirname(html), "Analysis_Report.md")).read()
+                top = md[md.index("## Top proteins per contrast"):]
+                self.assertIn("| Protein | Gene | Description | log2FC |", top)
+                self.assertIn("| P01 | sampA | outer membrane porin A |", top)
+                self.assertRegex(top, r"\| P02 \| \u2014 \| hypothetical protein 2 \|")
+                for w in ("MULTISPECIES:", "| hypothetical |", "| 30S |", "| fimbrial |"):
+                    self.assertNotIn(w, top)
+
+
 @unittest.skipUnless(r_has("limma", "jsonlite"), "needs Rscript with limma and jsonlite")
 class RunDeLeavesSilacResultsAlone(unittest.TestCase):
     """run_de.R refuses an --outdir holding SILAC results (as run_silac.R refuses run_de.R's):
