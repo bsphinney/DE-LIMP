@@ -581,6 +581,17 @@ def build_sdrf(f):
     mod_vals = [(_mod_term(m), m) for m in mods]
     lab = srec.get("labelled")
     label_val = ("label free sample" if lab and lab["value"] is False else None)
+    # SILAC: one row per run and channel (the spec: a multiplexed run's samples share its assay
+    # name and differ in comment[label]), from the search's channels and the channel design
+    import silac
+    sdrf_terms = silac.sdrf_labels(srec.get("labels"))
+    design = silac.design_for_session(f["p"]["session_dir"], f.get("de_prov")) if sdrf_terms else None
+    channels_of = {}
+    for r in (design or {}).get("runs") or []:
+        chans = [(ch, g) for ch, g in r["channels"].items() if ch in sdrf_terms]
+        if chans:
+            channels_of[r["run"]] = (r["replicate"], sorted(
+                chans, key=lambda x: list(sdrf_terms).index(x[0])))
 
     templates = (["human"] if human else []) + (["dia-acquisition"] if acq == "DIA"
                                                 else ["ms-proteomics"])
@@ -617,27 +628,39 @@ def build_sdrf(f):
             c = conds[i]
             run = _run_name(c.get("File.Name", f"run_{i + 1}"))
         group = (c or {}).get("Group", "").strip() or None
-        if group:
-            rep_n[group] = rep_n.get(group, 0) + 1
-        row = [run, org_val or TO_FILL, TO_FILL, TO_FILL, TO_FILL]
-        if human:
-            row += [TO_FILL, TO_FILL]
-        row += [str(rep_n[group]) if group else TO_FILL, run,
-                "proteomic profiling by mass spectrometry",
-                acq_val or TO_FILL, label_val or TO_FILL, instr or TO_FILL, enz or TO_FILL]
-        row += [v or TO_FILL for v, _ in mod_vals]
-        row += [f"{mm._g(t['value'])} {t['unit']}" for _, t in tol_cols]
-        if ms1_range:
-            row.append(ms1_range)
-        row += ["1", "1", safe_name(base) if base else TO_FILL, SDRF_VERSION]
-        row += [f"{t} {TEMPLATE_VERSION}" for t in templates]
-        row += [f"ucdavis-proteomics-core-pipeline {label(skill_ver, ascii=True)}", group or TO_FILL]
-        rows.append(row)
-        if path and not c and conds:
+        # (source name, group, label) per row: one for a label-free run, one per channel for a
+        # SILAC run in the channel design
+        if run in channels_of:
+            rep, chans = channels_of[run]
+            samples = [(f"{rep}_{g}", g, sdrf_terms[ch][0]) for ch, g in chans]
+        else:
+            samples = [(run, group, label_val)]
+        for source, group, lab_v in samples:
+            if group:
+                rep_n[group] = rep_n.get(group, 0) + 1
+            row = [source, org_val or TO_FILL, TO_FILL, TO_FILL, TO_FILL]
+            if human:
+                row += [TO_FILL, TO_FILL]
+            row += [str(rep_n[group]) if group else TO_FILL, run,
+                    "proteomic profiling by mass spectrometry",
+                    acq_val or TO_FILL, lab_v or TO_FILL, instr or TO_FILL, enz or TO_FILL]
+            row += [v or TO_FILL for v, _ in mod_vals]
+            row += [f"{mm._g(t['value'])} {t['unit']}" for _, t in tol_cols]
+            if ms1_range:
+                row.append(ms1_range)
+            row += ["1", "1", safe_name(base) if base else TO_FILL, SDRF_VERSION]
+            row += [f"{t} {TEMPLATE_VERSION}" for t in templates]
+            row += [f"ucdavis-proteomics-core-pipeline {label(skill_ver, ascii=True)}",
+                    group or TO_FILL]
+            rows.append(row)
+        if path and not c and conds and run not in channels_of:
             notes.append(("factor value", TO_FILL, f"{base} has no row in conditions.csv"))
 
     # where every column came from, and what the user must fill
-    src = [("source name", "run name", "the raw file name without extension -- replace with "
+    src = [("source name", "<replicate>_<group>" if channels_of else "run name",
+            "SILAC: the sample in each channel, from the channel design -- replace with your own "
+            "sample IDs if you have them" if channels_of else
+            "the raw file name without extension -- replace with "
             "your own sample IDs if you have them"),
            ("characteristics[organism]", org_val or TO_FILL, org_src or
             "no search-database record (input/search.fasta.meta.json)"),
@@ -647,7 +670,10 @@ def build_sdrf(f):
     if human:
         src += [("characteristics[sex]", TO_FILL, "not in any session record"),
                 ("characteristics[age]", TO_FILL, "not in any session record")]
-    src += [("characteristics[biological replicate]", "1..n per group" if conds else TO_FILL,
+    src += [("characteristics[biological replicate]",
+             "1..n per group" if conds or channels_of else TO_FILL,
+             "numbered within each group of the SILAC channel design, one per run and channel"
+             if channels_of else
              "numbered within each conditions.csv Group, one per raw file -- the DE design "
              "treated each run as a separate biological sample; correct it if some runs are "
              "re-injections" if conds else "no conditions.csv"),
@@ -656,9 +682,18 @@ def build_sdrf(f):
              "fixed value required by the spec"),
             ("comment[proteomics data acquisition method]", acq_val or TO_FILL,
              acq_src or "acquisition not recorded in the session"),
-            ("comment[label]", label_val or TO_FILL,
+            ("comment[label]", label_val or (", ".join(t for t, _ in sdrf_terms.values())
+                                             if channels_of else TO_FILL),
              (lab or {}).get("source", "search parameters not readable") if label_val else
-             ("the search used labels -- enter each channel's label term and one row per "
+             ("SILAC: one row per run and channel, the search's channels ("
+              + ", ".join(f"{ch} = {t} ({ac})" for ch, (t, ac) in sdrf_terms.items())
+              + ", PRIDE ontology) and the channel design "
+              + os.path.basename((design or {}).get("design_file") or "")
+              + "; source name = <replicate>_<group>, assay name = the run"
+              + ("; runs not in the design keep one row with comment[label] TO-FILL"
+                 if raws and len(channels_of) < len(raws) else "")
+              if channels_of else
+              "the search used labels -- enter each channel's label term and one row per "
               "channel" if lab and lab["value"] else
               "search parameters could not be read, so labelling is unknown")),
             ("comment[instrument]", instr or TO_FILL,
@@ -700,7 +735,11 @@ def build_sdrf(f):
             ("comment[sdrf annotation tool]",
              f"ucdavis-proteomics-core-pipeline {label(skill_ver, ascii=True)}",
              "this skill"),
-            (f"factor value[{TO_FILL}]", "conditions.csv Group" if conds else TO_FILL,
+            (f"factor value[{TO_FILL}]",
+             "SILAC channel design Group" if channels_of else
+             "conditions.csv Group" if conds else TO_FILL,
+             "the channel design gives each sample's group (filled in) but not what variable "
+             "the groups are" if channels_of else
              "conditions.csv gives each run's group label (filled in) but not what variable "
              "the groups are" if conds else "no conditions.csv")]
     seen = set()

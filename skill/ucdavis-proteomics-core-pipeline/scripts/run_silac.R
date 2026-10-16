@@ -622,6 +622,10 @@ prov <- list(
     "per sample (replicate x channel): log2 of the summed channel-passing raw precursor quantity,",
     "median-centred within the sample; for the sample-quality panels and depth checks, not what was tested")),
   report_sections = report_sections, high_significance_note = high_significance_note,
+  # the README's line for output/tables (session_docs.py reads it instead of run_de.R's)
+  tables_summary = paste("one `DE_silac_*.csv` per comparison (median-centred log2 ratios, with the",
+                         "uncentred ones), `SILAC_channel_specific_detections.csv`,",
+                         "`SILAC_channel_summary.csv`, `SILAC_ratio_offsets.csv`, `methods.txt`"),
   de_columns = list(
     logFC = paste("the mean median-centred log2 ratio, numerator/denominator, over the replicates with a",
                   "ratio (limma's estimate): relative to the typical protein of each replicate; positive =",

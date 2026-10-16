@@ -182,12 +182,37 @@ class SilacSession(unittest.TestCase):
                       open(os.path.join(d, "output", "tables", "de_provenance.json"), "w"))
             self.assertFalse(normalization_check.delivery_gate(d)["proceed"])
 
+    def test_sdrf_has_a_row_per_run_and_channel_with_the_pride_label(self):
+        import make_deposit as md
+        with open(os.path.join(self.s, "input", "raw_files.txt"), "w") as fh:
+            fh.write("# raw\n" + "".join(f"/data/{r}.d\n" for r in fx.RUNS))
+        try:
+            cols, rows, sources, _ = md.build_sdrf(md.gather(self.s))
+        finally:
+            os.unlink(os.path.join(self.s, "input", "raw_files.txt"))
+        c = {name: i for i, name in reversed(list(enumerate(cols)))}
+        self.assertEqual(len(rows), 12, "4 runs x 3 channels")
+        first = [r for r in rows if r[c["assay name"]] == "run_A1"]
+        self.assertEqual([(r[c["source name"]], r[c["comment[label]"]], r[-1]) for r in first],
+                         [("Rep1_WT", "SILAC light", "WT"), ("Rep1_KO", "SILAC medium", "KO"),
+                          ("Rep1_DKO", "SILAC heavy", "DKO")])
+        self.assertEqual({r[c["comment[data file]"]] for r in first}, {"run_A1.d"})
+        keys = {(r[c["source name"]], r[c["assay name"]], r[c["comment[label]"]]) for r in rows}
+        self.assertEqual(len(keys), len(rows), "source + assay + label must be unique (spec)")
+        self.assertEqual(sorted(r[c["characteristics[biological replicate]"]] for r in rows
+                                if r[-1] == "KO"), ["1", "2", "3", "4"])
+        label_src = next(why for col, _, why in sources if col == "comment[label]")
+        self.assertIn("PRIDE:0000327", label_src)
+
     def test_agents_md_reads_the_pipelines_own_columns(self):
         run([sys.executable, os.path.join(SCRIPTS, "session.py"), "docs", "--dir", self.s])
         a = open(os.path.join(self.s, "AGENTS.md"), encoding="utf-8").read()
         self.assertIn("- `logFC` — the mean median-centred log2 ratio", a)
         self.assertIn("- `uncentred_Rep2` — that replicate's log2 ratio before centring", a)
         self.assertNotIn("no description recorded", a.split("## Table columns")[1].split("##")[0])
+        r = open(os.path.join(self.s, "README.md"), encoding="utf-8").read()
+        self.assertIn("one `DE_silac_*.csv` per comparison", r)
+        self.assertNotIn("Expression_Matrix.csv", r)
 
     # ---- reproducibility, set tests, figures ---------------------------------------------------
     def test_reproduce_sh_replays_the_silac_analysis(self):

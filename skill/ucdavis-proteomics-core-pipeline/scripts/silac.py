@@ -354,6 +354,40 @@ def refusal(cfg_path, seed_lib=False, prog="run_search"):
             "estimate_params.py --labels (references/silac.md).")
 
 
+# An SDRF row's comment[label] (SDRF-Proteomics v1.1.0: "ontology: pride ... SILAC light, SILAC
+# heavy"; a multiplexed run has one row per sample, the rows sharing `assay name` and told apart
+# by comment[label]). The PRIDE terms, read in OLS4 on 2026-10-15: SILAC light PRIDE:0000326,
+# SILAC medium PRIDE:0000327, SILAC heavy PRIDE:0000325. By channel position, lightest first.
+SDRF_LABELS = {2: (("SILAC light", "PRIDE:0000326"), ("SILAC heavy", "PRIDE:0000325")),
+               3: (("SILAC light", "PRIDE:0000326"), ("SILAC medium", "PRIDE:0000327"),
+                   ("SILAC heavy", "PRIDE:0000325"))}
+
+
+def sdrf_labels(rec):
+    """{channel name: (SDRF label, PRIDE accession)} for a labels record, or {} when its plex has
+    no SDRF terms here."""
+    names = [c.get("name") for c in (rec or {}).get("channels") or []]
+    terms = SDRF_LABELS.get(len(names))
+    return dict(zip(names, terms)) if terms else {}
+
+
+def design_for_session(session_dir, de_prov=None):
+    """The session's SILAC channel design (read_design), from the path the analysis recorded
+    (de_provenance.json `metadata`), else input/silac_design.csv; None when there is none."""
+    cands = []
+    md = (de_prov or {}).get("metadata")
+    if isinstance(md, str) and md:
+        cands += [md, os.path.join(session_dir, "input", os.path.basename(md))]
+    cands.append(os.path.join(session_dir, "input", "silac_design.csv"))
+    for c in cands:
+        if os.path.isfile(c) and c.endswith(".csv"):
+            try:
+                return read_design(c)
+            except SilacError:
+                continue
+    return None
+
+
 def step8_command(report, session, params, fasta=None):
     """Step 8 for a SILAC search, as a resumed session reads it in the chain's recovery note
     (diann_parallel.step8_next): the design check, then run_silac.R -- never run_de.R and the

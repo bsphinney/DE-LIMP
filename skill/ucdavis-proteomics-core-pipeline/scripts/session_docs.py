@@ -571,6 +571,13 @@ def _named_tables(f):
             ("quality", "sample quality and contamination flags" + both("quality")))
 
 
+def _tables_summary(f):
+    """The DE pipeline's own one-line description of its tables (de_provenance.json
+    `tables_summary`), or None -- then run_de.R's tables are described."""
+    t = (f.get("de") or {}).get("tables_summary")
+    return t.strip() if isinstance(t, str) and t.strip() else None
+
+
 def readme_md(f, for_html=False):
     """THE README source. README.md is this text; README.html is this text rendered (for_html
     drops only the line pointing the Markdown reader at the .html)."""
@@ -592,8 +599,10 @@ def readme_md(f, for_html=False):
              "out, and the top proteins per contrast"),
             ("methods_docx", "Methods for the paper (Word)", ""),
             ("methods_md", "Methods for the paper (text)", ""),
-            ("tables", "Results tables", " — one `DE_*.csv` per comparison, "
-                                         "`Expression_Matrix.csv`, `methods.txt`"
+            # a pipeline that names its own tables says so in its record (`tables_summary`,
+            # e.g. run_silac.R's SILAC tables); run_de.R's are the default
+            ("tables", "Results tables", " — " + (_tables_summary(f) or (
+                "one `DE_*.csv` per comparison, `Expression_Matrix.csv`, `methods.txt`"))
                                          + (", protein-set tests `Sets_*.csv`"
                                             if f.get("sets_files") else "")),
             ("howto_html", "How to deposit the data in PRIDE / MassIVE", ""),
@@ -630,8 +639,9 @@ def readme_md(f, for_html=False):
                       + (", raw_files.txt (where the raw data are)" if files.get("raw_list")
                          else "")),
             ("output/search", "the search output (report, engine logs, search_provenance.json)"),
-            ("output/tables", "DE results (DE_*.csv), Expression_Matrix.csv, methods.txt, "
-                              "de_provenance.json, reproducibility_log.R (the analysis as R)"),
+            ("output/tables", (_tables_summary(f) or "DE results (DE_*.csv), "
+                               "Expression_Matrix.csv, methods.txt")
+                              + ", de_provenance.json, reproducibility_log.R (the analysis as R)"),
             ("output/figures", "plots; captions in figures.json"),
             ("output/reproducibility", "the pinned bundle for re-running the search too"),
             ("output/DATA_SUBMISSION", "everything to deposit the data in PRIDE / MassIVE"),
