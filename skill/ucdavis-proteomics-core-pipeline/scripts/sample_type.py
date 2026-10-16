@@ -12,8 +12,13 @@ every analysis (SKILL.md step 3), recorded here in the user's own words, and rea
 analysis brief (analysis_prompt.py) -- which says NOT STATED, and forbids guessing, when it
 was not recorded. Nothing in the skill infers it.
 
+Core staff are not asked it up front (a staff report, 2026-10-08: "stop asking what tissue!
+irrelevant!"): only when a step's choice depends on it (SKILL.md step 3). Their session records
+that it was not asked (--not-asked), never that they were asked and did not say.
+
   python3 sample_type.py set  --session <session> --stated "mouse leg muscle, flash-frozen"
-  python3 sample_type.py set  --session <session> --not-stated     # the user does not know
+  python3 sample_type.py set  --session <session> --not-stated     # asked; the user does not know
+  python3 sample_type.py set  --session <session> --not-asked      # Core staff (any analysis): not asked
   python3 sample_type.py show --session <session>                  # JSON; exit 0
 
 The record is written only from what the user said; `--stated` refuses an empty answer.
@@ -42,18 +47,24 @@ def path_for(session):
     return os.path.join(os.path.abspath(os.path.expanduser(session)), "input", FILE)
 
 
-def record(session, stated=None, user_did_not_say=False, when=None):
+NOT_ASKED = ("not asked: a Core staff analysis, where it is asked only when a step's choice "
+             "depends on it")
+
+
+def record(session, stated=None, user_did_not_say=False, when=None, not_asked=False):
     """Write the session's sample-type record -> its path. `stated`: the user's words, as given.
-    `user_did_not_say`: asked, and the user does not know or did not answer."""
-    if bool(stated and stated.strip()) == bool(user_did_not_say):
-        raise ValueError("give the user's answer (--stated) or say they did not give one "
-                         "(--not-stated), not both or neither")
+    `user_did_not_say`: asked, and the user does not know or did not answer. `not_asked`: a Core
+    staff analysis, where it is not asked up front (SKILL.md step 3)."""
+    if sum((bool(stated and stated.strip()), bool(user_did_not_say), bool(not_asked))) != 1:
+        raise ValueError("give the user's answer (--stated), say they did not give one "
+                         "(--not-stated), or that it was not asked (--not-asked): exactly one")
     p = path_for(session)
     if not os.path.isdir(os.path.dirname(p)):
         raise ValueError(f"not a session directory (no input/): {os.path.dirname(os.path.dirname(p))}")
     rec = {"schema": SCHEMA,
            "stated": " ".join(stated.split()) if stated else None,
-           "source": "user" if stated else "asked; the user did not say",
+           "source": ("user" if stated else NOT_ASKED if not_asked
+                      else "asked; the user did not say"),
            "recorded_at": when or datetime.datetime.now(datetime.timezone.utc).strftime(
                "%Y-%m-%dT%H:%M:%SZ"),
            "rule": "as the user stated it; " + NEVER_INFER}
@@ -84,6 +95,8 @@ def describe(rec):
     """One line for a reader: the user's words, or NOT STATED (and why)."""
     if rec and rec.get("stated"):
         return f"{rec['stated']} (as the user stated it)"
+    if rec and rec.get("source") == NOT_ASKED:
+        return f"{NOT_STATED} ({NOT_ASKED})"
     if rec:
         return f"{NOT_STATED} (asked; the user did not say)"
     return f"{NOT_STATED} (not recorded in this session -- ask the user)"
@@ -99,12 +112,14 @@ def main():
     g.add_argument("--stated", help="what the user said the samples are, in their words")
     g.add_argument("--not-stated", action="store_true",
                    help="asked, and the user does not know or did not say")
+    g.add_argument("--not-asked", action="store_true",
+                   help="Core staff: not asked, since no step's choice depended on it yet")
     sh = sub.add_parser("show", help="print the record (JSON)")
     sh.add_argument("--session", required=True)
     a = ap.parse_args()
     try:
         if a.cmd == "set":
-            p = record(a.session, a.stated, a.not_stated)
+            p = record(a.session, a.stated, a.not_stated, not_asked=a.not_asked)
             print(json.dumps({"written": p, "sample_type": describe(load(a.session))}, indent=2))
         else:
             rec = load(a.session)

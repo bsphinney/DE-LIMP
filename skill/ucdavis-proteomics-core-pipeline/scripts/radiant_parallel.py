@@ -36,6 +36,9 @@ Usage:
 import sys, os, json, argparse, shlex
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+# Every step script, list and config is written without following a planted link (safe_write.py).
+from safe_write import write_file  # noqa: E402
 
 
 def _mounts_for(runtime, pairs):
@@ -69,7 +72,7 @@ def detect_queue(partition, account, qos, peak_cpus=None, preemptible_ok=False):
         return partition, account, qos
 
 
-def header(job, cpus, mem, hours, partition, account, qos, array=None):
+def header(job, cpus, mem, hours, partition, account, qos, array=None, exclude=None):
     L = ["#!/bin/bash -l", f"#SBATCH --job-name={job}",
          f"#SBATCH --cpus-per-task={cpus}", f"#SBATCH --mem={mem}G",
          f"#SBATCH --time={hours}:00:00",
@@ -83,6 +86,11 @@ def header(job, cpus, mem, hours, partition, account, qos, array=None):
         if qos.startswith("public") or qos == "low":
             # publicgrp/low is preemptible -- requeue rather than losing the task.
             L.append("#SBATCH --requeue")
+    if exclude:
+        # the nodes --exclude keeps every step off (node_fault.exclude_nodes)
+        sys.path.insert(0, HERE)
+        from node_fault import exclude_directive
+        L.append(exclude_directive(exclude))
     if array:
         L.append(f"#SBATCH --array={array}")
     return "\n".join(L)
@@ -99,6 +107,10 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--library", help="DIA-NN .tsv library; generated in step 1 if omitted")
     ap.add_argument("--diann", help="DIA-NN command (needed only when --library is omitted)")
+    ap.add_argument("--cys-alkylation", default="cam",
+                    help="the fixed cysteine modification step 1's predicted library carries "
+                         "(estimate_params.CYS_ALKYLATION_CHOICES; default cam). Radiant takes "
+                         "its modifications from the library")
     # Memory defaults are MEASURED, not guessed (3-run HeLa, 9.9 GB TSV library,
     # 2026-08-03): each RadiantDIA task peaked at ~19 GB, Fulcrum at ~14 GB — roughly
     # 2x the library size plus overhead. Over-requesting is not free: asking 200 GB
@@ -115,6 +127,9 @@ def main():
     ap.add_argument("--libpred-mem", type=int, default=64)
     ap.add_argument("--libpred-time", type=int, default=4)
     ap.add_argument("--partition"); ap.add_argument("--account"); ap.add_argument("--qos")
+    ap.add_argument("--exclude", metavar="NODE[,NODE...]",
+                    help="SLURM nodes to keep every step off (names or ranges, e.g. "
+                         "hive-dc-7-4-[50-54]): #SBATCH --exclude in every step's script")
     ap.add_argument("--max-simultaneous", type=int, default=20)
     ap.add_argument("--fdr-thresh", type=float, default=0.01)
     # MBR ON by default. Seer's example TOML ships mbr=false, but our DIA-NN chain
@@ -138,6 +153,16 @@ def main():
                      help="an instrument QC / standard run: never staged from a job")
     qcx.add_argument("--not-qc", action="store_true", help="not a QC run: passed on to stage")
     a = ap.parse_args()
+    # it lands in a #SBATCH line of every step: checked first (node_fault.exclude_nodes)
+    exclude = None
+    if a.exclude is not None:
+        sys.path.insert(0, HERE)
+        from node_fault import exclude_nodes
+        try:
+            exclude = exclude_nodes(a.exclude)
+        except ValueError as e:
+            sys.exit(f"[radiant_parallel] REFUSING --exclude {a.exclude!r}: {e}. "
+                     "Nothing was generated.")
 
     files = [ln.strip() for ln in open(a.raw_list) if ln.strip()]
     if not files:
@@ -174,12 +199,14 @@ def main():
     # writes <stem>.predicted.speclib (its compact binary format). Radiant reads .speclib
     # directly (FragLibReader accepts .fragLibFF/.tsv/.csv/.speclib), so no conversion is
     # needed -- but the filename must match what DIA-NN really produces or step 2 looks
-    # for a file that was never written.
-    lib_stem = os.path.join(D, "diann_predicted_lib")
-    lib = a.library or (lib_stem + ".predicted.speclib")
+    # for a file that was never written. The --out-lib has an extension: DIA-NN cuts the name
+    # it derives at the last '.' of the whole path, so a bare stem in a folder with a '.' in its
+    # name put the library one folder up (diann_parallel.diann_output_path).
+    from diann_parallel import predicted_speclib
+    out_lib = os.path.join(D, "diann_predicted_lib.speclib")
+    lib = a.library or predicted_speclib(out_lib)
     listing = os.path.join(D, "file_list.txt")
-    with open(listing, "w") as fh:
-        fh.write("\n".join(os.path.abspath(f) for f in files) + "\n")
+    write_file(listing, "\n".join(os.path.abspath(f) for f in files) + "\n")
 
     # Bind every distinct host dir the container must see. Mount parents rather than
     # copying so large mzML stay where they are.
@@ -208,8 +235,8 @@ def main():
                                          preemptible_ok=True)      # array
     part, acct, qos = detect_queue(a.partition, a.account, a.qos,
                                    peak_cpus=a.fulcrum_cpus)       # single jobs
-    q = dict(partition=part, account=acct, qos=qos)
-    q_array = dict(partition=part_a, account=acct_a, qos=qos_a)
+    q = dict(partition=part, account=acct, qos=qos, exclude=exclude)
+    q_array = dict(partition=part_a, account=acct_a, qos=qos_a, exclude=exclude)
 
     # The job-end hook (notify_slack.wrap_job_script, the one definition: run log -> FRAN ->
     # Slack): step 3 ends the search and reports success or failure (and stages a finished
@@ -227,13 +254,16 @@ def main():
                                                 fran=not a.no_fran, fran_name=a.fran_name,
                                                 qc=(True if a.qc else
                                                     False if a.not_qc else None)).rstrip("\n")
-        p = os.path.join(D, name)
-        with open(p, "w") as fh:
-            fh.write(text + "\n")
-        os.chmod(p, 0o755)
-        return p
+        return write_file(os.path.join(D, name), text + "\n", 0o755)
 
     scripts = {}
+    # the fixed C modification (estimate_params.cys_diann_flags, the one map): Radiant's config has
+    # no modifications, it searches what the library carries
+    from estimate_params import CYS_ALKYLATION_CHOICES, cys_diann_flags
+    if a.cys_alkylation not in CYS_ALKYLATION_CHOICES:
+        sys.exit(f"--cys-alkylation {a.cys_alkylation!r}: one of "
+                 f"{', '.join(CYS_ALKYLATION_CHOICES)}")
+    cys_flags = cys_diann_flags(a.cys_alkylation)
 
     # ---- step 1: DIA-NN predicted library (skipped when --library is given) -----
     if not a.library:
@@ -245,8 +275,8 @@ def main():
             header("r1_libpred", a.libpred_cpus, a.libpred_mem, a.libpred_time, **q), "",
             'echo "Step 1/3 DIA-NN library prediction"; date',
             f'{a.diann} --fasta {shlex.quote(os.path.abspath(a.fasta))} --fasta-search '
-            f'--predictor --gen-spec-lib --out-lib {shlex.quote(lib_stem)} '
-            f'--threads {a.libpred_cpus}',
+            f'--predictor --gen-spec-lib --out-lib {shlex.quote(out_lib)} '
+            f'--threads {a.libpred_cpus}' + "".join(f" {shlex.quote(x)}" for x in cys_flags),
             # Check for what DIA-NN ACTUALLY writes, and say what it did write if absent.
             f'if [ ! -s {shlex.quote(lib)} ]; then',
             f'  echo "expected {os.path.basename(lib)}; DIA-NN wrote:"; ls -la {shlex.quote(D)}',
@@ -260,8 +290,7 @@ def main():
     # host->container paths in bash would need string substitution whose delimiter is
     # `/` -- the same character the paths are full of -- so we resolve it here instead.
     clisting = os.path.join(D, "file_list_container.txt")
-    with open(clisting, "w") as fh:
-        fh.write("\n".join(cp(f) for f in files) + "\n")
+    write_file(clisting, "\n".join(cp(f) for f in files) + "\n")
 
     pick = (f'FILE=$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" {shlex.quote(clisting)})\n'
             'if [ -z "$FILE" ]; then echo "no file for task $SLURM_ARRAY_TASK_ID"; exit 1; fi\n'
@@ -317,8 +346,7 @@ def main():
         '"spark.sql.shuffle.partitions" = "64"',
     ])
     toml_path = os.path.join(results, "fulcrum_rescore.toml")
-    with open(toml_path, "w") as fh:
-        fh.write(toml + "\n")
+    write_file(toml_path, toml + "\n")
 
     scripts["step3_fulcrum"] = write("step3_fulcrum.sbatch", "\n".join([
         header("r3_fulcrum", a.fulcrum_cpus, a.fulcrum_mem, a.fulcrum_time, **q), "",
@@ -330,14 +358,22 @@ def main():
         f'{prefix} fulcrum -v --toml-file {cres}/fulcrum_rescore.toml']),
         stage="step 3/3 Fulcrum rescoring", hours=a.fulcrum_time, final=True)
 
+    # the most the three steps can use (cpu_hours.py, the one rule), from the scripts written
+    from cpu_hours import reservation
+    cpu = reservation(list(scripts.values()))
     print(json.dumps({
         "mode": "radiant_parallel_3step",
         "n_files": n,
         "scripts": scripts,
+        "cpu_hours_reserved": cpu["cpu_hours_reserved"],
+        "gpu_hours_reserved": cpu["gpu_hours_reserved"],
+        "cpu_hours_reservation": cpu,
         "results_dir": results,
         "per_file_results": rdir,
         "toml": toml_path,
         "library": lib,
+        # the nodes every step's #SBATCH --exclude keeps it off (--exclude); None for none
+        "exclude": exclude,
         "queue": {"single_jobs": {"partition": part, "account": acct, "qos": qos},
                   "array_step2": {"partition": part_a, "account": acct_a, "qos": qos_a}},
         "submit": ("Submit with dependencies, e.g.:\n"

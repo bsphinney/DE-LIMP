@@ -41,6 +41,10 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# How many added sequences are still a bait / tag list: one definition, beside --add-fasta
+from fetch_fasta import FEW_ADDED_SEQUENCES  # noqa: E402
+
 FILE = "experiment_type.json"
 SCHEMA = "experiment_type/1"
 # The session's copy of fetch_fasta.py's <fasta>.meta.json (session.py's "fasta_meta").
@@ -263,10 +267,10 @@ def session_of(*paths, depth=4):
 
 def bait_candidates(session):
     """The sequences the user added to the search database (fetch_fasta.py --add-fasta: a bait
-    such as EGFP, a tag), as the candidates for the bait: [{"accession", "name", "file"}], the
-    accession being the one the report gives the protein (fetch_fasta records it). [] when there
-    is no session, no FASTA record, or no added sequence; an unreadable record is [] too -- the
-    bait is then asked, as before."""
+    such as EGFP, a tag), as the candidates for the bait: [{"accession", "name", "gene", "file"}],
+    the accession being the one the report gives the protein (fetch_fasta records it), the gene
+    its header's GN= ("" when none). [] when there is no session, no FASTA record, or no added
+    sequence; an unreadable record is [] too -- the bait is then asked, as before."""
     if not session:
         return []
     try:
@@ -278,9 +282,91 @@ def bait_candidates(session):
     for f in (meta.get("added_sequences") or []) if isinstance(meta, dict) else []:
         for e in (f.get("entries") or []) if isinstance(f, dict) else []:
             if isinstance(e, dict) and e.get("accession"):
+                gene = re.search(r"\bGN=(\S+)", e.get("header") or "")
                 out.append({"accession": e["accession"], "name": e.get("name") or e["accession"],
-                            "file": f.get("file")})
+                            "gene": gene.group(1) if gene else "", "file": f.get("file")})
     return out
+
+
+def many_added(cands):
+    """More added sequences than a bait / tag list (fetch_fasta.FEW_ADDED_SEQUENCES): a whole
+    proteome, whose entries are never listed as the bait's candidates."""
+    return len(cands) > FEW_ADDED_SEQUENCES
+
+
+def added_files(cands):
+    return ", ".join(dict.fromkeys(os.path.basename(c.get("file") or "") or "?" for c in cands))
+
+
+def ask_bait(cands):
+    """The bait question for the sequences the user added, or None when there are none. A few are
+    listed by accession; a whole added proteome is counted, and the bait asked for by name --
+    listing 4,506 accessions asks nothing (staff search, 2026-10-10)."""
+    if not cands:
+        return None
+    if many_added(cands):
+        return (f"The search database has {len(cands):,} sequences the user added "
+                f"({added_files(cands)}): a whole proteome, too many to list. If this is an "
+                "enrichment, ask the user which protein is the bait -- by gene, entry name or "
+                "accession -- and record it with set-bait --bait <the bait> (or --bait none).")
+    return ("The search database has sequence(s) the user added: "
+            + ", ".join(c["accession"] for c in cands) + ". If this is an "
+            "enrichment, is one of them the bait? Record the answer with "
+            "set-bait --bait <accession> (or --bait none).")
+
+
+def matching_candidates(answer, cands):
+    """The added sequences `answer` names: by accession, entry name or gene (case-insensitive)."""
+    want = str(answer or "").strip().casefold()
+    return [c for c in cands if want and want in {
+        c["accession"].casefold(), (c.get("gene") or "").casefold(), c["name"].casefold(),
+        c["name"].rsplit("|", 1)[-1].casefold()} - {""}]
+
+
+def bait_question(rec, cands):
+    """(ask_bait or None, what the record already says about the bait or None). The bait is asked
+    ONCE (staff review, 2.12: a TurboID study with its fusion added by --add-fasta was asked at
+    step 3 for `set --bait`, then again by propose). Nothing is asked when set-bait was answered,
+    or when the `--bait` recorded at step 3 names exactly one of the added sequences; a recorded
+    bait that names none of them is put in the question, so it reads as a confirmation."""
+    if not cands:
+        return None, None
+    conf = (rec or {}).get("bait_confirmed")
+    if isinstance(conf, dict) and conf.get("answer"):
+        return None, {"bait": conf["answer"], "source": "set-bait (asked after step 6)"}
+    told = (rec or {}).get("bait")
+    if told:
+        hits = matching_candidates(told, cands)
+        if len(hits) == 1:
+            return None, {"bait": told, "accession": hits[0]["accession"],
+                          "source": "experiment_type.py set --bait (step 3): one of the added "
+                                    "sequences"}
+        return (f"The bait was recorded at step 3 as {told}, which names "
+                + ("several" if hits else "none") + " of the sequences the user added. "
+                + ask_bait(cands)), None
+    return ask_bait(cands), None
+
+
+def resolve_bait(answer, cands):
+    """The added sequence the user named as the bait -> its accession. A few added sequences:
+    the answer is one of their accessions, as listed. A whole added proteome: the accession, or
+    the entry name or gene in its header (case-insensitive), when it names exactly one."""
+    if answer in {c["accession"] for c in cands}:
+        return answer
+    if not many_added(cands):
+        raise ValueError(f"--bait {answer}: not one of the added sequences "
+                         f"({', '.join(c['accession'] for c in cands)}); give one of them, or 'none'")
+    hits = matching_candidates(answer, cands)
+    if len(hits) == 1:
+        return hits[0]["accession"]
+    if hits:
+        raise ValueError(f"--bait {answer}: names {len(hits)} of the added sequences ("
+                         + ", ".join(f"{c['accession']} {c['name']}" for c in hits[:FEW_ADDED_SEQUENCES])
+                         + (", ..." if len(hits) > FEW_ADDED_SEQUENCES else "")
+                         + "); give the bait's accession")
+    raise ValueError(f"--bait {answer}: no accession, entry name or gene among the {len(cands):,} "
+                     f"added sequences ({added_files(cands)}) is {answer}; give the bait's "
+                     f"accession, or 'none'")
 
 
 # The answer to ask_bait that NONE of the added sequences is the bait (a tag, a spike-in).
@@ -298,13 +384,12 @@ def record_bait(session, bait, when=None):
     answer = " ".join(str(bait or "").split())
     if not answer:
         raise ValueError("--bait needs the bait's accession, or 'none'")
-    cands = [c["accession"] for c in bait_candidates(session)]
-    if answer.casefold() != NO_BAIT and cands and answer not in cands:
-        raise ValueError(f"--bait {answer}: not one of the added sequences ({', '.join(cands)}); "
-                         f"give one of them, or 'none'")
+    cands = bait_candidates(session)
     none = answer.casefold() == NO_BAIT
-    rec.update(bait=None if none else answer,
-               bait_confirmed={"answer": NO_BAIT if none else answer,
+    acc = answer if none or not cands else resolve_bait(answer, cands)
+    rec.update(bait=None if none else acc,
+               bait_confirmed={"answer": NO_BAIT if none else acc,
+                               **({"given_as": answer} if not none and acc != answer else {}),
                                "by": "the user, asked ask_bait after the database was built",
                                "at": when or datetime.datetime.now(datetime.timezone.utc).strftime(
                                    "%Y-%m-%dT%H:%M:%SZ")})
@@ -332,8 +417,11 @@ def bait_for_check(session, bait=None, rec=None):
     if len(cands) == 1:
         return (cands[0]["accession"], "the one sequence the user added to the database "
                 "(--add-fasta), not confirmed as the bait", cands)
-    return None, ("not given, and the user added several sequences (--add-fasta): record "
-                  "which is the bait with experiment_type.py set --bait" if cands else
+    return None, ((f"not given, and the user added {len(cands):,} sequences (--add-fasta, "
+                   f"{added_files(cands)}): ask which protein is the bait and record it with "
+                   f"experiment_type.py set-bait" if many_added(cands) else
+                   "not given, and the user added several sequences (--add-fasta): record "
+                   "which is the bait with experiment_type.py set --bait") if cands else
                   "not given"), cands
 
 
@@ -382,7 +470,8 @@ def main():
     sb = sub.add_parser("set-bait", help="record the user's answer to ask_bait (after step 6)")
     sb.add_argument("--session", required=True)
     sb.add_argument("--bait", required=True,
-                    help="the bait's accession (one of the added sequences), or 'none'")
+                    help="the bait's accession (one of the added sequences), or 'none'; for a "
+                         "whole added proteome also its entry name or gene")
     sh = sub.add_parser("show")
     sh.add_argument("--session", required=True)
     a = ap.parse_args()
@@ -398,6 +487,12 @@ def main():
         if a.cmd == "propose":
             t, answer = propose_from_submission((submission or {}).get("experiment_types"))
             cands = bait_candidates(a.session)
+            try:
+                rec_now = load(a.session)
+            except ValueError as e:          # said, and the bait is asked as if nothing were recorded
+                rec_now = None
+                print(f"[experiment_type] {e}: the bait is asked", file=sys.stderr)
+            question, known = bait_question(rec_now, cands)
             print(json.dumps({
                 "proposed": t, "from": answer,
                 "submission_types": (submission or {}).get("experiment_types"),
@@ -408,13 +503,13 @@ def main():
                        "No submission type to go on: ask the user what kind of experiment this "
                        "is (" + "; ".join(v[0] for v in DEFAULTS.values()) + ").",
                 # the sequences the user added (--add-fasta): a bait, if this is an
-                # enrichment; confirm which one with set --bait
-                "bait_candidates": cands,
-                "ask_bait": (("The search database has sequence(s) the user added: "
-                              + ", ".join(c["accession"] for c in cands) + ". If this is an "
-                              "enrichment, is one of them the bait? Record the answer with "
-                              "set-bait --bait <accession> (or --bait none).")
-                             if cands else None),
+                # enrichment; confirm which one with set-bait. A whole added proteome is
+                # counted, never listed (ask_bait)
+                "bait_candidates": [] if many_added(cands) else cands,
+                "n_added_sequences": len(cands),
+                # asked once: None when set-bait was answered or step 3's --bait names one
+                "ask_bait": question,
+                "bait_recorded": known,
                 "types": {k: v[0] for k, v in DEFAULTS.items()}}, indent=2))
         elif a.cmd == "set-bait":
             path = record_bait(a.session, a.bait)

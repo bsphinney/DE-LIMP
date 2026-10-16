@@ -101,6 +101,10 @@ empirical-library round-trip.
   assigns `genome-center-grp-high-qos` by itself. `publicgrp/low` **does** need
   `--qos publicgrp-low-qos` named, and the generator adds it. Do not "fix" this by
   hardcoding the facility QOS — an account outside the group cannot submit with it.
+- **Bad nodes: `--exclude <node[,node...]>`** (here, or on `run_search.py`, which passes it
+  on) writes `#SBATCH --exclude=` into every step, so no step can start on them. sbatch
+  reads no `SBATCH_EXCLUDE` variable; `node_fault.py retry` keeps these nodes excluded
+  (→ `references/watcher.md`, "Keeping a search off nodes known to be bad").
 - **The `--temp` folders MUST pre-exist.** DIA-NN aborts immediately with
   `ERROR: cannot find the temp folder .../quant_step2. Specify an existing folder` if
   the `--temp` dir is missing — it will **not** create it, and it aborts *before* doing any
@@ -158,6 +162,10 @@ python3 scripts/diann_parallel.py \
 # then submit the chain (on HIVE, over hive_exec.sh):
 bash scripts/hive_exec.sh 'bash <out>/submit.sh'
 ```
+Its JSON gives `cpu_hours_reserved`, the most the chain can use: every step's CPUs per task × time
+limit × array tasks, summed (`cpu_hours.py`; an upper bound, also the first comment line of
+`submit.sh`). E.g. 3 runs at 8 CPUs / 4 h per array task, steps 3 and 5 at 32 CPUs / 12 h, step 1
+at 16 CPUs / 4 h: 64 + 2 × 96 + 2 × 384 = 1,024.
 It writes `file_list.txt`, `step{1..5}_*.sbatch`, and `submit.sh` (which submits all
 five with dependencies and prints the job ids). **Watch the final job** with
 `watch_run.sh --all <out> --hive` (reads `jobs.txt`; covers all five steps — watching
@@ -727,8 +735,8 @@ what the runs said is checked for plausibility before it is pinned for the cohor
 | check | rule | why that number |
 |---|---|---|
 | band | MS2 **3–30 ppm**, MS1 **1.5–25 ppm** (`probe_window.MASS_ACC_BAND`) | all DIA-NN's own: its documented Orbitrap tiers span 4–15 ppm, it calibrates from `25 (MS1), 25 (MS2)`, and its runtime value for a 15k MS2 is 25. Ceiling = its widest number +20%; floor below its tightest tier (240k→4) |
-| agreement | per-run spread ≤ **50%** of the median (`MASS_ACC_MAX_SPREAD`) | the widest real disagreement measured here: the same three runs gave MS2 14/17/14 with the window auto (21%) and 12/17/14 with `--window 7` (36%), both reproducible. 35% would refuse the cohort this branch was validated on |
-| runs | at least **2** runs logged everything (`MASS_ACC_MIN_RUNS`) | one run is DIA-NN's own first-run auto mode — "use this mode for preliminary analyses only" — which measuring representative runs exists to replace, and a lone value agrees with itself |
+| agreement | per-run spread ≤ **50%** of the median (`MASS_ACC_MAX_SPREAD`) | the widest real disagreement measured here: the same three runs gave MS2 14/17/14 with the window auto (21%) and 12/17/14 with `--window 7` (36%), both reproducible. 35% would refuse the cohort this branch was validated on. **A wider spread only warns** (`mass_acc.warnings`, the job log) when the median is at or below the SOP floor, every run is inside the band and no run is above 1.5× the floor (`SPREAD_WARN_MAX_OVER_FLOOR`; MS2 30, MS1 10.5 ppm): the floor is then pinned whatever the spread. 18 streptavidin pull-down runs measured MS2 20/24/10 (70%, median 20 = the floor) and were refused before 2.12; sparse controls of an enrichment cohort are a known benign cause, which the warning and the refusal both name |
+| runs | at least **2** runs logged everything (`MASS_ACC_MIN_RUNS`) | one run is DIA-NN's own first-run auto mode — "use this mode for preliminary analyses only" — which measuring representative runs exists to replace, and a lone value agrees with itself. **A cohort of one run** (a one-file single-shot search) pins its own measurement (`mass_acc_min_runs`, `mass_acc.single_run_cohort`), band and floor as usual: before 2.12 every one-file search on a 15k-MS2 Orbitrap failed here after its library was built |
 
 Failing the band or the agreement check is a **refusal**: nothing reaches the cfg or
 `massacc.txt`, `window.json` keeps every per-run value with the reason under
@@ -937,7 +945,7 @@ DIA-NN 2.7.0 (HIVE, review srun 23512013): a re-run with no .NET logged `ERROR: 
 | 2 | this task's `quant_step2/<run>.quant` | this task's `.quant` was written to `quant_step2/` |
 | 3 | `empirical.parquet` | the empirical spectral library exists |
 | 4 | this task's `quant_step4/<run>.quant` (before the no-step-2-quant skip) | this task's `.quant` was written to `quant_step4/` |
-| 5 | `report.parquet` and `report.stats.tsv` | `report.parquet` exists **and** every `.quant` the runs in `file_list.txt` map to is present and non-empty in `quant_step4/` |
+| 5 | `report.parquet` and `report.stats.tsv` | every `.quant` the runs in `file_list.txt` map to is present and non-empty in `quant_step4/` (before DIA-NN runs), `report.parquet` exists, **and** its `Run` column holds every run in `file_list.txt` (`check_report_runs.py`, the single-shot search's check) |
 
 Step 5's count check is the backstop: it is the only place that can notice a sample went
 missing several steps earlier. It counts the `.quant` **files** this chain's inputs map to —
@@ -950,16 +958,57 @@ so a collision makes the count fall short and the job fails. It names each missi
 (`MISSING: <run>.quant -- no step-4 task wrote it`), and reports a short count of distinct
 names separately (`N inputs map to only M distinct run names`).
 
+The `.quant` count says every run was searched; DIA-NN can still leave one out of the report
+(a run with nothing past the q-value filter, a path it could not parse) and exit 0. So after
+the report exists step 5 runs `check_report_runs.py --report <report> --files-list
+file_list.txt`, as the single-shot search job does, and fails naming each missing run and what
+`report.stats.tsv` shows about it. A blank or wash injection therefore fails step 5 too. The
+message ends with what to do (`check_report_runs.MISSING_RUN_WHAT_TO_DO`): **not** a resubmission
+— step 5's `--f` list and run count are fixed when the chain is generated, so it fails the same
+way, and dropping the run from `file_list.txt` before resubmitting step 5 fails too ("3 inputs map
+to only 2 distinct run names"; tested with the suite's fake DIA-NN, 2026-10-15). The report is on
+disk without the run, so the cheap recovery for a blank the user or Core staff agree is not a
+sample is to accept it on the record: `check_report_runs.py --report <report> --files-list
+file_list.txt --accept-missing <run> --reason "<why>"` re-checks that report (runs nothing) and
+writes `<report stem>.accepted_missing.json`; the run is left out of `conditions.csv`. A run
+DIA-NN could not load, or a real sample, goes back to the file and Core staff.
+
 Colliding run names are refused before any of that, at generation: `run_search.py` checks the
 input list it routes, and `diann_parallel.py` checks `--raw`/`--raw-list` in its own `main()`
 — the chain is run directly too, and that route used to generate a chain, spend its SLURM
 hours and merge two samples into one column.
+
+**A path with `--` in it.** DIA-NN joins its arguments with spaces and cuts the result at every
+`--`, quoted or not (`arguments()`, `diann.cpp` at tag 1.8), so `--f …_DIA--asp3_S3.d` becomes
+the file `…_DIA` (skipped: "invalid raw MS data format") and the option `--asp3_S3.d`
+("unrecognised option"); DIA-NN 2.7.0 did exactly that on a Core run and searched the others,
+and does it for a `--` in a folder too (HIVE srun 24807838: `plate--1/s1.mzML` became the file
+`plate` and the option `--1/s1.mzML`, while a link to the dashed run without `--` was read).
+Both generators (`diann_parallel.dashed_input_plan`, the one rule) search a run whose **folder**
+holds `--` through a link in `<out>/input_links/` with the same file name, so the run keeps its
+name; `file_list.txt` and every step then name the link, and `search_provenance.json`
+`input_links` (`diann_parallel.py`'s JSON output, when run directly) records each pair. A run
+whose **file name** holds `--` is refused, with the name it would be searched as, unless
+`--rename-dashed-runs` is given: then the link is named with each run of dashes made one
+(`a--b.d` → `a-b.d`) and the report and `conditions.csv` use that name. A new name that another
+input already has is refused. `--out`, `--fasta`, `--cfg` and `--seed-lib` with `--` are refused.
+A single `-` is harmless, and every path the skill passes is absolute.
 
 `--out` is refused if it contains `$`, a backtick, `"`, a backslash or a newline. Every guard
 above quotes its path with **double** quotes on purpose, so that an array task's `$QUANT`
 expands; a `$(...)` in `--out` would therefore be command substitution that runs when the
 **job** runs — inside the `rm -f --` the step performs before DIA-NN starts, so it would also
 choose what gets deleted.
+
+A `.` in a folder name (a re-injection's `S07_A01.01dup2`, a `v1.2`) is fine. DIA-NN names
+everything it writes beside an output — the predicted library, the log, the stats — by cutting
+the `--out` / `--out-lib` path at its **last** `.`, counted over the whole path. Every output
+file the skill names for DIA-NN therefore has an extension (`step1.speclib`,
+`diann_lib.speclib`, `report.parquet`), so the cut always falls in the file name
+(`diann_parallel.diann_output_path`). Before 2.12.0 the single-shot library job and the Radiant
+library step passed a bare `diann_lib`: on 2026-10-02 a search into `…/S07_A01.01dup2`
+wrote `S07_A01.predicted.speclib` and `S07_A01.log.txt` one folder up and its guard
+failed (reproduced on HIVE with DIA-NN 2.7.0, job 24560319).
 
 The **single-shot** search `run_search.py` writes for ≤ 5 files has the same contract: its
 library job deletes, then asserts, `diann_lib.predicted.speclib`, and its search job deletes

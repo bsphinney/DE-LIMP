@@ -10,16 +10,21 @@ node ties up that node and the session **times out** mid-analysis. Keeping Claud
 on the laptop means it stays alive while the actual compute runs as detached **SLURM
 jobs** on HIVE — nothing depends on an interactive session staying open.
 
-## Step 0a asks two questions → pick a mode
+## Step 0a asks two questions (Core staff, three) → pick a mode
 1. **"Do you have access to UC Davis HIVE (account + SSH private key)?"**
    If yes, **ask where the private key is** (e.g. `~/.ssh/id_ed25519`).
-2. **"Are you a member of the UC Davis Proteomics Core?"**
+2. **"Do you work for the UC Davis Proteomics Core (staff)?"**
+3. **Core staff only** (yes to 2, and `check_access.sh` says `core_member: true`), right after
+   that check: **"Which CoreOmics submission is this analysis for?"** — a number, several, or
+   "none" for internal work (SKILL.md step 0a; `references/board.md` section 2). Anyone else is
+   never asked, and never hears of CoreOmics or the Core Project Board.
 
 Verify before trusting the answers:
 ```
 bash scripts/check_access.sh <hive_user> <private_key_path>
 ```
-Reads `recommended_mode` + `core_member` (= `facility_software_available`). If
+Reads `recommended_mode` + `core_member` (= `facility_software_available`). With
+`core_member: false`, `coreomics_runs_on` is `none` and there is no `coreomics_key_advice`. If
 `hive_ssh` is `"failed"`, `hive_ssh_error.kind` says why — relay it, don't guess:
 
 | `kind` | Meaning → what to tell the user |
@@ -148,14 +153,28 @@ three in one SSH call and prints one JSON object: `status`, `local`, `hive`, `re
     `jobs: null` and the error in `say`. Only a HIVE with no squeue at all puts without
     counting.
   - `jobs_total` is every job of the user, for the message.
-- **Updating the plugin** (checked on Claude Code 2.1.285): `/plugin` → **Installed** →
-  **ucdavis-proteomics-core-pipeline** → **Update now**, or in a terminal
-  `claude plugin update ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core`, then
-  `/reload-plugins`. `/plugin marketplace update ucdavis-proteomics-core` only refreshes the
-  catalogue: the installed plugin stays where it was. Automatic updates are **off** for this
-  marketplace until the user turns them on: `/plugin` → **Marketplaces** →
-  **ucdavis-proteomics-core** → **Enable auto-update**. That default is the likely reason staff
-  sat on 2.6.0. Claude Desktop: **+** → **Plugins** → **Manage plugins**.
+- **Updating the plugin**: `bash scripts/skill_version.sh --update`. Step 0 runs it once the user
+  agrees, when `--check-update` (this computer vs GitHub main, every mode) or `--check-hive`
+  (vs the Core's release) says this computer is behind. It refreshes the plugin catalogue (the
+  marketplace clone) over HTTPS when it is behind main:
+  `git -C ~/.claude/plugins/marketplaces/ucdavis-proteomics-core pull --ff-only`. A catalogue
+  with an SSH remote is pulled from `https://github.com/bsphinney/DE-LIMP.git` instead. Then it
+  runs `claude plugin update ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core` and
+  compares the version that landed with main. Exit 1 means the update did not happen, and it
+  never says "latest" while behind. Then `/reload-plugins`.
+  - Why: on 2026-10-07 (msalemi, Windows, Git Bash, no GitHub SSH key) `claude plugin update`
+    alone warned "marketplace not refreshed: SSH host key is not in your known_hosts", then
+    "SSH authentication failed", and said "already at the latest version (2.10.0)" while main
+    shipped 2.11.2. The catalogue's remote was HTTPS. The same `git pull` and update took it
+    to 2.11.2.
+  - Checked on Claude Code 2.1.285: `/plugin marketplace update ucdavis-proteomics-core` only
+    refreshes the catalogue, and the installed plugin stays where it was.
+  - Automatic updates are **off** for this marketplace until the user turns them on: `/plugin`
+    → **Marketplaces** → **ucdavis-proteomics-core** → **Enable auto-update**. That default is
+    the likely reason staff sat on 2.6.0.
+  - A new install adds the marketplace by its HTTPS URL (`references/install.md`); Claude Code
+    probes SSH only for the `bsphinney/DE-LIMP` shorthand. Claude Desktop: **+** → **Plugins**
+    → **Manage plugins**.
 
 Step 0 also reads the Core's notes, in `/quobyte/proteomics-grp/skill_notes/` (`references/notes.md`).
 
@@ -271,8 +290,14 @@ HPC support before connecting — it may have been rotated, or someone is in the
 ## Core staff — submission workflow prerequisites
 Searching and delivering a **CoreOmics submission** ("search the data from submission 807",
 SKILL.md steps 1c + 12b) splits across two machines, so it needs three things in place:
-- **Your own CoreOmics API key, saved on your own computer.** `check`, `fetch` and `bioshare`
-  run locally; HIVE has no CoreOmics key. Steps:
+- **Your own CoreOmics API key, where the CoreOmics steps run.** `check`, `identify`, `fetch`,
+  `bioshare` and `email-draft` run on your computer when it has a working Python, and **on HIVE**
+  (through `hive_exec.sh`, reading `~/.coreomics_token` there, mode 600) when it has none —
+  `check_access.sh` says which (`coreomics_runs_on`) and what to do (`coreomics_key_advice`).
+  On HIVE the agent sets the key up once: it sends a key saved on your computer with
+  `bash scripts/coreomics_key_to_hive.sh` (over ssh standard input, never shown), or you paste
+  one at that script's `--paste` prompt in your own Git Bash
+  (`references/core-submissions.md` "The key on HIVE"). Saving it on your computer:
   1. In CoreOmics (https://ucdavis.coreomics.com): **Profile → API Key**, click to show it,
      **Create** if there is none. Copy it.
   2. In your own terminal, never in the chat, run this ONE line. It then waits, showing
@@ -288,9 +313,9 @@ SKILL.md steps 1c + 12b) splits across two machines, so it needs three things in
      in `references/core-submissions.md` "Troubleshooting `check`". `no_lab_access` means the
      key works but the CoreOmics account is not in the Proteomics lab: ask Brett (brettsp).
 
-  Never paste the key into the chat. These run in Python on your computer, so they need a
-  working local Python 3 — not the Windows Store stub (`local_python3.usable: false`; see
-  "Python on this computer" there).
+  Never paste the key into the chat. With no working local Python 3 (the Windows Store stub:
+  `local_python3.usable: false`) they run on HIVE instead, with the key there — nothing to
+  install (see "Python on this computer" there).
 - **HIVE membership in `proteomics-grp`** — `locate`, `stage` and `deliver` read the Flinders
   raw data and write the service directory and Bioshare share (`/nfs/lssc0/flinders/proteomics`).
 - **The whole skill at `~/proteomics-pipeline/`** on HIVE (`hive_exec.sh --put-skill`, step 1

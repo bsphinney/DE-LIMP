@@ -33,6 +33,11 @@ Subcommands:
   python3 session.py init --name "HeLa QC DIA" --raw /data/HeLaQC/*.d --base ~/Documents/DataAnalysis
   #   a re-analysis BESIDE the earlier session (which is not written to): <date>_<name>_v2
   python3 session.py init --name "HeLa QC DIA" --raw ... --reanalysis-of <prior> --beside
+  #   Core staff: what the analysis is for (SKILL.md step 0a), kept in session.json's
+  #   "analysis_for" -- the CoreOmics submission(s), the first the main one, or internal work
+  #   with its title on the Core Project Board (references/board.md section 2)
+  python3 session.py init --name PROT_0807 --raw ... --submission PROT_0807 [--submission 9002]
+  python3 session.py init --name "Astral HeLa gradient test" --raw ... --internal "Astral HeLa gradient test"
   #   -> prints JSON with every canonical path + "placement"; route later steps into them
 
   # at the end — ensure the publication Methods, write the deposit package
@@ -51,6 +56,8 @@ session was initialised without --raw).
 import sys, os, json, re, glob, shutil, argparse, datetime
 
 NOT_RECORDED = "not recorded"      # a fact the session's records do not give -- never a guess
+# session.json: what a Core staff analysis is for (init --submission / --internal)
+ANALYSIS_FOR = "analysis_for"
 
 SUBDIRS = ["input", "output", "output/search", "output/tables", "output/figures",
            "output/reproducibility", "scripts", "logs"]
@@ -97,6 +104,82 @@ def paths_for(session_dir):
         # the re-injection policy), carried in by submission_report.py attach
         "locate_decisions": os.path.join(d, "input", "locate_decisions.json"),
     }
+
+
+def analysis_for_block(submissions, internal):
+    """session.json's "analysis_for" from init's --submission / --internal: {"submissions":
+    ["PROT_0807", "PROT_9002"]} (as staff named them, the first the main one) or {"internal":
+    "<its title on the Core Project Board>"}. None when neither was given: only Core staff are
+    asked (SKILL.md step 0a). ValueError for anything that is not one or the other."""
+    if submissions and internal is not None:
+        raise ValueError("--submission and --internal: an analysis is for CoreOmics submissions "
+                         "or internal work, not both")
+    if internal is not None:
+        title = " ".join(internal.split())
+        if not title:
+            raise ValueError("--internal: give the title the analysis has on the Core Project Board")
+        return {"internal": title}
+    if not submissions:
+        return None
+    try:
+        from core_submission import normalize_submission  # the one reading of a submission number
+    except ImportError as e:
+        raise ValueError(f"--submission needs core_submission.py beside session.py ({e}): "
+                         "copy the whole scripts folder")
+    out = []
+    for s in submissions:
+        kind, val = normalize_submission(s)               # ValueError says what it accepts
+        if kind != "internal_id":
+            raise ValueError(f"--submission {s}: give the submission's PROT number (PROT_0807), "
+                             "not its CoreOmics id")
+        if val not in out:
+            out.append(val)
+    return {"submissions": out}
+
+
+def read_analysis_for(session_dir):
+    """(the session's "analysis_for" or None, why it could not be read or None). The second is
+    set when session.json EXISTS but cannot be read -- damaged, not a JSON object, or its
+    "analysis_for" not an object -- so a resume (checkpoint.py status) says so instead of
+    silently losing which submission or board thread the analysis is for (2.12 review). No
+    session.json, or one without the key, is (None, None)."""
+    p = paths_for(session_dir)["session_json"]
+    try:
+        with open(p, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return None, None
+    except (OSError, ValueError) as e:              # UnicodeDecodeError is a ValueError
+        return None, f"{p} could not be read ({type(e).__name__}: {e})"
+    if not isinstance(data, dict):
+        return None, f"{p} is not a JSON object"
+    v = data.get(ANALYSIS_FOR)
+    if v is None or isinstance(v, dict):
+        return v, None
+    return None, f"{p} has an \"{ANALYSIS_FOR}\" that is not an object"
+
+
+def analysis_for(session_dir):
+    """The session's "analysis_for" (see analysis_for_block), or None when it has none or
+    session.json cannot be read (read_analysis_for says why)."""
+    return read_analysis_for(session_dir)[0]
+
+
+def _record_analysis_for(p, block):
+    """Add "analysis_for" to session.json, keeping what is there (submission_report.py attach
+    writes "coreomics" into the same file). Refuses a session.json that is not a JSON object."""
+    sj = {}
+    if os.path.isfile(p["session_json"]):
+        sj = _load(p["session_json"])
+        if not isinstance(sj, dict):
+            sys.exit(f"{p['session_json']} is not readable JSON: look at it before init writes "
+                     "to it again")
+    sj[ANALYSIS_FOR] = block
+    tmp = p["session_json"] + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(sj, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp, p["session_json"])
 
 
 def read_raw_list(session_dir):
@@ -282,6 +365,10 @@ def do_init(a):
     if getattr(a, "beside", False) and not a.reanalysis_of:
         sys.exit("--beside places a re-analysis beside the session it re-does: give that session "
                  "with --reanalysis-of <prior session dir>")
+    try:
+        wanted = analysis_for_block(getattr(a, "submission", None), getattr(a, "internal", None))
+    except ValueError as e:
+        sys.exit(str(e))
     if a.reanalysis_of:
         prior = os.path.abspath(os.path.expanduser(a.reanalysis_of))
         if not os.path.isdir(prior):
@@ -310,6 +397,8 @@ def do_init(a):
     for sd in SUBDIRS:
         os.makedirs(os.path.join(session_dir, sd), exist_ok=True)
     p = paths_for(session_dir)
+    if wanted:
+        _record_analysis_for(p, wanted)
 
     # self-contained: copy the skill scripts that ran this analysis
     skill_scripts = os.path.dirname(os.path.abspath(__file__))
@@ -382,7 +471,7 @@ def do_init(a):
 
     print(json.dumps({"created": session_dir, "date": date, "name": a.name,
                       "placement": placement, "reanalysis_of": parent, "version": version,
-                      "paths": p}, indent=2))
+                      ANALYSIS_FOR: wanted, "paths": p}, indent=2))
 
 
 def _load(path):
@@ -754,6 +843,9 @@ def do_finalize(a):
               "agents": docs["written"].get("agents"), "de_files": de_files,
               "methods": methods_md, "manifest": p["manifest_txt"],
               "deposit": deposit, "skipped": (man.n_skipped if man is not None else 1)}
+    # for the agent, never the zip: make_methods' database build warnings, when finalize built the
+    # Methods (make_deposit.methods_build_warnings) -- tell the user
+    result.update(getattr(man, "for_agent", None) or {})
 
     # re-analysis: write DIFFERENCES.md vs the parent (read, never written to)
     parent = a.reanalysis_of or (reanalysis_of(p["session_dir"]) or {}).get("session")
@@ -1119,6 +1211,13 @@ def main():
                    help="with --reanalysis-of: put this run BESIDE the prior session, as "
                         "<date>_<name>_v<N> in the prior's parent folder, instead of inside it -- "
                         "nothing is written into the prior (a delivered folder)")
+    i.add_argument("--submission", action="append", metavar="PROT_NUMBER",
+                   help="Core staff: the CoreOmics submission this analysis is for (807 or "
+                        "PROT_0807); repeat it for an analysis that combines submissions, the "
+                        "main one first. Kept in session.json's analysis_for")
+    i.add_argument("--internal", metavar="TITLE",
+                   help="Core staff: internal work (a method test, QC, training, a tool "
+                        "comparison), with the title it has on the Core Project Board")
     i.set_defaults(func=do_init)
     fp = sub.add_parser("find-prior", help="find existing sessions covering the same raw files "
                                            "(to mention; a new session is fresh by default)")

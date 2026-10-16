@@ -20,7 +20,7 @@ Usage (the orchestrator fills these from earlier steps):
     --params       ./wf/diann.cfg \
     --conditions   ./conditions.csv \
     --fasta        ./search.fasta \
-    --fasta-info   "$(cat ./search.fasta.meta.json)" \
+    --fasta-info-file ./search.fasta.meta.json \
     --raw          /data/*.d \
     --report       ./search_out/report.parquet \
     --de-dir       ./de_results \
@@ -120,6 +120,45 @@ def load_json(path):
         return None
 
 
+def read_fasta_info(text=None, path=None):
+    """fetch_fasta.py's sidecar (<fasta>.meta.json) for the bundle -> (dict, None), or (None, the
+    problem). From --fasta-info-file <path> or --fasta-info @<path>, or --fasta-info '<JSON>' (the
+    older form). A file, because the JSON on a command line can exceed the system's argument limit:
+    a database with 8,685 added sequences has a 2 MB sidecar, and `--fasta-info "$(cat ...)"` failed
+    with "Argument list too long" (exit 126; staff report 2026-10-09)."""
+    if text and text.startswith("@"):
+        path, text = text[1:], None
+    if path:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+        except OSError as e:
+            return None, f"cannot read {path}: {e}"
+    try:
+        info = json.loads(text)
+    except (TypeError, ValueError) as e:
+        return None, f"not valid JSON ({e})"
+    if not isinstance(info, dict):
+        return None, f"a JSON {type(info).__name__}, not fetch_fasta.py's sidecar (a JSON object)"
+    added = info.get("added_sequences")
+    if added is not None and not (isinstance(added, list) and
+                                  all(isinstance(f, dict) for f in added)):
+        return None, ("added_sequences must be a list of objects, one per --add-fasta file "
+                      "({file, sha256, n_entries, entries}), as fetch_fasta.py writes it; got "
+                      f"{type(added).__name__}. Pass the sidecar fetch_fasta.py wrote, unedited")
+    return info, None
+
+
+def fasta_info_for_bundle(info):
+    """The sidecar as the bundle records it: each --add-fasta file by path, sha256 and entry count.
+    The per-entry records stay in the sidecar (thousands of them for an added proteome); the file's
+    sha256 already pins every entry."""
+    if not isinstance(info, dict) or not info.get("added_sequences"):
+        return info
+    return dict(info, added_sequences=[
+        {k: f.get(k) for k in ("file", "sha256", "n_entries")} for f in info["added_sequences"]])
+
+
 # PROT_0756 v2 (2026-09-28): identical inputs, software and flags on a zen4 and a zen2 HIVE node.
 CPU_FAMILY_EVIDENCE = ("|ΔlogFC| ≤ 0.0022 and |Δt| ≤ 0.0064 across 12 contrasts, no significance "
                        "call changed; each family reproduced its own tables exactly")
@@ -205,7 +244,11 @@ def main():
     ap.add_argument("--params")
     ap.add_argument("--conditions")
     ap.add_argument("--fasta")
-    ap.add_argument("--fasta-info", help="JSON from fetch_fasta.py")
+    ap.add_argument("--fasta-info-file", metavar="PATH",
+                    help="fetch_fasta.py's <fasta>.meta.json -- the database as it was built")
+    ap.add_argument("--fasta-info", help="the same, as @<path> or (older form) its JSON text; "
+                                         "use the file form: a big sidecar exceeds the "
+                                         "command-line limit")
     ap.add_argument("--raw", nargs="*")
     ap.add_argument("--report")
     ap.add_argument("--de-dir")
@@ -222,6 +265,22 @@ def main():
                                          "staff-only")
     ap.add_argument("--timestamp", default="", help="ISO timestamp (script can't call clock)")
     a = ap.parse_args()
+    # The database record is checked before anything is written: a bundle whose database replay
+    # silently fell back to the workflow defaults would reproduce a different database.
+    fasta_info = None
+    # `is not None`: an empty value (`--fasta-info-file "$EMPTY_VAR"`) is a mistake to say, never
+    # "not given" -- that quietly replayed the workflow's default database (error-handling review)
+    if a.fasta_info_file is not None and a.fasta_info is not None:
+        ap.error("give the FASTA sidecar once: --fasta-info-file <path> (or --fasta-info @<path>)")
+    if a.fasta_info_file is not None or a.fasta_info is not None:
+        flag = "--fasta-info-file" if a.fasta_info_file is not None else "--fasta-info"
+        if not (a.fasta_info_file if a.fasta_info_file is not None else a.fasta_info).strip():
+            ap.error(f"{flag} is empty: give fetch_fasta.py's <fasta>.meta.json (or leave the flag "
+                     f"out, and the bundle says the database was not recorded)")
+        fasta_info, problem = read_fasta_info(a.fasta_info, a.fasta_info_file)
+        if problem:
+            ap.error(f"{flag}: {problem}")
+        fasta_info = fasta_info_for_bundle(fasta_info)
 
     out = os.path.abspath(a.outdir)
     for sub in ("environment", "inputs", "checksums"):
@@ -230,10 +289,6 @@ def main():
     setup = load_json(a.setup_json) if a.setup_json else None
     tools = load_json(a.tools_json) if a.tools_json else None
     wfman = load_json(a.workflow_manifest) if a.workflow_manifest else None
-    fasta_info = None
-    if a.fasta_info:
-        try: fasta_info = json.loads(a.fasta_info)
-        except json.JSONDecodeError: skip("fasta-info", "not valid JSON")
 
     # ---- environment capture -------------------------------------------------
     # The environment the DE RAN in, as run_de.R recorded it (de_provenance.json `runtime`):
@@ -354,7 +409,9 @@ def main():
         "repository": skill_meta.get("repository", "https://github.com/bsphinney/DE-LIMP"),
         "marketplace": "ucdavis-proteomics-core",
         "install": [
-            "claude plugin marketplace add bsphinney/DE-LIMP",
+            # by its HTTPS URL: for the owner/repo shorthand Claude Code tries SSH first, and a
+            # laptop with no GitHub SSH key then cannot refresh it (references/install.md)
+            "claude plugin marketplace add https://github.com/bsphinney/DE-LIMP.git",
             "claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core",
         ],
     }
@@ -504,9 +561,21 @@ def main():
         _res_flags.append(f"--resolution-source {shlex.quote(str(_res['source']))}")
     res_repro = (" \\\n  " + " ".join(_res_flags)) if _res_flags else ""
     raw_arg = " ".join(f"'{f}'" for f in raw_files) or "/path/to/raw/*"
+    # A run whose file name holds '--' was searched under a new name (run_search.py
+    # --rename-dashed-runs; search_provenance.json `input_links`): the replay must rename it the
+    # same way, or it is refused before it starts -- and the design names the new run.
+    rename_repro = ""
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(a.report or "")),
+                               "search_provenance.json")) as fh:
+            _links = json.load(fh).get("input_links") or []
+        if any(isinstance(x, dict) and x.get("renamed") for x in _links):
+            rename_repro = " --rename-dashed-runs"
+    except (OSError, ValueError, AttributeError, TypeError):
+        pass
 
     # Rebuild the FASTA from what actually ran (fetch_fasta.py's output), falling back
-    # to the bundle only if --fasta-info was not supplied. The bundle's proteome is the
+    # to the bundle only if --fasta-info-file was not supplied. The bundle's proteome is the
     # workflow DEFAULT — the user may have confirmed a different organism in step 3, and
     # regenerating from the bundle would silently reproduce a different database.
     # `or {}` on every lookup, not just the outer one: a manifest with an explicit
@@ -547,7 +616,7 @@ def main():
                                  f"dated {(sf.get('mtime_utc') or '?')[:10]}, sha256 "
                                  f"{(sf.get('sha256') or '?')[:12]}...), release unknown.")
     else:
-        fasta_repro_note = ("NOT RECORDED — --fasta-info was not passed to provenance.py, "
+        fasta_repro_note = ("NOT RECORDED — --fasta-info-file was not passed to provenance.py, "
                             "so these values come from the workflow bundle's defaults and "
                             "may not be what was searched. Verify against checksums/.")
     # The digestion enzyme(s) decide which protease contaminant entries stay Cont_ when they
@@ -601,6 +670,14 @@ def main():
     elif keratin_sample_recorded(fi) is False and fi.get("keratin_sample_source") == "user":
         # the user's "not keratin" is replayed as an answer, never left to the default
         fasta_repro_keep += " --no-keratin-sample"
+    # Contaminant entries the user left out by name (fetch --drop-contaminant), as given.
+    _named = [str(x) for x in (fi or {}).get("drop_contaminant_requested") or [] if x]
+    for acc in _named:
+        fasta_repro_keep += f" --drop-contaminant {shlex.quote(acc)}"
+    if _named:
+        fasta_repro_note += (f" Contaminant entr{'y' if len(_named) == 1 else 'ies'} "
+                             f"{', '.join(_named)} {'was' if len(_named) == 1 else 'were'} left "
+                             f"out by name (--drop-contaminant).")
     # The user's own target sequences (fetch --add-fasta), from the files the sidecar records.
     for f in (fi or {}).get("added_sequences") or []:
         fasta_repro_keep += f" --add-fasta {shlex.quote(f.get('file') or '<added sequences file>')}"
@@ -621,6 +698,11 @@ def main():
     # a replay without them would quietly read the other ones
     de_quantities = (f" \\\n  --quantities {de_rec['quantities']}"
                      if de_rec.get("quantities") in ("normalised", "raw") else "")
+    # the covariates the DE fitted as numbers (run_de.R --numeric-covariates, its `covariates`
+    # record): replayed without them each would be a factor -- another model, or no fit at all
+    _cov = de_rec.get("covariates") if isinstance(de_rec.get("covariates"), dict) else {}
+    de_numeric = [c for c in (_cov.get("numeric_requested") or []) if c in ("Covariate1", "Covariate2")]
+    de_numeric_arg = f" \\\n  --numeric-covariates {','.join(de_numeric)}" if de_numeric else ""
     # maxlfq + raw read a --no-norm report's PG.MaxLFQ. run_search.py has no --no-norm, so the
     # replayed search below writes a NORMALISED report, on which run_de.R refuses --quantities raw:
     # said here plainly, with what to do, rather than left to fail at step 6.
@@ -679,14 +761,14 @@ python3 "$SKILL/scripts/fetch_fasta.py" fetch --proteome {fasta_repro_proteome} 
 # 5. Re-run the search (inputs from inputs/checksums; verify against checksums/checksums.json).{de_nonorm_note}
 python3 "$SKILL/scripts/run_search.py" --tools ~/.proteomics-pipeline/tools/tools.json \\
   --bundle ./wf/workflow.manifest.json --params ./wf/$(basename "$(ls wf | grep -vi manifest | head -n1)") \\
-  --fasta ./search.fasta --out ./search_out --files {raw_arg}{' --keratin-sample' if fasta_repro_keratin else ''}
+  --fasta ./search.fasta --out ./search_out --files {raw_arg}{' --keratin-sample' if fasta_repro_keratin else ''}{rename_repro}
 
 # 6. Re-run differential expression with identical settings.{de_where}
 Rscript "$SKILL/scripts/run_de.R" --input ./search_out/report.parquet \\
   --metadata inputs/{os.path.basename(a.conditions) if a.conditions else 'conditions.csv'} \\
   --method {a.de_method or '<method>'} --outdir ./de_results \\
   {('--contrasts "'+a.contrasts+'"') if a.contrasts else ''} \\
-  --q-cutoff {a.q_cutoff or '0.01'} --logfc {a.logfc or '1.0'} --adjp {a.adjp or '0.05'}{de_quantities}
+  --q-cutoff {a.q_cutoff or '0.01'} --logfc {a.logfc or '1.0'} --adjp {a.adjp or '0.05'}{de_quantities}{de_numeric_arg}
 
 echo "Done. Compare ./de_results against checksums/checksums.json to confirm reproduction."
 """

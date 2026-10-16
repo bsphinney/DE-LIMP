@@ -157,9 +157,12 @@ for the whole cohort:
   * each measured median must lie inside MASS_ACC_BAND (MS2 3-30 ppm, MS1 1.5-25 ppm: the
     derivation, all of it from DIA-NN's own numbers, is at the constant);
   * the per-run values of a measured level must span no more than MASS_ACC_MAX_SPREAD (50%) of
-    that median -- one acquisition method has one tolerance, or none;
+    that median -- one acquisition method has one tolerance, or none. A wider spread only WARNS
+    when the median is at or below the SOP floor (below), which is then pinned whatever the
+    spread, every run's value is inside the band, and none is above 1.5x the floor;
   * at least MASS_ACC_MIN_RUNS (2) runs must have logged everything asked; one run is DIA-NN's
-    own first-run auto mode, which this probe exists to replace.
+    own first-run auto mode, which this probe exists to replace -- unless the cohort IS one run,
+    whose own measurement is then pinned (mass_acc_min_runs).
 
 Failing any of them is a PROBE FAILURE, handled exactly like a run that logged nothing: nothing
 is written to the cfg or massacc.txt, the evidence JSON keeps every per-run value and the reason
@@ -310,11 +313,35 @@ MASS_ACC_BAND = {"ms2_ppm": (3.0, 30.0), "ms1_ppm": (1.5, 25.0)}
 # tight enough that one run at 30 ppm beside two at 14 (114%) cannot reach a cfg. The BAND above
 # is the primary check; this one catches runs that do not describe one method at all.
 MASS_ACC_MAX_SPREAD = 0.50
+# ...EXCEPT where the spread cannot change the pin: a measured median AT OR BELOW the SOP floor is
+# pinned at the floor whatever the runs say, so a spread there is a WARNING, not a refusal -- as
+# long as every run's value is inside MASS_ACC_BAND (an implausible run is still refused). Seen on
+# 18 Exploris 480 streptavidin pull-down runs (2026-10-08): MS2 20/24/10 ppm, 70% spread, median
+# 20 = the floor; refused, though 20 would have been pinned either way.
+# ...and only while no run measured more than this multiple of the floor: a run that needs a
+# window half again as wide as the SOP is not noise the floor can absorb (statistics review of
+# 2.12). MS2: every run <= 30 ppm (the band's top), MS1: <= 10.5 ppm.
+SPREAD_WARN_MAX_OVER_FLOOR = 1.5
+SPREAD_BENIGN = ("A spread like this has one known benign cause: an enrichment or pull-down "
+                 "cohort (IP, TurboID, streptavidin) whose sparse runs -- the no-bait or "
+                 "no-biotin controls -- identify few precursors, so their per-run value is noisy")
 
 # Mass accuracy is pinned from the median of at least this many runs. One run is exactly DIA-NN's
 # own first-run auto mode, "use this mode for preliminary analyses only", which measuring
 # representative runs exists to replace -- and a lone value agrees with itself vacuously.
+#
+# EXCEPT when the cohort IS one run (mass_acc_min_runs): a one-file search -- a QC run, a method
+# test -- has no second run to measure, so the rule refused every one of them after the library
+# was built (Exploris 480, 60k/15k, msalemi 2026-10-05: MS2 measured 12 ppm, refused, nothing
+# searched). Its own measurement is the measurement of the whole cohort; it still has to be inside
+# the band, and the SOP floor still applies, so a 12 is pinned at 20.
 MASS_ACC_MIN_RUNS = 2
+
+
+def mass_acc_min_runs(n_inputs):
+    """How many runs must have logged everything before mass accuracy is pinned: 1 for a cohort
+    of one run, MASS_ACC_MIN_RUNS for any other."""
+    return 1 if n_inputs == 1 else MASS_ACC_MIN_RUNS
 
 # The level each measured key belongs to, and the DIA-NN log line it comes from -- for messages.
 LEVEL_OF = {"ms2_ppm": "MS2", "ms1_ppm": "MS1"}
@@ -1078,8 +1105,8 @@ def pin_mass_acc(probes, documented=None):
     documented = documented or {}
     if not probes:
         return None
-    out = {"sources": {}, "documented": dict(documented), "rejected": [], "spread": {},
-           "sop_floor": dict(SOP_MASS_ACC), "sop_floor_source": SOP_MASS_ACC_SOURCE,
+    out = {"sources": {}, "documented": dict(documented), "rejected": [], "warnings": [],
+           "spread": {}, "sop_floor": dict(SOP_MASS_ACC), "sop_floor_source": SOP_MASS_ACC_SOURCE,
            "floored": {}}
     for key in ("ms2_ppm", "ms1_ppm"):
         level, line = LEVEL_OF[key], LOG_LINE_OF[key]
@@ -1122,9 +1149,23 @@ def pin_mass_acc(probes, documented=None):
         spread = (max(per_run) - min(per_run)) / value if value else None
         out["spread"][key] = spread
         if spread is not None and spread > MASS_ACC_MAX_SPREAD:
-            bad.append(f"the probed runs disagree on {LEVEL_OF[key]}: {printed} ppm spans "
-                       f"{spread:.0%} of the median ({ppm_text(value)} ppm), over the "
-                       f"{MASS_ACC_MAX_SPREAD:.0%} one acquisition method is allowed")
+            disagree = (f"the probed runs disagree on {LEVEL_OF[key]}: {printed} ppm spans "
+                        f"{spread:.0%} of the median ({ppm_text(value)} ppm), over the "
+                        f"{MASS_ACC_MAX_SPREAD:.0%} one acquisition method is allowed")
+            floor = float(SOP_MASS_ACC[key])
+            ceiling = SPREAD_WARN_MAX_OVER_FLOOR * floor
+            if (value <= floor and all(lo <= v <= hi for v in per_run)
+                    and max(per_run) <= ceiling):
+                # the floor decides the pin whatever the spread (SPREAD_BENIGN, above)
+                out["warnings"].append(
+                    f"{disagree} -- NOT refused: the median is at or below the "
+                    f"{ppm_text(floor)} ppm SOP floor, so {ppm_text(floor)} ppm is pinned whatever "
+                    f"the spread, every run's value is inside {band_text(key)}, and none is above "
+                    f"{ppm_text(ceiling)} ppm ({SPREAD_WARN_MAX_OVER_FLOOR:g}x the floor). "
+                    f"{SPREAD_BENIGN}; otherwise look at the per-run evidence before trusting "
+                    "this cohort as one acquisition method")
+            else:
+                bad.append(disagree)
         out["rejected"] += bad
         if bad:
             # A refused level is NOT floored. The band and the floor answer different questions:
@@ -1173,7 +1214,10 @@ def pin_mass_acc(probes, documented=None):
               "--ms1-ppm/--ms2-ppm is pinned as given and never floored; refused, and never "
               "floored, when a measured median is outside "
               f"{'; '.join(LEVEL_OF[k] + ' ' + band_text(k) for k in LEVEL_OF)} or the per-run "
-              f"spread of a measured level exceeds {MASS_ACC_MAX_SPREAD:.0%} of it"))
+              f"spread of a measured level exceeds {MASS_ACC_MAX_SPREAD:.0%} of it -- a spread "
+              "only WARNS when the median is at or below the SOP floor (so the floor is pinned "
+              "either way), every run is inside the band and none is above "
+              f"{SPREAD_WARN_MAX_OVER_FLOOR:g}x the floor"))
     return out
 
 
@@ -1506,6 +1550,18 @@ def main():
             raws += [ln.strip() for ln in fh if ln.strip()]
     if not raws:
         _fail(EXIT_CONFIG, "no runs given (--raw or --raw-list)")
+    # DIA-NN cuts its command line at every '--', quoted or not (check_report_runs.DIANN_OPTION_MARK):
+    # a run, FASTA, library or workdir path holding one would be lost. The chain hands this probe
+    # links without '--' (diann_parallel.dashed_input_plan); run by hand it has to be told.
+    from check_report_runs import dashed
+    bad = [f"{what} {p}" for what, ps in (("run", raws), ("--fasta", [a.fasta]), ("--lib", [a.lib]),
+                                          ("--workdir", [a.workdir or ""]))
+           for p in ps if dashed(p)]
+    if bad:
+        _fail(EXIT_CONFIG, "these paths hold '--', which DIA-NN cuts into an option, so the probe "
+                           "would measure nothing on them: " + "; ".join(bad) + ". Link each "
+                           "under a name and folder without '--' (run_search.py and "
+                           "diann_parallel.py do this for a search) and probe the links.")
     for f, what in ((a.fasta, "fasta"), (a.lib, "library")):
         if not os.path.exists(f):
             _fail(EXIT_CONFIG, f"{what} not found: {f}")
@@ -1638,7 +1694,8 @@ def main():
     # pinned. They fail the probe exactly as a run that logged nothing does -- loudly, with the
     # evidence written -- because a wrong number pinned cohort-wide is worse than no number.
     refused, too_few = [], None
-    if pin and "mass-acc" in measure and len(good) < MASS_ACC_MIN_RUNS:
+    min_runs = mass_acc_min_runs(sel["n_inputs"])
+    if pin and "mass-acc" in measure and len(good) < min_runs:
         # `stopped_because: budget` after one run leaves one good probe, whose value "agrees"
         # with itself. That is DIA-NN's first-run auto mode wearing the evidence of a measurement.
         # Not an implausibility refusal: failure_class() says why the other runs failed.
@@ -1650,6 +1707,11 @@ def main():
     mass_acc = pin_mass_acc(good, documented) if pin and "mass-acc" in measure else None
     if mass_acc:
         refused += mass_acc["rejected"]
+        if min_runs == 1:
+            mass_acc["single_run_cohort"] = True
+            mass_acc["rule"] += (f"; the cohort is ONE run, so its own measurement is pinned -- "
+                                 f"there is no second run to take a median with (cohorts of 2 "
+                                 f"or more need {MASS_ACC_MIN_RUNS})")
     pinned = pin and not refused and (radius is not None or "window" not in measure) and \
         (mass_acc is not None or "mass-acc" not in measure)
     if not pinned and not refused:
@@ -1712,6 +1774,12 @@ def main():
     # The floor in the job log, not only in the JSON: whoever reads the log has to see that the
     # instrument measured one number and the search will run at another.
     if pinned and mass_acc:
+        for w in mass_acc["warnings"]:
+            _say(f"[probe_window] WARNING: {w}")
+        if mass_acc.get("single_run_cohort"):
+            _say("[probe_window] the cohort is ONE run: its own mass accuracy is pinned (there is "
+                 "no second run to take a median with), inside the band and floored at the SOP "
+                 "like any other")
         for key in ("ms2_ppm", "ms1_ppm"):
             if mass_acc["floored"].get(key):
                 _say(f"[probe_window] {LEVEL_OF[key]}: measured "
@@ -1771,7 +1839,10 @@ def main():
                  "DIA-NN itself works with normally means the search was pointed at the "
                  "wrong FASTA or the wrong species, or the batch is miscalibrated -- and the "
                  "median over three runs cannot see that, because all three move together. "
-                 "Check the library, the FASTA and the instrument, then re-run.")
+                 "Check the library, the FASTA and the instrument, then re-run."
+                 + (f" {SPREAD_BENIGN}: if that is this cohort, tell the user and ask before "
+                    "anything is pinned by hand." if any(" disagree on " in r for r in refused)
+                    else ""))
             sys.exit(EXIT_REFUSED)
         if too_few:
             _say(f"Not pinning the {what}: {too_few}.")

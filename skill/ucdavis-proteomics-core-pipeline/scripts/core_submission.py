@@ -23,24 +23,34 @@ a human as an exit code plus the exact question. The search and DE in between ar
 ordinary skill flow -- nothing here runs an engine.
 
 WHERE EACH SUBCOMMAND RUNS
-    check        LOCAL    is there a CoreOmics API key here, and does CoreOmics accept it for
+    The five CoreOmics steps (KEY) run where the staff member's CoreOmics key is: on their
+    computer, or ON HIVE (~/.coreomics_token there, mode 600) in hive_remote when the computer has
+    no usable Python -- Windows' python3 is usually the Microsoft Store stub. check_access.sh says
+    which (coreomics_runs_on); coreomics_key_to_hive.sh puts the key on HIVE once, over ssh stdin.
+    check        KEY      is there a CoreOmics API key here, and does CoreOmics accept it for
                           the Proteomics lab? One diagnosis, in plain words, with the fix
-    identify     LOCAL    which submission is this data? PROT/hex ids in the names or the
+    identify     KEY      which submission is this data? PROT/hex ids in the names or the
                           user's message, else the sample ids in the file names (token)
-    fetch        LOCAL    the CoreOmics token lives on the staff member's computer
-                          (~/.coreomics_token); HIVE has none
+    fetch        KEY      the submission, its neighbours, its shares. On HIVE the full record
+                          (emails, billing) goes into <out>/private/ (mode 700), and <out>/ gets
+                          the HIVE copies the laptop route --puts there
     locate       ON HIVE  reads the Flinders raw_data tree
     stage        ON HIVE  symlinks the raw files into the Core service directory
     conditions   either   wraps collect_conditions.py
     deliver      ON HIVE  copies the deliverables into the submission's Bioshare folder
-                          (--mode raw-only for "I only require raw data" submissions)
-    bioshare     LOCAL    status | ensure | send, through the CoreOmics Bioshare plugin
-    email-draft  LOCAL    writes a draft to the submitter; never sends
+                          (--mode raw-only for "I only require raw data" submissions;
+                          --mode no-de for a report without differential expression)
+    bioshare     KEY      status | ensure | send, through the CoreOmics Bioshare plugin
+    email-draft  KEY      writes a draft to the submitter, saying where each address came from
+                          and flagging one that cannot be right; never sends
 
     python3 core_submission.py fetch 807 --out ~/core/PROT_0807
-    bash hive_exec.sh --put ~/core/PROT_0807/submission_summary.json '~/core/PROT_0807/'
+    bash hive_exec.sh --put ~/core/PROT_0807/hive/submission_summary.json '~/core/PROT_0807/'
     bash hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/core_submission.py locate \\
         --summary ~/core/PROT_0807/submission_summary.json --out ~/core/PROT_0807'
+    # no usable Python on the computer: fetch on HIVE instead (no --put)
+    bash hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/core_submission.py fetch 807 \\
+        --out ~/core/PROT_0807'
 
 Every subcommand prints ONE JSON object to stdout (`check` only with --json; without it, a
 few lines for a person); human notes go to stderr. `stage`, `deliver` and
@@ -55,7 +65,9 @@ CONFIGURATION (environment -- which is also how the tests point it at temp dirs)
     COREOMICS_BASE_URL   default https://ucdavis.coreomics.com/server/api
     COREOMICS_TOKEN      else the contents of ~/.coreomics_token -- Python's ~, which on
                          Windows is the profile folder (USERPROFILE), then Git Bash's $HOME
-                         when that is somewhere else (key_files)
+                         when that is somewhere else (key_files). On HIVE the file must be
+                         readable by its owner alone (key_mode_problem)
+    CORE_ON_HIVE         tests only: 1 treats this machine as HIVE, 0 as not (default: /quobyte)
     CORE_FLINDERS_ROOT   default: the Flinders share's HIVE path in hive_shares.tsv
                          (/nfs/lssc0/flinders/proteomics)  (local file work only)
     CORE_WORK_ROOT       default: the proteomics-grp share's SERVICE tree (hive_shares.tsv)
@@ -583,8 +595,13 @@ def local_share_dir(summary: dict, warnings: list) -> str:
 # Each staff member makes their own key in CoreOmics: Profile -> "API Key" -> show it -> Create
 # (or Regenerate). That is CoreOmics' own profile page (its web app, read 2026-09-30: the
 # users/get_token/ and users/create_token/ calls), and the API takes the key as
-# `Authorization: Token <key>`. The key lives on the staff member's computer; HIVE has none.
+# `Authorization: Token <key>`. The key lives where the CoreOmics steps run: on the staff
+# member's computer, or -- in hive_remote from a computer with no usable Python (the Windows
+# Store stub: Michelle, 2026-10-08) -- on HIVE, as ~/.coreomics_token with mode 600, put there
+# once by scripts/coreomics_key_to_hive.sh over ssh stdin.
 KEY_NAME = ".coreomics_token"
+KEY_TO_HIVE = "bash scripts/coreomics_key_to_hive.sh"
+ON_HIVE_ENV = "CORE_ON_HIVE"        # tests only: "1" is HIVE, "0" is not; unset = look for /quobyte
 # Typed into `read -s`, the key never reaches the screen, a command line (so neither the shell
 # history nor the process list: printf is a builtin) or the conversation. ONE line: pasted as two
 # into a terminal without bracketed paste (macOS bash 3.2, the old Windows console), `read` took
@@ -602,11 +619,36 @@ SAVE_KEY_LINE = {
                 "&& (umask 077; printf '%s\\n' \"$TOK\" > \"$F\") && chmod 600 \"$F\"; unset TOK"),
 }
 LAB_ADMIN = "a Core admin (Brett Phinney, brettsp)"
-CHECK_HINT = "run `python3 scripts/core_submission.py check` on this computer: it says what is wrong and how to fix it"
+CHECK_ON_HIVE = "bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/core_submission.py check'"
 
 
 def _windows() -> bool:
     return os.name == "nt"
+
+
+def on_hive() -> bool:
+    """Is this machine HIVE? There every home folder is drwxrwsr-x -- open to every account -- so a
+    key file's own mode is its only protection (key_mode_problem) and fetch keeps the full record
+    in a private folder. share_map.on_hive() is the skill's test (/quobyte)."""
+    forced = os.environ.get(ON_HIVE_ENV)
+    if forced in ("0", "1"):
+        return forced == "1"
+    if _windows():
+        return False
+    return share_map.on_hive() if share_map is not None else os.path.isdir("/quobyte")
+
+
+def here() -> str:
+    """Where this run is, in the words a person reads: "on HIVE" or "on this computer"."""
+    return "on HIVE" if on_hive() else "on this computer"
+
+
+def check_hint() -> str:
+    """What to run when CoreOmics refuses the key, where this run is."""
+    if on_hive():
+        return (f"run `python3 scripts/core_submission.py check` on HIVE (from the computer: "
+                f"{CHECK_ON_HIVE}): it says what is wrong and how to fix it")
+    return "run `python3 scripts/core_submission.py check` on this computer: it says what is wrong and how to fix it"
 
 
 def _drive_path(p: str) -> str:
@@ -699,21 +741,73 @@ def site_url() -> str:
 
 
 def save_key_steps() -> str:
-    """How to make a key and save it on this computer, for a person to follow."""
+    """How to make a key and save it where this run reads it, for a person to follow. On HIVE
+    nobody types anything on HIVE: the agent sends a key saved on the computer, or the person
+    pastes it at coreomics_key_to_hive.sh's hidden prompt in their own Git Bash."""
+    make = (f"1. In a web browser, sign in to CoreOmics ({site_url()}), open your Profile and find "
+            "\"API Key\". Click to show it; if there is none yet, click Create. Copy it.")
+    never = ("3. Never paste the key into the chat. If it was pasted there, Regenerate it in CoreOmics "
+             "and save the new one the same way.")
+    if on_hive():
+        return "\n".join([
+            make,
+            "2. Your Claude puts it on HIVE for you, from your computer. A key already saved on your "
+            f"computer (~/.coreomics_token, the skill's one-line save): Claude runs `{KEY_TO_HIVE}`, "
+            "which sends that file to HIVE over ssh -- never shown, never on a command line. None: "
+            "open Git Bash (Windows) or a terminal yourself, not this chat, run the "
+            f"`{KEY_TO_HIVE} --paste` line Claude gives you, paste the key at its prompt (nothing "
+            "shows) and press Enter.",
+            f"   It is saved on HIVE as {key_target()}, readable only by you (mode 600): HIVE home "
+            "folders are open to every account, so the scripts refuse a key file anyone else can read.",
+            never,
+        ])
     win = _windows()
     return "\n".join([
-        f"1. In a web browser, sign in to CoreOmics ({site_url()}), open your Profile and find "
-        "\"API Key\". Click to show it; if there is none yet, click Create. Copy it.",
+        make,
         f"2. Open {'Git Bash' if win else 'a terminal'} yourself (not this chat) and run this one "
         "line. It then waits, showing nothing, while you paste the key"
         f"{' (Shift+Insert, or right-click > Paste)' if win else ''}; then press Enter.",
         "       " + SAVE_KEY_LINE["windows" if win else "posix"],
         f"   That saves it as {key_target()}"
         f"{', in your own profile folder' if win else ', readable only by you (chmod 600)'}.",
-        "3. Never paste the key into the chat. If it was pasted there, Regenerate it in CoreOmics "
-        "and save the new one the same way.",
-        "HIVE has no CoreOmics key: CoreOmics lookups run on this computer.",
+        never,
+        # hive_remote without a usable Python here (on Windows usually the Microsoft Store stub):
+        # the CoreOmics steps run on HIVE instead, and the agent moves this saved key there.
+        ("Working through HIVE with no usable Python on this computer (the Microsoft Store stub)? "
+         if win else "Working through HIVE with no usable Python on this computer? ")
+        + f"Save it as above anyway: your Claude then moves it to HIVE for you (`{KEY_TO_HIVE}`, over "
+          "ssh, never shown) as ~/.coreomics_token, readable only by you (mode 600), and runs the "
+          "CoreOmics lookups there.",
     ])
+
+
+def key_mode_problem(path: str):
+    """On HIVE: why the key file at `path` is not private, or None. Every home folder there is
+    drwxrwsr-x, so any account can open a file in it that group or others may read: the file's
+    own mode is the key's only protection. Owner-only (600, 400) passes. Elsewhere None: a
+    laptop's home is its user's, and on Windows chmod does not reach NTFS permissions."""
+    if not on_hive():
+        return None
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None                     # it was just read; the read decides
+    if hasattr(os, "getuid") and st.st_uid != os.getuid():
+        return f"{path} belongs to another account"
+    mode = stat.S_IMODE(st.st_mode)
+    if mode & 0o077:
+        return f"{path} has mode {mode:03o}, so other HIVE accounts can read it"
+    return None
+
+
+def key_mode_fix(path: str) -> str:
+    q = shlex.quote(path)
+    return ("Make it readable by you alone, on HIVE:\n"
+            f"       chmod 600 {q}\n"
+            "   (from your computer: bash scripts/hive_exec.sh 'chmod 600 ~/.coreomics_token'), then "
+            "run check again. A file that is not yours: delete it (rm " + q + ") and put your own key "
+            f"there ({KEY_TO_HIVE}). If others could read it for a while, Regenerate the key in "
+            f"CoreOmics and put the new one on HIVE the same way.")
 
 
 def move_key_steps(src: str) -> str:
@@ -755,6 +849,12 @@ def find_key() -> tuple:
         elif why:
             malformed.append(f"{path} does not hold a usable key: {why}")
         else:
+            bad = key_mode_problem(path)
+            if bad:
+                raise KeyProblem("key_mode_wrong",
+                                 f"{bad}. HIVE home folders are open to every account, so the file's "
+                                 f"own mode is the key's only protection; the key was not used.",
+                                 key_mode_fix(path))
             return tok, path
     if malformed:
         raise KeyProblem("key_malformed", "; ".join(malformed) + ".",
@@ -772,7 +872,7 @@ def find_key() -> tuple:
                                       f"empty: the key was not saved into it.",
                          "Save the key again:\n" + save_key_steps())
     places = files + ["the COREOMICS_TOKEN variable"]
-    raise KeyProblem("no_key", f"There is no CoreOmics API key on this computer (looked in "
+    raise KeyProblem("no_key", f"There is no CoreOmics API key {here()} (looked in "
                                f"{', '.join(places[:-1]) + ' and ' if files else ''}{places[-1]}).",
                      save_key_steps())
 
@@ -782,10 +882,12 @@ def api_token() -> str:
 
 
 def token_help() -> str:
-    return (f"Looking a submission up needs YOUR CoreOmics API key, saved on THIS computer as "
-            f"~/.coreomics_token (here: {key_target()}; chmod 600) or exported as COREOMICS_TOKEN; "
-            f"HIVE has none. `python3 scripts/core_submission.py check` says what is wrong. To make "
-            f"and save a key:\n" + save_key_steps())
+    where = ("on HIVE, where this ran (the CoreOmics steps run on HIVE when your computer has no "
+             "usable Python)," if on_hive() else "on THIS computer, where this ran,")
+    return (f"Looking a submission up needs YOUR CoreOmics API key, saved {where} as "
+            f"~/.coreomics_token (here: {key_target()}; mode 600) or exported as COREOMICS_TOKEN. "
+            f"`python3 scripts/core_submission.py check` says what is wrong. To make and save a "
+            f"key:\n" + save_key_steps())
 
 
 # ------------------------------------------------------------------- CoreOmics API --
@@ -1120,10 +1222,11 @@ def load_json_file(path: str, what: str) -> dict:
 
 
 def hive_summary(summary: dict) -> dict:
-    """The summary as it may leave the staff member's computer: no email address, no contacts,
-    and free text scrubbed of anything shaped like an email or phone number. locate, stage and
-    deliver need none of those; `bioshare` and `email-draft` do, and they run locally on the
-    full summary. (The record's allowlist is submission_report.py's; this is the summary's.)"""
+    """The summary as locate, stage and deliver read it on HIVE: no email address, no contacts,
+    and free text scrubbed of anything shaped like an email or phone number. They need none of
+    those; `bioshare` and `email-draft` do, and read the full summary -- on the computer, or in
+    private/ when fetch ran on HIVE (full_summary). (The record's allowlist is
+    submission_report.py's; this is the summary's.)"""
     scrub = sibling("submission_report").scrub
 
     def walk(v):
@@ -1137,17 +1240,150 @@ def hive_summary(summary: dict) -> dict:
     return out
 
 
+PRIVATE_DIR = "private"     # fetch on HIVE: the full record, beside the HIVE copies
+
+
+def private_dir(out: str) -> str:
+    """<out>/private/, made (or made again) mode 700 and refused unless it is a real folder of
+    this account's: a group member can add entries to a HIVE home folder, and a folder of theirs
+    -- or a link to one -- here would hand them the submitter's emails and billing fields."""
+    d = os.path.join(out, PRIVATE_DIR)
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    st = os.lstat(d)
+    if (stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode)
+            or (hasattr(os, "getuid") and st.st_uid != os.getuid())):
+        raise Stop(EXIT_DECIDE, {"error": f"{d} is not a folder of this account's; the full CoreOmics "
+                                          f"record (emails, billing) is written only into one",
+                                 "hint": f"remove {d} and fetch again"})
+    os.chmod(d, 0o700)
+    return d
+
+
+def private_home_folder(out: str) -> list:
+    """On HIVE, a fetch folder in this account's home is this account's alone: every HIVE home is
+    drwxrwsr-x and the umask 0002, so ~/core/PROT_xxxx/{submission_summary.json, submission.json,
+    samples.tsv} -- the PI's and submitter's names, the description, sample names, neighbouring
+    submissions -- were readable by every HIVE account (security review, 2.12). Folders made here
+    between the home and `out` (~/core the first time) are made 700; an existing `out` that others
+    can read is made 700, said in the returned notes. Anything on the way that another account put
+    in the home (a group member can: the home is group-writable), folder or link, is refused --
+    the record is never written into or through it. A link of this account's own is followed, and
+    a folder it leads to outside the home (the Core's group storage) keeps its mode. -> [notes]."""
+    home = os.path.abspath(os.path.expanduser("~"))
+    o = os.path.abspath(out)
+    if o == home or not o.startswith(home + os.sep):
+        return []
+    me = os.getuid() if hasattr(os, "getuid") else None
+    cur = home
+    for part in os.path.relpath(o, home).split(os.sep):
+        cur = os.path.join(cur, part)
+        if not os.path.lexists(cur):
+            os.mkdir(cur, 0o700)
+            os.chmod(cur, 0o700)            # setgid inherited from a 2775 parent comes off too
+            continue
+        lst = os.lstat(cur)
+        if (me is not None and lst.st_uid != me) or not os.path.isdir(cur):
+            raise Stop(EXIT_DECIDE, {"error": f"{cur} is not a folder of this account's (another "
+                                              f"account can add entries to a HIVE home); the "
+                                              f"submission record (names, samples) is written "
+                                              f"only into one",
+                                     "hint": f"remove {cur} (or choose another --out) and fetch "
+                                             f"again"})
+    real_home = os.path.realpath(home)
+    if not os.path.realpath(o).startswith(real_home + os.sep):
+        return []                           # this account's link leads out of the home
+    mode = stat.S_IMODE(os.stat(o).st_mode)
+    if mode & 0o077:
+        os.chmod(o, 0o700)
+        return [f"{out} was mode {mode:o} -- readable by other HIVE accounts -- and is now 700: the "
+                f"submission's names and samples are this account's alone"]
+    return []
+
+
+def private_core_home() -> str:
+    """On HIVE, an EXISTING ~/core of this account's that other accounts can read or enter is made
+    700, and one plain line says so (security review, 2.12): it holds CoreOmics records, and an
+    earlier fetch or a staff member's own workaround may have left it, and files in it, readable
+    by every HIVE account. Never a ~/core that is a link or another account's. -> the line, or ""."""
+    core = os.path.join(os.path.expanduser("~"), "core")
+    try:
+        st = os.lstat(core)
+    except OSError:
+        return ""
+    if (not stat.S_ISDIR(st.st_mode) or (hasattr(os, "getuid") and st.st_uid != os.getuid())
+            or not stat.S_IMODE(st.st_mode) & 0o077):
+        return ""
+    try:
+        os.chmod(core, 0o700)
+    except OSError as e:                    # said, never silent; the command itself goes on
+        return f"could not make ~/core private ({e}): it holds CoreOmics records -- chmod 700 ~/core"
+    return "made ~/core private: it holds CoreOmics records"
+
+
+def write_text(path: str, text: str, private: bool = False) -> None:
+    """`text` into `path`; with `private`, readable by this account alone from its first byte
+    (an existing file is made 600 too: O_CREAT keeps an old file's mode)."""
+    if not private:
+        with open(path, "w") as fh:
+            fh.write(text)
+        return
+    # a new file, 600 from its first byte, then renamed over the old one: an old file of mode 644
+    # was truncated and rewritten while still readable by every account
+    tmp = f"{path}.{os.getpid()}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            os.fchmod(fh.fileno(), 0o600)
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
+
+
 def load_summary(path: str) -> dict:
     try:
         with open(path) as fh:
             s = json.load(fh)
     except (OSError, ValueError) as e:
         raise Stop(EXIT_DECIDE, {"error": f"cannot read summary {path}: {e}",
-                                 "hint": "run `core_submission.py fetch` first (locally), then "
-                                         "--put the summary to HIVE"})
+                                 "hint": "run `core_submission.py fetch` first (where the CoreOmics "
+                                         "key is), then --put the HIVE copy to HIVE if it ran on "
+                                         "the computer"})
     if not isinstance(s, dict) or not s.get("id"):
         raise Stop(EXIT_DECIDE, {"error": f"{path} is not a submission_summary.json"})
     return s
+
+
+def full_summary(path: str) -> tuple:
+    """(summary, its path) for bioshare and email-draft, which need the emails and contacts: the
+    summary at `path`, or -- when that is the HIVE copy (redacted_for_hive) of a fetch that ran on
+    HIVE -- the full one fetch kept in private/ beside it. So the same --summary works on both."""
+    s = load_summary(path)
+    if not s.get("redacted_for_hive"):
+        return s, path
+    alt = os.path.join(os.path.dirname(os.path.abspath(path)), PRIVATE_DIR, "submission_summary.json")
+    # The HIVE copy has no address: drafted from it, the email said the submitter had none and
+    # left the PI out of Cc (error-handling review, 2.12). Never fall back to it.
+    if not os.path.isfile(alt):
+        raise Stop(EXIT_DECIDE, {
+            "error": f"{path} is the HIVE copy, without contact details, and there is no full "
+                     f"summary beside it ({alt})",
+            "hint": "fetch where the CoreOmics key is (SKILL.md step 1c.1) and give that --summary: "
+                    "on a computer <out>/submission_summary.json, on HIVE the same folder after a "
+                    "fetch there (it keeps the full one in private/)"})
+    full = load_summary(alt)
+    # ... and the full one must be THIS submission's: a reused --out folder once drafted PROT_0000's
+    # email with another submission's addresses
+    differ = [k for k in ("id", "internal_id") if _s(full.get(k)) != _s(s.get(k))]
+    if differ:
+        raise Stop(EXIT_DECIDE, {
+            "error": f"{alt} is another submission's ({', '.join(f'{k} {full.get(k)!r}' for k in differ)}"
+                     f"; {path} has {', '.join(f'{k} {s.get(k)!r}' for k in differ)})",
+            "hint": f"fetch this submission again into its own folder (--out), or remove {alt}"})
+    note(f"using the full summary {alt}: {path} is the HIVE copy, without emails or contacts")
+    return full, alt
 
 
 def cmd_fetch(a) -> int:
@@ -1175,18 +1411,23 @@ def cmd_fetch(a) -> int:
 
     summary = build_summary(rec, neighbors, shares, shares_error, a.neighbor_days,
                             truncated, warnings)
+    if on_hive():
+        warnings.extend(private_home_folder(a.out))
     os.makedirs(a.out, exist_ok=True)
-    paths = {"submission_json": os.path.join(a.out, "submission.json"),
+    # The raw record and the full summary hold emails and billing (PPMS) fields. On a computer
+    # they sit in <out>/ and only hive/ goes to HIVE. ON HIVE -- every home folder open to every
+    # account -- they go into <out>/private/ (mode 700, files 600), where bioshare and email-draft
+    # find them, and <out>/ itself gets exactly what the computer route --puts there: the HIVE
+    # copies, the only files locate, stage and submission_report.py attach read.
+    private = on_hive()
+    full_dir = private_dir(a.out) if private else a.out
+    hive = a.out if private else os.path.join(a.out, "hive")
+    paths = {"submission_json": os.path.join(full_dir, "submission.json"),
              "samples_tsv": os.path.join(a.out, "samples.tsv"),
-             "summary": os.path.join(a.out, "submission_summary.json")}
-    with open(paths["submission_json"], "w") as fh:
-        json.dump(rec, fh, indent=2)
+             "summary": os.path.join(full_dir, "submission_summary.json")}
+    write_text(paths["submission_json"], json.dumps(rec, indent=2), private)
     write_tsv(paths["samples_tsv"], ["unique_id", "sample_name", "condition_name"], summary["samples"])
-    with open(paths["summary"], "w") as fh:
-        json.dump(summary, fh, indent=2)
-    # What goes to HIVE: only these two. The raw record and the full summary hold emails and
-    # billing (PPMS) fields and stay on this computer.
-    hive = os.path.join(a.out, "hive")
+    write_text(paths["summary"], json.dumps(summary, indent=2), private)
     os.makedirs(hive, exist_ok=True)
     paths["hive_summary"] = os.path.join(hive, "submission_summary.json")
     paths["hive_record"] = os.path.join(hive, "submission.json")
@@ -1197,6 +1438,7 @@ def cmd_fetch(a) -> int:
     for w in warnings:
         note(f"WARN {w}")
     emit({"internal_id": summary["internal_id"], "id": summary["id"],
+          "ran": "on HIVE" if private else "on this computer",
           "submitted_date": summary["submitted_date"], "campus": summary["campus"],
           "pi": summary["pi"]["name"], "institution": summary["pi"]["institution"],
           "n_samples": summary["n_samples"], "conditions": summary["conditions"],
@@ -1228,6 +1470,17 @@ def _page_summary(text: str) -> str:
     return html.unescape(words)[:160]
 
 
+def _file_mode(path):
+    """A key file's permission bits as octal text ("600"), for `check` to report; None for the
+    COREOMICS_TOKEN variable, a missing file, and on Windows (NTFS permissions are not modes)."""
+    if _windows() or not path or not os.path.isfile(path):
+        return None
+    try:
+        return f"{stat.S_IMODE(os.stat(path).st_mode):03o}"
+    except OSError:
+        return None
+
+
 def diagnose() -> dict:
     """check's one diagnosis: status, say (plain words), fix (steps; "" when nothing to do).
     The key is looked for as api_token() looks, then tried on a lab-scoped list query: a key
@@ -1235,12 +1488,16 @@ def diagnose() -> dict:
     401/403 is read only from CoreOmics' own JSON `detail`: an Apache or proxy page saying
     "permission" or "Access Denied" says nothing about the key or the lab."""
     out = {"server": base_url(), "platform": "windows" if _windows() else "posix",
-           "looked_in": key_files(), "key_source": None, "http_status": None, "detail": None}
+           "runs_on": "hive" if on_hive() else "this_computer",
+           "looked_in": key_files(), "key_source": None, "key_mode": None,
+           "http_status": None, "detail": None}
     try:
         key, where = find_key()
     except KeyProblem as e:
-        return dict(out, status=e.diagnosis, say=e.detail, fix=e.fix)
-    out["key_source"] = where
+        held = [p for p in out["looked_in"] if os.path.isfile(p)]
+        return dict(out, key_mode=_file_mode(held[0]) if held else None,
+                    status=e.diagnosis, say=e.detail, fix=e.fix)
+    out["key_source"], out["key_mode"] = where, _file_mode(where)
 
     def said(status, say, fix=""):
         return _redact(dict(out, status=status, say=say, fix=fix), key)
@@ -1335,7 +1592,8 @@ def diagnose() -> dict:
                     "submissions: it is not a member of the Proteomics lab.",
                     f"Ask {LAB_ADMIN} to add your CoreOmics account to the Proteomics lab. Nothing "
                     f"on this computer needs to change. {again}")
-    res = said("ok", f"CoreOmics accepts your key (from {where}) and your account can read the "
+    shown = where + (f" {here()}" if out["key_mode"] is None else f" {here()}, mode {out['key_mode']}")
+    res = said("ok", f"CoreOmics accepts your key (from {shown}) and your account can read the "
                      f"Proteomics lab's submissions.")
     res["submissions_visible"] = count
     first = key_target()
@@ -1589,6 +1847,54 @@ def ht_sample_field(name: str, plate) -> str:
     return PLATE_POSITION.sub("_", HT_TAIL.sub("", name[m.end():] if m else name))
 
 
+# Runs named for the person, numbered for the sample: the sheet says QP4 .. QP13 (<initials><N>)
+# and the runs say `6oct26_QPlaceholder_100spd_4_S4-A1_1_1234.d` (<initial><surname>, then N). The id
+# never appears in such a name, so locate found none of the 10 samples (a staff report,
+# 2026-10-08). Such a run is only ever PROPOSED -- the sample stays unmatched and the gates stand
+# -- and staff confirm it with --choose. A run is proposed for a sample (prefix letters P, number
+# N) only when ALL of these hold, so another lab's runs are not offered:
+#   * the id is P + N (2+ letters, then a number) and not weak, and no raw file carries it;
+#   * the run's name part (raw suffix, HT tail -- plate position, injection, acquisition counter --
+#     and any plate position removed) has exactly ONE word token that starts with P and ends with
+#     the PI's or the submitter's surname (QPlaceholder), and after it exactly ONE bare-number token,
+#     equal to N (`_4_`; `100spd`, `4b` are not bare numbers);
+#   * the run was acquired inside the window, and no sample id (ours or a neighbour's) owns it.
+# A neighbour id P' + N whose P' also starts that word, submitted on or before the run, contests
+# it; a run proposed for two of our samples is shared. Both are shown on the proposal.
+PREFIXED_ID = re.compile(r"^([A-Za-z]{2,})[-_\s]*(\d{1,4})$")
+
+
+def prefixed_id(uid):
+    """(normalised letter prefix, number) of an id shaped <letters><number> (QP4, QP-04), or None."""
+    m = PREFIXED_ID.match(_s(uid))
+    return (normkey(m.group(1)), int(m.group(2))) if m else None
+
+
+def name_number_pairs(name: str) -> list:
+    """[(normalised word token, [bare-number tokens after it])] for each word token of a run name's
+    sample part: the raw suffix, the HT tail and any plate position removed first, so a well, an
+    injection number or an acquisition counter is never read as the sample's number."""
+    base = name
+    for suf in sorted(RAW_SUFFIXES, key=len, reverse=True):
+        if base.lower().endswith(suf):
+            base = base[:-len(suf)]
+            break
+    toks = [t for t in re.split(r"[-_\s.]+", PLATE_POSITION.sub("_", HT_TAIL.sub("", base))) if t]
+    return [(normkey(t), [x for x in toks[i + 1:] if x.isdigit()])
+            for i, t in enumerate(toks) if t.isalpha()]
+
+
+def name_number_fits(pairs: list, prefix: str, number: int, surnames=None) -> bool:
+    """The proposal rule on one run's name_number_pairs: exactly one word starts with `prefix`
+    (and is longer than it) -- and, when `surnames` are given, ends with one of them -- and after
+    it exactly one bare number, equal to `number`. surnames=None: a neighbour's id, whose PI is not
+    known here, contests on prefix and number alone."""
+    words = [(w, nums) for w, nums in pairs
+             if w.startswith(prefix) and len(w) > len(prefix)
+             and (surnames is None or any(w.endswith(s) for s in surnames))]
+    return len(words) == 1 and len(words[0][1]) == 1 and int(words[0][1][0]) == number
+
+
 def _acquired(path: str) -> str:
     d, _src = acquisition_date(path)
     return d.isoformat() if d else ""
@@ -1809,15 +2115,87 @@ def _same_file(a: str, b: str) -> bool:
     return os.path.realpath(a) == os.path.realpath(b)
 
 
+PROPOSAL_RULE = ("its number is the one bare number after a word that starts with its letters "
+                 "and ends with the PI's or submitter's surname")
+
+
+def propose_by_name_number(samples, entries, universe, hits_by, lo, hi, surnames, owner_cache,
+                           dated, taken, choices, keys) -> dict:
+    """id(sample) -> [{"entry", "acquired", "date_source", "contested_by", "shared_with"}]: the runs
+    PREFIXED_ID's rule proposes for each sample no run names (hits_by empty). Nothing without a
+    surname to check against. A run staff chose for another sample is not offered."""
+    sn = sorted({normkey(x) for x in surnames or () if len(normkey(x)) >= 2})
+    if not sn:
+        return {}
+    pairs_cache = {}
+
+    def pairs(e):
+        if e["path"] not in pairs_cache:
+            pairs_cache[e["path"]] = name_number_pairs(e["name"])
+        return pairs_cache[e["path"]]
+    neighbours = [(prefixed_id(u["uid"]), u) for u in universe if not u["ours"]]
+    neighbours = [(pid, u) for pid, u in neighbours if pid]
+    out, users = {}, {}
+    for smp in samples:
+        pid = prefixed_id(smp.get("unique_id"))
+        if not pid or id(smp) not in hits_by or hits_by[id(smp)]:
+            continue
+        own = (choices.get(keys[id(smp)]) or {}).get("file")
+        found = []
+        for e in entries:
+            if not name_number_fits(pairs(e), pid[0], pid[1], sn):
+                continue
+            d, src = dated(e)
+            if d is None or not lo <= d <= hi or file_owners(e, universe, owner_cache):
+                continue
+            if os.path.realpath(e["path"]) in taken and not (own and _same_file(own, e["path"])):
+                continue
+            found.append({"entry": e, "acquired": d.isoformat(), "date_source": src,
+                          "contested_by": sorted({f"{u['uid']} ({u['sub']})" for p, u in neighbours
+                                                  if p[1] == pid[1] and u["submitted"] is not None
+                                                  and u["submitted"] <= d
+                                                  and name_number_fits(pairs(e), p[0], p[1])}),
+                          "shared_with": []})
+            users.setdefault(e["path"], []).append(keys[id(smp)])
+        if found:
+            out[id(smp)] = found
+    for smp_id, found in out.items():
+        for x in found:
+            x["shared_with"] = [k for k in users[x["entry"]["path"]] if k != keys.get(smp_id)]
+    return out
+
+
+def proposal_view(x: dict) -> dict:
+    """A proposal as locate.json and the gate show it (no internal entry)."""
+    return {"file": x["entry"]["path"], "acquired": x["acquired"], "date_source": x["date_source"],
+            "contested_by": x["contested_by"], "shared_with": x["shared_with"]}
+
+
+def proposal_note(skey: str, props: list) -> str:
+    clean = [x for x in props if not x["contested_by"] and not x["shared_with"]]
+    names = ", ".join(os.path.basename(x["entry"]["path"]) for x in props[:3])
+    flags = sorted({c for x in props for c in x["contested_by"]})
+    also = sorted({k for x in props for k in x["shared_with"]})
+    return ("no raw file carries this id; "
+            + (f"PROPOSED, not assigned: {names} ({PROPOSAL_RULE})" if len(props) == 1 and clean else
+               f"{len(props)} run(s) fit by name and number, not assigned: {names} ({PROPOSAL_RULE})")
+            + (f"; another submission's id fits too: {', '.join(flags)}" if flags else "")
+            + (f"; it also fits {', '.join(also)} of this submission" if also else "")
+            + f" -- confirm with staff, then --choose {skey}=<file>")
+
+
 def match_samples(samples: list, entries: list, neighbors: list, lo: dt.date, hi: dt.date,
                   ours_label: str = "", accept_ambiguous: bool = False,
                   choices: dict | None = None, reinjections: str = "ask",
-                  stan: dict | None = None) -> list:
+                  stan: dict | None = None, surnames=()) -> list:
     """The deterministic core of `locate`: one row per sample.
 
     A file in the window is AMBIGUOUS when another submission -- older, same day or newer --
     uses the same label and was submitted on or before the file was acquired: either lab
-    could have sent that sample, and the label alone cannot say which."""
+    could have sent that sample, and the label alone cannot say which.
+
+    `surnames`: the PI's and the submitter's -- a sample no run names may get runs PROPOSED by
+    name and number (PREFIXED_ID's rule), never assigned without a staff --choose."""
     for e in entries:
         if "space" not in e:
             prepare_entry(e)
@@ -1850,15 +2228,24 @@ def match_samples(samples: list, entries: list, neighbors: list, lo: dt.date, hi
     shared = Counter(normkey(smp.get("unique_id")) for smp in samples)
     # a run staff chose for one sample is no other sample's candidate
     taken = {os.path.realpath(c["file"]) for c in (choices or {}).values()}
+    # the runs whose name carries each (usable) id: the ordinary rules decide those samples
+    hits_by = {}
+    for smp in samples:
+        pat, key = token_pattern(smp.get("unique_id", "")), normkey(smp.get("unique_id", ""))
+        if pat and not weak_reason(smp.get("unique_id", "")):
+            hits_by[id(smp)] = [e for e in entries if key in e["norm"] and pat.search(e["space"])]
+    proposals = propose_by_name_number(samples, entries, universe, hits_by, lo, hi, surnames,
+                                       owner_cache, dated, taken, choices or {}, keys)
 
-    def chosen(smp, pick, pool, cands=(), amb=(), amb_info=(), n_out=0, shadowed=()):
+    def chosen(smp, pick, pool, cands=(), amb=(), amb_info=(), n_out=0, shadowed=(), what=None):
         """Staff's answer (--choose) for this sample: one of `pool`, the runs whose name carries
-        its id -- in the window or not. Anything else is refused, never guessed at."""
+        its id -- in the window or not -- or, when none does, the runs proposed for it by name
+        and number (`what` says which). Anything else is refused, never guessed at."""
         hit = next((e for e in pool if _same_file(e["path"], pick["file"])), None)
         if hit is None:
             raise Stop(EXIT_DECIDE, {
                 "error": f"{pick['source']} {smp.get('unique_id')}={pick['file']}: not one of the "
-                         f"runs whose name carries {smp.get('unique_id')}",
+                         + (what or f"runs whose name carries {smp.get('unique_id')}"),
                 "candidates": [e["path"] for e in pool][:20],
                 "hint": "a file whose name does not carry the id: --files-from a curated list"})
         d, src = dated(hit)
@@ -1887,7 +2274,26 @@ def match_samples(samples: list, entries: list, neighbors: list, lo: dt.date, hi
             rows.append(_row(smp, status="weak", sample_key=skey,
                              note=f"{reason}; {n} raw file(s) carry this token -- not auto-assigned"))
             continue
-        hits = [e for e in entries if key in e["norm"] and pat.search(e["space"])]
+        hits = hits_by[id(smp)]
+        props = proposals.get(id(smp), [])
+        if not hits and props:
+            # No run carries the id; some carry its number after the PI's or submitter's name.
+            # Proposed only: taken when staff name one with --choose, otherwise left unmatched.
+            if pick:
+                row = chosen(smp, pick, [x["entry"] for x in props],
+                             what=f"runs proposed for {uid} by name and number ({PROPOSAL_RULE})")
+                hit = next(x for x in props if _same_file(x["entry"]["path"], row["file"]))
+                row.update(proposed=[proposal_view(x) for x in props],
+                           accepted_ambiguous=bool(hit["contested_by"]),
+                           note=f"chosen by staff ({pick['source']}) from {len(props)} run(s) "
+                                f"proposed by name and number (no run carries the id: "
+                                f"{PROPOSAL_RULE})")
+                rows.append(row)
+            else:
+                rows.append(_row(smp, status="unmatched", sample_key=skey,
+                                 proposed=[proposal_view(x) for x in props],
+                                 note=proposal_note(skey, props)))
+            continue
         owned, shadowed = [], []
         for e in hits:
             owners = file_owners(e, universe, owner_cache)
@@ -2110,8 +2516,9 @@ def curated_rows(samples: list, paths: list, raw: str, choices: dict | None = No
                                 if set_aside and not rec else "")))
     for p, cands, on in loose:
         d, src = acquisition_date(p)
+        # candidate_samples: the unique_ids of the samples it names; [] for a run of no sample
         rows.append(_row({}, status="unassigned", file=p, acquired=d.isoformat() if d else "",
-                         date_source=src, matched_on=on,
+                         date_source=src, matched_on=on, candidate_samples=cands,
                          note=(f"matches several samples ({on}): " + ", ".join(cands)) if cands
                          else "matches no sample id" + (" or sample name" if plate else "")))
     return rows
@@ -2202,6 +2609,20 @@ def locate_gates(rows: list, files: list, allow_partial: bool, wanted_folder, un
                                          "files": r["ambiguous"]} for r in accepted]))
         else:
             gates.append(_gate("ambiguous_label", "PASS"))
+        # Unmatched samples with runs proposed by name and number (PREFIXED_ID's rule): shown so
+        # staff can confirm them (--choose); --allow-partial would leave them out as not run.
+        proposed = [r for r in unmatched if r.get("proposed")]
+        if proposed:
+            gates.append(_gate("proposed_runs", "WARN" if allow_partial else "INFO",
+                               f"{len(proposed)} unmatched sample(s) have run(s) whose name carries "
+                               f"the sample's number after the PI's or submitter's name instead of "
+                               f"its id (<date>_<initial><surname>_<speed>_<N>_... for <letters><N>). "
+                               f"NOT assigned: show staff each proposal; for each they confirm, "
+                               f"re-run with --choose <key>=<file>"
+                               + (". --allow-partial leaves these samples out as NOT RUN -- "
+                                  "confirm that with staff" if allow_partial else ""),
+                               samples=[{"unique_id": r["unique_id"], "key": r.get("sample_key"),
+                                         "proposed": r["proposed"]} for r in proposed]))
         shadowed = [r for r in rows if r["shadowed"]]
         if shadowed:
             gates.append(_gate("shadowed_by_longer_id", "INFO",
@@ -2394,7 +2815,10 @@ def cmd_locate(a) -> int:
             result.update(ht_plate=True, n_ht_files=len(ht), ht_examples=ht[:10],
                           next_step=("this is a high-throughput plate: get the file list from STAN -- "
                                      "python3 ~/proteomics-pipeline/scripts/ht_manifest.py fetch "
-                                     + re.sub(r"\D", "", _s(s.get("internal_id"))) + " --out <dir>"),
+                                     + re.sub(r"\D", "", _s(s.get("internal_id")))
+                                     # the record's sample list: ht_manifest's sample_list gate
+                                     + " --summary " + shlex.quote(os.path.abspath(a.summary))
+                                     + " --out <dir>"),
                           outputs={"locate_json": outputs["locate_json"]})
             with open(outputs["locate_json"], "w") as fh:
                 json.dump(result, fh, indent=2)
@@ -2402,7 +2826,9 @@ def cmd_locate(a) -> int:
             emit(result)
             return EXIT_HT
         rows = match_samples(samples, entries, s.get("neighbors") or [], lo, hi,
-                             submission_label(s), a.accept_ambiguous, choices, a.reinjections, stan)
+                             submission_label(s), a.accept_ambiguous, choices, a.reinjections, stan,
+                             surnames=[(s.get(k) or {}).get("last") for k in ("pi", "submitter")
+                                       if isinstance(s.get(k), dict)])
         files = list(dict.fromkeys(r["file"] for r in rows if r["status"] == "matched"))
         gates = locate_gates(rows, files, a.allow_partial, wanted, unreadable, False, [],
                              a.accept_ambiguous, samples=samples)
@@ -3059,6 +3485,11 @@ def cmd_stage(a) -> int:
 # --------------------------------------------------------------------- conditions --
 def cmd_conditions(a) -> int:
     run_name = sibling("collect_conditions").run_name     # File.Name is defined in ONE place
+    if getattr(a, "rename_dashed_runs", False):
+        # the name a search with --rename-dashed-runs gives a run whose file name holds '--'
+        # (check_report_runs.renamed_dashed_name, the one rule), so the design matches the report
+        rename, raw_name = sibling("check_report_runs").renamed_dashed_name, run_name
+        run_name = lambda f: rename(raw_name(f))   # noqa: E731
     cc_script = os.path.join(HERE, "collect_conditions.py")
     s = load_summary(a.summary)
     try:
@@ -3182,6 +3613,18 @@ def cmd_conditions(a) -> int:
 
 
 # ------------------------------------------------------------------------ deliver --
+# deliver's modes, defined once: the delivery folder's suffix (<id>_<suffix>_<date>), whether it
+# carries a differential expression, and what it is -- in delivery.json (`mode_description`),
+# `--mode`'s help and the README. A report without the DE (2026-10-05: a QC report delivered
+# while the DE waited on the study design) is its own mode, not raw-only with a report copied in.
+DELIVERY_MODES = {
+    "analysis": {"suffix": "analysis", "de": True,
+                 "what": "an analysis report with its differential expression"},
+    "no-de": {"suffix": "report", "de": False,
+              "what": "an analysis report delivered without differential expression: a QC report, "
+                      "an identification list, or results delivered before the statistics"},
+    "raw-only": {"suffix": "raw_data", "de": False, "what": "the raw instrument files only"},
+}
 # No AI_Analysis_Report.docx: Analysis_Report.html is the report of record, and an older
 # session's Word copy (Word mangled its figures) is kept there but never handed out.
 DELIVER_FILES = (("Analysis_Report.html", True), ("Analysis_Report.pdf", False),
@@ -3532,7 +3975,8 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
             if ".raw" in exts:
                 L.append("- `.raw` files are Thermo instrument files.")
     else:
-        L = [f"# {label} — results from the UC Davis Proteomics Core", ""]
+        de = DELIVERY_MODES[mode]["de"]
+        L = [f"# {label} — {'results' if de else 'report'} from the UC Davis Proteomics Core", ""]
         if pi_name:
             L += [f"Prepared for {pi_name}.", ""]
         L += opener
@@ -3545,6 +3989,11 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
                           "table per comparison in `tables/`.")
         L += [f"This folder holds what the UC Davis Proteomics Core prepared for CoreOmics submission "
               f"{label}{_submission_details(summary)}." + ("" if not claims else " " + " ".join(claims)), ""]
+        if not de:
+            L += ["**This delivery has no differential expression:** no statistical comparison "
+                  "between sample groups is in it. It is a report delivered without those "
+                  "statistics, or before them (for example a quality-control report, or a list of "
+                  "the proteins identified).", ""]
         if "Analysis_Report.html" in delivered:
             L += ["## Start here", "",
                   "**Open `Analysis_Report.html` first.** It is the whole report in one file — every figure "
@@ -3790,8 +4239,14 @@ def write_deliver_job(a, session_dir, where_dir: str, label: str, total: int, wa
         argv += ["--service-project", os.path.abspath(a.service_project)]
     if a.force:
         argv += ["--force"]
+    log = os.path.join(logs if os.path.isdir(logs) else where_dir, "deliver_%j.log")
+    if re.search(r'["\n]', log):
+        raise Stop(EXIT_DECIDE, {"error": f"the delivery job's log path holds a quote or a line "
+                                          f"break, which #SBATCH --output cannot carry: {log!r}"})
+    # the log path double-quoted: an unquoted space makes sbatch refuse the script ("Invalid
+    # directive"); quoted, HIVE's SLURM writes the log there (job 24808508, 2026-10-15)
     L = ["#!/bin/bash", f"#SBATCH --job-name=deliver_{label}",
-         f"#SBATCH --output={os.path.join(logs if os.path.isdir(logs) else where_dir, 'deliver_%j.log')}",
+         f'#SBATCH --output="{log}"',
          "#SBATCH --cpus-per-task=1", "#SBATCH --mem=2G", "#SBATCH --time=24:00:00"]
     if part:
         L.append(f"#SBATCH --partition={part}")
@@ -3809,9 +4264,8 @@ def write_deliver_job(a, session_dir, where_dir: str, label: str, total: int, wa
         if os.environ.get(var):
             L.append(f"export {var}={shlex.quote(os.environ[var])}")
     L.append(" ".join(shlex.quote(x) for x in argv))
-    with open(path, "w") as fh:
-        fh.write("\n".join(L) + "\n")
-    os.chmod(path, 0o755)
+    # never through a planted link: the service folders are group-writable (safe_write.py)
+    sibling("safe_write").write_file(path, "\n".join(L) + "\n", 0o755)
     return path
 
 
@@ -3822,8 +4276,9 @@ def cmd_deliver(a) -> int:
     froot = flinders_root()
     mode = a.mode if a.mode != "auto" else ("raw-only" if s.get("raw_data_only") is True else "analysis")
     session_dir = os.path.abspath(a.session) if a.session else None
-    if mode == "analysis" and not session_dir:
-        raise Stop(EXIT_DECIDE, {"error": "--session is required for an analysis delivery",
+    if mode != "raw-only" and not session_dir:
+        raise Stop(EXIT_DECIDE, {"error": f"--session is required for {'an analysis' if mode == 'analysis' else 'a no-de'} "
+                                          f"delivery: it delivers the session's report",
                                  "hint": "a raw-data-only submission uses --mode raw-only"})
     if session_dir and not os.path.isdir(session_dir):
         raise Stop(EXIT_DECIDE, {"error": f"session dir not found: {session_dir}"})
@@ -3857,7 +4312,7 @@ def cmd_deliver(a) -> int:
         raise Stop(EXIT_DECIDE, {"error": f"raw data was requested but the staged service project cannot be found: {where}"})
 
     today = dt.date.today().isoformat()
-    suffix = safe_component(a.label) if a.label else (f"raw_data_{today}" if mode == "raw-only" else f"analysis_{today}")
+    suffix = safe_component(a.label) if a.label else f"{DELIVERY_MODES[mode]['suffix']}_{today}"
     folder = f"{label}_{suffix}"
     delivery = os.path.join(share, folder)
     share_raw = os.path.join(share, "raw")
@@ -3907,7 +4362,8 @@ def cmd_deliver(a) -> int:
         warnings.append(RAW_WHITELIST_WARNING)
     if not record and not want_raw:
         warnings.append(f"service project: {where}")
-    plan = {"applied": bool(a.apply), "mode": mode, "internal_id": s.get("internal_id"), "id": s.get("id"),
+    plan = {"applied": bool(a.apply), "mode": mode, "differential_expression": DELIVERY_MODES[mode]["de"],
+            "internal_id": s.get("internal_id"), "id": s.get("id"),
             "delivery_dir": delivery, "share_dir": server_share, "share_dir_local": share,
             "session": session_dir, "session_ownership": ownership,
             "n_files": len(ok), "bytes": total, "gb": round(total / 1024 ** 3, 3), "max_gb": a.max_gb,
@@ -3915,15 +4371,40 @@ def cmd_deliver(a) -> int:
             "raw": {"wanted": want_raw, "include_raw": a.include_raw, "links": raw_plan,
                     "service_project": where if record else None},
             "warnings": warnings}
+    # Whether the session has a DE decides between the two report modes, and never silently: an
+    # analysis delivery carries one (behind the normalisation gate below), and a no-de delivery
+    # carries none -- not the DE record (run_de.R's), and no file the DE wrote
+    # (report_files.is_de_output, the one definition), delivered or not.
+    if mode != "raw-only":
+        is_de_output = sibling("report_files").is_de_output
+        de_record = sibling("normalization_check").de_provenance_path(session_dir)
+        has_record = os.path.lexists(de_record)          # even one that does not resolve
+        de_output = sorted({i["name"] for i in items if is_de_output(i["name"])}
+                           | ({os.path.relpath(de_record, output_dir)} if has_record else set()))
+        if mode == "no-de" and de_output:
+            plan["de_output"] = de_output
+            plan["error"] = ("--mode no-de delivers a report without differential expression, but this "
+                             "session has differential expression output: " + ", ".join(de_output))
+            plan["hint"] = "deliver it with --mode analysis (the normalisation check applies)"
+            emit(plan)
+            return EXIT_DECIDE
+        if mode == "analysis" and not has_record:
+            plan["error"] = f"held: this session has no differential expression (no DE record: {de_record})"
+            plan["hint"] = ("if that is intended -- a QC report, an identification list, or results "
+                            "delivered before the statistics -- re-run with --mode no-de; otherwise run "
+                            "step 8 (the DE and its normalisation check) and deliver again")
+            emit(plan)
+            return EXIT_DECIDE
     if missing_required:
         plan["error"] = "required deliverable missing: " + ", ".join(missing_required)
         plan["hint"] = "run step 9 (make_analysis_html.py) before delivering"
         emit(plan)
         return EXIT_DECIDE
     # The instrument's QC around the project (qc_bracket.py, staff-only): a check or concern
-    # verdict -- or a check that never ran -- holds an analysis delivery, dry run included, until
-    # a staff member records an acknowledgement for this record. The rule is qc_bracket's.
-    if mode == "analysis" and session_dir:
+    # verdict -- or a check that never ran -- holds a delivery of the session's report (analysis
+    # or no-de), dry run included, until a staff member records an acknowledgement for this
+    # record. The rule is qc_bracket's.
+    if mode != "raw-only" and session_dir:
         qb = sibling("qc_bracket")
         gate = qb.delivery_gate(session_dir)
         # printed to the staff member running deliver; never into `warnings` or delivery.json,
@@ -3938,10 +4419,11 @@ def cmd_deliver(a) -> int:
                             "--note \"<what was reviewed and decided>\"")
             emit(plan)
             return EXIT_DECIDE
-        # The second gate, in the same form: the DE's quantities (normalization_check.py, step
-        # 8). A DE that ran without a decided normalisation check -- an IP read with normalised
-        # quantities, unchecked -- holds the delivery, dry run included, until step 8 is run.
-        # The rule is normalization_check's.
+    # The second gate, in the same form: the DE's quantities (normalization_check.py, step 8). A
+    # DE that ran without a decided normalisation check -- an IP read with normalised quantities,
+    # unchecked -- holds the delivery, dry run included, until step 8 is run. The rule is
+    # normalization_check's. Only an analysis delivery has a DE to check (no-de refused one above).
+    if mode == "analysis":
         ngate = sibling("normalization_check").delivery_gate(session_dir)
         plan["normalization_gate"] = ngate
         if not ngate["proceed"]:
@@ -4042,6 +4524,9 @@ def cmd_deliver(a) -> int:
     for r in raw_plan:
         manifest_lines.append(f"[OK] ../raw/{r['name']} -- linked to the raw instrument file"
                               if r["status"] == "OK" else f"[SKIPPED] ../raw/{r['name']} -- {r['reason']}")
+    if mode == "no-de":
+        manifest_lines.append("[SKIPPED] differential expression -- not part of this delivery "
+                              "(--mode no-de: a report without the statistics)")
     if not want_raw:
         manifest_lines.append(f"[SKIPPED] ../raw/ -- not requested (--include-raw {a.include_raw}"
                               + (", CoreOmics says the Core does the analysis)" if a.include_raw == "auto" else ")"))
@@ -4093,7 +4578,9 @@ def cmd_deliver(a) -> int:
         except OSError as e:
             warnings.append(f"could not remove {DELIVERY_MARKER}: {e.strerror}")
     files_now = [os.path.join(dp, f) for dp, _, fs in os.walk(delivery) for f in fs] if os.path.isdir(delivery) else []
-    result = {"applied": True, "mode": mode, "internal_id": s.get("internal_id"), "id": s.get("id"),
+    result = {"applied": True, "mode": mode, "mode_description": DELIVERY_MODES[mode]["what"],
+              "differential_expression": DELIVERY_MODES[mode]["de"],
+              "internal_id": s.get("internal_id"), "id": s.get("id"),
               "label": label, "delivered_at": now_utc(), "delivery_dir": delivery,
               "share_dir": server_share, "share_dir_local": share, "session": session_dir,
               "session_ownership": ownership, "resumed": resume,
@@ -4194,7 +4681,7 @@ def delivery_gate(summary: dict, delivery_path, share: str) -> dict:
 
 
 def cmd_bioshare(a) -> int:
-    s = load_summary(a.summary)
+    s, summary_path = full_summary(a.summary)
     sid = _s(s.get("id"))
     share = server_share_dir(s)                         # never re-derived from a local root
     shares = list_shares(sid)
@@ -4231,7 +4718,7 @@ def cmd_bioshare(a) -> int:
         raise Stop(EXIT_DECIDE, {"error": f"no Bioshare share is linked to {share}",
                                  "hint": "run `bioshare ensure --apply` first"})
     pi, sub = s.get("pi") or {}, s.get("submitter") or {}
-    contacts, contacts_source = submission_contacts(s, a.summary)
+    contacts, contacts_source = submission_contacts(s, summary_path)
     recipients = {"submitter": {"name": sub.get("name"), "email": sub.get("email")},
                   "pi": {"name": pi.get("name"), "email": pi.get("email")},
                   "contacts": contacts, "contacts_source": contacts_source}
@@ -4263,8 +4750,75 @@ def cmd_bioshare(a) -> int:
 
 
 # -------------------------------------------------------------------- email-draft --
+# Every address in the draft is one somebody typed into the CoreOmics submission form, and a typo
+# there once went into a delivery's draft unremarked (2026-10-05). So the draft
+# names each recipient and where the address came from, and flags one that cannot be right -- a
+# shape check only: a well-formed address can still be the wrong one.
+ADDRESS_SOURCE = "as typed on the CoreOmics submission form"
+CAMPUS_DOMAIN = "ucdavis.edu"              # a domain a letter or two from it is flagged as a typo
+_ADDRESS_LOCAL = re.compile(r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]$")
+_DOMAIN_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$")
+
+
+def _edits(a: str, b: str) -> int:
+    """Edit distance (insertions, deletions, substitutions) between two short strings."""
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def address_problem(addr):
+    """Why `addr` cannot be a working email address, or why it looks like a typo of the campus
+    domain, in plain words; None when it passes."""
+    a = _s(addr)
+    if any(c.isspace() for c in a):
+        return "it contains a space"
+    if a.count("@") != 1:
+        return "it has no @" if "@" not in a else "it has more than one @"
+    local, domain = a.split("@")
+    if not local:
+        return "nothing comes before the @"
+    bad = sorted({c for c in local if not _ADDRESS_LOCAL.match(c)}
+                 | {c for c in domain if not (c.isascii() and (c.isalnum() or c in ".-"))})
+    if bad:
+        return "it contains " + ", ".join(repr(c) for c in bad) + ", which an address cannot"
+    if local.startswith(".") or local.endswith(".") or ".." in local:
+        return "the part before the @ has a misplaced dot"
+    labels = domain.split(".")
+    if len(labels) < 2:
+        return "the part after the @ has no dot (an address ends in a domain such as .edu or .com)"
+    if not all(_DOMAIN_LABEL.match(x) for x in labels):
+        return "the part after the @ is malformed (an empty part, or one that starts or ends with '-')"
+    if not (labels[-1].isalpha() and len(labels[-1]) >= 2):
+        return f"it ends in '.{labels[-1]}', which is not a domain ending"
+    base = ".".join(labels[-2:]).lower()
+    if base != CAMPUS_DOMAIN and _edits(base, CAMPUS_DOMAIN) <= 2:
+        return f"'{domain}' looks like a typo of {CAMPUS_DOMAIN}"
+    return None
+
+
+def draft_recipients(summary: dict) -> list:
+    """To the submitter, Cc the PI (unless the same address), each with where its address came
+    from and, when it fails the shape check, why."""
+    sub, pi = summary.get("submitter") or {}, summary.get("pi") or {}
+    to, cc = _s(sub.get("email")), _s(pi.get("email"))
+    out = [{"field": "To", "who": "submitter", "name": sub.get("name"), "email": to or None,
+            "source": f"the submitter's address {ADDRESS_SOURCE} (submission_summary.json "
+                      "submitter.email)" if to else "none: the submission has no submitter address",
+            "problem": address_problem(to) if to else None}]
+    if cc and cc.lower() != to.lower():
+        out.append({"field": "Cc", "who": "PI", "name": pi.get("name"), "email": cc,
+                    "source": f"the PI's address {ADDRESS_SOURCE} (submission_summary.json pi.email)",
+                    "problem": address_problem(cc)})
+    return out
+
+
 def cmd_email_draft(a) -> int:
-    s = load_summary(a.summary)
+    s, _ = full_summary(a.summary)
     delivery = load_json_file(a.delivery, "delivery.json") if a.delivery else {}
     url = _s(a.share_url)
     if not url:
@@ -4272,32 +4826,54 @@ def cmd_email_draft(a) -> int:
             if s.get("share_dir") and _s(sh.get("link_to_path")).rstrip("/") == _s(s["share_dir"]).rstrip("/"):
                 url = _s(sh.get("url"))
     label = submission_label(s)
-    sub, pi = s.get("submitter") or {}, s.get("pi") or {}
-    placeholders = []
-    to = _s(sub.get("email"))
-    if not to:
+    sub = s.get("submitter") or {}
+    placeholders, warnings = [], []
+    recipients = draft_recipients(s)
+    if not recipients[0]["email"]:
         placeholders.append("submitter email")
-    cc = _s(pi.get("email")) if _s(pi.get("email")).lower() != to.lower() else ""
+    problems = [f"{r['field']}: {r['email']} ({r['who']}, {ADDRESS_SOURCE}) -- {r['problem']}"
+                for r in recipients if r["problem"]]
     link = url or "[BIOSHARE LINK -- run `core_submission.py bioshare ensure` and paste the share URL]"
     if not url:
         placeholders.append("Bioshare link")
     contents = set(delivery.get("contents") or [])
     raw = delivery.get("raw_links") or {}
     n_raw = (raw.get("created") or 0) + (raw.get("existing") or 0) + (raw.get("replaced") or 0)
-    raw_only = delivery.get("mode") == "raw-only"
-    L = ["<!-- DRAFT -- not sent. Review it, then send it from your own mail client. -->", "",
-         f"To: {to or '[SUBMITTER EMAIL]'}"]
-    if cc:
-        L.append(f"Cc: {cc}")
+    # the wording follows what deliver delivered (its delivery.json `mode`), never a guess
+    mode = delivery.get("mode")
+    raw_only, no_de = mode == "raw-only", mode == "no-de"
+    if not a.delivery:
+        warnings.append("no --delivery: the draft cannot say what was delivered and is worded for an "
+                        "analysis with its report; pass the delivery.json deliver wrote")
+    L = ["<!-- DRAFT -- not sent. Review it, then send it from your own mail client.",
+         "Recipients, and where each address came from:"]
+    for r in recipients:
+        who = ", ".join(x for x in (_s(r["name"]), f"the {r['who']}") if x)
+        L.append(f"  {r['field']}: {r['email'] or '(none)'} -- {who}, "
+                 + (ADDRESS_SOURCE if r["email"] else "no address on the submission"))
+        if r["problem"]:
+            L.append(f"    CHECK BEFORE SENDING: {r['problem']}")
+    L += ["-->", ""]
+    for r in recipients:
+        addr = r["email"] or "[SUBMITTER EMAIL]"
+        L.append(f"{r['field']}: {addr}" + (f"  [CHECK THIS ADDRESS: {r['problem']}]" if r["problem"] else ""))
     samples = f" ({s['n_samples']} samples)" if s.get("n_samples") else ""
     if raw_only:
         L += [f"Subject: Raw data for {label} is ready", "", f"Hi {sub.get('first') or 'there'},", "",
               f"The raw instrument files for your submission {label}{samples} are ready on Bioshare:", "",
               link, "", "They are in the raw folder of the share. As requested, no search or analysis was run."]
     else:
-        L += [f"Subject: Proteomics results for {label} are ready", "", f"Hi {sub.get('first') or 'there'},", "",
-              f"The UC Davis Proteomics Core has finished the analysis for your submission {label}{samples}. "
-              f"Your results are on Bioshare:", "", link, ""]
+        if no_de:
+            L += [f"Subject: Proteomics report for {label} is ready", "", f"Hi {sub.get('first') or 'there'},", "",
+                  f"The UC Davis Proteomics Core has prepared a report for your submission {label}{samples}. "
+                  f"It is on Bioshare:", "", link, "",
+                  "This delivery does not include differential expression -- the statistical comparison "
+                  "between your sample groups. If your project includes that comparison, we will send it "
+                  "separately.", ""]
+        else:
+            L += [f"Subject: Proteomics results for {label} are ready", "", f"Hi {sub.get('first') or 'there'},", "",
+                  f"The UC Davis Proteomics Core has finished the analysis for your submission {label}{samples}. "
+                  f"Your results are on Bioshare:", "", link, ""]
         if not contents or "Analysis_Report.html" in contents:
             L.append("Please start with Analysis_Report.html. It is the whole report in one file and opens in "
                      "any web browser -- the quality-control panels come first, then the results.")
@@ -4329,11 +4905,14 @@ def cmd_email_draft(a) -> int:
         L += ["", feedback_line("email", core["prot"], bool(delivery.get("podcast")), fmt="text")]
     L += ["", "Best regards,", "UC Davis Proteomics Core", ""]
     os.makedirs(os.path.dirname(os.path.abspath(a.out)) or ".", exist_ok=True)
-    with open(a.out, "w") as fh:
-        fh.write("\n".join(L))
-    emit({"wrote": os.path.abspath(a.out), "to": to or None, "cc": cc or None, "share_url": url or None,
-          "placeholders": placeholders, "sent": False})
-    return EXIT_DECIDE if placeholders else EXIT_OK
+    write_text(a.out, "\n".join(L), private=on_hive())     # names and emails: on HIVE, 600
+    emit({"wrote": os.path.abspath(a.out), "mode": mode, "recipients": recipients,
+          "to": recipients[0]["email"], "cc": recipients[1]["email"] if len(recipients) > 1 else None,
+          "share_url": url or None, "placeholders": placeholders, "address_problems": problems,
+          "warnings": warnings, "sent": False})
+    for p in problems:
+        note(f"CHECK THIS ADDRESS before sending -- {p}")
+    return EXIT_DECIDE if placeholders or problems else EXIT_OK
 
 
 # --------------------------------------------------------------------------- main --
@@ -4341,20 +4920,22 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    ck = sub.add_parser("check", help="LOCAL: is the CoreOmics API key here, and does CoreOmics "
-                                      "accept it for the Proteomics lab? (never prints the key)")
+    ck = sub.add_parser("check", help="WHERE THE KEY IS (this computer, or HIVE): is the CoreOmics "
+                                      "API key here, and does CoreOmics accept it for the "
+                                      "Proteomics lab? (never prints the key)")
     ck.add_argument("--json", action="store_true", help="one JSON object: status, say, fix, ...")
     ck.set_defaults(func=cmd_check)
 
-    f = sub.add_parser("fetch", help="LOCAL: fetch a submission + neighbours + Bioshare shares")
+    f = sub.add_parser("fetch", help="WHERE THE KEY IS: fetch a submission + neighbours + Bioshare "
+                                      "shares (on HIVE: the full record into <out>/private/)")
     f.add_argument("submission", help="807, 0807, PROT_0807, prot-807, #807, or the 12-hex CoreOmics id")
     f.add_argument("--out", required=True, help="directory for submission.json, samples.tsv, submission_summary.json")
     f.add_argument("--neighbor-days", type=int, default=NEIGHBOR_WINDOW_DAYS,
                    help=f"record submissions within +/- this many days (default {NEIGHBOR_WINDOW_DAYS})")
     f.set_defaults(func=cmd_fetch)
 
-    idn = sub.add_parser("identify", help="LOCAL: which submission is this data? (names first, "
-                                          "then sample ids; never guesses)")
+    idn = sub.add_parser("identify", help="WHERE THE KEY IS: which submission is this data? "
+                                          "(names first, then sample ids; never guesses)")
     idn.add_argument("paths", nargs="*", help="raw files and/or their folder, as the user gave them")
     idn.add_argument("--files-from", default=None, help="a file listing raw paths, one per line")
     idn.add_argument("--text", default="", help="the user's message, for 'PROT_0756' / 'submission 756'")
@@ -4411,14 +4992,21 @@ def main(argv=None) -> int:
                     help="a condition per REPLICATE (<sample>_mix_1 .. _n): auto reads it as "
                          "conditions + replicates only when unambiguous and asks; collapse / keep "
                          "is the user's answer (collect_conditions.py --replicate-labels)")
+    co.add_argument("--rename-dashed-runs", action="store_true",
+                    help="name each run whose file name holds '--' as run_search.py "
+                         "--rename-dashed-runs will search it (each run of dashes made one), so "
+                         "conditions.csv matches the report (detect_acquisition.py lists them)")
     co.set_defaults(func=cmd_conditions)
 
     de = sub.add_parser("deliver", help="ON HIVE: copy deliverables into the Bioshare share dir (dry run)")
     de.add_argument("--summary", required=True)
     de.add_argument("--session", default=None, help="the analysis session directory (optional for raw-only)")
-    de.add_argument("--mode", choices=["auto", "analysis", "raw-only"], default="auto",
-                    help="auto = raw-only when CoreOmics says 'I only require raw data', else analysis")
-    de.add_argument("--label", default=None, help="folder suffix instead of analysis_<date> / raw_data_<date>")
+    de.add_argument("--mode", choices=["auto", *DELIVERY_MODES], default="auto",
+                    help="auto = raw-only when CoreOmics says 'I only require raw data', else analysis "
+                         f"(held when the session has no DE). no-de = {DELIVERY_MODES['no-de']['what']}")
+    de.add_argument("--label", default=None,
+                    help="folder suffix instead of " + " / ".join(f"{m['suffix']}_<date>"
+                                                                  for m in DELIVERY_MODES.values()))
     de.add_argument("--include-raw", choices=["auto", "yes", "no"], default="auto",
                     help="auto = only when CoreOmics says the submitter wants raw data")
     de.add_argument("--service-project", default=None, help="staged service project (default: discovered)")
@@ -4430,7 +5018,7 @@ def main(argv=None) -> int:
     de.add_argument("--no-size-guard", action="store_true", help="used by deliver_job.sh itself")
     de.set_defaults(func=cmd_deliver)
 
-    bs = sub.add_parser("bioshare", help="LOCAL: status | ensure | send (ensure/send are dry runs)")
+    bs = sub.add_parser("bioshare", help="WHERE THE KEY IS: status | ensure | send (ensure/send are dry runs)")
     bs.add_argument("action", choices=["status", "ensure", "send"])
     bs.add_argument("--summary", required=True)
     bs.add_argument("--delivery", default=None,
@@ -4442,7 +5030,7 @@ def main(argv=None) -> int:
     g.add_argument("--no-email", dest="email", action="store_false", help="send: grant access silently (default)")
     bs.set_defaults(func=cmd_bioshare, email=False)
 
-    em = sub.add_parser("email-draft", help="LOCAL: draft the results email (never sends)")
+    em = sub.add_parser("email-draft", help="WHERE THE KEY IS: draft the results email (never sends)")
     em.add_argument("--summary", required=True)
     em.add_argument("--delivery", default=None, help="delivery.json from deliver")
     em.add_argument("--share-url", default=None)
@@ -4451,20 +5039,26 @@ def main(argv=None) -> int:
 
     a = ap.parse_args(argv)
     try:
+        if on_hive():
+            # every subcommand that runs on HIVE: fetch, locate, stage and conditions keep their
+            # records in ~/core
+            made = private_core_home()
+            if made:
+                note(made)
         return a.func(a)
     except Stop as e:
         emit(e.payload)
         note(e.payload.get("error", "stopped"))
         return e.code
     except KeyProblem as e:
-        emit({"error": "no usable CoreOmics API key on this computer", "diagnosis": e.diagnosis,
+        emit({"error": f"no usable CoreOmics API key {here()}", "diagnosis": e.diagnosis,
               "detail": e.detail, "fix": e.fix})
         note(f"CoreOmics: {e.detail}")
         return EXIT_UNREACHABLE
     except ApiError as e:
         out = {"error": "CoreOmics request failed", "status": e.status, "detail": e.detail, "url": e.url}
         if e.status in (401, 403):
-            out["hint"] = CHECK_HINT
+            out["hint"] = check_hint()
         emit(out)
         note(f"CoreOmics: {e}")
         return EXIT_UNREACHABLE

@@ -84,7 +84,13 @@ def child_env(tmp, base_url="http://127.0.0.1:9/server/api", **extra):
     # never the Core's real staff list (it exists on HIVE): qc_bracket.py ack falls back to
     # refusing agent-like names only
     e["CORE_STAFF_FILE"] = os.path.join(tmp, "no_core_staff.txt")
+    # a laptop, wherever the suite runs (on HIVE /quobyte exists): TestKeyOnHive sets "1"
+    e["CORE_ON_HIVE"] = "0"
     e.update(extra)
+    # run "on HIVE", core_submission makes ~/core private (private_core_home): never the real home's
+    if e["CORE_ON_HIVE"] == "1" and "HOME" not in extra:
+        e["HOME"] = os.path.join(tmp, "home")
+        os.makedirs(e["HOME"], exist_ok=True)
     return e
 
 
@@ -640,6 +646,8 @@ class TestLocate(unittest.TestCase):
         self.assertEqual(rc, 4)
         self.assertTrue(out["ht_plate"])
         self.assertIn("ht_manifest.py", out["next_step"])
+        # the record goes with it, so ht_manifest checks STAN's list against its samples
+        self.assertIn(f"--summary {os.path.abspath(summary)}", out["next_step"])
 
     def test_an_ht_plate_named_with_prot_exits_4(self):
         """2.9.1: a plate named `<date>_PROT_<n>_...` went to sample matching and found 0 of 96."""
@@ -717,6 +725,150 @@ class TestLocate(unittest.TestCase):
         rc, out, _ = self.locate(summary, "--files-from", cur)
         self.assertEqual(rc, 2)
         self.assertEqual(gates(out)["paths_exist"]["status"], "FAIL")
+
+
+class TestNumberAfterTheName(unittest.TestCase):
+    """Runs named for the person and numbered for the sample (a staff report, 2026-10-08): the sheet
+    says QP4 (<initials><N>), the run says `<date>_QPlaceholder_100spd_4_S4-A1_...` (<initial>
+    <surname>, then N). No run carries the id, so locate found none. Such a run is only PROPOSED --
+    the sample stays unmatched, every gate stands -- and staff confirm it with --choose. Near
+    misses are never proposed: the whole point of locate's gates is not to take another lab's
+    runs. PI here: Quinn Placeholder (record()'s default); submitter: Ada Example."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = self._tmp.name
+        self.env = child_env(self.tmp)
+        self.out = os.path.join(self.tmp, "loc")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def locate(self, summary, *extra):
+        return run(["locate", "--summary", summary, "--out", self.out, *extra], self.env)
+
+    def run_named(self, n, well, date="20250312", word="QPlaceholder", month="mar25", mid="100spd"):
+        return raw(self.tmp, "tTOF_HT", month, f"{date}_{word}_{mid}_{n}_S4-{well}_1_{24000 + n}.d")
+
+    def rows(self):
+        return {r["sample_key"]: r for r in load(os.path.join(self.out, "locate.json"))["samples"]}
+
+    def test_the_name_part_drops_the_plate_tail_and_keeps_bare_numbers(self):
+        self.assertEqual(cs.name_number_pairs("20250312_QPlaceholder_100spd_4_S4-A1_1_24001.d"),
+                         [("qplaceholder", ["4"])])
+        # the well (A4), the injection (1) and the counter (4) are never the sample's number
+        self.assertEqual(cs.name_number_pairs("20250312_QPlaceholder_100spd_S4-A4_1_4.d"),
+                         [("qplaceholder", [])])
+        self.assertEqual(cs.prefixed_id("QP-04"), ("qp", 4))
+        self.assertIsNone(cs.prefixed_id("Q4"))            # one letter: too loose to propose on
+        self.assertIsNone(cs.prefixed_id("QP4a"))
+
+    def test_runs_are_proposed_never_assigned(self):
+        runs = {"QP4": self.run_named(4, "A1"), "QP5": self.run_named(5, "A2"),
+                "QP13": self.run_named(13, "A3")}
+        rec = record(samples=[("QP4", "ctrl"), ("QP5", "ctrl"), ("QP13", "treat")])
+        summary, _ = write_summary(self.tmp, rec)
+        rc, out, p = self.locate(summary)
+        self.assertEqual(rc, 2, p.stderr)
+        g = gates(out)
+        self.assertEqual(g["unmatched_samples"]["status"], "FAIL")
+        self.assertEqual(g["no_files"]["status"], "FAIL")              # nothing was assigned
+        self.assertEqual(g["proposed_runs"]["status"], "INFO")
+        self.assertIn("NOT assigned", g["proposed_runs"]["detail"])
+        self.assertEqual({x["unique_id"]: [y["file"] for y in x["proposed"]]
+                          for x in g["proposed_runs"]["samples"]},
+                         {u: [f] for u, f in runs.items()})
+        self.assertEqual(read(os.path.join(self.out, "files.txt")), "")
+        r = self.rows()["QP4"]
+        self.assertEqual(r["status"], "unmatched")
+        self.assertIn("PROPOSED, not assigned", r["note"])
+        self.assertIn("--choose QP4=<file>", r["note"])
+        # --allow-partial would drop them as not run: still said, as a warning
+        rc, out, _ = self.locate(summary, "--allow-partial")
+        self.assertEqual(gates(out)["proposed_runs"]["status"], "WARN")
+        self.assertIn("NOT RUN", gates(out)["proposed_runs"]["detail"])
+
+    def test_staff_confirm_each_with_choose(self):
+        runs = {"QP4": self.run_named(4, "A1"), "QP5": self.run_named(5, "A2"),
+                "QP13": self.run_named(13, "A3")}
+        rec = record(samples=[("QP4", "ctrl"), ("QP5", "ctrl"), ("QP13", "treat")])
+        summary, _ = write_summary(self.tmp, rec)
+        rc, out, _ = self.locate(summary, "--choose", f"QP4={runs['QP5']}")
+        self.assertEqual(rc, 2)
+        self.assertIn("not one of the runs proposed for QP4 by name and number", out["error"])
+        rc, out, p = self.locate(summary, *[x for u, f in runs.items() for x in ("--choose", f"{u}={f}")])
+        self.assertEqual(rc, 0, p.stderr)
+        self.assertEqual(sorted(read(os.path.join(self.out, "files.txt")).split()), sorted(runs.values()))
+        rows = self.rows()
+        for u, f in runs.items():
+            self.assertEqual((rows[u]["status"], rows[u]["file"], rows[u]["chosen_by"]),
+                             ("matched", f, "--choose"))
+            self.assertIn("proposed by name and number", rows[u]["note"])
+        self.assertEqual(gates(out)["staff_choices"]["status"], "INFO")
+        self.assertNotIn("proposed_runs", gates(out))
+
+    def test_near_misses_are_never_proposed(self):
+        rec = record(samples=[("QP4", "ctrl"), ("A4", "ctrl"), ("QP5", "treat")])
+        self.run_named(14, "A1")                                    # 14, not 4
+        raw(self.tmp, "tTOF_HT", "mar25", "20250312_QPlaceholder_100spd4_S4-A2_1_24002.d")  # glued
+        raw(self.tmp, "tTOF_HT", "mar25", "20250312_QPlaceholder_4_2_S4-A3_1_24003.d")  # two numbers
+        self.run_named(4, "A4", word="XQPlaceholder")              # the letters do not start the word
+        self.run_named(4, "A5", word="QPeters")                    # another person's name
+        self.run_named(4, "A6", word="Placeholder")                # no initials
+        raw(self.tmp, "tTOF_HT", "mar25", "20250312_QPlaceholder_100spd_S4-A4_1_4.d")  # well/counter
+        self.run_named(4, "A7", date="20250201", month="feb25")    # before the submission
+        self.run_named(4, "A8", word="APlaceholder")               # A4 is a well-like id: weak
+        self.run_named(5, "A9")                                    # QP5's own: proposed
+        summary, _ = write_summary(self.tmp, rec)
+        rc, out, _ = self.locate(summary)
+        self.assertEqual(rc, 2)
+        rows = self.rows()
+        self.assertEqual(rows["QP4"]["status"], "unmatched")
+        self.assertNotIn("proposed", rows["QP4"])
+        self.assertEqual(rows["A4"]["status"], "weak")
+        self.assertNotIn("proposed", rows["A4"])
+        self.assertEqual([x["unique_id"] for x in gates(out)["proposed_runs"]["samples"]], ["QP5"])
+
+    def test_without_this_submissions_surname_nothing_is_proposed(self):
+        self.run_named(4, "A1")
+        rec = record(samples=[("QP4", "ctrl"), ("QP5", "treat")], pi_last="")
+        summary, _ = write_summary(self.tmp, rec)
+        rc, out, _ = self.locate(summary)
+        self.assertEqual(rc, 2)
+        self.assertNotIn("proposed_runs", gates(out))
+        self.assertNotIn("proposed", self.rows()["QP4"])
+
+    def test_another_submissions_id_that_fits_is_shown_on_the_proposal(self):
+        mine = self.run_named(4, "A1")
+        self.run_named(5, "A2")
+        neighbor = {"internal_id": "PROT_0810", "id": "aaaaaaaaaaaa",
+                    "submitted": "2025-02-20T09:00:00-08:00", "unique_ids": ["QP4", "ZZ5"]}
+        rec = record(samples=[("QP4", "ctrl"), ("QP5", "treat")])
+        summary, _ = write_summary(self.tmp, rec, neighbors=[neighbor])
+        rc, out, _ = self.locate(summary)
+        self.assertEqual(rc, 2)
+        rows = self.rows()
+        self.assertEqual(rows["QP4"]["proposed"][0]["contested_by"], ["QP4 (PROT_0810)"])
+        self.assertIn("another submission's id fits too: QP4 (PROT_0810)", rows["QP4"]["note"])
+        self.assertEqual(rows["QP5"]["proposed"][0]["contested_by"], [])
+        rc, out, p = self.locate(summary, "--choose", f"QP4={mine}", "--choose",
+                                 f"QP5={rows['QP5']['proposed'][0]['file']}")
+        self.assertEqual(rc, 0, p.stderr)
+        self.assertTrue(self.rows()["QP4"]["accepted_ambiguous"])
+
+    def test_a_run_two_of_our_samples_fit_names_both(self):
+        f = self.run_named(4, "A1")
+        rec = record(samples=[("QP4", "ctrl"), ("QPL4", "treat")])
+        summary, _ = write_summary(self.tmp, rec)
+        rc, out, _ = self.locate(summary)
+        self.assertEqual(rc, 2)
+        rows = self.rows()
+        self.assertEqual(rows["QP4"]["proposed"][0]["shared_with"], ["QPL4"])
+        self.assertEqual(rows["QPL4"]["proposed"][0]["shared_with"], ["QP4"])
+        self.assertIn("it also fits QPL4 of this submission", rows["QP4"]["note"])
+        rc, out, _ = self.locate(summary, "--choose", f"QP4={f}", "--choose", f"QPL4={f}")
+        self.assertEqual(rc, 2)
+        self.assertEqual(gates(out)["duplicate_assignment"]["status"], "FAIL")
 
 
 class TestHtFilesFrom(unittest.TestCase):
@@ -1396,6 +1548,16 @@ class DeliverBase(unittest.TestCase):
             args += ["--include-raw", "no"]
         return run(args + list(extra), env or self.env)
 
+    def set_qc(self, *verdicts, **kw):
+        write(self.session, "logs/qc_bracket.json",
+              json.dumps(qc_record(*verdicts, session=self.session, **kw)))
+
+    def ack(self, note="reviewed the 2 runs after the failed QC; data stand"):
+        p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "qc_bracket.py"), "ack",
+                            "--session", self.session, "--by", "staffexample", "--note", note],
+                           capture_output=True, text=True, env=self.env)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+
 
 def qc_record(*verdicts, status="ok", session=None):
     """A minimal qc_bracket.py record (schema 1): one instrument per verdict, covering `session`'s
@@ -1415,16 +1577,6 @@ def qc_record(*verdicts, status="ok", session=None):
 class TestDeliverQcGate(DeliverBase):
     """Brett, 2026-10-01: the QC verdict is staff-only, and a check or concern holds the client
     delivery until a staff member records an acknowledgement (who, when, a one-line note)."""
-
-    def set_qc(self, *verdicts, **kw):
-        write(self.session, "logs/qc_bracket.json",
-              json.dumps(qc_record(*verdicts, session=self.session, **kw)))
-
-    def ack(self, note="reviewed the 2 runs after the failed QC; data stand"):
-        p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "qc_bracket.py"), "ack",
-                            "--session", self.session, "--by", "staffexample", "--note", note],
-                           capture_output=True, text=True, env=self.env)
-        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
 
     def test_check_or_concern_holds_the_delivery_dry_run_included(self):
         for verdicts in (("check",), ("good", "concern")):
@@ -1847,6 +1999,18 @@ class TestDeliver(DeliverBase):
         manifest = read(os.path.join(self.delivery, "MANIFEST.txt"))
         self.assertIn("[SKIPPED] tables/locked/ -- unreadable directory", manifest)
 
+    def test_an_analysis_delivery_says_it_carries_the_de(self):
+        rc, out, p = run(["deliver", "--summary", self.summary, "--session", self.session,
+                          "--include-raw", "no", "--apply"], self.env)
+        self.assertEqual(rc, 0, p.stdout + p.stderr)
+        self.assertEqual(out["delivery_dir"], os.path.join(
+            self.share, f"PROT_0807_analysis_{dt.date.today().isoformat()}"))
+        dj = load(os.path.join(self.session, "delivery.json"))
+        self.assertEqual((dj["mode"], dj["differential_expression"]), ("analysis", True))
+        self.assertTrue(dj["normalization_gate"]["proceed"])
+        self.assertNotIn("differential expression --",
+                         read(os.path.join(out["delivery_dir"], "MANIFEST.txt")))
+
     # -- live finding C
     def test_readme_claims_only_what_was_delivered(self):
         bare = cs.build_readme(self.s, {"Analysis_Report.html"}, [], "analysis")
@@ -1888,6 +2052,167 @@ class TestRawOnlyDelivery(DeliverBase):
         run(["email-draft", "--summary", self.summary, "--delivery",
              os.path.join(self.work, "delivery.json"), "--out", out_md], self.env)
         self.assertNotIn(SURVEY, read(out_md))
+
+
+class TestNoDeDelivery(DeliverBase):
+    """2026-10-05: a project's first deliverable was a QC report, with no differential expression
+    yet (it waits on the study design; some projects never have one). The normalisation gate held
+    it ("the DE record ... could not be read ([Errno 2] ..."), so staff delivered it as raw-only
+    and copied the report onto the share by hand, outside verification -- and the email draft
+    called it raw data only. --mode no-de delivers such a report behind the QC gate, and
+    refuses a session that has a DE."""
+
+    def setUp(self):
+        super().setUp()
+        # a QC-only session: the report, QC tables and figures, methods; nothing the DE writes
+        for rel in ("tables/DE_dpc_ctrl.vs.treat.csv", "tables/reproducibility_log.R",
+                    "tables/de_provenance.json", "figures/pca.png"):
+            os.remove(os.path.join(self.output, rel))
+        write(self.output, "tables/qc_pooled_standard.csv", "Run,Proteins\nQC1,4000\n")
+        write(self.output, "figures/qc_standard_trend.png", "png")
+        write(self.output, "methods.md", "# Methods\n")
+
+    def no_de(self, *extra):
+        return run(["deliver", "--summary", self.summary, "--session", self.session,
+                    "--mode", "no-de", *extra], self.env)
+
+    def folder(self, suffix):
+        return os.path.join(self.share, f"PROT_0807_{suffix}_{dt.date.today().isoformat()}")
+
+    def test_a_qc_report_goes_out_with_the_raw_data_and_says_it_has_no_de(self):
+        self.set_qc("concern")                     # the QC gate applies; an acknowledgement releases it
+        self.ack()
+        rc, out, p = self.no_de("--include-raw", "yes")
+        self.assertEqual(rc, 0, p.stdout + p.stderr)
+        self.assertTrue(out["qc_gate"]["proceed"])
+        self.assertNotIn("normalization_gate", out)
+        self.assertFalse(out["differential_expression"])
+        rc, out, p = self.no_de("--include-raw", "yes", "--apply")
+        self.assertEqual(rc, 0, p.stdout + p.stderr)
+        self.assertTrue(out["verified"], out)
+        d = self.folder("report")
+        self.assertEqual(out["delivery_dir"], d)
+        for rel in ("Analysis_Report.html", "methods.md", "tables/qc_pooled_standard.csv",
+                    "figures/qc_standard_trend.png", "README.html", "AGENTS.md"):
+            self.assertTrue(os.path.isfile(os.path.join(d, rel)), rel)
+        for f in self.raw_files:
+            self.assertTrue(os.path.islink(os.path.join(self.share, "raw", os.path.basename(f))))
+        readme = read(os.path.join(d, "README.md"))
+        self.assertIn("This delivery has no differential expression", readme)
+        self.assertNotIn("compared between sample groups", readme)
+        self.assertIn("../raw/", readme)
+        self.assertIn("[SKIPPED] differential expression -- not part of this delivery",
+                      read(os.path.join(d, "MANIFEST.txt")))
+        dj = load(os.path.join(self.session, "delivery.json"))
+        self.assertEqual((dj["mode"], dj["differential_expression"], dj["verified"]),
+                         ("no-de", False, True))
+        self.assertIn("without differential expression", dj["mode_description"])
+        self.assertIsNone(dj["normalization_gate"])
+        self.assertEqual(set(dj["qc_gate"]), {"proceed", "record_sha256", "ack_at"})
+
+    def test_a_session_with_a_de_record_is_refused(self):
+        rec = write(self.output, "tables/de_provenance.json", json.dumps(NORM_DECIDED))
+        for extra in ((), ("--apply",)):
+            rc, out, _ = self.no_de(*extra)
+            self.assertEqual(rc, 2, extra)
+            self.assertIn("this session has differential expression", out["error"])
+            self.assertIn("tables/de_provenance.json", out["de_output"])
+            self.assertIn("--mode analysis", out["hint"])
+        os.remove(rec)                             # a record that does not even resolve is one
+        os.symlink(os.path.join(self.tmp, "gone.json"), rec)
+        rc, out, _ = self.no_de("--apply")
+        self.assertEqual(rc, 2)
+        self.assertIn("tables/de_provenance.json", out["de_output"])
+        self.assertFalse(os.path.exists(self.share), "nothing may be delivered")
+
+    def test_any_de_output_is_refused(self):
+        for rel in ("tables/DE_dpc_ctrl.vs.treat.csv", "tables/Expression_Matrix.csv",
+                    "tables/Sets_ctrl.vs.treat.csv", "figures/volcano_ctrl.vs.treat.png",
+                    "figures/heatmap_top.png"):
+            with self.subTest(rel):
+                p = write(self.output, rel, "x")
+                rc, out, _ = self.no_de("--apply")
+                self.assertEqual(rc, 2)
+                self.assertEqual(out["de_output"], [rel])
+                self.assertIn(rel, out["error"])
+                os.remove(p)
+        self.assertFalse(os.path.exists(self.share))
+
+    def test_auto_or_analysis_with_no_de_holds_with_a_clear_message(self):
+        for mode in ((), ("--mode", "analysis")):
+            rc, out, _ = run(["deliver", "--summary", self.summary, "--session", self.session,
+                              *mode, "--apply"], self.env)
+            self.assertEqual(rc, 2, mode)
+            self.assertEqual(out["mode"], "analysis", "never switched silently")
+            self.assertIn("this session has no differential expression", out["error"])
+            self.assertNotIn("Errno", out["error"])
+            self.assertIn("--mode no-de", out["hint"])
+            self.assertIn("step 8", out["hint"])
+            self.assertNotIn("normalization_gate", out)
+        self.assertFalse(os.path.exists(self.share))
+
+    def test_the_qc_gate_still_holds_it(self):
+        for verdicts in (("concern",), ("good", "check")):
+            self.set_qc(*verdicts)
+            rc, out, _ = self.no_de("--apply")
+            self.assertEqual(rc, 2, verdicts)
+            self.assertIn("held for staff review", out["error"])
+            self.assertIn("qc_bracket.py ack", out["hint"])
+        os.remove(os.path.join(self.session, "logs", "qc_bracket.json"))
+        rc, out, _ = self.no_de("--apply")
+        self.assertEqual(rc, 2)
+        self.assertIn("were not checked", out["error"])
+        self.assertFalse(os.path.exists(self.share))
+
+    def test_it_needs_a_session_and_a_report(self):
+        rc, out, _ = run(["deliver", "--summary", self.summary, "--mode", "no-de"], self.env)
+        self.assertEqual(rc, 2)
+        self.assertIn("--session", out["error"])
+        os.remove(os.path.join(self.output, "Analysis_Report.html"))
+        rc, out, _ = self.no_de("--apply")
+        self.assertEqual(rc, 2)
+        self.assertIn("Analysis_Report.html", out["error"])
+
+    def test_a_later_analysis_delivery_goes_beside_it(self):
+        rc, out, p = self.no_de("--include-raw", "yes", "--apply")
+        self.assertEqual(rc, 0, p.stdout + p.stderr)
+        report = self.folder("report")
+        before = read(os.path.join(report, "checksums.sha256"))
+        # step 8 runs in the same session once the design is known
+        write(self.output, "tables/de_provenance.json", json.dumps(NORM_DECIDED))
+        write(self.output, "tables/DE_dpc_ctrl.vs.treat.csv", "Protein,logFC\nP1,1\n")
+        write(self.output, "figures/volcano_ctrl.vs.treat.png", "png")
+        rc, out, p = run(["deliver", "--summary", self.summary, "--session", self.session,
+                          "--include-raw", "yes", "--apply"], self.env)
+        self.assertEqual(rc, 0, p.stdout + p.stderr)
+        self.assertEqual(out["mode"], "analysis")
+        self.assertTrue(out["verified"], out)
+        analysis = self.folder("analysis")
+        self.assertEqual(out["delivery_dir"], analysis)
+        self.assertTrue(os.path.isfile(os.path.join(analysis, "tables", "DE_dpc_ctrl.vs.treat.csv")))
+        self.assertEqual(out["raw_links"]["existing"], len(self.raw_files))
+        self.assertEqual(read(os.path.join(report, "checksums.sha256")), before,
+                         "the earlier report is left as it was")
+        self.assertFalse(os.path.exists(os.path.join(report, "tables", "DE_dpc_ctrl.vs.treat.csv")))
+        rc, out, _ = self.no_de("--label", "again")      # and no-de now refuses this session
+        self.assertEqual(rc, 2)
+
+    def test_the_email_draft_says_report_and_raw_data_without_the_statistics(self):
+        rc, out, p = self.no_de("--include-raw", "yes", "--apply")
+        self.assertEqual(rc, 0, p.stdout + p.stderr)
+        md = os.path.join(self.tmp, "EMAIL_DRAFT.md")
+        rc, js, p = run(["email-draft", "--summary", self.summary, "--delivery",
+                         os.path.join(self.session, "delivery.json"), "--share-url",
+                         "https://bioshare.example/bsx/", "--out", md], self.env)
+        self.assertEqual(rc, 0, p.stdout + p.stderr)
+        self.assertEqual(js["mode"], "no-de")
+        text = read(md)
+        self.assertIn("Subject: Proteomics report for PROT_0807 is ready", text)
+        self.assertIn("does not include differential expression", text)
+        self.assertIn("Please start with Analysis_Report.html", text)
+        self.assertIn("Your raw instrument files are in the raw folder of the same share.", text)
+        for wrong in ("Raw data for", "no search or analysis was run", "has finished the analysis"):
+            self.assertNotIn(wrong, text)
 
 
 # ---------------------------------------------------------------------- bioshare --
@@ -2290,6 +2615,74 @@ class TestEmailDraft(unittest.TestCase):
             self.assertEqual(rc, 2)
             self.assertIn("Bioshare link", js["placeholders"])
             self.assertIn("[BIOSHARE LINK", read(out))
+
+    def draft(self, tmp, delivery, rec=None):
+        summary, _ = write_summary(tmp, rec)
+        dj = write(tmp, "delivery.json", json.dumps(delivery))
+        out = os.path.join(tmp, "EMAIL_DRAFT.md")
+        rc, js, p = run(["email-draft", "--summary", summary, "--delivery", dj, "--share-url",
+                         "https://bioshare.example/bsx/", "--out", out], child_env(tmp))
+        return rc, js, read(out) if os.path.exists(out) else "", p
+
+    def test_the_wording_follows_the_delivery_mode(self):
+        report = ["Analysis_Report.html", "tables", "figures", "MANIFEST.txt"]
+        for mode, contents, says, never in (
+                ("analysis", report, "has finished the analysis",
+                 ("does not include differential expression", "Raw data for")),
+                ("no-de", report, "does not include differential expression",
+                 ("has finished the analysis", "Raw data for", "no search or analysis")),
+                ("raw-only", ["MANIFEST.txt", "README.md"], "Raw data for",
+                 ("Analysis_Report.html", "differential expression"))):
+            with self.subTest(mode), tempfile.TemporaryDirectory() as tmp:
+                rc, js, text, p = self.draft(tmp, {"mode": mode, "contents": contents,
+                                                   "raw_links": {"created": 2}})
+                self.assertEqual(rc, 0, p.stdout + p.stderr)
+                self.assertEqual(js["mode"], mode)
+                self.assertIn(says, text)
+                for w in never:
+                    self.assertNotIn(w, text)
+
+    def test_the_draft_names_each_recipient_and_where_the_address_came_from(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, js, text, p = self.draft(tmp, {"mode": "analysis", "contents": ["Analysis_Report.html"]})
+            self.assertEqual(rc, 0, p.stdout + p.stderr)
+            got = {r["field"]: r for r in js["recipients"]}
+            self.assertEqual(got["To"]["email"], "ada.example@example.org")
+            self.assertEqual(got["To"]["who"], "submitter")
+            self.assertIn("CoreOmics submission form", got["To"]["source"])
+            self.assertEqual(got["Cc"]["email"], "pi.placeholder@example.org")
+            self.assertEqual(got["Cc"]["who"], "PI")
+            self.assertIsNone(got["To"]["problem"])
+            self.assertEqual(js["address_problems"], [])
+            head = text.split("-->")[0]
+            self.assertIn("To: ada.example@example.org -- Ada Example, the submitter, as typed "
+                          "on the CoreOmics submission form", head)
+            self.assertIn("To: ada.example@example.org\n", text)
+            self.assertNotIn("CHECK", text)
+
+    def test_a_malformed_or_typo_address_is_flagged_never_used_silently(self):
+        for sub, pi, field, why in (
+                ("ada.example@example,org", None, "To", "','"),
+                ("ada.example@ucdavis.ed", None, "To", "ucdavis.edu"),
+                ("ada.example example.org", None, "To", "space"),
+                (None, "pi.placeholder@@example.org", "Cc", "@")):
+            with self.subTest(sub or pi), tempfile.TemporaryDirectory() as tmp:
+                rec = record()
+                rec["email"] = sub or rec["email"]
+                rec["pi_email"] = pi or rec["pi_email"]
+                rc, js, text, p = self.draft(tmp, {"mode": "analysis",
+                                                   "contents": ["Analysis_Report.html"]}, rec)
+                self.assertEqual(rc, 2, "a decision is needed: fix the address first")
+                bad = sub or pi
+                self.assertEqual(len(js["address_problems"]), 1, js["address_problems"])
+                self.assertIn(bad, js["address_problems"][0])
+                self.assertIn(why, js["address_problems"][0])
+                line = [ln for ln in text.splitlines() if ln.startswith(f"{field}: {bad}")]
+                self.assertTrue(line and "[CHECK THIS ADDRESS:" in line[0], text)
+
+    def test_an_address_that_passes_is_not_flagged(self):
+        for good in ("first.last@ucdavis.edu", "a+b@health.ucdavis.edu", "x_y@lab.example.co.uk"):
+            self.assertIsNone(cs.address_problem(good), good)
 
 
 # ---------------------------------------------------------------------- identify --
@@ -2779,7 +3172,7 @@ class TestCheck(unittest.TestCase):
 
     def assert_save_steps(self, fix):
         for s in ("Profile", '"API Key"', "Create", "read -rs TOK", 'chmod 600 "$F"',
-                  "Never paste the key into the chat", "HIVE has no CoreOmics key"):
+                  "Never paste the key into the chat", "coreomics_key_to_hive.sh", "mode 600"):
             self.assertIn(s, fix)
 
     def test_ok_asks_one_lab_scoped_page_with_the_key(self):
@@ -3071,11 +3464,399 @@ class TestKeyHelpElsewhere(unittest.TestCase):
             self.assertIn("read -rs TOK", out["fix"])
 
     def test_token_help_is_the_steps_not_ask_someone(self):
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"HOME": tmp, "CORE_ON_HIVE": "0"}):
             h = cs.token_help()
         self.assertNotIn("not documented", h)
-        for s in ("~/.coreomics_token", '"API Key"', "read -rs TOK", "HIVE has none", "check"):
+        for s in ("~/.coreomics_token", '"API Key"', "read -rs TOK", "on THIS computer", "check",
+                  "coreomics_key_to_hive.sh"):
             self.assertIn(s, h)
+        self.assertNotIn("HIVE has none", h)
+
+
+# ------------------------------------------------------- the CoreOmics key ON HIVE --
+@unittest.skipIf(os.name == "nt", "POSIX file modes")
+class TestKeyOnHive(unittest.TestCase):
+    """Michelle (2026-10-08, Windows, no Python) saved her key on her laptop, where nothing could
+    run the CoreOmics steps, and HIVE had no key. Now the steps run on HIVE from ~/.coreomics_token
+    -- in a home folder that is drwxrwsr-x there, open to every account, so the file's own mode is
+    the key's only protection: a key anyone else can read is refused, and never sent."""
+
+    def hive_env(self, tmp, base_url="http://127.0.0.1:9/server/api", **extra):
+        return key_env(tmp, base_url, CORE_ON_HIVE="1", **extra)
+
+    def keyfile(self, tmp, mode):
+        path = os.path.join(key_home(tmp, KEY + "\n"), ".coreomics_token")
+        os.chmod(path, mode)
+        return path
+
+    def check(self, env):
+        rc, out, p = run(["check", "--json"], env)
+        for part in (KEY, KEY[:20], KEY[20:]):
+            self.assertNotIn(part, p.stdout + p.stderr)
+        return rc, out, p
+
+    def test_a_key_others_can_read_is_refused_and_never_sent(self):
+        for mode in (0o644, 0o640, 0o604, 0o660):
+            with self.subTest(mode=oct(mode)), tempfile.TemporaryDirectory() as tmp, \
+                    FakeCoreOmics() as fake:
+                env = self.hive_env(tmp, fake.base)
+                path = self.keyfile(tmp, mode)
+                rc, out, p = self.check(env)
+                self.assertEqual((rc, out["status"]), (3, "key_mode_wrong"), p.stderr)
+                self.assertEqual(fake.requests, [], "a readable key is not used")
+                self.assertEqual((out["runs_on"], out["key_mode"]), ("hive", f"{mode:03o}"))
+                self.assertIn(f"mode {mode:03o}", out["say"])
+                self.assertIn(f"chmod 600 {shlex.quote(path)}", out["fix"])
+                self.assertIn("hive_exec.sh 'chmod 600 ~/.coreomics_token'", out["fix"])
+                self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), mode, "check changes nothing")
+
+    def test_owner_only_is_used_and_check_says_where_and_its_mode(self):
+        for mode in (0o600, 0o400):
+            with self.subTest(mode=oct(mode)), tempfile.TemporaryDirectory() as tmp, \
+                    FakeCoreOmics() as fake:
+                fake.routes[("GET", "/server/api/submissions/")] = \
+                    lambda q, b: (200, {"count": 3, "next": None, "results": [record()]})
+                env = self.hive_env(tmp, fake.base)
+                path = self.keyfile(tmp, mode)
+                rc, out, p = self.check(env)
+                self.assertEqual((rc, out["status"]), (0, "ok"), p.stderr)
+                self.assertEqual(out["key_source"], path)
+                self.assertEqual((out["runs_on"], out["key_mode"]), ("hive", f"{mode:03o}"))
+                self.assertIn(f"{path} on HIVE, mode {mode:03o}", out["say"])
+                self.assertEqual(fake.requests[0]["auth"], "Token " + KEY)
+
+    def test_fetch_and_identify_refuse_it_too(self):
+        with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
+            env = self.hive_env(tmp, fake.base)
+            self.keyfile(tmp, 0o644)
+            rc, out, p = run(["fetch", "807", "--out", os.path.join(tmp, "o")], env)
+            self.assertEqual((rc, out["diagnosis"]), (3, "key_mode_wrong"), p.stderr)
+            self.assertEqual(out["error"], "no usable CoreOmics API key on HIVE")
+            rc, out, p = run(["identify", "/x/run_KG1.d"], env)
+            # identify treats an unusable key as none, and its token_help points at check
+            self.assertEqual((rc, out["status"]), (3, "needs_token"), p.stderr)
+            self.assertIn("core_submission.py check", out["token_help"])
+            self.assertEqual(fake.requests, [])
+            self.assertNotIn(KEY, p.stdout + p.stderr)
+
+    def test_a_laptop_is_not_held_to_it(self):
+        """Off HIVE the home is the user's own (and Windows' chmod does not reach NTFS)."""
+        with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
+            fake.routes[("GET", "/server/api/submissions/")] = \
+                lambda q, b: (200, {"count": 3, "next": None, "results": [record()]})
+            self.keyfile(tmp, 0o644)
+            rc, out, p = self.check(key_env(tmp, fake.base))
+            self.assertEqual((rc, out["status"], out["runs_on"]), (0, "ok", "this_computer"), p.stderr)
+            self.assertIn("on this computer, mode 644", out["say"])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.keyfile(tmp, 0o644)
+            with mock.patch.dict(os.environ, {ON_HIVE: "0"}):
+                self.assertIsNone(cs.key_mode_problem(path))
+            with mock.patch.dict(os.environ, {ON_HIVE: "1"}):
+                self.assertIn("mode 644", cs.key_mode_problem(path))
+
+    def test_on_hive_is_quobyte_unless_forced(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(ON_HIVE, None)
+            with mock.patch.object(cs.os.path, "isdir", lambda p: p == "/quobyte"):
+                self.assertTrue(cs.on_hive())
+            with mock.patch.object(cs.os.path, "isdir", lambda p: False):
+                self.assertFalse(cs.on_hive())
+                with mock.patch.dict(os.environ, {ON_HIVE: "1"}):
+                    self.assertTrue(cs.on_hive())
+
+    def test_no_key_on_hive_names_the_agent_s_two_routes_not_a_typed_line(self):
+        """Nobody types anything on HIVE: the agent sends a laptop key, or the user pastes it at
+        coreomics_key_to_hive.sh's hidden prompt in their own Git Bash."""
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, out, _ = self.check(self.hive_env(tmp))
+            self.assertEqual((rc, out["status"]), (3, "no_key"))
+            self.assertIn("no CoreOmics API key on HIVE", out["say"])
+            for s in ("Profile", '"API Key"', "bash scripts/coreomics_key_to_hive.sh`",
+                      "coreomics_key_to_hive.sh --paste", "mode 600", "Never paste the key into the chat"):
+                self.assertIn(s, out["fix"])
+            self.assertNotIn("read -rs TOK", out["fix"])
+            rc, out, _ = run(["identify", "/x/run_KG1.d"], self.hive_env(tmp))
+            self.assertEqual(out["status"], "needs_token")
+            self.assertIn("on HIVE, where this ran", out["token_help"])
+
+    def test_windows_is_told_the_agent_puts_the_key_on_hive(self):
+        """The windows branch of the save steps (a Windows Python): the same one-line save, and
+        that in hive_remote with no usable Python the agent moves it to HIVE, mode 600."""
+        with mock.patch.dict(os.environ, dict(WIN_ENV, HOME="H:\\"), clear=True), \
+                mock.patch.object(cs.os, "name", "nt"), mock.patch.object(cs.os, "path", ntpath):
+            steps = cs.save_key_steps()
+            self.assertFalse(cs.on_hive())
+        self.assertIn(cs.SAVE_KEY_LINE["windows"], steps)
+        for s in ("Microsoft Store stub", "bash scripts/coreomics_key_to_hive.sh", "HIVE",
+                  "~/.coreomics_token", "mode 600", "never shown"):
+            self.assertIn(s, steps)
+        self.assertNotIn("HIVE has no CoreOmics key", steps)
+
+
+ON_HIVE = "CORE_ON_HIVE"
+
+
+@unittest.skipIf(os.name == "nt", "POSIX file modes")
+class TestFetchOnHive(unittest.TestCase):
+    """fetch run ON HIVE (a laptop with no Python): the record holds emails, phones and PPMS
+    billing fields, and HIVE home folders are open to every account. The full record goes into
+    <out>/private/ (700, files 600); <out>/ gets exactly what the laptop route --puts there."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = self._tmp.name
+        self.fake = FakeCoreOmics().__enter__()
+        rec = record()
+        rec["payment"] = {"display": {"PPMS Order Ref #": "PPMS-CANARY"}}
+        self.rec = rec
+        TestFetch.serve(self, self.fake, rec)
+        self.out_dir = os.path.join(self.tmp, "core", "PROT_0807")
+
+    def tearDown(self):
+        self.fake.__exit__(None, None, None)
+        self._tmp.cleanup()
+
+    def fetch(self):
+        rc, out, p = run(["fetch", "807", "--out", self.out_dir],
+                         child_env(self.tmp, self.fake.base, CORE_ON_HIVE="1"))
+        self.assertEqual(rc, 0, p.stderr)
+        return out
+
+    def test_the_full_record_is_private_and_the_top_holds_only_the_hive_copies(self):
+        out = self.fetch()
+        priv = os.path.join(self.out_dir, "private")
+        self.assertEqual(out["ran"], "on HIVE")
+        self.assertEqual(stat.S_IMODE(os.stat(priv).st_mode), 0o700)
+        for name in ("submission.json", "submission_summary.json"):
+            p = os.path.join(priv, name)
+            self.assertEqual(stat.S_IMODE(os.stat(p).st_mode), 0o600, name)
+            self.assertIn("ada.example@example.org", read(p), name)
+        self.assertIn("PPMS-CANARY", read(os.path.join(priv, "submission.json")))
+        self.assertEqual(out["outputs"]["summary"], os.path.join(priv, "submission_summary.json"))
+        # what locate / stage / attach read: the HIVE copies, where the laptop route --puts them
+        self.assertEqual(out["outputs"]["hive_summary"], os.path.join(self.out_dir, "submission_summary.json"))
+        self.assertEqual(out["outputs"]["hive_record"], os.path.join(self.out_dir, "submission.json"))
+        for name in ("submission_summary.json", "submission.json"):
+            text = read(os.path.join(self.out_dir, name))
+            for bad in ("@", "PPMS-CANARY", "Robin"):
+                self.assertNotIn(bad, text, f"{bad} in {name}")
+        self.assertTrue(load(os.path.join(self.out_dir, "submission_summary.json"))["redacted_for_hive"])
+        self.assertFalse(os.path.exists(os.path.join(self.out_dir, "hive")), "no hive/ on HIVE")
+
+    def test_a_second_fetch_keeps_it_private_and_a_planted_link_is_refused(self):
+        self.fetch()
+        priv = os.path.join(self.out_dir, "private")
+        os.chmod(priv, 0o755)
+        os.chmod(os.path.join(priv, "submission.json"), 0o644)
+        self.fetch()
+        self.assertEqual(stat.S_IMODE(os.stat(priv).st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.join(priv, "submission.json")).st_mode), 0o600)
+        shutil.rmtree(priv)
+        elsewhere = os.path.join(self.tmp, "someone_elses")
+        os.makedirs(elsewhere)
+        os.symlink(elsewhere, priv)
+        rc, out, p = run(["fetch", "807", "--out", self.out_dir],
+                         child_env(self.tmp, self.fake.base, CORE_ON_HIVE="1"))
+        self.assertEqual(rc, 2, p.stderr)
+        self.assertIn("not a folder of this account's", out["error"])
+        self.assertEqual(os.listdir(elsewhere), [], "nothing was written through the link")
+
+    def test_email_draft_and_bioshare_find_the_full_summary_from_the_hive_copy(self):
+        self.fetch()
+        hive_copy = os.path.join(self.out_dir, "submission_summary.json")
+        draft = os.path.join(self.out_dir, "EMAIL_DRAFT.md")
+        env = child_env(self.tmp, self.fake.base, CORE_ON_HIVE="1")
+        rc, js, p = run(["email-draft", "--summary", hive_copy, "--share-url",
+                         "https://bioshare.example/bsx/", "--out", draft], env)
+        self.assertEqual(rc, 0, p.stderr)
+        self.assertIn("To: ada.example@example.org", read(draft))
+        self.assertEqual(stat.S_IMODE(os.stat(draft).st_mode), 0o600, "names and emails, on HIVE")
+        self.assertIn("using the full summary", p.stderr)
+        linked = {"id": 41, "submission": HEX, "link_to_path": SERVER_SHARE + "/",
+                  "url": "https://bioshare.example/bsx/"}
+        self.fake.routes[("GET", SHARES)] = lambda q, b: (200, [linked])
+        rc, js, p = run(["bioshare", "send", "--summary", hive_copy], env)     # a dry run
+        self.assertEqual(rc, 0, p.stderr)
+        self.assertEqual(self.fake.posts(), [])
+        rec = js["recipients"]
+        self.assertEqual(rec["submitter"]["email"], "ada.example@example.org")
+        self.assertEqual(rec["pi"]["email"], "pi.placeholder@example.org")
+        self.assertEqual([c["email"] for c in rec["contacts"]], ["robin.contact@example.org"])
+        rc, js, p = run(["bioshare", "status", "--summary", hive_copy], env)
+        self.assertEqual(rc, 0, p.stderr)
+        self.assertEqual(js["url"], "https://bioshare.example/bsx/")
+
+
+
+@unittest.skipIf(os.name == "nt", "POSIX file modes")
+class TestFullSummaryIsThisSubmissions(unittest.TestCase):
+    """Error-handling review (2.12): with private/ missing, email-draft and bioshare used the HIVE
+    copy -- no addresses -- and the draft said the submitter had none and left the PI out of Cc;
+    and a private/ left by ANOTHER submission in a reused --out folder drafted this submission's
+    email with that one's addresses. Both now stop (exit 2), saying why and what to do."""
+    setUp, tearDown, fetch = TestFetchOnHive.setUp, TestFetchOnHive.tearDown, TestFetchOnHive.fetch
+
+    def draft(self):
+        env = child_env(self.tmp, self.fake.base, CORE_ON_HIVE="1")
+        return run(["email-draft", "--summary", os.path.join(self.out_dir, "submission_summary.json"),
+                    "--share-url", "https://bioshare.example/bsx/",
+                    "--out", os.path.join(self.out_dir, "EMAIL_DRAFT.md")], env)
+
+    def test_no_full_summary_is_a_stop_not_a_draft_without_addresses(self):
+        self.fetch()
+        shutil.rmtree(os.path.join(self.out_dir, "private"))
+        rc, js, p = self.draft()
+        self.assertEqual(rc, 2, p.stderr)
+        self.assertIn("is the HIVE copy, without contact details", js["error"])
+        self.assertIn("step 1c.1", js["hint"])
+        self.assertFalse(os.path.exists(os.path.join(self.out_dir, "EMAIL_DRAFT.md")))
+        env = child_env(self.tmp, self.fake.base, CORE_ON_HIVE="1")
+        rc, js, p = run(["bioshare", "status", "--summary",
+                         os.path.join(self.out_dir, "submission_summary.json")], env)
+        self.assertEqual(rc, 2, p.stderr)
+
+    def test_another_submissions_full_summary_is_refused(self):
+        self.fetch()
+        priv = os.path.join(self.out_dir, "private", "submission_summary.json")
+        other = load(priv)
+        other["id"], other["internal_id"] = "b" * 12, "PROT_0001"
+        with open(priv, "w") as fh:
+            json.dump(other, fh)
+        rc, js, p = self.draft()
+        self.assertEqual(rc, 2, p.stderr)
+        self.assertIn("is another submission's", js["error"])
+        self.assertIn("PROT_0001", js["error"])
+        self.assertFalse(os.path.exists(os.path.join(self.out_dir, "EMAIL_DRAFT.md")))
+
+    def test_the_private_files_are_replaced_whole(self):
+        self.fetch()
+        priv = os.path.join(self.out_dir, "private")
+        os.chmod(os.path.join(priv, "submission.json"), 0o644)
+        self.fetch()
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.join(priv, "submission.json")).st_mode), 0o600)
+        self.assertEqual([n for n in os.listdir(priv) if n.endswith(".tmp")], [])
+
+
+@unittest.skipIf(os.name == "nt", "POSIX file modes")
+class TestFetchFolderPrivateOnHive(unittest.TestCase):
+    """Security review (2.12): on HIVE every home is drwxrwsr-x and the umask 0002, so the fetch
+    folder ~/core/PROT_xxxx and its submission_summary.json / submission.json / samples.tsv (the
+    PI's and submitter's names, the description, sample names, neighbouring submissions) were
+    readable by every HIVE account. A fetch folder in the home is now this account's alone."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = os.path.realpath(self._tmp.name)
+        self.home = os.path.join(self.tmp, "home")
+        os.makedirs(self.home)
+        self.fake = FakeCoreOmics().__enter__()
+        TestFetch.serve(self, self.fake, record())
+        self.core = os.path.join(self.home, "core")
+        self.out_dir = os.path.join(self.core, "PROT_0807")
+
+    def tearDown(self):
+        self.fake.__exit__(None, None, None)
+        self._tmp.cleanup()
+
+    def fetch(self, on_hive="1", out=None, ok=True):
+        rc, js, p = run(["fetch", "807", "--out", out or self.out_dir],
+                        child_env(self.tmp, self.fake.base, CORE_ON_HIVE=on_hive, HOME=self.home))
+        if ok:
+            self.assertEqual(rc, 0, p.stderr)
+        return rc, js, p
+
+    def mode(self, path):
+        return stat.S_IMODE(os.stat(path).st_mode)
+
+    def test_a_new_folder_and_core_are_made_private(self):
+        _, js, _ = self.fetch()
+        self.assertEqual(self.mode(self.core), 0o700)
+        self.assertEqual(self.mode(self.out_dir), 0o700)
+        self.assertTrue(os.path.isfile(os.path.join(self.out_dir, "samples.tsv")))
+        self.assertFalse([w for w in js["warnings"] if "now 700" in w])
+
+    def test_an_open_existing_folder_is_closed_with_a_note(self):
+        os.makedirs(self.out_dir)
+        os.chmod(self.core, 0o775)
+        os.chmod(self.out_dir, 0o775)
+        _, js, p = self.fetch()
+        self.assertEqual(self.mode(self.out_dir), 0o700)
+        self.assertEqual(self.mode(self.core), 0o700)
+        (w,) = [w for w in js["warnings"] if "now 700" in w]
+        self.assertIn("was mode 775 -- readable by other HIVE accounts -- and is now 700", w)
+        self.assertIn("now 700", p.stderr)
+
+    def run_as(self, args, on_hive="1"):
+        return run(args, child_env(self.tmp, self.fake.base, CORE_ON_HIVE=on_hive, HOME=self.home))
+
+    def test_an_existing_open_core_is_made_private_by_any_subcommand_on_hive(self):
+        """An earlier fetch, or a staff member's own workaround, left ~/core (and a file in it)
+        readable by every HIVE account: the next core_submission run on HIVE closes it, with one
+        line, and nothing for the staff member to do."""
+        os.makedirs(os.path.join(self.core, "PROT_0000"))
+        with open(os.path.join(self.core, "PROT_0000", "submission_summary.json"), "w") as fh:
+            fh.write("{}")
+        os.chmod(self.core, 0o2775)
+        rc, js, p = self.run_as(["locate", "--summary", os.path.join(self.core, "PROT_0000",
+                                                                       "submission_summary.json"),
+                                 "--out", os.path.join(self.core, "PROT_0000")])
+        self.assertEqual(self.mode(self.core), 0o700)
+        self.assertEqual(p.stderr.count("made ~/core private: it holds CoreOmics records"), 1)
+        rc, js, p = self.run_as(["check", "--json"])
+        self.assertNotIn("made ~/core private", p.stderr, "said once, when it changed something")
+
+    def test_a_core_that_is_a_link_another_s_or_off_hive_is_never_touched(self):
+        group = os.path.join(self.tmp, "group_core")
+        os.makedirs(group)
+        os.chmod(group, 0o2775)
+        os.symlink(group, self.core)
+        _, _, p = self.run_as(["check", "--json"])
+        self.assertEqual(self.mode(group), 0o2775)
+        self.assertNotIn("made ~/core private", p.stderr)
+        os.remove(self.core)
+        os.makedirs(self.core)
+        os.chmod(self.core, 0o775)
+        self.run_as(["check", "--json"], on_hive="0")
+        self.assertEqual(self.mode(self.core), 0o775)
+        real_getuid = os.getuid
+        with mock.patch.dict(os.environ, {"HOME": self.home}), \
+                mock.patch.object(cs.os, "getuid", lambda: real_getuid() + 1):
+            self.assertEqual(cs.private_core_home(), "")
+        self.assertEqual(self.mode(self.core), 0o775)
+
+    def test_off_hive_and_outside_the_home_nothing_changes(self):
+        os.makedirs(self.out_dir)
+        os.chmod(self.out_dir, 0o775)
+        self.fetch(on_hive="0")
+        self.assertEqual(self.mode(self.out_dir), 0o775)
+        group = os.path.join(self.tmp, "group", "PROT_0807")     # the Core's storage, not the home
+        os.makedirs(group)
+        os.chmod(group, 0o2775)
+        self.fetch(out=group)
+        self.assertEqual(self.mode(group), 0o2775)
+
+    def test_an_entry_of_another_account_is_refused(self):
+        """A group member can add entries to a HIVE home. The record must never be written into
+        or through one: the owner check, run here as if another account owned it."""
+        os.makedirs(self.out_dir)
+        real_getuid = os.getuid
+        with mock.patch.dict(os.environ, {"HOME": self.home}), \
+                mock.patch.object(cs.os, "getuid", lambda: real_getuid() + 1):
+            with self.assertRaises(cs.Stop) as e:
+                cs.private_home_folder(self.out_dir)
+        self.assertIn("is not a folder of this account's", e.exception.payload["error"])
+
+    def test_this_account_s_own_link_out_of_the_home_is_followed_and_left_as_it_is(self):
+        os.makedirs(self.core)
+        group = os.path.join(self.tmp, "group", "PROT_0807")
+        os.makedirs(group)
+        os.chmod(group, 0o2775)
+        os.symlink(group, self.out_dir)
+        self.fetch()
+        self.assertTrue(os.path.isfile(os.path.join(group, "samples.tsv")))
+        self.assertEqual(self.mode(group), 0o2775)
 
 
 if __name__ == "__main__":

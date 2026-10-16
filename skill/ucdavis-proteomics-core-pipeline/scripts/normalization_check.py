@@ -59,6 +59,13 @@ differently from a classic IP?); run_de.R copies it into de_provenance.json
   # a DE from before 2.10 (no check record) that staff say stands: lets the delivery through
   python3 normalization_check.py ack-legacy --session <S> --by <their HIVE login> --note "<why>"
 
+The two check DEs and the final DE carry the same design flags (--numeric-covariates, --block,
+--block-effect, --block-scope, --contrasts; step8_commands prints them). run() records the design
+both check DEs were fitted with (run_de.R's design_request) as `check_design`, and refuses DEs
+fitted with different designs or on another report or conditions file; gate() refuses a final DE
+whose method, formula, numeric covariates or block differ (other contrasts: a warning). A check
+from before 2.12 records no design: the final DE's design is then said to be NOT CHECKED.
+
 MaxLFQ has no non-normalised protein quantity in a normal report (PG.MaxLFQ is normalised unless
 the search ran with --no-norm): its raw DE reads a report searched with --no-norm, given to the
 check as --report-raw; the B1-B4 checks still read --report. dpc needs no second search.
@@ -516,21 +523,156 @@ def check_dir(session):
     return os.path.join(os.path.abspath(session), "output", "norm_check")
 
 
-def step8_commands(report, conditions, session, method="dpc", scripts=None, report_raw=None):
+# The design a DE was fitted with, as run_de.R records it before fitting (de_provenance.json
+# `design_request`). A final DE must share these with the two DEs its check compared: another
+# method, formula, numeric covariate or block is another model, whose volcano the check never saw.
+# Contrasts may differ (a subset, another order) -- warned, not refused.
+DESIGN_KEYS = ("method", "formula", "numeric_covariates", "block_column", "block_effect",
+               "block_scope")
+
+
+def _design_value(d, k):
+    v = (d or {}).get(k)
+    return sorted(v) if k == "numeric_covariates" else v
+
+
+def design_diff(a, b, keys=DESIGN_KEYS):
+    """['formula: <a's> here, <b's> there', ...] for each design field that differs."""
+    return [f"{k}: {_design_value(a, k)!r} vs {_design_value(b, k)!r}" for k in keys
+            if _design_value(a, k) != _design_value(b, k)]
+
+
+def describe_design(d):
+    """One line: the formula, method, numeric covariates and block of a design_request."""
+    if not isinstance(d, dict):
+        return "not recorded"
+    bits = [f"method {d.get('method')}"]
+    if d.get("numeric_covariates"):
+        bits.append("numeric covariates " + ", ".join(d["numeric_covariates"]))
+    if d.get("block_column"):
+        bits.append(f"block {d['block_column']} ({d.get('block_effect')}, scope {d.get('block_scope')})")
+    return f"{d.get('formula')} ({'; '.join(bits)})"
+
+
+def design_flags(d):
+    """The design flags a DE was given (design_request `flags`), as one shell-quoted string."""
+    import shlex
+    return " ".join(shlex.quote(str(x)) for x in ((d or {}).get("flags") or []))
+
+
+def load_design(path):
+    """run_de.R's --design-json file (its design_request) -> dict, or None for no file."""
+    if not path:
+        return None
+    with open(path, encoding="utf-8") as fh:
+        d = json.load(fh)
+    if not isinstance(d, dict):
+        raise ValueError(f"{path} is not a design record")
+    return d
+
+
+def check_design_of(norm, raw, report_sha, report_raw_sha, conditions_sha):
+    """The design the check's DEs were fitted with, and the files they read -> the record's
+    `check_design`. Raises ValueError (the check refuses) when the two DEs were fitted with
+    different designs, or read another report or conditions file than the check is made on: their
+    volcanoes would not be about the data or the model the decision covers. A DE from before 2.12
+    records no design: status "not_recorded", and gate() then says the final DE's design was NOT
+    CHECKED."""
+    des = [(k, d["prov"]) for k, d in (("normalised", norm), ("raw", raw)) if d]
+    files, unverified = {}, []
+    for k, prov in des:
+        want_rep = report_raw_sha if k == "raw" and report_raw_sha else report_sha
+        for what, got, want, flag in (("report", prov.get("input_sha256"), want_rep,
+                                       "--report-raw" if k == "raw" and report_raw_sha else "--report"),
+                                      ("conditions", prov.get("metadata_sha256"), conditions_sha,
+                                       "--conditions")):
+            if not got:
+                unverified.append(f"the {k} DE's {what}")
+                continue
+            if want and got != want:
+                raise ValueError(
+                    f"REFUSED: the {k} check DE ({prov.get('input') if what == 'report' else prov.get('metadata')}) "
+                    f"read another {what} than the check's {flag} (sha256 differs). Run both check DEs "
+                    f"on the report and conditions the check is made on (SKILL.md step 8's commands), "
+                    f"then the check.")
+        files[k] = {"input_sha256": prov.get("input_sha256"),
+                    "metadata_sha256": prov.get("metadata_sha256")}
+    reqs = {k: prov.get("design_request") for k, prov in des}
+    missing = [k for k, r in reqs.items() if not isinstance(r, dict)]
+    if missing or not reqs:
+        return {"status": "not_recorded", "files": files,
+                "note": (f"the {' and '.join(missing)} check DE(s) record no design (run_de.R "
+                         f"before 2.12)" if missing else "no check DE could be read")}
+    if len(reqs) == 2:
+        diffs = design_diff(reqs["normalised"], reqs["raw"], DESIGN_KEYS + ("contrasts",))
+        if diffs:
+            raise ValueError(
+                "REFUSED: the two check DEs were fitted with different designs (normalised vs raw: "
+                + "; ".join(diffs) + "). They must differ only in --quantities: run both again with "
+                "the same design flags (" + (design_flags(reqs["normalised"]) or "none") + " / "
+                + (design_flags(reqs["raw"]) or "none") + "), then the check.")
+    d = next(iter(reqs.values()))
+    rec = {"status": "recorded", **{k: d.get(k) for k in DESIGN_KEYS + ("contrasts", "flags")},
+           "files": files}
+    if unverified:
+        rec["files_unverified"] = unverified
+    return rec
+
+
+def design_check(rec, design):
+    """A final DE's design (run_de.R's design_request) against the check's `check_design` ->
+    {"match", "warnings", "refusal"}. Another method, formula, numeric covariate or block is
+    refused; other contrasts are a warning; a check that recorded no design is NOT CHECKED, said."""
+    if design is None:
+        return {"match": "not compared (no design given)", "warnings": [], "refusal": None}
+    cd = rec.get("check_design")
+    if not isinstance(cd, dict) or cd.get("status") != "recorded":
+        why = ((cd or {}).get("note") if isinstance(cd, dict) else None) or \
+            "the check was made before 2.12, when it did not record its DEs' design"
+        return {"match": "not recorded", "refusal": None, "warnings": [
+            f"the design this check's two DEs were fitted with is NOT RECORDED ({why}), so this "
+            f"DE's design ({describe_design(design)}) was NOT CHECKED against it. To check it, run "
+            f"step 8's check again with this DE's design flags (both check DEs, then "
+            f"normalization_check.py run) and record the decision again."]}
+    diffs = design_diff(cd, design)
+    if diffs:
+        return {"match": "differs", "warnings": [], "refusal": (
+            f"REFUSED: this DE's design differs from the one the normalisation check's two DEs "
+            f"were fitted with ({'; '.join(diffs)}). The check's volcanoes and its decision are "
+            f"about that model, not this one. Run this DE with the check's design ("
+            f"{design_flags(cd) or 'no design flags'}), or run the check again with this design "
+            f"({design_flags(design) or 'no design flags'}: both check DEs, then "
+            f"normalization_check.py run) and decide again.")}
+    want, got = list(cd.get("contrasts") or []), list(design.get("contrasts") or [])
+    if want != got:
+        extra = [c for c in got if c not in want]
+        return {"match": "matches; contrasts differ", "refusal": None, "warnings": [
+            f"this DE's contrasts ({', '.join(got)}) differ from those the check's volcanoes were "
+            f"drawn for ({', '.join(want)})"
+            + (f": the check did not look at {', '.join(extra)}" if extra else "")
+            + ". The decision stands for the same model; say so if it matters."]}
+    return {"match": "matches", "warnings": [], "refusal": None}
+
+
+def step8_commands(report, conditions, session, method="dpc", scripts=None, report_raw=None,
+                   design=None):
     """Step 8 for a session, as commands: the two DEs the check compares (--check-input), the
     check, and the final DE held to its decision. THE one wording -- the chain's recovery step
     (diann_parallel.py --next) and run_de.R's refusal both print it. -> {"check", "final",
     "next"}: `next` runs the first three (the final DE waits for the check's answer).
     `report_raw`: MaxLFQ's non-normalised DE reads a report searched with --no-norm (the module
-    docstring); the check is told so with --report-raw."""
+    docstring); the check is told so with --report-raw. `design`: the asking DE's design_request
+    -- its design flags (--numeric-covariates, --block ..., --contrasts) are carried by all three
+    DEs, which the check and the gate then hold to one design."""
     import shlex
     q = shlex.quote
     sc = scripts or HERE
     nd = check_dir(session)
+    flags = design_flags(design)
 
     def de(rep):
         return (f"Rscript {q(os.path.join(sc, 'run_de.R'))} --input {q(rep)} --metadata "
-                f"{q(conditions)} --method {method}")
+                f"{q(conditions)} --method {method}" + (f" {flags}" if flags else ""))
     check = [f"{de(report_raw if k == et.RAW and report_raw else report)} --quantities {k} "
              f"--check-input --outdir {q(os.path.join(nd, k))}" for k in (et.NORMALISED, et.RAW)]
     check.append(f"python3 {q(os.path.join(sc, 'normalization_check.py'))} run --report "
@@ -555,7 +697,7 @@ MAXLFQ_RAW_NOTE = (
     "--report-raw. SKILL.md step 8.)")
 
 
-def required(report, conditions, method="dpc"):
+def required(report, conditions, method="dpc", design=None):
     """Must a DE of these files be held to a normalisation check? Yes when they belong to a session
     that records an experiment type (experiment_type.session_of): that type has a default the DE
     must not override silently. -> {"required", "session", "type", "default", "message"}."""
@@ -565,7 +707,7 @@ def required(report, conditions, method="dpc"):
         return {"required": False, "session": session, "type": None, "default": None,
                 "message": None}
     d = et.default_for(rec["type"])
-    cmds = step8_commands(report, conditions, session, method)
+    cmds = step8_commands(report, conditions, session, method, design=design)
     return {"required": True, "session": session, "type": rec["type"],
             "default": d["quantities"],
             "message": (f"REFUSED: this session records the experiment type {rec['label']} "
@@ -751,6 +893,11 @@ def run(report, conditions, de_norm, de_raw, session=None, bait=None, out=None, 
     design = et.pulldown_design(rec_type, sorted(set(groups.values())), contrasts)
     bait, bait_source, bait_cands = et.bait_for_check(session, bait, rec_type)
     data, why_data = read_report(report, set(groups))
+    # the files and the design the two DEs used: the same report, conditions and design, or no
+    # check (check_design_of refuses) -- gate() then holds the final DE to that design
+    report_sha, conditions_sha = sha256(report), sha256(conditions)
+    report_raw_sha = sha256(report_raw) if report_raw else None
+    check_design = check_design_of(norm, raw, report_sha, report_raw_sha, conditions_sha)
     checks = {"factor_confound": factor_confound(data, groups),
               "raw_shift": raw_shift(data, groups, contrasts),
               "id_gap": id_gap(data, groups),
@@ -765,10 +912,13 @@ def run(report, conditions, de_norm, de_raw, session=None, bait=None, out=None, 
         "checked_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "report": os.path.abspath(report), "conditions": os.path.abspath(conditions),
         # what the decision is about: gate() refuses a DE of any other report or design
-        "report_sha256": sha256(report), "conditions_sha256": sha256(conditions),
+        "report_sha256": report_sha, "conditions_sha256": conditions_sha,
         # the non-normalised DE's own report, when it is another one (MaxLFQ: --no-norm)
         "report_raw": os.path.abspath(report_raw) if report_raw else None,
-        "report_raw_sha256": sha256(report_raw) if report_raw else None,
+        "report_raw_sha256": report_raw_sha,
+        # the design both check DEs were fitted with (run_de.R design_request): the final DE's
+        # must match it (gate, design_check)
+        "check_design": check_design,
         # where decide records who decided (STAFF_RECORD in its logs/)
         "session": os.path.abspath(session) if session else None,
         "experiment_type": {"type": (rec_type or {}).get("type"),
@@ -934,6 +1084,13 @@ def summary_md(rec):
         L.append(f"  - {t}")
     if rec.get("design_note"):
         L += ["", f"- **Design:** {rec['design_note']}"]
+    cd = rec.get("check_design") if isinstance(rec.get("check_design"), dict) else {}
+    L += ["", "- **Model of the two DEs compared:** "
+          + (describe_design(cd) + (f"; contrasts {', '.join(cd.get('contrasts') or [])}"
+                                    if cd.get("contrasts") else "")
+             if cd.get("status") == "recorded" else
+             f"NOT RECORDED ({cd.get('note') or 'a check from before 2.12'}). The final DE's design "
+             f"cannot be checked against it.")]
     c = rec["checks"]
     fc = c["factor_confound"]
     L += ["", "## Checks", "",
@@ -1054,9 +1211,10 @@ def decide(path, quantities, by, reason):
     return rec
 
 
-def gate(path, quantities, report=None, conditions=None):
+def gate(path, quantities, report=None, conditions=None, design=None):
     """(ok, message, record) for run_de.R: the DE may read only the decided quantities, of the
-    report and design the decision was made on (their sha256, recorded by run())."""
+    report and conditions the decision was made on (their sha256, recorded by run()), fitted with
+    the design the check's DEs used (`design`: run_de.R's design_request; design_check)."""
     rec = load(path)
     # MaxLFQ's non-normalised DE reads its own (--no-norm) report: a raw DE is held to that one
     rkey = "report_raw" if quantities == et.RAW and rec.get("report_raw_sha256") else "report"
@@ -1073,6 +1231,9 @@ def gate(path, quantities, report=None, conditions=None):
                            + f", not on this DE's {what} {given} (sha256 differs). Run the check "
                            "again on this DE's report and conditions -- a decision about one "
                            "report never authorises another."), rec
+    dc = design_check(rec, design)
+    if dc["refusal"]:
+        return False, dc["refusal"], rec
     d = rec.get("decision")
     if not d:
         why = "; ".join(rec.get("trips") or []) or rec.get("needs_decision_why") or "undecided"
@@ -1085,7 +1246,8 @@ def gate(path, quantities, report=None, conditions=None):
                        f"with --quantities {d['quantities']}, or record a new decision -- never a "
                        "silent switch."), rec
     return True, (f"{quantities} quantities, as decided ({d['by']}); data check "
-                  + ("agreed" if not rec["tripped"] else "tripped: " + "; ".join(rec["trips"]))), rec
+                  + ("agreed" if not rec["tripped"] else "tripped: " + "; ".join(rec["trips"]))
+                  + f"; design {dc['match']}"), rec
 
 
 def main():
@@ -1120,6 +1282,8 @@ def main():
     g.add_argument("--quantities", required=True)
     g.add_argument("--report", help="the DE's --input: must be the report the check was made on")
     g.add_argument("--conditions", help="the DE's --metadata: must be the check's conditions")
+    g.add_argument("--design-json", help="the DE's design (run_de.R design_request): must be the "
+                                         "design the check's DEs were fitted with")
     nn = sub.add_parser("no-norm", help="did the search behind a report run with --no-norm, by "
                                         "its provenance? (run_de.R's MaxLFQ)")
     nn.add_argument("--report", required=True)
@@ -1128,6 +1292,8 @@ def main():
     rq.add_argument("--input", required=True)
     rq.add_argument("--metadata", required=True)
     rq.add_argument("--method", default="dpc")
+    rq.add_argument("--design-json", help="the DE's design (run_de.R design_request): the printed "
+                                          "step-8 commands carry its design flags")
     a = ap.parse_args()
     try:
         if a.cmd == "run":
@@ -1157,10 +1323,13 @@ def main():
         elif a.cmd == "no-norm":
             print(json.dumps(searched_no_norm(a.report, a.search_dir)))
         elif a.cmd == "required":
-            print(json.dumps(required(a.input, a.metadata, a.method)))
+            print(json.dumps(required(a.input, a.metadata, a.method, load_design(a.design_json))))
         else:
-            ok, msg, rec = gate(a.check, a.quantities, a.report, a.conditions)
-            print(json.dumps({"ok": ok, "message": msg, "record": rec}))
+            design = load_design(a.design_json)
+            ok, msg, rec = gate(a.check, a.quantities, a.report, a.conditions, design)
+            dc = design_check(rec, design)
+            print(json.dumps({"ok": ok, "message": msg, "record": rec,
+                              "design_match": dc["match"], "warnings": dc["warnings"]}))
     except (ValueError, OSError) as e:
         sys.exit(f"[normalization_check] {e}")
     return 0

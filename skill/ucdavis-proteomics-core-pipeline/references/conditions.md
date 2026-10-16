@@ -63,15 +63,33 @@ the proposal) or `--replicate-labels keep` (the labels are the groups). The same
 to `--mapping-json` intent, which is how `core_submission.py conditions` hands CoreOmics
 condition names to `--map`.
 
+## A run whose file name holds `--`
+DIA-NN cannot be given such a path, so `run_search.py --rename-dashed-runs` searches the run
+under a new name, each run of dashes made one (`x_DIA--asp3_S3` → `x_DIA-asp3_S3`), and that is
+its `Run` in the report. `detect_acquisition.py` lists these runs at step 2 (`dashed_run_names`).
+Build the design with the same names: `--rename-dashed-runs` on `--list-runs`, `--map` and
+`--emit-template` (with `--from-dir` or `--runs`; a `--from-report` already has them), or on
+`core_submission.py conditions`. Matching ignores punctuation, so a user's file naming the raw
+name still finds the run. `--validate --against <report>` names any row that still holds the raw
+name (`x_DIA--asp3_S3 -> x_DIA-asp3_S3`).
+
 ## How mapping works (`collect_conditions.py --map`)
 Matching is grounded in the actual run names (never guessed):
 1. exact match (case-insensitive, punctuation-insensitive), else
-2. whole words of the run name, in order (`LRS-96` names `..._DIA-LRS-96_S3`), or the run
-   name's words inside the identifier (a full file name names its run). Never a bare substring:
-   a word with digits matches only a whole word (`KG1` never names `KG12`, `A1` never `A10`); a
-   word of letters names that word plus digits (`Ctrl` names `Ctrl1..3`). **Never the plate
-   position**: the slot-well words of a run name (`_S3-A1_`) say where a tube sat on the Core's
-   plate, so a sample labelled `A1` does not match the run in well A1.
+2. the identifier as a whole **token** of the run name (`LRS-96` names `..._DIA-LRS-96_S3`), or
+   the run name inside the identifier (a full file name names its run). `-`, `_` and spaces are
+   token boundaries, so a delimiter in the identifier counts: `DIA-XY1_` names `DIA-XY1_S3…`
+   and never `DIA-XY10_…` (2.9.1 dropped the `_` and matched XY10–XY19 too). A separator may
+   come or go only where letters meet digits (`XY-1` names `XY1`, `LRS96` names `LRS-96`). This
+   is the same rule `core_submission.py locate` matches sample ids with. Only when no run carries
+   the identifier as a token:
+3. its words as whole words of the run name, where a word of letters also names that word plus
+   digits (`Ctrl` names `Ctrl1..3`, a prefix). A word with digits always matches only a whole
+   word (`KG1` never names `KG12`, `A1` never `A10`).
+
+Never a bare substring, and **never the plate position**: the slot-well words of a run name
+(`_S3-A1_`) say where a tube sat on the Core's plate, so a sample labelled `A1` does not match
+the run in well A1.
 
 It then reports, for confirmation:
 - `unassigned_runs` — a raw file no condition matched. **Blocking**: every run
@@ -97,6 +115,12 @@ The agent confirms each with the user, finalizes `conditions.csv`, then runs
 ## The finished metadata
 `conditions.csv` columns: `File.Name,Group[,Batch,Covariate1,Covariate2][,<block column>]`.
 
+**Is a covariate a measurement?** `run_de.R` fits every covariate as a factor (one level per
+value) unless told otherwise. When `Covariate1`/`Covariate2` holds a continuous measurement (a
+bait intensity, an age, a run depth), ask the user, and run DE with `--numeric-covariates
+Covariate1` (`references/de-analysis.md`, "Continuous covariates"). Never decide it from the
+values: a batch numbered 1/2/3 is a factor. A numeric covariate needs a number for every sample.
+
 **Samples from the same animal / patient?** (five IPs from one mouse brain, paired
 before/after samples.) Ask. If so, keep that unit in its own column under its own name
 (`Mouse`, `Patient`) and run DE with `--block Mouse` (`references/de-analysis.md`,
@@ -111,7 +135,13 @@ subjects or were confirmed (`subject_confirmed`). Ambiguities add
 prints a note when a column recurs across groups and no `--block` was given.
 `File.Name` must equal the Run names in the search report. `--validate` checks
 column presence, blank groups, singleton groups, and that the report runs and
-metadata rows line up exactly.
+metadata rows line up exactly. A report run the user decided to leave out of the DE
+(a re-run, a failed injection) has no row; record it with `--validate ... --against
+<report> --exclude <run> --reason '<why>'` (one `--reason` right after each
+`--exclude`). It then passes and goes into `<csv>.decisions.json` under
+`excluded_runs`; `run_de.R` carries the reasons into `de_provenance.json`
+(`runs_left_out`), and the Methods and the report list them. An excluded run must be
+in the report and must not have a row. Any other missing run still fails.
 
 ## Why deterministic matching (not pure LLM)
 Filename↔condition matching is where an LLM can hallucinate (assigning a group to a

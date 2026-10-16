@@ -22,7 +22,7 @@ trypsin/LFQ default:
 | Orbitrap by resolution, per level | 240k→4, 120k→7, 60k→10, 30k→15 ppm; between tiers interpolated (tagged) | both MS1 and MS2 resolution known and inside 30k–240k |
 | Bruker timsTOF (dia-PASEF / ddaPASEF) | 15 / 15 ppm | name contains "tims" |
 | SCIEX TripleTOF / ZenoTOF | 20 / 20 ppm | name contains tripletof/zenotof/sciex |
-| Orbitrap, **one level outside 30k–240k** (e.g. 15k MS2), the other inside | that level **measured with DIA-NN before the search**, refused unless it lands in a plausible band (MS2 3–30, MS1 1.5–25 ppm) over at least 2 agreeing runs, then **floored at the SOP** (`max(measured, SOP)`, `estimate_params.SOP_MASS_ACC` = MS2 20 / MS1 7 ppm): the measurement is used only where it is wider. The level with a tier keeps it and is never floored (both flags omitted from the cfg, plan `measure_with_diann`) | both resolutions known, one outside the table |
+| Orbitrap, **one level outside 30k–240k** (e.g. 15k MS2), the other inside | that level **measured with DIA-NN before the search**, refused unless it lands in a plausible band (MS2 3–30, MS1 1.5–25 ppm) over at least 2 agreeing runs (a one-file search: its one run; runs that disagree only warn when the median is at or below the SOP and no run is above 1.5× it, the SOP then being pinned either way), then **floored at the SOP** (`max(measured, SOP)`, `estimate_params.SOP_MASS_ACC` = MS2 20 / MS1 7 ppm): the measurement is used only where it is wider. The level with a tier keeps it and is never floored (both flags omitted from the cfg, plan `measure_with_diann`) | both resolutions known, one outside the table |
 | Orbitrap, **resolution unknown** | **automatic calibration** — *not* measured: with no resolution both levels would be, and a measured MS1 is what DIA-NN warns about. Pass `--ms1-resolution`/`--ms2-resolution`, or pin the two flags | generic orbitrap names with no resolution — since 2.5.1 only when step 2 could not read it from the `.raw` scan trailer (see below) or the input is an mzML without `MS:1000800` |
 | Instrument not detected | **automatic calibration** | fallback |
 
@@ -119,6 +119,57 @@ Trypsin/P, 1–2 missed cleavages, peptide length 7–30, charge 2–4, fixed
 carbamidomethyl (C). Variable mods are **off by default** — the DIA-NN README
 notes variable mods don't improve depth for relative quant; pass `var_mods: "ox"`
 in the workflow (or `--var-mods ox`) to add Ox(M).
+
+## Cysteine: which alkylating agent, or none (`--cys-alkylation`)
+Each alkylating agent leaves its own fixed modification on C, and a search for the wrong one (or
+for one at all, on samples never alkylated) identifies almost no cysteine peptide: three on-bead
+Core searches had 0.03–0.5% of identified peptides with a C, against 7.8% on an S-Trap prep with
+DTT/IAA (staff reports, 2026-10-09). The choice is its own option (`--overrides` cannot remove a
+flag), one map in `estimate_params.CYS_REAGENTS`; masses and names are UniMod's (unimod.org,
+read 2026-10-15):
+
+| `--cys-alkylation` | agent | fixed on C (UniMod) | DIA-NN cfg | Sage `static_mods` |
+|---|---|---|---|---|
+| not given | assumed iodo-/chloroacetamide, **DEFAULT** | Carbamidomethyl (4) +57.021464 | `--unimod4` | `{"C": 57.0215}` |
+| `cam` | iodoacetamide or chloroacetamide | Carbamidomethyl (4) +57.021464 | `--unimod4` | `{"C": 57.0215}` |
+| `none` | not reduced and alkylated | — | (nothing) | `{}` |
+| `propionamide` | acrylamide | Propionamide (24) +71.037114 | `--fixed-mod UniMod:24,71.037114,C` | `{"C": 71.037114}` |
+| `nem` | N-ethylmaleimide | Nethylmaleimide (108) +125.047679 | `--fixed-mod UniMod:108,125.047679,C` | `{"C": 125.047679}` |
+| `carboxymethyl` | iodoacetic acid | Carboxymethyl (6) +58.005479 | `--fixed-mod UniMod:6,58.005479,C` | `{"C": 58.005479}` |
+| `mmts` | S-methyl methanethiosulfonate | Methylthio (39) +45.987721 | `--fixed-mod UniMod:39,45.987721,C` | `{"C": 45.987721}` |
+| `pyridylethyl` | 4-vinylpyridine | Pyridylethyl (31) +105.057849 | `--fixed-mod UniMod:31,105.057849,C` | `{"C": 105.057849}` |
+
+DIA-NN's `--fixed-mod [name],[mass],[sites]` (README) applies the modification in the FASTA
+digest, so the predicted library carries it; how well DIA-NN's predictor handles a modification
+other than carbamidomethyl is not measured here. FragPipe (`make_presets.py --cys-alkylation`) sets
+MSFragger's fixed C row to the agent's mass (0 for `none`); Radiant's DIA-NN library is predicted
+with the same DIA-NN flags (`run_search.py`, `radiant_parallel.py`, `make_radiant_library.py`,
+which reuses a library only when it was built with the same choice).
+
+SKILL.md step 3 asks only for an enrichment experiment (IP / pull-down / proximity labelling, or
+an on-bead digest), and then which agent. `make_methods.py` lists the fixed C modification only
+when the parameters fix it, with `none` says cysteine was searched unmodified because the samples
+were not reduced and alkylated, and with another agent names it. `sample_quality.py --report`
+warns when a fixed C modification was searched and under 1% of the identified precursors hold a C
+(`sample_quality.CYS_MIN_FRACTION`), pooled **or in any run** with at least 100 identified
+precursors (`CYS_MIN_PRECURSORS_RUN`) -- a cohort half of whose samples were never alkylated stays
+above 1% pooled. It names the causes and fixes: not alkylated (`none`), alkylated with another
+agent than searched (the matching choice), or a protein mix naturally poor in cysteine (histone
+or collagen-rich preps), which can fall under 1% though it was alkylated.
+
+## CPU-hours a search reserves (`cpu_hours_reserved`)
+Every search that writes job scripts states the most CPU-hours it can use: for each job it submits,
+CPUs per task × time limit (hours) × array tasks, summed (`scripts/cpu_hours.py`, the one rule),
+read from the `#SBATCH` lines actually written. It is an **upper bound** -- a job that finishes
+early uses less. `run_search.py` prints it (`[run_search] cpu_hours_reserved: …` and
+`cpu_hours_reserved` in its JSON and in `search_provenance.json`) for the single-shot, two-job,
+5-step chain, Radiant and FragPipe routes; `diann_parallel.py` and `radiant_parallel.py` print it
+in their JSON; each `submit.sh` has it in a header comment. `gpu_hours_reserved` sits beside it,
+by the same rule from the GPU lines (`--gres=gpu…`, `--gpus`, `--gpus-per-task`,
+`--gpus-per-node`): 0 today, since no route of the skill asks for a GPU. Every job script the skill
+writes carries an `#SBATCH --time`, so for a SLURM job neither figure is null
+(`tests/test_cpu_hours.py` checks every generator). The Core board approves a request under
+10,000 CPU- or GPU-hours automatically and sends 10,000 or more to a person.
 
 ## Provenance (DE-LIMP rule #2)
 Every emitted value is tagged in the `rationale`:

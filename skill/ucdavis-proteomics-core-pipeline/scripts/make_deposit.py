@@ -140,6 +140,9 @@ class Manifest:
 
     def __init__(self):
         self.lines = []
+        # what the agent must see and the zip must not carry (build warnings name server paths):
+        # session.py finalize adds it to the JSON it prints, never to MANIFEST.txt
+        self.for_agent = {}
 
     def ok(self, name, note="", elapsed=None):
         t = f" ({elapsed:.1f}s)" if elapsed is not None else ""
@@ -829,12 +832,15 @@ def write_prep_script(f, out, rows):
     bad = [i for i in items if "\t" in i[1] or "\n" in i[1]]
     if bad:
         raise Skip(f"a path contains a tab/newline: {bad[0][1]!r}")
+    if re.search(r'["\n]', out):
+        raise Skip(f"the package folder holds a quote or a line break, which the job's #SBATCH "
+                   f"--output cannot carry: {out!r}")
     qlines, qsrc = queue_lines()
     skill_ver = skill_version()
     listing = "\n".join("\t".join(i) for i in items)
     script = f"""#!/bin/bash -l
 #SBATCH --job-name=deposit_prep
-#SBATCH --output={out}/prepare_upload_%j.log
+#SBATCH --output="{out}/prepare_upload_%j.log"
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=8G
 #SBATCH --time=24:00:00
@@ -937,11 +943,12 @@ echo "Globus submission (the PRIDE Submission Tool writes its own)."
 [ "$missing" -eq 0 ]
 """
     path = os.path.join(out, "prepare_upload.sbatch")
-    # newline="\n": text mode on Windows writes CRLF, and sbatch refuses the script ("Batch script
-    # contains DOS line breaks").
-    with open(path, "w", encoding="utf-8", newline="\n") as fh:
-        fh.write(script)
-    os.chmod(path, 0o755)
+    # safe_write.write_file: never through a planted link, and "\n" line ends on every platform
+    # (text mode on Windows writes CRLF, and sbatch refuses the script: "Batch script contains DOS
+    # line breaks"). The log path above is double-quoted: an unquoted space makes sbatch refuse the
+    # script ("Invalid directive"; HIVE, 2026-10-15).
+    from safe_write import write_file
+    write_file(path, script, 0o755)
     n_dir = sum(1 for i in items if i[0] == "dir")
     return f"{len(items)} file(s), {n_dir} .d run(s) to archive; queue: {qsrc}"
 
@@ -1419,6 +1426,63 @@ def _run(cmd, what):
     return r
 
 
+def methods_build_warnings(r, man, md):
+    """make_methods.py's database_build_warnings (its printed JSON): kept out of methods.md, so a
+    Methods built here would otherwise drop them. Printed on stderr and handed to the agent
+    (man.for_agent -> finalize's JSON); the MANIFEST line gets only their count. -> that note."""
+    try:
+        warns = [str(w) for w in json.loads(r.stdout or "{}").get("database_build_warnings") or []]
+    except (ValueError, AttributeError) as e:
+        # never a silent "none": the warnings are unknown, and the agent is told so
+        why = (f"make_methods.py's output could not be read ({type(e).__name__}), so whether the "
+               f"database has build warnings is not known: run make_methods.py again and read its "
+               f"database_build_warnings")
+        man.for_agent.setdefault("database_build_warnings_unknown", []).append(why)
+        print(f"[make_deposit] {why}", file=sys.stderr)
+        return "; " + why
+    if not warns:
+        return ""
+    man.for_agent.setdefault("database_build_warnings", []).extend(warns)
+    for w in warns:
+        print(f"[make_deposit] database build warning (not in {os.path.basename(md)}; tell the "
+              f"user): {w}", file=sys.stderr)
+    return (f"; {len(warns)} database build warning{'s' if len(warns) != 1 else ''} left out of "
+            f"the Methods, for you to tell the user (stderr; finalize's database_build_warnings)")
+
+
+# The block make_methods.py before 2.12 put into methods.md: build warnings, with server paths
+OLD_WARNINGS_BLOCK = "Database build warnings (resolve before publication)"
+
+
+def scrub_kept_methods(md, man):
+    """A methods.md kept as written (it may be hand-polished) still goes to the client: every
+    server path in it is cut to its file name (make_methods.client_text, each cut on stderr), and
+    an older make_methods.py's build-warnings block is pointed out for removal -- the agent's job,
+    since only a person can resolve those warnings. -> the note for the MANIFEST line."""
+    with open(md, encoding="utf-8") as fh:
+        text = fh.read()
+    new, cuts = mm.client_text(text)
+    note = ""
+    if cuts:
+        tmp = md + ".part"
+        with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(new)
+        os.replace(tmp, md)
+        for before, after in cuts:
+            print(f"[make_deposit] a file path cut to its name in {os.path.basename(md)} (a server "
+                  f"path is not for the client): {before} -> {after}", file=sys.stderr)
+        note += (f"; {len(cuts)} file path{'s' if len(cuts) != 1 else ''} cut to "
+                 f"{'their names' if len(cuts) != 1 else 'its name'} (stderr)")
+    if OLD_WARNINGS_BLOCK in new:
+        why = (f"{os.path.basename(md)} still has a \"{OLD_WARNINGS_BLOCK}\" block from an older "
+               f"make_methods.py: resolve those warnings with the user and remove the block before "
+               f"delivery")
+        man.for_agent.setdefault("methods_to_fix", []).append(why)
+        print(f"[make_deposit] {why}", file=sys.stderr)
+        note += f"; it still has an older \"{OLD_WARNINGS_BLOCK}\" block -- remove it"
+    return note
+
+
 def _has_text(path):
     """A file with something in it. An empty methods.md (0 bytes or blank: a make_methods.py
     that died after opening it) is no methods at all -- never a source, never "kept"."""
@@ -1449,25 +1513,28 @@ def ensure_methods(session_dir, man):
                 have = md_sections(fh.read())
             missing = [s for s in need if s not in have]
             chosen["path"] = md
+            kept = scrub_kept_methods(md, man)
             if not missing:
-                return "present -- kept as written"
+                return "present -- kept as written" + kept
             draft = os.path.join(p["output_dir"], "methods_complete_draft.md")
             try:
-                _run(methods_command(f, draft), "make_methods.py")
+                r = _run(methods_command(f, draft), "make_methods.py")
             except Skip as e:
                 return (f"present, kept as written, but it lacks: {', '.join(missing)}; a "
-                        f"complete draft could not be written ({e})")
+                        f"complete draft could not be written ({e})" + kept)
             chosen["path"] = draft
             return (f"present, kept as written, but it lacks: {', '.join(missing)} -- a "
-                    f"complete draft is in output/methods_complete_draft.md")
-        _run(methods_command(f, md), "make_methods.py")
+                    f"complete draft is in output/methods_complete_draft.md"
+                    + kept + methods_build_warnings(r, man, draft))
+        r = _run(methods_command(f, md), "make_methods.py")
         chosen["path"] = md
         with open(md, encoding="utf-8") as fh:
             have = md_sections(fh.read())
         missing = [s for s in need if s not in have]
         return ("generated by make_methods.py" + (" (the methods.md there was empty)"
                                                   if was_empty else "") + (
-            f"; no record to write: {', '.join(missing)}" if missing else ""))
+            f"; no record to write: {', '.join(missing)}" if missing else "")
+            + methods_build_warnings(r, man, md))
 
     man.section("Publication methods (output/methods.md)", _md)
 

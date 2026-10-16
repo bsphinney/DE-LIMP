@@ -1,10 +1,11 @@
-# Optional: an audio discussion of the results ("Signal to Noise")
+# The audio discussion of the results ("Signal to Noise")
 
 A two-host, roughly 20-minute audio episode in which a cell biologist and a statistician talk
 through ONE finished analysis. It sits beside the report, and a "Listen" card near the top of
 `Analysis_Report.html` links to it. **You write the script** from the report you have already
 read. `scripts/make_podcast.py` then checks it against the report, turns it into audio, and
-links it in. It never writes a word of the conversation.
+links it in. It never writes a word of the conversation. A CoreOmics submission gets one by
+default; internal Core work and anyone else are offered one ("When it is made").
 
 **Who it is for: the collaborator who submitted the samples** -- picture a biologist who knows
 their own system well but not mass spectrometry or statistics. The episode has three jobs:
@@ -38,16 +39,58 @@ the tables and the figures, so you write the script. The tool then checks the sc
 against the report -- numbers, symbol-like words, capitalised names -- which catches invented
 ones, not wrong sentences (see "What check cannot catch" below).
 
-## When to offer it
+## When it is made
 
 - **Only after the report is final**: `Analysis_Report.html` is written, and any expert-review
   or data-quality changes are in. A podcast of a draft goes stale.
-- **When you deliver the results to a collaborator**, offer it in one line. Never make one by
-  default. For example: "Want a ~20-min audio discussion of these results for the lab
-  (AI-generated, synthetic voices), linked at the top of the report? It also explains how the
-  measurement and the statistics work, using their data." Make it only on a yes. Cloud voices
-  need consent too (next section).
+- **A CoreOmics submission: by default.** Core staff analysing a CoreOmics submission (the
+  session answers one, `submission_report.core_run`). Brett (Core director) made the podcast
+  the default on 2026-10-15. Once the report is final, make it without asking, and tell the
+  staff member in one line that you are. If they say no, skip it. The consent is his standing
+  approval, which `--core-run` records ("Privacy and consent").
+- **Internal Core work: offer it.** An analysis of the Core's own samples with no submission (a
+  method test, QC; `session.py init --internal`) is offered in one line when its results are
+  written up, never made by default. On a yes, `--core-run internal` records the same standing
+  approval.
+- **Anyone else: offer it when the results go to a collaborator or the lab.** A user outside the
+  Core, with their own data, is offered it in one line then. For example: "Want a ~20-min audio
+  discussion of these results for the lab (AI-generated, synthetic voices), linked at the top of
+  the report? It also explains how the measurement and the statistics work, using their data."
+  Make it only on a yes. Their data, their consent: cloud voices need it too ("Privacy and
+  consent").
+- **It never holds up the report or the delivery.** No key, Gemini unreachable or out of quota,
+  a render or a job that fails: say so in one line ("No podcast this time: Gemini's daily quota
+  is used up.") and deliver without it. On HIVE, submit the job as soon as `job` writes it. If
+  it has not ended when everything else is ready to deliver, do not wait: cancel it (`scancel
+  <jobid>`; the chunks it made are cached), say so in one line, and finalize and deliver
+  without it. A job left running would change the report while `deliver` copies it.
+- **Adding it later.** Make it (submitting the job again resumes from its cache), run
+  `finalize` again, then deliver again with a new `--label` (SKILL.md step 12b): the new delivery
+  goes beside the first, which is never changed.
 - If the analysis is preliminary (a v1 with a v2 planned), say so in the disclosure turn.
+
+## Where it is made
+
+Where the report was finished, so the podcast's checks read the report it links into.
+
+- **On HIVE** when the report was built there: this computer cannot run the skill's Python
+  (Windows staff: `check_access.sh` → `local_python3.usable: false`), or any session of record
+  on HIVE whose report was made there. You write the script here and put it beside the report
+  in `$S/output/podcast/`. `check` runs there through `hive_exec.sh`, and a small SLURM job
+  (`make_podcast.py job`) renders it in Gemini voices, verifies it, links it and shares it
+  ("Commands", "On HIVE"). A Core run uses the Core's shared key. Anyone else needs their own
+  key on HIVE, `~/.config/ucdavis-proteomics/gemini_key` with mode 600, saved in their own
+  terminal and never in this chat; `say` does not exist there.
+- **Here** when the report was built here: `local` mode, or a copy pulled from a HIVE session of
+  record (SKILL.md step 1c.7 on a Mac, or any hive_remote user who built the report here). Make
+  the podcast before the finished files go back. Then put `podcast/`, the linked
+  `Analysis_Report.html` and `.md`, and `Analysis_Report_with_audio.html` into the session of
+  record (step 1c.7's push lines), since finalize and `deliver` read them there. As in
+  "Commands", "Here": for a Core run use **`--tts gemini --core-run`**. The Gemini voices are
+  far better than `say`, the consent is standing, and `verify` (the only check of the audio)
+  uses Gemini anyway. It needs a key on this computer; `make_podcast.py key --core-run` says
+  whether there is one. With none, use `--tts say`: it is offline and sends nothing, but with
+  no key `verify` cannot run either, so say that someone must listen to it.
 
 ## Privacy and consent (read before any cloud voice)
 
@@ -74,22 +117,54 @@ What Google's Gemini API terms say (checked 2026-09-25 at
 
 So:
 
-- For **unpublished client data**, use a **paid-tier key** (billing enabled on the key's
-  Cloud project), or **`--tts say`**, which runs offline on macOS and sends nothing.
-- A free-tier key is for published or synthetic data only.
-- **Who approves: the Core director.** Brett ruled on 2026-09-28 that the Core director's
-  approval is enough to send a collaborator's transcript and audio to the TTS and ASR service;
-  the collaborator's lab is not asked separately. Ask the director, say which tier the key is
-  on, and record the answer: `--cloud-ok "Brett (Core director), 2026-09-28, free-tier key"`.
-  It is written to `podcast.json` as `cloud_tts_consent`. Without `--cloud-ok`, the gemini
-  backend sends nothing and exits, explaining why. The free-tier terms above still apply:
-  Google may use the text and audio, and people may read or hear it.
-- Key: `GEMINI_API_KEY`, or `~/.config/ucdavis-proteomics/gemini_key` (`chmod 600`; the tool
-  warns if others can read it), beside the skill's other per-user settings. Never paste a key
-  into the chat. The tool never prints the key and scrubs it from every error with the skill's
-  one list of secret patterns (`notify_slack.redact`).
-- `--cloud-ok` records consent; `--cloud-ok no` (or `false`, `0`, `none`, `declined`) is a
-  refusal, and nothing is sent.
+- **A Core run: the consent is standing.** Brett (Core director) ruled on 2026-09-28 that the
+  Core director's approval is enough to send a Core run's transcript and audio to the TTS and
+  ASR service; the collaborator's lab is not asked separately. On 2026-10-15 he made the
+  podcast the default for CoreOmics submissions. Pass **`--core-run`** to `render`, `verify` and
+  `job`. It records that approval in `podcast.json` (`cloud_tts_consent`, with `core_run` saying
+  which kind) in the one wording kept in `make_podcast.py` (`CORE_CLOUD_OK`); never type it
+  yourself. `--core-run` refuses a session that answers no CoreOmics submission
+  (`submission_report.core_run`). For internal Core work that the staff member said yes to,
+  pass `--core-run internal`; it refuses a session whose `session.json` does not say internal
+  work (`analysis_for`, from `session.py init --internal`), and a session for a CoreOmics
+  submission (attached, or named in `analysis_for`): a client's data is never labelled the
+  Core's own. A submission named in `session.json` but not attached is a `--core-run` refusal
+  that says to run `submission_report.py attach` first. Never use either for anyone else's
+  data.
+- **Only Core staff can claim a Core run.** Every member of proteomics-grp can read the Core's
+  key, but the approval is for Core staff. So `--core-run` also needs the person running it on
+  the Core staff list (`$CORE_STAFF_FILE`, default `/quobyte/proteomics-grp/.config/
+  core_staff.txt`, trusted only when a Core admin owns it, `staff.load_staff`). On HIVE that is
+  this account, by its uid, never `$USER`. On a laptop HIVE is asked, through `hive_exec.sh`,
+  about the account the saved HIVE login reaches. No usable list is a no. `podcast.json` says
+  `"by": "Core staff"` and how it was checked; the login goes to the session's staff-only
+  `logs/podcast.staff.json` (`staff.py`: names stay with the staff, never delivered or zipped).
+- The terms above still apply to whatever tier the key is on: on the free tier Google may use
+  the text and audio, and people may read or hear it. Brett accepted that for Core runs.
+- **Anyone else's data: ask them.** It is theirs. Say what is sent and what the key's tier
+  means, and record their answer: `--cloud-ok "<who agreed>, <date>, <paid|free> key"`, written
+  to `podcast.json` as `cloud_tts_consent`. For unpublished data suggest a **paid-tier key**
+  (billing enabled on the key's Cloud project), or **`--tts say`**, which runs offline on macOS
+  and sends nothing. A free-tier key is for published or synthetic data only.
+- Without consent the gemini backend sends nothing and exits, explaining why. `--cloud-ok no`
+  (or `false`, `0`, `none`, `declined`) is a refusal. `--core-run` and `--cloud-ok` cannot be
+  given together.
+- **Keys**, the first found: `GEMINI_API_KEY`; `~/.config/ucdavis-proteomics/gemini_key`
+  (`chmod 600`), beside the skill's other per-user settings. On HIVE, where every home folder is
+  open to every account, a personal key others can read is **refused**, not used
+  (`core_submission.key_mode_problem`, the skill's one rule for key files): chmod 600 it, and if
+  it was readable for a while, make a new key. On a laptop the tool only warns. And, **for a
+  Core run only**, the Core's shared key on HIVE,
+  `/quobyte/proteomics-grp/.config/gemini_key`. Brett installs that one: owner brettsp, group
+  proteomics-grp, mode 640, in the Core's `.config` folder (mode 2750). It is used only while a
+  Core admin (`scripts/core_admins.txt`) owns the file and its folder and nobody else can write
+  either (the Core's rule for its files on HIVE, `slack_collab.trust_problem`), and only while
+  accounts outside the group cannot read it; otherwise render names the reason and sends
+  nothing. Group-readable is how the Core's members use it, so that is no warning.
+  `make_podcast.py key [--core-run]` says where the key would come from, never the key.
+- Never read, print, copy or paste a key, and never ask for one in the chat. The tool never
+  prints the key and scrubs it from every error with the skill's one list of secret patterns
+  (`notify_slack.redact`).
 
 ## The hosts
 
@@ -310,6 +385,8 @@ Read the script against the report for these; a PASS says nothing about them:
 
 ## Commands
 
+### Here (a Mac, or `local` mode)
+
 ```bash
 S=<session>; P=$S/output/podcast
 # 1. write $P/podcast_script.md (above), then check it until it passes
@@ -320,13 +397,15 @@ python3 scripts/make_podcast.py check $P/podcast_script.md \
 #    -> $P/check.txt. Fix every FAIL line, re-run until PASS. Read the WARN lines.
 # 2. preview what will be spoken (sends nothing)
 python3 scripts/make_podcast.py render $P/podcast_script.md --tts say --dry-run | less
-# 3. render: offline ...
-python3 scripts/make_podcast.py render $P/podcast_script.md --tts say
-#    ... or Gemini voices, with the user's consent recorded (verify runs at the end)
+# 3. render. A Core run: Gemini voices under the standing approval (verify runs at the end)
+python3 scripts/make_podcast.py render $P/podcast_script.md --tts gemini --core-run
+#    ... anyone else, once they agreed:
 python3 scripts/make_podcast.py render $P/podcast_script.md --tts gemini \
     --cloud-ok "<who agreed>, <date>, <paid|free> key"
+#    ... or offline (macOS; no key needed, nothing sent):
+python3 scripts/make_podcast.py render $P/podcast_script.md --tts say
 # 4. verify: the ASR round trip (automatic after a consented gemini render; by hand after say)
-python3 scripts/make_podcast.py verify $P/podcast_script.md --cloud-ok "<who agreed>, <date>"
+python3 scripts/make_podcast.py verify $P/podcast_script.md --core-run   # or --cloud-ok "<who, when>"
 #    -> $P/verify.txt. Listen to every segment it names; fix, re-render, verify again.
 # 5. link it into the report, README and AGENTS.md (safe to re-run)
 python3 scripts/make_podcast.py link $S/output
@@ -334,6 +413,75 @@ python3 scripts/make_podcast.py link $S/output
 #    makes it; safe to re-run)
 python3 scripts/make_podcast.py share $S/output
 ```
+
+A session of record on HIVE whose report was built here (SKILL.md step 1c.7 on a Mac, or a
+hive_remote user): make the podcast on the local copy before the finished files go back. The
+push (step 1c.7's lines) puts `podcast/`, the linked `Analysis_Report.html` and `.md`, and
+`Analysis_Report_with_audio.html` into the session of record, where finalize and `deliver`
+read them.
+
+### On HIVE (the report was built there; Windows staff)
+
+Every step runs in the session of record `$S` on HIVE, once the finished report is there
+(`Analysis_Report.html`, `AI_Analysis_Report.md`, `methods.md`, `AUDIT.md`,
+`SAMPLE_QUALITY.md` in `$S/output/`). You write the script on this computer; nothing else
+runs here.
+
+```bash
+# 1. write podcast_script.md here, put it beside the report, check it there until it passes
+bash scripts/hive_exec.sh "mkdir -p $S/output/podcast"
+bash scripts/hive_exec.sh --put <here>/podcast_script.md "$S/output/podcast/"
+bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py check \
+    $S/output/podcast/podcast_script.md --source $S/output/AI_Analysis_Report.md \
+    $S/output/methods.md $S/output/AUDIT.md $S/output/SAMPLE_QUALITY.md \
+    --forbid-name '<PI full name>' '<submitter full name>' '<first names>'"
+bash scripts/hive_exec.sh "cat $S/output/podcast/check.txt"   # fix here, --put again, check again
+# 2. preview what will be spoken (sends nothing; light, so no job)
+bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py render \
+    $S/output/podcast/podcast_script.md --tts gemini --dry-run"
+# 3. the job: render in Gemini voices (verify follows), link, share -- submit it at once
+bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py job \
+    $S/output/podcast/podcast_script.md --core-run"
+#    internal Core work they said yes to: --core-run internal
+#    anyone else: --cloud-ok "<who agreed>, <date>, <paid|free> key" (their own key on HIVE)
+bash scripts/hive_exec.sh '<the "submit" line it printed>'
+# 4. watch it like any job, with the "log" it printed; when it ends, read verify.txt
+bash scripts/watch_run.sh --hive --slurm <jobid> --log "<the log it printed, with the job id>"
+bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.txt"
+```
+
+- **`job` checks first and writes nothing on a problem**, each a one-line refusal: the script
+  must be `output/podcast/podcast_script.md` in a session's output folder, its check must hold,
+  the consent must be there (`--core-run` with the person on the Core staff list, or
+  `--cloud-ok` for anyone else), a python must have
+  google-genai >= 2.25.0 (the pipeline env's, from `setup.json`; `bash
+  ~/proteomics-pipeline/scripts/setup.sh` installs it, and `setup.sh --check` reports it as
+  `podcast`), and there must be a key (for a Core run, the Core's shared key).
+- **The job** is `~/.proteomics-pipeline/jobs/podcast_<PROT or session>_<hash>.sh`, its log
+  `..._<jobid>.log` beside it; `job` prints both. That folder is yours alone (mode 700). Core
+  session folders are group-writable with no sticky bit, so a script there could be swapped for
+  another member's before `sbatch` reads it, and the job would run as you. The script is written
+  without following a link, and a link where it goes is refused. The job asks for 1 CPU, 2 GB
+  and 2 hours, on the queue `run_search.slurm_queue` picks for this account (as every job the
+  skill writes; `--requeue` on a preemptible one, with `--open-mode=append` so a requeued job
+  adds to its log). Its `--output` path is in double quotes, so a space in it is fine (single
+  quotes leave no log in a real run). It is a login shell (`#!/bin/bash -l`), so it can
+  `module load ffmpeg/7.0.2` for the AAC; when no ffmpeg can be found, its log says so in a
+  `[WARN]` (the episode then stays a ~58 MB `podcast.wav`, and `share` cannot build). Then `render --tts gemini --core-run` (verify follows by itself), `link` and `share`;
+  a failed step stops it there. Submitting it again resumes: finished chunks are cached. An
+  episode takes minutes; rate limits can stretch that to an hour.
+- **Never run render, verify or share on the login node**: they are minutes of network calls.
+  HIVE's compute nodes reach Google's API (checked 2026-10-15). `check`, the preview, `link`
+  and `key` are light, so they may run through `hive_exec.sh` directly.
+- **After the job, the HIVE report carries the Listen card.** Never put a local copy of
+  `Analysis_Report.html` over it. To change the report later, rebuild it
+  (`make_analysis_html.py` keeps the card), then `check` and the job again: only changed chunks
+  are rendered again.
+- Then finalize (step 12) and deliver (step 12b), which find `podcast/` and
+  `Analysis_Report_with_audio.html` in `$S/output`. **They never wait for it.** A job that
+  failed: one line to the staff member, then finalize and deliver without it. A job still
+  running when everything else is ready: `scancel` it, one line, then finalize and deliver
+  without it, and add the audio later ("When it is made").
 
 - **Sources.** Pass the delivered report text you wrote from, all from the session's `output/`
   folder: `AI_Analysis_Report.md` (or the report's `Analysis_Report.md` twin, or
@@ -355,8 +503,8 @@ python3 scripts/make_podcast.py share $S/output
   not count). `--unchecked` overrides this and is recorded in `podcast.json`; use it only when
   the user asks. `link` refuses the same way (the card vouches for the episode), with its own
   `--unchecked`.
-- **Gemini** needs `google-genai` (`python3 -m pip install google-genai`); the tool says so if
-  it is missing.
+- **Gemini** needs `google-genai`: `setup.sh` installs it into the pipeline env (conda-forge,
+  >= 2.25.0), or `python3 -m pip install google-genai`; the tool says so if it is missing.
   - **Model order.** Names are read from the API (`models.list`), never assumed: a pro TTS
     model, then `gemini-3.8-flash-tts`, then `gemini-2.5-flash-preview-tts`. Any other TTS
     model (a preview or lite one) is used only with `--model`.
@@ -414,9 +562,14 @@ python3 scripts/make_podcast.py share $S/output
     (ratio, gaps, numbers_not_heard, segments_to_check, model). It WARNs when the ratio is
     below 0.93, or when there is a gap or a number not heard, and names the segments to
     listen to.
-  - It runs at the end of every `render --tts gemini` given `--cloud-ok` (`--no-verify`
-    skips it). It never fails the render and never touches the report. It **sends the
-    audio** to Google, so the same consent rules apply: nothing without `--cloud-ok`.
+  - Every render removes the last render's `verify.txt` and `verify_transcript.txt`, so an
+    old OK never stands beside new audio. When this render's verify does not run (it failed,
+    for example on a 429; `--no-verify`; an offline `say` render), `verify.txt` says `NOT RUN`
+    with the reason, and so does the `verify` block: nothing has heard the audio back.
+  - It runs at the end of every `render --tts gemini` given consent (`--core-run` or
+    `--cloud-ok`; `--no-verify` skips it). It never fails the render and never touches the
+    report. It **sends the audio** to Google, so the same consent rules apply: nothing without
+    that consent. Run by hand, `verify` needs the same `--core-run` or `--cloud-ok`.
   - Calibration, PROT_0756: a first render scored 0.969 with no gaps and found one real
     misread (the voice said "5,244" for "5,024"), which a Pronunciation row fixed. The clean
     26-minute episode on gemini-3.8-flash-tts then scored ratio 0.965, coverage 0.957, 0 gaps,
@@ -510,9 +663,12 @@ when someone asks for "the report with the audio".
 `podcast.m4a`, `podcast_script.md` (the script with its claims ledger), `transcript.html`
 (disclosure, player, transcript, claims, how it was made -- the pronunciation table is in
 `check.txt`, not here), `podcast.json` (show, title, hosts and voices, TTS backend and exact
-model, consent, script sha256, sources as relative paths or labelled file names with their
+model, consent and, for a Core run, `core_run` (`submission` with its PROT number, or
+`internal`), script sha256, sources as relative paths or labelled file names with their
 sha256, words, duration, `ai_generated: true`, and the `verify` block), `check.txt`, and after
-verify `verify.txt` and `verify_transcript.txt`.
+verify `verify.txt` and `verify_transcript.txt`. For a Core run, who made it (their login) is in
+the session's staff-only `logs/podcast.staff.json`, never delivered or zipped. A podcast made on
+HIVE leaves its job script and log in `~/.proteomics-pipeline/jobs/` of whoever submitted it.
 
 `.cache/` is scratch. So is any `*.part` file, and `podcast.wav` when `podcast.m4a` sits beside it
 (`render --keep-wav`). One rule (`scripts/scratch_files.py`) keeps all three out of the session
@@ -534,5 +690,6 @@ Listen card points at: the audio, the transcript, the script, `check.txt` and `p
   pronunciation rows that add content. It cannot catch the list under "What check cannot
   catch", so your own read against the report is the other half.
 
-`make_podcast.py verify --verify-model <model>[,<model>]` picks the Gemini text model(s) that
-transcribe the audio (the default is in `make_podcast.py`).
+`make_podcast.py verify --model <model>` (repeatable; `render --verify-model` for the verify a
+render runs) picks the Gemini text model(s) that transcribe the audio (the default is in
+`make_podcast.py`).

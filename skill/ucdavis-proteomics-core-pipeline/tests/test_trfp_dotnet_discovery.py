@@ -585,7 +585,9 @@ class SetupReportsThermoRawReadiness(setup_t.SetupCheckHarness):
 
 # argv logged; `create` makes an env with python + Rscript, `install` puts the parser stand-in
 # and/or a pythonnet conda-meta record in it, as asked. Both honour only -p: a named env would
-# land wherever a user's .condarc says.
+# land wherever a user's .condarc says. google-genai (setup.sh step 2d, the podcast): `install`
+# replaces its record as conda does; `create` writes one too, so these tests see only their own
+# installs -- tests/test_make_podcast_hive.py removes it to test step 2d.
 FAKE_MICROMAMBA = r'''#!/bin/bash
 echo "$*" >> "$FAKE_MM_LOG"
 sub="$1"; shift
@@ -596,7 +598,8 @@ done
 [ -n "$prefix" ] || { echo "no -p" >&2; exit 2; }
 case "$sub" in
   create)  mkdir -p "$prefix/bin" "$prefix/conda-meta"; ln -s "$FAKE_PY" "$prefix/bin/python"
-           printf '#!/bin/sh\nexit 0\n' > "$prefix/bin/Rscript"; chmod +x "$prefix/bin/Rscript" ;;
+           printf '#!/bin/sh\nexit 0\n' > "$prefix/bin/Rscript"; chmod +x "$prefix/bin/Rscript"
+           echo '{}' > "$prefix/conda-meta/google-genai-2.31.0-pyh0000000_0.json" ;;
   install) [ -n "${FAKE_MM_INSTALL_FAIL:-}" ] && { echo "nothing provides thermorawfileparser" >&2; exit 1; }
            for p in $pkgs; do case "$p" in
              thermorawfileparser)
@@ -604,6 +607,8 @@ case "$sub" in
                chmod +x "$prefix/bin/ThermoRawFileParser" ;;
              pythonnet) echo '{}' > "$prefix/conda-meta/pythonnet-3.1.0-pyhd8ed1ab_0.json" ;;
              pandas) echo '{}' > "$prefix/conda-meta/pandas-2.3.2-py311h0000000_0.json" ;;
+             google-genai*) rm -f "$prefix"/conda-meta/google-genai-[0-9]*.json
+               echo '{}' > "$prefix/conda-meta/google-genai-2.31.0-pyh0000000_0.json" ;;
            esac; done ;;
 esac
 '''

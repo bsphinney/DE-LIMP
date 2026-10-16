@@ -133,6 +133,13 @@ label <- ifelse(is.na(gene_first), prot, gene_first)
 # whose protein matrix is complete by construction) with a finite statistic in every contrast.
 finite_t <- Reduce(`&`, lapply(inp$stat[tested], function(s) is.finite(s$t)))
 uni <- which(rowSums(is.na(E_all)) == 0 & finite_t)
+# The proteins a contrast tests, as positions in `uni`: run_de's DE table leaves out a protein
+# measured in no run of the compared groups (Evidence NOT_MEASURED_LABEL; on dpc its t is the
+# detection model's inferred ~0), so the primary tests leave it out too -- in a set it pulls the
+# statistic towards 0, and in camera it is one of the "other" proteins a set competes with. A set
+# left with fewer than min_size of them is not tested in that contrast (not in its table).
+contrast_rows <- function(cn) which(!(inp$evidence[[cn]][uni] %in% NOT_MEASURED_LABEL))
+
 say("%d of %d proteins tested (%s)", length(uni), nrow(E_all),
     if (length(uni) < nrow(E_all)) "complete rows with a finite statistic" else "all")
 
@@ -217,6 +224,11 @@ for (nm in names(sets_u$counts)) {
   source_info[[nm]]$counts <- cc
 }
 if (!length(sets_u$index)) stop("no set has ", min_size, "-", max_size, " tested proteins")
+.no_sets <- Filter(function(cn) !any(lengths(reindex(sets_u$index, contrast_rows(cn))) >= min_size), tested)
+if (length(.no_sets))
+  stop("no set keeps ", min_size, " proteins tested in ", paste(.no_sets, collapse = ", "),
+       " (most of its proteins were measured in neither compared group, so its DE table does not ",
+       "test them): leave it out with --contrasts, or lower --min-size")
 
 # ---- the model: run_de's, and a check that the refit route reproduces it ----------------
 is_random <- function(mdl) identical(mdl, "blocked") && identical(inp$block_effect, "random")
@@ -328,11 +340,15 @@ between_block_caution <- function(cn) {
 }
 
 run_contrast <- function(cn) {
-  s <- sets_u; idx <- s$index
-  pm <- primary_model(cn)
+  s <- sets_u
+  tr <- contrast_rows(cn)
+  idx <- reindex(s$index, tr)                       # positions in uni[tr]
+  keep <- lengths(idx) >= min_size
+  idx <- idx[keep]
+  pm <- subset_model(primary_model(cn), tr)
   prim <- test_sets(pm, idx, camera_cor)
-  tab <- cbind(s$meta, NGenes = prim$NGenes,
-               Mean_logFC = set_effect(idx, inp$stat[[cn]]$logFC, uni),
+  tab <- cbind(s$meta[keep, , drop = FALSE], NGenes = prim$NGenes,
+               Mean_logFC = set_effect(idx, inp$stat[[cn]]$logFC, uni[tr]),
                Call = call_of(prim$camera_FDR, prim$fry_FDR), prim[, -1], stringsAsFactors = FALSE)
   # fry's call on other reference bases: camera does not depend on the basis, fry does (S4)
   sig <- tab$fry_FDR < fdr
@@ -348,10 +364,10 @@ run_contrast <- function(cn) {
   dcols <- c("depth_Mean_logFC", "depth_camera_Direction", "depth_camera_PValue", "depth_camera_FDR",
              "depth_fry_Direction", "depth_fry_PValue", "depth_fry_FDR")
   if (depth_ok && !identical(ip_role(cn), "bait_vs_control")) {
-    dm <- depth_model(cn)
+    dm <- depth_model(cn, uni[tr])
     d <- test_sets(dm, idx, camera_cor)
     names(d) <- paste0("depth_", names(d))
-    d$depth_Mean_logFC <- set_effect(idx, dm$logfc, seq_along(uni))
+    d$depth_Mean_logFC <- set_effect(idx, dm$logfc, seq_along(tr))
     tab <- cbind(tab, d[, dcols])
     tab$camera_Depth <- holds(tab$camera_FDR, tab$camera_Direction, tab$depth_camera_FDR, tab$depth_camera_Direction)
     tab$fry_Depth <- holds(tab$fry_FDR, tab$fry_Direction, tab$depth_fry_FDR, tab$depth_fry_Direction)
@@ -359,15 +375,15 @@ run_contrast <- function(cn) {
     for (m in dcols) tab[[m]] <- NA
     tab$camera_Depth <- tab$fry_Depth <- "not run"
   }
-  # presence calls (DPC): run_de's Evidence for this contrast
-  ev <- inp$evidence[[cn]][uni]
+  # presence calls (DPC): run_de's Evidence for this contrast, over the proteins it tests
+  ev <- inp$evidence[[cn]][uni[tr]]
   tab$Presence_Call_Fraction <- round(presence_fraction(idx, ev), 3)
   tab$Mostly_Presence_Calls <- tab$Presence_Call_Fraction > SET_DEFAULTS$presence_majority
-  meas <- which(!(ev %in% PRESENCE_CALL_LABEL))
+  meas <- measured_rows(ev)
   mcols <- c("measured_NGenes", "measured_camera_Direction", "measured_camera_PValue",
              "measured_camera_FDR", "measured_fry_Direction", "measured_fry_PValue", "measured_fry_FDR")
   for (m in mcols) tab[[m]] <- NA
-  if (length(meas) == length(uni)) {
+  if (length(meas) == length(tr)) {
     tab[, mcols] <- tab[, c("NGenes", "camera_Direction", "camera_PValue", "camera_FDR",
                             "fry_Direction", "fry_PValue", "fry_FDR")]
   } else if (length(meas) >= min_size) {
@@ -401,6 +417,9 @@ run_contrast <- function(cn) {
   rownames(tab) <- NULL
   attr(tab, "df_residual") <- attr(prim, "df_residual")
   attr(tab, "global_correlation") <- attr(prim, "global_correlation")
+  attr(tab, "n_proteins_tested") <- length(tr)
+  attr(tab, "n_not_measured_left_out") <- length(uni) - length(tr)
+  attr(tab, "n_sets_not_tested") <- sum(!keep)
   tab
 }
 
@@ -469,8 +488,8 @@ tidy_numbers <- function(tab) {
   for (col in intersect(c("Mean_logFC", "camera_Correlation"), names(tab))) tab[[col]] <- round(tab[[col]], 4)
   tab
 }
-# Every set's tested proteins, once: the tested proteins are the same in every comparison
-# (a pulldown's interactome tables carry their own Members column).
+# Every set's proteins in the universe, once (a pulldown's interactome tables carry their own
+# Members column). A comparison tests those measured in its groups: its table's NGenes.
 members_file <- "sets_members.csv"
 utils::write.csv(data.frame(sets_u$meta, NGenes = lengths(sets_u$index),
                             Members = members_of(sets_u$index, uni), check.names = FALSE),
@@ -507,7 +526,13 @@ for (cn in tested) {
   cw <- inp$cmat[intersect(rownames(inp$cmat), names(gm)), cn]
   su <- side_units(cn)
   rho0 <- attr(tab, "global_correlation")
+  tr <- contrast_rows(cn)
   contrast_rec[[cn]] <- c(list(file = basename(f), figure = fig, model = inp$contrast_model[[cn]],
+                               # the proteins this comparison tested: the universe less those measured
+                               # in neither compared group (left out, as in its DE table)
+                               n_proteins_tested = attr(tab, "n_proteins_tested"),
+                               n_not_measured_left_out = attr(tab, "n_not_measured_left_out"),
+                               n_sets_not_tested = attr(tab, "n_sets_not_tested"),
                                ip_role = ip_role(cn),
                                n_significant_proteins = inp$de_tables[[cn]]$n_significant,
                                n_pos = su$pos, n_neg = su$neg, n_words = su$words, pos_groups = as.list(su$pos_groups),
@@ -519,9 +544,9 @@ for (cn in tested) {
                                depth_difference_log2 = round(sum(cw * gm[names(cw)]), 3),
                                depth_tested = depth_ok && !identical(ip_role(cn), "bait_vs_control"),
                                # the proteins themselves: a "broad shift" must be one (review W1)
-                               protein_share_up = round(mean(inp$stat[[cn]]$logFC[uni] > 0), 3),
-                               protein_share_down = round(mean(inp$stat[[cn]]$logFC[uni] < 0), 3),
-                               protein_median_logFC = round(stats::median(inp$stat[[cn]]$logFC[uni]), 4)), sm)
+                               protein_share_up = round(mean(inp$stat[[cn]]$logFC[uni[tr]] > 0), 3),
+                               protein_share_down = round(mean(inp$stat[[cn]]$logFC[uni[tr]] < 0), 3),
+                               protein_median_logFC = round(stats::median(inp$stat[[cn]]$logFC[uni[tr]]), 4)), sm)
   say("%-24s %d sets, FDR < %.2g: camera %d, fry %d, both %d; %s -> %s", cn, sm$n_sets, fdr,
       sm$camera, sm$fry, sm$both,
       if (isTRUE(contrast_rec[[cn]]$depth_tested))
@@ -565,7 +590,9 @@ if (!is.null(ip_rec)) {
     rec$n_pooled_enriched_any <- sum(adj_e < fdr & enrich > 0)
     # context: what "enriched at every condition" would have taken, one condition at a time
     rec$n_enriched_per_condition <- as.list(setNames(vapply(vs_ctrl, function(cn) {
-      d <- read_de(cn); sum(d$logFC > 0 & d$adj.P.Val < fdr) }, 0L), vs_ctrl))
+      # na.rm: a row with no test (Evidence 'not measured in either group'; maxlfq presence
+      # calls) has NA there, and is not significant
+      d <- read_de(cn); sum(d$logFC > 0 & d$adj.P.Val < fdr, na.rm = TRUE) }, 0L), vs_ctrl))
     say("bait %s: interactome %d proteins (pooled enrichment over the control >= %g log2 at FDR %.2g; %d at any enrichment)",
         b, length(rows_b), ip_min_enr, fdr, rec$n_pooled_enriched_any)
     design_b <- inp$design[runs, , drop = FALSE]
@@ -777,9 +804,12 @@ methods_paragraph <- paste0(
                        if (!is.null(ip_rec)) " (not done for bait-vs-control contrasts, where the depth difference is the enrichment itself)" else "",
                        ". ")
   else "The run-depth sensitivity analysis could not be run (design not estimable with depth). ",
+  "In each comparison, proteins measured in neither compared group -- not tested in its differential-expression ",
+  "table -- were left out of both tests, and a set left with fewer than ", min_size, " tested proteins was not ",
+  "tested in that comparison. ",
   if (identical(inp$method, "dpc")) paste0("Because DPC-Quant gives every protein a value in every run, the fraction ",
-    "of each set's proteins never measured in one of the compared groups (presence calls) is reported, with both ",
-    "tests repeated on measured proteins only. ") else "",
+    "of each set's tested proteins never measured in one of the compared groups (presence calls) is reported, ",
+    "with both tests repeated on proteins measured in both groups only. ") else "",
   if (!is.null(ip_rec)) sprintf(paste0("For the pulldown, each bait's IPs were offset by the median of the bait's ",
     "interactome -- proteins enriched over the control IP in the bait-vs-control comparison pooled over ",
     "conditions (adj.P.Val < %.3g, at least %.0f-fold%s), a selection independent of the between-condition ",
@@ -860,9 +890,10 @@ prov <- list(
                per_run = as.list(setNames(as.numeric(dep$counts), names(dep$counts))),
                columns = as.list(ad$columns),
                rule = "a set significant (FDR) in the primary test is 'lost' when the same test is not significant in the same direction with depth in the design; the depth_* columns give that test's p-value, FDR and the set's effect with depth"),
-  presence_calls = list(label = PRESENCE_CALL_LABEL, source = "run_de's Evidence column for the contrast",
+  presence_calls = list(label = PRESENCE_CALL_LABEL, labels = as.list(UNMEASURED_LABELS),
+                        source = "run_de's Evidence column for the contrast",
                         mostly = sprintf("more than %.0f%% of the set's tested proteins", 100 * SET_DEFAULTS$presence_majority),
-                        measured_only = "both tests repeated with presence-call proteins removed from the sets and the background"),
+                        measured_only = "both tests repeated with the proteins never measured in a compared group (presence calls, and proteins measured in neither) removed from the sets and the background"),
   contrasts = contrast_rec,
   pulldown = ip_rec,
   # where the figures are, relative to this record's folder (the session moves as a whole)

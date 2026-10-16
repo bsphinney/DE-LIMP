@@ -21,7 +21,8 @@ metadata CSV schema:  File.Name,Group[,Batch,Covariate1,Covariate2][,<subject co
   --map asks for confirmation (subject_ambiguous). --subject-column <header> confirms one.
 
 Modes:
-  # list the real run names the agent must map to
+  # list the real run names the agent must map to (add --rename-dashed-runs when the runs whose
+  # file name holds '--' will be searched that way: detect_acquisition.py's dashed_run_names)
   python3 collect_conditions.py --list-runs --from-dir /data --glob '*.d'
 
   # MAP an uploaded conditions file onto the real runs (CSV, TSV, or an Excel .xlsx such as
@@ -38,10 +39,22 @@ Modes:
 
   # validate a finished design against the search output
   python3 collect_conditions.py --validate conditions.csv --against report.parquet
+
+  # ... with runs the search reported that the USER decided to leave out of the DE (a re-run,
+  # a failed injection): one --exclude per run, each with its own --reason. They pass, and are
+  # recorded in <csv>.decisions.json (excluded_runs), which run_de.R and the Methods read.
+  python3 collect_conditions.py --validate conditions.csv --against report.parquet \
+          --exclude <run> --reason "<why, in the user's words>" [--exclude ... --reason ...]
 """
-import sys, os, csv, glob, json, re, argparse, io, zipfile
+import sys, os, csv, glob, json, re, argparse, io, zipfile, functools
 import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# A delimited token has ONE definition: the one `core_submission.py locate` matches sample ids with.
+from core_submission import HT_TAIL, TIMS_NAME, match_space, token_pattern  # noqa: E402
+# The name a run whose file name holds '--' is searched under (run_search.py --rename-dashed-runs).
+from check_report_runs import RENAME_DASHED_FLAG, renamed_dashed_name  # noqa: E402
 
 COV_COLS = ["Batch", "Covariate1", "Covariate2"]
 # "unique id" / "sample id": the Core LIMS export (PROT_####.samples.<date>.xlsx: internal_id,
@@ -161,10 +174,14 @@ def runs_from_dir(d, pattern):
 
 
 def get_runs(a):
-    if a.from_report:  return runs_from_report(a.from_report)
-    if a.from_dir:     return runs_from_dir(a.from_dir, a.glob)
-    if a.runs:         return [r.strip() for r in a.runs.split(",") if r.strip()]
-    sys.exit("need --from-report, --from-dir, or --runs to know the real run names")
+    if a.from_report:  return runs_from_report(a.from_report)   # already the searched names
+    if a.from_dir:     runs = runs_from_dir(a.from_dir, a.glob)
+    elif a.runs:       runs = [r.strip() for r in a.runs.split(",") if r.strip()]
+    else: sys.exit("need --from-report, --from-dir, or --runs to know the real run names")
+    # --rename-dashed-runs: the names a search with that flag gives runs whose file name holds
+    # '--' (detect_acquisition.py lists them as dashed_run_names), so the design matches the report
+    return [renamed_dashed_name(r) for r in runs] if getattr(a, "rename_dashed_runs", False) \
+        else runs
 
 
 # ------------------------------------------------------------------ matching --
@@ -209,20 +226,55 @@ def _contains(seq, sub, eq):
                          for i in range(len(seq) - n + 1))
 
 
+# compiled once per label: --map tries every identifier against every run, both ways
+_token_re = functools.lru_cache(maxsize=None)(token_pattern)
+
+
+def _carries(text, label):
+    """`label` is a delimited token of `text` (core_submission.token_pattern)."""
+    pat = _token_re(label)
+    return bool(pat and pat.search(text))
+
+
+def match_text(run):
+    """The part of a run name an identifier may match -- core_submission.match_space, the rule
+    `locate` matches sample ids with: a timsTOF name's sample field, with its DIA-/DDA- tag
+    (identifiers are written as 'DIA-XY1_'); any other name without its plate tail
+    (`_S3-A1_1_24376`: plate position, injection, acquisition counter) and with its plate
+    positions blanked. Matched over the whole name, a numeric id such as 1234 named the run whose
+    acquisition counter is 1234, and '60SPD' every run (review of 2.12)."""
+    run = str(run)
+    m = TIMS_NAME.match(run)
+    if m:      # match_space's field (TIMS_NAME's), with the 4-character DIA-/DDA- tag before it
+        return run[m.start("field") - 4:m.end("field")]
+    return PLATE_POSITION_RE.sub("_", match_space(HT_TAIL.sub("", run)))
+
+
 def match_to_runs(identifier, runs):
-    """Runs an identifier names: the whole name exactly (case and punctuation aside), else its
-    words as a run of whole words of the run name (or the run name's inside the identifier -- a
-    full file name names its run). Never a bare substring, never a plate position: 'A1' does not
-    name '..._S3-A1_...', and 'KG1' does not name 'KG12'."""
+    """Runs an identifier names, the first of these that names any:
+      1. the whole run name (case and punctuation aside);
+      2. the identifier as a delimited TOKEN of the run name's sample part (match_text: a
+         timsTOF name's DIA-<field>, never its acquisition counter), or the run name as one of the
+         identifier (a full file name names its run) -- core_submission.token_pattern, the rule
+         `locate` matches sample ids with: '-', '_' and space are token boundaries, so DIA-XY1_
+         names XY1 and never XY10 (2.9.1 normalised the '_' away and matched XY10..XY19), and a
+         separator may come or go only between letters and digits (XY-1 names XY1);
+      3. only when no run carries it as a token: its words as whole words of the run name, where
+         a word of letters only also names itself plus digits ('ctrl' names 'ctrl1') -- a prefix.
+    Never a bare substring, never a plate position: 'A1' does not name '..._S3-A1_...'. Several
+    runs named is a question for the user (do_map), never a choice made here."""
     idn = norm(identifier)
     if not idn:
         return []
     exact = [r for r in runs if norm(r) == idn]
     if exact:
         return exact
+    whole = [r for r in runs if _carries(match_text(r), identifier) or _carries(identifier, r)]
+    if whole:
+        return whole
     want = tokens(identifier)
     return [r for r in runs
-            if _contains(run_tokens(r), want, _token_eq)
+            if _contains(run_tokens(match_text(r)), want, _token_eq)
             or _contains(want, tokens(r), lambda a, b: a == b)]
 
 
@@ -651,6 +703,24 @@ def decisions_path(out_path):
     return out_path + ".decisions.json"
 
 
+def write_decisions(dpath, record):
+    """Write the decisions record whole or not at all: a new file beside it (O_EXCL, so nothing
+    already at that name -- a link -- is written through), then os.replace. Written in place, an
+    interrupted write left half a record that run_de.R could not read (2.12 review)."""
+    tmp = f"{dpath}.{os.getpid()}.tmp"
+    fh = open(tmp, "x", encoding="utf-8")      # FileExistsError: not ours, left alone
+    try:
+        with fh:
+            json.dump(record, fh, indent=2)
+        os.replace(tmp, dpath)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def do_map(out_path, runs, intent, subject_col=None, subject_confirmed=False, columns=None,
            confirm_multi=(), replicate_mode="auto"):
     intent, replicates = collapse_replicates(intent, replicate_mode)
@@ -746,8 +816,7 @@ def do_map(out_path, runs, intent, subject_col=None, subject_confirmed=False, co
     if tech:
         record["technical_replicates"] = tech
     if record:
-        with open(dpath, "w", encoding="utf-8") as fh:
-            json.dump(dict(record, conditions_csv=os.path.abspath(out_path)), fh, indent=2)
+        write_decisions(dpath, dict(record, conditions_csv=os.path.abspath(out_path)))
     elif os.path.exists(dpath):
         os.remove(dpath)               # an older answer does not describe this mapping
 
@@ -923,7 +992,72 @@ def emit_template(out, names, covariates):
 
 
 # ------------------------------------------------------------------ validate --
-def validate(meta_path, report_path):
+# A run the search reported but the design leaves out ON PURPOSE (PROT_0000: 13 runs searched,
+# two of them re-runs, 11 analysed). run_de.R already analyses only the metadata's runs, but
+# --validate failed on the two ("report runs missing from metadata"), so the agent went past a
+# failed check on its own judgment and the reason lived only in decisions.md. --exclude <run>
+# --reason "<why>" makes it a recorded decision instead: the run passes, and it is written to
+# <csv>.decisions.json under EXCLUDED_KEY, which run_de.R copies into de_provenance.json
+# (runs_left_out) for the Methods and the report. A run missing WITHOUT --exclude fails exactly
+# as before.
+EXCLUDED_KEY = "excluded_runs"
+
+
+class _ExcludeAction(argparse.Action):
+    """--exclude <run> and --reason "<text>" fill ONE ordered list of [run, reason] pairs, so each
+    reason belongs to the --exclude right before it (two --exclude then one --reason cannot pair
+    the reason with the wrong run)."""
+    def __call__(self, parser, ns, value, option_string=None):
+        items = list(getattr(ns, self.dest, None) or [])
+        if option_string == "--exclude":
+            items.append([value, None])
+        elif not items or items[-1][1] is not None:
+            parser.error("--reason must follow the --exclude it explains: "
+                         "--exclude <run> --reason \"<why>\"")
+        else:
+            items[-1][1] = value
+        setattr(ns, self.dest, items)
+
+
+def _write_exclusions(meta_path, report_path, excluded, report_runs, meta_runs):
+    """Record (or clear) the excluded runs in <csv>.decisions.json, keeping every other answer in
+    it (--map's confirmed_multi_match, technical_replicates). -> (path or None, problem or None)."""
+    dpath = decisions_path(meta_path)
+    rec = {}
+    if os.path.exists(dpath):
+        try:
+            with open(dpath, encoding="utf-8") as fh:
+                rec = json.load(fh)
+            if not isinstance(rec, dict):
+                raise ValueError("not a JSON object")
+        except (OSError, ValueError) as e:
+            if not excluded:
+                return None, None          # nothing to record; leave the unreadable file alone
+            return None, (f"the decisions record {dpath} is unreadable ({e}), so the exclusions "
+                          f"cannot be added to it: re-run --map to rewrite it, then --validate")
+    if excluded:
+        rec[EXCLUDED_KEY] = {
+            "runs": [{"run": r, "reason": why} for r, why in excluded],
+            "against": os.path.abspath(report_path),
+            "n_report_runs": len(report_runs),
+            "n_analysed": len(report_runs & meta_runs),
+            "how": "collect_conditions.py --validate --exclude <run> --reason: runs the search "
+                   "reported that the user decided to leave out of the DE; run_de.R analyses only "
+                   "the metadata's runs"}
+    elif EXCLUDED_KEY in rec:
+        del rec[EXCLUDED_KEY]          # an older exclusion does not describe this design
+    else:
+        return (os.path.abspath(dpath) if rec else None), None
+    rest = {k: v for k, v in rec.items() if k != "conditions_csv"}
+    if not rest:
+        os.remove(dpath)
+        return None, None
+    write_decisions(dpath, dict(rest, conditions_csv=os.path.abspath(meta_path)))
+    return os.path.abspath(dpath), None
+
+
+def validate(meta_path, report_path, excluded=()):
+    excluded = [(r.strip(), (why or "").strip()) for r, why in (excluded or [])]
     with io.StringIO(_read_text(meta_path)[0], newline="") as fh:
         rows = list(csv.DictReader(fh))
     problems = []
@@ -936,15 +1070,55 @@ def validate(meta_path, report_path):
     sizes = Counter(r["Group"].strip() for r in rows if r.get("Group", "").strip())
     singletons = [g for g, c in sizes.items() if c < 2]
     if singletons: problems.append(f"groups with <2 replicates (no within-group variance): {singletons}")
+    out = {}
     if report_path:
         report_runs = set(runs_from_report(report_path))
         meta_runs = {r["File.Name"] for r in rows}
-        missing = report_runs - meta_runs
+        excl = {r for r, _ in excluded}
+        missing = report_runs - meta_runs - excl
         extra = meta_runs - report_runs
         if missing: problems.append(f"{len(missing)} report runs missing from metadata: {sorted(missing)[:5]}...")
         if extra:   problems.append(f"{len(extra)} metadata rows not in report: {sorted(extra)[:5]}...")
+        # a design built from the raw names of runs searched with --rename-dashed-runs
+        renamed = sorted((m, renamed_dashed_name(m)) for m in extra
+                         if renamed_dashed_name(m) != m and renamed_dashed_name(m) in report_runs)
+        if renamed:
+            problems.append(f"{len(renamed)} metadata row(s) name a run whose file name holds "
+                            f"'--' by that name, but the search ran it as another ("
+                            f"{RENAME_DASHED_FLAG}): "
+                            + "; ".join(f"{m} -> {n}" for m, n in renamed)
+                            + f" -- set File.Name to the searched name (collect_conditions.py "
+                              f"--map ... {RENAME_DASHED_FLAG} writes it)")
+        absent = sorted(excl - report_runs)
+        if absent:
+            problems.append(f"--exclude names {len(absent)} run(s) the report does not have: "
+                            f"{absent} -- an excluded run must be one the search reported "
+                            f"(its exact name: --list-runs --from-report)")
+        kept = sorted(excl & meta_runs)
+        if kept:
+            problems.append(f"--exclude names {len(kept)} run(s) that still have a metadata row: "
+                            f"{kept} -- run_de.R analyses every row, so an excluded run must have "
+                            f"none: delete its row, or drop the --exclude")
+        if missing:
+            # the failure stays; this only says how a DELIBERATE exclusion is recorded
+            out["fix"] = ("every report run needs a metadata row. A run left out of the DE on "
+                          "purpose (a re-run, a failed injection) is recorded with --exclude <run> "
+                          "--reason \"<why>\" -- only when the user decided it, never on your own "
+                          "judgment")
+        if excluded:
+            out["excluded_runs"] = [{"run": r, "reason": why} for r, why in excluded]
+            out["n_report_runs"] = len(report_runs)
+            out["n_analysed"] = len(report_runs & meta_runs)
+        if not problems:
+            dpath, problem = _write_exclusions(meta_path, report_path, excluded, report_runs,
+                                               meta_runs)
+            if problem:
+                problems.append(problem)
+            elif dpath and excluded:
+                out["decisions_file"] = dpath
     ok = not problems
-    print(json.dumps({"valid": ok, "n_samples": len(rows), "groups": dict(sizes), "problems": problems}, indent=2))
+    print(json.dumps({"valid": ok, "n_samples": len(rows), "groups": dict(sizes), "problems": problems,
+                      **out}, indent=2))
     sys.exit(0 if ok else 1)
 
 
@@ -969,6 +1143,10 @@ def main():
     ap.add_argument("--from-dir")
     ap.add_argument("--glob", default="*.raw")
     ap.add_argument("--runs", help="comma-separated run names (alternative to --from-*)")
+    ap.add_argument(RENAME_DASHED_FLAG, action="store_true",
+                    help="--from-dir/--runs: name each run whose file name holds '--' as a "
+                         "search with run_search.py --rename-dashed-runs will (each run of "
+                         "dashes made one), so conditions.csv matches the report")
     ap.add_argument("--covariates", default="", help="comma list for --emit-template, e.g. Batch,Covariate1")
     ap.add_argument("--sample-column", help="--map --from-file: the header the user said names the "
                     "samples, when two identifier columns name as many runs (sample_column_tie)")
@@ -981,7 +1159,27 @@ def main():
                          "recorded in <csv>.decisions.json")
     ap.add_argument("--validate")
     ap.add_argument("--against", help="report to validate File.Name against")
+    ap.add_argument("--exclude", dest="excluded", action=_ExcludeAction, metavar="RUN",
+                    help="--validate --against: a run the report has that the USER decided to "
+                         "leave out of the DE (a re-run, a failed injection); it has no metadata "
+                         "row. Repeatable; each needs its own --reason right after it. Recorded "
+                         "in <csv>.decisions.json (excluded_runs)")
+    ap.add_argument("--reason", dest="excluded", action=_ExcludeAction, metavar="TEXT",
+                    help="why the --exclude before it was left out, in the user's words")
     a = ap.parse_args()
+    if a.excluded:
+        if not a.validate:
+            ap.error("--exclude only goes with --validate <conditions.csv> --against <report>")
+        if not a.against:
+            ap.error("--exclude needs --against <report>: an excluded run must be one the "
+                     "search reported")
+        no_reason = [r for r, why in a.excluded if not (why or "").strip()]
+        if no_reason:
+            ap.error(f"--exclude {', '.join(no_reason)} has no --reason: each excluded run needs "
+                     f"its own --reason \"<why>\" right after it")
+        twice = sorted(r for r, n in Counter(r.strip() for r, _ in a.excluded).items() if n > 1)
+        if twice:
+            ap.error(f"--exclude {', '.join(twice)} is given more than once")
 
     if a.list_runs:
         runs = get_runs(a)
@@ -1002,7 +1200,7 @@ def main():
         covs = [c.strip() for c in a.covariates.split(",") if c.strip()]
         emit_template(a.emit_template, names, covs)
     elif a.validate:
-        validate(a.validate, a.against)
+        validate(a.validate, a.against, a.excluded or ())
     else:
         ap.print_help(); sys.exit(2)
 

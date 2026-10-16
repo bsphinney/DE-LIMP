@@ -312,11 +312,24 @@ contrast_display <- function(ct) {
     sub("\\s*-\\s*", " vs ", form) else ct
 }
 
+# Proteins of a DE table measured in no run of the groups it compares: listed there but not
+# tested (run_de.R 2.12.0: de_provenance.json not_measured, and de_tables n_not_measured), so they
+# have no p-value and neither the volcano nor the p-value panel draws them. 0 for an older record.
+not_measured_n <- function(f) {
+  for (t in or_else(prov$de_tables, list()))
+    if (is.list(t) && identical(t$file, basename(f))) return(as.integer(or_else(t$n_not_measured, 0L)))
+  0L
+}
+not_measured_said <- function(n, ct) if (n > 0) sprintf(paste0(
+  " %d proteins measured in neither group of %s are not tested and not drawn (DE table ",
+  "Evidence '%s')."), n, contrast_display(ct), or_else(prov$not_measured$label, "not recorded")) else ""
+
 # ---- volcano per contrast; p-values collected for one panel -------------------
-pv <- list()
+pv <- list(); pv_nm <- list()
 for (f in de_files) {
   ct <- contrast_of(f)
   fn <- file.path(outdir, sprintf("volcano_%s.png", make.names(ct)))
+  pv_nm[[ct]] <- not_measured_n(f)
   tryCatch({
     d <- utils::read.csv(f, stringsAsFactors = FALSE, check.names = FALSE)
     if ("P.Value" %in% names(d) && any(is.finite(d$P.Value)))
@@ -363,7 +376,7 @@ for (f in de_files) {
       "filter is applied. Vertical dashed lines mark %.3g-fold (labelled on the top axis) for",
       "reference only, so a coloured point inside them is a confidently estimated small change,",
       "not an error."),
-      ct, adjp_thr, 2^logfc_ref), CUT_NOTE))
+      ct, adjp_thr, 2^logfc_ref), CUT_NOTE, not_measured_said(pv_nm[[ct]], ct)))
   }, error = function(e) add_failed(fn, "volcano", conditionMessage(e)))
 }
 
@@ -387,11 +400,16 @@ if (length(pv)) tryCatch({
           plot.title.position = "plot", strip.background = element_rect(fill = "#f3f2ee", colour = "#d6d5cf"),
           strip.text = element_text(size = 9), plot.subtitle = element_text(colour = "#52514e"))
   ggsave(fn_pv, pp, width = 2.6 * ncol_pv + 0.8, height = 2.1 * nrow_pv + 1.1, dpi = 200)
-  add_fig(fn_pv, "pvalue", sprintf(paste(
+  add_fig(fn_pv, "pvalue", paste0(sprintf(paste(
     "Raw p-value distributions for all %d contrast%s (appendix; a calibration check, not a result).",
     "A flat background with a peak near 0 indicates real signal on a well-behaved model; a skew",
     "toward 1, a hump mid-range or a U shape suggests model or QC problems for that contrast."),
-    nc, if (nc > 1) "s" else ""))
+    nc, if (nc > 1) "s" else ""),
+    if (any(unlist(pv_nm) > 0)) sprintf(paste0(
+      " Proteins measured in no run of either compared group are not tested in that contrast and ",
+      "are not in its histogram (%s)."),
+      paste(sprintf("%s %d", vapply(names(pv_nm)[unlist(pv_nm) > 0], contrast_display, ""),
+                    unlist(pv_nm)[unlist(pv_nm) > 0]), collapse = "; ")) else ""))
 }, error = function(e) add_failed(fn_pv, "pvalue", conditionMessage(e)))
 
 # ---- expression-matrix-based figures (PCA, heatmap, QC) ---------------------

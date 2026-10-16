@@ -48,7 +48,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # bruker_tdf.py for how a read-write open truncates a tdf (the state of 342 on HIVE).
 import bruker_method  # noqa: E402
 # the contaminant tag and the sidecar's keratin_sample reader: one definition each (rule 3)
-from fetch_fasta import CONT_TAG, keratin_sample_recorded  # noqa: E402
+from fetch_fasta import CONT_TAG, keratin_sample_recorded, FEW_ADDED_SEQUENCES  # noqa: E402
 
 ACK_SOURCE = "https://proteomics.ucdavis.edu/instrument-grant-acknowledgments"
 # (instrument-name substrings, facility filename prefixes, label, acknowledgment).
@@ -85,6 +85,10 @@ DEF = "[facility default — confirm]"
 # never replaced by a plausible default (DE-LIMP rule #2).
 NR_TAG = "[not recorded — confirm]"
 NOT_RECORDED = f"____ {NR_TAG}"
+# A run left out of the DE whose reason exists but could not be read: run_de.R's runs_left_out
+# record has `reasons_unreadable` (its decisions record was damaged), so "not recorded" would be
+# wrong -- the user did record one (2.12 review).
+REASON_NOT_READ = "reason not read: the decisions record could not be read [confirm]"
 # Evosep loads every sample from an Evotip; the tip type and the amount on it are the Core's
 # bench record, not the instrument's.
 EVOTIP_TAG = "[Evotip type, loading protocol and peptide amount — confirm]"
@@ -107,6 +111,9 @@ SAGE_CUT = {("KR", "P"): ("Trypsin", "MS:1001251"), ("KR", ""): ("Trypsin/P", "M
 UNIMOD = {1: ("Acetyl", 42.010565), 4: ("Carbamidomethyl", 57.021464),
           7: ("Deamidated", 0.984016), 21: ("Phospho", 79.966331),
           28: ("Gln->pyro-Glu", -17.026549), 35: ("Oxidation", 15.994915)}
+# ...and every cysteine alkylation estimate_params.py can search, from its one map (UniMod too)
+from estimate_params import CYS_REAGENTS  # noqa: E402
+UNIMOD.update({r["unimod"]: (r["mod"], r["mass"]) for r in CYS_REAGENTS.values() if r})
 
 
 def _num(x):
@@ -704,6 +711,17 @@ def diann_cont_quant_exclude_why(report=None, prov=None, params_file=None):
     return None, "; ".join(why)
 
 
+def _cys_alkylation(paths):
+    """estimate_params.py's `cys_alkylation` record (what was searched for cysteine, and on whose
+    word) from the first of these params files whose .rationale.json sidecar holds one, else None.
+    The resolved cfg step 1b writes has no sidecar, so the given params file is asked too."""
+    for path in paths:
+        side = _load_json(f"{path}.rationale.json") if path else None
+        if isinstance(side, dict) and isinstance(side.get("cys_alkylation"), dict):
+            return side["cys_alkylation"]
+    return None
+
+
 def search_record(params=None, search_prov=None, manifest=None):
     """What the database search ran with, each value with where it came from.
 
@@ -725,7 +743,7 @@ def search_record(params=None, search_prov=None, manifest=None):
            "max_var_mods": None, "met_excision": False, "ms1_tol": None, "ms2_tol": None,
            "tol_note": None, "precursor_fdr": None, "library": None, "mbr": None, "dda": None,
            "search_mode": prov.get("search_mode"),
-           "labelled": None, "cont_quant_exclude": None,
+           "labelled": None, "cont_quant_exclude": None, "cys_alkylation": None,
            "probe_fallback": probe_fallback_record(prov), "warnings": []}
     if prov.get("version"):
         rec["version"] = str(prov["version"])
@@ -756,6 +774,8 @@ def search_record(params=None, search_prov=None, manifest=None):
         rec["warnings"].append("no search parameters file could be found from here")
         return rec
     where = os.path.basename(pf)
+    # cysteine searched unmodified: the Methods say why (paragraph), from the params' sidecar
+    rec["cys_alkylation"] = _cys_alkylation([pf] + [c for c, _ in cands])
 
     if engine == "diann" or pf.endswith(".cfg"):
         # the cfg tokeniser every other DIA-NN reader uses (diann_parallel.cfg_tokens)
@@ -1055,6 +1075,17 @@ def search_paragraph(rec, de_prov=None):
     var = [mod_phrase(m) for m in rec["mods"] if m["type"] == "variable" and not m.get("label")]
     s.append(("Fixed modifications: " + "; ".join(fixed) + ". ") if fixed else
              "No fixed modifications were set. ")
+    # The fixed list above comes from the parameters, so it never names carbamidomethylation that
+    # was not searched; when the samples were not alkylated (estimate_params --cys-alkylation
+    # none), say why cysteine carries none.
+    cys = rec.get("cys_alkylation") or {}
+    cys_fixed = [m for m in rec["mods"] if m["type"] == "fixed" and "C" in str(m.get("targets") or "")]
+    if cys.get("value") == "none" and not cys_fixed:
+        s[-1] += ("Cysteine was searched unmodified (no carbamidomethylation), as the samples "
+                  "were not reduced and alkylated. ")
+    elif cys.get("reagent") and cys.get("value") != "cam" and any(
+            m.get("unimod") == cys.get("unimod") for m in cys_fixed):
+        s[-1] += f"Cysteines were alkylated with {cys['reagent']}. "
     s[-1] += (("Variable modifications: " + "; ".join(var)
                + (f" (at most {rec['max_var_mods']['value']} per peptide)"
                   if rec.get("max_var_mods") else "") + ".") if var else
@@ -1104,42 +1135,77 @@ def diann_contaminant_sentence(srec):
             f"containing no {tag} entry.")
 
 
+# At most this many added sequences (and contaminant entries removed or kept beside them) are
+# named one by one in the Methods: the bait / tag case (fetch_fasta.FEW_ADDED_SEQUENCES). Above
+# it, the count and the file with its SHA-256 identify them -- an added second proteome of 4,506
+# entries once put a 145 KB line of accessions into a client's Methods (staff report 2026-10-10).
+ADDED_SEQUENCES_NAMED_MAX = FEW_ADDED_SEQUENCES
+
+
 def added_sequences_sentence(fmeta):
     """The user's own target sequences (fetch_fasta.py --add-fasta: a bait, a tag), named with
     the file and SHA-256 they came from, the contaminant entries removed because most of each is
     an added protein, and those kept whose shared peptides are ambiguous
-    (fetch_fasta.ADDED_SEQUENCE_RULE). "" when none were added."""
+    (fetch_fasta.ADDED_SEQUENCE_RULE). Each list is named entry by entry only up to
+    ADDED_SEQUENCES_NAMED_MAX, else counted. "" when none were added."""
     files = fmeta.get("added_sequences") or []
     names = [e.get("name") or e.get("accession") or "____"
              for f in files for e in (f.get("entries") or [])]
-    if not names:
+    # the entry count each file records (an entries list trimmed from a copy of the sidecar
+    # still leaves n_entries)
+    n = max(len(names), sum(f.get("n_entries") or 0 for f in files))
+    if not n:
         return ""
-    many = len(names) != 1
+    many = n != 1
+    listed = len(names) == n and n <= ADDED_SEQUENCES_NAMED_MAX
     src = "; ".join(f"{os.path.basename(f.get('file') or '') or '____'}, SHA-256 "
                     f"{f.get('sha256') or '____'}" for f in files)
-    sent = (f" {len(names)} user-supplied sequence{'s' if many else ''} ({', '.join(names)}) "
-            f"{'were' if many else 'was'} added to the database as target "
-            f"entr{'ies' if many else 'y'} ({src}).")
+    sent = (f" {n:,} user-supplied sequence{'s' if many else ''}"
+            + (f" ({', '.join(names)})" if listed else "")
+            + f" {'were' if many else 'was'} added to the database as target "
+              f"entr{'ies' if many else 'y'} ({src}).")
     gone = fmeta.get("contaminants_dropped_for_added_sequences") or []
     if gone:
         one = len(gone) == 1
-        sent += (f" {len(gone)} contaminant entr{'y' if one else 'ies'} sharing most of "
-                 f"{'its' if one else 'their'} peptides with {'it' if not many else 'them'} ("
-                 + ", ".join(f"{r.get('cont_acc')} ({r.get('cont_entry') or r.get('cont_gene') or '____'})"
-                             for r in gone)
-                 + f") {'was' if one else 'were'} removed from the library, so the added "
+        sent += (f" {len(gone):,} contaminant entr{'y' if one else 'ies'} sharing most of "
+                 f"{'its' if one else 'their'} peptides with {'it' if not many else 'them'}"
+                 + (" (" + ", ".join(f"{r.get('cont_acc')} ({r.get('cont_entry') or r.get('cont_gene') or '____'})"
+                                     for r in gone) + ")"
+                    if len(gone) <= ADDED_SEQUENCES_NAMED_MAX else "")
+                 + f" {'was' if one else 'were'} removed from the library, so the added "
                    f"sequence{'s keep' if many else ' keeps'} those peptides.")
     kept = fmeta.get("contaminants_sharing_peptides_with_added_sequences") or []
     if kept:
         one = len(kept) == 1
-        sent += (f" {len(kept)} contaminant entr{'y' if one else 'ies'} sharing fewer of "
+        sent += (f" {len(kept):,} contaminant entr{'y' if one else 'ies'} sharing fewer of "
                  f"{'its' if one else 'their'} peptides with {'it' if not many else 'them'} "
                  f"{'was' if one else 'were'} kept, and the peptides shared are ambiguous between "
-                 f"the contaminant and the added sequence: "
-                 + "; ".join(f"{r.get('cont_acc')} ({r.get('cont_entry') or r.get('cont_gene') or '____'}) "
-                             f"and {r.get('target_acc')}: {', '.join(r.get('shared_peptides') or [])}"
-                             for r in kept) + ".")
+                 f"the contaminant and the added sequence")
+        if len(kept) <= ADDED_SEQUENCES_NAMED_MAX:
+            sent += (": " + "; ".join(
+                f"{r.get('cont_acc')} ({r.get('cont_entry') or r.get('cont_gene') or '____'}) "
+                f"and {r.get('target_acc')}: {', '.join(r.get('shared_peptides') or [])}"
+                for r in kept) + ".")
+        else:
+            n_pep = len({p for r in kept for p in (r.get("shared_peptides") or [])})
+            sent += f" ({n_pep:,} peptide{'' if n_pep == 1 else 's'})."
     return sent
+
+
+def named_contaminants_sentence(fmeta):
+    """The contaminant entries the analyst left out by name (fetch_fasta.py --drop-contaminant),
+    named one by one up to ADDED_SEQUENCES_NAMED_MAX, else counted. "" when there were none -- the
+    paragraph is then what it was before the flag existed."""
+    gone = [r for r in (fmeta.get("contaminants_dropped_by_name") or []) if isinstance(r, dict)]
+    if not gone:
+        return ""
+    one = len(gone) == 1
+    return (f" {len(gone):,} contaminant entr{'y' if one else 'ies'}"
+            + (" (" + ", ".join(f"{r.get('cont_acc') or '____'} "
+                                f"({r.get('cont_entry') or r.get('cont_gene') or '____'})"
+                                for r in gone) + ")"
+               if len(gone) <= ADDED_SEQUENCES_NAMED_MAX else "")
+            + f" {'was' if one else 'were'} left out of the database by name.")
 
 
 def keratin_database_sentence(fmeta):
@@ -1343,6 +1409,108 @@ def de_block_sentence(prov):
                   f"{col}-to-{col} variation.")
 
 
+def de_covariate_sentence(prov):
+    """How the covariates entered the linear model (run_de.R's `covariates` record), when one was
+    numeric (--numeric-covariates): its range, that one slope is shared by all groups, and -- for
+    each comparison whose groups it nearly matches (run_de.R's per_contrast, confounded_contrasts)
+    -- that comparison and why. None when every covariate
+    was a factor (the design formula says it all), and for a record from before 2.12, which could
+    only fit factors. The one description: the Methods, the analysis brief and the report's
+    callout all read it."""
+    rec = prov.get("covariates")
+    terms = [t for t in (rec.get("terms") or []) if isinstance(t, dict)] if isinstance(rec, dict) else []
+    numeric = [t for t in terms if t.get("type") == "numeric"]
+    if not numeric:
+        return None
+
+    def rng(t):
+        lo, hi = t.get("min"), t.get("max")
+        return (f"values {lo:.4g} to {hi:.4g}" if isinstance(lo, (int, float))
+                and isinstance(hi, (int, float)) else f"range {NOT_RECORDED}")
+    names = [str(t.get("column") or NOT_RECORDED) for t in numeric]
+    one = len(names) == 1
+    out = (f"{' and '.join(names)} {'was' if one else 'were'} fitted as "
+           f"{'a continuous covariate' if one else 'continuous covariates'} ("
+           + (rng(numeric[0]) if one else
+              "; ".join(f"{n}: {rng(t)}" for n, t in zip(names, numeric)))
+           + ", as given in the conditions file), "
+           + ("with one slope shared by all groups, so each group comparison is adjusted for it "
+              "and compares the groups at the same covariate value." if one else
+              "each with one slope shared by all groups, so each group comparison is adjusted "
+              "for them and compares the groups at the same covariate values."))
+    factors = [t for t in terms if t.get("type") == "factor"]
+    if factors:
+        out += " " + "; ".join(
+            f"{t.get('column') or NOT_RECORDED} was a categorical factor"
+            + (f" ({t['n_levels']} levels)" if isinstance(t.get("n_levels"), int) else "")
+            for t in factors) + "."
+    for t in numeric:
+        if t.get("confounded") is not True:
+            continue
+        pc = t.get("per_contrast") if isinstance(t.get("per_contrast"), dict) else {}
+        conf = [c for c in (t.get("confounded_contrasts") or []) if isinstance(pc.get(c), dict)]
+        if conf:
+            # per contrast (2.12): the comparisons whose groups the covariate separates, and why
+            out += " " + " ".join(
+                f"In {c}, {t.get('column')} nearly matched the groups compared ("
+                + "; ".join(str(w) for w in (pc[c].get("why") or [])) + "), so that comparison "
+                "rests largely on the fitted slope." for c in conf)
+            continue
+        # a record without per-contrast detail: the overall share
+        r2 = t.get("group_r2")
+        se = t.get("se_inflation") if isinstance(t.get("se_inflation"), dict) else {}
+        se_max = max((v for v in se.values() if isinstance(v, (int, float))), default=None)
+        out += (f" Group explained {r2 * 100:.0f}% of the variance of {t.get('column')}"
+                if isinstance(r2, (int, float)) else
+                f" {t.get('column')} was strongly confounded with Group")
+        out += (", so the adjusted group comparisons rest largely on its fitted slope"
+                + (f" (the design alone widens their standard errors up to {se_max:.1f}x)"
+                   if se_max is not None else "") + ".")
+    return out
+
+
+def de_runs_left_out_sentence(prov):
+    """The searched runs the DE left out, each with the reason the user gave, from run_de.R's
+    `runs_left_out` record (the reasons come from collect_conditions.py --validate --exclude). A
+    run with no recorded reason says NOT RECORDED -- never a reason supplied here -- or, when
+    the record says its decisions file could not be read (`reasons_unreadable`),
+    REASON_NOT_READ. A run of the design that had no quantities (`not_quantified`, 2.12) is said
+    on its own, with run_de.R's reason. None when every searched run was analysed, or the record
+    predates it. The one wording: the Methods and the report's callout
+    (make_analysis_html.runs_left_out_note) both use it."""
+    r = prov.get("runs_left_out")
+    if not isinstance(r, dict):
+        return None
+    # design runs with no quantities (2.12): their own sentence, with run_de.R's reason
+    nq = [x for x in (r.get("not_quantified") or []) if isinstance(x, dict) and x.get("run")]
+    nq_text = (f"{len(nq)} run{' was' if len(nq) == 1 else 's were'} in the design but had no "
+               f"quantities, so {'it was' if len(nq) == 1 else 'they were'} not analysed: "
+               + "; ".join(f"{x['run']} ({str(x.get('reason') or 'reason ' + NOT_RECORDED).strip().rstrip('.')})"
+                           for x in nq) + ".") if nq else None
+    if not r.get("determined"):
+        return nq_text
+    runs = [x for x in (r.get("runs") or []) if isinstance(x, dict) and x.get("run")]
+    if not runs:
+        return nq_text
+
+    unread = bool(r.get("reasons_unreadable"))
+
+    def one(x):
+        why = x.get("reason")
+        why = why.strip().rstrip(".") if isinstance(why, str) and why.strip() else None
+        return f"{x['run']} ({why or (REASON_NOT_READ if unread else 'reason ' + NOT_RECORDED)})"
+
+    n_rep, n_an = r.get("n_report_runs"), r.get("n_analysed")
+    n = len(runs)
+    tail = (f"{'was' if n == 1 else 'were'} left out of the differential-expression analysis: "
+            f"{'; '.join(one(x) for x in runs)}.")
+    if isinstance(n_rep, int) and isinstance(n_an, int):
+        out = f"Of the {n_rep} runs searched, {n_an} were analysed and {n} {tail}"
+    else:
+        out = f"{n} searched run{'' if n == 1 else 's'} {tail}"
+    return out + (f" {nq_text}" if nq_text else "")
+
+
 def de_normalisation_sentence(prov):
     """Which quantities the DE read and why, from run_de.R's record (`normalisation`, and the
     normalization_check block normalization_check.py wrote): the experiment type, the default
@@ -1384,6 +1552,28 @@ def de_normalisation_sentence(prov):
     return out
 
 
+def de_not_measured_sentence(prov):
+    """run_de.R's `not_measured` rule (2.12.0), with each contrast's count from `de_tables`: a
+    protein measured in no run of the groups a contrast compares was not tested in it. None for
+    a record without the rule -- that run tested every protein, which the BH sentence covers."""
+    rec = prov.get("not_measured") if isinstance(prov.get("not_measured"), dict) else None
+    if not rec:
+        return None
+    tabs = prov.get("de_tables") if isinstance(prov.get("de_tables"), dict) else {}
+
+    def count(t):
+        n, of = t.get("n_not_measured"), t.get("n_proteins")
+        if not isinstance(n, int):
+            return NOT_RECORDED
+        return f"{n:,} of {of:,}" if isinstance(of, int) else f"{n:,}"
+    per = "; ".join(f"{c}: {count(t)}" for c, t in tabs.items() if isinstance(t, dict))
+    return (f"In each contrast, a protein measured in no run of either compared group (DE "
+            f"table Evidence '{rec.get('label') or NOT_RECORDED}') was not tested in that "
+            f"contrast: it is listed without a fold change or p-value and was left out of that "
+            f"contrast's Benjamini–Hochberg adjustment"
+            + (f" ({per} proteins)." if per else f" (counts per contrast: {NOT_RECORDED})."))
+
+
 def de_paragraph(prov):
     """The Differential-expression paragraph, from run_de.R's de_provenance.json. Significance
     is described exactly as run_de.R applied it: an adjusted-p cutoff, with |log2FC| only a
@@ -1396,6 +1586,9 @@ def de_paragraph(prov):
         return f" ({', '.join(bits)})" if bits else ""
     s = [f"Differential expression was analysed with "
          f"{prov.get('display_label') or NOT_RECORDED}{fmt_pkgs(prov)}."]
+    left_out = de_runs_left_out_sentence(prov)
+    if left_out:
+        s.append(left_out)
     if prov.get("rollup_method"):
         s.append(f"Protein quantities: {prov['rollup_method']}.")
     s.append(de_normalisation_sentence(prov))
@@ -1427,6 +1620,9 @@ def de_paragraph(prov):
         cons = [cons] if isinstance(cons, str) else (cons or [])
         s.append(f"The linear model was {prov['design']}"
                  + (f", with contrasts {', '.join(cons)}" if cons else "") + ".")
+    cov = de_covariate_sentence(prov)
+    if cov:
+        s.append(cov)
     blk = de_block_sentence(prov)
     if blk:
         s.append(blk)
@@ -1437,6 +1633,9 @@ def de_paragraph(prov):
     s.append((f"Moderated t-statistics ({eng}) were computed and p-values adjusted by the "
               f"Benjamini–Hochberg method; proteins with {sig} were called significant."
               if eng else f"Proteins with {sig} (Benjamini–Hochberg) were called significant."))
+    nm = de_not_measured_sentence(prov)
+    if nm:
+        s.append(nm)
     if prov.get("logfc_role") == "reference_line_only":
         lf = prov.get("logfc")
         s.append("No fold-change filter was applied"
@@ -1579,6 +1778,50 @@ def sample_prep_lines(rec, sr):
     return [f"Who prepared the samples is not recorded: {why} ({src}). {NOT_RECORDED}"]
 
 
+def database_build_warnings(fmeta):
+    """fetch_fasta.py's build warnings that the Sequence-database paragraph does not already
+    describe (its drop notes are records, written out in the sentences). They are for the agent
+    and the user to resolve -- printed on stderr and in the JSON -- never in methods.md: a client's
+    Methods once carried "Database build warnings (resolve before publication)" with a server path
+    in it (staff report 2026-10-10)."""
+    described = (fmeta.get("contaminants_dropped_note"),
+                 fmeta.get("contaminants_dropped_for_added_sequences_note"),
+                 fmeta.get("contaminants_sharing_peptides_with_added_sequences_note"))
+    return [str(x) for x in (fmeta.get("warnings") or []) if x and x not in described]
+
+
+# An absolute path: /quobyte/..., /nfs/..., /home/<user>/..., ~/..., C:\Users\... -- a server's or
+# a laptop's file system, which means nothing to the Methods' reader and names internal storage.
+# It starts the text, or follows a space or an opening quote/bracket -- never a word, a ")" or a
+# "%": "S-Trap (ProtiFi)/Trypsin/Lys-C", "0.1%/80%/20%" and "(Biognosys)/DIA-NN/FragPipe" are
+# prose (error-handling review, 2.12), as are m/z, 1/K0, Trypsin/P and URLs. And it starts with a
+# root a file system has (FS_ROOTS), or ~/, or a drive letter -- or else has at least three
+# segments made of file-name characters (/a/b/c.d).
+FS_ROOTS = ("quobyte", "nfs", "home", "Users", "private", "tmp", "Volumes", "var", "mnt",
+            "scratch", "group", "share", "data", "opt", "srv", "media", "lustre", "gpfs", "work")
+_SEG = r"[^\s/\\'\"`<>|()\[\]{},;]+"
+_NAME = r"[\w.@+-]+"
+_ABS_PATH = re.compile(
+    r"(?<![^\s(\[{\"'`])(?:"
+    rf"/(?:{'|'.join(FS_ROOTS)})(?:/{_SEG})+/?"
+    rf"|~(?:/{_SEG})+/?"
+    rf"|/{_NAME}(?:/{_NAME}){{2,}}/?"
+    rf"|[A-Za-z]:\\{_SEG}(?:\\{_SEG})*\\?)")
+
+
+def client_text(text):
+    """-> (text with every absolute path cut to its file name, [(path, what it became)]).
+    Applied to the whole of methods.md as it is written, so no path from any record reaches the
+    client; the caller echoes each cut on stderr, so a wrong one is seen."""
+    cuts = []
+
+    def base(m):
+        after = re.split(r"[/\\]", m.group(0).rstrip("/\\"))[-1]
+        cuts.append((m.group(0), after))
+        return after
+    return _ABS_PATH.sub(base, text), cuts
+
+
 def _write_text(path, text):
     """UTF-8 whatever the platform's locale ("1/K₀" and "—" fail under Windows cp1252), and
     atomic: written to <path>.part and renamed, so a failure never leaves a 0-byte methods.md."""
@@ -1621,7 +1864,7 @@ def main():
                                          "performance sentence -- the verdict stays staff-only")
     a = ap.parse_args()
 
-    fmeta = None
+    fmeta, build_warnings = None, []
     if a.fasta_meta:
         try:
             with open(a.fasta_meta, encoding="utf-8") as fh:
@@ -1856,19 +2099,11 @@ def main():
                          f"accessions.")
         else:
             sent += " No contaminant database was appended."
+        sent += named_contaminants_sentence(fmeta)
         sent += added_sequences_sentence(fmeta)
         sent += keratin_database_sentence(fmeta)
         w(sent)
-        # The drop notes are described in the sentences above -- they are records, not
-        # something to resolve before publication.
-        build_warnings = [x for x in (fmeta.get("warnings") or [])
-                          if x not in (fmeta.get("contaminants_dropped_note"),
-                                       fmeta.get("contaminants_dropped_for_added_sequences_note"),
-                                       fmeta.get("contaminants_sharing_peptides_with_added_sequences_note"))]
-        if build_warnings:
-            w("")
-            w(f"> Database build warnings (resolve before publication): "
-              f"{'; '.join(build_warnings)}")
+        build_warnings = database_build_warnings(fmeta)
     else:
         w(f"Spectra were searched against {NOT_RECORDED} "
           f"(run `fetch_fasta.py` and pass `--fasta-meta <fasta>.meta.json` to fill "
@@ -1985,12 +2220,23 @@ def main():
     w(f"*Acknowledgment source: {ACK_SOURCE} (confirm the exact current wording before publishing).*")
     w("")
 
-    _write_text(a.out, "\n".join(L) + "\n")
+    text, cuts = client_text("\n".join(L) + "\n")
+    for before, after in cuts:
+        print(f"make_methods: a file path cut to its name in {os.path.basename(a.out)} (a server "
+              f"path is not for the client): {before} -> {after}", file=sys.stderr)
+    _write_text(a.out, text)
+    for x in build_warnings:
+        print(f"make_methods: database build warning (not in {os.path.basename(a.out)}): {x}",
+              file=sys.stderr)
     print(json.dumps({"methods": os.path.abspath(a.out), "instrument": instrument,
                       "acknowledgment_for": ack_label, "n_files": len(metas),
                       "params_json": os.path.splitext(a.out)[0] + "_params.json",
-                      "next": "Verify the draft against the params table, polish the prose, then "
-                              "convert to .docx with to_docx.py."}, indent=2))
+                      # for the agent, never the client's Methods: tell the user, resolve them
+                      "database_build_warnings": build_warnings,
+                      "next": ("Tell the user the database build warnings above and resolve "
+                               "them (they are not in methods.md). " if build_warnings else "")
+                              + "Verify the draft against the params table, polish the prose, "
+                                "then convert to .docx with to_docx.py."}, indent=2))
 
 
 if __name__ == "__main__":

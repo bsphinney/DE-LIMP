@@ -5,8 +5,18 @@ was decided at a decision point, and why. Any agent can write it (the skill is a
 without Claude Code there is no transcript to save), and on Claude Code it is the curated record
 beside the raw conversation (save_transcript.py) -- far quicker for a reviewer to read.
 
-  python3 log_decision.py --session <session dir> --what "Contrasts: Old - Young per bait" \\
-      --why "the user confirmed them after seeing the design table" [--step "3. design"]
+  python3 log_decision.py --session <session dir> --step '3. design' --what-file - --why-file - <<'EOF'
+  Contrasts: Old - Young per bait
+  ---
+  the user confirmed them after seeing the design table
+  EOF
+
+The text comes in as DATA: --what-file / --why-file F (a file) or - (standard input; when both
+are -, the what, a line `---`, then the why), with a heredoc quoted <<'EOF', in which nothing is
+expanded. --what "..." / --why "..." still work for text with none of $ ` \\ " ', but in double
+quotes bash runs anything in backticks or $(...) -- the user's own words, an error text -- on
+this computer, and again on HIVE through hive_exec.sh's `bash -l -c` (2.12 security review).
+A text is read up to 64 KiB.
 
 Log it where SKILL.md says: the conditions confirmed, the contrasts chosen, the defaults
 confirmed or changed, any override (--unchecked, --force, a gate accepted), anything the user
@@ -61,18 +71,64 @@ def append(session, what, why, step=None, when=None):
     return path
 
 
+TEXT_MAX = 65536
+SEPARATOR = "---"      # between the what and the why when both come from standard input
+
+
+def _read(src, limit):
+    """The text in file `src`, or standard input for "-": UTF-8 (a BOM dropped, a bad byte
+    replaced), cut at `limit` bytes with a note. Raises OSError."""
+    if src == "-":
+        data = sys.stdin.buffer.read(limit + 1)
+    else:
+        with open(src, "rb") as fh:
+            data = fh.read(limit + 1)
+    text = data[:limit].decode("utf-8-sig", "replace")
+    return text + (" [... cut at 64 KiB]" if len(data) > limit else "")
+
+
+def texts(a, ap):
+    """(what, why) from --what/--why or --what-file/--why-file (see the module text)."""
+    what, why = a.what, a.why
+    try:
+        if a.what_file == "-" and a.why_file == "-":
+            lines = _read("-", 2 * TEXT_MAX).splitlines()
+            cut = next((i for i, ln in enumerate(lines) if ln.strip() == SEPARATOR), None)
+            if cut is None:
+                ap.error(f"--what-file - --why-file -: standard input needs the what, a line "
+                         f"{SEPARATOR!r}, then the why")
+            what, why = "\n".join(lines[:cut]), "\n".join(lines[cut + 1:])
+        else:
+            if a.what_file:
+                what = _read(a.what_file, TEXT_MAX)
+            if a.why_file:
+                why = _read(a.why_file, TEXT_MAX)
+    except OSError as e:
+        ap.error(f"could not read the text: {e}")
+    for name, v in (("what", what), ("why", why)):
+        if not (v or "").strip():
+            ap.error(f"the {name} is empty")
+    return what, why
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--session", required=True, help="the analysis session folder")
-    ap.add_argument("--what", required=True, help="what was decided")
-    ap.add_argument("--why", required=True, help="why: the user's words, the evidence")
+    w = ap.add_mutually_exclusive_group(required=True)
+    w.add_argument("--what", help="what was decided (text with none of $ ` \\ \" ')")
+    w.add_argument("--what-file", metavar="F|-", help="what was decided, from a file or - (stdin)")
+    y = ap.add_mutually_exclusive_group(required=True)
+    y.add_argument("--why", help="why: the user's words, the evidence (none of $ ` \\ \" ')")
+    y.add_argument("--why-file", metavar="F|-", help="why, from a file or - (stdin; with "
+                                                     "--what-file - too: what, a line ---, why)")
     ap.add_argument("--step", help="the SKILL.md step, e.g. '3. design'")
     a = ap.parse_args(argv)
+    what, why = texts(a, ap)
     if not os.path.isdir(a.session):
         print(json.dumps({"logged": False, "reason": f"no session folder {a.session!r}"}))
         return 0
-    print(json.dumps({"logged": True, "path": append(a.session, a.what, a.why, a.step)}))
+    print(json.dumps({"logged": True, "path": append(a.session, what, why, a.step)}))
     return 0
 
 

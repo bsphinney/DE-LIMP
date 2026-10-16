@@ -32,10 +32,22 @@
 }
 .rvec <- function(x) paste0("c(", paste(vapply(x, .rq, ""), collapse = ", "), ")")
 
-# A named map, one entry per line, in DE-LIMP's reproducibility-log style.
-.rmap <- function(varname, names_vec, values_vec) {
+# A number written so it reads back as the same double: the shortest of 15-17 significant
+# digits that round-trips (a numeric covariate's values must reproduce exactly).
+.rnum_exact <- function(x) vapply(as.numeric(x), function(v) {
+  for (d in 15:17) {
+    s <- trimws(formatC(v, digits = d, format = "g"))
+    if (identical(as.numeric(s), v)) return(s)
+  }
+  s
+}, "")
+
+# A named map, one entry per line, in DE-LIMP's reproducibility-log style. `numeric`: the
+# values are written as numbers (a numeric covariate), not quoted strings.
+.rmap <- function(varname, names_vec, values_vec, numeric = FALSE) {
+  vals <- if (numeric) .rnum_exact(values_vec) else vapply(values_vec, .rq, "")
   c(sprintf("%s <- c(", varname),
-    paste0(sprintf("  %s = %s", vapply(names_vec, .rq, ""), vapply(values_vec, .rq, "")),
+    paste0(sprintf("  %s = %s", vapply(names_vec, .rq, ""), vals),
            c(rep(",", max(0, length(names_vec) - 1)), "")),
     ")")
 }
@@ -50,6 +62,9 @@ write_repro_script <- function(path,
                                cov_min_frac,     # maxlfq coverage filter
                                meta,             # design, already aligned to the matrix
                                covariates,       # covariate column names in `meta`
+                               # the covariates fitted as one numeric column each
+                               # (--numeric-covariates); every other covariate is a factor
+                               numeric_covariates = character(0),
                                formula_parts,
                                forms,            # contrast strings
                                adjp_thr, logfc_ref,
@@ -72,6 +87,10 @@ write_repro_script <- function(path,
                                intensity_column = NULL,
                                # FALSE when the maxlfq run applied no quantile step (--quantities raw)
                                quantile_normalise = TRUE,
+                               # run_de.R's not_measured record: in each contrast a protein measured
+                               # in no run of the compared groups is not tested. NULL = the run
+                               # tested every protein (before 2.12.0), so nothing is emitted.
+                               not_measured = NULL,
                                timestamp = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
                                # TRUE only when this is being generated for a run that
                                # predates the feature, from that run's recorded provenance
@@ -120,6 +139,7 @@ write_repro_script <- function(path,
   two_fits <- blk_on && any(contrast_model == "independent")
   blk_fixed <- blk_on && identical(block$effect, "fixed")
   pgq_on  <- !is.na(pgq_cutoff) && pgq_cutoff > 0
+  nm_on   <- !is.null(not_measured)
 
   L <- c(
     "# =============================================================================",
@@ -168,14 +188,16 @@ write_repro_script <- function(path,
   # ---- experimental design ----------------------------------------------------
   L <- c(L,
     .hdr(sprintf("Experimental design (%d samples%s%s)", nrow(meta),
-                 if (length(covariates)) sprintf(", covariates: %s", paste(covariates, collapse = ", ")) else "",
+                 if (length(covariates)) sprintf(", covariates: %s", paste(
+                   paste0(covariates, ifelse(covariates %in% numeric_covariates, " (numeric)", "")),
+                   collapse = ", ")) else "",
                  if (blk_on) sprintf(", block: %s", blk_col) else "")),
     .rmap("group_map", meta$File.Name, meta$Group))
 
   df_cols <- "Group = unname(group_map)"
   for (cv in covariates) {
     mapname <- paste0(tolower(cv), "_map")
-    L <- c(L, .rmap(mapname, meta$File.Name, meta[[cv]]))
+    L <- c(L, .rmap(mapname, meta$File.Name, meta[[cv]], numeric = cv %in% numeric_covariates))
     df_cols <- paste0(df_cols, sprintf(", %s = unname(%s)", cv, mapname))
   }
   L <- c(L,
@@ -322,7 +344,10 @@ write_repro_script <- function(path,
     "metadata <- metadata[match(colnames(E), metadata$File.Name), ]",
     "groups <- factor(metadata$Group)")
   for (cv in covariates)
-    L <- c(L, sprintf("%s <- factor(metadata$%s)", cv, cv))
+    L <- c(L, if (cv %in% numeric_covariates)
+      sprintf("%s <- as.numeric(metadata$%s)   # numeric (--numeric-covariates): one slope shared by all groups",
+              cv, cv)
+    else sprintf("%s <- factor(metadata$%s)", cv, cv))
   L <- c(L,
     sprintf("design <- model.matrix(~ 0 + %s)", paste(formula_parts, collapse = " + ")),
     "colnames(design) <- sub('^groups', '', colnames(design))",
@@ -407,6 +432,16 @@ write_repro_script <- function(path,
     "              by = 'Protein.Group', all.x = TRUE, sort = FALSE)",
     "write.csv(expr, file.path(outdir, 'Expression_Matrix.csv'), row.names = FALSE)",
     "",
+    if (nm_on) c(
+    "# Which runs measured each protein -- the rule below reads it.",
+    if (is_dpc) c(
+    "# dpc: at least one precursor observed in that run (0 = value inferred by the DPC model).",
+    "n_obs <- rowsum((!is.na(dat$E)) * 1L, as.character(dat$genes$Protein.Group))",
+    "measured <- n_obs[match(rownames(E), rownames(n_obs)), colnames(E), drop = FALSE] > 0")
+    else c(
+    "# maxlfq: a value in the protein matrix (NA = missing).",
+    "measured <- !is.na(E)"),
+    "") else NULL,
     sprintf("for (cn in %s) {", .rvec(forms)),
     if (two_fits)
     "  tt <- limma::topTable(if (contrast_model[[cn]] == 'blocked') fit else fit_independent,\n                        coef = cn, number = Inf, adjust.method = 'BH')"
@@ -416,6 +451,15 @@ write_repro_script <- function(path,
     "  miss <- setdiff(names(ann), c('Protein.Group', names(tt)))   # don't duplicate columns",
     "  if (length(miss)) tt <- merge(tt, ann[, c('Protein.Group', miss), drop = FALSE],",
     "                                by = 'Protein.Group', all.x = TRUE, sort = FALSE)") else NULL,
+    if (nm_on) c(
+    sprintf("  # Not measured in either group (Evidence '%s'): a protein measured in no run", not_measured$label),
+    "  # of the groups this contrast compares is not tested in it -- its test columns are NA and",
+    "  # Benjamini-Hochberg runs over the tested proteins only.",
+    "  compared <- intersect(rownames(contrast_matrix)[contrast_matrix[, cn] != 0], levels(groups))",
+    "  not_measured <- length(compared) > 0 &",
+    "    rowSums(measured[match(tt$Protein.Group, rownames(measured)), groups %in% compared, drop = FALSE]) %in% 0",
+    sprintf("  tt[not_measured, intersect(%s, names(tt))] <- NA", .rvec(unlist(not_measured$columns_na))),
+    "  tt$adj.P.Val <- p.adjust(tt$P.Value, method = 'BH')   # NA p-values are left out") else NULL,
     "  tt <- tt[order(tt$adj.P.Val), ]",
     sprintf("  write.csv(tt, file.path(outdir, sprintf('DE_%s_%%s.csv', make.names(cn))), row.names = FALSE)",
             method),

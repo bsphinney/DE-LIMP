@@ -62,7 +62,7 @@ The orchestrator asks where results should live (SKILL.md step 3b):
     SAMPLE_QUALITY.md       # biological sample-quality panels (contamination that mimics biology)
     DATA_SUBMISSION/        # PRIDE / MassIVE deposit package (finalize): HOW_TO_SUBMIT.md/.html,
                             #   sdrf.tsv, protocols.txt, files_to_upload.tsv, prepare_upload.sbatch
-    podcast/                # OPTIONAL audio discussion (make_podcast.py; references/podcast.md):
+    podcast/                # audio discussion (make_podcast.py; references/podcast.md), by default for a CoreOmics submission:
                             #   podcast.m4a, podcast_script.md (with its claims ledger),
                             #   transcript.html, podcast.json, check.txt; .cache/ is scratch
     Analysis_Report_with_audio.html  # with a podcast: the report with the audio built in (send this one file)
@@ -163,16 +163,26 @@ two kinds of detection column, from `Detection_Matrix.csv` (the one definition o
   On dpc the other runs' values were inferred by the detection-probability model; on maxlfq
   they are missing.
 - **`Evidence`**: `measured in both` (every run of every group in the contrast measured it) ·
-  `presence call` (never measured in at least one group — the difference there is the
-  model's, not a measurement: read it as present/absent) · `partly inferred` (dpc) /
-  `partly missing` (maxlfq) otherwise. Empty when the protein has no detection record.
+  `presence call` (never measured in at least one group but measured in another — the
+  difference there is the model's, not a measurement: read it as present/absent) ·
+  `not measured in either group` (measured only in other groups of the study: **not tested
+  in this contrast** — see below) · `partly inferred` (dpc) / `partly missing` (maxlfq)
+  otherwise. Empty when the protein has no detection record.
 
 The exact wording of both is in `de_provenance.json` → `detection_matrix.de_columns`, which
 AGENTS.md reads.
 
-### The optional podcast (`output/podcast/`, `make_podcast.py`)
-An AI-generated audio discussion of the finished report, made only when the user asks
-(`references/podcast.md`). It is a **derivative, not a record**: README and AGENTS.md say so,
+**Rows without a p-value.** A `not measured in either group` row has `logFC`, `t`,
+`P.Value`, `adj.P.Val` and `B` empty (NA): it was not tested in that contrast and is not in
+its Benjamini–Hochberg adjustment, which runs over the tested proteins only (2.12.0;
+`references/de-analysis.md`). On maxlfq a protein with no value at all in one compared group
+has no p-value either (limma cannot estimate it). Proteins *tested* in a contrast are the rows
+with a `P.Value`; `de_provenance.json` → `de_tables` gives each table's `n_proteins`,
+`n_tested`, `n_not_measured` and `n_significant`, and `not_measured` the rule.
+
+### The podcast (`output/podcast/`, `make_podcast.py`)
+An AI-generated audio discussion of the finished report: made by default for a CoreOmics
+submission, and only on a yes for internal Core work and anyone else (`references/podcast.md`). It is a **derivative, not a record**: README and AGENTS.md say so,
 and the report and tables stay authoritative.
 - `podcast.m4a` (or `podcast.wav` when there is no AAC encoder): the episode.
 - `podcast_script.md`: the script, with its **"Claims beyond the report"** ledger.

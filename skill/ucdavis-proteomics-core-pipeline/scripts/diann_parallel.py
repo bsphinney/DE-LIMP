@@ -44,6 +44,8 @@ from probe_window import RETRY_ON, FALLBACK_ON, EXIT_MEANING            # noqa: 
 # ONE definition of "this cfg searches DDA" (the flag estimate_params.py writes for DDA), and of
 # what an unset --window means under it.
 from estimate_params import DIANN_DDA_FLAG, DDA_WINDOW_NOTE, is_dda     # noqa: E402
+# Every step script, list and cfg is written without following a planted link (safe_write.py).
+from safe_write import write_file                                       # noqa: E402
 
 # The same SOP floor, keyed by the DIA-NN flag rather than by level, for the provenance records.
 SOP_MASS_ACC_FLAGS = {"--mass-acc": SOP_MASS_ACC["ms2_ppm"],
@@ -442,11 +444,9 @@ def write_cfg(cfg, dest, drop=()):
     reader treats quotes is not verified."""
     names = set(drop)
     special = re.compile(r"""[\s'"\\]|^#""")
-    with open(dest, "w") as fh:
-        for flag, vals in cfg_groups(cfg_tokens(cfg)):
-            if flag not in names:
-                fh.write(" ".join([flag] + [shlex.quote(v) if not v or special.search(v)
-                                            else v for v in vals]) + "\n")
+    write_file(dest, "".join(" ".join([flag] + [shlex.quote(v) if not v or special.search(v)
+                                                 else v for v in vals]) + "\n"
+                              for flag, vals in cfg_groups(cfg_tokens(cfg)) if flag not in names))
 
 
 def xic_flag(cfg):
@@ -1189,6 +1189,175 @@ def refuse_unsafe_path(path, flag="--out", prog="diann_parallel"):
     return path
 
 
+# DIA-NN cannot be handed a path with '--' in it, quoted or not. Its command-line reader joins every
+# argument with a space and cuts the result at EVERY '--' (arguments(), diann.cpp at tag 1.8, the
+# last public source: `args += argv[i] + std::string(" ")`, then `next = args.find("--", start)`),
+# so the rest of the path becomes an "option" of its own. DIA-NN 2.7.0 does exactly that: a Core run
+# named `<date>__60SPD_DIA--asp3_<well>.d` logged "unrecognised option [--asp3_<well>.d]" and
+# "skipping .../<date>__60SPD_DIA - invalid raw MS data format", and searched the other runs (a
+# staff report, 2026-10-14). Re-run on HIVE (DIA-NN 2.7.0, srun 24807838): `--f <d>/x_DIA--asp3_S3
+# .mzML --f <d>/plate--1/s1.mzML --f <d>/x_DIA-asp3_S3.mzML` (the last a link to the first) logged
+# "unrecognised option" for `--asp3_S3.mzML` and `--1/s1.mzML`, skipped `<d>/x_DIA` and
+# `<d>/plate`, and processed 1 file: the link. A '--' in a FOLDER is cut the same way. A single
+# '-' is harmless -- only '--' starts an option -- and every path this skill hands DIA-NN is
+# absolute, so a name that starts with one '-' never starts an argument. Sage, msconvert,
+# ThermoRawFileParser (-i=<path>), AlphaDIA and radiant_fulcrum take each path as one argument and
+# are not affected; FragPipe's own DIA-NN step is (run_search.refuse_fragpipe_dashed).
+# The mark, the flag and the renaming rule are defined once, in check_report_runs.py, beside the
+# other rules about run names; detect_acquisition.py and collect_conditions.py read them there.
+from check_report_runs import (DIANN_OPTION_MARK, RENAME_DASHED_FLAG, dashed,  # noqa: E402,F401
+                               dashed_names_text, renamed_dashed_name)
+# Inputs whose path holds '--' are searched through links in this folder of the search's --out.
+INPUT_LINKS_DIR = "input_links"
+
+
+def refuse_dashed_path(path, flag, prog="diann_parallel"):
+    """Exit when a path DIA-NN is given that is not an input run (--out, --fasta, --cfg, a
+    library) holds '--'. Input runs are linked instead (dashed_input_plan). Returns `path`."""
+    if dashed(path):
+        sys.exit(f"[{prog}] REFUSING {flag} {path!r}: it contains '--'. DIA-NN cuts its command "
+                 f"line at every '--', quoted or not, so it would read the rest of this path as an "
+                 f"option of its own and go on without it (DIA-NN 2.7.0 exits 0 when that "
+                 f"happens). Use a path without '--': rename the folder, or link it under a name "
+                 f"without one. Nothing was written or submitted.")
+    return path
+
+
+def refuse_dashed_cfg(cfg, prog="diann_parallel"):
+    """Exit when a value in the cfg holds '--' -- a --lib, --temp or --out-lib path, a --var-mod:
+    DIA-NN reads the cfg's text as a command line (--cfg), cutting it at every '--' as it does
+    argv, so the rest of that value becomes an option and the value is lost. A flag that is
+    itself `--x` is read as one; only a value carrying '--' is the problem."""
+    try:
+        groups = cfg_groups(cfg_tokens(cfg))
+    except CfgError:
+        return                                   # parallel_safe / the routes report it
+    bad = [(flag, v) for flag, vals in groups for v in vals if dashed(v)]
+    if bad:
+        sys.exit(f"[{prog}] REFUSING {cfg}: " + "; ".join(f"{f} {v!r}" for f, v in bad)
+                 + " -- DIA-NN reads a cfg like a command line and cuts it at every '--', quoted "
+                   "or not, so that value would be lost and its tail read as an option. Use a "
+                   "path (or value) without '--'. Nothing was written or submitted.")
+
+
+def dashed_input_plan(files, out, rename=False):
+    """How each input whose path holds '--' reaches DIA-NN: through a link under
+    <out>/input_links/. Pure -- make_input_links() creates them, after every other refusal.
+
+    -> {"links": [{"original", "link", "run_name", "renamed"}], "refused": message or None}.
+
+    '--' in a FOLDER only: the link keeps the file name, so the run keeps its name (DIA-NN names
+    a run by its file name without the folder: check_report_runs.run_name) and nothing downstream
+    changes. '--' in the FILE NAME: the run cannot keep its name, and conditions.csv names runs,
+    so that is refused unless `rename` (the caller's --rename-dashed-runs); the link is then named
+    with each run of dashes made one ('a--b.d' -> 'a-b.d'). A new name that another input
+    already has is refused either way: DIA-NN would merge the two into one run."""
+    from check_report_runs import run_name
+    out = os.path.abspath(out)
+    links, need_rename = [], []
+    for f in files:
+        if not dashed(f):
+            continue
+        name = os.path.basename(f.rstrip("/"))
+        new = renamed_dashed_name(name)
+        link = os.path.join(out, INPUT_LINKS_DIR, new)
+        rec = {"original": f, "link": link, "run_name": run_name(link), "renamed": new != name}
+        links.append(rec)
+        if rec["renamed"]:
+            need_rename.append(rec)
+    final = [run_name(f) for f in files if not dashed(f)] + [r["run_name"] for r in links]
+    clash = sorted({r["run_name"] for r in links if final.count(r["run_name"]) > 1})
+    refused = None
+    if clash:
+        refused = (f"input(s) whose path holds '--' would be searched under a run name another "
+                   f"input already has ({', '.join(clash)}), and DIA-NN would merge the two into "
+                   f"one run. DIA-NN cannot be given a path with '--' in it (it cuts its command "
+                   f"line at every '--', quoted or not), so give one of them another name -- a "
+                   f"link under a name of your choosing works -- or search them separately.")
+    elif need_rename and not rename:
+        refused = (f"{len(need_rename)} input file name(s) contain '--', and DIA-NN cannot be "
+                   f"given such a path: it cuts its command line at every '--', quoted or not, "
+                   f"reads the rest of the name as an option and skips the run, then searches the "
+                   f"others and exits 0 (DIA-NN 2.7.0: \"unrecognised option [--...]\", "
+                   f"\"skipping ... - invalid raw MS data format\").\n"
+                   + dashed_names_text([{"file": r["original"], "renamed_run_name": r["run_name"]}
+                                        for r in need_rename])
+                   + f"The run has to be searched under another name, and conditions.csv names "
+                     f"runs, so this is a choice to make: re-run with {RENAME_DASHED_FLAG} to "
+                     f"search each one through a link under {os.path.join(out, INPUT_LINKS_DIR)} "
+                     f"with the name shown (nothing on disk is renamed or copied). The report, "
+                     f"conditions.csv and every table then use that name, so set File.Name in "
+                     f"conditions.csv to it.")
+    return {"links": links, "refused": refused}
+
+
+def make_input_links(plan):
+    """Create the links dashed_input_plan() planned, replacing a stale link of the same name.
+    -> {original: link}. Raises ValueError when something that is not a link has that name."""
+    made = {}
+    for r in plan["links"]:
+        os.makedirs(os.path.dirname(r["link"]), exist_ok=True)
+        if os.path.islink(r["link"]) and os.readlink(r["link"]) != r["original"]:
+            os.unlink(r["link"])
+        elif os.path.lexists(r["link"]) and not os.path.islink(r["link"]):
+            raise ValueError(f"{r['link']} exists and is not a link; move it, or search into "
+                             "another --out")
+        if not os.path.islink(r["link"]):
+            os.symlink(r["original"], r["link"])
+        made[r["original"]] = r["link"]
+    return made
+
+
+def input_links_note(plan, prog):
+    """The FLAG a search prints when it links inputs, one line per link ('' when none)."""
+    if not plan["links"]:
+        return ""
+    return (f"[{prog}] FLAG: {len(plan['links'])} input path(s) contain '--', which DIA-NN would "
+            f"cut into an option; each is searched through a link in "
+            f"{os.path.dirname(plan['links'][0]['link'])}:\n"
+            + "".join(f"[{prog}]   {r['original']} -> {os.path.basename(r['link'])}"
+                      + (f" (the run is named {r['run_name']})" if r["renamed"] else
+                         " (same file name: the run keeps its name)") + "\n"
+                      for r in plan["links"]))
+
+
+# DIA-NN names everything it writes beside an output -- `<name>.predicted.speclib`, `<name>.log.txt`,
+# `<name>.stats.tsv`, the matrices -- by cutting the --out / --out-lib path at its LAST '.', over
+# the WHOLE path (remove_extension(): find_last_of('.'), diann.cpp at tag 1.8, the last public
+# source). A file name with no extension is therefore cut inside a FOLDER whose name has a '.': on
+# 2026-10-02 (DIA-NN 2.7.0) `--out-lib .../species_check/S07_A01.01dup2/diann_lib` wrote
+# species_check/S07_A01.predicted.speclib and S07_A01.log.txt one folder up, and the job's
+# guard failed. Re-run on HIVE (DIA-NN 2.7.0, job 24560319): `--out-lib <dot folder>/diann_lib`
+# -> both one level up; `<dot folder>/diann_lib.speclib` -> diann_lib.predicted.speclib and
+# diann_lib.log.txt inside it; a conversion's `<dot folder>/conv.parquet` -> conv.parquet and
+# conv.log.txt inside it. So every output file this skill names for DIA-NN has an extension, and a
+# folder with a '.' in its name (a re-injection's `.01dup2`, a `v1.2`) is searched into as it is.
+def diann_output_path(path, flag="--out"):
+    """`path`, checked to be one DIA-NN derives names from inside its own folder: its file name
+    has an extension. Raises ValueError otherwise -- the file names are this skill's own, so that
+    is a bug in a generator, stopped before anything is written."""
+    name = re.split(r"[/\\]", path)[-1]
+    if "." not in name[1:]:
+        raise ValueError(
+            f"{flag} {path!r}: the file name has no extension, so DIA-NN would cut every name it "
+            f"derives from it (the predicted library, the log) at the last '.' of the whole path "
+            f"-- in a folder whose name has one, and write them outside it")
+    return path
+
+
+def diann_stem(path):
+    """DIA-NN's remove_extension(): `path` up to its last '.' (see diann_output_path)."""
+    i = path.rfind(".")
+    return path if i < 0 else path[:i]
+
+
+def predicted_speclib(out_lib):
+    """The file DIA-NN's predictor writes for `--out-lib <out_lib>`: `<stem>.predicted.speclib`,
+    whatever extension was asked for (README, "Output library": "the output file takes the
+    .predicted.speclib extension, with the name derived from the same template")."""
+    return diann_stem(diann_output_path(out_lib, "--out-lib")) + ".predicted.speclib"
+
+
 # Wall clock per array task (steps 2 and 4), hours, for a task of TIME_REFERENCE_CPUS CPUs -- the
 # default every chain ran at before 2.10 -- and SCALED UP for fewer (array_task_hours). Real Core
 # runs (HIVE sacct, every brettsp step-2 task since 2026-07-01 at 16 CPUs, 6,182 completed):
@@ -1291,7 +1460,9 @@ def needs_requeue(partition, qos):
     return (qos or "").startswith("public") or partition == "low"
 
 
-def header(name, cpus, mem_gb, hours, partition, account, qos=None, array=None):
+def header(name, cpus, mem_gb, hours, partition, account, qos=None, array=None, exclude=None):
+    """A chain step's #SBATCH lines. `exclude`: the nodes --exclude keeps every step off
+    (node_fault.exclude_nodes)."""
     h = ["#!/bin/bash -l",
          f"#SBATCH --job-name={name}",
          f"#SBATCH --cpus-per-task={cpus}",
@@ -1301,6 +1472,9 @@ def header(name, cpus, mem_gb, hours, partition, account, qos=None, array=None):
          f"#SBATCH --account={account}"]
     if qos:
         h.append(f"#SBATCH --qos={qos}")
+    if exclude:
+        from node_fault import exclude_directive
+        h.append(exclude_directive(exclude))
     if needs_requeue(partition, qos):
         h.append("#SBATCH --requeue")
     h += [f"#SBATCH -o {name}_%j.log", f"#SBATCH -e {name}_%j.log"]
@@ -1359,6 +1533,9 @@ def main():
     ap.add_argument("--account")
     ap.add_argument("--qos", default=None, help="SLURM QOS. Needed for publicgrp/low "
                     "(publicgrp-low-qos); high/genome-center-grp uses its default.")
+    ap.add_argument("--exclude", metavar="NODE[,NODE...]",
+                    help="SLURM nodes to keep every step off (names or ranges, e.g. "
+                         "hive-dc-7-4-[50-54]): #SBATCH --exclude in every step's script")
     ap.add_argument("--max-simultaneous", type=int, default=20)
     ap.add_argument("--no-norm", action="store_true")
     ap.add_argument("--probe-window", action=argparse.BooleanOptionalAction, default=True,
@@ -1381,7 +1558,22 @@ def main():
     qcx.add_argument("--qc", action="store_true",
                      help="an instrument QC / standard run: never staged from a job")
     qcx.add_argument("--not-qc", action="store_true", help="not a QC run: passed on to stage")
+    ap.add_argument(RENAME_DASHED_FLAG, action="store_true",
+                    help="search an input whose FILE NAME holds '--' through a link named with "
+                         "each run of dashes made one, so its run is renamed (DIA-NN cannot be "
+                         "given a path with '--'); without it such an input is refused. A '--' "
+                         "in a folder only is linked under the same file name either way")
     a = ap.parse_args()
+    # checked here too: this generator is run by hand as well, and the value lands in a #SBATCH
+    # line of every step (node_fault.exclude_nodes, the one rule)
+    a.exclude_nodes = None
+    if a.exclude is not None:
+        from node_fault import exclude_nodes
+        try:
+            a.exclude_nodes = exclude_nodes(a.exclude)
+        except ValueError as e:
+            sys.exit(f"[diann_parallel] REFUSING --exclude {a.exclude!r}: {e}. "
+                     "Nothing was generated.")
     # The cfg path is recorded (search_provenance.json, params.resolved.cfg's origin) and read by
     # later jobs and readers in other working directories: absolute from here on, and it must
     # exist now -- a relative one is otherwise resolved against whatever directory reads it.
@@ -1418,6 +1610,18 @@ def main():
     if shared:
         sys.exit(names_stop(shared, "diann_parallel"))
     refuse_unsafe_path(a.out)
+    # DIA-NN cuts its command line at every '--' (DIANN_OPTION_MARK): an output, database or cfg
+    # path holding one is refused; an input run is searched through a link (made below, once
+    # nothing is left to refuse) -- or refused, when the link would have to rename the run.
+    for flag, path in (("--out", a.out), ("--fasta", a.fasta), ("--cfg", a.cfg),
+                       ("--seed-lib", a.seed_lib)):
+        if path:
+            refuse_dashed_path(os.path.abspath(path), flag)
+    if a.cfg:
+        refuse_dashed_cfg(a.cfg)
+    links_plan = dashed_input_plan(raws, a.out, rename=a.rename_dashed_runs)
+    if links_plan["refused"]:
+        sys.exit(f"[diann_parallel] REFUSING: {links_plan['refused']} Nothing was generated.")
     # run_search.py checks --dda against the bundle; the documented direct call -- and a
     # --seed-lib phase 2 -- never pass through it. So the generator checks it too, against the
     # acquisition estimate_params.py wrote the cfg for. An unreadable cfg is parallel_safe's to
@@ -1512,15 +1716,25 @@ def main():
     # Every refusal is behind us: an earlier search's probe outputs must not describe this one
     # (set aside, not deleted -- they are that search's evidence)
     set_aside_probe_outputs(out)
+    # ...so the '--' links can be made now; every step reads the runs from the file list
+    try:
+        linked = make_input_links(links_plan)
+    except (OSError, ValueError) as e:
+        sys.exit(f"[diann_parallel] could not link the inputs whose path holds '--': {e}. "
+                 "Nothing was submitted.")
+    sys.stderr.write(input_links_note(links_plan, "diann_parallel"))
+    originals, raws = raws, [linked.get(r, r) for r in raws]
     # file list (1 raw path per line) — array tasks index into it
-    open(os.path.join(out, "file_list.txt"), "w").write("\n".join(raws) + "\n")
+    write_file(os.path.join(out, "file_list.txt"), "\n".join(raws) + "\n")
     all_f = " ".join(f"--f {shlex.quote(r)}" for r in raws)   # quote — data paths may contain spaces
     array = f"0-{n-1}%{a.max_simultaneous}"
     seed = refuse_unsafe_path(os.path.abspath(a.seed_lib), "--seed-lib") if a.seed_lib else None
-    predicted = seed if seed else f"{D}/step1.predicted.speclib"
+    step1_lib = f"{D}/step1.speclib"
+    predicted = seed if seed else predicted_speclib(step1_lib)
     empirical = f"{D}/empirical.parquet"
     first_pass = f"{D}/{FIRST_PASS_REPORT}"
     pass_cmp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pass_comparison.py")
+    run_check = os.path.join(os.path.dirname(os.path.abspath(__file__)), "check_report_runs.py")
 
     # QUEUE CHOICE, ported from DE-LIMP's select_best_partition()
     # (R/helpers_search.R) + docs/QUEUE_SWITCHING.md:
@@ -1552,7 +1766,8 @@ def main():
     # folder (node_fault.py): a node whose /quobyte mount has dropped fails as a NODE fault (exit
     # 75), which watch_run.sh and node_fault.py retry act on, never as "DIA-NN exited 0 but ...".
     from node_fault import preflight_lines, chain_checks
-    node_check = preflight_lines(chain_checks(a.diann, out, fasta, raws)
+    # the raw data's own folders, not the links': a node that cannot reach them is the fault
+    node_check = preflight_lines(chain_checks(a.diann, out, fasta, originals)
                                  + ([("-r", seed, "the seed library")]
                                     if seed and os.path.exists(seed) else []))
 
@@ -1568,7 +1783,7 @@ def main():
                                                     False if a.not_qc else None),
                                                 preflight=node_check).rstrip("\n")
         p = os.path.join(out, name)
-        open(p, "w").write(body + "\n"); os.chmod(p, 0o755); return name
+        write_file(p, body + "\n", 0o755); return name
 
     # array preamble: pick this task's raw file
     pick = ('FILE=$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" ' + f'"{D}/file_list.txt")\n'
@@ -1579,11 +1794,12 @@ def main():
     s1 = None
     if not seed:
         s1 = write("step1_libpred.sbatch", "\n".join([
-            header("s1_libpred", a.libpred_cpus, a.libpred_mem, a.libpred_time, _ps, _as_, qos=_qs), "",
+            header("s1_libpred", a.libpred_cpus, a.libpred_mem, a.libpred_time, _ps, _as_, qos=_qs,
+                   exclude=a.exclude_nodes), "",
             f'echo "Step 1/5 library prediction"; date',
             clear_stale(predicted),       # see clear_stale(): a re-run must not pass on the old one
             f'{DN} --fasta "{fasta}" --fasta-search --predictor --gen-spec-lib \\',
-            f'  --out-lib "{D}/step1.speclib" --out "{D}/step1_lib.parquet" \\',
+            f'  --out-lib "{step1_lib}" --out "{D}/step1_lib.parquet" \\',
             f'  --threads {a.libpred_cpus} {flags}',
             must_exist(predicted, "the predicted spectral library")]),
             stage="step 1/5 library prediction", hours=a.libpred_time)
@@ -1634,7 +1850,7 @@ def main():
                                 if m in measure)
         s1b = write("step1b_window.sbatch", "\n".join([
             header("s1b_window", probe_cpus, task_memory(a)[0], PROBE_WALL_HOURS,
-                   _ps, _as_, qos=_qs), "",
+                   _ps, _as_, qos=_qs, exclude=a.exclude_nodes), "",
             f'echo "Step 1b/5 measuring {what} on representative runs"; date',
             # Every other step reaches DIA-NN through DN, which carries the .NET 8 exports a
             # Thermo .raw needs. probe_window.py runs DIA-NN as its own subprocess (no shell),
@@ -1769,7 +1985,8 @@ def main():
 
     # Step 2 — first pass (array): predicted lib -> per-file .quant
     s2 = write("step2_firstpass.sbatch", "\n".join([
-        header("s2_firstpass", a.threads_per_file, task_memory(a)[0], a.time_per_file, _pa, _aa, qos=_qa, array=array), "",
+        header("s2_firstpass", a.threads_per_file, task_memory(a)[0], a.time_per_file, _pa, _aa, qos=_qa, array=array,
+               exclude=a.exclude_nodes), "",
         f'echo "Step 2/5 first pass, task ${{SLURM_ARRAY_TASK_ID}} of {n}"; date',
         *measured_guard, pick, tmpguard("quant_step2"),
         f'mkdir -p "{D}/{TASK_OUT_DIRS["step2"]}"   # this task\'s report files (TASK_OUT_DIRS)',
@@ -1784,7 +2001,8 @@ def main():
 
     # Step 3 — empirical library assembly (single job, --use-quant)
     s3 = write("step3_assembly.sbatch", "\n".join([
-        header("s3_assembly", a.assembly_cpus, a.assembly_mem, a.assembly_time, _ps, _as_, qos=_qs), "",
+        header("s3_assembly", a.assembly_cpus, a.assembly_mem, a.assembly_time, _ps, _as_, qos=_qs,
+               exclude=a.exclude_nodes), "",
         f'echo "Step 3/5 empirical library assembly"; date', *measured_guard,
         tmpguard("quant_step2"),
         f'cp -r "{D}/quant_step2" "{D}/quant_step2_orig" 2>/dev/null || true   # backup for resume',
@@ -1815,7 +2033,8 @@ def main():
     task_out4 = f' --out "{D}/{out4_dir}/t${{SLURM_ARRAY_TASK_ID}}.parquet"'
 
     s4 = write("step4_finalpass.sbatch", "\n".join([
-        header("s4_finalpass", a.threads_per_file, task_memory(a)[1], a.time_per_file, _pa, _aa, qos=_qa, array=array), "",
+        header("s4_finalpass", a.threads_per_file, task_memory(a)[1], a.time_per_file, _pa, _aa, qos=_qa, array=array,
+               exclude=a.exclude_nodes), "",
         f'echo "Step 4/5 final pass, task ${{SLURM_ARRAY_TASK_ID}} of {n}"; date',
         *measured_guard, pick, tmpguard("quant_step4"),
         'QUANT="${FILE##*/}"; QUANT="${QUANT%.*}.quant"',
@@ -1839,7 +2058,8 @@ def main():
 
     # Step 5 — cross-run report (single job, --use-quant --matrices)
     s5 = write("step5_report.sbatch", "\n".join([
-        header("s5_report", a.assembly_cpus, a.assembly_mem, a.assembly_time, _ps, _as_, qos=_qs), "",
+        header("s5_report", a.assembly_cpus, a.assembly_mem, a.assembly_time, _ps, _as_, qos=_qs,
+               exclude=a.exclude_nodes), "",
         f'echo "Step 5/5 cross-run report"; date', *measured_guard, tmpguard("quant_step4"),
         # the report AND its stats file: check_report_runs.stats_path() names the latter
         clear_stale(f'{D}/{report}', stats_path(f'{D}/{report}')),
@@ -1870,7 +2090,10 @@ def main():
         f'if [ "$NNAMES" -ne {n} ]; then '
         f'echo "FAILED: {n} inputs map to only $NNAMES distinct run names -- DIA-NN names a run '
         f'by its file name alone, so inputs that share one are merged into a single Run. '
-        f'Rename them, or search them separately." >&2; exit 1; fi',
+        f'Rename them, or search them separately. (Or file_list.txt was edited after the chain was '
+        f'generated: its runs and their count are fixed then, so a run cannot be dropped that way '
+        f'-- to go on without one the report lacks, see check_report_runs.py --accept-missing.)" '
+        f'>&2; exit 1; fi',
         f'if [ "$NQ" -ne {n} ]; then '
         f'echo "FAILED: only $NQ of {n} runs have a final-pass .quant -- a step-4 task did not '
         f'succeed, so no report was written. Resubmit the step-4 tasks of the runs listed '
@@ -1880,6 +2103,13 @@ def main():
         f'  --temp "{D}/quant_step4" --matrices --out "{D}/{report}" \\',
         f'  --threads {a.assembly_cpus} {norm} {wflag}{mflag}{flags}',
         must_exist(f'{D}/{report}', "the cross-run report"),
+        # ...and every input run IN it (check_report_runs.py, the single-shot search's check too).
+        # The .quant count above says every run was searched; DIA-NN can still leave one out of
+        # the report -- a path it cut at a '--', a run with nothing past the q-value filter --
+        # and it exits 0 either way. Under the generator's python, else python3, as below.
+        f'PY={shlex.quote(sys.executable)}; [ -x "$PY" ] || PY=python3; '
+        f'"$PY" {shlex.quote(run_check)} --report {shlex.quote(D + "/" + report)} '
+        f'--files-list {shlex.quote(D + "/file_list.txt")} || exit 1',
         f'echo "OK: report built from all {n} runs"',
         # Did the final pass keep what the first pass found? A table, a WARNING per run that
         # lost more than half its precursors, and the record in search_provenance.json -- see
@@ -1958,6 +2188,11 @@ def main():
         f'say "final report will be {D}/{report}; watch with: watch_run.sh --slurm $jid5 --log {D}/s5_report_${{jid5}}.log"',
         f'say "all chain job ids -> {D}/jobs.txt  (watch the WHOLE chain: watch_run.sh --all {D})"',
         f'say "recovery notes written to {sess}/RECOVERY.md — you can safely close your terminal"']
+    # The most the chain can use (cpu_hours.py, the one rule): read from the step scripts just
+    # written, and said where the board and the person submitting see it.
+    from cpu_hours import reservation, submit_comment
+    cpu = reservation([os.path.join(out, x) for x in (s1, s1b, s2, s3, s4, s5) if x])
+    sub_lines.insert(1, submit_comment(cpu))
     write("submit.sh", "\n".join(sub_lines))
 
     # Describe what WILL run, not what the cfg says (CLAUDE.md rule 1). On the probe path the
@@ -2045,9 +2280,17 @@ def main():
         "seeded": bool(seed), "seed_lib": predicted if seed else None,
         # CPUs per array task, how many run at once, and why (run_search.array_task_cpus)
         "cpu_sizing": cpu_sizing,
+        # the nodes every step's #SBATCH --exclude keeps it off (--exclude); None for none
+        "exclude": a.exclude_nodes,
+        # inputs whose path holds '--', searched through links (dashed_input_plan)
+        "input_links": links_plan["links"],
         "scripts": [x for x in [s1, s1b, s2, s3, s4, s5, "submit.sh"] if x],
         "submit": f"bash {out}/submit.sh   (or: hive_exec.sh 'bash {out}/submit.sh')",
         "report_jobid_var": "jid5",
+        # the most this chain can use (cpu_hours.py): every step's CPUs x time limit x tasks
+        "cpu_hours_reserved": cpu["cpu_hours_reserved"],
+        "gpu_hours_reserved": cpu["gpu_hours_reserved"],
+        "cpu_hours_reservation": cpu,
         "note": "5-step DIA-NN parallel chain. Submit with submit.sh, watch EVERY step with "
                 "watch_run.sh --all, then point run_de.R at the report.",
     }, indent=2))

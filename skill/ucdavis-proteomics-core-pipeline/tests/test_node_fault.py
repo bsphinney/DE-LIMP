@@ -216,9 +216,10 @@ class Step5WritesNothingOnAnIncompleteFinalPass(unittest.TestCase):
     the path run_de.R reads, and then failed. It counts first now."""
 
     def chain(self, d):
+        # writes a report holding every --f run (FAKE_REPORT_RUNS): step 5 checks the report's runs
+        from test_single_shot_sbatch import FAKE_DIANN
         diann = os.path.join(d, "fake-diann")
-        _exe(diann, "#!/bin/sh\nwhile [ $# -gt 0 ]; do [ \"$1\" = --out ] && echo report > \"$2\"; "
-                    "shift; done\n")
+        _exe(diann, FAKE_DIANN)
         raws = []
         for i in range(3):
             raws.append(os.path.join(d, "raw", f"r{i}.d"))
@@ -230,7 +231,8 @@ class Step5WritesNothingOnAnIncompleteFinalPass(unittest.TestCase):
         with open(fasta, "w") as fh:
             fh.write(">sp|P1|X\nPEPTIDEK\n")
         out = os.path.join(d, "out")
-        env = job_env(d, PATH=os.environ["PATH"])
+        env = job_env(d, PATH=os.environ["PATH"], FAKE_PY=sys.executable,
+                      FAKE_REPORT_RUNS="r0,r1,r2")
         g = subprocess.run([sys.executable, os.path.join(SCRIPTS, "diann_parallel.py"),
                             "--diann", diann, "--raw", *raws, "--fasta", fasta, "--out", out,
                             "--cfg", cfg, "--no-probe-window", "--partition", "low",
@@ -540,6 +542,39 @@ class RetryTests(unittest.TestCase):
         self.assertEqual(st["jobs"], ["101", "102", "201", "202", "203"])
         self.assertEqual(st["watch_job"], "203")
         self.assertTrue(st["watch_log"].endswith("s5_report_203.log"))
+
+    def _scripts_exclude(self, value):
+        for s in ("step3_assembly.sbatch", "step4_finalpass.sbatch", "step5_report.sbatch"):
+            with open(os.path.join(self.out, s), "w") as fh:
+                fh.write("#!/bin/bash -l\n#SBATCH --job-name=x\n"
+                         f"#SBATCH --exclude={value}\nset -euo pipefail\necho hi\n")
+
+    def test_the_nodes_the_search_was_kept_off_stay_off(self):
+        """A command-line --exclude REPLACES the script's `#SBATCH --exclude` (man sbatch: the
+        command line overrides the environment, which overrides the script), so the retry passes
+        the union -- the nodes run_search.py --exclude kept the search off, and the failed one,
+        each once."""
+        self._scripts_exclude("hive-dc-7-4-[50-51],nU")
+        self.step3_failed_on("hive-dc-7-4-50")
+        r, out = self.retry()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(len(self.calls()), 3)
+        for c in self.calls():
+            ex = [a for a in c["argv"] if a.startswith("--exclude")]
+            self.assertEqual(ex, ["--exclude=hive-dc-7-4-50,hive-dc-7-4-51,nU"], c["argv"])
+        rec = json.loads(_read(os.path.join(self.out, "node_faults.json")))["retries"][0]
+        self.assertEqual(rec["nodes"], ["hive-dc-7-4-50"])
+        self.assertEqual(rec["excluded"], ["hive-dc-7-4-50", "hive-dc-7-4-51", "nU"])
+        self.assertEqual(rec["excluded_by_search"], ["hive-dc-7-4-50", "hive-dc-7-4-51", "nU"])
+        self.assertEqual(out["excluded"], rec["excluded"])
+
+    def test_a_script_whose_exclude_cannot_be_read_is_not_resubmitted_without_it(self):
+        self._scripts_exclude("n1 n2")
+        self.step3_failed_on("hive-dc-7-4-50")
+        r, out = self.retry()
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("--exclude", out["say"])
+        self.assertEqual(self.calls(), [])
 
     def test_the_two_job_search_is_understood_too(self):
         lib, srch = os.path.join(self.d, "job_1_lib.sh"), os.path.join(self.d, "job_2_search.sh")

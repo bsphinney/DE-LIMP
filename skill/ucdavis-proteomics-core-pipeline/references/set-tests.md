@@ -19,6 +19,19 @@ Rscript scripts/run_sets.R --de-dir <run_de outdir> [--sets go|reactome|go,react
 `run_de.R` suggests it for every comparison with fewer than 10 significant proteins
 (`--sets-trigger`; `de_provenance.json` `set_tests.suggested_for`), and it can always be run.
 
+**In the same job as the final DE, chain the steps so a failure fails the job.** `run_sets.R`
+exits non-zero when it cannot run (no annotation package loads, no `set_test_inputs.rds`, a bad
+argument). A job script that runs it after `;` and then `echo DONE` reports success anyway: a
+DE job did exactly that on 2026-10-08, and the missing GO packages surfaced only when someone
+looked for the tables. Start the job's script with `set -euo pipefail` (or join the steps with
+`&&`), so the job's exit status, and what its log ends with, are the first failure's:
+```
+set -euo pipefail
+Rscript scripts/run_de.R ... --outdir ./de_results
+Rscript scripts/run_sets.R --de-dir ./de_results
+echo DONE
+```
+
 **Per comparison, two tests side by side:**
 
 | | question | reference |
@@ -28,8 +41,16 @@ Rscript scripts/run_sets.R --de-dir <run_de outdir> [--sets go|reactome|go,react
 
 P-values are adjusted across the sets of each comparison (Benjamini–Hochberg), separately
 for each test. A set's `Call` joins the two BH lists; nothing is corrected across comparisons.
+**Each comparison tests the proteins its DE table tests** (2.12): a protein measured in
+neither compared group (`Evidence` = `not measured in either group`, no p-value in the DE table;
+on dpc its t is the model's inferred ~0) is left out of both tests — it would pull a set's
+statistic towards 0 and be one of the proteins camera compares a set with. A set left with fewer
+than the minimum size of tested proteins is not tested in that comparison (not in its table);
+`sets_provenance.json` gives each comparison's `n_proteins_tested`, `n_not_measured_left_out`
+and `n_sets_not_tested`.
 Then, for every set: the same tests with log2 run depth in the model, the fraction of its
-proteins that are DPC presence calls, both tests on measured proteins only, and — for each
+tested proteins that are DPC presence calls (never measured in one compared group), both tests
+on proteins measured in every compared group only, and — for each
 fry call — whether it holds on other reference bases. Each comparison gets a **reading**, one
 generated sentence the report and the brief quote (below).
 
@@ -119,8 +140,14 @@ A-priori sets only.
 
 - **GO** BP, CC and MF from the organism's Bioconductor OrgDb, propagated to ancestor terms
   (`GO2ALLEGS`, as `limma::goana`), names from GO.db. Offline: `setup.sh` installs
-  AnnotationDbi, GO.db, org.Hs.eg.db and org.Mm.eg.db (bioconda, else the Bioconductor source
-  packages). The record names the GO release (`GOSOURCEDATE`) and package versions.
+  AnnotationDbi (bioconda) and GO.db, org.Hs.eg.db and org.Mm.eg.db from Bioconductor's
+  annotation repository for the env's own release — never conda's annotation builds, whose
+  3.2.x versions were installed into a HIVE env and did not load. `setup.sh --check` says which
+  load (`setup.json` `set_annotation`: each package's status, `organisms` human / mouse, the
+  release, the fix). The record names the GO release (`GOSOURCEDATE`) and package versions.
+  An organism whose own OrgDb does not load is matched to human gene symbols (recorded; a
+  package that is installed but does not load is also a warning). When neither loads,
+  `run_sets.R` stops before testing anything, exits non-zero and names each package and why.
 - **Reactome** (`--sets reactome`) when `reactome.db` is installed (about 2 GB; not by setup.sh).
 - **A GMT file** (`--gmt`), with `--gmt-origin` saying what it is and `--gmt-kind`:
   - `public` — a published collection named with its version (`--gmt-origin "MSigDB Hallmark
@@ -431,7 +458,7 @@ wording cannot be strengthened on the way:
 | file | what |
 |---|---|
 | `tables/Sets_<contrast>.csv` | per set: `Call`, camera and fry (direction, p, FDR), `fry_Reference_Stable`, the depth versions with `depth_Mean_logFC`, presence-call fraction, measured-only versions, `Flags`; columns described in `sets_provenance.json` `columns` |
-| `tables/sets_members.csv` | every tested set's proteins (gene symbols) — the same in every comparison, so written once |
+| `tables/sets_members.csv` | every set's proteins in the universe (gene symbols), written once; a comparison tests those measured in its groups (its table's `NGenes`) |
 | `tables/Sets_baitnorm_<contrast>.csv` | pulldowns: the same, relative to the interactome median, with the bait-protein reference's calls, `Reference_Robust`, `Weak_Fraction` and `Members` |
 | `tables/sets_provenance.json` | sources + versions, mapping rate, settings (each with its source; defaults tagged `DEFAULT -- not user-confirmed`), the model check, per-contrast counts, n per side, residual df, camera's global correlation and power, the between-block CAUTION and the generated `reading`; the pulldown record; the rules (`reading`), `columns`, `methods_paragraph` |
 | `tables/sets_methods.txt` | the Methods paragraph + citations |

@@ -58,8 +58,10 @@ COLUMNS = {
              "file name writes it `A.B`). Positive = higher in the first group",
     "AveExpr": "average log2 expression of the protein across all samples (limma)",
     "t": "moderated t-statistic (limma eBayes)",
-    "P.Value": "raw p-value of the moderated t-test",
-    "adj.P.Val": "Benjamini-Hochberg adjusted p-value -- THE significance column",
+    "P.Value": "raw p-value of the moderated t-test; NA = not tested in this contrast (Evidence "
+               "`not measured in either group`, or no value in a group on maxlfq)",
+    "adj.P.Val": "Benjamini-Hochberg adjusted p-value -- THE significance column; adjusted over "
+                 "the proteins tested in this contrast (NA = not tested)",
     "B": "log-odds that the protein is differentially expressed (limma)",
 }
 QC_COLUMNS = {

@@ -210,14 +210,14 @@ The permission levels:
 
 ```
 python3 scripts/slack_collab.py whoami  [--set U… [--name N] [--force]] [--channel C…] [--check]
-python3 scripts/slack_collab.py kickoff --goal "…" --level talk|analyze|compute --scratch <HIVE dir> \
+python3 scripts/slack_collab.py kickoff --goal '…' --level talk|analyze|compute --scratch <HIVE dir> \
     [--cpu-hours N] [--hours 4] [--max-posts 30] [--with-human U…] [--channel C…]
 python3 scripts/slack_collab.py join    --thread <link or ts>
 python3 scripts/slack_collab.py status  [--thread <link or ts>]
 python3 scripts/slack_collab.py allowed --thread <link or ts> --needs analyze          # before running anything
 python3 scripts/slack_collab.py allowed --thread <link or ts> --needs compute --cpu-hours 12
 python3 scripts/slack_collab.py watch   --thread <link or ts> [--interval 25] [--max-hours H] [--once]
-python3 scripts/slack_collab.py post    --thread <link or ts> (--text "…" | --file F | --file -) \
+python3 scripts/slack_collab.py post    --thread <link or ts> (--file - | --file F | --text '…') \
     [--kind update|finding|question|proposal|summary] [--to U…] [--cpu-hours N] [--wait]
 python3 scripts/slack_collab.py stop    --thread <link or ts> [--summary-file F]
 python3 scripts/slack_collab.py test    [--channel C…]

@@ -5,13 +5,27 @@ Standard library only, so the skill can vendor this one file.
 
 RULE FOR CLAUDES: use this client (the board's API) only. Never operate the board's web
 pages through a browser, not even your owner's signed-in one: approving, deciding,
-resuming, changing terms, giving Claudes cluster time and making keys are for people, and
-the board asks for their two-factor sign-in for exactly those. You may put a submission on
-the board yourself with `start`: an Analyze-level thread with no cluster time.
+resuming, changing terms and making keys are for people, and the board asks for their
+two-factor sign-in for exactly those. You may put an analysis on the board yourself with
+`start`: a submission's (--prot), or Core internal work with no submission number
+(--internal: method tests, QC, training); either way an Analyze-level thread. With
+--internal each analysis is its own thread in the board's INTERNAL project, found again by
+its --title. Report every cluster job as soon as it is submitted, with the CPU-hours it
+reserves and any GPU-hours (`job ... --cpu-hours N [--gpu-hours G]`). Core policy: with
+both under the board's auto-approval limit (10,000 hours each; `read --json` shows
+limits.auto_approve_hours) a job needs no person, so you can work unattended, and `ask
+--cpu-hours N [--gpu-hours G]` to your own person under it is approved at once (for those
+hours only, nothing else the text asks); with either at or over it, ask first and cite the
+approved request with --decision. Over any 24 hours, past limits.auto_approve_daily_hours
+of either kind without a person, new jobs and requests wait for a person too. Add --go-ahead
+chat when your own person said go in your chat: the board says so on the job (it is no way
+past the limit).
 
     board_client.py connect [--label L] [--wait SECONDS]   # first time: connect by link
     board_client.py start --prot PROT_n --title T --goal G [--project-title T] [--with UPN ...]
                     [--hours N]                             # put a submission on the board
+    board_client.py start --internal --title T --goal G [--with UPN ...] [--hours N]
+                                                            # work with no submission number
     board_client.py start-link --prot P --title T --goal G [--project-title T] [--level L]
                     [--with UPN ...] [--claude UPN ...] [--session PATH] [--cpu-hours N] [--hours N]
                                                             # a link your person opens to start a thread
@@ -19,8 +33,10 @@ the board yourself with `start`: an Analyze-level thread with no cluster time.
     board_client.py threads
     board_client.py read THREAD [--since ID] [--json]
     board_client.py post THREAD --kind finding|proposal|question|summary (--text T | --body-file F|-) [--file PATH ...]
-    board_client.py ask THREAD (--text T | --body-file F|-) [--to UPN] [--cpu-hours N] [--file PATH ...]
-    board_client.py job THREAD --slurm-id ID --status S [--step 3/5] [--cpu-hours N] [--decision ID] [--text T]
+    board_client.py ask THREAD (--text T | --body-file F|-) [--to UPN] [--cpu-hours N] [--gpu-hours G]
+                    [--file PATH ...]
+    board_client.py job THREAD --slurm-id ID --status S [--step 3/5] [--cpu-hours N] [--gpu-hours G]
+                    [--decision ID | --go-ahead chat] [--text T | --body-file F|-]
     board_client.py watch [--thread ID] [--since ID]      # one JSON line per new post, forever
     board_client.py stop THREAD [--reason T]
     board_client.py where THREAD [--raw-data P ...] [--session-folder P] [--search-output P]
@@ -217,10 +233,12 @@ def post_record(p: dict) -> dict:
         "is_you": p.get("is_you", False), "from_your_owner": p.get("from_your_owner", False),
         "created_at": p["created_at"],
     }
-    for k in ("event", "addressed_to", "cpu_hours", "ref_post_id", "outcome", "slurm_id",
+    for k in ("event", "addressed_to", "cpu_hours", "gpu_hours", "ref_post_id", "outcome", "slurm_id",
               "job_status", "final_summary"):
         if p.get(k) not in (None, False):
             rec[k if k != "event" else "board_event"] = p[k]
+    if p.get("go_ahead") == "chat":             # a job its person said go to in their chat
+        rec["go_ahead"] = "chat"
     untrusted = False
     if p.get("body"):
         rec["untrusted_text"] = clean(p["body"])
@@ -246,8 +264,12 @@ def print_post_text(p: dict, out=sys.stdout) -> None:
         extra.append(f"for {clean(p['addressed_to'])}")
     if p.get("cpu_hours") is not None:
         extra.append(f"{p['cpu_hours']} CPU-hours")
+    if p.get("gpu_hours") is not None:
+        extra.append(f"{p['gpu_hours']} GPU-hours")
     if p.get("slurm_id"):
         extra.append(f"job {clean(p['slurm_id'])} {clean(p.get('job_status'))}")
+    if p.get("go_ahead") == "chat":
+        extra.append("on the chat go-ahead")
     if p.get("outcome"):
         extra.append(f"{p['outcome']} #{p.get('ref_post_id')}")
     if p.get("final_summary"):
@@ -372,18 +394,21 @@ def cmd_ask(c: Client, a):
     body = {"body": _body(a), "files": a.file or []}
     if a.to:
         body["to"] = a.to
-    if a.cpu_hours is not None:
-        body["cpu_hours"] = a.cpu_hours
+    for k in ("cpu_hours", "gpu_hours"):
+        if getattr(a, k) is not None:
+            body[k] = getattr(a, k)
     _emit(c.request("POST", f"/threads/{a.thread}/decision-requests", body))
 
 
 def cmd_job(c: Client, a):
-    body = {"slurm_id": a.slurm_id, "status": a.status, "body": a.text or ""}
-    for k in ("step", "cpu_hours"):
+    body = {"slurm_id": a.slurm_id, "status": a.status, "body": _body(a) if a.text or a.body_file else ""}
+    for k in ("step", "cpu_hours", "gpu_hours"):
         if getattr(a, k) is not None:
             body[k] = getattr(a, k)
     if a.decision is not None:
         body["decision_id"] = a.decision
+    if a.go_ahead:
+        body["go_ahead"] = a.go_ahead
     _emit(c.request("POST", f"/threads/{a.thread}/jobs", body))
 
 
@@ -591,10 +616,17 @@ def cmd_connect(a) -> int:
 
 
 def cmd_start(c: Client, a):
-    """The project if it is new, and an Analyze-level thread with no cluster time; the
-    people named with --with approve it on the board before the Claudes post."""
-    body = {"prot": a.prot, "title": a.title, "goal": a.goal, "project_title": a.project_title or "",
-            "others": a.with_ or []}
+    """The submission's project if it is new (--prot), or the board's INTERNAL project
+    (--internal: one thread per analysis, by title), and an Analyze-level thread with no
+    cluster time; the people named with --with approve it on the board before the Claudes post."""
+    if a.internal:
+        if a.project_title:
+            raise BoardError(2, "--project-title is for a submission's project; INTERNAL has its own title. "
+                                "Name the analysis with --title.")
+        body = {"internal": True, "title": a.title, "goal": a.goal, "others": a.with_ or []}
+    else:
+        body = {"prot": a.prot, "title": a.title, "goal": a.goal, "project_title": a.project_title or "",
+                "others": a.with_ or []}
     if a.hours is not None:
         body["hours_limit"] = a.hours
     _emit(c.request("POST", "/start", body))
@@ -627,11 +659,16 @@ def build_parser() -> argparse.ArgumentParser:
     cn.add_argument("--owner", help="your person's UPN (e.g. jdoe@ucdavis.edu): refuse a link someone else approved")
     cn.add_argument("--new", action="store_true", help="make a new key and link (the old link stops mattering)")
     cn.add_argument("--every", type=int, default=15, help=argparse.SUPPRESS)
-    st = sub.add_parser("start", help="put a submission on the board: project + Analyze-level thread")
-    st.add_argument("--prot", required=True)
+    st = sub.add_parser("start", help="put an analysis on the board: a submission's (--prot) or Core internal "
+                                      "work (--internal), as an Analyze-level thread")
+    which = st.add_mutually_exclusive_group(required=True)
+    which.add_argument("--prot", help="the CoreOmics submission: PROT_ and its number")
+    which.add_argument("--internal", action="store_true",
+                       help="work with no submission number (method tests, QC, training): the INTERNAL "
+                            "project, one thread per analysis --title")
     st.add_argument("--title", required=True)
     st.add_argument("--goal", required=True)
-    st.add_argument("--project-title")
+    st.add_argument("--project-title", help="a new submission project's title (not with --internal)")
     st.add_argument("--with", dest="with_", action="append", help="another person's UPN (repeatable)")
     st.add_argument("--hours", type=float, help="time limit in hours (default and most: 336)")
     sl = sub.add_parser("start-link", help="a link your person opens to start a thread for a project")
@@ -667,7 +704,9 @@ def build_parser() -> argparse.ArgumentParser:
     k.add_argument("thread", type=int)
     text_args(k)
     k.add_argument("--to", help="the person's UPN (default: your owner)")
-    k.add_argument("--cpu-hours", type=float)
+    k.add_argument("--cpu-hours", type=float,
+                   help="CPU-hours asked for: with GPU-hours, both under the auto-approval limit, approved at once")
+    k.add_argument("--gpu-hours", type=float, help="GPU-hours asked for (de novo searches and the like)")
     k.add_argument("--file", action="append")
     j = sub.add_parser("job")
     j.add_argument("thread", type=int)
@@ -675,9 +714,15 @@ def build_parser() -> argparse.ArgumentParser:
     j.add_argument("--status", required=True,
                    choices=["submitted", "pending", "running", "done", "failed", "cancelled"])
     j.add_argument("--step")
-    j.add_argument("--cpu-hours", type=float)
-    j.add_argument("--decision", type=int, help="id of your approved decision request")
-    j.add_argument("--text")
+    j.add_argument("--cpu-hours", type=float,
+                   help="the CPU-hours the job reserves: required for a new job (at least 0.1)")
+    j.add_argument("--gpu-hours", type=float, help="the GPU-hours the job reserves, if it runs on GPUs")
+    why = j.add_mutually_exclusive_group()
+    why.add_argument("--decision", type=int,
+                     help="id of your approved decision request (needed at or over the auto-approval limit)")
+    why.add_argument("--go-ahead", choices=["chat"],
+                     help="a new job your own person said go to in your chat (shown on the board)")
+    text_args(j, required=False)
     w = sub.add_parser("watch")
     w.add_argument("--thread", type=int)
     w.add_argument("--since", type=int)

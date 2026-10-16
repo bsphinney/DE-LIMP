@@ -599,10 +599,12 @@ class Tables:
     def counts(self, c):
         """(tested, up, down) at adj.P < adjp ONLY -- the only significance rule the DE applied.
         The page used to also require |log2FC| >= 1, the volcano reference line, re-imposing a
-        fold-change filter the DE never applied."""
-        rows = self.rows(c)
-        sig = [r for r in rows if r["_p"] is not None and r["_p"] < self.adjp]
-        return len(rows), sum(r["_lfc"] > 0 for r in sig), sum(r["_lfc"] < 0 for r in sig)
+        fold-change filter the DE never applied. Tested = the rows with an adjusted p-value: a
+        row without one (Evidence "not measured in either group", run_de.R 2.12.0; a maxlfq
+        group with no value) is listed in the table but was not tested."""
+        tested = [r for r in self.rows(c) if r["_p"] is not None]
+        sig = [r for r in tested if r["_p"] < self.adjp]
+        return len(tested), sum(r["_lfc"] > 0 for r in sig), sum(r["_lfc"] < 0 for r in sig)
 
     def top(self, c, k):
         """The k best by adj.P, ties broken by the raw p-value (topTable's order, as the brief
@@ -978,8 +980,11 @@ def glance_data(prov, tables, tables_dir, session=None):
         tiles.append((len(rows), "contrasts"))
         tiles.append((max(r["tested"] for r in rows), "proteins tested"))
     notes = [n for n in (search_measurement_note(prov, session), search_inputs_note(prov, session),
+                         runs_left_out_note(prov),
                          added_sequences_note(session), inferred_note(prov, tables_dir),
-                         database_note(prov, tables_dir, session), keratin_note(prov))
+                         not_measured_note(prov),
+                         database_note(prov, tables_dir, session), keratin_note(prov),
+                         covariate_note(prov))
              if n]
     return {"tiles": tiles, "contrasts": rows, "adjp": tables.adjp, "adjp_src": tables.src,
             "recorded": tables.src == "de_provenance.json", "notes": notes,
@@ -1031,6 +1036,25 @@ def inferred_note(prov, tables_dir):
                        f"where one group was never measured is a detection event, not a measured "
                        f"magnitude"
                      + (" — `Detection_Matrix.csv` marks every value." if dm else "."))}
+
+
+def not_measured_note(prov):
+    """The fixed "not tested" callout, from run_de.R's record (2.12.0): in each contrast a protein
+    measured in no run of the compared groups is listed but not tested (`not_measured`), with each
+    contrast's count from `de_tables`. None when the record has no such rule or none was excluded."""
+    rec = prov.get("not_measured") if isinstance(prov.get("not_measured"), dict) else None
+    tabs = prov.get("de_tables") if isinstance(prov.get("de_tables"), dict) else {}
+    per = [(c, t["n_not_measured"]) for c, t in tabs.items()
+           if isinstance(t, dict) and isinstance(t.get("n_not_measured"), int) and t["n_not_measured"]]
+    if not rec or not per:
+        return None
+    return {"kind": "info",
+            "title": "Proteins measured only in other groups are not tested in a comparison",
+            "text": (f"In each comparison, a protein measured in no run of either group compared has "
+                     f"no fold change or p-value: its DE table row says `Evidence` = "
+                     f"*{rec.get('label') or 'not recorded'}*, and it is left out of that comparison's "
+                     f"multiple-testing correction and of the counts of tested proteins here. "
+                     + "; ".join(f"{contrast_label(c)} {n:,}" for c, n in per) + ".")}
 
 
 def database_note(prov, tables_dir, session=None):
@@ -1139,12 +1163,52 @@ def search_measurement_note(prov, session=None):
     if not sprov:
         return None
     # provenance_caution() type-checks every piece: a malformed record never stops the page
-    from probe_fallback import provenance_caution
-    text = provenance_caution(sprov)
+    from probe_fallback import measurement_note, provenance_caution
+    text, note = provenance_caution(sprov), measurement_note(sprov)
+    if not (text or note):
+        return None
+    return {"kind": "warning",
+            "title": ("The search did not measure what it was to measure" if text else
+                      "The probed runs disagreed on the mass accuracy"),
+            "text": " ".join(x for x in (text, note) if x)}
+
+
+def runs_left_out_note(prov):
+    """The fixed callout for runs the search reported that the DE left out (run_de.R's
+    `runs_left_out`; reasons from collect_conditions.py --validate --exclude), worded by
+    make_methods.de_runs_left_out_sentence (the one description). A warning when a run has no
+    recorded reason, or its decisions record could not be read (`reasons_unreadable`: the
+    sentence then says "reason not read"); None when every searched run was analysed."""
+    from make_methods import de_runs_left_out_sentence
+    text = de_runs_left_out_sentence(prov)
     if not text:
         return None
-    return {"kind": "warning", "title": "The search did not measure what it was to measure",
-            "text": text}
+    runs = (prov.get("runs_left_out") or {}).get("runs") or []
+    unexplained = any(not (isinstance(x, dict) and isinstance(x.get("reason"), str)
+                           and x["reason"].strip()) for x in runs)
+    # a design run that had no quantities was meant to be analysed: always a warning
+    unexplained = unexplained or bool((prov.get("runs_left_out") or {}).get("not_quantified"))
+    # the reasons exist but could not be read: never an info callout
+    unexplained = unexplained or bool((prov.get("runs_left_out") or {}).get("reasons_unreadable"))
+    return {"kind": "warning" if unexplained else "info",
+            "title": "Searched runs left out of the analysis", "text": text}
+
+
+def covariate_note(prov):
+    """The fixed callout for a continuous covariate (run_de.R --numeric-covariates): every group
+    comparison is adjusted for it, worded by make_methods.de_covariate_sentence (the one
+    description). A warning when Group explains most of its variance (the record's `confounded`);
+    None when every covariate was a factor."""
+    from make_methods import de_covariate_sentence
+    text = de_covariate_sentence(prov)
+    if not text:
+        return None
+    terms = ((prov.get("covariates") or {}).get("terms") or []) \
+        if isinstance(prov.get("covariates"), dict) else []
+    warn = any(isinstance(t, dict) and t.get("confounded") is True for t in terms)
+    return {"kind": "warning" if warn else "info",
+            "title": ("Comparisons adjusted for a covariate that nearly matches the groups" if warn
+                      else "Comparisons adjusted for a continuous covariate"), "text": text}
 
 
 def keratin_note(prov):

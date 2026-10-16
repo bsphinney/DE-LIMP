@@ -11,6 +11,7 @@ Rscript scripts/run_de.R --input report.parquet [--format parquet|tsv] \
         [--contrasts "B-A,C-A"] [--q-cutoff 0.01] [--eq-cutoff 0] [--pgq-cutoff 0] \
         [--coverage-min 0.5] [--logfc 1.0] [--adjp 0.05] \
         [--fasta-meta search.fasta.meta.json] [--keep-contaminants] \
+        [--numeric-covariates Covariate1[,Covariate2]] \
         [--block Mouse [--block-scope within|all] [--block-effect auto|fixed|random]]
 ```
 - `--q-cutoff` is the q-value filter on the report; `--eq-cutoff` / `--pgq-cutoff` the
@@ -22,6 +23,8 @@ Rscript scripts/run_de.R --input report.parquet [--format parquet|tsv] \
   proteins sat in the database only as `Cont_` entries, which the removal would then take out
   too. `--keep-contaminants` quantifies and tests `Cont_` entries with the sample proteins
   instead of removing them first; `de_provenance.json` records which.
+- `--numeric-covariates`: covariates that are continuous measurements, fitted as numbers
+  (below, "Continuous covariates").
 - `--block` / `--block-scope` / `--block-effect`: paired and repeated designs, below.
 `metadata` CSV: `File.Name,Group[,Batch,Covariate1,Covariate2][,<block column>]`. `File.Name` must
 match the `Run` / column names in the report. Default contrasts = every group vs
@@ -38,6 +41,34 @@ estimate, proteins whose true effect is below the line pass it routinely. If a g
 fold-change threshold is ever wanted, use `limma::treat()` + `topTreat()`, whose interval
 null tests it properly; note that `treat` is far more stringent than the same cut applied
 post hoc, so limma recommends a *small* threshold there (fc 1.1–1.5, not 2).
+
+**A protein measured in neither group of a contrast is not tested in it (2.12.0).** With more
+than two groups, a protein can be measured only in groups a contrast does not compare (seen in
+C and D, never in A or B). For A vs B it has nothing to test: on dpc both sides are the
+detection model's inferred value (logFC ≈ 0, p ≈ 1), on maxlfq both are missing. Before
+2.12.0 such a protein was labelled `presence call`, tested, and counted in that contrast's
+Benjamini–Hochberg correction — one staff analysis had 186 of its 249 p > 0.975 proteins in
+one contrast from this, and a spike at p = 1 in every p-value histogram. Now, per contrast:
+- its `Evidence` is `not measured in either group` (`presence call` keeps its meaning:
+  measured in one compared group, never in another);
+- its `logFC`, `t`, `P.Value`, `adj.P.Val` and `B` are NA — the row stays, so nothing
+  disappears — and it is never significant;
+- BH runs over the proteins tested in that contrast. The rule depends only on the detection
+  counts of the two groups together, not on which group is which, so leaving these out is
+  independent filtering (Bourgon et al. 2010) and does not bias the error rate. The model fit
+  (and limma's variance prior) is one fit for all contrasts and is not changed;
+- `de_provenance.json` records the rule (`not_measured`) and, per DE table, `n_proteins`,
+  `n_tested` and `n_not_measured`; `methods.txt`, the Methods paragraph, the analysis page's
+  counts, the figure captions and `reproducibility_log.R` all follow it. It applies to every
+  `--method` and to blocked fits (technical replicates, `--block`).
+
+The DE-LIMP session (`DE-LIMP_session.rds`) follows the same rule (2.12): DE-LIMP draws its
+volcano and tables with `topTable()` from the session's fit, so in that fit an untested protein's
+logFC (coefficient), `t`, `p.value` and `lods` are NA for the contrast (its moderated F too, when
+any contrast does not test it) and `not_measured` lists them. `topTable()` then matches
+`DE_*.csv`: the same NA rows, BH over the tested proteins. DE-LIMP leaves NA values off the
+volcano and counts them as not significant; its GSEA, which ranks by logFC, drops them -- a fold
+change between two groups that never measured the protein is the model's inference, not data.
 
 ## `--method dpc` (limpa DPC-Quant + limma) — DE-LIMP default, use with DIA-NN
 ```r
@@ -113,6 +144,51 @@ Protein.Names`). `run_search.py` produces this for non-DIA-NN engines.
 **Rank-checked before fitting** (`qr(design)$rank`); fails on confounded covariates
 or empty groups. Groups with <2 replicates have no within-group variance — warn the
 user at the design step (`collect_conditions.py --validate` flags singletons).
+
+### Continuous covariates — `--numeric-covariates Covariate1[,Covariate2]` (2.12)
+Every covariate column is a **factor** unless named here: one design column per level. A
+continuous measurement (a centred log2 bait intensity, an age, a run depth) as a factor gets a
+level per distinct value — a staff analysis's 11-value TurboID intensity became an 11-level
+factor and "not full rank". Named in `--numeric-covariates`, it is **one numeric column**: one
+slope, shared by all groups. Ask the user which covariates are continuous; never decide it from
+the values (a batch numbered 1/2/3 is a factor, and `Batch` always is — only `Covariate1` /
+`Covariate2` can be numeric). When a design fails and a covariate holds only numbers with 3 or
+more distinct values, the error names the flag.
+- **Values** are used as given, not centred, and must be a finite number for every sample: a
+  blank, `NA`, text or `Inf` stops the run before quantification, naming the samples (fill them
+  in — never a made-up value — or fit the column as a factor). A column with one value stops too.
+- **The contrasts stay between groups.** With `~ 0 + groups + Covariate1` the design's columns
+  are the group levels plus `Covariate1`; `makeContrasts("B-A", levels = design)` puts weight 0
+  on `Covariate1`, so each contrast is the difference between the group coefficients — the
+  groups compared at the same covariate value (ANCOVA's parallel slopes). Centring the
+  covariate would move the group coefficients, never their difference. The same holds for both
+  `--method`s (dpc: `dpcDE`, whose `voomaLmFitWithImputation` takes any design matrix; maxlfq:
+  `lmFit`), for a fixed `--block` (its columns are added to this design; a numeric covariate
+  constant within each block is absorbed and dropped, as a factor would be) and for a random
+  block or technical replicates (`duplicateCorrelation` and the blocked fit use the same
+  design). No group × covariate interaction is fitted: a slope that differs between groups is
+  not modelled.
+- **Confounding is warned about, per contrast** (2.12). A comparison is flagged when, among the
+  samples of the groups it compares, the groups explain ≥ 80% of the covariate's variance (R² of
+  covariate ~ group within them; variance-inflation factor ≥ 5), when the design alone widens
+  its standard error ≥ √5 (2.24x, the same line), or when the compared groups' covariate values
+  do not overlap at all (the comparison is then an extrapolation along the slope). Per contrast,
+  not overall: with three or more groups a pair the covariate separates hides in a modest
+  overall R² (0.595 overall, 0.988 within the two compared groups, in the review's example). The
+  run warns, naming each flagged comparison and why; `methods.txt` carries a `CAUTION`, the report
+  a warning callout, the brief a Data Quality Note and AUDIT.md a WARN, all naming it: that
+  comparison rests largely on the fitted straight line, and if the covariate differs between the
+  groups *because of* the grouping, adjusting for it removes part of the effect being tested. Ask
+  whether it belongs in the model.
+- **Recorded** in `de_provenance.json` `covariates`: each term's `type` (`factor` with
+  `n_levels`, or `numeric` with `source: --numeric-covariates`, `n_distinct`, `min`, `max`,
+  `group_r2` (overall), `confounded`, `confounded_contrasts`, `se_inflation` — per contrast, the
+  standard error with the covariate over without it, from the design alone — and `per_contrast`:
+  for each contrast the groups compared, `r2` within them, `overlap`, `se_inflation`,
+  `confounded` and `why`), `numeric_requested`, `absorbed_by_block`, `model`, the two thresholds
+  and `warnings`. `methods.txt` has a `Covariates` line, the Methods paragraph and the
+  analysis brief a sentence (`make_methods.de_covariate_sentence`), the analysis page a callout,
+  and `reproducibility_log.R` writes the values as numbers and fits `as.numeric(...)`.
 
 ## Paired / repeated designs — `--block <column>`
 When several samples come from one source — the IPs cut from one mouse brain, the
@@ -340,7 +416,16 @@ turned into depletion. So the DE's input is a decision, made once and recorded:
    questions), a Core staff member chooses — never Claude (`decide --by <their HIVE login>
    --reason`, the login checked against the Core's staff list by `staff.py`) — and the final `run_de.R
    --normalization-check` refuses any other quantities, and any report or conditions other than
-   the ones checked (sha256 recorded). No silent switch in either direction. In a session that
+   the ones checked (sha256 recorded). It is held to the checked model too (2.12): run_de.R
+   records the design it was asked for before fitting (`design_request`: method, formula,
+   numeric covariates, block column/effect/scope, contrasts, the flags given) and the conditions'
+   sha256; `normalization_check.py run` refuses two check DEs whose designs differ or that read
+   another report or conditions file, and records `check_design`; the final DE passes its design
+   to `gate` (`--design-json`), which refuses another method, formula, numeric covariate or block
+   and warns on other contrasts (`normalization_check.design_match` in de_provenance.json). A
+   check from before 2.12 has no `check_design`: the final DE runs, says the design was NOT
+   CHECKED, and the Methods line carries `[confirm]`. The step-8 commands run_de.R prints carry
+   its design flags. No silent switch in either direction. In a session that
    records a type, `run_de.R` refuses a DE with neither `--normalization-check` nor
    `--check-input`; a DE without a decided check is a WARN in AUDIT.md and holds
    `core_submission.py deliver` (the second gate beside the QC one). A DE from before 2.10 (no

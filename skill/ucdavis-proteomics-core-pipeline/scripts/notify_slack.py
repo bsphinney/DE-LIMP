@@ -192,6 +192,14 @@ _SECRET_PATTERNS = [
     re.compile(r"(?i)(?<=share_token=)['\"]?(?![/~.$])[^\s\"'<>]{8,}"),
     # ...and its companion, ht_manifest.py --cookie <Entra session cookie>
     re.compile(r"(?i)--cookie[ \t=]+['\"]?(?P<s>(?![/~.$-])[^\s\"'<>]{8,})"),
+    # The CoreOmics API key (core_submission.py), now also kept on HIVE (2026-10-08): set as the
+    # COREOMICS_TOKEN variable in a logged command (`COREOMICS_TOKEN=... python3 ...`, `export`,
+    # PowerShell's `$env:COREOMICS_TOKEN = "..."`, a JSON key). Upper case only, never after a dot,
+    # so the file NAME (~/.coreomics_token: ...) and the values that are paths or placeholders pass.
+    re.compile(r"(?<![A-Za-z0-9_.])COREOMICS_TOKEN['\"]?[ \t]*[:=][ \t]*['\"]?(?P<s>(?![/~.$<])[^\s\"'<>]{8,})"),
+    # ...and its header in a quoted dict or JSON form (`"Authorization": "Token ..."`), which the
+    # `authorization:` pattern above misses because of the quote before the colon.
+    re.compile(r"(?i)authorization['\"][ \t]*:[ \t]*['\"](?:token|bearer)[ \t]+(?P<s>(?![<{])[^\s'\"]+)"),
 ]
 
 

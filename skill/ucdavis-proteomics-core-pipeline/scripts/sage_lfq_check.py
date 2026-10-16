@@ -367,6 +367,9 @@ def rerun_plan(out, corrected, ppm):
         v = (prov.get("queue") or {}).get(k)
         if v:
             argv += [f"--{k}", str(v)]
+    # the nodes the search was kept off (run_search.py --exclude): the re-run stays off them too
+    if (prov.get("queue") or {}).get("exclude"):
+        argv += ["--exclude", ",".join(prov["queue"]["exclude"])]
     job = prov.get("submitted_sbatch")
     if job:
         stem, ext = os.path.splitext(job)

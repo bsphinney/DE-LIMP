@@ -39,9 +39,10 @@ import csv  # noqa: E402
 # interactors (HGNC symbols; the mouse genes are the same names in title case).
 ER_BACKGROUND = ("HSPA5", "HSP90B1", "CANX", "CALR", "P4HB", "PDIA3", "PDIA4", "PDIA6")
 # The names of run_de.R's `Evidence` categories (its EVIDENCE_LABELS: every run of every group
-# measured / never measured in a group / otherwise, "partly" + the record's zero_means word).
+# measured / never measured in a group / otherwise, "partly" + the record's zero_means word /
+# measured in no compared group, so not tested -- 2.12.0).
 # They name the tiers; what they mean is quoted from de_provenance.json when the run recorded it.
-EVIDENCE = ("measured in both", "presence call", "partly")
+EVIDENCE = ("measured in both", "presence call", "partly", "not measured in either group")
 
 
 def submission_brief(w, source):
@@ -100,6 +101,12 @@ def sample_type_brief(w, session):
           "panels (SAMPLE_QUALITY.md) point to a different tissue or biofluid (e.g. muscle, "
           "plasma or skin proteins dominating a sample stated as brain), say so in **Data "
           "Quality Notes** as a question for the user; do not resolve it either way yourself.")
+    elif rec and rec.get("source") == st.NOT_ASKED:
+        w("- Core staff were not asked (no step's choice depended on it). Describe the samples "
+          "as the attached submission record does, when there is one, or else by their groups "
+          "only; do not name a "
+          f"tissue, cell type or biofluid it does not state; {st.NEVER_INFER}. Nothing about "
+          "the sample type goes in Data Quality Notes unless the data contradict the record.")
     else:
         w("- Do not name a tissue, cell type or biofluid anywhere in the report or Methods; "
           f"{st.NEVER_INFER}. Say in **Data Quality Notes** that the sample type was not stated, "
@@ -359,6 +366,15 @@ def main():
             w(f"- **Blocking caveat (say this in Data Quality Notes):** {warn}")
     elif blk.get("column") and blk.get("note"):
         w(f"- Blocking: none used — {blk['note']}")
+    # run_de.R's covariate record (--numeric-covariates): make_methods' sentence is its one
+    # description. Only a numeric covariate is said here; a factor is the design's term.
+    from make_methods import de_covariate_sentence
+    cov = de_covariate_sentence(prov)
+    if cov:
+        w(f"- Continuous covariate: {cov} Describe every group difference as adjusted for it.")
+        cov_rec = prov.get("covariates") if isinstance(prov.get("covariates"), dict) else {}
+        for warn in cov_rec.get("warnings") or []:
+            w(f"- **Covariate caveat (say this in Data Quality Notes):** {warn}")
     if adjp_rec is not None:
         w(f"- Significance rule: adj.P.Val < {adjp:g} (Benjamini-Hochberg within each contrast) "
           f"— the adjusted p-value ALONE (identification FDR: "
@@ -508,6 +524,11 @@ def main():
             f"change (the absent side is {zero_word});")
         w(f"  - **{ev_part}**" + ("" if recorded_ev else " (every other case)")
           + ": a measured ratio with gaps — give each group's k/n.")
+        if has_evidence and prov.get("not_measured"):
+            w(f"  - **{EVIDENCE[3]}**: measured only in other groups of the study, so NOT TESTED "
+              "in that comparison (no logFC or p-value; left out of its BH correction). Never a "
+              "hit, never a 'tested' protein: count tested proteins per comparison as the rows "
+              "with a P.Value (`de_provenance.json` de_tables n_tested).")
     w("")
     if pulldown:
         w("## Pull-down design — enrichment over a control")

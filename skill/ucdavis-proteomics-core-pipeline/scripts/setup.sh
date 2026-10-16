@@ -21,9 +21,12 @@
 #                         thermo_resolution.py read the Orbitrap resolution) + pandas
 #                         -- one separate, non-fatal install that an existing env gets too
 #   - AnnotationDbi + GO.db + org.Hs.eg.db + org.Mm.eg.db: offline GO sets for run_sets.R
-#                         (bioconda, else Bioconductor source; non-fatal)
+#                         (AnnotationDbi from bioconda; the annotation packages from Bioconductor's
+#                         annotation repository for the env's release; each must load; non-fatal)
 #   - .NET 8 (NETCore + AspNetCore) via ensure_dotnet8.sh, into ~/.proteomics-pipeline/dotnet8:
 #                         DIA-NN's .raw reader and the resolution reader both run on it
+#   - google-genai >= 2.25.0 (conda-forge): the podcast's Gemini voices (make_podcast.py, step
+#                         9e) -- its own, non-fatal install
 #
 # What stays special-cased (handled elsewhere / reported):
 #   - DIA-NN: license-gated, no conda. Linux -> binary (acquire_tools.sh);
@@ -189,6 +192,9 @@ in_env_meta() {     # in_env_meta PKG: conda's own record of an installed packag
   local f; for f in "$ENV_PREFIX"/conda-meta/"$1"-[0-9]*.json; do [ -e "$f" ] && return 0; done
   return 1
 }
+nanoparquet_ok() {
+  "$ENV_PREFIX/bin/Rscript" -e "q(status = as.integer(!requireNamespace('nanoparquet', quietly = TRUE)))" >/dev/null 2>&1
+}
 EXTRA_PKGS=""       # a word list, not an array: bash 3.2 + set -u and empty arrays do not mix
 trfp_in_env           || EXTRA_PKGS="$EXTRA_PKGS thermorawfileparser"
 in_env_meta pythonnet || EXTRA_PKGS="$EXTRA_PKGS pythonnet"
@@ -204,38 +210,205 @@ if [ -n "$CONDA" ] && env_ready && [ -n "$EXTRA_PKGS" ] && ! $CHECK_ONLY; then
   esac || NOTES+=("Could not install$EXTRA_PKGS into the env (the rest of the env is unaffected). Thermo .raw needs thermorawfileparser, and reading the Orbitrap resolution needs pythonnet: see thermo_raw_reader in setup.json.")
 fi
 
+# ---- 2b1. nanoparquet: its OWN install ----------------------------------------
+# limpa reads DIA-NN's report.parquet with it ("nanoparquet package required but is not
+# installed", limpa's EListFromLongFormatFile), but it is only in limpa's Suggests -- installing
+# limpa never brings it -- and create_env lists it from 2.8.0 only, so an env built before that
+# never got it (2.8.0 report). Loadable is the test, not a conda-meta record: an R-installed copy
+# counts.
+#   * conda-forge builds r-nanoparquet only for r-base < 4.6 (0.5.2; anaconda.org, 2026-10-15).
+#     Solved in 2b's call above, without --freeze-installed, an R 4.6.1 env got the plan
+#     "r-base 4.6.1 -> 4.5.3" (2.12 review; reproduced with a dry run on HIVE's
+#     proteomics-pipeline-r46): R downgraded under limpa and every Bioconductor package. So it is
+#     installed alone and --freeze-installed: conda may only add it, or fail (the same dry run
+#     frozen: "r-nanoparquet ... is not installable", nothing changed).
+#   * R >= 4.6 has no conda build, so it is CRAN's source package, compiled. 2.8.0 ruled CRAN out
+#     because install.packages("nanoparquet") failed with "x86_64-conda-linux-gnu-c++: not found":
+#     conda's R compiles with the compilers its Makeconf names (R CMD config CC / CXX), which an
+#     env has only with conda-forge's c-compiler + cxx-compiler. So CRAN is used only when those
+#     run here; otherwise the fix installs them (frozen) first. HIVE's proteomics-pipeline-r46 is
+#     built exactly so: conda-forge's c-compiler + cxx-compiler, nanoparquet 0.5.2 from CRAN.
+R_VERSION=""
+env_ready && R_VERSION="$("$ENV_PREFIX/bin/Rscript" -e 'cat(as.character(getRversion()))' 2>/dev/null)"
+NANOPARQUET_CONDA=true      # does conda-forge build r-nanoparquet for this R? (unknown R: try it)
+case "$R_VERSION" in ""|[0-3].*|4.[0-5]|4.[0-5].*) ;; *) NANOPARQUET_CONDA=false ;; esac
+r_compilers_ok() {          # can R's own C and C++ compilers and make run, the env's bin first?
+  local v c
+  for v in CC CXX MAKE; do
+    c="$(PATH="$ENV_PREFIX/bin:$PATH" "$ENV_PREFIX/bin/R" CMD config "$v" 2>/dev/null)"; c="${c%% *}"
+    [ -n "$c" ] && ( PATH="$ENV_PREFIX/bin:$PATH"; command -v "$c" >/dev/null 2>&1 ) || return 1
+  done
+}
+NANOPARQUET_CRAN_R="install.packages('nanoparquet', repos = 'https://cloud.r-project.org', type = 'source')"
+NANOPARQUET_CRAN="PATH=\"$ENV_PREFIX/bin:\$PATH\" $ENV_PREFIX/bin/Rscript -e \"$NANOPARQUET_CRAN_R\""
+case "$CONDA" in            # -p for the reason create_env gives
+  *micromamba) NANOPARQUET_CONDA_CMD="$CONDA install -y -r $MAMBA_ROOT -p $ENV_PREFIX --freeze-installed --override-channels -c conda-forge -c bioconda" ;;
+  "")          NANOPARQUET_CONDA_CMD="" ;;
+  *)           NANOPARQUET_CONDA_CMD="$CONDA install -y -p $ENV_PREFIX --freeze-installed --override-channels -c conda-forge -c bioconda" ;;
+esac
+if env_ready && ! nanoparquet_ok && ! $CHECK_ONLY; then
+  if $NANOPARQUET_CONDA && [ -n "$CONDA" ]; then
+    say "[setup] installing r-nanoparquet into the env (conda-forge; nothing already there changes)..."
+    case "$CONDA" in
+      *micromamba) "$CONDA" install -y -r "$MAMBA_ROOT" -p "$ENV_PREFIX" --freeze-installed \
+                     --override-channels -c conda-forge -c bioconda r-nanoparquet >&2 ;;
+      *)           "$CONDA" install -y -p "$ENV_PREFIX" --freeze-installed \
+                     --override-channels -c conda-forge -c bioconda r-nanoparquet >&2 ;;
+    esac || say "[setup] conda could not add r-nanoparquet without changing the env (above)"
+  fi
+  if ! nanoparquet_ok && r_compilers_ok; then
+    say "[setup] installing nanoparquet from CRAN's source package (R $R_VERSION, compiled with R's own compilers)..."
+    PATH="$ENV_PREFIX/bin:$PATH" "$ENV_PREFIX/bin/Rscript" -e "$NANOPARQUET_CRAN_R" >&2 \
+      || say "[setup] the nanoparquet install from CRAN failed (above)"
+  fi
+fi
+NANOPARQUET_OK=false
+if env_ready && nanoparquet_ok; then NANOPARQUET_OK=true; fi
+# The fix that works for THIS env (setup.json nanoparquet.fix, the note, the ERROR line)
+if $NANOPARQUET_CONDA; then
+  NANOPARQUET_WHY="conda-forge's binary, added without changing anything else in the env"
+  if [ -n "$CONDA" ]; then NANOPARQUET_FIX="$NANOPARQUET_CONDA_CMD r-nanoparquet"
+  else NANOPARQUET_FIX="run setup.sh (it installs micromamba), or install conda-forge's r-nanoparquet into $ENV_PREFIX with --freeze-installed"; fi
+elif env_ready && r_compilers_ok; then
+  NANOPARQUET_WHY="R $R_VERSION: conda-forge has no r-nanoparquet for it, so CRAN's source package, compiled with the env's own compilers"
+  NANOPARQUET_FIX="$NANOPARQUET_CRAN"
+else
+  NANOPARQUET_WHY="R $R_VERSION: conda-forge has no r-nanoparquet for it, and CRAN's source package needs the compilers this R names (R CMD config CC / CXX), which the env does not have -- conda-forge's c-compiler + cxx-compiler provide them"
+  if [ -n "$CONDA" ]; then NANOPARQUET_FIX="$NANOPARQUET_CONDA_CMD c-compiler cxx-compiler make && $NANOPARQUET_CRAN"
+  else NANOPARQUET_FIX="install conda-forge's c-compiler, cxx-compiler and make into $ENV_PREFIX (with --freeze-installed), then: $NANOPARQUET_CRAN"; fi
+fi
+if env_ready && ! $NANOPARQUET_OK; then
+  NOTES+=("nanoparquet cannot be loaded in $ENV_PREFIX: run_de.R reads DIA-NN's report.parquet with it (limpa needs it), so no DE can run. The route that works here: $NANOPARQUET_WHY. Fix: $NANOPARQUET_FIX.")
+fi
+
 # ---- 2b2. protein-set annotation: GO, offline -----------------------------------
 # run_sets.R tests Gene Ontology sets. They come from the Bioconductor annotation packages,
 # installed here once, so a set test never downloads anything and its record names the GO
 # release it used (the package's GOSOURCEDATE). org.Hs.eg.db also serves every organism
 # without its own package (human gene symbols; run_sets.R records that route). About 250 MB.
 # Not installed: reactome.db (about 2 GB); run_sets.R --sets reactome says how to add it.
-# bioconda first (its R 4.5 builds suit this env); an env whose R bioconda has no builds for
-# (R 4.6: HIVE's proteomics-pipeline-r46) gets the Bioconductor source packages instead --
-# AnnotationDbi's dependencies compile, which the env's own compilers do. Not fatal: DE runs
-# without them; setup.json's set_annotation says what is missing and the fix.
+# "Installed" is not enough: each package must LOAD. requireNamespace() said FALSE alike for a
+# missing package and for conda's bioconductor-org.mm.eg.db / go.db 3.2.x builds, which
+# `micromamba install --freeze-installed` resolved into a HIVE env and which did not load
+# (staff report 2026-10-08: run_sets.R stopped inside a DE job). So R reports each package as
+# ok / missing / broken (installed, does not load, with R's reason), and:
+#   - AnnotationDbi (software; its dependencies compile): conda's binary first, as for the env;
+#   - GO.db and the org.*.eg.db data packages -- and AnnotationDbi if conda could not -- from
+#     Bioconductor's own repositories for the env's release, never conda's annotation builds:
+#     install.packages(repos = https://bioconductor.org/packages/<release>/data/annotation) is
+#     what fixed that env. The release is the one whose AnnotationDbi the env has (release X's
+#     annotation packages need X's AnnotationDbi: GO.db 3.23 wants AnnotationDbi >= 1.73), else
+#     its limma's (the env's own Bioconductor), else BiocVersion's -- read from their DESCRIPTION
+#     (Repository: Bioconductor X.Y / git_branch RELEASE_X_Y), else $LIMPA_BIOC.
+# Not fatal: DE runs without them; setup.json's set_annotation says what loads and the fix, and
+# `setup.sh --check` reports it without installing anything.
 SET_ANN_PKGS="AnnotationDbi GO.db org.Hs.eg.db org.Mm.eg.db"
-set_ann_missing() {
-  "$ENV_PREFIX/bin/Rscript" -e "p <- strsplit('$SET_ANN_PKGS', ' ')[[1]]; cat(p[!vapply(p, requireNamespace, TRUE, quietly = TRUE)])" 2>/dev/null
+# R's answer, one line each: "<pkg> ok <version>" | "<pkg> missing" | "<pkg> broken <reason>", then
+# "bioc <X.Y> <package it was read from>" or "bioc -". (No single quote in it: bash quotes it.)
+SET_ANN_R='
+ok <- character(0)
+for (q in strsplit(Sys.getenv("SET_ANN_PKGS"), " ")[[1]]) {
+  if (!nzchar(system.file(package = q))) { cat(q, " missing\n", sep = ""); next }
+  e <- tryCatch({ loadNamespace(q); "" }, error = function(e) conditionMessage(e))
+  if (nzchar(e)) { cat(q, " broken ", gsub("[[:space:]]+", " ", e), "\n", sep = ""); next }
+  ok <- c(ok, q)
+  cat(q, " ok ", as.character(utils::packageVersion(q)), "\n", sep = "")
 }
-if env_ready && ! $CHECK_ONLY && [ -n "$(set_ann_missing)" ]; then
-  say "[setup] installing the GO annotation packages for protein-set tests ($SET_ANN_PKGS)..."
-  case "$CONDA" in
-    *micromamba) "$CONDA" install -y -r "$MAMBA_ROOT" -p "$ENV_PREFIX" --override-channels -c conda-forge -c bioconda \
-                   bioconductor-annotationdbi bioconductor-go.db bioconductor-org.hs.eg.db bioconductor-org.mm.eg.db >&2 ;;
-    "")          false ;;
-    *)           "$CONDA" install -y -p "$ENV_PREFIX" --override-channels -c conda-forge -c bioconda \
-                   bioconductor-annotationdbi bioconductor-go.db bioconductor-org.hs.eg.db bioconductor-org.mm.eg.db >&2 ;;
-  esac || say "[setup] conda could not install them; trying the Bioconductor $LIMPA_BIOC source packages"
-  if [ -n "$(set_ann_missing)" ]; then
-    "$ENV_PREFIX/bin/Rscript" -e "install.packages(strsplit('$(set_ann_missing)', ' ')[[1]], repos = c(BioCsoft = 'https://bioconductor.org/packages/$LIMPA_BIOC/bioc', BioCann = 'https://bioconductor.org/packages/$LIMPA_BIOC/data/annotation', CRAN = 'https://cloud.r-project.org'), dependencies = NA)" >&2 \
+rel <- function(q) {
+  d <- suppressWarnings(utils::packageDescription(q))
+  if (!is.list(d)) return(NA)
+  r <- sub("^Bioconductor ", "", if (is.null(d$Repository)) "" else d$Repository)
+  if (grepl("^[0-9]+[.][0-9]+$", r)) return(r)
+  b <- if (is.null(d$git_branch)) "" else d$git_branch
+  if (grepl("^RELEASE_[0-9]+_[0-9]+$", b)) return(sub("_", ".", sub("^RELEASE_", "", b)))
+  if (q == "BiocVersion") return(sub("^([0-9]+[.][0-9]+).*", "\\1", d$Version))
+  NA
+}
+for (q in c("AnnotationDbi", "limma", "BiocVersion")) {
+  if (q == "AnnotationDbi" && !(q %in% ok)) next
+  r <- rel(q)
+  if (!is.na(r)) { cat("bioc ", r, " ", q, "\n", sep = ""); quit(save = "no") }
+}
+cat("bioc -\n")
+'
+# -> SET_ANN_ANSWERED (did R answer), SET_ANN_MISSING (missing or broken, space-separated),
+#    SET_ANN_LOADS, SET_ANN_STATUS ("pkg|status" lines), SET_ANN_PROBLEMS (for the note), ENV_BIOC(_FROM)
+set_ann_check() {
+  SET_ANN_ANSWERED=false; SET_ANN_MISSING=""; SET_ANN_STATUS=""; SET_ANN_PROBLEMS=""
+  SET_ANN_LOADS=" "; ENV_BIOC=""; ENV_BIOC_FROM=""
+  local out line pkg st rest
+  out="$(SET_ANN_PKGS="$SET_ANN_PKGS" "$ENV_PREFIX/bin/Rscript" -e "$SET_ANN_R" 2>/dev/null)"
+  while IFS= read -r line; do
+    pkg="${line%% *}"; rest=""; case "$line" in *" "*) rest="${line#* }" ;; esac
+    st="${rest%% *}"; case "$rest" in *" "*) rest="${rest#* }" ;; *) rest="" ;; esac
+    if [ "$pkg" = "bioc" ]; then
+      SET_ANN_ANSWERED=true
+      [ "$st" != "-" ] && { ENV_BIOC="$st"; ENV_BIOC_FROM="$rest"; }
+      continue
+    fi
+    case " $SET_ANN_PKGS " in *" $pkg "*) ;; *) continue ;; esac
+    case "$st" in
+      ok)      SET_ANN_LOADS="$SET_ANN_LOADS$pkg "; rest="loads ($rest)" ;;
+      missing) rest="not installed" ;;
+      broken)  rest="installed but does not load: $rest" ;;
+      *)       continue ;;
+    esac
+    [ "$st" = ok ] || { SET_ANN_MISSING="$SET_ANN_MISSING${SET_ANN_MISSING:+ }$pkg"
+                        SET_ANN_PROBLEMS="$SET_ANN_PROBLEMS${SET_ANN_PROBLEMS:+; }$pkg $rest"; }
+    SET_ANN_STATUS="$SET_ANN_STATUS$pkg|$rest
+"
+  done <<SET_ANN_EOF
+$out
+SET_ANN_EOF
+}
+set_ann_loads() { case "$SET_ANN_LOADS" in *" $1 "*) return 0 ;; esac; return 1; }
+# SET_ANN_STATUS as JSON members, at setup.json time (j is defined there)
+set_ann_status_json() {
+  local line sep=""
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    printf '%s"%s": "%s"' "$sep" "$(j "${line%%|*}")" "$(j "${line#*|}")"; sep=", "
+  done <<SET_ANN_EOF
+$SET_ANN_STATUS
+SET_ANN_EOF
+}
+SET_ANN_ANSWERED=false; SET_ANN_MISSING=""; SET_ANN_STATUS=""; SET_ANN_PROBLEMS=""; SET_ANN_LOADS=" "
+ENV_BIOC=""; ENV_BIOC_FROM=""
+env_ready && set_ann_check
+if env_ready && ! $CHECK_ONLY && [ -n "$SET_ANN_MISSING" ]; then
+  if ! set_ann_loads AnnotationDbi; then
+    say "[setup] installing AnnotationDbi for the protein-set tests (conda)..."
+    case "$CONDA" in
+      *micromamba) "$CONDA" install -y -r "$MAMBA_ROOT" -p "$ENV_PREFIX" --override-channels \
+                     -c conda-forge -c bioconda bioconductor-annotationdbi >&2 ;;
+      "")          false ;;
+      *)           "$CONDA" install -y -p "$ENV_PREFIX" --override-channels \
+                     -c conda-forge -c bioconda bioconductor-annotationdbi >&2 ;;
+    esac || say "[setup] conda could not install AnnotationDbi; trying Bioconductor's source package"
+    set_ann_check
+  fi
+  if [ -n "$SET_ANN_MISSING" ]; then
+    SET_ANN_BIOC="${ENV_BIOC:-$LIMPA_BIOC}"
+    say "[setup] installing $SET_ANN_MISSING from Bioconductor $SET_ANN_BIOC (annotation repository)..."
+    "$ENV_PREFIX/bin/Rscript" -e "install.packages(strsplit('$SET_ANN_MISSING', ' ')[[1]], repos = c(BioCann = 'https://bioconductor.org/packages/$SET_ANN_BIOC/data/annotation', BioCsoft = 'https://bioconductor.org/packages/$SET_ANN_BIOC/bioc', CRAN = 'https://cloud.r-project.org'), dependencies = NA)" >&2 \
       || say "[setup] the annotation install failed (above)"
+    set_ann_check
   fi
 fi
-SET_ANN_MISSING=""; SET_ANN_OK=false
-if env_ready; then SET_ANN_MISSING="$(set_ann_missing)"; [ -z "$SET_ANN_MISSING" ] && SET_ANN_OK=true; fi
-if env_ready && ! $SET_ANN_OK; then
-  NOTES+=("Protein-set tests (run_sets.R) need $SET_ANN_MISSING. Fix: $ENV_PREFIX/bin/Rscript -e \"install.packages(c('$(printf '%s' "$SET_ANN_MISSING" | sed "s/ /','/g")'), repos = c('https://bioconductor.org/packages/$LIMPA_BIOC/bioc', 'https://bioconductor.org/packages/$LIMPA_BIOC/data/annotation', 'https://cloud.r-project.org'))\" where there is internet. DE does not need them.")
+SET_ANN_BIOC="${ENV_BIOC:-$LIMPA_BIOC}"
+if [ -z "$ENV_BIOC" ]; then
+  if $SET_ANN_ANSWERED; then ENV_BIOC_FROM="none of AnnotationDbi, limma or BiocVersion names one"
+  else ENV_BIOC_FROM="not known: R did not answer"; fi
+  ENV_BIOC_FROM="$ENV_BIOC_FROM -- the skill's pinned release (PROTEOMICS_LIMPA_BIOC) instead"
+fi
+SET_ANN_OK=false; $SET_ANN_ANSWERED && [ -z "$SET_ANN_MISSING" ] && SET_ANN_OK=true
+SET_ANN_FIX=""
+if env_ready && ! $SET_ANN_ANSWERED; then
+  SET_ANN_FIX="re-run bash setup.sh --check; if it says the same, run $ENV_PREFIX/bin/Rscript by hand to see R's error"
+  NOTES+=("Protein-set tests (run_sets.R): R in $ENV_PREFIX did not say whether the annotation packages ($SET_ANN_PKGS) load, so they are not known to work. DE does not need them.")
+elif env_ready && ! $SET_ANN_OK; then
+  SET_ANN_FIX="bash setup.sh where there is internet (a login node), or by hand: $ENV_PREFIX/bin/Rscript -e \"install.packages(c('$(printf '%s' "$SET_ANN_MISSING" | sed "s/ /','/g")'), repos = c('https://bioconductor.org/packages/$SET_ANN_BIOC/data/annotation', 'https://bioconductor.org/packages/$SET_ANN_BIOC/bioc', 'https://cloud.r-project.org'))\""
+  NOTES+=("Protein-set tests (run_sets.R) cannot run until these load: $SET_ANN_PROBLEMS. Fix: $SET_ANN_FIX. DE does not need them.")
 fi
 
 # ---- 2c. .NET 8 (ensure_dotnet8.sh) ------------------------------------------
@@ -261,6 +434,54 @@ if ! $CHECK_ONLY; then
       fi ;;
     *) DOTNET8_NOTE="not run on $OS" ;;
   esac
+fi
+
+# ---- 2d. google-genai: the podcast's Gemini voices ---------------------------
+# A Core run makes the podcast by default (SKILL.md step 9e), and on HIVE its job runs with this
+# env's python (make_podcast.py job reads setup.json's `python`). Gemini 3 TTS needs
+# client.interactions: google-genai >= GENAI_MIN (make_podcast.GENAI_MIN;
+# tests/test_make_podcast_hive.py keeps the two equal). conda-forge's noarch build, in its own
+# install like 2b's: only the podcast needs it, so a failure is a note. Installed = its
+# conda-meta record (2b's rule); make_podcast.py job asks the python itself before it writes a job.
+GENAI_MIN="2.25.0"
+genai_version() {   # the version in google-genai's conda-meta record, or nothing
+  local f
+  for f in "$ENV_PREFIX"/conda-meta/google-genai-[0-9]*.json; do
+    [ -e "$f" ] || continue
+    f="${f##*/google-genai-}"; printf '%s' "${f%%-*}"; return 0
+  done
+  return 1
+}
+version_ge() {      # version_ge A B: is A >= B, on the first three numbers (bash 3.2: no sort -V)
+  local a="$1." b="$2." i x y
+  for i in 1 2 3; do
+    x="${a%%.*}"; y="${b%%.*}"; a="${a#*.}"; b="${b#*.}"
+    x="${x//[!0-9]/}"; y="${y//[!0-9]/}"
+    [ "${x:-0}" -gt "${y:-0}" ] && return 0
+    [ "${x:-0}" -lt "${y:-0}" ] && return 1
+  done
+  return 0
+}
+GENAI_VERSION="$(genai_version)"
+genai_ok() { [ -n "$GENAI_VERSION" ] && version_ge "$GENAI_VERSION" "$GENAI_MIN"; }
+case "$CONDA" in
+  *micromamba) GENAI_FIX="$CONDA install -y -r $MAMBA_ROOT -p $ENV_PREFIX --override-channels -c conda-forge -c bioconda 'google-genai>=$GENAI_MIN'" ;;
+  "")          GENAI_FIX="run setup.sh (it installs micromamba), or install conda-forge's google-genai>=$GENAI_MIN into $ENV_PREFIX" ;;
+  *)           GENAI_FIX="$CONDA install -y -p $ENV_PREFIX --override-channels -c conda-forge -c bioconda 'google-genai>=$GENAI_MIN'" ;;
+esac
+if [ -n "$CONDA" ] && env_ready && ! genai_ok && ! $CHECK_ONLY; then
+  say "[setup] installing google-genai >= $GENAI_MIN (the podcast's Gemini voices) into the env..."
+  case "$CONDA" in      # -p for the reason create_env gives
+    *micromamba) "$CONDA" install -y -r "$MAMBA_ROOT" -p "$ENV_PREFIX" \
+                   --override-channels -c conda-forge -c bioconda "google-genai>=$GENAI_MIN" >&2 ;;
+    *)           "$CONDA" install -y -p "$ENV_PREFIX" \
+                   --override-channels -c conda-forge -c bioconda "google-genai>=$GENAI_MIN" >&2 ;;
+  esac || say "[setup] the google-genai install failed (above); only the podcast needs it"
+  GENAI_VERSION="$(genai_version)"
+fi
+GENAI_OK=false; genai_ok && GENAI_OK=true
+if env_ready && ! $GENAI_OK; then
+  NOTES+=("google-genai ${GENAI_VERSION:-is not installed}${GENAI_VERSION:+ is older than $GENAI_MIN}: the podcast's Gemini voices (step 9e; on HIVE, make_podcast.py job) need google-genai >= $GENAI_MIN. Nothing else needs it. Fix: $GENAI_FIX.")
 fi
 
 # ---- 3. resolve tool paths --------------------------------------------------
@@ -292,11 +513,18 @@ elif [ "$OS" = "darwin" ];       then DIANN_READY=false; DIANN_NOTE="macOS: DIA-
 fi
 
 # readiness per acquisition type (for the orchestrator to gate on)
-DE_READY=false; [ -n "$RSCRIPT" ] && DE_READY=true
+# DE reads every engine's report.parquet with nanoparquet (run_de.R, limpa_compat.R)
+DE_READY=false; [ -n "$RSCRIPT" ] && $NANOPARQUET_OK && DE_READY=true
 DDA_READY=false
 if [ -n "$SAGE" ] && [ -n "$RSCRIPT" ]; then DDA_READY=true; fi
 DIA_READY=false
 if $DIANN_READY && [ -n "$RSCRIPT" ]; then DIA_READY=true; fi
+# A search can run (an Rscript outside the env counts for it) while the DE cannot: say why, or
+# ready_for.de is false beside dia/dda true with no note (2.12 review). With the env built, the
+# nanoparquet note above says it.
+if ! $DE_READY && ! env_ready && { $DIA_READY || $DDA_READY; }; then
+  NOTES+=("ready_for.de is false although a search can run here: the DE runs in the skill's own env ($ENV_PREFIX), which is not built yet, so whether its R can read report.parquet (nanoparquet) is not known (the Rscript found, $RSCRIPT, is not that env's). Run bash setup.sh (without --check) to build it before the DE step.")
+fi
 
 # Thermo .raw: can step 2 read it HERE? Asked of detect_acquisition.py itself, so the parser
 # search (env var, PATH, the env, the Core's shared copy) and the .NET check are the ones step
@@ -349,10 +577,18 @@ j() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
          "$($QUOBYTE && echo true || echo false)"
   printf '  "diann": {"ready": %s, "note": "%s"},\n' "$($DIANN_READY && echo true || echo false)" "$(j "$DIANN_NOTE")"
   printf '  "dotnet8": {"root": "%s", "note": "%s"},\n' "$(j "$DOTNET8_ROOT")" "$(j "$DOTNET8_NOTE")"
+  printf '  "podcast": {"google_genai": "%s", "required": ">= %s", "ok": %s},\n' \
+         "$(j "$GENAI_VERSION")" "$GENAI_MIN" "$($GENAI_OK && echo true || echo false)"
   printf '  "limpa": {"version": "%s", "required": ">= %s", "ok": %s, "source": "Bioconductor %s"},\n' \
          "$(j "$LIMPA_VERSION")" "$LIMPA_MIN" "$($LIMPA_OK && echo true || echo false)" "$LIMPA_BIOC"
-  printf '  "set_annotation": {"ok": %s, "packages": "%s", "missing": "%s"},\n' \
-         "$($SET_ANN_OK && echo true || echo false)" "$SET_ANN_PKGS" "$(j "$SET_ANN_MISSING")"
+  printf '  "nanoparquet": {"ok": %s, "fix": "%s"},\n' \
+         "$($NANOPARQUET_OK && echo true || echo false)" "$(j "$($NANOPARQUET_OK || printf '%s' "$NANOPARQUET_FIX")")"
+  printf '  "set_annotation": {"ok": %s, "packages": "%s", "missing": "%s", "status": {%s}, "organisms": {"human": %s, "mouse": %s}, "bioconductor": "%s", "bioconductor_from": "%s", "fix": "%s"},\n' \
+         "$($SET_ANN_OK && echo true || echo false)" "$SET_ANN_PKGS" "$(j "$SET_ANN_MISSING")" \
+         "$(set_ann_status_json)" \
+         "$(set_ann_loads AnnotationDbi && set_ann_loads GO.db && set_ann_loads org.Hs.eg.db && echo true || echo false)" \
+         "$(set_ann_loads AnnotationDbi && set_ann_loads GO.db && set_ann_loads org.Mm.eg.db && echo true || echo false)" \
+         "$(j "$SET_ANN_BIOC")" "$(j "$ENV_BIOC_FROM")" "$(j "$SET_ANN_FIX")"
   printf '  "ready_for": {"de": %s, "dia": %s, "dda": %s, "thermo_raw": %s},\n' \
          "$($DE_READY && echo true || echo false)" \
          "$($DIA_READY && echo true || echo false)" \
@@ -373,11 +609,20 @@ say ""
 say "[setup] activate with:  source $ACTIVATE"
 say "[setup] readiness report written to $SETUP_JSON"
 
-# The pinned R stack is part of a working setup: an env whose limpa is < 1.4.0 is a setup
-# failure, said plainly and with the fix -- not a note to be scrolled past.
+# The pinned R stack is part of a working setup: an env whose limpa is < 1.4.0, or whose R cannot
+# load nanoparquet, is a setup failure, said plainly and with the fix -- not a note to be
+# scrolled past. Both are said before setup.sh exits.
+R_STACK_OK=true
 if env_ready && ! $LIMPA_OK; then
   say ""
   say "[setup] ERROR: limpa ${LIMPA_VERSION:-(not installed)} in $ENV_PREFIX -- the skill needs limpa >= $LIMPA_MIN (Bioconductor $LIMPA_BIOC)."
   say "[setup]        Fix: $LIMPA_FIX"
-  $CHECK_ONLY || exit 1
+  R_STACK_OK=false
 fi
+if env_ready && ! $NANOPARQUET_OK; then
+  say ""
+  say "[setup] ERROR: nanoparquet cannot be loaded in $ENV_PREFIX -- run_de.R reads every report.parquet with it (limpa needs it)."
+  say "[setup]        Fix: $NANOPARQUET_FIX   ($NANOPARQUET_WHY)"
+  R_STACK_OK=false
+fi
+if ! $R_STACK_OK && ! $CHECK_ONLY; then exit 1; fi

@@ -48,14 +48,24 @@ were samples. Neither shows up as an error; the search just succeeds on the wron
 * **Tray labels repeat.** `S6` is a tray *position*, reused every month since December. It
   is not a submission identifier.
 
+Since 2.12.0 a tray named without the number (0793's S5 above) is **not** searched from STAN's
+list: `named_for_submission` fails and lists its runs, and the operator confirms them through a
+curated list (`core_submission.py locate --files-from`) — because a tray STAN joins by position
+can just as well be another project's (2026-10-05, below).
+
 ## 1. Get the file list
 
 `ht_manifest.py` runs **on HIVE** (like `fran_deposit.py`), because that is where STAN,
 its credential, and the raw files are. Drive it through `hive_exec.sh`:
 
 ```
-bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/ht_manifest.py fetch 0793 --out ~/ht0793'
+bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/ht_manifest.py fetch 0793 \
+    --summary ~/core/PROT_0793/submission_summary.json --out ~/ht0793'
 ```
+
+`--summary` is the submission's CoreOmics record, written by `core_submission.py fetch` and put
+on HIVE (`references/core-submissions.md`). It is what lets `ht_manifest.py` see a sample STAN
+has no run for (gate `sample_list`, below); without it that check is not made, and says so.
 
 `--include` takes `samples` (**default** — blanks and standards excluded), `rerun` (only
 what STAN flagged for re-injection), `standards`, or `all`. Both `0793` and `793` work.
@@ -64,7 +74,7 @@ It writes two files into `--out`:
 
 | file | what it is |
 |---|---|
-| `files.txt` | one absolute, resolved `/nfs/...` path per line — feed straight to `--raw` / `--files` |
+| `files.txt` | one absolute, resolved `/nfs/...` path per line — **only the runs named for the submission** (`named_for_submission`, below); fed to `core_submission.py locate --files-from`, or to `--raw` / `--files` |
 | `ht_manifest.json` | the full STAN payload (plates, wells, per-run class, verdicts) **plus** the gate results |
 
 ## 2. Honour the exit code — this is the whole point of the gates
@@ -86,6 +96,54 @@ covering the wrong files**:
   because otherwise a 120-file SLURM array dies partway through, hours in.
 * **`repeated_paths` FAIL** — STAN lists one file more than once with *different* details
   (well, run name, class, verdict): which sample it is cannot be read from the manifest.
+* **`named_for_submission`** — a run whose name does not carry the submission number right after
+  its date (`<date>_<n>_…`, `<date>_PROT_<n>_…`; the same rule `core_submission.py locate` uses to
+  recognise a plate). Every such file is listed, with STAN's class, plate, well and injection, and
+  none of them is written to `files.txt`.
+* **`one_method`** — the file names declare more than one acquisition method: another throughput
+  (`100spd` beside `60SPD`) or another mode (`DIA` beside `DDA`), each group listed with its count
+  and how many of it are named for the submission. In a run named for the submission the method
+  is read **only right after the plate token** (`<date>_[PROT_]<n>_<speed>_…`), never in the
+  sample name after it: a re-injection `<date>_<n>_rerun_Liver_24m_3_…` declares no method (WARN
+  below), not `24m` (before 2.12 it stopped the plate as two methods). DIA vs DDA is read again
+  from the data at step 2 (`detect_acquisition.py`).
+* **`sample_list`** (with `--summary`) — a sample on the CoreOmics record with no run named for
+  the submission, or such a run that names no sample on the record. Each is named. Runs are
+  matched to samples by the rule `core_submission.py locate --files-from` applies (`sample_name`
+  inside the run's sample field), so the two never disagree. A run that names **several** samples
+  (two samples share a `sample_name`, or a label looks like a plate well) is not a run of no
+  sample: it is `sample_list` **INFO** (`runs_of_several_samples`), and staff say whose it is when
+  the list is staged (`locate --files-from … --choose <unique_id>=<file>`). Not checked for
+  `--include rerun|standards`. A `--summary` that cannot be read is a FAIL that says to put
+  `submission_summary.json` on HIVE and pass its path — nothing to ask the operator.
+
+### Why STAN's list is checked, not trusted (2026-10-05)
+
+A 96-sample plate on tray S3 came back from STAN as **136 files with every gate PASS**: 95 of
+the plate's 96 runs, one real run **missing**, and **41 runs of other projects** that had used tray
+S3 on earlier days — named `<MMDDYYYY>__60SPD_DIA-<code>…` (5 of them `__30SPD_DDA…`), other
+dates, other methods. Searched as given, other clients' data would have gone into the search, the
+report and FRAN, and a sample would have been left out silently. It was caught by hand.
+
+How STAN produced it (STAN `expand_submission_runs`, read 2026-10-05): it takes the runs whose
+names carry the number, then **every run on the same tray** within ±300 injections, from the
+**tray's earliest run in that window** — not from the submission's first run. Tray labels are
+reused constantly, so a tray another project used a few days earlier is swept in whole. (Its rule
+that a tray naming another submission never joins applies only to the further trays it adds, not
+to the submission's own tray, and recognises only names shaped `<8 digits>_<number>_`.) The
+missing run was not in STAN's records at all, so no STAN-based gate could see it; only the
+CoreOmics sample list can.
+
+So: **when `named_for_submission` fails, treat STAN's tray assignment as suspect** and ask the
+operator whose those runs are. Runs that ran *before* the first run named for the submission
+(by the acquisition counter) are called out: they cannot be a later tray of it.
+
+**Getting past a failed gate is staff choosing the files.** There is no flag that accepts STAN's
+list as it is. Write the runs the operator confirms — `files.txt` plus, say, a continuation tray
+named without the number, or a sample's run that STAN never recorded — to a list, and stage it with
+`core_submission.py locate --files-from <list>` (`references/core-submissions.md`), which matches
+each run to its sample and records the staff choices in `locate.json`. When no listed run is
+named for the submission at all, `n_files` fails and points there too.
 
 And the warnings, which need a human rather than a stop:
 
@@ -108,6 +166,9 @@ stop on their own:
   `radiant_parallel.py`. A repeated path is searched once and recorded in
   `search_provenance.json` `repeated_paths`, which the analysis report shows.
 * **`plates`** — more than two trays. Confirm the extent; it is inferred, not recorded.
+* **`one_method` WARN** — a file name declares no method (a re-injection is named
+  `<date>_<n>_rerun_…`), so it could not be compared with the rest. Confirm with the operator.
+* **`sample_list` WARN** — not checked, because no `--summary` was given.
 * **`counts`** — fewer than 12 customer samples. A mistyped submission looks exactly like
   this. A genuinely small submission is legal, so this warns rather than blocks.
 * **`needs_rerun`** — samples STAN flagged for another injection. They **are** included in
@@ -244,7 +305,8 @@ Every other Core member gets *permission denied* at (4). That is expected, and i
 ```
 printf '%s\n' '<tok>' | bash scripts/hive_exec.sh 'umask 077; mkdir -p ~/.stan && cat > ~/.stan/share_0793'
 bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/ht_manifest.py fetch 0793 \
-    --http https://ucd.stan-proteomics.org --share-token-file ~/.stan/share_0793 --out ~/ht0793'
+    --summary ~/core/PROT_0793/submission_summary.json --http https://ucd.stan-proteomics.org \
+    --share-token-file ~/.stan/share_0793 --out ~/ht0793'
 ```
 
 **The token goes in a file, never on a command line.** A token in argv is in the process list,

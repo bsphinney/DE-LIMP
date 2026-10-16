@@ -57,6 +57,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # ONE instrument -> ppm table for the whole skill. Do not restate it here.
 from estimate_params import (classify_instrument, add_resolution_args,  # noqa: E402
                              resolution_args_error, resolution_source)
+# ONE map of what each alkylating agent leaves on cysteine (the DIA-NN and Sage routes use it too)
+from estimate_params import (CYS_ALKYLATION_CHOICES, CYS_REAGENTS,  # noqa: E402
+                             cys_alkylation_record, cys_diann_flags)
+
+# MSFragger's fixed-modification table names cysteine by this row; the shipped DIA presets fix it
+# at 57.02146 (carbamidomethyl).
+FRAGPIPE_FIX_C = re.compile(r"(?<![0-9.\-])-?[0-9.]+(,C \(cysteine\),)")
 
 PRESETS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "presets")
 
@@ -149,6 +156,21 @@ def build_fragpipe(args, cls, ms1, ms2, label, src, prov):
     if args.threads:
         changes["workflow.threads"] = args.threads
         why["workflow.threads"] = "this run's CPU allocation"
+    # Cysteine: the vendor presets fix carbamidomethyl (57.02146) on C. Another prep's
+    # modification (or none) replaces that one row of MSFragger's fixed-mod table; the rest of the
+    # table is copied through. The library FragPipe builds -- and so its DIA-NN step -- carries it.
+    cys = prov["cys_alkylation"]
+    if cys["value"] != "cam":
+        key = "msfragger.table.fix-mods"
+        line = next((ln for ln in text.splitlines() if ln.split("=", 1)[0].strip() == key), None)
+        if line is None or not FRAGPIPE_FIX_C.search(line):
+            sys.exit(f"make_presets: {rel} has no cysteine row in {key}, so --cys-alkylation "
+                     f"{cys['value']} cannot be applied -- the template changed; check it.")
+        mass = 0.0 if cys["mass"] is None else cys["mass"]
+        changes[key] = FRAGPIPE_FIX_C.sub(lambda m: f"{mass}{m.group(1)}",
+                                          line.split("=", 1)[1].strip(), count=1)
+        why[key] = (f"C (cysteine) fixed at {mass} -- {cys['searched']}: {cys['source']} "
+                    "(the vendor preset fixes carbamidomethyl, 57.02146)")
 
     # Mass tolerances: the vendor already tuned these PER DATA TYPE (that is what
     # the template selection buys us). Only override when the caller supplies a
@@ -230,6 +252,11 @@ def build_radiant(args, cls, ms1, ms2, label, src, prov):
         why["[General] threadCount"] = "this run's CPU allocation (0 = all cores)"
 
     out, applied = patch_ini(text, changes)
+    # Radiant takes its modifications from the DIA-NN library it searches (its config has none):
+    # run_search.py / radiant_parallel.py build that library with these flags, read from here.
+    why["cysteine (DIA-NN library prediction)"] = (
+        f"{' '.join(cys_diann_flags(prov['cys_alkylation']['value'])) or 'no fixed modification'}"
+        f" -- {prov['cys_alkylation']['searched']}: {prov['cys_alkylation']['source']}")
     prov.update({
         "engine": "radiant",
         "template": "radiant/default.radiantConfig",
@@ -261,6 +288,11 @@ def main():
     ap.add_argument("--threads", type=int, default=None)
     ap.add_argument("--template", choices=["timstof", "orbitrap"],
                     help="force a FragPipe template instead of choosing by instrument")
+    ap.add_argument("--cys-alkylation", choices=CYS_ALKYLATION_CHOICES, default=None,
+                    help="what the sample prep did to cysteine, as for estimate_params.py: cam "
+                         "(default, recorded as a DEFAULT when not given), none, or the agent "
+                         "used. FragPipe: MSFragger's fixed C row; Radiant: the DIA-NN library's "
+                         "fixed C modification")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
@@ -280,7 +312,9 @@ def main():
                           args.ms2_analyzer), args.ms2_analyzer)
     prov = {"instrument": args.instrument or None, "instrument_class": cls,
             "instrument_label": label, "acquisition": args.acquisition,
-            "ppm_source": src, "output": os.path.abspath(args.out)}
+            "ppm_source": src, "output": os.path.abspath(args.out),
+            # read back by run_search.py (Radiant's library) and make_methods.py
+            "cys_alkylation": cys_alkylation_record(args.cys_alkylation)}
 
     text = (build_fragpipe if args.engine == "fragpipe" else build_radiant)(
         args, cls, ms1, ms2, label, src, prov)

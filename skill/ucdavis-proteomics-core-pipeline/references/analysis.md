@@ -14,7 +14,8 @@ inline instead of shipping the prompt to an external API.
    CSVs, and CVs from measured values only — citing specific proteins, never fabricating.
    Hits are tiered by per-group detection: the DE tables' `Evidence` (measured in both /
    partly inferred or missing / presence call, as `de_provenance.json` defines it), never
-   by PropObs. The brief lists every figure in `figures/figures.json` (the 2.8.0 object or an
+   by PropObs. A `not measured in either group` row was not tested in that comparison (no
+   p-value): it is never a hit and not counted as tested. The brief lists every figure in `figures/figures.json` (the 2.8.0 object or an
    older bare list) and names each one make_figures.R could not draw, with its reason.
 3. `make_analysis_html.py` renders it into **`Analysis_Report.html`** — the report of
    record: one self-contained page (figures inlined). Only figures in this run's
