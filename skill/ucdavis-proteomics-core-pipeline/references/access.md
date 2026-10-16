@@ -99,19 +99,26 @@ bash scripts/hive_exec.sh 'hostname; sbatch --version | head -1'   # confirm
      ```
    - **Non-Core HIVE user:** same `setup.sh`, plus you must acquire DIA-NN/Sage
      yourself (no access to the group's builds). See "Rebuild on HIVE".
+   **Where data and results go: group storage, never home.** HIVE's home is 20 GB per user
+   (HPC@UCD's `ucd-hpc`: "conda environments and every package cache belong on group
+   storage"; data and results too). Raw uploads, the search output and its per-run `.quant`
+   files go under the user's group share — `/quobyte/<pi>grp/$USER/proteomics-pipeline/`
+   (`id -Gn` lists the `…grp` groups; `qinfo quota /quobyte/<grp>` its space); a Core session
+   is already on `/quobyte/proteomics-grp`. Below, `<work>` is that folder. Only a user with no
+   group share (free tier only) uses `~/proteomics-pipeline`, and then watches `df -h ~`.
 3. **Stage the raw data** — usually there is nothing to stage. See "Data already on a
    network drive" below: run `hive_path.sh` on the raw folder FIRST, and use the HIVE
    path it verifies in place. Upload only when the data is on the laptop's own disk:
    ```
    bash scripts/hive_path.sh '<the path the user gave>'     # exit 3 = local disk
-   bash scripts/hive_exec.sh --put /path/to/raw '~/proteomics-pipeline/data/'
+   bash scripts/hive_exec.sh --put /path/to/raw '<work>/data/'
    ```
 4. **Run the search as SLURM jobs** (never the login node). Run `run_search.py --sbatch
    job.sh` ON HIVE, then submit exactly what it prints under "submit with:":
    ```
-   bash scripts/hive_exec.sh 'cd ~/proteomics-pipeline && python3 scripts/run_search.py ... --sbatch job.sh'
+   bash scripts/hive_exec.sh 'cd <work> && python3 ~/proteomics-pipeline/scripts/run_search.py ... --sbatch job.sh'
    bash scripts/hive_exec.sh 'bash <out>/submit.sh'     # DIA-NN from a FASTA, or the 5-step chain
-   bash scripts/hive_exec.sh 'cd ~/proteomics-pipeline && sbatch job.sh'   # only if job.sh was written
+   bash scripts/hive_exec.sh 'cd <work> && sbatch job.sh'   # only if job.sh was written
    bash scripts/watch_run.sh --all <out> --hive          # submit.sh wrote <out>/jobs.txt
    ```
    A DIA-NN search that predicts its library from the FASTA is two jobs (library, then
@@ -122,11 +129,11 @@ bash scripts/hive_exec.sh 'hostname; sbatch --version | head -1'   # confirm
    `report.parquet` back and run them locally.
 6. **Retrieve results** into the session folder on the user's machine:
    ```
-   bash scripts/hive_exec.sh --get '~/proteomics-pipeline/out' ./<session>/output/
+   bash scripts/hive_exec.sh --get '<work>/out' ./<session>/output/
    ```
    The search's per-run `.quant` files sit in `<out>/quant` (single-shot) or
    `<out>/quant_step2`/`quant_step4` (5-step chain) — kept there, not beside the raw data on
-   the instrument share, and they count toward your HIVE home quota. They are only needed to
+   the instrument share; in home they would count toward its 20 GB. They are only needed to
    re-run the search; for DE and the report, fetch the report files instead of the whole
    folder (e.g. `--get '<out>/report.parquet' ./<session>/output/`).
 
@@ -364,7 +371,9 @@ your own copy in your HIVE home. Run all of this **on HIVE** (via `hive_exec.sh`
    bash scripts/hive_exec.sh 'bash ~/proteomics-pipeline/scripts/setup.sh'
    ```
    This installs micromamba + R + limpa + limma + arrow + Sage + Python/pyarrow into
-   `~/.proteomics-pipeline/` (no admin). DE, Sage (DDA), and figures now work.
+   `~/.proteomics-pipeline/` (no admin; about 3 GB of the 20 GB home — HPC@UCD's `ucd-hpc`
+   would have environments on group storage, which the skill does not do yet). DE, Sage (DDA),
+   and figures now work.
 2. **DIA-NN (for DIA data):** you can't read the group's DIA-NN builds, so let the skill
    fetch the free academic Linux build into your home. Pin the version the workflow
    manifest pins (`engine.version`; `resolve_defaults.py` pins 2.7.0) — any other version
@@ -382,7 +391,7 @@ your own copy in your HIVE home. Run all of this **on HIVE** (via `hive_exec.sh`
    python3 scripts/fetch_fasta.py resolve --organism "<what the user said>"
    # no usable local python3 (check_access.sh local_python3.usable=false, e.g. Windows)?
    #   run the same resolve on HIVE:  bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/fetch_fasta.py resolve --organism "<...>"'
-   bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/fetch_fasta.py fetch --proteome <confirmed UPID> --content one_per_gene --contaminants universal --out ~/proteomics-pipeline/search.fasta'
+   bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/fetch_fasta.py fetch --proteome <confirmed UPID> --content one_per_gene --contaminants universal --out <work>/search.fasta'   # <work>: group storage (runbook above); it runs itself on a compute node
    ```
 4. Then run the search via SLURM as above. Everything else (DE/figures/report/audit/
    reproducibility) is identical to a local run.
