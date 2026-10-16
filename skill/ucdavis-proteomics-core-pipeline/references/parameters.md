@@ -164,8 +164,12 @@ read from the `#SBATCH` lines actually written. It is an **upper bound** -- a jo
 early uses less. `run_search.py` prints it (`[run_search] cpu_hours_reserved: …` and
 `cpu_hours_reserved` in its JSON and in `search_provenance.json`) for the single-shot, two-job,
 5-step chain, Radiant and FragPipe routes; `diann_parallel.py` and `radiant_parallel.py` print it
-in their JSON; each `submit.sh` has it in a header comment. The Core board approves a request
-under 10,000 CPU-hours automatically and sends 10,000 or more to a person.
+in their JSON; each `submit.sh` has it in a header comment. `gpu_hours_reserved` sits beside it,
+by the same rule from the GPU lines (`--gres=gpu…`, `--gpus`, `--gpus-per-task`,
+`--gpus-per-node`): 0 today, since no route of the skill asks for a GPU. Every job script the skill
+writes carries an `#SBATCH --time`, so for a SLURM job neither figure is null
+(`tests/test_cpu_hours.py` checks every generator). The Core board approves a request under
+10,000 CPU- or GPU-hours automatically and sends 10,000 or more to a person.
 
 ## Provenance (DE-LIMP rule #2)
 Every emitted value is tagged in the `rationale`:
