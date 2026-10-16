@@ -324,7 +324,17 @@ acquire_radiant() {
       fi
       local searched="${RADIANT_HIVE_DIRS//:/ or }"
       [ -z "$searched" ] && searched="(none: RADIANT_HIVE_DIRS is empty)"
-      NOTES+=("Radiant $ver: no .sif found under $searched. Build one ON A COMPUTE NODE (never the login node): 'srun -c 8 --mem 16G --pty apptainer build radiant-fulcrum-$ver.sif docker://$image', then re-run acquire_tools.sh.")
+      # HPC@UCD's ucd-hpc rules: `apptainer build` once, in a job, every request explicit
+      # (on_compute.py spells out the queue), and the ~3 GB pull's cache off the 20 GB home --
+      # the job's own $TMPDIR. The .sif goes where this script looks for it.
+      local into="" d rest2="$RADIANT_HIVE_DIRS"
+      while [ -n "$rest2" ]; do
+        d="${rest2%%:*}"; case "$rest2" in *:*) rest2="${rest2#*:}" ;; *) rest2="" ;; esac
+        [ -n "$d" ] && [ -d "$d" ] && { into="$d"; break; }
+      done
+      local again="re-run acquire_tools.sh"
+      [ -z "$into" ] && { into="<a folder on your group storage>"; again="re-run acquire_tools.sh with RADIANT_HIVE_DIRS=<that folder>"; }
+      NOTES+=("Radiant $ver: no .sif found under $searched. Build one in a job, never on the login node: python3 $SCRIPT_DIR/on_compute.py --time 120 --mem 16G --cpus 8 -- bash -lc 'APPTAINER_CACHEDIR=\"\$TMPDIR/apptainer-cache\" apptainer build $into/radiant-fulcrum-$ver.sif docker://$image', then $again.")
       ;;
     mac|linux)
       # The release recorded is read from the image REFERENCE -- the thing that is stored and

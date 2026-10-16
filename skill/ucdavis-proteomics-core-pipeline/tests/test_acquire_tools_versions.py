@@ -493,6 +493,17 @@ class HiveRadiantSifTests(AcquireHarness):
         self.assertEqual(t["radiant_image"], p)
         self.assertEqual(t["versions"]["radiant"], "2.3.3")
 
+    def test_no_sif_says_how_to_build_one_in_a_job_with_the_queue_and_cache_off_home(self):
+        """HPC@UCD's ucd-hpc rules: `apptainer build` once, in a job, with every request explicit,
+        and APPTAINER_CACHEDIR off the 20 GB home (the pull is ~3 GB). The note's old line was a
+        bare `srun -c 8 --mem 16G --pty apptainer build ...` into the current folder."""
+        t = self.acquire("hpc", "radiant", "2.3.3")
+        (note,) = [n for n in t["notes"] if "no .sif found" in n]
+        self.assertIn("on_compute.py --time 120 --mem 16G --cpus 8 --", note)
+        self.assertIn('APPTAINER_CACHEDIR="$TMPDIR/apptainer-cache"', note)
+        self.assertIn(f"apptainer build {self.radiant_dirs[0]}/radiant-fulcrum-2.3.3.sif", note)
+        self.assertNotIn("srun -c 8", note)
+
     def test_an_unpinned_sif_that_names_no_release_records_none_and_says_so(self):
         p = self.sif("radiant-fulcrum.sif")
         t = self.acquire("hpc", extra_env={"ACQUIRE_RADIANT": "1"})

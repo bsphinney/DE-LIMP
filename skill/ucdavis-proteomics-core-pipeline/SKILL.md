@@ -1314,7 +1314,8 @@ ACQUIRE_RADIANT=1 PIN_ENGINE=radiant PIN_VERSION=2.3.3 bash scripts/acquire_tool
 ```
 It needs Docker or Apptainer — Seer ships no native binary. On HIVE the `.sif` must
 already exist; building one pulls ~3 GB and **must run on a compute node, never the
-login node** (the note in `tools.json` gives the exact `srun apptainer build` line).
+login node** (the note in `tools.json` gives the exact line: `on_compute.py` with the queue
+spelled out, and the pull's cache in the job's `$TMPDIR`, off the 20 GB home).
 
 ### 6. Build the FASTA
 Use the proteome, database type, and contaminant set the **user confirmed in
