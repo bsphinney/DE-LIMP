@@ -483,16 +483,27 @@ def do_init(a):
                  "(search, tables, figures, reproducibility, report), `scripts/`, `logs/`.\n")
 
     # this Claude Code conversation runs this analysis: the transcript hook saves it here
-    # (save_transcript.py; a no-op outside Claude Code, and never a reason to fail init)
+    # (save_transcript.py; a no-op outside Claude Code, and never a reason to fail init). Whether
+    # it was recorded is in the JSON, not only on stderr: a refusal (subagents at work and the
+    # call not traced to one conversation) must reach the agent, which tells the user.
+    transcript = {"recorded": False, "reason": (
+        "not a Claude Code conversation here (in hive_remote mode, `save_transcript.py --hive "
+        "\"$S\" --remember` on the computer driving HIVE records it)")}
     try:
         import save_transcript
-        save_transcript.remember(session_dir, from_now=getattr(a, "transcript_from_now", False))
+        entry, warn = save_transcript.remember(session_dir,
+                                               from_now=getattr(a, "transcript_from_now", False))
+        if entry:
+            transcript = dict({"recorded": True}, **({"note": warn} if warn else {}))
+        elif warn:
+            transcript = {"recorded": False, "reason": warn}
     except Exception as e:
         sys.stderr.write(f"[session] conversation not recorded for the transcript hook: {e}\n")
+        transcript = {"recorded": False, "reason": f"{type(e).__name__}: {e}"}
 
     print(json.dumps({"created": session_dir, "date": date, "name": a.name,
                       "placement": placement, "reanalysis_of": parent, "version": version,
-                      ANALYSIS_FOR: wanted, "paths": p}, indent=2))
+                      ANALYSIS_FOR: wanted, "paths": p, "transcript": transcript}, indent=2))
 
 
 def _load(path):

@@ -376,19 +376,23 @@ def _label(info):
 # agent-<agent id>.jsonl. Going by the id alone, a teammate registered the PARENT conversation
 # for its client's session (2026-10): the hook would have copied the lead's work -- other
 # clients' -- into that client's logs, and none of the agent's own. So while a conversation
-# has subagents at work, a call is traced to the transcript that makes it, and when that is in
-# any doubt NOTHING is recorded: saving nothing is safe, saving the wrong conversation is not.
-# The call is this process's own: a Bash call made since this process started (Claude Code
-# writes it to the transcript a few seconds after the command starts, ~4 s seen), still running
-# (no result yet, or run in the background), naming this script and every flag and subcommand
-# this process was given. One such call, still the only one once our own has had time to be
-# written, is the caller; none, or several, is a refusal. (A first version took the first lone
-# hit at once, before the caller's own call was written, and so could take an hour-old
-# background call in the parent's transcript for this one -- review of 2.13.1.)
+# has subagents at work, a call is traced to the transcript that is making it, and with two
+# candidates NOTHING is recorded: saving nothing is safe, saving the wrong conversation is not.
+#
+# A transcript holds this process's call when it names this script and every --flag and the
+# subcommand this process was given, and either
+#   * it is RUNNING NOW: a Bash call of the transcript's last tool-call message with no result
+#     yet -- whatever its age (a permission prompt approved minutes after the call was written
+#     must not refuse the main conversation's save; review of 2.13.1), or
+#   * it was run in the background (its result comes at once) within BACKGROUND_SLACK seconds
+#     of this process's start -- only when that start can be read.
+# The caller's own call is written a few seconds after the command starts (~4 s seen), so a
+# lone candidate is believed only once that time has passed (TRACE_SETTLE): an hour-old
+# background call in the parent once won the race (review of 2.13.1, M1).
 SUBAGENTS_ACTIVE = 6 * 3600     # a subagent transcript written this recently may be the caller
 TRACE_WAIT = 15                 # s to wait for the caller's call to be written
-TRACE_SETTLE = 8                # s after process start before a lone match is believed
-CALL_SLACK = 120                # s a call may be written before this process started
+TRACE_SETTLE = 8                # s after start before a lone candidate is believed
+BACKGROUND_SLACK = 10           # s between a background call being written and this start
 TRACE_TAIL = 1 << 18            # bytes of each transcript's end that are read
 
 
@@ -407,7 +411,8 @@ def active_subagents(parent):
 
 
 def process_start():
-    """When this process started (epoch seconds), or None: /proc on Linux, else `ps`."""
+    """When this process started (epoch seconds), or None: /proc on Linux, else `ps` (macOS).
+    None (Windows) leaves only the running-call rule."""
     try:
         with open("/proc/self/stat") as fh:
             ticks = int(fh.read().rsplit(")", 1)[1].split()[19])      # field 22, starttime
@@ -416,6 +421,8 @@ def process_start():
         return time.time() - (up - ticks / float(os.sysconf("SC_CLK_TCK")))
     except (OSError, ValueError, IndexError, AttributeError):
         pass
+    if os.name == "nt":
+        return None
     try:
         r = subprocess.run(["ps", "-o", "etime=", "-p", str(os.getpid())], capture_output=True,
                            text=True, timeout=10)
@@ -435,20 +442,18 @@ def _epoch(ts):
         return None
 
 
-def running_calls(path, since):
-    """The commands of the transcript's Bash calls (in its last TRACE_TAIL bytes) made at or
-    after `since` (epoch seconds) that may still be running: no result yet, or run in the
-    background, whose result comes at once. A call with no readable timestamp is not counted."""
+def candidate_calls(path, start=None):
+    """The commands in the transcript (its last TRACE_TAIL bytes) that may be this process's
+    call: the Bash calls of its last tool-call message that have no result yet, and -- with
+    `start` known -- the background Bash calls written within BACKGROUND_SLACK s of it."""
     try:
-        if os.path.getmtime(path) < since:
-            return []                                  # written before the call could be made
         with open(path, "rb") as fh:
             fh.seek(0, os.SEEK_END)
             fh.seek(max(0, fh.tell() - TRACE_TAIL))
             data = fh.read().decode("utf-8", "replace")
     except OSError:
         return []
-    uses, done, background = {}, set(), set()
+    last, done, background = [], set(), []
     for raw in data.split("\n"):
         if '"tool_use' not in raw and '"tool_result' not in raw:
             continue
@@ -457,20 +462,24 @@ def running_calls(path, since):
             c = (e.get("message") or {}).get("content")
         except (ValueError, AttributeError):
             continue
-        when = _epoch(e.get("timestamp"))
-        for blk in c if isinstance(c, list) else []:
-            if not isinstance(blk, dict):
-                continue
-            if blk.get("type") == "tool_use" and blk.get("name") == "Bash":
-                if when is None or when < since:
+        uses = [blk for blk in (c if isinstance(c, list) else [])
+                if isinstance(blk, dict) and blk.get("type") == "tool_use"]
+        if uses:
+            last = []                                     # a newer tool-call message
+            when = _epoch(e.get("timestamp"))
+            for blk in uses:
+                if blk.get("name") != "Bash":
                     continue
                 inp = blk.get("input") if isinstance(blk.get("input"), dict) else {}
-                uses[blk.get("id")] = str(inp.get("command") or "")
-                if inp.get("run_in_background") is True:
-                    background.add(blk.get("id"))
-            elif blk.get("type") == "tool_result":
+                cmd = str(inp.get("command") or "")
+                last.append((blk.get("id"), cmd))
+                if (inp.get("run_in_background") is True and start is not None
+                        and when is not None and abs(when - start) <= BACKGROUND_SLACK):
+                    background.append(cmd)
+        for blk in c if isinstance(c, list) else []:
+            if isinstance(blk, dict) and blk.get("type") == "tool_result":
                 done.add(blk.get("tool_use_id"))
-    return [cmd for k, cmd in uses.items() if k not in done or k in background]
+    return [cmd for k, cmd in last if k not in done] + background
 
 
 def call_words(script, argv):
@@ -491,7 +500,7 @@ def trace_caller(sid, script=None, argv=None, wait=None, start=None):
     """-> (session id, transcript, problem): whose conversation is making this call. With no
     subagent at work: the conversation's own (sid). Else the one transcript -- the parent's or
     a subagent's (its id is its file's name, agent-<agent id>) -- holding this process's call
-    (see above). Any doubt is a problem, and the caller saves and records nothing."""
+    (see above). None, or two or more: a problem, and the caller saves and records nothing."""
     parent = find_transcript(sid)
     if not parent:
         return sid, None, None
@@ -501,29 +510,28 @@ def trace_caller(sid, script=None, argv=None, wait=None, start=None):
     me = script or os.path.basename(sys.argv[0] or "") or "save_transcript.py"
     words = call_words(me, sys.argv[1:] if argv is None else list(argv))
     t0 = process_start() if start is None else start
-    sub = f"{os.path.splitext(parent)[0]}/subagents/"
-    advice = (f"nothing was recorded, so that no other conversation's work reaches this session. "
-              f"A subagent saves its own: save_transcript.py <session> --transcript <its file "
-              f"under {sub}> --session-id <that file's name, no .jsonl>")
-    if t0 is None:
-        return sid, None, ("this conversation has subagents at work, and when this process "
-                           "started could not be read, so its call could not be told from "
-                           "older ones: " + advice)
-    deadline = time.time() + (TRACE_WAIT if wait is None else wait)
+    began = time.time()
+    settled_at = (t0 if t0 is not None else began) + TRACE_SETTLE
+    deadline = began + (TRACE_WAIT if wait is None else wait)
     while True:
         hits = [p for p in [parent] + agents
-                if any(_names(c, words) for c in running_calls(p, t0 - CALL_SLACK))]
+                if any(_names(c, words) for c in candidate_calls(p, t0))]
         if len(hits) > 1:
             break
-        if len(hits) == 1 and time.time() - t0 >= TRACE_SETTLE:
+        if len(hits) == 1 and time.time() >= settled_at:
             return ((sid, parent, None) if hits[0] == parent else
                     (os.path.splitext(os.path.basename(hits[0]))[0], hits[0], None))
         if time.time() >= deadline:
             break
         time.sleep(0.5)
+    sub = f"{os.path.splitext(parent)[0]}/subagents/"
     return sid, None, (
         f"this conversation has subagents at work, and this call could not be traced to one "
-        f"transcript ({len(hits)} found running {' '.join(words)}): " + advice)
+        f"transcript ({len(hits)} found running {' '.join(words)}), so nothing was recorded: "
+        f"no other conversation's work may reach this session. Run it again on its own (not "
+        f"beside another call that runs the same command), or name the transcript yourself: "
+        f"the main conversation's is --transcript {parent} --session-id {sid}; a subagent's "
+        f"or teammate's is --transcript {sub}agent-<id>.jsonl --session-id agent-<id>")
 
 
 def whose(session_id=None, transcript=None):

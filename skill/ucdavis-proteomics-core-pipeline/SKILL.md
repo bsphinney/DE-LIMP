@@ -1055,7 +1055,9 @@ python3 scripts/session.py init --name "<short study name>" --raw /path/to/*.d \
     --base ~/Documents/DataAnalysis
 ```
 **Core staff:** add step 0a's answer to either form: `--submission PROT_0807` (once per number,
-the main one first) or `--internal '<its title on the board>'`.
+the main one first) or `--internal '<its title on the board>'`. Its JSON's `transcript` says
+whether this conversation was recorded for the session; `recorded: false` with a `reason` other
+than "not a Claude Code conversation here": tell the user, and do what the reason says.
 
 **Core data with a CoreOmics submission (step 1)? Attach it now -- BEFORE the experiment type below**, where the session lives (`experiment_type.py set --source submission` reads the attached record and refuses without one; set before attach, the submission's ASK never fired):
 ```
@@ -3224,11 +3226,12 @@ EOF
   plugin's hook (`hooks/hooks.json` → `transcript_hook.py`) saves it before a compaction and
   when the session ends — a no-op in any conversation not recorded for an analysis.
   No transcript (another agent), or none found: it says so and exits 0. It never fails a step.
-- **Run by a subagent or teammate** (an Agent call): it shares the parent's session id, so the
-  scripts trace each call to the transcript that makes it and save **the agent's own**
-  (`agent-<id>.jsonl`), never the parent's, which holds other work. When it cannot tell, it
-  records nothing and says so: then name the agent's file,
-  `save_transcript.py <S> --transcript <…/subagents/agent-<id>.jsonl> --session-id agent-<id>`.
+- **Run by a subagent or teammate** (an Agent call): it shares the parent's session id, so
+  while subagents are at work the scripts trace each call to the transcript running it and save
+  **that one** -- a subagent's own (`agent-<id>.jsonl`), never the parent's, which holds other
+  work. With two candidates it records nothing and says so (each save waits about 8 s for this):
+  re-run it on its own, or name the transcript, as its message says (a subagent's:
+  `save_transcript.py <S> --transcript <…/subagents/agent-<id>.jsonl> --session-id agent-<id>`).
   The hook saves only the main conversation, so a subagent saves its own before it reports back.
 - **One conversation, several analyses** (an orchestrator, or staff looking at another client's
   run): each analysis keeps only its own part.
