@@ -287,7 +287,6 @@ for (i in seq_len(nrow(cmp))) {
   reps <- intersect(loaded[[a]], loaded[[b]])
   mr <- min_reps_for(length(reps))
   res <- silac_compare(w, a, b, reps, mr, adjp = adjp_thr)
-  kr <- silac_residue_bias(w, a, b, reps)
   tab <- merge(annot[, .(Protein.Group, Protein.Names, Genes, Description)], res$table,
                by = "Protein.Group", all.y = TRUE)
   det <- dd[ok == TRUE & Group %in% c(a, b), .(n = uniqueN(Replicate)), by = .(Protein.Group, Group)]
@@ -314,11 +313,7 @@ for (i in seq_len(nrow(cmp))) {
     n_significant_one_precursor = sum(sig$min_precursors == 1, na.rm = TRUE),
     offset_log2 = setNames(as.list(o$offset), o$label),
     mode_log2 = setNames(as.list(o$mode), o$label),
-    zero_point = res$mode_check,
-    residue_bias = c(kr[c("median", "n_pairs", "n_proteins")],
-                     list(per_run = kr$per_run, basis = paste(
-                       "per run and protein group: median log2 ratio of the K-ending precursors",
-                       "minus that of the R-ending ones; the median over protein-run pairs")))), res$fit)
+    zero_point = res$mode_check), res$fit)
   message(sprintf("[run_silac] %s: %d proteins with a ratio; %d tested (ratio in >= %d of %d replicates); %d significant at adj.P < %g (%d up, %d down)",
                   ct, nrow(tab), res$n_tested, mr, length(reps), nrow(sig), adjp_thr,
                   sum(sig$logFC > 0), sum(sig$logFC < 0)))
@@ -445,31 +440,40 @@ for (ct in names(tables_rec)) {
       "replicate (min_precursors = 1); limma's variance moderation treats them like the rest, so",
       "confirm the ones that matter."), ct, t$n_significant_one_precursor, t$n_significant))
 }
-# A label that reads K- and R-ending precursors of one protein differently (silac_residue_bias);
-# a deuterated label is named, since its retention shift is the known cause
+# A label that reads K- and R-ending precursors of one protein differently (silac_residue_bias):
+# per CHANNEL pair, heavier over lighter, whatever groups they hold (a label swap must not cancel
+# it), judged on the median and run by run; a deuterated label is named, since its retention
+# shift is the known cause
 RESIDUE_BIAS_MAX <- 0.15            # |log2| between K- and R-ending precursors of one protein
 RESIDUE_BIAS_MIN_PAIRS <- 20        # protein-run pairs with both, before it is judged
 deuterated <- Filter(function(ch) any(grepl("2H", c(ch$K$composition %||% "", ch$R$composition %||% ""),
                                            fixed = TRUE)), labels$channels %||% list())
-channel_of <- function(g) paste(unique(ratio_asg[Group == g]$Channel), collapse = "/")
-for (ct in names(tables_rec)) {
-  t <- tables_rec[[ct]]; kr <- t$residue_bias
+wc <- silac_wide_channels(dd)
+used_ch <- chan_order[chan_order %in% unique(ratio_asg$Channel)]
+residue_bias <- list()
+for (i in seq_along(used_ch)) for (j in seq_along(used_ch)) if (i < j) {
+  lo <- used_ch[i]; hi <- used_ch[j]; key <- paste0(hi, "/", lo)
+  kr <- silac_residue_bias(wc, hi, lo)
+  holds <- function(ch) paste(unique(ratio_asg[Channel == ch]$Group), collapse = " or ")
+  kr$groups <- sprintf("%s holds %s, %s holds %s", hi, holds(hi), lo, holds(lo))
+  kr$basis <- paste("per run and protein group: median log2 ratio", key, "of the K-ending precursors",
+                    "minus that of the R-ending ones; the median over protein-run pairs, and per run")
+  residue_bias[[key]] <- kr
   if (kr$n_pairs < RESIDUE_BIAS_MIN_PAIRS) {
     chk("silac_label_residue_bias", "INFO", sprintf(paste(
       "%s: K- against R-ending precursors not compared: %d protein-run pairs hold both (fewer",
-      "than %d)."), ct, kr$n_pairs, RESIDUE_BIAS_MIN_PAIRS), kr)
+      "than %d)."), key, kr$n_pairs, RESIDUE_BIAS_MIN_PAIRS), kr)
     next
   }
   pr <- unlist(kr$per_run)
-  chans <- c(channel_of(t$numerator), channel_of(t$denominator))
-  deut <- Filter(function(ch) ch$name %in% unlist(strsplit(chans, "/")), deuterated)
-  if (abs(kr$median) > RESIDUE_BIAS_MAX)
+  deut <- Filter(function(ch) ch$name %in% c(hi, lo), deuterated)
+  if (abs(kr$median) > RESIDUE_BIAS_MAX || stats::median(abs(pr)) > RESIDUE_BIAS_MAX)
     chk("silac_label_residue_bias", "WARN", sprintf(paste(
-      "%s (channels %s/%s): lysine-ending precursors read %+.2f log2 against arginine-ending ones of",
+      "Channels %s (%s): lysine-ending precursors read %+.2f log2 against arginine-ending ones of",
       "the same protein and run (median of %d protein-run pairs, %d protein groups; per run %+.2f",
-      "to %+.2f), above %.2f. A protein's ratio then depends on its mix of K- and R-ending",
-      "peptides, by up to that much: read effects of that size with care. %s"),
-      ct, chans[1], chans[2], kr$median, kr$n_pairs, kr$n_proteins, min(pr), max(pr), RESIDUE_BIAS_MAX,
+      "to %+.2f), above %.2f. A protein's ratio between these channels then depends on its mix of",
+      "K- and R-ending peptides, by up to that much: read effects of that size with care. %s"),
+      key, kr$groups, kr$median, kr$n_pairs, kr$n_proteins, min(pr), max(pr), RESIDUE_BIAS_MAX,
       if (length(deut)) sprintf(paste(
         "The %s channel's lysine label is deuterated (%s): deuterium shifts a peptide's retention",
         "time against its light partner, so the channels are not measured over the same elution",
@@ -482,9 +486,9 @@ for (ct in names(tables_rec)) {
                  "incorporation and arginine-to-proline conversion (heavy arginine) before reading",
                  "these ratios.")), kr)
   else chk("silac_label_residue_bias", "PASS", sprintf(paste(
-    "%s: lysine- and arginine-ending precursors of the same protein agree (median difference",
-    "%+.2f log2 over %d protein-run pairs; within %.2f)."), ct, kr$median, kr$n_pairs,
-    RESIDUE_BIAS_MAX), kr)
+    "Channels %s: lysine- and arginine-ending precursors of the same protein agree (median difference",
+    "%+.2f log2 over %d protein-run pairs, per run %+.2f to %+.2f; within %.2f)."), key, kr$median,
+    kr$n_pairs, min(pr), max(pr), RESIDUE_BIAS_MAX), kr)
 }
 if (length(incorp)) {
   low <- Filter(function(x) isTRUE(x$median_percent < INCORPORATION_MIN), incorp)
@@ -959,6 +963,7 @@ prov <- list(
   comparisons_source = des$comparisons_source, comparisons_sentence = cmp_sentence,
   significant_per_contrast = sig_counts, de_tables = tables_rec,
   labels = labels, labels_source = labels_source, protein_names = names_record,
+  label_residue_bias = residue_bias,
   decoy_channel = decoy_channel %||% list(masses = NULL, note = "no DIA-NN log beside the report named it"),
   # searched runs the user decided to leave out (silac.py design --exclude), in run_de.R's shape
   runs_left_out = jsonlite::fromJSON(jsonlite::toJSON(des$runs_left_out, auto_unbox = TRUE, null = "null"),

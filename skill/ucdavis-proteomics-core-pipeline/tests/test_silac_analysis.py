@@ -523,12 +523,15 @@ cat(jsonlite::toJSON(list(mc = res$mode_check, off = res$offsets), auto_unbox = 
 
     def test_a_label_that_reads_lysine_and_arginine_differently_is_flagged(self):
         """#18: in a triple-SILAC experiment the medium channel (K4R6: Lys4 is deuterated) read
-        K-ending precursors 0.29 log2 below R-ending ones of the same protein, in every run."""
+        K-ending precursors 0.29 log2 below R-ending ones of the same protein, in every run.
+        Review of 2.13.1 (M3): computed by GROUP, a label swap flipped its sign between runs and
+        the check said PASS; it is per CHANNEL pair, and judged run by run too."""
         import pyarrow as pa
         import pyarrow.parquet as pq
 
         def plant(report, shift):
-            # every other precursor ends in R; the KO channel (M) reads K-ending ones `shift` low
+            # every other precursor ends in R; channel M reads K-ending ones `shift` low,
+            # whichever group it holds
             import re
             t = pq.read_table(report).to_pydict()
             for i, pid in enumerate(t["Precursor.Id"]):
@@ -541,30 +544,36 @@ cat(jsonlite::toJSON(list(mc = res$mode_check, off = res$offsets), auto_unbox = 
                     t["Precursor.Quantity"][i] *= 2 ** shift
             pq.write_table(pa.table(t), report)
 
-        for shift, status in ((-0.3, "WARN"), (0.0, "PASS")):
-            with self.subTest(shift=shift), tempfile.TemporaryDirectory() as d:
-                rep = fx.make_report(os.path.join(d, "report.parquet"))
+        for shift, swap, status in ((-0.3, False, "WARN"), (-0.3, True, "WARN"),
+                                    (0.0, False, "PASS")):
+            with self.subTest(shift=shift, swap=swap), tempfile.TemporaryDirectory() as d:
+                rep = fx.make_report(os.path.join(d, "report.parquet"), swap=swap)
                 plant(rep, shift)
-                fx.write_design(os.path.join(d, "design.csv"))
+                fx.write_design(os.path.join(d, "design.csv"), swap=swap)
                 cfg = os.path.join(d, "params.cfg")
                 open(cfg, "w").write("--fixed-mod SILAC,0.0,KR,label\n")
                 json.dump({"labels": silac.labels_record("silac3", "K4R6,K8R10")},
                           open(cfg + ".rationale.json", "w"))
                 _, out = run_silac(d, "--params", cfg)
                 prov = json.load(open(os.path.join(out, "de_provenance.json")))
-                got = {c["message"].split(" ")[0].rstrip(":"): c for c in prov["checks"]
-                       if c["check"] == "silac_label_residue_bias"}
-                self.assertEqual(got["KO-WT"]["status"], status, got["KO-WT"]["message"])
-                kr = prov["de_tables"]["KO-WT"]["residue_bias"]
+                got = {c["detail"]["basis"].split(" ratio ")[1].split(" ")[0]: c
+                       for c in prov["checks"] if c["check"] == "silac_label_residue_bias"}
+                self.assertEqual(sorted(got), ["H/L", "H/M", "M/L"])
+                self.assertEqual(got["M/L"]["status"], status, got["M/L"]["message"])
+                kr = prov["label_residue_bias"]["M/L"]
                 self.assertAlmostEqual(kr["median"], shift, delta=0.08)
+                for r in kr["per_run"].values():                # every run, swapped or not
+                    self.assertAlmostEqual(r, shift, delta=0.1)
                 self.assertGreaterEqual(kr["n_pairs"], 20)
+                self.assertEqual(got["H/L"]["status"], "PASS", "H (K8R10) is not biased")
                 if status == "WARN":
-                    m = got["KO-WT"]["message"]
-                    self.assertIn("channels M/L", m)
+                    m = got["M/L"]["message"]
+                    self.assertTrue(m.startswith("Channels M/L (M holds KO"), m)
+                    if swap:
+                        self.assertIn("M holds KO or WT", m)
                     self.assertIn("The M channel's lysine label is deuterated (Lys4, 2H(4))", m)
                     self.assertIn("K6R6", m)
-                    self.assertEqual(got["DKO-WT"]["status"], "PASS", "H (K8R10) is not biased")
-                    self.assertEqual(got["DKO-KO"]["status"], "WARN")
+                    self.assertEqual(got["H/M"]["status"], "WARN")
 
     def test_another_pipelines_results_are_not_overwritten(self):
         with tempfile.TemporaryDirectory() as d:

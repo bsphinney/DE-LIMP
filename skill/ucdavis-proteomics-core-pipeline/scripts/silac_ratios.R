@@ -184,17 +184,19 @@ silac_cterm <- function(id) {
 }
 
 # A label that reads lysine and arginine differently: per run and protein group, the median log2
-# ratio num/den of its K-ending precursors minus that of its R-ending ones, over the replicates
-# `reps`. A deuterated lysine (Lys4, 2H(4)) elutes slightly earlier than its light partner, so
-# the two channels are not integrated over the same peak; a protein's ratio then depends on its
-# mix of K- and R-ending peptides (a triple-SILAC experiment, 2026-10-16: M/L K-ending 0.29 log2
-# below R-ending in every run). -> list(median (over protein-run pairs), per_run (named medians),
-# n_pairs, n_proteins).
-silac_residue_bias <- function(w, num, den, reps) {
-  r <- data.table::copy(w[Replicate %in% reps])
-  if (!all(c(num, den) %in% names(r)) || !nrow(r))
+# ratio hi/lo of two CHANNELS (label-oriented, whatever group each holds in that run) of its
+# K-ending precursors minus that of its R-ending ones. A deuterated lysine (Lys4, 2H(4)) elutes
+# slightly earlier than its light partner, so the two channels are not integrated over the same
+# peak; a protein's ratio then depends on its mix of K- and R-ending peptides (a triple-SILAC
+# experiment, 2026-10-16: M/L K-ending 0.29 log2 below R-ending in every run). Computed by
+# group, a label swap flipped its sign between runs and the median read ~0 (review of 2.13.1).
+# `wc`: channel-passing precursor quantities, one column per channel (silac_wide_channels).
+# -> list(median (over protein-run pairs), per_run (named medians), n_pairs, n_proteins).
+silac_residue_bias <- function(wc, hi, lo) {
+  if (!all(c(hi, lo) %in% names(wc)) || !nrow(wc))
     return(list(median = NA_real_, per_run = list(), n_pairs = 0L, n_proteins = 0L))
-  r[, lr := log2(get(num) / get(den))]
+  r <- data.table::copy(wc)
+  r[, lr := log2(get(hi) / get(lo))]
   r <- r[is.finite(lr)]
   r[, res := silac_cterm(Precursor.Id)]
   pr <- r[res %in% c("K", "R"), .(k = stats::median(lr[res == "K"]), r = stats::median(lr[res == "R"])),
@@ -205,6 +207,13 @@ silac_residue_bias <- function(w, num, den, reps) {
   list(median = if (nrow(pr)) stats::median(pr$d) else NA_real_,
        per_run = stats::setNames(as.list(per_run$d), per_run$Run),
        n_pairs = nrow(pr), n_proteins = data.table::uniqueN(pr$Protein.Group))
+}
+
+# Precursor quantities side by side by CHANNEL (not group): one row per (Run, Replicate,
+# Protein.Group, Precursor.Id), from the channel-passing rows only.
+silac_wide_channels <- function(d) {
+  data.table::dcast(d[ok == TRUE], Run + Replicate + Protein.Group + Precursor.Id ~ Channel,
+                    value.var = "Precursor.Quantity", fun.aggregate = sum, fill = NA)
 }
 
 # Detection of each protein group in each group's channel: the replicates where >= 1 of its
