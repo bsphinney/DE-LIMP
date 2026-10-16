@@ -394,6 +394,22 @@ class AlphaDiaVersionTests(AcquireHarness):
         self.assertEqual(t["versions"]["alphadia"], "")
         self.assertTrue(any("pip reports no version" in n for n in t["notes"]), t["notes"])
 
+    def test_on_a_cluster_alphadia_is_never_pip_installed_where_this_runs(self):
+        """acquire_tools.sh runs on HIVE's login node (hive_exec.sh). A bare `pip install` there is
+        a large download on the login node and, with the system python, an install into ~/.local
+        (HPC@UCD's ucd-hpc: never pip into a central python or --user). It says how to install
+        it into the pipeline env, in a job, instead."""
+        log = os.path.join(self.d, "pip.log")
+        for name in ("pip", "pip3"):
+            _exe(os.path.join(self.bin, name), f'#!/bin/sh\necho "$*" >> {log}\nexit 0\n')
+        t = self.acquire("hpc", "alphadia", "1.10.0")
+        self.assertFalse(os.path.exists(log), "pip ran on the cluster")
+        self.assertIsNone(t["alphadia"])
+        (note,) = [n for n in t["notes"] if n.startswith("AlphaDIA: not installed")]
+        self.assertIn("on_compute.py --time 60 --mem 8G --", note)
+        self.assertIn("-m pip install 'alphadia==1.10.0'", note)
+        self.assertIn("micromamba/envs/proteomics-pipeline/bin/python", note)
+
     def test_no_alphadia_records_an_empty_version_not_a_missing_key(self):
         t = self.acquire("linux")
         self.assertIsNone(t["alphadia"])

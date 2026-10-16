@@ -425,6 +425,15 @@ acquire_alphadia() {
     [ -z "$ALPHADIA_VER" ] && NOTES+=("AlphaDIA ($ALPHADIA_CMD): pip reports no version for an installed alphadia distribution, so tools.json records no AlphaDIA version.")
     return; fi
   local spec="alphadia"; pin_for alphadia && spec="alphadia==$PIN_VERSION"
+  # On a cluster this runs on the login node (hive_exec.sh): a large download there, and a bare
+  # pip with the system python installs into ~/.local -- both against HPC@UCD's ucd-hpc rules
+  # (never pip into a central python or --user). The note says how: the pipeline env's own pip,
+  # in a job.
+  if [ "$CLASS" = "hpc" ]; then
+    local envpy="${PROTEOMICS_PIPELINE_HOME:-$HOME/.proteomics-pipeline}/micromamba/envs/proteomics-pipeline/bin/python"
+    NOTES+=("AlphaDIA: not installed (on a cluster it is never pip-installed where this runs). Install it into the pipeline env, in a job: python3 $SCRIPT_DIR/on_compute.py --time 60 --mem 8G -- $envpy -m pip install '$spec' (Apache-2.0, commercial-OK; GPU recommended). https://github.com/MannLabs/alphadia")
+    return
+  fi
   if have pip || have pip3; then
     echo "  AlphaDIA: pip install $spec (large download; GPU recommended)..."
     { pip install "$spec" >/dev/null 2>&1 || pip3 install "$spec" >/dev/null 2>&1; }
