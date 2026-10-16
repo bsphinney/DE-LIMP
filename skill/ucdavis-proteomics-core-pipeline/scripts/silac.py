@@ -485,7 +485,9 @@ def read_design(path, channels=None, comparisons=None, report_runs=None, exclude
         run_01,Rep1,H,KO          (a label swap is just another assignment: run_02,Rep2,L,KO ...)
 
     File.Name is the run as the report names it (its Run column; conditions.csv's convention).
-    Replicate defaults to File.Name. A channel that holds no sample has no row. A run with one
+    Replicate defaults to File.Name; runs sharing a Replicate are re-injections of one mix (the
+    same samples in the same channels) and count as one replicate. A channel that holds no sample
+    has no row. A run with one
     labelled channel only is a label-check run (incorporation is measured on it, never compared).
     `channels`: the search's channel names, lightest first (from the params; else the design's
     own, in L, M, H order). `comparisons`: 'A-B,...' or None for every pair, the group in the
@@ -532,10 +534,9 @@ def read_design(path, channels=None, comparisons=None, report_runs=None, exclude
         if g in e["channels"].values():
             probs.append(f"line {i}: group {g} is in two channels of run {run}")
         e["channels"][ch] = g
-        if rep in rep_of and rep_of[rep] != run:
-            probs.append(f"line {i}: replicate {rep!r} names two runs ({rep_of[rep]}, {run}); "
-                         "one replicate is one run")
-        rep_of[rep] = run
+        rep_of.setdefault(rep, [])
+        if run not in rep_of[rep]:
+            rep_of[rep].append(run)
         if g not in groups:
             groups.append(g)
     excl = {r for r, _ in excluded}
@@ -558,6 +559,14 @@ def read_design(path, channels=None, comparisons=None, report_runs=None, exclude
             probs.append(f"report run(s) with no row: {', '.join(left)} -- add them; a run the "
                          "user decided to leave out (a failed injection) is recorded with "
                          "--exclude <run> --reason \"<why>\", only on their word")
+    # Several runs of one replicate are re-injections of one mix: they must hold the same samples
+    # in the same channels, and count as ONE replicate (run_silac.R averages their ratios)
+    for rep, rr in rep_of.items():
+        maps = {tuple(sorted(runs[r]["channels"].items())) for r in rr}
+        if len(maps) > 1:
+            probs.append(f"replicate {rep!r} has runs ({', '.join(rr)}) with different channel "
+                         "assignments; re-injections of one mix hold the same samples in the same "
+                         "channels -- give a different mix its own Replicate")
     mixed = {r: e for r, e in runs.items() if len(e["channels"]) >= 2}
     checks = {r: e for r, e in runs.items() if len(e["channels"]) == 1
               and next(iter(e["channels"])) != order[0]}
@@ -603,6 +612,8 @@ def read_design(path, channels=None, comparisons=None, report_runs=None, exclude
                   "role": "ratio" if r in mixed else "label_check" if r in checks else "unused"}
                  for r, e in runs.items()],
         "label_swapped_groups": swaps,
+        # replicates with more than one run: re-injections, averaged within the replicate
+        "reinjected_replicates": {rep: rr for rep, rr in rep_of.items() if len(rr) > 1},
         "comparisons": out_pairs,
         "comparisons_source": ("given (--comparisons)" if given else
                                "DEFAULT, not user-confirmed: every pair of groups, the group in "

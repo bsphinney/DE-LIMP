@@ -103,11 +103,11 @@ class SilacSession(unittest.TestCase):
         self.assertIn("SILAC channels and mixing", self.md)
 
     def test_glance_counts_are_the_tables(self):
-        # 20 of 54 tested significant in KO-WT: 10 up, 10 down
+        # 20 of 52 tested significant in KO-WT: 10 up, 10 down (P40 fails Global.PG.Q.Value)
         text = re.sub(r"<[^>]+>", " ", self.page)
         self.assertRegex(text, r"20\s+KO vs WT\s+&#9650;&thinsp;10 up &nbsp;&#9660;&thinsp;10 down")
         self.assertRegex(text, r"0\s+DKO vs KO\s+&#9650;&thinsp;0 up")
-        self.assertRegex(text, r"54\s+proteins tested")
+        self.assertRegex(text, r"52\s+proteins tested")
 
     # ---- Methods ------------------------------------------------------------------------------
     def test_methods(self):

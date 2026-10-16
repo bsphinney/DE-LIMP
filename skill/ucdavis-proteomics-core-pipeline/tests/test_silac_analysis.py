@@ -7,8 +7,13 @@ The method was validated on a real triple-SILAC experiment (4 replicates, DIA-NN
 reproduced the hand-made analysis's tables to floating-point precision (1,224 / 1,153 / 1,093
 proteins tested; 816 / 799 / 0 significant). These tests pin, on data whose answer is known:
   * the planted changes are found, in the right direction, and nothing else;
-  * the ratio maths, recomputed here in Python: the precursor median, the per-replicate
-    centring, the limma mean, Benjamini-Hochberg, the minimum number of replicates;
+  * the ratio maths, recomputed here in Python: the q-value filter (every column the report has,
+    or the run-specific two with --run-level-only), the precursor median, the per-run centring,
+    the mean over a replicate's re-injections, the limma mean, Benjamini-Hochberg, the minimum
+    number of replicates;
+  * the statistician's checks: the zero point (median against the density peak), single-precursor
+    calls, the realised BH cutoff behind the power reading, detection-pattern wording;
+  * every default is tagged in the record and in the Methods;
   * a label swap compares groups, not channels; a label-check run gives the incorporation;
   * a search that declared the label twice is flagged; channel imbalance is flagged;
   * figures.json is the contract make_analysis_html.py / analysis_prompt.py read;
@@ -71,6 +76,37 @@ def num(x):
     return float("nan") if x in ("", "NA", None) else float(x)
 
 
+GROUP = {"L": "WT", "M": "KO", "H": "DKO"}
+RUN_LEVEL = ("Q.Value", "PG.Q.Value")
+EXPERIMENT_WIDE = ("Global.Q.Value", "Global.PG.Q.Value", "Lib.Q.Value", "Lib.PG.Q.Value")
+
+
+def hand_ratios(report, num_g, den_g, rep_of, run_level_only=False):
+    """The ratio maths by hand: -> (per-run protein medians {(run, pg): [log2 ratios]},
+    per-run offsets {run: median}, per-replicate centred means {(rep, pg): value})."""
+    import pyarrow.parquet as pq
+    cols = RUN_LEVEL if run_level_only else RUN_LEVEL + EXPERIMENT_WIDE
+    cut = {c: 0.05 if c == "PG.Q.Value" else 0.01 for c in cols}
+    q = {}
+    for r in pq.read_table(report).to_pylist():
+        if (r["Channel"] in GROUP and r["Run"] in rep_of and r["Channel.Q.Value"] <= 0.01
+                and all(r[c] <= v for c, v in cut.items())
+                and not r["Protein.Ids"].startswith("Cont_")):
+            q.setdefault((r["Run"], r["Protein.Group"], r["Precursor.Id"]), {})[
+                GROUP[r["Channel"]]] = r["Precursor.Quantity"]
+    prot = {}
+    for (run, pg, _), v in q.items():
+        if num_g in v and den_g in v:
+            prot.setdefault((run, pg), []).append(math.log2(v[num_g] / v[den_g]))
+    med = {k: statistics.median(v) for k, v in prot.items()}
+    offset = {run: statistics.median([m for (r, _), m in med.items() if r == run])
+              for run in {r for r, _ in med}}
+    per_rep = {}
+    for (run, pg), m in med.items():
+        per_rep.setdefault((rep_of[run], pg), []).append(m - offset[run])
+    return prot, offset, {k: statistics.mean(v) for k, v in per_rep.items()}
+
+
 def run_silac(d, *more, report=None, design=None, ok=True, outdir=None):
     outdir = outdir or os.path.join(d, "out", "tables")
     p = subprocess.run([RSCRIPT, os.path.join(SCRIPTS, "run_silac.R"),
@@ -90,6 +126,9 @@ class Analysis(unittest.TestCase):
         cls.d = cls.tmp.name
         fx.make_report(os.path.join(cls.d, "report.parquet"))
         fx.write_design(os.path.join(cls.d, "design.csv"))
+        with open(os.path.join(cls.d, "report.log.txt"), "w") as fh:   # DIA-NN 2.7.0's wording
+            fh.write("Registered SILAC channel H with following masses: K[8.0142] R[10.0083] \n"
+                     "Registered SILAC channel decoy with following masses: K[12.0033] R[13.9964] \n")
         cls.p, cls.out = run_silac(cls.d)
         cls.prov = json.load(open(os.path.join(cls.out, "de_provenance.json")))
         cls.ko = {r["Protein.Group"]: r for r in read(os.path.join(cls.out, "DE_silac_KO.WT.csv"))}
@@ -112,43 +151,52 @@ class Analysis(unittest.TestCase):
     def test_untested_channel_specific_and_contaminants(self):
         self.assertIn("ratio in 2 of 4 replicates: not tested (minimum 3)", self.ko["P56"]["Evidence"])
         self.assertTrue(math.isnan(num(self.ko["P56"]["adj.P.Val"])))
-        for k in ("P51", "P55", "Cont_P00761"):
+        for k in ("P51", "P55", "P57", "Cont_P00761"):
             self.assertNotIn(k, self.ko)
         spec = {r["Protein.Group"]: r for r in read(os.path.join(self.out,
                                                                  "SILAC_channel_specific_detections.csv"))}
         self.assertEqual(sorted(spec), [f"P{i}" for i in range(51, 56)])
-        self.assertEqual(spec["P51"]["pattern"], "in WT; not in KO, DKO")
+        self.assertEqual(spec["P51"]["pattern"],
+                         "detected in WT (4/4); not detected in KO (0/4), DKO (0/4)")
+        # where it is detected: its abundance among that channel's proteins; elsewhere nothing
+        self.assertTrue(0 < num(spec["P51"]["percentile_WT"]) <= 100)
+        self.assertEqual(spec["P51"]["percentile_KO"], "")
         self.assertEqual(self.prov["filter_counts"]["contaminant_protein_groups"], 1)
         self.assertEqual(self.ko["P01"]["Detected_KO"], "4/4")
+        # P57: in WT in 2 replicates -- no ratio, too few for a pattern: only in the sample matrix
+        em = {r["Protein.Group"] for r in read(os.path.join(self.out, "SILAC_sample_matrix.csv"))}
+        self.assertIn("P57", em)
+        self.assertEqual(self.prov["sample_matrix"]["proteins_only_here"], 1)
+        chk = [c for c in self.prov["checks"] if c["check"] == "silac_unlisted_proteins"]
+        self.assertIn("1 protein groups", chk[0]["message"])
 
     def test_ratio_maths_by_hand(self):
-        import pyarrow.parquet as pq
-        t = pq.read_table(os.path.join(self.d, "report.parquet")).to_pylist()
         rep = dict(zip(fx.RUNS, fx.REPS))
-        grp = {"L": "WT", "M": "KO", "H": "DKO"}
-        q = {}
-        for r in t:
-            if (r["Channel"] in grp and r["Channel.Q.Value"] <= 0.01 and r["Q.Value"] <= 0.01
-                    and r["PG.Q.Value"] <= 0.05 and not r["Protein.Ids"].startswith("Cont_")):
-                q.setdefault((rep[r["Run"]], r["Protein.Group"], r["Precursor.Id"]), {})[
-                    grp[r["Channel"]]] = r["Precursor.Quantity"]
-        prot = {}
-        for (rp, pg, _), v in q.items():
-            if "KO" in v and "WT" in v:
-                prot.setdefault((rp, pg), []).append(math.log2(v["KO"] / v["WT"]))
+        prot, offset, _ = hand_ratios(os.path.join(self.d, "report.parquet"), "KO", "WT", rep)
         med = {k: statistics.median(v) for k, v in prot.items()}
-        offset = {rp: statistics.median([m for (r, _), m in med.items() if r == rp]) for rp in fx.REPS}
-        for rp in fx.REPS:
-            self.assertAlmostEqual(offset[rp], self.prov["de_tables"]["KO-WT"]["offset_log2"][rp], places=9)
-        for pg in ("P03", "P12", "P30", "P44"):
+        for run, rp in rep.items():
+            self.assertAlmostEqual(offset[run], self.prov["de_tables"]["KO-WT"]["offset_log2"][rp], places=9)
+        for pg in ("P03", "P12", "P30", "P41", "P42", "P44"):
             row = self.ko[pg]
-            for rp in fx.REPS:
-                self.assertAlmostEqual(num(row[f"uncentred_{rp}"]), med[(rp, pg)], places=9)
-                self.assertAlmostEqual(num(row[f"centred_{rp}"]), med[(rp, pg)] - offset[rp], places=9)
-                self.assertEqual(int(row[f"n_precursors_{rp}"]), len(prot[(rp, pg)]))
+            for run, rp in rep.items():
+                self.assertAlmostEqual(num(row[f"uncentred_{rp}"]), med[(run, pg)], places=9)
+                self.assertAlmostEqual(num(row[f"centred_{rp}"]), med[(run, pg)] - offset[run], places=9)
+                self.assertEqual(int(row[f"n_precursors_{rp}"]), len(prot[(run, pg)]))
             # intercept-only limma: the estimate is the mean of the centred values
             self.assertAlmostEqual(num(row["logFC"]),
                                    statistics.mean(num(row[f"centred_{rp}"]) for rp in fx.REPS), places=9)
+        # the experiment-wide columns apply: P40 fails Global.PG.Q.Value, P41 / P42 lose the
+        # precursor that fails Global.Q.Value / Lib.Q.Value
+        self.assertNotIn("P40", self.ko)
+        self.assertEqual(int(self.ko["P41"]["n_precursors_Rep1"]), 2, "3 searched, 1 fails")
+        self.assertEqual(int(self.ko["P42"]["n_precursors_Rep1"]), 3, "4 searched, 1 fails")
+        fc = self.prov["filter_counts"]
+        self.assertEqual((fc["rows_failing_Global.PG.Q.Value"], fc["rows_failing_Global.Q.Value"],
+                          fc["rows_failing_Lib.Q.Value"]), (24, 12, 12))
+        self.assertEqual(self.prov["q_columns"],
+                         ["Q.Value", "PG.Q.Value", "Lib.Q.Value", "Lib.PG.Q.Value", "Global.Q.Value",
+                          "Global.PG.Q.Value", "Channel.Q.Value"])
+        self.assertEqual(self.prov["q_cutoffs"], [0.01, 0.05, 0.01, 0.01, 0.01, 0.01, 0.01])
         # Benjamini-Hochberg over the tested rows
         tested = sorted((num(r["P.Value"]), k) for k, r in self.ko.items() if r["Evidence"] == "tested")
         m, prev = len(tested), 1.0
@@ -167,6 +215,19 @@ class Analysis(unittest.TestCase):
         self.assertEqual(by["silac_channel_balance"][0]["status"], "WARN")
         self.assertEqual(by["silac_label_incorporation"][0]["status"], "INFO")
         self.assertNotIn("silac_label_declaration", by)
+        # the zero point: median and density peak agree here (a symmetric design)
+        self.assertEqual([c["status"] for c in by["silac_zero_point"]], ["PASS"] * 3)
+        # P04's KO ratio rests on one precursor in Rep1: counted, said
+        self.assertEqual(self.prov["de_tables"]["KO-WT"]["n_significant_one_precursor"], 1)
+        self.assertEqual(num(self.ko["P04"]["min_precursors"]), 1)
+        one = by["silac_single_precursor"][0]
+        self.assertEqual(one["status"], "INFO")
+        self.assertIn("KO-WT: 1 of the 20 significant", one["message"])
+        # replicates not confirmed as separate cultures: said, tagged
+        self.assertIn("DEFAULT", by["silac_replicate_independence"][0]["message"])
+        pat = by["silac_detection_patterns"][0]["message"]
+        self.assertIn("not a statistical test", pat)
+        self.assertIn("not detected is not absent", pat)
         for c in self.prov["checks"]:
             self.assertEqual(set(c), {"check", "status", "message", "detail"})
             self.assertIn(c["status"], ("PASS", "WARN", "FAIL", "INFO"))
@@ -181,11 +242,29 @@ class Analysis(unittest.TestCase):
         self.assertEqual(p["replay"]["script"], "run_silac.R")
         args = p["replay"]["args"]
         self.assertEqual(args[args.index("--comparisons") + 1], "KO-WT,DKO-WT,DKO-KO")
-        for want in ("median-centred", "at least 3 of the 4 replicates", "robust = TRUE",
-                     "Benjamini-Hochberg", "Derks", "Phipson", "no fold-change filter"):
+        tag = "(DEFAULT \u2014 not user-confirmed)"
+        for want in ("median detected protein", "KO/WT: 3 of 4", "robust = TRUE",
+                     "Benjamini-Hochberg", "Derks", "Phipson", "no fold-change filter",
+                     f"the run-specific Q.Value <= 0.01 {tag}",
+                     f"the experiment-wide Global.PG.Q.Value <= 0.01 {tag}",
+                     f"Channel.Q.Value <= 0.01 {tag}", f"adj.P.Val < 0.05 {tag}",
+                     f"max(3, half the replicates) {tag}",
+                     "The comparisons were KO/WT, DKO/WT, DKO/KO",
+                     f"the group in the heavier channel over the lighter {tag}",
+                     f"taken to be a separate culture and mix {tag}",
+                     "not detected is not absent",
+                     "decoy channel (K[12.0033] R[13.9964], from the search log)"):
             self.assertIn(want, p["methods_paragraph"])
-        self.assertEqual(p["settings"]["min_replicates"]["value"], 3)
-        self.assertIn("default", p["settings"]["min_replicates"]["source"])
+        self.assertNotIn("1% global FDR", p["methods_paragraph"])
+        self.assertEqual(p["de_tables"]["KO-WT"]["min_replicates"], 3)
+        # every setting nobody gave says so, in its first word
+        for k, v in p["settings"].items():
+            self.assertIs(v["given"], False, k)
+            self.assertTrue(v["source"].startswith("DEFAULT, not user-confirmed"), k)
+        self.assertEqual(p["comparisons_sentence"].split(";")[0],
+                         "The comparisons were KO/WT, DKO/WT, DKO/KO, each a log2 ratio "
+                         "numerator/denominator (a positive value is higher in the first-named group)")
+        self.assertEqual(p["decoy_channel"]["masses"], "K[12.0033] R[13.9964]")
         self.assertEqual(p["quantities"], "raw")
         self.assertTrue(any("MEDIAN-CENTRED" in n for n in p["brief_notes"]))
         self.assertEqual([s["title"] for s in p["report_sections"]],
@@ -199,14 +278,31 @@ class Analysis(unittest.TestCase):
         files = [f["file"] for f in fj["figures"]]
         for want in ("volcano_KO.WT.png", "volcano_DKO.WT.png", "volcano_DKO.KO.png",
                      "silac_channel_composition.png", "silac_channel_detections.png",
-                     "qc_pvalue_panel.png", "silac_scatter_KO.WT_vs_DKO.KO.png"):
+                     "qc_pvalue_panel.png"):
             self.assertIn(want, files)
         for f in fj["figures"]:
             self.assertTrue(os.path.getsize(os.path.join(figdir, f["file"])) > 0, f["file"])
             self.assertTrue(f["caption"], f["file"])
         self.assertEqual(fj["failed"], [])
+        # the default scatter: two comparisons over the same reference (M/L against H/L), and
+        # the correlation the shared channel builds in, with its sign
+        self.assertIn("silac_scatter_KO.WT_vs_DKO.WT.png", files)
         scatter = next(f for f in fj["figures"] if f["file"].startswith("silac_scatter"))
-        self.assertIn("share the KO channel", scatter["caption"])
+        self.assertIn("share WT as the denominator in both", scatter["caption"])
+        self.assertIn("a positive correlation", scatter["caption"])
+
+    def test_power_reading_uses_the_realised_bh_cutoff(self):
+        ko, dk = self.prov["de_tables"]["KO-WT"], self.prov["de_tables"]["DKO-KO"]
+        self.assertAlmostEqual(ko["p_cutoff"], 0.05 * 20 / 52, places=12)
+        self.assertIn("20 significant of 52 tested", ko["p_cutoff_basis"])
+        self.assertAlmostEqual(dk["p_cutoff"], 0.05 / 52, places=12)
+        self.assertIn("none of 52 tested significant", dk["p_cutoff_basis"])
+        for t in (ko, dk):
+            self.assertLess(t["critical_log2_raw_p05"], t["critical_log2_significant"])
+            self.assertLess(t["critical_log2_significant"], t["true_log2_80pct_power"])
+        self.assertNotIn("detectable_log2", ko)
+        self.assertTrue(any("80% power" in n and "BH's realised cutoff" in n
+                            for n in self.prov["brief_notes"]))
 
     def test_qc_matrix(self):
         em = read(os.path.join(self.out, "SILAC_sample_matrix.csv"))
@@ -234,15 +330,116 @@ class Variants(unittest.TestCase):
     def test_min_replicates_is_a_recorded_parameter(self):
         with tempfile.TemporaryDirectory() as d:
             fx.make_report(os.path.join(d, "report.parquet")); fx.write_design(os.path.join(d, "design.csv"))
-            _, out = run_silac(d, "--min-replicates", "4")
+            _, out = run_silac(d, "--min-replicates", "4", "--scatter", "KO-WT:DKO-KO")
             ko = {r["Protein.Group"]: r for r in read(os.path.join(out, "DE_silac_KO.WT.csv"))}
             self.assertIn("ratio in 2 of 4", ko["P56"]["Evidence"])
             prov = json.load(open(os.path.join(out, "de_provenance.json")))
             self.assertEqual(prov["settings"]["min_replicates"],
-                             {"value": 4, "source": "given (--min-replicates)"})
-            self.assertIn("at least 4 of the 4 replicates", prov["methods_paragraph"])
+                             {"value": 4, "given": True, "source": "given (--min-replicates)"})
+            self.assertIn("(KO/WT: 4 of 4; DKO/WT: 4 of 4; DKO/KO: 4 of 4)", prov["methods_paragraph"])
+            # a scatter of comparisons sharing a group on opposite sides: a negative coupling
+            fj = json.load(open(os.path.join(os.path.dirname(out), "figures", "figures.json")))
+            sc = next(f for f in fj["figures"] if f["file"].startswith("silac_scatter"))
+            self.assertIn("a negative correlation", sc["caption"])
             self.assertTrue(any(c["check"] == "silac_replicates" and c["status"] == "WARN"
                                 for c in prov["checks"]))
+
+    def test_run_level_only_is_the_validated_hand_made_rule(self):
+        # --run-level-only: the run-specific Q.Value and channel-specific PG.Q.Value alone, the
+        # filter of the hand-made analysis the method reproduced; recorded and replayed
+        with tempfile.TemporaryDirectory() as d:
+            report = fx.make_report(os.path.join(d, "report.parquet"))
+            fx.write_design(os.path.join(d, "design.csv"))
+            _, out = run_silac(d, "--run-level-only")
+            ko = {r["Protein.Group"]: r for r in read(os.path.join(out, "DE_silac_KO.WT.csv"))}
+            rep = dict(zip(fx.RUNS, fx.REPS))
+            prot, offset, centred = hand_ratios(report, "KO", "WT", rep, run_level_only=True)
+            prov = json.load(open(os.path.join(out, "de_provenance.json")))
+            for run, rp in rep.items():
+                self.assertAlmostEqual(offset[run], prov["de_tables"]["KO-WT"]["offset_log2"][rp], places=9)
+            for pg in ("P40", "P41", "P42"):
+                self.assertEqual(ko[pg]["Evidence"], "tested", pg)
+                for rp in fx.REPS:
+                    self.assertAlmostEqual(num(ko[pg][f"centred_{rp}"]), centred[(rp, pg)], places=9)
+            self.assertEqual(int(ko["P41"]["n_precursors_Rep1"]), 3)
+            self.assertEqual(prov["q_columns"], ["Q.Value", "PG.Q.Value", "Channel.Q.Value"])
+            self.assertEqual(prov["settings"]["run_level_only"]["given"], True)
+            self.assertIn("--run-level-only", prov["replay"]["args"])
+            self.assertNotIn("Global", prov["methods_paragraph"])
+            with open(os.path.join(out, "reproducibility_log.R")) as fh:
+                self.assertIn("cutoffs <- c('Q.Value' = 0.01, 'PG.Q.Value' = 0.05)", fh.read())
+
+    def test_reinjections_are_one_replicate(self):
+        # run_A2 re-injects run_A1's mix: they share Rep1, are averaged, and count once
+        with tempfile.TemporaryDirectory() as d:
+            report = fx.make_report(os.path.join(d, "report.parquet"))
+            design = fx.write_design(os.path.join(d, "design.csv"))
+            text = open(design).read()
+            with open(design, "w") as fh:
+                fh.write(text.replace("run_A2,Rep2", "run_A2,Rep1"))
+            _, out = run_silac(d, "--replicates", "biological")
+            prov = json.load(open(os.path.join(out, "de_provenance.json")))
+            self.assertEqual(prov["design_record"]["reinjected_replicates"], {"Rep1": ["run_A1", "run_A2"]})
+            self.assertEqual(prov["n_replicates"], 3)
+            t = prov["de_tables"]["KO-WT"]
+            self.assertEqual((t["n_replicates_available"], t["min_replicates"]), (3, 3))
+            self.assertEqual(sorted(t["offset_log2"]), ["Rep1_run_A1", "Rep1_run_A2", "Rep3", "Rep4"])
+            rep = {"run_A1": "Rep1", "run_A2": "Rep1", "run_B1": "Rep3", "run_B2": "Rep4"}
+            _, _, centred = hand_ratios(report, "KO", "WT", rep)
+            ko = {r["Protein.Group"]: r for r in read(os.path.join(out, "DE_silac_KO.WT.csv"))}
+            self.assertNotIn("centred_Rep2", ko["P03"])
+            for pg in ("P03", "P12", "P44"):
+                for rp in ("Rep1", "Rep3", "Rep4"):
+                    self.assertAlmostEqual(num(ko[pg][f"centred_{rp}"]), centred[(rp, pg)], places=9)
+                # distinct precursors: a re-injection does not count one twice
+                self.assertEqual(ko[pg]["n_precursors_Rep1"], ko[pg]["n_precursors_Rep3"])
+            self.assertIn("averaged into one replicate (Rep1: 2 runs)", prov["methods_paragraph"])
+            self.assertIn("Each replicate was a separate culture and mix.", prov["methods_paragraph"])
+            self.assertEqual(prov["settings"]["replicates"]["source"],
+                             "given (--replicates biological): each Replicate is a separate culture and mix")
+            self.assertNotIn("silac_replicate_independence", [c["check"] for c in prov["checks"]])
+            samples = [r["File.Name"] for r in read(os.path.join(out, "SILAC_samples.csv"))]
+            self.assertIn("Rep1_run_A2_KO", samples)
+            self.assertIn("Rep3_KO", samples)
+            # different channel maps under one Replicate are two mixes, not a re-injection
+            text = open(design).read()
+            with open(design, "w") as fh:
+                fh.write(text.replace("run_A2,Rep1,L,WT", "run_A2,Rep1,L,XX"))
+            p, _ = run_silac(d, ok=False, outdir=os.path.join(d, "o2"))
+            self.assertIn("different channel assignments", p.stderr)
+
+    def test_default_minimum_grows_with_the_replicates(self):
+        with tempfile.TemporaryDirectory() as d:
+            fx.make_report(os.path.join(d, "report.parquet"), n_runs=8)
+            fx.write_design(os.path.join(d, "design.csv"), n_runs=8)
+            _, out = run_silac(d, "--comparisons", "KO-WT")
+            prov = json.load(open(os.path.join(out, "de_provenance.json")))
+            self.assertEqual(prov["de_tables"]["KO-WT"]["min_replicates"], 4, "max(3, ceiling(8 / 2))")
+            self.assertIn("KO/WT: 4 of 8", prov["methods_paragraph"])
+
+    def test_zero_point_check_reports_the_mode_centred_count(self):
+        # one channel's losses fill the lower half: the median (the zero) sits 0.5 log2 below the
+        # density peak -- silac_compare says so and recounts with the peak as the zero
+        code = r"""
+suppressMessages({library(data.table); library(limma)})
+source(file.path(Sys.getenv("SCRIPTS"), "silac_ratios.R"))
+set.seed(3)
+pr <- c(rnorm(90, 0, 0.08), runif(60, -1.2, -0.4), rnorm(50, -2.5, 0.08))
+w <- rbindlist(lapply(1:4, function(i) data.table(Run = paste0("r", i), Replicate = paste0("R", i),
+  Protein.Group = sprintf("P%03d", 1:200), Precursor.Id = sprintf("pep%03d", 1:200),
+  WT = 2^12, KO = 2^(12 - 1.5 + pr + rnorm(200, 0, 0.1)))))
+res <- silac_compare(w, "KO", "WT", paste0("R", 1:4), 3)
+cat(jsonlite::toJSON(list(mc = res$mode_check, off = res$offsets), auto_unbox = TRUE, digits = NA))
+"""
+        p = subprocess.run([RSCRIPT, "-e", code], capture_output=True, text=True, timeout=300,
+                           env=dict(os.environ, SCRIPTS=SCRIPTS))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        r = json.loads(p.stdout)
+        self.assertGreater(r["mc"]["max_abs_difference"], 0.25)
+        self.assertIsInstance(r["mc"]["n_significant_mode_centred"], int)
+        for o in r["off"]:
+            self.assertAlmostEqual(o["mode"], -1.5, delta=0.15)
+            self.assertLess(o["offset"], o["mode"] - 0.25)
 
     def test_label_swap_compares_groups_not_channels(self):
         with tempfile.TemporaryDirectory() as d:
@@ -374,7 +571,7 @@ class DesignRules(unittest.TestCase):
             "unknown channel": head + "r1,R1,X,WT\nr1,R1,H,KO\n",
             "group twice in a run": head + "r1,R1,L,WT\nr1,R1,H,WT\n",
             "channel twice": head + "r1,R1,L,WT\nr1,R1,L,KO\n",
-            "replicate names two runs": head + "r1,R1,L,WT\nr1,R1,H,KO\nr2,R1,L,WT\nr2,R1,H,KO\n",
+            "one replicate, two mixes": head + "r1,R1,L,WT\nr1,R1,H,KO\nr2,R1,L,KO\nr2,R1,H,WT\n",
             "bad group name": head + "r1,R1,L,W-T\nr1,R1,H,KO\n",
             "no run with two groups": head + "r1,R1,H,KO\n",
         }
@@ -392,6 +589,14 @@ class DesignRules(unittest.TestCase):
             self.assertIn("r3", str(e.exception))
             des = silac.read_design(p, ["L", "H"], comparisons="WT-KO")
             self.assertEqual(des["comparisons"][0]["contrast"], "WT-KO")
+
+    def test_reinjected_replicate(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self.write(d, "File.Name,Replicate,Channel,Group\nr1,R1,L,WT\nr1,R1,H,KO\n"
+                              "r1b,R1,L,WT\nr1b,R1,H,KO\nr2,R2,L,WT\nr2,R2,H,KO\n")
+            des = silac.read_design(p, ["L", "H"])
+            self.assertEqual(des["reinjected_replicates"], {"R1": ["r1", "r1b"]})
+            self.assertEqual(len(des["comparisons"]), 1)
 
     def test_label_check_and_unused_runs(self):
         with tempfile.TemporaryDirectory() as d:
