@@ -304,8 +304,16 @@ else
   if [ -n "$CONDA" ]; then NANOPARQUET_FIX="$NANOPARQUET_CONDA_CMD c-compiler cxx-compiler make && $NANOPARQUET_CRAN"
   else NANOPARQUET_FIX="install conda-forge's c-compiler, cxx-compiler and make into $ENV_PREFIX (with --freeze-installed), then: $NANOPARQUET_CRAN"; fi
 fi
+# What a missing nanoparquet costs depends on the limpa (DE_READER below): limpa >= 1.4.0 reads
+# report.parquet with it; limpa 1.2.x reads with arrow, and only run_de.R's contaminant share
+# (Precursor.Quantity, read with nanoparquet) falls back to Precursor.Normalised.
 if env_ready && ! $NANOPARQUET_OK; then
-  NOTES+=("nanoparquet cannot be loaded in $ENV_PREFIX: run_de.R reads DIA-NN's report.parquet with it (limpa needs it), so no DE can run. The route that works here: $NANOPARQUET_WHY. Fix: $NANOPARQUET_FIX.")
+  if $LIMPA_OK || [ -z "$LIMPA_VERSION" ]; then
+    NANOPARQUET_COST="limpa >= $LIMPA_MIN reads DIA-NN's report.parquet with it, so no DE can run"
+  else
+    NANOPARQUET_COST="this env's limpa ($LIMPA_VERSION) reads report.parquet with arrow, so the DE runs, but on the unpinned limpa, and run_de.R's contaminant share is read from Precursor.Normalised instead of Precursor.Quantity (de_provenance.json contaminants.intensity_column); limpa >= $LIMPA_MIN needs it"
+  fi
+  NOTES+=("nanoparquet cannot be loaded in $ENV_PREFIX: $NANOPARQUET_COST. The route that works here: $NANOPARQUET_WHY. Fix: $NANOPARQUET_FIX.")
 fi
 
 # ---- 2b2. protein-set annotation: GO, offline -----------------------------------
@@ -543,8 +551,23 @@ elif [ "$OS" = "darwin" ];       then DIANN_READY=false; DIANN_NOTE="macOS: DIA-
 fi
 
 # readiness per acquisition type (for the orchestrator to gate on)
-# DE reads every engine's report.parquet with nanoparquet (run_de.R, limpa_compat.R)
-DE_READY=false; [ -n "$RSCRIPT" ] && $NANOPARQUET_OK && DE_READY=true
+# The DE can run when R can read report.parquet the way THIS env's limpa does. run_de.R filters
+# the report with arrow on both methods; limpa >= 1.4.0 then reads it with nanoparquet, limpa
+# 1.2.x with arrow (readDIANN: arrow::read_parquet, github.com/bioc/limpa RELEASE_3_22). On
+# 2026-10-16 an env on limpa 1.2.5 without nanoparquet ran every DE of the week (de_provenance.json:
+# limpa 1.2.5) while setup.json said ready_for.de false, "no DE can run". limpa.ok and the exit
+# status still hold the env to the pinned stack; this says only whether a DE can run.
+arrow_ok() {
+  "$ENV_PREFIX/bin/Rscript" -e "q(status = as.integer(!requireNamespace('arrow', quietly = TRUE)))" >/dev/null 2>&1
+}
+DE_READER=""; DE_READER_OK=false; ARROW_OK=false
+if env_ready && [ -n "$LIMPA_VERSION" ]; then
+  arrow_ok && ARROW_OK=true
+  if $LIMPA_OK; then DE_READER=nanoparquet; $ARROW_OK && $NANOPARQUET_OK && DE_READER_OK=true
+  else DE_READER=arrow; $ARROW_OK && DE_READER_OK=true; fi
+  $ARROW_OK || NOTES+=("arrow cannot be loaded in $ENV_PREFIX: run_de.R reads and filters report.parquet with it on both methods, so no DE can run. Fix: re-run bash setup.sh (on a cluster it runs itself on a compute node).")
+fi
+DE_READY=false; [ -n "$RSCRIPT" ] && $DE_READER_OK && DE_READY=true
 DDA_READY=false
 if [ -n "$SAGE" ] && [ -n "$RSCRIPT" ]; then DDA_READY=true; fi
 DIA_READY=false
@@ -617,6 +640,8 @@ SETUP_SKILL_VERSION="$( (. "$SCRIPT_DIR/skill_version.sh" && skill_version) 2>/d
          "$(j "$GENAI_VERSION")" "$GENAI_MIN" "$($GENAI_OK && echo true || echo false)"
   printf '  "limpa": {"version": "%s", "required": ">= %s", "ok": %s, "source": "Bioconductor %s"},\n' \
          "$(j "$LIMPA_VERSION")" "$LIMPA_MIN" "$($LIMPA_OK && echo true || echo false)" "$LIMPA_BIOC"
+  printf '  "de_reader": {"limpa": "%s", "reads_parquet_with": "%s", "ok": %s},\n' \
+         "$(j "$LIMPA_VERSION")" "$DE_READER" "$($DE_READER_OK && echo true || echo false)"
   printf '  "nanoparquet": {"ok": %s, "fix": "%s"},\n' \
          "$($NANOPARQUET_OK && echo true || echo false)" "$(j "$($NANOPARQUET_OK || printf '%s' "$NANOPARQUET_FIX")")"
   printf '  "set_annotation": {"ok": %s, "packages": "%s", "missing": "%s", "status": {%s}, "organisms": {"human": %s, "mouse": %s}, "bioconductor": "%s", "bioconductor_from": "%s", "fix": "%s"},\n' \
@@ -657,7 +682,7 @@ if env_ready && ! $LIMPA_OK; then
 fi
 if env_ready && ! $NANOPARQUET_OK; then
   say ""
-  say "[setup] ERROR: nanoparquet cannot be loaded in $ENV_PREFIX -- run_de.R reads every report.parquet with it (limpa needs it)."
+  say "[setup] ERROR: nanoparquet cannot be loaded in $ENV_PREFIX -- limpa >= $LIMPA_MIN reads report.parquet with it, and run_de.R its contaminant share."
   say "[setup]        Fix: $NANOPARQUET_FIX   ($NANOPARQUET_WHY)"
   R_STACK_OK=false
 fi

@@ -51,6 +51,7 @@ case "$*" in
   *nanoparquet*)
     [ -z "${FAKE_NP_STATE:-}" ] && exit 0
     [ "$(cat "$FAKE_NP_STATE" 2>/dev/null)" = present ] && exit 0 || exit 1 ;;
+  *"'arrow'"*) [ -n "${FAKE_ARROW_MISSING:-}" ] && exit 1; exit 0 ;;
   *requireNamespace*)
     case "$v" in 1.[4-9]*|1.[1-9][0-9]*|[2-9].*) exit 0 ;; *) exit 1 ;; esac ;;
 esac

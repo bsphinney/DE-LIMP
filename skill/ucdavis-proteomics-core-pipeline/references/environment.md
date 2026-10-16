@@ -93,7 +93,8 @@ Container runtime preference: hpc→apptainer, mac→docker, linux→native.
   with "x86_64-conda-linux-gnu-c++: not found". Without them the fix first installs
   conda-forge's `c-compiler cxx-compiler make` (frozen), then the CRAN line — how HIVE's
   `proteomics-pipeline-r46` got nanoparquet 0.5.2. `setup.json` → `nanoparquet` = `{ok, fix}`
-  (the fix is the command that works for THIS env's R), `ready_for.de` is false without it, and
+  (the fix is the command that works for THIS env's R), `ready_for.de` is false without it
+  when limpa is ≥ 1.4.0 (`de_reader`, below), and
   `notes` / stderr say `ERROR: nanoparquet ...` with it; `setup.sh` exits 1 (`--check` only
   reports). The limpa fix line above leaves nanoparquet as it is. With no env built yet,
   `ready_for.dia` / `dda` can be true (an Rscript outside the env) while `de` is false, and a
@@ -101,8 +102,17 @@ Container runtime preference: hpc→apptainer, mac→docker, linux→native.
 - **An env that is still on limpa 1.2.x** (an old `setup.sh`, no internet) is not a dead
   end: `run_de.R` passes the annotation columns under whichever name this limpa's
   `readDIANN()` has (`limpa_compat.R`) and records it — `de_provenance.json` →
-  `limpa_read = {limpa_version, annotation_argument, path}`. The upgrade is still the fix:
-  re-run `setup.sh` — 1.2.x and 1.4 do NOT give identical numbers (next point).
+  `limpa_read = {limpa_version, annotation_argument, path}`. limpa 1.2.x reads `report.parquet`
+  with **arrow** (`readDIANN`: `arrow::read_parquet`, RELEASE_3_22); only limpa ≥ 1.4.0 reads it
+  with nanoparquet (RELEASE_3_23, where arrow left `Suggests`). So `setup.json` →
+  `de_reader = {limpa, reads_parquet_with, ok}`, and `ready_for.de` is true on limpa 1.2.x
+  without nanoparquet as long as arrow loads (run_de.R also filters the report with arrow on
+  both methods). What such a DE loses: the pinned limpa, and run_de.R's contaminant share, which
+  reads `Precursor.Quantity` with nanoparquet and falls back to `Precursor.Normalised`
+  (`de_provenance.json` → `contaminants.intensity_column`). Seen on HIVE on 2026-10-16: the
+  account's env (limpa 1.2.5, no nanoparquet) ran every DE that week while `setup.sh --check` said
+  "no DE can run". The upgrade is still the fix: re-run `setup.sh` — 1.2.x and 1.4 do NOT give
+  identical numbers (next point), so an env other analyses run on is upgraded between analyses.
 - **Results depend on the limpa version, through `dpcCN()`'s row subset.** On more than
   2,000 precursors `dpcCN()` fits the detection-probability curve on 2,000 rows: in limpa
   1.2.x a SEEDED RANDOM sample (`set.seed(20250620)`, `sample.int`); in 1.4 a SYSTEMATIC one

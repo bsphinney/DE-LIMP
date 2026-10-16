@@ -225,12 +225,16 @@ Sourcing `activate.sh` makes every later step use those interpreters — **sourc
 in the same shell before running anything below** (or prefix later commands).
 
 Read `setup.json` and **gate on `ready_for`**:
-- `ready_for.de` false → DE can't run; re-run `setup.sh` and report any `notes`. (A SILAC
-  ratio analysis, `run_silac.R`, needs only limma, data.table, arrow and jsonlite in that R.)
+- `ready_for.de` false → DE can't run: R cannot read `report.parquet` the way this env's limpa
+  does (`de_reader`: arrow for limpa 1.2.x, nanoparquet for limpa ≥ 1.4.0, arrow on both
+  methods); re-run `setup.sh` and report any `notes`. (A SILAC ratio analysis, `run_silac.R`,
+  needs only limma, data.table, arrow and jsonlite in that R.)
 - `limpa.ok` false (setup.sh then ends `ERROR: limpa ...` and exits 1) → the env's limpa is
   older than 1.4.0 (bioconda has only 1.2.5; setup.sh installs 1.4 from Bioconductor 3.23):
-  run the fix it prints where there is internet. run_de.R still reads the report with limpa
-  1.2.x and records that it did (`references/environment.md`).
+  re-run `setup.sh` (on a cluster it runs on a compute node). run_de.R still reads the report
+  with limpa 1.2.x, through arrow, and records that it did (`references/environment.md`); without
+  nanoparquet its contaminant share is then read from `Precursor.Normalised`. Upgrading an env
+  that other analyses run on changes their limpa mid-analysis: Core staff ask Brett first.
 - `ready_for.dia` false → on macOS this means Docker is missing. Run
   `bash scripts/build_diann_docker.sh` and relay its instructions (install Docker
   Desktop, open it once), then continue. Don't silently fall back to a DDA engine.
