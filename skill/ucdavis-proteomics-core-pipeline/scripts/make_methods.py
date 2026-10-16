@@ -1592,6 +1592,16 @@ def de_not_measured_sentence(prov):
             + (f" ({per} proteins)." if per else f" (counts per contrast: {NOT_RECORDED})."))
 
 
+DE_HEADING = "Differential expression"
+
+
+def de_heading(de_prov):
+    """The Methods' heading for the DE section: the pipeline's own (de_provenance.json
+    `methods_heading`; run_silac.R's is "SILAC ratio analysis"), else "Differential expression".
+    make_deposit.py checks a kept methods.md for this same heading -- one definition."""
+    return str((de_prov or {}).get("methods_heading") or "").strip() or DE_HEADING
+
+
 def de_paragraph(prov):
     """The Differential-expression paragraph, from run_de.R's de_provenance.json. Significance
     is described exactly as run_de.R applied it: an adjusted-p cutoff, with |log2FC| only a
@@ -2141,7 +2151,7 @@ def main():
     if de_prov:
         # A pipeline that writes its own Methods paragraph (run_silac.R) is quoted as written:
         # it describes itself (DE-LIMP rule 1); run_de.R's record is described by de_paragraph()
-        w(f"## {de_prov.get('methods_heading') or 'Differential expression'}")
+        w(f"## {de_heading(de_prov)}")
         w("")
         own = de_prov.get("methods_paragraph")
         left_out = de_runs_left_out_sentence(de_prov) if own else None
