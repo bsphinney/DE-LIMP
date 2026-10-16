@@ -3974,9 +3974,10 @@ def write_job(path, py, script, out, consent_args, models, queue, log_path, name
     text = "\n".join(L)
     if os.path.islink(path):
         raise RenderError(f"{path} is a link: not writing through it. Remove it and run job again.")
-    with open(path, "w", encoding="utf-8") as fh:       # safe_write.write_file after the merge
-        fh.write(text)
-    os.chmod(path, 0o700)
+    # a new file moved into place (safe_write.write_file, the one way a job script is written):
+    # never through a link planted after the check above, mode set on the file itself
+    from safe_write import write_file
+    write_file(path, text, 0o700)
     return text
 
 

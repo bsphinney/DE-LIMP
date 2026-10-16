@@ -52,6 +52,29 @@ class TheRule(unittest.TestCase):
             self.assertEqual(rec["no_time_limit"], [c])
 
 
+class Gpus(unittest.TestCase):
+    """Brett (2026-10-15): CPU OR GPU requests under 10,000 hours are approved automatically."""
+
+    def test_every_way_slurm_asks_for_gpus(self):
+        head = "#!/bin/bash\n#SBATCH --cpus-per-task=4\n#SBATCH --time=10:00:00\n"
+        with tempfile.TemporaryDirectory() as d:
+            for i, (lines, gpus) in enumerate((
+                    ("#SBATCH --gres=gpu:a100:2\n", 2), ("#SBATCH --gres=gpu:1\n", 1),
+                    ("#SBATCH --gres=gpu\n", 1), ("#SBATCH --gpus=3\n", 3),
+                    ("#SBATCH -G a100:2\n", 2),
+                    ("#SBATCH --ntasks=2\n#SBATCH --gpus-per-task=1\n", 2),
+                    ("#SBATCH --nodes=2\n#SBATCH --gpus-per-node=4\n", 8),
+                    ("#SBATCH --gres=tmpfs:10G\n", 0), ("", 0))):
+                path = _write(os.path.join(d, f"j{i}.sh"), head + lines)
+                job = cpu_hours.job_reservation(path)
+                self.assertEqual(job["gpus"], gpus, lines)
+                self.assertEqual(job["gpu_hours"], gpus * 10.0, lines)
+            arr = _write(os.path.join(d, "arr.sh"), head + "#SBATCH --gres=gpu:1\n#SBATCH --array=0-4\n")
+            rec = cpu_hours.reservation([arr, os.path.join(d, "j8.sh")])
+            self.assertEqual(rec["gpu_hours_reserved"], 1 * 10 * 5)
+            self.assertEqual(rec["cpu_hours_reserved"], 4 * 10 * 5 + 4 * 10)
+
+
 class Routes(unittest.TestCase):
     def test_single_shot_one_job(self):
         cfg = [ln for ln in LIBFREE_CFG if ln not in ("--fasta-search", "--predictor")]
@@ -60,8 +83,9 @@ class Routes(unittest.TestCase):
             p = w.generate(*HIGH)
             res = last_json(p.stdout)
             self.assertEqual(res["cpu_hours_reserved"], 4 * run_search.SEARCH_WALL_HOURS)
-            self.assertIn(f"[run_search] cpu_hours_reserved: {res['cpu_hours_reserved']} -- the "
-                          "most this search can use", p.stdout)
+            self.assertIn(f"[run_search] cpu_hours_reserved: {res['cpu_hours_reserved']}  "
+                          "gpu_hours_reserved: 0.0 -- the most this search can use", p.stdout)
+            self.assertEqual(res["gpu_hours_reserved"], 0.0)
             with open(os.path.join(w.out, "search_provenance.json")) as fh:
                 self.assertEqual(json.load(fh)["cpu_hours_reserved"], res["cpu_hours_reserved"])
 
@@ -74,8 +98,10 @@ class Routes(unittest.TestCase):
             self.assertEqual([os.path.basename(j["script"]) for j in jobs],
                              ["diann_job_1_lib.sh", "diann_job_2_search.sh"])
             self.assertEqual(res["cpu_hours_reserved"], sum(4 * j["hours"] for j in jobs))
-            self.assertTrue(_read(os.path.join(w.out, "submit.sh")).splitlines()[1].startswith(
-                f"# cpu_hours_reserved: {res['cpu_hours_reserved']} -- the most this search"))
+            self.assertEqual(_read(os.path.join(w.out, "submit.sh")).splitlines()[1],
+                             cpu_hours.submit_comment(res["cpu_hours_reservation"]))
+            self.assertTrue(cpu_hours.submit_comment(res["cpu_hours_reservation"]).startswith(
+                f"# cpu_hours_reserved: {res['cpu_hours_reserved']}  gpu_hours_reserved: 0.0 -- "))
 
     def test_the_five_step_chain(self):
         with tempfile.TemporaryDirectory() as d:
@@ -135,6 +161,97 @@ class Routes(unittest.TestCase):
 
     def test_inline_reserves_nothing(self):
         self.assertEqual(run_search.search_cpu_hours({"ran": True}), {"ran": True})
+
+
+class EveryGenerator(unittest.TestCase):
+    """The board requires cpu_hours >= 0.1 on every job (2026-10-15), so every job script any
+    generator writes carries an #SBATCH --time and gives a non-null figure. Searches are covered
+    by Routes; these are the rest, and the generators the Routes do not reach. Their log paths are
+    double-quoted (an unquoted space makes sbatch refuse the script; HIVE, 2026-10-15)."""
+
+    def assert_bounded(self, path):
+        rec = cpu_hours.reservation([path])
+        self.assertIsNotNone(rec["cpu_hours_reserved"], path)
+        self.assertGreaterEqual(rec["cpu_hours_reserved"], 0.1, path)
+        self.assertEqual(rec["gpu_hours_reserved"], 0.0, path)
+        return _read(path)
+
+    def test_diatracer_array(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "stage", "r1.d"))
+            out = os.path.join(d, "out")
+            p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "diatracer_parallel.py"),
+                                "--stage", os.path.join(d, "stage"), "--out", out, "--jar",
+                                "/x/diatracer.jar", "--partition", "high", "--account",
+                                "genome-center-grp"], capture_output=True, text=True)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assert_bounded(os.path.join(out, "diatracer_array.sbatch"))
+
+    def test_fran_backfill(self):
+        import fran_deposit as fd
+        with tempfile.TemporaryDirectory() as d:
+            class A:
+                sbatch_dir, time_budget, max_depth = os.path.join(d, "with space"), 1200, 9
+                roots, list, no_homes, apply = None, None, False, False
+                partition, account, qos = "high", "genome-center-grp", None
+                sbatch_minutes = 30
+            res = fd.write_backfill_sbatch(A())
+            text = self.assert_bounded(res["sbatch"])
+            self.assertIn(f'#SBATCH --output="{A.sbatch_dir}/fran_backfill_%j.log"', text)
+
+    def test_deposit_prep(self):
+        import make_deposit as md
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "deposit with space")
+            os.makedirs(out)
+            md.write_prep_script({"session": "s"}, out, [
+                {"kind": "file", "source_path": "/x/a.raw", "upload_name": "a.raw"}])
+            text = self.assert_bounded(os.path.join(out, "prepare_upload.sbatch"))
+            self.assertIn(f'#SBATCH --output="{out}/prepare_upload_%j.log"', text)
+
+    def test_core_delivery(self):
+        import argparse
+        import core_submission as cs
+        with tempfile.TemporaryDirectory() as d:
+            where = os.path.join(d, "PROT_0000 service")
+            os.makedirs(where)
+            a = argparse.Namespace(summary=os.path.join(d, "s.json"), mode="analysis",
+                                   include_raw="no", label=None, service_project=None, force=False)
+            path = cs.write_deliver_job(a, None, where, "PROT_0000", 10 ** 12, [])
+            text = self.assert_bounded(path)
+            self.assertIn(f'#SBATCH --output="{where}/deliver_%j.log"', text)
+
+    def test_podcast_job(self):
+        import make_podcast as mp
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "podcast_job.sh")
+            mp.write_job(path, sys.executable, os.path.join(d, "script.json"), d, [], [],
+                         ("high", "genome-center-grp", None, False),
+                         os.path.join(d, "logs", "podcast_job_%j.log"), "t")
+            self.assert_bounded(path)
+
+    def test_sage_and_alphadia_single_jobs(self):
+        with tempfile.TemporaryDirectory() as d:
+            fasta = _write(os.path.join(d, "db.fasta"), ">sp|P1|X\nPEPTIDEK\n")
+            runs = [_write(os.path.join(d, f"r{i}.mzML"), "") for i in range(2)]
+            for engine, params, acq in (("sage", "sage_config.json", "DDA"),
+                                        ("alphadia", "alphadia.yaml", "DIA")):
+                tools = _write(os.path.join(d, f"tools_{engine}.json"), json.dumps(
+                    {engine: os.path.join(d, f"fake-{engine}"), "versions": {engine: "1.0.0"}}))
+                bundle = _write(os.path.join(d, f"m_{engine}.json"), json.dumps(
+                    {"engine": {"name": engine}, "acquisition": acq}))
+                cfg = _write(os.path.join(d, params), "{}\n")
+                job = os.path.join(d, f"{engine}.sh")
+                p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "run_search.py"),
+                                    "--tools", tools, "--bundle", bundle, "--engine", engine,
+                                    "--params", cfg, "--fasta", fasta, "--out",
+                                    os.path.join(d, f"o_{engine}"), "--files", *runs,
+                                    "--threads", "4", "--sbatch", job, *HIGH],
+                                   capture_output=True, text=True)
+                self.assertEqual(p.returncode, 0, engine + p.stdout + p.stderr)
+                self.assertEqual(last_json(p.stdout)["cpu_hours_reserved"],
+                                 4 * run_search.SEARCH_WALL_HOURS, engine)
+                self.assert_bounded(job)
 
 
 if __name__ == "__main__":
