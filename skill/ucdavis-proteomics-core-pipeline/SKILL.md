@@ -3153,8 +3153,9 @@ python3 scripts/core_submission.py email-draft --summary ~/core/PROT_0807/submis
   (required), the reports (and its `.pdf`/`.md`), methods, `tables/`, `figures/`,
   `reproducibility/`, the search matrices and, when one was made, `podcast/` (the audio and
   `transcript.html` only — never its script, checks or consent record), plus `README.html` +
-  `README.md` (every claim from a file actually delivered, every item a link, and the session's
-  "Where this lives on HIVE" table), `AGENTS.md` (the session's guide for an AI assistant, its
+  `README.md` (every claim from a file actually delivered, every item a link in README.html --
+  README.md names files without links, since Bioshare breaks relative links there -- and the
+  session's "Where this lives on HIVE" table), `AGENTS.md` (the session's guide for an AI assistant, its
   paths mapped onto the delivery), `MANIFEST.txt`
   (`[OK]` / `[SKIPPED] <name> -- <reason>`, architectural rule #4) and `checksums.sha256`, all
   group- and world-readable. A raw-only delivery holds README.html/.md, MANIFEST, checksums and any

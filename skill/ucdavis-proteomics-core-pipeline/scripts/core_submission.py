@@ -4141,9 +4141,21 @@ def _submission_details(summary: dict) -> str:
     return f" ({'; '.join(extra)})" if extra else ""
 
 
-def _item(name: str) -> str:
-    """A delivered item as a link that works from README.html (and reads fine in README.md)."""
+def _item(name: str, link: bool = True) -> str:
+    """A delivered item: a link in README.html, a plain file name in README.md. Bioshare shows a
+    folder's README.md inside the folder page and rewrites only src=, never href= (bioshareX
+    views.py list_directory), so every relative link there opened "Unable to locate the files"
+    (2026-10); README.html is served from /download/, where its relative links work."""
+    if not link:
+        return f"`{name}`"
     return f"[`{name}`]({urllib.parse.quote(name, safe='/.')})"
+
+
+# README.md's first line in a delivery (the HTML twin has no such line): its file names are not
+# links, for the reason in _item
+README_MD_OPENER = ("**Open `README.html`** (double-click it, or click it in Bioshare's file "
+                    "list) — the same page, with working links. The file names below are not "
+                    "links: in Bioshare, open each file from the file list.")
 
 
 def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "analysis",
@@ -4155,13 +4167,14 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
     "Where this lives on HIVE" table (`hive_md`, session_docs' own), which every collaborator
     README carries so the Core can find the session and the raw data again.
     README.md is this text; README.html (`html_twin`) is the same text rendered, without the
-    line pointing a Markdown reader at the .html (`for_html`). `podcast`: the delivery carries
+    line pointing a Markdown reader at the .html (`for_html`). Only README.html links its files
+    (_item): Bioshare breaks every relative link in a README.md. `podcast`: the delivery carries
     the run's podcast (delivered_podcast), so the survey line asks about it too."""
     label = submission_label(summary)
     pi_name = (summary.get("pi") or {}).get("name")
     fixed = ("MANIFEST.txt", "checksums.sha256") + (("README.html",) if html_twin else ())
-    opener = (["**Open `README.html`** (double-click it) — the same page, with working links.", ""]
-              if html_twin and not for_html else [])
+    opener = ([README_MD_OPENER, ""] if html_twin and not for_html else [])
+    item = lambda name: _item(name, link=for_html)     # noqa: E731  links in README.html only
     if mode == "raw-only":
         L = [f"# {label} — raw data from the UC Davis Proteomics Core", ""]
         if pi_name:
@@ -4174,7 +4187,7 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
               f"{_submission_details(summary)}.{why}", "", "## What is here", "",
               "| item | what it is |", "|---|---|"]
         if raw_names:
-            L.append(f"| {_item('../raw/')} | {len(raw_names)} raw instrument file(s), in the `raw` folder next to this one |")
+            L.append(f"| {item('../raw/')} | {len(raw_names)} raw instrument file(s), in the `raw` folder next to this one |")
         for name, text in (("README.html", "this README as a web page, with working links"),
                            ("AGENTS.md", "a guide to this folder for an AI assistant: give it this file with the folder"),
                            ("methods.md", "a Methods section describing the acquisition, with the instrument acknowledgment"),
@@ -4183,7 +4196,7 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
                            ("checksums.sha256", "SHA-256 checksums of the files in this folder "
                                                 "(`shasum -a 256 -c checksums.sha256`)")):
             if name in delivered or name in fixed:
-                L.append(f"| {_item(name)} | {text} |")
+                L.append(f"| {item(name)} | {text} |")
         exts = {os.path.splitext(n.lower())[1] for n in raw_names}
         if exts & {".d", ".raw"}:
             L += ["", "## Opening the files", ""]
@@ -4251,9 +4264,9 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
             present = (name in delivered or name in fixed or
                        (name.endswith("/") and any(x.startswith(name) for x in delivered)))
             if present:
-                L.append(f"| {_item(name)} | {text} |")
+                L.append(f"| {item(name)} | {text} |")
         if raw_names:
-            L.append(f"| {_item('../raw/')} | your raw instrument files, in the `raw` folder next to this one |")
+            L.append(f"| {item('../raw/')} | your raw instrument files, in the `raw` folder next to this one |")
         methods = []
         if "methods.md" in delivered:
             methods.append("- **Methods text:** `methods.md`" + (" (and `methods.docx`)" if "methods.docx" in delivered

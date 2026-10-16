@@ -1898,7 +1898,7 @@ class TestDeliver(DeliverBase):
         readme = read(os.path.join(d2, "README.md"))
         self.assertIn(f"**To send the report on with its audio discussion, send `{mp.SHARE_NAME}`**",
                       readme)
-        self.assertIn(f"| [`{mp.SHARE_NAME}`]({mp.SHARE_NAME}) | the same report with that audio", readme)
+        self.assertIn(f"| `{mp.SHARE_NAME}` | the same report with that audio", readme)
         out_md = os.path.join(self.tmp, "EMAIL_DRAFT.md")
         rc, js, p = run(["email-draft", "--summary", self.summary, "--delivery",
                          os.path.join(self.session, "delivery.json"), "--out", out_md], self.env)
@@ -1960,9 +1960,14 @@ class TestDeliver(DeliverBase):
             self.assertTrue(os.path.exists(os.path.join(self.delivery, urllib.parse.unquote(h))), h)
         self.assertNotIn("Open `README.html`", page, "the HTML does not point at itself")
         readme = read(os.path.join(self.delivery, "README.md"))
-        self.assertIn("**Open `README.html`**", readme)
+        self.assertIn(cs.README_MD_OPENER, readme)
         self.assertIn("## Where this lives on HIVE", readme)
-        self.assertIn("[`AGENTS.md`](AGENTS.md)", readme)
+        self.assertIn("| `AGENTS.md` |", readme)
+        # 2026-10: Bioshare shows README.md inside the folder page and rewrites no href=, so a
+        # relative link there opens an error page: the delivered README.md links nothing but
+        # absolute URLs (the survey), while README.html keeps its working relative links
+        self.assertEqual(re.findall(r"\]\((?!https?://)[^)]*\)", readme), [])
+        self.assertIn('<a href="AGENTS.md">', page)
         agents = read(os.path.join(self.delivery, "AGENTS.md"))
         self.assertTrue(agents.startswith("# AGENTS.md"), "the delivery note sits under the title")
         self.assertIn("delivery copy of an analysis session", agents)
@@ -2206,7 +2211,8 @@ class TestRawOnlyDelivery(DeliverBase):
         self.assertTrue(load(os.path.join(self.work, "delivery.json"))["verified"])
         # README.html even here; AGENTS.md needs a session to describe, and says so
         self.assertTrue(os.path.isfile(os.path.join(delivery, "README.html")))
-        self.assertIn("[`README.html`](README.html)", readme)
+        self.assertIn("| `README.html` |", readme)
+        self.assertEqual(re.findall(r"\]\((?!https?://)[^)]*\)", readme), [])
         manifest = read(os.path.join(delivery, "MANIFEST.txt"))
         self.assertIn("[OK] README.html", manifest)
         self.assertIn("[SKIPPED] AGENTS.md -- no analysis session to describe (a raw-only delivery)",
