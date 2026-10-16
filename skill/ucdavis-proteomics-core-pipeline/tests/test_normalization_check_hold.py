@@ -174,6 +174,22 @@ class DeliveryIsHeld(unittest.TestCase):
             self.assertIn(words, g["reason"])
             self.assertIn("step 8", g["hint"])
 
+    def test_not_applicable_proceeds_only_with_its_reason(self):
+        # one definition (normalization_check.not_applicable_reason): the gate, the audit and
+        # the brief all read it
+        self.assertEqual(nc.not_applicable_reason({"status": "not_applicable",
+                                                   "reason": "  a ratio inside one run "}),
+                         "a ratio inside one run")
+        for rec in ({"status": "not_applicable"}, {"status": "not_applicable", "reason": " "},
+                    {"status": "decided", "reason": "x"}, None, "not_applicable"):
+            self.assertIsNone(nc.not_applicable_reason(rec), rec)
+        ok = self.gate({"normalization_check": {"status": "not_applicable",
+                                                "reason": "a ratio inside one run"}})
+        self.assertTrue(ok["proceed"])
+        self.assertIn("a ratio inside one run", ok["reason"])
+        self.assertFalse(self.gate({"normalization_check": {"status": "not_applicable",
+                                                            "reason": " "}})["proceed"])
+
     def test_core_submission_deliver_holds_an_unchecked_de(self):
         from test_core_submission import DeliverBase
 

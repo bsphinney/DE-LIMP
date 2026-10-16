@@ -84,7 +84,7 @@ class TheReader(unittest.TestCase):
 
 
 class TheAudit(unittest.TestCase):
-    def audit(self, d, rows=UNSTABLE, engine="diann", stats=True, conditions=None):
+    def audit(self, d, rows=UNSTABLE, engine="diann", stats=True, conditions=None, de_extra=None):
         out = os.path.join(d, "search")
         os.makedirs(out)
         if stats:
@@ -95,7 +95,7 @@ class TheAudit(unittest.TestCase):
         os.makedirs(tables)
         with open(os.path.join(tables, "de_provenance.json"), "w") as fh:
             json.dump({"input": os.path.join(out, "report.parquet"), "adjp": 0.05,
-                       "logfc": 1}, fh)
+                       "logfc": 1, **(de_extra or {})}, fh)
         argv = [sys.executable, AUDIT, "--out", "AUDIT.md", "--de-dir", tables]
         if conditions:
             cpath = os.path.join(d, "conditions.csv")
@@ -147,6 +147,19 @@ class TheAudit(unittest.TestCase):
             found, _ = self.audit(d, stats=False)
         self.assertEqual([f["status"] for f in found], ["INFO"])
         self.assertIn("report.stats.tsv", found[0]["message"])
+
+    def test_a_label_free_de_on_raw_quantities_is_not_relevant(self):
+        # run_de.R on DIA-NN's non-normalised quantities (a pull-down's raw decision): DIA-NN's
+        # cross-run normalisation never reached the DE, so its instability is not relevant --
+        # an INFO saying so, never a PASS or a WARN about quantities the DE did not read
+        with tempfile.TemporaryDirectory() as d:
+            found, md = self.audit(d, de_extra={
+                "pipeline_id": "dpc", "method": "dpc", "quantities": "raw",
+                "normalisation": "none: DIA-NN's non-normalised Precursor.Quantity"})
+        self.assertEqual([f["status"] for f in found], ["INFO"])
+        self.assertIn("Not relevant", found[0]["message"])
+        self.assertIn("quantities: raw", found[0]["message"])
+        self.assertNotIn("above 0.3", md)
 
     def test_another_engines_report_is_not_asked(self):
         with tempfile.TemporaryDirectory() as d:

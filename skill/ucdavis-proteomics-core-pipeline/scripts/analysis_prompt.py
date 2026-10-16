@@ -127,9 +127,11 @@ def normalisation_brief(w, prov, etype, etype_err, design):
     w(f"- **Pull-down design:** {'yes' if design['pulldown'] else 'no'} ({design['source']})"
       + (f". **Raise with the user:** {design['note']}" if design.get("note") else ""))
     w(f"- **Quantities the DE read:** {prov.get('normalisation') or 'NOT RECORDED'}")
-    if nc.get("status") == "not_applicable" and str(nc.get("reason") or "").strip():
+    from normalization_check import not_applicable_reason
+    na_reason = not_applicable_reason(nc)
+    if na_reason:
         # the pipeline's own record of why there is no between-run normalisation to check
-        w(f"- **Normalisation check:** not applicable to this pipeline -- {nc['reason'].strip()}")
+        w(f"- **Normalisation check:** not applicable to this pipeline -- {na_reason}")
     elif nc.get("status") != "decided":
         w("- **Normalisation check: NOT RUN.** Say in Data Quality Notes that whether "
           "normalisation suited this experiment was not checked.")

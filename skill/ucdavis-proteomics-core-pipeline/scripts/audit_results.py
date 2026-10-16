@@ -818,11 +818,13 @@ def audit_normalization_check(findings, de_prov):
     nc = (de_prov or {}).get("normalization_check")
     if not isinstance(nc, dict):
         return                      # a DE record from before 2.10: nothing to quote
-    if nc.get("status") == "not_applicable" and str(nc.get("reason") or "").strip():
+    from normalization_check import not_applicable_reason
+    na_reason = not_applicable_reason(nc)
+    if na_reason:
         # the pipeline's own record of why there is no between-run normalisation to check
         add(findings, "normalization_check", "PASS",
             f"Not applicable to {(de_prov or {}).get('display_label') or 'this pipeline'}: "
-            f"{nc['reason'].strip()}", {"status": "not_applicable"})
+            f"{na_reason}", {"status": "not_applicable"})
         return
     if nc.get("status") != "decided":
         # a WARN, and core_submission.py deliver holds the delivery (normalization_check.
