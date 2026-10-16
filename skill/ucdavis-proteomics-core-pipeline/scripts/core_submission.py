@@ -3410,9 +3410,11 @@ def submission_md(s: dict, label: str, links: list, sample_rows_: list, work_dir
     return "\n".join(L) + "\n"
 
 
-def locate_gate_check(files_path: str, warnings: list) -> dict:
+def locate_gate_check(files_path: str, warnings: list, apply: bool = True) -> dict:
     """stage --apply refuses a file list whose locate run hard-failed: files.txt is written
-    even then (it is a proposal), and nothing else stops it being staged."""
+    even then (it is a proposal), and nothing else stops it being staged. The dry run checks the
+    same thing and says what --apply will do (2026-10: it said "checked on --apply" and exit 0,
+    so staff were shown a plan that --apply then refused)."""
     lj = os.path.join(os.path.dirname(os.path.abspath(files_path)), "locate.json")
     if not os.path.exists(lj):
         warnings.append(f"no locate.json next to {files_path}; its gates could not be checked")
@@ -3421,13 +3423,60 @@ def locate_gate_check(files_path: str, warnings: list) -> dict:
     info = {"checked": True, "locate_json": lj, "mode": loc.get("mode"), "hard_fail": bool(loc.get("hard_fail")),
             "accepted": loc.get("accepted")}
     if loc.get("hard_fail") and loc.get("mode") != "files_from":
-        raise Stop(EXIT_DECIDE, {
-            "error": "locate hard-failed for this file list; staging it would search the wrong or partial files",
-            "failing_gates": [g for g in loc.get("gates") or [] if g.get("status") == "FAIL"],
-            "hint": "resolve with staff: locate --files-from <curated list>, or re-run locate with "
-                    "--choose <unique_id>=<file> / --allow-partial / --accept-ambiguous as they "
-                    "decide"})
+        failing = [g for g in loc.get("gates") or [] if g.get("status") == "FAIL"]
+        hint = ("resolve with staff: locate --files-from <curated list>, or re-run locate with "
+                "--choose <unique_id>=<file> / --allow-partial / --accept-ambiguous as they decide")
+        if apply:
+            raise Stop(EXIT_DECIDE, {
+                "error": "locate hard-failed for this file list; staging it would search the wrong or partial files",
+                "failing_gates": failing, "hint": hint})
+        info.update(apply_will_refuse=True, failing_gates=failing, hint=hint,
+                    note=f"--apply will refuse: locate hard-failed "
+                         f"({', '.join(_s(g.get('gate')) or '?' for g in failing) or 'hard_fail'})")
     return info
+
+
+def folders_holding_submission(group: str, files: list, internal_id, skip: str) -> list:
+    """Folders under the PI's group folder that already hold this submission -- its raw files
+    (by name, in the folder, its raw/ or one level down), or an analysis session recorded for it
+    (session.json analysis_for, or the attached input/submission.json) -- other than `skip` (the
+    <label> folder stage would make). 2026-10: stage proposed a new PROT_<n> folder beside the one
+    where the submission's raw files and its delivered session already were.
+    -> [{"dir", "raw_files_there", "sessions"}]."""
+    names = {os.path.basename(f.rstrip("/")) for f in files}
+    out = []
+    for d in _subdirs(group):
+        if os.path.realpath(d) == os.path.realpath(skip):
+            continue
+        mk = os.path.join(d, MARKER)
+        if os.path.exists(mk):
+            try:
+                owner = load_json_file(mk, MARKER).get("internal_id")
+            except Stop:
+                owner = None
+            if _s(owner) and _s(owner) != _s(internal_id):
+                continue                                  # another submission's folder
+        here, sessions = set(), []
+        for sub in [d] + _subdirs(d):
+            try:
+                here |= names & set(os.listdir(sub))
+            except OSError:
+                pass
+            for sj in (os.path.join(sub, "session.json"),
+                       os.path.join(sub, "input", "submission.json")):
+                try:
+                    with open(sj, encoding="utf-8") as fh:
+                        rec = json.load(fh)
+                except (OSError, ValueError):
+                    continue
+                af = (rec.get("analysis_for") or {}) if isinstance(rec, dict) else {}
+                ids = (af.get("submissions") or []) if isinstance(af, dict) else []
+                if internal_id and (internal_id in ids or _s(rec.get("internal_id")) == internal_id):
+                    sessions.append(sub)
+        if here or sessions:
+            out.append({"dir": d, "raw_files_there": len(here),
+                        "sessions": sorted(set(sessions))})
+    return out
 
 
 def cmd_stage(a) -> int:
@@ -3452,7 +3501,9 @@ def cmd_stage(a) -> int:
     if not os.path.isdir(os.path.join(sroot, campus)):
         raise Stop(EXIT_UNREACHABLE, {"error": f"service directory not reachable: {os.path.join(sroot, campus)}",
                                       "hint": "stage runs ON HIVE (hive_exec.sh)"})
-    gate_info = locate_gate_check(a.files, warnings) if a.apply else {"checked": False, "note": "checked on --apply"}
+    gate_info = locate_gate_check(a.files, warnings, a.apply)
+    if gate_info.get("apply_will_refuse"):
+        warnings.append(gate_info["note"])
 
     if a.service_dir:
         group = resolve_explicit_service_dir(a.service_dir, sroot, campus)
@@ -3470,6 +3521,34 @@ def cmd_stage(a) -> int:
         group = resolution["group_dir"]
 
     project = os.path.join(group, label)
+    existing = []
+    if a.project_dir:
+        project = resolve_explicit_service_dir(a.project_dir, sroot, campus)
+        if len(os.path.relpath(os.path.realpath(project), os.path.realpath(sroot)).split(os.sep)) < 3:
+            raise Stop(EXIT_DECIDE, {"error": f"--project-dir must be a folder inside a group "
+                                              f"folder (<campus>/<group>/<folder>), got {project}"})
+        group = os.path.dirname(project)
+        resolution = dict(resolution, project_dir=project, project_mode="explicit (--project-dir)")
+    elif not a.service_dir and not os.path.exists(os.path.join(project, MARKER)):
+        # the submission may already have a folder of its own here (an earlier analysis)
+        existing = folders_holding_submission(group, files, _s(s.get("internal_id")), project)
+        if len(existing) == 1:
+            project = existing[0]["dir"]
+            resolution = dict(resolution, project_dir=project, project_mode="existing",
+                              project_basis=existing[0])
+            warnings.append(f"{os.path.basename(project)}/ already holds this submission "
+                            f"({existing[0]['raw_files_there']} of its raw files"
+                            + (f", {len(existing[0]['sessions'])} analysis session(s)"
+                               if existing[0]["sessions"] else "")
+                            + f"): staging there, not in a new {label}/ -- for a new folder "
+                              f"instead, re-run with --service-dir {os.path.basename(group)!r}")
+        elif len(existing) > 1:
+            raise Stop(EXIT_DECIDE, {
+                "error": f"{len(existing)} folders under {group} already hold this submission's "
+                         f"raw files or sessions: which one is its folder is for staff to say",
+                "existing_folders": existing,
+                "hint": "re-run with --project-dir <folder> (one of them), or --service-dir "
+                        f"{os.path.basename(group)!r} for a new {label}/ folder"})
     marker = os.path.join(project, MARKER)
     prior = None
     if os.path.exists(marker):
@@ -3485,7 +3564,7 @@ def cmd_stage(a) -> int:
     froot = flinders_root()
     raw_dir = os.path.join(project, "raw")
     rel_root = os.path.relpath(os.path.realpath(group), os.path.realpath(sroot))
-    work_dir = os.path.join(work_root(), rel_root, label)
+    work_dir = os.path.join(work_root(), rel_root, os.path.basename(project))
     share = server_share_dir(s)
 
     plan = []
@@ -3527,13 +3606,16 @@ def cmd_stage(a) -> int:
            "links_created": 0, "links_existing": sum(p["action"] == "existing" for p in plan),
            "links_replaced": 0, "conflicts": conflicts, "locate_gates": gate_info, "warnings": warnings}
     if not a.apply:
+        refuse = gate_info.get("apply_will_refuse")
         out.update(would_create=sum(p["action"] == "create" for p in plan),
                    would_replace=sum(p["action"] == "replace" for p in plan), plan=plan,
-                   submission_md=md_path,
-                   next_step="show staff this folder together with the file list in ONE confirmation; "
+                   submission_md=md_path, apply_will_refuse=bool(refuse),
+                   next_step=(f"{gate_info['note']}: {gate_info['hint']} -- then run this dry run "
+                              f"again before showing staff the plan") if refuse else
+                             "show staff this folder together with the file list in ONE confirmation; "
                              "then re-run with --apply")
         emit(out)
-        return EXIT_OK
+        return EXIT_DECIDE if refuse else EXIT_OK
 
     make_shared_dirs(raw_dir, warnings)
     make_shared_dirs(work_dir, warnings)
@@ -5087,6 +5169,11 @@ def main(argv=None) -> int:
     st.add_argument("--sample-files", default=None, help="sample_files.tsv (default: next to --files)")
     st.add_argument("--service-dir", default=None,
                     help="the group folder to use when resolution is ambiguous (under the service root)")
+    st.add_argument("--project-dir", default=None,
+                    help="the submission's own folder, when staff name one (an existing folder "
+                         "that already holds its raw files or an earlier analysis; under the "
+                         "service root). Default: <group>/<PROT_n>, or the one existing folder "
+                         "that holds this submission")
     st.add_argument("--apply", action="store_true", help="create the links and folders")
     st.set_defaults(func=cmd_stage)
 

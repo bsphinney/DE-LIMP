@@ -1391,13 +1391,54 @@ class TestStage(unittest.TestCase):
         locate_json = os.path.join(self.tmp, "locate.json")
         with open(locate_json, "w") as fh:
             json.dump({"mode": "auto", "hard_fail": True, "gates": [{"gate": "weak_ids", "status": "FAIL"}]}, fh)
-        self.assertEqual(self.stage(summary)[0], 0, "a dry run may still show the plan")
+        # the dry run still shows the plan, and says what --apply will do (2026-10: it said
+        # "checked on --apply" with exit 0, and staff were shown a plan --apply refused)
+        rc, out, _ = self.stage(summary)
+        self.assertEqual(rc, 2)
+        self.assertTrue(out["apply_will_refuse"])
+        self.assertEqual(out["would_create"], 2)
+        self.assertIn("--apply will refuse: locate hard-failed (weak_ids)", out["next_step"])
+        self.assertTrue(any("--apply will refuse" in w for w in out["warnings"]))
         rc, out, _ = self.stage(summary, "--apply")
         self.assertEqual(rc, 2)
         self.assertEqual(out["failing_gates"][0]["gate"], "weak_ids")
         with open(locate_json, "w") as fh:
             json.dump({"mode": "files_from", "hard_fail": True, "gates": []}, fh)
         self.assertEqual(self.stage(summary, "--apply")[0], 0)
+
+    def test_the_submissions_existing_folder_is_proposed_not_a_second_one(self):
+        """2026-10: stage proposed <group>/PROT_<n> while the submission's raw files and its
+        delivered session already lived in <group>/<a folder staff named by hand>."""
+        group = self.folder("on_campus", "Placeholder lab")
+        other = self.folder("on_campus", "Placeholder lab", "Other09012025")
+        os.makedirs(os.path.join(other, "raw", "unrelated_run.d"))
+        mine = self.folder("on_campus", "Placeholder lab", "Sampled03122025")
+        for f in self.files:
+            os.symlink(f, os.path.join(mine, os.path.basename(f)))
+        summary, _ = write_summary(self.tmp)
+        rc, out, p = self.stage(summary)
+        self.assertEqual(rc, 0, p.stderr)
+        self.assertEqual(out["service_dir"], mine)
+        self.assertEqual(out["group_resolution"]["project_mode"], "existing")
+        self.assertEqual(out["group_resolution"]["project_basis"]["raw_files_there"], 2)
+        self.assertTrue(any("already holds this submission" in w for w in out["warnings"]))
+        self.assertTrue(out["work_dir"].endswith(os.path.join("Placeholder lab", "Sampled03122025")))
+        # staff want a new folder after all: --service-dir keeps <group>/PROT_0807
+        rc, out, _ = self.stage(summary, "--service-dir", "Placeholder lab")
+        self.assertEqual((rc, out["service_dir"]), (0, os.path.join(group, "PROT_0807")))
+        # an earlier session recorded for it marks a folder too; two such folders: staff choose
+        sess = os.path.join(other, "2025-03-20_redo")
+        os.makedirs(sess)
+        with open(os.path.join(sess, "session.json"), "w") as fh:
+            json.dump({"analysis_for": {"submissions": ["PROT_0807"]}}, fh)
+        rc, out, _ = self.stage(summary)
+        self.assertEqual(rc, 2)
+        self.assertEqual(sorted(x["dir"] for x in out["existing_folders"]), [other, mine])
+        rc, out, p = self.stage(summary, "--project-dir", other, "--apply")
+        self.assertEqual(rc, 0, p.stderr)
+        self.assertEqual(out["service_dir"], other)
+        self.assertEqual(load(os.path.join(other, cs.MARKER))["internal_id"], "PROT_0807")
+        self.assertEqual(self.stage(summary, "--project-dir", group)[0], 2, "a group, not a folder")
 
     def test_apply_records_the_staff_choices_the_file_list_rests_on(self):
         group = self.folder("on_campus", "Placeholder lab")

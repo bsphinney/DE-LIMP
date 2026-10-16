@@ -631,7 +631,10 @@ submission, the same path locally and on HIVE (`~/core/PROT_0807`).
    bash scripts/hive_exec.sh --get '~/core/PROT_0807/locate.json' ~/core/PROT_0807/
    ```
 3. **Stage dry run — on HIVE:** `stage --summary ~/core/PROT_0807/submission_summary.json
-   --files ~/core/PROT_0807/files.txt` names the service folder it would use.
+   --files ~/core/PROT_0807/files.txt` names the service folder it would use: a folder that
+   already holds the submission's raw files or an earlier analysis of it, else a new
+   `<group>/PROT_n` (`--project-dir` / `--service-dir` when staff say otherwise). Exit 2 with
+   `apply_will_refuse` means `locate` hard-failed: resolve that first, never show staff the plan.
 4. **ONE staff confirmation: the file list AND the service folder together** — sample → raw
    file → acquired date, every non-PASS gate, and "staged under `<folder>`". Not a menu.
    **Which run IS a sample is a call only staff can make — never pick one yourself.**
