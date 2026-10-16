@@ -996,9 +996,25 @@ class Subagents(SubagentEnv):
     def test_the_main_conversations_own_call_is_its_own(self):
         self.write(parent_pending=True, agent_pending=False, parent_tok="m4in0001")
         self.assertEqual(st.trace_caller(SID, "m4in0001"), (SID, self.parent, None))
-        # no subagent at work (none written for hours): no token needed, as before 2.13.1
+        # no subagent at work (none written for hours): no token needed, as before 2.13.1 --
+        # and a token found nowhere, or malformed, never refuses what 2.13.0 recorded
         os.utime(self.agent, (1, 1))
-        self.assertEqual(st.trace_caller(SID), (SID, self.parent, None))
+        for tok in (None, "zz99zz99", "short"):
+            self.assertEqual(st.trace_caller(SID, tok), (SID, self.parent, None), tok)
+
+    def test_a_powershell_call_counts_like_bash(self):
+        """Windows: Claude Code runs commands with its PowerShell tool (tool name "PowerShell",
+        input.command); a Bash-only match refused every save there while subagents worked."""
+        write_lines(self.parent, [msg(0, "Lead's work.")])
+        call = bash_call(6, f"python scripts\\save_transcript.py --hive $S --remember "
+                            f"--call-id {self.TOK}", done=False, agent=self.AGENT[6:])
+        call[0]["message"]["content"][0]["name"] = "PowerShell"
+        write_lines(self.agent, call)
+        self.assertEqual(st.trace_caller(SID, self.TOK)[:2], (self.AGENT, self.agent))
+        call.append({"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "toolu_b6", "content": "ok"}]}})
+        write_lines(self.agent, call)                       # finished: not this call
+        self.assertIsNone(st.trace_caller(SID, self.TOK)[1])
 
     def test_the_token_is_a_word_of_its_own(self):
         self.write(agent_tok=self.TOK + "5")

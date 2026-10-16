@@ -387,6 +387,10 @@ TRACE_WAIT = 15                 # s to wait for the call to be written (~4 s see
 TRACE_CONFIRM = 3               # s a lone match must stay alone: a second (a reused token) refuses
 TRACE_TAIL = 1 << 20            # bytes of each transcript's end that are read
 CALL_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+# The tools that run a command line, by the names Claude Code gives them in a transcript, with
+# the command in input.command: Bash, and on Windows PowerShell (Claude Code 2.1.300's own
+# constants: `var Ge="Bash";var xt="PowerShell"`, and its PowerShell tool's input.command)
+SHELL_TOOLS = ("Bash", "PowerShell")
 
 
 def active_subagents(parent):
@@ -404,7 +408,8 @@ def active_subagents(parent):
 
 
 def calls_with(path, call_id):
-    """Does the transcript (its last TRACE_TAIL bytes) hold a RUNNING Bash call -- a tool_use
+    """Does the transcript (its last TRACE_TAIL bytes) hold a RUNNING shell call (Bash, or
+    PowerShell on Windows: SHELL_TOOLS) -- a tool_use
     with no tool_result yet -- whose command names `call_id` as a word of its own? The caller's
     own call is necessarily still running; a finished one (the same token used earlier, a
     `grep <token>`) is never it (review of 2.13.1, round 4). A call run in the background gets
@@ -428,7 +433,7 @@ def calls_with(path, call_id):
         for blk in c if isinstance(c, list) else []:
             if not isinstance(blk, dict):
                 continue
-            if (blk.get("type") == "tool_use" and blk.get("name") == "Bash"
+            if (blk.get("type") == "tool_use" and blk.get("name") in SHELL_TOOLS
                     and rx.search(str((blk.get("input") or {}).get("command") or ""))):
                 named.add(blk.get("id"))
             elif blk.get("type") == "tool_result":
@@ -437,11 +442,11 @@ def calls_with(path, call_id):
 
 
 def trace_caller(sid, call_id=None, wait=None):
-    """-> (session id, transcript, problem): whose conversation is making this call. With
+    """-> (session id, transcript, problem): whose conversation is making this call. With no
+    subagent of it at work: the conversation's own, with or without `call_id`. Else with
     `call_id`: the one transcript -- the parent's, or a subagent's (its id is its file's name,
-    agent-<agent id>) -- holding a Bash call that names it; none (after TRACE_WAIT s) or several
-    is a problem. Without: the conversation's own, while no subagent of it is at work; else a
-    problem. A problem records nothing."""
+    agent-<agent id>) -- holding a running shell call that names it; none (after TRACE_WAIT s)
+    or several is a problem; and without `call_id`, a problem. A problem records nothing."""
     parent = find_transcript(sid)
     if not parent:
         return sid, None, None
@@ -450,9 +455,9 @@ def trace_caller(sid, call_id=None, wait=None):
     name_it = (f"or name the transcript yourself: the main conversation's is --transcript {parent} "
                f"--session-id {sid}; a subagent's or teammate's is --transcript "
                f"{sub}agent-<id>.jsonl --session-id agent-<id>")
+    if not agents:              # no subagent at work: the conversation's own, token or not --
+        return sid, parent, None    # never refuse what 2.13.0 recorded
     if not call_id:
-        if not agents:
-            return sid, parent, None
         return sid, None, (
             "this conversation has subagents at work, and this call carries no --call-id, so "
             "which conversation is making it cannot be told: nothing was recorded, so that no "
