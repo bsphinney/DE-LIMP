@@ -252,17 +252,25 @@ class TheDocsSayIt(unittest.TestCase):
         self.assertIn("--submission PROT_0807", ref)
         self.assertIn("--internal '<the title it has on the board>'", ref)
 
-    def test_the_chat_go_ahead_starts_a_search(self):
-        """Brett, 2026-10-15: no board approval before a search; the job is recorded right after."""
+    def test_the_chat_go_ahead_starts_a_job_with_its_hours(self):
+        """Brett, 2026-10-15: the go-ahead in the chat starts the jobs; each is recorded with the
+        CPU-hours a script printed; the board approves under 10,000 CPU- and GPU-hours, and 10,000
+        or more is asked for on the board first (core-board 1164632)."""
         ref = _flat(self.board)
         self.assertNotIn("Asking for cluster time", self.board)
-        self.assertNotIn("ask THREAD", self.board)
-        self.assertIn("--go-ahead chat", ref)
-        self.assertIn("never work one out yourself", ref)
+        self.assertIn("--go-ahead chat --cpu-hours <cpu_hours_reserved>", ref)
+        self.assertIn("never work one out, round it or guess it", ref)
+        self.assertIn("python3 scripts/cpu_hours.py <its job script(s)>", ref)
+        self.assertIn("10,000 or more of either: ask before you submit", ref)
+        self.assertIn("Exit 3 `job_needs_decision` on a job under 10,000", ref)
+        self.assertNotIn("None is printed today", ref)
         board_sec = _flat(self.skill[self.skill.index("## The Core Project Board"):
                                      self.skill.index("## Working with other Claudes")])
-        self.assertIn("A search starts on your person's go-ahead in this conversation", board_sec)
-        self.assertNotIn("asked for on the board", self.skill)
+        self.assertIn("A job starts on your person's go-ahead in this conversation", board_sec)
+        self.assertIn("10,000 or more of either: ask on the board before submitting", board_sec)
+        rule1 = _flat(self.skill[self.skill.index("1. **Confirm before committing compute.**"):
+                                 self.skill.index("2. **Never fabricate parameters.**")])
+        self.assertIn("approves it by itself when both are under 10,000", rule1)
 
     def test_each_milestone_step_names_its_board_row(self):
         rows = {"### 1c.": "session made", "### 3b.": "session made", "### 7. ": "search submitted",
