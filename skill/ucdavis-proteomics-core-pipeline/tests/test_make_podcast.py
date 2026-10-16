@@ -815,6 +815,14 @@ class Gemini(Workspace):
         self.assertIn("re-run the same command to resume", err)
         self.assertEqual(len([f for f in os.listdir(os.path.join(self.pod, ".cache"))
                               if f.endswith(".wav")]), 1)
+        # the time lost to unanswered requests is capped per render, like the rate-limit waits
+        shutil.rmtree(os.path.join(self.pod, ".cache"))
+        state.update(n=0, hang={2})
+        rc, out, err, log = self.render(hangs, "--cloud-ok", *model, "--request-timeout", "0.4",
+                                        "--request-timeout-budget", "0.005")
+        self.assertEqual(rc, 1)
+        self.assertIn("unanswered requests have cost 0 min in this render "
+                      "(--request-timeout-budget 0.005 min)", err)
 
     def test_an_error_carrying_the_key_is_scrubbed_everywhere(self):
         def boom(model, contents, config):

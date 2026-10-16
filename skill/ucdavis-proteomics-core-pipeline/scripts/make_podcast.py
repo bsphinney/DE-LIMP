@@ -126,6 +126,10 @@ RATE_WAIT_BUDGET_MIN = 30.0                         # rate-limit waits allowed p
 REQUEST_TIMEOUT = 600.0                             # s
 REQUEST_TIMEOUTS = 2                                # unanswered requests allowed per chunk
 HEARTBEAT = 60.0                                    # s between "still waiting" log lines
+# ...and all the time lost to unanswered requests in one render is capped too, like the rate-limit
+# waits: eleven chunks each hanging once would otherwise reach the job's time limit (review of
+# 2.13.1), where SLURM's TIMEOUT says less than the resume message does
+REQUEST_TIMEOUT_BUDGET_MIN = 30.0                   # minutes
 TERMS_URL = "https://ai.google.dev/gemini-api/terms"
 KEY_FILE = os.path.join("~", ".config", "ucdavis-proteomics", "gemini_key")
 # The Core's shared key on HIVE (Brett installs it: owner brettsp, group proteomics-grp, mode
@@ -1545,6 +1549,9 @@ class GeminiTTS(object):
         self.model = self.candidates[0]
         self.min_interval = float(getattr(a, "min_interval", MIN_INTERVAL))
         self.request_timeout = float(getattr(a, "request_timeout", None) or REQUEST_TIMEOUT)
+        self.timeout_budget = 60.0 * float(getattr(a, "request_timeout_budget", None)
+                                           or REQUEST_TIMEOUT_BUDGET_MIN)
+        self.timed_out = 0.0                 # s lost to unanswered requests in this render
         self.wait_budget = 60.0 * float(getattr(a, "rate_wait_budget", RATE_WAIT_BUDGET_MIN))
         self.waited = 0.0
         self.pinned = False                  # set by prepare() / --redo: no model hand-over
@@ -1760,6 +1767,13 @@ class GeminiTTS(object):
                 r = self.timed_request(chunk, speak, label)
             except RequestTimeout as e:
                 timeouts += 1
+                self.timed_out += self.request_timeout
+                if self.timed_out >= self.timeout_budget:
+                    raise RenderError(
+                        f"{label}: {e}; unanswered requests have cost {self.timed_out / 60:.0f} "
+                        f"min in this render (--request-timeout-budget "
+                        f"{self.timeout_budget / 60:g} min). The chunks already made are cached: "
+                        "re-run the same command to resume")
                 if timeouts >= REQUEST_TIMEOUTS:
                     raise RenderError(
                         f"{label}: {self.model} did not answer within {self.request_timeout:.0f} s, "
@@ -4172,6 +4186,10 @@ def main(argv=None):
     r.add_argument("--request-timeout", type=float, default=REQUEST_TIMEOUT, metavar="SEC",
                    help="seconds one TTS request's answer is waited for; asked once more, then "
                         "the render stops with the resume message (default %(default)s)")
+    r.add_argument("--request-timeout-budget", type=float, default=REQUEST_TIMEOUT_BUDGET_MIN,
+                   metavar="MIN", help="minutes lost to unanswered requests allowed in one render "
+                                       "before it stops with the resume message (default "
+                                       "%(default)s)")
     r.add_argument("--keep-wav", action="store_true")
     r.add_argument("--unchecked", action="store_true",
                    help="render without a passing check.txt (recorded in podcast.json)")
