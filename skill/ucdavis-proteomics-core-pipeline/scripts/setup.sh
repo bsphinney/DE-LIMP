@@ -41,6 +41,8 @@
 #
 # Usage:  bash setup.sh            # install/repair everything it can
 #         bash setup.sh --check    # report only, install nothing
+# On a cluster login node either one runs itself again on a compute node (on_compute.py: one
+# blocking srun) -- never the solve or the R loads on the login node. Exit 2: it could not.
 # =============================================================================
 set -uo pipefail
 
@@ -56,11 +58,36 @@ mkdir -p "$PP_HOME"
 case "${BASH_SOURCE[0]}" in */*) SCRIPT_DIR="${BASH_SOURCE[0]%/*}" ;; *) SCRIPT_DIR="." ;; esac
 SCRIPT_DIR="$(cd "$SCRIPT_DIR" && pwd)"
 
+
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"   # darwin | linux
 ARCH="$(uname -m)"                               # arm64 | x86_64 | aarch64
 have() { command -v "$1" >/dev/null 2>&1; }
 say()  { printf '%s\n' "$*" >&2; }
 NOTES=()
+
+# ---- 0. a compute node, never a cluster login node ---------------------------
+# HPC@UCD's ucd-hpc skill (mandatory on Hive, Farm and Franklin since 2026-10-16) names conda
+# solves as login-node abuse, and downloads and package builds belong inside a job; even --check
+# loads R and a handful of packages and starts the .NET parser. On a login node (sbatch on PATH,
+# no SLURM job) setup.sh runs itself again through on_compute.py: one blocking srun with the queue
+# spelled out, and waits. HIVE's compute nodes reach conda-forge, Bioconductor, CRAN and
+# Microsoft's .NET downloads (srun job 24827776, 2026-10-16). An install asks for a queue that
+# will not preempt it half way (--no-preempt).
+if command -v sbatch >/dev/null 2>&1 && [ -z "${SLURM_JOB_ID:-}" ]; then
+  if $CHECK_ONLY; then OC_ARGS="--time 20 --mem 4G --cpus 1"; OC_WHY="setup.sh --check loads R and its packages"
+  else OC_ARGS="--time 120 --mem 8G --cpus 2 --no-preempt"; OC_WHY="setup.sh solves and installs the environment"; fi
+  OC_PY="$(command -v python3 2>/dev/null || true)"
+  if [ -n "$OC_PY" ] && [ -f "$SCRIPT_DIR/on_compute.py" ]; then
+    # shellcheck disable=SC2086  # OC_ARGS is meant to split
+    exec "$OC_PY" "$SCRIPT_DIR/on_compute.py" $OC_ARGS --name pp_setup --why "$OC_WHY" \
+      -- "${BASH:-bash}" "$SCRIPT_DIR/setup.sh" "$@"
+  fi
+  say "[setup] REFUSING to run on a cluster login node (sbatch is on PATH, SLURM_JOB_ID is unset),"
+  say "[setup] and there is no python3 + on_compute.py here to move it to a compute node. Run it in a"
+  say "[setup] job, with your account and partition: srun --account=<yours> --partition=<yours> \\"
+  say "[setup]   --time=120 --mem=8G --cpus-per-task=2 bash $SCRIPT_DIR/setup.sh $*"
+  exit 2
+fi
 
 # micromamba platform slug
 case "$OS-$ARCH" in
@@ -166,7 +193,7 @@ if env_ready; then
   LIMPA_VERSION="$("$ENV_PREFIX/bin/Rscript" -e "cat(tryCatch(as.character(utils::packageVersion('limpa')), error = function(e) ''))" 2>/dev/null)"
   limpa_ok && LIMPA_OK=true
 fi
-LIMPA_FIX="$ENV_PREFIX/bin/Rscript -e \"install.packages('limpa', repos = '$LIMPA_REPO', type = 'source')\" where there is internet (a login node), then bash setup.sh --check"
+LIMPA_FIX="bash $SCRIPT_DIR/setup.sh (it installs it; on a cluster it runs itself on a compute node), or by hand -- on a cluster inside a job, never on a login node: $ENV_PREFIX/bin/Rscript -e \"install.packages('limpa', repos = '$LIMPA_REPO', type = 'source')\", then bash setup.sh --check"
 if env_ready && ! $LIMPA_OK; then
   NOTES+=("limpa ${LIMPA_VERSION:-is not installed}${LIMPA_VERSION:+ is older than $LIMPA_MIN}: run_de.R --method dpc needs limpa >= $LIMPA_MIN (it can still read the report with limpa 1.2.x and records that it did, but the pinned stack is >= $LIMPA_MIN). Fix: $LIMPA_FIX.")
 fi
@@ -407,7 +434,7 @@ if env_ready && ! $SET_ANN_ANSWERED; then
   SET_ANN_FIX="re-run bash setup.sh --check; if it says the same, run $ENV_PREFIX/bin/Rscript by hand to see R's error"
   NOTES+=("Protein-set tests (run_sets.R): R in $ENV_PREFIX did not say whether the annotation packages ($SET_ANN_PKGS) load, so they are not known to work. DE does not need them.")
 elif env_ready && ! $SET_ANN_OK; then
-  SET_ANN_FIX="bash setup.sh where there is internet (a login node), or by hand: $ENV_PREFIX/bin/Rscript -e \"install.packages(c('$(printf '%s' "$SET_ANN_MISSING" | sed "s/ /','/g")'), repos = c('https://bioconductor.org/packages/$SET_ANN_BIOC/data/annotation', 'https://bioconductor.org/packages/$SET_ANN_BIOC/bioc', 'https://cloud.r-project.org'))\""
+  SET_ANN_FIX="bash setup.sh (on a cluster it runs itself on a compute node), or by hand -- on a cluster inside a job, never on a login node: $ENV_PREFIX/bin/Rscript -e \"install.packages(c('$(printf '%s' "$SET_ANN_MISSING" | sed "s/ /','/g")'), repos = c('https://bioconductor.org/packages/$SET_ANN_BIOC/data/annotation', 'https://bioconductor.org/packages/$SET_ANN_BIOC/bioc', 'https://cloud.r-project.org'))\""
   NOTES+=("Protein-set tests (run_sets.R) cannot run until these load: $SET_ANN_PROBLEMS. Fix: $SET_ANN_FIX. DE does not need them.")
 fi
 
@@ -430,7 +457,7 @@ if ! $CHECK_ONLY; then
         DOTNET8_NOTE="ensure_dotnet8.sh: .NET 8 at $DOTNET8_ROOT"
       else
         DOTNET8_NOTE="ensure_dotnet8.sh could not provide .NET 8 (it needs internet the first time; its own messages are on setup.sh's stderr)"
-        NOTES+=("$DOTNET8_NOTE. Until it does, DIA-NN cannot read .raw and the Orbitrap resolution cannot be read: re-run \`bash $ENSURE_DOTNET8\` where there is internet (a login node).")
+        NOTES+=("$DOTNET8_NOTE. Until it does, DIA-NN cannot read .raw and the Orbitrap resolution cannot be read: re-run bash setup.sh, or \`bash $ENSURE_DOTNET8\` (on a cluster both run themselves on a compute node, which on HIVE reaches Microsoft's downloads).")
       fi ;;
     *) DOTNET8_NOTE="not run on $OS" ;;
   esac

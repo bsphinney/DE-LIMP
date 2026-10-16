@@ -74,8 +74,9 @@ Container runtime preference: hpc→apptainer, mac→docker, linux→native.
   (limpa 1.4.0 / limma 3.68.5) exactly — every contrast's significant set identical.
 - **The check.** The last thing `setup.sh` does is verify `packageVersion("limpa") >=
   "1.4.0"`. `setup.json` → `limpa` = `{version, required, ok, source}`; when it fails,
-  `notes` and stderr say `ERROR: limpa <v> ...` with the fix (an `install.packages()` line to
-  run where there is internet — a login node), and `setup.sh` exits 1 (`--check` only
+  `notes` and stderr say `ERROR: limpa <v> ...` with the fix (re-run `setup.sh`, or an
+  `install.packages()` line — on a cluster inside a job, never on a login node; HIVE's compute
+  nodes reach Bioconductor and CRAN), and `setup.sh` exits 1 (`--check` only
   reports).
 - **nanoparquet is checked too.** limpa reads DIA-NN's `report.parquet` with it (`nanoparquet
   package required but is not installed`), but it is only in limpa's *Suggests*, so installing

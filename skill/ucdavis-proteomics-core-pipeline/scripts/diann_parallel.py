@@ -237,7 +237,8 @@ def dotnet_prefix(raws):
     (>= 8.0.17) on PATH to read it. Resolve/install via ensure_dotnet8.sh and return an
     'export DOTNET_ROOT=...; export PATH=...; ' prefix to put in front of every DIA-NN
     invocation (each array task/step runs it; the shared install is read on the node).
-    Returns "" for mzML/.d-only inputs. Run the generator on a login node (internet)."""
+    Returns "" for mzML/.d-only inputs. A download, when one is needed, ensure_dotnet8.sh moves
+    to a compute node itself (on a cluster login node)."""
     if not any(r.lower().endswith(".raw") for r in raws):
         return ""
     helper = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ensure_dotnet8.sh")

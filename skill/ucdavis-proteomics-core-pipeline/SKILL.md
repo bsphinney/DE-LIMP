@@ -238,7 +238,7 @@ Read `setup.json` and **gate on `ready_for`**:
   `.d`/`.raw` → mzML; tell the user and, if their data is DIA, route to DIA-NN.
 - `ready_for.thermo_raw` false **and the input has Thermo `.raw`** → fix it before step 2:
   do exactly what `thermo_raw_reader.note` says (usually re-run `setup.sh`, or `bash
-  scripts/ensure_dotnet8.sh` where there is internet), then `setup.sh --check` until it is
+  scripts/ensure_dotnet8.sh`; on a cluster both move to a compute node), then `setup.sh --check` until it is
   true. `ready_for.dia` does not cover this: without a working parser every `.raw` is
   `unknown` and a DIA search falls back to 380–980. Irrelevant for `.d`/mzML-only input.
 - `thermo_raw_reader.resolution_reader.ready` false only means step 2 cannot read the
@@ -330,7 +330,11 @@ login skips it silently; the release is compared only for Core accounts (→ `re
 
 In `hive_remote` the toolchain lives on HIVE, so run it there instead (the laptop needs none
 of it): `bash scripts/hive_exec.sh 'bash ~/proteomics-pipeline/scripts/setup.sh'`, and read
-`~/.proteomics-pipeline/setup.json` on HIVE the same way.
+`~/.proteomics-pipeline/setup.json` on HIVE the same way. On a cluster login node `setup.sh`
+(and `--check`) runs itself on a compute node (`on_compute.py`: one blocking `srun`, up to 2 h for
+an install, printed first): run that call in the background and wait for it. Never run a conda,
+R or .NET install on the login node by hand; HIVE's compute nodes have internet. Exit 2: it
+could not get there (no python3 there), and says how.
 
 **Notes from the Core — check every session**, on every start and every resume: after the
 HIVE version check (step 0) and before the resume check (0c). The Core's director can leave a
@@ -789,10 +793,10 @@ zip) needs .NET 8 with **both** Microsoft.NETCore.App and Microsoft.AspNetCore.A
 script finds an install that has both and hands it to the parser itself — **don't export
 DOTNET_ROOT for step 2**. If none has both, it prints one `ERROR: … cannot start` up front
 and reads nothing (every `.raw` comes back `unknown` with that reason): run `bash
-scripts/ensure_dotnet8.sh` on the login node (installs both into
-`~/.proteomics-pipeline/dotnet8`; needs internet), or on HIVE `module load
-dotnet-core-sdk/8.0.4` in the same shell, and re-run step 2. Don't retry under `srun`
-first — a compute node gives the same answer. Each file's `reader` records the parser, its
+scripts/ensure_dotnet8.sh` (installs both into `~/.proteomics-pipeline/dotnet8`; needs
+internet; on a cluster login node its download runs itself on a compute node), or on HIVE
+`module load dotnet-core-sdk/8.0.4` in the same shell, and re-run step 2. Don't retry step 2
+under `srun` before that — a compute node gives the same answer. Each file's `reader` records the parser, its
 version and the `DOTNET_ROOT` used. A `.raw` that is `unknown` for any other reason says
 why in its `warnings`; without a measured precursor range step 6b falls back to 380–980 for
 DIA, and refuses a DIA-NN DDA cfg.

@@ -24,8 +24,10 @@
 #
 # Idempotent: reuses a root that already has both; into its own DEST it installs only the
 # runtime that is missing (an existing NETCore-only DEST gets AspNetCore added in place).
-# Run it on a machine with internet (an HPC LOGIN node) -- compute nodes often have none.
-# It installs to a shared path so compute nodes can read it at run time.
+# It needs internet only when it has something to install. On a cluster login node that part runs
+# on a compute node (on_compute.py, one blocking srun): HPC@UCD's ucd-hpc rules keep downloads and
+# installs off login nodes, and HIVE's compute nodes reach Microsoft's downloads (srun job 24827776,
+# 2026-10-16). It installs to a shared path so compute nodes can read it at run time.
 #
 # If AspNetCore cannot be installed but a NETCore >= 8.0.17 root exists, that root is still
 # printed (exit 0) with a WARNING: DIA-NN's callers (run_search.py, diann_parallel.py) read
@@ -69,7 +71,21 @@ if [ -n "$sysroot" ] && have_ok "$sysroot"; then
   echo "system .NET 8 ok at $sysroot" >&2; echo "$sysroot"; exit 0
 fi
 
-# 3) install whichever runtime DEST lacks (needs internet -- run on a login node)
+# 3) install whichever runtime DEST lacks (needs internet). Steps 1-2 above are checks and stay
+# where they are; a download on a cluster login node (sbatch on PATH, no SLURM job) is moved to a
+# compute node first: this script again, under on_compute.py. srun passes stdout through, so the
+# root is still the LAST line.
+if command -v sbatch >/dev/null 2>&1 && [ -z "${SLURM_JOB_ID:-}" ]; then
+  here="$(cd "$(dirname "$0")" && pwd)"
+  if command -v python3 >/dev/null 2>&1 && [ -f "$here/on_compute.py" ]; then
+    exec python3 "$here/on_compute.py" --time 30 --mem 4G --name pp_dotnet8 \
+      --why "ensure_dotnet8.sh downloads and installs .NET 8" -- bash "$here/ensure_dotnet8.sh" "$@"
+  fi
+  echo "ERROR: .NET 8 must be installed, and this is a cluster login node with no python3 +" \
+       "on_compute.py to move the download to a compute node. Run it in a job: srun" \
+       "--account=<yours> --partition=<yours> --time=30 --mem=4G bash $here/ensure_dotnet8.sh" >&2
+  exit 1
+fi
 # install_runtime <dotnet|aspnetcore>; returns non-zero instead of exiting, so a failed
 # AspNetCore download can still fall back to a NETCore root below
 install_runtime() {

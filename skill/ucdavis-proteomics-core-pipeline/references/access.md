@@ -91,7 +91,9 @@ bash scripts/hive_exec.sh 'hostname; sbatch --version | head -1'   # confirm
      builds (`/quobyte/proteomics-grp/dia-nn/build_*/diann-<version>/`, plus an older
      `.sif`); `fetch_fasta.py --hive`
      reuses `/quobyte/proteomics-grp/MRS/` FASTAs. Build the R/Python/DE env once with
-     `setup.sh` (it's the same micromamba env):
+     `setup.sh` (it's the same micromamba env). On the login node it runs itself on a compute
+     node (one blocking `srun`, up to 2 h; HIVE's compute nodes have internet), so run the call
+     in the background and wait:
      ```
      bash scripts/hive_exec.sh 'bash ~/proteomics-pipeline/scripts/setup.sh'
      ```
