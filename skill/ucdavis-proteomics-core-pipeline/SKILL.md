@@ -422,13 +422,13 @@ Core's: its Submission section and feedback survey). Carry on to step 1b.
 
 Core staff answered step 0a's question 3 (never ask for a number again here):
 - **None (internal work)** → no `identify` and no submission. Put it on the board now, before
-  step 2 (`references/board.md` sections 1–2; `connect` exit 9: show its `link` and
-  `tell_your_person` word for word, and carry on):
+  step 2 (`references/board.md` sections 1–2: `whoami` first, its `owner.person` is the UPN;
+  `connect` exit 9: show its `link` and `tell_your_person` word for word, and carry on):
   ```
-  bash scripts/board.sh connect --owner <their HIVE login>@ucdavis.edu
+  bash scripts/board.sh connect --owner <their UPN>
   bash scripts/board.sh start --internal --title '<the analysis short name>' --goal '<what it is, in your words>' --hours 336 --with bsphinney@ucdavis.edu
   # no usable local Python: the same on HIVE (title and goal without $ ` \ " ')
-  bash scripts/hive_exec.sh 'bash ~/proteomics-pipeline/scripts/board.sh connect --owner <their HIVE login>@ucdavis.edu'
+  bash scripts/hive_exec.sh 'bash ~/proteomics-pipeline/scripts/board.sh connect --owner <their UPN>'
   bash scripts/hive_exec.sh 'bash ~/proteomics-pipeline/scripts/board.sh start --internal --title "<the analysis short name>" --goal "<what it is, in your words>" --hours 336 --with bsphinney@ucdavis.edu'
   ```
   Use the same title at `session.py init --internal`. If the paths name a submission anyway,
@@ -609,12 +609,14 @@ submission, the same path locally and on HIVE (`~/core/PROT_0807`).
    them (given the HIVE copy's path, they find `private/` themselves).
 
    **Then put it on the Core Project Board** (a minute, and never a reason to wait): `bash
-   scripts/board.sh connect --owner <their HIVE login>@ucdavis.edu` (exit 9 the first time on
+   scripts/board.sh whoami` first (when it answers, its `owner.person` is `--owner`: a HIVE
+   login is not always the UPN), then `bash scripts/board.sh connect --owner <their UPN>`
+   (exit 9 the first time on
    this computer: show its `link` and `tell_your_person` word for word), then `bash
    scripts/board.sh start --prot PROT_0807 ... --with bsphinney@ucdavis.edu` (the whole command,
    with its single-quoted titles and goal: `references/board.md` section 2). No usable local
    Python: each through HIVE, `bash scripts/hive_exec.sh 'bash
-   ~/proteomics-pipeline/scripts/board.sh connect --owner <their HIVE login>@ucdavis.edu'`, and
+   ~/proteomics-pipeline/scripts/board.sh connect --owner <their UPN>'`, and
    `start` the same way, its titles and goal in double quotes without `$` `` ` `` `\` `"` `'`.
    You create the project and its thread yourself, and Brett approves it on the board. Carry on.
    Later, one record at each milestone (`references/board.md` section 3); a search starts on

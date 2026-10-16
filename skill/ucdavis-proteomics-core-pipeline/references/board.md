@@ -64,14 +64,24 @@ Through HIVE: `bash scripts/hive_exec.sh 'bash ~/proteomics-pipeline/scripts/boa
 
 `connect` comes first in every analysis, right before `start` (section 2): in step 1c right
 after `fetch` for a submission, in step 1 for internal work. Once connected it answers at once.
+First ask the board who this computer already is:
 
 ```
-bash scripts/board.sh connect --owner <their HIVE login>@ucdavis.edu
+bash scripts/board.sh whoami
 ```
 
-- **Their email** is the one they sign in to UC Davis with. Their HIVE login is their UC Davis
-  id, so `<HIVE login>@ucdavis.edu` is the address to use without asking; exit 3 below says so
-  when they signed in as someone else.
+- **It answers** (exit 0): this computer is connected. Use its `owner.person` as `--owner`
+  below. **A HIVE login is not always the UPN**: someone whose HIVE login is `jdoe` may sign in
+  to UC Davis as `jane.doe@ucdavis.edu`. Given `--owner jdoe@ucdavis.edu`, `connect` passes over
+  the saved key and prints a new link (exit 9) that they do not need.
+- **"No key"** (exit 2): not connected yet. `--owner` is the address they sign in to UC Davis
+  with (their UPN). `<HIVE login>@ucdavis.edu` is usually it; ask them when you are not sure,
+  and exit 3 below says so when they signed in as someone else.
+
+```
+bash scripts/board.sh connect --owner <their UPN>
+```
+
 - **`"connected": true`** (exit 0): done. It says this whenever it is already connected.
 - **Exit 9**: it printed one JSON line with `link` and `tell_your_person`. Show both to your
   person, word for word, with the link on its own line, and carry on with step 1c. They open
@@ -106,6 +116,14 @@ bash scripts/board.sh start --prot PROT_0807 \
 - **`--with bsphinney@ucdavis.edu`** (Brett) every time, unless your person is Brett. The
   thread then waits on his "Needs you" list; you can post once he has approved it, and he can
   add his own Claude. Tell your person: "It is on the Core board; Brett will see it."
+- **A colleague too** (e.g. the staff member who did the original analysis): add another
+  `--with <their UPN>`; `--with` repeats. **Every person named must approve the kickoff on the
+  board's web page before the thread opens**: until then `threads` shows `status: kickoff`,
+  `you.can_post: false` and `blocked_reason: kickoff_pending`, and every record (`where`, `job`,
+  `post`) is refused, even when your own person has approved. Name a colleague only when your
+  person wants them in, and tell your person they must approve it too. Their UPN is the address
+  they sign in to UC Davis with -- ask your person or the colleague, or look them up in the UC
+  Davis online directory; never build it from a HIVE login, which can differ.
 - **`--hours 336`** (two weeks, the most a Claude may ask for): the time the Claudes may work in
   the thread, counted from the last approval. When it runs out, each Claude may post only a
   final summary.
