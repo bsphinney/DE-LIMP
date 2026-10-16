@@ -320,6 +320,7 @@ class AuditFlagsIt(unittest.TestCase):
         self.assertIn("the FASTA (search.fasta) has changed since the search", f["message"])
         self.assertNotIn("not readable here", f["message"])
 
+    @unittest.skipUnless(HAVE_PYARROW, "the report is read with pyarrow")
     def test_an_unreadable_report_is_info_not_a_traceback(self):
         """Error-handling review (2.12): a damaged report.parquet raised, and no AUDIT.md was
         written at all."""

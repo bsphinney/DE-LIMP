@@ -30,6 +30,12 @@ sys.path.insert(0, SCRIPTS)
 sys.path.insert(0, HERE)
 
 import diann_parallel as dp  # noqa: E402
+
+try:
+    import pyarrow  # noqa: F401  -- the fake DIA-NN writes report.parquet with it
+    HAVE_PYARROW = True
+except ImportError:
+    HAVE_PYARROW = False
 from test_single_shot_sbatch import HIGH, LIBFREE_CFG, _Workspace, _read, _write  # noqa: E402
 
 # DIA-NN's arguments() at tag 1.8: argv joined with spaces, cut at every "--"; "--f X" adds a file;
@@ -124,6 +130,7 @@ class ThePlan(unittest.TestCase):
 
 
 class SingleShot(unittest.TestCase):
+    @unittest.skipUnless(HAVE_PYARROW, "the fake DIA-NN writes report.parquet with pyarrow")
     def test_a_dashed_folder_is_searched_through_links_and_every_run_is_reported(self):
         with tempfile.TemporaryDirectory() as d:
             w = _Workspace(d)
@@ -152,6 +159,7 @@ class SingleShot(unittest.TestCase):
             self.assertNotIn("unrecognised option", r.stdout)
             self.assertIn("all 2 runs", r.stdout)
 
+    @unittest.skipUnless(HAVE_PYARROW, "the fake DIA-NN writes report.parquet with pyarrow")
     def test_the_bug_itself_a_dashed_path_drops_the_run_and_the_job_fails(self):
         """Handed straight to the parsing fake (what 2.11 did), the run is skipped -- and the
         search job's report check fails it rather than finishing on the other run."""
@@ -182,6 +190,7 @@ class SingleShot(unittest.TestCase):
             self.assertFalse(os.path.exists(w.out), "nothing may be written")
             self.assertFalse(os.path.exists(w.lib_job))
 
+    @unittest.skipUnless(HAVE_PYARROW, "the fake DIA-NN writes report.parquet with pyarrow")
     def test_rename_dashed_runs_searches_it_under_the_new_name(self):
         with tempfile.TemporaryDirectory() as d:
             w = _Workspace(d)

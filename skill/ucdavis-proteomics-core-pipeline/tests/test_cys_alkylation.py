@@ -313,6 +313,7 @@ class UnreadableReport(unittest.TestCase):
     """Error audit of 2.12: a damaged report.parquet made cys_check() and detected_depth() raise
     with a traceback. Each now says, in one line, that it could not be read."""
 
+    @unittest.skipUnless(HAVE_PYARROW, "the cysteine check reads report.parquet with pyarrow")
     def test_a_damaged_report_is_one_info_line(self):
         with tempfile.TemporaryDirectory() as d:
             rep = os.path.join(d, "report.parquet")
