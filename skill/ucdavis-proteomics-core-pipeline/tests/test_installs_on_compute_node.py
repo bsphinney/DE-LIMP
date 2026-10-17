@@ -125,6 +125,15 @@ class SetupOnAComputeNode(limpa_t.SetupLimpaGate):
         self.assertIn("inside a job", note)
 
 
+class FixTextsSayCompute(unittest.TestCase):
+    def test_detect_acquisitions_dotnet_fix_no_longer_says_a_login_node_is_fine(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(HERE), "scripts"))
+        import detect_acquisition
+        fix = detect_acquisition._dotnet_fix()
+        self.assertNotIn("fine on a login node", fix)
+        self.assertIn("compute node", fix)
+
+
 class EnsureDotnet8OnAComputeNode(dn_t.EnsureDotnet8):
     TOOLS = dn_t.EnsureDotnet8.TOOLS + ("tr",)
 

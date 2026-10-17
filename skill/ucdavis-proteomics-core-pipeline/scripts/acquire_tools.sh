@@ -39,6 +39,7 @@
 # =============================================================================
 set -uo pipefail
 
+ACQUIRE_ARGS=("$@")              # for a re-run on a compute node (download_here)
 CLASS="${1:?platform_class required (hpc|mac|linux)}"
 ROOT="${2:-$HOME/.proteomics-pipeline/tools}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -51,6 +52,27 @@ mkdir -p "$ROOT"
 MANIFEST="$ROOT/tools.json"
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"; ARCH="$(uname -m)"
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# A download (Sage, DIA-NN, FragPipe: a release archive fetched and unpacked) is work for a
+# compute node -- HPC@UCD's ucd-hpc rules; finding a build that is already there is not. On a
+# cluster login node (on_compute.py --is-login-node) the first download re-runs this whole script
+# there through on_compute.py: one blocking srun, and tools.json is written by that run. With no
+# python3 + on_compute.py on a cluster, nothing is downloaded and a note says how.
+# download_here <what>: returns 0 to download here; 1 = do not.
+download_here() {
+  if [ -n "${SLURM_JOB_ID:-}" ] || [ -n "${PROTEOMICS_ON_COMPUTE:-}" ]; then return 0; fi
+  if have python3 && [ -f "$SCRIPT_DIR/on_compute.py" ]; then
+    python3 "$SCRIPT_DIR/on_compute.py" --is-login-node || return 0
+    exec python3 "$SCRIPT_DIR/on_compute.py" --time 60 --mem 4G --name pp_acquire \
+      --why "acquire_tools.sh downloads $1" -- "${BASH:-bash}" "$SCRIPT_DIR/acquire_tools.sh" "${ACQUIRE_ARGS[@]}"
+  fi
+  if have sbatch || [ -x "${HPCCF_SLURM_BIN:-/cvmfs/hpc.ucdavis.edu/sw/spack/environments/core/view/generic/slurm/bin}/sbatch" ] \
+     || [ -r "${UCD_HPC_CLUSTER_CONF:-/opt/hpccf/etc/cluster_name.conf}" ]; then
+    NOTES+=("$1: not downloaded -- this is a cluster login node with no python3 + on_compute.py to move the download to a compute node. Run acquire_tools.sh in a job: srun --account=<yours> --partition=<yours> --time=60 --mem=4G bash $SCRIPT_DIR/acquire_tools.sh ${ACQUIRE_ARGS[*]}")
+    return 1
+  fi
+  return 0
+}
 
 # normalize a version into the tags engines actually use
 sage_tag()  { local v="$1"; [ -z "$v" ] && { echo ""; return; }; case "$v" in v*) echo "$v";; *) echo "v$v";; esac; }
@@ -179,6 +201,7 @@ acquire_sage() {
     esac
     local url; url="$(asset_url_tag lazear/sage "$tag" "$pat")"
     if [ -z "$url" ]; then NOTES+=("Sage: could not resolve a release asset for $OS-$ARCH version='$ver'; see https://github.com/lazear/sage/releases"); return; fi
+    download_here Sage || return
     echo "  Sage: downloading $url"
     curl -fsSL "$url" -o "$dir/sage.tar.gz" && { tar -xzf "$dir/sage.tar.gz" -C "$dir" --strip-components=1 2>/dev/null || tar -xzf "$dir/sage.tar.gz" -C "$dir"; }
     bin="$(find "$dir" -name sage -type f 2>/dev/null | head -n1)"
@@ -265,6 +288,7 @@ acquire_diann() {
   local dir="$ROOT/diann/$got"; mkdir -p "$dir"
   local existing; existing="$(find "$dir" -name 'diann-linux' -type f 2>/dev/null | head -n1)"
   if [ -n "$existing" ]; then DIANN_CMD="$existing"; DIANN_VER="$got"; return; fi
+  download_here DIA-NN || return
   echo "  DIA-NN: downloading $url"
   curl -fsSL "$url" -o "$dir/diann.zip" && (cd "$dir" && unzip -oq diann.zip)
   existing="$(find "$dir" -name 'diann-linux' -type f 2>/dev/null | head -n1)"
@@ -372,6 +396,7 @@ acquire_fragpipe() {
     mkdir -p "$dir"
     local url; url="$(asset_url_tag Nesvilab/FragPipe "$tag" 'FragPipe-[0-9].*zip' | grep -v jre)"
     if [ -z "$url" ]; then NOTES+=("FragPipe: could not resolve release zip for version '$ver'; see https://github.com/Nesvilab/FragPipe/releases"); return; fi
+    download_here FragPipe || return
     echo "  FragPipe: downloading $url"
     # The asset names the release (FragPipe-24.0.zip). Keep it: the file is saved as
     # fragpipe.zip, so after this line the name is the only place the release survives if

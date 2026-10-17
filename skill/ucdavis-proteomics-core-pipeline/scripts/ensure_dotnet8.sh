@@ -82,7 +82,7 @@ if [ -z "${SLURM_JOB_ID:-}" ] && [ -z "${PROTEOMICS_ON_COMPUTE:-}" ]; then
   if command -v python3 >/dev/null 2>&1 && [ -f "$here/on_compute.py" ]; then
     if python3 "$here/on_compute.py" --is-login-node; then
       exec python3 "$here/on_compute.py" --time 30 --mem 4G --name pp_dotnet8 \
-        --why "ensure_dotnet8.sh downloads and installs .NET 8" -- bash "$here/ensure_dotnet8.sh" "$@"
+        --why "ensure_dotnet8.sh downloads and installs .NET 8" -- "${BASH:-bash}" "$here/ensure_dotnet8.sh" "$@"
     fi
   elif command -v sbatch >/dev/null 2>&1 \
        || [ -x "${HPCCF_SLURM_BIN:-/cvmfs/hpc.ucdavis.edu/sw/spack/environments/core/view/generic/slurm/bin}/sbatch" ] \

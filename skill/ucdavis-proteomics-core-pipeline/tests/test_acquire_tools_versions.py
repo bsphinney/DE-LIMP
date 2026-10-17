@@ -29,6 +29,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -192,6 +193,40 @@ class DownloadBranchTests(AcquireHarness):
         t = self.acquire("hpc", "diann", "2.7.0")
         self.assertEqual(t["versions"]["diann"], "2.7.0")
         self.assertNotIn("2.6.1", t["diann"])
+
+    def test_on_a_login_node_a_download_runs_on_a_compute_node(self):
+        """HPC@UCD's ucd-hpc rules: a download and an unzip belong in a job (review of the HPC
+        branch: access.md ran acquire_tools.sh hpc on the login node). Finding a build stays a
+        check; a download re-runs the script under on_compute.py, which writes tools.json."""
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import test_on_compute as oc
+        for name, text in (("sbatch", "#!/bin/sh\nexit 0\n"), ("srun", oc.FAKE_SRUN),
+                           ("sacctmgr", oc.FAKE_SACCTMGR)):
+            _exe(os.path.join(self.bin, name), text)
+        os.symlink(sys.executable, os.path.join(self.bin, "python3"))
+        log = os.path.join(self.d, "srun.log")
+        env = {"FAKE_SRUN_LOG": log, "FAKE_ASSOC": oc.LAB, "USER": "staff1",
+               "UCD_HPC_CLUSTER_CONF": os.path.join(self.d, "none"),
+               "HPCCF_SLURM_BIN": os.path.join(self.d, "none")}
+        t = self.acquire("hpc", "diann", "2.7.0", extra_env=env)
+        self.assertEqual(t["versions"]["diann"], "2.7.0")          # downloaded, in the "job"
+        with open(log) as fh:
+            (call,) = [json.loads(ln) for ln in fh if ln.strip()]
+        self.assertIn("--job-name=pp_acquire", call)
+        self.assertIn("--time=60", call)
+        self.assertEqual(call[-2:], ["hpc", self.root])
+
+    def test_a_build_already_there_is_found_without_a_job(self):
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import test_on_compute as oc
+        for name, text in (("sbatch", "#!/bin/sh\nexit 0\n"), ("srun", oc.FAKE_SRUN)):
+            _exe(os.path.join(self.bin, name), text)
+        os.symlink(sys.executable, os.path.join(self.bin, "python3"))
+        log = os.path.join(self.d, "srun.log")
+        self.hive_build("build_270/diann-2.7.0")
+        t = self.acquire("hpc", "diann", "2.7.0", extra_env={"FAKE_SRUN_LOG": log})
+        self.assertEqual(t["versions"]["diann"], "2.7.0")
+        self.assertFalse(os.path.exists(log))
 
     def test_nothing_resolvable_records_no_version_rather_than_latest(self):
         """No HIVE build and no reachable release: there is no command, so there is no

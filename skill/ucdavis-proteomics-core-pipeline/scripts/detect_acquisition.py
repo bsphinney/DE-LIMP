@@ -672,7 +672,8 @@ def _dotnet_fix():
     dest = os.environ.get(DOTNET_DIR_ENV) or DOTNET_DIR_DEFAULT
     return (f"Fix, then re-run: `bash {helper}` (installs Microsoft.NETCore.App and "
             f"Microsoft.AspNetCore.App 8.0 into {dest}, which is checked here; "
-            f"needs internet -- fine on a login node), or on UC Davis HIVE run `module load "
+            f"needs internet; on a cluster login node its download runs itself on a compute "
+            f"node), or on UC Davis HIVE run `module load "
             f"dotnet-core-sdk/8.0.4` in the same shell first; or use a self-contained parser, "
             f"which needs no .NET (bioconda's `thermorawfileparser`, which `bash "
             f"scripts/setup.sh` installs, or a Linux/macOS/Windows zip from {TRFP_RELEASES})")
