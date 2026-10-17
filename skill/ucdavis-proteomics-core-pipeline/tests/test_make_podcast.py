@@ -698,10 +698,13 @@ class Gemini(Workspace):
             p.stop()
         super().tearDown()
 
-    def render(self, behaviour, *extra, **kw):
+    def render(self, behaviour, *extra, preflight=False, **kw):
+        """--no-preflight unless asked: these tests count and order the chunks' own requests;
+        the two-line test before them has its own tests (test_podcast_tts_fallback.py)."""
         mods, log = fake_genai(behaviour, **kw)
+        flags = ("--no-verify",) + (() if preflight else ("--no-preflight",))
         with mock.patch.dict(sys.modules, mods):                 # verify has its own tests
-            rc, out, err = run("render", self.script, "--tts", "gemini", "--no-verify", *extra)
+            rc, out, err = run("render", self.script, "--tts", "gemini", *flags, *extra)
         return rc, out, err, log
 
     def assert_no_key_anywhere(self, *texts):
@@ -1092,7 +1095,8 @@ class Gemini(Workspace):
         mods["google.genai"].Client = WavClient
         with mock.patch.dict(sys.modules, mods):
             rc, out, err = run("render", self.script, "--tts", "gemini", "--no-verify",
-                               "--cloud-ok", "--model", "gemini-2.5-flash-preview-tts")
+                               "--no-preflight", "--cloud-ok", "--model",
+                               "gemini-2.5-flash-preview-tts")
         self.assertEqual(rc, 1)
         self.assertEqual(state["n"], 1)                           # one billed request, no more
         self.assertIn("could not be read", err)
@@ -1125,7 +1129,8 @@ class Gemini(Workspace):
                 self.models = real(api_key).models
         mods["google.genai"].Client = OldClient
         with mock.patch.dict(sys.modules, mods):
-            rc, out, err = run("render", self.script, "--tts", "gemini", "--no-verify", "--cloud-ok")
+            rc, out, err = run("render", self.script, "--tts", "gemini", "--no-verify",
+                               "--no-preflight", "--cloud-ok")
             self.assertEqual(rc, 0, err)
             self.assertIn("has no client.interactions", err)
             self.assertIn("pip install -U google-genai", err)

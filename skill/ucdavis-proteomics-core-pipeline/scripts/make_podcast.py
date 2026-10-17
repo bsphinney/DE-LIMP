@@ -131,6 +131,14 @@ HEARTBEAT = 60.0                                    # s between "still waiting" 
 # waits: eleven chunks each hanging once would otherwise reach the job's time limit (review of
 # 2.13.1), where SLURM's TIMEOUT says less than the resume message does
 REQUEST_TIMEOUT_BUDGET_MIN = 30.0                   # minutes
+# A model that stops answering: after REQUEST_TIMEOUTS unanswered requests on one chunk the render
+# moves to the next candidate model and makes EVERY chunk again with it (one episode never mixes
+# two models' voices). And before the first chunk it must make, each candidate is asked a two-line
+# test first and the first that answers is used. A staff render (2026-10-16) sat 28 minutes on a
+# stalled gemini-3.8-flash-tts while gemini-2.5-flash-preview-tts answered the same test in 2.9 s;
+# the episode's first chunks were cached from the stalled model, so it could never hand over.
+PREFLIGHT_TIMEOUT = 60.0                            # s for the two-line test
+PREFLIGHT_LINES = ("This is a short sound check.", "And this is the second voice.")
 TERMS_URL = "https://ai.google.dev/gemini-api/terms"
 KEY_FILE = os.path.join("~", ".config", "ucdavis-proteomics", "gemini_key")
 # The Core's shared key on HIVE (Brett installs it: owner brettsp, group proteomics-grp, mode
@@ -1511,12 +1519,43 @@ class RequestTimeout(Exception):
     """A TTS request with no answer within --request-timeout seconds."""
 
 
+class RestartRender(Exception):
+    """The model stopped answering and the render moved to another: every chunk is made again
+    with the new model, so the episode never mixes two models' voices."""
+
+
+def gemini_client(genai, types, key, timeout_s):
+    """genai.Client with a per-request HTTP timeout and no silent SDK retries -> (client, record).
+    Read from google-genai 2.31.0's source (HIVE, 2026-10-16): HttpOptions.timeout is in
+    milliseconds; models.generate_content retries only when retry_options is set; the interactions
+    client (Gemini 3 TTS) retries by itself -- 3 retries when retry_options is unset, with a
+    server's Retry-After obeyed while nothing is logged -- and takes HttpRetryOptions.attempts as
+    its retry count, so attempts=1 leaves it one retry, the fewest this SDK allows (attempts=0 is
+    turned into 1 when the client is built). timed_request's deadline bounds every request either
+    way. An SDK without these options keeps its own defaults, and the record says so."""
+    want = {"timeout_ms": int(timeout_s * 1000), "retry_attempts": 1}
+    try:
+        opts = types.HttpOptions(timeout=want["timeout_ms"],
+                                 retry_options=types.HttpRetryOptions(attempts=1))
+    except (AttributeError, TypeError, ValueError) as e:
+        return genai.Client(api_key=key), {
+            "set": False, "note": f"this google-genai has no HttpOptions / HttpRetryOptions "
+                                  f"({type(e).__name__}): its own timeout and retries apply"}
+    try:
+        return genai.Client(api_key=key, http_options=opts), dict(want, set=True)
+    except TypeError as e:
+        return genai.Client(api_key=key), {
+            "set": False, "note": f"this google-genai's Client takes no http_options ({e}): "
+                                  "its own timeout and retries apply"}
+
+
 class GeminiTTS(object):
     """Gemini multi-speaker TTS, one request per chunk. Model names are read from the API
     (models.list), never assumed. Default order: a pro TTS model, then gemini-3.8-flash-tts,
     then gemini-2.5-flash-preview-tts. A model missing (404), without quota, or rejecting the
     request before it has made a chunk hands over to the next. Once a model has made a chunk
-    the episode stays on it, because a second model's voices sound different.
+    the episode stays on it, because a second model's voices sound different -- unless it stops
+    answering (preflight, stall_switch): then the next model makes every chunk again.
 
     Two APIs, chosen from the model name (https://ai.google.dev/gemini-api/docs/speech-generation,
     read 2026-09-25):
@@ -1552,12 +1591,22 @@ class GeminiTTS(object):
                               "python3 -m pip install google-genai (or use --tts say)")
         self.key = read_key(core=bool(getattr(a, "core_run", None)))
         self.types = types
-        self.client = genai.Client(api_key=self.key)
+        self.request_timeout = float(getattr(a, "request_timeout", None) or REQUEST_TIMEOUT)
+        self.client, self.http = gemini_client(genai, types, self.key, self.request_timeout)
+        if not self.http.get("set"):
+            log(f"[INFO] {self.http['note']}")
         self.user_models = list(a.model or [])
         self.candidates = self.user_models or self.discover()
         self.model = self.candidates[0]
         self.min_interval = float(getattr(a, "min_interval", MIN_INTERVAL))
-        self.request_timeout = float(getattr(a, "request_timeout", None) or REQUEST_TIMEOUT)
+        # what the key is: "free" once a 429 names a free-tier quota (never assumed), and whether
+        # a hand-typed --cloud-ok note says otherwise ("paid") -- recorded, never a stop
+        self.key_tier, self.key_tier_basis, self.tier_warning = None, None, None
+        note = getattr(a, "cloud_ok", None)
+        self.paid_note = (note if isinstance(note, str) and re.search(r"\bpaid\b", note, re.I)
+                          and not re.search(r"\b(?:un|not\s+|non-?)paid\b", note, re.I) else None)
+        self.stalled, self.switches = [], []     # models that stopped answering; the hand-overs
+        self.preflight_record = None
         self.timeout_budget = 60.0 * float(getattr(a, "request_timeout_budget", None)
                                            or REQUEST_TIMEOUT_BUDGET_MIN)
         self.timed_out = 0.0                 # s lost to unanswered requests in this render
@@ -1711,11 +1760,12 @@ class GeminiTTS(object):
         return (self.interaction_audio(r) if self.api(self.model) == "interactions" else
                 self.audio(r))
 
-    def timed_request(self, chunk, speak, label):
-        """request() in a worker thread, waited for at most request_timeout seconds, with a log
-        line when it is sent and every HEARTBEAT seconds while it is out: a hung request shows in
-        the log and ends as RequestTimeout, never an endless wait. The abandoned thread is a
-        daemon, so it cannot keep the process alive."""
+    def timed_request(self, chunk, speak, label, timeout=None):
+        """request() in a worker thread, waited for at most `timeout` (request_timeout) seconds,
+        with a log line when it is sent and every HEARTBEAT seconds while it is out: a hung request
+        shows in the log and ends as RequestTimeout, never an endless wait. The abandoned thread
+        is a daemon, so it cannot keep the process alive."""
+        timeout = self.request_timeout if timeout is None else timeout
         box = {}
 
         def work():
@@ -1726,15 +1776,15 @@ class GeminiTTS(object):
         t = threading.Thread(target=work, name="tts-request", daemon=True)
         start = _now()
         log(f"[render] {label}: sent to {self.model} (an answer is waited for up to "
-            f"{self.request_timeout:.0f} s)")
+            f"{timeout:.0f} s)")
         t.start()
         while True:
-            left = self.request_timeout - (_now() - start)
+            left = timeout - (_now() - start)
             t.join(max(0.0, min(HEARTBEAT, left)))
             if not t.is_alive():
                 break
             waited = _now() - start
-            if waited >= self.request_timeout:
+            if waited >= timeout:
                 raise RequestTimeout(f"no answer from {self.model} in {waited:.0f} s")
             log(f"[render] {label}: still waiting for {self.model} ({waited:.0f} s)")
         if "e" in box:
@@ -1744,6 +1794,105 @@ class GeminiTTS(object):
     def _has_next(self):
         return (self.model in self.candidates
                 and self.candidates.index(self.model) + 1 < len(self.candidates))
+
+    def _next_model(self):
+        """The next candidate after this model that has not stopped answering, or None."""
+        if self.model not in self.candidates:
+            return None
+        return next((m for m in self.candidates[self.candidates.index(self.model) + 1:]
+                     if m not in self.stalled), None)
+
+    def note_tier(self, err):
+        """A 429 that names a free-tier quota: the key's Google project is on the FREE tier.
+        Said once in the log and recorded (podcast.json key_tier); a --cloud-ok note that says
+        "paid" gets one plain warning that it does not match. Never a stop: the Core's standing
+        approval covers free-tier Core podcasts (2026-09-28)."""
+        if not err.get("free_tier") or self.key_tier == "free":
+            return
+        self.key_tier = "free"
+        self.key_tier_basis = f"a 429 from {self.model} named the free-tier quota {err['free_tier']}"
+        log(f"[render] the Gemini key's Google project is on the FREE tier ({self.key_tier_basis})")
+        if self.paid_note:
+            self.tier_warning = (f"the --cloud-ok note says the key is paid ({self.paid_note!r}), but "
+                                 f"its Google project is on the free tier ({self.key_tier_basis}): "
+                                 "the note does not match the key; correct it for the next render")
+            log(f"[WARN] {self.tier_warning}")
+
+    def stall_switch(self, label, why):
+        """This model stopped answering: hand over to the next candidate, which makes EVERY chunk
+        again (RestartRender), or None when there is no other."""
+        nxt = self._next_model()
+        if not nxt:
+            return None
+        was = self.model
+        self.stalled.append(was)
+        note = (f"{was} stopped answering ({label}: {why}); switched to {nxt}, which made every "
+                "chunk again, so the episode has one model's voices")
+        self.switches.append({"from": was, "to": nxt, "at": label, "why": why, "note": note})
+        log(f"[render] {was} stopped answering ({label}: {why}). Switching to {nxt} and making "
+            f"EVERY chunk again with it, so the episode never mixes two models' voices")
+        self.model, self.produced, self.models_used = nxt, 0, []
+        return RestartRender(note)
+
+    def switch_notes(self):
+        """One line per hand-over in this render, for podcast.json's warnings."""
+        return [x["note"] for x in self.switches]
+
+    def preflight(self, cached_from=None):
+        """Before the first chunk this render must make: a two-line test to each candidate in
+        turn, from the current one, on a PREFLIGHT_TIMEOUT deadline; the first that answers is
+        used. A rate limit counts as an answer (the normal loop waits it out); a missing model,
+        no quota, a rejected request, an error or no answer moves on; a key problem stops. A
+        model other than the one the cache was made with (`cached_from`) makes every chunk
+        again. -> the model chosen; RenderError when none answers."""
+        probe = Chunk(0, [Turn(self.hosts[0], PREFLIGHT_LINES[0], 0, 0),
+                          Turn(self.hosts[1], PREFLIGHT_LINES[1], 0, 0)])
+        start = self.model if self.model in self.candidates else self.candidates[0]
+        order = self.candidates[self.candidates.index(start):]
+        tried = []
+        for m in order:
+            self.model = m
+            self._pace()
+            t0 = _now()
+            try:
+                self.parse(self.timed_request(probe, lambda x: x, "preflight",
+                                              timeout=PREFLIGHT_TIMEOUT))
+            except RequestTimeout:
+                self.stalled.append(m)
+                tried.append(f"{m}: no answer in {PREFLIGHT_TIMEOUT:.0f} s")
+                continue
+            except EmptyAudio as e:
+                tried.append(f"{m}: {e}")
+                continue
+            except Exception as e:
+                err = error_info(e)
+                self.note_tier(err)
+                if err["kind"] == "fatal":
+                    raise RenderError(f"preflight: {m}: {why_line(err, 300)}")
+                if err["kind"] != "rate":
+                    tried.append(f"{m}: {err['kind']} ({why_line(err, 120)})")
+                    continue
+            secs = round(_now() - t0, 1)
+            self.preflight_record = {"model": m, "seconds": secs, "skipped": tried}
+            if tried:
+                log(f"[render] preflight: {'; '.join(tried)}; using {m}, which answered the "
+                    f"two-line test in {secs:g} s")
+            else:
+                log(f"[render] preflight: {m} answered the two-line test in {secs:g} s")
+            if cached_from and m != cached_from:
+                note = (f"{cached_from} made this episode's cached chunks but did not answer the "
+                        f"preflight; {m} makes every chunk again, so the episode has one model's "
+                        "voices")
+                self.switches.append({"from": cached_from, "to": m, "at": "preflight",
+                                      "why": "; ".join(tried), "note": note})
+                self.pinned = False              # none of its chunks are made yet
+                log(f"[render] {note}")
+            return m
+        raise RenderError("no Gemini TTS model answered a two-line test ("
+                          + "; ".join(tried) + "). The chunks already made are cached: re-run "
+                          "later" + (", or" if not self.key_tier else " (this key's project is on "
+                                     "the free tier: its quotas are small), or")
+                          + " --tts say")
 
     def _advance(self):
         if self.produced or not self._has_next():
@@ -1784,6 +1933,10 @@ class GeminiTTS(object):
                         f"{self.timeout_budget / 60:g} min). The chunks already made are cached: "
                         "re-run the same command to resume")
                 if timeouts >= REQUEST_TIMEOUTS:
+                    switch = self.stall_switch(label, f"{timeouts} requests of "
+                                                      f"{self.request_timeout:.0f} s unanswered")
+                    if switch:
+                        raise switch
                     raise RenderError(
                         f"{label}: {self.model} did not answer within {self.request_timeout:.0f} s, "
                         f"{timeouts} times ({e}). The chunks already made are cached: re-run the "
@@ -1792,6 +1945,7 @@ class GeminiTTS(object):
                 continue
             except Exception as e:
                 err = error_info(e)
+                self.note_tier(err)
                 kind = err["kind"]
                 if kind in ("missing", "exhausted", "rejected") and not self.produced \
                         and not self.pinned:
@@ -1907,13 +2061,15 @@ def error_info(e):
     msg = scrub(f"{type(e).__name__}: {e}")
     code = next((c for c in (getattr(e, "code", None), getattr(e, "status_code", None))
                  if isinstance(c, int)), None)
-    found = {"ids": [], "values": [], "delay": None}
+    found = {"ids": [], "values": [], "delay": None, "metrics": []}
 
     def walk(x):
         if isinstance(x, dict):
             for k, v in x.items():
                 if k == "quotaId" and isinstance(v, str):
                     found["ids"].append(v)
+                elif k == "quotaMetric" and isinstance(v, str):
+                    found["metrics"].append(v.rsplit("/", 1)[-1])
                 elif k == "quotaValue":
                     found["values"].append(str(v))
                 elif k == "retryDelay" and found["delay"] is None:
@@ -1935,7 +2091,13 @@ def error_info(e):
     if found["delay"] is not None:
         found["delay"] = min(max(found["delay"], 1.0), 300.0)
     quota = ", ".join(dict.fromkeys(found["ids"]))
-    info = {"msg": msg, "delay": found["delay"], "quota": quota}
+    # The key's project is on Google's FREE tier when a quota it hit says so: quotaMetric
+    # generate_content_free_tier_requests, quotaId ...-FreeTier (render records key_tier)
+    tier = [q for q in found["metrics"] + found["ids"] if re.search(r"free[_-]?tier", q, re.I)]
+    if not tier and re.search(r"\w*free[_-]?tier\w*", text, re.I):
+        tier = [re.search(r"\w*free[_-]?tier\w*", text, re.I).group(0)]
+    info = {"msg": msg, "delay": found["delay"], "quota": quota,
+            "free_tier": ", ".join(dict.fromkeys(tier)) or None}
     if code == 404 or "NOT_FOUND" in text:
         return dict(info, kind="missing")
     if code == 429 or "RESOURCE_EXHAUSTED" in text:
@@ -2275,6 +2437,52 @@ def consent_of(a):
 
 
 # ----------------------------------------------------------------------------- render
+def render_chunks(backend, chunks, speak, cache):
+    """Every chunk, cached or made now -> (pieces, n_cached, n_new, used cache keys, warnings).
+    RestartRender (the model stopped answering and the next one takes over) propagates: the
+    caller starts again from the first chunk, with the new model."""
+    pieces, n_cached, n_new, used, warnings = [], 0, 0, set(), []
+    for i, c in enumerate(chunks, 1):
+        label = f"chunk {i}/{len(chunks)} (segment {c.seg + 1})"
+        while True:
+            key = cache_key(backend, c, speak)
+            path = os.path.join(cache, key + ".wav")
+            side = os.path.join(cache, key + ".json")
+            if os.path.isfile(path):
+                try:
+                    pcm = read_wav(path)
+                    n_cached += 1
+                    backend.produced += 1
+                    if backend.model not in backend.models_used:
+                        backend.models_used.append(backend.model)
+                    try:
+                        with open(side, encoding="utf-8") as fh:
+                            warnings += [str(w) for w in (json.load(fh).get("warnings") or [])]
+                    except (OSError, ValueError, AttributeError):
+                        pass                             # a chunk cached with no warnings
+                    log(f"[render] {label}: cached")
+                    break
+                except (wave.Error, EOFError, OSError, ValueError):
+                    os.remove(path)
+            before = len(backend.warnings)
+            try:
+                pcm = backend.synth(c, speak, label)
+            except SwitchModel:
+                continue
+            new_w = backend.warnings[before:]
+            write_wav(path, pcm)
+            with open(side, "w", encoding="utf-8") as fh:
+                json.dump({"label": label, "model": backend.model, "warnings": new_w}, fh)
+            warnings += new_w
+            n_new += 1
+            backend.produced += 1
+            log(f"[render] {label}: {len(pcm) / float(RATE):.0f} s from {backend.model}")
+            break
+        used.add(key)
+        pieces.append((c.seg, pcm))
+    return pieces, n_cached, n_new, used, warnings
+
+
 def cmd_render(a):
     s = parse_script(a.script)
     if s.problems:
@@ -2328,49 +2536,35 @@ def cmd_render(a):
             backend.pinned = True                 # the re-made chunks join the others' voices
     log(f"[render] {len(chunks)} chunk(s), {words:,} words -> about {words / float(WPM):.0f} min "
         f"with {backend.name}")
+    # A two-line test before the first chunk this render must make (PREFLIGHT_TIMEOUT): a model
+    # that does not answer is passed over before the episode depends on it. Nothing to make, no
+    # test; --no-preflight skips it (and podcast.json says so).
+    preflight = {"run": False, "why": "every chunk is cached"}
+    if hasattr(backend, "preflight"):
+        todo = [c for c in chunks if not os.path.isfile(os.path.join(
+            cache, cache_key(backend, c, speak) + ".wav"))]
+        if getattr(a, "no_preflight", False):
+            preflight = {"run": False, "why": "--no-preflight"}
+        elif todo:
+            cached_from = backend.model if len(todo) < len(chunks) else None
+            backend.preflight(cached_from=cached_from)
+            preflight = dict(run=True, **(backend.preflight_record or {}))
 
     # Each chunk: <key>.wav, and <key>.json with the warnings made when it was synthesized, so
-    # a resumed render still reports them.
-    pieces, n_cached, n_new, used, warnings = [], 0, 0, set(), []
-    for i, c in enumerate(chunks, 1):
-        label = f"chunk {i}/{len(chunks)} (segment {c.seg + 1})"
-        while True:
-            key = cache_key(backend, c, speak)
-            path = os.path.join(cache, key + ".wav")
-            side = os.path.join(cache, key + ".json")
-            if os.path.isfile(path):
-                try:
-                    pcm = read_wav(path)
-                    n_cached += 1
-                    backend.produced += 1
-                    if backend.model not in backend.models_used:
-                        backend.models_used.append(backend.model)
-                    try:
-                        with open(side, encoding="utf-8") as fh:
-                            warnings += [str(w) for w in (json.load(fh).get("warnings") or [])]
-                    except (OSError, ValueError, AttributeError):
-                        pass                             # a chunk cached with no warnings
-                    log(f"[render] {label}: cached")
-                    break
-                except (wave.Error, EOFError, OSError, ValueError):
-                    os.remove(path)
-            before = len(backend.warnings)
-            try:
-                pcm = backend.synth(c, speak, label)
-            except SwitchModel:
-                continue
-            new_w = backend.warnings[before:]
-            write_wav(path, pcm)
-            with open(side, "w", encoding="utf-8") as fh:
-                json.dump({"label": label, "model": backend.model, "warnings": new_w}, fh)
-            warnings += new_w
-            n_new += 1
-            backend.produced += 1
-            log(f"[render] {label}: {len(pcm) / float(RATE):.0f} s from {backend.model}")
+    # a resumed render still reports them. A model that stops answering mid-episode hands over
+    # (RestartRender), and every chunk is made again with the next one.
+    while True:
+        try:
+            pieces, n_cached, n_new, used, warnings = render_chunks(backend, chunks, speak, cache)
             break
-        used.add(key)
-        pieces.append((c.seg, pcm))
+        except RestartRender:
+            continue
+    warnings = list(backend.switch_notes()) + warnings if hasattr(backend, "switch_notes") \
+        else warnings
+    if getattr(backend, "tier_warning", None):
+        warnings.append(backend.tier_warning)
 
+    audio = array.array("h")
     audio = array.array("h")
     audio.extend(chime())
     audio.extend(silence(0.5))
@@ -2416,11 +2610,20 @@ def cmd_render(a):
         "tts": {"backend": backend.name, "model": (backend.models_used or [backend.model])[0],
                 "models_used": backend.models_used, "sample_rate": RATE,
                 "sent_to_cloud": bool(backend.cloud),
+                # the SDK's per-request timeout and retries as set (gemini_client), the two-line
+                # test before the first chunk, and any hand-over from a model that stopped
+                # answering (every chunk made again by the next one)
+                "http": getattr(backend, "http", None), "preflight": preflight,
+                "switched": list(getattr(backend, "switches", None) or []),
                 "what_was_sent": ("the transcript turns after pronunciation substitutions, plus "
                                   "one style line; then, for verify (unless --no-verify), the "
                                   "rendered audio downsampled to 16 kHz; never the report"
                                   if backend.cloud else "nothing (offline)")},
         "cloud_tts_consent": (consent if backend.cloud else False),
+        # "free" once a 429 named a free-tier quota; null when no answer said which tier
+        "key_tier": getattr(backend, "key_tier", None),
+        "key_tier_basis": getattr(backend, "key_tier_basis", None) or (
+            "no answer from Google named the key's tier in this render" if backend.cloud else None),
         "core_run": record_core_run(a.script, core_rec, "render") if core_rec else None,
         "script": "podcast_script.md", "script_sha256": s.sha256,
         "script_author": s.author,
@@ -4194,11 +4397,15 @@ def main(argv=None):
                    help="seconds between requests to one Gemini model (default %(default)s)")
     r.add_argument("--request-timeout", type=float, default=REQUEST_TIMEOUT, metavar="SEC",
                    help="seconds one TTS request's answer is waited for; asked once more, then "
-                        "the render stops with the resume message (default %(default)s)")
+                        "the next candidate model makes every chunk again (with none, the render "
+                        "stops with the resume message) (default %(default)s)")
     r.add_argument("--request-timeout-budget", type=float, default=REQUEST_TIMEOUT_BUDGET_MIN,
                    metavar="MIN", help="minutes lost to unanswered requests allowed in one render "
                                        "before it stops with the resume message (default "
                                        "%(default)s)")
+    r.add_argument("--no-preflight", action="store_true",
+                   help="skip the two-line test each candidate model gets before the first chunk "
+                        "this render makes (recorded in podcast.json)")
     r.add_argument("--keep-wav", action="store_true")
     r.add_argument("--unchecked", action="store_true",
                    help="render without a passing check.txt (recorded in podcast.json)")

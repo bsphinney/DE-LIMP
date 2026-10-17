@@ -537,6 +537,33 @@ bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.t
     is out of quota, render stops, names the chunk and keeps the cache. Re-run later to
     resume, or pass `--model <other>` to re-render every chunk with that model. Only an
     explicit `--model` render prunes another model's cached chunks.
+  - **A model that stops answering is left, and every chunk is made again.** A staff render
+    (2026-10-16) sat 28 minutes on a stalled `gemini-3.8-flash-tts` while
+    `gemini-2.5-flash-preview-tts` answered a two-line test in 2.9 s; its first chunks were
+    cached from the stalled model, so it could never hand over. Now:
+    - **The two-line test (preflight).** Before the first chunk a render must make, each
+      candidate model in turn (the cache's model first) gets one tiny two-speaker request with
+      a 60 s deadline; the first that answers is used. A rate limit counts as an answer; a
+      missing model, no quota, a rejected request or no answer moves on; a key problem stops.
+      If the model that made the cached chunks does not answer, the next one makes **every
+      chunk again**, so the voices never mix. Nothing to make, no test. `--no-preflight` skips
+      it (one request per model tried is saved); `podcast.json` `tts.preflight` records which.
+    - **Mid-episode.** When a chunk's request goes unanswered twice (`--request-timeout`), the
+      render moves to the next candidate model and makes **every chunk again** with it, and
+      says so in the log; with no other model it stops with the resume message, as before.
+      `tts.switched` and the warnings record each hand-over.
+    - **No silent retries in the SDK.** The client is built with a per-request HTTP timeout
+      (`--request-timeout`) and `HttpRetryOptions(attempts=1)` (`tts.http`). Read from
+      google-genai 2.31.0: `generate_content` then never retries; the `interactions` client
+      (Gemini 3) takes `attempts` as its retry count, so it keeps one retry (without the option
+      it made three, obeying a server's Retry-After with nothing logged). The render's own
+      deadline bounds every request either way.
+  - **The key's tier.** When a 429 names a free-tier quota (`generate_content_free_tier_requests`,
+    `…-FreeTier`), render says the key's Google project is on the FREE tier and records
+    `key_tier: "free"` in `podcast.json` (`null` when no answer named a tier: never guessed).
+    A hand-typed `--cloud-ok` note that says "paid" then gets one plain warning that the note
+    does not match the key, in the log and the warnings. It never stops a render: the Core's
+    standing approval covers free-tier Core podcasts (2026-09-28).
   - Gemini 3 TTS needs a google-genai with `client.interactions` (2.25.0 has it). With an older
     one the 3.x models are left out, and render says to run `python3 -m pip install -U
     google-genai`.
@@ -554,8 +581,9 @@ bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.t
   - **A request that does not answer.** Each request logs `[render] chunk k/N ...: sent to
     <model>` and, while it waits, `still waiting for <model> (Ns)` every minute. With no answer
     in `--request-timeout` seconds (default 600; a chunk takes about 3 minutes) it is asked once
-    more, then render stops with the resume message, so the job fails where its watcher sees it
-    instead of hanging until its time limit. The time lost to unanswered requests in one render
+    more, then the next model takes over (above); with no other model render stops with the
+    resume message, so the job fails where its watcher sees it instead of hanging until its
+    time limit. The time lost to unanswered requests in one render
     is capped as well (`--request-timeout-budget`, default 30 min). Re-running resumes from the
     cached chunks. (An abandoned request may still finish and be billed: the retry can cost that
     chunk twice.)
