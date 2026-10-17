@@ -68,25 +68,44 @@ NOTES=()
 # ---- 0. a compute node, never a cluster login node ---------------------------
 # HPC@UCD's ucd-hpc skill (mandatory on Hive, Farm and Franklin since 2026-10-16) names conda
 # solves as login-node abuse, and downloads and package builds belong inside a job; even --check
-# loads R and a handful of packages and starts the .NET parser. On a login node (sbatch on PATH,
-# no SLURM job) setup.sh runs itself again through on_compute.py: one blocking srun with the queue
-# spelled out, and waits. HIVE's compute nodes reach conda-forge, Bioconductor, CRAN and
-# Microsoft's .NET downloads (srun job 24827776, 2026-10-16). An install asks for a queue that
-# will not preempt it half way (--no-preempt).
-if command -v sbatch >/dev/null 2>&1 && [ -z "${SLURM_JOB_ID:-}" ]; then
-  if $CHECK_ONLY; then OC_ARGS="--time 20 --mem 4G --cpus 1"; OC_WHY="setup.sh --check loads R and its packages"
-  else OC_ARGS="--time 120 --mem 8G --cpus 2 --no-preempt"; OC_WHY="setup.sh solves and installs the environment"; fi
+# loads R and a handful of packages and starts the .NET parser. On a login node (on_compute.py
+# --is-login-node: no SLURM job, and SLURM or HPCCF's cluster file here) setup.sh runs itself
+# again through on_compute.py: one blocking srun with the queue spelled out, on a queue that does
+# not preempt, and waits. HIVE's compute nodes reach conda-forge, Bioconductor, CRAN and
+# Microsoft's .NET downloads (srun job 24827776, 2026-10-16).
+# Exit 3: that run did not finish (SLURM refused it, a time limit), so setup.json -- which would
+# otherwise be read as current -- was not rewritten. Exit 2: no way to a compute node here.
+UCD_SLURM_BIN="${HPCCF_SLURM_BIN:-/cvmfs/hpc.ucdavis.edu/sw/spack/environments/core/view/generic/slurm/bin}"
+UCD_CONF="${UCD_HPC_CLUSTER_CONF:-/opt/hpccf/etc/cluster_name.conf}"
+if [ -z "${SLURM_JOB_ID:-}" ] && [ -z "${PROTEOMICS_ON_COMPUTE:-}" ]; then
   OC_PY="$(command -v python3 2>/dev/null || true)"
   if [ -n "$OC_PY" ] && [ -f "$SCRIPT_DIR/on_compute.py" ]; then
-    # shellcheck disable=SC2086  # OC_ARGS is meant to split
-    exec "$OC_PY" "$SCRIPT_DIR/on_compute.py" $OC_ARGS --name pp_setup --why "$OC_WHY" \
-      -- "${BASH:-bash}" "$SCRIPT_DIR/setup.sh" "$@"
+    if "$OC_PY" "$SCRIPT_DIR/on_compute.py" --is-login-node; then
+      if $CHECK_ONLY; then OC_ARGS="--time 20 --mem 4G --cpus 1"; OC_WHY="setup.sh --check loads R and its packages"
+      else OC_ARGS="--time 120 --mem 8G --cpus 2"; OC_WHY="setup.sh solves and installs the environment"; fi
+      # the run writes this id into setup.json (srun passes the environment on): the one that is
+      # there afterwards is this run's, or the run did not finish
+      PROTEOMICS_SETUP_RUN_ID="$$.${RANDOM:-0}.${RANDOM:-0}"; export PROTEOMICS_SETUP_RUN_ID
+      # shellcheck disable=SC2086  # OC_ARGS is meant to split
+      "$OC_PY" "$SCRIPT_DIR/on_compute.py" $OC_ARGS --name pp_setup --why "$OC_WHY" \
+        -- "${BASH:-bash}" "$SCRIPT_DIR/setup.sh" "$@"
+      OC_RC=$?
+      OC_WROTE="$(sed -n 's/.*"run_id": "\([^"]*\)".*/\1/p' "$SETUP_JSON" 2>/dev/null)"
+      if [ "$OC_WROTE" != "$PROTEOMICS_SETUP_RUN_ID" ]; then
+        say "[setup] ERROR: the compute-node run did not finish (exit $OC_RC), and $SETUP_JSON was"
+        say "[setup] not rewritten: its ready_for is from an earlier run. Read the srun lines above"
+        say "[setup] (an account or partition SLURM refused, a time limit), then run setup.sh again."
+        exit 3
+      fi
+      exit $OC_RC
+    fi
+  elif command -v sbatch >/dev/null 2>&1 || [ -x "$UCD_SLURM_BIN/sbatch" ] || [ -r "$UCD_CONF" ]; then
+    say "[setup] REFUSING to run on a cluster login node (SLURM is here, SLURM_JOB_ID is unset),"
+    say "[setup] and there is no python3 + on_compute.py here to move it to a compute node. Run it in a"
+    say "[setup] job, with your account and partition: srun --account=<yours> --partition=<yours> \\"
+    say "[setup]   --time=120 --mem=8G --cpus-per-task=2 bash $SCRIPT_DIR/setup.sh $*"
+    exit 2
   fi
-  say "[setup] REFUSING to run on a cluster login node (sbatch is on PATH, SLURM_JOB_ID is unset),"
-  say "[setup] and there is no python3 + on_compute.py here to move it to a compute node. Run it in a"
-  say "[setup] job, with your account and partition: srun --account=<yours> --partition=<yours> \\"
-  say "[setup]   --time=120 --mem=8G --cpus-per-task=2 bash $SCRIPT_DIR/setup.sh $*"
-  exit 2
 fi
 
 # micromamba platform slug
@@ -620,8 +639,9 @@ j() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 SETUP_SKILL_VERSION="$( (. "$SCRIPT_DIR/skill_version.sh" && skill_version) 2>/dev/null || true)"
 {
   printf '{\n'
-  printf '  "skill_version": "%s", "written": "%s", "check_only": %s,\n' \
-         "$(j "$SETUP_SKILL_VERSION")" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$($CHECK_ONLY && echo true || echo false)"
+  printf '  "skill_version": "%s", "written": "%s", "check_only": %s, "run_id": "%s",\n' \
+         "$(j "$SETUP_SKILL_VERSION")" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$($CHECK_ONLY && echo true || echo false)" \
+         "$(j "${PROTEOMICS_SETUP_RUN_ID:-}")"
   printf '  "os": "%s", "arch": "%s",\n' "$OS" "$ARCH"
   printf '  "conda": "%s",\n' "$(j "${CONDA:-}")"
   printf '  "env_prefix": "%s",\n' "$(j "$ENV_PREFIX")"

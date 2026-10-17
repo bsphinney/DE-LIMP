@@ -95,6 +95,23 @@ class SetupOnAComputeNode(limpa_t.SetupLimpaGate):
         self.assertEqual(limpa_t._lines(self.r_log), [])
         self.assertFalse(os.path.exists(os.path.join(self.home, "setup.json")))
 
+    def test_a_compute_node_run_that_did_not_finish_is_exit_3_not_a_stale_setup_json(self):
+        """Review of this branch: srun refused (an invalid account) or killed (a time limit) exited 1,
+        which already means "the R stack is not OK", and left the old setup.json, whose ready_for
+        the agent would then gate on."""
+        self.prebuilt_env("1.4.1")
+        env = self.login_node()
+        r, s = self.run_setup("--check", **env)                  # a first, good run
+        self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+        self.assertTrue(s["run_id"])                             # the guard's id, written there
+        r = limpa_t.subprocess.run([self.bash, limpa_t.setup_t.SETUP, "--check"], capture_output=True,
+                                   text=True, timeout=120,
+                                   env={"PATH": self.sys, "HOME": self.d, "PP_HOME": self.home,
+                                        "FAKE_SRUN_FAIL": "1", **env})
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertIn("did not finish", r.stderr)
+        self.assertIn("not rewritten", r.stderr)
+
     def test_no_fix_says_to_install_on_a_login_node(self):
         self.prebuilt_env("1.2.5")
         np_state = os.path.join(self.d, "np")
@@ -133,6 +150,19 @@ class EnsureDotnet8OnAComputeNode(dn_t.EnsureDotnet8):
         self.assertEqual(p.stdout.splitlines()[-1], self.dest)
         self.assertEqual(srun_calls(self.srun_log), [])
         self.assertEqual(log, [])
+
+    def test_without_python_on_a_cluster_nothing_is_downloaded_and_a_netcore_root_still_serves(self):
+        """Review of this branch: with no python3 + on_compute.py the guard exited 1 before step 4,
+        so a NETCore >= 8.0.17 root without AspNetCore no longer reached DIA-NN (the header's
+        promise: never lose a .raw search that worked before AspNetCore was asked for)."""
+        os.remove(os.path.join(self.bin, "python3"))
+        dn_t.fake_dotnet_root(self.dest, (dn_t.NETCORE,))
+        p, log = self.run_it()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stdout.splitlines()[-1], self.dest)
+        self.assertEqual(log, [])                               # no download on the login node
+        self.assertIn("nothing is downloaded here", p.stderr)
+        self.assertEqual(srun_calls(self.srun_log), [])
 
     def test_inside_a_job_it_downloads_where_it_is(self):
         p, log = self.run_it(SLURM_JOB_ID="12")

@@ -72,19 +72,27 @@ if [ -n "$sysroot" ] && have_ok "$sysroot"; then
 fi
 
 # 3) install whichever runtime DEST lacks (needs internet). Steps 1-2 above are checks and stay
-# where they are; a download on a cluster login node (sbatch on PATH, no SLURM job) is moved to a
-# compute node first: this script again, under on_compute.py. srun passes stdout through, so the
-# root is still the LAST line.
-if command -v sbatch >/dev/null 2>&1 && [ -z "${SLURM_JOB_ID:-}" ]; then
-  here="$(cd "$(dirname "$0")" && pwd)"
+# where they are; a download on a cluster login node (on_compute.py --is-login-node) is moved to
+# a compute node first: this script again, under on_compute.py. srun passes stdout through, so
+# the root is still the LAST line. With no python3 + on_compute.py on a cluster, nothing is
+# downloaded here, and step 4 still prints a root DIA-NN can use when there is one.
+SKIP_INSTALL=false
+here="$(cd "$(dirname "$0")" && pwd)"
+if [ -z "${SLURM_JOB_ID:-}" ] && [ -z "${PROTEOMICS_ON_COMPUTE:-}" ]; then
   if command -v python3 >/dev/null 2>&1 && [ -f "$here/on_compute.py" ]; then
-    exec python3 "$here/on_compute.py" --time 30 --mem 4G --name pp_dotnet8 \
-      --why "ensure_dotnet8.sh downloads and installs .NET 8" -- bash "$here/ensure_dotnet8.sh" "$@"
+    if python3 "$here/on_compute.py" --is-login-node; then
+      exec python3 "$here/on_compute.py" --time 30 --mem 4G --name pp_dotnet8 \
+        --why "ensure_dotnet8.sh downloads and installs .NET 8" -- bash "$here/ensure_dotnet8.sh" "$@"
+    fi
+  elif command -v sbatch >/dev/null 2>&1 \
+       || [ -x "${HPCCF_SLURM_BIN:-/cvmfs/hpc.ucdavis.edu/sw/spack/environments/core/view/generic/slurm/bin}/sbatch" ] \
+       || [ -r "${UCD_HPC_CLUSTER_CONF:-/opt/hpccf/etc/cluster_name.conf}" ]; then
+    echo "WARNING: .NET 8 needs installing, and this is a cluster login node with no python3 +" \
+         "on_compute.py to move the download to a compute node: nothing is downloaded here. Run it" \
+         "in a job: srun --account=<yours> --partition=<yours> --time=30 --mem=4G bash" \
+         "$here/ensure_dotnet8.sh" >&2
+    SKIP_INSTALL=true
   fi
-  echo "ERROR: .NET 8 must be installed, and this is a cluster login node with no python3 +" \
-       "on_compute.py to move the download to a compute node. Run it in a job: srun" \
-       "--account=<yours> --partition=<yours> --time=30 --mem=4G bash $here/ensure_dotnet8.sh" >&2
-  exit 1
 fi
 # install_runtime <dotnet|aspnetcore>; returns non-zero instead of exiting, so a failed
 # AspNetCore download can still fall back to a NETCore root below
@@ -105,8 +113,10 @@ install_runtime() {
   rm -f "$tmp"
   return "$rc"
 }
-have_netcore "$DEST" || install_runtime dotnet || true
-have_aspnet "$DEST" || install_runtime aspnetcore || true
+if ! $SKIP_INSTALL; then
+  have_netcore "$DEST" || install_runtime dotnet || true
+  have_aspnet "$DEST" || install_runtime aspnetcore || true
+fi
 if have_ok "$DEST"; then echo "installed .NET 8 at $DEST" >&2; echo "$DEST"; exit 0; fi
 
 # 4) degraded: DIA-NN can still read .raw; a framework-dependent ThermoRawFileParser cannot
