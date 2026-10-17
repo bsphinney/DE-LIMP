@@ -254,7 +254,7 @@ Read `setup.json` and **gate on `ready_for`**:
   re-run `setup.sh` (on a cluster it runs on a compute node). run_de.R still reads the report
   with limpa 1.2.x, through arrow, and records that it did (`references/environment.md`); without
   nanoparquet its contaminant share is then read from `Precursor.Normalised`. Upgrading an env
-  that other analyses run on changes their limpa mid-analysis: Core staff ask Brett first.
+  that other analyses run on changes their limpa mid-analysis: Core staff ask the Core's director first.
 - `ready_for.dia` false → on macOS this means Docker is missing. Run
   `bash scripts/build_diann_docker.sh` and relay its instructions (install Docker
   Desktop, open it once), then continue. Don't silently fall back to a DDA engine.
