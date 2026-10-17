@@ -22,9 +22,9 @@ Usage
   checkpoint.py status --session <dir>
 
   # find interrupted runs under a directory: a project folder, never a whole share. It walks
-  # at most --max-depth (default 6) folders down, follows links once, skips a search's per-run,
-  # temp and hidden folders and Bruker .d runs, and on a cluster login node runs itself on a
-  # compute node (on_compute.py)
+  # at most --max-depth (default 6) folders down, looks 2 levels into a folder linked in from
+  # outside it, skips a search's per-run, temp and hidden folders and Bruker .d runs, and on a
+  # cluster login node runs itself on a compute node (on_compute.py)
   checkpoint.py find --base <project dir> [--max-depth N]
 """
 import argparse, json, os, re, subprocess, sys, glob, datetime
@@ -247,29 +247,64 @@ def _never_a_session(name):
     return name.startswith(".") or name.lower().endswith(".d") or bool(_PIPELINE_DIR.match(name))
 
 
+LINK_LEVELS = 2           # how far below a link out of --base is looked: a login node's -maxdepth 2
+
+
+def _under(path, top):
+    return path == top or path.startswith(top.rstrip(os.sep) + os.sep)
+
+
+def _linked_sessions(link, real, seen):
+    """The .recovery.json files in the folder a link out of --base points at, and at most
+    LINK_LEVELS below it, reported under the link's own path. Each real folder once."""
+    if real in seen:
+        return
+    seen.add(real)
+    level = [(link, real)]
+    for depth in range(LINK_LEVELS + 1):
+        nxt = []
+        for shown, actual in level:
+            if os.path.isfile(os.path.join(actual, REC_JSON)):
+                yield os.path.join(shown, REC_JSON)
+            if depth == LINK_LEVELS:
+                continue
+            try:
+                names = sorted(os.listdir(actual))
+            except OSError:
+                continue
+            for n in names:
+                a = os.path.join(actual, n)
+                if not _never_a_session(n) and os.path.isdir(a) and not os.path.islink(a):
+                    nxt.append((os.path.join(shown, n), a))
+        level = nxt
+
+
 def _recovery_files(base, max_depth):
-    """Every .recovery.json at most `max_depth` folders below `base` (base itself is depth 0).
-    Linked folders are followed, each real folder once (a link back up cannot loop); a folder
-    that is skipped is still checked for its own .recovery.json."""
+    """Every .recovery.json at most `max_depth` folders below `base` (base itself is depth 0). A
+    folder that is skipped is still checked for its own .recovery.json. Links: one that stays
+    inside --base is not followed (its folder is walked where it is, so a deep link can hide
+    nothing and nothing loops); one out of --base is looked into LINK_LEVELS deep only (a session
+    folder linked in from elsewhere is found; a link to a whole share is never walked)."""
     base = os.path.abspath(os.path.expanduser(base))
+    real_base = os.path.realpath(base)
     top = base.rstrip(os.sep).count(os.sep)
     seen = set()
-    for root, dirs, files in os.walk(base, followlinks=True):
-        real = os.path.realpath(root)
-        if real in seen:
-            dirs[:] = []
-            continue
-        seen.add(real)
+    for root, dirs, files in os.walk(base):              # followlinks=False
         if REC_JSON in files:
             yield os.path.join(root, REC_JSON)
-        skipped = [d for d in dirs if _never_a_session(d)]
+        links = [d for d in dirs if os.path.islink(os.path.join(root, d))]
+        skipped = [d for d in dirs if d not in links and _never_a_session(d)]
         for d in skipped:
             if os.path.isfile(os.path.join(root, d, REC_JSON)):
                 yield os.path.join(root, d, REC_JSON)
         if root.rstrip(os.sep).count(os.sep) - top >= max_depth:
             dirs[:] = []
-        else:
-            dirs[:] = sorted(d for d in dirs if d not in skipped)
+            continue
+        for d in sorted(links):
+            real = os.path.realpath(os.path.join(root, d))
+            if os.path.isdir(real) and not _under(real, real_base) and not _never_a_session(d):
+                yield from _linked_sessions(os.path.join(root, d), real, seen)
+        dirs[:] = sorted(d for d in dirs if d not in skipped and d not in links)
 
 
 def cmd_find(a):

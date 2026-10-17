@@ -179,17 +179,40 @@ class CheckpointFindIsBounded(unittest.TestCase):
         a = self.plant("proj", "temp")
         self.assertEqual(self.find(), [a])
 
-    def test_a_linked_folder_is_followed_once_and_a_loop_ends(self):
+    def linked_target(self):
         elsewhere = tempfile.mkdtemp(dir=os.environ.get("TMPDIR"))
         self.addCleanup(lambda: __import__("shutil").rmtree(elsewhere, ignore_errors=True))
-        os.makedirs(os.path.join(elsewhere, "sessions", "s3"))
-        with open(os.path.join(elsewhere, "sessions", "s3", ".recovery.json"), "w") as fh:
+        return elsewhere
+
+    def plant_in(self, root, *parts):
+        d = os.path.join(root, *parts)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, ".recovery.json"), "w") as fh:
             json.dump({"updated": "x", "stages": []}, fh)
+
+    def test_a_link_out_of_base_is_looked_into_two_levels_and_a_loop_ends(self):
+        """A session folder (or a folder of them) linked in from elsewhere is found -- the
+        reviewer's case: proj/linked -> other/link_target/2026-10-16_y. Only two levels below the
+        link, as a login node's -maxdepth 2: a link to a whole share is never walked."""
+        elsewhere = self.linked_target()
+        self.plant_in(elsewhere, "sessions", "s3")                     # 2 below the link: found
+        self.plant_in(elsewhere, "a", "b", "too_deep")                 # 3 below: not walked
         os.makedirs(os.path.join(self.base, "proj"))
         os.symlink(elsewhere, os.path.join(self.base, "proj", "linked"))
         os.symlink(self.base, os.path.join(self.base, "proj", "loop"))     # back to the top
-        found = self.find()
-        self.assertEqual(found, [os.path.join(self.base, "proj", "linked", "sessions", "s3")])
+        self.assertEqual(self.find(),
+                         [os.path.join(self.base, "proj", "linked", "sessions", "s3")])
+
+    def test_a_link_inside_base_is_not_followed_and_hides_nothing(self):
+        """Re-review: a deep link to a shallower folder marked it seen at the depth cap, so the
+        folder itself was then skipped (base/a/b/c/d/e/zlink -> base/z). A link that stays inside
+        --base is never followed: its folder is walked where it is."""
+        z = self.plant("z", "sess")
+        deep = os.path.join(self.base, "a", "b", "c", "d", "e")
+        os.makedirs(deep)
+        os.symlink(os.path.join(self.base, "z"), os.path.join(deep, "zlink"))
+        os.symlink(self.base, os.path.join(self.base, "z", "sess", "up"))
+        self.assertEqual(self.find(), [z])
 
 
 if __name__ == "__main__":
