@@ -356,13 +356,22 @@ tables. `--no-meaning-check "<why>"` (render, job) goes on without it and is rec
 episode rendered before this check existed (no `meaning_check` in its `podcast.json`) is linked
 with a warning.
 
-What `check` now catches of it mechanically: a protein named within 15 words before or 30 after
-a robust claim ("robust", "survives", "holds up"; not when negated) that no robustness table
-calls robust is a FAIL; robust in some comparisons only is a WARN. The tables are every CSV
-under `output/tables/` (three folders deep) with a `robust` column, whatever made them, matched
-on `Genes`, `Protein.Names` and `Protein.Group`; `check.txt` lists them. A superlative ("the
-only", "the strongest", "the top", "none of" ...) whose words are not in the sources is a WARN
-for the meaning check to confirm.
+What `check` now catches of it mechanically: a protein named **in the same clause** as a robust
+claim ("robust", "survives", "holds up") that every row of the robustness tables calls not
+robust is a FAIL; robust in some comparisons only, or a `robust` cell it does not understand, is
+a WARN. A clause is cut at `.`, `;`, `!`, `?` and at "but", "while", "whereas", "unlike",
+"except" ("Jph3 survives every check; Ryr2 doesn't" names Ryr2 in another clause), never at a
+colon ("It survives everything: Ryr2 and Jph3" is about both). A negation before the claim
+("Neither Ryr2 nor Actb is robust", "Not one of them ... is robust") or beside a name ("Ryr2 and
+Actb don't", "drop out", "unlike Ryr2") is not a claim. A gene symbol is matched as written, so
+SET, WAS or MAX in the table never match "set", "was" or "max"; one with a digit matches in
+either case (Jph3 / JPH3). **The tables** are every CSV under `output/tables/` (three folders
+deep) with a `robust` column, whatever made them: `yes`/`no`, and `TRUE`/`FALSE`, `1`/`0` or
+"not testable ..." as R and pandas write them, matched on `Genes`, `Protein.Names` and
+`Protein.Group`, read with or without a byte-order mark; `check.txt` lists them. A superlative
+("the only", "the strongest", "the top", "none of" ...) whose words are not in the sources is a
+WARN for the meaning check to confirm. The mechanical lines are a floor, not the check: the
+meaning reviewer reads robust status across sentences too.
 
 ### What check cannot catch
 

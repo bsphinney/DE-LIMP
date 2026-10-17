@@ -892,10 +892,35 @@ def survey_invites(text):
 # (meaning_check.md, below): render, link, share and job refuse without its PASS for this script.
 ROBUST_CLAIM = re.compile(r"\b(?:robust(?:ly)?|surviv(?:e|es|ed|ing)|holds?\s+up|held\s+up|"
                           r"stands?\s+up|stood\s+up)\b", re.I)
-_ROBUST_NEG = re.compile(r"\b(?:not|no|never|less|fails?\s+to|failed\s+to|without|\w+n[’']t)"
-                         r"(?:\W+\w+){0,2}\W*$", re.I)
-ROBUST_BEFORE, ROBUST_AFTER = 15, 30           # words around a robust claim that it covers
+# A claim covers its own clause: a sentence, cut at ; and at the words that turn a contrast
+# ("Jph3 survives every check; Ryr2 doesn't", "Jph3 is robust, unlike Ryr2"). A colon does not
+# cut: "It survives everything: Ryr2 and Jph3" names what the claim is about.
+_CLAUSE_CUT = re.compile(r"[.;!?](?=\s|$)|\b(?:but|while|whereas|although|though|unlike|except|"
+                         r"however|yet)\b", re.I)
+# A negation before the claim in its clause turns it around ("Neither Ryr2 nor Actb is robust",
+# "Not one of them ... is robust"); so does one beside a name ("Ryr2 and Actb don't").
+_CLAUSE_NEG = re.compile(r"\b(?:not|no|never|neither|nor|none|without|n[’']t|\w+n[’']t|fails?\s+to|"
+                         r"failed\s+to)\b", re.I)
+_NAME_NEG_AFTER = re.compile(r"^[^.;!?]{0,40}?\b(?:\w+n[’']t|do(?:es)?\s+not|did\s+not|is\s+not|"
+                             r"are\s+not|was\s+not|were\s+not|drops?\s+out|dropped\s+out|"
+                             r"falls?\s+away|fell\s+away|fails?|failed)\b", re.I)
+_NAME_NEG_BEFORE = re.compile(r"\b(?:not|neither|nor|unlike|except|but\s+not)\W+(?:\w+\W+){0,2}$",
+                              re.I)
+# What a `robust` cell says. R's write.csv writes TRUE/FALSE, pandas True/False; a cell that
+# says neither is not understood (a WARN, never a FAIL).
+ROBUST_YES = {"yes", "y", "true", "t", "1", "robust"}
+ROBUST_NO = {"no", "n", "false", "f", "0", "not robust"}
 _NAME_TOK = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.\-]*[A-Za-z0-9]|[A-Za-z0-9]")
+
+
+def robust_value(v):
+    """'yes', 'no' or None (not understood) for one `robust` cell."""
+    v = " ".join(str(v or "").split()).lower()
+    if v in ROBUST_YES:
+        return "yes"
+    if v in ROBUST_NO or v.startswith("not "):
+        return "no"
+    return None
 SUPERLATIVE = re.compile(r"\b(?:the\s+only|only\s+one|the\s+(?:strongest|biggest|largest|"
                          r"highest|lowest|best|most|top)|every\s+single|none\s+of)\b", re.I)
 MEANING_FILE = "meaning_check.md"
@@ -916,10 +941,11 @@ MEANING_CHECKS = (
 
 
 def robustness_tables(out, depth=3):
-    """{protein name, lowercase: [(table, robust value, name as written)]} from every CSV under
-    <out>/tables (to `depth` folders) whose header has a `robust` column -- the session's own
-    robustness tables, whatever made them; names from Genes, Protein.Names and Protein.Group
-    (";"-separated). {} when there are none."""
+    """{protein name as written: [(table, robust cell, name)]} from every CSV under <out>/tables
+    (to `depth` folders) whose header has a `robust` column -- the session's own robustness
+    tables, whatever made them; names from Genes, Protein.Names and Protein.Group
+    (";"-separated). Read as utf-8-sig (Excel and readr write a byte-order mark). {} when there
+    are none."""
     found = {}
     root = os.path.join(out or "", "tables")
     if not out or not os.path.isdir(root):
@@ -933,51 +959,72 @@ def robustness_tables(out, depth=3):
                 continue
             path = os.path.join(d, f)
             try:
-                with open(path, newline="", encoding="utf-8", errors="replace") as fh:
+                with open(path, newline="", encoding="utf-8-sig", errors="replace") as fh:
                     head = next(csv.reader(fh), [])
                     col = {h.strip().lower(): h for h in head}
                     if "robust" not in col:
                         continue
-                    fh.seek(0)
+                    fh.seek(0)                    # utf-8-sig skips the mark again
                     for row in csv.DictReader(fh):
                         v = (row.get(col["robust"]) or "").strip()
                         for k in ("genes", "protein.names", "protein.group"):
                             for n in (row.get(col[k]) or "").split(";") if k in col else ():
                                 n = n.strip()
                                 if n:
-                                    found.setdefault(n.lower(), []).append(
+                                    found.setdefault(n, []).append(
                                         (os.path.relpath(path, out).replace(os.sep, "/"), v, n))
             except (OSError, csv.Error, StopIteration):
                 continue
     return found
 
 
+def _robust_rows(robust, tok):
+    """The table rows for a token: as written (a symbol that is also an English word -- SET, WAS,
+    MAX -- is never matched by "set" or "was"); a token with a digit in either case (Jph3 /
+    JPH3, g1_c4)."""
+    rows = robust.get(tok)
+    if rows or not re.search(r"\d", tok):
+        return rows
+    low = tok.lower()
+    return [r for n, rs in robust.items() if n.lower() == low for r in rs] or None
+
+
 def robust_claims(text, robust):
-    """-> [(level, protein, claim, detail)]: each protein named within ROBUST_BEFORE /
-    ROBUST_AFTER words of a robust claim ("robust", "survives", "holds up") that is not negated,
-    whose robustness tables never say yes (FAIL) or say yes for only some comparisons (WARN)."""
+    """-> [(level, protein, claim, detail)]: a protein named in the same clause as a robust claim
+    ("robust", "survives", "holds up") that no negation turns around, whose robustness tables
+    say not robust in every row (FAIL), robust in some only (WARN), or something not understood
+    (WARN). The meaning check reads the rest."""
     out, seen = [], set()
     if not robust:
         return out
-    toks = list(_NAME_TOK.finditer(text))
-    for m in ROBUST_CLAIM.finditer(text):
-        if _ROBUST_NEG.search(text[max(0, m.start() - 40):m.start()]):
-            continue
-        i = next((k for k, t in enumerate(toks) if t.start() >= m.start()), len(toks))
-        for t in toks[max(0, i - ROBUST_BEFORE):i + ROBUST_AFTER]:
-            name = t.group(0).lower()
-            rows = robust.get(name)
-            if not rows or name in seen:
+    cuts = [0] + [m.end() for m in _CLAUSE_CUT.finditer(text)] + [len(text)]
+    for a, b in zip(cuts, cuts[1:]):
+        clause = text[a:b]
+        for m in ROBUST_CLAIM.finditer(clause):
+            if _CLAUSE_NEG.search(clause[:m.start()]):
                 continue
-            seen.add(name)
-            yes = [r for r in rows if r[1].lower() == "yes"]
-            other = [r for r in rows if r[1].lower() != "yes"]
-            where = "; ".join(f"{tbl}: robust = {v or 'blank'}" for tbl, v, _ in other[:3])
-            if not yes:
-                out.append(("FAIL", rows[0][2], m.group(0), where))
-            elif other:
-                out.append(("WARN", rows[0][2], m.group(0),
-                            f"robust in {', '.join(t for t, _, _ in yes[:3])}; not in {where}"))
+            for t in _NAME_TOK.finditer(clause):
+                rows = _robust_rows(robust, t.group(0))
+                if not rows or rows[0][2] in seen:
+                    continue
+                if (_NAME_NEG_AFTER.search(clause[t.end():])
+                        or _NAME_NEG_BEFORE.search(clause[:t.start()])):
+                    continue
+                seen.add(rows[0][2])
+                said = [(tbl, v, robust_value(v)) for tbl, v, _ in rows]
+                yes = [x for x in said if x[2] == "yes"]
+                no = [x for x in said if x[2] == "no"]
+                odd = [x for x in said if x[2] is None]
+                where = "; ".join(f"{tbl}: robust = {v or 'blank'}" for tbl, v, _ in (no + odd)[:3])
+                if odd and not yes:
+                    out.append(("WARN", rows[0][2], m.group(0),
+                                f"robust value not understood -- {where}; the meaning check "
+                                "decides"))
+                elif not yes:
+                    out.append(("FAIL", rows[0][2], m.group(0), where))
+                elif no or odd:
+                    out.append(("WARN", rows[0][2], m.group(0),
+                                f"robust in {', '.join(t for t, _, _ in yes[:3])}; not in {where}"))
     return out
 
 

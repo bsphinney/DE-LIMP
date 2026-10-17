@@ -2944,8 +2944,10 @@ number and protein, (b) the report's hedges kept, (c) the robust status of every
 outside the report and the Claims list. The writer fixes what it finds and re-runs `check`; the
 reviewer records `make_podcast.py meaning <script> --verdict PASS --reviewer "<who>" --findings
 <file>`, which writes `podcast/meaning_check.md` with the script's sha256. `check` itself fails a
-protein named next to "robust" / "survives" that the robustness tables call not robust, and warns
-on a superlative the sources do not make. Render, link, share and `job` refuse until the check
+protein named in the same clause as "robust" / "survives" that the robustness tables call not
+robust, and warns on a superlative the sources do not make. A robustness table you write for an
+analysis goes under `output/tables/` as a CSV with a `Genes` (or `Protein.Names`) column and a
+`robust` column of `yes`/`no` (`TRUE`/`FALSE` also read). Render, link, share and `job` refuse until the check
 passes for the current script and sources AND `meaning_check.md` says PASS for this script. `--tts gemini` sends
 the transcript (never the report) to Google, and nothing without consent: `--core-run` for a Core
 run, `--cloud-ok` for anyone else (`--cloud-ok no` is a refusal). On a free-tier key Google may use

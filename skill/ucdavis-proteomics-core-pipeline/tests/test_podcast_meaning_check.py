@@ -203,10 +203,63 @@ class Mechanical(Base):
     def test_robust_in_one_comparison_only_is_a_warning(self):
         self.tables(ROBUST_CSV_2)
         rc, txt = self.checked(self.script_saying("C1qa is robust, says the report."))
+        self.assertEqual(rc, 0, txt)                                  # a warning, never a FAIL
         self.assertIn("C1qa is named next to 'robust'", txt)
         self.assertIn("robust in tables/robustness/Robustness_C0.D.csv; not in "
                       "tables/robustness/Robustness_A.B.csv: robust = not testable in S1", txt)
-        self.assertNotIn("FAIL\n- turn 9", txt)
+        fails = txt.split("\nFAIL\n")[1].split("\n\n")[0] if "\nFAIL\n" in txt else ""
+        self.assertNotIn("C1qa", fails)
+
+    def claims(self, csv_text, line):
+        self.tables()
+        write(os.path.join(self.out, "tables", "robustness", "Robustness_A.B.csv"), csv_text)
+        return mp.robust_claims(line, mp.robustness_tables(self.out))
+
+    def test_true_false_and_other_spellings_of_the_robust_column(self):
+        """Review of 2.13.2 (H2): R's write.csv writes TRUE/FALSE, pandas True/False."""
+        for yes, no in (("TRUE", "FALSE"), ("True", "False"), ("1", "0"), ("Yes", "No")):
+            table = f'"Genes","robust"\n"Jph3",{yes}\n"Ryr2",{no}\n'
+            with self.subTest(yes=yes):
+                self.assertEqual(self.claims(table, "Jph3 is robust."), [])
+                self.assertEqual([c[0] for c in self.claims(table, "Ryr2 is robust.")], ["FAIL"])
+        odd = self.claims('"Genes","robust"\n"Ryr2","maybe"\n', "Ryr2 is robust.")
+        self.assertEqual([c[0] for c in odd], ["WARN"])                # not understood: no FAIL
+        self.assertIn("not understood", odd[0][3])
+
+    def test_a_table_saved_with_a_byte_order_mark(self):
+        table = '\ufeff"robust","Genes"\n"no","Ryr2"\n'
+        self.assertEqual([c[0] for c in self.claims(table, "Ryr2 is robust.")], ["FAIL"])
+
+    def test_contrasts_and_negations_an_honest_host_says(self):
+        table = '"Genes","robust"\n"Jph3","yes"\n"Ryr2","no"\n"Actb","no"\n'
+        for line in ("Jph3 survives every check; Ryr2 and Actb don't.",
+                     "Only Jph3 holds up. Ryr2 and Actb drop out once the outlier is removed.",
+                     "Neither Ryr2 nor Actb is robust.",
+                     "Not one of them, Ryr2 or Actb, is robust.",
+                     "Jph3 is robust, unlike Ryr2.",
+                     "Jph3 holds up, but Ryr2 does not."):
+            with self.subTest(line=line):
+                self.assertEqual(self.claims(table, line), [])
+        self.assertEqual([c[1] for c in self.claims(table, "It survives everything: Ryr2 and "
+                                                           "Jph3 both.")], ["Ryr2"])
+
+    def test_gene_symbols_that_are_english_words(self):
+        table = '"Genes","robust"\n"SET","no"\n"WAS","no"\n"MAX","no"\n"Jph3","yes"\n'
+        for line in ("That set of results holds up.",
+                     "The result was robust to the normalisation choice.",
+                     "Jph3 is robust, and at most a handful of others come close."):
+            with self.subTest(line=line):
+                self.assertEqual(self.claims(table, line), [])
+        self.assertEqual([c[1] for c in self.claims(table, "SET is robust.")], ["SET"])
+        # a symbol with a digit is the same protein in either case (Jph3 / JPH3)
+        self.assertEqual(self.claims('"Genes","robust"\n"Ryr2","no"\n', "RYR2 is robust.")[0][1],
+                         "Ryr2")
+
+    def test_an_honest_script_passes_without_unchecked(self):
+        self.tables()
+        rc, txt = self.checked(self.script_saying(
+            "Jph3 survives every check; Ryr2 doesn't, and C1qa was not testable."))
+        self.assertEqual(rc, 0, txt)
 
     def test_no_tables_means_nothing_to_check(self):
         rc, txt = self.checked(self.script_saying("It survives everything: Ryr2 and Jph3."))
