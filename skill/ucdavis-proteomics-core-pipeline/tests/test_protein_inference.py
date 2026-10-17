@@ -6,7 +6,7 @@ DIA-NN's protein inference level is recorded and stated, never left to be guesse
 A staff report (PROT_0000, skill 2.11.2): a transcriptome FASTA was rewritten with UniProt-style
 GN= tags so that ORFs of one gene would group; no step of the 5-step chain passed --pg-level,
 nothing recorded which level ran, and the report overstated what the tags did to the protein
-groups. Measured on HIVE with DIA-NN 2.7.0 (srun jobs 24827735 and 24827755, a 6,752-entry
+groups. Measured on HIVE with DIA-NN 2.7.0 (2026-10-16, a 6,752-entry
 subset of that FASTA and one of its runs):
   * no --pg-level = --pg-level 2 (genes): identical Protein.Group on all 12,190 precursors, and
     the log counts "genes"; 0 (isoform IDs) and 1 (protein names) regroup 242 of them;

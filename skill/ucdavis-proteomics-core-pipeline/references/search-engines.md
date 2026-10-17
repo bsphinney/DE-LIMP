@@ -412,7 +412,7 @@ on a busy preemptible queue. They size only the chain: when routing picks single
 **Protein inference (`--pg-level`).** No cfg the skill writes sets it. DIA-NN's README lists
 `--pg-level 0|1|2` (isoform IDs, protein names, genes) without its default, so it was measured
 on HIVE with DIA-NN 2.7.0 (a 6,752-entry transcriptome FASTA with UniProt-style `GN=` tags,
-one timsTOF run, a library predicted at each level; srun 24827755):
+one timsTOF run, a library predicted at each level; HIVE, 2026-10-16):
 
 - **The default is genes.** With no `--pg-level` the protein groups equal `--pg-level 2`'s on
   all 12,190 precursors, and the log counts "genes identified"; `0` and `1` regroup 242 of them.
@@ -425,7 +425,7 @@ one timsTOF run, a library predicted at each level; srun 24827755):
   report's `Genes.*` columns; `run_de.R` quantifies `Protein.Group`. Say exactly that when a
   client asks what gene tags did; a gene-level DE is a rollup by `Genes`, not a re-search.
 - **Set it from step 1, or it does nothing.** Step 5 re-run at 0, 1 and 2 on one search's
-  `.quant` files and empirical library gave identical groups (srun 24827735). A level other
+  `.quant` files and empirical library gave identical groups. A level other
   than the default is a new search from library prediction (the 5-step chain re-runs every
   step); reusing `.quant` files does not change it.
 

@@ -631,17 +631,17 @@ def mass_acc_record(ma, cfg=None):
 # it "determines which peptides are considered 'proteotypic' and thus affects protein FDR
 # calculation"); --no-prot-inf switches inference off. Neither is in a cfg the skill writes; a
 # user sets one with estimate_params.py --overrides, and it reaches every step (not in STRIP).
-# Measured on HIVE, DIA-NN 2.7.0 (srun 24827755: a 6,752-entry transcriptome FASTA with GN= gene
+# Measured on HIVE, DIA-NN 2.7.0 (2026-10-16: a 6,752-entry transcriptome FASTA with GN= gene
 # tags, one timsTOF run, a library predicted at each level, then searched):
 #   * no --pg-level gives the same Protein.Group as --pg-level 2 on all 12,190 precursors, and
 #     its log counts "genes" -- the default is genes; 0 and 1 regroup 242 of them;
 #   * at every level, a gene whose ORFs carry peptides of their own keeps one protein group per
 #     ORF (35 genes): GN= tags do not merge them -- the gene level is the gg_matrix / Genes;
-#   * step 5 re-run at 0, 1 and 2 on one search's .quant files and empirical library (srun
-#     24827735): identical groups. A level other than the default must be set from step 1.
+#   * step 5 re-run at 0, 1 and 2 on one search's .quant files and empirical library:
+#     identical groups. A level other than the default must be set from step 1.
 PG_LEVELS = {0: "isoform IDs", 1: "protein names", 2: "genes"}
 PG_LEVEL_DEFAULT = 2
-PG_LEVEL_MEASURED = ("measured on DIA-NN 2.7.0 (HIVE srun 24827755): with no --pg-level the "
+PG_LEVEL_MEASURED = ("measured on DIA-NN 2.7.0 (HIVE, 2026-10-16): with no --pg-level the "
                      "protein groups equal --pg-level 2's on every precursor")
 
 
