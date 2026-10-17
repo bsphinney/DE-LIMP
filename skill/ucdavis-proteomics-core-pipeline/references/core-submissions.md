@@ -454,12 +454,13 @@ set_aside, reason), `sample_files.tsv` (`reinjections`), gate `reinjections` (IN
 named), `SUBMISSION.md`, `stage`'s record (`reinjections`), and — `submission_report.py attach`
 copies `input/locate_decisions.json` into the session — the report's Data Quality Notes.
 `locate_decisions.json` also carries locate's whole assignment of runs to samples
-(`assignments`: every matched row, chosen with `--choose` or matched by locate itself) and the
-`locate.json` it came from. The report's "Sample sheet vs raw files" notes read that
-assignment, never the names: sheet IDs `ME01`..`ME09` against runs `DIA-ME1`..`ME9`, assigned
-with `--choose`, once read as "9 of 9 sample IDs match no raw file". A `locate` re-run after
-`attach` is read from its newer `locate.json` when that file is reachable; otherwise re-run
-`attach`. Only a session with no locate record falls back to matching IDs against file names. A
+(`assignments`: every matched row, chosen with `--choose` or matched by locate itself), the
+submission it is for and the `locate.json` it came from. The report's "Sample sheet vs raw files"
+notes take a run's sample from that assignment wherever locate assigned it, and match the other
+runs by name: sheet IDs `S01`..`S09` against runs `DIA-S1`..`S9`, assigned with `--choose`, once
+read as "9 of 9 sample IDs match no raw file", and an empty or partial record never erases a
+name match. A `locate` re-run after `attach` for the same submission is read from its newer
+`locate.json` when that file is reachable; otherwise re-run `attach`. A
 **collision** — a label another sample of this submission or another submission shares — is
 never a re-injection: `choose_run` (`kind: collision`) needs `--choose` per sample under every
 policy. Different files sharing a run name (the same name in two folders) are kept and flagged

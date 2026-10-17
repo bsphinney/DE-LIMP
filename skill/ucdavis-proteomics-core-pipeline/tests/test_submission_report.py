@@ -983,44 +983,47 @@ class TestNotes(unittest.TestCase):
 
 # ------------------------------------------- the sheet vs the runs staff located --
 class TestSheetVsLocatedRuns(unittest.TestCase):
-    """Staff's `locate` assignment is the sample <-> run record; name matching is the fallback.
+    """Staff's `locate` assignment is the sample <-> run record where it assigned a run; name
+    matching covers the rest.
 
-    A staff report (PROT_0000, skill 2.11.2): sheet IDs ME01..ME09, runs named DIA-ME1..ME9 (no
-    leading zero). Staff assigned each run with `locate --files-from ... --choose ME0N=<file>`
-    and sample_files.tsv had every sample matched, yet the report's Submission section and
+    A staff report (PROT_0000, skill 2.11.2): sheet IDs S01..S09, runs named DIA-S1..S9 (no
+    leading zero). Staff assigned each run with `locate --files-from ... --choose S0N=<file>` and
+    sample_files.tsv had every sample matched, yet the report's Submission section and
     ANALYSIS_PROMPT said "9 of 9 sample IDs on the sheet match no raw file" and "9 of 9 raw files
     carry no sample ID": _sheet_vs_raw re-matched by name and never read the locate result."""
     N = 9
 
-    def record(self):
+    def record(self, ids=None):
         r = fixture()
         r["submission_data"]["samples"] = [
-            {"unique_id": f"ME{n:02d}", "sample_name": f"S{n}", "condition_name": f"cond {n % 3}"}
-            for n in range(1, self.N + 1)]
+            {"unique_id": uid, "sample_name": f"X{n}", "condition_name": f"cond {n % 3}"}
+            for n, uid in enumerate(ids or [f"S{n:02d}" for n in range(1, self.N + 1)], 1)]
         return r
 
     def run_name(self, n):
-        return f"01012026__60SPD_DIA-ME{n}_S3-A1_1_{100 + n}"
+        return f"01012026_DIA-S{n}_1_{100 + n}"
 
-    def session(self, tmp):
-        s = make_session(tmp, raws=[self.run_name(n) for n in range(1, self.N + 1)])
-        attach_fixture(s, self.record())
+    def session(self, tmp, runs=None, ids=None):
+        s = make_session(tmp, raws=runs or [self.run_name(n) for n in range(1, self.N + 1)])
+        attach_fixture(s, self.record(ids))
         return s
 
-    def locate_json(self, folder, assigned, via="--choose"):
+    def locate_json(self, folder, assigned, via="--choose", runs=None, uid=None, prot=None):
         """locate.json as core_submission.py writes it: one row per (sample, run)."""
         rows = []
         for n in range(1, self.N + 1):
-            uid = f"ME{n:02d}"
+            u = (uid or (lambda k: f"S{k:02d}"))(n)
             if n in assigned:
-                rows.append({"unique_id": uid, "sample_key": uid, "status": "matched",
-                             "file": f"/data/JUL26/{self.run_name(n)}.d", "chosen_by": via})
+                run = (runs or [self.run_name(k) for k in range(1, self.N + 1)])[n - 1]
+                rows.append({"unique_id": u, "sample_key": u, "status": "matched",
+                             "file": f"/data/JUL26/{run}.d", "chosen_by": via})
             else:
-                rows.append({"unique_id": uid, "sample_key": uid, "status": "unmatched", "file": ""})
+                rows.append({"unique_id": u, "sample_key": u, "status": "needs_choice", "file": ""})
         os.makedirs(folder, exist_ok=True)
         path = os.path.join(folder, "locate.json")
         with open(path, "w") as fh:
-            json.dump({"mode": "files_from", "accepted": {"reinjections": "ask"}, "samples": rows}, fh)
+            json.dump({"internal_id": prot, "mode": "files_from",
+                       "accepted": {"reinjections": "ask"}, "samples": rows}, fh)
         return path
 
     def write_decisions(self, s, decisions):
@@ -1060,9 +1063,27 @@ class TestSheetVsLocatedRuns(unittest.TestCase):
                 self.locate_json(os.path.join(tmp, "fetch"), set(range(1, self.N)))))
             n = notes_by_id(sr.load(s), s)
             self.assertIn("1 of 9 sample IDs on the sheet", n["sheet_ids_without_raw"])
-            self.assertIn("(ME09)", n["sheet_ids_without_raw"])
+            self.assertIn("(S09)", n["sheet_ids_without_raw"])
             self.assertIn("1 of 9 raw files", n["raw_without_sheet_id"])
             self.assertIn(self.run_name(9) + ".d", n["raw_without_sheet_id"])
+
+    def test_a_partial_or_empty_locate_record_keeps_the_name_matches(self):
+        """Review of 2.13.2 (M6): runs whose names DO carry the sheet ids; locate matched 6 of 9
+        (3 needs_choice, resolved by hand into the run list), or nothing. The runs locate did
+        not assign are matched by name, never "assigned to no sample"."""
+        ids = [f"P{n:02d}" for n in range(1, self.N + 1)]
+        runs = [f"2026_P{n:02d}_DIA_{100 + n}" for n in range(1, self.N + 1)]
+        for assigned in (set(range(1, 7)), set()):
+            with self.subTest(assigned=len(assigned)), tempfile.TemporaryDirectory() as tmp:
+                s = self.session(tmp, runs=runs, ids=ids)
+                self.assertEqual({k for k in notes_by_id(sr.load(s), s)
+                                  if "sheet" in k or "raw" in k}, set())     # names alone: none
+                self.write_decisions(s, sr.locate_decisions(self.locate_json(
+                    os.path.join(tmp, "fetch"), assigned, runs=runs,
+                    uid=lambda k: f"P{k:02d}")))
+                n = notes_by_id(sr.load(s), s)
+                self.assertNotIn("sheet_ids_without_raw", n)
+                self.assertNotIn("raw_without_sheet_id", n)
 
     def test_an_older_record_with_staff_choices_only(self):
         """locate_decisions.json from skill 2.13.1 and older has no assignment list: its
@@ -1070,7 +1091,7 @@ class TestSheetVsLocatedRuns(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             s = self.session(tmp)
             self.write_decisions(s, {"reinjections_policy": "ask", "reinjections": {},
-                                     "staff_choices": [{"sample": f"ME{n:02d}",
+                                     "staff_choices": [{"sample": f"S{n:02d}",
                                                         "file": self.run_name(n) + ".d",
                                                         "by": "--choose"}
                                                        for n in range(1, self.N + 1)],
@@ -1100,6 +1121,18 @@ class TestSheetVsLocatedRuns(unittest.TestCase):
             self.assertNotIn("sheet_ids_without_raw", n)
             self.assertNotIn("raw_without_sheet_id", n)
             self.assertIn("staff_run_choices", n)                    # the same record, read once
+
+    def test_a_later_locate_for_another_submission_is_not_read(self):
+        """Review of 2.13.2 (L7): the fetch folder's locate.json reused for another submission."""
+        with tempfile.TemporaryDirectory() as tmp:
+            s = self.session(tmp)
+            fetch = os.path.join(tmp, "fetch")
+            loc = self.locate_json(fetch, set(), prot=sr.load(s)["internal_id"])
+            self.write_decisions(s, sr.locate_decisions(loc))
+            self.locate_json(fetch, set(range(1, self.N + 1)), prot="PROT_9002")
+            st = os.stat(loc)
+            os.utime(loc, (st.st_atime, st.st_mtime + 60))
+            self.assertIn("9 of 9", notes_by_id(sr.load(s), s)["sheet_ids_without_raw"])
 
 
 if __name__ == "__main__":

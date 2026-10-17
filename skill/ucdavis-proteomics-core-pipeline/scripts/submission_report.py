@@ -594,19 +594,26 @@ def session_locate(p):
             newer = False
         if newer:
             fresh = locate_decisions(src)
-            if fresh is not None:
+            # the fetch folder's locate.json may since have been run for another submission
+            # (review of 2.13.2): only the same submission's replaces the session's copy
+            rec = _read_json(p["submission_record"]) if os.path.isfile(
+                p["submission_record"]) else None
+            want = d.get("internal_id") or (rec or {}).get("internal_id")
+            got = (fresh or {}).get("internal_id")
+            if fresh is not None and not (got and want and got != want):
                 return fresh
     return d
 
 
 def run_assignment(rec, p, names):
     """({name: {unique_id, ...}}, basis): which sheet sample each run is. A run is matched by
-    collect_conditions.run_name, so raw paths and conditions.csv's File.Name both work.
-    basis "locate": staff's locate result, every run it matched (by itself or by `--choose`);
-    the one record of sample identity, and the only one when the names do not carry the ids
-    (sheet ME01, runs DIA-ME1). basis "names": no locate result, so core_submission's name
-    matching (run_owners); a record from skill 2.13.1 or older lists only staff choices, and
-    those settle their runs."""
+    collect_conditions.run_name, so raw paths and conditions.csv's File.Name both work. Staff's
+    locate result settles every run it assigned (matched by itself or by `--choose`; a record
+    from skill 2.13.1 or older lists only the staff choices): the one record of sample identity,
+    and the only one when the names do not carry the ids (sheet S01, runs DIA-S1). Every other
+    run is matched by name (core_submission's run_owners): an empty or partial locate record
+    never erases a name match (review of 2.13.2). basis: "locate" when locate assigned every
+    run here, "mixed" when some, "names" when none."""
     from collect_conditions import run_name
     loc = session_locate(p) if p else None
     uids = {s["unique_id"] for s in rec["samples"] if s["unique_id"]}
@@ -615,19 +622,18 @@ def run_assignment(rec, p, names):
         key = cs._s(key)
         return key if key in uids else re.sub(r"#\d+$", "", key)
 
-    if isinstance(loc, dict) and isinstance(loc.get("assignments"), list):
-        by_run = defaultdict(set)
-        for a in loc["assignments"]:
-            if isinstance(a, dict) and a.get("sample") and a.get("file"):
-                by_run[run_name(a["file"])].add(uid_of(a["sample"]))
-        return {n: set(by_run.get(run_name(n), ())) for n in names}, "locate"
-    owners = run_owners(rec["samples"], names)
-    for c in (loc or {}).get("staff_choices") or []:
-        if isinstance(c, dict) and c.get("sample") and c.get("file"):
-            for n in names:
-                if run_name(n) == run_name(c["file"]):
-                    owners[n] = {uid_of(c["sample"])}
-    return owners, "names"
+    by_run = defaultdict(set)
+    loc = loc if isinstance(loc, dict) else {}
+    given = loc.get("assignments") if isinstance(loc.get("assignments"), list) else \
+        loc.get("staff_choices") or []
+    for a in given:
+        if isinstance(a, dict) and a.get("sample") and a.get("file"):
+            by_run[run_name(a["file"])].add(uid_of(a["sample"]))
+    by_name = run_owners(rec["samples"], [n for n in names if run_name(n) not in by_run])
+    owners = {n: set(by_run[run_name(n)]) if run_name(n) in by_run else by_name[n] for n in names}
+    covered = sum(run_name(n) in by_run for n in names)
+    return owners, ("locate" if names and covered == len(names) else
+                    "mixed" if covered else "names")
 
 
 def _read_conditions(p):
@@ -836,6 +842,19 @@ def _sheet_vs_raw(rec, p):
     none = [u for u in uids if u not in found]
     out = []
     files = lambda ns: _examples(os.path.basename(n.rstrip("/")) for n in ns)   # noqa: E731
+    if basis == "mixed":                  # some runs by staff's assignment, the rest by name
+        if none:
+            out.append(("sheet_ids_without_raw",
+                        f"Sample sheet vs raw files: {len(none)} of {len(uids)} sample IDs on the "
+                        f"sheet have no raw file analysed here, by the Core's assignment of runs "
+                        f"to samples or, for the runs it did not assign, by name "
+                        f"({_examples(none)})."))
+        if loose:
+            out.append(("raw_without_sheet_id",
+                        f"Sample sheet vs raw files: {len(loose)} of {len(names)} raw files "
+                        f"analysed here were assigned to no sample and carry no sample ID from the "
+                        f"sheet ({files(loose)})."))
+        return out
     if basis == "locate":                 # staff assigned the runs: say so, not "match"
         if none:
             out.append(("sheet_ids_without_raw",
@@ -911,10 +930,11 @@ def _no_groups(rec, d):
 def locate_decisions(locate_json):
     """locate.json -> what staff decided about the runs: the re-injection policy and its result
     per sample, each run chosen by --choose, and the whole assignment of runs to samples (every
-    matched row: `assignments`, which run_assignment reads). File NAMES only -- this goes into a
-    report a collaborator reads; `source` (and its time) is where it came from, so a locate
-    re-run after attach is read from there (session_locate). None when there is no
-    locate.json."""
+    matched row: `assignments`, which run_assignment reads). Runs by file NAME only -- the notes
+    a collaborator reads are made from it; `source` (and its time) is the path of the
+    locate.json it came from, kept in the session's input/ (never delivered), so a locate re-run
+    after attach for the same submission is read from there (session_locate). None when there
+    is no locate.json."""
     loc = _read_json(locate_json)
     if not isinstance(loc, dict):
         return None
@@ -937,6 +957,7 @@ def locate_decisions(locate_json):
     return {"reinjections_policy": acc.get("reinjections"), "reinjections": reinj,
             "staff_choices": chosen, "accept_ambiguous": bool(acc.get("accept_ambiguous")),
             "allow_partial": bool(acc.get("allow_partial")), "assignments": assigned,
+            "internal_id": loc.get("internal_id"),
             "source": os.path.abspath(locate_json), "source_mtime": os.path.getmtime(locate_json)}
 
 
