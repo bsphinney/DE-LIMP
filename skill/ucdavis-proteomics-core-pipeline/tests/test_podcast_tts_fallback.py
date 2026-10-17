@@ -64,7 +64,7 @@ def is_probe(contents):
     return mp.PREFLIGHT_LINES[0] in text
 
 
-class Fallback(Gemini):
+class StallBase(Gemini):
     def setUp(self):
         super().setUp()
         self.release = threading.Event()
@@ -79,6 +79,9 @@ class Fallback(Gemini):
 
     def wavs(self):
         return [f for f in os.listdir(os.path.join(self.pod, ".cache")) if f.endswith(".wav")]
+
+
+class Fallback(StallBase):
 
     def test_a_model_that_stops_answering_hands_over_and_every_chunk_is_made_again(self):
         seen = {"n": 0}
@@ -183,6 +186,59 @@ class Fallback(Gemini):
         self.assertEqual(self.manifest()["tts"]["preflight"],
                          {"run": False, "why": "--no-preflight"})
         self.assertFalse(any(is_probe(c) for _, c, _ in log["calls"]))
+
+
+class ResumeAfterAStall(StallBase):
+    """Review of 2.13.2 (H3), the staff incident's own shape, WITHOUT --model on the resume (so
+    prepare pins the cached model): chunks cached from a model that then stalls, pro models with
+    no free-tier quota, and the 2.5 flash model that answers."""
+    PRO = "gemini-9-pro-tts"
+
+    def first_render_stops_on_a_stall(self):
+        n = {"k": 0}
+
+        def first(model, contents, config):
+            n["k"] += 1
+            if n["k"] >= 2:
+                self.release.wait(30)
+            return pcm_for(contents)
+        rc, out, err, log = self.render(first, "--cloud-ok", "--model", STALLS,
+                                        "--request-timeout", "0.3")
+        self.assertEqual(rc, 1, err)
+        self.assertEqual(len(self.wavs()), 1)
+
+    def second(self, model, contents, config):
+        if "pro" in model:
+            raise ApiError(429, "RESOURCE_EXHAUSTED", rpc_error(FREE_DAY, value="0"))
+        if model == STALLS and not is_probe(contents):
+            self.release.wait(30)
+        return pcm_for(contents)
+
+    def resume(self):
+        return self.render(self.second, "--cloud-ok", "--request-timeout", "0.3", preflight=True)
+
+    def test_a_stall_is_remembered_so_the_resume_never_pins_that_model(self):
+        self.first_render_stops_on_a_stall()
+        self.assertTrue(os.path.isfile(os.path.join(self.pod, ".cache", "stalled.json")))
+        rc, out, err, log = self.resume()
+        self.assertEqual(rc, 0, err)
+        self.assertIn(f"not resuming with {STALLS}", err)
+        man = self.manifest()
+        self.assertEqual(man["tts"]["models_used"], [ANSWERS])
+        self.assertNotIn(STALLS, [m for m, c, _ in log["calls"] if not is_probe(c)])
+        self.assertNotIn("made this episode's cached chunks", err)
+
+    def test_without_the_memory_the_hand_over_skips_models_that_cannot_be_used(self):
+        self.first_render_stops_on_a_stall()
+        os.remove(os.path.join(self.pod, ".cache", "stalled.json"))       # an older cache
+        rc, out, err, log = self.resume()
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn(f"{self.PRO} made this episode's cached chunks", err)
+        self.assertEqual(self.manifest()["tts"]["models_used"], [ANSWERS])
+        # and the next resume does not wait on the stalled model again
+        rc, out, err, log = self.resume()
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("still waiting for", err)
 
 
 class KeyTier(Gemini):

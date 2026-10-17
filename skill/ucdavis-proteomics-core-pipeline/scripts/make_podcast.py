@@ -145,6 +145,11 @@ REQUEST_TIMEOUT_BUDGET_MIN = 30.0                   # minutes
 # stalled gemini-3.8-flash-tts while gemini-2.5-flash-preview-tts answered the same test in 2.9 s;
 # the episode's first chunks were cached from the stalled model, so it could never hand over.
 PREFLIGHT_TIMEOUT = 60.0                            # s for the two-line test
+# A model that stopped answering is remembered in the cache (STALL_FILE) for STALL_MEMORY_H
+# hours: a resume then never pins it again, so it cannot repeat the same timeouts (review of
+# 2.13.2: every resume went back to the stalled model, waited, and stopped).
+STALL_FILE = "stalled.json"
+STALL_MEMORY_H = 12.0
 PREFLIGHT_LINES = ("This is a short sound check.", "And this is the second voice.")
 TERMS_URL = "https://ai.google.dev/gemini-api/terms"
 KEY_FILE = os.path.join("~", ".config", "ucdavis-proteomics", "gemini_key")
@@ -1881,6 +1886,8 @@ class GeminiTTS(object):
         self.paid_note = (note if isinstance(note, str) and re.search(r"\bpaid\b", note, re.I)
                           and not re.search(r"\b(?:un|not\s+|non-?)paid\b", note, re.I) else None)
         self.stalled, self.switches = [], []     # models that stopped answering; the hand-overs
+        self.unusable = []                       # missing, no quota or rejected in this render
+        self.cache_dir = None
         self.preflight_record = None
         self.timeout_budget = 60.0 * float(getattr(a, "request_timeout_budget", None)
                                            or REQUEST_TIMEOUT_BUDGET_MIN)
@@ -1937,14 +1944,70 @@ class GeminiTTS(object):
             log(f"[render] other TTS models, used only with --model: {', '.join(other)}")
         return out
 
+    def remembered_stalls(self):
+        """{model: record} of the models that stopped answering in this cache within
+        STALL_MEMORY_H hours."""
+        try:
+            with open(os.path.join(self.cache_dir, STALL_FILE), encoding="utf-8") as fh:
+                got = json.load(fh)
+        except (OSError, ValueError, TypeError):
+            return {}
+        now = datetime.datetime.now(datetime.timezone.utc)
+        out = {}
+        for m, rec in (got.items() if isinstance(got, dict) else ()):
+            try:
+                at = datetime.datetime.fromisoformat(str(rec.get("at")))
+                if at.tzinfo is None:
+                    at = at.replace(tzinfo=datetime.timezone.utc)
+            except (ValueError, AttributeError):
+                continue
+            if (now - at).total_seconds() < STALL_MEMORY_H * 3600:
+                out[m] = rec
+        return out
+
+    def remember_stall(self, model, where, why):
+        """Record in the cache that `model` stopped answering (never fatal)."""
+        if not self.cache_dir:
+            return
+        path = os.path.join(self.cache_dir, STALL_FILE)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                got = json.load(fh)
+            got = got if isinstance(got, dict) else {}
+        except (OSError, ValueError):
+            got = {}
+        got[model] = {"at": now_iso(), "where": where, "why": why}
+        try:
+            with open(path + ".part", "w", encoding="utf-8") as fh:
+                json.dump(got, fh, indent=2)
+            os.replace(path + ".part", path)
+        except OSError as e:
+            log(f"[WARN] could not record that {model} stopped answering ({e})")
+
     def prepare(self, chunks, speak, cache_dir):
-        """Stay on the model the cache was made with: resuming must not mix voices."""
+        """Stay on the model the cache was made with: resuming must not mix voices -- unless that
+        model stopped answering within STALL_MEMORY_H hours: then it is not resumed with, and the
+        model that is used makes every chunk again."""
+        self.cache_dir = cache_dir
         if self.user_models:
             return
+        recent = self.remembered_stalls()
+        if all(m in recent for m in self.candidates):
+            recent = {}                         # every model stalled: each gets another chance
+        for m in recent:
+            if m in self.candidates and m not in self.stalled:
+                self.stalled.append(m)
         have = {m: sum(os.path.isfile(os.path.join(cache_dir, cache_key(self, c, speak, m) +
                                                    ".wav")) for c in chunks)
                 for m in self.candidates}
-        best = max(self.candidates, key=lambda m: have[m])
+        for m in [m for m in self.candidates if m in recent and have[m]]:
+            log(f"[render] not resuming with {m}: it stopped answering at {recent[m].get('at')} "
+                f"({recent[m].get('where')}); the model used makes every chunk again, so the "
+                "episode has one model's voices")
+        usable = [m for m in self.candidates if m not in recent]
+        self.candidates = usable + [m for m in self.candidates if m not in usable]
+        self.model = self.candidates[0]
+        best = max(usable, key=lambda m: have[m])
         if have[best]:
             self.candidates.remove(best)
             self.candidates.insert(0, best)
@@ -2071,11 +2134,12 @@ class GeminiTTS(object):
                 and self.candidates.index(self.model) + 1 < len(self.candidates))
 
     def _next_model(self):
-        """The next candidate after this model that has not stopped answering, or None."""
+        """The next candidate after this model that has not stopped answering and was not found
+        missing, out of quota or rejected in this render, or None."""
         if self.model not in self.candidates:
             return None
         return next((m for m in self.candidates[self.candidates.index(self.model) + 1:]
-                     if m not in self.stalled), None)
+                     if m not in self.stalled and m not in self.unusable), None)
 
     def note_tier(self, err):
         """A 429 that names a free-tier quota: the key's Google project is on the FREE tier.
@@ -2096,17 +2160,20 @@ class GeminiTTS(object):
     def stall_switch(self, label, why):
         """This model stopped answering: hand over to the next candidate, which makes EVERY chunk
         again (RestartRender), or None when there is no other."""
+        was = self.model
+        if was not in self.stalled:
+            self.stalled.append(was)
+        self.remember_stall(was, label, why)
         nxt = self._next_model()
         if not nxt:
             return None
-        was = self.model
-        self.stalled.append(was)
         note = (f"{was} stopped answering ({label}: {why}); switched to {nxt}, which made every "
                 "chunk again, so the episode has one model's voices")
         self.switches.append({"from": was, "to": nxt, "at": label, "why": why, "note": note})
         log(f"[render] {was} stopped answering ({label}: {why}). Switching to {nxt} and making "
             f"EVERY chunk again with it, so the episode never mixes two models' voices")
         self.model, self.produced, self.models_used = nxt, 0, []
+        self.pinned = False        # the next model made nothing yet: a model it cannot use hands over
         return RestartRender(note)
 
     def switch_notes(self):
@@ -2123,7 +2190,8 @@ class GeminiTTS(object):
         probe = Chunk(0, [Turn(self.hosts[0], PREFLIGHT_LINES[0], 0, 0),
                           Turn(self.hosts[1], PREFLIGHT_LINES[1], 0, 0)])
         start = self.model if self.model in self.candidates else self.candidates[0]
-        order = self.candidates[self.candidates.index(start):]
+        order = [m for m in self.candidates[self.candidates.index(start):]
+                 if m not in self.stalled and m not in self.unusable]
         tried = []
         for m in order:
             self.model = m
@@ -2134,6 +2202,7 @@ class GeminiTTS(object):
                                               timeout=PREFLIGHT_TIMEOUT))
             except RequestTimeout:
                 self.stalled.append(m)
+                self.remember_stall(m, "preflight", f"no answer in {PREFLIGHT_TIMEOUT:.0f} s")
                 tried.append(f"{m}: no answer in {PREFLIGHT_TIMEOUT:.0f} s")
                 continue
             except EmptyAudio as e:
@@ -2145,6 +2214,7 @@ class GeminiTTS(object):
                 if err["kind"] == "fatal":
                     raise RenderError(f"preflight: {m}: {why_line(err, 300)}")
                 if err["kind"] != "rate":
+                    self.unusable.append(m)
                     tried.append(f"{m}: {err['kind']} ({why_line(err, 120)})")
                     continue
             secs = round(_now() - t0, 1)
@@ -2170,9 +2240,10 @@ class GeminiTTS(object):
                           + " --tts say")
 
     def _advance(self):
-        if self.produced or not self._has_next():
+        nxt = None if self.produced else self._next_model()
+        if not nxt:
             return False
-        self.model = self.candidates[self.candidates.index(self.model) + 1]
+        self.model = nxt
         return True
 
     def _pace(self):
@@ -2222,6 +2293,8 @@ class GeminiTTS(object):
                 err = error_info(e)
                 self.note_tier(err)
                 kind = err["kind"]
+                if kind in ("missing", "exhausted", "rejected") and self.model not in self.unusable:
+                    self.unusable.append(self.model)
                 if kind in ("missing", "exhausted", "rejected") and not self.produced \
                         and not self.pinned:
                     was = self.model

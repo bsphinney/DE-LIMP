@@ -616,12 +616,21 @@ bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.t
       a 60 s deadline; the first that answers is used. A rate limit counts as an answer; a
       missing model, no quota, a rejected request or no answer moves on; a key problem stops.
       If the model that made the cached chunks does not answer, the next one makes **every
-      chunk again**, so the voices never mix. Nothing to make, no test. `--no-preflight` skips
-      it (one request per model tried is saved); `podcast.json` `tts.preflight` records which.
+      chunk again**, so the voices never mix. Nothing to make, no test. Each test is one request
+      against the key's daily quota (a free-tier key's TTS quota is small), and a resume walks
+      the models until one answers (up to 60 s each). `--no-preflight` skips it;
+      `podcast.json` `tts.preflight` records which.
     - **Mid-episode.** When a chunk's request goes unanswered twice (`--request-timeout`), the
       render moves to the next candidate model and makes **every chunk again** with it, and
       says so in the log; with no other model it stops with the resume message, as before.
-      `tts.switched` and the warnings record each hand-over.
+      `tts.switched` and the warnings record each hand-over. The next model then hands over
+      like any first model: one that is missing, out of quota or rejects the request is passed
+      over (never "made this episode's cached chunks", which it did not).
+    - **A stall is remembered.** A model that stopped answering (twice on a chunk, or at the
+      preflight) is written to `podcast/.cache/stalled.json`; for 12 hours a resume does not
+      pin it, even when it made the most cached chunks, and the model used makes every chunk
+      again. So a resume cannot repeat the same timeouts. When every model stalled, each gets
+      another chance.
     - **No silent retries in the SDK.** The client is built with a per-request HTTP timeout
       (`--request-timeout`) and `HttpRetryOptions(attempts=1)` (`tts.http`). Read from
       google-genai 2.31.0: `generate_content` then never retries; the `interactions` client
