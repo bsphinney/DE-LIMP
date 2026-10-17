@@ -36,7 +36,7 @@ class DeReadinessFollowsTheReader(limpa_t.SetupLimpaGate):
         self.assertEqual(r.returncode, 0, r.stderr[-2000:])
         self.assertIs(s["ready_for"]["de"], True)
         self.assertEqual(s["de_reader"], {"limpa": "1.2.5", "reads_parquet_with": "arrow",
-                                          "ok": True})
+                                          "ok": True, "maxlfq": True})
         self.assertIs(s["limpa"]["ok"], False)                 # still not the pinned stack
         (note,) = [n for n in s["notes"] if n.startswith("nanoparquet")]
         self.assertNotIn("no DE can run", note)
@@ -49,7 +49,7 @@ class DeReadinessFollowsTheReader(limpa_t.SetupLimpaGate):
         r, s = self.check("1.4.1", **self.np_missing())
         self.assertIs(s["ready_for"]["de"], False)
         self.assertEqual(s["de_reader"], {"limpa": "1.4.1", "reads_parquet_with": "nanoparquet",
-                                          "ok": False})
+                                          "ok": False, "maxlfq": True})
         (note,) = [n for n in s["notes"] if n.startswith("nanoparquet")]
         self.assertIn("no DE can run", note)
 
@@ -70,10 +70,20 @@ class DeReadinessFollowsTheReader(limpa_t.SetupLimpaGate):
         self.assertEqual(s["de_reader"]["reads_parquet_with"], "nanoparquet")
         self.assertFalse([n for n in s["notes"] if n.startswith(("nanoparquet", "arrow"))])
 
-    def test_no_limpa_no_de(self):
+    def test_no_limpa_no_de_but_maxlfq_can_run(self):
+        """run_de.R --method maxlfq needs arrow and limma, no limpa (review of this branch)."""
         _r, s = self.check("")
         self.assertIs(s["ready_for"]["de"], False)
         self.assertEqual(s["de_reader"]["reads_parquet_with"], "")
+        self.assertIs(s["de_reader"]["maxlfq"], True)
+
+    def test_a_devel_limpa_is_read_by_its_description_not_its_number(self):
+        """A limpa between 1.2 and 1.4 (a devel build): its DESCRIPTION says which reader."""
+        _r, s = self.check("1.3.9", FAKE_LIMPA_SUGGESTS="nanoparquet", **self.np_missing())
+        self.assertEqual(s["de_reader"]["reads_parquet_with"], "nanoparquet")
+        self.assertIs(s["ready_for"]["de"], False)
+        (note,) = [n for n in s["notes"] if n.startswith("nanoparquet")]
+        self.assertIn("no DE can run", note)
 
 
 # the parent's own tests run in test_setup_limpa.py; not again here

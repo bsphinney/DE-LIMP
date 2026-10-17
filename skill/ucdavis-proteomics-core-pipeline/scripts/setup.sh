@@ -212,6 +212,18 @@ if env_ready; then
   LIMPA_VERSION="$("$ENV_PREFIX/bin/Rscript" -e "cat(tryCatch(as.character(utils::packageVersion('limpa')), error = function(e) ''))" 2>/dev/null)"
   limpa_ok && LIMPA_OK=true
 fi
+# What THIS limpa reads report.parquet with. Its own DESCRIPTION says: Suggests arrow in the 1.2.x
+# line (readDIANN: arrow::read_parquet), nanoparquet from 1.4 (github.com/bioc/limpa RELEASE_3_22
+# vs RELEASE_3_23) -- right for a devel limpa between the two as well. The version decides only
+# when the DESCRIPTION names neither.
+LIMPA_READS=""
+if env_ready && { $LIMPA_OK || [ -n "$LIMPA_VERSION" ]; }; then
+  LIMPA_READS="$("$ENV_PREFIX/bin/Rscript" -e "d <- tryCatch(utils::packageDescription('limpa')[['Suggests']], error = function(e) NULL); d <- if (is.null(d)) '' else d; cat(if (grepl('nanoparquet', d)) 'nanoparquet' else if (grepl('arrow', d)) 'arrow' else '')" 2>/dev/null)"
+  case "$LIMPA_READS" in
+    nanoparquet|arrow) ;;
+    *) if $LIMPA_OK; then LIMPA_READS=nanoparquet; else LIMPA_READS=arrow; fi ;;
+  esac
+fi
 LIMPA_FIX="bash $SCRIPT_DIR/setup.sh (it installs it; on a cluster it runs itself on a compute node), or by hand -- on a cluster inside a job, never on a login node: $ENV_PREFIX/bin/Rscript -e \"install.packages('limpa', repos = '$LIMPA_REPO', type = 'source')\", then bash setup.sh --check"
 if env_ready && ! $LIMPA_OK; then
   NOTES+=("limpa ${LIMPA_VERSION:-is not installed}${LIMPA_VERSION:+ is older than $LIMPA_MIN}: run_de.R --method dpc needs limpa >= $LIMPA_MIN (it can still read the report with limpa 1.2.x and records that it did, but the pinned stack is >= $LIMPA_MIN). Fix: $LIMPA_FIX.")
@@ -327,7 +339,9 @@ fi
 # report.parquet with it; limpa 1.2.x reads with arrow, and only run_de.R's contaminant share
 # (Precursor.Quantity, read with nanoparquet) falls back to Precursor.Normalised.
 if env_ready && ! $NANOPARQUET_OK; then
-  if $LIMPA_OK || [ -z "$LIMPA_VERSION" ]; then
+  if [ "$LIMPA_READS" = nanoparquet ]; then
+    NANOPARQUET_COST="this env's limpa${LIMPA_VERSION:+ ($LIMPA_VERSION)} reads DIA-NN's report.parquet with it, so no DE can run"
+  elif [ -z "$LIMPA_READS" ]; then
     NANOPARQUET_COST="limpa >= $LIMPA_MIN reads DIA-NN's report.parquet with it, so no DE can run"
   else
     NANOPARQUET_COST="this env's limpa ($LIMPA_VERSION) reads report.parquet with arrow, so the DE runs, but on the unpinned limpa, and run_de.R's contaminant share is read from Precursor.Normalised instead of Precursor.Quantity (de_provenance.json contaminants.intensity_column); limpa >= $LIMPA_MIN needs it"
@@ -576,15 +590,18 @@ fi
 # 2026-10-16 an env on limpa 1.2.5 without nanoparquet ran every DE of the week (de_provenance.json:
 # limpa 1.2.5) while setup.json said ready_for.de false, "no DE can run". limpa.ok and the exit
 # status still hold the env to the pinned stack; this says only whether a DE can run.
-arrow_ok() {
-  "$ENV_PREFIX/bin/Rscript" -e "q(status = as.integer(!requireNamespace('arrow', quietly = TRUE)))" >/dev/null 2>&1
+# --method maxlfq needs no limpa at all: arrow and limma (de_reader.maxlfq).
+r_read_ok() {
+  "$ENV_PREFIX/bin/Rscript" -e "q(status = as.integer(!all(vapply(c('arrow', 'limma'), requireNamespace, logical(1), quietly = TRUE))))" >/dev/null 2>&1
 }
-DE_READER=""; DE_READER_OK=false; ARROW_OK=false
-if env_ready && { $LIMPA_OK || [ -n "$LIMPA_VERSION" ]; }; then
-  arrow_ok && ARROW_OK=true
-  if $LIMPA_OK; then DE_READER=nanoparquet; $ARROW_OK && $NANOPARQUET_OK && DE_READER_OK=true
-  else DE_READER=arrow; $ARROW_OK && DE_READER_OK=true; fi
-  $ARROW_OK || NOTES+=("arrow cannot be loaded in $ENV_PREFIX: run_de.R reads and filters report.parquet with it on both methods, so no DE can run. Fix: re-run bash setup.sh (on a cluster it runs itself on a compute node).")
+DE_READER="$LIMPA_READS"; DE_READER_OK=false; R_READ_OK=false
+if env_ready; then
+  r_read_ok && R_READ_OK=true
+  case "$DE_READER" in
+    nanoparquet) $R_READ_OK && $NANOPARQUET_OK && DE_READER_OK=true ;;
+    arrow)       $R_READ_OK && DE_READER_OK=true ;;
+  esac
+  $R_READ_OK || NOTES+=("arrow cannot be loaded in $ENV_PREFIX (or limma): run_de.R reads and filters report.parquet with arrow on both methods, so no DE can run. Fix: re-run bash setup.sh (on a cluster it runs itself on a compute node).")
 fi
 DE_READY=false; [ -n "$RSCRIPT" ] && $DE_READER_OK && DE_READY=true
 DDA_READY=false
@@ -660,8 +677,9 @@ SETUP_SKILL_VERSION="$( (. "$SCRIPT_DIR/skill_version.sh" && skill_version) 2>/d
          "$(j "$GENAI_VERSION")" "$GENAI_MIN" "$($GENAI_OK && echo true || echo false)"
   printf '  "limpa": {"version": "%s", "required": ">= %s", "ok": %s, "source": "Bioconductor %s"},\n' \
          "$(j "$LIMPA_VERSION")" "$LIMPA_MIN" "$($LIMPA_OK && echo true || echo false)" "$LIMPA_BIOC"
-  printf '  "de_reader": {"limpa": "%s", "reads_parquet_with": "%s", "ok": %s},\n' \
-         "$(j "$LIMPA_VERSION")" "$DE_READER" "$($DE_READER_OK && echo true || echo false)"
+  printf '  "de_reader": {"limpa": "%s", "reads_parquet_with": "%s", "ok": %s, "maxlfq": %s},\n' \
+         "$(j "$LIMPA_VERSION")" "$DE_READER" "$($DE_READER_OK && echo true || echo false)" \
+         "$($R_READ_OK && echo true || echo false)"
   printf '  "nanoparquet": {"ok": %s, "fix": "%s"},\n' \
          "$($NANOPARQUET_OK && echo true || echo false)" "$(j "$($NANOPARQUET_OK || printf '%s' "$NANOPARQUET_FIX")")"
   printf '  "set_annotation": {"ok": %s, "packages": "%s", "missing": "%s", "status": {%s}, "organisms": {"human": %s, "mouse": %s}, "bioconductor": "%s", "bioconductor_from": "%s", "fix": "%s"},\n' \
