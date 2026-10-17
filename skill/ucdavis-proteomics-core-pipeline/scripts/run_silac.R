@@ -466,8 +466,10 @@ for (ct in names(tables_rec)) {
       "%s: %d of the %d significant protein groups rest on a single precursor in at least one",
       "replicate (min_precursors = 1); limma's variance moderation treats them like the rest, so",
       "confirm the ones that matter."), ct, t$n_significant_one_precursor, t$n_significant),
-      plain = paste("Some significant proteins rest on a single peptide in at least one replicate:",
-                    "confirm those that matter before relying on them."))
+      plain = if (t$n_significant_one_precursor > 0)
+        paste("Some significant proteins rest on a single peptide in at least one replicate:",
+              "confirm those that matter before relying on them.")
+      else "No significant protein rests on a single peptide in any replicate.")
 }
 # A label that reads K- and R-ending precursors of one protein differently (silac_residue_bias):
 # per CHANNEL pair, heavier over lighter, whatever groups they hold (a label swap must not cancel
@@ -573,8 +575,10 @@ chk("silac_detection_patterns", "INFO", sprintf(paste(
   "for whole pathways before calling it a loading or detection-limit effect."), nrow(specific), min_reps_all,
   if (nrow(specific)) paste(sprintf("%s: %d", names(table(specific$pattern)), as.integer(table(specific$pattern))),
                             collapse = "; ") else "none"),
-  plain = paste("Some proteins are detected in some channels but not in others. They have no ratio,",
-                "so they are listed separately as detection patterns, not tested."))
+  plain = if (nrow(specific) > 0)
+    paste("Some proteins are detected in some channels but not in others. They have no ratio,",
+          "so they are listed separately as detection patterns, not tested.")
+  else "No protein is detected in some channels while missing from every replicate of another.")
 if (length(unlisted))
   chk("silac_unlisted_proteins", "INFO", sprintf(paste(
     "%d protein groups were detected but appear in neither a DE_silac table (no ratio) nor the detection",
