@@ -139,10 +139,37 @@ class CheckpointFindIsBounded(unittest.TestCase):
         self.assertEqual(self.find(), [])
         self.assertEqual(len(self.find("--max-depth", "9")), 1)
 
-    def test_search_and_raw_folders_are_not_entered(self):
+    def test_a_searchs_per_run_folders_are_not_entered(self):
         self.plant("S", "output", "search", "quant_step2", "x")
+        self.plant("S", "output", "search", "quant", "x")
+        self.plant("S", "output", "search", "report_xic", "x")
         self.plant("S", "raw", "run1.d", "y")
         self.assertEqual(self.find(), [])
+
+    def test_a_session_beside_the_raw_data_is_found(self):
+        """session.py init's default puts the session beside the raw files (<raw dir>/<date>_<name>),
+        and raw folders are often called raw/: never skipped (review of this branch: the first
+        version did, so a resume could have resubmitted a running search)."""
+        a = self.plant("proj", "raw", "2026-10-16_hela")
+        b = self.plant("proj", "Quant_study", "sessions", "s1")
+        c = self.plant("proj", "quantification", "s2")
+        self.assertEqual(self.find(), sorted([a, b, c]))
+
+    def test_a_skipped_folder_that_is_itself_a_session_is_found(self):
+        a = self.plant("proj", "temp")
+        self.assertEqual(self.find(), [a])
+
+    def test_a_linked_folder_is_followed_once_and_a_loop_ends(self):
+        elsewhere = tempfile.mkdtemp(dir=os.environ.get("TMPDIR"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(elsewhere, ignore_errors=True))
+        os.makedirs(os.path.join(elsewhere, "sessions", "s3"))
+        with open(os.path.join(elsewhere, "sessions", "s3", ".recovery.json"), "w") as fh:
+            json.dump({"updated": "x", "stages": []}, fh)
+        os.makedirs(os.path.join(self.base, "proj"))
+        os.symlink(elsewhere, os.path.join(self.base, "proj", "linked"))
+        os.symlink(self.base, os.path.join(self.base, "proj", "loop"))     # back to the top
+        found = self.find()
+        self.assertEqual(found, [os.path.join(self.base, "proj", "linked", "sessions", "s3")])
 
 
 if __name__ == "__main__":

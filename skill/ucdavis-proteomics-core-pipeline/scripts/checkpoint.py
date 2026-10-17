@@ -22,11 +22,12 @@ Usage
   checkpoint.py status --session <dir>
 
   # find interrupted runs under a directory: a project folder, never a whole share. It walks
-  # at most --max-depth (default 6) folders down, skips a search's per-run, raw-data and hidden
-  # folders, and on a cluster login node runs itself on a compute node (on_compute.py)
+  # at most --max-depth (default 6) folders down, follows links once, skips a search's per-run,
+  # temp and hidden folders and Bruker .d runs, and on a cluster login node runs itself on a
+  # compute node (on_compute.py)
   checkpoint.py find --base <project dir> [--max-depth N]
 """
-import argparse, json, os, subprocess, sys, glob, datetime
+import argparse, json, os, re, subprocess, sys, glob, datetime
 
 REC_JSON = ".recovery.json"
 REC_MD = "RECOVERY.md"
@@ -234,26 +235,41 @@ def cmd_status(a):
     print(json.dumps(out, indent=2))
 
 
-# Folders a session's .recovery.json is never in, and that hold thousands of entries: a search's
-# per-run files (quant, quant_step2/4, *_xic), raw data (raw/, *.d), temp, and hidden folders
-# (.cache, a conda root) -- which the recursive glob this replaced skipped as well.
+# Folders the pipeline itself fills with thousands of entries and never puts a session in: a
+# search's per-run files (quant, quant_step2/4, *_xic, xic), DIA-NN's temp folders, a Bruker
+# run (*.d), and hidden folders (.cache, a conda root -- the recursive glob this replaced skipped
+# those too). Never a folder by the user's naming (raw/, Quant_study/): session.py init's default
+# session sits beside the raw data, and a resume that cannot find it may resubmit the search.
+_PIPELINE_DIR = re.compile(r"^(quant(_step\d+)?|xic|.*_xic|temp|tmp)$", re.I)
+
+
 def _never_a_session(name):
-    n = name.lower()
-    return (name.startswith(".") or n in ("raw", "temp", "tmp", "xic") or n.startswith("quant")
-            or n.endswith(("_xic", ".d", ".raw")))
+    return name.startswith(".") or name.lower().endswith(".d") or bool(_PIPELINE_DIR.match(name))
 
 
 def _recovery_files(base, max_depth):
-    """Every .recovery.json at most `max_depth` folders below `base` (base itself is depth 0)."""
+    """Every .recovery.json at most `max_depth` folders below `base` (base itself is depth 0).
+    Linked folders are followed, each real folder once (a link back up cannot loop); a folder
+    that is skipped is still checked for its own .recovery.json."""
     base = os.path.abspath(os.path.expanduser(base))
     top = base.rstrip(os.sep).count(os.sep)
-    for root, dirs, files in os.walk(base):
+    seen = set()
+    for root, dirs, files in os.walk(base, followlinks=True):
+        real = os.path.realpath(root)
+        if real in seen:
+            dirs[:] = []
+            continue
+        seen.add(real)
         if REC_JSON in files:
             yield os.path.join(root, REC_JSON)
+        skipped = [d for d in dirs if _never_a_session(d)]
+        for d in skipped:
+            if os.path.isfile(os.path.join(root, d, REC_JSON)):
+                yield os.path.join(root, d, REC_JSON)
         if root.rstrip(os.sep).count(os.sep) - top >= max_depth:
             dirs[:] = []
         else:
-            dirs[:] = sorted(d for d in dirs if not _never_a_session(d))
+            dirs[:] = sorted(d for d in dirs if d not in skipped)
 
 
 def cmd_find(a):
