@@ -2630,8 +2630,9 @@ section, the audit and the podcast. The review → fix history (what a reviewer 
 changed) goes in `logs/decisions.md` (staff only), with `log_decision.py`. A staff report: a
 changelog-style Expert Review Notes, an audit line saying an earlier reason was "corrected" and
 a podcast saying "the first draft of this report fell for it" nearly reached a client.
-`make_analysis_html.py` warns on these phrases in `AI_Analysis_Report.md` and `make_podcast.py
-check` fails on them (one list: `scripts/client_text.py`); rewrite every one it names.
+`make_analysis_html.py` warns on these phrases in `AI_Analysis_Report.md`, and `make_podcast.py
+check` fails on the unambiguous ones and warns on the rest (one list: `scripts/client_text.py`);
+rewrite every one they name.
 
 ### 8e. QC runs around this project (Core runs) — STAFF-ONLY
 **Only on a Core STAFF route:** a CoreOmics submission (step 1c, fetched with the Core's
@@ -2941,7 +2942,7 @@ meaning before render** (one `Agent` call with `make_podcast.py meaning <script>
 every sentence against the report for (a) the right comparison, group and direction of each
 number and protein, (b) the report's hedges kept, (c) the robust status of every named protein
 (the session's robustness tables), (d) no superlative the report does not make, (e) no claim
-outside the report and the Claims list. The writer fixes what it finds and re-runs `check`; the
+outside the report and the Claims list, (f) no draft history. The writer fixes what it finds and re-runs `check`; the
 reviewer records `make_podcast.py meaning <script> --verdict PASS --reviewer "<who>" --findings
 <file>`, which writes `podcast/meaning_check.md` with the script's sha256. `check` itself fails a
 protein named in the same clause as "robust" / "survives" that the robustness tables call not

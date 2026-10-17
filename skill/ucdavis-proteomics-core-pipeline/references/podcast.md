@@ -309,11 +309,15 @@ Claims section):
   "the first draft of this report fell for it" passed `check` and reached a podcast script.
   The hosts talk about what the report finds and what was checked, in the present tense: "the
   review checked whether a loading difference could explain this, and it does not", never "the
-  first draft fell for it, and we corrected that". `check` FAILS on the phrases in
-  `client_text.py` (first / earlier / previous draft or version of the report, "we corrected
-  ...", "was wrong ... corrected", "fell for it", "honest correction" and close variants), and
-  never on the science words that look like them ("p-values were corrected for multiple
-  testing", "batch-corrected", "fixed modification", "a draft genome", "previously reported").
+  first draft fell for it, and we corrected that". `client_text.py` holds the phrases, in two
+  tiers. `check` FAILS on the unambiguous ones ("first draft", "an earlier version of this
+  report", "fell for it", "we got this wrong", "the report originally said", "we've updated the
+  wording", "... was incorrect, and it has been changed", "honest correction") and WARNS on
+  words that are draft history only in context ("corrected", "fixed", "updated" in a sentence
+  that also speaks of a review, a mistake, a draft or the report; "the draft"; "an earlier
+  pass"; "initially reported as"). Science wording trips neither ("the p-values are corrected",
+  "batch effects were corrected", "fixed modification", "a draft genome", "fell for this group
+  of mice", "previously reported"). What neither tier catches is the meaning check's (f).
 
 ### The meaning check: a separate reader, before render
 
@@ -333,7 +337,8 @@ sentence against the report** before anything is rendered, and checks it for:
   "holds up" must be robust (`robust` = yes) in that comparison's robustness table;
 - **(d)** no superlative or totality the report does not make ("the only", "all", "every",
   "the strongest");
-- **(e)** no claim outside the report and the Claims list.
+- **(e)** no claim outside the report and the Claims list;
+- **(f)** no draft history: nothing an earlier draft or version said, got wrong or had changed.
 
 The reviewer's brief, with every sentence numbered by its line and the robustness tables found
 in `output/tables/`: `make_podcast.py meaning <script> --brief` (also written as

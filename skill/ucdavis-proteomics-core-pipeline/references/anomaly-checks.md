@@ -165,7 +165,7 @@ confuses a non-MS reader and makes a sound result look shaky. The review → fix
 each reviewer found, what changed and why) goes in the staff-only `logs/decisions.md`
 (`log_decision.py`). The same applies to every other section, the audit and the podcast;
 `make_analysis_html.py` warns on the phrases (`scripts/client_text.py`, one list) and
-`make_podcast.py check` fails on them. **Skip review** for
+`make_podcast.py check` fails on the unambiguous ones and warns on the rest. **Skip review** for
 format conversion, single-column extraction, exploratory looks with no formal report, FASTA
 prep, and annotation correction against a single reference.
 

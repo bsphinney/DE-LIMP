@@ -19,8 +19,10 @@ CHECKS the script, RENDERS it to audio and LINKS the audio into the outputs.
          -> the meaning check, by a reader who did not write the script: every sentence against
             the report for (a) the right comparison, group and direction, (b) the report's hedges
             kept, (c) robust status of every named protein, (d) no superlative the report does not
-            make, (e) no claim outside the report. --verdict writes meaning_check.md with THIS
-            script's sha256; render, link, share and job refuse without its PASS.
+            make, (e) no claim outside the report, (f) no draft history. --brief first (the
+            reviewer works from it); --verdict, after a passing check, writes meaning_check.md
+            with THIS script's sha256 and its sources' and robustness tables'; render, link,
+            share and job refuse without its PASS while all of them hold.
   render SCRIPT.md [--out DIR] --tts gemini|say [--cloud-ok [NOTE] | --core-run [internal]]
          [--model M] [--keep-wav]
          -> DIR/podcast.m4a (podcast.wav when neither afconvert nor ffmpeg is present),
@@ -116,7 +118,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 from notify_slack import REDACTED, redact as _redact    # noqa: E402  the ONE secret list
 from report_files import SHARE_NAME, SHARE_STALE    # noqa: E402  names defined once
-from client_text import draft_history                # noqa: E402  the ONE draft-history list
+from client_text import draft_history, draft_history_loose  # noqa: E402  the ONE list
 
 SHOW = "Signal to Noise"
 HOSTS = (("Maya", "cell biologist"), ("Leo", "statistician"))
@@ -929,7 +931,8 @@ def robust_value(v):
 SUPERLATIVE = re.compile(r"\b(?:the\s+only|only\s+one|the\s+(?:strongest|biggest|largest|"
                          r"highest|lowest|best|most|top)|every\s+single|none\s+of)\b", re.I)
 MEANING_FILE = "meaning_check.md"
-# What the reviewer checks in every sentence (the staff report's (a)-(e)). Said in the brief,
+# What the reviewer checks in every sentence (the staff report's (a)-(e), and (f) from the 2.13.2
+# review: draft history no phrase list catches). Said in the brief,
 # in meaning_check.md and in references/podcast.md.
 MEANING_CHECKS = (
     ("a", "the right comparison, group and direction for every number and named protein: the "
@@ -942,6 +945,8 @@ MEANING_CHECKS = (
           "\"every\", \"the strongest\""),
     ("e", "no claim outside the report and the Claims list: a tool or database presented as one "
           "the client uses, a host answering their own question as if it were a finding"),
+    ("f", "no draft history: nothing an earlier draft or version said, got wrong or had changed "
+          "(the listener never saw one); say what the report finds and what was checked"),
 )
 
 
@@ -1351,6 +1356,10 @@ def check(s, sources, forbid=(), core=False, robust=None):
                          "say what the report finds and what was checked, in the present tense, "
                          "never what an earlier draft said, got wrong or corrected "
                          "(references/podcast.md)")
+        for snip in draft_history_loose(t.text):
+            warns.append(f"{where}: possible draft history '{snip}' -- if it tells of an earlier "
+                         "draft or a fix, say what the report finds instead; the meaning check "
+                         "(f) decides")
 
     seen = {}
     for i, t in enumerate(turns, 1):

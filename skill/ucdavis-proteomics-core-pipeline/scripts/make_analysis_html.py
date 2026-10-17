@@ -44,7 +44,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import report_style as rs  # noqa: E402  -- the ONE look shared by the skill's HTML pages
 import html_to_pdf  # noqa: E402  -- the PDF: the same page printed by a headless browser
 import make_podcast       # noqa: E402  -- an optional audio discussion keeps its Listen card
-from client_text import draft_history  # noqa: E402  -- the ONE draft-history list (podcast check too)
+from client_text import draft_history, draft_history_loose  # noqa: E402  -- the ONE list (podcast too)
 import audit_results      # noqa: E402  -- the audit's plain words: the client's Audit & caveats
 from session_docs import IP_CONTROL_NAME  # noqa: E402  -- which groups are pull-down controls
 from fetch_fasta import CONTAMINANT_TAGS  # noqa: E402  -- Cont_ and FragPipe's contam_: one definition
@@ -1771,7 +1771,7 @@ def main():
         # The client never saw a draft: Expert Review Notes and the audit state what was checked,
         # in the present tense; the review -> fix history is logs/decisions.md's (staff only).
         # A warning, not a stop -- the phrases are a lint, and a staff member reads the report.
-        hist = draft_history(md_orig)
+        hist = draft_history(md_orig) + draft_history_loose(md_orig)
         if hist:
             print(f"[make_analysis_html] WARNING: draft history in {os.path.basename(a.report)} "
                   f"({len(hist)} place(s)): " + " | ".join(f"\"{h}\"" for h in hist[:8])
