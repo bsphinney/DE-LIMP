@@ -2987,7 +2987,7 @@ def main():
             on_compute.ensure_compute_node(
                 f"fetch_fasta.py {a.cmd} " + ("downloads and digests the proteome" if a.cmd == "fetch"
                                               else "reads the search's database"),
-                minutes=60 if a.cmd == "fetch" else 30, mem="8G")
+                minutes=60 if a.cmd == "fetch" else 30, mem="8G", script=__file__)
         except ImportError:
             pass                          # a partial scripts/ without on_compute.py: as before
     if a.cmd == "keratin-db":

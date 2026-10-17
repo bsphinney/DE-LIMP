@@ -1283,7 +1283,7 @@ def main():
         try:
             import on_compute
             on_compute.ensure_compute_node("session.py finalize builds the documents and zips the "
-                                           "session", minutes=60, mem="8G")
+                                           "session", minutes=60, mem="8G", script=__file__)
         except ImportError:
             pass                          # a partial scripts/ without on_compute.py: as before
     a.func(a)

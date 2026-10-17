@@ -35,6 +35,9 @@ FAKE_SRUN = r'''#!/usr/bin/env python3
 import json, os, sys
 with open(os.environ["FAKE_SRUN_LOG"], "a") as fh:
     fh.write(json.dumps(sys.argv[1:]) + "\n")
+if os.environ.get("FAKE_SRUN_ENV_LOG"):
+    with open(os.environ["FAKE_SRUN_ENV_LOG"], "a") as fh:
+        fh.write(os.environ.get("PROTEOMICS_ON_COMPUTE", "") + "\n")
 args = sys.argv[1:]
 while args and args[0].startswith("--"):
     args.pop(0)
@@ -77,10 +80,13 @@ class Harness(unittest.TestCase):
 
     def env(self, **extra):
         e = dict(os.environ)
-        for k in ("SLURM_JOB_ID", "FAKE_SRUN_FAIL"):
+        for k in ("SLURM_JOB_ID", "FAKE_SRUN_FAIL", "PROTEOMICS_ON_COMPUTE"):
             e.pop(k, None)
+        # hermetic on a real cluster node too: no HPCCF cluster file, no CVMFS SLURM
         e.update({"PATH": self.bin + os.pathsep + e["PATH"], "FAKE_SRUN_LOG": self.srun_log,
-                  "FAKE_ASSOC": LAB, "USER": "staff1"})
+                  "FAKE_ASSOC": LAB, "USER": "staff1",
+                  "UCD_HPC_CLUSTER_CONF": os.path.join(self.d, "no-cluster-file"),
+                  "HPCCF_SLURM_BIN": os.path.join(self.d, "no-slurm-bin")})
         e.update(extra)
         return e
 
@@ -236,11 +242,113 @@ class SbatchHeader(Harness):
         self.assertEqual(self.header("--mem", "48").returncode, 2)
 
 
+class QueueNeverPreempts(Harness):
+    """Review of this branch: run_search.slurm_queue sends work to publicgrp/low when the account
+    is at its `high` cap -- fine for a requeued sbatch job, not for an srun, which a preemption
+    cancels half way through an install or a copy. An srun now takes a queue that does not
+    preempt; --preemptible lets the job rule choose."""
+
+    def at_capacity(self):
+        _exe(os.path.join(self.bin, "squeue"), "#!/bin/sh\necho 64\n")          # 64 CPUs running
+        _exe(os.path.join(self.bin, "sinfo"), "#!/bin/sh\necho 0/4000/0/4000\n")  # low is idle
+        return {"FAKE_ASSOC": f"{LAB};{PUBLIC}"}
+
+    def run_oc(self, *args, **env):
+        return subprocess.run([sys.executable, ON_COMPUTE, *args, "--", *self.probe()],
+                              capture_output=True, text=True, env=self.env(**env), timeout=60)
+
+    def test_the_job_rule_would_pick_low_here(self):
+        self.login_node()
+        env = self.env(**self.at_capacity())
+        r = subprocess.run([sys.executable, "-c", "import run_search; "
+                            "print(run_search.slurm_queue(peak_cpus=1, preemptible_ok=False))"],
+                           cwd=SCRIPTS, capture_output=True, text=True, env=env, timeout=60)
+        self.assertIn("'low'", r.stdout, r.stderr)
+
+    def test_an_srun_stays_on_high_at_capacity(self):
+        self.login_node()
+        r = self.run_oc(**self.at_capacity())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        (call,) = self.srun_calls()
+        self.assertIn("--partition=high", call)
+        self.assertIn("--account=genome-center-grp", call)
+        self.assertNotIn("--requeue", r.stderr)
+
+    def test_preemptible_lets_the_job_rule_choose(self):
+        self.login_node()
+        self.run_oc("--preemptible", **self.at_capacity())
+        (call,) = self.srun_calls()
+        self.assertIn("--partition=low", call)
+
+    def test_a_free_tier_account_takes_its_high(self):
+        self.login_node()
+        self.run_oc(FAKE_ASSOC=f"publicgrp|high|publicgrp-high-qos;{PUBLIC}")
+        (call,) = self.srun_calls()
+        self.assertIn("--partition=high", call)
+        self.assertIn("--qos=publicgrp-high-qos", call)
+
+    def test_but_not_past_its_8_cpu_cap(self):
+        self.login_node()
+        self.run_oc("--cpus", "16", FAKE_ASSOC=f"publicgrp|high|publicgrp-high-qos;{PUBLIC}")
+        (call,) = self.srun_calls()
+        self.assertIn("--partition=low", call)
+
+    def test_only_low_is_said(self):
+        self.login_node()
+        r = self.run_oc(FAKE_ASSOC=PUBLIC)
+        self.assertIn("preemptible", r.stderr)
+
+
+class LoginNodeWithoutSbatchOnPath(Harness):
+    """Review of this branch: the login-node test needed sbatch on PATH. A non-login shell, or one
+    after `module purge`, has none -- ucd-hpc: SLURM is at a fixed CVMFS path -- and every heavy
+    step then ran on the login node. HPCCF's cluster file, or SLURM at that path, counts too."""
+
+    def env_without_sbatch(self, **extra):
+        e = self.env(**extra)
+        e["PATH"] = os.pathsep.join(p for p in e["PATH"].split(os.pathsep) if p != self.bin)
+        return e
+
+    def run_oc(self, env):
+        return subprocess.run([sys.executable, ON_COMPUTE, "--", *self.probe()],
+                              capture_output=True, text=True, env=env, timeout=60)
+
+    def test_slurm_at_the_fixed_path_is_a_login_node_and_its_srun_is_used(self):
+        fixed = os.path.join(self.d, "cvmfs-slurm-bin")
+        os.makedirs(fixed)
+        _exe(os.path.join(fixed, "sbatch"), "#!/bin/sh\nexit 0\n")
+        os.rename(os.path.join(self.bin, "srun"), os.path.join(fixed, "srun"))
+        os.rename(os.path.join(self.bin, "sacctmgr"), os.path.join(fixed, "sacctmgr"))
+        env = self.env_without_sbatch(HPCCF_SLURM_BIN=fixed)
+        r = self.run_oc(env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.ran_in(), "4242")
+        (call,) = self.srun_calls()
+        self.assertIn("--time=30", call)
+
+    def test_hpccfs_cluster_file_alone_is_a_login_node(self):
+        conf = os.path.join(self.d, "cluster_name.conf")
+        with open(conf, "w") as fh:
+            fh.write('export CLUSTER_NAME="hive"\n')
+        env = self.env_without_sbatch(UCD_HPC_CLUSTER_CONF=conf)
+        r = subprocess.run([sys.executable, ON_COMPUTE, "--is-login-node"], env=env, timeout=60)
+        self.assertEqual(r.returncode, 0)
+        env["SLURM_JOB_ID"] = "5"
+        r = subprocess.run([sys.executable, ON_COMPUTE, "--is-login-node"], env=env, timeout=60)
+        self.assertEqual(r.returncode, 1)
+
+    def test_a_laptop_is_not(self):
+        env = self.env_without_sbatch(UCD_HPC_CLUSTER_CONF=os.path.join(self.d, "nope"),
+                                      HPCCF_SLURM_BIN=os.path.join(self.d, "nope"))
+        r = subprocess.run([sys.executable, ON_COMPUTE, "--is-login-node"], env=env, timeout=60)
+        self.assertEqual(r.returncode, 1)
+
+
 # a script that moves itself: ensure_compute_node() first, then its work
 MOVER = r'''import os, sys
 sys.path.insert(0, {scripts!r})
 import on_compute
-on_compute.ensure_compute_node("this walks a share", minutes=15, mem="3G")
+on_compute.ensure_compute_node("this walks a share", minutes=15, mem="3G", script=__file__)
 open(sys.argv[1], "w").write(os.environ.get("SLURM_JOB_ID", "none") + " " + " ".join(sys.argv[2:]))
 '''
 
@@ -262,6 +370,29 @@ class EnsureComputeNode(Harness):
         self.assertIn("--mem=3G", call)
         self.assertEqual(self.ran_in(), "4242 --summary a b.json")
         self.assertIn("this walks a share", r.stderr)
+
+    def test_whatever_runs_under_it_is_marked_and_never_sent_again(self):
+        self.login_node()
+        log = os.path.join(self.d, "env.log")
+        self.run_mover("x", FAKE_SRUN_ENV_LOG=log)
+        with open(log) as fh:
+            self.assertEqual(fh.read().strip(), "1")
+        os.remove(self.out)
+        self.run_mover("y", PROTEOMICS_ON_COMPUTE="1")      # marked: runs here, no second srun
+        self.assertEqual(len(self.srun_calls()), 1)
+        self.assertEqual(self.ran_in(), "none y")
+
+    def test_a_main_called_in_process_is_never_sent(self):
+        """A test (or another script) that imports a script and calls its main() must not be
+        re-run under srun: sys.argv[0] is then pytest, not the script."""
+        self.login_node()
+        r = subprocess.run([sys.executable, "-c",
+                            "import sys; sys.path.insert(0, sys.argv[1]); import on_compute; "
+                            "on_compute.ensure_compute_node('x', script=sys.argv[1] + '/some_script.py'); "
+                            "print('carried on')", SCRIPTS],
+                           capture_output=True, text=True, env=self.env(), timeout=60)
+        self.assertEqual(r.stdout.strip(), "carried on", r.stderr)
+        self.assertEqual(self.srun_calls(), [])
 
     def test_inside_a_job_or_without_slurm_it_carries_on_here(self):
         self.login_node()

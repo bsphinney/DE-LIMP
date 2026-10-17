@@ -3014,8 +3014,8 @@ def slurm_queue(partition=None, account=None, qos=None,
         if avail is not None and avail < need and idle >= need:
             a, p, q = pub
             print(f"[slurm_queue] priority queue at capacity ({avail} CPUs free, need "
-                  f"{need}); publicgrp/low has {idle} idle -> using low (preemptible, "
-                  f"--requeue is added)", file=sys.stderr)
+                  f"{need}); publicgrp/low has {idle} idle -> using low (preemptible: a job "
+                  f"script gets --requeue)", file=sys.stderr)
             return p, a, q
         if preemptible_ok and idle >= need and (avail is None or avail < need * 2):
             a, p, q = pub

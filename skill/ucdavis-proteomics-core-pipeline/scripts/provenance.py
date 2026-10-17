@@ -307,7 +307,8 @@ def main():
     # On a cluster login node this runs itself again there (on_compute.py; HPC@UCD's ucd-hpc rules).
     try:
         import on_compute
-        on_compute.ensure_compute_node("provenance.py hashes every input file", minutes=60, mem="4G")
+        on_compute.ensure_compute_node("provenance.py hashes every input file", minutes=60, mem="4G",
+                                       script=__file__)
     except ImportError:
         pass                              # a partial scripts/ without on_compute.py: as before
     # The database record is checked before anything is written: a bundle whose database replay

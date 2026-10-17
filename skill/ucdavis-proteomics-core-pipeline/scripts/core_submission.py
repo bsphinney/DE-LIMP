@@ -5300,7 +5300,7 @@ def main(argv=None) -> int:
             on_compute = None
         if on_compute:
             on_compute.ensure_compute_node(f"core_submission.py {a.cmd} {why}", minutes=minutes,
-                                           mem=mem)
+                                           mem=mem, script=__file__)
     try:
         if on_hive():
             # every subcommand that runs on HIVE: fetch, locate, stage and conditions keep their

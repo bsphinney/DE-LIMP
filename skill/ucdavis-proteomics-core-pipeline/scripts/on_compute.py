@@ -8,20 +8,27 @@ analysis on the login node ... anything past a few seconds of CPU or much I/O --
 The searches and DEs are sbatch jobs already; this is the skill's one way to send any OTHER
 command to a compute node (a walk of a share, an install, a zip of a session, hashing raw files):
 
-  python3 on_compute.py [--time MIN] [--mem SIZE] [--cpus N] [--name NAME] [--no-preempt]
+  python3 on_compute.py [--time MIN] [--mem SIZE] [--cpus N] [--name NAME] [--preemptible]
                         [--partition P] [--account A] [--qos Q] [--why TEXT] [--print]
                         -- COMMAND [ARG ...]
+  python3 on_compute.py --is-login-node          # exit 0 on a cluster login node, else 1
 
-  * On a cluster login node (sbatch on PATH, SLURM_JOB_ID unset): ONE blocking `srun`, with the
-    queue from run_search.slurm_queue (the skill's one queue rule) written out -- --account,
-    --partition, --qos -- and --time (minutes, default 30), --mem (default 4G), --ntasks=1,
-    --cpus-per-task (default 1). stdin, stdout and the exit status are the command's. The srun
-    line is printed on stderr first.
+  * On a cluster login node (no SLURM job, and sbatch on PATH, SLURM at HPC@UCD's fixed CVMFS
+    path, or HPCCF's /opt/hpccf/etc/cluster_name.conf): ONE blocking `srun`, the queue written
+    out -- --account, --partition, --qos -- and --time (minutes, default 30), --mem (default 4G),
+    --ntasks=1, --cpus-per-task (default 1). stdin, stdout and the exit status are the
+    command's. The srun line is printed on stderr first.
+  * The queue is one that does not preempt: an srun that is preempted is cancelled, not
+    requeued, and these commands install, copy or write. genome-center-grp/high when the account
+    has it, else another account's `high`; only an account with nothing but `low` gets low (and
+    is told so). --preemptible lets run_search.slurm_queue (the skill's queue rule for jobs)
+    choose, `low` included. A named --partition/--account/--qos is used as given.
   * Inside a job (SLURM_JOB_ID set) or where there is no SLURM (a laptop): the command runs here,
     unchanged, so one documented line works everywhere.
   * --print: print the srun line on stdout and run nothing.
-  * --no-preempt: the command must not be killed half way (an install): the queue rule is asked
-    for a non-preemptible queue when it has the choice.
+  * The srun BLOCKS until the job ends (queue wait + the work). An agent runs the call in the
+    background, or with a tool timeout of at least --time plus 10 minutes: a killed ssh cancels
+    the srun half way.
   * --header LOGDIR (no command): print the top of a job script the skill does not generate (a
     DE, set tests, figures): the same queue, --time/--mem/--cpus, one log per job
     (LOGDIR/NAME_%j.log) and `set -euo pipefail`. Append the commands, then sbatch it. A step
@@ -48,11 +55,63 @@ DEFAULT_MEM = "4G"
 SIZE = re.compile(r"^[1-9][0-9]*[KMGT]$")      # a bare number is MEGABYTES to SLURM (ucd-hpc)
 
 
+# Where SLURM lives on all three HPC@UCD clusters (ucd-hpc: "a fixed path ... never something to
+# search for"); a non-login shell, or one after `module purge`, has no sbatch on PATH. HPCCF's
+# own marker of a cluster node. Both overridable for the tests.
+SLURM_BIN_DEFAULT = "/cvmfs/hpc.ucdavis.edu/sw/spack/environments/core/view/generic/slurm/bin"
+CLUSTER_CONF_DEFAULT = "/opt/hpccf/etc/cluster_name.conf"
+# Set in the environment of every srun this starts: whatever runs under it is never sent again
+REEXEC_ENV = "PROTEOMICS_ON_COMPUTE"
+
+
+def _slurm_bin(env):
+    return env.get("HPCCF_SLURM_BIN") or SLURM_BIN_DEFAULT
+
+
 def on_login_node(env=None):
-    """sbatch present + no SLURM_JOB_ID == a cluster login/submit node, not a compute node.
-    THE definition (detect_acquisition.on_cluster_login_node asks this)."""
+    """A cluster login/submit node: no SLURM job here, and SLURM is (sbatch on PATH, or at the
+    fixed CVMFS path) or HPCCF's cluster file is. THE definition: detect_acquisition.
+    on_cluster_login_node, setup.sh and ensure_dotnet8.sh (--is-login-node) ask this."""
     env = os.environ if env is None else env
-    return shutil.which("sbatch") is not None and not env.get("SLURM_JOB_ID")
+    if env.get("SLURM_JOB_ID") or env.get(REEXEC_ENV):
+        return False
+    return (shutil.which("sbatch", path=env.get("PATH")) is not None
+            or os.access(os.path.join(_slurm_bin(env), "sbatch"), os.X_OK)
+            or os.path.isfile(env.get("UCD_HPC_CLUSTER_CONF") or CLUSTER_CONF_DEFAULT))
+
+
+def _srun_path(env=None):
+    env = os.environ if env is None else env
+    found = shutil.which("srun", path=env.get("PATH"))
+    if found:
+        return found
+    for d in (_slurm_bin(env), os.path.dirname(shutil.which("sbatch", path=env.get("PATH")) or "")):
+        if d and os.access(os.path.join(d, "srun"), os.X_OK):
+            return os.path.join(d, "srun")
+    return "srun"
+
+
+def pick_queue(cpus=1, preemptible_ok=False, partition=None, account=None, qos=None):
+    """(partition, account, qos) for an srun. Not preemptible unless allowed: run_search.
+    slurm_queue moves work to publicgrp/low when the account is at its `high` cap, which suits a
+    requeued sbatch job and not an srun (preempted = cancelled, half way through an install or a
+    copy). A named queue is used as given (the skill's rule checks it)."""
+    import run_search
+    if preemptible_ok or partition or account or qos:
+        return run_search.slurm_queue(partition, account, qos, peak_cpus=cpus,
+                                      preemptible_ok=preemptible_ok)
+    steady = [(a, p, q) for a, p, q in run_search._associations()
+              if p and p != "low" and not p.startswith("gpu")
+              and not (a == "publicgrp" and p == "high" and cpus > 8)]   # the free tier's cap
+    if steady:
+        steady.sort(key=lambda x: (x[:2] != ("genome-center-grp", "high"), x[1] != "high"))
+        a, p, q = steady[0]
+        return p, a, (q if q and "," not in q else None)
+    p, a, q = run_search.slurm_queue(peak_cpus=cpus, preemptible_ok=False)
+    if p == "low":
+        sys.stderr.write("[on_compute] this account can use only `low`, which is preemptible: a "
+                         "preempted srun is cancelled, not requeued -- run it again if it is.\n")
+    return p, a, q
 
 
 def check_size(mem):
@@ -63,19 +122,16 @@ def check_size(mem):
 
 
 def srun_argv(command, minutes=DEFAULT_MINUTES, mem=DEFAULT_MEM, cpus=1, name=None,
-              preemptible_ok=True, partition=None, account=None, qos=None):
+              preemptible_ok=False, partition=None, account=None, qos=None):
     """The srun line for `command` (a list), the queue written out. Asks SLURM (sacctmgr) which
-    queue this user can submit to, like every job the skill writes."""
+    queue this user can submit to (pick_queue)."""
     check_size(mem)
     minutes, cpus = int(minutes), int(cpus)
     if minutes < 1 or cpus < 1:
         raise ValueError("--time and --cpus must be at least 1")
-    import run_search
-    part, acct, q = run_search.slurm_queue(partition, account, qos, peak_cpus=cpus,
-                                           preemptible_ok=preemptible_ok)
-    srun = shutil.which("srun") or os.path.join(os.path.dirname(shutil.which("sbatch") or ""), "srun")
+    part, acct, q = pick_queue(cpus, preemptible_ok, partition, account, qos)
     name = name or "pp_" + re.sub(r"[^A-Za-z0-9_.-]", "_", os.path.basename(str(command[0])))[:40]
-    argv = [srun if os.path.isabs(srun) else "srun"]
+    argv = [_srun_path()]
     argv += [f"--account={acct}"] if acct else []
     argv += [f"--partition={part}"] if part else []
     argv += [f"--qos={q}"] if q else []
@@ -89,9 +145,11 @@ def shown(argv):
     return " ".join(shlex.quote(a) for a in ["srun"] + list(argv[1:]))
 
 
-def _exec(argv):
+def _exec(argv, srun=False):
     sys.stdout.flush()
     sys.stderr.flush()
+    if srun:
+        os.environ[REEXEC_ENV] = "1"     # srun passes it on: nothing under it is sent again
     try:
         os.execvp(argv[0], argv)
     except OSError as e:                 # no srun beside sbatch, or no such command: say so, once
@@ -100,10 +158,14 @@ def _exec(argv):
 
 
 def ensure_compute_node(why, minutes=DEFAULT_MINUTES, mem=DEFAULT_MEM, cpus=1,
-                        preemptible_ok=True, argv=None):
+                        preemptible_ok=False, argv=None, script=None):
     """First thing in a script whose work does not belong on a login node: there, replace this
-    process with the same command under srun (never returns). Anywhere else, return."""
+    process with the same command under srun (never returns). Anywhere else, return. `script`
+    (the caller's __file__): only when that script IS this process's program -- a test or
+    another script calling its main() in-process is left alone, never re-run under srun."""
     if not on_login_node():
+        return
+    if script and (not sys.argv or os.path.realpath(sys.argv[0]) != os.path.realpath(script)):
         return
     argv = list(sys.argv if argv is None else argv)
     cmd = [sys.executable or "python3", os.path.abspath(argv[0])] + argv[1:]
@@ -112,16 +174,17 @@ def ensure_compute_node(why, minutes=DEFAULT_MINUTES, mem=DEFAULT_MEM, cpus=1,
     sys.stderr.write(f"[on_compute] {why}: that is work for a compute node, not this login node "
                      f"(HPC@UCD's ucd-hpc rules). Running it there and waiting for it:\n"
                      f"  {shown(line)}\n")
-    _exec(line)
+    _exec(line, srun=True)
 
 
 def _usage(msg):
     sys.stderr.write(f"on_compute.py: {msg}\n"
                      "usage: on_compute.py [--time MIN] [--mem SIZE] [--cpus N] [--name NAME] "
-                     "[--no-preempt] [--partition P] [--account A] [--qos Q] [--why TEXT] "
+                     "[--preemptible] [--partition P] [--account A] [--qos Q] [--why TEXT] "
                      "[--print] -- COMMAND [ARG ...]\n"
                      "       on_compute.py --header LOGDIR --name NAME [--time MIN] [--mem SIZE] "
-                     "[--cpus N] [--no-preempt]\n")
+                     "[--cpus N] [--no-preempt]\n"
+                     "       on_compute.py --is-login-node\n")
     return 2
 
 
@@ -164,7 +227,7 @@ def main(args):
         return 0
     o = {"time": DEFAULT_MINUTES, "mem": DEFAULT_MEM, "cpus": 1, "name": None, "partition": None,
          "account": None, "qos": None, "why": None, "header": None}
-    flags = {"print": False, "no-preempt": False}
+    flags = {"print": False, "no-preempt": False, "preemptible": False, "is-login-node": False}
     k = 0
     while k < len(opts):
         f = opts[k]
@@ -176,6 +239,8 @@ def main(args):
             k += 2
         else:
             return _usage(f"unknown or incomplete option {f!r}")
+    if flags["is-login-node"]:
+        return 0 if on_login_node() else 1
     if o["header"] is not None:
         try:
             print("\n".join(sbatch_header(o["name"] or "pp_job", o["header"], o["time"], o["mem"],
@@ -191,7 +256,7 @@ def main(args):
         if int(o["time"]) < 1 or int(o["cpus"]) < 1:
             raise ValueError("--time and --cpus must be at least 1")
         line = srun_argv(cmd, o["time"], o["mem"], o["cpus"], o["name"],
-                         preemptible_ok=not flags["no-preempt"], partition=o["partition"],
+                         preemptible_ok=flags["preemptible"], partition=o["partition"],
                          account=o["account"], qos=o["qos"]) if (flags["print"] or on_login_node()) \
             else None
     except ValueError as e:
@@ -203,7 +268,7 @@ def main(args):
         _exec(cmd)
     sys.stderr.write(f"[on_compute] {o['why'] + ': ' if o['why'] else ''}running on a compute node "
                      f"(HPC@UCD's ucd-hpc rules), waiting for it:\n  {shown(line)}\n")
-    _exec(line)
+    _exec(line, srun=True)
 
 
 if __name__ == "__main__":
