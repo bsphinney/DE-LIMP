@@ -561,7 +561,7 @@ arrow_ok() {
   "$ENV_PREFIX/bin/Rscript" -e "q(status = as.integer(!requireNamespace('arrow', quietly = TRUE)))" >/dev/null 2>&1
 }
 DE_READER=""; DE_READER_OK=false; ARROW_OK=false
-if env_ready && [ -n "$LIMPA_VERSION" ]; then
+if env_ready && { $LIMPA_OK || [ -n "$LIMPA_VERSION" ]; }; then
   arrow_ok && ARROW_OK=true
   if $LIMPA_OK; then DE_READER=nanoparquet; $ARROW_OK && $NANOPARQUET_OK && DE_READER_OK=true
   else DE_READER=arrow; $ARROW_OK && DE_READER_OK=true; fi
