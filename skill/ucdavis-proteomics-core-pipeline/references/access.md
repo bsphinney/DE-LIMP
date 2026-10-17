@@ -382,7 +382,8 @@ your own copy in your HIVE home. Run all of this **on HIVE** (via `hive_exec.sh`
    bash scripts/hive_exec.sh 'PIN_ENGINE=diann PIN_VERSION=2.7.0 bash ~/proteomics-pipeline/scripts/acquire_tools.sh hpc'
    ```
    `acquire_tools.sh` downloads the DIA-NN Academia Linux zip to
-   `~/.proteomics-pipeline/tools/diann/<version>/` (needs glibc ≥ Mint 21.2 / .NET 8;
+   `~/.proteomics-pipeline/tools/diann/<version>/` — on the login node the download runs itself
+   on a compute node (one blocking `srun`), so run the call in the background — (needs glibc ≥ Mint 21.2 / .NET 8;
    if the native binary won't run on the node, build the Apptainer image from the
    zip's Dockerfile). Check its `tools.json` `notes`.
 3. **FASTA:** without the Core's pre-staged proteomes, download from UniProt.

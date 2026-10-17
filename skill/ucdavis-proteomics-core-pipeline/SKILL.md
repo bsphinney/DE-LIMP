@@ -206,12 +206,16 @@ because the environment does not carry over from one command to the next.
   `fetch`/`bioshare`/`email-draft`, `node_fault.py retry`, `cpu_hours.py`). **Everything else
   goes to a compute node** — whatever reads `report.parquet` or raw files, runs R, walks a
   share, installs, renders or zips: `bash scripts/hive_exec.sh --job [--time MIN] [--mem SIZE]
-  [--cpus N] '<cmd>'` (one blocking `srun` with the queue spelled out; defaults 30 min, 4G, 1
-  CPU; its output and exit status are the command's) for minutes of work, or an sbatch job for
+  [--cpus N] '<cmd>'` (one blocking `srun` on a queue that does not preempt, spelled out;
+  defaults 30 min, 4G, 1 CPU; its output and exit status are the command's) for minutes of work, or an sbatch job for
   longer work and anything that must survive a closed laptop (step 8: `on_compute.py --header`).
   These move themselves when started on the login node: `setup.sh`, `ensure_dotnet8.sh`,
   `fetch_fasta.py fetch`/`check-db`, `core_submission.py locate`/`stage`/`deliver`,
-  `provenance.py`, `session.py finalize`, `checkpoint.py find`. Unsure → `--job`. In
+  `provenance.py`, `session.py finalize`, `checkpoint.py find`, and `acquire_tools.sh` when it
+  downloads. **Each of these blocks until its job ends (queue wait + the work): run the call
+  with `run_in_background` and wait for it, or with a Bash timeout of at least its `--time` plus
+  10 minutes — never the 2-minute default. A killed call kills the ssh, which cancels the srun
+  half way (in the middle of an `--apply` copy or an install).** Unsure → `--job`. In
   `hive_local` (Claude Code on HIVE) the same split, with `python3 scripts/on_compute.py [--time
   MIN] [--mem SIZE] -- <cmd>` for `--job`.
 - **Core member = yes (with HIVE) → reuse the installed software** in
@@ -357,8 +361,11 @@ of it): `bash scripts/hive_exec.sh 'bash ~/proteomics-pipeline/scripts/setup.sh'
 `~/.proteomics-pipeline/setup.json` on HIVE the same way. On a cluster login node `setup.sh`
 (and `--check`) runs itself on a compute node (`on_compute.py`: one blocking `srun`, up to 2 h for
 an install, printed first): run that call in the background and wait for it. Never run a conda,
-R or .NET install on the login node by hand; HIVE's compute nodes have internet. Exit 2: it
-could not get there (no python3 there), and says how.
+R or .NET install on the login node by hand; HIVE's compute nodes have internet. Run it before
+the first search: it installs .NET 8, so writing a `.raw` search later does not wait on a
+download job. Exit 3: the compute-node run did not finish (SLURM refused it, a time limit) and
+`setup.json` was not rewritten — its `ready_for` is old; read the srun lines and run it again.
+Exit 2: it could not get there (no python3 there), and says how.
 
 **Notes from the Core — check every session**, on every start and every resume: after the
 HIVE version check (step 0) and before the resume check (0c). The Core's director can leave a
@@ -404,7 +411,7 @@ jobs survive that; the conversation does not. So before doing any work, check wh
 an earlier session already submitted something (step 0's notes check runs on a resume
 too, with `--session <dir>` once the session is found):
 ```
-python3 scripts/checkpoint.py find --base <the project folder>   # never ~ or a whole share
+python3 scripts/checkpoint.py find --base <the project folder>   # never ~ or a whole share; HIVE: in the background
 python3 scripts/checkpoint.py status --session <session dir> --resume   # live sacct re-query
 ```
 `status` returns each stage's real state, whether the expected output file exists, and
@@ -854,9 +861,10 @@ and `acquired_at_note`, read in the same pass: from a `.d`'s `AcquisitionDateTim
 Pacific time (the note says so). Step 8e uses them. **Keep this step's JSON**: save it as
 `<session>/input/acquisition.json` at step 3b.
 Each `.raw` costs ~3–7 s of parser I/O (more on a busy mount). **On a cluster, run step 2 on
-a compute node whenever there is a `.raw`**: `bash scripts/hive_exec.sh --job --time 30 --mem 2G
-'python3 ~/proteomics-pipeline/scripts/detect_acquisition.py …'` (`hive_local`: `python3
-scripts/on_compute.py --time 30 --mem 2G -- python3 scripts/detect_acquisition.py …`). A
+a compute node whenever there is a `.raw`**, in the background: `bash scripts/hive_exec.sh --job
+--time <T> --mem 2G 'python3 ~/proteomics-pipeline/scripts/detect_acquisition.py …'` with `<T>`
+= the number of `.raw` ÷ 4 in minutes, at least 10 (`hive_local`: `python3
+scripts/on_compute.py --time <T> --mem 2G -- python3 scripts/detect_acquisition.py …`). A
 `.d`-only input is an SQLite lookup per file and may stay on the login node. On a login node the
 script itself refuses more than 5 `.raw` before reading anything and prints the `srun` line. Do not add
 `--allow-login-node` yourself to get past the refusal; it is for a user who chooses that.
@@ -1296,7 +1304,8 @@ Honor the manifest's exact version — not "latest":
 PIN_ENGINE=diann PIN_VERSION=2.7.0 bash scripts/acquire_tools.sh <platform_class>
 ```
 Reads/writes `~/.proteomics-pipeline/tools/tools.json`. On HIVE it reuses the Core's
-native DIA-NN build for that version (downloading it if the Core has none); on mac it uses
+native DIA-NN build for that version (downloading it if the Core has none — a download runs
+itself on a compute node, so run the call in the background); on mac it uses
 Docker for DIA-NN. **Read `tools.json` `notes`** — license gates (FragPipe, Radiant) and
 missing-runtime warnings surface there. `tools.json` `versions` is the build it found,
 never `latest` and never the version that was ASKED for (`""` when it cannot tell, `env` for
@@ -2272,7 +2281,9 @@ on HIVE** starts from `python3 ~/proteomics-pipeline/scripts/on_compute.py --hea
 --name <short name> --time <minutes> --mem <size>G --cpus <n>`: the queue the skill's rule
 picks, `--time`/`--mem`/`--cpus` explicit, one log per job (`%j`), `set -euo pipefail`. Append
 the commands, `sbatch` it, and when the `ucd-hpc` skill is installed here, lint it first:
-`bash scripts/hive_exec.sh 'bash -s -- <job file>' < ~/.claude/skills/ucd-hpc/scripts/lint-jobscript.sh`.
+`bash scripts/hive_exec.sh 'bash -s -- <job file>' < ~/.claude/skills/ucd-hpc/scripts/lint-jobscript.sh`
+(it misreads a log path that holds a space as having no `%j`; sbatch reads it right, so that
+one message can be ignored).
 ```
 Rscript scripts/run_de.R --input ./search_out/report.parquet --metadata conditions.csv \
     --method <dpc|maxlfq> --fasta-meta ./search.fasta.meta.json [--block Mouse] [--numeric-covariates Covariate1] \
@@ -2950,7 +2961,8 @@ shared key on HIVE is used for a Core run only.
 → detail (when and where, the brief, the file format, privacy, keys): `references/podcast.md`.
 
 ### 10. Reproducibility bundle (mandatory)
-Assemble the bundle that makes the whole analysis reproducible:
+Assemble the bundle that makes the whole analysis reproducible (it hashes every input file; on
+HIVE's login node it moves itself to a compute node — run it in the background):
 ```
 python3 scripts/provenance.py --outdir ./reproducibility \
   --workflow-manifest ./wf/workflow.manifest.json \
@@ -3071,7 +3083,7 @@ First check the notes from the Core again (step 0: `notes.py check --json --sess
 ```
 python3 scripts/session.py finalize --dir <session> --zip
 ```
-This tidies `output/` (tables→`tables/`, figures→`figures/`) and makes sure the session carries
+(On HIVE's login node it moves itself to a compute node: run it in the background.) This tidies `output/` (tables→`tables/`, figures→`figures/`) and makes sure the session carries
 **publication Methods**: `output/methods.md` + `.docx`, covering LC-MS acquisition, the search
 (engine, pinned version, parameters, FDR), the sequence database and contaminants, the DE, and the
 instrument-grant acknowledgment. If step 9d did not write them, `make_methods.py` does it here. An
@@ -3151,7 +3163,8 @@ touched** — `deliver` lists them as warnings.
 **On HIVE — always the dry run first** (file list, size, and any refusal), then the same
 command with `--apply`. `locate`, `stage` and `deliver` walk the shares, so on HIVE's login node
 each runs itself on a compute node (one blocking `srun`, its line printed first; HPC@UCD's
-`ucd-hpc` rules): it takes a minute longer to start, and you wait for it:
+`ucd-hpc` rules): run each call in the background (or with a Bash timeout of at least 70
+minutes) and wait for it — a killed call cancels the copy half way:
 ```
 python3 ~/proteomics-pipeline/scripts/core_submission.py deliver \
     --summary ~/core/PROT_0807/submission_summary.json --session "$S"
