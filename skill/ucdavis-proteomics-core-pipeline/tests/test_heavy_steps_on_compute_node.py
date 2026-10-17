@@ -203,6 +203,14 @@ class CheckpointFindIsBounded(unittest.TestCase):
         self.assertEqual(self.find(),
                          [os.path.join(self.base, "proj", "linked", "sessions", "s3")])
 
+    def test_a_link_out_to_an_ancestor_reports_each_session_once(self):
+        """Round-3 review: proj/up -> .. points out of --base at its parent, and looking 2 levels
+        into it reached proj/<session> again -- each session reported twice. Hits are one per
+        real file, under the shortest (direct) path."""
+        a = self.plant("s1")
+        os.symlink("..", os.path.join(self.base, "up"))
+        self.assertEqual(self.find(), [a])
+
     def test_a_link_inside_base_is_not_followed_and_hides_nothing(self):
         """Re-review: a deep link to a shallower folder marked it seen at the depth cap, so the
         folder itself was then skipped (base/a/b/c/d/e/zlink -> base/z). A link that stays inside

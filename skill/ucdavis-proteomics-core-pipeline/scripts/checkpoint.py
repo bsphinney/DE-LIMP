@@ -307,9 +307,21 @@ def _recovery_files(base, max_depth):
         dirs[:] = sorted(d for d in dirs if d not in skipped and d not in links)
 
 
+def _unique_recovery_files(base, max_depth):
+    """_recovery_files, one per real file: a link out of --base can point back at an ancestor
+    (proj/up -> ..) and reach a session the walk also finds. The shortest path -- the direct
+    one -- is kept."""
+    best = {}
+    for p in _recovery_files(base, max_depth):
+        real = os.path.realpath(p)
+        if real not in best or len(p) < len(best[real]):
+            best[real] = p
+    return sorted(best.values())
+
+
 def cmd_find(a):
     hits = []
-    for p in _recovery_files(a.base, a.max_depth):
+    for p in _unique_recovery_files(a.base, a.max_depth):
         try:
             with open(p) as fh:
                 d = json.load(fh)
