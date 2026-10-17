@@ -4,10 +4,11 @@ A podcast is checked for MEANING before it is rendered (make_podcast.py meaning;
 robustness and superlative lines).
 
 A staff episode (PROT_0000, skill 2.11.2, 2026-10-16) passed `check` (0 problems, 0 warnings),
-yet a separate read of every line against the report found a T18 vs T24 hit told as part of a
-T30 vs T24 story and called "nearly absent" (detected in 2 of 3 cultures), proteins put right after
-"It survives everything" whose robustness table says robust = no or "not testable", "not a main
-driver" spoken as "aren't driving", and a tool presented as one the client already uses. check
+yet a separate read of every line against the report found a hit from one comparison told as
+part of another comparison's story and called "nearly absent" (detected in 2 of 3 cultures),
+proteins put right after "It survives everything" whose robustness table says robust = no or
+"not testable", "not a main driver" spoken as "aren't driving", and a tool presented as one the
+client already uses. check
 matches tokens and numbers only. Now a reader who did not write the script records a verdict for
 the script's exact sha256 (meaning_check.md), and render, link, share and job refuse without its
 PASS; what can be caught mechanically is caught by check.
@@ -45,7 +46,7 @@ class Base(Workspace):
         enc.start()
         self.addCleanup(enc.stop)
         self.findings = os.path.join(self.pod, "findings.txt")
-        write(self.findings, "- line 31: the hit is T18 vs T24, not T30 -> fixed (resolved)\n")
+        write(self.findings, "- line 31: the hit is A vs B, not C vs B -> fixed (resolved)\n")
 
     def checked(self, text=None):
         write(self.script, text if text is not None else script_text())
@@ -83,7 +84,7 @@ class Gate(Base):
         self.assertIn("verdict: PASS", mc)
         for k, _ in mp.MEANING_CHECKS:
             self.assertIn(f"- ({k}) ", mc)
-        self.assertIn("T18 vs T24", mc)                                   # the findings
+        self.assertIn("A vs B, not C vs B", mc)                                   # the findings
         rc, out, err = self.render()
         self.assertEqual(rc, 0, err)
         man = json.loads(read(os.path.join(self.pod, "podcast.json")))

@@ -318,8 +318,9 @@ Claims section):
 ### The meaning check: a separate reader, before render
 
 `check` matches tokens. A staff episode (2026-10-16) passed it with 0 problems and 0 warnings,
-and a separate read of every line against the report then found: a T18-vs-T24 hit told as part
-of a T30-vs-T24 story and called "nearly absent" (it was detected in 2 of 3 cultures); proteins
+and a separate read of every line against the report then found: a hit from one comparison told
+as part of another comparison's story and called "nearly absent" (it was detected in 2 of 3
+cultures); proteins
 put right after "It survives everything" whose robustness table says `robust` = no or "not
 testable"; the report's "not a main driver" spoken as "aren't driving"; a tool presented as a
 database the client already uses; a number given for "the shifted cultures" that belongs to one
