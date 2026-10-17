@@ -1371,8 +1371,8 @@ def main(argv=None, now=None):
                  f"ThermoRawFileParser process, ~3-7 s): pass --acquisition-json with step 2's "
                  f"output, or run this on a compute node (python3 "
                  f"{os.path.join(os.path.dirname(os.path.abspath(__file__)), 'on_compute.py')} "
-                 f"--time 30 --mem 2G -- python3 <this command>; from a laptop: hive_exec.sh "
-                 f"--job), or add --allow-login-node.")
+                 f"--time 30 --mem 2G --preemptible -- python3 <this command>; from a laptop: "
+                 f"hive_exec.sh --job --preemptible), or add --allow-login-node.")
             return EXIT_USAGE
     if acq_problem:
         _say(f"WARNING: {acq_problem}")

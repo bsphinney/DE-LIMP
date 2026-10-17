@@ -65,12 +65,16 @@ class HeavyStepsMove(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def run_script(self, script, args):
+    def run_script(self, script, args, **extra):
         env = dict(os.environ)
-        env.pop("SLURM_JOB_ID", None)
+        for k in ("SLURM_JOB_ID", "PROTEOMICS_ON_COMPUTE", "PROTEOMICS_SRUN_ACCOUNT"):
+            env.pop(k, None)
         env.update({"PATH": self.bin + os.pathsep + env["PATH"], "FAKE_SRUN_LOG": self.log,
                     "FAKE_SRUN_NORUN": "1", "FAKE_ASSOC": LAB, "USER": "staff1",
-                    "HOME": self.d, "CORE_FLINDERS_ROOT": self.d, "CORE_WORK_ROOT": self.d})
+                    "HOME": self.d, "CORE_FLINDERS_ROOT": self.d, "CORE_WORK_ROOT": self.d,
+                    "UCD_HPC_CLUSTER_CONF": os.path.join(self.d, "no-cluster-file"),
+                    "HPCCF_SLURM_BIN": os.path.join(self.d, "no-slurm-bin")})
+        env.update(extra)
         return subprocess.run([sys.executable, os.path.join(SCRIPTS, script), *args], cwd=self.d,
                               capture_output=True, text=True, env=env, timeout=120)
 
@@ -94,6 +98,22 @@ class HeavyStepsMove(unittest.TestCase):
                 i = call.index(os.path.join(SCRIPTS, script))
                 self.assertEqual(call[i + 1:], args)          # the same command, unchanged
                 self.assertIn("compute node", r.stderr)
+
+    def test_at_the_own_cap_restartable_steps_take_low_the_rest_wait_on_high(self):
+        """checkpoint find, locate, provenance and fetch_fasta check-db can be run again from the
+        start; stage, deliver, finalize and the FASTA build write, and must not be preempted."""
+        _exe(os.path.join(self.bin, "squeue"), "#!/bin/sh\necho 64\n")
+        _exe(os.path.join(self.bin, "sinfo"), "#!/bin/sh\necho 0/4000/0/4000\n")
+        restartable = {("checkpoint.py", "find"), ("core_submission.py", "locate"),
+                       ("provenance.py", "--outdir"), ("fetch_fasta.py", "check-db")}
+        for script, args, _minutes, _mem in HEAVY:
+            with self.subTest(script=script, cmd=args[0]):
+                if os.path.exists(self.log):
+                    os.remove(self.log)
+                r = self.run_script(script, args, FAKE_ASSOC=f"{LAB};publicgrp|low|publicgrp-low-qos")
+                (call,) = self.calls()
+                want = "low" if (script, args[0]) in restartable else "high"
+                self.assertIn(f"--partition={want}", call, r.stderr[-800:])
 
     def test_light_steps_stay_where_they_are(self):
         for script, args in LIGHT:

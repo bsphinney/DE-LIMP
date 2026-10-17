@@ -1624,7 +1624,8 @@ def login_node_refusal(n_raw):
         f"  Run it on a compute node instead -- one blocking srun with the queue spelled out "
         f"(on_compute.py):\n"
         f"    python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'on_compute.py')} "
-        f"--time {minutes} --mem 2G -- python3 {os.path.abspath(__file__)} <the same files>\n"
+        f"--time {minutes} --mem 2G --preemptible -- python3 {os.path.abspath(__file__)} "
+        f"<the same files>\n"
         f"{_srun_shown(minutes)}"
         f"  or re-run with {ALLOW_LOGIN_NODE} to read them here anyway "
         f"({LOGIN_NODE_MAX_RAW} or fewer need no flag).")
@@ -1635,7 +1636,7 @@ def _srun_shown(minutes):
     try:
         import on_compute
         line = on_compute.srun_argv(["python3", os.path.abspath(__file__), "<the same files>"],
-                                    minutes=minutes, mem="2G")
+                                    minutes=minutes, mem="2G", preemptible_ok=True)
         return f"  which is: {on_compute.shown(line)}\n"
     except Exception:
         return ("  (or srun --cpus-per-task=1 --mem=2G with the --account/--partition/--qos your "

@@ -325,7 +325,7 @@ def main():
         try:
             import on_compute
             on_compute.ensure_compute_node("checkpoint.py find walks " + a.base, minutes=15,
-                                           mem="2G", script=__file__)
+                                           mem="2G", preemptible_ok=True, script=__file__)
         except ImportError:
             pass                          # a partial scripts/ without on_compute.py: as before
     a.func(a)

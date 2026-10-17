@@ -206,8 +206,11 @@ because the environment does not carry over from one command to the next.
   `fetch`/`bioshare`/`email-draft`, `node_fault.py retry`, `cpu_hours.py`). **Everything else
   goes to a compute node** — whatever reads `report.parquet` or raw files, runs R, walks a
   share, installs, renders or zips: `bash scripts/hive_exec.sh --job [--time MIN] [--mem SIZE]
-  [--cpus N] '<cmd>'` (one blocking `srun` on a queue that does not preempt, spelled out;
-  defaults 30 min, 4G, 1 CPU; its output and exit status are the command's) for minutes of work, or an sbatch job for
+  [--cpus N] [--preemptible] '<cmd>'` (one blocking `srun` on a queue that does not preempt,
+  spelled out; defaults 30 min, 4G, 1 CPU; its output and exit status are the command's; when
+  your own searches fill your 64-CPU cap on `high` it says it waits behind them, and
+  `--preemptible` — only for a command that just reads and can be run again, as step 2 — runs it
+  on `low` instead) for minutes of work, or an sbatch job for
   longer work and anything that must survive a closed laptop (step 8: `on_compute.py --header`).
   These move themselves when started on the login node: `setup.sh`, `ensure_dotnet8.sh`,
   `fetch_fasta.py fetch`/`check-db`, `core_submission.py locate`/`stage`/`deliver`,
@@ -251,7 +254,8 @@ in the same shell before running anything below** (or prefix later commands).
 Read `setup.json` and **gate on `ready_for`**:
 - `ready_for.de` false → DE can't run: R cannot read `report.parquet` the way this env's limpa
   does (`de_reader`: arrow for limpa 1.2.x, nanoparquet for limpa ≥ 1.4.0, arrow on both
-  methods); re-run `setup.sh` and report any `notes`. (A SILAC ratio analysis, `run_silac.R`,
+  methods); re-run `setup.sh` and report any `notes`. `ready_for.de` is the default method's
+  (`dpc`); `de_reader.maxlfq` true means `--method maxlfq` can still run (arrow + limma, no limpa). (A SILAC ratio analysis, `run_silac.R`,
   needs only limma, data.table, arrow and jsonlite in that R.)
 - `limpa.ok` false (setup.sh then ends `ERROR: limpa ...` and exits 1) → the env's limpa is
   older than 1.4.0 (bioconda has only 1.2.5; setup.sh installs 1.4 from Bioconductor 3.23):
@@ -862,9 +866,9 @@ Pacific time (the note says so). Step 8e uses them. **Keep this step's JSON**: s
 `<session>/input/acquisition.json` at step 3b.
 Each `.raw` costs ~3–7 s of parser I/O (more on a busy mount). **On a cluster, run step 2 on
 a compute node whenever there is a `.raw`**, in the background: `bash scripts/hive_exec.sh --job
---time <T> --mem 2G 'python3 ~/proteomics-pipeline/scripts/detect_acquisition.py …'` with `<T>`
+--preemptible --time <T> --mem 2G 'python3 ~/proteomics-pipeline/scripts/detect_acquisition.py …'` with `<T>`
 = the number of `.raw` ÷ 4 in minutes, at least 10 (`hive_local`: `python3
-scripts/on_compute.py --time <T> --mem 2G -- python3 scripts/detect_acquisition.py …`). A
+scripts/on_compute.py --preemptible --time <T> --mem 2G -- python3 scripts/detect_acquisition.py …`). A
 `.d`-only input is an SQLite lookup per file and may stay on the login node. On a login node the
 script itself refuses more than 5 `.raw` before reading anything and prints the `srun` line. Do not add
 `--allow-login-node` yourself to get past the refusal; it is for a user who chooses that.

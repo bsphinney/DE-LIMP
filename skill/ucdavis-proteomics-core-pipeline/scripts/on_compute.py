@@ -91,26 +91,92 @@ def _srun_path(env=None):
     return "srun"
 
 
-def pick_queue(cpus=1, preemptible_ok=False, partition=None, account=None, qos=None):
-    """(partition, account, qos) for an srun. Not preemptible unless allowed: run_search.
-    slurm_queue moves work to publicgrp/low when the account is at its `high` cap, which suits a
-    requeued sbatch job and not an srun (preempted = cancelled, half way through an install or a
-    copy). A named queue is used as given (the skill's rule checks it)."""
+# Partitions SLURM preempts (PreemptMode=REQUEUE in ucd-hpc's tables): `low` on all three clusters,
+# Farm's bigmem scavenger `bml`. Judged by name; `scontrol show partition` is not asked.
+PREEMPTIBLE_PARTITIONS = ("low", "bml")
+# a script that cannot pass --account (ensure_compute_node) takes it from here
+ACCOUNT_ENV = "PROTEOMICS_SRUN_ACCOUNT"
+
+
+class QueueChoice(ValueError):
+    """No queue can be chosen without deciding who is billed: the user names the account."""
+
+
+def _say(msg):
+    sys.stderr.write(f"[on_compute] {msg}\n")
+
+
+def _own_cpus_on_high():
+    """(CPUs this user's jobs hold on genome-center-grp/high, its per-user cap), or (None, None).
+    The cap is the QOS's own (MaxTRESPU cpu=64 on HIVE), through run_search's one reader."""
     import run_search
-    if preemptible_ok or partition or account or qos:
+    free = run_search._lab_cpus_available()
+    if free is None:
+        return None, None
+    cap = run_search.user_limits("high", "genome-center-grp").get("cpu") or run_search.HIVE_USER_CPU_CAP
+    return cap - free, cap
+
+
+def pick_queue(cpus=1, preemptible_ok=False, partition=None, account=None, qos=None):
+    """(partition, account, qos) for an srun. A preempted srun is CANCELLED, not requeued, so:
+      * not preemptible (the default: an install, an --apply copy, a write): a queue that never
+        preempts -- genome-center-grp/high, else the one account's `high` (the free tier within its
+        8 CPUs per job), Farm's `bmh` after `high`. When the user's own jobs fill their per-user
+        cap on genome-center-grp/high, it says it waits behind them.
+      * preemptible_ok (a restartable, read-only step: checkpoint find, locate, provenance,
+        fetch_fasta check-db, step 2): the same, except that at that cap it runs on publicgrp/low
+        now instead of waiting behind the user's own searches, and says so.
+    Two accounts that could both run it, neither genome-center-grp: QueueChoice (who is billed is
+    the user's call: --account, or PROTEOMICS_SRUN_ACCOUNT for a script). A named queue goes to
+    run_search.slurm_queue, which checks it."""
+    import run_search
+    account = account or os.environ.get(ACCOUNT_ENV) or None
+    if partition or account or qos:
         return run_search.slurm_queue(partition, account, qos, peak_cpus=cpus,
                                       preemptible_ok=preemptible_ok)
-    steady = [(a, p, q) for a, p, q in run_search._associations()
-              if p and p != "low" and not p.startswith("gpu")
-              and not (a == "publicgrp" and p == "high" and cpus > 8)]   # the free tier's cap
-    if steady:
-        steady.sort(key=lambda x: (x[:2] != ("genome-center-grp", "high"), x[1] != "high"))
-        a, p, q = steady[0]
-        return p, a, (q if q and "," not in q else None)
-    p, a, q = run_search.slurm_queue(peak_cpus=cpus, preemptible_ok=False)
-    if p == "low":
-        sys.stderr.write("[on_compute] this account can use only `low`, which is preemptible: a "
-                         "preempted srun is cancelled, not requeued -- run it again if it is.\n")
+    assoc = run_search._associations()
+    user = os.environ.get("USER", "?")
+    if not assoc:
+        p, a, q = run_search.slurm_queue(peak_cpus=cpus, preemptible_ok=preemptible_ok)
+        _say(f"SLURM's associations for {user} could not be read (sacctmgr), so no queue that never "
+             f"preempts can be chosen: using the skill's fallback {a}/{p}. A preempted srun is "
+             f"cancelled, not requeued -- run it again if it is.")
+        return p, a, q
+    nonpre = [x for x in assoc if x[1] and x[1] not in PREEMPTIBLE_PARTITIONS and "gpu" not in x[1]]
+    over_free_cap = [x for x in nonpre if x[0] == "publicgrp" and x[1] == "high" and cpus > 8]
+    nonpre = [x for x in nonpre if x not in over_free_cap]
+    lows = [x for x in assoc if x[1] in PREEMPTIBLE_PARTITIONS]
+    if not nonpre:
+        why = (f"publicgrp's `high` allows 8 CPUs per job and this asks for {cpus}"
+               if over_free_cap else f"{user} can use only a preemptible queue")
+        p, a, q = run_search.slurm_queue(peak_cpus=cpus, preemptible_ok=True)
+        _say(f"{why}: using {a}/{p}. A preempted srun is cancelled, not requeued -- run it again "
+             f"if it is.")
+        return p, a, q
+    accounts = sorted({x[0] for x in nonpre})
+    if "genome-center-grp" in accounts:
+        nonpre = [x for x in nonpre if x[0] == "genome-center-grp"]
+    elif len(accounts) > 1:
+        raise QueueChoice(
+            f"more than one SLURM account can run this on a queue that never preempts "
+            f"({', '.join(accounts)}), and choosing one decides which is billed. Name it: "
+            f"--account <one> (a script that moves itself: {ACCOUNT_ENV}=<one>).")
+    nonpre.sort(key=lambda x: (x[1] != "high", x[1] != "bmh"))
+    a, p, q = nonpre[0]
+    q = q if q and "," not in q else None
+    if (a, p) == ("genome-center-grp", "high"):
+        used, cap = _own_cpus_on_high()
+        if used is not None and cap - used < cpus:
+            low = ([x for x in lows if x[0] == "publicgrp"] or lows or [None])[0]
+            if preemptible_ok and low:
+                la, lp, lq = low
+                lq = lq if lq and "," not in lq else run_search._public_low_qos(lp, la, None)
+                _say(f"your own jobs use {used} of your {cap} CPUs on high; this step can be run "
+                     f"again from the start, so it runs on {la}/{lp} now instead of waiting behind "
+                     f"them (preemptible: if it is stopped, run it again).")
+                return lp, la, lq
+            _say(f"waiting behind your own {used} CPUs on high (your cap is {cap}): this step must "
+                 f"not be preempted, so it starts when one of your jobs ends.")
     return p, a, q
 
 
@@ -169,8 +235,12 @@ def ensure_compute_node(why, minutes=DEFAULT_MINUTES, mem=DEFAULT_MEM, cpus=1,
         return
     argv = list(sys.argv if argv is None else argv)
     cmd = [sys.executable or "python3", os.path.abspath(argv[0])] + argv[1:]
-    line = srun_argv(cmd, minutes, mem, cpus, preemptible_ok=preemptible_ok,
-                     name="pp_" + os.path.splitext(os.path.basename(argv[0]))[0])
+    try:
+        line = srun_argv(cmd, minutes, mem, cpus, preemptible_ok=preemptible_ok,
+                         name="pp_" + os.path.splitext(os.path.basename(argv[0]))[0])
+    except QueueChoice as e:
+        sys.stderr.write(f"[on_compute] {why}, which is work for a compute node, but {e}\n")
+        sys.exit(2)
     sys.stderr.write(f"[on_compute] {why}: that is work for a compute node, not this login node "
                      f"(HPC@UCD's ucd-hpc rules). Running it there and waiting for it:\n"
                      f"  {shown(line)}\n")

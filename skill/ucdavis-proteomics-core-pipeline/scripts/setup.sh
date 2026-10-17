@@ -81,7 +81,9 @@ if [ -z "${SLURM_JOB_ID:-}" ] && [ -z "${PROTEOMICS_ON_COMPUTE:-}" ]; then
   OC_PY="$(command -v python3 2>/dev/null || true)"
   if [ -n "$OC_PY" ] && [ -f "$SCRIPT_DIR/on_compute.py" ]; then
     if "$OC_PY" "$SCRIPT_DIR/on_compute.py" --is-login-node; then
-      if $CHECK_ONLY; then OC_ARGS="--time 20 --mem 4G --cpus 1"; OC_WHY="setup.sh --check loads R and its packages"
+      # --check only reads (setup.json at the end): it may run on low rather than wait behind
+      # the user's own searches on high; an install never does
+      if $CHECK_ONLY; then OC_ARGS="--time 20 --mem 4G --cpus 1 --preemptible"; OC_WHY="setup.sh --check loads R and its packages"
       else OC_ARGS="--time 120 --mem 8G --cpus 2"; OC_WHY="setup.sh solves and installs the environment"; fi
       # the run writes this id into setup.json (srun passes the environment on): the one that is
       # there afterwards is this run's, or the run did not finish

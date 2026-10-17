@@ -115,7 +115,7 @@ winpath() {
   printf '%s\n' "$1"
 }
 
-usage() { echo "usage: hive_exec.sh '<command>' | --job [--time MIN] [--mem SIZE] [--cpus N] '<command>' | --put <local> <remote> | --get <remote> <local> | --put-skill" >&2; exit 2; }
+usage() { echo "usage: hive_exec.sh '<command>' | --job [--time MIN] [--mem SIZE] [--cpus N] [--preemptible] '<command>' | --put <local> <remote> | --get <remote> <local> | --put-skill" >&2; exit 2; }
 
 # gabrig 2026-09-23: T:\Data\lab\service\... went up by scp (7.1 GB, ~20 min) although T: is
 # the Flinders share HIVE mounts at /nfs/lssc0/flinders/proteomics. hive_path.sh makes no
@@ -222,6 +222,9 @@ case "${1:-}" in
                [ $# -ge 2 ] && [[ "$2" =~ ^[1-9][0-9]*[KMGT]$ ]] \
                  || { echo "hive_exec.sh --job: --mem takes a size with a unit, e.g. 4G (a bare number is megabytes to SLURM)" >&2; exit 2; }
                jopts="$jopts $1 $2"; shift 2 ;;
+             # a restartable, read-only command: at the user's own CPU cap on high it may run
+             # on low (preemptible) instead of waiting behind their searches (on_compute.py)
+             --preemptible) jopts="$jopts $1"; shift ;;
              *) break ;;
            esac
          done

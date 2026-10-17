@@ -80,7 +80,7 @@ class Harness(unittest.TestCase):
 
     def env(self, **extra):
         e = dict(os.environ)
-        for k in ("SLURM_JOB_ID", "FAKE_SRUN_FAIL", "PROTEOMICS_ON_COMPUTE"):
+        for k in ("SLURM_JOB_ID", "FAKE_SRUN_FAIL", "PROTEOMICS_ON_COMPUTE", "PROTEOMICS_SRUN_ACCOUNT"):
             e.pop(k, None)
         # hermetic on a real cluster node too: no HPCCF cluster file, no CVMFS SLURM
         e.update({"PATH": self.bin + os.pathsep + e["PATH"], "FAKE_SRUN_LOG": self.srun_log,
@@ -299,6 +299,110 @@ class QueueNeverPreempts(Harness):
         self.assertIn("preemptible", r.stderr)
 
 
+class OwnCapOnHigh(QueueNeverPreempts):
+    """Re-review of this branch: with two 32-CPU searches running, the user's own 64-CPU cap on
+    genome-center-grp/high is full, and every srun-backed step queued behind them -- the resume
+    check (checkpoint.py find) behind the very searches it looks for. A restartable, read-only
+    step (--preemptible) now runs on low then; a step that must not be preempted stays on high
+    and says what it waits behind."""
+
+    def test_a_restartable_step_runs_on_low_and_says_why(self):
+        self.login_node()
+        r = self.run_oc("--preemptible", **self.at_capacity())
+        (call,) = self.srun_calls()
+        self.assertIn("--partition=low", call)
+        self.assertIn("--qos=publicgrp-low-qos", call)
+        self.assertIn("your own jobs use 64 of your 64 CPUs on high", r.stderr)
+
+    def test_a_step_that_must_not_be_preempted_waits_and_says_so(self):
+        self.login_node()
+        r = self.run_oc(**self.at_capacity())
+        (call,) = self.srun_calls()
+        self.assertIn("--partition=high", call)
+        self.assertIn("waiting behind your own 64 CPUs on high", r.stderr)
+
+    def test_below_the_cap_a_restartable_step_stays_on_high_silently(self):
+        self.login_node()
+        env = self.at_capacity()
+        _exe(os.path.join(self.bin, "squeue"), "#!/bin/sh\necho 8\n")
+        r = self.run_oc("--preemptible", **env)
+        (call,) = self.srun_calls()
+        self.assertIn("--partition=high", call)
+        self.assertNotIn("your own", r.stderr)
+
+
+class SayWhichCase(Harness):
+    """Re-review: when no queue that never preempts is available, say why."""
+
+    def run_oc(self, *args, **env):
+        return subprocess.run([sys.executable, ON_COMPUTE, *args, "--", *self.probe()],
+                              capture_output=True, text=True, env=self.env(**env), timeout=60)
+
+    def test_associations_unreadable(self):
+        self.login_node()
+        r = self.run_oc(FAKE_ASSOC="")
+        self.assertIn("could not be read", r.stderr)
+
+    def test_only_low(self):
+        self.login_node()
+        r = self.run_oc(FAKE_ASSOC=PUBLIC)
+        self.assertIn("can use only a preemptible queue", r.stderr)
+
+    def test_more_than_8_cpus_on_the_free_tier(self):
+        self.login_node()
+        r = self.run_oc("--cpus", "16", FAKE_ASSOC=f"publicgrp|high|publicgrp-high-qos;{PUBLIC}")
+        self.assertIn("8 CPUs per job", r.stderr)
+
+    def test_farms_bigmem_scavenger_queue_is_preemptible_too(self):
+        self.login_node()
+        self.run_oc(FAKE_ASSOC="labgrp|bml|labgrp-bml-qos;labgrp|bmh|labgrp-bmh-qos")
+        (call,) = self.srun_calls()
+        self.assertIn("--partition=bmh", call)
+
+
+class TwoAccountsOnHigh(Harness):
+    """Re-review: two accounts on high, neither genome-center-grp -- which is billed is not
+    chosen silently (slurm_queue refuses the same way)."""
+
+    ASSOC = "labagrp|high|labagrp-high-qos;labbgrp|high|labbgrp-high-qos"
+
+    def test_refused_with_the_choice(self):
+        self.login_node()
+        r = subprocess.run([sys.executable, ON_COMPUTE, "--", *self.probe()], capture_output=True,
+                           text=True, env=self.env(FAKE_ASSOC=self.ASSOC), timeout=60)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("labagrp, labbgrp", r.stderr)
+        self.assertIn("PROTEOMICS_SRUN_ACCOUNT", r.stderr)
+        self.assertEqual(self.srun_calls(), [])
+
+    def test_the_account_named_is_used(self):
+        self.login_node()
+        subprocess.run([sys.executable, ON_COMPUTE, "--", *self.probe()], capture_output=True,
+                       text=True, timeout=60,
+                       env=self.env(FAKE_ASSOC=self.ASSOC, PROTEOMICS_SRUN_ACCOUNT="labbgrp"))
+        (call,) = self.srun_calls()
+        self.assertIn("--account=labbgrp", call)
+        self.assertIn("--partition=high", call)
+
+    def test_genome_center_grp_is_preferred(self):
+        self.login_node()
+        subprocess.run([sys.executable, ON_COMPUTE, "--", *self.probe()], capture_output=True,
+                       text=True, timeout=60, env=self.env(FAKE_ASSOC=f"{self.ASSOC};{LAB}"))
+        (call,) = self.srun_calls()
+        self.assertIn("--account=genome-center-grp", call)
+
+    def test_a_script_that_moves_itself_refuses_too(self):
+        self.login_node()
+        script = os.path.join(self.d, "mover.py")
+        with open(script, "w") as fh:
+            fh.write(MOVER.format(scripts=SCRIPTS))
+        r = subprocess.run([sys.executable, script, self.out], capture_output=True, text=True,
+                           env=self.env(FAKE_ASSOC=self.ASSOC), timeout=60)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("PROTEOMICS_SRUN_ACCOUNT", r.stderr)
+        self.assertFalse(os.path.exists(self.out))
+
+
 class LoginNodeWithoutSbatchOnPath(Harness):
     """Review of this branch: the login-node test needed sbatch on PATH. A non-login shell, or one
     after `module purge`, has none -- ucd-hpc: SLURM is at a fixed CVMFS path -- and every heavy
@@ -465,6 +569,13 @@ class HiveExecJob(Harness):
         r = self.hive_exec("--job", cmd)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.ran_in(), "two words")
+
+    def test_job_passes_preemptible_on(self):
+        self.login_node()
+        r = self.hive_exec("--job", "--preemptible", "--time", "15", "true")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(self.ssh_log) as fh:
+            self.assertIn("on_compute.py --preemptible --time 15 --", fh.read().replace("\\", ""))
 
     def test_job_refuses_a_bad_size_before_connecting(self):
         r = self.hive_exec("--job", "--mem", "lots", "true")

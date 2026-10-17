@@ -5146,11 +5146,13 @@ def cmd_email_draft(a) -> int:
 
 
 # --------------------------------------------------------------------------- main --
-# subcommand -> (srun minutes, memory, what makes it heavy): run on a compute node, never a login node
+# subcommand -> (srun minutes, memory, what makes it heavy, can it be run again from the start):
+# run on a compute node, never a login node. Only locate may take a preemptible queue (on_compute
+# pick_queue): stage and deliver --apply write into the service tree and must not stop half way.
 COMPUTE_NODE_CMDS = {
-    "locate": (30, "4G", "lists every instrument's raw folders"),
-    "stage": (60, "4G", "lists the service tree and links the raw files"),
-    "deliver": (60, "4G", "searches the service tree and copies the deliverables"),
+    "locate": (30, "4G", "lists every instrument's raw folders", True),
+    "stage": (60, "4G", "lists the service tree and links the raw files", False),
+    "deliver": (60, "4G", "searches the service tree and copies the deliverables", False),
 }
 
 
@@ -5293,14 +5295,14 @@ def main(argv=None) -> int:
     # stage record (find_service_record: ~4 min on HIVE's login node, a re-analysis, 2026-10-16)
     # and copies. On a cluster login node they run themselves again on a compute node.
     if a.cmd in COMPUTE_NODE_CMDS and argv is None:
-        minutes, mem, why = COMPUTE_NODE_CMDS[a.cmd]
+        minutes, mem, why, restartable = COMPUTE_NODE_CMDS[a.cmd]
         try:
             import on_compute
         except ImportError:               # a partial scripts/: the sibling check below says so
             on_compute = None
         if on_compute:
             on_compute.ensure_compute_node(f"core_submission.py {a.cmd} {why}", minutes=minutes,
-                                           mem=mem, script=__file__)
+                                           mem=mem, preemptible_ok=restartable, script=__file__)
     try:
         if on_hive():
             # every subcommand that runs on HIVE: fetch, locate, stage and conditions keep their
