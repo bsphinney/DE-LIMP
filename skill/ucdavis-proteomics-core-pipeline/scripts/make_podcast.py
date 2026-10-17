@@ -945,41 +945,63 @@ MEANING_CHECKS = (
 )
 
 
-def robustness_tables(out, depth=3):
-    """{protein name as written: [(table, robust cell, name)]} from every CSV under <out>/tables
-    (to `depth` folders) whose header has a `robust` column -- the session's own robustness
-    tables, whatever made them; names from Genes, Protein.Names and Protein.Group
-    (";"-separated). Read as utf-8-sig (Excel and readr write a byte-order mark). {} when there
-    are none."""
-    found = {}
+def robustness_files(out, depth=3):
+    """Every CSV under <out>/tables (to `depth` folders) whose header has a `robust` column --
+    the session's own robustness tables, whatever made them. Sorted paths; [] when none."""
     root = os.path.join(out or "", "tables")
     if not out or not os.path.isdir(root):
-        return found
-    base = root.rstrip(os.sep).count(os.sep)
+        return []
+    found, base = [], root.rstrip(os.sep).count(os.sep)
     for d, dirs, files in os.walk(root):
         if d.count(os.sep) - base >= depth:
             dirs[:] = []
         for f in sorted(files):
+            path = os.path.join(d, f)
             if not f.lower().endswith(".csv"):
                 continue
-            path = os.path.join(d, f)
             try:
                 with open(path, newline="", encoding="utf-8-sig", errors="replace") as fh:
                     head = next(csv.reader(fh), [])
-                    col = {h.strip().lower(): h for h in head}
-                    if "robust" not in col:
-                        continue
-                    fh.seek(0)                    # utf-8-sig skips the mark again
-                    for row in csv.DictReader(fh):
-                        v = (row.get(col["robust"]) or "").strip()
-                        for k in ("genes", "protein.names", "protein.group"):
-                            for n in (row.get(col[k]) or "").split(";") if k in col else ():
-                                n = n.strip()
-                                if n:
-                                    found.setdefault(n, []).append(
-                                        (os.path.relpath(path, out).replace(os.sep, "/"), v, n))
-            except (OSError, csv.Error, StopIteration):
+            except (OSError, csv.Error):
                 continue
+            if "robust" in {h.strip().lower() for h in head}:
+                found.append(path)
+    return sorted(found)
+
+
+def robustness_digest(out):
+    """One sha256 of the robustness tables (their paths under <out> and contents), or "none":
+    check.txt and meaning_check.md record it, so new or changed tables make both stale."""
+    files = robustness_files(out)
+    if not files:
+        return "none"
+    h = hashlib.sha256()
+    for path in files:
+        h.update(os.path.relpath(path, out).replace(os.sep, "/").encode("utf-8") + b"\0")
+        h.update(sha256_file(path).encode("ascii") + b"\n")
+    return h.hexdigest()
+
+
+def robustness_tables(out, depth=3):
+    """{protein name as written: [(table, robust cell, name)]} from robustness_files: names from
+    Genes, Protein.Names and Protein.Group (";"-separated). Read as utf-8-sig (Excel and readr
+    write a byte-order mark). {} when there are none."""
+    found = {}
+    for path in robustness_files(out, depth):
+        try:
+            with open(path, newline="", encoding="utf-8-sig", errors="replace") as fh:
+                rows = csv.DictReader(fh)
+                col = {h.strip().lower(): h for h in (rows.fieldnames or [])}
+                for row in rows:
+                    v = (row.get(col["robust"]) or "").strip()
+                    for k in ("genes", "protein.names", "protein.group"):
+                        for n in (row.get(col[k]) or "").split(";") if k in col else ():
+                            n = n.strip()
+                            if n:
+                                found.setdefault(n, []).append(
+                                    (os.path.relpath(path, out).replace(os.sep, "/"), v, n))
+        except (OSError, csv.Error):
+            continue
     return found
 
 
@@ -1054,13 +1076,27 @@ def read_meaning(s):
         return (verdict.group(1) if verdict else "unreadable"), f"{MEANING_FILE} does not say PASS"
     if not sha or sha.group(1) != s.sha256:
         return "STALE", f"the script changed after {MEANING_FILE} was recorded"
+    # ...and what it was read against: each delivered source and the robustness tables (a
+    # meaning check from before these lines were written has none to compare)
+    for m in re.finditer(r"(?m)^source: (.+) sha256=(\w+)$", text):
+        try:
+            now = source_sha(source_text(os.path.join(os.path.dirname(path), m.group(1))))
+        except OSError:
+            return "STALE", f"{os.path.basename(m.group(1))} is missing"
+        if now != m.group(2):
+            return "STALE", (f"{os.path.basename(m.group(1))} changed after {MEANING_FILE} was "
+                             "recorded")
+    tables = re.search(r"(?m)^robust_tables_sha256: (\w+)$", text)
+    out = output_dir_of(s.path)
+    if tables and out and robustness_digest(out) != tables.group(1):
+        return "STALE", f"the robustness tables changed after {MEANING_FILE} was recorded"
     return "PASS", None
 
 
 def meaning_brief(s, robust, sources):
     """The reviewer's brief: what to check in every sentence, the sources, the robustness tables,
     and the transcript, sentence by sentence with its line."""
-    L = [f"# Meaning check brief: {os.path.basename(s.path)}", "",
+    L = [f"# Meaning check brief: {os.path.basename(s.path)}", f"script_sha256: {s.sha256}", "",
          "You did NOT write this script. Read every sentence against the report and the files "
          "below, and check each for:", ""]
     L += [f"- ({k}) {t}" for k, t in MEANING_CHECKS]
@@ -1092,6 +1128,11 @@ def cmd_meaning(a):
         with open(os.path.join(os.path.dirname(s.path), "meaning_brief.md"), "w",
                   encoding="utf-8") as fh:
             fh.write(text)
+        if hasattr(sys.stdout, "reconfigure"):           # a cp1252 console: "α", "→" print as ?
+            try:
+                sys.stdout.reconfigure(errors="replace")
+            except (ValueError, OSError):
+                pass
         print(text)
         return 0
     if not a.verdict:
@@ -1116,6 +1157,23 @@ def cmd_meaning(a):
     if not findings:
         log("[meaning] --findings is empty: list each problem found (or write `None`)")
         return 2
+    # read against what passed the check: its sources (and the tables) are recorded below, so a
+    # report rewritten after this verdict makes it stale
+    status, srcs, why = read_check(s)
+    if why:
+        log(f"[meaning] refusing: {why}. check.txt must PASS for this script and its sources "
+            "first: the meaning check reads the same report")
+        return 2
+    brief = os.path.join(os.path.dirname(s.path), "meaning_brief.md")
+    try:
+        with open(brief, encoding="utf-8") as fh:
+            brief_ok = f"script_sha256: {s.sha256}" in fh.read()
+    except OSError:
+        brief_ok = False
+    if not brief_ok:
+        log(f"[meaning] refusing: no meaning_brief.md for this script: run `make_podcast.py "
+            f"meaning {a.script} --brief` first -- the reviewer works from it")
+        return 2
     mech = []
     for t in s.turns():
         for level, name, claim, detail in robust_claims(t.text, robust):
@@ -1125,8 +1183,10 @@ def cmd_meaning(a):
         return 2
     L = [f"# Meaning check: {os.path.basename(s.path)}",
          f"script_sha256: {s.sha256}", f"verdict: {a.verdict}", f"reviewer: {who}",
-         f"checked: {now_iso()}", "",
-         "Every sentence was read against the report for:"]
+         f"checked: {now_iso()}", f"brief_sha256: {sha256_file(brief)}"]
+    L += [f"source: {x['file']} sha256={x['sha256']}" for x in srcs if x.get("delivered")]
+    L += [f"robust_tables_sha256: {robustness_digest(out) if out else 'none'}", "",
+          "Every sentence was read against the report for:"]
     L += [f"- ({k}) {t}" for k, t in MEANING_CHECKS]
     L += ["", "## Mechanical (robustness tables)", ""] + (mech or ["- none"])
     L += ["", "## Findings", "", findings, ""]
@@ -1446,6 +1506,8 @@ def check_report(s, res, sources, forbid):
     rt = res.get("robust_tables") or []
     L.append("robustness tables: " + (", ".join(rt) if rt else "none (no CSV under output/tables "
                                                                "has a `robust` column)"))
+    if res.get("robust_digest"):
+        L.append(f"robust_tables_sha256: {res['robust_digest']}")
     L += ["", f"words: {st['words']:,} · turns: {st['turns']} · segments: {st['segments']} · "
               f"about {st['minutes']} min at {WPM} wpm",
           "speaking share: " + " · ".join(f"{h} {v}%" for h, v in st["share"].items())]
@@ -1535,6 +1597,7 @@ def cmd_check(a):
                         "label": lab.strip() or os.path.basename(p), "ref": os.path.basename(p)})
     res = check(s, sources, a.forbid_name or [], core=bool(out and _core_run(_session_of(out))),
                 robust=robustness_tables(out) if out else None)
+    res["robust_digest"] = robustness_digest(out) if out else None
     for pr in reversed(problems):
         res["fails"].insert(0, pr)
     if problems:
@@ -1574,6 +1637,10 @@ def read_check(s):
         return "STALE", srcs, "the script changed after check.txt was written"
     if not srcs:
         return "STALE", srcs + extra, "check.txt names no delivered source"
+    tables = re.search(r"(?m)^robust_tables_sha256: (\w+)$", text)
+    out = output_dir_of(s.path)
+    if tables and out and robustness_digest(out) != tables.group(1):
+        return "STALE", srcs + extra, "the robustness tables changed after check.txt was written"
     for src in srcs:                     # relative to check.txt; extra sources are not re-read
         try:
             now = source_sha(source_text(os.path.join(os.path.dirname(path), src["file"])))
@@ -2896,7 +2963,8 @@ def cmd_render(a):
     # A two-line test before the first chunk this render must make (PREFLIGHT_TIMEOUT): a model
     # that does not answer is passed over before the episode depends on it. Nothing to make, no
     # test; --no-preflight skips it (and podcast.json says so).
-    preflight = {"run": False, "why": "every chunk is cached"}
+    preflight = {"run": False, "why": ("every chunk is cached" if hasattr(backend, "preflight")
+                                       else f"no two-line test for {backend.name} (offline)")}
     if hasattr(backend, "preflight"):
         todo = [c for c in chunks if not os.path.isfile(os.path.join(
             cache, cache_key(backend, c, speak) + ".wav"))]
@@ -2921,7 +2989,6 @@ def cmd_render(a):
     if getattr(backend, "tier_warning", None):
         warnings.append(backend.tier_warning)
 
-    audio = array.array("h")
     audio = array.array("h")
     audio.extend(chime())
     audio.extend(silence(0.5))
@@ -2952,17 +3019,16 @@ def cmd_render(a):
     script_copy = os.path.join(out, "podcast_script.md")
     if os.path.abspath(s.path) != script_copy:
         shutil.copyfile(s.path, script_copy)
-        mc = meaning_path(s.path)
-        if os.path.isfile(mc) and os.path.abspath(mc) != os.path.join(out, MEANING_FILE):
-            shutil.copyfile(mc, os.path.join(out, MEANING_FILE))     # it names the script's sha
-        chk = os.path.join(os.path.dirname(s.path), "check.txt")
-        if os.path.isfile(chk) and os.path.abspath(chk) != os.path.join(out, "check.txt"):
-            with open(chk, encoding="utf-8") as fh:              # sources stay relative, rebased
+        for name in ("check.txt", MEANING_FILE):      # both name the script's sha and sources
+            src = os.path.join(os.path.dirname(s.path), name)
+            if not os.path.isfile(src) or os.path.abspath(src) == os.path.join(out, name):
+                continue
+            with open(src, encoding="utf-8") as fh:              # sources stay relative, rebased
                 text = fh.read()
             text = re.sub(r"(?m)^source: (.+) (sha256=\w+)$", lambda m: "source: " + (
                 m.group(1) if os.path.isabs(m.group(1)) else rel(os.path.normpath(os.path.join(
                     os.path.dirname(s.path), m.group(1))), out)) + " " + m.group(2), text)
-            with open(os.path.join(out, "check.txt"), "w", encoding="utf-8") as fh:
+            with open(os.path.join(out, name), "w", encoding="utf-8") as fh:
                 fh.write(text)
     man = {
         "show": s.show, "title": s.title,
@@ -3842,18 +3908,23 @@ def vouch(out, man, unchecked=False):
         return s, (f"refusing: {stale}. Re-run `make_podcast.py check` (and `render`, if the "
                    "script changed) so the episode matches the report, or pass --unchecked."), None
     mc = man.get("meaning_check")
+    m_warn = None
     if s and isinstance(mc, dict):                    # rendered since the meaning check (2.13.2)
         m_why = read_meaning(s)[1]
-        if m_why and not mc.get("overridden"):
+        if m_why and not (mc.get("overridden") or unchecked):
             return s, (f"refusing: {m_why}. Record the meaning check for this script "
                        "(`make_podcast.py meaning <script> --verdict ...`), and render again if "
-                       "the script changed."), None
+                       "the script changed, or pass --unchecked."), None
+        m_warn = m_why and f"meaning check: {m_why}"
     elif s and ("meaning", out) not in _WARNED:
         _WARNED.add(("meaning", out))
         log("[WARN] this episode was rendered before the meaning check existed (skill 2.13.2): "
             "nothing on record says a separate reader checked its sentences against the report")
-    return s, None, (stale and stale + (" (rendered with --unchecked)" if overridden
-                                        else " (--unchecked)"))
+    warn = stale and stale + (" (rendered with --unchecked)" if overridden else " (--unchecked)")
+    if m_warn:
+        warn = (warn + "; " if warn else "") + m_warn + (
+            " (rendered with --no-meaning-check)" if mc.get("overridden") else " (--unchecked)")
+    return s, None, warn
 
 
 def cmd_link(a):

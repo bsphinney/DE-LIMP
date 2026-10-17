@@ -56,7 +56,10 @@ class Base(Workspace):
     def meaning(self, *extra):
         return run("meaning", self.script, *extra)
 
-    def record(self, verdict="PASS", reviewer="a reviewer agent that did not write the script"):
+    def record(self, verdict="PASS", reviewer="a reviewer agent that did not write the script",
+               brief=True):
+        if brief:                                     # the reviewer works from the brief
+            self.meaning("--brief", "--source", self.report)
         return self.meaning("--verdict", verdict, "--reviewer", reviewer, "--findings",
                             self.findings)
 
@@ -136,6 +139,49 @@ class Gate(Base):
         self.assertIn("../AI_Analysis_Report.md", brief)
 
 
+class Freshness(Base):
+    """Review of 2.13.2 (M1, L1): a PASS is for the script AND what it was read against."""
+
+    def passed(self):
+        self.assertEqual(self.checked()[0], 0)
+        self.assertEqual(self.record()[0], 0)
+
+    def test_a_rewritten_report_makes_the_meaning_check_stale(self):
+        self.passed()
+        write(self.report, REPORT + "\nNone of these proteins is robust; treat them as "
+                                    "candidates.\n")
+        self.assertEqual(self.checked(read(self.script))[0], 0)   # the token check passes again
+        rc, out, err = self.render()
+        self.assertEqual(rc, 2)
+        self.assertIn("AI_Analysis_Report.md changed after meaning_check.md was recorded", err)
+
+    def test_new_robustness_tables_make_both_checks_stale(self):
+        self.passed()
+        write(os.path.join(self.out, "tables", "Robustness_A.B.csv"), ROBUST_CSV)
+        rc, out, err = self.render()
+        self.assertEqual(rc, 2)
+        self.assertIn("robustness tables changed", err)
+        self.assertEqual(self.checked(read(self.script))[0], 0)
+        rc, out, err = self.render()
+        self.assertEqual(rc, 2)
+        self.assertIn("robustness tables changed after meaning_check.md was recorded", err)
+
+    def test_a_verdict_needs_a_passing_check_and_the_brief_for_this_script(self):
+        write(self.script, script_text())
+        rc, out, err = self.record()
+        self.assertEqual(rc, 2)
+        self.assertIn("check.txt", err)
+        self.assertEqual(self.checked()[0], 0)
+        os.remove(os.path.join(self.pod, "meaning_brief.md"))
+        rc, out, err = self.record(brief=False)
+        self.assertEqual(rc, 2)
+        self.assertIn("--brief` first", err)
+        self.assertEqual(self.record()[0], 0)
+        mc = read(os.path.join(self.pod, "meaning_check.md"))
+        self.assertIn("brief_sha256: ", mc)
+        self.assertIn("source: ../AI_Analysis_Report.md sha256=", mc)
+
+
 class LinkShareJob(Base):
     def rendered(self):
         self.assertEqual(self.checked()[0], 0)
@@ -187,10 +233,10 @@ class Mechanical(Base):
                       "(tables/robustness/Robustness_A.B.csv: robust = no)", txt)
         self.assertNotIn("Jph3 is named next to", txt)
         self.assertIn("robustness tables: tables/robustness/Robustness_A.B.csv", txt)
-        # and meaning --verdict PASS is refused while it stands
+        # and no meaning PASS can be recorded while it stands: the check must pass first
         rc, out, err = self.record()
         self.assertEqual(rc, 2)
-        self.assertIn("refusing PASS", err)
+        self.assertIn("check.txt does not say PASS", err)
 
     def test_a_negated_or_distant_claim_is_not_one(self):
         self.tables()

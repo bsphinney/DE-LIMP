@@ -325,6 +325,30 @@ class SdkOptions(Gemini):
         self.assertFalse(man["tts"]["http"]["set"])
 
 
+class OfflineRecord(unittest.TestCase):
+    def test_an_offline_voice_says_why_there_is_no_test(self):
+        """Review of 2.13.2 (L2): --tts say recorded "every chunk is cached" with none cached."""
+        from test_make_podcast import FakeTTS, meaning_pass, script_text, write
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "output")
+            pod = os.path.join(out, "podcast")
+            script = os.path.join(pod, "podcast_script.md")
+            write(os.path.join(out, "AI_Analysis_Report.md"), __import__("test_make_podcast").REPORT)
+            write(os.path.join(out, "Analysis_Report.html"), "<html></html>")
+            write(script, script_text())
+            self.assertEqual(run("check", script, "--source",
+                                 os.path.join(out, "AI_Analysis_Report.md"))[0], 0)
+            meaning_pass(script)
+            mp.BACKENDS["fake"] = FakeTTS
+            self.addCleanup(mp.BACKENDS.pop, "fake", None)
+            with mock.patch.object(mp, "encode_aac", return_value=(None, "test")):
+                self.assertEqual(run("render", script, "--tts", "fake")[0], 0)
+            man = json.loads(read(os.path.join(pod, "podcast.json")))
+        self.assertFalse(man["tts"]["preflight"]["run"])
+        self.assertIn("no two-line test", man["tts"]["preflight"]["why"])
+
+
 class Documented(unittest.TestCase):
     def test_the_brief_describes_the_fallback(self):
         with open(os.path.join(os.path.dirname(HERE), "references", "podcast.md"),

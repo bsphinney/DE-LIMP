@@ -107,6 +107,8 @@ def meaning_pass(script):
     link, share and job need it beside the script, for this sha256."""
     findings = os.path.join(os.path.dirname(script), "findings.txt")
     write(findings, "None\n")
+    rc, out, err = run("meaning", script, "--brief")              # the reviewer works from it
+    assert rc == 0, err
     rc, out, err = run("meaning", script, "--verdict", "PASS", "--reviewer",
                        "a reviewer agent (test)", "--findings", findings)
     assert rc == 0, err

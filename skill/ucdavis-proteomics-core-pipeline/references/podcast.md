@@ -347,14 +347,19 @@ python3 scripts/make_podcast.py meaning $P/podcast_script.md --verdict PASS \
 ```
 
 That writes `podcast/meaning_check.md`: the script's sha256, `verdict: PASS` or `FAIL`, the
-reviewer, the five checks, the mechanical robustness lines and the findings. **`render`, `link`,
-`share` and `job` refuse without a PASS for the script as it is now**: an edit after the meaning
-check needs `check` and the meaning check again. It refuses a reviewer whose name is the script's
-`Author:` line, an empty findings file, and a PASS while a robust claim stands against the
-tables. `--no-meaning-check "<why>"` (render, job) goes on without it and is recorded in
-`podcast.json` `meaning_check` (with `--unchecked`, which overrides only the token check). An
+reviewer, the sha256 of the brief, of each delivered source `check.txt` names and of the
+robustness tables, the checks, the mechanical robustness lines and the findings. It is recorded
+only after `check` passes for this script and its sources and after `--brief` was run for this
+script, and it refuses a reviewer whose name is the script's `Author:` line and an empty
+findings file. **`render`, `link`, `share` and `job` refuse without a PASS that still holds**:
+for the script as it is now, the report and other sources as they were read, and the same
+robustness tables. An edited script, a rewritten report or new tables need `check` and the
+meaning check again. `--no-meaning-check "<why>"` (render, job) goes on without it and is
+recorded in `podcast.json` `meaning_check` (`--unchecked` overrides only the token check at
+render; at link and share it also carries a meaning check that went stale, as a warning). An
 episode rendered before this check existed (no `meaning_check` in its `podcast.json`) is linked
-with a warning.
+with a warning. A job or requeue written by 2.13.1 runs the new render and refuses without a
+meaning check: record one, then submit again.
 
 What `check` now catches of it mechanically: a protein named **in the same clause** as a robust
 claim ("robust", "survives", "holds up") that every row of the robustness tables calls not
