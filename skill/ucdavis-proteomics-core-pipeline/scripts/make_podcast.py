@@ -15,6 +15,12 @@ CHECKS the script, RENDERS it to audio and LINKS the audio into the outputs.
             "Claims beyond the report"; quantities in words fail; Pronunciation rows may only
             re-spell; the AI disclosure is in the first 3 turns; no host claims a specialty; no
             forbidden name appears anywhere shown or sent. check.txt lists what it cannot catch.
+  meaning SCRIPT.md --brief | --verdict PASS|FAIL --reviewer WHO --findings FILE
+         -> the meaning check, by a reader who did not write the script: every sentence against
+            the report for (a) the right comparison, group and direction, (b) the report's hedges
+            kept, (c) robust status of every named protein, (d) no superlative the report does not
+            make, (e) no claim outside the report. --verdict writes meaning_check.md with THIS
+            script's sha256; render, link, share and job refuse without its PASS.
   render SCRIPT.md [--out DIR] --tts gemini|say [--cloud-ok [NOTE] | --core-run [internal]]
          [--model M] [--keep-wav]
          -> DIR/podcast.m4a (podcast.wav when neither afconvert nor ffmpeg is present),
@@ -80,6 +86,7 @@ import argparse
 import array
 import base64
 import binascii
+import csv
 import datetime
 import decimal
 import difflib
@@ -875,6 +882,210 @@ def survey_invites(text):
     return out
 
 
+# ---------------------------------------------------------------- meaning (beyond tokens)
+# check matches tokens. A staff episode (2026-10-16) passed it with a true number attached to the
+# wrong comparison, a hedge dropped ("not a main driver" spoken as "aren't driving"), proteins put
+# right after "It survives everything" that the session's robustness tables call not robust, and
+# a tool presented as one the client uses. Two things follow: what can be caught mechanically is
+# (a robust claim next to a protein whose table says it is not: FAIL; a superlative the sources do
+# not make: WARN), and a separate reviewer reads every sentence against the report before render
+# (meaning_check.md, below): render, link, share and job refuse without its PASS for this script.
+ROBUST_CLAIM = re.compile(r"\b(?:robust(?:ly)?|surviv(?:e|es|ed|ing)|holds?\s+up|held\s+up|"
+                          r"stands?\s+up|stood\s+up)\b", re.I)
+_ROBUST_NEG = re.compile(r"\b(?:not|no|never|less|fails?\s+to|failed\s+to|without|\w+n[’']t)"
+                         r"(?:\W+\w+){0,2}\W*$", re.I)
+ROBUST_BEFORE, ROBUST_AFTER = 15, 30           # words around a robust claim that it covers
+_NAME_TOK = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.\-]*[A-Za-z0-9]|[A-Za-z0-9]")
+SUPERLATIVE = re.compile(r"\b(?:the\s+only|only\s+one|the\s+(?:strongest|biggest|largest|"
+                         r"highest|lowest|best|most|top)|every\s+single|none\s+of)\b", re.I)
+MEANING_FILE = "meaning_check.md"
+# What the reviewer checks in every sentence (the staff report's (a)-(e)). Said in the brief,
+# in meaning_check.md and in references/podcast.md.
+MEANING_CHECKS = (
+    ("a", "the right comparison, group and direction for every number and named protein: the "
+          "report's sentence or table it comes from says so"),
+    ("b", "every hedge the report gives is kept: \"not a main driver\" never becomes \"isn't "
+          "driving\", \"may\" never becomes \"does\""),
+    ("c", "the robust status of every named protein: one spoken next to \"robust\", \"survives\" "
+          "or \"holds up\" is robust in that comparison's robustness table"),
+    ("d", "no superlative or totality the report does not make: \"the only\", \"all\", "
+          "\"every\", \"the strongest\""),
+    ("e", "no claim outside the report and the Claims list: a tool or database presented as one "
+          "the client uses, a host answering their own question as if it were a finding"),
+)
+
+
+def robustness_tables(out, depth=3):
+    """{protein name, lowercase: [(table, robust value, name as written)]} from every CSV under
+    <out>/tables (to `depth` folders) whose header has a `robust` column -- the session's own
+    robustness tables, whatever made them; names from Genes, Protein.Names and Protein.Group
+    (";"-separated). {} when there are none."""
+    found = {}
+    root = os.path.join(out or "", "tables")
+    if not out or not os.path.isdir(root):
+        return found
+    base = root.rstrip(os.sep).count(os.sep)
+    for d, dirs, files in os.walk(root):
+        if d.count(os.sep) - base >= depth:
+            dirs[:] = []
+        for f in sorted(files):
+            if not f.lower().endswith(".csv"):
+                continue
+            path = os.path.join(d, f)
+            try:
+                with open(path, newline="", encoding="utf-8", errors="replace") as fh:
+                    head = next(csv.reader(fh), [])
+                    col = {h.strip().lower(): h for h in head}
+                    if "robust" not in col:
+                        continue
+                    fh.seek(0)
+                    for row in csv.DictReader(fh):
+                        v = (row.get(col["robust"]) or "").strip()
+                        for k in ("genes", "protein.names", "protein.group"):
+                            for n in (row.get(col[k]) or "").split(";") if k in col else ():
+                                n = n.strip()
+                                if n:
+                                    found.setdefault(n.lower(), []).append(
+                                        (os.path.relpath(path, out).replace(os.sep, "/"), v, n))
+            except (OSError, csv.Error, StopIteration):
+                continue
+    return found
+
+
+def robust_claims(text, robust):
+    """-> [(level, protein, claim, detail)]: each protein named within ROBUST_BEFORE /
+    ROBUST_AFTER words of a robust claim ("robust", "survives", "holds up") that is not negated,
+    whose robustness tables never say yes (FAIL) or say yes for only some comparisons (WARN)."""
+    out, seen = [], set()
+    if not robust:
+        return out
+    toks = list(_NAME_TOK.finditer(text))
+    for m in ROBUST_CLAIM.finditer(text):
+        if _ROBUST_NEG.search(text[max(0, m.start() - 40):m.start()]):
+            continue
+        i = next((k for k, t in enumerate(toks) if t.start() >= m.start()), len(toks))
+        for t in toks[max(0, i - ROBUST_BEFORE):i + ROBUST_AFTER]:
+            name = t.group(0).lower()
+            rows = robust.get(name)
+            if not rows or name in seen:
+                continue
+            seen.add(name)
+            yes = [r for r in rows if r[1].lower() == "yes"]
+            other = [r for r in rows if r[1].lower() != "yes"]
+            where = "; ".join(f"{tbl}: robust = {v or 'blank'}" for tbl, v, _ in other[:3])
+            if not yes:
+                out.append(("FAIL", rows[0][2], m.group(0), where))
+            elif other:
+                out.append(("WARN", rows[0][2], m.group(0),
+                            f"robust in {', '.join(t for t, _, _ in yes[:3])}; not in {where}"))
+    return out
+
+
+def meaning_path(script_path):
+    return os.path.join(os.path.dirname(os.path.abspath(script_path)), MEANING_FILE)
+
+
+def read_meaning(s):
+    """-> (status, problem) from the meaning_check.md beside the script: ("PASS", None) only for
+    a PASS recorded for THIS script's sha256. Else the status ("missing", "FAIL", "STALE", ...)
+    and why render, link, share and job refuse."""
+    path = meaning_path(s.path)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return "missing", (f"no {MEANING_FILE} beside {os.path.basename(s.path)}: the meaning "
+                           "check has not been recorded")
+    verdict = re.search(r"(?m)^verdict: (\w+)", text)
+    sha = re.search(r"(?m)^script_sha256: (\w+)", text)
+    if not verdict or verdict.group(1) != "PASS":
+        return (verdict.group(1) if verdict else "unreadable"), f"{MEANING_FILE} does not say PASS"
+    if not sha or sha.group(1) != s.sha256:
+        return "STALE", f"the script changed after {MEANING_FILE} was recorded"
+    return "PASS", None
+
+
+def meaning_brief(s, robust, sources):
+    """The reviewer's brief: what to check in every sentence, the sources, the robustness tables,
+    and the transcript, sentence by sentence with its line."""
+    L = [f"# Meaning check brief: {os.path.basename(s.path)}", "",
+         "You did NOT write this script. Read every sentence against the report and the files "
+         "below, and check each for:", ""]
+    L += [f"- ({k}) {t}" for k, t in MEANING_CHECKS]
+    L += ["", "Sources: " + (", ".join(sources) if sources else "the files check.txt lists"),
+          "Robustness tables (a `robust` column): " + (", ".join(sorted({r[0] for v in robust.values()
+                                                                        for r in v}))
+                                                      if robust else "none in output/tables"),
+          "", "For each problem write one line: `line N: <what is wrong> -> <the fix>` (mark it "
+          "`resolved` once the script is fixed). Then record the verdict, the script's sha256 "
+          "is taken by the tool:", "",
+          f"    make_podcast.py meaning {os.path.basename(s.path)} --verdict PASS|FAIL "
+          "--reviewer \"<who, not the writer>\" --findings <your findings file>", "",
+          "## The transcript, sentence by sentence", ""]
+    for t in s.turns():
+        for sent in re.split(r"(?<=[.!?])\s+", t.text.strip()):
+            if sent:
+                L.append(f"- line {t.line} {t.speaker}: {sent}")
+    return "\n".join(L) + "\n"
+
+
+def cmd_meaning(a):
+    """--brief: print (and write beside the script) what the reviewer checks. --verdict: record
+    the reviewer's verdict for THIS script (its sha256 is computed here, never typed)."""
+    s = parse_script(a.script)
+    out = output_dir_of(s.path, getattr(a, "output_dir", None))
+    robust = robustness_tables(out) if out else {}
+    if a.brief:
+        text = meaning_brief(s, robust, [rel(x, os.path.dirname(s.path)) for x in a.source or []])
+        with open(os.path.join(os.path.dirname(s.path), "meaning_brief.md"), "w",
+                  encoding="utf-8") as fh:
+            fh.write(text)
+        print(text)
+        return 0
+    if not a.verdict:
+        log("[meaning] give --brief (what to check) or --verdict PASS|FAIL with --reviewer and "
+            "--findings")
+        return 2
+    who = " ".join((a.reviewer or "").split())
+    if not who:
+        log("[meaning] --reviewer is required: who read the script (an agent or a person that "
+            "did not write it)")
+        return 2
+    if s.author and who.lower() == " ".join(str(s.author).split()).lower():
+        log(f"[meaning] refusing: the reviewer ({who}) is the script's author: the meaning check "
+            "is a separate reader's")
+        return 2
+    try:
+        with open(a.findings, encoding="utf-8") as fh:
+            findings = fh.read().strip()
+    except (OSError, TypeError) as e:
+        log(f"[meaning] --findings: {e}")
+        return 2
+    if not findings:
+        log("[meaning] --findings is empty: list each problem found (or write `None`)")
+        return 2
+    mech = []
+    for t in s.turns():
+        for level, name, claim, detail in robust_claims(t.text, robust):
+            mech.append(f"- {level}: line {t.line}: {name} next to '{claim}' ({detail})")
+    if a.verdict == "PASS" and any(x.startswith("- FAIL") for x in mech):
+        log("[meaning] refusing PASS: " + "; ".join(x[2:] for x in mech if x.startswith("- FAIL")))
+        return 2
+    L = [f"# Meaning check: {os.path.basename(s.path)}",
+         f"script_sha256: {s.sha256}", f"verdict: {a.verdict}", f"reviewer: {who}",
+         f"checked: {now_iso()}", "",
+         "Every sentence was read against the report for:"]
+    L += [f"- ({k}) {t}" for k, t in MEANING_CHECKS]
+    L += ["", "## Mechanical (robustness tables)", ""] + (mech or ["- none"])
+    L += ["", "## Findings", "", findings, ""]
+    path = meaning_path(s.path)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(L))
+    print(json.dumps({"meaning_check": path, "verdict": a.verdict, "script_sha256": s.sha256},
+                     indent=2))
+    return 0 if a.verdict == "PASS" else 1
+
+
 def _core_run(session):
     """submission_report.core_run: the one test of a UC Davis Core run. False when it cannot be
     asked -- never invite a user outside the Core to the Core's survey."""
@@ -895,7 +1106,7 @@ def _as_source(x):
             "ref": os.path.basename(path)}
 
 
-def check(s, sources, forbid=(), core=False):
+def check(s, sources, forbid=(), core=False, robust=None):
     """-> dict with fails / warns / infos (lists of str) and stats. `sources`: dicts from
     cmd_check (or (path, sha, text) tuples, taken as delivered). A token found only in an
     extra source (one the lab was not given) passes only when a Claims bullet names it and that
@@ -1013,6 +1224,16 @@ def check(s, sources, forbid=(), core=False):
             fails.append(f"{where}: '{m.group(0)}' -- a host must not claim a real research "
                          "specialty (it lends a synthetic voice false authority); say \"I'm the "
                          "biologist of the pair\" or \"I'm the statistician\"")
+        for level, name, claim, detail in robust_claims(t.text, robust):
+            (fails if level == "FAIL" else warns).append(
+                f"{where}: {name} is named next to '{claim}', but the robustness tables say "
+                f"otherwise ({detail}) -- name only the robust proteins there, or say which "
+                "comparison it holds in")
+        for m in SUPERLATIVE.finditer(t.text):
+            ph = quantity_phrase(t.text, m) or m.group(0).lower()
+            if f" {ph} " not in phrases:
+                warns.append(f"{where}: '{ph}' -- a superlative the sources do not say in these "
+                             "words: the meaning check must confirm the report makes it")
         for snip in draft_history(t.text):
             fails.append(f"{where}: draft history '{snip}' -- the listener never saw a draft: "
                          "say what the report finds and what was checked, in the present tense, "
@@ -1141,7 +1362,8 @@ def check(s, sources, forbid=(), core=False):
         elif words and by.get(h, 0) < 0.35 * words:
             warns.append(f"{h} speaks only {100.0 * by[h] / words:.0f}% of the words")
     return {"status": "FAIL" if fails else "PASS", "fails": fails, "warns": warns,
-            "infos": infos, "stats": stats, "pron": pron}
+            "infos": infos, "stats": stats, "pron": pron,
+            "robust_tables": sorted({r[0] for v in (robust or {}).values() for r in v})}
 
 
 def _ctx(text, token):
@@ -1169,6 +1391,9 @@ def check_report(s, res, sources, forbid):
     names = [n for n in forbid if n.strip()]
     L.append(f"forbidden names: {len(names)} given (not listed here)" if names else
              "forbidden names: none given")
+    rt = res.get("robust_tables") or []
+    L.append("robustness tables: " + (", ".join(rt) if rt else "none (no CSV under output/tables "
+                                                               "has a `robust` column)"))
     L += ["", f"words: {st['words']:,} · turns: {st['turns']} · segments: {st['segments']} · "
               f"about {st['minutes']} min at {WPM} wpm",
           "speaking share: " + " · ".join(f"{h} {v}%" for h, v in st["share"].items())]
@@ -1185,7 +1410,9 @@ def check_report(s, res, sources, forbid):
                   "found in the sources or is listed under Claims beyond the report; the AI "
                   "disclosure is spoken early; no forbidden name appears; every pronunciation row "
                   "only re-spells its written form; no turn narrates an earlier draft "
-                  "(client_text.draft_history). It does NOT mean the script is right."]
+                  "(client_text.draft_history); no protein the robustness tables call not "
+                  "robust is named next to a robust claim. It does NOT mean the script is right. "
+                  f"The meaning check ({MEANING_FILE}) reads it for meaning before render."]
     L += ["", "What check cannot catch -- read the script against the report for these:"]
     L += [f"- {x}" for x in CANNOT_CATCH]
     return "\n".join(L) + "\n"
@@ -1254,7 +1481,8 @@ def cmd_check(a):
         sha, text = load_source(p)
         sources.append({"path": os.path.realpath(p), "sha": sha, "text": text, "kind": "extra",
                         "label": lab.strip() or os.path.basename(p), "ref": os.path.basename(p)})
-    res = check(s, sources, a.forbid_name or [], core=bool(out and _core_run(_session_of(out))))
+    res = check(s, sources, a.forbid_name or [], core=bool(out and _core_run(_session_of(out))),
+                robust=robustness_tables(out) if out else None)
     for pr in reversed(problems):
         res["fails"].insert(0, pr)
     if problems:
@@ -2518,6 +2746,15 @@ def cmd_render(a):
                 f"--core-run, the Core director's standing approval), or use --tts say "
                 f"(offline, macOS).")
         return 2
+    m_status, m_why = read_meaning(s)
+    m_override = " ".join((getattr(a, "no_meaning_check", None) or "").split())
+    if m_why and not m_override:
+        log(f"[render] refusing: {m_why}. A reader who did not write the script checks every "
+            f"sentence against the report first: `make_podcast.py meaning {a.script} --brief`, "
+            f"then `make_podcast.py meaning {a.script} --verdict PASS --reviewer \"<who>\" "
+            "--findings <file>` (or pass --no-meaning-check \"<why>\", which podcast.json "
+            "records).")
+        return 2
     out = os.path.abspath(a.out or os.path.dirname(s.path))
     cache = os.path.join(out, ".cache")
     os.makedirs(cache, exist_ok=True)
@@ -2595,6 +2832,9 @@ def cmd_render(a):
     script_copy = os.path.join(out, "podcast_script.md")
     if os.path.abspath(s.path) != script_copy:
         shutil.copyfile(s.path, script_copy)
+        mc = meaning_path(s.path)
+        if os.path.isfile(mc) and os.path.abspath(mc) != os.path.join(out, MEANING_FILE):
+            shutil.copyfile(mc, os.path.join(out, MEANING_FILE))     # it names the script's sha
         chk = os.path.join(os.path.dirname(s.path), "check.txt")
         if os.path.isfile(chk) and os.path.abspath(chk) != os.path.join(out, "check.txt"):
             with open(chk, encoding="utf-8") as fh:              # sources stay relative, rebased
@@ -2629,6 +2869,10 @@ def cmd_render(a):
         "script_author": s.author,
         "check": {"status": status or "not run", "file": "check.txt",
                   "overridden": bool(why and a.unchecked), "reason": why},
+        # the separate reader's sentence-by-sentence check (meaning_check.md, this script's sha)
+        "meaning_check": {"status": m_status, "file": MEANING_FILE,
+                          "overridden": bool(m_why and m_override), "reason": m_why,
+                          "override_reason": m_override if m_why else None},
         "sources": sources,
         "words": words, "turns": len(s.turns()), "segments": len(s.segments),
         "chunks": len(chunks), "chunks_cached": n_cached, "chunks_synthesized": n_new,
@@ -3477,6 +3721,17 @@ def vouch(out, man, unchecked=False):
     if stale and not (unchecked or overridden):
         return s, (f"refusing: {stale}. Re-run `make_podcast.py check` (and `render`, if the "
                    "script changed) so the episode matches the report, or pass --unchecked."), None
+    mc = man.get("meaning_check")
+    if s and isinstance(mc, dict):                    # rendered since the meaning check (2.13.2)
+        m_why = read_meaning(s)[1]
+        if m_why and not mc.get("overridden"):
+            return s, (f"refusing: {m_why}. Record the meaning check for this script "
+                       "(`make_podcast.py meaning <script> --verdict ...`), and render again if "
+                       "the script changed."), None
+    elif s and ("meaning", out) not in _WARNED:
+        _WARNED.add(("meaning", out))
+        log("[WARN] this episode was rendered before the meaning check existed (skill 2.13.2): "
+            "nothing on record says a separate reader checked its sentences against the report")
     return s, None, (stale and stale + (" (rendered with --unchecked)" if overridden
                                         else " (--unchecked)"))
 
@@ -4282,6 +4537,13 @@ def cmd_job(a):
         log(f"[job] refusing: {why}. Run `make_podcast.py check {a.script} --source <the report "
             "files>` and fix every flagged line first.")
         return 2
+    m_why = read_meaning(s)[1]
+    m_override = " ".join((getattr(a, "no_meaning_check", None) or "").split())
+    if m_why and not m_override:
+        log(f"[job] refusing: {m_why}. A reader who did not write the script checks every "
+            f"sentence first: `make_podcast.py meaning {a.script} --brief`, then `--verdict "
+            "PASS --reviewer ... --findings ...` (or --no-meaning-check \"<why>\").")
+        return 2
     consent, core_rec, refusal = consent_of(a)
     if not consent:
         log("[job] refusing: " + (refusal or "the job sends the transcript and the audio to "
@@ -4323,6 +4585,8 @@ def cmd_job(a):
     else:
         consent_args = ["--cloud-ok"] + ([consent] if isinstance(consent, str) else [])
     models = [x for m in (a.model or []) for x in ("--model", m)]
+    if m_why and m_override:                       # the render records the override
+        models += ["--no-meaning-check", m_override]
     try:
         write_job(path, py, os.path.abspath(a.script), out, consent_args, models,
                   (part, acct, qos, requeue), log_path, name)
@@ -4403,6 +4667,9 @@ def main(argv=None):
                    metavar="MIN", help="minutes lost to unanswered requests allowed in one render "
                                        "before it stops with the resume message (default "
                                        "%(default)s)")
+    r.add_argument("--no-meaning-check", metavar="WHY",
+                   help="render although meaning_check.md has no PASS for this script; the reason "
+                        "goes into podcast.json")
     r.add_argument("--no-preflight", action="store_true",
                    help="skip the two-line test each candidate model gets before the first chunk "
                         "this render makes (recorded in podcast.json)")
@@ -4417,6 +4684,18 @@ def main(argv=None):
     r.add_argument("--verify-model", action="append", help="text model(s) for verify")
     r.add_argument("--dry-run", action="store_true",
                    help="print the chunks as they would be spoken; send nothing")
+    mn = sub.add_parser("meaning", help="the meaning check: --brief for the reader who did not "
+                                        "write the script; --verdict to record what they found")
+    mn.add_argument("script")
+    mn.add_argument("--brief", action="store_true",
+                    help="print the reviewer's brief (and write meaning_brief.md beside the script)")
+    mn.add_argument("--source", nargs="+", default=[], action="extend",
+                    help="the report files to name in the brief")
+    mn.add_argument("--output-dir", help="the session's output folder (default: the folder above "
+                                         "the script's podcast/ folder)")
+    mn.add_argument("--verdict", choices=("PASS", "FAIL"))
+    mn.add_argument("--reviewer", help="who read it: an agent or person that did not write it")
+    mn.add_argument("--findings", help="the reviewer's findings, one line per problem (or `None`)")
     v = sub.add_parser("verify", help="transcribe the rendered audio and compare it with the "
                                       "spoken script (sends the audio to Google)")
     v.add_argument("script")
@@ -4444,6 +4723,9 @@ def main(argv=None):
     consent_args(j, "consent to send the transcript and audio to Gemini: a note of who agreed "
                     "and when (recorded in podcast.json)")
     j.add_argument("--model", action="append", help="Gemini TTS model(s) for render, in order")
+    j.add_argument("--no-meaning-check", metavar="WHY",
+                   help="render although no PASS meaning check is recorded for this script; the "
+                        "reason goes into podcast.json")
     j.add_argument("--python", help="the python the job runs (default: the pipeline env's, from "
                                     "setup.json, else this one; it needs google-genai >= "
                                     + GENAI_MIN + ")")
@@ -4455,7 +4737,8 @@ def main(argv=None):
         ap.print_help()
         return 2
     try:
-        return {"check": cmd_check, "render": cmd_render, "verify": cmd_verify,
+        return {"check": cmd_check, "meaning": cmd_meaning, "render": cmd_render,
+                "verify": cmd_verify,
                 "link": cmd_link, "share": cmd_share, "job": cmd_job, "key": cmd_key}[a.cmd](a)
     except RenderError as e:
         log(f"[{a.cmd}] {e}")

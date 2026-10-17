@@ -315,6 +315,54 @@ Claims section):
   never on the science words that look like them ("p-values were corrected for multiple
   testing", "batch-corrected", "fixed modification", "a draft genome", "previously reported").
 
+### The meaning check: a separate reader, before render
+
+`check` matches tokens. A staff episode (2026-10-16) passed it with 0 problems and 0 warnings,
+and a separate read of every line against the report then found: a T18-vs-T24 hit told as part
+of a T30-vs-T24 story and called "nearly absent" (it was detected in 2 of 3 cultures); proteins
+put right after "It survives everything" whose robustness table says `robust` = no or "not
+testable"; the report's "not a main driver" spoken as "aren't driving"; a tool presented as a
+database the client already uses; a number given for "the shifted cultures" that belongs to one
+of them. So **after `check` passes, an agent (or person) who did not write the script reads every
+sentence against the report** before anything is rendered, and checks it for:
+
+- **(a)** the right comparison, group and direction for every number and named protein;
+- **(b)** every hedge the report gives, kept ("not a main driver" is not "isn't driving");
+- **(c)** the robust status of every named protein: one spoken next to "robust", "survives" or
+  "holds up" must be robust (`robust` = yes) in that comparison's robustness table;
+- **(d)** no superlative or totality the report does not make ("the only", "all", "every",
+  "the strongest");
+- **(e)** no claim outside the report and the Claims list.
+
+The reviewer's brief, with every sentence numbered by its line and the robustness tables found
+in `output/tables/`: `make_podcast.py meaning <script> --brief` (also written as
+`podcast/meaning_brief.md`). Spawn the reviewer with it (one `Agent` call; not the agent that
+wrote the script). The writer fixes what it finds, then `check` again. The reviewer records the
+verdict; the tool takes the script's sha256 itself:
+
+```bash
+python3 scripts/make_podcast.py meaning $P/podcast_script.md --verdict PASS \
+    --reviewer "<who: an agent or person that did not write the script>" --findings <their file>
+```
+
+That writes `podcast/meaning_check.md`: the script's sha256, `verdict: PASS` or `FAIL`, the
+reviewer, the five checks, the mechanical robustness lines and the findings. **`render`, `link`,
+`share` and `job` refuse without a PASS for the script as it is now**: an edit after the meaning
+check needs `check` and the meaning check again. It refuses a reviewer whose name is the script's
+`Author:` line, an empty findings file, and a PASS while a robust claim stands against the
+tables. `--no-meaning-check "<why>"` (render, job) goes on without it and is recorded in
+`podcast.json` `meaning_check` (with `--unchecked`, which overrides only the token check). An
+episode rendered before this check existed (no `meaning_check` in its `podcast.json`) is linked
+with a warning.
+
+What `check` now catches of it mechanically: a protein named within 15 words before or 30 after
+a robust claim ("robust", "survives", "holds up"; not when negated) that no robustness table
+calls robust is a FAIL; robust in some comparisons only is a WARN. The tables are every CSV
+under `output/tables/` (three folders deep) with a `robust` column, whatever made them, matched
+on `Genes`, `Protein.Names` and `Protein.Group`; `check.txt` lists them. A superlative ("the
+only", "the strongest", "the top", "none of" ...) whose words are not in the sources is a WARN
+for the meaning check to confirm.
+
 ### What check cannot catch
 
 Read the script against the report for these; a PASS says nothing about them:
@@ -406,6 +454,11 @@ python3 scripts/make_podcast.py check $P/podcast_script.md \
              $S/output/SAMPLE_QUALITY.md \
     --forbid-name "<PI full name>" "<submitter full name>" "<first names>"
 #    -> $P/check.txt. Fix every FAIL line, re-run until PASS. Read the WARN lines.
+# 1b. the meaning check: a reader who did not write the script (an Agent call) reads every
+#     sentence against the report from the brief; fix, check again; they record the verdict
+python3 scripts/make_podcast.py meaning $P/podcast_script.md --brief --source $S/output/AI_Analysis_Report.md
+python3 scripts/make_podcast.py meaning $P/podcast_script.md --verdict PASS \
+    --reviewer "<who>" --findings <their findings file>
 # 2. preview what will be spoken (sends nothing)
 python3 scripts/make_podcast.py render $P/podcast_script.md --tts say --dry-run | less
 # 3. render. A Core run: Gemini voices under the standing approval (verify runs at the end)
@@ -447,6 +500,13 @@ bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py
     $S/output/methods.md $S/output/AUDIT.md $S/output/SAMPLE_QUALITY.md \
     --forbid-name '<PI full name>' '<submitter full name>' '<first names>'"
 bash scripts/hive_exec.sh "cat $S/output/podcast/check.txt"   # fix here, --put again, check again
+# 1b. the meaning check (a reader who did not write the script; see above), recorded on HIVE
+bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py meaning \
+    $S/output/podcast/podcast_script.md --brief --source $S/output/AI_Analysis_Report.md"
+bash scripts/hive_exec.sh --put <here>/findings.md "$S/output/podcast/"
+bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py meaning \
+    $S/output/podcast/podcast_script.md --verdict PASS --reviewer '<who>' \
+    --findings $S/output/podcast/findings.md"
 # 2. preview what will be spoken (sends nothing; light, so no job)
 bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py render \
     $S/output/podcast/podcast_script.md --tts gemini --dry-run"

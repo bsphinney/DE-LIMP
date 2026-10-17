@@ -597,6 +597,7 @@ class Job(CoreKeyFile, T.Workspace):
         T.write(script, T.script_text())
         rc, o, e = T.run("check", script, "--source", os.path.join(out, "AI_Analysis_Report.md"))
         self.assertEqual(rc, 0, e)
+        T.meaning_pass(script)
         os.makedirs(os.path.join(sd, "input"))
         submission_report.attach(sd, {"internal_id": "PROT_0807"})
         home = os.path.join(self.d, "pipeline home")

@@ -2891,6 +2891,9 @@ a Core run, Gemini voices; with no key here (`make_podcast.py key --core-run`), 
 P=<session>/output/podcast
 python3 scripts/make_podcast.py check $P/podcast_script.md --source <session>/output/AI_Analysis_Report.md \
     <session>/output/methods.md <session>/output/AUDIT.md <session>/output/SAMPLE_QUALITY.md --forbid-name "<people>"
+python3 scripts/make_podcast.py meaning $P/podcast_script.md --brief --source <session>/output/AI_Analysis_Report.md
+#   -> a reviewer agent that did not write the script reads every sentence; fix, check again, then:
+python3 scripts/make_podcast.py meaning $P/podcast_script.md --verdict PASS --reviewer "<who>" --findings <file>
 python3 scripts/make_podcast.py render $P/podcast_script.md --tts gemini --core-run   # verify follows
 #   anyone else: --tts gemini --cloud-ok "<who agreed, when>", or --tts say
 python3 scripts/make_podcast.py link <session>/output
@@ -2906,10 +2909,12 @@ bash scripts/hive_exec.sh "mkdir -p $S/output/podcast"
 bash scripts/hive_exec.sh --put <here>/podcast_script.md "$S/output/podcast/"
 bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py check $S/output/podcast/podcast_script.md \
     --source $S/output/AI_Analysis_Report.md $S/output/methods.md $S/output/AUDIT.md $S/output/SAMPLE_QUALITY.md --forbid-name '<people>'"
+bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py meaning $S/output/podcast/podcast_script.md --brief"
+#   -> the reviewer's findings go to $S/output/podcast/findings.md (--put), then --verdict PASS --reviewer ... --findings ...
 bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py job $S/output/podcast/podcast_script.md --core-run"
 bash scripts/hive_exec.sh '<the "submit" line it printed>'      # at once; then watch its "log"
 ```
-`job` writes nothing until everything the job needs is there: a passing check, the consent (and
+`job` writes nothing until everything the job needs is there: a passing check, a PASS meaning check, the consent (and
 for `--core-run`, a staff member), google-genai in the pipeline env (`setup.sh` installs it) and
 a key. Each gap is a one-line refusal. The job and its log go in your private
 `~/.proteomics-pipeline/jobs/`, never the group-writable session. After the job, the report on
@@ -2931,8 +2936,17 @@ the per-group detection columns. `check` matches tokens, not meaning. It fails a
 that is not in the sources or listed under "Claims beyond the report", a quantity in words, a
 missing AI disclosure, a host claiming a real specialty, and a forbidden name. It cannot catch
 a true number attached to the wrong protein, a relational word ("higher", "the top hit") or a
-false sentence built from true tokens, so read the script against the report yourself. Render
-and link refuse until the check passes for the current script and sources. `--tts gemini` sends
+false sentence built from true tokens. So **a reader who did not write the script checks its
+meaning before render** (one `Agent` call with `make_podcast.py meaning <script> --brief`):
+every sentence against the report for (a) the right comparison, group and direction of each
+number and protein, (b) the report's hedges kept, (c) the robust status of every named protein
+(the session's robustness tables), (d) no superlative the report does not make, (e) no claim
+outside the report and the Claims list. The writer fixes what it finds and re-runs `check`; the
+reviewer records `make_podcast.py meaning <script> --verdict PASS --reviewer "<who>" --findings
+<file>`, which writes `podcast/meaning_check.md` with the script's sha256. `check` itself fails a
+protein named next to "robust" / "survives" that the robustness tables call not robust, and warns
+on a superlative the sources do not make. Render, link, share and `job` refuse until the check
+passes for the current script and sources AND `meaning_check.md` says PASS for this script. `--tts gemini` sends
 the transcript (never the report) to Google, and nothing without consent: `--core-run` for a Core
 run, `--cloud-ok` for anyone else (`--cloud-ok no` is a refusal). On a free-tier key Google may use
 the text; for anyone else's unpublished data suggest a paid-tier key or `--tts say`. The Core's
