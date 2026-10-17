@@ -92,7 +92,11 @@ def shown(argv):
 def _exec(argv):
     sys.stdout.flush()
     sys.stderr.flush()
-    os.execvp(argv[0], argv)
+    try:
+        os.execvp(argv[0], argv)
+    except OSError as e:                 # no srun beside sbatch, or no such command: say so, once
+        sys.stderr.write(f"on_compute.py: cannot run {argv[0]}: {e.strerror or e}\n")
+        sys.exit(127)
 
 
 def ensure_compute_node(why, minutes=DEFAULT_MINUTES, mem=DEFAULT_MEM, cpus=1,

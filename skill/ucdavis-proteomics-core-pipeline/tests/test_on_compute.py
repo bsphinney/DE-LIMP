@@ -185,6 +185,15 @@ class OnComputeCommandLine(Harness):
         self.assertIn("--partition=low", call)
         self.assertIn("--account=publicgrp", call)
 
+    def test_no_srun_beside_sbatch_is_said_not_a_traceback(self):
+        self.login_node()
+        os.remove(os.path.join(self.bin, "srun"))
+        r = self.run_oc()
+        self.assertEqual(r.returncode, 127)
+        self.assertIn("cannot run", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertFalse(os.path.exists(self.out))
+
     def test_an_allocation_that_fails_is_a_failure(self):
         self.login_node()
         r = self.run_oc(FAKE_SRUN_FAIL="1")
