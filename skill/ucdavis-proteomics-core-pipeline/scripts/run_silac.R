@@ -461,16 +461,25 @@ for (ct in names(tables_rec)) {
     "%s: the median protein ratio (the zero) is within %.2f log2 of the density peak in every run.",
     ct, z$tolerance), z,
     plain = "The ratios' zero point agrees with where most proteins sit.")
-  if (t$n_significant)
+  # one finding per comparison that HAS such hits; none at all is said once, below -- a
+  # comparison with none beside one with some made the client's row contradict itself
+  # (review of 2.13.2, round 2)
+  if (t$n_significant && t$n_significant_one_precursor > 0)
     chk("silac_single_precursor", "INFO", sprintf(paste(
       "%s: %d of the %d significant protein groups rest on a single precursor in at least one",
       "replicate (min_precursors = 1); limma's variance moderation treats them like the rest, so",
       "confirm the ones that matter."), ct, t$n_significant_one_precursor, t$n_significant),
-      plain = if (t$n_significant_one_precursor > 0)
-        paste("Some significant proteins rest on a single peptide in at least one replicate:",
-              "confirm those that matter before relying on them.")
-      else "No significant protein rests on a single peptide in any replicate.")
+      plain = paste("Some significant proteins rest on a single peptide in at least one replicate:",
+                    "confirm those that matter before relying on them."))
 }
+sig_cts <- Filter(function(ct) tables_rec[[ct]]$n_significant > 0, names(tables_rec))
+if (length(sig_cts) && !any(vapply(sig_cts, function(ct)
+      tables_rec[[ct]]$n_significant_one_precursor > 0, logical(1))))
+  chk("silac_single_precursor", "INFO", sprintf(paste(
+    "No significant protein group rests on a single precursor in any replicate (%s)."),
+    paste(sprintf("%s: 0 of %d", sig_cts, vapply(sig_cts, function(ct)
+      as.integer(tables_rec[[ct]]$n_significant), integer(1))), collapse = "; ")),
+    plain = "No significant protein rests on a single peptide in any replicate.")
 # A label that reads K- and R-ending precursors of one protein differently (silac_residue_bias):
 # per CHANNEL pair, heavier over lighter, whatever groups they hold (a label swap must not cancel
 # it), judged on the median and run by run; a deuterated label is named, since its retention

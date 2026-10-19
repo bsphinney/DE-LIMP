@@ -246,9 +246,10 @@ class PipelineChecksSpeakForThemselves(unittest.TestCase):
     def test_a_zero_count_is_never_some(self):
         """Review of 2.13.2 (M2): "Some significant proteins rest on a single peptide" when none
         did, and "Some proteins are detected in some channels" when none were."""
-        one = self.chk_call("silac_single_precursor")
-        self.assertIn("n_significant_one_precursor > 0", one)
-        self.assertIn("No significant protein rests on a single peptide", one)
+        src = open(os.path.join(SCRIPTS, "run_silac.R"), encoding="utf-8").read()
+        self.assertIn("if (t$n_significant && t$n_significant_one_precursor > 0)", src)
+        self.assertIn("No significant protein rests on a single peptide", src)   # said once
+        # (runtime, several comparisons: test_silac_analysis.test_the_client_row_never_...)
         pat = self.chk_call("silac_detection_patterns")
         self.assertIn("nrow(specific) > 0", pat)
         self.assertIn("No protein is detected in some channels", pat)
