@@ -2978,6 +2978,19 @@ def main():
     if legacy and not explicit_contam:
         a.contaminants = "universal" if a.add_contaminants else "none"
 
+    # HPC@UCD's ucd-hpc rules: a download, a digest of a whole proteome, a recursive look through
+    # the Core's FASTA folders, or reading a search's database is work for a compute node. On a
+    # cluster login node these run themselves again there (on_compute.py: one blocking srun).
+    if a.cmd in ("fetch", "check-db"):
+        try:
+            import on_compute
+            on_compute.ensure_compute_node(
+                f"fetch_fasta.py {a.cmd} " + ("downloads and digests the proteome" if a.cmd == "fetch"
+                                              else "reads the search's database"),
+                minutes=60 if a.cmd == "fetch" else 30, mem="8G",
+                preemptible_ok=a.cmd == "check-db", script=__file__)  # check-db only reads
+        except ImportError:
+            pass                          # a partial scripts/ without on_compute.py: as before
     if a.cmd == "keratin-db":
         if not (a.fasta_meta or a.search_dir):
             ap.error("keratin-db needs --fasta-meta or --search-dir")

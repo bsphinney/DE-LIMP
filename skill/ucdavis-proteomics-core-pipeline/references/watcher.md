@@ -43,7 +43,8 @@ while true; do
   status=$(bash scripts/watch_run.sh --slurm <jobid> --log <log> --hive)   # or --log <log> locally
   done=$(echo "$status" | python3 -c 'import sys,json;print(json.load(sys.stdin)["done"])')
   [ "$done" = "True" ] && break
-  sleep 60        # for long SLURM jobs, schedule a wake-up instead of busy-waiting
+  sleep 300       # SLURM: 5 min or more (each poll is several logins + sacct on the login
+                  # node); a local run: 60. For long jobs, schedule a wake-up instead
 done
 # if failed: read error_class + fix, apply it, resubmit, watch again.
 ```

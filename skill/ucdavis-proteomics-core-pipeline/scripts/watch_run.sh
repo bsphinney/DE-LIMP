@@ -13,7 +13,9 @@
 #   add --hive to query HIVE over SSH (needs HIVE_USER/HIVE_KEY; uses hive_exec.sh)
 #
 # Emits JSON: {state, done, failed, error_class, fix, log_tail}. Loop pattern:
-#   while not done: watch_run.sh ...; sleep 60; done   # then act on failed/fix
+#   while not done: watch_run.sh ...; sleep 300; done  # then act on failed/fix
+#   (--hive: 5 min or more -- each poll is several logins and sacct calls on HIVE's shared
+#   login node; a local run: 60 s)
 # =============================================================================
 set -uo pipefail
 MODE="local"; JOB=""; LOG=""; HIVE=false; STALL_MIN=15; OUTDIR=""; POLL=0; CHAINDIR=""

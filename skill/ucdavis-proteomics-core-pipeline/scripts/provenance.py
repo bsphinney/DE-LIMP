@@ -303,6 +303,15 @@ def main():
                                          "staff-only")
     ap.add_argument("--timestamp", default="", help="ISO timestamp (script can't call clock)")
     a = ap.parse_args()
+    # sha256 of every input raw file (up to 5 GB each) and the report: I/O for a compute node.
+    # On a cluster login node this runs itself again there (on_compute.py; HPC@UCD's ucd-hpc rules).
+    try:
+        import on_compute
+        # restartable: a run stopped half way is simply run again (preemptible_ok, pick_queue)
+        on_compute.ensure_compute_node("provenance.py hashes every input file", minutes=60, mem="4G",
+                                       preemptible_ok=True, script=__file__)
+    except ImportError:
+        pass                              # a partial scripts/ without on_compute.py: as before
     # The database record is checked before anything is written: a bundle whose database replay
     # silently fell back to the workflow defaults would reproduce a different database.
     fasta_info = None

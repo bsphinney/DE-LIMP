@@ -64,9 +64,17 @@ the spine.
    SLURM instead routes to the 5-step chain, exits 3 without writing `--sbatch`, and is
    submitted with `bash <out>/submit.sh`), not inline on the login node. Login nodes are shared; running compute there gets the user flagged/killed.
    The **only** things allowed on the login node are tiny orchestration commands —
-   submitting jobs, `squeue`/`sacct` polling (`watch_run.sh`), and small file moves.
+   submitting jobs, `squeue`/`sacct` polling (`watch_run.sh`), small file moves and the
+   bookkeeping scripts step 0a lists. Everything else runs on a compute node:
+   `hive_exec.sh --job '<cmd>'` (one blocking `srun`) or an sbatch job (step 0a, "On HIVE").
    If you're unsure whether a step is heavy, submit it as a job. (No SLURM but a big
    dataset locally? Warn the user it may be slow rather than hammering a shared host.)
+   **On a UC Davis cluster (HIVE, Farm, Franklin), HPC@UCD's own `ucd-hpc` skill is
+   mandatory, and on cluster policy it wins over this skill**: what may run on a login node,
+   resource requests (`--account`/`--partition`/`--time`/memory), software installs and
+   storage. Load it (Skill `ucd-hpc`) before the first command on the cluster. Where the two
+   disagree, follow `ucd-hpc`, tell the user which instruction of this skill you set aside, and
+   record it (`report_issue.sh`). Step 0a checks that it is installed.
 4. **Organism decides the FASTA and nothing else**, and is **always asked, never
    assumed** — not from a folder name, not "probably human". The **sample type** (tissue,
    cell line, biofluid, IP …) is likewise **asked, never inferred** — not from a file-name
@@ -157,7 +165,11 @@ Verify (don't just trust the answers):
 ```
 bash scripts/check_access.sh <hive_user> <private_key_path>
 ```
-Read `recommended_mode` + `core_member`, then pick the mode below. Once the SSH login works,
+Read `recommended_mode` + `core_member`, then pick the mode below. **`ucd_hpc_skill`**: when
+`required` is true and `installed` is false, tell the user in one line that HPC@UCD requires its
+`ucd-hpc` skill for any agent on its clusters, ask, then run its `install` line here (it goes in
+their own `~/.claude/skills`; relay `note` for Windows) and ask them to type `/reload-plugins`.
+Until it loads, follow golden rule #3 to the letter. Once the SSH login works,
 `check_access.sh` saves the user and the key's path (never the key) to
 `~/.config/ucdavis-proteomics/hive.env` (`hive_login_saved`). Later calls read the login there,
 because the environment does not carry over from one command to the next.
@@ -184,6 +196,31 @@ because the environment does not carry over from one command to the next.
   `~/proteomics-pipeline/`; the latter carries the version every record states). Step 0's
   `skill_version.sh --check-hive` says when that is needed. HIVE gives **compute**; the Core
   software is separate (next).
+- **On HIVE: the login node or a compute node** (golden rule #3, HPC@UCD's `ucd-hpc` rules).
+  A plain `hive_exec.sh '<cmd>'` runs on HIVE's shared login node, where only seconds of light
+  work belong: `sbatch`/`squeue`/`sacct`/`scancel`, `watch_run.sh`, `ls`/`cat` of one folder or
+  a small file, `mkdir`, `--put`/`--get`, writing a job (`run_search.py --sbatch`,
+  `diann_parallel.py`, `make_podcast.py check`/`job`), and the bookkeeping scripts (`board.sh`,
+  `notes.py`, `log_decision.py`, `report_issue.sh`, `skill_version.sh`, `session.py init`,
+  `checkpoint.py status`, `submission_report.py attach`, `core_submission.py check`/`identify`/
+  `fetch`/`bioshare`/`email-draft`, `node_fault.py retry`, `cpu_hours.py`). **Everything else
+  goes to a compute node** — whatever reads `report.parquet` or raw files, runs R, walks a
+  share, installs, renders or zips: `bash scripts/hive_exec.sh --job [--time MIN] [--mem SIZE]
+  [--cpus N] [--preemptible] '<cmd>'` (one blocking `srun` on a queue that does not preempt,
+  spelled out; defaults 30 min, 4G, 1 CPU; its output and exit status are the command's; when
+  your own searches fill your 64-CPU cap on `high` it says it waits behind them, and
+  `--preemptible` — only for a command that just reads and can be run again, as step 2 — runs it
+  on `low` instead) for minutes of work, or an sbatch job for
+  longer work and anything that must survive a closed laptop (step 8: `on_compute.py --header`).
+  These move themselves when started on the login node: `setup.sh`, `ensure_dotnet8.sh`,
+  `fetch_fasta.py fetch`/`check-db`, `core_submission.py locate`/`stage`/`deliver`,
+  `provenance.py`, `session.py finalize`, `checkpoint.py find`, and `acquire_tools.sh` when it
+  downloads. **Each of these blocks until its job ends (queue wait + the work): run the call
+  with `run_in_background` and wait for it, or with a Bash timeout of at least its `--time` plus
+  10 minutes — never the 2-minute default. A killed call kills the ssh, which cancels the srun
+  half way (in the middle of an `--apply` copy or an install).** Unsure → `--job`. In
+  `hive_local` (Claude Code on HIVE) the same split, with `python3 scripts/on_compute.py [--time
+  MIN] [--mem SIZE] -- <cmd>` for `--job`.
 - **Core member = yes (with HIVE) → reuse the installed software** in
   `/quobyte/proteomics-grp/`: `acquire_tools.sh` finds the Core's DIA-NN builds,
   `fetch_fasta.py --hive` reuses pre-staged FASTAs. No rebuilding.
@@ -307,12 +344,17 @@ Sourcing `activate.sh` makes every later step use those interpreters — **sourc
 in the same shell before running anything below** (or prefix later commands).
 
 Read `setup.json` and **gate on `ready_for`**:
-- `ready_for.de` false → DE can't run; re-run `setup.sh` and report any `notes`. (A SILAC
-  ratio analysis, `run_silac.R`, needs only limma, data.table, arrow and jsonlite in that R.)
+- `ready_for.de` false → DE can't run: R cannot read `report.parquet` the way this env's limpa
+  does (`de_reader`: arrow for limpa 1.2.x, nanoparquet for limpa ≥ 1.4.0, arrow on both
+  methods); re-run `setup.sh` and report any `notes`. `ready_for.de` is the default method's
+  (`dpc`); `de_reader.maxlfq` true means `--method maxlfq` can still run (arrow + limma, no limpa). (A SILAC ratio analysis, `run_silac.R`,
+  needs only limma, data.table, arrow and jsonlite in that R.)
 - `limpa.ok` false (setup.sh then ends `ERROR: limpa ...` and exits 1) → the env's limpa is
   older than 1.4.0 (bioconda has only 1.2.5; setup.sh installs 1.4 from Bioconductor 3.23):
-  run the fix it prints where there is internet. run_de.R still reads the report with limpa
-  1.2.x and records that it did (`references/environment.md`).
+  re-run `setup.sh` (on a cluster it runs on a compute node). run_de.R still reads the report
+  with limpa 1.2.x, through arrow, and records that it did (`references/environment.md`); without
+  nanoparquet its contaminant share is then read from `Precursor.Normalised`. Upgrading an env
+  that other analyses run on changes their limpa mid-analysis: Core staff ask the Core's director first.
 - `ready_for.dia` false → on macOS this means Docker is missing. Run
   `bash scripts/build_diann_docker.sh` and relay its instructions (install Docker
   Desktop, open it once), then continue. Don't silently fall back to a DDA engine.
@@ -320,7 +362,7 @@ Read `setup.json` and **gate on `ready_for`**:
   `.d`/`.raw` → mzML; tell the user and, if their data is DIA, route to DIA-NN.
 - `ready_for.thermo_raw` false **and the input has Thermo `.raw`** → fix it before step 2:
   do exactly what `thermo_raw_reader.note` says (usually re-run `setup.sh`, or `bash
-  scripts/ensure_dotnet8.sh` where there is internet), then `setup.sh --check` until it is
+  scripts/ensure_dotnet8.sh`; on a cluster both move to a compute node), then `setup.sh --check` until it is
   true. `ready_for.dia` does not cover this: without a working parser every `.raw` is
   `unknown` and a DIA search falls back to 380–980. Irrelevant for `.d`/mzML-only input.
 - `thermo_raw_reader.resolution_reader.ready` false only means step 2 cannot read the
@@ -328,7 +370,14 @@ Read `setup.json` and **gate on `ready_for`**:
 
 In `hive_remote` the toolchain lives on HIVE, so run it there instead (the laptop needs none
 of it): `bash scripts/hive_exec.sh 'bash ~/proteomics-pipeline/scripts/setup.sh'`, and read
-`~/.proteomics-pipeline/setup.json` on HIVE the same way.
+`~/.proteomics-pipeline/setup.json` on HIVE the same way. On a cluster login node `setup.sh`
+(and `--check`) runs itself on a compute node (`on_compute.py`: one blocking `srun`, up to 2 h for
+an install, printed first): run that call in the background and wait for it. Never run a conda,
+R or .NET install on the login node by hand; HIVE's compute nodes have internet. Run it before
+the first search: it installs .NET 8, so writing a `.raw` search later does not wait on a
+download job. Exit 3: the compute-node run did not finish (SLURM refused it, a time limit) and
+`setup.json` was not rewritten — its `ready_for` is old; read the srun lines and run it again.
+Exit 2: it could not get there (no python3 there), and says how.
 
 **Notes from the Core — check every session**, on every start and every resume: after the
 HIVE version check (step 0) and before the resume check (0c). The Core's director can leave a
@@ -380,7 +429,7 @@ an earlier session already submitted something (step 0's version check,
 `skill_version.sh --check-update` and in `hive_remote` `--check-hive`, runs on a resume too,
 first; then its notes check, with `--session <dir>` once the session is found):
 ```
-python3 scripts/checkpoint.py find --base <where results live>   # e.g. ~ or the project dir
+python3 scripts/checkpoint.py find --base <the project folder>   # never ~ or a whole share; HIVE: in the background
 python3 scripts/checkpoint.py status --session <session dir> --resume   # live sacct re-query
 ```
 `status` returns each stage's real state, whether the expected output file exists, and
@@ -760,7 +809,7 @@ submission, the same path locally and on HIVE (`~/core/PROT_0807`).
 | **2** | a human decision / hard gate — proposal files are still written | show the failing gates. `locate`: `unmatched_samples` (→ `--allow-partial` only if staff confirm those were not run), `choose_run` (→ re-injections: ONE `--reinjections latest|all`; collisions: `--choose <key>=<file>` each), `ambiguous_label` (→ staff decide: `--choose`, `--accept-ambiguous` or `--files-from`), `weak_ids` (→ `--choose`, or `--files-from`), `duplicate_ids` (→ `--choose <key>=<file>`, keys `KG1#1`/`KG1#2` from the gate), `duplicate_assignment` (→ staff pick the files, `--files-from`), `no_files`. `stage`: several folders, or one naming a different person or institution (→ `--service-dir`); a folder owned by another submission; `--apply` on a hard-failed locate. `deliver`: **not verified — do not share** (see 12b); **held by `qc_gate`** (step 8e) → a staff member reads `logs/qc_bracket.md` and records `qc_bracket.py ack` (or re-runs 8e when it says so) |
 | **3** | CoreOmics or the filesystem unreachable, auth failed, or the scripts directory is incomplete | a key problem: `core_submission.py check` names it and the fix; run where the data is (`fetch`/`bioshare` where the key is — `coreomics_runs_on`; `locate`/`stage`/`deliver` on HIVE); re-put the skill: `hive_exec.sh --put-skill` |
 | **4** | the files look like an **HT plate** | step 1a, `ht_manifest.py` |
-| **5** | delivery too big for the login node | `sbatch` the `deliver_job.sh` it wrote |
+| **5** | delivery too big for one interactive step (`--max-gb`, 5 GB) | `sbatch` the `deliver_job.sh` it wrote |
 
 → detail: `references/core-submissions.md`.
 
@@ -793,10 +842,10 @@ zip) needs .NET 8 with **both** Microsoft.NETCore.App and Microsoft.AspNetCore.A
 script finds an install that has both and hands it to the parser itself — **don't export
 DOTNET_ROOT for step 2**. If none has both, it prints one `ERROR: … cannot start` up front
 and reads nothing (every `.raw` comes back `unknown` with that reason): run `bash
-scripts/ensure_dotnet8.sh` on the login node (installs both into
-`~/.proteomics-pipeline/dotnet8`; needs internet), or on HIVE `module load
-dotnet-core-sdk/8.0.4` in the same shell, and re-run step 2. Don't retry under `srun`
-first — a compute node gives the same answer. Each file's `reader` records the parser, its
+scripts/ensure_dotnet8.sh` (installs both into `~/.proteomics-pipeline/dotnet8`; needs
+internet; on a cluster login node its download runs itself on a compute node), or on HIVE
+`module load dotnet-core-sdk/8.0.4` in the same shell, and re-run step 2. Don't retry step 2
+under `srun` before that — a compute node gives the same answer. Each file's `reader` records the parser, its
 version and the `DOTNET_ROOT` used. A `.raw` that is `unknown` for any other reason says
 why in its `warnings`; without a measured precursor range step 6b falls back to 380–980 for
 DIA, and refuses a DIA-NN DDA cfg.
@@ -829,10 +878,13 @@ and `acquired_at_note`, read in the same pass: from a `.d`'s `AcquisitionDateTim
 `.raw`'s ThermoRawFileParser creation date, which records no time zone and is read as the Core's
 Pacific time (the note says so). Step 8e uses them. **Keep this step's JSON**: save it as
 `<session>/input/acquisition.json` at step 3b.
-Each `.raw` costs ~3–7 s of parser I/O (more on a busy mount). **On a cluster, run step 2 for more than 5 `.raw`
-on a compute node** (`srun --cpus-per-task=1 --mem=2G … python3 scripts/detect_acquisition.py …`,
-with the account/partition the user can submit to); on a login node the script refuses
-such a cohort before reading anything and prints that `srun` line. Do not add
+Each `.raw` costs ~3–7 s of parser I/O (more on a busy mount). **On a cluster, run step 2 on
+a compute node whenever there is a `.raw`**, in the background: `bash scripts/hive_exec.sh --job
+--preemptible --time <T> --mem 2G 'python3 ~/proteomics-pipeline/scripts/detect_acquisition.py …'` with `<T>`
+= the number of `.raw` ÷ 4 in minutes, at least 10 (`hive_local`: `python3
+scripts/on_compute.py --preemptible --time <T> --mem 2G -- python3 scripts/detect_acquisition.py …`). A
+`.d`-only input is an SQLite lookup per file and may stay on the login node. On a login node the
+script itself refuses more than 5 `.raw` before reading anything and prints the `srun` line. Do not add
 `--allow-login-node` yourself to get past the refusal; it is for a user who chooses that.
 For a Bruker `.d` the
 `warnings` come from `tdf_integrity`: `truncated` means `analysis.tdf` indexes only
@@ -1270,7 +1322,8 @@ Honor the manifest's exact version — not "latest":
 PIN_ENGINE=diann PIN_VERSION=2.7.0 bash scripts/acquire_tools.sh <platform_class>
 ```
 Reads/writes `~/.proteomics-pipeline/tools/tools.json`. On HIVE it reuses the Core's
-native DIA-NN build for that version (downloading it if the Core has none); on mac it uses
+native DIA-NN build for that version (downloading it if the Core has none — a download runs
+itself on a compute node, so run the call in the background); on mac it uses
 Docker for DIA-NN. **Read `tools.json` `notes`** — license gates (FragPipe, Radiant) and
 missing-runtime warnings surface there. `tools.json` `versions` is the build it found,
 never `latest` and never the version that was ASKED for (`""` when it cannot tell, `env` for
@@ -1288,7 +1341,8 @@ ACQUIRE_RADIANT=1 PIN_ENGINE=radiant PIN_VERSION=2.3.3 bash scripts/acquire_tool
 ```
 It needs Docker or Apptainer — Seer ships no native binary. On HIVE the `.sif` must
 already exist; building one pulls ~3 GB and **must run on a compute node, never the
-login node** (the note in `tools.json` gives the exact `srun apptainer build` line).
+login node** (the note in `tools.json` gives the exact line: `on_compute.py` with the queue
+spelled out, and the pull's cache in the job's `$TMPDIR`, off the 20 GB home).
 
 ### 6. Build the FASTA
 Use the proteome, database type, and contaminant set the **user confirmed in
@@ -2031,7 +2085,9 @@ a hang.** Give them one short line from `progress.summary` plus `doing`, and pas
 Keep it to a couple of lines; don't dump the JSON. Never present the note as a finding
 about **their** data — it is general background, and it must not be mistaken for a result.
 It returns `{state, done, failed, stalled, error_class, fix}`. While `done` is false,
-keep polling (sleep ~60s between polls; for long SLURM jobs use a scheduled wake-up).
+keep polling: about every minute for a local run; **on SLURM every 5 minutes or more**, or a
+scheduled wake-up (each `--hive` poll is several logins and `sacct` calls on HIVE's shared login
+node, and a stall is only called after 15 minutes anyway).
 Pass `--log` so it can also catch **stalls** — a job stuck in `RUNNING` with its log
 frozen (a hung file; `sacct` will show RUNNING forever). **If `failed` OR `stalled` is
 true, apply the `fix` and resubmit AUTONOMOUSLY — do not wait for the user.** Starting
@@ -2238,7 +2294,14 @@ afterwards. An excluded run must be one the report has, and must not keep a row:
 analyses every row. A missing run without `--exclude` still fails. Also log the decision
 (`log_decision.py`).
 **Then check the normalisation before the final DE** — for every experiment type. Run the DE
-both ways into scratch folders (one job on HIVE), then the check:
+both ways into scratch folders (one job on HIVE), then the check. **A DE, set-test or figure job
+on HIVE** starts from `python3 ~/proteomics-pipeline/scripts/on_compute.py --header <S>/logs
+--name <short name> --time <minutes> --mem <size>G --cpus <n>`: the queue the skill's rule
+picks, `--time`/`--mem`/`--cpus` explicit, one log per job (`%j`), `set -euo pipefail`. Append
+the commands, `sbatch` it, and when the `ucd-hpc` skill is installed here, lint it first:
+`bash scripts/hive_exec.sh 'bash -s -- <job file>' < ~/.claude/skills/ucd-hpc/scripts/lint-jobscript.sh`
+(it misreads a log path that holds a space as having no `%j`; sbatch reads it right, so that
+one message can be ignored).
 ```
 Rscript scripts/run_de.R --input ./search_out/report.parquet --metadata conditions.csv \
     --method <dpc|maxlfq> --fasta-meta ./search.fasta.meta.json [--block Mouse] [--numeric-covariates Covariate1] \
@@ -2957,7 +3020,8 @@ shared key on HIVE is used for a Core run only.
 → detail (when and where, the brief, the file format, privacy, keys): `references/podcast.md`.
 
 ### 10. Reproducibility bundle (mandatory)
-Assemble the bundle that makes the whole analysis reproducible:
+Assemble the bundle that makes the whole analysis reproducible (it hashes every input file; on
+HIVE's login node it moves itself to a compute node — run it in the background):
 ```
 python3 scripts/provenance.py --outdir ./reproducibility \
   --workflow-manifest ./wf/workflow.manifest.json \
@@ -3078,7 +3142,7 @@ First check the notes from the Core again (step 0: `notes.py check --json --sess
 ```
 python3 scripts/session.py finalize --dir <session> --zip
 ```
-This tidies `output/` (tables→`tables/`, figures→`figures/`) and makes sure the session carries
+(On HIVE's login node it moves itself to a compute node: run it in the background.) This tidies `output/` (tables→`tables/`, figures→`figures/`) and makes sure the session carries
 **publication Methods**: `output/methods.md` + `.docx`, covering LC-MS acquisition, the search
 (engine, pinned version, parameters, FDR), the sequence database and contaminants, the DE, and the
 instrument-grant acknowledgment. If step 9d did not write them, `make_methods.py` does it here. An
@@ -3156,7 +3220,10 @@ relative raw-data links inside the Flinders tree. **Links already in a share are
 touched** — `deliver` lists them as warnings.
 
 **On HIVE — always the dry run first** (file list, size, and any refusal), then the same
-command with `--apply`:
+command with `--apply`. `locate`, `stage` and `deliver` walk the shares, so on HIVE's login node
+each runs itself on a compute node (one blocking `srun`, its line printed first; HPC@UCD's
+`ucd-hpc` rules): run each call in the background (or with a Bash timeout of at least 70
+minutes) and wait for it — a killed call cancels the copy half way:
 ```
 python3 ~/proteomics-pipeline/scripts/core_submission.py deliver \
     --summary ~/core/PROT_0807/submission_summary.json --session "$S"

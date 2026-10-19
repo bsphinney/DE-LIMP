@@ -48,9 +48,14 @@ case "$*" in
     [ -n "${FAKE_LIMPA_INSTALL_FAIL:-}" ] && { echo "cannot open URL bioconductor.org" >&2; exit 1; }
     echo "1.4.0" > "$FAKE_LIMPA_STATE"; exit 0 ;;
   *"cat(tryCatch"*) printf '%s' "$v"; exit 0 ;;
+  *packageDescription*)     # what this limpa's DESCRIPTION Suggests for reading parquet
+    [ -n "${FAKE_LIMPA_SUGGESTS:-}" ] && { printf '%s' "$FAKE_LIMPA_SUGGESTS"; exit 0; }
+    case "$v" in 1.[4-9]*|1.[1-9][0-9]*|[2-9].*) printf nanoparquet ;; 1.*) printf arrow ;; esac
+    exit 0 ;;
   *nanoparquet*)
     [ -z "${FAKE_NP_STATE:-}" ] && exit 0
     [ "$(cat "$FAKE_NP_STATE" 2>/dev/null)" = present ] && exit 0 || exit 1 ;;
+  *"'arrow'"*) [ -n "${FAKE_ARROW_MISSING:-}" ] && exit 1; exit 0 ;;
   *requireNamespace*)
     case "$v" in 1.[4-9]*|1.[1-9][0-9]*|[2-9].*) exit 0 ;; *) exit 1 ;; esac ;;
 esac

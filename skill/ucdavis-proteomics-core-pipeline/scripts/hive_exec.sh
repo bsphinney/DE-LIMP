@@ -15,6 +15,10 @@
 #     bash hive_exec.sh --put  ./local/path   '~/remote/path'
 #     bash hive_exec.sh --get  '~/remote/path' ./local/path
 #
+#   Run a command on a HIVE COMPUTE node (one blocking srun, the queue spelled out) -- for
+#   anything heavier than seconds of light work (HPC@UCD's ucd-hpc rules):
+#     bash hive_exec.sh --job --time 30 --mem 4G 'python3 ~/proteomics-pipeline/scripts/...'
+#
 #   Put the skill on HIVE -- once, and again after every skill update:
 #     bash hive_exec.sh --put-skill
 #   = scripts/ AND .claude-plugin/ into ~/proteomics-pipeline/. plugin.json is where every
@@ -28,7 +32,7 @@
 #   HIVE_PUT_FORCE=1 uploads anyway. With no rsync (Git Bash on Windows has none),
 #   --put/--get use scp.
 #
-# Heavy compute must go through SLURM (sbatch), never the login node.
+# Heavy compute must go through SLURM (sbatch, or --job), never the login node.
 # =============================================================================
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -111,7 +115,7 @@ winpath() {
   printf '%s\n' "$1"
 }
 
-usage() { echo "usage: hive_exec.sh '<command>' | --put <local> <remote> | --get <remote> <local> | --put-skill" >&2; exit 2; }
+usage() { echo "usage: hive_exec.sh '<command>' | --job [--time MIN] [--mem SIZE] [--cpus N] [--preemptible] '<command>' | --put <local> <remote> | --get <remote> <local> | --put-skill" >&2; exit 2; }
 
 # gabrig 2026-09-23: T:\Data\lab\service\... went up by scp (7.1 GB, ~20 min) although T: is
 # the Flinders share HIVE mounts at /nfs/lssc0/flinders/proteomics. hive_path.sh makes no
@@ -201,6 +205,32 @@ case "${1:-}" in
          dst="$(winpath "$2")"
          if command -v rsync >/dev/null 2>&1; then rsync -e "$RSYNC_E" -rlt "$HU@$HOST:$1" "$dst"
          else scp_get "$1" "$dst"; fi ;;
+  # A command for a COMPUTE node -- HPC@UCD's ucd-hpc rules: on a login node nothing "past a
+  # few seconds of CPU or much I/O" (a walk of a share, an install, a zip, hashing raw files).
+  # On HIVE, on_compute.py runs it under ONE blocking srun with the queue spelled out
+  # (--account/--partition/--qos from run_search.slurm_queue) and waits; its output and exit
+  # status are the command's. --time in minutes (default 30), --mem with a unit (default 4G),
+  # --cpus (default 1). Checked here, before any connection is spent.
+  --job) shift; jopts=""
+         while [ $# -gt 0 ]; do
+           case "$1" in
+             --time|--cpus)
+               [ $# -ge 2 ] && [[ "$2" =~ ^[1-9][0-9]*$ ]] \
+                 || { echo "hive_exec.sh --job: $1 takes a whole number (minutes for --time)" >&2; exit 2; }
+               jopts="$jopts $1 $2"; shift 2 ;;
+             --mem)
+               [ $# -ge 2 ] && [[ "$2" =~ ^[1-9][0-9]*[KMGT]$ ]] \
+                 || { echo "hive_exec.sh --job: --mem takes a size with a unit, e.g. 4G (a bare number is megabytes to SLURM)" >&2; exit 2; }
+               jopts="$jopts $1 $2"; shift 2 ;;
+             # a restartable, read-only command: at the user's own CPU cap on high it may run
+             # on low (preemptible) instead of waiting behind their searches (on_compute.py)
+             --preemptible) jopts="$jopts $1"; shift ;;
+             *) break ;;
+           esac
+         done
+         [ $# -ge 1 ] || usage
+         remote="python3 ~/proteomics-pipeline/scripts/on_compute.py$jopts -- bash -lc $(printf '%q' "$*")"
+         "${SSH[@]}" "bash -l -c $(printf '%q' "$remote")" ;;
   "")    usage ;;
   # LOGIN shell (bash -l). ssh with a bare command runs a NON-login shell, where
   # HIVE does not put sacct/squeue/sbatch on PATH. Every SLURM query then returned

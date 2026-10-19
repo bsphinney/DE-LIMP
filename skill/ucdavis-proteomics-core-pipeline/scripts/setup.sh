@@ -41,6 +41,8 @@
 #
 # Usage:  bash setup.sh            # install/repair everything it can
 #         bash setup.sh --check    # report only, install nothing
+# On a cluster login node either one runs itself again on a compute node (on_compute.py: one
+# blocking srun) -- never the solve or the R loads on the login node. Exit 2: it could not.
 # =============================================================================
 set -uo pipefail
 
@@ -56,11 +58,57 @@ mkdir -p "$PP_HOME"
 case "${BASH_SOURCE[0]}" in */*) SCRIPT_DIR="${BASH_SOURCE[0]%/*}" ;; *) SCRIPT_DIR="." ;; esac
 SCRIPT_DIR="$(cd "$SCRIPT_DIR" && pwd)"
 
+
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"   # darwin | linux
 ARCH="$(uname -m)"                               # arm64 | x86_64 | aarch64
 have() { command -v "$1" >/dev/null 2>&1; }
 say()  { printf '%s\n' "$*" >&2; }
 NOTES=()
+
+# ---- 0. a compute node, never a cluster login node ---------------------------
+# HPC@UCD's ucd-hpc skill (mandatory on Hive, Farm and Franklin since 2026-10-16) names conda
+# solves as login-node abuse, and downloads and package builds belong inside a job; even --check
+# loads R and a handful of packages and starts the .NET parser. On a login node (on_compute.py
+# --is-login-node: no SLURM job, and SLURM or HPCCF's cluster file here) setup.sh runs itself
+# again through on_compute.py: one blocking srun with the queue spelled out, on a queue that does
+# not preempt, and waits. HIVE's compute nodes reach conda-forge, Bioconductor, CRAN and
+# Microsoft's .NET downloads (srun job 24827776, 2026-10-16).
+# Exit 3: that run did not finish (SLURM refused it, a time limit), so setup.json -- which would
+# otherwise be read as current -- was not rewritten. Exit 2: no way to a compute node here.
+UCD_SLURM_BIN="${HPCCF_SLURM_BIN:-/cvmfs/hpc.ucdavis.edu/sw/spack/environments/core/view/generic/slurm/bin}"
+UCD_CONF="${UCD_HPC_CLUSTER_CONF:-/opt/hpccf/etc/cluster_name.conf}"
+if [ -z "${SLURM_JOB_ID:-}" ] && [ -z "${PROTEOMICS_ON_COMPUTE:-}" ]; then
+  OC_PY="$(command -v python3 2>/dev/null || true)"
+  if [ -n "$OC_PY" ] && [ -f "$SCRIPT_DIR/on_compute.py" ]; then
+    if "$OC_PY" "$SCRIPT_DIR/on_compute.py" --is-login-node; then
+      # --check only reads (setup.json at the end): it may run on low rather than wait behind
+      # the user's own searches on high; an install never does
+      if $CHECK_ONLY; then OC_ARGS="--time 20 --mem 4G --cpus 1 --preemptible"; OC_WHY="setup.sh --check loads R and its packages"
+      else OC_ARGS="--time 120 --mem 8G --cpus 2"; OC_WHY="setup.sh solves and installs the environment"; fi
+      # the run writes this id into setup.json (srun passes the environment on): the one that is
+      # there afterwards is this run's, or the run did not finish
+      PROTEOMICS_SETUP_RUN_ID="$$.${RANDOM:-0}.${RANDOM:-0}"; export PROTEOMICS_SETUP_RUN_ID
+      # shellcheck disable=SC2086  # OC_ARGS is meant to split
+      "$OC_PY" "$SCRIPT_DIR/on_compute.py" $OC_ARGS --name pp_setup --why "$OC_WHY" \
+        -- "${BASH:-bash}" "$SCRIPT_DIR/setup.sh" "$@"
+      OC_RC=$?
+      OC_WROTE="$(sed -n 's/.*"run_id": "\([^"]*\)".*/\1/p' "$SETUP_JSON" 2>/dev/null)"
+      if [ "$OC_WROTE" != "$PROTEOMICS_SETUP_RUN_ID" ]; then
+        say "[setup] ERROR: the compute-node run did not finish (exit $OC_RC), and $SETUP_JSON was"
+        say "[setup] not rewritten: its ready_for is from an earlier run. Read the srun lines above"
+        say "[setup] (an account or partition SLURM refused, a time limit), then run setup.sh again."
+        exit 3
+      fi
+      exit $OC_RC
+    fi
+  elif command -v sbatch >/dev/null 2>&1 || [ -x "$UCD_SLURM_BIN/sbatch" ] || [ -r "$UCD_CONF" ]; then
+    say "[setup] REFUSING to run on a cluster login node (SLURM is here, SLURM_JOB_ID is unset),"
+    say "[setup] and there is no python3 + on_compute.py here to move it to a compute node. Run it in a"
+    say "[setup] job, with your account and partition: srun --account=<yours> --partition=<yours> \\"
+    say "[setup]   --time=120 --mem=8G --cpus-per-task=2 bash $SCRIPT_DIR/setup.sh $*"
+    exit 2
+  fi
+fi
 
 # micromamba platform slug
 case "$OS-$ARCH" in
@@ -166,7 +214,19 @@ if env_ready; then
   LIMPA_VERSION="$("$ENV_PREFIX/bin/Rscript" -e "cat(tryCatch(as.character(utils::packageVersion('limpa')), error = function(e) ''))" 2>/dev/null)"
   limpa_ok && LIMPA_OK=true
 fi
-LIMPA_FIX="$ENV_PREFIX/bin/Rscript -e \"install.packages('limpa', repos = '$LIMPA_REPO', type = 'source')\" where there is internet (a login node), then bash setup.sh --check"
+# What THIS limpa reads report.parquet with. Its own DESCRIPTION says: Suggests arrow in the 1.2.x
+# line (readDIANN: arrow::read_parquet), nanoparquet from 1.4 (github.com/bioc/limpa RELEASE_3_22
+# vs RELEASE_3_23) -- right for a devel limpa between the two as well. The version decides only
+# when the DESCRIPTION names neither.
+LIMPA_READS=""
+if env_ready && { $LIMPA_OK || [ -n "$LIMPA_VERSION" ]; }; then
+  LIMPA_READS="$("$ENV_PREFIX/bin/Rscript" -e "d <- tryCatch(utils::packageDescription('limpa')[['Suggests']], error = function(e) NULL); d <- if (is.null(d)) '' else d; cat(if (grepl('nanoparquet', d)) 'nanoparquet' else if (grepl('arrow', d)) 'arrow' else '')" 2>/dev/null)"
+  case "$LIMPA_READS" in
+    nanoparquet|arrow) ;;
+    *) if $LIMPA_OK; then LIMPA_READS=nanoparquet; else LIMPA_READS=arrow; fi ;;
+  esac
+fi
+LIMPA_FIX="bash $SCRIPT_DIR/setup.sh (it installs it; on a cluster it runs itself on a compute node), or by hand -- on a cluster inside a job, never on a login node: $ENV_PREFIX/bin/Rscript -e \"install.packages('limpa', repos = '$LIMPA_REPO', type = 'source')\", then bash setup.sh --check"
 if env_ready && ! $LIMPA_OK; then
   NOTES+=("limpa ${LIMPA_VERSION:-is not installed}${LIMPA_VERSION:+ is older than $LIMPA_MIN}: run_de.R --method dpc needs limpa >= $LIMPA_MIN (it can still read the report with limpa 1.2.x and records that it did, but the pinned stack is >= $LIMPA_MIN). Fix: $LIMPA_FIX.")
 fi
@@ -277,8 +337,18 @@ else
   if [ -n "$CONDA" ]; then NANOPARQUET_FIX="$NANOPARQUET_CONDA_CMD c-compiler cxx-compiler make && $NANOPARQUET_CRAN"
   else NANOPARQUET_FIX="install conda-forge's c-compiler, cxx-compiler and make into $ENV_PREFIX (with --freeze-installed), then: $NANOPARQUET_CRAN"; fi
 fi
+# What a missing nanoparquet costs depends on the limpa (DE_READER below): limpa >= 1.4.0 reads
+# report.parquet with it; limpa 1.2.x reads with arrow, and only run_de.R's contaminant share
+# (Precursor.Quantity, read with nanoparquet) falls back to Precursor.Normalised.
 if env_ready && ! $NANOPARQUET_OK; then
-  NOTES+=("nanoparquet cannot be loaded in $ENV_PREFIX: run_de.R reads DIA-NN's report.parquet with it (limpa needs it), so no DE can run. The route that works here: $NANOPARQUET_WHY. Fix: $NANOPARQUET_FIX.")
+  if [ "$LIMPA_READS" = nanoparquet ]; then
+    NANOPARQUET_COST="this env's limpa${LIMPA_VERSION:+ ($LIMPA_VERSION)} reads DIA-NN's report.parquet with it, so no DE can run"
+  elif [ -z "$LIMPA_READS" ]; then
+    NANOPARQUET_COST="limpa >= $LIMPA_MIN reads DIA-NN's report.parquet with it, so no DE can run"
+  else
+    NANOPARQUET_COST="this env's limpa ($LIMPA_VERSION) reads report.parquet with arrow, so the DE runs, but on the unpinned limpa, and run_de.R's contaminant share is read from Precursor.Normalised instead of Precursor.Quantity (de_provenance.json contaminants.intensity_column); limpa >= $LIMPA_MIN needs it"
+  fi
+  NOTES+=("nanoparquet cannot be loaded in $ENV_PREFIX: $NANOPARQUET_COST. The route that works here: $NANOPARQUET_WHY. Fix: $NANOPARQUET_FIX.")
 fi
 
 # ---- 2b2. protein-set annotation: GO, offline -----------------------------------
@@ -407,7 +477,7 @@ if env_ready && ! $SET_ANN_ANSWERED; then
   SET_ANN_FIX="re-run bash setup.sh --check; if it says the same, run $ENV_PREFIX/bin/Rscript by hand to see R's error"
   NOTES+=("Protein-set tests (run_sets.R): R in $ENV_PREFIX did not say whether the annotation packages ($SET_ANN_PKGS) load, so they are not known to work. DE does not need them.")
 elif env_ready && ! $SET_ANN_OK; then
-  SET_ANN_FIX="bash setup.sh where there is internet (a login node), or by hand: $ENV_PREFIX/bin/Rscript -e \"install.packages(c('$(printf '%s' "$SET_ANN_MISSING" | sed "s/ /','/g")'), repos = c('https://bioconductor.org/packages/$SET_ANN_BIOC/data/annotation', 'https://bioconductor.org/packages/$SET_ANN_BIOC/bioc', 'https://cloud.r-project.org'))\""
+  SET_ANN_FIX="bash setup.sh (on a cluster it runs itself on a compute node), or by hand -- on a cluster inside a job, never on a login node: $ENV_PREFIX/bin/Rscript -e \"install.packages(c('$(printf '%s' "$SET_ANN_MISSING" | sed "s/ /','/g")'), repos = c('https://bioconductor.org/packages/$SET_ANN_BIOC/data/annotation', 'https://bioconductor.org/packages/$SET_ANN_BIOC/bioc', 'https://cloud.r-project.org'))\""
   NOTES+=("Protein-set tests (run_sets.R) cannot run until these load: $SET_ANN_PROBLEMS. Fix: $SET_ANN_FIX. DE does not need them.")
 fi
 
@@ -430,7 +500,7 @@ if ! $CHECK_ONLY; then
         DOTNET8_NOTE="ensure_dotnet8.sh: .NET 8 at $DOTNET8_ROOT"
       else
         DOTNET8_NOTE="ensure_dotnet8.sh could not provide .NET 8 (it needs internet the first time; its own messages are on setup.sh's stderr)"
-        NOTES+=("$DOTNET8_NOTE. Until it does, DIA-NN cannot read .raw and the Orbitrap resolution cannot be read: re-run \`bash $ENSURE_DOTNET8\` where there is internet (a login node).")
+        NOTES+=("$DOTNET8_NOTE. Until it does, DIA-NN cannot read .raw and the Orbitrap resolution cannot be read: re-run bash setup.sh, or \`bash $ENSURE_DOTNET8\` (on a cluster both run themselves on a compute node, which on HIVE reaches Microsoft's downloads).")
       fi ;;
     *) DOTNET8_NOTE="not run on $OS" ;;
   esac
@@ -516,8 +586,26 @@ elif [ "$OS" = "darwin" ];       then DIANN_READY=false; DIANN_NOTE="macOS: DIA-
 fi
 
 # readiness per acquisition type (for the orchestrator to gate on)
-# DE reads every engine's report.parquet with nanoparquet (run_de.R, limpa_compat.R)
-DE_READY=false; [ -n "$RSCRIPT" ] && $NANOPARQUET_OK && DE_READY=true
+# The DE can run when R can read report.parquet the way THIS env's limpa does. run_de.R filters
+# the report with arrow on both methods; limpa >= 1.4.0 then reads it with nanoparquet, limpa
+# 1.2.x with arrow (readDIANN: arrow::read_parquet, github.com/bioc/limpa RELEASE_3_22). On
+# 2026-10-16 an env on limpa 1.2.5 without nanoparquet ran every DE of the week (de_provenance.json:
+# limpa 1.2.5) while setup.json said ready_for.de false, "no DE can run". limpa.ok and the exit
+# status still hold the env to the pinned stack; this says only whether a DE can run.
+# --method maxlfq needs no limpa at all: arrow and limma (de_reader.maxlfq).
+r_read_ok() {
+  "$ENV_PREFIX/bin/Rscript" -e "q(status = as.integer(!all(vapply(c('arrow', 'limma'), requireNamespace, logical(1), quietly = TRUE))))" >/dev/null 2>&1
+}
+DE_READER="$LIMPA_READS"; DE_READER_OK=false; R_READ_OK=false
+if env_ready; then
+  r_read_ok && R_READ_OK=true
+  case "$DE_READER" in
+    nanoparquet) $R_READ_OK && $NANOPARQUET_OK && DE_READER_OK=true ;;
+    arrow)       $R_READ_OK && DE_READER_OK=true ;;
+  esac
+  $R_READ_OK || NOTES+=("arrow cannot be loaded in $ENV_PREFIX (or limma): run_de.R reads and filters report.parquet with arrow on both methods, so no DE can run. Fix: re-run bash setup.sh (on a cluster it runs itself on a compute node).")
+fi
+DE_READY=false; [ -n "$RSCRIPT" ] && $DE_READER_OK && DE_READY=true
 DDA_READY=false
 if [ -n "$SAGE" ] && [ -n "$RSCRIPT" ]; then DDA_READY=true; fi
 DIA_READY=false
@@ -570,8 +658,9 @@ j() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 SETUP_SKILL_VERSION="$( (. "$SCRIPT_DIR/skill_version.sh" && skill_version) 2>/dev/null || true)"
 {
   printf '{\n'
-  printf '  "skill_version": "%s", "written": "%s", "check_only": %s,\n' \
-         "$(j "$SETUP_SKILL_VERSION")" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$($CHECK_ONLY && echo true || echo false)"
+  printf '  "skill_version": "%s", "written": "%s", "check_only": %s, "run_id": "%s",\n' \
+         "$(j "$SETUP_SKILL_VERSION")" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$($CHECK_ONLY && echo true || echo false)" \
+         "$(j "${PROTEOMICS_SETUP_RUN_ID:-}")"
   printf '  "os": "%s", "arch": "%s",\n' "$OS" "$ARCH"
   printf '  "conda": "%s",\n' "$(j "${CONDA:-}")"
   printf '  "env_prefix": "%s",\n' "$(j "$ENV_PREFIX")"
@@ -590,6 +679,9 @@ SETUP_SKILL_VERSION="$( (. "$SCRIPT_DIR/skill_version.sh" && skill_version) 2>/d
          "$(j "$GENAI_VERSION")" "$GENAI_MIN" "$($GENAI_OK && echo true || echo false)"
   printf '  "limpa": {"version": "%s", "required": ">= %s", "ok": %s, "source": "Bioconductor %s"},\n' \
          "$(j "$LIMPA_VERSION")" "$LIMPA_MIN" "$($LIMPA_OK && echo true || echo false)" "$LIMPA_BIOC"
+  printf '  "de_reader": {"limpa": "%s", "reads_parquet_with": "%s", "ok": %s, "maxlfq": %s},\n' \
+         "$(j "$LIMPA_VERSION")" "$DE_READER" "$($DE_READER_OK && echo true || echo false)" \
+         "$($R_READ_OK && echo true || echo false)"
   printf '  "nanoparquet": {"ok": %s, "fix": "%s"},\n' \
          "$($NANOPARQUET_OK && echo true || echo false)" "$(j "$($NANOPARQUET_OK || printf '%s' "$NANOPARQUET_FIX")")"
   printf '  "set_annotation": {"ok": %s, "packages": "%s", "missing": "%s", "status": {%s}, "organisms": {"human": %s, "mouse": %s}, "bioconductor": "%s", "bioconductor_from": "%s", "fix": "%s"},\n' \
@@ -630,7 +722,7 @@ if env_ready && ! $LIMPA_OK; then
 fi
 if env_ready && ! $NANOPARQUET_OK; then
   say ""
-  say "[setup] ERROR: nanoparquet cannot be loaded in $ENV_PREFIX -- run_de.R reads every report.parquet with it (limpa needs it)."
+  say "[setup] ERROR: nanoparquet cannot be loaded in $ENV_PREFIX -- limpa >= $LIMPA_MIN reads report.parquet with it, and run_de.R its contaminant share."
   say "[setup]        Fix: $NANOPARQUET_FIX   ($NANOPARQUET_WHY)"
   R_STACK_OK=false
 fi

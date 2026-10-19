@@ -309,8 +309,9 @@ Windows** DIA-NN reads `.raw` out of the box (skip this whole section). On **Lin
 files**. It does a HARD ≥ 8.0.17 check: an older 8.0.x (e.g. a cluster's `8.0.4`
 module) is **rejected**, and a .NET 9 runtime is **not** used (rollForward is
 LatestMinor — it won't cross the major version). Fix, done for you by
-**`scripts/ensure_dotnet8.sh`** (idempotent; run it on a login node — it needs
-internet, compute nodes usually don't):
+**`scripts/ensure_dotnet8.sh`** (idempotent; it needs internet only to install, and on a
+cluster login node that download runs itself on a compute node through `on_compute.py` —
+HIVE's compute nodes reach Microsoft's downloads, srun job 24827776, 2026-10-16):
 ```
 export DOTNET_ROOT="$(bash scripts/ensure_dotnet8.sh | tail -1)"   # installs 8.0.latest if missing
 export PATH="$DOTNET_ROOT:$PATH"

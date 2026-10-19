@@ -342,8 +342,8 @@ def dotnet_env_for(files):
     except Exception as e:
         sys.stderr.write(
             f"[run_diann] ensure_dotnet8.sh could not provide a .NET 8 runtime ({e}).\n"
-            "  DIA-NN 2.6 will not read .raw. Options: run ensure_dotnet8.sh on a login\n"
-            "  node (needs internet), or feed mzML instead of .raw.\n")
+            "  DIA-NN 2.6 will not read .raw. Options: re-run ensure_dotnet8.sh (needs\n"
+            "  internet; on a cluster login node it moves to a compute node), or feed mzML.\n")
         return ""
     return (f"export DOTNET_ROOT={shlex.quote(root)}; "
             f'export PATH={shlex.quote(root)}:"$PATH";')
@@ -3023,8 +3023,8 @@ def slurm_queue(partition=None, account=None, qos=None,
         if avail is not None and avail < need and idle >= need:
             a, p, q = pub
             print(f"[slurm_queue] priority queue at capacity ({avail} CPUs free, need "
-                  f"{need}); publicgrp/low has {idle} idle -> using low (preemptible, "
-                  f"--requeue is added)", file=sys.stderr)
+                  f"{need}); publicgrp/low has {idle} idle -> using low (preemptible: a job "
+                  f"script gets --requeue)", file=sys.stderr)
             return p, a, q
         if preemptible_ok and idle >= need and (avail is None or avail < need * 2):
             a, p, q = pub

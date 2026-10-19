@@ -29,6 +29,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -192,6 +193,40 @@ class DownloadBranchTests(AcquireHarness):
         t = self.acquire("hpc", "diann", "2.7.0")
         self.assertEqual(t["versions"]["diann"], "2.7.0")
         self.assertNotIn("2.6.1", t["diann"])
+
+    def test_on_a_login_node_a_download_runs_on_a_compute_node(self):
+        """HPC@UCD's ucd-hpc rules: a download and an unzip belong in a job (review of the HPC
+        branch: access.md ran acquire_tools.sh hpc on the login node). Finding a build stays a
+        check; a download re-runs the script under on_compute.py, which writes tools.json."""
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import test_on_compute as oc
+        for name, text in (("sbatch", "#!/bin/sh\nexit 0\n"), ("srun", oc.FAKE_SRUN),
+                           ("sacctmgr", oc.FAKE_SACCTMGR)):
+            _exe(os.path.join(self.bin, name), text)
+        os.symlink(sys.executable, os.path.join(self.bin, "python3"))
+        log = os.path.join(self.d, "srun.log")
+        env = {"FAKE_SRUN_LOG": log, "FAKE_ASSOC": oc.LAB, "USER": "staff1",
+               "UCD_HPC_CLUSTER_CONF": os.path.join(self.d, "none"),
+               "HPCCF_SLURM_BIN": os.path.join(self.d, "none")}
+        t = self.acquire("hpc", "diann", "2.7.0", extra_env=env)
+        self.assertEqual(t["versions"]["diann"], "2.7.0")          # downloaded, in the "job"
+        with open(log) as fh:
+            (call,) = [json.loads(ln) for ln in fh if ln.strip()]
+        self.assertIn("--job-name=pp_acquire", call)
+        self.assertIn("--time=60", call)
+        self.assertEqual(call[-2:], ["hpc", self.root])
+
+    def test_a_build_already_there_is_found_without_a_job(self):
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import test_on_compute as oc
+        for name, text in (("sbatch", "#!/bin/sh\nexit 0\n"), ("srun", oc.FAKE_SRUN)):
+            _exe(os.path.join(self.bin, name), text)
+        os.symlink(sys.executable, os.path.join(self.bin, "python3"))
+        log = os.path.join(self.d, "srun.log")
+        self.hive_build("build_270/diann-2.7.0")
+        t = self.acquire("hpc", "diann", "2.7.0", extra_env={"FAKE_SRUN_LOG": log})
+        self.assertEqual(t["versions"]["diann"], "2.7.0")
+        self.assertFalse(os.path.exists(log))
 
     def test_nothing_resolvable_records_no_version_rather_than_latest(self):
         """No HIVE build and no reachable release: there is no command, so there is no
@@ -394,6 +429,22 @@ class AlphaDiaVersionTests(AcquireHarness):
         self.assertEqual(t["versions"]["alphadia"], "")
         self.assertTrue(any("pip reports no version" in n for n in t["notes"]), t["notes"])
 
+    def test_on_a_cluster_alphadia_is_never_pip_installed_where_this_runs(self):
+        """acquire_tools.sh runs on HIVE's login node (hive_exec.sh). A bare `pip install` there is
+        a large download on the login node and, with the system python, an install into ~/.local
+        (HPC@UCD's ucd-hpc: never pip into a central python or --user). It says how to install
+        it into the pipeline env, in a job, instead."""
+        log = os.path.join(self.d, "pip.log")
+        for name in ("pip", "pip3"):
+            _exe(os.path.join(self.bin, name), f'#!/bin/sh\necho "$*" >> {log}\nexit 0\n')
+        t = self.acquire("hpc", "alphadia", "1.10.0")
+        self.assertFalse(os.path.exists(log), "pip ran on the cluster")
+        self.assertIsNone(t["alphadia"])
+        (note,) = [n for n in t["notes"] if n.startswith("AlphaDIA: not installed")]
+        self.assertIn("on_compute.py --time 60 --mem 8G --", note)
+        self.assertIn("-m pip install 'alphadia==1.10.0'", note)
+        self.assertIn("micromamba/envs/proteomics-pipeline/bin/python", note)
+
     def test_no_alphadia_records_an_empty_version_not_a_missing_key(self):
         t = self.acquire("linux")
         self.assertIsNone(t["alphadia"])
@@ -492,6 +543,17 @@ class HiveRadiantSifTests(AcquireHarness):
         t = self.acquire("hpc", "radiant", "2.3.3")
         self.assertEqual(t["radiant_image"], p)
         self.assertEqual(t["versions"]["radiant"], "2.3.3")
+
+    def test_no_sif_says_how_to_build_one_in_a_job_with_the_queue_and_cache_off_home(self):
+        """HPC@UCD's ucd-hpc rules: `apptainer build` once, in a job, with every request explicit,
+        and APPTAINER_CACHEDIR off the 20 GB home (the pull is ~3 GB). The note's old line was a
+        bare `srun -c 8 --mem 16G --pty apptainer build ...` into the current folder."""
+        t = self.acquire("hpc", "radiant", "2.3.3")
+        (note,) = [n for n in t["notes"] if "no .sif found" in n]
+        self.assertIn("on_compute.py --time 120 --mem 16G --cpus 8 --", note)
+        self.assertIn('APPTAINER_CACHEDIR="$TMPDIR/apptainer-cache"', note)
+        self.assertIn(f"apptainer build {self.radiant_dirs[0]}/radiant-fulcrum-2.3.3.sif", note)
+        self.assertNotIn("srun -c 8", note)
 
     def test_an_unpinned_sif_that_names_no_release_records_none_and_says_so(self):
         p = self.sif("radiant-fulcrum.sif")
