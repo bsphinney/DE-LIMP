@@ -370,12 +370,18 @@ What `check` now catches of it mechanically: a protein named **in the same claus
 claim ("robust", "survives", "holds up") that every row of the robustness tables calls not
 robust is a FAIL; robust in some comparisons only, or a `robust` cell it does not understand, is
 a WARN. A clause is cut at `.`, `;`, `!`, `?` and at "but", "while", "whereas", "unlike",
-"except" ("Jph3 survives every check; Ryr2 doesn't" names Ryr2 in another clause), never at a
-colon ("It survives everything: Ryr2 and Jph3" is about both). A negation before the claim
-("Neither Ryr2 nor Actb is robust", "Not one of them ... is robust") or beside a name ("Ryr2 and
-Actb don't", "drop out", "unlike Ryr2") is not a claim. A gene symbol is matched as written, so
-SET, WAS or MAX in the table never match "set", "was" or "max"; one with a digit matches in
-either case (Jph3 / JPH3). **The tables** are every CSV under `output/tables/` (three folders
+"except" ("Jph3 survives every check; Ryr2 doesn't" names Ryr2 in another clause), and at a
+comma that opens a second clause (", and", ", so", ", which": "Gapdh survives every check, and
+Ryr2 goes up threefold" says nothing about Ryr2), but never at a colon ("It survives everything:
+Ryr2, Jph3, and Actb" is about all three), in a list of names before the claim ("Ryr2, Jph3, and
+Actb all survive") or at ", and so does Ryr2". A negation before the claim ("Neither Ryr2 nor
+Actb is robust", "Not one of them ... is robust") or beside a name ("Ryr2 and Actb don't", "drop
+out", "unlike Ryr2") is not a claim; one after the claim word is ("Ryr2 holds up, which doesn't
+happen often"). A gene symbol is matched as written, so SET, WAS or MAX in the table never match
+"set", "was" or "max"; one with a digit, or written in capitals, matches in either case (Jph3 /
+JPH3, ACTB for a mouse table's Actb). A common English word that starts a sentence ("Was that
+robust?", "Set against that, ...") is read as English, not as the mouse gene; in capitals (SET)
+it is the gene. **The tables** are every CSV under `output/tables/` (three folders
 deep) with a `robust` column, whatever made them: `yes`/`no`, and `TRUE`/`FALSE`, `1`/`0` or
 "not testable ..." as R and pandas write them, matched on `Genes`, `Protein.Names` and
 `Protein.Group`, read with or without a byte-order mark; `check.txt` lists them. A superlative

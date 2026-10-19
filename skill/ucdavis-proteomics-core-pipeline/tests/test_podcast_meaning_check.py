@@ -301,6 +301,34 @@ class Mechanical(Base):
         self.assertEqual(self.claims('"Genes","robust"\n"Ryr2","no"\n', "RYR2 is robust.")[0][1],
                          "Ryr2")
 
+    def test_round_two_shapes(self):
+        """Review of 2.13.2, round 2 (N-M1): ", and" between independent clauses, sentence-
+        initial English words that are mouse symbols, and a negation after the claim word."""
+        table = ('"Genes","robust"\n"Actb","no"\n"Jph3","no"\n"JPH2","no"\n"Ryr2","no"\n'
+                 '"Set","no"\n"Was","no"\n"Gapdh","yes"\n')
+        fail = ("It survives everything: Actb and Jph3 both.",
+                "It survives everything: Ryr2, Jph3, and Actb.",
+                "Actb is robust.",
+                "JPH3 holds up in every check.",
+                "jph2 survives every check.",
+                "ACTB is robust.",
+                "Gapdh survives every check, and so does Ryr2.",
+                "Ryr2 survives every check and isn't driven by one sample.",
+                "Ryr2 holds up, which doesn't happen often.",
+                "Ryr2 is robust; Gapdh is too.",
+                "Ryr2, Jph3, and Actb all survive every check.")
+        ok = ("Gapdh survives every check, and Ryr2 goes up threefold.",
+              "Gapdh is robust, while Ryr2 is not.",
+              "Was that robust? Gapdh says yes.",
+              "Set against that, Gapdh holds up.",
+              "Ryr2 goes up threefold, and Gapdh survives every check.")
+        for line in fail:
+            with self.subTest(line=line):
+                self.assertIn("FAIL", [c[0] for c in self.claims(table, line)])
+        for line in ok:
+            with self.subTest(line=line):
+                self.assertEqual(self.claims(table, line), [])
+
     def test_an_honest_script_passes_without_unchecked(self):
         self.tables()
         rc, txt = self.checked(self.script_saying(

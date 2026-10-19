@@ -1010,12 +1010,28 @@ def robustness_tables(out, depth=3):
     return found
 
 
-def _robust_rows(robust, tok):
+# A comma does not end a clause, except before a second, independent one (", and Ryr2 goes up",
+# ", while ...", ", which ..."): never ", and so does Ryr2", which carries the claim on, and never
+# inside a list a colon opened ("It survives everything: Ryr2, Jph3, and Actb").
+_COMMA_CUT = re.compile(r",\s+(?:and|so|while|which|whereas)\b(?!\s+so\s+(?:does|did|do|is|are|was|"
+                        r"were)\b)", re.I)
+# English words that are also (mouse) gene symbols, read as English at the start of a sentence:
+# "Was that robust?", "Set against that, ..." (review of 2.13.2, round 2).
+SENTENCE_START_WORDS = {"was", "set", "max", "son", "rest", "impact", "cat", "arc", "star", "can",
+                        "far", "ran", "gas", "spin", "pole", "tan", "lot", "not", "per", "top",
+                        "act", "aim", "bad", "cap", "end", "fat", "fit", "ill", "key", "kit",
+                        "mad", "met", "net", "pan", "ret", "tor", "via", "wars", "wise", "yes"}
+
+
+def _robust_rows(robust, tok, sentence_start=False):
     """The table rows for a token: as written (a symbol that is also an English word -- SET, WAS,
-    MAX -- is never matched by "set" or "was"); a token with a digit in either case (Jph3 /
-    JPH3, g1_c4)."""
+    MAX -- is never matched by "set" or "was"); a token with a digit, or in capitals (ACTB for a
+    mouse table's Actb), in either case. The first word of a sentence that is a common English
+    word ("Was", "Set"; not in capitals: SET is the gene) is read as English."""
+    if sentence_start and tok.lower() in SENTENCE_START_WORDS and not tok.isupper():
+        return None
     rows = robust.get(tok)
-    if rows or not re.search(r"\d", tok):
+    if rows or not (re.search(r"\d", tok) or (tok.isupper() and len(tok) >= 3)):
         return rows
     low = tok.lower()
     return [r for n, rs in robust.items() if n.lower() == low for r in rs] or None
@@ -1029,18 +1045,33 @@ def robust_claims(text, robust):
     out, seen = [], set()
     if not robust:
         return out
+    starts = {0} | {m.end() for m in re.finditer(r"[.!?]\s+", text)}     # sentence starts
     cuts = [0] + [m.end() for m in _CLAUSE_CUT.finditer(text)] + [len(text)]
     for a, b in zip(cuts, cuts[1:]):
         clause = text[a:b]
         for m in ROBUST_CLAIM.finditer(clause):
             if _CLAUSE_NEG.search(clause[:m.start()]):
                 continue
-            for t in _NAME_TOK.finditer(clause):
-                rows = _robust_rows(robust, t.group(0))
+            # the claim's reach: its clause, less a second one a comma opens -- after the claim,
+            # unless a colon opened a list; before it, unless what precedes is a list of names
+            # ("Ryr2, Jph3, and Actb all survive")
+            begin, end = 0, len(clause)
+            c = _COMMA_CUT.search(clause, m.end())
+            if c and ":" not in clause[m.end():c.start()]:
+                end = c.start()
+            for c in _COMMA_CUT.finditer(clause, 0, m.start()):
+                words = [w for w in _NAME_TOK.findall(clause[begin:c.start()])
+                         if w.lower() not in ("and", "or")]
+                if not words or not all(_robust_rows(robust, w) for w in words):
+                    begin = c.end()
+            for t in _NAME_TOK.finditer(clause, begin, end):
+                rows = _robust_rows(robust, t.group(0), sentence_start=(a + t.start()) in starts)
                 if not rows or rows[0][2] in seen:
                     continue
-                if (_NAME_NEG_AFTER.search(clause[t.end():])
-                        or _NAME_NEG_BEFORE.search(clause[:t.start()])):
+                # a negation beside the name -- after it, but never past the claim word ("Ryr2
+                # holds up, which doesn't happen often" is a claim)
+                after = clause[t.end():m.start()] if t.start() < m.start() else clause[t.end():end]
+                if _NAME_NEG_AFTER.search(after) or _NAME_NEG_BEFORE.search(clause[:t.start()]):
                     continue
                 seen.add(rows[0][2])
                 said = [(tbl, v, robust_value(v)) for tbl, v, _ in rows]
