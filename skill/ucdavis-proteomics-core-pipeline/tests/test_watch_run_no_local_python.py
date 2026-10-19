@@ -85,6 +85,7 @@ class NoLocalPython(unittest.TestCase):
         env = dict(os.environ, PATH=path, REAL_PATH=real, REAL_SCRIPTS=SCRIPTS,
                    HIVE_LOG=self.log, **env_extra)
         env.pop("MSYS_NO_PATHCONV", None)
+        # job_env: not a search job (a copy of the skill's own watch_run.sh)
         r = subprocess.run(["bash", os.path.join(self.local, "watch_run.sh"), *args],
                            capture_output=True, text=True, env=env, timeout=120)
         return r, json.loads(r.stdout)
