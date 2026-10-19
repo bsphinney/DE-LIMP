@@ -48,7 +48,8 @@ HOME="$FAKE_HIVE_HOME" exec bash -c "$cmd"
 '''
 FAKE_UNAME = '#!/bin/bash\necho "${FAKE_UNAME:-Darwin}"\n'
 # Git Bash's cygpath -u for the profile folder: C:\Users\x -> the stand-in laptop profile
-FAKE_CYGPATH = '#!/bin/bash\necho "$FAKE_PROFILE"\n'
+# cygpath -u "$USERPROFILE" -> the profile folder; -m (hive_exec.sh's key) -> the path as given
+FAKE_CYGPATH = '#!/bin/bash\n[ "$1" = -m ] && { echo "$2"; exit; }\necho "$FAKE_PROFILE"\n'
 
 
 def _exe(path, body):
