@@ -2303,8 +2303,9 @@ both ways into scratch folders (one job on HIVE), then the check. **A DE, set-te
 on HIVE** starts from `python3 ~/proteomics-pipeline/scripts/on_compute.py --header <S>/logs
 --name <short name> --time <minutes> --mem <size>G --cpus <n>`: the queue the skill's rule
 picks, `--time`/`--mem`/`--cpus` explicit, one log per job (`%j`), `set -euo pipefail`. Append
-the commands, `sbatch` it, and when the `ucd-hpc` skill is installed here, lint it first:
-`bash scripts/hive_exec.sh 'bash -s -- <job file>' < ~/.claude/skills/ucd-hpc/scripts/lint-jobscript.sh`
+the commands, `sbatch` it, and when the `ucd-hpc` skill is installed here, lint it first with
+its `lint-jobscript.sh` (`U` = that skill's scripts folder, `~/.claude/skills/ucd-hpc/scripts`):
+`bash scripts/hive_exec.sh 'bash -s -- <job file>' < "$U"/lint-jobscript.sh`
 (it misreads a log path that holds a space as having no `%j`; sbatch reads it right, so that
 one message can be ignored).
 ```
