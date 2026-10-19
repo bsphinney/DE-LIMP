@@ -92,6 +92,43 @@ class OneRunCohort(unittest.TestCase):
             self.assertNotIn("--mass-acc", cfg)
 
 
+class TwoRunCohort(unittest.TestCase):
+    """A staff report (skill 2.13.1, a 2-run Orbitrap search whose MS2 resolution is not in
+    DIA-NN's table): selection probed only the median of a cohort under 3, put the other run in
+    reserve, and the rule then refused the one answer -- "only 1 run logged everything asked" --
+    so every 2-file search measuring mass accuracy FAILED after its library was built. Both runs
+    are probed, and their median is pinned under the usual rule of at least 2."""
+
+    def test_a_two_file_search_probes_both_runs_and_pins_their_median(self):
+        with tempfile.TemporaryDirectory() as d:
+            raws = with_ms2(_cohort(d)[:2], [22, 24])
+            p, out, cfg = probe(d, raws)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertEqual(sorted(x["file"] for x in out["probes"]), sorted(raws))
+            self.assertEqual(out["selection"]["reserves"], [])
+            ma = out["mass_acc"]
+            self.assertEqual(ma["pin_as"], "--mass-acc 24 --mass-acc-ms1 7")
+            self.assertNotIn("single_run_cohort", ma)
+            self.assertIn("--mass-acc 24\n", cfg)
+
+    def test_selection_takes_as_many_runs_as_mass_accuracy_needs(self):
+        with tempfile.TemporaryDirectory() as d:
+            two = _cohort(d)[:2]
+            sel = probe_window.select_representative(two, max_probes=3,
+                                                     min_probes=probe_window.MASS_ACC_MIN_RUNS)
+            self.assertEqual(len(sel["chosen"]), 2)
+            self.assertEqual(sel["chosen"][0]["role"], "median")
+            self.assertEqual(sel["reserves"], [])
+            # the scan window alone still probes a cohort of two once
+            sel = probe_window.select_representative(two, max_probes=3)
+            self.assertEqual((len(sel["chosen"]), len(sel["reserves"])), (1, 1))
+            # --max-probes 2 on a bigger cohort: the median and the run next to it, not one
+            sel = probe_window.select_representative(_cohort(d), max_probes=2,
+                                                     min_probes=probe_window.MASS_ACC_MIN_RUNS)
+            self.assertEqual(len(sel["chosen"]), 2)
+            self.assertEqual(len(sel["reserves"]), 1)
+
+
 class SpreadAtTheFloor(unittest.TestCase):
     def test_a_spread_whose_median_is_the_floor_warns_and_pins_the_floor(self):
         """The pull-down cohort's own numbers: 20/24/10 ppm, 70% of the median, median 20."""
