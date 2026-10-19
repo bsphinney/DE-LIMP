@@ -1963,6 +1963,7 @@ class GeminiTTS(object):
                           and not re.search(r"\b(?:un|not\s+|non-?)paid\b", note, re.I) else None)
         self.stalled, self.switches = [], []     # models that stopped answering; the hand-overs
         self.unusable = []                       # missing, no quota or rejected in this render
+        self.remembered = {}                     # stalled in an earlier render (STALL_FILE)
         self.cache_dir = None
         self.preflight_record = None
         self.timeout_budget = 60.0 * float(getattr(a, "request_timeout_budget", None)
@@ -2041,6 +2042,20 @@ class GeminiTTS(object):
                 out[m] = rec
         return out
 
+    def forget_stall(self, model):
+        """`model` answers again: take it out of STALL_FILE (never fatal)."""
+        self.remembered.pop(model, None)
+        path = os.path.join(self.cache_dir or "", STALL_FILE)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                got = json.load(fh)
+            if isinstance(got, dict) and got.pop(model, None) is not None:
+                with open(path + ".part", "w", encoding="utf-8") as fh:
+                    json.dump(got, fh, indent=2)
+                os.replace(path + ".part", path)
+        except (OSError, ValueError):
+            pass
+
     def remember_stall(self, model, where, why):
         """Record in the cache that `model` stopped answering (never fatal)."""
         if not self.cache_dir:
@@ -2073,6 +2088,7 @@ class GeminiTTS(object):
         for m in recent:
             if m in self.candidates and m not in self.stalled:
                 self.stalled.append(m)
+        self.remembered = {m: r for m, r in recent.items() if m in self.candidates}
         have = {m: sum(os.path.isfile(os.path.join(cache_dir, cache_key(self, c, speak, m) +
                                                    ".wav")) for c in chunks)
                 for m in self.candidates}
@@ -2268,8 +2284,17 @@ class GeminiTTS(object):
         start = self.model if self.model in self.candidates else self.candidates[0]
         order = [m for m in self.candidates[self.candidates.index(start):]
                  if m not in self.stalled and m not in self.unusable]
+        # then, before giving up, the models an earlier render remembered as stalled: an outage
+        # may be over (round 2: on a free-tier key the pro models never answer, so passing over
+        # the remembered flash models left nothing)
+        later = [m for m in self.candidates if m in self.remembered and m not in order
+                 and m not in self.unusable]
         tried = []
-        for m in order:
+        for m in order + later:
+            if m in later:
+                self.stalled = [x for x in self.stalled if x != m]
+                log(f"[render] preflight: {m} stopped answering earlier "
+                    f"({self.remembered[m].get('at')}); trying it once more")
             self.model = m
             self._pace()
             t0 = _now()
@@ -2277,8 +2302,10 @@ class GeminiTTS(object):
                 self.parse(self.timed_request(probe, lambda x: x, "preflight",
                                               timeout=PREFLIGHT_TIMEOUT))
             except RequestTimeout:
+                # not remembered: one 60 s miss in a short outage must not keep the model out
+                # of every render for STALL_MEMORY_H (review of 2.13.2, round 2); only a stall
+                # mid-episode is (stall_switch)
                 self.stalled.append(m)
-                self.remember_stall(m, "preflight", f"no answer in {PREFLIGHT_TIMEOUT:.0f} s")
                 tried.append(f"{m}: no answer in {PREFLIGHT_TIMEOUT:.0f} s")
                 continue
             except EmptyAudio as e:
@@ -2295,6 +2322,9 @@ class GeminiTTS(object):
                     continue
             secs = round(_now() - t0, 1)
             self.preflight_record = {"model": m, "seconds": secs, "skipped": tried}
+            if m in later:
+                log(f"[render] preflight: {m} stopped answering earlier; it answers now")
+                self.forget_stall(m)
             if tried:
                 log(f"[render] preflight: {'; '.join(tried)}; using {m}, which answered the "
                     f"two-line test in {secs:g} s")
@@ -2309,11 +2339,16 @@ class GeminiTTS(object):
                 self.pinned = False              # none of its chunks are made yet
                 log(f"[render] {note}")
             return m
-        raise RenderError("no Gemini TTS model answered a two-line test ("
-                          + "; ".join(tried) + "). The chunks already made are cached: re-run "
-                          "later" + (", or" if not self.key_tier else " (this key's project is on "
-                                     "the free tier: its quotas are small), or")
-                          + " --tts say")
+        before = [m for m in self.candidates if m in self.remembered]
+        raise RenderError(
+            "no Gemini TTS model answered a two-line test (" + "; ".join(tried) + ")"
+            + (f"; {', '.join(before)} also stopped answering in an earlier render "
+               f"(podcast/.cache/{STALL_FILE})" if before else "")
+            + ". The chunks already made are cached: re-run later"
+            + (" (this key's project is on the free tier: its quotas are small)"
+               if self.key_tier == "free" else "")
+            + ", name a model with --model <name> (it is tried whatever happened before), or "
+            "--tts say")
 
     def _advance(self):
         nxt = None if self.produced else self._next_model()
@@ -3150,6 +3185,8 @@ def prune_cache(cache, used, model, explicit=False):
                 pass
     for f in files:
         stem = f.split(".", 1)[0]
+        if f == STALL_FILE:
+            continue                             # the stall memory is not a chunk's sidecar
         if f.endswith(".part"):
             pass
         elif stem in used:

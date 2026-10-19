@@ -241,6 +241,75 @@ class ResumeAfterAStall(StallBase):
         self.assertNotIn("still waiting for", err)
 
 
+class OneOutage(StallBase):
+    """Review of 2.13.2, round 2 (N-M2): on a free-tier key the pro models always answer
+    "exhausted"; one short outage that stalled both flash models must not block every render of
+    the next 12 hours."""
+    FLASH = (STALLS, ANSWERS)
+
+    @staticmethod
+    def pro_exhausted(model):
+        if "pro" in model:
+            raise ApiError(429, "RESOURCE_EXHAUSTED", rpc_error(FREE_DAY, value="0"))
+
+    def remember(self, *models):
+        os.makedirs(os.path.join(self.pod, ".cache"), exist_ok=True)
+        with open(os.path.join(self.pod, ".cache", mp.STALL_FILE), "w") as fh:
+            json.dump({m: {"at": mp.now_iso(), "where": "chunk 2/2 (segment 2)",
+                           "why": "2 requests of 600 s unanswered"} for m in models}, fh)
+
+    def test_a_preflight_miss_is_not_remembered_and_the_recovery_renders(self):
+        def outage(model, contents, config):
+            self.pro_exhausted(model)
+            self.release.wait(30)
+            return pcm_for(contents)
+        rc, out, err, log = self.render(outage, "--cloud-ok", "--request-timeout", "0.3",
+                                        preflight=True)
+        self.assertEqual(rc, 1)
+        self.assertFalse(os.path.isfile(os.path.join(self.pod, ".cache", mp.STALL_FILE)))
+
+        def recovered(model, contents, config):
+            self.pro_exhausted(model)
+            return pcm_for(contents)
+        rc, out, err, log = self.render(recovered, "--cloud-ok", "--request-timeout", "0.3",
+                                        preflight=True)
+        self.assertEqual(rc, 0, err)
+
+    def test_remembered_models_get_their_chance_before_the_render_stops(self):
+        self.remember(*self.FLASH)
+
+        def recovered(model, contents, config):
+            self.pro_exhausted(model)
+            return pcm_for(contents)
+        rc, out, err, log = self.render(recovered, "--cloud-ok", "--request-timeout", "0.3",
+                                        preflight=True)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("stopped answering earlier", err)
+        self.assertIn("it answers now", err)
+
+    def test_when_nothing_answers_the_message_names_the_remembered_models(self):
+        self.remember(*self.FLASH)
+
+        def still_out(model, contents, config):
+            self.pro_exhausted(model)
+            self.release.wait(30)
+            return pcm_for(contents)
+        rc, out, err, log = self.render(still_out, "--cloud-ok", "--request-timeout", "0.3",
+                                        preflight=True)
+        self.assertEqual(rc, 1)
+        for m in self.FLASH:
+            self.assertIn(m, err.split("no Gemini TTS model answered")[1])
+        self.assertIn("--model", err)
+        self.assertIn(mp.STALL_FILE, err)
+
+    def test_the_memory_survives_the_cache_pruning(self):
+        self.remember(STALLS)
+        rc, out, err, log = self.render(lambda m, c, k: pcm_for(c), "--cloud-ok", "--model",
+                                        ANSWERS)
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(os.path.isfile(os.path.join(self.pod, ".cache", mp.STALL_FILE)))
+
+
 class KeyTier(Gemini):
     def free_tier_pro(self, model, contents, config):
         if "pro" in model:

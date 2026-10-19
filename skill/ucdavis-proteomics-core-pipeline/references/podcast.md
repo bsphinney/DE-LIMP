@@ -636,11 +636,15 @@ bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.t
       `tts.switched` and the warnings record each hand-over. The next model then hands over
       like any first model: one that is missing, out of quota or rejects the request is passed
       over (never "made this episode's cached chunks", which it did not).
-    - **A stall is remembered.** A model that stopped answering (twice on a chunk, or at the
-      preflight) is written to `podcast/.cache/stalled.json`; for 12 hours a resume does not
-      pin it, even when it made the most cached chunks, and the model used makes every chunk
-      again. So a resume cannot repeat the same timeouts. When every model stalled, each gets
-      another chance.
+    - **A stall is remembered.** A model that stopped answering mid-episode (twice on a chunk)
+      is written to `podcast/.cache/stalled.json`; for 12 hours a resume does not pin it, even
+      when it made the most cached chunks, and the model used makes every chunk again. So a
+      resume cannot repeat the same timeouts. A miss at the two-line test is not remembered
+      (one short outage would otherwise shut a model out for 12 hours). The remembered models
+      are still tried, last, before a render gives up -- on a free-tier key the pro models
+      never answer, so they may be all there is -- and one that answers again is forgotten.
+      When nothing answers, the message names them; `--model <name>` tries a model whatever
+      happened before.
     - **No silent retries in the SDK.** The client is built with a per-request HTTP timeout
       (`--request-timeout`) and `HttpRetryOptions(attempts=1)` (`tts.http`). Read from
       google-genai 2.31.0: `generate_content` then never retries; the `interactions` client
