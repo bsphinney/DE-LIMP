@@ -41,8 +41,7 @@ until the run finishes, and on `failed` **or** `stalled` apply the fix and resub
 # start the search (background locally, or sbatch on HIVE), capture the log path / job id
 while true; do
   status=$(bash scripts/watch_run.sh --slurm <jobid> --log <log> --hive)   # or --log <log> locally
-  done=$(echo "$status" | python3 -c 'import sys,json;print(json.load(sys.stdin)["done"])')
-  [ "$done" = "True" ] && break
+  echo "$status" | grep -qE '"done": ?true' && break      # no python needed (Windows)
   sleep 300       # SLURM: 5 min or more (each poll is several logins + sacct on the login
                   # node); a local run: 60. For long jobs, schedule a wake-up instead
 done
@@ -69,6 +68,15 @@ any auto-fix you applied to the user.
 | `held` | job PENDING with reason **`JobHeldUser`** / **`JobHeldAdmin`** | it will **never start by itself**, and it is **not** failed — do **not** resubmit (that duplicates it). `JobHeldUser`: `scontrol release <jobid>` once whatever it was held for is fixed; `JobHeldAdmin`: ask the HIVE admins. (A PENDING job otherwise reports "queued, not started" only when nothing has run yet; a chain step waiting on earlier steps keeps its file count.) |
 | `dependency_failed` | job PENDING with reason **`DependencyNeverSatisfied`** (an upstream step failed) | the chain is dead but **sits PENDING forever** (never leaves the queue). `sacct -j <arrayjob>` to find the failed step, fix it, resubmit downstream steps reusing completed outputs. If it was **step 1b**, `scancel` the pending steps 2–5 (ids in `<out>/jobs.txt`), then resubmit `step1b_window.sbatch` and steps 2–5 chained `afterok` on its new id (reusing `step1.predicted.speclib`), or re-run `submit.sh`: steps 2–5 refuse to start without the `window.txt` / `massacc.txt` step 1b writes (without them DIA-NN would optimise per file). Since 2.9 step 1b does **not** fail when only the probe's own machinery failed (its log unreadable — e.g. an NFS `Stale file handle` — a crash, or a time limit): it retries a crash or an unreadable log once and then **falls back** (`window.txt` = `auto`, `<out>/probe_fallback.json`), and the chain runs on — `watch_run.sh --all` then reports `probe_fallback: true` with a CAUTION: say so to the user, with its `reason`. It still fails, as before, on everything else — the job log names which: a **refused** mass accuracy (implausible: check the FASTA, species and calibration first), no .NET / DIA-NN cannot start, the probe's arguments, runs DIA-NN finished without logging a radius, a signal |
 | `unknown_failure` | job FAILED with no known signature | read the full log; diagnose; fix; resubmit (and add the new signature here) |
+| `watcher_query_failed` | the watcher could not ask HIVE (unreachable, `HIVE_USER`/`HIVE_KEY` unset, or — with no local python3 — the skill not on HIVE) | **not a job failure: never resubmit on it.** Fix the connection (or `bash scripts/hive_exec.sh --put-skill`), then poll again |
+| `watcher_no_python` | no usable `python3` on this computer and no `--hive` | **not a job failure** (`failed: false`). Install Python 3, or for a search on HIVE add `--hive` |
+
+**No python3 on this computer** (Windows, where `python3` is often the Microsoft Store stub
+that prints "Python was not found"): with `--hive` the watcher runs the whole poll on HIVE,
+through `hive_exec.sh`, and prints HIVE's JSON — the skill must be on HIVE (step 0 puts it).
+Before 2.13.2 it printed `failed: true, done: true` for a healthy search. With `--hive`, Git
+Bash's path conversion is off (`MSYS_NO_PATHCONV=1`), so a `/nfs/...` folder is never
+rewritten into `C:/Program Files/Git/nfs/...` (which read as `no_jobs_file`).
 
 ## Warnings that are not failures: Sage LFQ
 

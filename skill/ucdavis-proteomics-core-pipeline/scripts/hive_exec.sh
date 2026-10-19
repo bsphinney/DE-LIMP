@@ -55,6 +55,12 @@ case "$HU" in
 esac
 KEY="${HIVE_KEY:?set HIVE_KEY to the private-key path the user gave you}"
 KEY="${KEY/#\~/$HOME}"
+# Git Bash: the key in the form every ssh there reads. Git's own ssh takes /c/Users/... and
+# C:/Users/...; Windows' OpenSSH only the second, which it used to get from Git Bash's automatic
+# path conversion -- now off for the command (below), so it is given that form here.
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*) case "$KEY" in /*) command -v cygpath >/dev/null 2>&1 && KEY="$(cygpath -m "$KEY")" ;; esac ;;
+esac
 HOST="${HIVE_HOST:-hive.hpc.ucdavis.edu}"
 [ -f "$KEY" ] || { echo "private key not found: $KEY" >&2; exit 2; }
 
@@ -230,11 +236,13 @@ case "${1:-}" in
          done
          [ $# -ge 1 ] || usage
          remote="python3 ~/proteomics-pipeline/scripts/on_compute.py$jopts -- bash -lc $(printf '%q' "$*")"
-         "${SSH[@]}" "bash -l -c $(printf '%q' "$remote")" ;;
+         MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "${SSH[@]}" "bash -l -c $(printf '%q' "$remote")" ;;
   "")    usage ;;
   # LOGIN shell (bash -l). ssh with a bare command runs a NON-login shell, where
   # HIVE does not put sacct/squeue/sbatch on PATH. Every SLURM query then returned
   # nothing, and watch_run.sh read that emptiness as "PENDING" -- so a job array with
   # 14 TIMEOUT tasks reported as still running. Silence must never look like health.
-  *)     "${SSH[@]}" "bash -l -c $(printf '%q' "$*")" ;;
+  # A command for HIVE holds HIVE paths only: Git Bash must not rewrite them for a Windows ssh
+  # (/nfs/... -> C:/Program Files/Git/nfs/...; staff report, skill 2.13.1).
+  *)     MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "${SSH[@]}" "bash -l -c $(printf '%q' "$*")" ;;
 esac

@@ -58,6 +58,8 @@ SHIMS = {
     "powershell.exe": RECORD.format(name="powershell") + 'printf "%s\\r\\n" "$FAKE_PS_ROOT"\n',
     # cygpath -u <Windows path>: the share's local copy lives under $SHAREROOT
     "cygpath": ('[ -n "${FAKE_CYGPATH_OUT:-}" ] && { echo "$FAKE_CYGPATH_OUT"; exit; }\n'
+                # -m (the key, hive_exec.sh): this computer's paths already read as they are
+                '[ "$1" = -m ] && { echo "$2"; exit; }\n'
                 'p="${2//\\\\//}"\n'
                 'case "$p" in [A-Za-z]:*) p="${p#?:}" ;; //*) p="${p#//}"; p="${p#*/}"; p="/${p#*/}" ;; esac\n'
                 'echo "$SHAREROOT$p"\n'),
@@ -804,6 +806,39 @@ class HiveLoginSavedWithoutCygpathTests(HiveLoginSavedTests):
 
     def test_a_path_that_resolves_to_no_file_is_saved_as_given(self):
         self.skipTest("needs cygpath")
+
+
+class WindowsRemoteCommandTests(Harness):
+    """A staff report (skill 2.13.1, Git Bash): Git Bash rewrote the /nfs path of a command meant
+    for HIVE (/nfs/... -> C:/Program Files/Git/nfs/...) when it started a Windows ssh, and the
+    watcher reported no_jobs_file. A command for HIVE never holds a local path, so it is sent with
+    that rewriting off -- and the key, which did need it, is given in the form every ssh on
+    Windows reads (cygpath -m)."""
+    WIN = {"FAKE_UNAME": "MINGW64_NT-10.0-26200"}
+
+    def setUp(self):
+        super().setUp()
+        _write_exe(os.path.join(self.bin, "ssh"), RECORD.format(name="ssh")
+                   + 'echo "MSYS_NO_PATHCONV=${MSYS_NO_PATHCONV:-}" >> "$LOGS/sshenv.log"\n')
+
+    def test_a_command_for_hive_is_never_path_converted(self):
+        for env in ({}, self.WIN):
+            with self.subTest(env=env):
+                r = self.run_script(HIVE_EXEC, "cat /nfs/lssc0/x/jobs.txt", **env)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertIn("/nfs/lssc0/x/jobs.txt", self.calls("ssh")[-1][-1])
+                self.assertEqual(self._log("sshenv").split()[-1], "MSYS_NO_PATHCONV=1")
+
+    def test_a_posix_key_path_is_given_to_ssh_in_windows_form(self):
+        r = self.run_script(HIVE_EXEC, "true", HIVE_KEY="/c/Users/tester/.ssh/id_test",
+                            FAKE_CYGPATH_OUT=self.key, **self.WIN)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        argv = self.calls("ssh")[-1]
+        self.assertEqual(argv[argv.index("-i") + 1], self.key)
+        # elsewhere the key is left exactly as given
+        r = self.run_script(HIVE_EXEC, "true", FAKE_CYGPATH_OUT="/wrong")
+        argv = self.calls("ssh")[-1]
+        self.assertEqual(argv[argv.index("-i") + 1], self.key)
 
 
 class ScriptModeTests(unittest.TestCase):

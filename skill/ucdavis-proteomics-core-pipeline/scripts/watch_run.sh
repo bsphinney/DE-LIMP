@@ -16,8 +16,11 @@
 #   while not done: watch_run.sh ...; sleep 300; done  # then act on failed/fix
 #   (--hive: 5 min or more -- each poll is several logins and sacct calls on HIVE's shared
 #   login node; a local run: 60 s)
+#   With --hive and no usable python3 on this computer (Windows' Store stub), the whole poll
+#   runs on HIVE instead, through hive_exec.sh -- the skill must be there (--put-skill).
 # =============================================================================
 set -uo pipefail
+ARGS=("$@")
 MODE="local"; JOB=""; LOG=""; HIVE=false; STALL_MIN=15; OUTDIR=""; POLL=0; CHAINDIR=""
 while [ $# -gt 0 ]; do case "$1" in
   --slurm)     MODE="slurm"; JOB="$2"; shift 2;;
@@ -31,6 +34,34 @@ while [ $# -gt 0 ]; do case "$1" in
 esac; done
 HERE="$(cd "$(dirname "$0")" && pwd)"
 run() { if $HIVE; then bash "$HERE/hive_exec.sh" "$*"; else bash -c "$*"; fi; }
+
+# With --hive every path here is a HIVE path. Git Bash rewrites an argument that looks like a
+# POSIX path (/nfs/... -> C:/Program Files/Git/nfs/...) when it starts a Windows program, and the
+# watcher then reported no_jobs_file for a search that had one (staff report, skill 2.13.1).
+if $HIVE; then export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'; fi
+
+# A JSON string, without python (the case below has none).
+json_str() { local s="${1//\\/\\\\}"; s="${s//\"/\\\"}"; printf '"%s"' "$(printf '%s' "$s" | tr -d '\000-\037')"; }
+# No usable python3 here -- on Windows it is often the Microsoft Store stub, which prints "Python
+# was not found ..." and exits 9009. Every JSON this script builds needs it, and a healthy search
+# read as {failed: true, done: true}, which an agent could act on by resubmitting a running
+# search (staff report, skill 2.13.1, Git Bash). With --hive the whole poll runs ON HIVE, whose
+# python3 is real; never is a missing parser on this side reported as a failed search.
+if [ "$(python3 -c 'print("ok")' 2>/dev/null | tr -d '\r')" != ok ]; then     # \r: Windows' own
+  if $HIVE; then
+    cmd="bash ~/proteomics-pipeline/scripts/watch_run.sh"
+    for a in ${ARGS[@]+"${ARGS[@]}"}; do [ "$a" = --hive ] || cmd="$cmd $(printf '%q' "$a")"; done
+    ef="$(mktemp 2>/dev/null || echo "${TMPDIR:-/tmp}/watch_run.$$")"
+    out="$(bash "$HERE/hive_exec.sh" "$cmd" 2>"$ef")"; rc=$?
+    err="$(cat "$ef" 2>/dev/null)"; rm -f "$ef"
+    j="$(printf '%s\n' "$out" | sed -n '/^{/,$p')"           # its JSON, one line or indented
+    if [ -n "$j" ]; then printf '%s\n' "$j"; exit "$rc"; fi
+    echo "{\"mode\":\"$MODE\",\"state\":\"unknown\",\"failed\":false,\"done\":false,\"error_class\":\"watcher_query_failed\",\"detail\":$(json_str "$(printf '%s\n%s' "$err" "$out" | grep -v '^$' | head -n 2 | tr '\n' ' ')"),\"fix\":\"There is no usable python3 on this computer, so this poll was run on HIVE, and HIVE did not answer it -- this is NOT a job failure. Usually HIVE cannot be reached (HIVE_USER/HIVE_KEY, the network), or the skill is not on HIVE yet (bash scripts/hive_exec.sh --put-skill). Re-run the watcher before drawing any conclusion about the run.\"}"
+    exit 3
+  fi
+  echo "{\"mode\":\"$MODE\",\"state\":\"unknown\",\"failed\":false,\"done\":false,\"error_class\":\"watcher_no_python\",\"fix\":\"There is no usable python3 on this computer (on Windows, python3 is often the Microsoft Store stub), so the watcher cannot read the run's state -- this is NOT a job failure. Install Python 3, or for a search on HIVE add --hive, which runs the poll there.\"}"
+  exit 3
+fi
 
 # sacct's JobID|State|ExitCode|NodeList rows for a job (every array task); the one query.
 NF_FORMAT="JobID,State,ExitCode,NodeList"
@@ -92,7 +123,9 @@ if [ "$MODE" = "chain" ]; then
   JT="$CHAINDIR/jobs.txt"; QD="$(printf %q "$CHAINDIR")"   # QD: the folder, quoted for run
   probe="$(run "echo __ok__" 2>&1)"
   if ! printf '%s' "$probe" | grep -q __ok__; then
-    echo "{\"mode\":\"chain\",\"failed\":true,\"done\":true,\"err_class\":\"watcher_query_failed\",\"detail\":$(printf '%s' "$probe" | head -2 | python3 -c 'import sys,json;print(json.dumps(sys.stdin.read()))'),\"fix\":\"Cannot reach the cluster at all — this is NOT a job failure and NOT a missing file. Usually HIVE_USER/HIVE_KEY are unset: save them once to ~/.config/ucdavis-proteomics/hive.env. Re-run the watcher before drawing any conclusion about the run.\"}"
+    # failed/done false: an agent acts on `failed`, and resubmitting a running search on it is
+    # the one thing this must never cause (staff report, skill 2.13.1)
+    echo "{\"mode\":\"chain\",\"failed\":false,\"done\":false,\"err_class\":\"watcher_query_failed\",\"detail\":$(printf '%s' "$probe" | head -2 | python3 -c 'import sys,json;print(json.dumps(sys.stdin.read()))'),\"fix\":\"Cannot reach the cluster at all — this is NOT a job failure and NOT a missing file. Usually HIVE_USER/HIVE_KEY are unset: save them once to ~/.config/ucdavis-proteomics/hive.env. Re-run the watcher before drawing any conclusion about the run.\"}"
     exit 3
   fi
   ids="$(run "cat $QD/jobs.txt 2>/dev/null | tr '\n' ' '" 2>/dev/null)"

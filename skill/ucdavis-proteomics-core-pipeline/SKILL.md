@@ -2070,6 +2070,11 @@ bash scripts/watch_run.sh --slurm <jobid> --log <job log> --out <out> --poll <n>
 # multi-step chains (diann_parallel / radiant_parallel): watch EVERY step, never just the last
 bash scripts/watch_run.sh --all <search out dir> --hive
 ```
+With `--hive` and no usable `python3` on this computer (Windows' Store stub), the watcher
+runs the poll on HIVE and prints HIVE's answer. `watcher_query_failed` and
+`watcher_no_python` are never a job failure: never resubmit on them; fix the connection and
+poll again (`references/watcher.md`).
+
 **Always pass `--out` and increment `--poll` each time.** `--out` is what turns "still
 running" into real progress: the chain drops a `.quant` per finished file, so the watcher
 reports the actual step and file count rather than guessing. `--poll` rotates the note.
