@@ -317,7 +317,10 @@ Claims section):
   that also speaks of a review, a mistake, a draft or the report; "the draft"; "an earlier
   pass"; "initially reported as"). Science wording trips neither ("the p-values are corrected",
   "batch effects were corrected", "fixed modification", "a draft genome", "fell for this group
-  of mice", "previously reported"). What neither tier catches is the meaning check's (f).
+  of mice", "previously reported"), and so does methods narration ("the QC flagged a batch
+  effect that we then corrected with ComBat", "we used the previous version, 2.6.1", "the tube
+  label was wrong and has been corrected in the sample sheet"). What neither tier catches is the
+  meaning check's (f).
 
 ### The meaning check: a separate reader, before render
 

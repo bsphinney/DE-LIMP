@@ -112,6 +112,12 @@ SCIENCE = (
     "The false discovery rate was 1%, and the error rate of the test is controlled.",
     "Ratios were corrected for label incorporation.",
     "We changed the normalisation to raw quantities because the loading differed.",
+    # review of 2.13.2, round 2 (N-L1): methods narration and a sample-handling note
+    "The normalisation check flagged a loading difference, which we then corrected for by median "
+    "normalisation.",
+    "The QC flagged a batch effect that we then corrected with ComBat.",
+    "We used the previous version, 2.6.1, because the newer one was not validated yet.",
+    "The sample label on tube 3 was wrong and has been corrected in the sample sheet.",
 )
 
 

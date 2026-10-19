@@ -35,6 +35,12 @@ _NOT_OURS = (r"(?!\s+(?:genome|proteome|map|assembl\w*|sequence\w*|transcriptome
              r"(?:manuscript|paper|grant|thesis|proposal)))")
 # what only a text has (never "the gene names", which a method also corrects)
 _OURS = r"(?:wording|labels?|report|text|sections?|draft|legends?|captions?|summary)"
+# a fix done FOR the data, not to a text: "corrected for by median normalisation", "with ComBat"
+_BY_METHOD = r"(?![^.!?;]{0,40}\b(?:for|using|by|with)\b)"
+# a fix to the sample records, not to a text: "corrected in the sample sheet"
+_RECORDS = re.compile(r"\s+(?:in|on)\s+the\s+(?:sample\s+sheet|submission(?:\s+form)?|form|"
+                      r"manifest|metadata|sheet|tube|vial|label)\b", re.I)
+_IN_RECORDS = r"(?!" + _RECORDS.pattern + r")"
 
 
 def _rx(*patterns):
@@ -47,7 +53,8 @@ DRAFT_HISTORY = _rx(
     r"\bdrafts?\s+of\s+(?:this|the|our|my)\s+" + _DOC + r"\b",
     r"\b(?:earlier|previous|prior|older|first|original|initial)\s+(?:versions?|revisions?|"
     r"iterations?)\s+of\s+(?:this|the|our|my)\s+" + _DOC + r"\b",
-    r"\b(?:an?|the|our|my)\s+(?:earlier|previous|prior|older)\s+version\b(?!\s+of\b)(?!\s*\()",
+    r"\b(?:an?|the|our|my)\s+(?:earlier|previous|prior|older)\s+version\b(?!\s+of\b)(?!\s*\()"
+    r"(?!\s*,?\s*v?\d)",                                    # "the previous version, 2.6.1," is software
     r"\bthis\s+(?:version|revision)\s+of\s+(?:the|this|our)\s+" + _DOC + r"\b",
     r"\b(?:the|this)\s+" + _DOC + r"\s+now\s+(?:says|reads|states|shows|lists|names|uses|gives|"
     r"correctly)\b",
@@ -59,11 +66,11 @@ DRAFT_HISTORY = _rx(
     r"\b(?:earlier|previous|original|initial)\s+(?:\w+\s+)?(?:reason|verdict|wording)\b",
     # a fix of our own, told as one
     r"\b(?:wrong|incorrect|mislabell?ed)\b[^.!?;]{0,80}\b(?:has|have)\s+been\s+(?:changed|"
-    r"corrected|fixed|updated|amended)\b",
+    r"corrected|fixed|updated|amended)\b" + _IN_RECORDS,
     r"\b(?:caught|flagged|spotted)\b[^.!?;]{0,80}\b(?:which|that)?\s*(?:we|then)\s+(?:then\s+)?"
-    r"(?:fixed|changed|updated|corrected|amended)\b",
+    r"(?:fixed|changed|updated|corrected|amended)\b" + _BY_METHOD,
     r"\b(?:we|i)(?:[’']ve|\s+have)?\s+(?:updated|changed|revised|amended|reworded|fixed|corrected)"
-    r"\s+the\s+(?:\w+\s+){0,2}?" + _OURS + r"\b(?![^.!?;]{0,40}\b(?:for|using|by|with)\b)",
+    r"\s+the\s+(?:\w+\s+){0,2}?" + _OURS + r"\b" + _BY_METHOD,
     r"\b(?:they|it)\s+(?:are|is)\s+(?:now\s+)?fixed\s+now\b|\b(?:is|are)\s+fixed\s+now\b",
     r"\b(?:we|i)\s+got\s+(?:it|this|that|these|those|them)\s+wrong\b",
     r"\bhonest\s+correction\b",
@@ -118,7 +125,8 @@ def draft_history_loose(text):
     for m in _FIX_VERB.finditer(text):
         a = _sentence_start(text, m.start())
         ends = [i for i in (text.find(c, m.end()) for c in ".!?\n") if i >= 0]
-        if a in seen or not _CONTEXT.search(text[a:min(ends or [len(text)])]):
+        if (a in seen or not _CONTEXT.search(text[a:min(ends or [len(text)])])
+                or _RECORDS.match(text, m.end())):
             continue
         seen.add(a)
         out.append(" ".join(text[max(a, m.start() - 60):m.end() + 40].split()))
