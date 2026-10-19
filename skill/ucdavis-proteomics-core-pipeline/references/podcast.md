@@ -660,12 +660,21 @@ bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.t
       (Gemini 3) takes `attempts` as its retry count, so it keeps one retry (without the option
       it made three, obeying a server's Retry-After with nothing logged). The render's own
       deadline bounds every request either way.
-  - **The key's tier.** When a 429 names a free-tier quota (`generate_content_free_tier_requests`,
-    `…-FreeTier`), render says the key's Google project is on the FREE tier and records
-    `key_tier: "free"` in `podcast.json` (`null` when no answer named a tier: never guessed).
-    A hand-typed `--cloud-ok` note that says "paid" then gets one plain warning that the note
-    does not match the key, in the log and the warnings. It never stops a render: the Core's
-    standing approval covers free-tier Core podcasts (2026-09-28).
+  - **The key's tier.** Read from Google's answers, never guessed, with the evidence kept:
+    `key_tier` and `key_tier_basis` in `podcast.json`, and `key_tier_evidence`, every answer it
+    rests on (`null` when no answer named a tier).
+    - A **402** "prepayment credits are depleted" shows the project is on **prepaid** (paid)
+      billing: `key_tier: "prepaid"`.
+    - A 429 that names a free-tier quota (`generate_content_free_tier_requests`, `…-FreeTier`)
+      shows the **free** tier: `key_tier: "free"` — but never over billing. One project
+      answered a 429 naming a free-tier quota (limit 0) and, later the same day, a 402 that
+      showed prepaid billing; it was recorded as free.
+    - The evidence is kept in `podcast/.cache/key_tier.json` for 7 days under a fingerprint of
+      the key (never the key), because a 402 stops the render and the render that writes
+      `podcast.json` is a later one. Another key starts afresh.
+    - A hand-typed `--cloud-ok` note that says "paid" gets one plain warning when the tier is
+      free, in the log and the warnings. The tier never stops a render by itself: the Core's
+      standing approval covers free-tier Core podcasts (2026-09-28).
   - Gemini 3 TTS needs a google-genai with `client.interactions` (2.25.0 has it). With an older
     one the 3.x models are left out, and render says to run `python3 -m pip install -U
     google-genai`.
@@ -675,10 +684,17 @@ bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.t
     empty answer is asked once more.
   - **Rate limits.** A 429 on a per-minute quota, or one that carries a `retryDelay`, is waited
     out, not fatal. Render reads the delay and the quota id from the error details, prints
-    `[render] rate-limited, waiting Ns`, sleeps the delay + 5 s, and retries the same chunk,
-    up to 10 times. All the waits in one render are capped by `--rate-wait-budget` (default 30
-    min), after which it stops with the resume message, as it does at once for a daily quota
-    (`…PerDay…`).
+    what Google answered (status and message) on the first wait of the render and
+    `[render] rate-limited, waiting Ns` on each, sleeps the delay + 5 s, and retries the same
+    chunk, up to 10 times. All the waits in one render are capped by `--rate-wait-budget`
+    (default 30 min), after which it stops with the resume message, as it does at once for a
+    daily quota (`…PerDay…`).
+  - **Prepay credits used up (402).** Not a rate limit, though Google's answer also says
+    `RESOURCE_EXHAUSTED`: no wait clears it, and every model draws on the same project. Render
+    (the preflight too) stops at once: "Gemini prepay credits are depleted", Google's own
+    message, add prepay credits to the key's project in AI Studio (its Billing page), re-run
+    the same command; the chunks already made are cached. Before 2.13.2 it was read as a
+    per-minute limit and each chunk waited 10 × 65 s.
   - **Pacing.** Requests to one model are spaced at least 20 s apart (`--min-interval`).
   - **A request that does not answer.** Each request logs `[render] chunk k/N ...: sent to
     <model>` and, while it waits, `still waiting for <model> (Ns)` every minute. With no answer

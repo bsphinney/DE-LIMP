@@ -354,6 +354,138 @@ class KeyTier(Gemini):
         self.assertIsNone(mp.error_info(e)["free_tier"])
 
 
+# A 402 the way the staff report quotes it (skill 2.11.2, 2026-10-16). SYNTHETIC wording around
+# the quoted parts: "402 RESOURCE_EXHAUSTED", "Your prepayment credits are depleted", AI Studio.
+PREPAY_BODY = {"error": {"code": 402, "status": "RESOURCE_EXHAUSTED",
+                         "message": "Your prepayment credits are depleted. Please go to AI Studio "
+                                    "to manage your project and billing."}}
+# Google's ordinary 429 text names billing too: never read as a billing stop
+PLAIN_429 = {"error": {"code": 429, "status": "RESOURCE_EXHAUSTED",
+                       "message": "You exceeded your current quota, please check your plan and "
+                                  "billing details.",
+                       "details": [{"@type": "type.googleapis.com/google.rpc.RetryInfo",
+                                    "retryDelay": "7s"}]}}
+
+
+def prepay_error(style="genai"):
+    return ApiError(402, "RESOURCE_EXHAUSTED", PREPAY_BODY, style=style)
+
+
+class Prepay(StallBase):
+    """A staff render (skill 2.11.2): a Gemini 402 "prepayment credits are depleted" was read as
+    a per-minute rate limit -- error_info() tested 429 OR RESOURCE_EXHAUSTED first -- and each
+    chunk waited 10 x 65 s on an error no wait can clear, the log saying only "rate-limited". The
+    same project's earlier 429 had named a free-tier quota, so the record said the key was free
+    tier; the 402 shows prepaid billing."""
+
+    def tier_file(self):
+        p = os.path.join(self.pod, ".cache", mp.TIER_FILE)
+        return json.loads(read(p)) if os.path.isfile(p) else None
+
+    def depleted_after(self, n):
+        seen = {"n": 0}
+
+        def behaviour(model, contents, config):
+            if not is_probe(contents):
+                seen["n"] += 1
+                if seen["n"] > n:
+                    raise prepay_error()
+            return pcm_for(contents)
+        return behaviour
+
+    def test_error_info_reads_a_402_as_billing_and_a_plain_429_as_a_rate_limit(self):
+        for e in (prepay_error(), prepay_error(style="interactions"),
+                  Exception("Your prepayment credits are depleted. Please go to AI Studio")):
+            with self.subTest(e=e):
+                self.assertEqual(mp.error_info(e)["kind"], "billing")
+        err = mp.error_info(ApiError(429, "RESOURCE_EXHAUSTED", PLAIN_429))
+        self.assertEqual(err["kind"], "rate")
+        self.assertEqual((err["code"], err["status"]), (429, "RESOURCE_EXHAUSTED"))
+
+    def test_a_402_stops_the_render_at_once_and_keeps_the_cached_chunks(self):
+        rc, out, err, log = self.render(self.depleted_after(1), "--cloud-ok", "--model", ANSWERS)
+        self.assertEqual(rc, 1)
+        self.assertIn("prepay credits are depleted", err)
+        self.assertIn("AI Studio", err)
+        self.assertIn("cached", err)
+        self.assertNotIn("rate-limited", err)
+        self.assertEqual(len(log["calls"]), 2, "a 402 was retried")
+        self.assertEqual(len(self.wavs()), 1)
+        self.assertEqual(self.tier_file()["tier"], "prepaid")
+
+    def test_a_402_in_the_preflight_stops_at_once(self):
+        def behaviour(model, contents, config):
+            raise prepay_error()
+        rc, out, err, log = self.render(behaviour, "--cloud-ok", "--model", STALLS, "--model",
+                                        ANSWERS, preflight=True)
+        self.assertEqual(rc, 1)
+        self.assertIn("prepay credits are depleted", err)
+        self.assertEqual([m for m, _, _ in log["calls"]], [STALLS], "credits are per project")
+
+    def test_the_next_render_records_prepaid_and_its_evidence(self):
+        self.render(self.depleted_after(1), "--cloud-ok", "--model", ANSWERS)
+        rc, out, err, log = self.render(lambda m, c, k: pcm_for(c), "--cloud-ok",
+                                        "PI, 2026-10-16, paid key", "--model", ANSWERS)
+        self.assertEqual(rc, 0, err)
+        man = self.manifest()
+        self.assertEqual(man["key_tier"], "prepaid")
+        self.assertIn("402", man["key_tier_basis"])
+        self.assertIn("earlier render", man["key_tier_basis"])
+        self.assertTrue(man["key_tier_evidence"])
+        self.assertNotIn("does not match the key", err)
+
+    def test_a_free_tier_quota_never_outvotes_billing(self):
+        """The same day's 429 named a free-tier quota on the pro model; billing wins either way
+        round, and both are in the record."""
+        def pro_free(model, contents, config):
+            if "pro" in model:
+                raise ApiError(429, "RESOURCE_EXHAUSTED", rpc_error(FREE_DAY, value="0"))
+            return pcm_for(contents)
+        self.render(self.depleted_after(1), "--cloud-ok", "--model", ANSWERS)      # 402 first
+        rc, out, err, log = self.render(pro_free, "--cloud-ok", "PI, paid key", "--model",
+                                        "gemini-2.5-pro-preview-tts", "--model", ANSWERS)
+        self.assertEqual(rc, 0, err)
+        man = self.manifest()
+        self.assertEqual(man["key_tier"], "prepaid")
+        self.assertEqual(sorted({e["tier"] for e in man["key_tier_evidence"]}),
+                         ["free", "prepaid"])
+        self.assertNotIn("does not match the key", err)
+        self.assertNotIn("is on the FREE tier", err)
+
+    def test_free_then_a_402_in_one_render_is_prepaid(self):
+        def behaviour(model, contents, config):
+            if "pro" in model:
+                raise ApiError(429, "RESOURCE_EXHAUSTED", rpc_error(FREE_DAY, value="0"))
+            raise prepay_error()
+        rc, out, err, log = self.render(behaviour, "--cloud-ok", preflight=True)
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.tier_file()["tier"], "prepaid")
+        self.assertEqual(sorted({e["tier"] for e in self.tier_file()["evidence"]}),
+                         ["free", "prepaid"])
+
+    def test_another_key_does_not_inherit_the_record(self):
+        self.render(self.depleted_after(1), "--cloud-ok", "--model", ANSWERS)
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": FAKE_KEY[:-4] + "wxyz"}):
+            rc, out, err, log = self.render(lambda m, c, k: pcm_for(c), "--cloud-ok",
+                                            "--model", ANSWERS)
+        self.assertEqual(rc, 0, err)
+        self.assertIsNone(self.manifest()["key_tier"])
+        self.assertNotIn(FAKE_KEY, read(os.path.join(self.pod, ".cache", mp.TIER_FILE)))
+
+    def test_the_first_rate_limit_wait_logs_what_google_said(self):
+        seen = {"n": 0}
+
+        def behaviour(model, contents, config):
+            seen["n"] += 1
+            if seen["n"] <= 2:
+                raise ApiError(429, "RESOURCE_EXHAUSTED", PLAIN_429)
+            return pcm_for(contents)
+        rc, out, err, log = self.render(behaviour, "--cloud-ok", "--model", ANSWERS)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(err.count("Google answered 429 RESOURCE_EXHAUSTED"), 1, err)
+        self.assertIn("You exceeded your current quota", err)
+
+
 class SdkOptions(Gemini):
     def sdk(self, with_options=True):
         mods, log = fake_genai(lambda m, c, k: pcm_for(c))

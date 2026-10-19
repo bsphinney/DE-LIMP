@@ -152,6 +152,11 @@ PREFLIGHT_TIMEOUT = 60.0                            # s for the two-line test
 # 2.13.2: every resume went back to the stalled model, waited, and stopped).
 STALL_FILE = "stalled.json"
 STALL_MEMORY_H = 12.0
+# What Google's answers said about the key's billing tier (GeminiTTS.note_tier), kept in the
+# cache for TIER_MEMORY_DAYS under a fingerprint of the key (never the key): a 402 stops the
+# render, so the render that records podcast.json is a later one (staff report, skill 2.11.2).
+TIER_FILE = "key_tier.json"
+TIER_MEMORY_DAYS = 7.0
 PREFLIGHT_LINES = ("This is a short sound check.", "And this is the second voice.")
 TERMS_URL = "https://ai.google.dev/gemini-api/terms"
 KEY_FILE = os.path.join("~", ".config", "ucdavis-proteomics", "gemini_key")
@@ -1977,6 +1982,8 @@ class GeminiTTS(object):
             raise RenderError("[INFO] the gemini backend needs the google-genai package: "
                               "python3 -m pip install google-genai (or use --tts say)")
         self.key = read_key(core=bool(getattr(a, "core_run", None)))
+        # which key the cache's TIER_FILE speaks for: a fingerprint, never the key
+        self.key_id = hashlib.sha256(self.key.encode("utf-8")).hexdigest()[:16]
         self.types = types
         self.request_timeout = float(getattr(a, "request_timeout", None) or REQUEST_TIMEOUT)
         self.client, self.http = gemini_client(genai, types, self.key, self.request_timeout)
@@ -1986,9 +1993,11 @@ class GeminiTTS(object):
         self.candidates = self.user_models or self.discover()
         self.model = self.candidates[0]
         self.min_interval = float(getattr(a, "min_interval", MIN_INTERVAL))
-        # what the key is: "free" once a 429 names a free-tier quota (never assumed), and whether
-        # a hand-typed --cloud-ok note says otherwise ("paid") -- recorded, never a stop
+        # what the key is (note_tier): "prepaid" once a 402 shows prepay billing, "free" once a
+        # 429 names a free-tier quota (never assumed), with the evidence; and whether a
+        # hand-typed --cloud-ok note says otherwise ("paid") -- recorded, never a stop
         self.key_tier, self.key_tier_basis, self.tier_warning = None, None, None
+        self.tier_evidence, self.prior_evidence, self.rate_logged = [], [], False
         note = getattr(a, "cloud_ok", None)
         self.paid_note = (note if isinstance(note, str) and re.search(r"\bpaid\b", note, re.I)
                           and not re.search(r"\b(?:un|not\s+|non-?)paid\b", note, re.I) else None)
@@ -2111,6 +2120,8 @@ class GeminiTTS(object):
         model stopped answering within STALL_MEMORY_H hours: then it is not resumed with, and the
         model that is used makes every chunk again."""
         self.cache_dir = cache_dir
+        self.prior_evidence = self._load_tier()
+        self._settle_tier()
         if self.user_models:
             return
         recent = self.remembered_stalls()
@@ -2265,20 +2276,102 @@ class GeminiTTS(object):
                      if m not in self.stalled and m not in self.unusable), None)
 
     def note_tier(self, err):
-        """A 429 that names a free-tier quota: the key's Google project is on the FREE tier.
-        Said once in the log and recorded (podcast.json key_tier); a --cloud-ok note that says
-        "paid" gets one plain warning that it does not match. Never a stop: the Core's standing
-        approval covers free-tier Core podcasts (2026-09-28)."""
-        if not err.get("free_tier") or self.key_tier == "free":
+        """What an error says about the key's billing tier, as evidence: a 402 (prepay credits
+        used up) shows PREPAID billing; a 429 that names a free-tier quota, the FREE tier. Said
+        in the log when the tier it settles on changes, recorded (podcast.json key_tier,
+        key_tier_evidence) and kept for this key in the cache (TIER_FILE). A --cloud-ok note that
+        says "paid" gets one plain warning when the tier is free. Never a stop by itself: the
+        Core's standing approval covers free-tier Core podcasts (2026-09-28)."""
+        if err.get("kind") == "billing":
+            tier = "prepaid"
+            basis = (f"a 402 from {self.model}: the project's prepay credits are depleted, so it "
+                     "is on prepaid (paid) billing")
+        elif err.get("free_tier"):
+            tier = "free"
+            basis = f"a 429 from {self.model} named the free-tier quota {err['free_tier']}"
+        else:
             return
-        self.key_tier = "free"
-        self.key_tier_basis = f"a 429 from {self.model} named the free-tier quota {err['free_tier']}"
-        log(f"[render] the Gemini key's Google project is on the FREE tier ({self.key_tier_basis})")
-        if self.paid_note:
+        if any((e["tier"], e["model"]) == (tier, self.model) for e in self.tier_evidence):
+            return
+        was = self.key_tier
+        self.tier_evidence.append({"tier": tier, "model": self.model, "at": now_iso(),
+                                   "basis": basis})
+        self._settle_tier()
+        self._save_tier()
+        if self.key_tier != was:
+            log(f"[render] the Gemini key's Google project is "
+                + ("on PREPAID billing" if self.key_tier == "prepaid" else "on the FREE tier")
+                + f" ({self.key_tier_basis})")
+            if self.tier_warning:
+                log(f"[WARN] {self.tier_warning}")
+        elif tier == "free" and self.key_tier == "prepaid":
+            log(f"[render] {basis}; not taken as the key's tier: billing outvotes it "
+                f"({self.key_tier_basis})")
+
+    def _settle_tier(self):
+        """key_tier from the evidence, this render's and this key's earlier renders' (TIER_FILE):
+        "prepaid" when any shows prepay billing, else "free" when any names a free-tier quota,
+        else None; the latest of that kind is the basis. A free-tier quota never outvotes
+        billing: the staff render's project answered a 429 naming a free-tier quota (limit 0) and,
+        later the same day, a 402 that showed prepaid billing."""
+        every = self.prior_evidence + self.tier_evidence
+        for tier in ("prepaid", "free"):
+            got = [e for e in every if e["tier"] == tier]
+            if got:
+                e = got[-1]
+                self.key_tier = tier
+                self.key_tier_basis = e["basis"] + (
+                    "" if e in self.tier_evidence else f" (an earlier render, {e['at']})")
+                break
+        else:
+            self.key_tier, self.key_tier_basis = None, None
+        self.tier_warning = None
+        if self.key_tier == "free" and self.paid_note:
             self.tier_warning = (f"the --cloud-ok note says the key is paid ({self.paid_note!r}), but "
                                  f"its Google project is on the free tier ({self.key_tier_basis}): "
                                  "the note does not match the key; correct it for the next render")
-            log(f"[WARN] {self.tier_warning}")
+
+    def key_tier_evidence(self):
+        """Every answer the tier rests on, earlier renders' for this key first."""
+        return self.prior_evidence + self.tier_evidence
+
+    def _load_tier(self):
+        """This key's evidence from TIER_FILE, the last TIER_MEMORY_DAYS of it ([] for another
+        key or none)."""
+        try:
+            with open(os.path.join(self.cache_dir, TIER_FILE), encoding="utf-8") as fh:
+                got = json.load(fh)
+        except (OSError, ValueError, TypeError):
+            return []
+        if not isinstance(got, dict) or got.get("key_id") != self.key_id:
+            return []
+        now = datetime.datetime.now(datetime.timezone.utc)
+        out = []
+        for e in got.get("evidence") or []:
+            try:
+                at = datetime.datetime.fromisoformat(str(e["at"]))
+                if at.tzinfo is None:
+                    at = at.replace(tzinfo=datetime.timezone.utc)
+                if (now - at).total_seconds() < TIER_MEMORY_DAYS * 86400 \
+                        and e["tier"] in ("prepaid", "free"):
+                    out.append({k: e[k] for k in ("tier", "model", "at", "basis")})
+            except (KeyError, TypeError, ValueError):
+                continue
+        return out
+
+    def _save_tier(self):
+        """Keep this key's evidence in the cache (never fatal)."""
+        if not self.cache_dir:
+            return
+        path = os.path.join(self.cache_dir, TIER_FILE)
+        rec = {"key_id": self.key_id, "tier": self.key_tier, "basis": self.key_tier_basis,
+               "evidence": self.key_tier_evidence()[-20:]}
+        try:
+            with open(path + ".part", "w", encoding="utf-8") as fh:
+                json.dump(rec, fh, indent=2)
+            os.replace(path + ".part", path)
+        except OSError as e:
+            log(f"[WARN] could not record the key's tier in the cache ({e})")
 
     def stall_switch(self, label, why):
         """This model stopped answering: hand over to the next candidate, which makes EVERY chunk
@@ -2345,6 +2438,8 @@ class GeminiTTS(object):
             except Exception as e:
                 err = error_info(e)
                 self.note_tier(err)
+                if err["kind"] == "billing":            # credits are per project: every model
+                    raise RenderError(billing_stop("preflight", m, err))
                 if err["kind"] == "fatal":
                     raise RenderError(f"preflight: {m}: {why_line(err, 300)}")
                 if err["kind"] != "rate":
@@ -2435,6 +2530,8 @@ class GeminiTTS(object):
                 err = error_info(e)
                 self.note_tier(err)
                 kind = err["kind"]
+                if kind == "billing":
+                    raise RenderError(billing_stop(label, self.model, err))
                 if kind in ("missing", "exhausted", "rejected") and self.model not in self.unusable:
                     self.unusable.append(self.model)
                 if kind in ("missing", "exhausted", "rejected") and not self.produced \
@@ -2467,6 +2564,11 @@ class GeminiTTS(object):
                                                      f"{wait:.0f} s would pass --rate-wait-budget "
                                                      f"({self.wait_budget / 60:g} min)")
                     self.waited += wait
+                    if not self.rate_logged:
+                        # what Google said, once: a misread error shows here, not after 11 min
+                        self.rate_logged = True
+                        log(f"[render] {label}: Google answered {err['code'] or '?'} "
+                            f"{err['status'] or '?'}: {(err['message'] or err['msg'])[:300]}")
                     log(f"[render] rate-limited, waiting {wait:.0f}s ({label}, {self.model}"
                         + (f", {err['quota']}" if err["quota"] else "") + f"; wait {waits} of "
                         f"{RATE_WAITS})")
@@ -2520,6 +2622,17 @@ def why_line(err, n=200):
     return "; ".join(parts + [err["msg"][:n]])
 
 
+def billing_stop(where, model, err):
+    """The message a 402 stops a render with: what it is, what clears it, what is kept --
+    with Google's own words, which carry its link."""
+    said = (f"{err.get('code') or '?'} {err.get('status') or '?'}: {err['message'][:300]}"
+            if err.get("message") else why_line(err, 300))
+    return (f"{where}: Gemini prepay credits are depleted ({model}: {said}). "
+            "Waiting cannot clear this, and every model draws on the same project: add prepay "
+            "credits to the key's Google project in AI Studio (its Billing page), then re-run the "
+            "same command. The chunks already made are cached.")
+
+
 def _error_details(e):
     """The structured part of an SDK error: google-genai's APIError keeps the response JSON in
     .details; the interactions client's errors keep it in .body."""
@@ -2543,15 +2656,27 @@ def _seconds(v):
     return float(m.group(1)) if m else None
 
 
+# A 402 / prepay credits used up. Never the bare word "billing": Google's ordinary 429 says
+# "please check your plan and billing details".
+_PREPAY = re.compile(r"\bprepay(?:ment)?\b|\bcredits?\s+(?:are|is|have\s+been)\s+(?:depleted|"
+                     r"exhausted|used\s+up)\b", re.I)
+_RPC_STATUS = re.compile(r"\b(RESOURCE_EXHAUSTED|PERMISSION_DENIED|INVALID_ARGUMENT|NOT_FOUND|"
+                         r"UNAVAILABLE|INTERNAL|DEADLINE_EXCEEDED|UNAUTHENTICATED|"
+                         r"FAILED_PRECONDITION)\b")
+
+
 def error_info(e):
-    """-> {kind, msg, delay, quota}. kind: missing | exhausted (daily or zero quota) | rate
-    (per-minute, or any 429 that gives a retryDelay) | rejected (400: the request does not fit
-    this model) | fatal (key, permission) | transient. The retry delay and the quota come from
-    google.rpc.RetryInfo / QuotaFailure in the error details when present, else from the text."""
+    """-> {kind, msg, delay, quota, free_tier, code, status, message}. kind: missing | billing (402:
+    the project's prepay credits are used up -- no wait clears it) | exhausted (daily or zero
+    quota) | rate (per-minute, or any 429 that gives a retryDelay) | rejected (400: the request
+    does not fit this model) | fatal (key, permission) | transient. The retry delay and the
+    quota come from google.rpc.RetryInfo / QuotaFailure in the error details when present, else
+    from the text."""
     msg = scrub(f"{type(e).__name__}: {e}")
     code = next((c for c in (getattr(e, "code", None), getattr(e, "status_code", None))
                  if isinstance(c, int)), None)
-    found = {"ids": [], "values": [], "delay": None, "metrics": []}
+    found = {"ids": [], "values": [], "delay": None, "metrics": [], "status": None,
+             "message": None}
 
     def walk(x):
         if isinstance(x, dict):
@@ -2564,6 +2689,10 @@ def error_info(e):
                     found["values"].append(str(v))
                 elif k == "retryDelay" and found["delay"] is None:
                     found["delay"] = _seconds(v)
+                elif k == "status" and isinstance(v, str):
+                    found["status"] = found["status"] or v
+                elif k == "message" and isinstance(v, str):
+                    found["message"] = found["message"] or v
                 else:
                     walk(v)
         elif isinstance(x, (list, tuple)):
@@ -2586,10 +2715,16 @@ def error_info(e):
     tier = [q for q in found["metrics"] + found["ids"] if re.search(r"free[_-]?tier", q, re.I)]
     if not tier and re.search(r"\w*free[_-]?tier\w*", text, re.I):
         tier = [re.search(r"\w*free[_-]?tier\w*", text, re.I).group(0)]
+    status = found["status"] or next(iter(_RPC_STATUS.findall(text)), None)
     info = {"msg": msg, "delay": found["delay"], "quota": quota,
-            "free_tier": ", ".join(dict.fromkeys(tier)) or None}
+            "free_tier": ", ".join(dict.fromkeys(tier)) or None, "code": code, "status": status,
+            "message": scrub(found["message"]) if found["message"] else None}
     if code == 404 or "NOT_FOUND" in text:
         return dict(info, kind="missing")
+    # Before RESOURCE_EXHAUSTED, which a 402 also says: read as a rate limit, it waited 10 x 65 s
+    # per chunk on an error no wait can clear (staff report, skill 2.11.2)
+    if code == 402 or _PREPAY.search(text):
+        return dict(info, kind="billing")
     if code == 429 or "RESOURCE_EXHAUSTED" in text:
         zero = "0" in found["values"] or re.search(r"limit:\s*0\b", text)
         daily = (any("perday" in q.lower() for q in found["ids"]) if found["ids"] else
@@ -3121,10 +3256,13 @@ def cmd_render(a):
                                   "rendered audio downsampled to 16 kHz; never the report"
                                   if backend.cloud else "nothing (offline)")},
         "cloud_tts_consent": (consent if backend.cloud else False),
-        # "free" once a 429 named a free-tier quota; null when no answer said which tier
+        # "prepaid" once a 402 showed prepay billing, "free" once a 429 named a free-tier quota
+        # (this render, or this key's earlier ones); null when no answer said which tier
         "key_tier": getattr(backend, "key_tier", None),
         "key_tier_basis": getattr(backend, "key_tier_basis", None) or (
             "no answer from Google named the key's tier in this render" if backend.cloud else None),
+        "key_tier_evidence": (backend.key_tier_evidence()
+                              if hasattr(backend, "key_tier_evidence") else None),
         "core_run": record_core_run(a.script, core_rec, "render") if core_rec else None,
         "script": "podcast_script.md", "script_sha256": s.sha256,
         "script_author": s.author,
@@ -3216,8 +3354,8 @@ def prune_cache(cache, used, model, explicit=False):
                 pass
     for f in files:
         stem = f.split(".", 1)[0]
-        if f == STALL_FILE:
-            continue                             # the stall memory is not a chunk's sidecar
+        if f in (STALL_FILE, TIER_FILE):
+            continue                             # the memories are not a chunk's sidecar
         if f.endswith(".part"):
             pass
         elif stem in used:
@@ -3505,7 +3643,7 @@ class Transcriber(object):
                         errors += 1
                         _sleep(5.0 * errors)
                         continue
-                    if err["kind"] == "fatal":
+                    if err["kind"] in ("fatal", "billing"):
                         raise VerifyError(last)
                     log(f"[verify] {last}; trying the next model")
                     break
