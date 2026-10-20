@@ -673,8 +673,9 @@ def _dotnet_fix():
     return (f"Fix, then re-run: `bash {helper}` (installs Microsoft.NETCore.App and "
             f"Microsoft.AspNetCore.App 8.0 into {dest}, which is checked here; "
             f"needs internet; on a cluster login node its download runs itself on a compute "
-            f"node), or on UC Davis HIVE run `module load "
-            f"dotnet-core-sdk/8.0.4` in the same shell first; or use a self-contained parser, "
+            f"node), or on UC Davis HIVE put `module load dotnet-core-sdk/8.0.4 && ` in front "
+            f"of this command inside its job (hive_exec.sh --job '...'; a module loaded in "
+            f"another shell never reaches the job); or use a self-contained parser, "
             f"which needs no .NET (bioconda's `thermorawfileparser`, which `bash "
             f"scripts/setup.sh` installs, or a Linux/macOS/Windows zip from {TRFP_RELEASES})")
 

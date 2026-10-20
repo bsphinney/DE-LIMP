@@ -843,12 +843,16 @@ script finds an install that has both and hands it to the parser itself — **do
 DOTNET_ROOT for step 2**. If none has both, it prints one `ERROR: … cannot start` up front
 and reads nothing (every `.raw` comes back `unknown` with that reason): run `bash
 scripts/ensure_dotnet8.sh` (installs both into `~/.proteomics-pipeline/dotnet8`; needs
-internet; on a cluster login node its download runs itself on a compute node), or on HIVE
-`module load dotnet-core-sdk/8.0.4` in the same shell, and re-run step 2. Don't retry step 2
-under `srun` before that — a compute node gives the same answer. Each file's `reader` records the parser, its
-version and the `DOTNET_ROOT` used. A `.raw` that is `unknown` for any other reason says
-why in its `warnings`; without a measured precursor range step 6b falls back to 380–980 for
-DIA, and refuses a DIA-NN DDA cfg.
+internet; on a cluster login node its download runs itself on a compute node), and re-run
+step 2; or on HIVE load the module inside step 2's own job: `bash scripts/hive_exec.sh --job …
+'module load dotnet-core-sdk/8.0.4 && python3 ~/proteomics-pipeline/scripts/detect_acquisition.py
+…'` (`hive_local`: `python3 scripts/on_compute.py … -- bash -lc 'module load
+dotnet-core-sdk/8.0.4 && python3 scripts/detect_acquisition.py …'`). From a laptop the job is a
+new ssh and a new shell on the compute node, so a module loaded in your own shell never reaches
+it. Re-running step 2 without one of these gives the same answer on any node. Each file's
+`reader` records the parser, its version and the `DOTNET_ROOT` used. A `.raw` that is `unknown`
+for any other reason says why in its `warnings`; without a measured precursor range step 6b
+falls back to 380–980 for DIA, and refuses a DIA-NN DDA cfg.
 **The Orbitrap resolution is read from the `.raw` itself.** For every Orbitrap `.raw` (not
 the Astral — its DIA-NN tolerances do not use it) `detect_acquisition.py` reads the MS1 and
 MS2 resolution from the scan trailer through `thermo_resolution.py` (Thermo's RawFileReader
