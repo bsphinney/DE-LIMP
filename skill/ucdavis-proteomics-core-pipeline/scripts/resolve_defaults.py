@@ -66,6 +66,24 @@ ENGINE_VERSIONS = {
     "radiant": "2.3.3",   # container release, NOT the Radiant DIA version inside
 }
 
+# Pinned Skyline, for the peak check after DE (skyline_peaks.py; references/skyline.md). Not a
+# search engine: SkylineCmd runs headless under Wine in ProteoWizard's vendor-reader container.
+# The release (not a daily): Skyline 26.1.0.266, skyline.ms's current download on 2026-10-20 and
+# GitHub tag Skyline-26.1.0.266. Pulled by digest into the Core's container folder on HIVE; the
+# .sif's sha256 is checked before every use (skyline_peaks.verify_container). Anyone else pulls
+# the same digest themselves (references/skyline.md); a .sif built elsewhere has another sha256,
+# so its version is checked from SkylineCmd --version instead.
+SKYLINE_PIN = {
+    "version": "26.1.0.266",
+    "commit": "578b175",
+    "image": "proteowizard/pwiz-skyline-i-agree-to-the-vendor-licenses",
+    "tag": "skyline_26.1.0.266-578b175",
+    "docker_digest": "sha256:448a833eb92eac2ca731f2461c046963c0c2afafb3550b4dfb6fc3914cec7b0e",
+    "sif": "/quobyte/proteomics-grp/apptainers/"
+           "pwiz-skyline-i-agree-to-the-vendor-licenses_skyline_26.1.0.266-578b175.sif",
+    "sif_sha256": "b5f135587e9b589dd2d4686ff520573ea237b84f53b1343d5b76213c16f302bf",
+}
+
 # Which engines are sensible for a data type, best first. Instrument class comes
 # from estimate_params.classify_instrument, so the ppm table and this table can
 # never disagree about what an instrument is.
