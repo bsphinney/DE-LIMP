@@ -524,12 +524,17 @@ class Job(CoreKeyFile, T.Workspace):
         text = T.read(self.job_path)
         lines = text.splitlines()
         self.assertEqual(lines[0], "#!/bin/bash -l", "a login shell: HIVE's `module` command")
+        # sized for the local voice, which takes over in this job when Gemini cannot be used
         for want in ("#SBATCH --open-mode=append",              # a requeued job keeps its log
-                     "#SBATCH --cpus-per-task=1", "#SBATCH --mem=2G", "#SBATCH --time=2:00:00",
+                     "#SBATCH --ntasks=1", "#SBATCH --cpus-per-task=16", "#SBATCH --mem=24G",
+                     "#SBATCH --time=2:00:00",
                      "#SBATCH --partition=high", "#SBATCH --account=genome-center-grp",
                      "#SBATCH --qos=genome-center-grp-high-qos",
-                     f'#SBATCH --output="{self.log_path}"', "module load ffmpeg/7.0.2"):
+                     f'#SBATCH --output="{self.log_path}"', "module load ffmpeg/7.0.2",
+                     "module load apptainer"):
             self.assertIn(want, text)
+        # ucd-hpc: modules.sh is sourced before the first `module`
+        self.assertLess(text.index(". /etc/profile.d/modules.sh"), text.index("module load"))
         self.assertNotIn("--requeue", text)
         steps = [ln for ln in lines if ln.startswith('"$PY" "$MP"')]
         self.assertEqual([s.split()[2] for s in steps], ["render", "link", "share"])

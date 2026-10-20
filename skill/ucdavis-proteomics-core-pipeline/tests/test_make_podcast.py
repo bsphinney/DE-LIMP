@@ -146,6 +146,14 @@ class Workspace(unittest.TestCase):
         self.script = os.path.join(self.pod, "podcast_script.md")
         write(self.report, REPORT)
         write(os.path.join(self.out, "Analysis_Report.html"), REPORT_HTML)   # a session output/
+        # No test reaches HIVE: a computer with a saved HIVE login would otherwise ask it when a
+        # Gemini failure hands over to the local voice. Tests of the local voice give it a
+        # runner of their own (test_podcast_local.py).
+        import podcast_local
+        nowhere = mock.patch.object(podcast_local, "find_runner", side_effect=podcast_local.Unavailable(
+            "no local voice in these tests"))
+        nowhere.start()
+        self.addCleanup(nowhere.stop)
 
     def tearDown(self):
         self._td.cleanup()

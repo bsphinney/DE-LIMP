@@ -23,20 +23,29 @@ CHECKS the script, RENDERS it to audio and LINKS the audio into the outputs.
             reviewer works from it); --verdict, after a passing check, writes meaning_check.md
             with THIS script's sha256 and its sources' and robustness tables'; render, link,
             share and job refuse without its PASS while all of them hold.
-  render SCRIPT.md [--out DIR] --tts gemini|say [--cloud-ok [NOTE] | --core-run [internal]]
-         [--model M] [--keep-wav]
+  render SCRIPT.md [--out DIR] --tts gemini|local|say [--cloud-ok [NOTE] | --core-run [internal]]
+         [--model M] [--keep-wav] [--no-fallback]
          -> DIR/podcast.m4a (podcast.wav when neither afconvert nor ffmpeg is present),
             transcript.html, podcast.json, podcast_script.md. Refuses unless check.txt says PASS
             for this exact script and unchanged sources (--unchecked overrides; podcast.json
             then says so). Every chunk is cached as DIR/.cache/<sha256>.wav, so a re-run resumes
             and editing one line re-synthesizes only its chunk; unused chunks are pruned after
             a successful render. --dry-run prints what would be spoken and exits.
+            --tts local: the local voice, Kokoro-82M in the Core's pinned container on HIVE
+            (podcast_local.py; nothing is sent, no consent needed). And when --tts gemini fails
+            in a way waiting cannot fix -- a 402 (prepay credits), the key refused, no quota on
+            any model, every model stalled (GeminiUnusable) -- the local voice makes EVERY chunk
+            again, so one episode never mixes voices; podcast.json tts.fallback says so and why
+            (--no-fallback stops instead). Where it cannot run (no HIVE), render says so.
   verify SCRIPT.md (--cloud-ok NOTE | --core-run [internal]) [--out DIR] [--model M]
          -> the ASR round trip: Gemini transcribes the rendered audio (16 kHz AAC 32 kbps) and
             difflib compares it with the spoken script. verify.txt, verify_transcript.txt and a
             `verify` block in podcast.json: word match ratio, spans of 6+ words not heard,
             numbers not heard (with transcript context), segments to listen to. Runs by itself
             after a consented --tts gemini render (--no-verify skips); never fails the render.
+            --local, and always for the local voice's episode: Whisper on HIVE hears it back
+            twice (podcast_local.WHISPER_MODELS) and a spot counts when both agree; nothing is
+            sent.
   link   OUTDIR
          -> a "Listen" card near the top of OUTDIR/Analysis_Report.html, a line near the top of
             the Markdown report, an entry in README.html / README.md and AGENTS.md. Idempotent:
@@ -55,10 +64,12 @@ CHECKS the script, RENDERS it to audio and LINKS the audio into the outputs.
             headless Chromium plays it when one is here. Warns above ~18 MB (~25 MB attached:
             email sends base64) with Bioshare as the way to send it. Refuses while the check
             does not hold, like link.
-  job    SCRIPT.md (--core-run [internal] | --cloud-ok NOTE) [--model M] [--python PY]
-         -> ~/.proteomics-pipeline/jobs/podcast_<name>_<hash>.sh, a SLURM job (1 CPU, 2 GB, 2 h)
-            that runs render --tts gemini (verify follows), link and share -- the route on HIVE,
-            where minutes of network calls must not run on the login node. Written only when
+  job    SCRIPT.md (--core-run [internal] | --cloud-ok NOTE | --tts local) [--model M] [--python PY]
+         -> ~/.proteomics-pipeline/jobs/podcast_<name>_<hash>.sh, a SLURM job (16 CPUs, 24 GB,
+            2 h: what the local voice needs if it takes over) that runs render --tts gemini
+            (verify follows), link and share -- the route on HIVE, where minutes of network calls
+            must not run on the login node. --tts local: render --tts local, no consent, key or
+            google-genai needed. Otherwise written only when
             what the job needs is here: a passing check, consent, a python with google-genai >=
             GENAI_MIN (setup.sh installs it) and a key; in a folder only you can change (a
             group-writable session folder would let another member swap the script). Loads
@@ -78,7 +89,8 @@ GEMINI_API_KEY, else ~/.config/ucdavis-proteomics/gemini_key (on HIVE refused wh
 read it), else -- for a Core run only -- the
 Core's shared key on HIVE (CORE_KEY_FILE, used only while the Core's trust rule holds and other
 accounts cannot read it). It is never printed or logged and is scrubbed from every error message
-(notify_slack.redact: the skill's one list of secret patterns).
+(notify_slack.redact: the skill's one list of secret patterns). --tts local and its check run on
+HIVE in the Core's containers and send nothing anywhere.
 
 Stdlib only at import time: google-genai is imported by the gemini backend alone. No numpy and
 no ffmpeg requirement -- audio is assembled with array/wave; afconvert (macOS) or ffmpeg, when
@@ -175,10 +187,14 @@ VERIFY_FILES = ("verify.txt", "verify_transcript.txt")      # what verify writes
 # Gemini 3 TTS needs client.interactions (2.25.0 has it). setup.sh installs at least this into
 # the pipeline env (its GENAI_MIN; tests/test_make_podcast_hive.py keeps the two equal).
 GENAI_MIN = "2.25.0"
-# The podcast job (job): one network-bound process; an episode renders in minutes, a rate-limited
-# one in up to an hour. HIVE's ffmpeg (verified 2026-10-15, AAC encoder present) is a module, so
-# the job is a login shell (#!/bin/bash -l), where `module` exists.
-JOB_HOURS, JOB_MEM = 2, "2G"
+# The podcast job (job): Gemini is network calls -- an episode in minutes, a rate-limited one in up
+# to an hour -- but when Gemini fails in a way waiting cannot fix, the local voice makes the
+# episode in the same job: Kokoro on podcast_local.JOB_CPUS CPUs (8 workers of 2 threads, ~2.5 GB
+# each: a 24-min episode in ~2 min) and Whisper's check (~6 min). So the job asks for what that
+# needs, podcast_local.JOB_CPUS and JOB_MEM, whatever Gemini does. HIVE's ffmpeg (verified
+# 2026-10-15, AAC encoder present) and apptainer are modules, so the job is a login shell
+# (#!/bin/bash -l) that sources modules.sh first (HPC@UCD's ucd-hpc rule).
+JOB_HOURS = 2
 HIVE_FFMPEG_MODULE = "ffmpeg/7.0.2"
 
 RATE = 24000                                        # Hz, 16-bit mono throughout
@@ -1971,6 +1987,31 @@ class RestartRender(Exception):
     with the new model, so the episode never mixes two models' voices."""
 
 
+class GeminiUnusable(RenderError):
+    """Gemini failed in a way waiting cannot fix. `why`: billing (402, the project's prepay
+    credits are used up), auth (the key or its permission refused), quota (no quota on any
+    candidate model, or none of them could be used) or stalled (every candidate stopped
+    answering). render then makes the whole episode with the local voice (KokoroTTS) unless
+    --no-fallback; a rate limit, one stalled model, a transient error or a resume pinned to
+    its model is not this, and is waited out or stops with the resume message as before."""
+
+    def __init__(self, msg, why, where=None, err=None):
+        super().__init__(msg)
+        self.why, self.where = why, where
+        self.said = None
+        if err:
+            self.said = (f"{err.get('code') or '?'} {err.get('status') or '?'}: "
+                         f"{err['message'][:300]}" if err.get("message") else why_line(err, 300))
+
+
+# What the fallback says about each kind of Gemini failure (podcast.json tts.fallback.reason)
+FALLBACK_WHY = {"billing": "its prepay credits are depleted (402)",
+                "auth": "it refused the key (authentication or permission)",
+                "quota": "none of the Gemini TTS models had quota (or could be used)",
+                "stalled": "every Gemini TTS model stopped answering",
+                "none": "none of the Gemini TTS models answered or could be used"}
+
+
 def gemini_client(genai, types, key, timeout_s):
     """genai.Client with a per-request HTTP timeout and no silent SDK retries -> (client, record).
     Read from google-genai 2.31.0's source (HIVE, 2026-10-16): HttpOptions.timeout is in
@@ -2081,6 +2122,7 @@ class GeminiTTS(object):
                     f"needs: leaving out {', '.join(three)}. To use them: python3 -m pip install "
                     "-U google-genai")
         self.produced, self.models_used, self.warnings = 0, [], []
+        self.sent_chunks = set()             # chunks whose text was sent (labels)
 
     @staticmethod
     def api(model):
@@ -2494,9 +2536,11 @@ class GeminiTTS(object):
                 err = error_info(e)
                 self.note_tier(err)
                 if err["kind"] == "billing":            # credits are per project: every model
-                    raise RenderError(billing_stop("preflight", m, err))
+                    raise GeminiUnusable(billing_stop("preflight", m, err), "billing",
+                                         "preflight", err)
                 if err["kind"] == "fatal":
-                    raise RenderError(f"preflight: {m}: {why_line(err, 300)}")
+                    raise GeminiUnusable(f"preflight: {m}: {why_line(err, 300)}", "auth",
+                                         "preflight", err)
                 if err["kind"] != "rate":
                     self.unusable.append(m)
                     tried.append(f"{m}: {err['kind']} ({why_line(err, 120)})")
@@ -2521,7 +2565,10 @@ class GeminiTTS(object):
                 log(f"[render] {note}")
             return m
         before = [m for m in self.candidates if m in self.remembered]
-        raise RenderError(
+        asked = order + later
+        why = ("quota" if asked and all(m in self.unusable for m in asked) else
+               "stalled" if asked and all(m in self.stalled for m in asked) else "none")
+        raise GeminiUnusable(
             "no Gemini TTS model answered a two-line test (" + "; ".join(tried) + ")"
             + (f"; {', '.join(before)} also stopped answering in an earlier render "
                f"(podcast/.cache/{STALL_FILE})" if before else "")
@@ -2529,7 +2576,7 @@ class GeminiTTS(object):
             + (" (this key's project is on the free tier: its quotas are small)"
                if self.key_tier == "free" else "")
             + ", name a model with --model <name> (it is tried whatever happened before), or "
-            "--tts say")
+            "--tts say", why, "preflight")
 
     def _advance(self):
         nxt = None if self.produced else self._next_model()
@@ -2559,6 +2606,7 @@ class GeminiTTS(object):
         errors, waits, empty, retried_len, timeouts = 0, 0, 0, False, 0
         while True:
             self._pace()
+            self.sent_chunks.add(label)          # its text left the machine (podcast.json)
             try:
                 r = self.timed_request(chunk, speak, label)
             except RequestTimeout as e:
@@ -2575,10 +2623,10 @@ class GeminiTTS(object):
                                                       f"{self.request_timeout:.0f} s unanswered")
                     if switch:
                         raise switch
-                    raise RenderError(
+                    raise GeminiUnusable(
                         f"{label}: {self.model} did not answer within {self.request_timeout:.0f} s, "
                         f"{timeouts} times ({e}). The chunks already made are cached: re-run the "
-                        "same command to resume (--request-timeout to wait longer)")
+                        "same command to resume (--request-timeout to wait longer)", "stalled", label)
                 log(f"[render] {label}: {e}; asking once more")
                 continue
             except Exception as e:
@@ -2586,7 +2634,7 @@ class GeminiTTS(object):
                 self.note_tier(err)
                 kind = err["kind"]
                 if kind == "billing":
-                    raise RenderError(billing_stop(label, self.model, err))
+                    raise GeminiUnusable(billing_stop(label, self.model, err), "billing", label, err)
                 if kind in ("missing", "exhausted", "rejected") and self.model not in self.unusable:
                     self.unusable.append(self.model)
                 if kind in ("missing", "exhausted", "rejected") and not self.produced \
@@ -2597,11 +2645,12 @@ class GeminiTTS(object):
                                "rejected": "request rejected"}[kind]
                         log(f"[render] {was}: {why} ({why_line(err)}); trying {self.model}")
                         raise SwitchModel()
-                    raise RenderError(
+                    raise GeminiUnusable(
                         f"{label}: no Gemini TTS model could be used (tried "
                         f"{', '.join(self.candidates)}; last: {why_line(err)}). Quotas are per Cloud "
                         "project (see https://aistudio.google.com/rate-limit): re-run later "
-                        "(finished chunks are cached), use a paid-tier key, or --tts say.")
+                        "(finished chunks are cached), use a paid-tier key, or --tts say.",
+                        "quota", label, err)
                 if kind in ("missing", "exhausted", "rejected") and self.pinned and not self.produced:
                     raise self._stop(label, err, "made this episode's cached chunks, so the "
                                                  "render stays on it, but it failed")
@@ -2630,7 +2679,11 @@ class GeminiTTS(object):
                     _sleep(wait)
                     continue
                 errors += 1
-                if kind in ("fatal", "rejected") or errors >= 4:
+                if kind == "fatal":
+                    raise GeminiUnusable(f"{label} failed on {self.model}: {why_line(err, 300)}. "
+                                         "The chunks already made are cached; re-run the same "
+                                         "command to resume.", "auth", label, err)
+                if kind == "rejected" or errors >= 4:
                     raise RenderError(f"{label} failed after {errors} error(s) on "
                                       f"{self.model}: {why_line(err, 300)}. The chunks already made are "
                                       "cached; re-run the same command to resume.")
@@ -2946,7 +2999,146 @@ class SayTTS(object):
         return out
 
 
-BACKENDS = {"gemini": GeminiTTS, "say": SayTTS}
+class LocalUnavailable(RenderError):
+    """The local voice cannot run from here (podcast_local.Unavailable); `why` says why."""
+
+    def __init__(self, why):
+        super().__init__(f"the local voice (Kokoro on HIVE) is not available here: {why}")
+        self.why = why
+
+
+def local_voices(s):
+    """{host: Kokoro voice} for this script: podcast_local.VOICES by position (first host
+    bf_emma, second af_heart), or a `Local voices:` / `Kokoro voices:` header line. RenderError
+    for a voice the image does not have."""
+    import podcast_local as pl
+    try:
+        return pl.voices_for([h for h, _ in s.hosts], s.header.get("local voices")
+                             or s.header.get("kokoro voices"))
+    except ValueError as e:
+        raise RenderError(str(e))
+
+
+def local_speaker(s, voices=None):
+    """speak(text) for the local voice: the Pronunciation table with its spelled-out letters in
+    capitals (kokoro_text.fix_table), then the Kokoro text rules (kokoro_text.apply), then a host
+    whose name does not fit their Kokoro voice said by the name it is given (Leo -> Lena, whole
+    word; podcast_local.spoken_names). Only what the voice reads changes: the transcript,
+    podcast.json's hosts and Gemini's text keep Leo."""
+    import kokoro_text
+    import podcast_local as pl
+    names = pl.spoken_names(voices or local_voices(s))
+    base = pronouncer(kokoro_text.fix_table(s.pronunciation))
+    rx = (re.compile(r"\b(" + "|".join(re.escape(n) for n in names) + r")\b") if names else None)
+
+    def speak(text):
+        t = kokoro_text.apply(base(text))[0]
+        return rx.sub(lambda m: names[m.group(1)], t) if rx else t
+    return speak
+
+
+class KokoroTTS(object):
+    """The local voice: Kokoro-82M in the Core's pinned container on HIVE (podcast_local), one
+    call for every line still to make, offline -- nothing leaves campus, so no consent is needed.
+    `--tts local`, and render's fallback when Gemini fails in a way waiting cannot fix
+    (GeminiUnusable). Voices bf_emma and af_heart (Brett, 2026-10-20); a second host named Leo
+    is spoken as Lena (local_speaker). The cache key holds the image's pinned sha256, so a new
+    image never reuses another's audio. LocalUnavailable when it cannot run from here."""
+    name, cloud = "kokoro", False
+
+    def __init__(self, s, a, runner=None):
+        import podcast_local as pl
+        self.pl = pl
+        self.hosts = [h for h, _ in s.hosts]
+        self.voices = local_voices(s)
+        self.spoken_names = pl.spoken_names(self.voices)
+        if runner is None:
+            try:
+                runner = pl.find_runner()
+            except pl.Unavailable as e:
+                raise LocalUnavailable(str(e))
+        self.runner = runner
+        self.model = pl.KOKORO_LABEL
+        self.produced, self.models_used, self.warnings = 0, [self.model], []
+        self.chunks, self.speak, self.cache_dir = [], None, None
+        self.turn_wavs, self.dirs, self.timing, self.lines_made = {}, [], None, 0
+
+    def prepare(self, chunks, speak, cache_dir):
+        self.chunks, self.speak, self.cache_dir = chunks, speak, cache_dir
+        if self.runner.scratch is None and not self.runner.remote:
+            self.runner.scratch = cache_dir      # a login node's srun writes where nodes can read
+
+    def payload(self, chunk, speak, model=None):
+        return {"backend": "kokoro", "image_sha256": self.pl.KOKORO_SHA256, "rate": RATE,
+                "gap": GAP_TURN, "speed": 1.0,
+                "voices": [[h, self.voices[h]] for h in self.hosts],
+                "turns": [[t.speaker, speak(t.text)] for t in chunk.turns]}
+
+    def _make_lines(self, label):
+        """Every line of every chunk not cached yet, in ONE container call (start-up once)."""
+        lines = []
+        for c in self.chunks:
+            if os.path.isfile(os.path.join(self.cache_dir, cache_key(self, c, self.speak) + ".wav")):
+                continue
+            for t in c.turns:
+                key = (t.speaker, self.speak(t.text))
+                if key not in self.turn_wavs and key not in lines:
+                    lines.append(key)
+        if not lines:
+            return
+        try:
+            d, paths, self.timing = self.pl.speak(self.runner, dict(self.voices), lines, log)
+        except self.pl.LocalError as e:
+            raise RenderError(f"{label}: the local voice failed: {e}. The chunks already made "
+                              "are cached: re-run the same command to resume")
+        self.dirs.append(d)
+        self.turn_wavs.update(zip(lines, paths))
+        self.lines_made += len(lines)
+
+    def synth(self, chunk, speak, label):
+        if any((t.speaker, speak(t.text)) not in self.turn_wavs for t in chunk.turns):
+            self._make_lines(label)
+        out = array.array("h")
+        for k, t in enumerate(chunk.turns):
+            path = self.turn_wavs.get((t.speaker, speak(t.text)))
+            if not path or not os.path.isfile(path):
+                raise RenderError(f"{label}: no Kokoro audio for the turn at line {t.line}")
+            if k:
+                out.extend(silence(GAP_TURN))
+            out.extend(read_wav(path))
+        return out
+
+    def close(self):
+        for d in self.dirs:
+            self.runner.close(d)
+        self.dirs = []
+
+    def engine(self, s):
+        """What made this audio, for podcast.json tts.engine."""
+        import kokoro_text
+        plain = pronouncer(s.pronunciation)
+        changed = sum(1 for t in s.turns() if kokoro_text.apply(plain(t.text))[0] != plain(t.text))
+        call = ({k: self.timing.get(k) for k in (
+            "turns", "threads", "workers", "threads_per_worker", "memory_gb", "synth",
+            "startup_in_process_s", "render_s", "wall_s")} if self.timing else None)
+        return {"name": "Kokoro-82M", "model": self.pl.KOKORO_MODEL, "licence": "Apache-2.0",
+                "image": self.pl.KOKORO_IMAGE, "image_sha256": self.pl.KOKORO_SHA256,
+                "synth": self.pl.KOKORO_SYNTH, "voices": dict(self.voices),
+                "spoken_names": dict(self.spoken_names), "where": self.runner.where,
+                "made_on": "HIVE, offline: nothing was sent to any service",
+                "text_rules": "kokoro_text.py: spelled-out letters in capitals, ISO dates in "
+                              "words, versions spelled out, PROT numbers digit by digit, signs "
+                              "and number ranges in words",
+                "lines_changed_by_text_rules": changed, "lines_made": self.lines_made,
+                "container_call": call}
+
+
+BACKENDS = {"gemini": GeminiTTS, "say": SayTTS, "local": KokoroTTS}
+
+
+def speaker_for(tts, s):
+    """speak(text) for a backend: the local voice's own (local_speaker), else the pronouncer."""
+    return local_speaker(s) if tts == "local" else pronouncer(s.pronunciation)
 
 
 def cache_key(backend, chunk, speak, model=None):
@@ -3163,6 +3355,96 @@ def render_chunks(backend, chunks, speak, cache):
     return pieces, n_cached, n_new, used, warnings
 
 
+def make_pieces(backend, chunks, speak, cache, a):
+    """Every chunk's audio from `backend`, cached or made now -> (pieces, n_cached, n_new, used
+    cache keys, warnings, preflight record). --redo re-makes its segments; a Gemini model that
+    stops answering hands over and every chunk is made again (RestartRender). GeminiUnusable
+    propagates: render decides about the local voice. A backend's scratch (the local voice's
+    per-line WAVs) is removed once the pieces are read."""
+    try:
+        backend.prepare(chunks, speak, cache)
+        redo = set(getattr(a, "redo", None) or [])
+        for c in chunks:                              # re-make these segments, text unchanged
+            if c.seg + 1 in redo:
+                for ext in (".wav", ".json"):
+                    f = os.path.join(cache, cache_key(backend, c, speak) + ext)
+                    if os.path.exists(f):
+                        os.remove(f)
+        if redo:
+            log(f"[render] re-making segment(s) {', '.join(str(x) for x in sorted(redo))}")
+            if hasattr(backend, "pinned") and not getattr(a, "model", None):
+                backend.pinned = True                 # the re-made chunks join the others' voices
+        words = sum(c.words for c in chunks)
+        log(f"[render] {len(chunks)} chunk(s), {words:,} words -> about {words / float(WPM):.0f} "
+            f"min with {backend.name}")
+        # A two-line test before the first chunk this render must make (PREFLIGHT_TIMEOUT): a
+        # model that does not answer is passed over before the episode depends on it. Nothing to
+        # make, no test; --no-preflight skips it (and podcast.json says so).
+        preflight = {"run": False, "why": ("every chunk is cached" if hasattr(backend, "preflight")
+                                           else f"no two-line test for {backend.name} (offline)")}
+        if hasattr(backend, "preflight"):
+            todo = [c for c in chunks if not os.path.isfile(os.path.join(
+                cache, cache_key(backend, c, speak) + ".wav"))]
+            if getattr(a, "no_preflight", False):
+                preflight = {"run": False, "why": "--no-preflight"}
+            elif todo:
+                cached_from = backend.model if len(todo) < len(chunks) else None
+                backend.preflight(cached_from=cached_from)
+                preflight = dict(run=True, **(backend.preflight_record or {}))
+
+        # Each chunk: <key>.wav, and <key>.json with the warnings made when it was synthesized,
+        # so a resumed render still reports them. A model that stops answering mid-episode hands
+        # over (RestartRender), and every chunk is made again with the next one.
+        while True:
+            try:
+                pieces, n_cached, n_new, used, warnings = render_chunks(backend, chunks, speak,
+                                                                        cache)
+                break
+            except RestartRender:
+                continue
+    finally:
+        if hasattr(backend, "close"):
+            backend.close()
+    warnings = list(backend.switch_notes()) + warnings if hasattr(backend, "switch_notes") \
+        else warnings
+    if getattr(backend, "tier_warning", None):
+        warnings.append(backend.tier_warning)
+    return pieces, n_cached, n_new, used, warnings, preflight
+
+
+def fallback_record(e, gemini):
+    """podcast.json tts.fallback: Gemini failed in a way waiting cannot fix (GeminiUnusable `e`)
+    and the local voice made the whole episode. Google's words are scrubbed (never a key)."""
+    why = FALLBACK_WHY.get(e.why, e.why)
+    return {"from": "gemini", "to": "kokoro", "why": e.why, "reason": f"Gemini failed: {why}",
+            "google_said": scrub(e.said) if e.said else None, "stopped_at": e.where,
+            "message": scrub(e)[:600], "at": now_iso(),
+            "gemini_models": list(getattr(gemini, "candidates", None) or []),
+            "gemini_switched": list(gemini.switch_notes()) if hasattr(gemini, "switch_notes")
+            else [],
+            "chunks_sent_to_gemini": len(getattr(gemini, "sent_chunks", None) or ()),
+            "note": f"Gemini failed ({why}); the whole episode was made with Kokoro on HIVE "
+                    "instead, so it has one voice throughout"}
+
+
+def what_was_sent(backend, gemini, fallback):
+    """podcast.json tts.what_was_sent, in words."""
+    if backend.cloud:
+        return ("the transcript turns after pronunciation substitutions, plus one style line; "
+                "then, for verify (unless --no-verify), the rendered audio downsampled to 16 kHz; "
+                "never the report")
+    if backend.name != "kokoro":
+        return "nothing (offline)"
+    said = "nothing for this audio: made on HIVE with Kokoro, and heard back there with Whisper"
+    if not fallback:
+        return said
+    n = fallback["chunks_sent_to_gemini"]
+    return (said + ". Before it failed, Gemini was " + (
+        f"sent the transcript of {n} chunk(s) of this script (after pronunciation "
+        "substitutions), under the consent in cloud_tts_consent" if n else
+        "sent no text of this script (at most its two-line test)"))
+
+
 def cmd_render(a):
     s = parse_script(a.script)
     if s.problems:
@@ -3170,7 +3452,7 @@ def cmd_render(a):
             log(f"[FAIL] {'line %d: ' % line if line else ''}{msg}")
         return 2
     backend_cls = BACKENDS[a.tts]
-    speak = pronouncer(s.pronunciation)
+    speak = speaker_for(a.tts, s)
     chunks = make_chunks(s.segments)
     words = sum(c.words for c in chunks)
     if a.dry_run:                                  # a preview sends nothing: no gate needed
@@ -3195,8 +3477,8 @@ def cmd_render(a):
                 f"(downsampled) for transcription. On a free-tier key Google may use both to "
                 f"improve its products and human reviewers may read it ({TERMS_URL}). Once the "
                 f"user has agreed, re-run with --cloud-ok \"who agreed, when\" (a Core run: "
-                f"--core-run, the Core director's standing approval), or use --tts say "
-                f"(offline, macOS).")
+                f"--core-run, the Core director's standing approval), or use --tts local "
+                f"(Kokoro on HIVE) or --tts say (macOS), which send nothing.")
         return 2
     m_status, m_why = read_meaning(s)
     m_override = " ".join((getattr(a, "no_meaning_check", None) or "").split())
@@ -3207,52 +3489,44 @@ def cmd_render(a):
             "--findings <file>` (or pass --no-meaning-check \"<why>\", which podcast.json "
             "records).")
         return 2
+    if a.tts == "local":
+        # the whole render on a compute node, never a HIVE login node (HPC@UCD's ucd-hpc rules)
+        import on_compute
+        import podcast_local as pl
+        on_compute.ensure_compute_node("render --tts local speaks the whole episode with Kokoro",
+                                       minutes=60, mem=pl.JOB_MEM, cpus=pl.JOB_CPUS,
+                                       script=os.path.abspath(__file__))
     out = os.path.abspath(a.out or os.path.dirname(s.path))
     cache = os.path.join(out, ".cache")
     os.makedirs(cache, exist_ok=True)
     backend = backend_cls(s, a)
-    backend.prepare(chunks, speak, cache)
-    redo = set(getattr(a, "redo", None) or [])
-    for c in chunks:                              # re-make these segments, text unchanged
-        if c.seg + 1 in redo:
-            for ext in (".wav", ".json"):
-                f = os.path.join(cache, cache_key(backend, c, speak) + ext)
-                if os.path.exists(f):
-                    os.remove(f)
-    if redo:
-        log(f"[render] re-making segment(s) {', '.join(str(x) for x in sorted(redo))}")
-        if hasattr(backend, "pinned") and not getattr(a, "model", None):
-            backend.pinned = True                 # the re-made chunks join the others' voices
-    log(f"[render] {len(chunks)} chunk(s), {words:,} words -> about {words / float(WPM):.0f} min "
-        f"with {backend.name}")
-    # A two-line test before the first chunk this render must make (PREFLIGHT_TIMEOUT): a model
-    # that does not answer is passed over before the episode depends on it. Nothing to make, no
-    # test; --no-preflight skips it (and podcast.json says so).
-    preflight = {"run": False, "why": ("every chunk is cached" if hasattr(backend, "preflight")
-                                       else f"no two-line test for {backend.name} (offline)")}
-    if hasattr(backend, "preflight"):
-        todo = [c for c in chunks if not os.path.isfile(os.path.join(
-            cache, cache_key(backend, c, speak) + ".wav"))]
-        if getattr(a, "no_preflight", False):
-            preflight = {"run": False, "why": "--no-preflight"}
-        elif todo:
-            cached_from = backend.model if len(todo) < len(chunks) else None
-            backend.preflight(cached_from=cached_from)
-            preflight = dict(run=True, **(backend.preflight_record or {}))
-
-    # Each chunk: <key>.wav, and <key>.json with the warnings made when it was synthesized, so
-    # a resumed render still reports them. A model that stops answering mid-episode hands over
-    # (RestartRender), and every chunk is made again with the next one.
-    while True:
+    fallback, gemini = None, None
+    try:
+        pieces, n_cached, n_new, used, warnings, preflight = make_pieces(backend, chunks, speak,
+                                                                         cache, a)
+    except GeminiUnusable as e:
+        # Waiting cannot clear it: the local voice makes EVERY chunk, so one episode never mixes
+        # Gemini's voices with Kokoro's. Gemini's chunks stay in the cache for a later render.
+        if getattr(a, "no_fallback", False):
+            raise
+        gemini, fallback = backend, fallback_record(e, backend)
+        log(f"[render] Gemini failed ({FALLBACK_WHY.get(e.why, e.why)}), which waiting cannot "
+            "fix: making the WHOLE episode with the local voice (Kokoro on HIVE) instead, so it "
+            "has one voice throughout; Gemini's chunks stay in the cache")
         try:
-            pieces, n_cached, n_new, used, warnings = render_chunks(backend, chunks, speak, cache)
-            break
-        except RestartRender:
-            continue
-    warnings = list(backend.switch_notes()) + warnings if hasattr(backend, "switch_notes") \
-        else warnings
-    if getattr(backend, "tier_warning", None):
-        warnings.append(backend.tier_warning)
+            backend = KokoroTTS(s, a)
+            speak = local_speaker(s, backend.voices)
+            pieces, n_cached, n_new, used, warnings, preflight = make_pieces(backend, chunks,
+                                                                             speak, cache, a)
+        except RenderError as u:
+            raise RenderError(
+                f"{e}\n[render] Gemini failed ({FALLBACK_WHY.get(e.why, e.why)}), and the local "
+                f"voice could not make the episode instead: "
+                + (u.why if isinstance(u, LocalUnavailable) else str(u))
+                + ". No episode this time: clear Gemini's failure (above) and re-run, or run "
+                "the podcast where the local voice is available (a HIVE job: make_podcast.py "
+                "job).")
+        warnings = [fallback["note"]] + warnings
 
     audio = array.array("h")
     audio.extend(chime())
@@ -3295,29 +3569,33 @@ def cmd_render(a):
                     os.path.dirname(s.path), m.group(1))), out)) + " " + m.group(2), text)
             with open(os.path.join(out, name), "w", encoding="utf-8") as fh:
                 fh.write(text)
+    tier = gemini or backend                      # what Google's answers said about the key
+    tts = {"backend": backend.name, "model": (backend.models_used or [backend.model])[0],
+           "models_used": backend.models_used, "sample_rate": RATE,
+           "sent_to_cloud": bool(backend.cloud),
+           # the SDK's per-request timeout and retries as set (gemini_client), the two-line test
+           # before the first chunk, and any hand-over from a model that stopped answering
+           # (every chunk made again by the next one)
+           "http": getattr(backend, "http", None), "preflight": preflight,
+           "switched": list(getattr(backend, "switches", None) or []),
+           "what_was_sent": what_was_sent(backend, gemini, fallback)}
+    if backend.name == "kokoro":
+        tts.update(engine=backend.engine(s), fallback=fallback,
+                   consent="not needed: made offline on HIVE, nothing was sent to any service")
     man = {
         "show": s.show, "title": s.title,
         "hosts": [{"name": h, "role": r or None, "voice": backend.voices.get(h)} for h, r in s.hosts],
-        "tts": {"backend": backend.name, "model": (backend.models_used or [backend.model])[0],
-                "models_used": backend.models_used, "sample_rate": RATE,
-                "sent_to_cloud": bool(backend.cloud),
-                # the SDK's per-request timeout and retries as set (gemini_client), the two-line
-                # test before the first chunk, and any hand-over from a model that stopped
-                # answering (every chunk made again by the next one)
-                "http": getattr(backend, "http", None), "preflight": preflight,
-                "switched": list(getattr(backend, "switches", None) or []),
-                "what_was_sent": ("the transcript turns after pronunciation substitutions, plus "
-                                  "one style line; then, for verify (unless --no-verify), the "
-                                  "rendered audio downsampled to 16 kHz; never the report"
-                                  if backend.cloud else "nothing (offline)")},
-        "cloud_tts_consent": (consent if backend.cloud else False),
+        "tts": tts,
+        # the consent the transcript went to Gemini under: this render's, or the failed
+        # attempt's before the local voice took over (fallback)
+        "cloud_tts_consent": (consent if (backend.cloud or gemini) else False),
         # "prepaid" once a 402 showed prepay billing, "free" once a 429 named a free-tier quota
         # (this render, or this key's earlier ones); null when no answer said which tier
-        "key_tier": getattr(backend, "key_tier", None),
-        "key_tier_basis": getattr(backend, "key_tier_basis", None) or (
-            "no answer from Google named the key's tier in this render" if backend.cloud else None),
-        "key_tier_evidence": (backend.key_tier_evidence()
-                              if hasattr(backend, "key_tier_evidence") else None),
+        "key_tier": getattr(tier, "key_tier", None),
+        "key_tier_basis": getattr(tier, "key_tier_basis", None) or (
+            "no answer from Google named the key's tier in this render" if tier.cloud else None),
+        "key_tier_evidence": (tier.key_tier_evidence()
+                              if hasattr(tier, "key_tier_evidence") else None),
         "core_run": record_core_run(a.script, core_rec, "render") if core_rec else None,
         "script": "podcast_script.md", "script_sha256": s.sha256,
         "script_author": s.author,
@@ -3350,16 +3628,36 @@ def cmd_render(a):
                       "transcript": os.path.join(out, "transcript.html"),
                       "manifest": os.path.join(out, "podcast.json"),
                       "cache_pruned": prune_cache(cache, used, backend.model,
-                                                  explicit=bool(getattr(a, "model", None))),
+                                                  explicit=bool(getattr(a, "model", None))
+                                                  and not fallback),
+                      "fallback": fallback["note"] if fallback else None,
                       "warnings": warnings}, indent=2))
-    # The ASR round trip. It sends the audio, so only under this render's cloud consent. It
-    # never fails the render and never touches the report.
+    # The ASR round trip. Gemini's sends the audio, so only under this render's cloud consent; the
+    # local voice's episode is heard back on HIVE (Whisper), sending nothing. It never fails the
+    # render and never touches the report.
+    target = s.path if os.path.dirname(s.path) == out else script_copy
+    if backend.name == "kokoro":
+        retry = f"`make_podcast.py verify {script_copy}` (Whisper on HIVE; nothing is sent)"
+        heard = False
+        if getattr(a, "no_verify", False):
+            verify_not_run(out, "--no-verify was given", retry)
+        else:
+            try:
+                run_verify_local(target, out, runner=backend.runner)
+                heard = True
+            except Exception as e:
+                why = scrub(e)
+                log(f"[WARN] verify skipped: {why} (the render is fine; run {retry} to retry)")
+                verify_not_run(out, f"verify failed: {why}", retry)
+        if fallback:
+            log(f"[render] {fallback['note']}. Nothing was sent to Google for the audio"
+                + (" or its check." if heard else "."))
+        return 0
     retry = (f"`make_podcast.py verify {script_copy} "
              f"{'--core-run' if core_rec else '--cloud-ok ...'}`")
     if backend.cloud and consent and not getattr(a, "no_verify", False):
         try:
-            run_verify(s.path if os.path.dirname(s.path) == out else script_copy, out,
-                       getattr(a, "verify_model", None), consent, core=bool(core_rec))
+            run_verify(target, out, getattr(a, "verify_model", None), consent, core=bool(core_rec))
         except Exception as e:
             why = scrub(e)
             log(f"[WARN] verify skipped: {why} (the render is fine; run {retry} to retry)")
@@ -3368,7 +3666,8 @@ def cmd_render(a):
         verify_not_run(out, "--no-verify was given", retry)
     else:
         verify_not_run(out, f"an offline render ({backend.name}) sends nothing",
-                       "`make_podcast.py verify` with consent (it sends the audio to Google)")
+                       "`make_podcast.py verify` with consent (it sends the audio to Google), or "
+                       "`make_podcast.py verify --local` (Whisper on HIVE, nothing sent)")
     return 0
 
 
@@ -3735,13 +4034,9 @@ def verify_report(res, audio, how, size, model):
     return "\n".join(L) + "\n"
 
 
-def run_verify(script_path, out=None, models=None, consent=True, core=False):
-    """Transcribe the rendered audio and compare it with the spoken script. Writes
-    verify.txt, verify_transcript.txt and a `verify` block in podcast.json. -> the result dict.
-    `core`: a Core run, which may use the Core's shared key. Raises VerifyError when it cannot
-    run; never touches the report."""
-    s = parse_script(script_path)
-    out = os.path.abspath(out or os.path.dirname(s.path))
+def _rendered(out):
+    """-> (podcast.json, its path, the audio file's name, its path) of the episode in `out`;
+    VerifyError when there is none to check."""
     mpath = os.path.join(out, "podcast.json")
     try:
         with open(mpath, encoding="utf-8") as fh:
@@ -3755,6 +4050,31 @@ def run_verify(script_path, out=None, models=None, consent=True, core=False):
     apath = os.path.join(out, audio)
     if not os.path.isfile(apath):
         raise VerifyError(f"{audio} is not in {out}")
+    return man, mpath, audio, apath
+
+
+def _write_verify(out, man, mpath, res, transcript, report):
+    """verify_transcript.txt, verify.txt and podcast.json's `verify` block."""
+    with open(os.path.join(out, "verify_transcript.txt"), "w", encoding="utf-8") as fh:
+        fh.write(transcript.rstrip() + "\n")
+    with open(os.path.join(out, "verify.txt"), "w", encoding="utf-8") as fh:
+        fh.write(report)
+    man["verify"] = res
+    tmp = mpath + ".part"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(man, fh, indent=2, ensure_ascii=False)
+        fh.write("\n")
+    os.replace(tmp, mpath)
+
+
+def run_verify(script_path, out=None, models=None, consent=True, core=False):
+    """Transcribe the rendered audio and compare it with the spoken script. Writes
+    verify.txt, verify_transcript.txt and a `verify` block in podcast.json. -> the result dict.
+    `core`: a Core run, which may use the Core's shared key. Raises VerifyError when it cannot
+    run; never touches the report."""
+    s = parse_script(script_path)
+    out = os.path.abspath(out or os.path.dirname(s.path))
+    man, mpath, audio, apath = _rendered(out)
     with tempfile.TemporaryDirectory() as td:
         data, mime, how = _verify_audio(apath, td)
     if len(data) > VERIFY_INLINE_MAX:
@@ -3765,16 +4085,7 @@ def run_verify(script_path, out=None, models=None, consent=True, core=False):
     res = compare_audio_text(s, pronouncer(s.pronunciation), text)
     res.update(model=model, audio_sent=how, created=now_iso(), cloud_consent=consent,
                report="verify.txt", transcript="verify_transcript.txt")
-    with open(os.path.join(out, "verify_transcript.txt"), "w", encoding="utf-8") as fh:
-        fh.write(text.rstrip() + "\n")
-    with open(os.path.join(out, "verify.txt"), "w", encoding="utf-8") as fh:
-        fh.write(verify_report(res, audio, how, len(data), model))
-    man["verify"] = res
-    tmp = mpath + ".part"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(man, fh, indent=2, ensure_ascii=False)
-        fh.write("\n")
-    os.replace(tmp, mpath)
+    _write_verify(out, man, mpath, res, text, verify_report(res, audio, how, len(data), model))
     if res["status"] == "WARN":
         log(f"[WARN] verify: word match ratio {res['ratio']}, {len(res['gaps'])} gap(s), "
             f"{len(res['numbers_not_heard'])} number(s) not heard -- listen to segment(s) "
@@ -3785,7 +4096,125 @@ def run_verify(script_path, out=None, models=None, consent=True, core=False):
     return res
 
 
+def run_verify_local(script_path, out=None, runner=None):
+    """The ASR round trip on HIVE, sending nothing: Whisper (podcast_local.WHISPER_MODELS, in
+    the Core's pinned container) transcribes the episode twice, and each transcript is scored as
+    run_verify scores Gemini's (compare_audio_text), against what the voice was given to read:
+    for a local-voice episode local_speaker's text (Leo said as Lena included). It WARNs when the
+    main transcript's word match is below VERIFY_RATIO, or when BOTH transcriptions depart from
+    the text at the same spot (a number not heard as itself, a gap, invented words); a spot only
+    one shows is listed as a place to listen, since Whisper too invents and skips words. Writes
+    what run_verify writes. VerifyError when it cannot run."""
+    import podcast_local as pl
+    s = parse_script(script_path)
+    out = os.path.abspath(out or os.path.dirname(s.path))
+    man, mpath, audio, apath = _rendered(out)
+    tts = man.get("tts") if isinstance(man.get("tts"), dict) else {}
+    if tts.get("backend") == "kokoro":
+        engine = tts.get("engine") if isinstance(tts.get("engine"), dict) else {}
+        voices = engine.get("voices")
+        speak = local_speaker(s, voices if isinstance(voices, dict) and voices else None)
+    else:
+        speak = pronouncer(s.pronunciation)
+    if runner is None:
+        try:
+            runner = pl.find_runner()
+        except pl.Unavailable as e:
+            raise VerifyError(f"the local check (Whisper on HIVE) is not available here: {e}")
+    if runner.scratch is None and not runner.remote:
+        runner.scratch = os.path.join(out, ".cache")      # where a compute node can read it
+        os.makedirs(runner.scratch, exist_ok=True)
+    try:
+        asr = pl.hear(runner, apath, log)
+    except pl.LocalError as e:
+        raise VerifyError(f"the local check failed: {e}")
+    m1, m2 = pl.WHISPER_MODELS
+    scores = {m: compare_audio_text(s, speak, asr[m].get("text") or "") for m in (m1, m2)}
+    said = " ".join(speak(t.text) for t in s.turns())
+    agreed, one_only = pl.compare_two(sys.modules[__name__], said, asr[m1], asr[m2])
+    for d in one_only:
+        d["by"] = (m1, m2)[d["by"]]
+    res = dict(scores[m1])
+    res.update(
+        status="WARN" if (res["ratio"] < VERIFY_RATIO or agreed) else "OK",
+        model=(f"whisper {m1} ({asr[m1].get('compute_type') or '?'} on "
+               f"{asr[m1].get('device') or '?'}, on HIVE)"),
+        second_model=f"whisper {m2}",
+        second={k: scores[m2][k] for k in ("ratio", "coverage", "gaps", "numbers_not_heard",
+                                           "status")},
+        agreed_departures=agreed, one_transcriber_only=one_only,
+        status_rule=(f"WARN when the word match is below {VERIFY_RATIO}, or when both "
+                     "transcriptions show the same spot (a number not heard as itself, 6+ words "
+                     "not heard, or invented words)"),
+        image=pl.WHISPER_IMAGE, image_sha256=pl.WHISPER_SHA256, where=runner.where,
+        audio_sent="nothing sent: transcribed on HIVE", created=now_iso(), cloud_consent=False,
+        report="verify.txt", transcript="verify_transcript.txt",
+        seconds={m: asr[m].get("transcribe_s") for m in (m1, m2)})
+    _write_verify(out, man, mpath, res, asr[m1].get("text") or "",
+                  verify_report_local(res, audio, (m1, m2)))
+    if res["status"] == "WARN":
+        log(f"[WARN] verify: word match ratio {res['ratio']}, {len(agreed)} spot(s) where both "
+            f"transcriptions agree the audio departs from the text -- listen at the times in "
+            f"{os.path.join(out, 'verify.txt')}")
+    else:
+        log(f"[verify] word match ratio {res['ratio']}; no spot both transcriptions agree on "
+            "(Whisper on HIVE; nothing was sent)")
+    return res
+
+
+def verify_report_local(res, audio, models):
+    """verify.txt for the local check (run_verify_local)."""
+    import podcast_local as pl
+    L = [f"Podcast audio check (ASR round trip, on HIVE): {res['status']}",
+         f"audio: {audio} (transcribed on HIVE with Whisper in "
+         f"{os.path.basename(res['image'])}; nothing was sent anywhere)",
+         f"transcribed by: whisper {models[0]}, second opinion whisper {models[1]}",
+         f"status rule: {res['status_rule']}",
+         f"checked: {res['created']}",
+         f"word match ratio: {res['ratio']} (difflib, normalised words; WARN below "
+         f"{VERIFY_RATIO}) · script words: {res['words_script']:,} · heard: "
+         f"{res['words_heard']:,} · script words matched: {res['coverage']:.1%}",
+         "", "SPOTS BOTH TRANSCRIPTIONS AGREE THE AUDIO DEPARTS FROM THE TEXT: "
+             f"{len(res['agreed_departures'])}"]
+    L += [f"- at {pl.clock(d['at_s'])} [{d['kind']}] text \"{d['script']}\" -- heard "
+          f"\"{d['heard'] or '(nothing)'}\"" for d in res["agreed_departures"]]
+    if res["one_transcriber_only"]:
+        L += ["", "HEARD DIFFERENTLY BY ONE TRANSCRIBER ONLY (most likely that transcriber; "
+                  "listen if in doubt)"]
+        L += [f"- at {pl.clock(d['at_s'])} [{d['kind']}, {d['by']}] text \"{d['script']}\" -- "
+              f"heard \"{d['heard'] or '(nothing)'}\"" for d in res["one_transcriber_only"]]
+    if res["status"] == "WARN":
+        L += ["", "Listen at the times above. A misread name or number: add or fix its row in "
+                  "the script's Pronunciation table, re-run check, then render again (only "
+                  "changed chunks are re-made) and verify again."]
+    L += ["", "The ASR can mishear too: a flagged spot is a place to listen, not proof of an "
+              "audio fault. A clean result is not a listen either."]
+    return "\n".join(L) + "\n"
+
+
+def _episode_backend(a):
+    """The backend that made the episode verify is asked about (podcast.json), or None."""
+    out = os.path.abspath(a.out or os.path.dirname(os.path.abspath(a.script)))
+    try:
+        with open(os.path.join(out, "podcast.json"), encoding="utf-8") as fh:
+            tts = json.load(fh).get("tts")
+        return tts.get("backend") if isinstance(tts, dict) else None
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
 def cmd_verify(a):
+    # The local voice's episode is always heard back on HIVE: nothing of it goes to Google.
+    if getattr(a, "local", False) or _episode_backend(a) == "kokoro":
+        try:
+            res = run_verify_local(a.script, a.out)
+        except (VerifyError, RenderError) as e:
+            log(f"[verify] could not verify: {scrub(e)}")
+            return 1
+        print(json.dumps({k: res.get(k) for k in ("status", "ratio", "coverage", "words_script",
+                                                  "words_heard", "agreed_departures", "model",
+                                                  "second_model")}, indent=2))
+        return 0
     consent, core_rec, refusal = consent_of(a)
     if not consent:
         if refusal:
@@ -3795,7 +4224,7 @@ def cmd_verify(a):
                 f"to Google's Gemini API for transcription. On a free-tier key Google may use it "
                 f"to improve its products and human reviewers may hear it ({TERMS_URL}). Once "
                 f"the user has agreed, re-run with --cloud-ok \"who agreed, when\" (a Core run: "
-                f"--core-run).")
+                f"--core-run), or check it on HIVE with --local (Whisper; nothing is sent).")
         return 2
     try:
         res = run_verify(a.script, a.out, a.model, consent, core=bool(core_rec))
@@ -3849,9 +4278,13 @@ def transcript_html(s, man, out, embedded=False):
     claims = ("<ul>" + "".join(f"<li>{_inline(c)}</li>" for c in s.claims) + "</ul>" if s.claims
               else "<p>None listed.</p>")
     tts = man["tts"]
+    spoken = ((tts.get("engine") or {}).get("spoken_names") or {}) if isinstance(
+        tts.get("engine"), dict) else {}
     rows = [["Hosts", esc(", ".join(f"{h['name']} ({h['role']})" if h.get("role") else h["name"]
                                     for h in man["hosts"]))],
-            ["Voices", esc(", ".join(f"{h['name']}: {h['voice']}" for h in man["hosts"]))],
+            ["Voices", esc(", ".join(f"{h['name']}: {h['voice']}" + (
+                f" (said as {spoken[h['name']]})" if h["name"] in spoken else "")
+                for h in man["hosts"]))],
             ["Speech", esc(f"{tts['backend']} ({', '.join(tts['models_used']) or tts['model']})"
                            + ("; the transcript text was sent to this cloud service"
                               if tts["sent_to_cloud"] else "; made offline"))],
@@ -4895,11 +5328,12 @@ def private_dir(path):
     return None
 
 
-def job_python(given=None):
+def job_python(given=None, genai=True):
     """The python the podcast job runs -> (path, its google-genai version, None), or (None, None,
     why). --python, else the skill's env here (setup.json's `python`, where setup.sh installs
     google-genai), else this python: the first whose google-genai is GENAI_MIN or newer. The
-    python that writes the job is often not it -- on HIVE `python3` is the system's."""
+    python that writes the job is often not it -- on HIVE `python3` is the system's. `genai`
+    False (the local voice's job, which needs only the standard library): the first that runs."""
     cands = [given]
     if not given:
         try:
@@ -4913,6 +5347,11 @@ def job_python(given=None):
         if not (isinstance(py, str) and py) or py in seen:
             continue
         seen.add(py)
+        if not genai:
+            if shutil.which(py) or os.access(py, os.X_OK):
+                return py, None, None
+            tried.append(f"{py}: not found")
+            continue
         v = None
         try:
             r = subprocess.run([py, "-c", "import google.genai as g; print(g.__version__)"],
@@ -4924,43 +5363,55 @@ def job_python(given=None):
         if v and _vtuple(v) >= _vtuple(GENAI_MIN):
             return py, v, None
         tried.append(f"{py}: " + (f"google-genai {v}" if v else "no google-genai"))
+    if not genai:
+        return None, None, f"no python found ({'; '.join(tried) or 'none named'}): name one with --python"
     return None, None, (f"no python here has google-genai >= {GENAI_MIN}, which Gemini 3 TTS "
                         f"needs ({'; '.join(tried) or 'none found'}). `bash "
                         f"{os.path.join(HERE, 'setup.sh')}` installs it into the pipeline env; "
                         "or name a python with --python")
 
 
-def write_job(path, py, script, out, consent_args, models, queue, log_path, name):
-    """The job script: render --tts gemini (verify follows), link, share -> its text, written
+def write_job(path, py, script, out, consent_args, models, queue, log_path, name, tts="gemini"):
+    """The job script: render --tts gemini (verify follows; the local voice takes over when
+    Gemini fails in a way waiting cannot fix) or --tts local, link, share -> its text, written
     mode 700 into the private jobs folder (private_dir). The log path is DOUBLE-quoted: sbatch
     reads `--output="a b/c"` as one path in a real run (HIVE, 2026-10-15); an unquoted space
     ends the directive, and single quotes pass --test-only but leave no log in a real run.
     --open-mode=append: a requeued job adds to its log instead of starting it over."""
     if re.search(r'["\n]', log_path):
         raise RenderError(f"the job's log path cannot hold a quote or a line break: {log_path!r}")
+    import podcast_local as pl
     part, acct, qos, requeue = queue
     q = shlex.quote
     L = ["#!/bin/bash -l", f"#SBATCH --job-name=podcast_{name}",
-         f'#SBATCH --output="{log_path}"', "#SBATCH --open-mode=append",
-         "#SBATCH --cpus-per-task=1", f"#SBATCH --mem={JOB_MEM}", f"#SBATCH --time={JOB_HOURS}:00:00"]
+         f'#SBATCH --output="{log_path}"', "#SBATCH --open-mode=append", "#SBATCH --ntasks=1",
+         f"#SBATCH --cpus-per-task={pl.JOB_CPUS}", f"#SBATCH --mem={pl.JOB_MEM}",
+         f"#SBATCH --time={JOB_HOURS}:00:00"]
     L += [f"#SBATCH --{k}={v}" for k, v in (("partition", part), ("account", acct), ("qos", qos))
           if v]
     if requeue:
         L.append("#SBATCH --requeue")
-    L += ["# Written by make_podcast.py job: the episode in Gemini voices (render; verify, the ASR",
-          "# round trip, follows by itself), linked into the report (link) and built into",
-          "# Analysis_Report_with_audio.html (share). Minutes of network calls: a job, never the",
-          "# login node. Submitting it again resumes -- rendered chunks are cached in podcast/.cache.",
+    L += (["# Written by make_podcast.py job: the episode in Gemini voices (render; verify, the ASR",
+           "# round trip, follows by itself; when Gemini fails in a way waiting cannot fix, the",
+           "# local voice -- Kokoro on HIVE -- makes the whole episode instead, in this job's CPUs),"]
+          if tts == "gemini" else
+          ["# Written by make_podcast.py job: the episode in the local voice (render --tts local:",
+           "# Kokoro on HIVE, then Whisper's check on HIVE; nothing is sent anywhere),"])
+    L += ["# linked into the report (link) and built into Analysis_Report_with_audio.html (share).",
+          "# A job, never the login node. Submitting it again resumes: chunks are cached in",
+          "# podcast/.cache.",
+          "# `module` in a job: modules.sh first, whatever the login shell set (HPC@UCD's ucd-hpc)",
+          "[ -r /etc/profile.d/modules.sh ] && . /etc/profile.d/modules.sh >/dev/null 2>&1",
           "set -uo pipefail",
-          "# AAC needs ffmpeg, a module on HIVE (this is a login shell, so `module` exists)",
+          "# AAC needs ffmpeg, and the local voice apptainer: modules on HIVE",
           f"if command -v module >/dev/null 2>&1; then module load {HIVE_FFMPEG_MODULE} >/dev/null "
-          "2>&1 || module load ffmpeg >/dev/null 2>&1; fi",
+          "2>&1 || module load ffmpeg >/dev/null 2>&1; module load apptainer >/dev/null 2>&1; fi",
           "command -v ffmpeg >/dev/null 2>&1 || command -v afconvert >/dev/null 2>&1 || echo "
           f"\"[WARN] no ffmpeg here (module load {HIVE_FFMPEG_MODULE} failed): the episode stays "
           "podcast.wav, about 58 MB for 20 min, and share cannot build the report with the "
           "audio\" >&2",
           f"PY={q(py)}", f"MP={q(os.path.abspath(__file__))}",
-          " ".join(['"$PY" "$MP" render', q(script), "--tts", "gemini"]
+          " ".join(['"$PY" "$MP" render', q(script), "--tts", tts]
                    + [q(x) for x in consent_args + models]) + " || exit $?",
           f'"$PY" "$MP" link {q(out)} || exit $?',
           f'"$PY" "$MP" share {q(out)}', ""]
@@ -4975,9 +5426,11 @@ def write_job(path, py, script, out, consent_args, models, queue, log_path, name
 
 
 def cmd_job(a):
-    """Write the SLURM job that renders a checked script in Gemini voices, then link and share.
-    What the job needs is checked here first -- the check, consent, google-genai, a key -- so a
-    missing piece is one line now, not a failed job later."""
+    """Write the SLURM job that renders a checked script in Gemini voices (or, --tts local, in
+    the local voice), then link and share. What the job needs is checked here first -- the check;
+    for Gemini also consent, google-genai and a key -- so a missing piece is one line now, not a
+    failed job later."""
+    local = getattr(a, "tts", None) == "local"
     if not os.path.isfile(a.script):
         log(f"[job] refusing: {a.script} is not there: put podcast_script.md in the session's "
             "output/podcast/ first.")
@@ -5005,23 +5458,28 @@ def cmd_job(a):
             f"sentence first: `make_podcast.py meaning {a.script} --brief`, then `--verdict "
             "PASS --reviewer ... --findings ...` (or --no-meaning-check \"<why>\").")
         return 2
-    consent, core_rec, refusal = consent_of(a)
-    if not consent:
+    consent, core_rec, refusal = (False, None, None) if local else consent_of(a)
+    if not (consent or local):
         log("[job] refusing: " + (refusal or "the job sends the transcript and the audio to "
                                   "Google, so it needs consent: --core-run for a Core run, or "
                                   "--cloud-ok \"<who agreed, when>\" from the person whose data "
-                                  "it is."))
+                                  "it is. Or --tts local: the local voice on HIVE, which sends "
+                                  "nothing."))
         return 2
-    py, version, why = job_python(a.python)
+    py, version, why = job_python(a.python, genai=not local)
     if not py:
         log(f"[job] refusing: {why}")
         return 2
-    key, src, why = find_key(bool(core_rec))
-    if not key:
-        log(f"[job] refusing: no Gemini API key for the job: set GEMINI_API_KEY or put it in "
-            f"{KEY_FILE} (chmod 600)" + (f"; {why}" if why else ""))
-        return 2
-    del key                                          # only where it is was needed
+    src = None
+    if not local:
+        key, src, why = find_key(bool(core_rec))
+        if not key:
+            log(f"[job] refusing: no Gemini API key for the job: set GEMINI_API_KEY or put it in "
+                f"{KEY_FILE} (chmod 600)" + (f"; {why}" if why else "")
+                + ". Or --tts local: the local voice on HIVE needs no key.")
+            return 2
+        del key                                      # only where it is was needed
+    import podcast_local as pl
     try:
         import diann_parallel                      # needs_requeue: the one rule
         import run_search                          # slurm_queue: never a hard-coded queue
@@ -5029,7 +5487,7 @@ def cmd_job(a):
         log(f"[job] cannot choose a SLURM queue: {e}. The skill's scripts are incomplete here; "
             "put them again (hive_exec.sh --put-skill).")
         return 2
-    part, acct, qos = run_search.slurm_queue(peak_cpus=1, preemptible_ok=True)
+    part, acct, qos = run_search.slurm_queue(peak_cpus=pl.JOB_CPUS, preemptible_ok=True)
     requeue = diann_parallel.needs_requeue(part, qos)
     session = _session_of(out)
     jobs = os.path.join(pipeline_home(), "jobs")
@@ -5041,28 +5499,37 @@ def cmd_job(a):
                   or os.path.basename(session))[:40]
     stem = f"podcast_{name}_{sha256_bytes(os.path.realpath(session).encode('utf-8'))[:8]}"
     path, log_path = os.path.join(jobs, stem + ".sh"), os.path.join(jobs, stem + "_%j.log")
-    if core_rec:
+    if local:
+        consent_args = []
+    elif core_rec:
         consent_args = ["--core-run"] + (["internal"] if core_rec["kind"] == "internal" else [])
     else:
         consent_args = ["--cloud-ok"] + ([consent] if isinstance(consent, str) else [])
-    models = [x for m in (a.model or []) for x in ("--model", m)]
+    models = [] if local else [x for m in (a.model or []) for x in ("--model", m)]
     if m_why and m_override:                       # the render records the override
         models += ["--no-meaning-check", m_override]
     try:
         write_job(path, py, os.path.abspath(a.script), out, consent_args, models,
-                  (part, acct, qos, requeue), log_path, name)
+                  (part, acct, qos, requeue), log_path, name, tts="local" if local else "gemini")
     except (RenderError, OSError) as e:
         log(f"[job] refusing: {e}")
         return 2
     print(json.dumps({"job": path, "submit": f"sbatch {shlex.quote(path)}",
                       "log": log_path.replace("%j", "<jobid>"),
                       "python": py, "google_genai": version, "key": src,
-                      "consent": (f"Core run ({core_rec['kind']}"
-                                  + (f", {core_rec['prot']}" if core_rec.get("prot") else "")
-                                  + "): CORE_CLOUD_OK") if core_rec else "--cloud-ok",
+                      "consent": ("not needed: the local voice sends nothing" if local else
+                                  (f"Core run ({core_rec['kind']}"
+                                   + (f", {core_rec['prot']}" if core_rec.get("prot") else "")
+                                   + "): CORE_CLOUD_OK") if core_rec else "--cloud-ok"),
                       "queue": {"partition": part, "account": acct, "qos": qos,
                                 "requeue": requeue},
-                      "steps": ["render --tts gemini (then verify)", "link", "share"]}, indent=2))
+                      "resources": {"cpus": pl.JOB_CPUS, "mem": pl.JOB_MEM,
+                                    "hours": JOB_HOURS},
+                      "steps": (["render --tts local (then the check: Whisper on HIVE)"]
+                                if local else
+                                ["render --tts gemini (then verify; the local voice makes the "
+                                 "whole episode if Gemini fails in a way waiting cannot fix)"])
+                      + ["link", "share"]}, indent=2))
     return 0
 
 
@@ -5109,7 +5576,9 @@ def main(argv=None):
     r = sub.add_parser("render", help="render a checked script to audio")
     r.add_argument("script")
     r.add_argument("--out", help="output folder (default: the script's folder)")
-    r.add_argument("--tts", required=True, choices=sorted(BACKENDS))
+    r.add_argument("--tts", required=True, choices=sorted(BACKENDS),
+                   help="gemini: Gemini voices (cloud; consent needed); local: the local voice, "
+                        "Kokoro on HIVE (nothing sent); say: macOS voices (offline)")
     consent_args(r, "consent to send the transcript to the cloud TTS service; optionally a "
                     "note of who agreed and when (recorded in podcast.json)")
     r.add_argument("--model", action="append", help="Gemini TTS model(s) to use, in order "
@@ -5141,7 +5610,11 @@ def main(argv=None):
                    help="re-make these segments (numbered from 1) although their text is "
                         "unchanged: audio that verify or a listener found dropped or garbled")
     r.add_argument("--no-verify", action="store_true",
-                   help="skip the ASR round trip that follows a --tts gemini render")
+                   help="skip the ASR round trip that follows a --tts gemini or local render")
+    r.add_argument("--no-fallback", action="store_true",
+                   help="when Gemini fails in a way waiting cannot fix (402 prepay credits, the "
+                        "key refused, no quota on any model, every model stalled), stop with the "
+                        "resume message instead of making the whole episode with the local voice")
     r.add_argument("--verify-model", action="append", help="text model(s) for verify")
     r.add_argument("--dry-run", action="store_true",
                    help="print the chunks as they would be spoken; send nothing")
@@ -5162,6 +5635,9 @@ def main(argv=None):
     v.add_argument("script")
     v.add_argument("--out", help="the folder with podcast.json (default: the script's folder)")
     consent_args(v, "consent to send the audio to Gemini for transcription")
+    v.add_argument("--local", action="store_true",
+                   help="hear it back on HIVE with Whisper instead (sends nothing; always so for "
+                        "an episode the local voice made)")
     v.add_argument("--model", action="append", help="text model(s) to transcribe with")
     k = sub.add_parser("link", help="link the podcast into the report, README and AGENTS.md")
     k.add_argument("outdir", help="the folder with Analysis_Report.html and podcast/")
@@ -5179,8 +5655,12 @@ def main(argv=None):
     h.add_argument("--no-browser", action="store_true",
                    help="skip the headless-browser playback test")
     j = sub.add_parser("job", help="write the SLURM job (HIVE) that renders the checked script in "
-                                   "Gemini voices, verifies, links and shares it")
+                                   "Gemini voices (or the local voice), verifies, links and "
+                                   "shares it")
     j.add_argument("script", help="<session>/output/podcast/podcast_script.md, checked")
+    j.add_argument("--tts", choices=("gemini", "local"), default="gemini",
+                   help="gemini (default; the local voice takes over if Gemini fails in a way "
+                        "waiting cannot fix) or local (Kokoro on HIVE: no consent or key needed)")
     consent_args(j, "consent to send the transcript and audio to Gemini: a note of who agreed "
                     "and when (recorded in podcast.json)")
     j.add_argument("--model", action="append", help="Gemini TTS model(s) for render, in order")
