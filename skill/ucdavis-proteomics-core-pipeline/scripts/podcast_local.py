@@ -289,7 +289,18 @@ class Srun(Runner):
         step ends. A job HIVE refuses, or that never starts, is a LocalError saying so."""
         import on_compute
         cpus, mem, minutes = STEPS[step]
-        note = os.path.join(self._base(), JOB_FILE)
+        tag = "[verify]" if step == "hear" else "[render]"
+        # beside the episode's cache (never bound into a container, so any path will do)
+        note = os.path.join(self.scratch or self._base(), JOB_FILE)
+        try:                         # one left by a podcast job that was cancelled mid-step
+            with open(note, encoding="utf-8") as fh:
+                old = (fh.read().split() or ["?"])[0]
+            os.remove(note)
+            if log:
+                log(f"{tag} an earlier local-voice job, {old}, was noted and may still be "
+                    f"running: `scancel {old}` if it is")
+        except OSError:
+            pass
         script = (f"echo \"$SLURM_JOB_ID {step} $(date -u +%Y-%m-%dT%H:%M:%SZ)\" > "
                   f"{shlex.quote(note)}\n" + script)
         try:
@@ -300,7 +311,7 @@ class Srun(Runner):
 
         def started(job):
             if log:
-                log(f"[render] the local voice's {step} step runs as HIVE job {job} ({cpus} CPUs, "
+                log(f"{tag} the local voice's {step} step runs as HIVE job {job} ({cpus} CPUs, "
                     f"{mem}); `scancel {job}` stops it (also noted in {note})")
         try:
             rc, out, err = _run(argv, minutes + 15, drop_slurm=True, watch=(note, started))
@@ -310,7 +321,9 @@ class Srun(Runner):
                 os.remove(note)
             except OSError:
                 pass
-        if rc and not ran:
+        # refused or never started: srun's own words decide (the note, written on another node,
+        # may not show here yet); the note only proves that the job did start
+        if rc and not ran and _REFUSED.search(err or ""):
             raise LocalError(f"HIVE did not give the local voice a job ({_tail(err, 300)})")
         return rc, out, err
 
@@ -402,6 +415,9 @@ SLURM_KEEP = ("SLURM_CONF",)
 # The HIVE job a local-voice step runs as (Srun): its id, the step and when it started, beside the
 # episode's cache while it runs, so cancelling the podcast job can cancel it too
 JOB_FILE = "local_voice.job"
+# srun's words for a job SLURM would not start (not a task that ran and failed)
+_REFUSED = re.compile(r"srun: error: (?:Unable to allocate|.*(?:Invalid (?:account|partition|qos)"
+                      r"|QOSMax|AssocMax|[Aa]ccess denied|not available|job .* revoked))")
 
 
 def _run(argv, minutes, drop_slurm=False, watch=None):

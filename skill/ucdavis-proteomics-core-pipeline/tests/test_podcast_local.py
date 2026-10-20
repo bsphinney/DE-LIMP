@@ -800,6 +800,18 @@ class NoKey(Local):
         self.assertNotIn("Gemini, tried first", read(os.path.join(self.pod, "transcript.html")))
         self.assertIn("No Gemini key was set; the whole episode was made with Kokoro", fb["note"])
 
+    def test_a_key_file_found_but_not_used_says_why(self):
+        """Review of 86671ee1: a key file refused for its mode was reported as no key."""
+        why = "~/.config/ucdavis-proteomics/gemini_key is not used: other accounts can read it"
+        with mock.patch.object(mp, "find_key", return_value=(None, None, why)):
+            rc, out, err = self.render_no_key()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("other accounts can read it", err)                 # the advice is logged
+        fb = self.manifest()["tts"]["fallback"]
+        self.assertEqual(fb["reason"], f"No usable Gemini key ({why})")
+        self.assertIn("Gemini was not asked: no usable Gemini key", self.manifest()["tts"]
+                      ["what_was_sent"])
+
     def test_no_fallback_still_stops(self):
         rc, out, err = self.render_no_key("--no-fallback")
         self.assertEqual(rc, 1)
@@ -842,6 +854,43 @@ class QuotaHandOver(Local):
                          [(STALLS, ANSWERS, "quota")])
         self.assertIn("ran out of its daily quota", man["warnings"][0])
         self.assertEqual(self.container_calls(), [], "Gemini still had a model")
+
+    def test_a_spent_budget_after_a_quota_hand_over_is_not_a_stall(self):
+        release = threading.Event()
+        self.addCleanup(release.set)
+        p = mock.patch.object(mp, "HEARTBEAT", 0.05)
+        p.start()
+        self.addCleanup(p.stop)
+        seen = {"n": 0}
+
+        def behaviour(model, contents, config):
+            if model == STALLS:
+                seen["n"] += 1
+                if seen["n"] > 1:
+                    raise ApiError(429, "RESOURCE_EXHAUSTED", rpc_error(self.DAILY))
+                return pcm_for(contents)
+            release.wait(30)                                     # the next model hangs once
+            return pcm_for(contents)
+        rc, out, err, log = self.render(behaviour, "--model", STALLS, "--model", ANSWERS,
+                                        "--request-timeout", "0.3", "--request-timeout-budget",
+                                        "0.004")
+        self.assertEqual(rc, 1, err)
+        self.assertIn("unanswered requests have cost", err)
+        self.assertEqual(self.container_calls(), [])
+
+    def test_one_model_out_of_quota_falls_back_with_a_true_message(self):
+        seen = {"n": 0}
+
+        def behaviour(model, contents, config):
+            seen["n"] += 1
+            if seen["n"] > 1:
+                raise ApiError(429, "RESOURCE_EXHAUSTED", rpc_error(self.DAILY))
+            return pcm_for(contents)
+        rc, out, err, log = self.render(behaviour, "--model", ANSWERS)
+        self.assertEqual(rc, 0, err)
+        fb = self.manifest()["tts"]["fallback"]
+        self.assertIn("no other Gemini model can be used", fb["message"])
+        self.assertNotIn(f"resume with {ANSWERS}", fb["message"])
 
     def test_every_model_out_of_quota_falls_back(self):
         seen = {"n": 0}
@@ -1158,6 +1207,39 @@ class Sizing(unittest.TestCase):
                                 for m in said), said)
             self.assertFalse(os.path.exists(os.path.join(d, pl.JOB_FILE)), "removed after")
 
+    def test_a_note_left_by_a_cancelled_podcast_job_is_named_then_replaced(self):
+        """Review of 86671ee1: a cancelled podcast job leaves its step's note behind."""
+        with tempfile.TemporaryDirectory() as d:
+            write(os.path.join(d, pl.JOB_FILE), "9999 speak 2026-10-20T20:00:00Z\n")
+            r = pl.Srun(inside_job=True)
+            r.scratch = d
+            said = []
+
+            def srun(cmd, *a, **k):
+                return ["env", "SLURM_JOB_ID=4242", "bash", "-c", cmd[2] + "\nsleep 3"]
+            with mock.patch("on_compute.srun_argv", side_effect=srun):
+                rc, out, err = r.run("true", "hear", said.append)
+            self.assertEqual(rc, 0, err)
+            self.assertTrue(any("an earlier local-voice job, 9999" in m and "`scancel 9999`" in m
+                                for m in said), said)
+            self.assertTrue(any(m.startswith("[verify]") and "HIVE job 4242" in m for m in said),
+                            said)
+            self.assertFalse(os.path.exists(os.path.join(d, pl.JOB_FILE)))
+
+    def test_a_job_that_started_and_failed_is_not_called_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            r = pl.Srun(inside_job=True)
+            r.scratch = d
+            for name, argv in (
+                    ("wrote its note", lambda cmd: ["env", "SLURM_JOB_ID=4242", "bash", "-c",
+                                                    cmd[2] + "\nexit 5"]),
+                    ("a task's exit", lambda cmd: ["bash", "-c", "echo 'srun: error: n1: task 0: "
+                                                   "Exited with exit code 4' >&2; exit 4"])):
+                with self.subTest(name), \
+                        mock.patch("on_compute.srun_argv", side_effect=lambda c, *a, **k: argv(c)):
+                    rc, out, err = r.run("true", "speak")          # no LocalError
+                    self.assertNotEqual(rc, 0)
+
     def test_a_job_hive_refuses_is_said_plainly(self):
         with tempfile.TemporaryDirectory() as d:
             r = pl.Srun(inside_job=True)
@@ -1334,6 +1416,8 @@ class Job(unittest.TestCase):
         rc, out, err = t.job("--core-run")
         self.assertEqual(rc, 0, err)
         self.assertIn("the job's render will make the episode with the local voice", err)
+        # a python with google-genai is still preferred: a key may be saved before it runs
+        self.assertEqual(json.loads(out)["google_genai"], "2.31.0")
 
 
 class Documented(unittest.TestCase):
