@@ -81,10 +81,10 @@ class FindPriorIsFreshByDefault(unittest.TestCase):
         next_commands. The condition is the user coming back, and it comes before the bullets."""
         with open(os.path.join(SKILL, "SKILL.md"), encoding="utf-8") as fh:
             md = fh.read()
-        step = md[md.index("### 0c."):md.index("### 1. ")]
+        step = " ".join(md[md.index("### 0c."):md.index("### 1. ")].split())   # layout-free
         rule = step.index("resume only when it is unfinished work the user is coming back to")
         self.assertLess(rule, step.index("**COMPLETED"))
-        self.assertIn("A new request (new settings, or \"analyse\nthese files\") is fresh", step)
+        self.assertIn("A new request (new settings, or \"analyse these files\") is fresh", step)
         self.assertIn("never resubmit one that is RUNNING without asking", step)
         self.assertNotIn("Only unfinished work is a resume", step)
 

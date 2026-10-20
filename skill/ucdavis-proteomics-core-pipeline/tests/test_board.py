@@ -158,9 +158,9 @@ class ReferenceMatchesTheClient(unittest.TestCase):
 
     def test_skill_md_points_to_the_reference(self):
         with open(os.path.join(SKILL, "SKILL.md"), encoding="utf-8") as fh:
-            skill = fh.read()
+            skill = " ".join(fh.read().split())     # line breaks are layout, not content
         self.assertIn("references/board.md", skill)
-        self.assertIn("bash\n   scripts/board.sh start --prot", skill)
+        self.assertIn("bash scripts/board.sh start --prot", skill)
 
 
 if __name__ == "__main__":

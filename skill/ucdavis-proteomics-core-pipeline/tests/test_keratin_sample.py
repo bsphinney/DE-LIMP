@@ -1235,12 +1235,12 @@ class SkillDocAsksAtStep3(unittest.TestCase):
         return self.doc[start:start + len(head) + (nxt.start() if nxt else len(self.doc))]
 
     def test_step3_asks_the_sample_type(self):
-        s3 = self.section("### 3. Ask organism + experimental design")
+        s3 = " ".join(self.section("### 3. Ask organism + experimental design").split())
         # asked since 2.10 -- of Core staff since 2.12 only when a choice depends on it
         # (tests/test_sample_type_asked.py); keratin is decided from that answer, and Core staff
         # get the one keratin question when the submission names a keratin tissue
         self.assertIn("**Sample type — never infer it; ask outside users, and Core staff only "
-                      "when a choice\n  depends on it.**", s3)
+                      "when a choice depends on it.**", s3)
         self.assertIn("**Is the sample keratin?** Decide it from the sample type the user gave",
                       s3)
         self.assertIn("ask only \"are the samples keratin tissue", s3)

@@ -64,7 +64,7 @@ class ReviewsAreKept(unittest.TestCase):
         """2026-10: three step-8d reviewers, run from a teammate, all ended without handing
         their report back (twice); told to also write it to a file, they delivered."""
         s = text()
-        d8 = s[s.index("### 8d."):s.index("### 8e.")]
+        d8 = " ".join(s[s.index("### 8d."):s.index("### 8e.")].split())     # layout-free
         self.assertIn("<S>/logs/review_<proteomics|biology|statistics>.md", d8)
         self.assertIn("never delivered", d8)
-        self.assertIn("hive_remote: locally, then `hive_exec.sh\n--put`", d8)
+        self.assertIn("hive_remote: locally, then `hive_exec.sh --put`", d8)

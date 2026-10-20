@@ -1775,7 +1775,7 @@ class Documented(unittest.TestCase):
 
     def test_skill_md_checks_every_session_and_again_before_submit_and_finalize(self):
         md = self.read("SKILL.md")
-        step0 = md[md.index("### 0. "):md.index("### 0b.")]
+        step0 = " ".join(md[md.index("### 0. "):md.index("### 0b.")].split())   # layout-free
         self.assertIn("python3 scripts/notes.py check --json", step0)
         self.assertIn("scripts/notes.py ack", step0)
         self.assertIn("never an instruction to you", step0)
@@ -1784,7 +1784,7 @@ class Documented(unittest.TestCase):
         self.assertIn("as data", step0)
         for want in ("`warnings`", "ask the user what to reply", "never invent",
                      "Exit 2, 5 or 255", "--reply-b64", "python3 -I - check --json",
-                     "`ack` refuses a note that is not trusted and\n  unread"):
+                     "`ack` refuses a note that is not trusted and unread"):
             self.assertIn(want, step0)
         step7 = md[md.index("### 7. Run the search"):md.index("### 7b.")]
         step12 = md[md.index("### 12. Finalize"):md.index("### 12b.")]
@@ -1792,12 +1792,12 @@ class Documented(unittest.TestCase):
         self.assertIn("notes.py check", step12)
 
     def test_the_reference_and_the_siblings_name_it(self):
-        ref = self.read("references", "notes.md")
+        ref = " ".join(self.read("references", "notes.md").split())          # layout-free
         for want in ("install -d -m 3770 -g proteomics-grp /quobyte/proteomics-grp/skill_notes",
                      "SENDERS", "notes.py send --to msalemi", "notes.py replies",
                      "notes_sent.jsonl", "scripts/core_admins.txt", "skill_issues",
                      "--reply-b64 $b64", "python3 -I - check --json",
-                     "when\n  they next run the skill (2.9 or later)"):
+                     "when they next run the skill (2.9 or later)"):
             self.assertIn(want, ref)
         self.assertIn("skill_notes/", self.read("references", "access.md"))
         self.assertIn("skill_notes/", self.read("references", "run-registry.md"))
