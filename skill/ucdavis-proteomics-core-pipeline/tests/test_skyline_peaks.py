@@ -681,6 +681,34 @@ class TestFollowUp(unittest.TestCase):
             self.assertIn(name, ("Bruker timsTOF", "Thermo Fusion", "Thermo Q Exactive",
                                  "Thermo Stellar", "Thermo Quantiva"))
 
+    def test_a_second_request_replaces_the_first(self):
+        with tempfile.TemporaryDirectory() as td:
+            w = os.path.join(td, "skyline", sp.WORK)
+            dest = os.path.join(td, sp.FOLLOWUP_DIR)
+            for d in (os.path.join(w, "prm"), os.path.join(w, "logs"), dest):
+                os.makedirs(d)
+            p = dict(plan_for(work=w), out=os.path.join(td, "skyline"))
+            with open(os.path.join(w, "plan.json"), "w") as fh:
+                json.dump(p, fh)
+            targets = sp.prm_plan({"family": "orbitrap"}, ["thermo_fusion"], True, None)
+            with open(os.path.join(w, "prm", "prm.json"), "w") as fh:
+                json.dump({"targets": targets, "dest": dest}, fh)
+            for f in (os.path.join(w, "prm", "refined.sky"), os.path.join(dest, targets[0]["file"])):
+                with open(f, "w") as fh:
+                    fh.write("old")
+
+            def fake(plan, args, log_name, minutes, rw=()):
+                # Skyline refuses an --out that exists: the last request's files are gone first
+                self.assertFalse(os.path.exists(os.path.join(w, "prm", "refined.sky")))
+                self.assertEqual(rw, [dest])
+                with open(os.path.join(dest, targets[0]["file"]), "w") as fh:
+                    fh.write("Compound,m/z\nA,1\n")
+                return 0, os.path.join(w, "logs", log_name)
+            with mock.patch.object(sp, "run_skyline", fake):
+                self.assertEqual(sp.main(["prm-run", "--work", w]), 0)
+            with open(os.path.join(dest, "followup_assay.json")) as fh:
+                self.assertEqual(json.load(fh)["rows"], {targets[0]["file"]: 1})
+
     def test_readme_says_ce_is_left_for_the_method(self):
         rec = {"name": "T", "family": "timstof"}
         spec = {"targets": sp.prm_plan(rec, ["bruker_timstof"], True, None)}

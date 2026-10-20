@@ -2039,7 +2039,16 @@ def cmd_prm_run(a):
     plan = _plan_of(a.work)
     spec = load_json(os.path.join(plan["work"], "prm", "prm.json"))
     rec = load_record(plan["out"]) or {}
-    rc, log = run_skyline(plan, [f"--batch-commands={win(os.path.join(plan['work'], 'prm', 'prm_batch.txt'))}"],
+    # a second request writes the same documents and lists: Skyline refuses to overwrite an
+    # --out document ("already exists"; the HIVE test), so the last request's own files go first
+    prm_dir = os.path.join(plan["work"], "prm")
+    for f in os.listdir(prm_dir):
+        if re.match(r"^(?:refined|prm|srm)\.sky", f):
+            os.remove(os.path.join(prm_dir, f))
+    for f in [t["file"] for t in spec["targets"]] + ["README.md", "followup_assay.json"]:
+        if os.path.isfile(os.path.join(spec["dest"], f)):
+            os.remove(os.path.join(spec["dest"], f))
+    rc, log = run_skyline(plan, [f"--batch-commands={win(os.path.join(prm_dir, 'prm_batch.txt'))}"],
                           "prm.txt", JOB_MINUTES["prm"], rw=[spec["dest"]])
     counts, srm_self = {}, 0
     for t in spec["targets"]:
