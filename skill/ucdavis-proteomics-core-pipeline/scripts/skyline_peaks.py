@@ -85,6 +85,7 @@ TOP_N_DEFAULT = 10                  # proteins checked (--top)
 APEX_DIFF_S = 6.0                   # Skyline's apex this far from DIA-NN's: a different peak
 PRECURSORS_DRAWN = 3                # per protein, the strongest by Skyline's fragment area
 MAX_RUNS_DRAWN = 12                 # columns in a peak picture (every run is in the tables)
+MAX_RUNS_AREAS = 48                 # bars in a peak-area chart; more runs: the pictures' runs
 FRAGMENTS_DRAWN = 8
 # Chromatogram extraction around DIA-NN's identification times (--full-scan-rt-filter=ms2_ids).
 # The feasibility trial's two settings, both checked against DIA-NN: +-1 min on an 11-min timsTOF
@@ -1008,8 +1009,11 @@ def chromatograms(rows):
         except ValueError:
             continue
         z = int(_float(r.get("ProductCharge")) or 1)
-        out.setdefault((key, run_of(r.get("FileName") or "")), []).append(
-            (f"{ion}{'+' * z}", t, y))
+        label = f"{ion}{'+' * z}"
+        traces = out.setdefault((key, run_of(r.get("FileName") or "")), [])
+        # a peptide of two checked proteins is exported once per protein: draw it once
+        if all(lab != label for lab, _t, _y in traces):
+            traces.append((label, t, y))
     return out
 
 
@@ -1083,7 +1087,8 @@ def draw_areas(path, title, keys, runs, tran_rows, sky_by):
                 continue
             ion = f"{r.get('FragmentIon')}{'+' * int(_float(r.get('ProductCharge')) or 1)}"
             run = run_of(r.get("FileName") or "")
-            frag.setdefault(ion, {})[run] = frag.get(ion, {}).get(run, 0.0) + (_float(r.get("Area")) or 0.0)
+            # once per ion and run: a peptide of two checked proteins is reported under each
+            frag.setdefault(ion, {}).setdefault(run, _float(r.get("Area")) or 0.0)
         bottom = [0.0] * len(runs)
         for n, ion in enumerate(list(frag)[:FRAGMENTS_DRAWN]):
             vals = [frag[ion].get(r, 0.0) for r in runs]
@@ -1460,8 +1465,26 @@ def make_plan(a, inp):
     return plan
 
 
+# What an earlier peak check wrote into the output folder: removed before a new one is planned, so
+# no picture, table or cache of the last run is taken for this one's (the join would reuse a stale
+# per-file cache, and a stale status file would pass for a finished import).
+OWN_OUTPUTS = re.compile(r"^(?:peaks_.+\.png|areas_.+\.png|skyline_precursors\.tsv|"
+                         r"disagreements\.tsv|.+_top_hits\.sky\.zip)$")
+
+
+def clear_previous(out):
+    work = os.path.join(out, WORK)
+    if os.path.isdir(work):
+        shutil.rmtree(work)
+    if os.path.isdir(out):
+        for f in os.listdir(out):
+            if OWN_OUTPUTS.match(f):
+                os.remove(os.path.join(out, f))
+
+
 def write_jobs(plan, queue):
     w = plan["work"]
+    clear_previous(plan["out"])
     os.makedirs(os.path.join(w, "logs"), exist_ok=True)
     os.makedirs(os.path.join(w, "status"), exist_ok=True)
     os.makedirs(os.path.join(w, "search"), exist_ok=True)
@@ -1503,6 +1526,12 @@ def planned_record(plan):
 def cmd_plan(a):
     inp = resolve_inputs(a)
     out = inp["out"]
+    rec = load_record(out)
+    if rec and rec.get("status") == "planned" and not a.replan:
+        raise SystemExit(f"skyline_peaks.py plan: a peak check was planned here at "
+                         f"{rec.get('written')} and has not written its result (`status` says "
+                         f"more). Wait for its jobs to end; to plan again anyway (its jobs "
+                         f"cancelled first), pass --replan")
     try:
         plan = make_plan(a, inp)
         import run_search
@@ -1790,7 +1819,8 @@ def finish(plan, build, imported, failed):
         title = f"{t['gene']} ({t['protein_group']})"
         draw_peaks(os.path.join(out, f"peaks_{base}.png"), title, keys, runs, chrom, sky_by, dia,
                    shown)
-        draw_areas(os.path.join(out, f"areas_{base}.png"), title, keys, runs_all, tran, sky_by)
+        draw_areas(os.path.join(out, f"areas_{base}.png"), title, keys,
+                   runs_all if len(runs_all) <= MAX_RUNS_AREAS else runs, tran, sky_by)
         why = (f"{t['contrast']}, adjusted p {t['adj_p']:.2g}" if t.get("adj_p") is not None
                else "one of the most abundant proteins")
         nf = sum(1 for k in keys for r in runs if (key_label(k), r) in flag_keys)
@@ -2042,6 +2072,8 @@ def main(argv=None):
         s.add_argument("--partition")
         s.add_argument("--account")
         s.add_argument("--qos")
+        s.add_argument("--replan", action="store_true",
+                       help="plan again although the last plan has not written its result")
     sk = sub.add_parser("skip")
     sk.add_argument("--session")
     sk.add_argument("--out")
