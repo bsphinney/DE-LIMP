@@ -388,9 +388,25 @@ cmp_sentence <- sprintf(paste0("The comparisons were %s, each a log2 ratio numer
 CHANNEL_SHARE_BAND <- c(0.5, 1.5)   # x the equal share (1/plex) before a channel is "unbalanced"
 INCORPORATION_MIN <- 95             # % labelled; SILAC practice asks for > 95%
 checks <- list()
-chk <- function(check, status, message, detail = NULL)
-  checks[[length(checks) + 1]] <<- list(check = check, status = status, message = message,
-                                        detail = detail %||% list())
+# The report's Audit & caveats is a plain-language table (audit_results.client_section_md): each
+# check carries its own label and, in `plain`, what its result means for the results in words a
+# client reads -- the message stays the technical record (AUDIT.md). This pipeline writes them;
+# the audit knows no pipeline by name.
+SILAC_CHECK_LABELS <- c(
+  silac_channel_balance = "SILAC channel mix", silac_replicates = "SILAC replicates",
+  silac_zero_point = "Centring of the SILAC ratios", silac_single_precursor = "Hits resting on one peptide",
+  silac_label_residue_bias = "Lysine and arginine labels agree",
+  silac_label_incorporation = "Label incorporation",
+  silac_label_declaration = "How the label was declared in the search",
+  silac_channel_norm = "The search's channel normalisation",
+  silac_replicate_independence = "Independent replicates",
+  silac_detection_patterns = "Proteins seen in only some channels",
+  silac_unlisted_proteins = "Proteins with no ratio")
+chk <- function(check, status, message, detail = NULL, plain = NULL)
+  checks[[length(checks) + 1]] <<- c(
+    list(check = check, status = status, message = message, detail = detail %||% list()),
+    if (!is.null(plain)) list(plain = plain),
+    if (!is.na(SILAC_CHECK_LABELS[check])) list(label = unname(SILAC_CHECK_LABELS[check])))
 eq <- 100 / max(1, length(unique(ratio_asg$Channel)))
 share_rng <- chsum[, .(lo = min(share_percent), hi = max(share_percent)), by = Group]
 off_band <- share_rng[hi > CHANNEL_SHARE_BAND[2] * eq | lo < CHANNEL_SHARE_BAND[1] * eq]
@@ -405,22 +421,30 @@ if (nrow(off_band)) {
     paste(sprintf("%s %.0f-%.0f%%", share_rng$Group, share_rng$lo, share_rng$hi), collapse = ", "), eq),
     list(equal_share_percent = eq, band = CHANNEL_SHARE_BAND,
          per_group = setNames(lapply(seq_len(nrow(share_rng)), function(i)
-           list(min = share_rng$lo[i], max = share_rng$hi[i])), share_rng$Group)))
+           list(min = share_rng$lo[i], max = share_rng$hi[i])), share_rng$Group)),
+    plain = paste("The labelled samples were not mixed in equal amounts. The tested ratios are",
+                  "centred to remove that offset, so they read relative to the typical protein; the",
+                  "strongest decreases in the smaller channel may show only as missing detections."))
 } else chk("silac_channel_balance", "PASS", sprintf(
   "Every channel holds %.0f-%.0f%% of the signal per run (an equal mix gives %.0f%%).",
-  min(chsum$share_percent), max(chsum$share_percent), eq))
+  min(chsum$share_percent), max(chsum$share_percent), eq),
+  plain = "The labelled samples were mixed in similar amounts.")
 for (ct in names(tables_rec)) {
   t <- tables_rec[[ct]]; n <- t$n_replicates_available; mr <- t$min_replicates
   if (n < mr)
     chk("silac_replicates", "WARN", sprintf(paste(
       "%s: only %d replicate(s) hold both channels, below the %d a ratio needs to be tested; no",
-      "protein is tested in this comparison."), ct, n, mr))
+      "protein is tested in this comparison."), ct, n, mr),
+      plain = "A comparison has too few replicates holding both channels, so no protein could be tested in it.")
   else if (n == mr)
     chk("silac_replicates", "WARN", sprintf(paste(
       "%s: %d replicates, the minimum: a protein is tested only when every replicate has its ratio,",
-      "and the variance rests on %d values per protein (moderated by limma)."), ct, n, n))
+      "and the variance rests on %d values per protein (moderated by limma)."), ct, n, n),
+      plain = paste("A comparison has the minimum number of replicates: a protein is tested only when",
+                    "every replicate measured it, and the statistics rest on few values."))
   else chk("silac_replicates", "PASS", sprintf("%s: %d replicates; a protein is tested with a ratio in at least %d.",
-                                               ct, n, mr))
+                                               ct, n, mr),
+                plain = "The comparison has more replicates than the minimum it needs.")
   z <- t$zero_point
   if (is.finite(z$max_abs_difference %||% NA_real_) && z$max_abs_difference > z$tolerance)
     chk("silac_zero_point", "WARN", sprintf(paste(
@@ -430,16 +454,32 @@ for (ct in names(tables_rec)) {
       "%s down) against %d (%d up, %d down) as reported; read the up/down balance with that in mind."),
       ct, z$max_abs_difference, z$tolerance, format(z$n_significant_mode_centred %||% NA),
       format(z$n_up_mode_centred %||% NA), format(z$n_down_mode_centred %||% NA),
-      t$n_significant, t$n_up, t$n_down), z)
+      t$n_significant, t$n_up, t$n_down), z,
+      plain = paste("In at least one run the ratios' zero point may be shifted, so read the balance",
+                    "of increases and decreases with care."))
   else chk("silac_zero_point", "PASS", sprintf(
     "%s: the median protein ratio (the zero) is within %.2f log2 of the density peak in every run.",
-    ct, z$tolerance), z)
-  if (t$n_significant)
+    ct, z$tolerance), z,
+    plain = "The ratios' zero point agrees with where most proteins sit.")
+  # one finding per comparison that HAS such hits; none at all is said once, below -- a
+  # comparison with none beside one with some made the client's row contradict itself
+  # (review of 2.13.2, round 2)
+  if (t$n_significant && t$n_significant_one_precursor > 0)
     chk("silac_single_precursor", "INFO", sprintf(paste(
       "%s: %d of the %d significant protein groups rest on a single precursor in at least one",
       "replicate (min_precursors = 1); limma's variance moderation treats them like the rest, so",
-      "confirm the ones that matter."), ct, t$n_significant_one_precursor, t$n_significant))
+      "confirm the ones that matter."), ct, t$n_significant_one_precursor, t$n_significant),
+      plain = paste("Some significant proteins rest on a single peptide in at least one replicate:",
+                    "confirm those that matter before relying on them."))
 }
+sig_cts <- Filter(function(ct) tables_rec[[ct]]$n_significant > 0, names(tables_rec))
+if (length(sig_cts) && !any(vapply(sig_cts, function(ct)
+      tables_rec[[ct]]$n_significant_one_precursor > 0, logical(1))))
+  chk("silac_single_precursor", "INFO", sprintf(paste(
+    "No significant protein group rests on a single precursor in any replicate (%s)."),
+    paste(sprintf("%s: 0 of %d", sig_cts, vapply(sig_cts, function(ct)
+      as.integer(tables_rec[[ct]]$n_significant), integer(1))), collapse = "; ")),
+    plain = "No significant protein rests on a single peptide in any replicate.")
 # A label that reads K- and R-ending precursors of one protein differently (silac_residue_bias):
 # per CHANNEL pair, heavier over lighter, whatever groups they hold (a label swap must not cancel
 # it), judged on the median and run by run; a deuterated label is named, since its retention
@@ -462,7 +502,8 @@ for (i in seq_along(used_ch)) for (j in seq_along(used_ch)) if (i < j) {
   if (kr$n_pairs < RESIDUE_BIAS_MIN_PAIRS) {
     chk("silac_label_residue_bias", "INFO", sprintf(paste(
       "%s: K- against R-ending precursors not compared: %d protein-run pairs hold both (fewer",
-      "than %d)."), key, kr$n_pairs, RESIDUE_BIAS_MIN_PAIRS), kr)
+      "than %d)."), key, kr$n_pairs, RESIDUE_BIAS_MIN_PAIRS), kr,
+      plain = "Not checked: too few proteins had both kinds of labelled peptide.")
     next
   }
   pr <- unlist(kr$per_run)
@@ -484,11 +525,14 @@ for (i in seq_along(used_ch)) for (j in seq_along(used_ch)) if (i < j) {
                                                          ch$K$composition %||% "?"), "")), collapse = "; "))
       else paste("Neither channel's label is recorded as deuterated: check the labels used, the label",
                  "incorporation and arginine-to-proline conversion (heavy arginine) before reading",
-                 "these ratios.")), kr)
+                 "these ratios.")), kr,
+      plain = paste("Lysine- and arginine-ending peptides of the same protein give different ratios",
+                    "between these channels, so effects of a similar size should be read with care."))
   else chk("silac_label_residue_bias", "PASS", sprintf(paste(
     "Channels %s: lysine- and arginine-ending precursors of the same protein agree (median difference",
     "%+.2f log2 over %d protein-run pairs, per run %+.2f to %+.2f; within %.2f)."), key, kr$median,
-    kr$n_pairs, min(pr), max(pr), RESIDUE_BIAS_MAX), kr)
+    kr$n_pairs, min(pr), max(pr), RESIDUE_BIAS_MAX), kr,
+    plain = "Lysine- and arginine-ending peptides of the same protein agree.")
 }
 if (length(incorp)) {
   low <- Filter(function(x) isTRUE(x$median_percent < INCORPORATION_MIN), incorp)
@@ -499,28 +543,39 @@ if (length(incorp)) {
   chk("silac_label_incorporation", if (length(low)) "WARN" else "PASS", paste0(
     "Label incorporation from the label-check runs (a lower bound): ", txt, ".",
     if (length(low)) sprintf(paste(" Below %g%%: unlabelled protein in the labelled cells adds light",
-                                   "signal and pulls ratios towards the light channel."), INCORPORATION_MIN) else ""))
+                                   "signal and pulls ratios towards the light channel."), INCORPORATION_MIN) else ""),
+    plain = if (length(low)) paste("The label was not fully taken up in at least one labelled",
+                                   "culture, which pulls ratios towards the unlabelled channel.")
+            else sprintf("The label was taken up fully (above %g%%) in the labelled cultures.",
+                         INCORPORATION_MIN))
 } else chk("silac_label_incorporation", "INFO", paste(
   "Label incorporation was not measured: every run is a mix that holds the light channel by design,",
   "and plexDIA gives each peptide one channel, so a partly labelled peptide is not searched. Measure",
   "it on a labelled-only injection of each labelled culture (a design row with that channel alone), or",
-  "from a search with the labels as variable modifications (two-site method, references/silac.md)."))
+  "from a search with the labels as variable modifications (two-site method, references/silac.md)."),
+  plain = "Not measured: label uptake needs an injection of a labelled culture on its own.")
 if (doubled > 0)
   chk("silac_label_declaration", "WARN", sprintf(paste(
     "%.1f%% of the precursor ids carry the label twice (%s(%s)(%s)): the search declared it twice",
     "(--lib-fixed-mod on a library predicted from the FASTA), which DIA-NN reports as not supported.",
     "The channels were still assigned, but for a deliverable re-search with estimate_params.py",
-    "--labels (references/silac.md)."), 100 * doubled, "K", lg, lg))
+    "--labels (references/silac.md)."), 100 * doubled, "K", lg, lg),
+    plain = paste("The search declared the label in a way the search engine does not support; the",
+                  "channels were still assigned, but the search should be repeated with the label",
+                  "declared once."))
 if (!is.null(cn) && identical(cn$given, FALSE))
   chk("silac_channel_norm", "INFO", paste(
     "The search's channel normalisation (", cn$flag %||% "?", ") is a DEFAULT, not user-confirmed.",
     "These ratios do not use DIA-NN's normalised quantities, so it does not change them; it changes",
-    "the report's normalised columns (Precursor.Normalised, PG.MaxLFQ)."))
+    "the report's normalised columns (Precursor.Normalised, PG.MaxLFQ)."),
+    plain = "A search setting was left at its default; it does not change the ratios reported here.")
 if (is.null(replicates_arg))
   chk("silac_replicate_independence", "INFO", paste(
     "Whether each replicate is a separate culture and mix was not confirmed: each Replicate in the",
     paste0("design is taken to be one", TAG, "."), "Re-injections of one mix must share a Replicate (they",
-    "are then averaged); counted as separate replicates they would make the p-values too small."))
+    "are then averaged); counted as separate replicates they would make the p-values too small."),
+    plain = paste("It was not confirmed that each replicate is a separate culture and mix; if some are",
+                  "re-injections of one mix, the statistics would be too optimistic."))
 chk("silac_detection_patterns", "INFO", sprintf(paste(
   "%d protein groups are detected (channel q-value passed in >= %d replicates) in some channels and",
   "not detected in any replicate of another: no ratio, so not tested; listed in",
@@ -528,12 +583,17 @@ chk("silac_detection_patterns", "INFO", sprintf(paste(
   "rate, and not detected is not absent, especially in the channel with less protein. Check the list",
   "for whole pathways before calling it a loading or detection-limit effect."), nrow(specific), min_reps_all,
   if (nrow(specific)) paste(sprintf("%s: %d", names(table(specific$pattern)), as.integer(table(specific$pattern))),
-                            collapse = "; ") else "none"))
+                            collapse = "; ") else "none"),
+  plain = if (nrow(specific) > 0)
+    paste("Some proteins are detected in some channels but not in others. They have no ratio,",
+          "so they are listed separately as detection patterns, not tested.")
+  else "No protein is detected in some channels while missing from every replicate of another.")
 if (length(unlisted))
   chk("silac_unlisted_proteins", "INFO", sprintf(paste(
     "%d protein groups were detected but appear in neither a DE_silac table (no ratio) nor the detection",
     "patterns (detected in too few replicates of every channel): they are only in SILAC_sample_matrix.csv."),
-    length(unlisted)))
+    length(unlisted)),
+    plain = "Some proteins were detected too rarely to get a ratio or a detection pattern; they are only in the sample matrix.")
 
 # ---- figures ------------------------------------------------------------------------------------
 dir.create(figdir, recursive = TRUE, showWarnings = FALSE)

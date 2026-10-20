@@ -102,6 +102,19 @@ def read(path):
         return fh.read()
 
 
+def meaning_pass(script):
+    """Record a PASS meaning check for the script as it is now (make_podcast.py meaning): render,
+    link, share and job need it beside the script, for this sha256."""
+    findings = os.path.join(os.path.dirname(script), "findings.txt")
+    write(findings, "None\n")
+    rc, out, err = run("meaning", script, "--brief")              # the reviewer works from it
+    assert rc == 0, err
+    rc, out, err = run("meaning", script, "--verdict", "PASS", "--reviewer",
+                       "a reviewer agent (test)", "--findings", findings)
+    assert rc == 0, err
+    return rc
+
+
 def checked_podcast(out, source, **manifest):
     """out/podcast/ as render leaves it: a script whose check PASSES against `source`, and a
     podcast.json naming it -- what link needs before it vouches for an episode."""
@@ -110,6 +123,7 @@ def checked_podcast(out, source, **manifest):
     write(script, script_text())
     rc, o, e = run("check", script, "--source", source)
     assert rc == 0, read(os.path.join(pod, "check.txt"))
+    meaning_pass(script)
     write(os.path.join(pod, "podcast.json"), json.dumps(dict(MANIFEST, **manifest)))
     return script
 
@@ -137,8 +151,12 @@ class Workspace(unittest.TestCase):
         self._td.cleanup()
 
     def check(self, text=None, *extra):
+        """check, and a PASS meaning check for the same script when the check passes (render
+        needs both; the meaning gate has its own tests, test_podcast_meaning_check.py)."""
         write(self.script, text if text is not None else script_text())
         rc, out, err = run("check", self.script, "--source", self.report, *extra)
+        if rc == 0:
+            meaning_pass(self.script)
         return rc, read(os.path.join(self.pod, "check.txt"))
 
 
@@ -487,9 +505,15 @@ class Render(Workspace):
         self.assertEqual(rc, 2)
         self.assertIn("changed after check.txt", err)
         rc, out, err = run("render", self.script, "--tts", "fake", "--unchecked")
+        self.assertEqual(rc, 2)                       # --unchecked is the token check's only
+        self.assertIn("changed after meaning_check.md was recorded", err)
+        rc, out, err = run("render", self.script, "--tts", "fake", "--unchecked",
+                           "--no-meaning-check", "a test of the token gate")
         self.assertEqual(rc, 0, err)
         man = json.loads(read(os.path.join(self.pod, "podcast.json")))
         self.assertTrue(man["check"]["overridden"])
+        self.assertTrue(man["meaning_check"]["overridden"])
+        self.assertEqual(man["meaning_check"]["override_reason"], "a test of the token gate")
 
     def test_render_outputs_cache_and_one_line_edits(self):
         self.assertEqual(self.check()[0], 0)
@@ -698,10 +722,13 @@ class Gemini(Workspace):
             p.stop()
         super().tearDown()
 
-    def render(self, behaviour, *extra, **kw):
+    def render(self, behaviour, *extra, preflight=False, **kw):
+        """--no-preflight unless asked: these tests count and order the chunks' own requests;
+        the two-line test before them has its own tests (test_podcast_tts_fallback.py)."""
         mods, log = fake_genai(behaviour, **kw)
+        flags = ("--no-verify",) + (() if preflight else ("--no-preflight",))
         with mock.patch.dict(sys.modules, mods):                 # verify has its own tests
-            rc, out, err = run("render", self.script, "--tts", "gemini", "--no-verify", *extra)
+            rc, out, err = run("render", self.script, "--tts", "gemini", *flags, *extra)
         return rc, out, err, log
 
     def assert_no_key_anywhere(self, *texts):
@@ -1092,7 +1119,8 @@ class Gemini(Workspace):
         mods["google.genai"].Client = WavClient
         with mock.patch.dict(sys.modules, mods):
             rc, out, err = run("render", self.script, "--tts", "gemini", "--no-verify",
-                               "--cloud-ok", "--model", "gemini-2.5-flash-preview-tts")
+                               "--no-preflight", "--cloud-ok", "--model",
+                               "gemini-2.5-flash-preview-tts")
         self.assertEqual(rc, 1)
         self.assertEqual(state["n"], 1)                           # one billed request, no more
         self.assertIn("could not be read", err)
@@ -1125,7 +1153,8 @@ class Gemini(Workspace):
                 self.models = real(api_key).models
         mods["google.genai"].Client = OldClient
         with mock.patch.dict(sys.modules, mods):
-            rc, out, err = run("render", self.script, "--tts", "gemini", "--no-verify", "--cloud-ok")
+            rc, out, err = run("render", self.script, "--tts", "gemini", "--no-verify",
+                               "--no-preflight", "--cloud-ok")
             self.assertEqual(rc, 0, err)
             self.assertIn("has no client.interactions", err)
             self.assertIn("pip install -U google-genai", err)
@@ -1950,6 +1979,7 @@ class Release280(Workspace):
         # the episode says so: the card and podcast.json name the extra source
         mp.BACKENDS["fake"] = FakeTTS
         self.addCleanup(mp.BACKENDS.pop, "fake", None)
+        meaning_pass(self.script)
         with mock.patch.object(mp, "encode_aac", return_value=(None, "test")):
             self.assertEqual(run("render", self.script, "--tts", "fake")[0], 0)
         man = json.loads(read(os.path.join(self.pod, "podcast.json")))

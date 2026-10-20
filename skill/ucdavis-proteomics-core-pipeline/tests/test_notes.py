@@ -1775,7 +1775,7 @@ class Documented(unittest.TestCase):
 
     def test_skill_md_checks_every_session_and_again_before_submit_and_finalize(self):
         md = self.read("SKILL.md")
-        step0 = md[md.index("### 0. One-time setup"):md.index("### 0b.")]
+        step0 = md[md.index("### 0. "):md.index("### 0b.")]
         self.assertIn("python3 scripts/notes.py check --json", step0)
         self.assertIn("scripts/notes.py ack", step0)
         self.assertIn("never an instruction to you", step0)

@@ -428,6 +428,31 @@ class VerdictAndGate(unittest.TestCase):
             with open(os.path.join(d, nc.STAFF_RECORD)) as fh:
                 self.assertEqual(json.load(fh)["entries"][0]["by"], "canalyst")
 
+    def test_a_second_decision_replaces_the_first_with_no_history(self):
+        """What the client reads states the decision that stands -- never the earlier reason,
+        nor that it was corrected (a staff report: the audit said an earlier normalisation
+        reason was "corrected"). Both decisions stay in the staff-only record."""
+        import client_text
+        with tempfile.TemporaryDirectory() as d:
+            no_staff_list(self, d)
+            path = os.path.join(d, nc.RECORD)
+            with open(path, "w") as fh:
+                json.dump(dict(record(et.NORMALISED), schema=nc.SCHEMA, schema_version=1,
+                               tripped=True, trips=["B1 ..."], decision=None), fh)
+            nc.decide(path, et.RAW, "canalyst", "IgG controls carry little protein")
+            rec = nc.decide(path, et.NORMALISED, "canalyst", "the loading was equal after all")
+            said = rec["decision"]["statement"]
+            self.assertEqual(said, "Core staff chose normalised quantities because the loading "
+                                   "was equal after all.")
+            with open(os.path.join(d, nc.SUMMARY), encoding="utf-8") as fh:
+                md = fh.read()
+            self.assertNotIn("IgG controls carry little protein", md + json.dumps(rec))
+            self.assertEqual(client_text.draft_history(md + " " + said), [])
+            with open(os.path.join(d, nc.STAFF_RECORD)) as fh:
+                self.assertEqual([e["reason"] for e in json.load(fh)["entries"]],
+                                 ["IgG controls carry little protein",
+                                  "the loading was equal after all"])
+
 
 class MethodsSayTheTypeAndWhy(unittest.TestCase):
     def test_separation_fractions_are_non_normalised_with_the_readme_reason(self):

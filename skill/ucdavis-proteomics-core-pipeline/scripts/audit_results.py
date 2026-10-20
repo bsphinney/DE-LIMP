@@ -103,8 +103,298 @@ CONTAMINANT_PATTERNS = ("KRT", "KRTAP",            # keratins (skin/hair)
 CONTAMINANT_WORDS = ("keratin", "trypsin", "casein", "contaminant", "cRAP")
 
 
-def add(findings, cid, status, message, detail=None):
-    findings.append({"check": cid, "status": status, "message": message, "detail": detail or {}})
+def add(findings, cid, status, message, detail=None, plain=None, label=None):
+    """One finding. `message` is the technical record (AUDIT.md, staff); `plain` is what it means
+    for the results in words a client reads, when it differs from its check's usual words
+    (PLAIN); `label` names a check PLAIN does not know (a pipeline's own)."""
+    f = {"check": cid, "status": status, "message": message, "detail": detail or {}}
+    if plain:
+        f["plain"] = plain
+    if label:
+        f["label"] = label
+    findings.append(f)
+
+
+# ---- the client's view: one plain row per check ----------------------------------------------
+# The report's "Audit & caveats" is a table a client can read: what was checked, the result, what
+# it means for the results (client_section_md). A staff report: the raw AUDIT.md -- check codes,
+# the normalisation check's B1-B4 strings, Normalisation.Instability values, "implausibly high
+# ... not real biology" -- went to clients, and neither staff nor clients could read it. The words
+# are written HERE, beside each check, never by the model writing the report; a finding that
+# means something else than its check's usual words carries its own (`plain`), and a pipeline's
+# own checks (de_provenance.json `checks`, e.g. run_silac.R's) carry their own label and words.
+# The technical AUDIT.md stays the full record.
+RESULT_WORDS = {"PASS": "✅ Passed", "WARN": "⚠️ Caution", "FAIL": "⛔ Problem", "INFO": "ℹ️ Note"}
+_RANK = {"INFO": 0, "PASS": 1, "WARN": 2, "FAIL": 3}
+# A check with no words of its own (a pipeline's check from before 2.13.2): never its message.
+GENERIC_MEANING = {
+    "PASS": "No problem found.",
+    "WARN": "A caution about these results; the Core's technical record (AUDIT.md) says what it "
+            "is, and the Core can explain it.",
+    "FAIL": "A problem to resolve before relying on these results; the Core's technical record "
+            "(AUDIT.md) says what it is.",
+    "INFO": "For information; the Core's technical record (AUDIT.md) has the details.",
+}
+NOT_CHECKED = "Not checked: the information this check needs was not available here."
+PLAIN_DE_SIGNAL_NONE = ("No protein changed significantly in at least one comparison: the study "
+                        "may be too small to detect the changes, or the changes are small.")
+PLAIN_DE_SIGNAL_HIGH = ("More than half of the proteins changed significantly in at least one "
+                        "comparison. That is unusual: it can be real when the groups are very "
+                        "different materials, or it can come from a technical difference between "
+                        "the groups (loading, batch or normalisation), so read the results with "
+                        "that in mind.")
+PLAIN_DE_SIGNAL_GENERIC = ("The number of proteins called significant is unusual in at least one "
+                           "comparison (none, or more than half of them), so read the results "
+                           "with that in mind.")
+# A check that emits one status for different reasons: each variant's words, used where it is
+# emitted (plain=) and, for a record from before 2.13.2 that has none, picked by OLD_RULES below.
+P_NO_GROUPS = "No groups were assigned to the samples, so nothing could be compared."
+P_FEW_REPLICATES = ("At least one group has fewer than two replicates, so its variability cannot be "
+                    "measured and its comparisons are not valid.")
+P_EMPTY_MATRIX = "No protein quantities were found."
+P_FEW_PROTEINS = ("Fewer proteins were quantified than is typical, which can point to a sample, "
+                  "search or database problem.")
+P_CONT_FEW = ("Few common lab contaminants (skin keratins, the digestion enzyme, milk proteins) were "
+              "found.")
+P_CONT_MANY = ("Common lab contaminants (skin keratins, the digestion enzyme or milk proteins) are "
+               "present at a noticeable level, which can affect the quantification.")
+P_KERATIN_FEW = ("The sample itself is keratin, so keratins are not counted as contaminants; few "
+                 "other common lab contaminants (the digestion enzyme, milk proteins) were found.")
+P_KERATIN_MANY = ("The sample itself is keratin, so keratins are not counted as contaminants; other "
+                  "common lab contaminants (the digestion enzyme or milk proteins) are present at a "
+                  "noticeable level, which can affect the quantification.")
+P_KERATIN_NONE = ("The sample itself is keratin, so keratins are not counted as contaminants; no "
+                  "other common contaminant was found.")
+P_PASSES_LOST = ("Some samples kept less than half of their first-pass identifications in the "
+                 "search's final pass, so their results rest on fewer peptides.")
+P_PASSES_FIRST_MORE = ("For some samples the search's first pass kept more identifications than its "
+                       "final pass, which these results use; the first pass could be used instead.")
+P_PASSES_USED_FIRST = ("The analysis used the search's first-pass results, so this does not affect "
+                       "them.")
+P_PASSES_UNRECORDED = "Not checked: the search did not record this comparison."
+P_MEASURE_FALLBACK = ("Some search settings that are normally measured from these runs could not be "
+                      "measured, so standard values were used instead; the results may be somewhat "
+                      "less complete.")
+P_MEASURE_SPREAD = ("The runs disagreed about the instrument's mass accuracy, and the search used the "
+                    "standard setting for it.")
+P_NORM_NA = "Not applicable to this kind of analysis."
+P_NORM_AGREED = ("The usual normalisation for this kind of experiment was used, and a check of the "
+                 "data agreed with it.")
+P_NORM_UNDECIDED = "The choice of normalisation was not yet checked against the data."
+P_NORM_NO_TYPE = ("No experiment type was recorded, so there was no usual normalisation to compare "
+                  "with.")
+P_NORM_TRIPPED = ("The usual normalisation for this kind of experiment did not fit these samples, so "
+                  "the Core chose which quantities to use.")
+P_STAB_RAW = "Not relevant here: the analysis did not use DIA-NN's normalised amounts."
+P_STAB_UNCHECKED = "Not checked: the search's statistics this check reads were not available."
+
+PLAIN = {
+    "replication": ("Replicates per group", {
+        "PASS": "Every group has at least three replicates, enough for the statistics.",
+        "WARN": "At least one group has only two replicates: its comparisons still work, but can "
+                "miss real changes.",
+        "FAIL": "At least one group has fewer than two replicates, so its variability cannot be "
+                "measured and its comparisons are not valid."}),
+    "group_balance": ("Group sizes", {
+        "PASS": "The groups are of similar size.",
+        "WARN": "The groups differ a lot in size, which lowers the power of the comparisons."}),
+    "confounding": ("Batch and groups", {
+        "PASS": "No batch or other recorded factor lines up exactly with the groups.",
+        "FAIL": "A batch or other recorded factor lines up exactly with the groups, so its effect "
+                "cannot be told apart from a real difference between the groups."}),
+    "numeric_covariate": ("Measured factors in the statistics", {
+        "PASS": "A measured factor was included in the statistics; the groups explain less of it "
+                "than the level at which the Core cautions, so it is not expected to distort the "
+                "comparisons.",
+        "WARN": "A measured factor included in the statistics largely follows the groups, so "
+                "adjusting for it can remove part of the real difference; the comparisons should "
+                "also be checked without it."}),
+    "acquisition_mix": ("Acquisition method", {
+        "PASS": "All runs used the same acquisition method.",
+        "FAIL": "The runs mix two acquisition methods (DIA and DDA), which cannot be quantified "
+                "together, so the comparison is not valid as run."}),
+    "instrument_mix": ("Instruments", {
+        "PASS": "All runs come from one instrument model.",
+        "WARN": "The runs come from more than one instrument model, which can add a technical "
+                "difference between samples."}),
+    "id_depth": ("Proteins quantified", {
+        "PASS": "The number of proteins quantified is not unusually low.",
+        "WARN": "Fewer proteins were quantified than is typical, which can point to a sample, "
+                "search or database problem."}),
+    "missingness": ("Missing values", {
+        "PASS": "Missing values are within the usual range.",
+        "WARN": "A large share of values is missing, which weakens the quantification."}),
+    "contamination": ("Common lab contaminants", {
+        "PASS": "Few common lab contaminants (skin keratins, the digestion enzyme, milk proteins) "
+                "were found.",
+        "WARN": "Common lab contaminants (skin keratins, the digestion enzyme or milk proteins) are "
+                "present at a noticeable level, which can affect the quantification."}),
+    "target_contaminants": ("Sample proteins identical to contaminants", {
+        "PASS": "None of the sample's own proteins that share a sequence with a common contaminant "
+                "were quantified.",
+        "WARN": "Some of the sample's own proteins have the same sequence as a common lab "
+                "contaminant. They are reported as the sample's proteins, but part of their "
+                "signal could come from contamination.",
+        "INFO": NOT_CHECKED}),
+    "contaminant_overlap": ("Proteins lost to the contaminant list", {
+        "WARN": "Some real proteins of the sample are missing from the results because the search "
+                "database listed them only as contaminants; a corrected database and a new search "
+                "would recover them."}),
+    "contaminant_evidence": ("Contaminants explained by the sample's proteins", {
+        "PASS": "Each contaminant found has evidence of its own.",
+        "WARN": "Some proteins listed as contaminants rest only on peptides the sample's own "
+                "proteins also have: they are the sample's own proteins or handling contamination "
+                "(such as skin keratin), not evidence of the contaminant species.",
+        "INFO": NOT_CHECKED}),
+    "de_signal": ("Number of significant proteins", {
+        "PASS": "The number of proteins called significant is in a plausible range in every "
+                "comparison.",
+        "WARN": PLAIN_DE_SIGNAL_GENERIC}),
+    "first_vs_final_pass": ("Search consistency between passes", {
+        "PASS": "No sample lost a large share of its identifications between the search's two "
+                "passes.",
+        "WARN": "Some samples kept less than half of their first-pass identifications in the "
+                "search's final pass, so their results rest on fewer peptides.",
+        "INFO": "Not checked: the search did not record this comparison."}),
+    "search_measurement": ("Search settings measured from the data", {
+        "WARN": "Some search settings that are normally measured from these runs could not be "
+                "measured, so standard values were used instead; the results may be somewhat less "
+                "complete."}),
+    "quantification": ("How protein amounts were calculated", {
+        "WARN": "The method used to turn peptide signals into protein amounts has a known "
+                "limitation for this kind of data, so treat small differences with care."}),
+    "sage_lfq": ("Quantification settings (Sage)", {
+        "PASS": "The quantification settings fit these runs.",
+        "WARN": "The quantification settings did not fit these runs' measured mass error, so the "
+                "protein amounts are less reliable; the identifications are not affected.",
+        "INFO": "Not checked: the search's own check could not run."}),
+    "normalization_check": ("Normalisation choice", {
+        "PASS": "The usual normalisation for this kind of experiment was used, and a check of the "
+                "data agreed with it.",
+        "WARN": "The choice of normalisation was not confirmed against the data."}),
+    "normalisation_stability": ("DIA-NN normalisation stability", {
+        "PASS": "DIA-NN's normalisation between runs was stable in every run.",
+        "WARN": "DIA-NN's normalisation between runs was unstable for some runs, and the analysis "
+                "used its normalised amounts, so those runs' values may be distorted.",
+        "INFO": "Not checked: the search's statistics this check reads were not available."}),
+    "search_checks": ("The search's own checks", {"INFO": NOT_CHECKED}),
+}
+
+
+# (check, status) emitted for more than one reason: PLAIN's words are not used for them; every
+# site gives its own (tests/test_audit_plain.py holds the sites to this).
+AMBIGUOUS = {("replication", "FAIL"), ("id_depth", "WARN"), ("contamination", "PASS"),
+             ("contamination", "WARN"), ("de_signal", "WARN"), ("first_vs_final_pass", "INFO"),
+             ("first_vs_final_pass", "WARN"), ("search_measurement", "WARN"),
+             ("normalization_check", "PASS"), ("normalization_check", "WARN"),
+             ("normalisation_stability", "INFO"), ("contaminant_evidence", "INFO"),
+             ("target_contaminants", "INFO")}
+_STATEMENT = re.compile(r"(Core staff chose [^.]*\.)")
+
+
+def _with_statement(words, msg):
+    m = _STATEMENT.search(msg)
+    return words + (" " + m.group(1) if m else "")
+
+
+# A record from before 2.13.2 has no `plain`: its variant is read from the message, as that
+# version wrote it. No rule matches -> the generic caution, never words that may be false.
+OLD_RULES = (
+    ("replication", "FAIL", r"^No groups assigned", P_NO_GROUPS),
+    ("replication", "FAIL", r"<2 ", P_FEW_REPLICATES),
+    ("id_depth", "WARN", r"^Expression matrix is empty", P_EMPTY_MATRIX),
+    ("id_depth", "WARN", r"^Only \d+ proteins", P_FEW_PROTEINS),
+    ("contamination", "PASS", r"^Keratin-matrix sample", P_KERATIN_NONE),
+    ("contamination", "PASS", r"keratin-matrix sample", P_KERATIN_FEW),
+    ("contamination", "WARN", r"keratin-matrix sample", P_KERATIN_MANY),
+    ("contamination", "PASS", r"likely contaminant protein", P_CONT_FEW),
+    ("contamination", "WARN", r"likely contaminant protein", P_CONT_MANY),
+    ("de_signal", "WARN", r": 0 proteins significant", PLAIN_DE_SIGNAL_NONE),
+    ("de_signal", "WARN", r"proteins significant —", PLAIN_DE_SIGNAL_HIGH),
+    ("first_vs_final_pass", "INFO", r"used the first-pass report", P_PASSES_USED_FIRST),
+    ("first_vs_final_pass", "INFO", r"comparison is not in", P_PASSES_UNRECORDED),
+    ("first_vs_final_pass", "WARN", r"^\d+ of \d+ runs kept less than half", P_PASSES_LOST),
+    ("first_vs_final_pass", "WARN", r"^no run lost more than half", P_PASSES_FIRST_MORE),
+    ("search_measurement", "WARN", r"^NOTE: the mass accuracy was pinned|SOP floor", P_MEASURE_SPREAD),
+    ("search_measurement", "WARN", r"^CAUTION", P_MEASURE_FALLBACK),
+    ("normalization_check", "PASS", r"^Not applicable", P_NORM_NA),
+    ("normalization_check", "PASS", r"the data check agreed", P_NORM_AGREED),
+    ("normalization_check", "WARN", r"^This DE is one of|^The normalisation check was not run",
+     P_NORM_UNDECIDED),
+    ("normalization_check", "WARN", r"^No experiment type was recorded", P_NORM_NO_TYPE),
+    ("normalization_check", "WARN", r"did not agree with its default", P_NORM_TRIPPED),
+    ("normalisation_stability", "INFO", r"^Not relevant", P_STAB_RAW),
+    ("normalisation_stability", "INFO", r"^Not assessed", P_STAB_UNCHECKED),
+    ("contaminant_evidence", "INFO", r"^Not assessed", NOT_CHECKED),
+    ("target_contaminants", "INFO", r"^Not assessed", NOT_CHECKED),
+)
+
+
+def _old_words(check, status, msg, detail):
+    if check == "normalization_check" and status == "PASS" and \
+            isinstance(detail, dict) and detail.get("status") == "not_applicable":
+        return P_NORM_NA
+    for c, st, rx, words in OLD_RULES:
+        if c == check and st == status and re.search(rx, msg):
+            return (_with_statement(words, msg) if words in (P_NORM_NO_TYPE, P_NORM_TRIPPED)
+                    else words)
+    return None
+
+
+def client_row(f):
+    """(plain label, what it means for the results) for one finding: its own words (`plain`,
+    written where it was found); for a record without them, the variant its message names
+    (OLD_RULES), else the check's words when the check has one meaning per status (PLAIN), else
+    the generic caution -- never words that may not fit."""
+    check = str(f.get("check") or "")
+    label, words = PLAIN.get(check, (check.replace("_", " ").strip().capitalize(), {}))
+    status = f.get("status")
+    meaning = f.get("plain") or _old_words(check, status, str(f.get("message") or ""),
+                                           f.get("detail"))
+    if not meaning:
+        meaning = (None if (check, status) in AMBIGUOUS else words.get(status)) \
+            or GENERIC_MEANING.get(status, "")
+    return str(f.get("label") or label), str(meaning)
+
+
+def client_section_md(findings):
+    """The report's "Audit & caveats": one row per check, the worst result of its findings and
+    their meanings at that result. Markdown; the technical record stays AUDIT.md."""
+    order, by = [], {}
+    for f in findings or []:
+        if isinstance(f, dict) and f.get("check") and f.get("status") in RESULT_WORDS:
+            if f["check"] not in by:
+                order.append(f["check"])
+            by.setdefault(f["check"], []).append(f)
+    if not order:
+        return ""
+    cell = lambda t: " ".join(str(t).replace("|", "/").split())      # noqa: E731
+    L = ["Every analysis goes through a set of automatic checks. Each row says what was checked, "
+         "the result, and what it means for these results; the full technical record is "
+         "AUDIT.md.", "", "| Check | Result | What it means for the results |", "|---|---|---|"]
+    for check in order:
+        fs = by[check]
+        status = max((f["status"] for f in fs), key=_RANK.get)
+        rows = [client_row(f) for f in fs if f["status"] == status]
+        meanings = list(dict.fromkeys(m for _, m in rows if m))
+        L.append(f"| {cell(rows[0][0])} | {RESULT_WORDS[status]} | {cell(' '.join(meanings))} |")
+    return "\n".join(L) + "\n"
+
+
+_MD_FINDING = re.compile(r"^- (\S+)\s+\*\*([A-Za-z0-9_.-]+)\*\*\s+—\s+(.*)$")
+_MD_ICON = {"✅": "PASS", "⚠": "WARN", "⛔": "FAIL", "❌": "FAIL", "ℹ": "INFO"}
+
+
+def findings_from_md(text):
+    """An AUDIT.md's findings (a session from before AUDIT.json, or without it): the lines main()
+    writes, "- <icon> **<check>** — <message>". [] when there are none."""
+    out = []
+    for ln in (text or "").splitlines():
+        m = _MD_FINDING.match(ln.strip())
+        if m and m.group(1)[:1] in _MD_ICON:
+            out.append({"check": m.group(2), "status": _MD_ICON[m.group(1)[:1]],
+                        "message": m.group(3)})
+    return out
 
 
 def read_csv(path):
@@ -135,7 +425,8 @@ def replication_unit(rows, block_col=None):
 def audit_conditions(findings, rows, adjp, block_col=None):
     runs = Counter(r.get("Group", "").strip() for r in rows if r.get("Group", "").strip())
     if not runs:
-        add(findings, "replication", "FAIL", "No groups assigned in conditions.csv.")
+        add(findings, "replication", "FAIL", "No groups assigned in conditions.csv.",
+            plain=P_NO_GROUPS)
         return runs
     unit = replication_unit(rows, block_col)
     if unit:
@@ -154,7 +445,7 @@ def audit_conditions(findings, rows, adjp, block_col=None):
     if singletons:
         add(findings, "replication", "FAIL",
             f"Group(s) with <2 {what} have no within-group variance — differential statistics are not valid: {singletons}.",
-            detail)
+            detail, plain=P_FEW_REPLICATES)
     elif small:
         add(findings, "replication", "WARN",
             f"Group(s) with only 2 {what}: {small}. Usable but low power; 3+ is recommended.",
@@ -290,7 +581,7 @@ def audit_search(findings, search_out):
 def audit_matrix(findings, em_path, min_proteins, max_missing, keratin_sample=False):
     rows = read_csv(em_path)
     if not rows:
-        add(findings, "id_depth", "WARN", "Expression matrix is empty.")
+        add(findings, "id_depth", "WARN", "Expression matrix is empty.", plain=P_EMPTY_MATRIX)
         return
     idcols = [c for c in ("Protein.Group", "Genes", "Protein.Names") if c in rows[0]]
     sample_cols = [c for c in rows[0].keys() if c not in idcols]
@@ -298,7 +589,8 @@ def audit_matrix(findings, em_path, min_proteins, max_missing, keratin_sample=Fa
     if n_prot < min_proteins:
         add(findings, "id_depth", "WARN",
             f"Only {n_prot} proteins quantified — lower than typical (<{min_proteins}). "
-            "Check the search parameters and that the FASTA matches the sample's organism.")
+            "Check the search parameters and that the FASTA matches the sample's organism.",
+            plain=P_FEW_PROTEINS)
     else:
         add(findings, "id_depth", "PASS", f"{n_prot} proteins quantified.")
     # missingness
@@ -335,10 +627,14 @@ def audit_matrix(findings, em_path, min_proteins, max_missing, keratin_sample=Fa
                 + ("A high contaminant load can distort normalization and quant — consider filtering them."
                    if status == "WARN" else "Low level; usually fine.")
                 + (" [keratin-matrix sample: keratins treated as the analyte, not flagged]" if keratin_sample else ""),
-                {"examples": sorted(set(hits))[:10]})
+                {"examples": sorted(set(hits))[:10]},
+                plain={(True, "WARN"): P_KERATIN_MANY, (True, "PASS"): P_KERATIN_FEW,
+                       (False, "WARN"): P_CONT_MANY, (False, "PASS"): P_CONT_FEW}[
+                           (bool(keratin_sample), status)])
         elif keratin_sample:
             add(findings, "contamination", "PASS",
-                "Keratin-matrix sample — keratins are the analyte (not flagged); no trypsin/casein issue.")
+                "Keratin-matrix sample — keratins are the analyte (not flagged); no trypsin/casein issue.",
+                plain=P_KERATIN_NONE)
 
 
 def _tokens(cell):
@@ -372,7 +668,7 @@ def audit_target_contaminants(findings, meta_path, em_path, de_dir, adjp, kerati
     if not meta_path:
         add(findings, "target_contaminants", "INFO",
             "Not assessed: no <fasta>.meta.json from fetch_fasta.py (pass --fasta-meta), so "
-            "proteins that are also common-contaminant sequences cannot be identified.")
+            "proteins that are also common-contaminant sequences cannot be identified.", plain=NOT_CHECKED)
         return
     try:
         with open(meta_path) as fh:
@@ -380,7 +676,7 @@ def audit_target_contaminants(findings, meta_path, em_path, de_dir, adjp, kerati
             tc = target_contaminants(json.load(fh), keratin_sample)
     except (OSError, ValueError) as e:
         add(findings, "target_contaminants", "INFO",
-            f"Not assessed: could not read {meta_path} ({e}).")
+            f"Not assessed: could not read {meta_path} ({e}).", plain=NOT_CHECKED)
         return
     org = tc["organism"] or "target-organism"
 
@@ -581,7 +877,7 @@ def audit_contaminant_evidence(findings, de_prov, meta_path):
     if not isinstance(meta, dict):
         add(findings, "contaminant_evidence", "INFO",
             "Not assessed: no readable <fasta>.meta.json (pass --fasta-meta), so whether a "
-            "contaminant group rests only on the sample's own peptides cannot be checked.")
+            "contaminant group rests only on the sample's own peptides cannot be checked.", plain=NOT_CHECKED)
         return
     fasta, why = searched_fasta(meta, meta_path)
     groups = runs = None
@@ -594,7 +890,7 @@ def audit_contaminant_evidence(findings, de_prov, meta_path):
     if groups is None:
         add(findings, "contaminant_evidence", "INFO",
             f"Not assessed: {why}, so whether a contaminant group rests only on the sample's own "
-            "peptides cannot be checked.")
+            "peptides cannot be checked.", plain=NOT_CHECKED)
         return
     if not groups:
         # the DE counted contaminant groups and this reading of its report finds none: something
@@ -603,7 +899,7 @@ def audit_contaminant_evidence(findings, de_prov, meta_path):
             f"Not assessed: the DE record counts {cont.get('n_protein_groups')} contaminant protein "
             f"group(s), but none passes the DE's q-value filter in {os.path.basename(inp)} as read "
             f"here (q-columns {', '.join(qcols) or 'none'}), so their peptides could not be checked.",
-            {"report": inp, "q_columns": qcols})
+            {"report": inp, "q_columns": qcols}, plain=NOT_CHECKED)
         return
     # A target's peptides are those the build's digest makes from it (the sidecar's
     # contaminant_digest: the rule that kept these entries), never any string inside it
@@ -674,8 +970,11 @@ def audit_pipeline_checks(findings, prov):
     for c in prov.get("checks") or []:
         if isinstance(c, dict) and c.get("check") and c.get("status") in ("PASS", "WARN", "FAIL",
                                                                          "INFO") and c.get("message"):
+            # its own plain words and label (run_silac.R chk(plain=, label=)): this audit
+            # writes none for a pipeline it does not know
             add(findings, str(c["check"]), c["status"], str(c["message"]),
-                c.get("detail") if isinstance(c.get("detail"), dict) else {})
+                c.get("detail") if isinstance(c.get("detail"), dict) else {},
+                plain=str(c.get("plain") or "") or None, label=str(c.get("label") or "") or None)
 
 
 def audit_de(findings, de_dir, adjp, logfc, prov=None):
@@ -703,14 +1002,15 @@ def audit_de(findings, de_dir, adjp, logfc, prov=None):
         if sig == 0:
             add(findings, "de_signal", "WARN",
                 f"{ct}: 0 proteins significant (adj.P<{adjp}). The experiment may be "
-                "underpowered, the effect small, or the groups mislabeled.")
+                "underpowered, the effect small, or the groups mislabeled.",
+                plain=PLAIN_DE_SIGNAL_NONE)
         elif frac > 0.5:
             note = (prov or {}).get("high_significance_note")
             add(findings, "de_signal", "WARN",
                 f"{ct}: {sig}/{n} ({frac*100:.0f}%) proteins significant — " + (
                     f"a high share. {note}" if note else
                     "implausibly high. This usually means a batch effect, a normalization problem, or "
-                    "confounded/mislabeled groups, not real biology."))
+                    "confounded/mislabeled groups, not real biology."), plain=PLAIN_DE_SIGNAL_HIGH)
         else:
             add(findings, "de_signal", "PASS",
                 f"{ct}: {sig}/{n} proteins significant at adj.P<{adjp} ({frac*100:.0f}%); "
@@ -744,12 +1044,14 @@ def audit_search_measurement(findings, de_prov, search_prov=None):
         fb = sprov.get("probe_fallback") if isinstance(sprov.get("probe_fallback"), dict) else {}
         add(findings, "search_measurement", "WARN", msg,
             {"scan_window_mode": window, "mass_acc_mode": mass_acc, "reason": fb.get("reason"),
-             "search_provenance": path})
+             "search_provenance": path}, plain=P_MEASURE_FALLBACK)
     # ...and a measured mass accuracy pinned at the SOP floor over a spread the probe warned about
     note = measurement_note(sprov)
     if note:
         add(findings, "search_measurement", "WARN", note,
-            {"warnings": measurement_warnings(sprov), "search_provenance": path})
+            {"warnings": measurement_warnings(sprov), "search_provenance": path},
+            plain="The runs disagreed about the instrument's mass accuracy, and the search used "
+                  "the standard setting for it.")
 
 
 def audit_normalisation(findings, de_prov, rows=None, search_prov=None):
@@ -764,7 +1066,8 @@ def audit_normalisation(findings, de_prov, rows=None, search_prov=None):
     if (de_prov or {}).get("quantities") == "raw":
         add(findings, "normalisation_stability", "INFO",
             "Not relevant: the DE read DIA-NN's non-normalised quantities (de_provenance.json "
-            "quantities: raw), so DIA-NN's cross-run normalisation does not enter it.")
+            "quantities: raw), so DIA-NN's cross-run normalisation does not enter it.",
+            plain="Not relevant here: the analysis did not use DIA-NN's normalised amounts.")
         return
     from check_report_runs import (normalisation_instability, stats_path,
                                    NORM_INSTABILITY_COLUMN)
@@ -776,18 +1079,18 @@ def audit_normalisation(findings, de_prov, rows=None, search_prov=None):
             add(findings, "normalisation_stability", "INFO",
                 f"Not assessed: there is no {os.path.basename(stats_path(str(inp)))} beside "
                 f"{os.path.basename(str(inp))} (a cfg with --no-stats?), so DIA-NN's per-run "
-                f"{NORM_INSTABILITY_COLUMN} could not be read.")
+                f"{NORM_INSTABILITY_COLUMN} could not be read.", plain=P_STAB_UNCHECKED)
         return                      # another engine's report: DIA-NN's question does not apply
     where = os.path.basename(ni["stats_file"])
     if not ni["column"]:
         add(findings, "normalisation_stability", "INFO",
             f"Not assessed: {where} has no {NORM_INSTABILITY_COLUMN} column (a DIA-NN version "
-            "that does not write it).", {"stats_file": ni["stats_file"]})
+            "that does not write it).", {"stats_file": ni["stats_file"]}, plain=P_STAB_UNCHECKED)
         return
     if not ni["per_run"]:
         add(findings, "normalisation_stability", "INFO",
             f"Not assessed: none of the analysed runs has identified precursors in {where}.",
-            {"stats_file": ni["stats_file"]})
+            {"stats_file": ni["stats_file"]}, plain=P_STAB_UNCHECKED)
         return
     detail = {k: ni[k] for k in ("stats_file", "per_run", "median", "max", "flagged",
                                  "threshold", "basis")}
@@ -827,7 +1130,8 @@ def audit_normalization_check(findings, de_prov):
         # the pipeline's own record of why there is no between-run normalisation to check
         add(findings, "normalization_check", "PASS",
             f"Not applicable to {(de_prov or {}).get('display_label') or 'this pipeline'}: "
-            f"{na_reason}", {"status": "not_applicable"})
+            f"{na_reason}", {"status": "not_applicable"},
+            plain="Not applicable to this kind of analysis.")
         return
     if nc.get("status") != "decided":
         # a WARN, and core_submission.py deliver holds the delivery (normalization_check.
@@ -837,7 +1141,8 @@ def audit_normalization_check(findings, de_prov):
              nc.get("status") == "check_input" else "The normalisation check was not run")
             + f": {nc.get('note') or 'no normalisation check'} (quantities: "
             f"{nc.get('quantities_applied')}). Run step 8's check and the final DE with "
-            "--normalization-check before delivering.", {"status": nc.get("status")})
+            "--normalization-check before delivering.", {"status": nc.get("status")},
+            plain="The choice of normalisation was not yet checked against the data.")
         return
     et_ = nc.get("experiment_type") or {}
     d = nc.get("decision") or {}
@@ -853,16 +1158,20 @@ def audit_normalization_check(findings, de_prov):
         add(findings, "normalization_check", "WARN",
             "No experiment type was recorded, so no default applied"
             + (f" (the data check: {'; '.join(nc.get('trips') or [])})" if nc.get("trips") else "")
-            + f"; {chose}", detail)
+            + f"; {chose}", detail,
+            plain=f"No experiment type was recorded, so there was no usual normalisation to "
+                  f"compare with. {chose}")
     elif nc.get("tripped"):
         add(findings, "normalization_check", "WARN",
             f"Experiment type {et_.get('label')} ({et_.get('source')}): the data check did not "
-            f"agree with its default ({'; '.join(nc.get('trips') or [])}); {chose}", detail)
+            f"agree with its default ({'; '.join(nc.get('trips') or [])}); {chose}", detail,
+            plain=f"The usual normalisation for this kind of experiment did not fit these "
+                  f"samples, so the Core chose which quantities to use. {chose}")
     else:
         add(findings, "normalization_check", "PASS",
             f"Experiment type {et_.get('label')} ({et_.get('source')}): "
             f"{nc.get('quantities_applied')} quantities, its default; the data check agreed.",
-            detail)
+            detail, plain=P_NORM_AGREED)
 
 
 def audit_passes(findings, de_prov, search_prov=None):
@@ -881,7 +1190,7 @@ def audit_passes(findings, de_prov, search_prov=None):
             "the 5-step chain's first-pass / final-pass comparison is not in "
             f"{os.path.basename(path)} (a chain generated before skill 2.9, or step 5 did not "
             f"get that far): compare {FIRST_PASS_REPORT[:-len('.parquet')]}.stats.tsv with "
-            "report.stats.tsv by hand before trusting the final pass")
+            "report.stats.tsv by hand before trusting the final pass", plain=P_PASSES_UNRECORDED)
         return
     flagged = [r for r in pc["runs"] if r.get("flagged")]
     better = pc.get("switch_recommended_for")          # None: post-filter rows not counted
@@ -915,9 +1224,11 @@ def audit_passes(findings, de_prov, search_prov=None):
     if used_first:
         add(findings, "first_vs_final_pass", "INFO",
             f"{what}. The DE used the first-pass report ({FIRST_PASS_REPORT}), so the results "
-            "do not depend on the second pass.", pc)
+            "do not depend on the second pass.", pc,
+            plain=P_PASSES_USED_FIRST)
     else:
-        add(findings, "first_vs_final_pass", "WARN", what + "." + verdict, pc)
+        add(findings, "first_vs_final_pass", "WARN", what + "." + verdict, pc,
+            plain=P_PASSES_LOST if flagged else P_PASSES_FIRST_MORE)
 
 
 def main():

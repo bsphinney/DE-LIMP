@@ -15,6 +15,14 @@ CHECKS the script, RENDERS it to audio and LINKS the audio into the outputs.
             "Claims beyond the report"; quantities in words fail; Pronunciation rows may only
             re-spell; the AI disclosure is in the first 3 turns; no host claims a specialty; no
             forbidden name appears anywhere shown or sent. check.txt lists what it cannot catch.
+  meaning SCRIPT.md --brief | --verdict PASS|FAIL --reviewer WHO --findings FILE
+         -> the meaning check, by a reader who did not write the script: every sentence against
+            the report for (a) the right comparison, group and direction, (b) the report's hedges
+            kept, (c) robust status of every named protein, (d) no superlative the report does not
+            make, (e) no claim outside the report, (f) no draft history. --brief first (the
+            reviewer works from it); --verdict, after a passing check, writes meaning_check.md
+            with THIS script's sha256 and its sources' and robustness tables'; render, link,
+            share and job refuse without its PASS while all of them hold.
   render SCRIPT.md [--out DIR] --tts gemini|say [--cloud-ok [NOTE] | --core-run [internal]]
          [--model M] [--keep-wav]
          -> DIR/podcast.m4a (podcast.wav when neither afconvert nor ffmpeg is present),
@@ -80,6 +88,7 @@ import argparse
 import array
 import base64
 import binascii
+import csv
 import datetime
 import decimal
 import difflib
@@ -109,6 +118,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 from notify_slack import REDACTED, redact as _redact    # noqa: E402  the ONE secret list
 from report_files import SHARE_NAME, SHARE_STALE    # noqa: E402  names defined once
+from client_text import draft_history, draft_history_loose  # noqa: E402  the ONE list
 
 SHOW = "Signal to Noise"
 HOSTS = (("Maya", "cell biologist"), ("Leo", "statistician"))
@@ -130,6 +140,24 @@ HEARTBEAT = 60.0                                    # s between "still waiting" 
 # waits: eleven chunks each hanging once would otherwise reach the job's time limit (review of
 # 2.13.1), where SLURM's TIMEOUT says less than the resume message does
 REQUEST_TIMEOUT_BUDGET_MIN = 30.0                   # minutes
+# A model that stops answering: after REQUEST_TIMEOUTS unanswered requests on one chunk the render
+# moves to the next candidate model and makes EVERY chunk again with it (one episode never mixes
+# two models' voices). And before the first chunk it must make, each candidate is asked a two-line
+# test first and the first that answers is used. A staff render (2026-10-16) sat 28 minutes on a
+# stalled gemini-3.8-flash-tts while gemini-2.5-flash-preview-tts answered the same test in 2.9 s;
+# the episode's first chunks were cached from the stalled model, so it could never hand over.
+PREFLIGHT_TIMEOUT = 60.0                            # s for the two-line test
+# A model that stopped answering is remembered in the cache (STALL_FILE) for STALL_MEMORY_H
+# hours: a resume then never pins it again, so it cannot repeat the same timeouts (review of
+# 2.13.2: every resume went back to the stalled model, waited, and stopped).
+STALL_FILE = "stalled.json"
+STALL_MEMORY_H = 12.0
+# What Google's answers said about the key's billing tier (GeminiTTS.note_tier), kept in the
+# cache for TIER_MEMORY_DAYS under a fingerprint of the key (never the key): a 402 stops the
+# render, so the render that records podcast.json is a later one (staff report, skill 2.11.2).
+TIER_FILE = "key_tier.json"
+TIER_MEMORY_DAYS = 7.0
+PREFLIGHT_LINES = ("This is a short sound check.", "And this is the second voice.")
 TERMS_URL = "https://ai.google.dev/gemini-api/terms"
 KEY_FILE = os.path.join("~", ".config", "ucdavis-proteomics", "gemini_key")
 # The Core's shared key on HIVE (Brett installs it: owner brettsp, group proteomics-grp, mode
@@ -293,6 +321,8 @@ CANNOT_CATCH = (
     "numbers with a unit or suffix other than %, fold, x, k, M and B (\"3 kDa\", \"2 µg\") are "
     "matched as plain numbers, and a count of 10 or less with one is not checked",
     "meaning: a caveat the report makes can be dropped, and speculation can be spoken as fact",
+    "draft history in words client_text.py's phrase list does not have (\"we had that "
+    "backwards before\")",
 )
 # --cloud-ok with one of these means no.
 NO_CONSENT = {"", "false", "no", "n", "0", "none", "null", "off", "declined", "decline",
@@ -864,6 +894,406 @@ def survey_invites(text):
     return out
 
 
+# ---------------------------------------------------------------- meaning (beyond tokens)
+# check matches tokens. A staff episode (2026-10-16) passed it with a true number attached to the
+# wrong comparison, a hedge dropped ("not a main driver" spoken as "aren't driving"), proteins put
+# right after "It survives everything" that the session's robustness tables call not robust, and
+# a tool presented as one the client uses. Two things follow: what can be caught mechanically is
+# (a robust claim next to a protein whose table says it is not: FAIL; a superlative the sources do
+# not make: WARN), and a separate reviewer reads every sentence against the report before render
+# (meaning_check.md, below): render, link, share and job refuse without its PASS for this script.
+ROBUST_CLAIM = re.compile(r"\b(?:robust(?:ly)?|surviv(?:e|es|ed|ing)|holds?\s+up|held\s+up|"
+                          r"stands?\s+up|stood\s+up)\b", re.I)
+# A claim covers its own clause: a sentence, cut at ; and at the words that turn a contrast
+# ("Jph3 survives every check; Ryr2 doesn't", "Jph3 is robust, unlike Ryr2"). A colon does not
+# cut: "It survives everything: Ryr2 and Jph3" names what the claim is about.
+_CLAUSE_CUT = re.compile(r"[.;!?](?=\s|$)|\b(?:but|while|whereas|although|though|unlike|except|"
+                         r"however|yet)\b", re.I)
+# A negation before the claim in its clause turns it around ("Neither Ryr2 nor Actb is robust",
+# "Not one of them ... is robust"); so does one beside a name ("Ryr2 and Actb don't").
+_CLAUSE_NEG = re.compile(r"\b(?:not|no|never|neither|nor|none|without|n[’']t|\w+n[’']t|fails?\s+to|"
+                         r"failed\s+to)\b", re.I)
+_NAME_NEG_AFTER = re.compile(r"^[^.;!?]{0,40}?\b(?:\w+n[’']t|do(?:es)?\s+not|did\s+not|is\s+not|"
+                             r"are\s+not|was\s+not|were\s+not|drops?\s+out|dropped\s+out|"
+                             r"falls?\s+away|fell\s+away|fails?|failed)\b", re.I)
+_NAME_NEG_BEFORE = re.compile(r"\b(?:not|neither|nor|unlike|except|but\s+not)\W+(?:\w+\W+){0,2}$",
+                              re.I)
+# What a `robust` cell says. R's write.csv writes TRUE/FALSE, pandas True/False; a cell that
+# says neither is not understood (a WARN, never a FAIL).
+ROBUST_YES = {"yes", "y", "true", "t", "1", "robust"}
+ROBUST_NO = {"no", "n", "false", "f", "0", "not robust"}
+_NAME_TOK = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.\-]*[A-Za-z0-9]|[A-Za-z0-9]")
+
+
+def robust_value(v):
+    """'yes', 'no' or None (not understood) for one `robust` cell."""
+    v = " ".join(str(v or "").split()).lower()
+    if v in ROBUST_YES:
+        return "yes"
+    if v in ROBUST_NO or v.startswith("not "):
+        return "no"
+    return None
+SUPERLATIVE = re.compile(r"\b(?:the\s+only|only\s+one|the\s+(?:strongest|biggest|largest|"
+                         r"highest|lowest|best|most|top)|every\s+single|none\s+of)\b", re.I)
+MEANING_FILE = "meaning_check.md"
+# What the reviewer checks in every sentence (the staff report's (a)-(e), and (f) from the 2.13.2
+# review: draft history no phrase list catches). Said in the brief,
+# in meaning_check.md and in references/podcast.md.
+MEANING_CHECKS = (
+    ("a", "the right comparison, group and direction for every number and named protein: the "
+          "report's sentence or table it comes from says so"),
+    ("b", "every hedge the report gives is kept: \"not a main driver\" never becomes \"isn't "
+          "driving\", \"may\" never becomes \"does\""),
+    ("c", "the robust status of every named protein: one spoken next to \"robust\", \"survives\" "
+          "or \"holds up\" is robust in that comparison's robustness table"),
+    ("d", "no superlative or totality the report does not make: \"the only\", \"all\", "
+          "\"every\", \"the strongest\""),
+    ("e", "no claim outside the report and the Claims list: a tool or database presented as one "
+          "the client uses, a host answering their own question as if it were a finding"),
+    ("f", "no draft history: nothing an earlier draft or version said, got wrong or had changed "
+          "(the listener never saw one); say what the report finds and what was checked"),
+)
+
+
+def robustness_files(out, depth=3):
+    """Every CSV under <out>/tables (to `depth` folders) whose header has a `robust` column --
+    the session's own robustness tables, whatever made them. Sorted paths; [] when none."""
+    root = os.path.join(out or "", "tables")
+    if not out or not os.path.isdir(root):
+        return []
+    found, base = [], root.rstrip(os.sep).count(os.sep)
+    for d, dirs, files in os.walk(root):
+        if d.count(os.sep) - base >= depth:
+            dirs[:] = []
+        for f in sorted(files):
+            path = os.path.join(d, f)
+            if not f.lower().endswith(".csv"):
+                continue
+            try:
+                with open(path, newline="", encoding="utf-8-sig", errors="replace") as fh:
+                    head = next(csv.reader(fh), [])
+            except (OSError, csv.Error):
+                continue
+            if "robust" in {h.strip().lower() for h in head}:
+                found.append(path)
+    return sorted(found)
+
+
+def robustness_digest(out):
+    """One sha256 of the robustness tables (their paths under <out> and contents), or "none":
+    check.txt and meaning_check.md record it, so new or changed tables make both stale."""
+    files = robustness_files(out)
+    if not files:
+        return "none"
+    h = hashlib.sha256()
+    for path in files:
+        h.update(os.path.relpath(path, out).replace(os.sep, "/").encode("utf-8") + b"\0")
+        h.update(sha256_file(path).encode("ascii") + b"\n")
+    return h.hexdigest()
+
+
+def robustness_tables(out, depth=3):
+    """{protein name as written: [(table, robust cell, name)]} from robustness_files: names from
+    Genes, Protein.Names and Protein.Group (";"-separated). Read as utf-8-sig (Excel and readr
+    write a byte-order mark). {} when there are none."""
+    found = {}
+    for path in robustness_files(out, depth):
+        try:
+            with open(path, newline="", encoding="utf-8-sig", errors="replace") as fh:
+                rows = csv.DictReader(fh)
+                col = {h.strip().lower(): h for h in (rows.fieldnames or [])}
+                for row in rows:
+                    v = (row.get(col["robust"]) or "").strip()
+                    for k in ("genes", "protein.names", "protein.group"):
+                        for n in (row.get(col[k]) or "").split(";") if k in col else ():
+                            n = n.strip()
+                            if n:
+                                found.setdefault(n, []).append(
+                                    (os.path.relpath(path, out).replace(os.sep, "/"), v, n))
+        except (OSError, csv.Error):
+            continue
+    return found
+
+
+# A comma does not end a clause, except before a second, independent one (", and Ryr2 goes up",
+# ", while ...", ", which ..."): never ", and so does Ryr2", which carries the claim on, and never
+# inside a list a colon opened ("It survives everything: Ryr2, Jph3, and Actb").
+_COMMA_CUT = re.compile(r",\s+(?:and|so|while|which|whereas)\b(?!\s+so\s+(?:does|did|do|is|are|was|"
+                        r"were)\b)", re.I)
+# ...but a comma clause after the claim that only names more proteins (", and Ryr2 too", ", and
+# for Jph3", ", so does Ryr2") or points back at it (", and they are Ryr2, Jph3 and Actb",
+# ", which are Ryr2 and Jph3") carries the claim on: its names are a WARN, never a FAIL (review of
+# 2.13.2, round 3). Its words are names (a capital or a digit) and these, nothing else.
+_CARRY_WORDS = {"and", "or", "they", "these", "those", "it", "are", "is", "were", "was", "include",
+                "includes", "including", "does", "do", "did", "too", "also", "as", "well", "both",
+                "alike", "for", "in", "with", "of", "the", "same", "goes", "true", "again", "even"}
+# English words that are also (mouse) gene symbols, read as English at the start of a sentence:
+# "Was that robust?", "Set against that, ..." (review of 2.13.2, round 2). Said straight before
+# the claim in a statement ("Set holds up", "Max survives every check") it may be the gene: a WARN
+# (round 3).
+SENTENCE_START_WORDS = {"was", "set", "max", "son", "rest", "impact", "cat", "arc", "star", "can",
+                        "far", "ran", "gas", "spin", "pole", "tan", "lot", "not", "per", "top",
+                        "act", "aim", "bad", "cap", "end", "fat", "fit", "ill", "key", "kit",
+                        "mad", "met", "net", "pan", "ret", "tor", "via", "wars", "wise", "yes"}
+_SENTENCE_END = re.compile(r"[.!?](?=\s|$)")
+
+
+def _carries_on(cut, tail):
+    """True when the comma clause `tail` that `cut` (a _COMMA_CUT match) opens carries the claim
+    before it on (_CARRY_WORDS); never one ", while" or ", whereas" opens."""
+    if cut.group(0).split()[-1].lower() in ("while", "whereas"):
+        return False
+    words = _NAME_TOK.findall(tail)
+    return bool(words) and all(w.lower() in _CARRY_WORDS or w[0].isupper() or re.search(r"\d", w)
+                               for w in words)
+
+
+def _robust_rows(robust, tok):
+    """The table rows for a token: as written (a symbol that is also an English word -- SET, WAS,
+    MAX -- is never matched by "set" or "was"); a token with a digit, or in capitals (ACTB for a
+    mouse table's Actb), in either case."""
+    rows = robust.get(tok)
+    if rows or not (re.search(r"\d", tok) or (tok.isupper() and len(tok) >= 3)):
+        return rows
+    low = tok.lower()
+    return [r for n, rs in robust.items() if n.lower() == low for r in rs] or None
+
+
+def robust_claims(text, robust):
+    """-> [(level, protein, claim, detail)]: a protein named in the same clause as a robust claim
+    ("robust", "survives", "holds up") that no negation turns around, whose robustness tables
+    say not robust in every row (FAIL), robust in some only (WARN), or something not understood
+    (WARN). A name that may not be the claim's -- after a comma that carries it on, or an English
+    word that starts the sentence -- is a WARN at most. The meaning check reads the rest."""
+    out, seen, maybe = [], set(), {}       # maybe: a name's WARN that only a doubt made (its index)
+    if not robust:
+        return out
+    starts = {0} | {m.end() for m in re.finditer(r"[.!?]\s+", text)}     # sentence starts
+    cuts = [0] + [m.end() for m in _CLAUSE_CUT.finditer(text)] + [len(text)]
+    for a, b in zip(cuts, cuts[1:]):
+        clause = text[a:b]
+        for m in ROBUST_CLAIM.finditer(clause):
+            if _CLAUSE_NEG.search(clause[:m.start()]):
+                continue
+            # the claim's reach: its clause, less a second one a comma opens -- after the claim,
+            # unless a colon opened a list (or a WARN, when it carries the claim on); before it,
+            # unless what precedes is a list of names ("Ryr2, Jph3, and Actb all survive")
+            begin, end, carried = 0, len(clause), []
+            c = _COMMA_CUT.search(clause, m.end())
+            if c and ":" not in clause[m.end():c.start()]:
+                end = c.start()
+                while c:
+                    nxt = _COMMA_CUT.search(clause, c.end())
+                    stop = nxt.start() if nxt else len(clause)
+                    if not _carries_on(c, clause[c.end():stop]):
+                        break
+                    carried.append((c.end(), stop))
+                    c = nxt
+            for c in _COMMA_CUT.finditer(clause, 0, m.start()):
+                words = [w for w in _NAME_TOK.findall(clause[begin:c.start()])
+                         if w.lower() not in ("and", "or")]
+                if not words or not all(_robust_rows(robust, w) for w in words):
+                    begin = c.end()
+            spans = [(begin, end, None)] + [(x, y, "named after a comma, which may open a new "
+                                                   "clause") for x, y in carried]
+            for lo, hi, doubt in spans:
+                for t in _NAME_TOK.finditer(clause, lo, hi):
+                    tok, why = t.group(0), doubt
+                    rows = _robust_rows(robust, tok)
+                    if not rows or rows[0][2] in seen:
+                        continue
+                    if ((a + t.start()) in starts and tok.lower() in SENTENCE_START_WORDS
+                            and not tok.isupper()):
+                        # the English word ("Was that robust?", "Set against that, Gapdh holds
+                        # up"), unless said straight before the claim in a statement
+                        e = _SENTENCE_END.search(text, a + t.end())
+                        if (e and e.group(0) == "?") or re.search(r"[,:;(–—]",
+                                                                  clause[t.end():m.start()]):
+                            continue
+                        why = f"'{tok}' starts the sentence and may be the English word"
+                    if why and rows[0][2] in maybe:
+                        continue
+                    # a negation beside the name -- after it, but never past the claim word ("Ryr2
+                    # holds up, which doesn't happen often" is a claim)
+                    after = clause[t.end():m.start() if t.start() < m.start() else hi]
+                    if (_NAME_NEG_AFTER.search(after)
+                            or _NAME_NEG_BEFORE.search(clause[:t.start()])):
+                        continue
+                    said = [(tbl, v, robust_value(v)) for tbl, v, _ in rows]
+                    yes = [x for x in said if x[2] == "yes"]
+                    no = [x for x in said if x[2] == "no"]
+                    odd = [x for x in said if x[2] is None]
+                    where = "; ".join(f"{tbl}: robust = {v or 'blank'}"
+                                      for tbl, v, _ in (no + odd)[:3])
+                    if odd and not yes:
+                        found = ("WARN", f"robust value not understood -- {where}; the meaning "
+                                         "check decides")
+                    elif not yes:
+                        found = ("FAIL", where)
+                    elif no or odd:
+                        found = ("WARN", f"robust in {', '.join(x for x, _, _ in yes[:3])}; "
+                                         f"not in {where}")
+                    else:
+                        found = None
+                    if why:
+                        if found:
+                            maybe[rows[0][2]] = len(out)
+                            out.append(("WARN", rows[0][2], m.group(0),
+                                        f"{found[1]}; {why} -- the meaning check decides"))
+                        continue
+                    seen.add(rows[0][2])
+                    if found:                          # replaces a WARN only a doubt made
+                        hit = (found[0], rows[0][2], m.group(0), found[1])
+                        if rows[0][2] in maybe:
+                            out[maybe.pop(rows[0][2])] = hit
+                        else:
+                            out.append(hit)
+    return out
+
+
+def meaning_path(script_path):
+    return os.path.join(os.path.dirname(os.path.abspath(script_path)), MEANING_FILE)
+
+
+def read_meaning(s):
+    """-> (status, problem) from the meaning_check.md beside the script: ("PASS", None) only for
+    a PASS recorded for THIS script's sha256. Else the status ("missing", "FAIL", "STALE", ...)
+    and why render, link, share and job refuse."""
+    path = meaning_path(s.path)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return "missing", (f"no {MEANING_FILE} beside {os.path.basename(s.path)}: the meaning "
+                           "check has not been recorded")
+    verdict = re.search(r"(?m)^verdict: (\w+)", text)
+    sha = re.search(r"(?m)^script_sha256: (\w+)", text)
+    if not verdict or verdict.group(1) != "PASS":
+        return (verdict.group(1) if verdict else "unreadable"), f"{MEANING_FILE} does not say PASS"
+    if not sha or sha.group(1) != s.sha256:
+        return "STALE", f"the script changed after {MEANING_FILE} was recorded"
+    # ...and what it was read against: each delivered source and the robustness tables (a
+    # meaning check from before these lines were written has none to compare)
+    for m in re.finditer(r"(?m)^source: (.+) sha256=(\w+)$", text):
+        try:
+            now = source_sha(source_text(os.path.join(os.path.dirname(path), m.group(1))))
+        except OSError:
+            return "STALE", f"{os.path.basename(m.group(1))} is missing"
+        if now != m.group(2):
+            return "STALE", (f"{os.path.basename(m.group(1))} changed after {MEANING_FILE} was "
+                             "recorded")
+    tables = re.search(r"(?m)^robust_tables_sha256: (\w+)$", text)
+    out = output_dir_of(s.path)
+    if tables and out and robustness_digest(out) != tables.group(1):
+        return "STALE", f"the robustness tables changed after {MEANING_FILE} was recorded"
+    return "PASS", None
+
+
+def meaning_brief(s, robust, sources):
+    """The reviewer's brief: what to check in every sentence, the sources, the robustness tables,
+    and the transcript, sentence by sentence with its line."""
+    L = [f"# Meaning check brief: {os.path.basename(s.path)}", f"script_sha256: {s.sha256}", "",
+         "You did NOT write this script. Read every sentence against the report and the files "
+         "below, and check each for:", ""]
+    L += [f"- ({k}) {t}" for k, t in MEANING_CHECKS]
+    L += ["", "Sources: " + (", ".join(sources) if sources else "the files check.txt lists"),
+          "Robustness tables (a `robust` column): " + (", ".join(sorted({r[0] for v in robust.values()
+                                                                        for r in v}))
+                                                      if robust else "none in output/tables"),
+          "", "For each problem write one line: `line N: <what is wrong> -> <the fix>` (mark it "
+          "`resolved` once the script is fixed). Then record the verdict, the script's sha256 "
+          "is taken by the tool:", "",
+          f"    make_podcast.py meaning {os.path.basename(s.path)} --verdict PASS|FAIL "
+          "--reviewer \"<who, not the writer>\" --findings <your findings file>", "",
+          "## The transcript, sentence by sentence", ""]
+    for t in s.turns():
+        for sent in re.split(r"(?<=[.!?])\s+", t.text.strip()):
+            if sent:
+                L.append(f"- line {t.line} {t.speaker}: {sent}")
+    return "\n".join(L) + "\n"
+
+
+def cmd_meaning(a):
+    """--brief: print (and write beside the script) what the reviewer checks. --verdict: record
+    the reviewer's verdict for THIS script (its sha256 is computed here, never typed)."""
+    s = parse_script(a.script)
+    out = output_dir_of(s.path, getattr(a, "output_dir", None))
+    robust = robustness_tables(out) if out else {}
+    if a.brief:
+        text = meaning_brief(s, robust, [rel(x, os.path.dirname(s.path)) for x in a.source or []])
+        with open(os.path.join(os.path.dirname(s.path), "meaning_brief.md"), "w",
+                  encoding="utf-8") as fh:
+            fh.write(text)
+        if hasattr(sys.stdout, "reconfigure"):           # a cp1252 console: "α", "→" print as ?
+            try:
+                sys.stdout.reconfigure(errors="replace")
+            except (ValueError, OSError):
+                pass
+        print(text)
+        return 0
+    if not a.verdict:
+        log("[meaning] give --brief (what to check) or --verdict PASS|FAIL with --reviewer and "
+            "--findings")
+        return 2
+    who = " ".join((a.reviewer or "").split())
+    if not who:
+        log("[meaning] --reviewer is required: who read the script (an agent or a person that "
+            "did not write it)")
+        return 2
+    if s.author and who.lower() == " ".join(str(s.author).split()).lower():
+        log(f"[meaning] refusing: the reviewer ({who}) is the script's author: the meaning check "
+            "is a separate reader's")
+        return 2
+    try:
+        with open(a.findings, encoding="utf-8") as fh:
+            findings = fh.read().strip()
+    except (OSError, TypeError) as e:
+        log(f"[meaning] --findings: {e}")
+        return 2
+    if not findings:
+        log("[meaning] --findings is empty: list each problem found (or write `None`)")
+        return 2
+    # read against what passed the check: its sources (and the tables) are recorded below, so a
+    # report rewritten after this verdict makes it stale
+    status, srcs, why = read_check(s)
+    if why:
+        log(f"[meaning] refusing: {why}. check.txt must PASS for this script and its sources "
+            "first: the meaning check reads the same report")
+        return 2
+    brief = os.path.join(os.path.dirname(s.path), "meaning_brief.md")
+    try:
+        with open(brief, encoding="utf-8") as fh:
+            brief_ok = f"script_sha256: {s.sha256}" in fh.read()
+    except OSError:
+        brief_ok = False
+    if not brief_ok:
+        log(f"[meaning] refusing: no meaning_brief.md for this script: run `make_podcast.py "
+            f"meaning {a.script} --brief` first -- the reviewer works from it")
+        return 2
+    mech = []
+    for t in s.turns():
+        for level, name, claim, detail in robust_claims(t.text, robust):
+            mech.append(f"- {level}: line {t.line}: {name} next to '{claim}' ({detail})")
+    if a.verdict == "PASS" and any(x.startswith("- FAIL") for x in mech):
+        log("[meaning] refusing PASS: " + "; ".join(x[2:] for x in mech if x.startswith("- FAIL")))
+        return 2
+    L = [f"# Meaning check: {os.path.basename(s.path)}",
+         f"script_sha256: {s.sha256}", f"verdict: {a.verdict}", f"reviewer: {who}",
+         f"checked: {now_iso()}", f"brief_sha256: {sha256_file(brief)}"]
+    L += [f"source: {x['file']} sha256={x['sha256']}" for x in srcs if x.get("delivered")]
+    L += [f"robust_tables_sha256: {robustness_digest(out) if out else 'none'}", "",
+          "Every sentence was read against the report for:"]
+    L += [f"- ({k}) {t}" for k, t in MEANING_CHECKS]
+    L += ["", "## Mechanical (robustness tables)", ""] + (mech or ["- none"])
+    L += ["", "## Findings", "", findings, ""]
+    path = meaning_path(s.path)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(L))
+    print(json.dumps({"meaning_check": path, "verdict": a.verdict, "script_sha256": s.sha256},
+                     indent=2))
+    return 0 if a.verdict == "PASS" else 1
+
+
 def _core_run(session):
     """submission_report.core_run: the one test of a UC Davis Core run. False when it cannot be
     asked -- never invite a user outside the Core to the Core's survey."""
@@ -884,7 +1314,7 @@ def _as_source(x):
             "ref": os.path.basename(path)}
 
 
-def check(s, sources, forbid=(), core=False):
+def check(s, sources, forbid=(), core=False, robust=None):
     """-> dict with fails / warns / infos (lists of str) and stats. `sources`: dicts from
     cmd_check (or (path, sha, text) tuples, taken as delivered). A token found only in an
     extra source (one the lab was not given) passes only when a Claims bullet names it and that
@@ -1002,6 +1432,25 @@ def check(s, sources, forbid=(), core=False):
             fails.append(f"{where}: '{m.group(0)}' -- a host must not claim a real research "
                          "specialty (it lends a synthetic voice false authority); say \"I'm the "
                          "biologist of the pair\" or \"I'm the statistician\"")
+        for level, name, claim, detail in robust_claims(t.text, robust):
+            (fails if level == "FAIL" else warns).append(
+                f"{where}: {name} is named next to '{claim}', but the robustness tables say "
+                f"otherwise ({detail}) -- name only the robust proteins there, or say which "
+                "comparison it holds in")
+        for m in SUPERLATIVE.finditer(t.text):
+            ph = quantity_phrase(t.text, m) or m.group(0).lower()
+            if f" {ph} " not in phrases:
+                warns.append(f"{where}: '{ph}' -- a superlative the sources do not say in these "
+                             "words: the meaning check must confirm the report makes it")
+        for snip in draft_history(t.text):
+            fails.append(f"{where}: draft history '{snip}' -- the listener never saw a draft: "
+                         "say what the report finds and what was checked, in the present tense, "
+                         "never what an earlier draft said, got wrong or corrected "
+                         "(references/podcast.md)")
+        for snip in draft_history_loose(t.text):
+            warns.append(f"{where}: possible draft history '{snip}' -- if it tells of an earlier "
+                         "draft or a fix, say what the report finds instead; the meaning check "
+                         "(f) decides")
 
     seen = {}
     for i, t in enumerate(turns, 1):
@@ -1125,7 +1574,8 @@ def check(s, sources, forbid=(), core=False):
         elif words and by.get(h, 0) < 0.35 * words:
             warns.append(f"{h} speaks only {100.0 * by[h] / words:.0f}% of the words")
     return {"status": "FAIL" if fails else "PASS", "fails": fails, "warns": warns,
-            "infos": infos, "stats": stats, "pron": pron}
+            "infos": infos, "stats": stats, "pron": pron,
+            "robust_tables": sorted({r[0] for v in (robust or {}).values() for r in v})}
 
 
 def _ctx(text, token):
@@ -1153,6 +1603,11 @@ def check_report(s, res, sources, forbid):
     names = [n for n in forbid if n.strip()]
     L.append(f"forbidden names: {len(names)} given (not listed here)" if names else
              "forbidden names: none given")
+    rt = res.get("robust_tables") or []
+    L.append("robustness tables: " + (", ".join(rt) if rt else "none (no CSV under output/tables "
+                                                               "has a `robust` column)"))
+    if res.get("robust_digest"):
+        L.append(f"robust_tables_sha256: {res['robust_digest']}")
     L += ["", f"words: {st['words']:,} · turns: {st['turns']} · segments: {st['segments']} · "
               f"about {st['minutes']} min at {WPM} wpm",
           "speaking share: " + " · ".join(f"{h} {v}%" for h, v in st["share"].items())]
@@ -1168,7 +1623,10 @@ def check_report(s, res, sources, forbid):
                   "symbol-like token and every capitalised word mid-sentence in the transcript was "
                   "found in the sources or is listed under Claims beyond the report; the AI "
                   "disclosure is spoken early; no forbidden name appears; every pronunciation row "
-                  "only re-spells its written form. It does NOT mean the script is right."]
+                  "only re-spells its written form; no turn narrates an earlier draft "
+                  "(client_text.draft_history); no protein the robustness tables call not "
+                  "robust is named next to a robust claim. It does NOT mean the script is right. "
+                  f"The meaning check ({MEANING_FILE}) reads it for meaning before render."]
     L += ["", "What check cannot catch -- read the script against the report for these:"]
     L += [f"- {x}" for x in CANNOT_CATCH]
     return "\n".join(L) + "\n"
@@ -1237,7 +1695,9 @@ def cmd_check(a):
         sha, text = load_source(p)
         sources.append({"path": os.path.realpath(p), "sha": sha, "text": text, "kind": "extra",
                         "label": lab.strip() or os.path.basename(p), "ref": os.path.basename(p)})
-    res = check(s, sources, a.forbid_name or [], core=bool(out and _core_run(_session_of(out))))
+    res = check(s, sources, a.forbid_name or [], core=bool(out and _core_run(_session_of(out))),
+                robust=robustness_tables(out) if out else None)
+    res["robust_digest"] = robustness_digest(out) if out else None
     for pr in reversed(problems):
         res["fails"].insert(0, pr)
     if problems:
@@ -1277,6 +1737,10 @@ def read_check(s):
         return "STALE", srcs, "the script changed after check.txt was written"
     if not srcs:
         return "STALE", srcs + extra, "check.txt names no delivered source"
+    tables = re.search(r"(?m)^robust_tables_sha256: (\w+)$", text)
+    out = output_dir_of(s.path)
+    if tables and out and robustness_digest(out) != tables.group(1):
+        return "STALE", srcs + extra, "the robustness tables changed after check.txt was written"
     for src in srcs:                     # relative to check.txt; extra sources are not re-read
         try:
             now = source_sha(source_text(os.path.join(os.path.dirname(path), src["file"])))
@@ -1502,12 +1966,43 @@ class RequestTimeout(Exception):
     """A TTS request with no answer within --request-timeout seconds."""
 
 
+class RestartRender(Exception):
+    """The model stopped answering and the render moved to another: every chunk is made again
+    with the new model, so the episode never mixes two models' voices."""
+
+
+def gemini_client(genai, types, key, timeout_s):
+    """genai.Client with a per-request HTTP timeout and no silent SDK retries -> (client, record).
+    Read from google-genai 2.31.0's source (HIVE, 2026-10-16): HttpOptions.timeout is in
+    milliseconds; models.generate_content retries only when retry_options is set; the interactions
+    client (Gemini 3 TTS) retries by itself -- 3 retries when retry_options is unset, with a
+    server's Retry-After obeyed while nothing is logged -- and takes HttpRetryOptions.attempts as
+    its retry count, so attempts=1 leaves it one retry, the fewest this SDK allows (attempts=0 is
+    turned into 1 when the client is built). timed_request's deadline bounds every request either
+    way. An SDK without these options keeps its own defaults, and the record says so."""
+    want = {"timeout_ms": int(timeout_s * 1000), "retry_attempts": 1}
+    try:
+        opts = types.HttpOptions(timeout=want["timeout_ms"],
+                                 retry_options=types.HttpRetryOptions(attempts=1))
+    except (AttributeError, TypeError, ValueError) as e:
+        return genai.Client(api_key=key), {
+            "set": False, "note": f"this google-genai has no HttpOptions / HttpRetryOptions "
+                                  f"({type(e).__name__}): its own timeout and retries apply"}
+    try:
+        return genai.Client(api_key=key, http_options=opts), dict(want, set=True)
+    except TypeError as e:
+        return genai.Client(api_key=key), {
+            "set": False, "note": f"this google-genai's Client takes no http_options ({e}): "
+                                  "its own timeout and retries apply"}
+
+
 class GeminiTTS(object):
     """Gemini multi-speaker TTS, one request per chunk. Model names are read from the API
     (models.list), never assumed. Default order: a pro TTS model, then gemini-3.8-flash-tts,
     then gemini-2.5-flash-preview-tts. A model missing (404), without quota, or rejecting the
     request before it has made a chunk hands over to the next. Once a model has made a chunk
-    the episode stays on it, because a second model's voices sound different.
+    the episode stays on it, because a second model's voices sound different -- unless it stops
+    answering (preflight, stall_switch): then the next model makes every chunk again.
 
     Two APIs, chosen from the model name (https://ai.google.dev/gemini-api/docs/speech-generation,
     read 2026-09-25):
@@ -1542,13 +2037,30 @@ class GeminiTTS(object):
             raise RenderError("[INFO] the gemini backend needs the google-genai package: "
                               "python3 -m pip install google-genai (or use --tts say)")
         self.key = read_key(core=bool(getattr(a, "core_run", None)))
+        # which key the cache's TIER_FILE speaks for: a fingerprint, never the key
+        self.key_id = hashlib.sha256(self.key.encode("utf-8")).hexdigest()[:16]
         self.types = types
-        self.client = genai.Client(api_key=self.key)
+        self.request_timeout = float(getattr(a, "request_timeout", None) or REQUEST_TIMEOUT)
+        self.client, self.http = gemini_client(genai, types, self.key, self.request_timeout)
+        if not self.http.get("set"):
+            log(f"[INFO] {self.http['note']}")
         self.user_models = list(a.model or [])
         self.candidates = self.user_models or self.discover()
         self.model = self.candidates[0]
         self.min_interval = float(getattr(a, "min_interval", MIN_INTERVAL))
-        self.request_timeout = float(getattr(a, "request_timeout", None) or REQUEST_TIMEOUT)
+        # what the key is (note_tier): "prepaid" once a 402 shows prepay billing, "free" once a
+        # 429 names a free-tier quota (never assumed), with the evidence; and whether a
+        # hand-typed --cloud-ok note says otherwise ("paid") -- recorded, never a stop
+        self.key_tier, self.key_tier_basis, self.tier_warning = None, None, None
+        self.tier_evidence, self.prior_evidence, self.rate_logged = [], [], False
+        note = getattr(a, "cloud_ok", None)
+        self.paid_note = (note if isinstance(note, str) and re.search(r"\bpaid\b", note, re.I)
+                          and not re.search(r"\b(?:un|not\s+|non-?)paid\b", note, re.I) else None)
+        self.stalled, self.switches = [], []     # models that stopped answering; the hand-overs
+        self.unusable = []                       # missing, no quota or rejected in this render
+        self.remembered = {}                     # stalled in an earlier render (STALL_FILE)
+        self.cache_dir = None
+        self.preflight_record = None
         self.timeout_budget = 60.0 * float(getattr(a, "request_timeout_budget", None)
                                            or REQUEST_TIMEOUT_BUDGET_MIN)
         self.timed_out = 0.0                 # s lost to unanswered requests in this render
@@ -1604,14 +2116,87 @@ class GeminiTTS(object):
             log(f"[render] other TTS models, used only with --model: {', '.join(other)}")
         return out
 
+    def remembered_stalls(self):
+        """{model: record} of the models that stopped answering in this cache within
+        STALL_MEMORY_H hours."""
+        try:
+            with open(os.path.join(self.cache_dir, STALL_FILE), encoding="utf-8") as fh:
+                got = json.load(fh)
+        except (OSError, ValueError, TypeError):
+            return {}
+        now = datetime.datetime.now(datetime.timezone.utc)
+        out = {}
+        for m, rec in (got.items() if isinstance(got, dict) else ()):
+            try:
+                at = datetime.datetime.fromisoformat(str(rec.get("at")))
+                if at.tzinfo is None:
+                    at = at.replace(tzinfo=datetime.timezone.utc)
+            except (ValueError, AttributeError):
+                continue
+            if (now - at).total_seconds() < STALL_MEMORY_H * 3600:
+                out[m] = rec
+        return out
+
+    def forget_stall(self, model):
+        """`model` answers again: take it out of STALL_FILE (never fatal)."""
+        self.remembered.pop(model, None)
+        path = os.path.join(self.cache_dir or "", STALL_FILE)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                got = json.load(fh)
+            if isinstance(got, dict) and got.pop(model, None) is not None:
+                with open(path + ".part", "w", encoding="utf-8") as fh:
+                    json.dump(got, fh, indent=2)
+                os.replace(path + ".part", path)
+        except (OSError, ValueError):
+            pass
+
+    def remember_stall(self, model, where, why):
+        """Record in the cache that `model` stopped answering (never fatal)."""
+        if not self.cache_dir:
+            return
+        path = os.path.join(self.cache_dir, STALL_FILE)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                got = json.load(fh)
+            got = got if isinstance(got, dict) else {}
+        except (OSError, ValueError):
+            got = {}
+        got[model] = {"at": now_iso(), "where": where, "why": why}
+        try:
+            with open(path + ".part", "w", encoding="utf-8") as fh:
+                json.dump(got, fh, indent=2)
+            os.replace(path + ".part", path)
+        except OSError as e:
+            log(f"[WARN] could not record that {model} stopped answering ({e})")
+
     def prepare(self, chunks, speak, cache_dir):
-        """Stay on the model the cache was made with: resuming must not mix voices."""
+        """Stay on the model the cache was made with: resuming must not mix voices -- unless that
+        model stopped answering within STALL_MEMORY_H hours: then it is not resumed with, and the
+        model that is used makes every chunk again."""
+        self.cache_dir = cache_dir
+        self.prior_evidence = self._load_tier()
+        self._settle_tier()
         if self.user_models:
             return
+        recent = self.remembered_stalls()
+        if all(m in recent for m in self.candidates):
+            recent = {}                         # every model stalled: each gets another chance
+        for m in recent:
+            if m in self.candidates and m not in self.stalled:
+                self.stalled.append(m)
+        self.remembered = {m: r for m, r in recent.items() if m in self.candidates}
         have = {m: sum(os.path.isfile(os.path.join(cache_dir, cache_key(self, c, speak, m) +
                                                    ".wav")) for c in chunks)
                 for m in self.candidates}
-        best = max(self.candidates, key=lambda m: have[m])
+        for m in [m for m in self.candidates if m in recent and have[m]]:
+            log(f"[render] not resuming with {m}: it stopped answering at {recent[m].get('at')} "
+                f"({recent[m].get('where')}); the model used makes every chunk again, so the "
+                "episode has one model's voices")
+        usable = [m for m in self.candidates if m not in recent]
+        self.candidates = usable + [m for m in self.candidates if m not in usable]
+        self.model = self.candidates[0]
+        best = max(usable, key=lambda m: have[m])
         if have[best]:
             self.candidates.remove(best)
             self.candidates.insert(0, best)
@@ -1702,11 +2287,12 @@ class GeminiTTS(object):
         return (self.interaction_audio(r) if self.api(self.model) == "interactions" else
                 self.audio(r))
 
-    def timed_request(self, chunk, speak, label):
-        """request() in a worker thread, waited for at most request_timeout seconds, with a log
-        line when it is sent and every HEARTBEAT seconds while it is out: a hung request shows in
-        the log and ends as RequestTimeout, never an endless wait. The abandoned thread is a
-        daemon, so it cannot keep the process alive."""
+    def timed_request(self, chunk, speak, label, timeout=None):
+        """request() in a worker thread, waited for at most `timeout` (request_timeout) seconds,
+        with a log line when it is sent and every HEARTBEAT seconds while it is out: a hung request
+        shows in the log and ends as RequestTimeout, never an endless wait. The abandoned thread
+        is a daemon, so it cannot keep the process alive."""
+        timeout = self.request_timeout if timeout is None else timeout
         box = {}
 
         def work():
@@ -1717,15 +2303,15 @@ class GeminiTTS(object):
         t = threading.Thread(target=work, name="tts-request", daemon=True)
         start = _now()
         log(f"[render] {label}: sent to {self.model} (an answer is waited for up to "
-            f"{self.request_timeout:.0f} s)")
+            f"{timeout:.0f} s)")
         t.start()
         while True:
-            left = self.request_timeout - (_now() - start)
+            left = timeout - (_now() - start)
             t.join(max(0.0, min(HEARTBEAT, left)))
             if not t.is_alive():
                 break
             waited = _now() - start
-            if waited >= self.request_timeout:
+            if waited >= timeout:
                 raise RequestTimeout(f"no answer from {self.model} in {waited:.0f} s")
             log(f"[render] {label}: still waiting for {self.model} ({waited:.0f} s)")
         if "e" in box:
@@ -1736,10 +2322,220 @@ class GeminiTTS(object):
         return (self.model in self.candidates
                 and self.candidates.index(self.model) + 1 < len(self.candidates))
 
+    def _next_model(self):
+        """The next candidate after this model that has not stopped answering and was not found
+        missing, out of quota or rejected in this render, or None."""
+        if self.model not in self.candidates:
+            return None
+        return next((m for m in self.candidates[self.candidates.index(self.model) + 1:]
+                     if m not in self.stalled and m not in self.unusable), None)
+
+    def note_tier(self, err):
+        """What an error says about the key's billing tier, as evidence: a 402 (prepay credits
+        used up) shows PREPAID billing; a 429 that names a free-tier quota, the FREE tier. Said
+        in the log when the tier it settles on changes, recorded (podcast.json key_tier,
+        key_tier_evidence) and kept for this key in the cache (TIER_FILE). A --cloud-ok note that
+        says "paid" gets one plain warning when the tier is free. Never a stop by itself: the
+        Core's standing approval covers free-tier Core podcasts (2026-09-28)."""
+        if err.get("kind") == "billing":
+            tier = "prepaid"
+            basis = (f"a 402 from {self.model}: the project's prepay credits are depleted, so it "
+                     "is on prepaid (paid) billing")
+        elif err.get("free_tier"):
+            tier = "free"
+            basis = f"a 429 from {self.model} named the free-tier quota {err['free_tier']}"
+        else:
+            return
+        if any((e["tier"], e["model"]) == (tier, self.model) for e in self.tier_evidence):
+            return
+        was = self.key_tier
+        self.tier_evidence.append({"tier": tier, "model": self.model, "at": now_iso(),
+                                   "basis": basis})
+        self._settle_tier()
+        self._save_tier()
+        if self.key_tier != was:
+            log(f"[render] the Gemini key's Google project is "
+                + ("on PREPAID billing" if self.key_tier == "prepaid" else "on the FREE tier")
+                + f" ({self.key_tier_basis})")
+            if self.tier_warning:
+                log(f"[WARN] {self.tier_warning}")
+        elif tier == "free" and self.key_tier == "prepaid":
+            log(f"[render] {basis}; not taken as the key's tier: billing outvotes it "
+                f"({self.key_tier_basis})")
+
+    def _settle_tier(self):
+        """key_tier from the evidence, this render's and this key's earlier renders' (TIER_FILE):
+        "prepaid" when any shows prepay billing, else "free" when any names a free-tier quota,
+        else None; the latest of that kind is the basis. A free-tier quota never outvotes
+        billing: the staff render's project answered a 429 naming a free-tier quota (limit 0) and,
+        later the same day, a 402 that showed prepaid billing."""
+        every = self.prior_evidence + self.tier_evidence
+        for tier in ("prepaid", "free"):
+            got = [e for e in every if e["tier"] == tier]
+            if got:
+                e = got[-1]
+                self.key_tier = tier
+                self.key_tier_basis = e["basis"] + (
+                    "" if e in self.tier_evidence else f" (an earlier render, {e['at']})")
+                break
+        else:
+            self.key_tier, self.key_tier_basis = None, None
+        self.tier_warning = None
+        if self.key_tier == "free" and self.paid_note:
+            self.tier_warning = (f"the --cloud-ok note says the key is paid ({self.paid_note!r}), but "
+                                 f"its Google project is on the free tier ({self.key_tier_basis}): "
+                                 "the note does not match the key; correct it for the next render")
+
+    def key_tier_evidence(self):
+        """Every answer the tier rests on, earlier renders' for this key first."""
+        return self.prior_evidence + self.tier_evidence
+
+    def _load_tier(self):
+        """This key's evidence from TIER_FILE, the last TIER_MEMORY_DAYS of it ([] for another
+        key or none)."""
+        try:
+            with open(os.path.join(self.cache_dir, TIER_FILE), encoding="utf-8") as fh:
+                got = json.load(fh)
+        except (OSError, ValueError, TypeError):
+            return []
+        if not isinstance(got, dict) or got.get("key_id") != self.key_id:
+            return []
+        now = datetime.datetime.now(datetime.timezone.utc)
+        out = []
+        for e in got.get("evidence") or []:
+            try:
+                at = datetime.datetime.fromisoformat(str(e["at"]))
+                if at.tzinfo is None:
+                    at = at.replace(tzinfo=datetime.timezone.utc)
+                if (now - at).total_seconds() < TIER_MEMORY_DAYS * 86400 \
+                        and e["tier"] in ("prepaid", "free"):
+                    out.append({k: e[k] for k in ("tier", "model", "at", "basis")})
+            except (KeyError, TypeError, ValueError):
+                continue
+        return out
+
+    def _save_tier(self):
+        """Keep this key's evidence in the cache (never fatal)."""
+        if not self.cache_dir:
+            return
+        path = os.path.join(self.cache_dir, TIER_FILE)
+        rec = {"key_id": self.key_id, "tier": self.key_tier, "basis": self.key_tier_basis,
+               "evidence": self.key_tier_evidence()[-20:]}
+        try:
+            with open(path + ".part", "w", encoding="utf-8") as fh:
+                json.dump(rec, fh, indent=2)
+            os.replace(path + ".part", path)
+        except OSError as e:
+            log(f"[WARN] could not record the key's tier in the cache ({e})")
+
+    def stall_switch(self, label, why):
+        """This model stopped answering: hand over to the next candidate, which makes EVERY chunk
+        again (RestartRender), or None when there is no other."""
+        was = self.model
+        if was not in self.stalled:
+            self.stalled.append(was)
+        self.remember_stall(was, label, why)
+        nxt = self._next_model()
+        if not nxt:
+            return None
+        note = (f"{was} stopped answering ({label}: {why}); switched to {nxt}, which made every "
+                "chunk again, so the episode has one model's voices")
+        self.switches.append({"from": was, "to": nxt, "at": label, "why": why, "note": note})
+        log(f"[render] {was} stopped answering ({label}: {why}). Switching to {nxt} and making "
+            f"EVERY chunk again with it, so the episode never mixes two models' voices")
+        self.model, self.produced, self.models_used = nxt, 0, []
+        self.pinned = False        # the next model made nothing yet: a model it cannot use hands over
+        return RestartRender(note)
+
+    def switch_notes(self):
+        """One line per hand-over in this render, for podcast.json's warnings."""
+        return [x["note"] for x in self.switches]
+
+    def preflight(self, cached_from=None):
+        """Before the first chunk this render must make: a two-line test to each candidate in
+        turn, from the current one, on a PREFLIGHT_TIMEOUT deadline; the first that answers is
+        used. A rate limit counts as an answer (the normal loop waits it out); a missing model,
+        no quota, a rejected request, an error or no answer moves on; a key problem stops. A
+        model other than the one the cache was made with (`cached_from`) makes every chunk
+        again. -> the model chosen; RenderError when none answers."""
+        probe = Chunk(0, [Turn(self.hosts[0], PREFLIGHT_LINES[0], 0, 0),
+                          Turn(self.hosts[1], PREFLIGHT_LINES[1], 0, 0)])
+        start = self.model if self.model in self.candidates else self.candidates[0]
+        order = [m for m in self.candidates[self.candidates.index(start):]
+                 if m not in self.stalled and m not in self.unusable]
+        # then, before giving up, the models an earlier render remembered as stalled: an outage
+        # may be over (round 2: on a free-tier key the pro models never answer, so passing over
+        # the remembered flash models left nothing)
+        later = [m for m in self.candidates if m in self.remembered and m not in order
+                 and m not in self.unusable]
+        tried = []
+        for m in order + later:
+            if m in later:
+                self.stalled = [x for x in self.stalled if x != m]
+                log(f"[render] preflight: {m} stopped answering earlier "
+                    f"({self.remembered[m].get('at')}); trying it once more")
+            self.model = m
+            self._pace()
+            t0 = _now()
+            try:
+                self.parse(self.timed_request(probe, lambda x: x, "preflight",
+                                              timeout=PREFLIGHT_TIMEOUT))
+            except RequestTimeout:
+                # not remembered: one 60 s miss in a short outage must not keep the model out
+                # of every render for STALL_MEMORY_H (review of 2.13.2, round 2); only a stall
+                # mid-episode is (stall_switch)
+                self.stalled.append(m)
+                tried.append(f"{m}: no answer in {PREFLIGHT_TIMEOUT:.0f} s")
+                continue
+            except EmptyAudio as e:
+                tried.append(f"{m}: {e}")
+                continue
+            except Exception as e:
+                err = error_info(e)
+                self.note_tier(err)
+                if err["kind"] == "billing":            # credits are per project: every model
+                    raise RenderError(billing_stop("preflight", m, err))
+                if err["kind"] == "fatal":
+                    raise RenderError(f"preflight: {m}: {why_line(err, 300)}")
+                if err["kind"] != "rate":
+                    self.unusable.append(m)
+                    tried.append(f"{m}: {err['kind']} ({why_line(err, 120)})")
+                    continue
+            secs = round(_now() - t0, 1)
+            self.preflight_record = {"model": m, "seconds": secs, "skipped": tried}
+            if m in later:
+                log(f"[render] preflight: {m} stopped answering earlier; it answers now")
+                self.forget_stall(m)
+            if tried:
+                log(f"[render] preflight: {'; '.join(tried)}; using {m}, which answered the "
+                    f"two-line test in {secs:g} s")
+            else:
+                log(f"[render] preflight: {m} answered the two-line test in {secs:g} s")
+            if cached_from and m != cached_from:
+                note = (f"{cached_from} made this episode's cached chunks but did not answer the "
+                        f"preflight; {m} makes every chunk again, so the episode has one model's "
+                        "voices")
+                self.switches.append({"from": cached_from, "to": m, "at": "preflight",
+                                      "why": "; ".join(tried), "note": note})
+                self.pinned = False              # none of its chunks are made yet
+                log(f"[render] {note}")
+            return m
+        before = [m for m in self.candidates if m in self.remembered]
+        raise RenderError(
+            "no Gemini TTS model answered a two-line test (" + "; ".join(tried) + ")"
+            + (f"; {', '.join(before)} also stopped answering in an earlier render "
+               f"(podcast/.cache/{STALL_FILE})" if before else "")
+            + ". The chunks already made are cached: re-run later"
+            + (" (this key's project is on the free tier: its quotas are small)"
+               if self.key_tier == "free" else "")
+            + ", name a model with --model <name> (it is tried whatever happened before), or "
+            "--tts say")
+
     def _advance(self):
-        if self.produced or not self._has_next():
+        nxt = None if self.produced else self._next_model()
+        if not nxt:
             return False
-        self.model = self.candidates[self.candidates.index(self.model) + 1]
+        self.model = nxt
         return True
 
     def _pace(self):
@@ -1775,6 +2571,10 @@ class GeminiTTS(object):
                         f"{self.timeout_budget / 60:g} min). The chunks already made are cached: "
                         "re-run the same command to resume")
                 if timeouts >= REQUEST_TIMEOUTS:
+                    switch = self.stall_switch(label, f"{timeouts} requests of "
+                                                      f"{self.request_timeout:.0f} s unanswered")
+                    if switch:
+                        raise switch
                     raise RenderError(
                         f"{label}: {self.model} did not answer within {self.request_timeout:.0f} s, "
                         f"{timeouts} times ({e}). The chunks already made are cached: re-run the "
@@ -1783,7 +2583,12 @@ class GeminiTTS(object):
                 continue
             except Exception as e:
                 err = error_info(e)
+                self.note_tier(err)
                 kind = err["kind"]
+                if kind == "billing":
+                    raise RenderError(billing_stop(label, self.model, err))
+                if kind in ("missing", "exhausted", "rejected") and self.model not in self.unusable:
+                    self.unusable.append(self.model)
                 if kind in ("missing", "exhausted", "rejected") and not self.produced \
                         and not self.pinned:
                     was = self.model
@@ -1814,6 +2619,11 @@ class GeminiTTS(object):
                                                      f"{wait:.0f} s would pass --rate-wait-budget "
                                                      f"({self.wait_budget / 60:g} min)")
                     self.waited += wait
+                    if not self.rate_logged:
+                        # what Google said, once: a misread error shows here, not after 11 min
+                        self.rate_logged = True
+                        log(f"[render] {label}: Google answered {err['code'] or '?'} "
+                            f"{err['status'] or '?'}: {(err['message'] or err['msg'])[:300]}")
                     log(f"[render] rate-limited, waiting {wait:.0f}s ({label}, {self.model}"
                         + (f", {err['quota']}" if err["quota"] else "") + f"; wait {waits} of "
                         f"{RATE_WAITS})")
@@ -1867,6 +2677,17 @@ def why_line(err, n=200):
     return "; ".join(parts + [err["msg"][:n]])
 
 
+def billing_stop(where, model, err):
+    """The message a 402 stops a render with: what it is, what clears it, what is kept --
+    with Google's own words, which carry its link."""
+    said = (f"{err.get('code') or '?'} {err.get('status') or '?'}: {err['message'][:300]}"
+            if err.get("message") else why_line(err, 300))
+    return (f"{where}: Gemini prepay credits are depleted ({model}: {said}). "
+            "Waiting cannot clear this, and every model draws on the same project: add prepay "
+            "credits to the key's Google project in AI Studio (its Billing page), then re-run the "
+            "same command. The chunks already made are cached.")
+
+
 def _error_details(e):
     """The structured part of an SDK error: google-genai's APIError keeps the response JSON in
     .details; the interactions client's errors keep it in .body."""
@@ -1890,25 +2711,43 @@ def _seconds(v):
     return float(m.group(1)) if m else None
 
 
+# A 402 / prepay credits used up. Never the bare word "billing": Google's ordinary 429 says
+# "please check your plan and billing details".
+_PREPAY = re.compile(r"\bprepay(?:ment)?\b|\bcredits?\s+(?:are|is|have\s+been)\s+(?:depleted|"
+                     r"exhausted|used\s+up)\b", re.I)
+_RPC_STATUS = re.compile(r"\b(RESOURCE_EXHAUSTED|PERMISSION_DENIED|INVALID_ARGUMENT|NOT_FOUND|"
+                         r"UNAVAILABLE|INTERNAL|DEADLINE_EXCEEDED|UNAUTHENTICATED|"
+                         r"FAILED_PRECONDITION)\b")
+
+
 def error_info(e):
-    """-> {kind, msg, delay, quota}. kind: missing | exhausted (daily or zero quota) | rate
-    (per-minute, or any 429 that gives a retryDelay) | rejected (400: the request does not fit
-    this model) | fatal (key, permission) | transient. The retry delay and the quota come from
-    google.rpc.RetryInfo / QuotaFailure in the error details when present, else from the text."""
+    """-> {kind, msg, delay, quota, free_tier, code, status, message}. kind: missing | billing (402:
+    the project's prepay credits are used up -- no wait clears it) | exhausted (daily or zero
+    quota) | rate (per-minute, or any 429 that gives a retryDelay) | rejected (400: the request
+    does not fit this model) | fatal (key, permission) | transient. The retry delay and the
+    quota come from google.rpc.RetryInfo / QuotaFailure in the error details when present, else
+    from the text."""
     msg = scrub(f"{type(e).__name__}: {e}")
     code = next((c for c in (getattr(e, "code", None), getattr(e, "status_code", None))
                  if isinstance(c, int)), None)
-    found = {"ids": [], "values": [], "delay": None}
+    found = {"ids": [], "values": [], "delay": None, "metrics": [], "status": None,
+             "message": None}
 
     def walk(x):
         if isinstance(x, dict):
             for k, v in x.items():
                 if k == "quotaId" and isinstance(v, str):
                     found["ids"].append(v)
+                elif k == "quotaMetric" and isinstance(v, str):
+                    found["metrics"].append(v.rsplit("/", 1)[-1])
                 elif k == "quotaValue":
                     found["values"].append(str(v))
                 elif k == "retryDelay" and found["delay"] is None:
                     found["delay"] = _seconds(v)
+                elif k == "status" and isinstance(v, str):
+                    found["status"] = found["status"] or v
+                elif k == "message" and isinstance(v, str):
+                    found["message"] = found["message"] or v
                 else:
                     walk(v)
         elif isinstance(x, (list, tuple)):
@@ -1926,9 +2765,21 @@ def error_info(e):
     if found["delay"] is not None:
         found["delay"] = min(max(found["delay"], 1.0), 300.0)
     quota = ", ".join(dict.fromkeys(found["ids"]))
-    info = {"msg": msg, "delay": found["delay"], "quota": quota}
+    # The key's project is on Google's FREE tier when a quota it hit says so: quotaMetric
+    # generate_content_free_tier_requests, quotaId ...-FreeTier (render records key_tier)
+    tier = [q for q in found["metrics"] + found["ids"] if re.search(r"free[_-]?tier", q, re.I)]
+    if not tier and re.search(r"\w*free[_-]?tier\w*", text, re.I):
+        tier = [re.search(r"\w*free[_-]?tier\w*", text, re.I).group(0)]
+    status = found["status"] or next(iter(_RPC_STATUS.findall(text)), None)
+    info = {"msg": msg, "delay": found["delay"], "quota": quota,
+            "free_tier": ", ".join(dict.fromkeys(tier)) or None, "code": code, "status": status,
+            "message": scrub(found["message"]) if found["message"] else None}
     if code == 404 or "NOT_FOUND" in text:
         return dict(info, kind="missing")
+    # Before RESOURCE_EXHAUSTED, which a 402 also says: read as a rate limit, it waited 10 x 65 s
+    # per chunk on an error no wait can clear (staff report, skill 2.11.2)
+    if code == 402 or _PREPAY.search(text):
+        return dict(info, kind="billing")
     if code == 429 or "RESOURCE_EXHAUSTED" in text:
         zero = "0" in found["values"] or re.search(r"limit:\s*0\b", text)
         daily = (any("perday" in q.lower() for q in found["ids"]) if found["ids"] else
@@ -2266,62 +3117,10 @@ def consent_of(a):
 
 
 # ----------------------------------------------------------------------------- render
-def cmd_render(a):
-    s = parse_script(a.script)
-    if s.problems:
-        for line, msg in s.problems:
-            log(f"[FAIL] {'line %d: ' % line if line else ''}{msg}")
-        return 2
-    backend_cls = BACKENDS[a.tts]
-    speak = pronouncer(s.pronunciation)
-    chunks = make_chunks(s.segments)
-    words = sum(c.words for c in chunks)
-    if a.dry_run:                                  # a preview sends nothing: no gate needed
-        for i, c in enumerate(chunks, 1):
-            print(f"===== chunk {i}/{len(chunks)} (segment {c.seg + 1}, {c.words} words)")
-            print("\n".join(f"{t.speaker}: {speak(t.text)}" for t in c.turns))
-        return 0
-    status, sources, why = read_check(s)
-    if why and not a.unchecked:
-        log(f"[render] refusing: {why}. Run `make_podcast.py check {a.script} --source <the "
-            "report files>` and fix every flagged line first (or pass --unchecked, which "
-            "podcast.json then records).")
-        return 2
-    consent, core_rec, refusal = consent_of(a) if backend_cls.cloud else (False, None, None)
-    if backend_cls.cloud and not consent:
-        if refusal:
-            log(f"[render] not sending anything: {refusal}")
-        if not getattr(a, "core_run", None):
-            log(f"[render] not sending anything. --tts {a.tts} sends the transcript -- "
-                f"{words:,} words of the turns, after pronunciation substitutions; never the "
-                f"report -- to Google's Gemini API, and verify then sends the rendered AUDIO "
-                f"(downsampled) for transcription. On a free-tier key Google may use both to "
-                f"improve its products and human reviewers may read it ({TERMS_URL}). Once the "
-                f"user has agreed, re-run with --cloud-ok \"who agreed, when\" (a Core run: "
-                f"--core-run, the Core director's standing approval), or use --tts say "
-                f"(offline, macOS).")
-        return 2
-    out = os.path.abspath(a.out or os.path.dirname(s.path))
-    cache = os.path.join(out, ".cache")
-    os.makedirs(cache, exist_ok=True)
-    backend = backend_cls(s, a)
-    backend.prepare(chunks, speak, cache)
-    redo = set(getattr(a, "redo", None) or [])
-    for c in chunks:                              # re-make these segments, text unchanged
-        if c.seg + 1 in redo:
-            for ext in (".wav", ".json"):
-                f = os.path.join(cache, cache_key(backend, c, speak) + ext)
-                if os.path.exists(f):
-                    os.remove(f)
-    if redo:
-        log(f"[render] re-making segment(s) {', '.join(str(x) for x in sorted(redo))}")
-        if hasattr(backend, "pinned") and not getattr(a, "model", None):
-            backend.pinned = True                 # the re-made chunks join the others' voices
-    log(f"[render] {len(chunks)} chunk(s), {words:,} words -> about {words / float(WPM):.0f} min "
-        f"with {backend.name}")
-
-    # Each chunk: <key>.wav, and <key>.json with the warnings made when it was synthesized, so
-    # a resumed render still reports them.
+def render_chunks(backend, chunks, speak, cache):
+    """Every chunk, cached or made now -> (pieces, n_cached, n_new, used cache keys, warnings).
+    RestartRender (the model stopped answering and the next one takes over) propagates: the
+    caller starts again from the first chunk, with the new model."""
     pieces, n_cached, n_new, used, warnings = [], 0, 0, set(), []
     for i, c in enumerate(chunks, 1):
         label = f"chunk {i}/{len(chunks)} (segment {c.seg + 1})"
@@ -2361,6 +3160,99 @@ def cmd_render(a):
             break
         used.add(key)
         pieces.append((c.seg, pcm))
+    return pieces, n_cached, n_new, used, warnings
+
+
+def cmd_render(a):
+    s = parse_script(a.script)
+    if s.problems:
+        for line, msg in s.problems:
+            log(f"[FAIL] {'line %d: ' % line if line else ''}{msg}")
+        return 2
+    backend_cls = BACKENDS[a.tts]
+    speak = pronouncer(s.pronunciation)
+    chunks = make_chunks(s.segments)
+    words = sum(c.words for c in chunks)
+    if a.dry_run:                                  # a preview sends nothing: no gate needed
+        for i, c in enumerate(chunks, 1):
+            print(f"===== chunk {i}/{len(chunks)} (segment {c.seg + 1}, {c.words} words)")
+            print("\n".join(f"{t.speaker}: {speak(t.text)}" for t in c.turns))
+        return 0
+    status, sources, why = read_check(s)
+    if why and not a.unchecked:
+        log(f"[render] refusing: {why}. Run `make_podcast.py check {a.script} --source <the "
+            "report files>` and fix every flagged line first (or pass --unchecked, which "
+            "podcast.json then records).")
+        return 2
+    consent, core_rec, refusal = consent_of(a) if backend_cls.cloud else (False, None, None)
+    if backend_cls.cloud and not consent:
+        if refusal:
+            log(f"[render] not sending anything: {refusal}")
+        if not getattr(a, "core_run", None):
+            log(f"[render] not sending anything. --tts {a.tts} sends the transcript -- "
+                f"{words:,} words of the turns, after pronunciation substitutions; never the "
+                f"report -- to Google's Gemini API, and verify then sends the rendered AUDIO "
+                f"(downsampled) for transcription. On a free-tier key Google may use both to "
+                f"improve its products and human reviewers may read it ({TERMS_URL}). Once the "
+                f"user has agreed, re-run with --cloud-ok \"who agreed, when\" (a Core run: "
+                f"--core-run, the Core director's standing approval), or use --tts say "
+                f"(offline, macOS).")
+        return 2
+    m_status, m_why = read_meaning(s)
+    m_override = " ".join((getattr(a, "no_meaning_check", None) or "").split())
+    if m_why and not m_override:
+        log(f"[render] refusing: {m_why}. A reader who did not write the script checks every "
+            f"sentence against the report first: `make_podcast.py meaning {a.script} --brief`, "
+            f"then `make_podcast.py meaning {a.script} --verdict PASS --reviewer \"<who>\" "
+            "--findings <file>` (or pass --no-meaning-check \"<why>\", which podcast.json "
+            "records).")
+        return 2
+    out = os.path.abspath(a.out or os.path.dirname(s.path))
+    cache = os.path.join(out, ".cache")
+    os.makedirs(cache, exist_ok=True)
+    backend = backend_cls(s, a)
+    backend.prepare(chunks, speak, cache)
+    redo = set(getattr(a, "redo", None) or [])
+    for c in chunks:                              # re-make these segments, text unchanged
+        if c.seg + 1 in redo:
+            for ext in (".wav", ".json"):
+                f = os.path.join(cache, cache_key(backend, c, speak) + ext)
+                if os.path.exists(f):
+                    os.remove(f)
+    if redo:
+        log(f"[render] re-making segment(s) {', '.join(str(x) for x in sorted(redo))}")
+        if hasattr(backend, "pinned") and not getattr(a, "model", None):
+            backend.pinned = True                 # the re-made chunks join the others' voices
+    log(f"[render] {len(chunks)} chunk(s), {words:,} words -> about {words / float(WPM):.0f} min "
+        f"with {backend.name}")
+    # A two-line test before the first chunk this render must make (PREFLIGHT_TIMEOUT): a model
+    # that does not answer is passed over before the episode depends on it. Nothing to make, no
+    # test; --no-preflight skips it (and podcast.json says so).
+    preflight = {"run": False, "why": ("every chunk is cached" if hasattr(backend, "preflight")
+                                       else f"no two-line test for {backend.name} (offline)")}
+    if hasattr(backend, "preflight"):
+        todo = [c for c in chunks if not os.path.isfile(os.path.join(
+            cache, cache_key(backend, c, speak) + ".wav"))]
+        if getattr(a, "no_preflight", False):
+            preflight = {"run": False, "why": "--no-preflight"}
+        elif todo:
+            cached_from = backend.model if len(todo) < len(chunks) else None
+            backend.preflight(cached_from=cached_from)
+            preflight = dict(run=True, **(backend.preflight_record or {}))
+
+    # Each chunk: <key>.wav, and <key>.json with the warnings made when it was synthesized, so
+    # a resumed render still reports them. A model that stops answering mid-episode hands over
+    # (RestartRender), and every chunk is made again with the next one.
+    while True:
+        try:
+            pieces, n_cached, n_new, used, warnings = render_chunks(backend, chunks, speak, cache)
+            break
+        except RestartRender:
+            continue
+    warnings = list(backend.switch_notes()) + warnings if hasattr(backend, "switch_notes") \
+        else warnings
+    if getattr(backend, "tier_warning", None):
+        warnings.append(backend.tier_warning)
 
     audio = array.array("h")
     audio.extend(chime())
@@ -2392,14 +3284,16 @@ def cmd_render(a):
     script_copy = os.path.join(out, "podcast_script.md")
     if os.path.abspath(s.path) != script_copy:
         shutil.copyfile(s.path, script_copy)
-        chk = os.path.join(os.path.dirname(s.path), "check.txt")
-        if os.path.isfile(chk) and os.path.abspath(chk) != os.path.join(out, "check.txt"):
-            with open(chk, encoding="utf-8") as fh:              # sources stay relative, rebased
+        for name in ("check.txt", MEANING_FILE):      # both name the script's sha and sources
+            src = os.path.join(os.path.dirname(s.path), name)
+            if not os.path.isfile(src) or os.path.abspath(src) == os.path.join(out, name):
+                continue
+            with open(src, encoding="utf-8") as fh:              # sources stay relative, rebased
                 text = fh.read()
             text = re.sub(r"(?m)^source: (.+) (sha256=\w+)$", lambda m: "source: " + (
                 m.group(1) if os.path.isabs(m.group(1)) else rel(os.path.normpath(os.path.join(
                     os.path.dirname(s.path), m.group(1))), out)) + " " + m.group(2), text)
-            with open(os.path.join(out, "check.txt"), "w", encoding="utf-8") as fh:
+            with open(os.path.join(out, name), "w", encoding="utf-8") as fh:
                 fh.write(text)
     man = {
         "show": s.show, "title": s.title,
@@ -2407,16 +3301,32 @@ def cmd_render(a):
         "tts": {"backend": backend.name, "model": (backend.models_used or [backend.model])[0],
                 "models_used": backend.models_used, "sample_rate": RATE,
                 "sent_to_cloud": bool(backend.cloud),
+                # the SDK's per-request timeout and retries as set (gemini_client), the two-line
+                # test before the first chunk, and any hand-over from a model that stopped
+                # answering (every chunk made again by the next one)
+                "http": getattr(backend, "http", None), "preflight": preflight,
+                "switched": list(getattr(backend, "switches", None) or []),
                 "what_was_sent": ("the transcript turns after pronunciation substitutions, plus "
                                   "one style line; then, for verify (unless --no-verify), the "
                                   "rendered audio downsampled to 16 kHz; never the report"
                                   if backend.cloud else "nothing (offline)")},
         "cloud_tts_consent": (consent if backend.cloud else False),
+        # "prepaid" once a 402 showed prepay billing, "free" once a 429 named a free-tier quota
+        # (this render, or this key's earlier ones); null when no answer said which tier
+        "key_tier": getattr(backend, "key_tier", None),
+        "key_tier_basis": getattr(backend, "key_tier_basis", None) or (
+            "no answer from Google named the key's tier in this render" if backend.cloud else None),
+        "key_tier_evidence": (backend.key_tier_evidence()
+                              if hasattr(backend, "key_tier_evidence") else None),
         "core_run": record_core_run(a.script, core_rec, "render") if core_rec else None,
         "script": "podcast_script.md", "script_sha256": s.sha256,
         "script_author": s.author,
         "check": {"status": status or "not run", "file": "check.txt",
                   "overridden": bool(why and a.unchecked), "reason": why},
+        # the separate reader's sentence-by-sentence check (meaning_check.md, this script's sha)
+        "meaning_check": {"status": m_status, "file": MEANING_FILE,
+                          "overridden": bool(m_why and m_override), "reason": m_why,
+                          "override_reason": m_override if m_why else None},
         "sources": sources,
         "words": words, "turns": len(s.turns()), "segments": len(s.segments),
         "chunks": len(chunks), "chunks_cached": n_cached, "chunks_synthesized": n_new,
@@ -2499,6 +3409,8 @@ def prune_cache(cache, used, model, explicit=False):
                 pass
     for f in files:
         stem = f.split(".", 1)[0]
+        if f in (STALL_FILE, TIER_FILE):
+            continue                             # the memories are not a chunk's sidecar
         if f.endswith(".part"):
             pass
         elif stem in used:
@@ -2786,7 +3698,7 @@ class Transcriber(object):
                         errors += 1
                         _sleep(5.0 * errors)
                         continue
-                    if err["kind"] == "fatal":
+                    if err["kind"] in ("fatal", "billing"):
                         raise VerifyError(last)
                     log(f"[verify] {last}; trying the next model")
                     break
@@ -3265,8 +4177,24 @@ def vouch(out, man, unchecked=False):
     if stale and not (unchecked or overridden):
         return s, (f"refusing: {stale}. Re-run `make_podcast.py check` (and `render`, if the "
                    "script changed) so the episode matches the report, or pass --unchecked."), None
-    return s, None, (stale and stale + (" (rendered with --unchecked)" if overridden
-                                        else " (--unchecked)"))
+    mc = man.get("meaning_check")
+    m_warn = None
+    if s and isinstance(mc, dict):                    # rendered since the meaning check (2.13.2)
+        m_why = read_meaning(s)[1]
+        if m_why and not (mc.get("overridden") or unchecked):
+            return s, (f"refusing: {m_why}. Record the meaning check for this script "
+                       "(`make_podcast.py meaning <script> --verdict ...`), and render again if "
+                       "the script changed, or pass --unchecked."), None
+        m_warn = m_why and f"meaning check: {m_why}"
+    elif s and ("meaning", out) not in _WARNED:
+        _WARNED.add(("meaning", out))
+        log("[WARN] this episode was rendered before the meaning check existed (skill 2.13.2): "
+            "nothing on record says a separate reader checked its sentences against the report")
+    warn = stale and stale + (" (rendered with --unchecked)" if overridden else " (--unchecked)")
+    if m_warn:
+        warn = (warn + "; " if warn else "") + m_warn + (
+            " (rendered with --no-meaning-check)" if mc.get("overridden") else " (--unchecked)")
+    return s, None, warn
 
 
 def cmd_link(a):
@@ -4070,6 +4998,13 @@ def cmd_job(a):
         log(f"[job] refusing: {why}. Run `make_podcast.py check {a.script} --source <the report "
             "files>` and fix every flagged line first.")
         return 2
+    m_why = read_meaning(s)[1]
+    m_override = " ".join((getattr(a, "no_meaning_check", None) or "").split())
+    if m_why and not m_override:
+        log(f"[job] refusing: {m_why}. A reader who did not write the script checks every "
+            f"sentence first: `make_podcast.py meaning {a.script} --brief`, then `--verdict "
+            "PASS --reviewer ... --findings ...` (or --no-meaning-check \"<why>\").")
+        return 2
     consent, core_rec, refusal = consent_of(a)
     if not consent:
         log("[job] refusing: " + (refusal or "the job sends the transcript and the audio to "
@@ -4111,6 +5046,8 @@ def cmd_job(a):
     else:
         consent_args = ["--cloud-ok"] + ([consent] if isinstance(consent, str) else [])
     models = [x for m in (a.model or []) for x in ("--model", m)]
+    if m_why and m_override:                       # the render records the override
+        models += ["--no-meaning-check", m_override]
     try:
         write_job(path, py, os.path.abspath(a.script), out, consent_args, models,
                   (part, acct, qos, requeue), log_path, name)
@@ -4185,11 +5122,18 @@ def main(argv=None):
                    help="seconds between requests to one Gemini model (default %(default)s)")
     r.add_argument("--request-timeout", type=float, default=REQUEST_TIMEOUT, metavar="SEC",
                    help="seconds one TTS request's answer is waited for; asked once more, then "
-                        "the render stops with the resume message (default %(default)s)")
+                        "the next candidate model makes every chunk again (with none, the render "
+                        "stops with the resume message) (default %(default)s)")
     r.add_argument("--request-timeout-budget", type=float, default=REQUEST_TIMEOUT_BUDGET_MIN,
                    metavar="MIN", help="minutes lost to unanswered requests allowed in one render "
                                        "before it stops with the resume message (default "
                                        "%(default)s)")
+    r.add_argument("--no-meaning-check", metavar="WHY",
+                   help="render although meaning_check.md has no PASS for this script; the reason "
+                        "goes into podcast.json")
+    r.add_argument("--no-preflight", action="store_true",
+                   help="skip the two-line test each candidate model gets before the first chunk "
+                        "this render makes (recorded in podcast.json)")
     r.add_argument("--keep-wav", action="store_true")
     r.add_argument("--unchecked", action="store_true",
                    help="render without a passing check.txt (recorded in podcast.json)")
@@ -4201,6 +5145,18 @@ def main(argv=None):
     r.add_argument("--verify-model", action="append", help="text model(s) for verify")
     r.add_argument("--dry-run", action="store_true",
                    help="print the chunks as they would be spoken; send nothing")
+    mn = sub.add_parser("meaning", help="the meaning check: --brief for the reader who did not "
+                                        "write the script; --verdict to record what they found")
+    mn.add_argument("script")
+    mn.add_argument("--brief", action="store_true",
+                    help="print the reviewer's brief (and write meaning_brief.md beside the script)")
+    mn.add_argument("--source", nargs="+", default=[], action="extend",
+                    help="the report files to name in the brief")
+    mn.add_argument("--output-dir", help="the session's output folder (default: the folder above "
+                                         "the script's podcast/ folder)")
+    mn.add_argument("--verdict", choices=("PASS", "FAIL"))
+    mn.add_argument("--reviewer", help="who read it: an agent or person that did not write it")
+    mn.add_argument("--findings", help="the reviewer's findings, one line per problem (or `None`)")
     v = sub.add_parser("verify", help="transcribe the rendered audio and compare it with the "
                                       "spoken script (sends the audio to Google)")
     v.add_argument("script")
@@ -4228,6 +5184,9 @@ def main(argv=None):
     consent_args(j, "consent to send the transcript and audio to Gemini: a note of who agreed "
                     "and when (recorded in podcast.json)")
     j.add_argument("--model", action="append", help="Gemini TTS model(s) for render, in order")
+    j.add_argument("--no-meaning-check", metavar="WHY",
+                   help="render although no PASS meaning check is recorded for this script; the "
+                        "reason goes into podcast.json")
     j.add_argument("--python", help="the python the job runs (default: the pipeline env's, from "
                                     "setup.json, else this one; it needs google-genai >= "
                                     + GENAI_MIN + ")")
@@ -4239,7 +5198,8 @@ def main(argv=None):
         ap.print_help()
         return 2
     try:
-        return {"check": cmd_check, "render": cmd_render, "verify": cmd_verify,
+        return {"check": cmd_check, "meaning": cmd_meaning, "render": cmd_render,
+                "verify": cmd_verify,
                 "link": cmd_link, "share": cmd_share, "job": cmd_job, "key": cmd_key}[a.cmd](a)
     except RenderError as e:
         log(f"[{a.cmd}] {e}")

@@ -309,8 +309,9 @@ Windows** DIA-NN reads `.raw` out of the box (skip this whole section). On **Lin
 files**. It does a HARD ≥ 8.0.17 check: an older 8.0.x (e.g. a cluster's `8.0.4`
 module) is **rejected**, and a .NET 9 runtime is **not** used (rollForward is
 LatestMinor — it won't cross the major version). Fix, done for you by
-**`scripts/ensure_dotnet8.sh`** (idempotent; run it on a login node — it needs
-internet, compute nodes usually don't):
+**`scripts/ensure_dotnet8.sh`** (idempotent; it needs internet only to install, and on a
+cluster login node that download runs itself on a compute node through `on_compute.py` —
+HIVE's compute nodes reach Microsoft's downloads, a compute-node job, 2026-10-16):
 ```
 export DOTNET_ROOT="$(bash scripts/ensure_dotnet8.sh | tail -1)"   # installs 8.0.latest if missing
 export PATH="$DOTNET_ROOT:$PATH"
@@ -408,6 +409,32 @@ the tasks get fewer) are forwarded to
 `diann_parallel.py` when given. Ask for less when a 64-CPU / 128 GB job would wait a long time
 on a busy preemptible queue. They size only the chain: when routing picks single-shot,
 `run_search.py` prints a NOTE saying they were ignored.
+
+**Protein inference (`--pg-level`).** No cfg the skill writes sets it. DIA-NN's README lists
+`--pg-level 0|1|2` (isoform IDs, protein names, genes) without its default, so it was measured
+on HIVE with DIA-NN 2.7.0 (a 6,752-entry transcriptome FASTA with UniProt-style `GN=` tags,
+one timsTOF run, a library predicted at each level; HIVE, 2026-10-16):
+
+- **The default is genes.** With no `--pg-level` the protein groups equal `--pg-level 2`'s on
+  all 12,190 precursors, and the log counts "genes identified"; `0` and `1` regroup 242 of them.
+  The level is DIA-NN's "implicit protein grouping": it decides which peptides count as
+  proteotypic for the protein-level FDR.
+- **It never merges a gene's ORFs into one protein group.** At every level, a gene whose ORFs
+  carry peptides of their own keeps one `Protein.Group` per ORF (35 genes in that subset,
+  including one that a staff report counted as 2 protein groups but 1 gene group). `GN=` tags
+  label the groups (`Genes`) and make the gene-level output, `report.gg_matrix.tsv` and the
+  report's `Genes.*` columns; `run_de.R` quantifies `Protein.Group`. Say exactly that when a
+  client asks what gene tags did; a gene-level DE is a rollup by `Genes`, not a re-search.
+- **Set it from step 1, or it does nothing.** Step 5 re-run at 0, 1 and 2 on one search's
+  `.quant` files and empirical library gave identical groups. A level other
+  than the default is a new search from library prediction (the 5-step chain re-runs every
+  step); reusing `.quant` files does not change it.
+
+To set it, put it in the cfg as a user choice with who and why:
+`estimate_params.py ... --overrides '{"--pg-level": 0}' --override-reason '<their words>'`
+(or `{"--no-prot-inf": true}`). It reaches every step of both routes. `search_provenance.json`
+`protein_inference` records what ran (the flag, or DIA-NN's measured default), and the Methods
+state it (`diann_parallel.protein_inference`, one reading).
 
 ### Radiant DIA + Fulcrum (Seer; Thermo Orbitrap only)
 

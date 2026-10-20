@@ -342,8 +342,8 @@ def dotnet_env_for(files):
     except Exception as e:
         sys.stderr.write(
             f"[run_diann] ensure_dotnet8.sh could not provide a .NET 8 runtime ({e}).\n"
-            "  DIA-NN 2.6 will not read .raw. Options: run ensure_dotnet8.sh on a login\n"
-            "  node (needs internet), or feed mzML instead of .raw.\n")
+            "  DIA-NN 2.6 will not read .raw. Options: re-run ensure_dotnet8.sh (needs\n"
+            "  internet; on a cluster login node it moves to a compute node), or feed mzML.\n")
         return ""
     return (f"export DOTNET_ROOT={shlex.quote(root)}; "
             f'export PATH={shlex.quote(root)}:"$PATH";')
@@ -491,6 +491,15 @@ def mass_acc_provenance(engine, params, res):
         return dp.mass_acc_record(dp.mass_acc_status(params), params)
     except dp.CfgError as e:
         return {"mode": "unknown", "fixed": None, "reason": f"unknown -- {e}"}
+
+
+def protein_inference_provenance(engine, params):
+    """DIA-NN's protein inference as the cfg set it, for search_provenance.json
+    `protein_inference` (diann_parallel.protein_inference_record: the one reading, which the
+    Methods use too). None for another engine."""
+    if engine != "diann":
+        return None
+    return _diann_parallel_mod().protein_inference_record(params)
 
 
 def ensure_temp_dirs(params, out):
@@ -3014,8 +3023,8 @@ def slurm_queue(partition=None, account=None, qos=None,
         if avail is not None and avail < need and idle >= need:
             a, p, q = pub
             print(f"[slurm_queue] priority queue at capacity ({avail} CPUs free, need "
-                  f"{need}); publicgrp/low has {idle} idle -> using low (preemptible, "
-                  f"--requeue is added)", file=sys.stderr)
+                  f"{need}); publicgrp/low has {idle} idle -> using low (preemptible: a job "
+                  f"script gets --requeue)", file=sys.stderr)
             return p, a, q
         if preemptible_ok and idle >= need and (avail is None or avail < need * 2):
             a, p, q = pub
@@ -3597,6 +3606,8 @@ def main():
                        # (diann_parallel.SCAN_WINDOW_MODES / MASS_ACC_MODES)
                        "scan_window": scan_window_record(engine, a.params, res),
                        "mass_acc": mass_acc_provenance(engine, a.params, res),
+                       # --pg-level / --no-prot-inf as the cfg set them, or DIA-NN's default
+                       "protein_inference": protein_inference_provenance(engine, a.params),
                        "fasta": a.fasta, "threads": a.threads,
                        # read by run_de.R (contaminants.R): keratin kept as the analyte
                        "keratin_sample": keratin_rec["value"],

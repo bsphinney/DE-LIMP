@@ -64,9 +64,17 @@ the spine.
    SLURM instead routes to the 5-step chain, exits 3 without writing `--sbatch`, and is
    submitted with `bash <out>/submit.sh`), not inline on the login node. Login nodes are shared; running compute there gets the user flagged/killed.
    The **only** things allowed on the login node are tiny orchestration commands —
-   submitting jobs, `squeue`/`sacct` polling (`watch_run.sh`), and small file moves.
+   submitting jobs, `squeue`/`sacct` polling (`watch_run.sh`), small file moves and the
+   bookkeeping scripts step 0a lists. Everything else runs on a compute node:
+   `hive_exec.sh --job '<cmd>'` (one blocking `srun`) or an sbatch job (step 0a, "On HIVE").
    If you're unsure whether a step is heavy, submit it as a job. (No SLURM but a big
    dataset locally? Warn the user it may be slow rather than hammering a shared host.)
+   **On a UC Davis cluster (HIVE, Farm, Franklin), HPC@UCD's own `ucd-hpc` skill is
+   mandatory, and on cluster policy it wins over this skill**: what may run on a login node,
+   resource requests (`--account`/`--partition`/`--time`/memory), software installs and
+   storage. Load it (Skill `ucd-hpc`) before the first command on the cluster. Where the two
+   disagree, follow `ucd-hpc`, tell the user which instruction of this skill you set aside, and
+   record it (`report_issue.sh`). Step 0a checks that it is installed.
 4. **Organism decides the FASTA and nothing else**, and is **always asked, never
    assumed** — not from a folder name, not "probably human". The **sample type** (tissue,
    cell line, biofluid, IP …) is likewise **asked, never inferred** — not from a file-name
@@ -157,7 +165,11 @@ Verify (don't just trust the answers):
 ```
 bash scripts/check_access.sh <hive_user> <private_key_path>
 ```
-Read `recommended_mode` + `core_member`, then pick the mode below. Once the SSH login works,
+Read `recommended_mode` + `core_member`, then pick the mode below. **`ucd_hpc_skill`**: when
+`required` is true and `installed` is false, tell the user in one line that HPC@UCD requires its
+`ucd-hpc` skill for any agent on its clusters, ask, then run its `install` line here (it goes in
+their own `~/.claude/skills`; relay `note` for Windows) and ask them to type `/reload-plugins`.
+Until it loads, follow golden rule #3 to the letter. Once the SSH login works,
 `check_access.sh` saves the user and the key's path (never the key) to
 `~/.config/ucdavis-proteomics/hive.env` (`hive_login_saved`). Later calls read the login there,
 because the environment does not carry over from one command to the next.
@@ -184,6 +196,31 @@ because the environment does not carry over from one command to the next.
   `~/proteomics-pipeline/`; the latter carries the version every record states). Step 0's
   `skill_version.sh --check-hive` says when that is needed. HIVE gives **compute**; the Core
   software is separate (next).
+- **On HIVE: the login node or a compute node** (golden rule #3, HPC@UCD's `ucd-hpc` rules).
+  A plain `hive_exec.sh '<cmd>'` runs on HIVE's shared login node, where only seconds of light
+  work belong: `sbatch`/`squeue`/`sacct`/`scancel`, `watch_run.sh`, `ls`/`cat` of one folder or
+  a small file, `mkdir`, `--put`/`--get`, writing a job (`run_search.py --sbatch`,
+  `diann_parallel.py`, `make_podcast.py check`/`job`), and the bookkeeping scripts (`board.sh`,
+  `notes.py`, `log_decision.py`, `report_issue.sh`, `skill_version.sh`, `session.py init`,
+  `checkpoint.py status`, `submission_report.py attach`, `core_submission.py check`/`identify`/
+  `fetch`/`bioshare`/`email-draft`, `node_fault.py retry`, `cpu_hours.py`). **Everything else
+  goes to a compute node** — whatever reads `report.parquet` or raw files, runs R, walks a
+  share, installs, renders or zips: `bash scripts/hive_exec.sh --job [--time MIN] [--mem SIZE]
+  [--cpus N] [--preemptible] '<cmd>'` (one blocking `srun` on a queue that does not preempt,
+  spelled out; defaults 30 min, 4G, 1 CPU; its output and exit status are the command's; when
+  your own searches fill your 64-CPU cap on `high` it says it waits behind them, and
+  `--preemptible` — only for a command that just reads and can be run again, as step 2 — runs it
+  on `low` instead) for minutes of work, or an sbatch job for
+  longer work and anything that must survive a closed laptop (step 8: `on_compute.py --header`).
+  These move themselves when started on the login node: `setup.sh`, `ensure_dotnet8.sh`,
+  `fetch_fasta.py fetch`/`check-db`, `core_submission.py locate`/`stage`/`deliver`,
+  `provenance.py`, `session.py finalize`, `checkpoint.py find`, and `acquire_tools.sh` when it
+  downloads. **Each of these blocks until its job ends (queue wait + the work): run the call
+  with `run_in_background` and wait for it, or with a Bash timeout of at least its `--time` plus
+  10 minutes — never the 2-minute default. A killed call kills the ssh, which cancels the srun
+  half way (in the middle of an `--apply` copy or an install).** Unsure → `--job`. In
+  `hive_local` (Claude Code on HIVE) the same split, with `python3 scripts/on_compute.py [--time
+  MIN] [--mem SIZE] -- <cmd>` for `--job`.
 - **Core member = yes (with HIVE) → reuse the installed software** in
   `/quobyte/proteomics-grp/`: `acquire_tools.sh` finds the Core's DIA-NN builds,
   `fetch_fasta.py --hive` reuses pre-staged FASTAs. No rebuilding.
@@ -198,41 +235,13 @@ because the environment does not carry over from one command to the next.
 
 Tell the user which mode you're using and why. → full runbook: `references/access.md`.
 
-### 0. One-time setup (install everything that's missing)
-```
-bash scripts/setup.sh
-source ~/.proteomics-pipeline/activate.sh        # puts R, python, sage on PATH
-```
-`setup.sh` installs micromamba (no admin), then a conda env with R + limpa +
-limma + arrow + Sage + Python/pyarrow, and writes `~/.proteomics-pipeline/setup.json`.
-It also provisions **.NET 8** (`scripts/ensure_dotnet8.sh`, Linux and macOS: one root in
-`~/.proteomics-pipeline/dotnet8` with Microsoft.NETCore.App ≥ 8.0.17 + AspNetCore, which
-DIA-NN's `.raw` reader, the Core's ThermoRawFileParser and the resolution reader all use)
-and installs `thermorawfileparser`, `pythonnet` and `pandas` into the env in their own step,
-so an existing env gets them on a re-run. Neither step is fatal — `setup.json`'s
-`dotnet8.note` and `notes` say what did not happen.
-Sourcing `activate.sh` makes every later step use those interpreters — **source it
-in the same shell before running anything below** (or prefix later commands).
-
-Read `setup.json` and **gate on `ready_for`**:
-- `ready_for.de` false → DE can't run; re-run `setup.sh` and report any `notes`. (A SILAC
-  ratio analysis, `run_silac.R`, needs only limma, data.table, arrow and jsonlite in that R.)
-- `limpa.ok` false (setup.sh then ends `ERROR: limpa ...` and exits 1) → the env's limpa is
-  older than 1.4.0 (bioconda has only 1.2.5; setup.sh installs 1.4 from Bioconductor 3.23):
-  run the fix it prints where there is internet. run_de.R still reads the report with limpa
-  1.2.x and records that it did (`references/environment.md`).
-- `ready_for.dia` false → on macOS this means Docker is missing. Run
-  `bash scripts/build_diann_docker.sh` and relay its instructions (install Docker
-  Desktop, open it once), then continue. Don't silently fall back to a DDA engine.
-- `ready_for.dda` false → Sage/R not ready, or (macOS) msconvert is unavailable for
-  `.d`/`.raw` → mzML; tell the user and, if their data is DIA, route to DIA-NN.
-- `ready_for.thermo_raw` false **and the input has Thermo `.raw`** → fix it before step 2:
-  do exactly what `thermo_raw_reader.note` says (usually re-run `setup.sh`, or `bash
-  scripts/ensure_dotnet8.sh` where there is internet), then `setup.sh --check` until it is
-  true. `ready_for.dia` does not cover this: without a working parser every `.raw` is
-  `unknown` and a DIA search falls back to 380–980. Irrelevant for `.d`/mzML-only input.
-- `thermo_raw_reader.resolution_reader.ready` false only means step 2 cannot read the
-  Orbitrap resolution and the user will be asked for it; its `note` is the fix.
+### 0. Is this skill current? Then one-time setup — EVERY conversation, start AND resume
+**The version check comes first, in every conversation: also when this computer is already set up
+(the setup below then only verifies), also on a resume (0c), and again before step 7 and step 12
+(below).** Staff reports of 2026-10-16 still came from 2.11.2, the day after 2.12.0 and
+2.13.0 were released: conversations begun before a release ran on into the next day without
+checking again, and the check sat in the middle of a step titled "One-time setup", easy to skip
+on a computer already set up.
 
 **Every mode, first: is this computer's skill behind GitHub `main`?** One HTTPS read of
 `main`'s `plugin.json` (bash and curl, which Git Bash has; no Python, no GitHub SSH key):
@@ -318,9 +327,57 @@ Then, by exit code:
 Only `hive_remote` runs `--check-hive`. Without `--mode hive_remote`, a computer with no HIVE
 login skips it silently; the release is compared only for Core accounts (→ `references/access.md`).
 
+**Then the one-time setup (install everything that's missing):**
+```
+bash scripts/setup.sh
+source ~/.proteomics-pipeline/activate.sh        # puts R, python, sage on PATH
+```
+`setup.sh` installs micromamba (no admin), then a conda env with R + limpa +
+limma + arrow + Sage + Python/pyarrow, and writes `~/.proteomics-pipeline/setup.json`.
+It also provisions **.NET 8** (`scripts/ensure_dotnet8.sh`, Linux and macOS: one root in
+`~/.proteomics-pipeline/dotnet8` with Microsoft.NETCore.App ≥ 8.0.17 + AspNetCore, which
+DIA-NN's `.raw` reader, the Core's ThermoRawFileParser and the resolution reader all use)
+and installs `thermorawfileparser`, `pythonnet` and `pandas` into the env in their own step,
+so an existing env gets them on a re-run. Neither step is fatal — `setup.json`'s
+`dotnet8.note` and `notes` say what did not happen.
+Sourcing `activate.sh` makes every later step use those interpreters — **source it
+in the same shell before running anything below** (or prefix later commands).
+
+Read `setup.json` and **gate on `ready_for`**:
+- `ready_for.de` false → DE can't run: R cannot read `report.parquet` the way this env's limpa
+  does (`de_reader`: arrow for limpa 1.2.x, nanoparquet for limpa ≥ 1.4.0, arrow on both
+  methods); re-run `setup.sh` and report any `notes`. `ready_for.de` is the default method's
+  (`dpc`); `de_reader.maxlfq` true means `--method maxlfq` can still run (arrow + limma, no limpa). (A SILAC ratio analysis, `run_silac.R`,
+  needs only limma, data.table, arrow and jsonlite in that R.)
+- `limpa.ok` false (setup.sh then ends `ERROR: limpa ...` and exits 1) → the env's limpa is
+  older than 1.4.0 (bioconda has only 1.2.5; setup.sh installs 1.4 from Bioconductor 3.23):
+  re-run `setup.sh` (on a cluster it runs on a compute node). run_de.R still reads the report
+  with limpa 1.2.x, through arrow, and records that it did (`references/environment.md`); without
+  nanoparquet its contaminant share is then read from `Precursor.Normalised`. Upgrading an env
+  that other analyses run on changes their limpa mid-analysis: Core staff ask the Core's director first.
+- `ready_for.dia` false → on macOS this means Docker is missing. Run
+  `bash scripts/build_diann_docker.sh` and relay its instructions (install Docker
+  Desktop, open it once), then continue. Don't silently fall back to a DDA engine.
+- `ready_for.dda` false → Sage/R not ready, or (macOS) msconvert is unavailable for
+  `.d`/`.raw` → mzML; tell the user and, if their data is DIA, route to DIA-NN.
+- `ready_for.thermo_raw` false **and the input has Thermo `.raw`** → fix it before step 2:
+  do exactly what `thermo_raw_reader.note` says (usually re-run `setup.sh`, or `bash
+  scripts/ensure_dotnet8.sh`; on a cluster both move to a compute node), then `setup.sh --check` until it is
+  true. `ready_for.dia` does not cover this: without a working parser every `.raw` is
+  `unknown` and a DIA search falls back to 380–980. Irrelevant for `.d`/mzML-only input.
+- `thermo_raw_reader.resolution_reader.ready` false only means step 2 cannot read the
+  Orbitrap resolution and the user will be asked for it; its `note` is the fix.
+
 In `hive_remote` the toolchain lives on HIVE, so run it there instead (the laptop needs none
 of it): `bash scripts/hive_exec.sh 'bash ~/proteomics-pipeline/scripts/setup.sh'`, and read
-`~/.proteomics-pipeline/setup.json` on HIVE the same way.
+`~/.proteomics-pipeline/setup.json` on HIVE the same way. On a cluster login node `setup.sh`
+(and `--check`) runs itself on a compute node (`on_compute.py`: one blocking `srun`, up to 2 h for
+an install, printed first): run that call in the background and wait for it. Never run a conda,
+R or .NET install on the login node by hand; HIVE's compute nodes have internet. Run it before
+the first search: it installs .NET 8, so writing a `.raw` search later does not wait on a
+download job. Exit 3: the compute-node run did not finish (SLURM refused it, a time limit) and
+`setup.json` was not rewritten — its `ready_for` is old; read the srun lines and run it again.
+Exit 2: it could not get there (no python3 there), and says how.
 
 **Notes from the Core — check every session**, on every start and every resume: after the
 HIVE version check (step 0) and before the resume check (0c). The Core's director can leave a
@@ -348,6 +405,11 @@ any); carry on.
   unread, and writes nothing then: exit 2, relay its `say`.
 - **Check again** (one line each) just before step 7 submits a search and just before step 12
   finalizes: notes can arrive during a long session. → `references/notes.md`.
+  **The version too**, at the same two points: `bash scripts/skill_version.sh --check-update`
+  (a release can land during a long session). Exit 3 → say in one line which version GitHub
+  `main` ships and ask whether to update before going on; on yes, `--update`, then
+  `/reload-plugins`, then pick the analysis up as a resume (0c), where `--check-hive` puts the
+  new copy on HIVE. Never update without asking. Exit 0 or 5 → carry on (5: one line).
 
 This step is idempotent — on a machine that's already set up it just verifies and
 returns in seconds. → detail: `references/install.md`.
@@ -363,10 +425,11 @@ decides how tools are acquired and whether to submit via SLURM.
 ### 0c. Is this a RESUME? — CHECK THIS BEFORE STARTING ANYTHING
 A cluster search runs for hours and the user **will** close their laptop. The SLURM
 jobs survive that; the conversation does not. So before doing any work, check whether
-an earlier session already submitted something (step 0's notes check runs on a resume
-too, with `--session <dir>` once the session is found):
+an earlier session already submitted something (step 0's version check,
+`skill_version.sh --check-update` and in `hive_remote` `--check-hive`, runs on a resume too,
+first; then its notes check, with `--session <dir>` once the session is found):
 ```
-python3 scripts/checkpoint.py find --base <where results live>   # e.g. ~ or the project dir
+python3 scripts/checkpoint.py find --base <the project folder>   # never ~ or a whole share; HIVE: in the background
 python3 scripts/checkpoint.py status --session <session dir> --resume   # live sacct re-query
 ```
 `status` returns each stage's real state, whether the expected output file exists, and
@@ -746,7 +809,7 @@ submission, the same path locally and on HIVE (`~/core/PROT_0807`).
 | **2** | a human decision / hard gate — proposal files are still written | show the failing gates. `locate`: `unmatched_samples` (→ `--allow-partial` only if staff confirm those were not run), `choose_run` (→ re-injections: ONE `--reinjections latest|all`; collisions: `--choose <key>=<file>` each), `ambiguous_label` (→ staff decide: `--choose`, `--accept-ambiguous` or `--files-from`), `weak_ids` (→ `--choose`, or `--files-from`), `duplicate_ids` (→ `--choose <key>=<file>`, keys `KG1#1`/`KG1#2` from the gate), `duplicate_assignment` (→ staff pick the files, `--files-from`), `no_files`. `stage`: several folders, or one naming a different person or institution (→ `--service-dir`); a folder owned by another submission; `--apply` on a hard-failed locate. `deliver`: **not verified — do not share** (see 12b); **held by `qc_gate`** (step 8e) → a staff member reads `logs/qc_bracket.md` and records `qc_bracket.py ack` (or re-runs 8e when it says so) |
 | **3** | CoreOmics or the filesystem unreachable, auth failed, or the scripts directory is incomplete | a key problem: `core_submission.py check` names it and the fix; run where the data is (`fetch`/`bioshare` where the key is — `coreomics_runs_on`; `locate`/`stage`/`deliver` on HIVE); re-put the skill: `hive_exec.sh --put-skill` |
 | **4** | the files look like an **HT plate** | step 1a, `ht_manifest.py` |
-| **5** | delivery too big for the login node | `sbatch` the `deliver_job.sh` it wrote |
+| **5** | delivery too big for one interactive step (`--max-gb`, 5 GB) | `sbatch` the `deliver_job.sh` it wrote |
 
 → detail: `references/core-submissions.md`.
 
@@ -779,13 +842,17 @@ zip) needs .NET 8 with **both** Microsoft.NETCore.App and Microsoft.AspNetCore.A
 script finds an install that has both and hands it to the parser itself — **don't export
 DOTNET_ROOT for step 2**. If none has both, it prints one `ERROR: … cannot start` up front
 and reads nothing (every `.raw` comes back `unknown` with that reason): run `bash
-scripts/ensure_dotnet8.sh` on the login node (installs both into
-`~/.proteomics-pipeline/dotnet8`; needs internet), or on HIVE `module load
-dotnet-core-sdk/8.0.4` in the same shell, and re-run step 2. Don't retry under `srun`
-first — a compute node gives the same answer. Each file's `reader` records the parser, its
-version and the `DOTNET_ROOT` used. A `.raw` that is `unknown` for any other reason says
-why in its `warnings`; without a measured precursor range step 6b falls back to 380–980 for
-DIA, and refuses a DIA-NN DDA cfg.
+scripts/ensure_dotnet8.sh` (installs both into `~/.proteomics-pipeline/dotnet8`; needs
+internet; on a cluster login node its download runs itself on a compute node), and re-run
+step 2; or on HIVE load the module inside step 2's own job: `bash scripts/hive_exec.sh --job …
+'module load dotnet-core-sdk/8.0.4 && python3 ~/proteomics-pipeline/scripts/detect_acquisition.py
+…'` (`hive_local`: `python3 scripts/on_compute.py … -- bash -lc 'module load
+dotnet-core-sdk/8.0.4 && python3 scripts/detect_acquisition.py …'`). From a laptop the job is a
+new ssh and a new shell on the compute node, so a module loaded in your own shell never reaches
+it. Re-running step 2 without one of these gives the same answer on any node. Each file's
+`reader` records the parser, its version and the `DOTNET_ROOT` used. A `.raw` that is `unknown`
+for any other reason says why in its `warnings`; without a measured precursor range step 6b
+falls back to 380–980 for DIA, and refuses a DIA-NN DDA cfg.
 **The Orbitrap resolution is read from the `.raw` itself.** For every Orbitrap `.raw` (not
 the Astral — its DIA-NN tolerances do not use it) `detect_acquisition.py` reads the MS1 and
 MS2 resolution from the scan trailer through `thermo_resolution.py` (Thermo's RawFileReader
@@ -815,10 +882,13 @@ and `acquired_at_note`, read in the same pass: from a `.d`'s `AcquisitionDateTim
 `.raw`'s ThermoRawFileParser creation date, which records no time zone and is read as the Core's
 Pacific time (the note says so). Step 8e uses them. **Keep this step's JSON**: save it as
 `<session>/input/acquisition.json` at step 3b.
-Each `.raw` costs ~3–7 s of parser I/O (more on a busy mount). **On a cluster, run step 2 for more than 5 `.raw`
-on a compute node** (`srun --cpus-per-task=1 --mem=2G … python3 scripts/detect_acquisition.py …`,
-with the account/partition the user can submit to); on a login node the script refuses
-such a cohort before reading anything and prints that `srun` line. Do not add
+Each `.raw` costs ~3–7 s of parser I/O (more on a busy mount). **On a cluster, run step 2 on
+a compute node whenever there is a `.raw`**, in the background: `bash scripts/hive_exec.sh --job
+--preemptible --time <T> --mem 2G 'python3 ~/proteomics-pipeline/scripts/detect_acquisition.py …'` with `<T>`
+= the number of `.raw` ÷ 4 in minutes, at least 10 (`hive_local`: `python3
+scripts/on_compute.py --preemptible --time <T> --mem 2G -- python3 scripts/detect_acquisition.py …`). A
+`.d`-only input is an SQLite lookup per file and may stay on the login node. On a login node the
+script itself refuses more than 5 `.raw` before reading anything and prints the `srun` line. Do not add
 `--allow-login-node` yourself to get past the refusal; it is for a user who chooses that.
 For a Bruker `.d` the
 `warnings` come from `tdf_integrity`: `truncated` means `analysis.tdf` indexes only
@@ -1256,7 +1326,8 @@ Honor the manifest's exact version — not "latest":
 PIN_ENGINE=diann PIN_VERSION=2.7.0 bash scripts/acquire_tools.sh <platform_class>
 ```
 Reads/writes `~/.proteomics-pipeline/tools/tools.json`. On HIVE it reuses the Core's
-native DIA-NN build for that version (downloading it if the Core has none); on mac it uses
+native DIA-NN build for that version (downloading it if the Core has none — a download runs
+itself on a compute node, so run the call in the background); on mac it uses
 Docker for DIA-NN. **Read `tools.json` `notes`** — license gates (FragPipe, Radiant) and
 missing-runtime warnings surface there. `tools.json` `versions` is the build it found,
 never `latest` and never the version that was ASKED for (`""` when it cannot tell, `env` for
@@ -1274,7 +1345,8 @@ ACQUIRE_RADIANT=1 PIN_ENGINE=radiant PIN_VERSION=2.3.3 bash scripts/acquire_tool
 ```
 It needs Docker or Apptainer — Seer ships no native binary. On HIVE the `.sif` must
 already exist; building one pulls ~3 GB and **must run on a compute node, never the
-login node** (the note in `tools.json` gives the exact `srun apptainer build` line).
+login node** (the note in `tools.json` gives the exact line: `on_compute.py` with the queue
+spelled out, and the pull's cache in the job's `$TMPDIR`, off the 20 GB home).
 
 ### 6. Build the FASTA
 Use the proteome, database type, and contaminant set the **user confirmed in
@@ -2002,6 +2074,11 @@ bash scripts/watch_run.sh --slurm <jobid> --log <job log> --out <out> --poll <n>
 # multi-step chains (diann_parallel / radiant_parallel): watch EVERY step, never just the last
 bash scripts/watch_run.sh --all <search out dir> --hive
 ```
+With `--hive` and no usable `python3` on this computer (Windows' Store stub), the watcher
+runs the poll on HIVE and prints HIVE's answer. `watcher_query_failed` and
+`watcher_no_python` are never a job failure: never resubmit on them; fix the connection and
+poll again (`references/watcher.md`).
+
 **Always pass `--out` and increment `--poll` each time.** `--out` is what turns "still
 running" into real progress: the chain drops a `.quant` per finished file, so the watcher
 reports the actual step and file count rather than guessing. `--poll` rotates the note.
@@ -2017,7 +2094,9 @@ a hang.** Give them one short line from `progress.summary` plus `doing`, and pas
 Keep it to a couple of lines; don't dump the JSON. Never present the note as a finding
 about **their** data — it is general background, and it must not be mistaken for a result.
 It returns `{state, done, failed, stalled, error_class, fix}`. While `done` is false,
-keep polling (sleep ~60s between polls; for long SLURM jobs use a scheduled wake-up).
+keep polling: about every minute for a local run; **on SLURM every 5 minutes or more**, or a
+scheduled wake-up (each `--hive` poll is several logins and `sacct` calls on HIVE's shared login
+node, and a stall is only called after 15 minutes anyway).
 Pass `--log` so it can also catch **stalls** — a job stuck in `RUNNING` with its log
 frozen (a hung file; `sacct` will show RUNNING forever). **If `failed` OR `stalled` is
 true, apply the `fix` and resubmit AUTONOMOUSLY — do not wait for the user.** Starting
@@ -2224,7 +2303,15 @@ afterwards. An excluded run must be one the report has, and must not keep a row:
 analyses every row. A missing run without `--exclude` still fails. Also log the decision
 (`log_decision.py`).
 **Then check the normalisation before the final DE** — for every experiment type. Run the DE
-both ways into scratch folders (one job on HIVE), then the check:
+both ways into scratch folders (one job on HIVE), then the check. **A DE, set-test or figure job
+on HIVE** starts from `python3 ~/proteomics-pipeline/scripts/on_compute.py --header <S>/logs
+--name <short name> --time <minutes> --mem <size>G --cpus <n>`: the queue the skill's rule
+picks, `--time`/`--mem`/`--cpus` explicit, one log per job (`%j`), `set -euo pipefail`. Append
+the commands, `sbatch` it, and when the `ucd-hpc` skill is installed here, lint it first with
+its `lint-jobscript.sh` (`U` = that skill's scripts folder, `~/.claude/skills/ucd-hpc/scripts`):
+`bash scripts/hive_exec.sh 'bash -s -- <job file>' < "$U"/lint-jobscript.sh`
+(it misreads a log path that holds a space as having no `%j`; sbatch reads it right, so that
+one message can be ignored).
 ```
 Rscript scripts/run_de.R --input ./search_out/report.parquet --metadata conditions.csv \
     --method <dpc|maxlfq> --fasta-meta ./search.fasta.meta.json [--block Mouse] [--numeric-covariates Covariate1] \
@@ -2267,7 +2354,11 @@ the list, a login on it is accepted and any other is refused. With no list, a lo
 agent's name (claude, assistant, bot…) is refused, and any other passes with a NOT VERIFIED
 warning. Their name and login go only into the
 staff-only `logs/normalization_check.staff.json`. The Methods, AUDIT.md, `de_provenance.json` and
-the zip say "Core staff chose … because <reason>", so the reason must not name anyone:
+the zip say "Core staff chose … because <reason>", so the reason must not name anyone. A
+second `decide` replaces the first: its sentence has no history, and the report, the audit and
+the podcast state only the decision that stands -- never the earlier reason, nor that it was
+"corrected" (the change and why go in `logs/decisions.md`; both decisions stay in the staff-only
+record):
 ```
 python3 scripts/normalization_check.py decide --check <S>/output/norm_check/normalization_check.json \
     --quantities <raw|normalised> --by <their HIVE login> --reason '<why, in their words; no quote marks, $ or backticks>'
@@ -2543,8 +2634,9 @@ Run the DE on both reports into separate output folders, compare, and
 report which one the results come from — never swap one for the other silently.
 **Surface every `WARN` to the user, and STOP on any `FAIL`** (e.g. a group with no
 replicate, or a batch confounded with the biology) until they resolve it — don't
-let a new user over-interpret a broken design. The findings also go into the
-report's "Audit & caveats" section. → detail: `references/audit.md`.
+let a new user over-interpret a broken design. The findings also become the
+report's "Audit & caveats" section, as a plain-language table (step 9). → detail:
+`references/audit.md`.
 `target_contaminants` lists quantified proteins whose sequence is also a common contaminant
 — **KEPT in quantification**: a possible contamination source, reported rather than
 excluded. Name any that are significant in DE, and judge them by type: skin/hair keratins
@@ -2602,6 +2694,18 @@ review then survives a hand-back that fails (it has), and stays with the analysi
 sort by severity) into a `## Expert Review Notes` section and surface every **critical**
 issue to the user before finalizing. Skip for format conversion / FASTA prep / exploratory
 looks with no formal report. → detail: `references/anomaly-checks.md`.
+**The client never saw a draft, so the deliverables carry no draft history.** Expert Review
+Notes state, in the present tense, what was checked and where the report deals with each
+point ("The review checked the protein names against UniProt (Key Findings) and whether a
+loading difference explains the shift (Data Quality Notes)"), never "checked the first draft",
+"two names were wrong ... corrected", "an earlier version" or "now". The same holds for every
+section, the audit and the podcast. The review → fix history (what a reviewer found and what
+changed) goes in `logs/decisions.md` (staff only), with `log_decision.py`. A staff report: a
+changelog-style Expert Review Notes, an audit line saying an earlier reason was "corrected" and
+a podcast saying "the first draft of this report fell for it" nearly reached a client.
+`make_analysis_html.py` warns on these phrases in `AI_Analysis_Report.md`, and `make_podcast.py
+check` fails on the unambiguous ones and warns on the rest (one list: `scripts/client_text.py`);
+rewrite every one they name.
 
 ### 8e. QC runs around this project (Core runs) — STAFF-ONLY
 **Only on a Core STAFF route:** a CoreOmics submission (step 1c, fetched with the Core's
@@ -2690,10 +2794,18 @@ Then **read `ANALYSIS_PROMPT.md` and every data file + figure it lists, and writ
 complete `AI_Analysis_Report.md`** with ALL its OUTPUT sections (Overview, QC, Key
 Findings Per Comparison, Cross-Comparison Biomarkers, High-Confidence Biomarkers,
 Pathway/GSEA if present, Biological Interpretation, How This Analysis Works, Methods
-& Reproducibility) **plus an "Audit & caveats" section from `AUDIT.md`**, a **Data
+& Reproducibility), a **Data
 Quality Notes** section (the 5-part anomalies from steps 8c/8d + `SAMPLE_QUALITY.md`,
 even if "nothing anomalous observed"), and — if a review panel ran (8d) — an **Expert
-Review Notes** section. **Embed
+Review Notes** section. **Do not write an "Audit & caveats" section:** `make_analysis_html.py`
+adds it as a plain-language table from `AUDIT.json`, one row per check (what was checked, the
+result, what it means for the results), in words written beside each check
+(`audit_results.py`; a pipeline's own checks carry theirs). The technical `AUDIT.md` (check
+codes, thresholds, file names) stays the full record. A staff report: the raw AUDIT.md in the
+client report ("implausibly high ... not real biology") was unreadable to staff and clients
+alike. Discuss a WARN or FAIL that bears on a finding next to that finding and in Data Quality
+Notes. A report's own "Audit & caveats" section still replaces the table, so write one only
+when staff ask for it, and then in plain words. **Embed
 every figure** (`![caption](figures/<file>.png)`) with an expert interpretation of
 what it shows for THIS data. Compute significant proteins, up/down splits,
 cross-comparison overlaps, and lowest-CV proteins directly from the CSVs — cite
@@ -2853,6 +2965,9 @@ a Core run, Gemini voices; with no key here (`make_podcast.py key --core-run`), 
 P=<session>/output/podcast
 python3 scripts/make_podcast.py check $P/podcast_script.md --source <session>/output/AI_Analysis_Report.md \
     <session>/output/methods.md <session>/output/AUDIT.md <session>/output/SAMPLE_QUALITY.md --forbid-name "<people>"
+python3 scripts/make_podcast.py meaning $P/podcast_script.md --brief --source <session>/output/AI_Analysis_Report.md
+#   -> a reviewer agent that did not write the script reads every sentence; fix, check again, then:
+python3 scripts/make_podcast.py meaning $P/podcast_script.md --verdict PASS --reviewer "<who>" --findings <file>
 python3 scripts/make_podcast.py render $P/podcast_script.md --tts gemini --core-run   # verify follows
 #   anyone else: --tts gemini --cloud-ok "<who agreed, when>", or --tts say
 python3 scripts/make_podcast.py link <session>/output
@@ -2868,10 +2983,12 @@ bash scripts/hive_exec.sh "mkdir -p $S/output/podcast"
 bash scripts/hive_exec.sh --put <here>/podcast_script.md "$S/output/podcast/"
 bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py check $S/output/podcast/podcast_script.md \
     --source $S/output/AI_Analysis_Report.md $S/output/methods.md $S/output/AUDIT.md $S/output/SAMPLE_QUALITY.md --forbid-name '<people>'"
+bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py meaning $S/output/podcast/podcast_script.md --brief"
+#   -> the reviewer's findings go to $S/output/podcast/findings.md (--put), then --verdict PASS --reviewer ... --findings ...
 bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py job $S/output/podcast/podcast_script.md --core-run"
 bash scripts/hive_exec.sh '<the "submit" line it printed>'      # at once; then watch its "log"
 ```
-`job` writes nothing until everything the job needs is there: a passing check, the consent (and
+`job` writes nothing until everything the job needs is there: a passing check, a PASS meaning check, the consent (and
 for `--core-run`, a staff member), google-genai in the pipeline env (`setup.sh` installs it) and
 a key. Each gap is a one-line refusal. The job and its log go in your private
 `~/.proteomics-pipeline/jobs/`, never the group-writable session. After the job, the report on
@@ -2893,8 +3010,19 @@ the per-group detection columns. `check` matches tokens, not meaning. It fails a
 that is not in the sources or listed under "Claims beyond the report", a quantity in words, a
 missing AI disclosure, a host claiming a real specialty, and a forbidden name. It cannot catch
 a true number attached to the wrong protein, a relational word ("higher", "the top hit") or a
-false sentence built from true tokens, so read the script against the report yourself. Render
-and link refuse until the check passes for the current script and sources. `--tts gemini` sends
+false sentence built from true tokens. So **a reader who did not write the script checks its
+meaning before render** (one `Agent` call with `make_podcast.py meaning <script> --brief`):
+every sentence against the report for (a) the right comparison, group and direction of each
+number and protein, (b) the report's hedges kept, (c) the robust status of every named protein
+(the session's robustness tables), (d) no superlative the report does not make, (e) no claim
+outside the report and the Claims list, (f) no draft history. The writer fixes what it finds and re-runs `check`; the
+reviewer records `make_podcast.py meaning <script> --verdict PASS --reviewer "<who>" --findings
+<file>`, which writes `podcast/meaning_check.md` with the script's sha256. `check` itself fails a
+protein named in the same clause as "robust" / "survives" that the robustness tables call not
+robust, and warns on a superlative the sources do not make. A robustness table you write for an
+analysis goes under `output/tables/` as a CSV with a `Genes` (or `Protein.Names`) column and a
+`robust` column of `yes`/`no` (`TRUE`/`FALSE` also read). Render, link, share and `job` refuse until the check
+passes for the current script and sources AND `meaning_check.md` says PASS for this script. `--tts gemini` sends
 the transcript (never the report) to Google, and nothing without consent: `--core-run` for a Core
 run, `--cloud-ok` for anyone else (`--cloud-ok no` is a refusal). On a free-tier key Google may use
 the text; for anyone else's unpublished data suggest a paid-tier key or `--tts say`. The Core's
@@ -2902,7 +3030,8 @@ shared key on HIVE is used for a Core run only.
 → detail (when and where, the brief, the file format, privacy, keys): `references/podcast.md`.
 
 ### 10. Reproducibility bundle (mandatory)
-Assemble the bundle that makes the whole analysis reproducible:
+Assemble the bundle that makes the whole analysis reproducible (it hashes every input file; on
+HIVE's login node it moves itself to a compute node — run it in the background):
 ```
 python3 scripts/provenance.py --outdir ./reproducibility \
   --workflow-manifest ./wf/workflow.manifest.json \
@@ -3023,7 +3152,7 @@ First check the notes from the Core again (step 0: `notes.py check --json --sess
 ```
 python3 scripts/session.py finalize --dir <session> --zip
 ```
-This tidies `output/` (tables→`tables/`, figures→`figures/`) and makes sure the session carries
+(On HIVE's login node it moves itself to a compute node: run it in the background.) This tidies `output/` (tables→`tables/`, figures→`figures/`) and makes sure the session carries
 **publication Methods**: `output/methods.md` + `.docx`, covering LC-MS acquisition, the search
 (engine, pinned version, parameters, FDR), the sequence database and contaminants, the DE, and the
 instrument-grant acknowledgment. If step 9d did not write them, `make_methods.py` does it here. An
@@ -3101,7 +3230,10 @@ relative raw-data links inside the Flinders tree. **Links already in a share are
 touched** — `deliver` lists them as warnings.
 
 **On HIVE — always the dry run first** (file list, size, and any refusal), then the same
-command with `--apply`:
+command with `--apply`. `locate`, `stage` and `deliver` walk the shares, so on HIVE's login node
+each runs itself on a compute node (one blocking `srun`, its line printed first; HPC@UCD's
+`ucd-hpc` rules): run each call in the background (or with a Bash timeout of at least 70
+minutes) and wait for it — a killed call cancels the copy half way:
 ```
 python3 ~/proteomics-pipeline/scripts/core_submission.py deliver \
     --summary ~/core/PROT_0807/submission_summary.json --session "$S"

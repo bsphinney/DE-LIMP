@@ -1186,7 +1186,10 @@ def load(path):
 
 
 def statement(quantities, reason, who=staff.ROLE):
-    """THE sentence client documents give a person's decision: by role, never by name."""
+    """THE sentence client documents give a person's decision: by role, never by name. A second
+    `decide` replaces the first, and this sentence carries no history: what a client reads states
+    the decision that stands, never the earlier reason or that it was corrected (client_text.py;
+    both decisions stay in the staff-only record)."""
     r = re.sub(r"^because\s+", "", (reason or "").strip(), flags=re.I).rstrip(". ")
     return f"{who} chose {LABEL.get(quantities, quantities)} quantities because {r}."
 

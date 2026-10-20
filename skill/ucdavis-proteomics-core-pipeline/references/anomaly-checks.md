@@ -153,7 +153,19 @@ list of *issue · severity (critical/warning/note) · suggested action*:
   pseudoreplication, sample size, missing-value handling, test choice, PCA/MDS for swaps.
 
 Consolidate (dedupe, sort by severity) into a **`## Expert Review Notes`** section of the
-report; surface every **critical** issue to the user before finalizing. **Skip review** for
+report; surface every **critical** issue to the user before finalizing.
+
+**Write it for a reader who never saw a draft.** The client receives only the finished report,
+so Expert Review Notes are not a changelog. For each point state, in the present tense, what
+was checked and where the report deals with it: "The statistics review checked whether the
+loading difference between groups explains the shift; it does not (Data Quality Notes)."
+Never draft history: "checked the first draft", "two protein names were wrong and have been
+corrected", "the categories were corrected", "an earlier version", "the report now says". It
+confuses a non-MS reader and makes a sound result look shaky. The review → fix history (what
+each reviewer found, what changed and why) goes in the staff-only `logs/decisions.md`
+(`log_decision.py`). The same applies to every other section, the audit and the podcast;
+`make_analysis_html.py` warns on the phrases (`scripts/client_text.py`, one list) and
+`make_podcast.py check` fails on the unambiguous ones and warns on the rest. **Skip review** for
 format conversion, single-column extraction, exploratory looks with no formal report, FASTA
 prep, and annotation correction against a single reference.
 

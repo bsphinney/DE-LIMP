@@ -578,6 +578,64 @@ def run_owners(samples, names):
                 universe, cache)} for n in names}
 
 
+def session_locate(p):
+    """Staff's locate decisions for the session: input/locate_decisions.json (attach writes it
+    from locate.json), or that locate.json itself when it is newer -- locate re-run after
+    attach. A staff report: attach at 12:15, the `--choose` locate at 12:18, and the session's
+    copy still said no run was matched. None when the session has neither."""
+    d = _read_json(p["locate_decisions"]) if os.path.isfile(p["locate_decisions"]) else None
+    if not isinstance(d, dict):
+        return None
+    src, at = d.get("source"), d.get("source_mtime")
+    if isinstance(src, str) and isinstance(at, (int, float)):
+        try:
+            newer = os.path.getmtime(src) > at
+        except OSError:                   # not here (a laptop's copy of the session): the copy
+            newer = False
+        if newer:
+            fresh = locate_decisions(src)
+            # the fetch folder's locate.json may since have been run for another submission
+            # (review of 2.13.2): only the same submission's replaces the session's copy
+            rec = _read_json(p["submission_record"]) if os.path.isfile(
+                p["submission_record"]) else None
+            want = d.get("internal_id") or (rec or {}).get("internal_id")
+            got = (fresh or {}).get("internal_id")
+            if fresh is not None and not (got and want and got != want):
+                return fresh
+    return d
+
+
+def run_assignment(rec, p, names):
+    """({name: {unique_id, ...}}, basis): which sheet sample each run is. A run is matched by
+    collect_conditions.run_name, so raw paths and conditions.csv's File.Name both work. Staff's
+    locate result settles every run it assigned (matched by itself or by `--choose`; a record
+    from skill 2.13.1 or older lists only the staff choices): the one record of sample identity,
+    and the only one when the names do not carry the ids (sheet S01, runs DIA-S1). Every other
+    run is matched by name (core_submission's run_owners): an empty or partial locate record
+    never erases a name match (review of 2.13.2). basis: "locate" when locate assigned every
+    run here, "mixed" when some, "names" when none."""
+    from collect_conditions import run_name
+    loc = session_locate(p) if p else None
+    uids = {s["unique_id"] for s in rec["samples"] if s["unique_id"]}
+
+    def uid_of(key):                      # a sample key KG1#2 is the unique_id KG1's
+        key = cs._s(key)
+        return key if key in uids else re.sub(r"#\d+$", "", key)
+
+    by_run = defaultdict(set)
+    loc = loc if isinstance(loc, dict) else {}
+    given = loc.get("assignments") if isinstance(loc.get("assignments"), list) else \
+        loc.get("staff_choices") or []
+    for a in given:
+        if isinstance(a, dict) and a.get("sample") and a.get("file"):
+            by_run[run_name(a["file"])].add(uid_of(a["sample"]))
+    by_name = run_owners(rec["samples"], [n for n in names if run_name(n) not in by_run])
+    owners = {n: set(by_run[run_name(n)]) if run_name(n) in by_run else by_name[n] for n in names}
+    covered = sum(run_name(n) in by_run for n in names)
+    return owners, ("locate" if names and covered == len(names) else
+                    "mixed" if covered else "names")
+
+
 def _read_conditions(p):
     try:
         with open(p["conditions"], newline="", encoding="utf-8-sig") as fh:
@@ -679,7 +737,7 @@ def _model_sentence(rec, u, p):
         return None
     noun = u["noun"]
     unit_of_run = {}
-    for run, uids in run_owners(rec["samples"], [r["File.Name"] for r in rows or []]).items():
+    for run, uids in run_assignment(rec, p, [r["File.Name"] for r in rows or []])[0].items():
         if len(uids) == 1 and next(iter(uids)) in u["by_sample"]:
             unit_of_run[run] = u["by_sample"][next(iter(uids))]
 
@@ -777,12 +835,37 @@ def _sheet_vs_raw(rec, p):
     names = read_raw_list(p["session_dir"])
     if not names or not rec["samples"]:
         return []
-    owners = run_owners(rec["samples"], names)
+    owners, basis = run_assignment(rec, p, names)
     found = {uid for o in owners.values() for uid in o}
     loose = [n for n, o in owners.items() if not o]
     uids = [s["unique_id"] for s in rec["samples"] if s["unique_id"]]
     none = [u for u in uids if u not in found]
     out = []
+    files = lambda ns: _examples(os.path.basename(n.rstrip("/")) for n in ns)   # noqa: E731
+    if basis == "mixed":                  # some runs by staff's assignment, the rest by name
+        if none:
+            out.append(("sheet_ids_without_raw",
+                        f"Sample sheet vs raw files: {len(none)} of {len(uids)} sample IDs on the "
+                        f"sheet have no raw file analysed here, by the Core's assignment of runs "
+                        f"to samples or, for the runs it did not assign, by name "
+                        f"({_examples(none)})."))
+        if loose:
+            out.append(("raw_without_sheet_id",
+                        f"Sample sheet vs raw files: {len(loose)} of {len(names)} raw files "
+                        f"analysed here were assigned to no sample and carry no sample ID from the "
+                        f"sheet ({files(loose)})."))
+        return out
+    if basis == "locate":                 # staff assigned the runs: say so, not "match"
+        if none:
+            out.append(("sheet_ids_without_raw",
+                        f"Sample sheet vs raw files: {len(none)} of {len(uids)} sample IDs on the "
+                        f"sheet have no raw file analysed here in the Core's assignment of runs to "
+                        f"samples ({_examples(none)})."))
+        if loose:
+            out.append(("raw_without_sheet_id",
+                        f"Sample sheet vs raw files: {len(loose)} of {len(names)} raw files "
+                        f"analysed here are assigned to no sample on the sheet ({files(loose)})."))
+        return out                        # how well ids match names no longer matters
     if none:
         out.append(("sheet_ids_without_raw", f"Sample sheet vs raw files: {len(none)} of "
                                              f"{len(uids)} sample IDs on the sheet match no raw "
@@ -790,7 +873,7 @@ def _sheet_vs_raw(rec, p):
     if loose:
         out.append(("raw_without_sheet_id", f"Sample sheet vs raw files: {len(loose)} of "
                                             f"{len(names)} raw files carry no sample ID from the "
-                                            f"sheet ({_examples(os.path.basename(n.rstrip('/')) for n in loose)})."))
+                                            f"sheet ({files(loose)})."))
     weak = [u for u in uids if cs.weak_reason(u)]
     if weak and (none or loose or len(weak) == len(uids)):
         out.append(("weak_sample_ids", f"{len(weak)} sample IDs are too short or numeric to "
@@ -804,7 +887,7 @@ def _conditions_vs_analysed(rec, p):
     sheet = sheet_groups(rec)
     if not rows or not sheet or (not d["unit"] and len({_key(g) for g in sheet.values()}) == len(sheet)):
         return []
-    owners = run_owners(rec["samples"], [r["File.Name"] for r in rows])
+    owners = run_assignment(rec, p, [r["File.Name"] for r in rows])[0]
     groups_of, in_design = defaultdict(set), set()
     for r in rows:
         o = owners[r["File.Name"]]
@@ -846,14 +929,18 @@ def _no_groups(rec, d):
 
 def locate_decisions(locate_json):
     """locate.json -> what staff decided about the runs: the re-injection policy and its result
-    per sample, and each run chosen by --choose. File NAMES only -- this goes into a report a
-    collaborator reads. None when there is no locate.json."""
+    per sample, each run chosen by --choose, and the whole assignment of runs to samples (every
+    matched row: `assignments`, which run_assignment reads). Runs by file NAME only -- the notes
+    a collaborator reads are made from it; `source` (and its time) is the path of the
+    locate.json it came from, kept in the session's input/ (never delivered), so a locate re-run
+    after attach for the same submission is read from there (session_locate). None when there
+    is no locate.json."""
     loc = _read_json(locate_json)
     if not isinstance(loc, dict):
         return None
     base = lambda p: os.path.basename(cs._s(p).rstrip("/"))   # noqa: E731
     acc = loc.get("accepted") if isinstance(loc.get("accepted"), dict) else {}
-    reinj, chosen = {}, []
+    reinj, chosen, assigned = {}, [], []
     for r in loc.get("samples") or []:
         if not isinstance(r, dict):
             continue
@@ -865,13 +952,17 @@ def locate_decisions(locate_json):
                                    "set_aside": [base(p) for p in rec.get("set_aside") or []]})
         if cs._s(r.get("chosen_by")) and r.get("file"):
             chosen.append({"sample": key, "file": base(r["file"]), "by": cs._s(r.get("chosen_by"))})
+        if r.get("status") == "matched" and r.get("file") and cs._s(r.get("unique_id")):
+            assigned.append({"sample": cs._s(r.get("unique_id")), "file": base(r["file"])})
     return {"reinjections_policy": acc.get("reinjections"), "reinjections": reinj,
             "staff_choices": chosen, "accept_ambiguous": bool(acc.get("accept_ambiguous")),
-            "allow_partial": bool(acc.get("allow_partial"))}
+            "allow_partial": bool(acc.get("allow_partial")), "assignments": assigned,
+            "internal_id": loc.get("internal_id"),
+            "source": os.path.abspath(locate_json), "source_mtime": os.path.getmtime(locate_json)}
 
 
 def _locate_notes(p):
-    d = _read_json(p["locate_decisions"]) if os.path.isfile(p["locate_decisions"]) else None
+    d = session_locate(p)
     if not isinstance(d, dict):
         return []
     out = []
@@ -889,8 +980,9 @@ def _locate_notes(p):
                        else f"decided --reinjections {pol}") + f" -- {each}."))
     if d.get("staff_choices"):
         out.append(("staff_run_choices",
-                    f"Run choices: staff said which run is the sample for {len(d['staff_choices'])} "
-                    f"sample(s) whose label named several runs ("
+                    f"Run choices: Core staff assigned the run by hand for "
+                    f"{len(d['staff_choices'])} sample(s), where the file names alone did not "
+                    f"settle which run is the sample ("
                     + "; ".join(f"{c['sample']}: {c['file']}" for c in d["staff_choices"]) + ")."))
     return out
 

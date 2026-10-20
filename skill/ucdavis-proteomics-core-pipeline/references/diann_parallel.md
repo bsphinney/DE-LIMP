@@ -518,7 +518,9 @@ listing is whatever sorts first — often a blank, a QC injection, or a failed a
    log prints a `WARNING`: hand step 1b the sample runs, not the folder.
 3. **Probes the median run first**, then the lower and upper quartile runs (positions ⌊m/4⌋
    and ⌈3m/4⌉ of the ranked eligible runs, distinct for every n ≥ 3), independent of input
-   order.
+   order. Measuring mass accuracy, which needs at least 2 runs, a cohort of two probes both
+   (and `--max-probes 2` the median and the run next to it); measuring the window alone, a
+   cohort of two is probed once.
 4. **Replaces a run that logs no radius** with the remaining run nearest the median *in rank
    position* (`|i - n//2|` in the ranking, not the nearest value — they differ wherever the
    ranked values are spaced unevenly) — the
@@ -530,8 +532,8 @@ listing is whatever sorts first — often a blank, a QC injection, or a failed a
    answered — the replacements ran out, or the time budget did — it still pins, as the
    first-file fall-through did, but `window.json` says `incomplete: true` and the job log
    prints a `WARNING`. `radii_agree` is `true`/`false` only when **more than one** radius was
-   measured — `null` otherwise, because one measurement corroborates nothing (a cohort of two
-   runs is probed once) — and radii that differ by more than 2 get their own `WARNING` in the
+   measured — `null` otherwise, because one measurement corroborates nothing (for the window
+   alone a cohort of two runs is probed once) — and radii that differ by more than 2 get their own `WARNING` in the
    job log rather than only `radii_agree: false` in the JSON. `window.json` records every probe
    (role, size, time, radius, seconds, log) and every run left out and why.
 
@@ -736,7 +738,7 @@ what the runs said is checked for plausibility before it is pinned for the cohor
 |---|---|---|
 | band | MS2 **3–30 ppm**, MS1 **1.5–25 ppm** (`probe_window.MASS_ACC_BAND`) | all DIA-NN's own: its documented Orbitrap tiers span 4–15 ppm, it calibrates from `25 (MS1), 25 (MS2)`, and its runtime value for a 15k MS2 is 25. Ceiling = its widest number +20%; floor below its tightest tier (240k→4) |
 | agreement | per-run spread ≤ **50%** of the median (`MASS_ACC_MAX_SPREAD`) | the widest real disagreement measured here: the same three runs gave MS2 14/17/14 with the window auto (21%) and 12/17/14 with `--window 7` (36%), both reproducible. 35% would refuse the cohort this branch was validated on. **A wider spread only warns** (`mass_acc.warnings`, the job log) when the median is at or below the SOP floor, every run is inside the band and no run is above 1.5× the floor (`SPREAD_WARN_MAX_OVER_FLOOR`; MS2 30, MS1 10.5 ppm): the floor is then pinned whatever the spread. 18 streptavidin pull-down runs measured MS2 20/24/10 (70%, median 20 = the floor) and were refused before 2.12; sparse controls of an enrichment cohort are a known benign cause, which the warning and the refusal both name |
-| runs | at least **2** runs logged everything (`MASS_ACC_MIN_RUNS`) | one run is DIA-NN's own first-run auto mode — "use this mode for preliminary analyses only" — which measuring representative runs exists to replace, and a lone value agrees with itself. **A cohort of one run** (a one-file single-shot search) pins its own measurement (`mass_acc_min_runs`, `mass_acc.single_run_cohort`), band and floor as usual: before 2.12 every one-file search on a 15k-MS2 Orbitrap failed here after its library was built |
+| runs | at least **2** runs logged everything (`MASS_ACC_MIN_RUNS`) | one run is DIA-NN's own first-run auto mode — "use this mode for preliminary analyses only" — which measuring representative runs exists to replace, and a lone value agrees with itself. **A cohort of two** probes both runs (before 2.13.2 it probed the median alone and then refused it, so every two-file search measuring mass accuracy failed after its library was built). **A cohort of one run** (a one-file single-shot search) pins its own measurement (`mass_acc_min_runs`, `mass_acc.single_run_cohort`), band and floor as usual: before 2.12 every one-file search on a 15k-MS2 Orbitrap failed here after its library was built |
 
 Failing the band or the agreement check is a **refusal**: nothing reaches the cfg or
 `massacc.txt`, `window.json` keeps every per-run value with the reason under

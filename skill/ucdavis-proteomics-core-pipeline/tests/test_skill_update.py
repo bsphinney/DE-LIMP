@@ -550,7 +550,32 @@ class Documented(unittest.TestCase):
 
     def step0(self):
         md = self.read("SKILL.md")
-        return " ".join(md[md.index("### 0. One-time setup"):md.index("### 0b.")].split())
+        return " ".join(md[md.index("### 0. "):md.index("### 0b.")].split())
+
+    def section(self, start, end):
+        md = self.read("SKILL.md")
+        return " ".join(md[md.index(start):md.index(end)].split())
+
+    def test_the_version_check_comes_before_setup_and_is_never_skipped(self):
+        """Every staff report of 2026-10-15/16 ran 2.11.2 while 2.12.0, 2.13.0 and 2.13.1 were
+        out. The check sat in the middle of "### 0. One-time setup", after setup.sh: a heading
+        an agent on an already-set-up computer skips, and a resume never ran it."""
+        s = self.step0()
+        self.assertLess(s.index("bash scripts/skill_version.sh --check-update"),
+                        s.index("bash scripts/setup.sh"))
+        head = s[:s.index("bash scripts/skill_version.sh --check-update")]
+        self.assertIn("every conversation", head.lower())
+        self.assertIn("already set up", head)
+        self.assertIn("resume", head)
+
+    def test_a_resume_and_the_milestones_check_again(self):
+        resume = self.section("### 0c.", "### 1. ")
+        self.assertIn("--check-update", resume)
+        s = self.step0()
+        again = s[s.index("**Check again**"):]
+        self.assertIn("skill_version.sh --check-update", again)
+        self.assertIn("step 7", again)
+        self.assertIn("step 12", again)
 
     def test_step_0_checks_main_first_in_every_mode(self):
         s = self.step0()

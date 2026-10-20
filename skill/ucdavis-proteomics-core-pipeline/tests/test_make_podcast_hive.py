@@ -239,7 +239,8 @@ class CoreRunConsent(CoreKeyFile, T.Workspace):
                 super().__init__(api_key)
         mods["google.genai"].Client = Client
         with mock.patch.dict(sys.modules, mods):
-            rc, out, err = T.run("render", self.script, "--tts", "gemini", "--no-verify", *extra)
+            rc, out, err = T.run("render", self.script, "--tts", "gemini", "--no-verify",
+                                 "--no-preflight", *extra)
         return rc, out, err, log, keys
 
     def manifest(self):
@@ -366,7 +367,7 @@ class CoreRunConsent(CoreKeyFile, T.Workspace):
                 mods, log = T.fake_genai(lambda m, c, k: T.pcm_for(c))
                 with mock.patch.dict(sys.modules, mods):
                     rc, out, err = T.run("render", self.script, "--tts", "gemini", "--no-verify",
-                                         "--core-run")
+                                         "--no-preflight", "--core-run")
                 self.assertEqual(rc, want_rc, err)
                 if said:
                     self.assertIn(said, err)
@@ -433,7 +434,7 @@ class StaleVerify(T.Workspace):
         mods, log = T.fake_genai(lambda m, c, k: T.pcm_for(c), transcribe=transcribe)
         with mock.patch.dict(sys.modules, mods):
             return T.run("render", self.script, "--tts", "gemini", "--cloud-ok", "PI, today",
-                         *extra)
+                         "--no-preflight", *extra)
 
     def files(self):
         verify = os.path.join(self.pod, "verify.txt")
@@ -596,6 +597,7 @@ class Job(CoreKeyFile, T.Workspace):
         T.write(script, T.script_text())
         rc, o, e = T.run("check", script, "--source", os.path.join(out, "AI_Analysis_Report.md"))
         self.assertEqual(rc, 0, e)
+        T.meaning_pass(script)
         os.makedirs(os.path.join(sd, "input"))
         submission_report.attach(sd, {"internal_id": "PROT_0807"})
         home = os.path.join(self.d, "pipeline home")

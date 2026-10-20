@@ -44,6 +44,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import report_style as rs  # noqa: E402  -- the ONE look shared by the skill's HTML pages
 import html_to_pdf  # noqa: E402  -- the PDF: the same page printed by a headless browser
 import make_podcast       # noqa: E402  -- an optional audio discussion keeps its Listen card
+from client_text import draft_history, draft_history_loose  # noqa: E402  -- the ONE list (podcast too)
+import audit_results      # noqa: E402  -- the audit's plain words: the client's Audit & caveats
 from session_docs import IP_CONTROL_NAME  # noqa: E402  -- which groups are pull-down controls
 from fetch_fasta import CONTAMINANT_TAGS  # noqa: E402  -- Cont_ and FragPipe's contam_: one definition
 
@@ -887,6 +889,24 @@ def detection_note_fn(tables_dir, prov, conditions):
     return note
 
 
+def audit_plain(path):
+    """The client's Audit & caveats: audit_results' plain table, one row per check, from the
+    AUDIT.json beside AUDIT.md (or AUDIT.md's own lines, for a session without it). A staff
+    report: the raw AUDIT.md -- check codes, B1-B4 strings, "not real biology" -- was what clients
+    read here. None when there are no findings to read (the page then shows AUDIT.md as it is)."""
+    found = None
+    try:
+        with open(os.path.splitext(path)[0] + ".json", encoding="utf-8") as fh:
+            j = json.load(fh)
+        if isinstance(j, dict) and isinstance(j.get("findings"), list):
+            found = j["findings"]
+    except (OSError, ValueError):
+        pass
+    if found is None:
+        found = audit_results.findings_from_md(read_text(path))
+    return audit_results.client_section_md(found) or None
+
+
 def build_page(a, prov, tables, figs, md_text, used):
     """Assemble the page ONCE, as data. render_html() and render_md() draw this same list,
     so the HTML report and its Markdown twin cannot say different things (rule 3).
@@ -909,7 +929,8 @@ def build_page(a, prov, tables, figs, md_text, used):
             continue
         if report_h2 & (SUPERSEDED_BY[key] | {norm_title(title)}):
             continue                    # the report has its own -- never show it twice
-        extras.append((title, strip_h1(read_text(path))))
+        body = audit_plain(path) if key == "audit" else None
+        extras.append((title, body or strip_h1(read_text(path))))
     top = top_data(tables, a, prov)
     g = glance_data(prov, tables, a.tables, a.session)
     for n in (not_drawn_note(figs.failed, referenced), unreadable_note()):
@@ -1747,6 +1768,16 @@ def main():
         import core_submission            # ... and its survey + star lines (the twin's): added below
         md_text = md_orig = core_submission.strip_feedback(
             make_podcast.strip_block(read_text(a.report)))  # its Listen line: the card is below
+        # The client never saw a draft: Expert Review Notes and the audit state what was checked,
+        # in the present tense; the review -> fix history is logs/decisions.md's (staff only).
+        # A warning, not a stop -- the phrases are a lint, and a staff member reads the report.
+        hist = draft_history(md_orig) + draft_history_loose(md_orig)
+        if hist:
+            print(f"[make_analysis_html] WARNING: draft history in {os.path.basename(a.report)} "
+                  f"({len(hist)} place(s)): " + " | ".join(f"\"{h}\"" for h in hist[:8])
+                  + " -- the client never saw a draft: say what was checked and where the report "
+                    "deals with it, in the present tense; the review history goes in "
+                    "logs/decisions.md (SKILL.md step 8d)", file=sys.stderr)
         # The one source both renderers draw from, so the HTML, .md and PDF all lose it.
         md_text, gone, n_par = drop_suppressed(md_text, figs.suppress)
         figs.suppressed += [g for g in gone if g not in figs.suppressed]

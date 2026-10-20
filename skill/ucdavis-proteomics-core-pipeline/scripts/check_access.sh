@@ -28,6 +28,9 @@
 #                               email-draft run: "hive" (hive_exec.sh) | "this_computer" |
 #                               "none" (core_member false: no CoreOmics step, ever);
 #                               coreomics_key_advice says what to do about the key (null for none)
+#   ucd_hpc_skill               HPC@UCD's mandatory agent skill (ucd-hpc) in THIS computer's
+#                               Claude skills folder: installed, required (a UC Davis cluster
+#                               user), the README's install line, a note
 #
 # Model: Claude Code runs LOCALLY; HIVE work is driven over SSH with the user's
 # private key. So this tests SSH to HIVE using that key.
@@ -251,6 +254,42 @@ fi
 # (2.12 staff review: SKILL.md step 1 asked outside users for a submission number).
 if [ "$FACILITY_SW" != true ]; then CK_ROUTE=none; CK_ADVICE=""; fi
 
+# HPC@UCD's own agent skill, ucd-hpc: mandatory for agents on Farm, Franklin and Hive since
+# 2026-10-16 ("agents that do not follow it put the user's account at risk of suspension"), and on
+# cluster policy it supersedes this skill. Claude reads it only from the skills folder of the
+# computer Claude Code runs on: this one (the laptop in hive_remote, HIVE in hive_local). Required
+# for anyone on a UC Davis cluster: hive_remote, or this machine carries HPCCF's cluster file.
+# Install = the ucd-hpc README's three lines; an existing clone needs only the link.
+UCD_HPC_CONF="${UCD_HPC_CLUSTER_CONF:-/opt/hpccf/etc/cluster_name.conf}"
+UH_SKILLS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills"
+UH_SKILLS_SAID="${CLAUDE_CONFIG_DIR:+$CLAUDE_CONFIG_DIR/skills}"; UH_SKILLS_SAID="${UH_SKILLS_SAID:-~/.claude/skills}"
+UH_PATH="$UH_SKILLS/ucd-hpc"; UH_CLONE="$HOME/ucdhpc-cluster-skill"
+uh_is_skill() { [ -f "$1/SKILL.md" ] && grep -q '^name:[[:space:]]*ucd-hpc[[:space:]]*$' "$1/SKILL.md" 2>/dev/null; }
+UH_OK=false; uh_is_skill "$UH_PATH" && UH_OK=true
+UH_REQ=false
+{ [ "$MODE" = hive_remote ] || { $ON_HIVE && [ -r "$UCD_HPC_CONF" ]; }; } && UH_REQ=true
+UH_LINK="mkdir -p $UH_SKILLS_SAID && ln -s ~/ucdhpc-cluster-skill/ucd-hpc $UH_SKILLS_SAID/ucd-hpc"
+UH_INSTALL=""
+if ! $UH_OK; then
+  # a link left by a deleted clone goes first (ln -s would refuse). Anything else in the way is
+  # the user's: named in the note, never deleted by the install line.
+  [ -L "$UH_PATH" ] && UH_LINK="rm -f $UH_SKILLS_SAID/ucd-hpc && $UH_LINK"
+  UH_IN_WAY=false; [ ! -L "$UH_PATH" ] && [ -e "$UH_PATH" ] && UH_IN_WAY=true
+  if $UH_IN_WAY; then UH_INSTALL=""
+  elif uh_is_skill "$UH_CLONE/ucd-hpc"; then UH_INSTALL="$UH_LINK"
+  else UH_INSTALL="git clone https://github.com/ucdavis/ucdhpc-cluster-skill ~/ucdhpc-cluster-skill && $UH_LINK"; fi
+fi
+UH_NOTE="HPC@UCD's ucd-hpc skill is mandatory for agents on Farm, Franklin and Hive and supersedes this skill on cluster policy (what may run on a login node, resource requests, software and storage rules)."
+if $UH_OK; then
+  UH_NOTE="$UH_NOTE Installed. HPCCF updates it on GitHub: git -C ~/ucdhpc-cluster-skill pull --ff-only every few days (a copied install: copy it again after the pull)."
+elif $UH_IN_WAY; then
+  UH_NOTE="$UH_NOTE Not installed: $UH_PATH exists but is not the ucd-hpc skill. Ask the user what it is before anything replaces it."
+elif $UH_REQ; then
+  UH_NOTE="$UH_NOTE Not installed here, and this user works on a UC Davis cluster: ask the user, then run \`install\`, then /reload-plugins (or restart Claude Code) so it loads. On Windows (Git Bash), where ln -s cannot make a link, copy instead: cp -r ~/ucdhpc-cluster-skill/ucd-hpc $UH_SKILLS_SAID/ucd-hpc (and copy again after each pull)."
+else
+  UH_NOTE="$UH_NOTE Not needed: this user does not work on a UC Davis cluster."
+fi
+
 ERR_JSON=null
 [ -n "$ERR_KIND" ] && ERR_JSON="{\"kind\": $(js "$ERR_KIND"), \"detail\": $(js "$ERR_DETAIL")}"
 FP_JSON=""
@@ -281,6 +320,7 @@ cat <<JSON
   "can_use_slurm": $HAS_SLURM,
   "facility_software_available": $FACILITY_SW,
   "recommended_mode": "$MODE",
+  "ucd_hpc_skill": {"installed": $UH_OK, "required": $UH_REQ, "path": $(js "$UH_PATH"), "install": $([ -n "$UH_INSTALL" ] && js "$UH_INSTALL" || echo null), "note": $(js "$UH_NOTE")},
   "notes": [
     "Claude Code runs locally; in hive_remote mode it drives HIVE over SSH with the user's private key (ssh -i <key> <user>@hive).",
     "core_member = /quobyte/proteomics-grp is readable, here (local_proteomics_grp_access) or over SSH (hive_ssh_has_proteomics_grp). Core members reuse the software already installed there (DIA-NN builds, pre-staged FASTAs).",

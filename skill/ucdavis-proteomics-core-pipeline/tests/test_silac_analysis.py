@@ -232,8 +232,27 @@ class Analysis(unittest.TestCase):
         self.assertIn("not a statistical test", pat)
         self.assertIn("not detected is not absent", pat)
         for c in self.prov["checks"]:
-            self.assertEqual(set(c), {"check", "status", "message", "detail"})
+            # plain + label: the client report's Audit & caveats row (audit_results.client_row)
+            self.assertEqual(set(c), {"check", "status", "message", "detail", "plain", "label"})
             self.assertIn(c["status"], ("PASS", "WARN", "FAIL", "INFO"))
+            self.assertTrue(c["plain"] and c["label"] and "_" not in c["label"], c)
+
+    def test_the_client_row_never_contradicts_itself(self):
+        """Review of 2.13.2, round 2 (N-M3): one comparison with single-precursor hits and
+        another with none made one client row say both "Some ... rest on a single peptide" and
+        "No significant protein rests on a single peptide"."""
+        import audit_results as ar
+        f = []
+        ar.audit_pipeline_checks(f, self.prov)
+        one = [x for x in f if x["check"] == "silac_single_precursor"]
+        self.assertTrue(one)
+        plains = {x["plain"] for x in one}
+        some = [p for p in plains if p.startswith("Some")]
+        none = [p for p in plains if p.startswith("No significant")]
+        self.assertFalse(some and none, plains)
+        row = [ln for ln in ar.client_section_md(f).splitlines() if "one peptide" in ln]
+        self.assertEqual(len(row), 1)
+        self.assertFalse("Some significant" in row[0] and "No significant" in row[0], row[0])
 
     def test_record_describes_itself(self):
         p = self.prov

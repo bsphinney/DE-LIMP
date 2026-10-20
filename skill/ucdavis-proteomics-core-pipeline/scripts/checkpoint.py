@@ -21,10 +21,13 @@ Usage
   # on reconnect — queries SLURM live and says what is left
   checkpoint.py status --session <dir>
 
-  # find interrupted runs anywhere under a directory
-  checkpoint.py find --base ~/            (or --base /quobyte/proteomics-grp/...)
+  # find interrupted runs under a directory: a project folder, never a whole share. It walks
+  # at most --max-depth (default 6) folders down, looks 2 levels into a folder linked in from
+  # outside it, skips a search's per-run, temp and hidden folders and Bruker .d runs, and on a
+  # cluster login node runs itself on a compute node (on_compute.py)
+  checkpoint.py find --base <project dir> [--max-depth N]
 """
-import argparse, json, os, subprocess, sys, glob, datetime
+import argparse, json, os, re, subprocess, sys, glob, datetime
 
 REC_JSON = ".recovery.json"
 REC_MD = "RECOVERY.md"
@@ -232,9 +235,93 @@ def cmd_status(a):
     print(json.dumps(out, indent=2))
 
 
+# Folders the pipeline itself fills with thousands of entries and never puts a session in: a
+# search's per-run files (quant, quant_step2/4, *_xic, xic), DIA-NN's temp folders, a Bruker
+# run (*.d), and hidden folders (.cache, a conda root -- the recursive glob this replaced skipped
+# those too). Never a folder by the user's naming (raw/, Quant_study/): session.py init's default
+# session sits beside the raw data, and a resume that cannot find it may resubmit the search.
+_PIPELINE_DIR = re.compile(r"^(quant(_step\d+)?|xic|.*_xic|temp|tmp)$", re.I)
+
+
+def _never_a_session(name):
+    return name.startswith(".") or name.lower().endswith(".d") or bool(_PIPELINE_DIR.match(name))
+
+
+LINK_LEVELS = 2           # how far below a link out of --base is looked: a login node's -maxdepth 2
+
+
+def _under(path, top):
+    return path == top or path.startswith(top.rstrip(os.sep) + os.sep)
+
+
+def _linked_sessions(link, real, seen):
+    """The .recovery.json files in the folder a link out of --base points at, and at most
+    LINK_LEVELS below it, reported under the link's own path. Each real folder once."""
+    if real in seen:
+        return
+    seen.add(real)
+    level = [(link, real)]
+    for depth in range(LINK_LEVELS + 1):
+        nxt = []
+        for shown, actual in level:
+            if os.path.isfile(os.path.join(actual, REC_JSON)):
+                yield os.path.join(shown, REC_JSON)
+            if depth == LINK_LEVELS:
+                continue
+            try:
+                names = sorted(os.listdir(actual))
+            except OSError:
+                continue
+            for n in names:
+                a = os.path.join(actual, n)
+                if not _never_a_session(n) and os.path.isdir(a) and not os.path.islink(a):
+                    nxt.append((os.path.join(shown, n), a))
+        level = nxt
+
+
+def _recovery_files(base, max_depth):
+    """Every .recovery.json at most `max_depth` folders below `base` (base itself is depth 0). A
+    folder that is skipped is still checked for its own .recovery.json. Links: one that stays
+    inside --base is not followed (its folder is walked where it is, so a deep link can hide
+    nothing and nothing loops); one out of --base is looked into LINK_LEVELS deep only (a session
+    folder linked in from elsewhere is found; a link to a whole share is never walked)."""
+    base = os.path.abspath(os.path.expanduser(base))
+    real_base = os.path.realpath(base)
+    top = base.rstrip(os.sep).count(os.sep)
+    seen = set()
+    for root, dirs, files in os.walk(base):              # followlinks=False
+        if REC_JSON in files:
+            yield os.path.join(root, REC_JSON)
+        links = [d for d in dirs if os.path.islink(os.path.join(root, d))]
+        skipped = [d for d in dirs if d not in links and _never_a_session(d)]
+        for d in skipped:
+            if os.path.isfile(os.path.join(root, d, REC_JSON)):
+                yield os.path.join(root, d, REC_JSON)
+        if root.rstrip(os.sep).count(os.sep) - top >= max_depth:
+            dirs[:] = []
+            continue
+        for d in sorted(links):
+            real = os.path.realpath(os.path.join(root, d))
+            if os.path.isdir(real) and not _under(real, real_base) and not _never_a_session(d):
+                yield from _linked_sessions(os.path.join(root, d), real, seen)
+        dirs[:] = sorted(d for d in dirs if d not in skipped and d not in links)
+
+
+def _unique_recovery_files(base, max_depth):
+    """_recovery_files, one per real file: a link out of --base can point back at an ancestor
+    (proj/up -> ..) and reach a session the walk also finds. The shortest path -- the direct
+    one -- is kept."""
+    best = {}
+    for p in _recovery_files(base, max_depth):
+        real = os.path.realpath(p)
+        if real not in best or len(p) < len(best[real]):
+            best[real] = p
+    return sorted(best.values())
+
+
 def cmd_find(a):
     hits = []
-    for p in glob.glob(os.path.join(a.base, "**", REC_JSON), recursive=True):
+    for p in _unique_recovery_files(a.base, a.max_depth):
         try:
             with open(p) as fh:
                 d = json.load(fh)
@@ -274,10 +361,20 @@ def main():
     s.set_defaults(func=cmd_status)
 
     f = sub.add_parser("find", help="find interrupted runs under a directory")
-    f.add_argument("--base", required=True)
+    f.add_argument("--base", required=True, help="a project folder, never a whole share")
+    f.add_argument("--max-depth", type=int, default=6,
+                   help="how many folders below --base to look (default 6)")
     f.set_defaults(func=cmd_find)
 
     a = ap.parse_args()
+    if a.cmd == "find":
+        # a walk: on a cluster login node, run it on a compute node (HPC@UCD's ucd-hpc rules)
+        try:
+            import on_compute
+            on_compute.ensure_compute_node("checkpoint.py find walks " + a.base, minutes=15,
+                                           mem="2G", preemptible_ok=True, script=__file__)
+        except ImportError:
+            pass                          # a partial scripts/ without on_compute.py: as before
     a.func(a)
 
 

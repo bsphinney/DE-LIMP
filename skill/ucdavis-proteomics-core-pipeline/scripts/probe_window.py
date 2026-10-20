@@ -729,7 +729,7 @@ def _wal_header_only_runs(measured, sel):
     return recovered
 
 
-def select_representative(paths, max_probes=3, min_fraction=MIN_FRACTION):
+def select_representative(paths, max_probes=3, min_fraction=MIN_FRACTION, min_probes=1):
     """Choose the runs to probe. Deterministic and independent of input order (ties are broken
     by path), because "which run is first" is exactly the dependence being removed.
 
@@ -741,7 +741,10 @@ def select_representative(paths, max_probes=3, min_fraction=MIN_FRACTION):
     for every n >= 3; on an even count the upper-middle run, the less likely to be a weak
     injection). `reserves` are the other eligible runs, nearest the median by RANK POSITION
     first -- |i - n//2| in the ranking, not |value - the median value|, which differ wherever the
-    ranked values are unevenly spaced -- the larger run on a tie.
+    ranked values are unevenly spaced -- the larger run on a tie. When that is fewer than
+    `min_probes` runs (a cohort of two, or --max-probes 2), the reserves nearest the median are
+    chosen too, up to min(min_probes, max_probes, n): mass accuracy is pinned from at least
+    MASS_ACC_MIN_RUNS runs, and a cohort of two probed once could never be pinned.
     Raises NoProbeableRun (a ValueError) when nothing is eligible."""
     measured = [measure_run(p) for p in paths]
     usable = [m for m in measured if m["readable"] and not m["problems"]]
@@ -852,6 +855,11 @@ def select_representative(paths, max_probes=3, min_fraction=MIN_FRACTION):
     # "Nearest the median" is by RANK POSITION, |i - mid|, not by how near the value is to the
     # median value; on a ranked list the two agree except where the values are spaced unevenly.
     rest = sorted((i for i in range(n) if i not in taken), key=lambda i: (abs(i - mid), -i))
+    # Mass accuracy needs MASS_ACC_MIN_RUNS answers. A cohort of two used to probe its median
+    # alone, keep the other run in reserve, and then refuse the one answer: every two-file search
+    # measuring mass accuracy failed after its library was built (staff report, skill 2.13.1).
+    while len(picks) < min(min_probes, max_probes, n):
+        picks.append(("next_to_median", rest.pop(0)))
 
     def entry(m, role):
         return {"file": m["file"], "size_bytes": m["size_bytes"], "time_s": m["time_s"],
@@ -1580,7 +1588,8 @@ def main():
             signal.signal(getattr(signal, name), _on_signal)
 
     try:
-        sel = select_representative(raws, max_probes=a.max_probes)
+        sel = select_representative(raws, max_probes=a.max_probes,
+                                    min_probes=MASS_ACC_MIN_RUNS if "mass-acc" in measure else 1)
     except NoProbeableRun as e:
         report({"measured": measure, "window_radius": None, "pin_as": None, "radii": [],
                 "radii_agree": None, "mass_acc": None, "mass_acc_refused": None,

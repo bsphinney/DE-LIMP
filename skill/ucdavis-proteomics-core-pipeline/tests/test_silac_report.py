@@ -88,7 +88,9 @@ class SilacSession(unittest.TestCase):
         self.assertIn(">Submission<", p)
         self.assertIn(f"prot={PROT}", p, "the Core's survey")
         self.assertIn("Audit &amp; caveats", p)
-        self.assertIn("silac_channel_balance", p)
+        # the audit's rows in plain words, labelled by run_silac.R, never its check ids
+        self.assertIn("SILAC channel mix", p)
+        self.assertNotIn("silac_channel_balance", p)
         for title in ("SILAC channels and mixing", "Channel-specific proteins",
                       "Top proteins per contrast", "Results at a glance"):
             self.assertIn(title, p)

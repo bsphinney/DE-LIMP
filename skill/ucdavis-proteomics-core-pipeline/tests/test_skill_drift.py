@@ -749,7 +749,7 @@ class Documented(unittest.TestCase):
 
     def test_skill_md_step_0_runs_the_check_and_says_what_each_exit_means(self):
         md = self.read("SKILL.md")
-        step0 = md[md.index("### 0. One-time setup"):md.index("### 0b.")]
+        step0 = md[md.index("### 0. "):md.index("### 0b.")]
         self.assertIn("bash scripts/skill_version.sh --check-hive --mode hive_remote", step0)
         for code in ("exit 0", "exit 3", "exit 4", "exit 5", "exit 6"):
             self.assertIn(code, step0)
@@ -759,7 +759,7 @@ class Documented(unittest.TestCase):
         """Brett: staff must hear it plainly -- relayed before any other work, an offer to
         update now (the steps that work), the decline recorded, and auto-update recommended."""
         md = self.read("SKILL.md")
-        step0 = " ".join(md[md.index("### 0. One-time setup"):md.index("### 0b.")].split())
+        step0 = " ".join(md[md.index("### 0. "):md.index("### 0b.")].split())
         for text in ("Relay it FIRST, before any other work",
                      "Your copy of the skill is older than the Core's current release",
                      "ask whether to update now",

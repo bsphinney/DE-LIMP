@@ -755,6 +755,7 @@ def search_record(params=None, search_prov=None, manifest=None):
            "tol_note": None, "precursor_fdr": None, "library": None, "mbr": None, "dda": None,
            "search_mode": prov.get("search_mode"),
            "labelled": None, "labels": None, "cont_quant_exclude": None, "cys_alkylation": None,
+           "protein_inference": None,
            "probe_fallback": probe_fallback_record(prov), "warnings": []}
     if prov.get("version"):
         rec["version"] = str(prov["version"])
@@ -792,7 +793,7 @@ def search_record(params=None, search_prov=None, manifest=None):
         # the cfg tokeniser every other DIA-NN reader uses (diann_parallel.cfg_tokens)
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from diann_parallel import cfg_tokens, cfg_groups, CfgError, mass_acc_defaults, \
-            mass_acc_status
+            mass_acc_status, protein_inference
         from estimate_params import SOP_DEFAULT_PUBLISHED, DIANN_DDA_FLAG
         try:
             groups = cfg_groups(cfg_tokens(pf))
@@ -831,6 +832,8 @@ def search_record(params=None, search_prov=None, manifest=None):
         if num("--var-mods") is not None:
             rec["max_var_mods"] = {"value": int(num("--var-mods")), "source": where}
         rec["met_excision"] = "--met-excision" in flags
+        # --pg-level / --no-prot-inf as the cfg set them, or DIA-NN's measured default
+        rec["protein_inference"] = protein_inference(groups)
         # DIA-NN searched the spectra as DDA: the paragraph must say so (DE-LIMP rule 1)
         if DIANN_DDA_FLAG in flags:
             rec["dda"] = {"value": True, "source": f"{DIANN_DDA_FLAG} in {where}"}
@@ -1121,6 +1124,8 @@ def search_paragraph(rec, de_prov=None):
         s.append(rec["tol_note"][0].upper() + rec["tol_note"][1:] + ".")
     if probe_fallback_sentence(rec):
         s.append(probe_fallback_sentence(rec))
+    if protein_inference_sentence(rec):
+        s.append(protein_inference_sentence(rec))
     fdr = rec.get("precursor_fdr")
     if fdr:
         s.append(f"Precursor identifications were filtered at {fdr['value'] * 100:g}% FDR "
@@ -1130,6 +1135,27 @@ def search_paragraph(rec, de_prov=None):
     for w in rec.get("warnings") or []:
         s.append(f"[{w} — confirm]")
     return " ".join(s)
+
+
+def protein_inference_sentence(rec):
+    """DIA-NN's protein inference, as the search's parameters set it (diann_parallel.
+    protein_inference), in DIA-NN's own terms; "" for another engine. The default is named as
+    the default, and as genes only for the DIA-NN version it was measured on."""
+    pi = (rec or {}).get("protein_inference")
+    if not isinstance(pi, dict) or rec.get("engine") not in (None, "diann"):
+        return ""
+    if pi.get("inference") is False:
+        return "Protein inference was switched off (--no-prot-inf)."
+    what = ("which decides which peptides count as proteotypic for the protein-level FDR; protein "
+            "groups were assembled from the protein accessions each precursor maps to")
+    if pi.get("passed"):
+        basis = pi.get("basis") or f"{NOT_RECORDED} (an undocumented level)"
+        return f"Protein inference used DIA-NN's implicit protein grouping by {basis} ({pi['passed']}), {what}."
+    if str(rec.get("version") or "").startswith("2.7.0"):
+        return (f"Protein inference used DIA-NN's implicit protein grouping by "
+                f"{pi.get('basis')} (DIA-NN's default; no --pg-level was set), {what}.")
+    return ("Protein inference used DIA-NN's default implicit protein grouping (no --pg-level was "
+            f"set; measured as {pi.get('basis')} for DIA-NN 2.7.0), {what}.")
 
 
 def diann_contaminant_sentence(srec):

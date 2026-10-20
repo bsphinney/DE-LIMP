@@ -4486,8 +4486,8 @@ def write_deliver_job(a, session_dir, where_dir: str, label: str, total: int, wa
         L.append(f"#SBATCH --qos={qos}")
     if part == "low":
         L.append("#SBATCH --requeue")
-    L += [f"# Written by core_submission.py deliver: {total / 1024 ** 3:.1f} GB is too much to copy on",
-          "# the login node. Re-runs the SAME delivery with --apply. A preempted, requeued job resumes",
+    L += [f"# Written by core_submission.py deliver: {total / 1024 ** 3:.1f} GB is too much to copy in",
+          "# one interactive step. Re-runs the SAME delivery with --apply. A preempted, requeued job resumes",
           "# the folder it started (it carries .core_delivery.json); verification still runs at the end.",
           "set -euo pipefail"]
     for var in ("CORE_FLINDERS_ROOT", "CORE_WORK_ROOT"):
@@ -4664,8 +4664,8 @@ def cmd_deliver(a) -> int:
     record_dir = session_dir or (record or {}).get("work_dir")
     if total > a.max_gb * 1024 ** 3 and not a.no_size_guard:
         plan["deliver_job"] = write_deliver_job(a, session_dir, record_dir, label, total, warnings)
-        plan["error"] = (f"{total / 1024 ** 3:.1f} GB exceeds --max-gb {a.max_gb}: too big for the login "
-                         f"node. Submit the job instead: sbatch {plan['deliver_job']}")
+        plan["error"] = (f"{total / 1024 ** 3:.1f} GB exceeds --max-gb {a.max_gb}: too big to copy in one "
+                         f"interactive step. Submit the job instead: sbatch {plan['deliver_job']}")
         emit(plan)
         return EXIT_GUARD
     if not a.apply:
@@ -5146,6 +5146,16 @@ def cmd_email_draft(a) -> int:
 
 
 # --------------------------------------------------------------------------- main --
+# subcommand -> (srun minutes, memory, what makes it heavy, can it be run again from the start):
+# run on a compute node, never a login node. Only locate may take a preemptible queue (on_compute
+# pick_queue): stage and deliver --apply write into the service tree and must not stop half way.
+COMPUTE_NODE_CMDS = {
+    "locate": (30, "4G", "lists every instrument's raw folders", True),
+    "stage": (60, "4G", "lists the service tree and links the raw files", False),
+    "deliver": (60, "4G", "searches the service tree and copies the deliverables", False),
+}
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -5278,6 +5288,21 @@ def main(argv=None) -> int:
     em.set_defaults(func=cmd_email_draft)
 
     a = ap.parse_args(argv)
+    # HPC@UCD's ucd-hpc rules: nothing past seconds of light work on a login node, and every
+    # directory a walk enters is a round trip to a metadata server shared by the whole cluster.
+    # locate lists every instrument's month folders (list_raw); stage lists the service tree's PI
+    # and institution folders and links the raw files; deliver globs the service tree for the
+    # stage record (find_service_record: ~4 min on HIVE's login node, a re-analysis, 2026-10-16)
+    # and copies. On a cluster login node they run themselves again on a compute node.
+    if a.cmd in COMPUTE_NODE_CMDS and argv is None:
+        minutes, mem, why, restartable = COMPUTE_NODE_CMDS[a.cmd]
+        try:
+            import on_compute
+        except ImportError:               # a partial scripts/: the sibling check below says so
+            on_compute = None
+        if on_compute:
+            on_compute.ensure_compute_node(f"core_submission.py {a.cmd} {why}", minutes=minutes,
+                                           mem=mem, preemptible_ok=restartable, script=__file__)
     try:
         if on_hive():
             # every subcommand that runs on HIVE: fetch, locate, stage and conditions keep their

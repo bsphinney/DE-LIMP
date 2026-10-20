@@ -672,8 +672,10 @@ def _dotnet_fix():
     dest = os.environ.get(DOTNET_DIR_ENV) or DOTNET_DIR_DEFAULT
     return (f"Fix, then re-run: `bash {helper}` (installs Microsoft.NETCore.App and "
             f"Microsoft.AspNetCore.App 8.0 into {dest}, which is checked here; "
-            f"needs internet -- fine on a login node), or on UC Davis HIVE run `module load "
-            f"dotnet-core-sdk/8.0.4` in the same shell first; or use a self-contained parser, "
+            f"needs internet; on a cluster login node its download runs itself on a compute "
+            f"node), or on UC Davis HIVE put `module load dotnet-core-sdk/8.0.4 && ` in front "
+            f"of this command inside its job (hive_exec.sh --job '...'; a module loaded in "
+            f"another shell never reaches the job); or use a self-contained parser, "
             f"which needs no .NET (bioconda's `thermorawfileparser`, which `bash "
             f"scripts/setup.sh` installs, or a Linux/macOS/Windows zip from {TRFP_RELEASES})")
 
@@ -1601,8 +1603,13 @@ def is_thermo_raw(path):
 
 
 def on_cluster_login_node():
-    """sbatch present + no SLURM_JOB_ID == a submit host, not a compute node."""
-    return shutil.which("sbatch") is not None and not os.environ.get("SLURM_JOB_ID")
+    """sbatch present + no SLURM_JOB_ID == a submit host, not a compute node (on_compute.py's
+    definition; this copy only for a partial scripts/ without it)."""
+    try:
+        import on_compute
+    except ImportError:
+        return shutil.which("sbatch") is not None and not os.environ.get("SLURM_JOB_ID")
+    return on_compute.on_login_node()
 
 
 def login_node_refusal(n_raw):
@@ -1615,13 +1622,26 @@ def login_node_refusal(n_raw):
         f"  Each .raw is two ThermoRawFileParser processes reading the raw -- measured ~1 core, "
         f"~350 MB and 3-7 s per file -- so up to ~{est} of I/O here, on a shared host "
         f"(SKILL.md golden rule #3).\n"
-        f"  Run it on a compute node instead, e.g.:\n"
-        f"    srun --cpus-per-task=1 --mem=2G --time={minutes} python3 "
-        f"{os.path.abspath(__file__)} <the same files>\n"
-        f"  adding the --account/--partition/--qos your cluster requires "
-        f"(`sacctmgr show assoc user=$USER` lists yours),\n"
+        f"  Run it on a compute node instead -- one blocking srun with the queue spelled out "
+        f"(on_compute.py):\n"
+        f"    python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'on_compute.py')} "
+        f"--time {minutes} --mem 2G --preemptible -- python3 {os.path.abspath(__file__)} "
+        f"<the same files>\n"
+        f"{_srun_shown(minutes)}"
         f"  or re-run with {ALLOW_LOGIN_NODE} to read them here anyway "
         f"({LOGIN_NODE_MAX_RAW} or fewer need no flag).")
+
+
+def _srun_shown(minutes):
+    """The srun line on_compute.py would run, for the refusal; nothing when it cannot be built."""
+    try:
+        import on_compute
+        line = on_compute.srun_argv(["python3", os.path.abspath(__file__), "<the same files>"],
+                                    minutes=minutes, mem="2G", preemptible_ok=True)
+        return f"  which is: {on_compute.shown(line)}\n"
+    except Exception:
+        return ("  (or srun --cpus-per-task=1 --mem=2G with the --account/--partition/--qos your "
+                "cluster requires: `sacctmgr show assoc user=$USER` lists yours)\n")
 
 
 def dashed_warning(rec):

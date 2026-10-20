@@ -1,0 +1,563 @@
+#!/usr/bin/env python3
+"""
+A podcast render is never pinned to a Gemini TTS model that stopped answering
+(make_podcast.py: GeminiTTS.stall_switch / preflight / gemini_client / note_tier).
+
+A staff render (PROT_0000, skill 2.11.2, 2026-10-16) sat 28 minutes on a stalled
+gemini-3.8-flash-tts while a two-line two-speaker request to gemini-2.5-flash-preview-tts answered
+in 2.9 s. The episode's first chunks were cached from the stalled model, and a model was handed
+over only before the first chunk and only when missing / out of quota / rejected, so the render
+could never fall back. The staff member probed each model by hand and re-rendered every chunk with
+--model gemini-2.5-flash-preview-tts. Its consent note said "paid"; the key was free tier.
+
+No network: google.genai is test_make_podcast.fake_genai (the HTTP-options case adds the two
+option types and a Client that takes http_options, as google-genai 2.31.0's do).
+"""
+import json
+import os
+import shutil
+import sys
+import threading
+import types
+import unittest
+from unittest import mock
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+
+from test_make_podcast import (FAKE_KEY, ApiError, Workspace, fake_genai, pcm_for,  # noqa: E402
+                               read, rpc_error, run, mp)
+
+STALLS = "gemini-3.8-flash-tts"
+ANSWERS = "gemini-2.5-flash-preview-tts"
+FREE_DAY = "GenerateRequestsPerDayPerProjectPerModel-FreeTier"
+
+
+class Gemini(Workspace):
+    """test_make_podcast.Gemini's setting, without its tests (a subclass would run them again)."""
+
+    def setUp(self):
+        super().setUp()
+        self.env = mock.patch.dict(os.environ, {"GEMINI_API_KEY": FAKE_KEY})
+        self.env.start()
+        self.nosleep = mock.patch.object(mp, "_sleep", lambda s: None)
+        self.nosleep.start()
+        self.enc = mock.patch.object(mp, "encode_aac", return_value=(None, "test"))
+        self.enc.start()
+        self.assertEqual(self.check()[0], 0)
+
+    def tearDown(self):
+        for p in (self.env, self.nosleep, self.enc):
+            p.stop()
+        super().tearDown()
+
+    def render(self, behaviour, *extra, preflight=False, **kw):
+        mods, log = fake_genai(behaviour, **kw)
+        flags = ("--no-verify",) + (() if preflight else ("--no-preflight",))
+        with mock.patch.dict(sys.modules, mods):
+            rc, out, err = run("render", self.script, "--tts", "gemini", *flags, *extra)
+        return rc, out, err, log
+
+
+def is_probe(contents):
+    text = json.dumps(contents) if not isinstance(contents, str) else contents
+    return mp.PREFLIGHT_LINES[0] in text
+
+
+class StallBase(Gemini):
+    def setUp(self):
+        super().setUp()
+        self.release = threading.Event()
+        self.addCleanup(self.release.set)                      # the hung worker threads end
+        for name, value in (("HEARTBEAT", 0.05), ("PREFLIGHT_TIMEOUT", 0.3)):
+            p = mock.patch.object(mp, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def manifest(self):
+        return json.loads(read(os.path.join(self.pod, "podcast.json")))
+
+    def wavs(self):
+        return [f for f in os.listdir(os.path.join(self.pod, ".cache")) if f.endswith(".wav")]
+
+
+class Fallback(StallBase):
+
+    def test_a_model_that_stops_answering_hands_over_and_every_chunk_is_made_again(self):
+        seen = {"n": 0}
+
+        def behaviour(model, contents, config):
+            if model == STALLS:
+                seen["n"] += 1
+                if seen["n"] >= 2:                          # chunk 2 never answers
+                    self.release.wait(30)
+            return pcm_for(contents)
+        rc, out, err, log = self.render(behaviour, "--cloud-ok", "PI, 2026-10-16",
+                                        "--model", STALLS, "--model", ANSWERS,
+                                        "--request-timeout", "0.4")
+        self.assertEqual(rc, 0, err)
+        self.assertIn(f"{STALLS} stopped answering (chunk 2/2", err)
+        self.assertIn(f"Switching to {ANSWERS} and making EVERY chunk again with it", err)
+        man = self.manifest()
+        self.assertEqual(man["tts"]["models_used"], [ANSWERS])             # one model's voices
+        self.assertEqual(man["chunks_synthesized"], 2)
+        self.assertEqual([(x["from"], x["to"]) for x in man["tts"]["switched"]],
+                         [(STALLS, ANSWERS)])
+        self.assertTrue(any("stopped answering" in w for w in man["warnings"]))
+        # the requests: chunk 1 on the stalled model, chunk 2 twice unanswered, then both on the next
+        self.assertEqual([m for m, _, _ in log["calls"]], [STALLS] * 3 + [ANSWERS] * 2)
+
+    def test_with_no_other_model_it_stops_with_the_resume_message(self):
+        def behaviour(model, contents, config):
+            self.release.wait(30)
+            return pcm_for(contents)
+        rc, out, err, log = self.render(behaviour, "--cloud-ok", "--model", STALLS,
+                                        "--request-timeout", "0.3")
+        self.assertEqual(rc, 1)
+        self.assertIn("did not answer within 0 s, 2 times", err)
+        self.assertIn("re-run the same command to resume", err)
+
+    def test_preflight_passes_over_a_model_that_does_not_answer(self):
+        def behaviour(model, contents, config):
+            if model == STALLS:
+                self.release.wait(30)
+            return pcm_for(contents)
+        rc, out, err, log = self.render(behaviour, "--cloud-ok", "--model", STALLS,
+                                        "--model", ANSWERS, preflight=True)
+        self.assertEqual(rc, 0, err)
+        self.assertIn(f"preflight: {STALLS}: no answer in 0 s; using {ANSWERS}", err)
+        probes = [m for m, c, _ in log["calls"] if is_probe(c)]
+        self.assertEqual(probes, [STALLS, ANSWERS])
+        self.assertEqual([m for m, c, _ in log["calls"] if not is_probe(c)], [ANSWERS, ANSWERS])
+        man = self.manifest()
+        self.assertEqual(man["tts"]["models_used"], [ANSWERS])
+        self.assertTrue(man["tts"]["preflight"]["run"])
+        self.assertEqual(man["tts"]["preflight"]["model"], ANSWERS)
+
+    def test_a_resume_whose_cached_model_stalls_makes_every_chunk_again(self):
+        """The staff render's case: chunks cached from a model that then stalls."""
+        rc, out, err, log = self.render(lambda m, c, k: pcm_for(c), "--cloud-ok", "--model",
+                                        STALLS)
+        self.assertEqual(rc, 0, err)
+        cache = os.path.join(self.pod, ".cache")
+        os.remove(os.path.join(cache, sorted(self.wavs())[0]))       # one chunk left to make
+
+        def behaviour(model, contents, config):
+            if model == STALLS:
+                self.release.wait(30)
+            return pcm_for(contents)
+        rc, out, err, log = self.render(behaviour, "--cloud-ok", "--model", STALLS, "--model",
+                                        ANSWERS, preflight=True)
+        self.assertEqual(rc, 0, err)
+        self.assertIn(f"{STALLS} made this episode's cached chunks but did not answer the "
+                      f"preflight; {ANSWERS} makes every chunk again", err)
+        man = self.manifest()
+        self.assertEqual(man["tts"]["models_used"], [ANSWERS])
+        self.assertEqual((man["chunks_cached"], man["chunks_synthesized"]), (0, 2))
+
+    def test_no_model_answering_the_preflight_stops_before_any_chunk(self):
+        def behaviour(model, contents, config):
+            self.release.wait(30)
+            return pcm_for(contents)
+        rc, out, err, log = self.render(behaviour, "--cloud-ok", "--model", STALLS, "--model",
+                                        ANSWERS, preflight=True)
+        self.assertEqual(rc, 1)
+        self.assertIn("no Gemini TTS model answered a two-line test", err)
+        self.assertEqual([c for _, c, _ in log["calls"] if not is_probe(c)], [])
+
+    def test_a_rate_limited_model_counts_as_answering(self):
+        state = {"n": 0}
+
+        def behaviour(model, contents, config):
+            state["n"] += 1
+            if state["n"] == 1:
+                raise ApiError(429, "RESOURCE_EXHAUSTED", rpc_error(
+                    "GenerateRequestsPerMinutePerProjectPerModel", delay="2s"))
+            return pcm_for(contents)
+        rc, out, err, log = self.render(behaviour, "--cloud-ok", "--model", ANSWERS,
+                                        preflight=True)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.manifest()["tts"]["preflight"]["model"], ANSWERS)
+
+    def test_no_preflight_is_recorded(self):
+        rc, out, err, log = self.render(lambda m, c, k: pcm_for(c), "--cloud-ok", "--model",
+                                        ANSWERS)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.manifest()["tts"]["preflight"],
+                         {"run": False, "why": "--no-preflight"})
+        self.assertFalse(any(is_probe(c) for _, c, _ in log["calls"]))
+
+
+class ResumeAfterAStall(StallBase):
+    """Review of 2.13.2 (H3), the staff incident's own shape, WITHOUT --model on the resume (so
+    prepare pins the cached model): chunks cached from a model that then stalls, pro models with
+    no free-tier quota, and the 2.5 flash model that answers."""
+    PRO = "gemini-9-pro-tts"
+
+    def first_render_stops_on_a_stall(self):
+        n = {"k": 0}
+
+        def first(model, contents, config):
+            n["k"] += 1
+            if n["k"] >= 2:
+                self.release.wait(30)
+            return pcm_for(contents)
+        rc, out, err, log = self.render(first, "--cloud-ok", "--model", STALLS,
+                                        "--request-timeout", "0.3")
+        self.assertEqual(rc, 1, err)
+        self.assertEqual(len(self.wavs()), 1)
+
+    def second(self, model, contents, config):
+        if "pro" in model:
+            raise ApiError(429, "RESOURCE_EXHAUSTED", rpc_error(FREE_DAY, value="0"))
+        if model == STALLS and not is_probe(contents):
+            self.release.wait(30)
+        return pcm_for(contents)
+
+    def resume(self):
+        return self.render(self.second, "--cloud-ok", "--request-timeout", "0.3", preflight=True)
+
+    def test_a_stall_is_remembered_so_the_resume_never_pins_that_model(self):
+        self.first_render_stops_on_a_stall()
+        self.assertTrue(os.path.isfile(os.path.join(self.pod, ".cache", "stalled.json")))
+        rc, out, err, log = self.resume()
+        self.assertEqual(rc, 0, err)
+        self.assertIn(f"not resuming with {STALLS}", err)
+        man = self.manifest()
+        self.assertEqual(man["tts"]["models_used"], [ANSWERS])
+        self.assertNotIn(STALLS, [m for m, c, _ in log["calls"] if not is_probe(c)])
+        self.assertNotIn("made this episode's cached chunks", err)
+
+    def test_without_the_memory_the_hand_over_skips_models_that_cannot_be_used(self):
+        self.first_render_stops_on_a_stall()
+        os.remove(os.path.join(self.pod, ".cache", "stalled.json"))       # an older cache
+        rc, out, err, log = self.resume()
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn(f"{self.PRO} made this episode's cached chunks", err)
+        self.assertEqual(self.manifest()["tts"]["models_used"], [ANSWERS])
+        # and the next resume does not wait on the stalled model again
+        rc, out, err, log = self.resume()
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("still waiting for", err)
+
+
+class OneOutage(StallBase):
+    """Review of 2.13.2, round 2 (N-M2): on a free-tier key the pro models always answer
+    "exhausted"; one short outage that stalled both flash models must not block every render of
+    the next 12 hours."""
+    FLASH = (STALLS, ANSWERS)
+
+    @staticmethod
+    def pro_exhausted(model):
+        if "pro" in model:
+            raise ApiError(429, "RESOURCE_EXHAUSTED", rpc_error(FREE_DAY, value="0"))
+
+    def remember(self, *models):
+        os.makedirs(os.path.join(self.pod, ".cache"), exist_ok=True)
+        with open(os.path.join(self.pod, ".cache", mp.STALL_FILE), "w") as fh:
+            json.dump({m: {"at": mp.now_iso(), "where": "chunk 2/2 (segment 2)",
+                           "why": "2 requests of 600 s unanswered"} for m in models}, fh)
+
+    def test_a_preflight_miss_is_not_remembered_and_the_recovery_renders(self):
+        def outage(model, contents, config):
+            self.pro_exhausted(model)
+            self.release.wait(30)
+            return pcm_for(contents)
+        rc, out, err, log = self.render(outage, "--cloud-ok", "--request-timeout", "0.3",
+                                        preflight=True)
+        self.assertEqual(rc, 1)
+        self.assertFalse(os.path.isfile(os.path.join(self.pod, ".cache", mp.STALL_FILE)))
+
+        def recovered(model, contents, config):
+            self.pro_exhausted(model)
+            return pcm_for(contents)
+        rc, out, err, log = self.render(recovered, "--cloud-ok", "--request-timeout", "0.3",
+                                        preflight=True)
+        self.assertEqual(rc, 0, err)
+
+    def test_remembered_models_get_their_chance_before_the_render_stops(self):
+        self.remember(*self.FLASH)
+
+        def recovered(model, contents, config):
+            self.pro_exhausted(model)
+            return pcm_for(contents)
+        rc, out, err, log = self.render(recovered, "--cloud-ok", "--request-timeout", "0.3",
+                                        preflight=True)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("stopped answering earlier", err)
+        self.assertIn("it answers now", err)
+
+    def test_when_nothing_answers_the_message_names_the_remembered_models(self):
+        self.remember(*self.FLASH)
+
+        def still_out(model, contents, config):
+            self.pro_exhausted(model)
+            self.release.wait(30)
+            return pcm_for(contents)
+        rc, out, err, log = self.render(still_out, "--cloud-ok", "--request-timeout", "0.3",
+                                        preflight=True)
+        self.assertEqual(rc, 1)
+        for m in self.FLASH:
+            self.assertIn(m, err.split("no Gemini TTS model answered")[1])
+        self.assertIn("--model", err)
+        self.assertIn(mp.STALL_FILE, err)
+
+    def test_the_memory_survives_the_cache_pruning(self):
+        self.remember(STALLS)
+        rc, out, err, log = self.render(lambda m, c, k: pcm_for(c), "--cloud-ok", "--model",
+                                        ANSWERS)
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(os.path.isfile(os.path.join(self.pod, ".cache", mp.STALL_FILE)))
+
+
+class KeyTier(Gemini):
+    def free_tier_pro(self, model, contents, config):
+        if "pro" in model:
+            raise ApiError(429, "RESOURCE_EXHAUSTED", rpc_error(FREE_DAY, value="0"))
+        return pcm_for(contents)
+
+    def test_a_free_tier_quota_is_recorded_and_a_paid_note_gets_one_warning(self):
+        rc, out, err, log = self.render(self.free_tier_pro, "--cloud-ok",
+                                        "PI, 2026-10-16, paid key")
+        self.assertEqual(rc, 0, err)                                     # never a stop
+        self.assertIn("the Gemini key's Google project is on the FREE tier", err)
+        self.assertIn("generate_content_free_tier_requests", err)
+        self.assertEqual(err.count("does not match the key"), 1)
+        man = json.loads(read(os.path.join(self.pod, "podcast.json")))
+        self.assertEqual(man["key_tier"], "free")
+        self.assertIn("free-tier quota", man["key_tier_basis"])
+        self.assertTrue(any("does not match the key" in w for w in man["warnings"]))
+
+    def test_a_note_that_says_free_or_nothing_gets_no_warning(self):
+        for note in ("PI, 2026-10-16, free key", "PI, 2026-10-16", "PI, not paid"):
+            with self.subTest(note=note):
+                shutil.rmtree(os.path.join(self.pod, ".cache"), ignore_errors=True)   # pro first
+                rc, out, err, log = self.render(self.free_tier_pro, "--cloud-ok", note)
+                self.assertEqual(rc, 0, err)
+                self.assertNotIn("does not match the key", err)
+                man = json.loads(read(os.path.join(self.pod, "podcast.json")))
+                self.assertEqual(man["key_tier"], "free")
+
+    def test_no_tier_named_is_never_guessed(self):
+        rc, out, err, log = self.render(lambda m, c, k: pcm_for(c), "--cloud-ok", "PI, paid key")
+        self.assertEqual(rc, 0, err)
+        man = json.loads(read(os.path.join(self.pod, "podcast.json")))
+        self.assertIsNone(man["key_tier"])
+        self.assertIn("no answer from Google named", man["key_tier_basis"])
+        self.assertNotIn("does not match the key", err)
+
+    def test_error_info_reads_the_tier(self):
+        e = ApiError(429, "RESOURCE_EXHAUSTED", rpc_error(FREE_DAY, value="0"))
+        self.assertIn("generate_content_free_tier_requests", mp.error_info(e)["free_tier"])
+        e = ApiError(429, "RESOURCE_EXHAUSTED", {"error": {"details": [{"violations": [
+            {"quotaMetric": "x/generate_content_paid_requests", "quotaId": "PerMinute"}]}]}})
+        self.assertIsNone(mp.error_info(e)["free_tier"])
+
+
+# A 402 the way the staff report quotes it (skill 2.11.2, 2026-10-16). SYNTHETIC wording around
+# the quoted parts: "402 RESOURCE_EXHAUSTED", "Your prepayment credits are depleted", AI Studio.
+PREPAY_BODY = {"error": {"code": 402, "status": "RESOURCE_EXHAUSTED",
+                         "message": "Your prepayment credits are depleted. Please go to AI Studio "
+                                    "to manage your project and billing."}}
+# Google's ordinary 429 text names billing too: never read as a billing stop
+PLAIN_429 = {"error": {"code": 429, "status": "RESOURCE_EXHAUSTED",
+                       "message": "You exceeded your current quota, please check your plan and "
+                                  "billing details.",
+                       "details": [{"@type": "type.googleapis.com/google.rpc.RetryInfo",
+                                    "retryDelay": "7s"}]}}
+
+
+def prepay_error(style="genai"):
+    return ApiError(402, "RESOURCE_EXHAUSTED", PREPAY_BODY, style=style)
+
+
+class Prepay(StallBase):
+    """A staff render (skill 2.11.2): a Gemini 402 "prepayment credits are depleted" was read as
+    a per-minute rate limit -- error_info() tested 429 OR RESOURCE_EXHAUSTED first -- and each
+    chunk waited 10 x 65 s on an error no wait can clear, the log saying only "rate-limited". The
+    same project's earlier 429 had named a free-tier quota, so the record said the key was free
+    tier; the 402 shows prepaid billing."""
+
+    def tier_file(self):
+        p = os.path.join(self.pod, ".cache", mp.TIER_FILE)
+        return json.loads(read(p)) if os.path.isfile(p) else None
+
+    def depleted_after(self, n):
+        seen = {"n": 0}
+
+        def behaviour(model, contents, config):
+            if not is_probe(contents):
+                seen["n"] += 1
+                if seen["n"] > n:
+                    raise prepay_error()
+            return pcm_for(contents)
+        return behaviour
+
+    def test_error_info_reads_a_402_as_billing_and_a_plain_429_as_a_rate_limit(self):
+        for e in (prepay_error(), prepay_error(style="interactions"),
+                  Exception("Your prepayment credits are depleted. Please go to AI Studio")):
+            with self.subTest(e=e):
+                self.assertEqual(mp.error_info(e)["kind"], "billing")
+        err = mp.error_info(ApiError(429, "RESOURCE_EXHAUSTED", PLAIN_429))
+        self.assertEqual(err["kind"], "rate")
+        self.assertEqual((err["code"], err["status"]), (429, "RESOURCE_EXHAUSTED"))
+
+    def test_a_402_stops_the_render_at_once_and_keeps_the_cached_chunks(self):
+        rc, out, err, log = self.render(self.depleted_after(1), "--cloud-ok", "--model", ANSWERS)
+        self.assertEqual(rc, 1)
+        self.assertIn("prepay credits are depleted", err)
+        self.assertIn("AI Studio", err)
+        self.assertIn("cached", err)
+        self.assertNotIn("rate-limited", err)
+        self.assertEqual(len(log["calls"]), 2, "a 402 was retried")
+        self.assertEqual(len(self.wavs()), 1)
+        self.assertEqual(self.tier_file()["tier"], "prepaid")
+
+    def test_a_402_in_the_preflight_stops_at_once(self):
+        def behaviour(model, contents, config):
+            raise prepay_error()
+        rc, out, err, log = self.render(behaviour, "--cloud-ok", "--model", STALLS, "--model",
+                                        ANSWERS, preflight=True)
+        self.assertEqual(rc, 1)
+        self.assertIn("prepay credits are depleted", err)
+        self.assertEqual([m for m, _, _ in log["calls"]], [STALLS], "credits are per project")
+
+    def test_the_next_render_records_prepaid_and_its_evidence(self):
+        self.render(self.depleted_after(1), "--cloud-ok", "--model", ANSWERS)
+        rc, out, err, log = self.render(lambda m, c, k: pcm_for(c), "--cloud-ok",
+                                        "PI, 2026-10-16, paid key", "--model", ANSWERS)
+        self.assertEqual(rc, 0, err)
+        man = self.manifest()
+        self.assertEqual(man["key_tier"], "prepaid")
+        self.assertIn("402", man["key_tier_basis"])
+        self.assertIn("earlier render", man["key_tier_basis"])
+        self.assertTrue(man["key_tier_evidence"])
+        self.assertNotIn("does not match the key", err)
+
+    def test_a_free_tier_quota_never_outvotes_billing(self):
+        """The same day's 429 named a free-tier quota on the pro model; billing wins either way
+        round, and both are in the record."""
+        def pro_free(model, contents, config):
+            if "pro" in model:
+                raise ApiError(429, "RESOURCE_EXHAUSTED", rpc_error(FREE_DAY, value="0"))
+            return pcm_for(contents)
+        self.render(self.depleted_after(1), "--cloud-ok", "--model", ANSWERS)      # 402 first
+        rc, out, err, log = self.render(pro_free, "--cloud-ok", "PI, paid key", "--model",
+                                        "gemini-2.5-pro-preview-tts", "--model", ANSWERS)
+        self.assertEqual(rc, 0, err)
+        man = self.manifest()
+        self.assertEqual(man["key_tier"], "prepaid")
+        self.assertEqual(sorted({e["tier"] for e in man["key_tier_evidence"]}),
+                         ["free", "prepaid"])
+        self.assertNotIn("does not match the key", err)
+        self.assertNotIn("is on the FREE tier", err)
+
+    def test_free_then_a_402_in_one_render_is_prepaid(self):
+        def behaviour(model, contents, config):
+            if "pro" in model:
+                raise ApiError(429, "RESOURCE_EXHAUSTED", rpc_error(FREE_DAY, value="0"))
+            raise prepay_error()
+        rc, out, err, log = self.render(behaviour, "--cloud-ok", preflight=True)
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.tier_file()["tier"], "prepaid")
+        self.assertEqual(sorted({e["tier"] for e in self.tier_file()["evidence"]}),
+                         ["free", "prepaid"])
+
+    def test_another_key_does_not_inherit_the_record(self):
+        self.render(self.depleted_after(1), "--cloud-ok", "--model", ANSWERS)
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": FAKE_KEY[:-4] + "wxyz"}):
+            rc, out, err, log = self.render(lambda m, c, k: pcm_for(c), "--cloud-ok",
+                                            "--model", ANSWERS)
+        self.assertEqual(rc, 0, err)
+        self.assertIsNone(self.manifest()["key_tier"])
+        self.assertNotIn(FAKE_KEY, read(os.path.join(self.pod, ".cache", mp.TIER_FILE)))
+
+    def test_the_first_rate_limit_wait_logs_what_google_said(self):
+        seen = {"n": 0}
+
+        def behaviour(model, contents, config):
+            seen["n"] += 1
+            if seen["n"] <= 2:
+                raise ApiError(429, "RESOURCE_EXHAUSTED", PLAIN_429)
+            return pcm_for(contents)
+        rc, out, err, log = self.render(behaviour, "--cloud-ok", "--model", ANSWERS)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(err.count("Google answered 429 RESOURCE_EXHAUSTED"), 1, err)
+        self.assertIn("You exceeded your current quota", err)
+
+
+class SdkOptions(Gemini):
+    def sdk(self, with_options=True):
+        mods, log = fake_genai(lambda m, c, k: pcm_for(c))
+        gt, made = mods["google.genai.types"], {}
+        if with_options:
+            gt.HttpRetryOptions = lambda **kw: types.SimpleNamespace(**kw)
+            gt.HttpOptions = lambda **kw: types.SimpleNamespace(**kw)
+        base = mods["google.genai"].Client
+
+        class Client(base):
+            def __init__(self, api_key, http_options=None):
+                made["http_options"] = http_options
+                super().__init__(api_key)
+        if with_options:
+            mods["google.genai"].Client = Client
+        return mods, made
+
+    def test_a_request_timeout_and_no_sdk_retries_when_the_sdk_has_them(self):
+        mods, made = self.sdk()
+        with mock.patch.dict(sys.modules, mods):
+            rc, out, err = run("render", self.script, "--tts", "gemini", "--no-verify",
+                               "--no-preflight", "--cloud-ok", "--request-timeout", "240")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(made["http_options"].timeout, 240000)            # milliseconds
+        self.assertEqual(made["http_options"].retry_options.attempts, 1)
+        man = json.loads(read(os.path.join(self.pod, "podcast.json")))
+        self.assertEqual(man["tts"]["http"], {"timeout_ms": 240000, "retry_attempts": 1,
+                                              "set": True})
+
+    def test_an_sdk_without_them_still_renders_and_says_so(self):
+        mods, _ = self.sdk(with_options=False)
+        with mock.patch.dict(sys.modules, mods):
+            rc, out, err = run("render", self.script, "--tts", "gemini", "--no-verify",
+                               "--no-preflight", "--cloud-ok")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("has no HttpOptions / HttpRetryOptions", err)
+        man = json.loads(read(os.path.join(self.pod, "podcast.json")))
+        self.assertFalse(man["tts"]["http"]["set"])
+
+
+class OfflineRecord(unittest.TestCase):
+    def test_an_offline_voice_says_why_there_is_no_test(self):
+        """Review of 2.13.2 (L2): --tts say recorded "every chunk is cached" with none cached."""
+        from test_make_podcast import FakeTTS, meaning_pass, script_text, write
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "output")
+            pod = os.path.join(out, "podcast")
+            script = os.path.join(pod, "podcast_script.md")
+            write(os.path.join(out, "AI_Analysis_Report.md"), __import__("test_make_podcast").REPORT)
+            write(os.path.join(out, "Analysis_Report.html"), "<html></html>")
+            write(script, script_text())
+            self.assertEqual(run("check", script, "--source",
+                                 os.path.join(out, "AI_Analysis_Report.md"))[0], 0)
+            meaning_pass(script)
+            mp.BACKENDS["fake"] = FakeTTS
+            self.addCleanup(mp.BACKENDS.pop, "fake", None)
+            with mock.patch.object(mp, "encode_aac", return_value=(None, "test")):
+                self.assertEqual(run("render", script, "--tts", "fake")[0], 0)
+            man = json.loads(read(os.path.join(pod, "podcast.json")))
+        self.assertFalse(man["tts"]["preflight"]["run"])
+        self.assertIn("no two-line test", man["tts"]["preflight"]["why"])
+
+
+class Documented(unittest.TestCase):
+    def test_the_brief_describes_the_fallback(self):
+        with open(os.path.join(os.path.dirname(HERE), "references", "podcast.md"),
+                  encoding="utf-8") as fh:
+            t = " ".join(fh.read().split())
+        for s in ("two-line test", "every chunk again", "--no-preflight", "key_tier"):
+            self.assertIn(s, t)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

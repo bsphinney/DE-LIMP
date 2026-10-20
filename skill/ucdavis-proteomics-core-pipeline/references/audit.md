@@ -24,6 +24,25 @@ over-interpret anything. FAILs should stop interpretation; WARNs go in the repor
 | `normalisation_stability` | — | (a DIA-NN report) DIA-NN's per-run `Normalisation.Instability` from the `<report>.stats.tsv` beside the DE input, for the runs in `--conditions`, above `check_report_runs.NORM_INSTABILITY_WARN` (0.3 — DIA-NN documents no cutoff; the skill's sits between a cohort measured at 0.04–0.07 and one at 0.67–1.00 in every run). Names each run and value, and the alternatives DIA-NN documents (`--global-norm`, `--no-norm`, the report's non-normalised `Precursor.Quantity`). PASS with the median and max; INFO when the stats file or its column is missing. Every value is in `AUDIT.json` |
 | `sage_lfq` | — | (`--search-out <search out dir>`, Sage only) a run's median precursor mass error is within 2 ppm of, or beyond, Sage's LFQ window (`quant.lfq_settings.ppm_tolerance`, default ±5 ppm), or Sage kept 0 or very few target MS1 peaks at 5% FDR. Identifications are not affected; the quantities are unreliable. The message is `sage_lfq_check.py`'s own record (`sage_lfq_check.json`), quoted as written and with the fix (a wider window, re-run Sage, `--adapt-only`); runs outside the window are also a gate at `--adapt-only` and `run_de.R`, so a DE on them means the user accepted them, which the message then says (who, when, why). PASS when the window fits; INFO when the check could not run |
 
+## What the client reads: a plain-language table
+
+The report's **Audit & caveats** section (`make_analysis_html.py`, from `AUDIT.json`; from
+`AUDIT.md`'s lines for a session without it) is a table with one row per check: **Check**
+(a plain name), **Result** (✅ Passed, ⚠️ Caution, ⛔ Problem, ℹ️ Note: the worst of that check's
+findings) and **What it means for the results**. The words are written beside each check in
+`audit_results.py` (`PLAIN`, and a finding's own `plain` where its meaning differs from the
+check's usual one: no significant protein vs more than half, the normalisation decision
+quoting Core staff's reason by role). A pipeline's own checks carry their label and words
+(`run_silac.R`'s `chk(..., plain =)`, `SILAC_CHECK_LABELS`); a check that has none reads as a
+generic caution pointing to AUDIT.md, never its technical message. `AUDIT.md` keeps every
+check code, number and file name: it is the Core's full record.
+
+A staff report (2.11.2): the section was AUDIT.md as written, check codes, B1-B4 normalisation
+strings, Normalisation.Instability values and "implausibly high ... not real biology". The
+staff member could not read it, and a client could take "not real biology" to mean the results
+are wrong. A report's own `## Audit & caveats` section still replaces the table (write one only
+when staff ask, and in plain words).
+
 ## How the orchestrator uses it
 - Run it with `--conditions`, `--de-dir`, and the `detect_acquisition` JSON
   (`--acquisition-json`) so it can see acquisition/instrument mixing, and `--search-out`

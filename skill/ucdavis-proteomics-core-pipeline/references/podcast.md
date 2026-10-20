@@ -304,6 +304,96 @@ Claims section):
   of the written form (`Ryr2 → Gapdh`) fails too. Every row is listed in `check.txt`. Write phonetic respellings in lowercase ("teck R").
 - **The disclosure** ("AI-generated") is in one of the first 3 turns, and **no host claims a
   real specialty**.
+- **No draft history.** The listener never saw a draft of the report, so no host says what an
+  earlier draft said, got wrong or fell for, or that something "was corrected". A staff report:
+  "the first draft of this report fell for it" passed `check` and reached a podcast script.
+  The hosts talk about what the report finds and what was checked, in the present tense: "the
+  review checked whether a loading difference could explain this, and it does not", never "the
+  first draft fell for it, and we corrected that". `client_text.py` holds the phrases, in two
+  tiers. `check` FAILS on the unambiguous ones ("first draft", "an earlier version of this
+  report", "fell for it", "we got this wrong", "the report originally said", "we've updated the
+  wording", "... was incorrect, and it has been changed", "honest correction") and WARNS on
+  words that are draft history only in context ("corrected", "fixed", "updated" in a sentence
+  that also speaks of a review, a mistake, a draft or the report; "the draft"; "an earlier
+  pass"; "initially reported as"). Science wording trips neither ("the p-values are corrected",
+  "batch effects were corrected", "fixed modification", "a draft genome", "fell for this group
+  of mice", "previously reported"), and so does methods narration ("the QC flagged a batch
+  effect that we then corrected with ComBat", "we used the previous version, 2.6.1", "the tube
+  label was wrong and has been corrected in the sample sheet"). What neither tier catches is the
+  meaning check's (f).
+
+### The meaning check: a separate reader, before render
+
+`check` matches tokens. A staff episode (2026-10-16) passed it with 0 problems and 0 warnings,
+and a separate read of every line against the report then found: a hit from one comparison told
+as part of another comparison's story and called "nearly absent" (it was detected in 2 of 3
+cultures); proteins
+put right after "It survives everything" whose robustness table says `robust` = no or "not
+testable"; the report's "not a main driver" spoken as "aren't driving"; a tool presented as a
+database the client already uses; a number given for "the shifted cultures" that belongs to one
+of them. So **after `check` passes, an agent (or person) who did not write the script reads every
+sentence against the report** before anything is rendered, and checks it for:
+
+- **(a)** the right comparison, group and direction for every number and named protein;
+- **(b)** every hedge the report gives, kept ("not a main driver" is not "isn't driving");
+- **(c)** the robust status of every named protein: one spoken next to "robust", "survives" or
+  "holds up" must be robust (`robust` = yes) in that comparison's robustness table;
+- **(d)** no superlative or totality the report does not make ("the only", "all", "every",
+  "the strongest");
+- **(e)** no claim outside the report and the Claims list;
+- **(f)** no draft history: nothing an earlier draft or version said, got wrong or had changed.
+
+The reviewer's brief, with every sentence numbered by its line and the robustness tables found
+in `output/tables/`: `make_podcast.py meaning <script> --brief` (also written as
+`podcast/meaning_brief.md`). Spawn the reviewer with it (one `Agent` call; not the agent that
+wrote the script). The writer fixes what it finds, then `check` again. The reviewer records the
+verdict; the tool takes the script's sha256 itself:
+
+```bash
+python3 scripts/make_podcast.py meaning $P/podcast_script.md --verdict PASS \
+    --reviewer "<who: an agent or person that did not write the script>" --findings <their file>
+```
+
+That writes `podcast/meaning_check.md`: the script's sha256, `verdict: PASS` or `FAIL`, the
+reviewer, the sha256 of the brief, of each delivered source `check.txt` names and of the
+robustness tables, the checks, the mechanical robustness lines and the findings. It is recorded
+only after `check` passes for this script and its sources and after `--brief` was run for this
+script, and it refuses a reviewer whose name is the script's `Author:` line and an empty
+findings file. **`render`, `link`, `share` and `job` refuse without a PASS that still holds**:
+for the script as it is now, the report and other sources as they were read, and the same
+robustness tables. An edited script, a rewritten report or new tables need `check` and the
+meaning check again. `--no-meaning-check "<why>"` (render, job) goes on without it and is
+recorded in `podcast.json` `meaning_check` (`--unchecked` overrides only the token check at
+render; at link and share it also carries a meaning check that went stale, as a warning). An
+episode rendered before this check existed (no `meaning_check` in its `podcast.json`) is linked
+with a warning. A job or requeue written by 2.13.1 runs the new render and refuses without a
+meaning check: record one, then submit again.
+
+What `check` now catches of it mechanically: a protein named **in the same clause** as a robust
+claim ("robust", "survives", "holds up") that every row of the robustness tables calls not
+robust is a FAIL; robust in some comparisons only, or a `robust` cell it does not understand, is
+a WARN. A clause is cut at `.`, `;`, `!`, `?` and at "but", "while", "whereas", "unlike",
+"except" ("Jph3 survives every check; Ryr2 doesn't" names Ryr2 in another clause), and at a
+comma that opens a second clause (", and", ", so", ", which": "Gapdh survives every check, and
+Ryr2 goes up threefold" says nothing about Ryr2), but never at a colon ("It survives everything:
+Ryr2, Jph3, and Actb" is about all three), in a list of names before the claim ("Ryr2, Jph3, and
+Actb all survive") or at ", and so does Ryr2". A comma clause after the claim that only names
+more proteins (", and Ryr2 too", ", and for Jph3", ", so does Ryr2") or points back at it (", and
+they are Ryr2, Jph3 and Actb", ", which are Ryr2 and Jph3") carries the claim on: its names are a
+WARN. A negation before the claim ("Neither Ryr2 nor Actb is robust", "Not one of them ... is
+robust") or beside a name ("Ryr2 and Actb don't", "drop out", "unlike Ryr2") is not a claim; one
+after the claim word is ("Ryr2 holds up, which doesn't happen often"). A gene symbol is matched as written, so SET, WAS or MAX in the table never match
+"set", "was" or "max"; one with a digit, or written in capitals, matches in either case (Jph3 /
+JPH3, ACTB for a mouse table's Actb). A common English word that starts a sentence ("Was that
+robust?", "Set against that, ...") is read as English, not as the mouse gene; said straight
+before the claim in a statement ("Set holds up", "Max survives every check") it is a WARN; in
+capitals (SET) it is the gene. **The tables** are every CSV under `output/tables/` (three folders
+deep) with a `robust` column, whatever made them: `yes`/`no`, and `TRUE`/`FALSE`, `1`/`0` or
+"not testable ..." as R and pandas write them, matched on `Genes`, `Protein.Names` and
+`Protein.Group`, read with or without a byte-order mark; `check.txt` lists them. A superlative
+("the only", "the strongest", "the top", "none of" ...) whose words are not in the sources is a
+WARN for the meaning check to confirm. The mechanical lines are a floor, not the check: the
+meaning reviewer reads robust status across sentences too.
 
 ### What check cannot catch
 
@@ -316,7 +406,8 @@ Read the script against the report for these; a PASS says nothing about them:
 - lowercase symbols ("gapdh") and lowercase respellings in the Pronunciation table;
 - a capitalised word that starts a sentence ("Gapdh went up."): the INFO line lists them;
 - numbers with a unit other than %, fold, ×, k, M and B ("3 kDa", "2 µg");
-- meaning: a caveat the report makes can be dropped, and speculation can be spoken as fact.
+- meaning: a caveat the report makes can be dropped, and speculation can be spoken as fact;
+- draft history in words the phrase list does not have ("we had that backwards before").
 
 ## The script file (`<session>/output/podcast/podcast_script.md`)
 
@@ -395,6 +486,11 @@ python3 scripts/make_podcast.py check $P/podcast_script.md \
              $S/output/SAMPLE_QUALITY.md \
     --forbid-name "<PI full name>" "<submitter full name>" "<first names>"
 #    -> $P/check.txt. Fix every FAIL line, re-run until PASS. Read the WARN lines.
+# 1b. the meaning check: a reader who did not write the script (an Agent call) reads every
+#     sentence against the report from the brief; fix, check again; they record the verdict
+python3 scripts/make_podcast.py meaning $P/podcast_script.md --brief --source $S/output/AI_Analysis_Report.md
+python3 scripts/make_podcast.py meaning $P/podcast_script.md --verdict PASS \
+    --reviewer "<who>" --findings <their findings file>
 # 2. preview what will be spoken (sends nothing)
 python3 scripts/make_podcast.py render $P/podcast_script.md --tts say --dry-run | less
 # 3. render. A Core run: Gemini voices under the standing approval (verify runs at the end)
@@ -436,6 +532,13 @@ bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py
     $S/output/methods.md $S/output/AUDIT.md $S/output/SAMPLE_QUALITY.md \
     --forbid-name '<PI full name>' '<submitter full name>' '<first names>'"
 bash scripts/hive_exec.sh "cat $S/output/podcast/check.txt"   # fix here, --put again, check again
+# 1b. the meaning check (a reader who did not write the script; see above), recorded on HIVE
+bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py meaning \
+    $S/output/podcast/podcast_script.md --brief --source $S/output/AI_Analysis_Report.md"
+bash scripts/hive_exec.sh --put <here>/findings.md "$S/output/podcast/"
+bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py meaning \
+    $S/output/podcast/podcast_script.md --verdict PASS --reviewer '<who>' \
+    --findings $S/output/podcast/findings.md"
 # 2. preview what will be spoken (sends nothing; light, so no job)
 bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py render \
     $S/output/podcast/podcast_script.md --tts gemini --dry-run"
@@ -526,6 +629,55 @@ bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.t
     is out of quota, render stops, names the chunk and keeps the cache. Re-run later to
     resume, or pass `--model <other>` to re-render every chunk with that model. Only an
     explicit `--model` render prunes another model's cached chunks.
+  - **A model that stops answering is left, and every chunk is made again.** A staff render
+    (2026-10-16) sat 28 minutes on a stalled `gemini-3.8-flash-tts` while
+    `gemini-2.5-flash-preview-tts` answered a two-line test in 2.9 s; its first chunks were
+    cached from the stalled model, so it could never hand over. Now:
+    - **The two-line test (preflight).** Before the first chunk a render must make, each
+      candidate model in turn (the cache's model first) gets one tiny two-speaker request with
+      a 60 s deadline; the first that answers is used. A rate limit counts as an answer; a
+      missing model, no quota, a rejected request or no answer moves on; a key problem stops.
+      If the model that made the cached chunks does not answer, the next one makes **every
+      chunk again**, so the voices never mix. Nothing to make, no test. Each test is one request
+      against the key's daily quota (a free-tier key's TTS quota is small), and a resume walks
+      the models until one answers (up to 60 s each). `--no-preflight` skips it;
+      `podcast.json` `tts.preflight` records which.
+    - **Mid-episode.** When a chunk's request goes unanswered twice (`--request-timeout`), the
+      render moves to the next candidate model and makes **every chunk again** with it, and
+      says so in the log; with no other model it stops with the resume message, as before.
+      `tts.switched` and the warnings record each hand-over. The next model then hands over
+      like any first model: one that is missing, out of quota or rejects the request is passed
+      over (never "made this episode's cached chunks", which it did not).
+    - **A stall is remembered.** A model that stopped answering mid-episode (twice on a chunk)
+      is written to `podcast/.cache/stalled.json`; for 12 hours a resume does not pin it, even
+      when it made the most cached chunks, and the model used makes every chunk again. So a
+      resume cannot repeat the same timeouts. A miss at the two-line test is not remembered
+      (one short outage would otherwise shut a model out for 12 hours). The remembered models
+      are still tried, last, before a render gives up -- on a free-tier key the pro models
+      never answer, so they may be all there is -- and one that answers again is forgotten.
+      When nothing answers, the message names them; `--model <name>` tries a model whatever
+      happened before.
+    - **No silent retries in the SDK.** The client is built with a per-request HTTP timeout
+      (`--request-timeout`) and `HttpRetryOptions(attempts=1)` (`tts.http`). Read from
+      google-genai 2.31.0: `generate_content` then never retries; the `interactions` client
+      (Gemini 3) takes `attempts` as its retry count, so it keeps one retry (without the option
+      it made three, obeying a server's Retry-After with nothing logged). The render's own
+      deadline bounds every request either way.
+  - **The key's tier.** Read from Google's answers, never guessed, with the evidence kept:
+    `key_tier` and `key_tier_basis` in `podcast.json`, and `key_tier_evidence`, every answer it
+    rests on (`null` when no answer named a tier).
+    - A **402** "prepayment credits are depleted" shows the project is on **prepaid** (paid)
+      billing: `key_tier: "prepaid"`.
+    - A 429 that names a free-tier quota (`generate_content_free_tier_requests`, `…-FreeTier`)
+      shows the **free** tier: `key_tier: "free"` — but never over billing. One project
+      answered a 429 naming a free-tier quota (limit 0) and, later the same day, a 402 that
+      showed prepaid billing; it was recorded as free.
+    - The evidence is kept in `podcast/.cache/key_tier.json` for 7 days under a fingerprint of
+      the key (never the key), because a 402 stops the render and the render that writes
+      `podcast.json` is a later one. Another key starts afresh.
+    - A hand-typed `--cloud-ok` note that says "paid" gets one plain warning when the tier is
+      free, in the log and the warnings. The tier never stops a render by itself: the Core's
+      standing approval covers free-tier Core podcasts (2026-09-28).
   - Gemini 3 TTS needs a google-genai with `client.interactions` (2.25.0 has it). With an older
     one the 3.x models are left out, and render says to run `python3 -m pip install -U
     google-genai`.
@@ -535,16 +687,24 @@ bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.t
     empty answer is asked once more.
   - **Rate limits.** A 429 on a per-minute quota, or one that carries a `retryDelay`, is waited
     out, not fatal. Render reads the delay and the quota id from the error details, prints
-    `[render] rate-limited, waiting Ns`, sleeps the delay + 5 s, and retries the same chunk,
-    up to 10 times. All the waits in one render are capped by `--rate-wait-budget` (default 30
-    min), after which it stops with the resume message, as it does at once for a daily quota
-    (`…PerDay…`).
+    what Google answered (status and message) on the first wait of the render and
+    `[render] rate-limited, waiting Ns` on each, sleeps the delay + 5 s, and retries the same
+    chunk, up to 10 times. All the waits in one render are capped by `--rate-wait-budget`
+    (default 30 min), after which it stops with the resume message, as it does at once for a
+    daily quota (`…PerDay…`).
+  - **Prepay credits used up (402).** Not a rate limit, though Google's answer also says
+    `RESOURCE_EXHAUSTED`: no wait clears it, and every model draws on the same project. Render
+    (the preflight too) stops at once: "Gemini prepay credits are depleted", Google's own
+    message, add prepay credits to the key's project in AI Studio (its Billing page), re-run
+    the same command; the chunks already made are cached. Before 2.13.2 it was read as a
+    per-minute limit and each chunk waited 10 × 65 s.
   - **Pacing.** Requests to one model are spaced at least 20 s apart (`--min-interval`).
   - **A request that does not answer.** Each request logs `[render] chunk k/N ...: sent to
     <model>` and, while it waits, `still waiting for <model> (Ns)` every minute. With no answer
     in `--request-timeout` seconds (default 600; a chunk takes about 3 minutes) it is asked once
-    more, then render stops with the resume message, so the job fails where its watcher sees it
-    instead of hanging until its time limit. The time lost to unanswered requests in one render
+    more, then the next model takes over (above); with no other model render stops with the
+    resume message, so the job fails where its watcher sees it instead of hanging until its
+    time limit. The time lost to unanswered requests in one render
     is capped as well (`--request-timeout-budget`, default 30 min). Re-running resumes from the
     cached chunks. (An abandoned request may still finish and be billed: the retry can cost that
     chunk twice.)
