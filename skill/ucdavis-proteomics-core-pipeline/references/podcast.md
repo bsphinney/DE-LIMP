@@ -828,7 +828,9 @@ the start.
   - a 402, "prepay credits are depleted" (`billing`);
   - the key refused: 401/403, `PERMISSION_DENIED`, "API key not valid" (`auth`);
   - no quota, or not usable, on every candidate model (`quota`);
-  - every candidate model stopped answering (`stalled`), or a mix of the last two.
+  - every candidate model stopped answering (`stalled`), or a mix of the last two (`none`).
+  A transient error or an empty answer from any model, at the two-line test or later, means a
+  later run may succeed, so it never hands over.
   It does **not** take over for what waiting or another Gemini model clears: a per-minute rate
   limit (waited out), one model that stops answering (the next Gemini model makes every chunk
   again), a transient error, the rate-limit or timeout budget, a resume pinned to the model that
@@ -863,9 +865,11 @@ the start.
   (16 CPUs, 24 GB). On another computer with the skill's HIVE login, each step is a HIVE job
   (`hive_exec.sh --job`): the lines (or the episode) go to a private folder in your HIVE home
   (`~/.proteomics-pipeline/podcast-local/`, mode 700), the results come back, and the folder is
-  removed. Nowhere else: render says so, with the reason -- no HIVE login on this computer, a
+  removed. No container call, srun or HIVE job is handed the Gemini key. Nowhere else: render
+  says so, with the reason -- no HIVE login on this computer, a
   HIVE account that cannot read the Core's containers (they are for members of
-  proteomics-grp), or the skill not on HIVE (`hive_exec.sh --put-skill`) -- and, after a Gemini
+  proteomics-grp), or the skill not on HIVE or older than 2.13.2, which has the `on_compute.py`
+  the HIVE job needs (`hive_exec.sh --put-skill`) -- and, after a Gemini
   failure, that there is no episode this time. Staff need nothing installed; their HIVE account
   must be in proteomics-grp.
 - **Speed and size.** Every line still to make goes to Kokoro in **one** container call
@@ -894,7 +898,9 @@ the start.
   `tts.fallback` (null for `--tts local`): `from` "gemini", `to` "kokoro", `why`
   (billing / auth / quota / stalled / none), `reason`, `google_said` (Google's own words,
   scrubbed of any key), `stopped_at` (the chunk, or the preflight), `at`, the Gemini models
-  tried and any hand-overs, `chunks_sent_to_gemini`, and the `note`. `tts.what_was_sent` says
+  tried and any hand-overs, `chunks_sent_to_gemini` (this render), `gemini_chunks_cached`
+  (chunks Gemini made, now or in an earlier render, whose text it therefore had), and the
+  `note`. `tts.what_was_sent` says
   what reached Gemini before it failed, and `cloud_tts_consent` the consent it went under. The
   `verify` block names Whisper, the image and its sha256, `audio_sent` "nothing sent:
   transcribed on HIVE", and the spots both transcriptions agree on.

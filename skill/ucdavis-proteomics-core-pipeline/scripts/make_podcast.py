@@ -2009,7 +2009,9 @@ FALLBACK_WHY = {"billing": "its prepay credits are depleted (402)",
                 "auth": "it refused the key (authentication or permission)",
                 "quota": "none of the Gemini TTS models had quota (or could be used)",
                 "stalled": "every Gemini TTS model stopped answering",
-                "none": "none of the Gemini TTS models answered or could be used"}
+                "none": "every Gemini TTS model had no quota or stopped answering"}
+# What a model can fail with that waiting does not clear (with "stalled": it stopped answering)
+FOR_GOOD = ("missing", "exhausted", "rejected")
 
 
 def gemini_client(genai, types, key, timeout_s):
@@ -2123,6 +2125,7 @@ class GeminiTTS(object):
                     "-U google-genai")
         self.produced, self.models_used, self.warnings = 0, [], []
         self.sent_chunks = set()             # chunks whose text was sent (labels)
+        self.failed_kind = {}                # model -> how it failed in this render
 
     @staticmethod
     def api(model):
@@ -2360,6 +2363,22 @@ class GeminiTTS(object):
             raise box["e"]
         return box["r"]
 
+    def for_good(self):
+        """Has every candidate failed in a way waiting cannot fix? -> "quota" (each missing, out of
+        quota or rejected), "stalled" (each stopped answering), "none" (a mix of the two), or
+        None when any failed otherwise -- a transient error or an empty answer, which a later
+        run may not meet -- or was not asked: then render stops with the resume message and the
+        local voice does not take over."""
+        kinds = {"stalled" if m in self.stalled else self.failed_kind.get(m)
+                 for m in self.candidates}
+        if kinds and kinds <= set(FOR_GOOD):
+            return "quota"
+        if kinds == {"stalled"}:
+            return "stalled"
+        if kinds and kinds <= set(FOR_GOOD) | {"stalled"}:
+            return "none"
+        return None
+
     def _has_next(self):
         return (self.model in self.candidates
                 and self.candidates.index(self.model) + 1 < len(self.candidates))
@@ -2530,6 +2549,7 @@ class GeminiTTS(object):
                 tried.append(f"{m}: no answer in {PREFLIGHT_TIMEOUT:.0f} s")
                 continue
             except EmptyAudio as e:
+                self.failed_kind[m] = "empty"
                 tried.append(f"{m}: {e}")
                 continue
             except Exception as e:
@@ -2543,6 +2563,7 @@ class GeminiTTS(object):
                                          "preflight", err)
                 if err["kind"] != "rate":
                     self.unusable.append(m)
+                    self.failed_kind[m] = err["kind"]
                     tried.append(f"{m}: {err['kind']} ({why_line(err, 120)})")
                     continue
             secs = round(_now() - t0, 1)
@@ -2565,10 +2586,7 @@ class GeminiTTS(object):
                 log(f"[render] {note}")
             return m
         before = [m for m in self.candidates if m in self.remembered]
-        asked = order + later
-        why = ("quota" if asked and all(m in self.unusable for m in asked) else
-               "stalled" if asked and all(m in self.stalled for m in asked) else "none")
-        raise GeminiUnusable(
+        msg = (
             "no Gemini TTS model answered a two-line test (" + "; ".join(tried) + ")"
             + (f"; {', '.join(before)} also stopped answering in an earlier render "
                f"(podcast/.cache/{STALL_FILE})" if before else "")
@@ -2576,7 +2594,11 @@ class GeminiTTS(object):
             + (" (this key's project is on the free tier: its quotas are small)"
                if self.key_tier == "free" else "")
             + ", name a model with --model <name> (it is tried whatever happened before), or "
-            "--tts say", why, "preflight")
+            "--tts say")
+        why = self.for_good()
+        if why:
+            raise GeminiUnusable(msg, why, "preflight")
+        raise RenderError(msg)
 
     def _advance(self):
         nxt = None if self.produced else self._next_model()
@@ -2623,10 +2645,14 @@ class GeminiTTS(object):
                                                       f"{self.request_timeout:.0f} s unanswered")
                     if switch:
                         raise switch
-                    raise GeminiUnusable(
-                        f"{label}: {self.model} did not answer within {self.request_timeout:.0f} s, "
-                        f"{timeouts} times ({e}). The chunks already made are cached: re-run the "
-                        "same command to resume (--request-timeout to wait longer)", "stalled", label)
+                    msg = (f"{label}: {self.model} did not answer within "
+                           f"{self.request_timeout:.0f} s, {timeouts} times ({e}). The chunks "
+                           "already made are cached: re-run the same command to resume "
+                           "(--request-timeout to wait longer)")
+                    why = self.for_good()
+                    if why:
+                        raise GeminiUnusable(msg, why, label)
+                    raise RenderError(msg)
                 log(f"[render] {label}: {e}; asking once more")
                 continue
             except Exception as e:
@@ -2635,8 +2661,10 @@ class GeminiTTS(object):
                 kind = err["kind"]
                 if kind == "billing":
                     raise GeminiUnusable(billing_stop(label, self.model, err), "billing", label, err)
-                if kind in ("missing", "exhausted", "rejected") and self.model not in self.unusable:
+                if kind in FOR_GOOD and self.model not in self.unusable:
                     self.unusable.append(self.model)
+                if kind in FOR_GOOD:
+                    self.failed_kind[self.model] = kind
                 if kind in ("missing", "exhausted", "rejected") and not self.produced \
                         and not self.pinned:
                     was = self.model
@@ -2645,12 +2673,14 @@ class GeminiTTS(object):
                                "rejected": "request rejected"}[kind]
                         log(f"[render] {was}: {why} ({why_line(err)}); trying {self.model}")
                         raise SwitchModel()
-                    raise GeminiUnusable(
-                        f"{label}: no Gemini TTS model could be used (tried "
-                        f"{', '.join(self.candidates)}; last: {why_line(err)}). Quotas are per Cloud "
-                        "project (see https://aistudio.google.com/rate-limit): re-run later "
-                        "(finished chunks are cached), use a paid-tier key, or --tts say.",
-                        "quota", label, err)
+                    msg = (f"{label}: no Gemini TTS model could be used (tried "
+                           f"{', '.join(self.candidates)}; last: {why_line(err)}). Quotas are per "
+                           "Cloud project (see https://aistudio.google.com/rate-limit): re-run "
+                           "later (finished chunks are cached), use a paid-tier key, or --tts say.")
+                    why = self.for_good()
+                    if why:
+                        raise GeminiUnusable(msg, why, label, err)
+                    raise RenderError(msg)
                 if kind in ("missing", "exhausted", "rejected") and self.pinned and not self.produced:
                     raise self._stop(label, err, "made this episode's cached chunks, so the "
                                                  "render stays on it, but it failed")
@@ -3412,10 +3442,17 @@ def make_pieces(backend, chunks, speak, cache, a):
     return pieces, n_cached, n_new, used, warnings, preflight
 
 
-def fallback_record(e, gemini):
+def fallback_record(e, gemini, chunks=(), speak=None, cache=None):
     """podcast.json tts.fallback: Gemini failed in a way waiting cannot fix (GeminiUnusable `e`)
-    and the local voice made the whole episode. Google's words are scrubbed (never a key)."""
+    and the local voice made the whole episode. Google's words are scrubbed (never a key).
+    `gemini_chunks_cached`: this script's chunks whose Gemini audio is in the cache -- their text
+    went to Google in this render or an earlier one."""
     why = FALLBACK_WHY.get(e.why, e.why)
+    made = 0
+    if speak and cache:
+        models = list(getattr(gemini, "candidates", None) or [])
+        made = sum(1 for c in chunks if any(os.path.isfile(os.path.join(
+            cache, cache_key(gemini, c, speak, m) + ".wav")) for m in models))
     return {"from": "gemini", "to": "kokoro", "why": e.why, "reason": f"Gemini failed: {why}",
             "google_said": scrub(e.said) if e.said else None, "stopped_at": e.where,
             "message": scrub(e)[:600], "at": now_iso(),
@@ -3423,6 +3460,7 @@ def fallback_record(e, gemini):
             "gemini_switched": list(gemini.switch_notes()) if hasattr(gemini, "switch_notes")
             else [],
             "chunks_sent_to_gemini": len(getattr(gemini, "sent_chunks", None) or ()),
+            "gemini_chunks_cached": made,
             "note": f"Gemini failed ({why}); the whole episode was made with Kokoro on HIVE "
                     "instead, so it has one voice throughout"}
 
@@ -3438,11 +3476,13 @@ def what_was_sent(backend, gemini, fallback):
     said = "nothing for this audio: made on HIVE with Kokoro, and heard back there with Whisper"
     if not fallback:
         return said
-    n = fallback["chunks_sent_to_gemini"]
-    return (said + ". Before it failed, Gemini was " + (
+    n, k = fallback["chunks_sent_to_gemini"], fallback.get("gemini_chunks_cached") or 0
+    return (said + ". In this render, before it failed, Gemini was " + (
         f"sent the transcript of {n} chunk(s) of this script (after pronunciation "
-        "substitutions), under the consent in cloud_tts_consent" if n else
-        "sent no text of this script (at most its two-line test)"))
+        "substitutions)" if n else "sent no text of this script (at most its two-line test)")
+        + (f"; {k} chunk(s) it made, in this render or an earlier one, are in the cache, so "
+           "their text went to it then" if k else "")
+        + "; under the consent in cloud_tts_consent")
 
 
 def cmd_render(a):
@@ -3509,7 +3549,7 @@ def cmd_render(a):
         # Gemini's voices with Kokoro's. Gemini's chunks stay in the cache for a later render.
         if getattr(a, "no_fallback", False):
             raise
-        gemini, fallback = backend, fallback_record(e, backend)
+        gemini, fallback = backend, fallback_record(e, backend, chunks, speak, cache)
         log(f"[render] Gemini failed ({FALLBACK_WHY.get(e.why, e.why)}), which waiting cannot "
             "fix: making the WHOLE episode with the local voice (Kokoro on HIVE) instead, so it "
             "has one voice throughout; Gemini's chunks stay in the cache")

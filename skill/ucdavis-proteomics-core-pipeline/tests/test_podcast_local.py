@@ -45,6 +45,8 @@ argv = sys.argv[1:]
 if os.environ.get("FAKE_APPTAINER_LOG"):
     with open(os.environ["FAKE_APPTAINER_LOG"], "a") as fh:
         fh.write(json.dumps(argv) + "\n")
+    if os.environ.get("GEMINI_API_KEY"):
+        open(os.environ["FAKE_APPTAINER_LOG"] + ".key", "w").write("the key reached a container")
 i = argv.index("python3")
 image, prog, args = argv[i - 1], argv[i + 1], argv[i + 2:]
 def opt(name):
@@ -306,6 +308,28 @@ class WhenItWaits(Local):
         self.assertIn("re-run the same command to resume", err)
         self.assertEqual(self.container_calls(), [])
 
+    def test_a_transient_error_on_every_model_at_the_preflight_waits(self):
+        """Review: a 503 from every model at the two-line test fell back as "no quota"."""
+        def behaviour(model, contents, config):
+            raise ApiError(503, "UNAVAILABLE", {"error": {"code": 503, "status": "UNAVAILABLE",
+                                                          "message": "The model is overloaded."}})
+        rc, out, err, log = self.render(behaviour, preflight=True)
+        self.assertEqual(rc, 1)
+        self.assertIn("no Gemini TTS model answered a two-line test", err)
+        self.assertIn("re-run later", err)
+        self.assertNotIn("local voice", err)
+        self.assertEqual(self.container_calls(), [])
+
+    def test_one_transient_model_among_ones_with_no_quota_waits_too(self):
+        def behaviour(model, contents, config):
+            if model == ANSWERS:
+                raise ApiError(503, "UNAVAILABLE", {"error": {"code": 503, "message": "busy"}})
+            raise ApiError(429, "RESOURCE_EXHAUSTED", rpc_error(
+                "GenerateRequestsPerDayPerProjectPerModel-FreeTier", value="0"))
+        rc, out, err, log = self.render(behaviour, preflight=True)
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.container_calls(), [])
+
     def test_no_fallback_stops_as_before(self):
         rc, out, err, log = self.render(lambda m, c, k: (_ for _ in ()).throw(prepay_error()),
                                         "--model", ANSWERS, "--no-fallback")
@@ -343,6 +367,25 @@ class EveryChunkAgain(Local):
         # every line of the script went to Kokoro, each once
         job = self.kokoro_calls()[0]
         self.assertIn("--per-turn", job)
+
+    def test_what_was_sent_counts_chunks_from_an_earlier_render(self):
+        """Review: a resume that met a 402 said Gemini "was sent no text of this script"."""
+        seen = {"n": 0}
+
+        def first(model, contents, config):
+            seen["n"] += 1
+            if seen["n"] > 1:
+                raise ApiError(503, "UNAVAILABLE", {"error": {"code": 503, "message": "busy"}})
+            return pcm_for(contents)
+        rc, out, err, log = self.render(first, "--model", ANSWERS)
+        self.assertEqual(rc, 1, "a transient error stops with the resume message")
+        rc, out, err, log = self.render(lambda m, c, k: (_ for _ in ()).throw(prepay_error()),
+                                        "--model", ANSWERS)
+        self.assertEqual(rc, 0, err)
+        fb = self.manifest()["tts"]["fallback"]
+        self.assertEqual((fb["chunks_sent_to_gemini"], fb["gemini_chunks_cached"]), (1, 1))
+        self.assertIn("1 chunk(s) it made, in this render or an earlier one, are in the cache",
+                      self.manifest()["tts"]["what_was_sent"])
 
     def test_a_later_gemini_render_resumes_from_its_own_chunk(self):
         self.test_gemini_chunks_are_never_in_the_kokoro_episode_and_stay_cached()
@@ -387,6 +430,7 @@ class Record(Local):
         self.assertEqual([h["name"] for h in man["hosts"]], ["Maya", "Leo"])      # labels kept
         self.assertEqual([h["voice"] for h in man["hosts"]], ["bf_emma", "af_heart"])
         self.assertNotIn(FAKE_KEY, read(os.path.join(self.pod, "podcast.json")) + err)
+        self.assertFalse(os.path.exists(self.calls + ".key"), "the Gemini key reached a container")
         self.assertIn("Nothing was sent to Google for the audio or its check.", err)
         self.assertEqual(json.loads(out)["fallback"], fb["note"])
 
@@ -627,6 +671,13 @@ class WhereItRuns(unittest.TestCase):
                     pl.find_runner()
             self.assertIn("HIVE could not be asked (Connection refused)", str(e.exception))
 
+            def hangs(*a, **k):                         # review: a traceback lost both reasons
+                raise pl.LocalError("no answer in 2 min: stopped")
+            with mock.patch.object(pl.Remote, "_hx", hangs):
+                with self.assertRaises(pl.Unavailable) as e:
+                    pl.find_runner()
+            self.assertIn("HIVE did not answer (no answer in 2 min", str(e.exception))
+
 
 class RemoteCleanup(unittest.TestCase):
     def test_closing_never_hides_the_real_error_and_names_what_is_left(self):
@@ -643,6 +694,23 @@ class RemoteCleanup(unittest.TestCase):
         self.assertFalse(os.path.exists(local))
         self.assertIn("could not remove ~/.proteomics-pipeline/podcast-local/", err.getvalue())
         self.assertIn("remove it by hand", err.getvalue())
+
+    def test_a_folder_that_cannot_be_made_leaves_nothing_here(self):
+        made = []
+        real = tempfile.mkdtemp
+
+        def mkdtemp(*a, **k):
+            made.append(real(*a, **k))
+            return made[-1]
+
+        def hangs(*a, **k):
+            raise pl.LocalError("no answer in 2 min: stopped")
+        with mock.patch.object(pl.tempfile, "mkdtemp", mkdtemp), \
+                mock.patch.object(pl.Remote, "_hx", hangs), \
+                mock.patch.object(pl.sys, "stderr", __import__("io").StringIO()):
+            with self.assertRaises(pl.LocalError):
+                pl.Remote("staff1").open()
+        self.assertFalse(os.path.exists(made[0]))
 
 
 class Sizing(unittest.TestCase):
@@ -723,6 +791,29 @@ class ContainerCall(FakeContainers, unittest.TestCase):
         self.assertEqual(got["small.en"]["text"], "hello there")
         calls = [c for c in self.container_calls() if any(a.endswith("transcribe.py") for a in c)]
         self.assertEqual([c[c.index("--threads") + 1] for c in calls], ["8", "8"])
+        for c in calls:          # review: never the episode's folder, read-only, over the work one
+            binds = [c[i + 1] for i, a in enumerate(c) if a == "--bind"]
+            self.assertEqual(len(binds), 1, c)
+            audio = c[c.index("/opt/whisper/transcribe.py") + 1]
+            self.assertEqual(os.path.dirname(audio), binds[0])
+            self.assertEqual(os.path.basename(audio), "episode.wav")
+
+    def test_cleanup_on_any_exception(self):
+        class Stop(pl.Here):
+            def run(self, script, minutes):
+                raise KeyboardInterrupt
+        r = Stop(JOB_ENV)
+        made = []
+        real_open = r.open
+
+        def opened():
+            d = real_open()
+            made.append(d[0])
+            return d
+        r.open = opened
+        with self.assertRaises(KeyboardInterrupt):
+            pl.speak(r, {"A": "bf_emma"}, [("A", "hello")])
+        self.assertFalse(os.path.exists(made[0]), "the folder with the script's lines is gone")
 
 
 class Agreement(unittest.TestCase):

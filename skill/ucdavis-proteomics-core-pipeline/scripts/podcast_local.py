@@ -290,10 +290,13 @@ class Remote(Runner):
         rid = uuid.uuid4().hex[:12]
         self._ids[local] = rid
         base, here = _remote()[0], _remote(rid)[0]
-        rc, out, err = self._hx(f"mkdir -p {base} && chmod 700 {base} && mkdir -m 700 {here}",
-                                timeout=120)
+        try:
+            rc, out, err = self._hx(f"mkdir -p {base} && chmod 700 {base} && mkdir -m 700 {here}",
+                                    timeout=120)
+        except LocalError as e:
+            rc, out, err = 1, "", str(e)
         if rc:
-            shutil.rmtree(local, ignore_errors=True)
+            self.close(local)                    # here and, if it was made, there
             raise LocalError(f"could not make a private folder on HIVE: {_tail(err or out)}")
         return local, _remote(rid)[1]
 
@@ -339,11 +342,17 @@ class Remote(Runner):
                              "lines or the episode)\n")
 
 
+# Never handed to a container call, an srun or hive_exec.sh: nothing there needs them
+PRIVATE_ENV = ("GEMINI_API_KEY", "GOOGLE_API_KEY")
+
+
 def _run(argv, minutes):
-    """-> (exit status, stdout, stderr); a run past `minutes` is killed and is a LocalError."""
+    """-> (exit status, stdout, stderr); a run past `minutes` is killed and is a LocalError. The
+    child gets this environment without PRIVATE_ENV."""
+    env = {k: v for k, v in os.environ.items() if k not in PRIVATE_ENV}
     try:
         r = subprocess.run(argv, capture_output=True, text=True, timeout=max(60.0, minutes * 60.0),
-                           stdin=subprocess.DEVNULL)
+                           stdin=subprocess.DEVNULL, env=env)
     except subprocess.TimeoutExpired:
         raise LocalError(f"no answer in {minutes:g} min: stopped")
     except OSError as e:
@@ -377,11 +386,14 @@ def find_runner(probe=True):
     r = Remote(user)
     if probe:
         test = " && ".join(f"test -r {shlex.quote(p)}" for p in (KOKORO_IMAGE, WHISPER_IMAGE))
-        rc, out, err = r._hx(f"if {test}; then echo PODCAST_LOCAL_IMAGES_OK; fi; "
-                             "test -d ~/proteomics-pipeline/scripts && "
-                             "echo PODCAST_LOCAL_SKILL_THERE; "
-                             "test -f ~/proteomics-pipeline/scripts/on_compute.py && "
-                             "echo PODCAST_LOCAL_SKILL_OK; true", timeout=120)
+        try:
+            rc, out, err = r._hx(f"if {test}; then echo PODCAST_LOCAL_IMAGES_OK; fi; "
+                                 "test -d ~/proteomics-pipeline/scripts && "
+                                 "echo PODCAST_LOCAL_SKILL_THERE; "
+                                 "test -f ~/proteomics-pipeline/scripts/on_compute.py && "
+                                 "echo PODCAST_LOCAL_SKILL_OK; true", timeout=120)
+        except LocalError as e:
+            raise Unavailable(f"HIVE did not answer ({e})")
         if rc or "PODCAST_LOCAL_" not in (out or ""):
             raise Unavailable(f"HIVE could not be asked ({_tail(err or out, 200)})")
         if "PODCAST_LOCAL_IMAGES_OK" not in out:
@@ -394,6 +406,14 @@ def find_runner(probe=True):
                  "the skill is not on HIVE, which runs the HIVE job")
                 + ": bash scripts/hive_exec.sh --put-skill")
     return r
+
+
+def _open(runner):
+    """runner.open(), a folder that cannot be made being a LocalError like any other failure."""
+    try:
+        return runner.open()
+    except OSError as e:
+        raise LocalError(f"cannot make a work folder: {e}")
 
 
 def _failed(what, rc, err, workers=None):
@@ -415,7 +435,7 @@ def speak(runner, voices, lines, log=None):
     -> (a folder to close with runner.close(), [each line's WAV in it, in order], the call's
     timing record). LocalError when it fails."""
     log = log or (lambda m: None)
-    local, run_dir = runner.open()
+    local, run_dir = _open(runner)
     try:
         with open(os.path.join(local, "job.json"), "w", encoding="utf-8") as fh:
             json.dump({"voices": voices, "speed": 1.0,
@@ -448,9 +468,9 @@ def speak(runner, voices, lines, log=None):
         log(f"[render] Kokoro made {timing.get('turns_audio_s', 0):.0f} s of speech in "
             f"{timing['wall_s']:.0f} s (start-up {timing.get('startup_in_process_s') or 0:.0f} s)")
         return local, paths, timing
-    except (LocalError, OSError, ValueError) as e:
+    except BaseException as e:               # Ctrl-C too: the folders hold the script's lines
         runner.close(local)
-        if isinstance(e, LocalError):
+        if isinstance(e, LocalError) or not isinstance(e, Exception):
             raise
         raise LocalError(f"Kokoro: {type(e).__name__}: {e}")
 
@@ -461,22 +481,21 @@ def hear(runner, audio, log=None):
     -> {model: its transcribe.py record (text, words with times, ...)}. LocalError when it
     fails."""
     log = log or (lambda m: None)
-    local, run_dir = runner.open()
+    local, run_dir = _open(runner)
     try:
-        name = os.path.basename(audio)
-        if runner.remote:
-            shutil.copyfile(audio, os.path.join(local, name))
-            runner.send(local, [name])
-            where = f'"$D"/{shlex.quote(name)}'
-        else:
-            where = shlex.quote(os.path.realpath(audio))
+        # A copy in the work folder, the only folder bound into the container: never the
+        # episode's own folder, which on a login node holds the work folder (a read-only bind
+        # of it could hide the writable one) and whose name may hold a , or : that --bind splits
+        name = "episode" + (os.path.splitext(audio)[1].lower() or ".m4a")
+        shutil.copyfile(audio, os.path.join(local, name))
+        runner.send(local, [name])
         cpus = runner.resources()[0]
         each = max(1, cpus // len(WHISPER_MODELS))
         img = shlex.quote(WHISPER_IMAGE)
         script = "\n".join([
-            "set -eo pipefail", f"D={run_dir}", f"A={where}", 'B=$(dirname "$A")',
+            "set -eo pipefail", f"D={run_dir}", f'A="$D"/{name}',
             _apptainer_setup(), _image_check(WHISPER_IMAGE, WHISPER_SHA256),
-            f'one() {{ apptainer exec --bind "$D" --bind "$B:$B:ro" {img} python3 '
+            f'one() {{ apptainer exec --bind "$D" {img} python3 '
             f'/opt/whisper/transcribe.py "$A" "$D/asr_$1.json" --model "$1" --threads {each} '
             '> "$D/asr_$1.log" 2>&1; }']
             + [f"one {m} & p{k}=$!" for k, m in enumerate(WHISPER_MODELS)]
@@ -496,7 +515,7 @@ def hear(runner, audio, log=None):
                 got[m] = json.load(fh)
         log(f"[verify] heard back in {time.time() - t0:.0f} s")
         return got
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, KeyError) as e:
         raise LocalError(f"Whisper: {type(e).__name__}: {e}")
     finally:
         runner.close(local)
