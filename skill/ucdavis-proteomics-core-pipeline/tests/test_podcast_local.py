@@ -263,6 +263,44 @@ class WhenItFallsBack(Local):
         self.assertIn("stopped answering", man["tts"]["fallback"]["reason"])
 
 
+class TimeoutBudget(Local):
+    """Review: with the defaults (600 s, twice per model, a 30 min budget) the budget ran out on
+    the second model's first timeout, so "every model stalled" mid-episode never handed over.
+    The same 3:1 ratio here: 0.3 s timeouts, a 0.9 s budget."""
+
+    def setUp(self):
+        super().setUp()
+        self.release = threading.Event()
+        self.addCleanup(self.release.set)
+        p = mock.patch.object(mp, "HEARTBEAT", 0.05)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_the_budget_after_a_stall_hand_over_is_every_model_stalled(self):
+        rc, out, err, log = self.render(stuck(self.release), "--model", STALLS, "--model",
+                                        ANSWERS, "--request-timeout", "0.3",
+                                        "--request-timeout-budget", "0.015")
+        self.assertEqual(rc, 0, err)
+        fb = self.manifest()["tts"]["fallback"]
+        self.assertEqual(fb["why"], "stalled")
+        self.assertIn("unanswered requests have cost", fb["message"])
+
+    def test_the_budget_without_a_stall_is_the_resume_message(self):
+        seen = {"n": 0}
+
+        def slow_now_and_then(model, contents, config):
+            seen["n"] += 1
+            if seen["n"] % 2:                       # every other request goes unanswered once
+                self.release.wait(30)
+            return pcm_for(contents)
+        rc, out, err, log = self.render(slow_now_and_then, "--model", ANSWERS,
+                                        "--request-timeout", "0.3",
+                                        "--request-timeout-budget", "0.01")
+        self.assertEqual(rc, 1)
+        self.assertIn("unanswered requests have cost", err)
+        self.assertEqual(self.container_calls(), [])
+
+
 class WhenItWaits(Local):
     """Errors that waiting or another Gemini model clears never reach the local voice."""
 
@@ -409,8 +447,9 @@ class Record(Local):
         tts = man["tts"]
         self.assertEqual((tts["backend"], tts["model"], tts["sent_to_cloud"]),
                          ("kokoro", pl.KOKORO_LABEL, False))
-        self.assertEqual(tts["consent"], "not needed: made offline on HIVE, nothing was sent to "
-                                         "any service")
+        self.assertEqual(tts["consent"], "not needed for this audio: made offline on HIVE; "
+                                         "Gemini, asked first, went under cloud_tts_consent "
+                                         "(what_was_sent)")
         eng = tts["engine"]
         self.assertEqual((eng["image"], eng["image_sha256"], eng["synth"]),
                          (pl.KOKORO_IMAGE, pl.KOKORO_SHA256, "1.2"))
@@ -452,6 +491,10 @@ class Record(Local):
         self.fall_back()
         page = read(os.path.join(self.pod, "transcript.html"))
         self.assertIn("Leo: af_heart (said as Lena)", page)
+        self.assertIn("Gemini, tried first, failed; the text of 1 part(s) of the transcript had "
+                      "been sent to it", page)
+        self.assertIn("Gemini, asked first, went under cloud_tts_consent",
+                      self.manifest()["tts"]["consent"])
         self.assertIn("<b>Leo</b>", page)
         self.assertNotIn("<b>Lena</b>", page)
 
@@ -526,6 +569,8 @@ class TtsLocal(Local):
         man = self.manifest()
         self.assertEqual(man["tts"]["backend"], "kokoro")
         self.assertIsNone(man["tts"]["fallback"])
+        self.assertEqual(man["tts"]["consent"], "not needed: made offline on HIVE, nothing was "
+                                                "sent to any service")
         self.assertFalse(man["cloud_tts_consent"])
         self.assertEqual(man["tts"]["what_was_sent"], "nothing for this audio: made on HIVE with "
                                                       "Kokoro, and heard back there with Whisper")
@@ -677,6 +722,40 @@ class WhereItRuns(unittest.TestCase):
                 with self.assertRaises(pl.Unavailable) as e:
                     pl.find_runner()
             self.assertIn("HIVE did not answer (no answer in 2 min", str(e.exception))
+
+
+class Plumbing(unittest.TestCase):
+    def test_no_apptainer_is_said_plainly(self):
+        empty = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, empty, True)
+        r = subprocess.run(["/bin/bash", "-c", "set -eo pipefail\n" + pl._apptainer_setup()],
+                           capture_output=True, text=True, env={"PATH": empty})
+        self.assertEqual(r.returncode, 5)
+        self.assertIn("no apptainer here", r.stderr)
+
+    def test_a_timeout_stops_the_whole_process_group(self):
+        class Slow(object):
+            pid = 4242
+            returncode = None
+            calls = 0
+
+            def communicate(self, timeout=None):
+                Slow.calls += 1
+                if Slow.calls == 1:
+                    raise subprocess.TimeoutExpired("bash", timeout)
+                return "", ""
+        with mock.patch.object(pl.subprocess, "Popen", return_value=Slow()) as popen, \
+                mock.patch.object(pl.os, "killpg") as killpg:
+            with self.assertRaises(pl.LocalError) as e:
+                pl._run(["bash", "-c", "sleep 99"], 1)
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
+        killpg.assert_called_once_with(4242, pl.signal.SIGKILL)
+        self.assertIn("no answer in 1 min", str(e.exception))
+
+    def test_the_gemini_key_is_not_handed_on(self):
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": FAKE_KEY}):
+            rc, out, err = pl._run(["/bin/sh", "-c", 'echo "[${GEMINI_API_KEY:-none}]"'], 1)
+        self.assertEqual(out.strip(), "[none]")
 
 
 class RemoteCleanup(unittest.TestCase):

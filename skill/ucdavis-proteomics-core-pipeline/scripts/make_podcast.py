@@ -2363,14 +2363,17 @@ class GeminiTTS(object):
             raise box["e"]
         return box["r"]
 
-    def for_good(self):
+    def for_good(self, asked_only=False):
         """Has every candidate failed in a way waiting cannot fix? -> "quota" (each missing, out of
         quota or rejected), "stalled" (each stopped answering), "none" (a mix of the two), or
         None when any failed otherwise -- a transient error or an empty answer, which a later
         run may not meet -- or was not asked: then render stops with the resume message and the
-        local voice does not take over."""
+        local voice does not take over. `asked_only`: the models not asked yet are left out
+        (the timeout budget is spent: no more waiting on them)."""
         kinds = {"stalled" if m in self.stalled else self.failed_kind.get(m)
                  for m in self.candidates}
+        if asked_only:
+            kinds.discard(None)
         if kinds and kinds <= set(FOR_GOOD):
             return "quota"
         if kinds == {"stalled"}:
@@ -2635,11 +2638,20 @@ class GeminiTTS(object):
                 timeouts += 1
                 self.timed_out += self.request_timeout
                 if self.timed_out >= self.timeout_budget:
-                    raise RenderError(
-                        f"{label}: {e}; unanswered requests have cost {self.timed_out / 60:.0f} "
-                        f"min in this render (--request-timeout-budget "
-                        f"{self.timeout_budget / 60:g} min). The chunks already made are cached: "
-                        "re-run the same command to resume")
+                    msg = (f"{label}: {e}; unanswered requests have cost "
+                           f"{self.timed_out / 60:.0f} min in this render "
+                           f"(--request-timeout-budget {self.timeout_budget / 60:g} min). The "
+                           "chunks already made are cached: re-run the same command to resume")
+                    # With the defaults (600 s, twice per model, 30 min) the budget runs out on
+                    # the second model's first timeout, before stall_switch can find no model
+                    # left: so when every model asked has stalled (or failed for good), that is
+                    # "every model stalled" (review of the Kokoro fallback)
+                    if self.switches and self.model not in self.stalled:
+                        self.stalled.append(self.model)
+                    why = self.for_good(asked_only=True) if self.switches else None
+                    if why:
+                        raise GeminiUnusable(msg, why, label)
+                    raise RenderError(msg)
                 if timeouts >= REQUEST_TIMEOUTS:
                     switch = self.stall_switch(label, f"{timeouts} requests of "
                                                       f"{self.request_timeout:.0f} s unanswered")
@@ -3465,6 +3477,15 @@ def fallback_record(e, gemini, chunks=(), speak=None, cache=None):
                     "instead, so it has one voice throughout"}
 
 
+def gemini_tried(fallback):
+    """The transcript page's words for a fallback whose script text reached Gemini first."""
+    if not isinstance(fallback, dict):
+        return ""
+    n = max(fallback.get("chunks_sent_to_gemini") or 0, fallback.get("gemini_chunks_cached") or 0)
+    return (f". Gemini, tried first, failed; the text of {n} part(s) of the transcript had been "
+            "sent to it" if n else "")
+
+
 def what_was_sent(backend, gemini, fallback):
     """podcast.json tts.what_was_sent, in words."""
     if backend.cloud:
@@ -3621,7 +3642,9 @@ def cmd_render(a):
            "what_was_sent": what_was_sent(backend, gemini, fallback)}
     if backend.name == "kokoro":
         tts.update(engine=backend.engine(s), fallback=fallback,
-                   consent="not needed: made offline on HIVE, nothing was sent to any service")
+                   consent=("not needed for this audio: made offline on HIVE; Gemini, asked "
+                            "first, went under cloud_tts_consent (what_was_sent)" if fallback else
+                            "not needed: made offline on HIVE, nothing was sent to any service"))
     man = {
         "show": s.show, "title": s.title,
         "hosts": [{"name": h, "role": r or None, "voice": backend.voices.get(h)} for h, r in s.hosts],
@@ -4327,7 +4350,8 @@ def transcript_html(s, man, out, embedded=False):
                 for h in man["hosts"]))],
             ["Speech", esc(f"{tts['backend']} ({', '.join(tts['models_used']) or tts['model']})"
                            + ("; the transcript text was sent to this cloud service"
-                              if tts["sent_to_cloud"] else "; made offline"))],
+                              if tts["sent_to_cloud"] else "; made offline")
+                           + gemini_tried(tts.get("fallback")))],
             ["Length", esc(f"{minutes_label(man['duration_s'])} ({man['words']:,} words, "
                            f"{man['turns']} turns)")],
             ["Script check", esc(f"{man['check']['status']}"

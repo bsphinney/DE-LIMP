@@ -828,12 +828,16 @@ the start.
   - a 402, "prepay credits are depleted" (`billing`);
   - the key refused: 401/403, `PERMISSION_DENIED`, "API key not valid" (`auth`);
   - no quota, or not usable, on every candidate model (`quota`);
-  - every candidate model stopped answering (`stalled`), or a mix of the last two (`none`).
+  - every candidate model stopped answering (`stalled`) -- also when the time lost to
+    unanswered requests (`--request-timeout-budget`, 30 min) runs out after a stalled model has
+    handed over, which with the defaults happens on the next model's first timeout -- or a mix
+    of the last two (`none`).
   A transient error or an empty answer from any model, at the two-line test or later, means a
   later run may succeed, so it never hands over.
   It does **not** take over for what waiting or another Gemini model clears: a per-minute rate
   limit (waited out), one model that stops answering (the next Gemini model makes every chunk
-  again), a transient error, the rate-limit or timeout budget, a resume pinned to the model that
+  again), a transient error, the rate-limit budget, the timeout budget with no stalled model, a
+  resume pinned to the model that
   made its chunks, or one model out of its daily quota mid-episode. Those stop with the resume
   message, as before. No consent and no key are not Gemini failures either: render refuses as
   before. `--no-fallback` keeps the old stop for all four.

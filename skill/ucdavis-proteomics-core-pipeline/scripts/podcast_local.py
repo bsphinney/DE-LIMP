@@ -30,6 +30,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -171,7 +172,7 @@ def _image_problem(path):
 def _apptainer_setup():
     return ("command -v apptainer >/dev/null 2>&1 || "
             "{ [ -r /etc/profile.d/modules.sh ] && . /etc/profile.d/modules.sh && "
-            "module load apptainer >/dev/null 2>&1; }\n"
+            "module load apptainer >/dev/null 2>&1; true; }\n"
             "command -v apptainer >/dev/null 2>&1 || "
             "{ echo '[podcast_local] no apptainer here (module load apptainer failed)' >&2; exit 5; }")
 
@@ -351,13 +352,27 @@ def _run(argv, minutes):
     child gets this environment without PRIVATE_ENV."""
     env = {k: v for k, v in os.environ.items() if k not in PRIVATE_ENV}
     try:
-        r = subprocess.run(argv, capture_output=True, text=True, timeout=max(60.0, minutes * 60.0),
-                           stdin=subprocess.DEVNULL, env=env)
-    except subprocess.TimeoutExpired:
-        raise LocalError(f"no answer in {minutes:g} min: stopped")
+        # its own process group, so a timeout stops apptainer and its workers, not only bash
+        p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                             stdin=subprocess.DEVNULL, env=env, start_new_session=True)
     except OSError as e:
         raise LocalError(f"cannot run {argv[0]}: {e}")
-    return r.returncode, r.stdout, r.stderr
+    try:
+        out, err = p.communicate(timeout=max(60.0, minutes * 60.0))
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            p.kill()
+        p.communicate()
+        raise LocalError(f"no answer in {minutes:g} min: stopped")
+    except BaseException:
+        try:
+            os.killpg(p.pid, signal.SIGTERM)
+        except OSError:
+            pass
+        raise
+    return p.returncode, out, err
 
 
 def _tail(text, n=600):
