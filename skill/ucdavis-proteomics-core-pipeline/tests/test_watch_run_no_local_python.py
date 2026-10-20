@@ -12,6 +12,9 @@ path and the watcher reported no_jobs_file.
   * HIVE cannot be reached that way   -> watcher_query_failed, failed false, done false;
   * no usable python3 and no --hive   -> watcher_no_python, failed false, done false;
   * a usable local python3            -> nothing changes: no poll is handed to HIVE.
+  * --slurm <id> with a local python3 -> HIVE out of reach: watcher_query_failed, failed false,
+                                         exit 3; a job SLURM does not know: query_failed,
+                                         failed false (review of 2.13.2, round 3).
 With --hive, MSYS_NO_PATHCONV=1 is set for every HIVE path.
 
 A fake hive_exec.sh stands in for HIVE (it runs the command here, with the real python3) and
@@ -132,6 +135,27 @@ class NoLocalPython(unittest.TestCase):
         self.assertEqual(out["err_class"], "watcher_query_failed")
         self.assertFalse(out["failed"], out)
         self.assertFalse(out["done"], out)
+
+    def test_a_single_job_with_hive_out_of_reach_is_not_failed_either(self):
+        """Single-job mode read sacct's and squeue's silence as failed: true (review of 2.13.2,
+        round 3: R3-L4). HIVE out of reach is a query failure, exit 3, as everywhere else."""
+        r, out = self.watch("--slurm", "999", "--hive", python="real", HIVE_DOWN="1")
+        self.assertEqual(r.returncode, 3)
+        self.assertEqual(out["error_class"], "watcher_query_failed")
+        self.assertFalse(out["failed"], out)
+        self.assertFalse(out["done"], out)
+        self.assertIn("NOT a job failure", out["fix"])
+        self.assertIn("Connection timed out", out["detail"])
+
+    def test_a_job_slurm_does_not_know_is_not_failed(self):
+        """HIVE answers, but neither sacct nor squeue knows the id: still never failed."""
+        r, out = self.watch("--slurm", "555", "--hive", python="real")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(out["state"], "query_failed")
+        self.assertEqual(out["error_class"], "watcher_query_failed")
+        self.assertFalse(out["failed"], out)
+        self.assertFalse(out["done"], out)
+        self.assertIn("NOT a job failure", out["fix"])
 
     def test_no_python_and_no_hive_says_so_and_is_not_failed(self):
         r, out = self.watch("--slurm", "999", python="none")

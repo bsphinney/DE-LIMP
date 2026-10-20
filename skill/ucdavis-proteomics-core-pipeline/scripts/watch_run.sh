@@ -257,9 +257,17 @@ if [ "$MODE" = "slurm" ] && [ -n "$JOB" ]; then
       all_states="$(printf '   1 %s\n' $live)"
     else
       # Neither sacct nor squeue answered. Do NOT call that PENDING -- that is how a
-      # dead job passes for a running one. Say the query failed and stop.
-      state="query_failed"; done=false; failed=true; q_failed=true
-      fix_qf="Could not read job state: sacct and squeue both returned nothing. Usually SLURM tools are not on PATH (hive_exec.sh must use a LOGIN shell), or the job id is wrong / aged out of sacct. Verify: hive_exec.sh 'sacct -j <id> -X'."
+      # dead job passes for a running one. Say the query failed and stop. Not failed either: an
+      # agent acts on `failed`, and resubmitting a running search because a question went
+      # unanswered is the one thing this must never cause (review of 2.13.2, round 3). HIVE out
+      # of reach is told apart from a job SLURM does not know, as chain mode does.
+      probe="$(run "echo __ok__" 2>&1)"
+      if ! printf '%s' "$probe" | grep -q __ok__; then
+        echo "{\"mode\":\"slurm\",\"job\":$(json_str "$JOB"),\"state\":\"unknown\",\"failed\":false,\"done\":false,\"error_class\":\"watcher_query_failed\",\"detail\":$(json_str "$(printf '%s\n' "$probe" | grep -v '^$' | head -n 2 | tr '\n' ' ')"),\"fix\":\"Cannot reach HIVE at all -- this is NOT a job failure. Usually HIVE_USER/HIVE_KEY are unset (save them once to ~/.config/ucdavis-proteomics/hive.env), or the network is down. Re-run the watcher before drawing any conclusion about the run.\"}"
+        exit 3
+      fi
+      state="query_failed"; done=false; failed=false; q_failed=true
+      fix_qf="Could not read job state: sacct and squeue both returned nothing -- this is NOT a job failure, so do not resubmit on it. Usually SLURM tools are not on PATH (hive_exec.sh must use a LOGIN shell), or the job id is wrong / aged out of sacct. Verify: hive_exec.sh 'sacct -j <id> -X'."
     fi
   fi
   if [ "${state:-}" != "query_failed" ]; then
