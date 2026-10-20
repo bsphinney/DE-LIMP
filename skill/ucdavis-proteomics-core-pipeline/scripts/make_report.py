@@ -21,7 +21,34 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from report_files import SHARE_NAME  # noqa: E402  defined once; no make_podcast / notify_slack
 
 # (regex on basename, category, description). First match wins.
+PEAKS = "Peak check (Skyline)"
 CATALOG = [
+    # the peak check (skyline_peaks.py, step 8f), in output/skyline/
+    (r"^peaks_disagreements\.png$", PEAKS,
+     "Where Skyline picked a different peak from DIA-NN's: the precursors with the largest apex "
+     "difference, fragment chromatograms per run (grey band = Skyline's peak, dashed lines = "
+     "DIA-NN's peak edges)."),
+    (r"^peaks_.+\.png$", PEAKS,
+     "One checked protein's peptide peaks as Skyline extracted them from the raw files: fragment "
+     "chromatograms per run, Skyline's integrated peak shaded, DIA-NN's peak edges dashed. A "
+     "visual check of DIA-NN's peaks, not independent confirmation (Skyline reuses DIA-NN's "
+     "peak edges by default)."),
+    (r"^areas_.+\.png$", PEAKS,
+     "One checked protein's fragment peak areas per run from Skyline, stacked by fragment ion, "
+     "with Skyline's library dot product above each bar."),
+    (r"^skyline_precursors\.tsv$", PEAKS,
+     "Skyline's precursor report for the checked proteins: per precursor and run, the apex and "
+     "peak edges (minutes), areas (MS1, fragments), dot products and mass error."),
+    (r"^disagreements\.tsv$", PEAKS,
+     "The precursor-runs where Skyline picked a different peak from DIA-NN's: no peak, its apex "
+     "more than 6 s from DIA-NN's, or outside DIA-NN's peak edges -- the peaks to look at before "
+     "trusting their numbers."),
+    (r".*_top_hits\.sky\.zip$", PEAKS,
+     "The Skyline document of the checked proteins, with the results of every run: open it in "
+     "Skyline 26.1 or later (Windows) to look at any peak, or upload it to Panorama."),
+    (r"^skyline_provenance\.json$", PEAKS,
+     "The peak check's record: Skyline version, container and its sha256, the tolerance and its "
+     "source, how the proteins were chosen, the settings copied from the search, the outcome."),
     (r"^report\.parquet$", "Search output",
      "The search result the DE step reads, in the DE-input column layout (Run, Protein.Group, "
      "PG.MaxLFQ, q-values). From DIA-NN it is DIA-NN's own report; from another engine it is "
@@ -282,6 +309,7 @@ INTERNAL_KINDS = [
 ]
 
 CATEGORY_ORDER = ["Analysis report", "Differential expression", "Protein-set tests", "Figures",
+                  PEAKS,
                   "Search output", "Search internals",
                   "Reproducibility bundle", "Inputs", "Data deposit (PRIDE / MassIVE)", "Other"]
 
@@ -356,10 +384,13 @@ def main():
     ap.add_argument("--root", default=".", help="base dir to show paths relative to")
     a = ap.parse_args()
 
-    # the podcast (make_podcast.py) sits in podcast/ beside OUTPUT_FILES.md: listed when present
-    podcast = os.path.join(os.path.dirname(os.path.abspath(a.out)), "podcast")
+    # the podcast (make_podcast.py) sits in podcast/ beside OUTPUT_FILES.md, and the peak check
+    # (skyline_peaks.py) in skyline/: each listed when present (its skyline_work/ is scratch)
+    here = os.path.dirname(os.path.abspath(a.out))
+    podcast, skyline = os.path.join(here, "podcast"), os.path.join(here, "skyline")
     files = collect([a.search_out, a.de_dir, a.repro, *a.extra,
-                     podcast if os.path.isdir(podcast) else None])
+                     podcast if os.path.isdir(podcast) else None,
+                     skyline if os.path.isdir(skyline) else None])
     root = os.path.abspath(a.root)
     rows, by_cat, kinds = [], {}, {}
     for f in files:

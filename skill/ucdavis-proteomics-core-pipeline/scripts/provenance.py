@@ -30,6 +30,9 @@ Usage (the orchestrator fills these from earlier steps):
     --commands ./commands.log         # optional: a log of the exact commands run
     --qc-bracket <session>/logs/qc_bracket.json   # optional: the instrument's QC record
                                       # (qc_bracket.py) -- referenced by path + sha256 only
+    --peak-check <session>/output/skyline/skyline_provenance.json
+                                      # optional (default: the one beside --de-dir's folder):
+                                      # the peak check's record (skyline_peaks.py), copied in
 
 Outputs under --outdir:
   run_manifest.json          everything, machine-readable
@@ -301,6 +304,9 @@ def main():
                                          "referenced in run_manifest.json by path and sha256 "
                                          "only -- the bundle is delivered, the verdict is "
                                          "staff-only")
+    ap.add_argument("--peak-check", help="skyline_peaks.py's record (output/skyline/"
+                                         "skyline_provenance.json); default: the one beside the "
+                                         "--de-dir folder, when there is one")
     ap.add_argument("--timestamp", default="", help="ISO timestamp (script can't call clock)")
     a = ap.parse_args()
     # sha256 of every input raw file (up to 5 GB each) and the report: I/O for a compute node.
@@ -566,6 +572,34 @@ def main():
     elif a.qc_bracket:
         skip("instrument QC (qc_bracket.json)", f"not found: {a.qc_bracket}")
 
+    # ---- the peak check (skyline_peaks.py, step 8f), when there is a record ---------------------
+    # The tool, its container and checksum, the tolerance and its source, the proteins' rule and
+    # N, and the outcome -- the record itself is copied in (it names no person).
+    peak_check = None
+    pk = a.peak_check or (os.path.join(os.path.dirname(os.path.abspath(a.de_dir)), "skyline",
+                                       "skyline_provenance.json") if a.de_dir else None)
+    if pk and os.path.exists(pk):
+        rec = load_json(pk)
+        if isinstance(rec, dict) and str(rec.get("schema", "")).startswith("skyline_peak_check/"):
+            tool = rec.get("tool") or {}
+            peak_check = {"record": os.path.abspath(pk), "sha256": sha256_file(pk),
+                          "status": rec.get("status"), "reason": rec.get("reason"),
+                          "skyline_version": tool.get("version"),
+                          "container": tool.get("container"),
+                          "container_sha256": tool.get("container_sha256"),
+                          "container_verified": tool.get("verified"),
+                          "docker_digest": tool.get("docker_digest"),
+                          "mass_accuracy": rec.get("mass_accuracy"),
+                          "proteins_n": (rec.get("top") or {}).get("value"),
+                          "proteins_n_source": (rec.get("top") or {}).get("source"),
+                          "copied_to": "inputs/skyline_provenance.json"}
+            shutil.copy2(pk, os.path.join(out, "inputs", "skyline_provenance.json"))
+            ok(f"peak check record copied (status {rec.get('status')})")
+        else:
+            skip("peak check (skyline_provenance.json)", "not a skyline_peaks.py record, or unreadable")
+    elif a.peak_check:
+        skip("peak check (skyline_provenance.json)", f"not found: {a.peak_check}")
+
     # ---- the master run manifest --------------------------------------------
     reg = (wfman or {}).get("registry")
     manifest = {
@@ -594,6 +628,8 @@ def main():
                    "conditions": a.conditions, "params": a.params},
         # qc_bracket.py's record: where and which (sha256), never its verdict; null = not given
         "instrument_qc": instrument_qc,
+        # skyline_peaks.py's record (step 8f): the tool, container sha256, tolerance + source, N
+        "peak_check": peak_check,
         "checksums_file": "checksums/checksums.json",
         "files_in_bundle": "see MANIFEST.txt",
     }

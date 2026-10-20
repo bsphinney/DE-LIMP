@@ -3848,6 +3848,11 @@ DELIVER_FILES = (("Analysis_Report.html", True), ("Analysis_Report.pdf", False),
                  ("Analysis_Report.md", False), ("AI_Analysis_Report.md", False), ("methods.md", False), ("methods.docx", False),
                  ("OUTPUT_FILES.md", False), ("AUDIT.md", False), ("SAMPLE_QUALITY.md", False))
 DELIVER_DIRS = ("tables", "figures", "reproducibility")
+# Delivered when the session has them, and not listed when it does not: the peak check
+# (skyline_peaks.py, step 8f) -- its pictures, tables and the Skyline document. Its working folder
+# (skyline_work/) is scratch and stays behind (EXCLUDED_DIRS). Whether it ran, or why not, is the
+# session MANIFEST's and the report's to say.
+OPTIONAL_DELIVER_DIRS = ("skyline",)
 # The optional audio discussion (make_podcast.py): the audio and its transcript only. Its
 # chunk cache, script, check/verify logs and podcast.json (consent notes) stay in the session.
 # The report's "Listen" card links podcast/<file> relative to Analysis_Report.html. Beside the
@@ -3857,7 +3862,8 @@ PODCAST_FILES = ("podcast.m4a", "podcast.wav", "transcript.html")
 SEARCH_FILES = ("report.parquet", "report.pg_matrix.tsv", "report.pr_matrix.tsv", "report.gg_matrix.tsv",
                 "report.unique_genes_matrix.tsv", "report.stats.tsv", "report.log.txt",
                 "search_provenance.json")
-EXCLUDED_DIRS = {"xic", "report_xic", "temp", "tmp", ".tmp", "__pycache__", "raw_data"}
+EXCLUDED_DIRS = {"xic", "report_xic", "temp", "tmp", ".tmp", "__pycache__", "raw_data",
+                 "skyline_work"}
 # The analysis conversation (save_transcript.py -> logs/conversation/) and the decisions log are
 # CORE-INTERNAL: internal paths, other projects, offhand remarks. logs/ is never delivered; this
 # keeps them out wherever a copy ends up (a Claude Code transcript is <uuid>.jsonl).
@@ -3913,7 +3919,8 @@ def _plan_share(output_dir: str) -> dict:
 def plan_delivery(output_dir: str) -> list:
     staff_only = sibling("staff").is_staff_only
     items = [_plan_file(os.path.join(output_dir, n), n, req) for n, req in DELIVER_FILES]
-    for d in DELIVER_DIRS:
+    for d in DELIVER_DIRS + tuple(x for x in OPTIONAL_DELIVER_DIRS
+                                  if os.path.isdir(os.path.join(output_dir, x))):
         root = os.path.join(output_dir, d)
         if not os.path.isdir(root):
             items.append({"name": d + "/", "status": "SKIPPED", "reason": "not found in the session",
@@ -5111,6 +5118,8 @@ def cmd_email_draft(a) -> int:
             L += ["", "The folder also contains:"]
             for name, text in (("tables", "the result tables"),
                                ("figures", "every figure as an image file"),
+                               ("skyline", "pictures of the peaks behind the top proteins, drawn "
+                                           "with Skyline, and a Skyline document of them"),
                                ("Analysis_Report.pdf", "the report as a PDF, for printing"),
                                (SHARE_FILE or "", f"{SHARE_FILE}: the report with an AI-generated audio "
                                             "discussion built in -- to pass the report on with the "
