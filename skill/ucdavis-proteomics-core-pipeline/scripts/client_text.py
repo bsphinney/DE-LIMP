@@ -24,6 +24,9 @@ p-values are corrected", "batch effects were corrected"), so it is never a FAIL 
 without that context. tests/test_client_text.py holds the science sentences that must pass both
 tiers, and what each tier must catch. Draft history in words neither tier has is the meaning
 check's (f) (make_podcast.MEANING_CHECKS). Stdlib only.
+
+PEAK-CHECK OVERCLAIMS (peak_check_overclaims, at the end): Skyline's peak check is a visual check
+of DIA-NN's peaks, never "confirmed by Skyline" or "validated" (skyline_peaks.py).
 """
 import re
 
@@ -130,4 +133,36 @@ def draft_history_loose(text):
             continue
         seen.add(a)
         out.append(" ".join(text[max(a, m.start() - 60):m.end() + 40].split()))
+    return out
+
+
+# PEAK-CHECK OVERCLAIMS. Skyline's peak check (skyline_peaks.py) draws DIA-NN's peaks again from
+# the raw files, but Skyline integrates inside DIA-NN's peak edges by default, so a peak that
+# matches is not independent confirmation. A client text never says the results were confirmed,
+# validated, verified or corroborated by Skyline (or by "the peak check"). A sentence that SAYS it
+# is not ("... is not independent confirmation") is fine: a negation earlier in the same clause
+# clears it. skyline_peaks.report_section() is tested to have none; make_analysis_html.py warns on
+# them in AI_Analysis_Report.md.
+_PEAK_SUBJECT = re.compile(r"\b(?:skyline|peak[\s-]+checks?|second\s+program)\b", re.I)
+_OVERCLAIM = re.compile(r"\b(?:confirm\w*|validat\w*|verif\w*|corroborat\w*|prov(?:e|es|ed|en)\b|"
+                        r"proof|independent(?:ly)?\s+(?:check\w*|evidence|measure\w*))", re.I)
+_NEGATION = re.compile(r"\b(?:not|no|never|nor|without|cannot|isn['’]t|aren['’]t|doesn['’]t|"
+                       r"don['’]t|wasn['’]t|weren['’]t|neither)\b|n['’]t\b", re.I)
+_SENTENCE = re.compile(r"[^.!?\n]+[.!?]?")
+
+
+def peak_check_overclaims(text):
+    """Each sentence that claims Skyline (or the peak check) confirmed, validated, verified,
+    corroborated or proved a result -- a snippet per sentence; [] when there is none."""
+    out = []
+    for m in _SENTENCE.finditer(text or ""):
+        sent = m.group(0)
+        if not _PEAK_SUBJECT.search(sent):
+            continue
+        for c in _OVERCLAIM.finditer(sent):
+            clause_start = max(sent.rfind(ch, 0, c.start()) for ch in ",;:—(") + 1
+            if _NEGATION.search(sent[clause_start:c.start()]):
+                continue
+            out.append(" ".join(sent.split()))
+            break
     return out
