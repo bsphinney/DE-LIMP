@@ -416,8 +416,9 @@ SLURM_KEEP = ("SLURM_CONF",)
 # episode's cache while it runs, so cancelling the podcast job can cancel it too
 JOB_FILE = "local_voice.job"
 # srun's words for a job SLURM would not start (not a task that ran and failed)
-_REFUSED = re.compile(r"srun: error: (?:Unable to allocate|.*(?:Invalid (?:account|partition|qos)"
-                      r"|QOSMax|AssocMax|[Aa]ccess denied|not available|job .* revoked))")
+_REFUSED = re.compile(r"srun: (?:error: )?(?:Unable to allocate|Job submit/allocate failed|"
+                      r".*(?:Invalid (?:account|partition|qos)|QOSMax|AssocMax|access denied|"
+                      r"not available|job allocation \S+ has been revoked))", re.I)
 
 
 def _run(argv, minutes, drop_slurm=False, watch=None):

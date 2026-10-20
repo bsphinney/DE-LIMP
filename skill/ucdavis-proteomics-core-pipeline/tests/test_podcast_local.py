@@ -803,6 +803,7 @@ class NoKey(Local):
     def test_a_key_file_found_but_not_used_says_why(self):
         """Review of 86671ee1: a key file refused for its mode was reported as no key."""
         why = "~/.config/ucdavis-proteomics/gemini_key is not used: other accounts can read it"
+        write(mp.KEY_FILE, "a key that may not be used\n")              # it is there
         with mock.patch.object(mp, "find_key", return_value=(None, None, why)):
             rc, out, err = self.render_no_key()
         self.assertEqual(rc, 0, err)
@@ -811,6 +812,15 @@ class NoKey(Local):
         self.assertEqual(fb["reason"], f"No usable Gemini key ({why})")
         self.assertIn("Gemini was not asked: no usable Gemini key", self.manifest()["tts"]
                       ["what_was_sent"])
+
+    def test_the_cores_key_for_another_run_is_a_note_not_a_refusal(self):
+        """HIVE, 2026-10-20: a run that is not a Core run read "No usable Gemini key"."""
+        note = "/quobyte/proteomics-grp/.config/gemini_key is used only for a Core run (--core-run)"
+        with mock.patch.object(mp, "find_key", return_value=(None, None, note)):
+            rc, out, err = self.render_no_key()
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.manifest()["tts"]["fallback"]["reason"],
+                         f"No Gemini key was set ({note})")
 
     def test_no_fallback_still_stops(self):
         rc, out, err = self.render_no_key("--no-fallback")
@@ -1225,6 +1235,15 @@ class Sizing(unittest.TestCase):
             self.assertTrue(any(m.startswith("[verify]") and "HIVE job 4242" in m for m in said),
                             said)
             self.assertFalse(os.path.exists(os.path.join(d, pl.JOB_FILE)))
+
+    def test_srun_refusals_are_read_as_refusals(self):
+        for said in ("srun: error: Unable to allocate resources: Invalid qos specification",
+                     "srun: error: Job submit/allocate failed: Requested time limit is invalid",
+                     "srun: Job allocation 4242 has been revoked",
+                     "srun: error: Unable to allocate resources: QOSMaxCpuPerJobLimit"):
+            with self.subTest(said):
+                self.assertTrue(pl._REFUSED.search(said))
+        self.assertFalse(pl._REFUSED.search("srun: error: n1: task 0: Exited with exit code 4"))
 
     def test_a_job_that_started_and_failed_is_not_called_refused(self):
         with tempfile.TemporaryDirectory() as d:

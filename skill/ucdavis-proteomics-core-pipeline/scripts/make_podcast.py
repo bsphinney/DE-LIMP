@@ -2022,11 +2022,14 @@ FALLBACK_WHY = {"billing": "its prepay credits are depleted (402)",
                 "nokey": "no Gemini key was set"}
 
 
-def fallback_cause(why, detail=None):
+def fallback_cause(why, detail=None, found=False):
     """The fallback's cause as a person says it: "Gemini failed (...)", or that there was no key
-    to ask it with -- or one that was found and not used, and why (`detail`)."""
+    to ask it with (find_key's note beside it, `detail`) -- or one that was found and refused
+    (`found`), and why."""
     if why == "nokey":
-        return f"No usable Gemini key ({detail})" if detail else "No Gemini key was set"
+        if found and detail:
+            return f"No usable Gemini key ({detail})"
+        return "No Gemini key was set" + (f" ({detail})" if detail else "")
     return f"Gemini failed ({FALLBACK_WHY.get(why, why)})"
 # What a model can fail with that waiting does not clear (with "stalled": it stopped answering)
 FOR_GOOD = ("missing", "exhausted", "rejected")
@@ -2097,7 +2100,11 @@ class GeminiTTS(object):
             e = GeminiUnusable(
                 f"no Gemini key was set: set GEMINI_API_KEY or put it in {KEY_FILE} (chmod 600)"
                 + (f"; {why}" if why else ""), "nokey", "start")
-            e.detail = why                   # a key file found but not used, and why
+            # a key file this run could use that was found and refused (its mode, its trust
+            # rule) is "not usable"; anything else is no key, with find_key's note beside it
+            e.detail = why
+            e.found = bool(why) and (os.path.isfile(os.path.expanduser(KEY_FILE)) or (
+                bool(getattr(a, "core_run", None)) and os.path.lexists(CORE_KEY_FILE)))
             raise e
         try:
             from google import genai
@@ -3595,7 +3602,7 @@ def fallback_record(e, gemini, chunks=(), speak=None, cache=None):
     this = len(getattr(gemini, "sent_chunks", None) or ())
     before = (getattr(gemini, "sent_before", None) or {}).get("preflight") or {}
     before = before if isinstance(before, dict) else {}
-    cause = fallback_cause(e.why, getattr(e, "detail", None))
+    cause = fallback_cause(e.why, getattr(e, "detail", None), getattr(e, "found", False))
     return {"from": "gemini", "to": "kokoro", "why": e.why, "reason": cause,
             "google_said": scrub(e.said) if e.said else None, "stopped_at": e.where,
             "message": scrub(e)[:600], "at": now_iso(),
@@ -3735,7 +3742,7 @@ def cmd_render(a):
             raise
         gemini, fallback = backend, fallback_record(e, backend, chunks, speak, cache)
         log(f"[render] {e}")                          # what Gemini said, and what clears it
-        log(f"[render] {fallback_cause(e.why, getattr(e, 'detail', None))}, which waiting cannot "
+        log(f"[render] {fallback_cause(e.why, getattr(e, 'detail', None), getattr(e, 'found', False))}, which waiting cannot "
             "fix: making the WHOLE "
             "episode with the local voice (Kokoro on HIVE) instead, so it has one voice "
             "throughout" + ("; Gemini's chunks stay in the cache" if gemini else ""))
@@ -3746,7 +3753,7 @@ def cmd_render(a):
                                                                              speak, cache, a)
         except RenderError as u:
             raise RenderError(                    # Gemini's own message is logged just above
-                f"{fallback_cause(e.why, getattr(e, 'detail', None))}, and the local "
+                f"{fallback_cause(e.why, getattr(e, 'detail', None), getattr(e, 'found', False))}, and the local "
                 f"voice could not make the episode instead: "
                 + (u.why if isinstance(u, LocalUnavailable) else str(u))
                 + ". No episode this time: clear Gemini's failure (above) and re-run, or run "
