@@ -492,9 +492,19 @@ def build_args(plan, rt_minutes):
     return args
 
 
+def task_doc(plan, i):
+    """Array task i's copy of the document, in a folder of its own. Skyline keeps an import's
+    spill files in <document folder>/xic/ and deletes that folder when the import ends, so tasks
+    sharing the document's folder deleted each other's spill files mid-import ("Unable to find the
+    specified file", the skill's test on HIVE, 2026-10-20: one of three, then two of three,
+    imports survived). The per-file cache it writes is named after the raw file and its folder
+    only (ChromatogramCache.PartPathForName), so it is moved beside the document for the join."""
+    return os.path.join(plan["work"], "tasks", str(i), os.path.basename(plan["doc"]))
+
+
 def import_args(plan, i):
-    """Array task i (1-based): ONE raw file, its own cache, no join and no save."""
-    return [f"--in={win(plan['doc'])}", f"--import-file={win(plan['raw_files'][i - 1])}",
+    """Array task i (1-based): ONE raw file, into its own copy of the document, no join, no save."""
+    return [f"--in={win(task_doc(plan, i))}", f"--import-file={win(plan['raw_files'][i - 1])}",
             "--import-no-join"]
 
 
@@ -531,17 +541,12 @@ def join_batch(plan, imported):
     return "\n".join(batch_line(x) for x in lines) + "\n"
 
 
-def apptainer_argv(plan, rw=(), tmp=None):
+def apptainer_argv(plan, rw=()):
     """apptainer exec with the binds the step needs and no more: the output folder (and `rw`)
     read-write, the search folder, the FASTA's and every raw-data folder read-only (nested binds
-    go on top, so a raw folder under the output folder is still read-only). `tmp`: this call's own
-    temporary folder, as Windows' TMP and TEMP -- the image's TMP is the node's shared /tmp, and
-    two imports started together on one node lost a spill file to each other there (the skill's
-    test on HIVE, 2026-10-20: "Unable to find the specified file" in ChromGroups)."""
+    go on top, so a raw folder under the output folder is still read-only)."""
     argv = ["apptainer", "exec", "--cleanenv", "--env", "WINEDEBUG=-all"]
-    if tmp:
-        argv += ["--env", f"TMP={tmp}", "--env", f"TEMP={tmp}"]
-    for d in [plan["out"]] + [x for x in rw if x != plan["out"]] + ([tmp] if tmp else []):
+    for d in [plan["out"]] + [x for x in rw if x != plan["out"]]:
         argv += ["--bind", f"{d}:{d}"]
     for d in plan["ro_binds"]:
         argv += ["--bind", f"{d}:{d}:ro"]
@@ -1550,14 +1555,10 @@ def _plan_of(work):
 
 
 def run_skyline(plan, args, log_name, minutes, rw=()):
-    """SkylineCmd in the container, with a temporary folder of its own on the node (removed
-    after) -> (exit code, log path). Never --import-process-count."""
+    """SkylineCmd in the container -> (exit code, log path). Never --import-process-count."""
     assert not any(x.startswith("--import-process-count") for x in args)
-    import tempfile
     log = os.path.join(plan["work"], "logs", log_name)
-    base = os.environ.get("TMPDIR")
-    tmp = tempfile.mkdtemp(prefix="skyline_", dir=base if base and os.path.isdir(base) else None)
-    argv = apptainer_argv(plan, rw, tmp) + ["wine", "SkylineCmd"] + list(args)
+    argv = apptainer_argv(plan, rw) + ["wine", "SkylineCmd"] + list(args)
     with open(os.path.join(plan["work"], "logs", log_name.replace(".txt", ".cmd.txt")), "w") as fh:
         fh.write(" ".join(shlex.quote(x) for x in argv) + "\n")
     try:
@@ -1570,8 +1571,6 @@ def run_skyline(plan, args, log_name, minutes, rw=()):
         with open(log, "a") as fh:
             fh.write(f"cannot start apptainer: {e}\n")
         rc = 127
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
     return rc, log
 
 
@@ -1679,10 +1678,26 @@ def cmd_import(a):
     plan = _plan_of(a.work)
     i = int(a.task)
     raw = plan["raw_files"][i - 1]
+    doc = task_doc(plan, i)
+    tdir = os.path.dirname(doc)
+    shutil.rmtree(tdir, ignore_errors=True)        # a requeued task starts clean
+    os.makedirs(tdir)
+    stem = os.path.splitext(plan["doc"])[0]
+    for ext in (".sky", ".blib", ".skyl", ".sky.view"):
+        if os.path.isfile(stem + ext):
+            shutil.copy2(stem + ext, os.path.join(tdir, os.path.basename(stem + ext)))
     rc, log = run_skyline(plan, import_args(plan, i), f"import_{i}.txt", JOB_MINUTES["import"])
+    reason = None if rc == 0 else log_tail(log)
+    if rc == 0:
+        made = [f for f in os.listdir(tdir) if f.endswith(".skyd")]
+        if not made:
+            rc, reason = 1, "Skyline wrote no cache for this file"
+        for f in made:
+            os.replace(os.path.join(tdir, f), os.path.join(plan["work"], f))
+    if rc == 0:
+        shutil.rmtree(tdir, ignore_errors=True)
     write_json(os.path.join(plan["work"], "status", f"import_{i}.json"),
-               {"file": raw, "rc": rc, "reason": None if rc == 0 else log_tail(log),
-                "finished": now()})
+               {"file": raw, "rc": rc, "reason": reason, "finished": now()})
     return 0 if rc == 0 else 1
 
 
