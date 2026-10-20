@@ -636,6 +636,38 @@ class TestBrief(unittest.TestCase):
         self.assertIn("a matching peak is not independent confirmation", brief)
 
 
+class TestMethods(unittest.TestCase):
+    def test_the_paragraph_only_when_it_ran(self):
+        import subprocess
+        for status in ("ok", "skipped"):
+            with tempfile.TemporaryDirectory() as td:
+                tables, sky = os.path.join(td, "output", "tables"), os.path.join(td, "output",
+                                                                                "skyline")
+                os.makedirs(tables)
+                os.makedirs(sky)
+                with open(os.path.join(tables, "de_provenance.json"), "w") as fh:
+                    json.dump({"adjp": 0.05, "method": "dpc"}, fh)
+                rec = dict(OK_REC, status=status, reason="turned off")
+                rec["methods_paragraph"] = sp.methods_paragraph(dict(OK_REC))
+                with open(os.path.join(sky, sp.RECORD), "w") as fh:
+                    json.dump(rec, fh)
+                raw = os.path.join(td, "FL_sample01.raw")
+                open(raw, "w").close()
+                out = os.path.join(td, "methods.md")
+                r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "make_methods.py"),
+                                    "--raw", raw, "--de-dir", tables, "--out", out],
+                                   capture_output=True, text=True, timeout=300)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                with open(out, encoding="utf-8") as fh:
+                    text = fh.read()
+                if status == "ok":
+                    self.assertIn("## Peak check (Skyline)", text)
+                    self.assertIn("not an independent identification", text)
+                    self.assertIn(SKYLINE_PIN["docker_digest"], text)
+                else:
+                    self.assertNotIn("Peak check", text)
+
+
 class TestFollowUp(unittest.TestCase):
     """PRM / SRM lists: scheduled only on the same instrument family AND gradient."""
 

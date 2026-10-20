@@ -1182,7 +1182,7 @@ def methods_paragraph(rec):
     fam = "TOF analysers, with the library's ion mobility" if rec.get("family") == "timstof" \
         else "centroided spectra"
     return (
-        f"Peak check. For selected proteins (how they were chosen follows), chromatograms were "
+        f"For selected proteins (how they were chosen follows), chromatograms were "
         f"extracted again from the raw files with Skyline {t['version']} (MacLean et al., "
         f"Bioinformatics 2010;26:966-968; "
         f"SkylineCmd in the ProteoWizard container {SKYLINE_PIN['image']}, image digest "
