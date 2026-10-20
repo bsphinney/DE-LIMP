@@ -399,31 +399,33 @@ def _run(argv, minutes, drop_slurm=False):
         _stop_group(p)
         raise LocalError(f"no answer in {minutes:g} min: stopped")
     except BaseException:                    # Ctrl-C: the same, with less patience
-        try:
-            _stop_group(p, grace=5.0)
-        finally:                             # a second Ctrl-C mid-wait: still nothing left
-            try:
-                os.killpg(p.pid, signal.SIGKILL)
-            except OSError:
-                pass
+        _stop_group(p, grace=5.0)
         raise
     return p.returncode, out, err
 
 
 def _stop_group(p, grace=30.0):
     """SIGTERM to the process group first -- an srun then cancels its allocation, a queued one
-    too -- then SIGKILL to what is left after `grace` seconds."""
-    for sig, wait in ((signal.SIGTERM, grace), (signal.SIGKILL, 10.0)):
+    too -- then SIGKILL to what is left after `grace` seconds. The SIGKILL is sent whatever
+    interrupts the wait (a Ctrl-C during it, too); one to a group already gone does nothing."""
+    try:
         try:
-            os.killpg(p.pid, sig)
+            os.killpg(p.pid, signal.SIGTERM)
         except OSError:
-            if sig == signal.SIGKILL:
-                p.kill()
+            pass
         try:
-            p.communicate(timeout=wait)
-            return
+            p.communicate(timeout=grace)
         except subprocess.TimeoutExpired:
-            continue
+            pass
+    finally:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            p.kill()
+        try:
+            p.communicate(timeout=10.0)
+        except Exception:
+            pass
 
 
 def _tail(text, n=600):

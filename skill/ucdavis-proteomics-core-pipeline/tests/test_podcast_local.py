@@ -934,8 +934,9 @@ class Plumbing(unittest.TestCase):
             with self.assertRaises(pl.LocalError) as e:
                 pl._run(["bash", "-c", "sleep 99"], 1)
         self.assertTrue(popen.call_args.kwargs["start_new_session"])
-        # SIGTERM first: an srun then cancels its allocation; it ended, so no SIGKILL
-        killpg.assert_called_once_with(4242, pl.signal.SIGTERM)
+        # SIGTERM first (an srun then cancels its allocation); SIGKILL to what is left
+        self.assertEqual([c.args for c in killpg.call_args_list],
+                         [(4242, pl.signal.SIGTERM), (4242, pl.signal.SIGKILL)])
         self.assertIn("no answer in 1 min", str(e.exception))
 
     def test_a_group_that_ignores_sigterm_is_killed(self):
@@ -953,6 +954,23 @@ class Plumbing(unittest.TestCase):
                 pl._run(["bash", "-c", "trap '' TERM; sleep 99"], 1)
         self.assertEqual([c.args[1] for c in killpg.call_args_list],
                          [pl.signal.SIGTERM, pl.signal.SIGKILL])
+
+    def test_a_ctrl_c_during_the_sigterm_wait_still_kills_the_group(self):
+        class Interrupted(object):
+            pid, returncode, calls = 4444, None, 0
+
+            def communicate(self, timeout=None):
+                Interrupted.calls += 1
+                if Interrupted.calls == 1:
+                    raise subprocess.TimeoutExpired("bash", timeout)
+                if Interrupted.calls == 2:                  # the SIGTERM wait
+                    raise KeyboardInterrupt
+                return "", ""
+        with mock.patch.object(pl.subprocess, "Popen", return_value=Interrupted()), \
+                mock.patch.object(pl.os, "killpg") as killpg:
+            with self.assertRaises(KeyboardInterrupt):
+                pl._run(["bash", "-c", "sleep 99"], 1)
+        self.assertIn(pl.signal.SIGKILL, [c.args[1] for c in killpg.call_args_list])
 
     def test_the_gemini_key_is_not_handed_on(self):
         with mock.patch.dict(os.environ, {"GEMINI_API_KEY": FAKE_KEY}):
