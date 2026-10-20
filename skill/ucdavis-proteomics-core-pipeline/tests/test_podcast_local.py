@@ -488,12 +488,30 @@ class EveryChunkAgain(Local):
         self.assertEqual((fb["gemini_chunks_sent"], fb["gemini_chunks_not_in_script"]), (2, 1))
         self.assertIn("the text of 1 chunk(s) that are not in this script as it is now",
                       self.manifest()["tts"]["what_was_sent"])
+        self.assertIn("it had been sent the text of 2 of the 2 parts of this transcript and the "
+                      "text of 1 part(s) not in this transcript",
+                      read(os.path.join(self.pod, "transcript.html")))
 
     def test_a_broken_record_never_stops_a_gemini_render(self):
         os.makedirs(os.path.join(self.pod, ".cache"), exist_ok=True)
         write(os.path.join(self.pod, ".cache", mp.SENT_FILE), json.dumps({"chunks": []}))
         rc, out, err, log = self.render(None, "--model", ANSWERS)
         self.assertEqual(rc, 0, err)
+
+    def test_a_broken_record_never_stops_a_fallback_and_unknown_keys_stay(self):
+        """Third review, round 3: a bad value inside the record broke the fallback itself."""
+        os.makedirs(os.path.join(self.pod, ".cache"), exist_ok=True)
+        path = os.path.join(self.pod, ".cache", mp.SENT_FILE)
+        write(path, json.dumps({"preflight": {"requests": "x"}, "chunks": {"k": [1]},
+                                "from_a_later_version": {"kept": True}}))
+        rc, out, err, log = self.render(lambda m, c, k: (_ for _ in ()).throw(prepay_error()),
+                                        "--model", ANSWERS, preflight=True)
+        self.assertEqual(rc, 0, err)
+        fb = self.manifest()["tts"]["fallback"]
+        self.assertEqual((fb["preflight_requests"], fb["preflight_requests_before"]), (1, 0))
+        got = json.loads(read(path))
+        self.assertEqual(got["from_a_later_version"], {"kept": True})
+        self.assertEqual(got["preflight"]["requests"], 1)
 
     def test_the_record_survives_the_cache_pruning(self):
         self.test_what_was_sent_counts_chunks_from_an_earlier_render()
@@ -886,6 +904,22 @@ class Plumbing(unittest.TestCase):
         killpg.assert_called_once_with(4242, pl.signal.SIGTERM)
         self.assertIn("no answer in 1 min", str(e.exception))
 
+    def test_a_group_that_ignores_sigterm_is_killed(self):
+        class Stubborn(object):
+            pid, returncode, calls = 4343, None, 0
+
+            def communicate(self, timeout=None):
+                Stubborn.calls += 1
+                if Stubborn.calls <= 2:                     # the run, then the SIGTERM wait
+                    raise subprocess.TimeoutExpired("bash", timeout)
+                return "", ""
+        with mock.patch.object(pl.subprocess, "Popen", return_value=Stubborn()), \
+                mock.patch.object(pl.os, "killpg") as killpg:
+            with self.assertRaises(pl.LocalError):
+                pl._run(["bash", "-c", "trap '' TERM; sleep 99"], 1)
+        self.assertEqual([c.args[1] for c in killpg.call_args_list],
+                         [pl.signal.SIGTERM, pl.signal.SIGKILL])
+
     def test_the_gemini_key_is_not_handed_on(self):
         with mock.patch.dict(os.environ, {"GEMINI_API_KEY": FAKE_KEY}):
             rc, out, err = pl._run(["/bin/sh", "-c", 'echo "[${GEMINI_API_KEY:-none}]"'], 1)
@@ -938,6 +972,13 @@ class Sizing(unittest.TestCase):
         self.assertEqual((pl.GB_PER_WORKER, pl.THREADS_PER_WORKER), (2.5, 2))
         workers, _ = pl.layout(64, 100)
         self.assertLessEqual(workers * pl.GB_PER_WORKER + pl.RESERVE_GB, 100)
+
+    def test_the_gemini_job_has_time_to_wait_for_a_fallback(self):
+        """Gemini's own waits, then each local-voice step with up to 15 min in the queue."""
+        need = (mp.RATE_WAIT_BUDGET_MIN + mp.REQUEST_TIMEOUT_BUDGET_MIN
+                + sum(m + 15 for _, _, m in pl.STEPS.values()))
+        self.assertLessEqual(need, mp.JOB_HOURS * 60)
+        self.assertEqual((mp.JOB_CPUS, mp.JOB_MEM), (1, "2G"), "never Kokoro's CPUs just in case")
 
     def test_the_jobs_resources(self):
         self.assertEqual(pl.job_resources(JOB_ENV), (16, 24.0))

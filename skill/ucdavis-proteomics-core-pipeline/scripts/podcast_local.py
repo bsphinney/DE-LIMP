@@ -398,19 +398,16 @@ def _run(argv, minutes, drop_slurm=False):
     except subprocess.TimeoutExpired:
         _stop_group(p)
         raise LocalError(f"no answer in {minutes:g} min: stopped")
-    except BaseException:
-        try:
-            os.killpg(p.pid, signal.SIGTERM)
-        except OSError:
-            pass
+    except BaseException:                    # Ctrl-C: the same, with less patience
+        _stop_group(p, grace=5.0)
         raise
     return p.returncode, out, err
 
 
-def _stop_group(p):
+def _stop_group(p, grace=30.0):
     """SIGTERM to the process group first -- an srun then cancels its allocation, a queued one
-    too -- then SIGKILL to what is left after 30 s."""
-    for sig, wait in ((signal.SIGTERM, 30.0), (signal.SIGKILL, 10.0)):
+    too -- then SIGKILL to what is left after `grace` seconds."""
+    for sig, wait in ((signal.SIGTERM, grace), (signal.SIGKILL, 10.0)):
         try:
             os.killpg(p.pid, sig)
         except OSError:

@@ -2172,17 +2172,27 @@ class GeminiTTS(object):
             log(f"[render] other TTS models, used only with --model: {', '.join(other)}")
         return out
 
-    def sent_record(self):
-        """SENT_FILE: {"chunks": {sent_key: {first, last, models}}, "preflight": {requests,
-        last}}, or {}."""
+    def _sent_file(self):
+        """SENT_FILE as it is on disk (a dict), or {}."""
         try:
             with open(os.path.join(self.cache_dir or "", SENT_FILE), encoding="utf-8") as fh:
                 got = json.load(fh)
         except (OSError, ValueError, TypeError):
             return {}
-        if not isinstance(got, dict):
-            return {}
-        return {k: v for k, v in got.items() if k in ("chunks", "preflight") and isinstance(v, dict)}
+        return got if isinstance(got, dict) else {}
+
+    def sent_record(self):
+        """SENT_FILE, read so that no value in it can break a render: {"chunks": {sent_key:
+        {first, last, models}}, "preflight": {"requests": int, last}}."""
+        got = self._sent_file()
+        chunks = got.get("chunks") if isinstance(got.get("chunks"), dict) else {}
+        pre = got.get("preflight") if isinstance(got.get("preflight"), dict) else {}
+        try:
+            n = max(0, int(pre.get("requests") or 0))
+        except (TypeError, ValueError):
+            n = 0
+        return {"chunks": {k: (v if isinstance(v, dict) else {}) for k, v in chunks.items()},
+                "preflight": dict(pre, requests=n)}
 
     def note_sent(self, chunk=None, speak=None):
         """A request is going to Gemini: a chunk's text (its sent_key), or a two-line test
@@ -2190,14 +2200,13 @@ class GeminiTTS(object):
         if not self.cache_dir:
             return
         try:
-            got = self.sent_record()
+            got = self._sent_file()                 # keeps keys another version may add
+            got.update(self.sent_record())
             if chunk is None:
-                rec = got.setdefault("preflight", {})
-                rec["requests"] = int(rec.get("requests") or 0) + 1
+                rec = got["preflight"]
+                rec["requests"] += 1
             else:
-                rec = got.setdefault("chunks", {}).setdefault(sent_key(chunk, speak), {})
-                rec = rec if isinstance(rec, dict) else {}
-                got["chunks"][sent_key(chunk, speak)] = rec
+                rec = got["chunks"].setdefault(sent_key(chunk, speak), {})
                 rec.setdefault("first", now_iso())
                 models = rec["models"] if isinstance(rec.get("models"), list) else []
                 rec["models"] = models + ([self.model] if self.model not in models else [])
@@ -3525,6 +3534,7 @@ def fallback_record(e, gemini, chunks=(), speak=None, cache=None):
     sent, made, other = 0, 0, 0
     if speak and cache:
         record = (gemini.sent_record() if hasattr(gemini, "sent_record") else {}).get("chunks") or {}
+        record = record if isinstance(record, dict) else {}
         models = list(getattr(gemini, "candidates", None) or [])
         mine = set()
         for c in chunks:
@@ -3536,6 +3546,7 @@ def fallback_record(e, gemini, chunks=(), speak=None, cache=None):
         other = len(set(record) - mine)
     this = len(getattr(gemini, "sent_chunks", None) or ())
     before = (getattr(gemini, "sent_before", None) or {}).get("preflight") or {}
+    before = before if isinstance(before, dict) else {}
     return {"from": "gemini", "to": "kokoro", "why": e.why, "reason": f"Gemini failed: {why}",
             "google_said": scrub(e.said) if e.said else None, "stopped_at": e.where,
             "message": scrub(e)[:600], "at": now_iso(),
@@ -3546,7 +3557,7 @@ def fallback_record(e, gemini, chunks=(), speak=None, cache=None):
             "gemini_chunks_not_in_script": other,
             "chunks_sent_to_gemini": this, "gemini_chunks_cached": made,
             "preflight_requests": getattr(gemini, "preflight_sent", 0),
-            "preflight_requests_before": int(before.get("requests") or 0),
+            "preflight_requests_before": before.get("requests") or 0,
             "note": f"Gemini failed ({why}); the whole episode was made with Kokoro on HIVE "
                     "instead, so it has one voice throughout"}
 
@@ -3560,10 +3571,15 @@ def gemini_had(fallback, page=False):
     tests = (fallback.get("preflight_requests") or 0) + (fallback.get("preflight_requests_before")
                                                          or 0)
     if page:
-        if k:
-            return f"the text of {k} of the {total} parts of this transcript"
-        return ("only a sound check, none of this transcript" if tests and not other else
-                "none of this transcript")
+        had = ([f"the text of {k} of the {total} parts of this transcript"] if k else [])
+        had += [f"the text of {other} part(s) not in this transcript"] if other else []
+        if not k:
+            if tests and not other:
+                return "only a sound check, none of this transcript"
+            had = (["a sound check"] if tests else []) + had
+            return (" and ".join(had) + ", none of this transcript" if had else
+                    "none of this transcript")
+        return " and ".join(had)
     parts = []
     if k:
         parts.append(f"the text of {k} of this script's {total} chunk(s), after pronunciation "
