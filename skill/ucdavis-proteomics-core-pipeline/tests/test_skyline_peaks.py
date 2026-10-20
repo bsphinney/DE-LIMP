@@ -661,8 +661,16 @@ class TestReviewFindings(unittest.TestCase):
             self.assertIn(os.path.join(rt, "real"), binds)
 
     def test_two_mods_on_one_residue(self):
-        self.assertEqual(sp.precursor_key("M[+58]ACK", 2),
-                         sp.precursor_key("(UniMod:1)M(UniMod:35)ACK", 2))
+        k = sp.precursor_key
+        self.assertEqual(k("M[+58]ACK", 2), k("(UniMod:1)M(UniMod:35)ACK", 2))
+        self.assertEqual(k("M[+42]ACK", 2), k("(UniMod:1)MACK", 2))
+        # one of the two is never the residue with both (an acetyl-only peptide is not its
+        # acetyl + oxidation form)
+        self.assertNotEqual(k("(UniMod:1)MACK", 2), k("(UniMod:1)M(UniMod:35)ACK", 2))
+        self.assertEqual(k("PEPM[+16]K", 2), k("PEPM(UniMod:35)K", 2))
+        self.assertEqual(k("PEPM[+15.994915]K", 2), k("PEPM(UniMod:35)K", 2))
+        self.assertNotEqual(k("PEPM[+16]K", 2), k("PEPMK", 2))
+        self.assertNotEqual(k("PEPM(UniMod:99999)K", 2), k("PEPM[+16]K", 2))     # unknown id
 
     def write_record(self, out_dir, rec):
         os.makedirs(os.path.join(out_dir, "skyline"), exist_ok=True)
@@ -674,7 +682,8 @@ class TestReviewFindings(unittest.TestCase):
             os.makedirs(os.path.join(td, "tables"))
             with open(os.path.join(td, "tables", "de_provenance.json"), "w") as fh:
                 fh.write('{"adjp": 0.05}')
-            self.write_record(td, dict(OK_REC, de_record_sha256=sp.de_fingerprint(td)))
+            de = os.path.join(td, "tables", "de_provenance.json")
+            self.write_record(td, dict(OK_REC, de_record=de, de_record_sha256=sp.de_fingerprint(de)))
             self.assertEqual(sp.manifest_line(td, True)[0], "OK")
             with open(os.path.join(td, "tables", "de_provenance.json"), "w") as fh:
                 fh.write('{"adjp": 0.05, "rerun": true}')
@@ -683,6 +692,15 @@ class TestReviewFindings(unittest.TestCase):
             level, _n, note = sp.manifest_line(td, True)
             self.assertEqual(level, "SKIPPED")
             self.assertIn("run again", note)
+
+    def test_a_check_made_without_a_de_goes_stale_when_one_appears(self):
+        with tempfile.TemporaryDirectory() as td:
+            self.write_record(td, dict(OK_REC, de_record=None, de_record_sha256=None))
+            self.assertEqual(sp.record_state(td)[0], "ok")
+            os.makedirs(os.path.join(td, "tables"))
+            with open(os.path.join(td, "tables", "de_provenance.json"), "w") as fh:
+                fh.write("{}")
+            self.assertEqual(sp.record_state(td)[0], "stale")
 
     def test_an_unreadable_record_is_said(self):
         with tempfile.TemporaryDirectory() as td:
@@ -828,6 +846,144 @@ class TestReviewFindings(unittest.TestCase):
             sp.main(["join", "--work", w])
             self.assertIn("build job ended without a result", sp.load_record(td)["reason"])
 
+    def test_a_job_of_an_earlier_plan_does_nothing(self):
+        with tempfile.TemporaryDirectory() as td:
+            w = os.path.join(td, sp.WORK)
+            os.makedirs(os.path.join(w, "status"))
+            with open(os.path.join(w, "plan.json"), "w") as fh:
+                json.dump(dict(plan_for(work=w), out=td, plan_id="new"), fh)
+            with mock.patch("sys.stderr", new=io.StringIO()), \
+                    self.assertRaises(SystemExit) as e:
+                sp.main(["join", "--work", w, "--plan-id", "old"])
+            self.assertEqual(e.exception.code, 0)
+            self.assertFalse(os.path.exists(sp.record_path(td)))
+            t = sp.job_script(dict(plan_for(), plan_id="p 1"), "join", ("high", "a", "q"))
+            self.assertIn("--plan-id 'p 1'", t)
+
+    def test_submit_records_each_job_as_it_is_made(self):
+        import subprocess
+        t = sp.submit_script(plan_for())
+        self.assertEqual(t.count('>> "$J"'), 3)
+        self.assertLess(t.index("build"), t.index("sky_2_import"))
+        self.assertEqual(subprocess.run(["bash", "-n"], input=t, text=True).returncode, 0)
+
+    def _cancel_case(self, td, sacct_out, scancel_rc=0, status="planned"):
+        os.makedirs(os.path.join(td, sp.WORK), exist_ok=True)
+        with open(os.path.join(td, sp.WORK, "jobs.txt"), "w") as fh:
+            fh.write("build\t301\nimport\t302\n")
+        with open(sp.record_path(td), "w") as fh:
+            json.dump({"schema": sp.SCHEMA, "status": status, "plan_id": "p",
+                       "reason": "x"}, fh)
+        calls = []
+
+        def fake(argv, **k):
+            calls.append(argv)
+            if argv[0] == "sacct":
+                return mock.Mock(returncode=0, stdout=sacct_out, stderr="")
+            return mock.Mock(returncode=scancel_rc, stdout="", stderr="scancel: error")
+        return calls, fake
+
+    def test_a_failing_scancel_refuses(self):
+        me = getpass.getuser()
+        with tempfile.TemporaryDirectory() as td:
+            calls, fake = self._cancel_case(td, f"301|{me}|sky_build|RUNNING\n302|{me}|sky_import|PENDING\n", 1)
+            with mock.patch.object(sp.subprocess, "run", fake), \
+                    mock.patch("sys.stdout", new=io.StringIO()), self.assertRaises(SystemExit) as e:
+                sp.main(["skip", "--out", td, "--reason", "x"])
+            self.assertIn("scancel 301 302 failed", str(e.exception))
+            self.assertEqual(sp.load_record(td)["status"], "planned")
+
+    def test_a_job_accounting_does_not_know_yet(self):
+        me = getpass.getuser()
+        with tempfile.TemporaryDirectory() as td:   # just submitted: refuse
+            calls, fake = self._cancel_case(td, f"301|{me}|sky_build|RUNNING\n")
+            with mock.patch.object(sp.subprocess, "run", fake), \
+                    mock.patch("sys.stdout", new=io.StringIO()), self.assertRaises(SystemExit) as e:
+                sp.main(["skip", "--out", td, "--reason", "x"])
+            self.assertIn("does not know job(s) 302", str(e.exception))
+        with tempfile.TemporaryDirectory() as td:   # a finished run long ago: gone is finished
+            calls, fake = self._cancel_case(td, "", status="skipped")
+            with mock.patch.object(sp.subprocess, "run", fake), \
+                    mock.patch("sys.stdout", new=io.StringIO()), \
+                    mock.patch("sys.stderr", new=io.StringIO()):
+                sp.main(["skip", "--out", td, "--reason", "x"])
+            self.assertNotIn("scancel", [c[0] for c in calls])
+            self.assertIn("Turned off", sp.load_record(td)["reason"])
+
+    def test_replan_while_jobs_run_cancels_them(self):
+        me = getpass.getuser()
+        with tempfile.TemporaryDirectory() as td:
+            out = os.path.join(td, "output", "skyline")
+            calls, fake = self._cancel_case(
+                out, f"301|{me}|sky_build|COMPLETED\n302_[1-2]|{me}|sky_import|PENDING\n")
+            with mock.patch.object(sp.subprocess, "run", fake), \
+                    mock.patch("sys.stdout", new=io.StringIO()), \
+                    mock.patch("sys.stderr", new=io.StringIO()):
+                rc = sp.main(["plan", "--search", os.path.join(td, "nosearch"), "--out", out,
+                              "--replan"])
+            self.assertEqual(rc, 3)                       # this plan cannot run: no search
+            self.assertIn(["scancel", "302"], calls)
+            self.assertFalse(os.path.isdir(os.path.join(out, sp.WORK)))
+
+    def test_a_plan_stopped_by_an_error_says_so(self):
+        with tempfile.TemporaryDirectory() as td:
+            search = TestNotRun().make_search(td)
+            out = os.path.join(td, "output", "skyline")
+            with mock.patch.object(sp, "make_plan", side_effect=SystemExit("bad --account")), \
+                    self.assertRaises(SystemExit):
+                sp.main(["plan", "--search", search, "--out", out])
+            rec = sp.load_record(out)
+            self.assertEqual(rec["status"], "skipped")
+            self.assertIn("bad --account", rec["reason"])
+
+    def test_a_failed_join_removes_its_half_made_outputs(self):
+        with tempfile.TemporaryDirectory() as td:
+            w = os.path.join(td, sp.WORK)
+            for d in ("status", "logs"):
+                os.makedirs(os.path.join(w, d))
+            p = dict(plan_for(raw=["/d/r1.raw"], work=w), out=td, plan_id="p1")
+            with open(os.path.join(w, "plan.json"), "w") as fh:
+                json.dump(p, fh)
+            with open(sp.record_path(td), "w") as fh:
+                json.dump({"schema": sp.SCHEMA, "status": "planned", "plan_id": "p1"}, fh)
+            for name, body in (("build.json", {"ok": True, "plan_id": "p1"}),
+                               ("import_1.json", {"rc": 0, "plan_id": "p1"})):
+                with open(os.path.join(w, "status", name), "w") as fh:
+                    json.dump(body, fh)
+            for f in (os.path.join(td, "skyline_precursors.tsv"), os.path.join(td, "peaks_G.png"),
+                      os.path.join(w, "skyline_transitions.tsv"),
+                      os.path.join(w, "skyline_chromatograms.tsv"), p["share_zip"]):
+                with open(f, "w") as fh:
+                    fh.write("x")
+            with mock.patch.object(sp, "run_skyline", lambda *a, **k: (0, "log")), \
+                    mock.patch.object(sp, "finish", side_effect=ValueError("bad table")):
+                self.assertEqual(sp.main(["join", "--work", w, "--plan-id", "p1"]), 1)
+            left = [f for f in os.listdir(td) if sp.OWN_OUTPUTS.match(f)]
+            self.assertEqual(left, [])
+            self.assertIn("ValueError: bad table", sp.load_record(td)["reason"])
+
+    def test_the_disagreement_picture_shows_the_runs_that_disagreed(self):
+        runs = [f"run{i:02d}" for i in range(30)]
+        flagged = [{"precursor": "X/2+", "run": "run29"}, {"precursor": "X/2+", "run": "run27"},
+                   {"precursor": "Y/3+", "run": "run28"}]
+        got = sp.disagreement_runs(flagged, {"X/2+"}, runs, {})
+        self.assertEqual(len(got), sp.MAX_RUNS_DRAWN)
+        self.assertIn("run29", got)
+        self.assertIn("run27", got)
+        self.assertNotIn("run28", got)               # another precursor's disagreement
+
+    def test_dda_from_the_manifest(self):
+        with tempfile.TemporaryDirectory() as td:
+            search = TestNotRun().make_search(td)
+            man = os.path.join(td, "workflow.manifest.json")
+            with open(man, "w") as fh:
+                json.dump({"acquisition": "DDA", "instrument_class": "orbitrap_generic"}, fh)
+            out = os.path.join(td, "output", "skyline")
+            with mock.patch("sys.stdout", new=io.StringIO()):
+                self.assertEqual(sp.main(["plan", "--search", search, "--out", out,
+                                          "--manifest", man]), 3)
+            self.assertIn("DDA", sp.load_record(out)["reason"])
+
     def test_nothing_matched_is_not_ok(self):
         with tempfile.TemporaryDirectory() as td:
             w = os.path.join(td, sp.WORK)
@@ -846,6 +1002,10 @@ class TestReviewFindings(unittest.TestCase):
             with self.assertRaises(sp.Skip) as e:
                 sp.finish(p, build, ["/d/r1.raw"], [])
             self.assertIn("nothing could be compared", str(e.exception))
+            with open(os.path.join(w, "diann_targets.tsv"), "w") as fh:   # DIA-NN: no rows
+                fh.write("Run\tProtein.Group\tModified.Sequence\tPrecursor.Charge\n")
+            with self.assertRaises(sp.Skip):
+                sp.finish(p, build, ["/d/r1.raw"], [])
 
     def test_the_median_is_over_the_rows_skyline_agreed_on(self):
         # the reviewer's numbers: 1, 2, 50, 60 and 70 s -> 50, 60, 70 flagged; median of 1, 2
