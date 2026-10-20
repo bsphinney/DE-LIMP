@@ -628,6 +628,23 @@ class WhereItRuns(unittest.TestCase):
             self.assertIn("HIVE could not be asked (Connection refused)", str(e.exception))
 
 
+class RemoteCleanup(unittest.TestCase):
+    def test_closing_never_hides_the_real_error_and_names_what_is_left(self):
+        r = pl.Remote("staff1")
+        with mock.patch.object(pl.Remote, "_hx", return_value=(0, "", "")):
+            local, word = r.open()
+        self.assertIn("$HOME/.proteomics-pipeline/podcast-local/", word)
+
+        def gone(*a, **k):
+            raise pl.LocalError("no answer in 2 min: stopped")
+        err = __import__("io").StringIO()
+        with mock.patch.object(pl.Remote, "_hx", gone), mock.patch.object(pl.sys, "stderr", err):
+            r.close(local)                                       # no exception
+        self.assertFalse(os.path.exists(local))
+        self.assertIn("could not remove ~/.proteomics-pipeline/podcast-local/", err.getvalue())
+        self.assertIn("remove it by hand", err.getvalue())
+
+
 class Sizing(unittest.TestCase):
     def test_workers_from_the_cpus_and_the_memory(self):
         for (cpus, mem), want in (((16, 24), (8, 16)), ((16, 32), (8, 16)), ((8, 24), (4, 8)),

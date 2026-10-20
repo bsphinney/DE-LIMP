@@ -323,10 +323,20 @@ class Remote(Runner):
                 raise LocalError(f"could not copy {n} back from HIVE: {_tail(err or out)}")
 
     def close(self, local):
+        """Never raises: it runs in `finally` blocks, where its own error would hide the real
+        one. A folder it could not remove is named, so a person can."""
         rid = self._ids.pop(local, None)
-        if rid:
-            self._hx(f"rm -rf {_remote(rid)[0]}", timeout=120)
         shutil.rmtree(local, ignore_errors=True)
+        if not rid:
+            return
+        try:
+            rc, out, err = self._hx(f"rm -rf {_remote(rid)[0]}", timeout=120)
+        except LocalError as e:
+            rc, err = 1, str(e)
+        if rc:
+            sys.stderr.write(f"[podcast_local] [WARN] could not remove {_remote(rid)[0]} on HIVE "
+                             f"({_tail(err, 200)}): remove it by hand (it holds the script's "
+                             "lines or the episode)\n")
 
 
 def _run(argv, minutes):
