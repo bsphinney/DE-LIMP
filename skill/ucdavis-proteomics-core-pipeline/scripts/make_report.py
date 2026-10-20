@@ -19,6 +19,14 @@ import sys, os, json, glob, argparse, re
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from report_files import SHARE_NAME  # noqa: E402  defined once; no make_podcast / notify_slack
+try:   # the peak check's rule and pinned Skyline, each defined once (a partial scripts/: generic)
+    from skyline_peaks import APEX_DIFF_S  # noqa: E402
+    from resolve_defaults import SKYLINE_PIN  # noqa: E402
+    _APEX = f"more than {APEX_DIFF_S:g} s from DIA-NN's"
+    _SKYLINE = f"Skyline {SKYLINE_PIN['version']} or later"
+except Exception:                            # recorded in the text: never a guessed number
+    _APEX, _SKYLINE = "too far from DIA-NN's (skyline_provenance.json results.apex_diff_s)", \
+        "the Skyline version its record names (tool.version) or later"
 
 # (regex on basename, category, description). First match wins.
 PEAKS = "Peak check (Skyline)"
@@ -41,12 +49,11 @@ CATALOG = [
      "peak edges (minutes), areas (MS1, fragments), dot products and mass error."),
     (r"^disagreements\.tsv$", PEAKS,
      "The precursor-runs where Skyline picked a different peak from DIA-NN's: no peak, its apex "
-     "further from DIA-NN's than the record's results.apex_diff_s, or outside DIA-NN's peak edges "
-     "-- the peaks to look at before trusting their numbers."),
+     f"{_APEX}, or outside DIA-NN's peak edges -- the peaks to look at before trusting their "
+     "numbers."),
     (r".*_top_hits\.sky\.zip$", PEAKS,
      "The Skyline document of the checked proteins, with the results of every run: open it in "
-     "the Skyline version its record names (tool.version) or later, on Windows, to look at any "
-     "peak, or upload it to Panorama."),
+     f"{_SKYLINE} (Windows) to look at any peak, or upload it to Panorama."),
     (r"^skyline_provenance\.json$", PEAKS,
      "The peak check's record: Skyline version, container and its sha256, the tolerance and its "
      "source, how the proteins were chosen, the settings copied from the search, the outcome."),

@@ -20,6 +20,7 @@ Stdlib only; the pictures test needs matplotlib and is skipped without it.
 """
 import csv
 import io
+import getpass
 import json
 import ntpath
 import os
@@ -124,6 +125,7 @@ class TestSearchSettings(unittest.TestCase):
         self.assertEqual(s["charges"], [2, 3, 4])
         self.assertEqual(s["fragment_mz"], [200.0, 1800.0])
         self.assertTrue(any("methionine" in x for x in s["not_carried_over"]))
+        self.assertTrue(any("precursor m/z range (357-1105)" in x for x in s["not_carried_over"]))
 
     def test_a_path_with_a_space_stays_whole(self):
         self.assertIn("/data/run A/r1.raw", sp.command_flags(CMD)["f"])
@@ -256,7 +258,7 @@ class TestCommandBuilders(unittest.TestCase):
         self.assertEqual(first.count("--import-file="), 2)
         self.assertNotIn("r3.raw", batch)
         self.assertIn('--in="Z:\\w\\skyline_work\\T_top_hits.sky"', first)
-        self.assertIn("--share-type=complete", batch)
+        self.assertIn("--share-type=minimal", batch)
         self.assertIn('--report-name="' + sp.REPORT_PRECURSORS + '"', batch)
         self.assertIn("--chromatogram-products", batch)
         with self.assertRaises(sp.Skip):
@@ -638,6 +640,26 @@ class TestReviewFindings(unittest.TestCase):
                         binds.index("/raw/proj/session/output/skyline:"
                                     "/raw/proj/session/output/skyline"))
 
+    def test_a_raw_file_searched_through_a_link(self):
+        # DIA-NN cuts its command at '--', so such a run was searched through a link, whose name
+        # is the run's name; Skyline imports the link, and both folders are bound
+        prov = {"files": ["/raw/a--b.d", "/raw/c.d"],
+                "input_links": [{"original": "/raw/a--b.d", "link": "/s/input_links/a_b.d",
+                                 "run_name": "a_b", "renamed": True}]}
+        raw = sp.raw_files_of(prov, None)
+        self.assertEqual(raw, ["/s/input_links/a_b.d", "/raw/c.d"])
+        with tempfile.TemporaryDirectory() as td:
+            real = os.path.join(td, "real")
+            os.makedirs(real)
+            open(os.path.join(real, "x.raw"), "w").close()
+            os.makedirs(os.path.join(td, "links"))
+            os.symlink(os.path.join(real, "x.raw"), os.path.join(td, "links", "x.raw"))
+            binds = sp.ro_binds(os.path.join(td, "s"), [os.path.join(td, "links", "x.raw")])
+            rt = os.path.realpath(td)
+            self.assertTrue(any(b in binds for b in (os.path.join(td, "links"),
+                                                      os.path.join(rt, "links"))), binds)
+            self.assertIn(os.path.join(rt, "real"), binds)
+
     def test_two_mods_on_one_residue(self):
         self.assertEqual(sp.precursor_key("M[+58]ACK", 2),
                          sp.precursor_key("(UniMod:1)M(UniMod:35)ACK", 2))
@@ -692,16 +714,119 @@ class TestReviewFindings(unittest.TestCase):
                 with open(os.path.join(td, f), "w") as fh:
                     fh.write("x")
             calls = []
-            with mock.patch.object(sp.subprocess, "run",
-                                   lambda argv, **k: calls.append(argv)), \
+            me = getpass.getuser()
+            sacct = (f"101|{me}|sky_build|COMPLETED\n102_1|{me}|sky_import|RUNNING\n"
+                     f"102_[2-3%3]|{me}|sky_import|PENDING\n103|{me}|sky_join|PENDING\n")
+
+            def fake(argv, **k):
+                calls.append(argv)
+                return mock.Mock(returncode=0, stdout=sacct if argv[0] == "sacct" else "",
+                                 stderr="")
+            with mock.patch.object(sp.subprocess, "run", fake), \
                     mock.patch("sys.stdout", new=io.StringIO()), \
                     mock.patch("sys.stderr", new=io.StringIO()):
                 sp.main(["skip", "--out", td, "--reason", "not wanted"])
-            self.assertEqual(calls, [["scancel", "101", "102", "103"]])
+            # only the live ones, after checking they are this user's and this step's
+            self.assertEqual(calls[0][0], "sacct")
+            self.assertEqual(calls[1], ["scancel", "102", "103"])
             self.assertFalse(os.path.exists(os.path.join(td, "peaks_G.png")))
             self.assertFalse(os.path.exists(os.path.join(td, "T_top_hits.sky.zip")))
             self.assertTrue(os.path.exists(os.path.join(td, "notes.txt")))   # not its own: kept
             self.assertFalse(os.path.isdir(os.path.join(td, sp.WORK)))
+
+    def test_jobs_that_cannot_be_checked_or_are_not_ours_are_left_alone(self):
+        with tempfile.TemporaryDirectory() as td:
+            os.makedirs(os.path.join(td, sp.WORK))
+            with open(os.path.join(td, sp.WORK, "jobs.txt"), "w") as fh:
+                fh.write("build\t201\n")
+            with open(sp.record_path(td), "w") as fh:
+                json.dump({"schema": sp.SCHEMA, "status": "planned", "plan_id": "p"}, fh)
+            for answer in (OSError("no sacct"),
+                           mock.Mock(returncode=0, stdout="201|someone|other_job|RUNNING\n",
+                                     stderr="")):
+                calls = []
+
+                def fake(argv, **k):
+                    calls.append(argv)
+                    if isinstance(answer, Exception):
+                        raise answer
+                    return answer
+                with mock.patch.object(sp.subprocess, "run", fake), \
+                        mock.patch("sys.stdout", new=io.StringIO()):
+                    with self.assertRaises(SystemExit) as e:
+                        sp.main(["skip", "--out", td, "--reason", "x"])
+                self.assertIn("were not cancelled", str(e.exception))
+                self.assertNotIn("scancel", [c[0] for c in calls])
+                self.assertEqual(sp.load_record(td)["status"], "planned")
+
+    def test_a_plan_that_cannot_run_leaves_no_old_pictures(self):
+        with tempfile.TemporaryDirectory() as td:
+            out = os.path.join(td, "output", "skyline")
+            os.makedirs(out)
+            with open(os.path.join(out, "peaks_OLD.png"), "w") as fh:
+                fh.write("x")
+            with open(sp.record_path(out), "w") as fh:
+                json.dump(dict(OK_REC), fh)
+            with mock.patch("sys.stdout", new=io.StringIO()):
+                rc = sp.main(["plan", "--search", os.path.join(td, "nosearch"), "--out", out])
+            self.assertEqual(rc, 3)
+            self.assertFalse(os.path.exists(os.path.join(out, "peaks_OLD.png")))
+            self.assertTrue(sp.report_data(os.path.dirname(out))["md"].startswith("**Not run.**"))
+
+    def test_planned_and_submitted_are_told_apart(self):
+        with tempfile.TemporaryDirectory() as td:
+            self.write_record(td, {"schema": sp.SCHEMA, "status": "planned", "plan_id": "p"})
+            self.assertEqual(sp.record_state(td)[0], "planned")
+            self.assertIn("never submitted", sp.report_data(td)["md"])
+            os.makedirs(os.path.join(td, "skyline", sp.WORK))
+            with open(os.path.join(td, "skyline", sp.WORK, "jobs.txt"), "w") as fh:
+                fh.write("build\t1\n")
+            self.assertEqual(sp.record_state(td)[0], "submitted")
+            self.assertIn("submitted", sp.report_data(td)["md"])
+
+    def test_a_crash_in_the_join_is_recorded(self):
+        with tempfile.TemporaryDirectory() as td:
+            w = os.path.join(td, sp.WORK)
+            for d in ("status", "logs"):
+                os.makedirs(os.path.join(w, d))
+            p = dict(plan_for(raw=["/d/r1.raw"], work=w), out=td, plan_id="p1")
+            with open(os.path.join(w, "plan.json"), "w") as fh:
+                json.dump(p, fh)
+            with open(sp.record_path(td), "w") as fh:
+                json.dump({"schema": sp.SCHEMA, "status": "planned", "plan_id": "p1"}, fh)
+            with open(os.path.join(w, "status", "build.json"), "w") as fh:
+                json.dump({"ok": True, "plan_id": "p1"}, fh)
+            with open(os.path.join(w, "status", "import_1.json"), "w") as fh:
+                json.dump({"rc": 0, "plan_id": "p1"}, fh)
+            for f in (os.path.join(td, "skyline_precursors.tsv"),
+                      os.path.join(w, "skyline_transitions.tsv"),
+                      os.path.join(w, "skyline_chromatograms.tsv"), p["share_zip"]):
+                with open(f, "w") as fh:
+                    fh.write("x")
+
+            def boom(*a, **k):
+                raise KeyError("selection")
+            with mock.patch.object(sp, "run_skyline", lambda *a, **k: (0, "log")), \
+                    mock.patch.object(sp, "finish", boom):
+                self.assertEqual(sp.main(["join", "--work", w]), 1)
+            rec = sp.load_record(td)
+            self.assertEqual(rec["status"], "skipped")
+            self.assertIn("the join job failed: KeyError", rec["reason"])
+
+    def test_a_status_file_of_another_plan_is_not_taken(self):
+        with tempfile.TemporaryDirectory() as td:
+            w = os.path.join(td, sp.WORK)
+            for d in ("status", "logs"):
+                os.makedirs(os.path.join(w, d))
+            p = dict(plan_for(raw=["/d/r1.raw"], work=w), out=td, plan_id="new")
+            with open(os.path.join(w, "plan.json"), "w") as fh:
+                json.dump(p, fh)
+            with open(sp.record_path(td), "w") as fh:
+                json.dump({"schema": sp.SCHEMA, "status": "planned", "plan_id": "new"}, fh)
+            with open(os.path.join(w, "status", "build.json"), "w") as fh:
+                json.dump({"ok": True, "plan_id": "old"}, fh)       # an earlier plan's job
+            sp.main(["join", "--work", w])
+            self.assertIn("build job ended without a result", sp.load_record(td)["reason"])
 
     def test_nothing_matched_is_not_ok(self):
         with tempfile.TemporaryDirectory() as td:
@@ -722,10 +847,15 @@ class TestReviewFindings(unittest.TestCase):
                 sp.finish(p, build, ["/d/r1.raw"], [])
             self.assertIn("nothing could be compared", str(e.exception))
 
-    def test_the_median_is_said_over_all_compared(self):
+    def test_the_median_is_over_the_rows_skyline_agreed_on(self):
+        # the reviewer's numbers: 1, 2, 50, 60 and 70 s -> 50, 60, 70 flagged; median of 1, 2
+        rows = [{"apex_difference_s": d, "reason": "" if d <= sp.APEX_DIFF_S else "apex far"}
+                for d in (1, 2, 50, 60, 70)]
+        s = sp.agreement_summary(rows)
+        self.assertEqual(s["apex_median_abs_s"], 1.5)
+        self.assertEqual(s["within_s_pct"], 40.0)
         md = sp.report_section(dict(OK_REC))["md"]
-        self.assertIn("over all of them, the median difference", md)
-        self.assertNotIn("for the others", md)
+        self.assertIn("where it picked the same peak, the median difference", md)
 
 
 class TestBrief(unittest.TestCase):

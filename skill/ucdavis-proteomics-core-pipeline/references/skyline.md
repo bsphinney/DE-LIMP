@@ -74,8 +74,11 @@ commands on a login node. Everything heavy runs in the three jobs.
   64-CPU cap on HIVE's `high`).
 - `--partition / --account / --qos`: the queue (default: the skill's queue rule,
   `run_search.slurm_queue`).
-- `--replan`: plan again although the last plan has not written its result. Its jobs (named
-  in `skyline_work/jobs.txt`) are cancelled first. Without it, `plan` refuses. Each plan has an
+- `--replan`: plan again although the last plan has not written its result. Its jobs still
+  running are cancelled first: only the ids `skyline_work/jobs.txt` names, and only those SLURM
+  (`sacct`) says are yours, named as this step's jobs (`sky_*`) and not finished. When that cannot
+  be checked, or a recorded job is not this step's, nothing is cancelled and `plan` refuses.
+  Without `--replan`, `plan` refuses. `skip` cancels the same way. Each plan has an
   id, and a job writes the record only while it is its own plan's, so a job of an earlier plan
   never overwrites a newer record or a `skip`.
 - **A DE run again** after the check makes the record **out of date**: the record keeps the
@@ -137,8 +140,14 @@ run):
 - carbamidomethyl C (Skyline's default; the step is not run without `--unimod4`);
 - variable modifications, which Skyline adds from the library (`--import-search-add-mods`).
 
-**Not carried over:** DIA-NN's N-terminal methionine excision (`--met-excision`), which has no
-SkylineCmd option. The report says so.
+**Not carried over** (the report says so):
+- DIA-NN's N-terminal methionine excision (`--met-excision`): no SkylineCmd option.
+- DIA-NN's precursor m/z range (`--min-pr-mz`/`--max-pr-mz`): SkylineCmd has no precursor m/z
+  filter of its own. The checked precursors are DIA-NN's library precursors, all inside it.
+
+**Raw files** are the ones the search read (`search_provenance.json` `files`). A run whose path
+holds `--` was searched through a link (`input_links`), which may rename it; Skyline imports the
+same link, so its run name matches DIA-NN's.
 
 **Fixed settings**, the ones the trial's agreement numbers were measured with:
 - DIA, with the isolation scheme read from the first raw file;
@@ -187,7 +196,7 @@ ucd-hpc's `lint-jobscript.sh`.
 |---|---|---|
 | `sky_1_build.sbatch` | checks the container, chooses the proteins, cuts the FASTA to them, reads DIA-NN's rows for them, then **one** SkylineCmd call builds the document | 4 CPUs, 16G, 60 min |
 | `sky_2_import.sbatch` | a SLURM array, **one raw file per task** (`--import-no-join`) | 4 CPUs, 16G, 60 min each, at most `--max-parallel` at once |
-| `sky_3_join.sbatch` | **one** `--batch-commands` call joins the per-file caches and exports the precursor and transition reports, the chromatograms of the targets and the `.sky.zip`; then it draws the pictures and writes the record | 4 CPUs, 16G, 90 min |
+| `sky_3_join.sbatch` | **one** `--batch-commands` call joins the per-file caches and exports the precursor and transition reports, the chromatograms of the targets and the `.sky.zip` (`--share-type=minimal`); then it draws the pictures and writes the record | 4 CPUs, 16G, 90 min |
 
 `submit.sh` chains the jobs:
 - the imports wait for the build (`afterok`, `--kill-on-invalid-dep=yes`: a failed build cancels
@@ -247,17 +256,28 @@ Plus queue waits. A 12-run timsTOF project should take about 10-15 min of wall t
   bar.
 - `skyline_precursors.tsv`: Skyline's precursor report (apex, peak edges, areas, dotp, idotp,
   mass error, ion mobility).
-- `disagreements.tsv`: the table above, one row per flagged precursor-run.
+- `disagreements.tsv`: the table above, one row per flagged precursor-run. The report's median
+  apex difference is over the precursor-runs where Skyline picked the same peak, so a flagged 50 s
+  never moves it.
 - `<name>_top_hits.sky.zip`: the Skyline document with every run's results. It opens in Skyline
-  26.1 or later and can be uploaded to Panorama.
+  26.1 or later and can be uploaded to Panorama. It is shared "minimal": the library and cache are
+  cut to the checked proteins. On the HeLa test it was 3.2 MB against 12.5 MB for "complete", and
+  reopened with the same 348 precursor rows.
 - `skyline_provenance.json` (schema `skyline_peak_check/1`), the record. It holds:
-  - the status (`ok`, `skipped` with the reason and stage, or `planned`);
+  - the status (`ok`, `skipped` with the reason and stage, or `planned`), and the plan's id: a job
+    writes the record only while it is its own plan's;
+  - the sha256 of the `de_provenance.json` the proteins were chosen from;
   - the tool, its container, sha256 and how it was checked;
   - the tolerance and its source;
   - N and its source, and the selection mode;
   - every setting and where it came from;
   - the runs imported and failed;
   - the results, the figures with their captions, and the Methods paragraph.
+
+**What the report says for each state** (`record_state`): "Not run." with the reason (skipped,
+or planned but never submitted); "Not finished when this report was made." (submitted, no result
+yet); "Out of date." (the DE was run again); "Could not be read."; otherwise the section above.
+`MANIFEST.txt` says the same, with what to run.
 
 **Where it goes:**
 - The report adds a "Peak check (Skyline)" section from the record, after the top-protein tables,

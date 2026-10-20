@@ -104,6 +104,7 @@ JOB_CPUS = 4
 JOB_MEM = "16G"
 JOB_MINUTES = {"build": 60, "import": 60, "join": 90, "prm": 30}
 MAX_PARALLEL_DEFAULT = 8
+SHARE_TYPE = "minimal"              # the .sky.zip (join_batch): checked against "complete"
 # The follow-up assay: the 3 best peptides, 6 best fragments and one charge per protein, judged
 # from the measured areas (Skyline's own refinement).
 PRM_REFINE_ARGS = ["--refine-max-peptide-peak-rank=3", "--refine-max-transition-peak-rank=6",
@@ -407,6 +408,11 @@ def search_settings(flags):
            "max_var_mods": num("var-mods") if flags.get("var-mods") else None,
            "fixed_mods": ["Carbamidomethyl (C)"],
            "not_carried_over": []}
+    if flags.get("min-pr-mz") or flags.get("max-pr-mz"):
+        lo, hi = (flags.get("min-pr-mz") or ["?"])[-1], (flags.get("max-pr-mz") or ["?"])[-1]
+        out["not_carried_over"].append(
+            f"DIA-NN's precursor m/z range ({lo}-{hi}): SkylineCmd has no precursor m/z filter of "
+            f"its own; the checked precursors are DIA-NN's library precursors, all inside it")
     if "met-excision" in flags:
         out["not_carried_over"].append(
             "DIA-NN's N-terminal methionine excision (--met-excision): SkylineCmd has no option "
@@ -539,8 +545,11 @@ def join_batch(plan, imported):
     lines.append([f"--in={win(doc)}",
                   f"--chromatogram-file={win(os.path.join(w, 'skyline_chromatograms.tsv'))}",
                   "--chromatogram-precursors", "--chromatogram-products"])
+    # minimal: the library and cache cut to the targets. On the HeLa test (2026-10-20) it was
+    # 3.2 MB against 12.5 MB for "complete", opened with SkylineCmd --in and reported the same
+    # 348 precursor rows (apex, start, end) as the complete archive
     lines.append([f"--in={win(doc)}", f"--share-zip={win(plan['share_zip'])}",
-                  "--share-type=complete"])
+                  f"--share-type={SHARE_TYPE}"])
     return "\n".join(batch_line(x) for x in lines) + "\n"
 
 
@@ -560,7 +569,7 @@ def apptainer_argv(plan, rw=()):
     return argv + [plan["sif"]]
 
 
-def ro_binds(search_dir, raw_files, fasta=None):
+def ro_binds(search_dir, raw_files, fasta=None, files=()):
     """The folders to bind read-only: the search's, the raw files', the FASTA's -- each as given
     AND as its real path, so a raw file reached through a link (a session's raw_data/, a renamed
     run) is visible where Skyline is told it is and where it really is. A folder inside another is
@@ -574,6 +583,8 @@ def ro_binds(search_dir, raw_files, fasta=None):
     if fasta:
         dirs |= both(os.path.dirname(os.path.abspath(fasta)))
         dirs.add(os.path.dirname(os.path.realpath(fasta)))
+    for f in files:          # the search's own files may be links into another folder
+        dirs.add(os.path.dirname(os.path.realpath(f)))
     keep = []
     for d in sorted(dirs, key=lambda x: (len(x), x)):
         if not any(d == k or d.startswith(k.rstrip("/") + "/") for k in keep):
@@ -971,15 +982,26 @@ def write_disagreements(path, rows, gene_of):
     os.replace(path + ".part", path)
 
 
+def _median(xs):
+    xs = sorted(xs)
+    if not xs:
+        return None
+    mid = len(xs) // 2
+    return xs[mid] if len(xs) % 2 else (xs[mid - 1] + xs[mid]) / 2
+
+
 def agreement_summary(compared):
-    diffs = sorted(abs(r["apex_difference_s"]) for r in compared
-                   if r["apex_difference_s"] is not None)
-    if not diffs:
-        return {"compared": len(compared), "apex_median_abs_s": None, "within_s_pct": None}
-    mid = len(diffs) // 2
-    med = diffs[mid] if len(diffs) % 2 else (diffs[mid - 1] + diffs[mid]) / 2
-    return {"compared": len(compared), "apex_median_abs_s": round(med, 2),
-            "within_s_pct": round(100.0 * sum(d <= APEX_DIFF_S for d in diffs) / len(diffs), 1)}
+    """-> compared; apex_median_abs_s: the median |apex difference| over the precursor-runs where
+    Skyline did NOT pick a different peak (the report's "for the others"; a flagged row's 50 s
+    must not move it); within_s_pct: the share of all compared rows within APEX_DIFF_S."""
+    diffs = [abs(r["apex_difference_s"]) for r in compared if r["apex_difference_s"] is not None]
+    agreed = [abs(r["apex_difference_s"]) for r in compared
+              if r["apex_difference_s"] is not None and not r.get("reason")]
+    med = _median(agreed)
+    return {"compared": len(compared),
+            "apex_median_abs_s": None if med is None else round(med, 2),
+            "within_s_pct": (round(100.0 * sum(d <= APEX_DIFF_S for d in diffs) / len(diffs), 1)
+                             if diffs else None)}
 
 
 # ---- the pictures (matplotlib, inside the join job) --------------------------------------------------
@@ -1237,9 +1259,9 @@ def report_section(rec, rel="skyline"):
     pct = f" ({100.0 * flagged / compared:.1f}%)" if compared else ""
     L += [f"**Result.** Of {compared} precursor-runs compared, Skyline picked a different peak in "
           f"{flagged}{pct}"
-          + (f"; over all of them, the median difference between the two programs' apexes was "
-             f"{fmt_num(res['apex_median_abs_s'])} s." if res.get("apex_median_abs_s") is not None
-             else ".")
+          + (f"; where it picked the same peak, the median difference between the two "
+             f"programs' apexes was {fmt_num(res['apex_median_abs_s'])} s."
+             if res.get("apex_median_abs_s") is not None else ".")
           + (" Look at these before relying on the numbers they feed." if flagged else ""), ""]
     L += ["| Protein | Why checked | Peptides drawn | Precursor-runs compared | Skyline picked a "
           "different peak |", "|---|---|---|---|---|"]
@@ -1313,9 +1335,9 @@ STATE_WORDS = {
     "unreadable": "output/skyline/skyline_provenance.json could not be read as a peak-check record",
     "stale": "the differential expression was run again after this peak check, so the proteins "
              "it shows were chosen from an earlier result; it needs to be run again",
-    "planned": "planned, but its jobs were never submitted (skyline_work/submit.sh)",
-    "submitted": "its jobs were submitted and have not written their results yet "
-                 "(skyline_work/jobs.txt names them)",
+    "planned": "it was planned, but its jobs were never submitted",
+    "submitted": "its jobs were submitted and had not written their results; make the report "
+                 "again once they finish",
 }
 
 
@@ -1325,8 +1347,10 @@ def report_data(output_dir, base=None):
     state, rec = record_state(output_dir)
     if state == "missing":
         return None
-    if state in ("unreadable", "stale"):
-        what = ("**Could not be read.** " if state == "unreadable" else "**Out of date.** ")
+    if state in ("unreadable", "stale", "planned", "submitted"):
+        what = {"unreadable": "**Could not be read.** ", "stale": "**Out of date.** ",
+                "planned": "**Not run.** ",
+                "submitted": "**Not finished when this report was made.** "}[state]
         return {"md": what + STATE_WORDS[state][0].upper() + STATE_WORDS[state][1:] + ".\n",
                 "figures": [], "captions": {}}
     sky = os.path.join(output_dir, "skyline")
@@ -1353,7 +1377,9 @@ def manifest_line(output_dir, has_de):
     if state == "skipped":
         return ("SKIPPED", name, rec.get("reason") or "no reason recorded")
     return ("SKIPPED", name, STATE_WORDS[state]
-            + (" (skyline_peaks.py plan)" if state in ("stale", "unreadable") else ""))
+            + {"stale": " (skyline_peaks.py plan)", "unreadable": " (skyline_peaks.py plan)",
+               "planned": " (bash output/skyline/skyline_work/submit.sh)",
+               "submitted": " (skyline_work/jobs.txt names them)"}.get(state, ""))
 
 
 # ---- plan ----------------------------------------------------------------------------------------------
@@ -1400,11 +1426,18 @@ def find_speclib(search, report):
 
 
 def raw_files_of(search_prov, session_paths):
+    """The raw files as DIA-NN read them: a file whose path holds '--' was searched through a
+    link (search_provenance.json input_links: {original, link, run_name, renamed}), and its run
+    name -- which Skyline's must equal -- is the link's, so the link is what Skyline imports. Both
+    the link's folder and the file's real folder are bound (ro_binds)."""
     files = [f for f in (search_prov or {}).get("files") or [] if f]
     if not files and session_paths and os.path.isfile(session_paths.get("raw_list", "")):
         with open(session_paths["raw_list"], encoding="utf-8") as fh:
             files = [ln.strip() for ln in fh if ln.strip() and not ln.startswith("#")]
-    return [f.rstrip("/") for f in files]
+    linked = {str(x.get("original") or "").rstrip("/"): x.get("link")
+              for x in (search_prov or {}).get("input_links") or []
+              if isinstance(x, dict) and x.get("link")}
+    return [linked.get(f.rstrip("/")) or f.rstrip("/") for f in files]
 
 
 def check_python(py):
@@ -1519,7 +1552,7 @@ def make_plan(a, inp):
         "family": fam, "family_source": fam_src, "settings": settings, "mass_accuracy": ma,
         "top": {"value": a.top if a.top else TOP_N_DEFAULT,
                 "source": "user" if a.top else "skill default"},
-        "sif": sif, "ro_binds": ro_binds(search, raw, fasta),
+        "sif": sif, "ro_binds": ro_binds(search, raw, fasta, [speclib, report]),
         "python": py, "script": os.path.abspath(__file__),
         "max_parallel": a.max_parallel or MAX_PARALLEL_DEFAULT,
     }
@@ -1592,17 +1625,64 @@ def planned_record(plan):
             "work": plan["work"]}
 
 
+STEP_JOB_NAMES = ("sky_build", "sky_import", "sky_join", "sky_prm")
+LIVE_STATES = ("PENDING", "RUNNING", "REQUEUED", "SUSPENDED", "CONFIGURING", "COMPLETING",
+               "RESIZING", "REQUEUE_HOLD", "REQUEUE_FED")
+
+
 def cancel_jobs(out):
-    """scancel the jobs the last plan's submit.sh recorded (skyline_work/jobs.txt: this user's
-    own) -> the ids cancelled. Light: one scancel."""
+    """Cancel the last plan's jobs that still run -> (cancelled ids, None), or ([], why not).
+    Only the ids its submit.sh recorded (skyline_work/jobs.txt), and of those only the ones SLURM
+    (sacct) says are this user's, named as this step's jobs, and not finished. When that cannot
+    be checked -- no sacct here -- or a recorded job is not this step's, nothing is cancelled and
+    the caller refuses. Light: one sacct and one scancel."""
+    import getpass
     jobs = os.path.join(out, WORK, "jobs.txt")
     ids = []
     if os.path.isfile(jobs):
         with open(jobs) as fh:
-            ids = [ln.split()[1] for ln in fh if len(ln.split()) == 2 and ln.split()[1].isdigit()]
-    if ids:
-        subprocess.run(["scancel"] + ids, capture_output=True, text=True, timeout=60)
-    return ids
+            ids = [p[1] for p in (ln.split() for ln in fh) if len(p) == 2 and p[1].isdigit()]
+    if not ids:
+        return [], None
+    try:
+        r = subprocess.run(["sacct", "-n", "-X", "-P", "-j", ",".join(ids),
+                            "-o", "JobID,User,JobName,State"],
+                           capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return [], f"whether its jobs ({' '.join(ids)}) still run cannot be checked here ({e})"
+    if r.returncode != 0:
+        return [], (f"whether its jobs ({' '.join(ids)}) still run cannot be checked here "
+                    f"(sacct: {(r.stderr.strip().splitlines() or ['no answer'])[-1]})")
+    me, live, foreign = getpass.getuser(), set(), set()
+    for line in r.stdout.splitlines():
+        f = line.split("|")
+        if len(f) < 4:
+            continue
+        base = f[0].split("_")[0].split(".")[0]
+        if base not in ids or f[3].split()[0] not in LIVE_STATES:
+            continue
+        if f[1] == me and f[2] in STEP_JOB_NAMES:
+            live.add(base)
+        else:
+            foreign.add(f"{base} ({f[1]}, {f[2]})")
+    if foreign:
+        return [], (f"jobs.txt names jobs that are not this step's or not yours: "
+                    f"{', '.join(sorted(foreign))}; nothing was cancelled")
+    if live:
+        subprocess.run(["scancel"] + sorted(live), capture_output=True, text=True, timeout=60)
+    return sorted(live), None
+
+
+def _stop_last_plan(out, what):
+    """Before planning again or turning the step off: the last plan's live jobs are cancelled, or
+    the command refuses, saying why. Says what it did."""
+    gone, why = cancel_jobs(out)
+    if why:
+        raise SystemExit(f"skyline_peaks.py {what}: the last plan's jobs were not cancelled -- "
+                         f"{why}. Cancel them yourself (scancel), then run this again")
+    print(f"[skyline_peaks] {what}: "
+          + (f"cancelled the last plan's jobs still running: {' '.join(gone)}" if gone
+             else "the last plan has no job still running"), file=sys.stderr)
 
 
 def cmd_plan(a):
@@ -1615,9 +1695,7 @@ def cmd_plan(a):
                              f"{rec.get('written')} and has not written its result (`status` "
                              f"says more). Wait for its jobs to end, or pass --replan to cancel "
                              f"them and plan again")
-        gone = cancel_jobs(out)
-        print(f"[skyline_peaks] --replan: cancelled the last plan's jobs {' '.join(gone) or '(none recorded)'}",
-              file=sys.stderr)
+        _stop_last_plan(out, "plan --replan")
     # 6. whatever happens next, nothing of the last run is left to be delivered as this one's
     clear_previous(out)
     try:
@@ -1648,9 +1726,7 @@ def cmd_skip(a):
         raise SystemExit("skyline_peaks.py skip: --reason is required (why, in the user's words)")
     rec = load_record(out)
     if rec and rec.get("status") == "planned":
-        gone = cancel_jobs(out)               # the user turned it off: its jobs stop too
-        print(f"[skyline_peaks] skip: cancelled the planned jobs {' '.join(gone) or '(none recorded)'}",
-              file=sys.stderr)
+        _stop_last_plan(out, "skip")          # the user turned it off: its jobs stop too
     clear_previous(out)                       # no picture of an earlier run goes out as current
     write_json(record_path(out), skipped_record(f"Turned off for this analysis: {reason}", "user"))
     print(json.dumps({"status": "skipped", "record": record_path(out)}, indent=2))
@@ -1804,10 +1880,11 @@ def cmd_build(a):
     except Exception as e:                       # recorded, never swallowed (rule 4)
         why = str(e) if isinstance(e, Skip) else f"the build job failed: {type(e).__name__}: {e}"
         _fail(plan, "build", why)
-        write_json(st, {"ok": False, "reason": why})
+        write_json(st, {"ok": False, "plan_id": plan.get("plan_id"), "reason": why})
         print(f"[skyline_peaks] build: not run -- {why}", file=sys.stderr)
         return 1
-    write_json(st, {"ok": True, "tool": tool, "selection": sel, "diann_rows": nrows,
+    write_json(st, {"ok": True, "plan_id": plan.get("plan_id"), "tool": tool, "selection": sel,
+                    "diann_rows": nrows,
                     "rt_window": {"minutes": rt_min, "source": rt_src}, "peptides": n_pep,
                     "finished": now()})
     print(f"[skyline_peaks] build: {len(sel['targets'])} protein(s), {n_pep} peptide(s)",
@@ -1838,14 +1915,17 @@ def cmd_import(a):
     if rc == 0:
         shutil.rmtree(tdir, ignore_errors=True)
     write_json(os.path.join(plan["work"], "status", f"import_{i}.json"),
-               {"file": raw, "rc": rc, "reason": reason, "finished": now()})
+               {"file": raw, "rc": rc, "reason": reason, "finished": now(),
+                "plan_id": plan.get("plan_id")})
     return 0 if rc == 0 else 1
 
 
 def cmd_join(a):
     plan = _plan_of(a.work)
     w = plan["work"]
-    build = load_json(os.path.join(w, "status", "build.json"))
+    def mine(st):            # a status file of this plan, never one an earlier plan's job left
+        return st if isinstance(st, dict) and st.get("plan_id") == plan.get("plan_id") else None
+    build = mine(load_json(os.path.join(w, "status", "build.json")))
     if not build or not build.get("ok"):
         if not build:                  # the build job died before it could say why
             _fail(plan, "build", "the build job ended without a result (see "
@@ -1853,7 +1933,7 @@ def cmd_join(a):
         return 0                       # the build wrote the record of why
     imported, failed = [], []
     for i, f in enumerate(plan["raw_files"], 1):
-        s = load_json(os.path.join(w, "status", f"import_{i}.json"))
+        s = mine(load_json(os.path.join(w, "status", f"import_{i}.json")))
         if s and s.get("rc") == 0:
             imported.append(f)
         else:
