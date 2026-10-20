@@ -2105,8 +2105,9 @@ class GeminiTTS(object):
             # a key file this run could use that was found and refused (its mode, its trust
             # rule) is "not usable"; anything else is no key, with find_key's note beside it
             e.detail = why
-            e.found = bool(why) and (os.path.isfile(os.path.expanduser(KEY_FILE)) or (
-                bool(getattr(a, "core_run", None)) and os.path.lexists(CORE_KEY_FILE)))
+            core = bool(getattr(a, "core_run", None))
+            e.found = bool(why) and (KEY_FILE in why or (
+                core and CORE_KEY_FILE in why and "used only for a Core run" not in why))
             raise e
         try:
             from google import genai
@@ -3745,10 +3746,10 @@ def cmd_render(a):
             raise
         gemini, fallback = backend, fallback_record(e, backend, chunks, speak, cache)
         log(f"[render] {e}")                          # what Gemini said, and what clears it
-        log(f"[render] {fallback_cause(e.why, getattr(e, 'detail', None), getattr(e, 'found', False))}, which waiting cannot "
-            "fix: making the WHOLE "
-            "episode with the local voice (Kokoro on HIVE) instead, so it has one voice "
-            "throughout" + ("; Gemini's chunks stay in the cache" if gemini else ""))
+        cause = fallback_cause(e.why, getattr(e, "detail", None), getattr(e, "found", False))
+        log(f"[render] {cause}, which waiting cannot fix: making the WHOLE episode with the local "
+            "voice (Kokoro on HIVE) instead, so it has one voice throughout"
+            + ("; Gemini's chunks stay in the cache" if gemini else ""))
         try:
             backend = KokoroTTS(s, a)
             speak = local_speaker(s, backend.voices)
@@ -3756,7 +3757,7 @@ def cmd_render(a):
                                                                              speak, cache, a)
         except RenderError as u:
             raise RenderError(                    # Gemini's own message is logged just above
-                f"{fallback_cause(e.why, getattr(e, 'detail', None), getattr(e, 'found', False))}, and the local "
+                f"{cause}, and the local "
                 f"voice could not make the episode instead: "
                 + (u.why if isinstance(u, LocalUnavailable) else str(u))
                 + ". No episode this time: clear Gemini's failure (above) and re-run, or run "

@@ -802,7 +802,7 @@ class NoKey(Local):
 
     def test_a_key_file_found_but_not_used_says_why(self):
         """Review of 86671ee1: a key file refused for its mode was reported as no key."""
-        why = "~/.config/ucdavis-proteomics/gemini_key is not used: other accounts can read it"
+        why = f"{mp.KEY_FILE} is not used: other accounts can read it"   # find_key's own words
         write(mp.KEY_FILE, "a key that may not be used\n")              # it is there
         with mock.patch.object(mp, "find_key", return_value=(None, None, why)):
             rc, out, err = self.render_no_key()
@@ -822,6 +822,10 @@ class NoKey(Local):
         with mock.patch.object(mp, "find_key", return_value=(None, None, note)):
             rc, out, err = self.render_no_key()
         self.assertEqual(rc, 0, err)
+        self.assertIn(f"No Gemini key was set ({note})", err)
+        write(mp.KEY_FILE, "")                       # an empty personal key file changes nothing
+        with mock.patch.object(mp, "find_key", return_value=(None, None, note)):
+            rc, out, err = self.render_no_key()
         self.assertIn(f"No Gemini key was set ({note})", err)
         self.assertEqual(self.manifest()["tts"]["fallback"]["reason"], "No Gemini key was set")
         self.assertNotIn("gemini_key", json.dumps(self.manifest()), "no key-file path delivered")
