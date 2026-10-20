@@ -2022,14 +2022,16 @@ FALLBACK_WHY = {"billing": "its prepay credits are depleted (402)",
                 "nokey": "no Gemini key was set"}
 
 
-def fallback_cause(why, detail=None, found=False):
+def fallback_cause(why, detail=None, found=False, plain=False):
     """The fallback's cause as a person says it: "Gemini failed (...)", or that there was no key
     to ask it with (find_key's note beside it, `detail`) -- or one that was found and refused
-    (`found`), and why."""
+    (`found`), and why. `plain`: for podcast.json, which is delivered: no key-file paths, the
+    render log has them."""
     if why == "nokey":
         if found and detail:
-            return f"No usable Gemini key ({detail})"
-        return "No Gemini key was set" + (f" ({detail})" if detail else "")
+            return ("No usable Gemini key (a key file was found but not used; the render log "
+                    "says why)" if plain else f"No usable Gemini key ({detail})")
+        return "No Gemini key was set" + (f" ({detail})" if detail and not plain else "")
     return f"Gemini failed ({FALLBACK_WHY.get(why, why)})"
 # What a model can fail with that waiting does not clear (with "stalled": it stopped answering)
 FOR_GOOD = ("missing", "exhausted", "rejected")
@@ -3602,10 +3604,11 @@ def fallback_record(e, gemini, chunks=(), speak=None, cache=None):
     this = len(getattr(gemini, "sent_chunks", None) or ())
     before = (getattr(gemini, "sent_before", None) or {}).get("preflight") or {}
     before = before if isinstance(before, dict) else {}
-    cause = fallback_cause(e.why, getattr(e, "detail", None), getattr(e, "found", False))
+    cause = fallback_cause(e.why, getattr(e, "detail", None), getattr(e, "found", False),
+                           plain=True)
     return {"from": "gemini", "to": "kokoro", "why": e.why, "reason": cause,
             "google_said": scrub(e.said) if e.said else None, "stopped_at": e.where,
-            "message": scrub(e)[:600], "at": now_iso(),
+            "message": cause if e.why == "nokey" else scrub(e)[:600], "at": now_iso(),
             "gemini_models": list(getattr(gemini, "candidates", None) or []),
             "gemini_switched": list(gemini.switch_notes()) if hasattr(gemini, "switch_notes")
             else [],

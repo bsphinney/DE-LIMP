@@ -807,9 +807,12 @@ class NoKey(Local):
         with mock.patch.object(mp, "find_key", return_value=(None, None, why)):
             rc, out, err = self.render_no_key()
         self.assertEqual(rc, 0, err)
-        self.assertIn("other accounts can read it", err)                 # the advice is logged
+        self.assertIn(f"No usable Gemini key ({why})", err)       # the log says why, in full
         fb = self.manifest()["tts"]["fallback"]
-        self.assertEqual(fb["reason"], f"No usable Gemini key ({why})")
+        # podcast.json is delivered: no key-file paths in it
+        self.assertEqual(fb["reason"], "No usable Gemini key (a key file was found but not used; "
+                                       "the render log says why)")
+        self.assertNotIn(".config", json.dumps(self.manifest()))
         self.assertIn("Gemini was not asked: no usable Gemini key", self.manifest()["tts"]
                       ["what_was_sent"])
 
@@ -819,8 +822,9 @@ class NoKey(Local):
         with mock.patch.object(mp, "find_key", return_value=(None, None, note)):
             rc, out, err = self.render_no_key()
         self.assertEqual(rc, 0, err)
-        self.assertEqual(self.manifest()["tts"]["fallback"]["reason"],
-                         f"No Gemini key was set ({note})")
+        self.assertIn(f"No Gemini key was set ({note})", err)
+        self.assertEqual(self.manifest()["tts"]["fallback"]["reason"], "No Gemini key was set")
+        self.assertNotIn("gemini_key", json.dumps(self.manifest()), "no key-file path delivered")
 
     def test_no_fallback_still_stops(self):
         rc, out, err = self.render_no_key("--no-fallback")
