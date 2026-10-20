@@ -190,11 +190,17 @@ def _image_check(path, sha):
 
 
 _UNBINDABLE = re.compile(r"[,:]")            # apptainer --bind splits its value on , and :
+# What a container gets besides its own work folder: no environment from here (no key), and
+# neither the home folder (which holds ~/.config/ucdavis-proteomics/gemini_key) nor the working
+# folder mounted. Apptainer >= 1.1 (HIVE: 1.5.4).
+CONTAIN = "--cleanenv --no-mount home,cwd"
 
 
 def _bindable(path):
-    """A folder that `apptainer exec --bind` can take: no , or : in its path."""
-    return bool(path) and not _UNBINDABLE.search(os.path.realpath(path))
+    """A folder that `apptainer exec --bind` can take: no , or : in its path, as given or
+    resolved."""
+    return bool(path) and not any(_UNBINDABLE.search(x) for x in (os.path.abspath(path),
+                                                                    os.path.realpath(path)))
 
 
 class Runner(object):
@@ -369,6 +375,8 @@ class Remote(Runner):
 
 # Never handed to a container call, an srun or hive_exec.sh: nothing there needs them
 PRIVATE_ENV = ("GEMINI_API_KEY", "GOOGLE_API_KEY")
+# The SLURM variables an srun of its own keeps: where SLURM's configuration is, not the job's
+SLURM_KEEP = ("SLURM_CONF",)
 
 
 def _run(argv, minutes, drop_slurm=False):
@@ -377,7 +385,8 @@ def _run(argv, minutes, drop_slurm=False):
     variables (an srun then asks for an allocation of its own, never a step of this job) and
     on_compute's re-run marker."""
     env = {k: v for k, v in os.environ.items() if k not in PRIVATE_ENV and not (
-        drop_slurm and (k.startswith("SLURM") or k == "PROTEOMICS_ON_COMPUTE"))}
+        drop_slurm and ((k.startswith("SLURM") and k not in SLURM_KEEP)
+                        or k == "PROTEOMICS_ON_COMPUTE"))}
     try:
         # its own process group, so a timeout stops apptainer and its workers, not only bash
         p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -387,11 +396,7 @@ def _run(argv, minutes, drop_slurm=False):
     try:
         out, err = p.communicate(timeout=max(60.0, minutes * 60.0))
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(p.pid, signal.SIGKILL)
-        except OSError:
-            p.kill()
-        p.communicate()
+        _stop_group(p)
         raise LocalError(f"no answer in {minutes:g} min: stopped")
     except BaseException:
         try:
@@ -400,6 +405,22 @@ def _run(argv, minutes, drop_slurm=False):
             pass
         raise
     return p.returncode, out, err
+
+
+def _stop_group(p):
+    """SIGTERM to the process group first -- an srun then cancels its allocation, a queued one
+    too -- then SIGKILL to what is left after 30 s."""
+    for sig, wait in ((signal.SIGTERM, 30.0), (signal.SIGKILL, 10.0)):
+        try:
+            os.killpg(p.pid, sig)
+        except OSError:
+            if sig == signal.SIGKILL:
+                p.kill()
+        try:
+            p.communicate(timeout=wait)
+            return
+        except subprocess.TimeoutExpired:
+            continue
 
 
 def _tail(text, n=600):
@@ -493,7 +514,7 @@ def speak(runner, voices, lines, log=None):
         script = "\n".join([
             "set -eo pipefail", f"D={run_dir}", _apptainer_setup(),
             _image_check(KOKORO_IMAGE, KOKORO_SHA256),
-            f'apptainer exec --cleanenv --bind "$D" {img} python3 /opt/kokoro/synth.py "$D/job.json" - '
+            f'apptainer exec {CONTAIN} --bind "$D" {img} python3 /opt/kokoro/synth.py "$D/job.json" - '
             f'--per-turn "$D/turns" --timing "$D/timing.json" --threads {threads} '
             f"--workers {workers}"])
         runner.send(local, ["job.json"])
@@ -542,7 +563,7 @@ def hear(runner, audio, log=None):
         script = "\n".join([
             "set -eo pipefail", f"D={run_dir}", f'A="$D"/{name}',
             _apptainer_setup(), _image_check(WHISPER_IMAGE, WHISPER_SHA256),
-            f'one() {{ apptainer exec --cleanenv --bind "$D" {img} python3 '
+            f'one() {{ apptainer exec {CONTAIN} --bind "$D" {img} python3 '
             f'/opt/whisper/transcribe.py "$A" "$D/asr_$1.json" --model "$1" --threads {each} '
             '> "$D/asr_$1.log" 2>&1; }']
             + [f"one {m} & p{k}=$!" for k, m in enumerate(WHISPER_MODELS)]

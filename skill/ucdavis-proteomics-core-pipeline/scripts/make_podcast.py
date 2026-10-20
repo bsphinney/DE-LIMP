@@ -200,7 +200,10 @@ GENAI_MIN = "2.25.0"
 # (podcast_local.JOB_CPUS, JOB_MEM). HIVE's ffmpeg (verified 2026-10-15, AAC encoder present) and
 # apptainer are modules, so the job is a login shell (#!/bin/bash -l) that sources modules.sh
 # first (HPC@UCD's ucd-hpc rule).
-JOB_HOURS, JOB_CPUS, JOB_MEM = 2, 1, "2G"
+# 3 hours: Gemini's own waits (rate limits, timeouts) can take an hour, and a fallback then waits
+# in the queue for each of its two steps (up to 45 and 60 min with the queue); the time limit holds
+# nothing while the job does not run
+JOB_HOURS, JOB_CPUS, JOB_MEM = 3, 1, "2G"
 HIVE_FFMPEG_MODULE = "ffmpeg/7.0.2"
 
 RATE = 24000                                        # Hz, 16-bit mono throughout
@@ -2175,30 +2178,35 @@ class GeminiTTS(object):
         try:
             with open(os.path.join(self.cache_dir or "", SENT_FILE), encoding="utf-8") as fh:
                 got = json.load(fh)
-            return got if isinstance(got, dict) else {}
         except (OSError, ValueError, TypeError):
             return {}
+        if not isinstance(got, dict):
+            return {}
+        return {k: v for k, v in got.items() if k in ("chunks", "preflight") and isinstance(v, dict)}
 
     def note_sent(self, chunk=None, speak=None):
         """A request is going to Gemini: a chunk's text (its sent_key), or a two-line test
         (chunk None). Recorded in SENT_FILE before it is sent; never fatal."""
         if not self.cache_dir:
             return
-        got = self.sent_record()
-        if chunk is None:
-            rec = got.setdefault("preflight", {})
-            rec["requests"] = int(rec.get("requests") or 0) + 1
-        else:
-            rec = got.setdefault("chunks", {}).setdefault(sent_key(chunk, speak), {"first": now_iso()})
-            if self.model not in rec.setdefault("models", []):
-                rec["models"].append(self.model)
-        rec["last"] = now_iso()
-        path = os.path.join(self.cache_dir, SENT_FILE)
         try:
+            got = self.sent_record()
+            if chunk is None:
+                rec = got.setdefault("preflight", {})
+                rec["requests"] = int(rec.get("requests") or 0) + 1
+            else:
+                rec = got.setdefault("chunks", {}).setdefault(sent_key(chunk, speak), {})
+                rec = rec if isinstance(rec, dict) else {}
+                got["chunks"][sent_key(chunk, speak)] = rec
+                rec.setdefault("first", now_iso())
+                models = rec["models"] if isinstance(rec.get("models"), list) else []
+                rec["models"] = models + ([self.model] if self.model not in models else [])
+            rec["last"] = now_iso()
+            path = os.path.join(self.cache_dir, SENT_FILE)
             with open(path + ".part", "w", encoding="utf-8") as fh:
                 json.dump(got, fh, indent=1)
             os.replace(path + ".part", path)
-        except OSError as e:
+        except Exception as e:              # the record never stops a render
             log(f"[WARN] could not record what was sent to Gemini in the cache ({e})")
 
     def remembered_stalls(self):
@@ -2690,9 +2698,10 @@ class GeminiTTS(object):
                     # the second model's first timeout, before stall_switch can find no model
                     # left: so when every model asked has stalled (or failed for good), that is
                     # "every model stalled" (review of the Kokoro fallback)
-                    if self.switches and self.model not in self.stalled:
+                    stalled = any(x.get("at") != "preflight" for x in self.switches)
+                    if stalled and self.model not in self.stalled:
                         self.stalled.append(self.model)
-                    why = self.for_good(asked_only=True) if self.switches else None
+                    why = self.for_good(asked_only=True) if stalled else None
                     if why:
                         raise GeminiUnusable(msg, why, label)
                     raise RenderError(msg)
@@ -3513,15 +3522,18 @@ def fallback_record(e, gemini, chunks=(), speak=None, cache=None):
     a render before that record), of `chunks`; `chunks_sent_to_gemini` of them in this render;
     the two-line tests (generic sentences, not the script) in this render and before."""
     why = FALLBACK_WHY.get(e.why, e.why)
-    sent, made = 0, 0
+    sent, made, other = 0, 0, 0
     if speak and cache:
         record = (gemini.sent_record() if hasattr(gemini, "sent_record") else {}).get("chunks") or {}
         models = list(getattr(gemini, "candidates", None) or [])
+        mine = set()
         for c in chunks:
             cached = any(os.path.isfile(os.path.join(cache, cache_key(gemini, c, speak, m) + ".wav"))
                          for m in models)
             made += cached
             sent += cached or sent_key(c, speak) in record
+            mine.add(sent_key(c, speak))
+        other = len(set(record) - mine)
     this = len(getattr(gemini, "sent_chunks", None) or ())
     before = (getattr(gemini, "sent_before", None) or {}).get("preflight") or {}
     return {"from": "gemini", "to": "kokoro", "why": e.why, "reason": f"Gemini failed: {why}",
@@ -3531,6 +3543,7 @@ def fallback_record(e, gemini, chunks=(), speak=None, cache=None):
             "gemini_switched": list(gemini.switch_notes()) if hasattr(gemini, "switch_notes")
             else [],
             "chunks": len(chunks), "gemini_chunks_sent": max(sent, this),
+            "gemini_chunks_not_in_script": other,
             "chunks_sent_to_gemini": this, "gemini_chunks_cached": made,
             "preflight_requests": getattr(gemini, "preflight_sent", 0),
             "preflight_requests_before": int(before.get("requests") or 0),
@@ -3543,17 +3556,21 @@ def gemini_had(fallback, page=False):
     chunks of this script whose text reached it, and the two-line tests. `page`: for the
     transcript page, which the lab reads."""
     k, total = fallback.get("gemini_chunks_sent") or 0, fallback.get("chunks") or 0
+    other = fallback.get("gemini_chunks_not_in_script") or 0
     tests = (fallback.get("preflight_requests") or 0) + (fallback.get("preflight_requests_before")
                                                          or 0)
     if page:
         if k:
             return f"the text of {k} of the {total} parts of this transcript"
-        return "only a sound check, none of this transcript" if tests else "none of this transcript"
+        return ("only a sound check, none of this transcript" if tests and not other else
+                "none of this transcript")
     parts = []
     if k:
         parts.append(f"the text of {k} of this script's {total} chunk(s), after pronunciation "
                      f"substitutions ({fallback.get('chunks_sent_to_gemini') or 0} of them in "
                      "this render)")
+    if other:
+        parts.append(f"the text of {other} chunk(s) that are not in this script as it is now")
     if tests:
         parts.append(f"{tests} two-line sound check(s), generic sentences that are not this "
                      f"script ({fallback.get('preflight_requests') or 0} in this render)")
@@ -3630,6 +3647,8 @@ def cmd_render(a):
         # the whole render on a compute node, never a HIVE login node (HPC@UCD's ucd-hpc rules)
         import on_compute
         import podcast_local as pl
+        for k in pl.PRIVATE_ENV:                    # nothing in it needs a key; never pass one on
+            os.environ.pop(k, None)
         on_compute.ensure_compute_node("render --tts local speaks the whole episode with Kokoro",
                                        minutes=60, mem=pl.JOB_MEM, cpus=pl.JOB_CPUS,
                                        script=os.path.abspath(__file__))

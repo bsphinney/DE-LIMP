@@ -295,6 +295,27 @@ class TimeoutBudget(Local):
         self.assertEqual(fb["why"], "stalled")
         self.assertIn("unanswered requests have cost", fb["message"])
 
+    def test_the_budget_after_only_a_preflight_hand_over_is_the_resume_message(self):
+        """Third review: a hand-over at the preflight is not a stall mid-episode."""
+        self.render(None, "--model", STALLS)                       # cached by STALLS
+        cache = os.path.join(self.pod, ".cache")
+        os.remove(os.path.join(cache, sorted(f for f in os.listdir(cache) if f.endswith(".wav"))[0]))
+        p = mock.patch.object(mp, "PREFLIGHT_TIMEOUT", 0.3)
+        p.start()
+        self.addCleanup(p.stop)
+
+        def behaviour(model, contents, config):
+            if model == STALLS or "short sound check" not in json.dumps(contents):
+                self.release.wait(30)
+            return pcm_for(contents)
+        rc, out, err, log = self.render(behaviour, "--model", STALLS, "--model", ANSWERS,
+                                        "--request-timeout", "0.3", "--request-timeout-budget",
+                                        "0.004", preflight=True)
+        self.assertEqual(rc, 1, err)
+        self.assertIn("did not answer the preflight", err)
+        self.assertIn("unanswered requests have cost", err)
+        self.assertEqual(self.container_calls(), [])
+
     def test_the_budget_without_a_stall_is_the_resume_message(self):
         seen = {"n": 0}
 
@@ -455,6 +476,25 @@ class EveryChunkAgain(Local):
                       "substitutions (1 of them in this render)",
                       self.manifest()["tts"]["what_was_sent"])
 
+    def test_chunks_whose_text_is_no_longer_in_the_script_are_counted(self):
+        """Third review: a line edited after Gemini had it was not counted."""
+        self.render(None, "--model", ANSWERS)                   # Gemini has both chunks
+        self.assertEqual(self.check(T.read(self.script).replace("30 IPs, 4 baits", "4 baits, 30 IPs"))[0],
+                         0)
+        rc, out, err, log = self.render(lambda m, c, k: (_ for _ in ()).throw(prepay_error()),
+                                        "--model", ANSWERS)
+        self.assertEqual(rc, 0, err)
+        fb = self.manifest()["tts"]["fallback"]
+        self.assertEqual((fb["gemini_chunks_sent"], fb["gemini_chunks_not_in_script"]), (2, 1))
+        self.assertIn("the text of 1 chunk(s) that are not in this script as it is now",
+                      self.manifest()["tts"]["what_was_sent"])
+
+    def test_a_broken_record_never_stops_a_gemini_render(self):
+        os.makedirs(os.path.join(self.pod, ".cache"), exist_ok=True)
+        write(os.path.join(self.pod, ".cache", mp.SENT_FILE), json.dumps({"chunks": []}))
+        rc, out, err, log = self.render(None, "--model", ANSWERS)
+        self.assertEqual(rc, 0, err)
+
     def test_the_record_survives_the_cache_pruning(self):
         self.test_what_was_sent_counts_chunks_from_an_earlier_render()
         self.assertTrue(os.path.isfile(os.path.join(self.pod, ".cache", mp.SENT_FILE)))
@@ -601,6 +641,7 @@ class TtsLocal(Local):
         with mock.patch.dict(sys.modules, mods):          # importing google.genai would fail
             rc, out, err = run("render", self.script, "--tts", "local")
         self.assertEqual(rc, 0, err)
+        self.assertNotIn("GEMINI_API_KEY", os.environ, "render --tts local passes no key on")
         man = self.manifest()
         self.assertEqual(man["tts"]["backend"], "kokoro")
         self.assertIsNone(man["tts"]["fallback"])
@@ -770,12 +811,13 @@ class WhereItRuns(unittest.TestCase):
         """srun inside a job makes a step of that job unless the job's SLURM variables are left
         out; and neither srun nor the container gets the Gemini key."""
         env = dict(JOB_ENV, SLURM_JOBID="1", SLURM_NODELIST="n1", PROTEOMICS_ON_COMPUTE="1",
-                   GEMINI_API_KEY=FAKE_KEY)
+                   GEMINI_API_KEY=FAKE_KEY, SLURM_CONF="/etc/slurm/slurm.conf")
         with mock.patch.dict(os.environ, env), \
                 mock.patch("on_compute.srun_argv", return_value=["/usr/bin/env"]):
             rc, out, err = pl.Srun(inside_job=True).run("true", "speak")
         self.assertEqual(rc, 0)
-        self.assertNotIn("SLURM", out)
+        self.assertEqual([ln for ln in out.splitlines() if ln.startswith("SLURM")],
+                         ["SLURM_CONF=/etc/slurm/slurm.conf"], "where SLURM's configuration is")
         self.assertNotIn("PROTEOMICS_ON_COMPUTE", out)
         self.assertNotIn(FAKE_KEY, out)
         self.assertIn("PATH=", out)
@@ -840,7 +882,8 @@ class Plumbing(unittest.TestCase):
             with self.assertRaises(pl.LocalError) as e:
                 pl._run(["bash", "-c", "sleep 99"], 1)
         self.assertTrue(popen.call_args.kwargs["start_new_session"])
-        killpg.assert_called_once_with(4242, pl.signal.SIGKILL)
+        # SIGTERM first: an srun then cancels its allocation; it ended, so no SIGKILL
+        killpg.assert_called_once_with(4242, pl.signal.SIGTERM)
         self.assertIn("no answer in 1 min", str(e.exception))
 
     def test_the_gemini_key_is_not_handed_on(self):
@@ -906,6 +949,10 @@ class Sizing(unittest.TestCase):
     def test_work_folders_apptainer_can_bind(self):
         """Review: a , or : in a path breaks apptainer's --bind (it splits on them)."""
         self.assertFalse(pl._bindable("/quobyte/x/PROT 0807, v2/output/podcast/.cache"))
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "plain"))
+            os.symlink(os.path.join(d, "plain"), os.path.join(d, "a:b"))
+            self.assertFalse(pl._bindable(os.path.join(d, "a:b")), "the path as given counts")
         self.assertTrue(pl._bindable("/quobyte/x/Core service/PROT 0807 (v2)/.cache"))
         with tempfile.TemporaryDirectory() as home:
             bad = os.path.join(home, "a,b")
@@ -941,6 +988,7 @@ class ContainerCall(FakeContainers, unittest.TestCase):
         self.assertEqual([os.path.basename(p) for p in paths], ["turn-0001.wav", "turn-0002.wav"])
         call = self.kokoro_calls()[0]
         self.assertIn("--cleanenv", call)
+        self.assertEqual(call[call.index("--no-mount") + 1], "home,cwd", "the key file is in home")
         self.assertEqual(call[call.index("--workers") + 1], "8")
         self.assertEqual(call[call.index("--threads") + 1], "16")
         self.assertIn(pl.KOKORO_IMAGE, call)
@@ -980,6 +1028,7 @@ class ContainerCall(FakeContainers, unittest.TestCase):
         self.assertEqual([c[c.index("--threads") + 1] for c in calls], ["8", "8"])
         for c in calls:          # review: never the episode's folder, read-only, over the work one
             self.assertIn("--cleanenv", c)
+            self.assertEqual(c[c.index("--no-mount") + 1], "home,cwd")
             binds = [c[i + 1] for i, a in enumerate(c) if a == "--bind"]
             self.assertEqual(len(binds), 1, c)
             audio = c[c.index("/opt/whisper/transcribe.py") + 1]
@@ -1043,7 +1092,7 @@ class Job(unittest.TestCase):
         got = json.loads(out)
         self.assertEqual(got["consent"], "not needed: the local voice sends nothing")
         self.assertIsNone(got["key"])
-        self.assertEqual(got["resources"], {"cpus": 16, "mem": "24G", "hours": 2})
+        self.assertEqual(got["resources"], {"cpus": 16, "mem": "24G", "hours": 3})
         text = read(got["job"])
         self.assertIn(f"render {t.script} --tts local || exit $?", text)
         self.assertNotIn("--core-run", text)

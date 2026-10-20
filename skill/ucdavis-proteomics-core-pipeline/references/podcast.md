@@ -585,9 +585,10 @@ bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.t
   session folders are group-writable with no sticky bit, so a script there could be swapped for
   another member's before `sbatch` reads it, and the job would run as you. The script is written
   without following a link, and a link where it goes is refused. The job asks for 1 CPU, 2 GB
-  and 2 hours: it is network calls. If the local voice takes over, each of its steps asks for an
+  and 3 hours: it is network calls. If the local voice takes over, each of its steps asks for an
   allocation of its own only then ("The local voice", "Where it runs"), so the job never holds
-  Kokoro's CPUs just in case. It runs on the queue
+  Kokoro's CPUs just in case; the third hour is room to wait for those in the queue. It runs on
+  the queue
   `run_search.slurm_queue` picks for this account (as every job the skill writes; `--requeue`
   on a preemptible one, with `--open-mode=append` so a requeued job adds to its log). Its
   `--output` path is in double quotes, so a space in it is fine (single quotes leave no log in a
@@ -832,8 +833,9 @@ the start.
   - the key refused: 401/403, `PERMISSION_DENIED`, "API key not valid" (`auth`);
   - no quota, or not usable, on every candidate model (`quota`);
   - every candidate model stopped answering (`stalled`) -- also when the time lost to
-    unanswered requests (`--request-timeout-budget`, 30 min) runs out after a stalled model has
-    handed over, which with the defaults happens on the next model's first timeout -- or a mix
+    unanswered requests (`--request-timeout-budget`, 30 min) runs out after a model that
+    stalled mid-episode has handed over (a hand-over at the two-line test does not count), which
+    with the defaults happens on the next model's first timeout -- or a mix
     of the last two (`none`).
   A transient error or an empty answer from any model, at the two-line test or later, means a
   later run may succeed, so it never hands over.
@@ -880,9 +882,11 @@ the start.
     --job`): the lines (or the episode) go to a private folder in your HIVE home
     (`~/.proteomics-pipeline/podcast-local/`, mode 700), the results come back, and the folder
     is removed.
-  - The containers run with `--cleanenv`, and no container call, srun or HIVE job is handed the
-    Gemini key. The one folder bound into a container never has a `,` or `:` in its path
-    (apptainer's `--bind` splits on them): the episode is copied into it to be heard back.
+  - The containers run with `--cleanenv --no-mount home,cwd` and see only their own work
+    folder, bound: no environment from the render, no home folder (where a Gemini key file
+    lives) and no working folder. No container call, srun or HIVE job is handed the Gemini key.
+    The work folder never has a `,` or `:` in its path, as given or resolved (apptainer's
+    `--bind` splits on them); the episode is copied into it to be heard back.
   - Nowhere else: render
   says so, with the reason -- no HIVE login on this computer, a
   HIVE account that cannot read the Core's containers (they are for members of
@@ -918,7 +922,8 @@ the start.
   scrubbed of any key), `stopped_at` (the chunk, or the preflight), `at`, the Gemini models
   tried and any hand-overs; exactly what Google had of this script: `gemini_chunks_sent` of
   `chunks` (their text, in this render or an earlier one), `chunks_sent_to_gemini` of them in
-  this render, `gemini_chunks_cached`, and the two-line sound checks
+  this render, `gemini_chunks_cached`, `gemini_chunks_not_in_script` (chunks whose text it
+  had that this script no longer holds, after an edit), and the two-line sound checks
   (`preflight_requests` in this render, `preflight_requests_before`: generic sentences, not the
   script); and the `note`. These come from `podcast/.cache/gemini_sent.json`, where every
   request to Gemini for the episode is noted before it is sent (each chunk by a hash of its text,
