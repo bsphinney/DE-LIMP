@@ -65,11 +65,12 @@ CHECKS the script, RENDERS it to audio and LINKS the audio into the outputs.
             email sends base64) with Bioshare as the way to send it. Refuses while the check
             does not hold, like link.
   job    SCRIPT.md (--core-run [internal] | --cloud-ok NOTE | --tts local) [--model M] [--python PY]
-         -> ~/.proteomics-pipeline/jobs/podcast_<name>_<hash>.sh, a SLURM job (16 CPUs, 24 GB,
-            2 h: what the local voice needs if it takes over) that runs render --tts gemini
-            (verify follows), link and share -- the route on HIVE, where minutes of network calls
-            must not run on the login node. --tts local: render --tts local, no consent, key or
-            google-genai needed. Otherwise written only when
+         -> ~/.proteomics-pipeline/jobs/podcast_<name>_<hash>.sh, a SLURM job (1 CPU, 2 GB, 2 h)
+            that runs render --tts gemini (verify follows), link and share -- the route on HIVE,
+            where minutes of network calls must not run on the login node. If the local voice
+            takes over, its steps ask for their own allocations then. --tts local: 16 CPUs,
+            24 GB, render --tts local; no consent, key or google-genai needed. Otherwise written
+            only when
             what the job needs is here: a passing check, consent, a python with google-genai >=
             GENAI_MIN (setup.sh installs it) and a key; in a folder only you can change (a
             group-writable session folder would let another member swap the script). Loads
@@ -168,6 +169,11 @@ STALL_MEMORY_H = 12.0
 # cache for TIER_MEMORY_DAYS under a fingerprint of the key (never the key): a 402 stops the
 # render, so the render that records podcast.json is a later one (staff report, skill 2.11.2).
 TIER_FILE = "key_tier.json"
+# Every request this skill sends Gemini for an episode, kept in its cache (never fatal): each
+# chunk whose text went to Google, by a hash of the text sent (sent_key: whatever model or render
+# sent it), and the two-line tests. A fallback's record (podcast.json tts.fallback) says from it
+# exactly what Google had of this script. Kept for as long as the cache.
+SENT_FILE = "gemini_sent.json"
 TIER_MEMORY_DAYS = 7.0
 PREFLIGHT_LINES = ("This is a short sound check.", "And this is the second voice.")
 TERMS_URL = "https://ai.google.dev/gemini-api/terms"
@@ -187,14 +193,14 @@ VERIFY_FILES = ("verify.txt", "verify_transcript.txt")      # what verify writes
 # Gemini 3 TTS needs client.interactions (2.25.0 has it). setup.sh installs at least this into
 # the pipeline env (its GENAI_MIN; tests/test_make_podcast_hive.py keeps the two equal).
 GENAI_MIN = "2.25.0"
-# The podcast job (job): Gemini is network calls -- an episode in minutes, a rate-limited one in up
-# to an hour -- but when Gemini fails in a way waiting cannot fix, the local voice makes the
-# episode in the same job: Kokoro on podcast_local.JOB_CPUS CPUs (8 workers of 2 threads, ~2.5 GB
-# each: a 24-min episode in ~2 min) and Whisper's check (~6 min). So the job asks for what that
-# needs, podcast_local.JOB_CPUS and JOB_MEM, whatever Gemini does. HIVE's ffmpeg (verified
-# 2026-10-15, AAC encoder present) and apptainer are modules, so the job is a login shell
-# (#!/bin/bash -l) that sources modules.sh first (HPC@UCD's ucd-hpc rule).
-JOB_HOURS = 2
+# The podcast job (job): one network-bound process; an episode renders in minutes, a rate-limited
+# one in up to an hour. When Gemini fails in a way waiting cannot fix, the local voice asks for
+# its own right-sized allocation then (podcast_local.Srun), so this job never holds Kokoro's
+# CPUs just in case. `job --tts local` asks for what the local voice needs
+# (podcast_local.JOB_CPUS, JOB_MEM). HIVE's ffmpeg (verified 2026-10-15, AAC encoder present) and
+# apptainer are modules, so the job is a login shell (#!/bin/bash -l) that sources modules.sh
+# first (HPC@UCD's ucd-hpc rule).
+JOB_HOURS, JOB_CPUS, JOB_MEM = 2, 1, "2G"
 HIVE_FFMPEG_MODULE = "ffmpeg/7.0.2"
 
 RATE = 24000                                        # Hz, 16-bit mono throughout
@@ -2125,6 +2131,8 @@ class GeminiTTS(object):
                     "-U google-genai")
         self.produced, self.models_used, self.warnings = 0, [], []
         self.sent_chunks = set()             # chunks whose text was sent (labels)
+        self.preflight_sent = 0              # two-line tests sent in this render
+        self.sent_before = {}                # SENT_FILE as this render found it
         self.failed_kind = {}                # model -> how it failed in this render
 
     @staticmethod
@@ -2160,6 +2168,38 @@ class GeminiTTS(object):
         if other:
             log(f"[render] other TTS models, used only with --model: {', '.join(other)}")
         return out
+
+    def sent_record(self):
+        """SENT_FILE: {"chunks": {sent_key: {first, last, models}}, "preflight": {requests,
+        last}}, or {}."""
+        try:
+            with open(os.path.join(self.cache_dir or "", SENT_FILE), encoding="utf-8") as fh:
+                got = json.load(fh)
+            return got if isinstance(got, dict) else {}
+        except (OSError, ValueError, TypeError):
+            return {}
+
+    def note_sent(self, chunk=None, speak=None):
+        """A request is going to Gemini: a chunk's text (its sent_key), or a two-line test
+        (chunk None). Recorded in SENT_FILE before it is sent; never fatal."""
+        if not self.cache_dir:
+            return
+        got = self.sent_record()
+        if chunk is None:
+            rec = got.setdefault("preflight", {})
+            rec["requests"] = int(rec.get("requests") or 0) + 1
+        else:
+            rec = got.setdefault("chunks", {}).setdefault(sent_key(chunk, speak), {"first": now_iso()})
+            if self.model not in rec.setdefault("models", []):
+                rec["models"].append(self.model)
+        rec["last"] = now_iso()
+        path = os.path.join(self.cache_dir, SENT_FILE)
+        try:
+            with open(path + ".part", "w", encoding="utf-8") as fh:
+                json.dump(got, fh, indent=1)
+            os.replace(path + ".part", path)
+        except OSError as e:
+            log(f"[WARN] could not record what was sent to Gemini in the cache ({e})")
 
     def remembered_stalls(self):
         """{model: record} of the models that stopped answering in this cache within
@@ -2220,6 +2260,7 @@ class GeminiTTS(object):
         model stopped answering within STALL_MEMORY_H hours: then it is not resumed with, and the
         model that is used makes every chunk again."""
         self.cache_dir = cache_dir
+        self.sent_before = self.sent_record()
         self.prior_evidence = self._load_tier()
         self._settle_tier()
         if self.user_models:
@@ -2541,6 +2582,8 @@ class GeminiTTS(object):
             self.model = m
             self._pace()
             t0 = _now()
+            self.preflight_sent += 1
+            self.note_sent()
             try:
                 self.parse(self.timed_request(probe, lambda x: x, "preflight",
                                               timeout=PREFLIGHT_TIMEOUT))
@@ -2632,6 +2675,7 @@ class GeminiTTS(object):
         while True:
             self._pace()
             self.sent_chunks.add(label)          # its text left the machine (podcast.json)
+            self.note_sent(chunk, speak)
             try:
                 r = self.timed_request(chunk, speak, label)
             except RequestTimeout as e:
@@ -3183,6 +3227,13 @@ def speaker_for(tts, s):
     return local_speaker(s) if tts == "local" else pronouncer(s.pronunciation)
 
 
+def sent_key(chunk, speak):
+    """What a chunk sends Gemini, as a hash: its turns' speakers and spoken text, whatever the
+    model (SENT_FILE)."""
+    blob = json.dumps([[t.speaker, speak(t.text)] for t in chunk.turns], ensure_ascii=False)
+    return sha256_bytes(blob.encode("utf-8"))
+
+
 def cache_key(backend, chunk, speak, model=None):
     blob = json.dumps(backend.payload(chunk, speak, model), sort_keys=True, ensure_ascii=False)
     return sha256_bytes(blob.encode("utf-8"))
@@ -3456,34 +3507,64 @@ def make_pieces(backend, chunks, speak, cache, a):
 
 def fallback_record(e, gemini, chunks=(), speak=None, cache=None):
     """podcast.json tts.fallback: Gemini failed in a way waiting cannot fix (GeminiUnusable `e`)
-    and the local voice made the whole episode. Google's words are scrubbed (never a key).
-    `gemini_chunks_cached`: this script's chunks whose Gemini audio is in the cache -- their text
-    went to Google in this render or an earlier one."""
+    and the local voice made the whole episode. Google's words are scrubbed (never a key). What
+    Google had of this script, exactly: `gemini_chunks_sent`, this script's chunks whose text
+    went to it in this render or an earlier one (SENT_FILE, or its Gemini audio in the cache from
+    a render before that record), of `chunks`; `chunks_sent_to_gemini` of them in this render;
+    the two-line tests (generic sentences, not the script) in this render and before."""
     why = FALLBACK_WHY.get(e.why, e.why)
-    made = 0
+    sent, made = 0, 0
     if speak and cache:
+        record = (gemini.sent_record() if hasattr(gemini, "sent_record") else {}).get("chunks") or {}
         models = list(getattr(gemini, "candidates", None) or [])
-        made = sum(1 for c in chunks if any(os.path.isfile(os.path.join(
-            cache, cache_key(gemini, c, speak, m) + ".wav")) for m in models))
+        for c in chunks:
+            cached = any(os.path.isfile(os.path.join(cache, cache_key(gemini, c, speak, m) + ".wav"))
+                         for m in models)
+            made += cached
+            sent += cached or sent_key(c, speak) in record
+    this = len(getattr(gemini, "sent_chunks", None) or ())
+    before = (getattr(gemini, "sent_before", None) or {}).get("preflight") or {}
     return {"from": "gemini", "to": "kokoro", "why": e.why, "reason": f"Gemini failed: {why}",
             "google_said": scrub(e.said) if e.said else None, "stopped_at": e.where,
             "message": scrub(e)[:600], "at": now_iso(),
             "gemini_models": list(getattr(gemini, "candidates", None) or []),
             "gemini_switched": list(gemini.switch_notes()) if hasattr(gemini, "switch_notes")
             else [],
-            "chunks_sent_to_gemini": len(getattr(gemini, "sent_chunks", None) or ()),
-            "gemini_chunks_cached": made,
+            "chunks": len(chunks), "gemini_chunks_sent": max(sent, this),
+            "chunks_sent_to_gemini": this, "gemini_chunks_cached": made,
+            "preflight_requests": getattr(gemini, "preflight_sent", 0),
+            "preflight_requests_before": int(before.get("requests") or 0),
             "note": f"Gemini failed ({why}); the whole episode was made with Kokoro on HIVE "
                     "instead, so it has one voice throughout"}
 
 
+def gemini_had(fallback, page=False):
+    """What Google had before a fallback, in words, from tts.fallback (fallback_record): the
+    chunks of this script whose text reached it, and the two-line tests. `page`: for the
+    transcript page, which the lab reads."""
+    k, total = fallback.get("gemini_chunks_sent") or 0, fallback.get("chunks") or 0
+    tests = (fallback.get("preflight_requests") or 0) + (fallback.get("preflight_requests_before")
+                                                         or 0)
+    if page:
+        if k:
+            return f"the text of {k} of the {total} parts of this transcript"
+        return "only a sound check, none of this transcript" if tests else "none of this transcript"
+    parts = []
+    if k:
+        parts.append(f"the text of {k} of this script's {total} chunk(s), after pronunciation "
+                     f"substitutions ({fallback.get('chunks_sent_to_gemini') or 0} of them in "
+                     "this render)")
+    if tests:
+        parts.append(f"{tests} two-line sound check(s), generic sentences that are not this "
+                     f"script ({fallback.get('preflight_requests') or 0} in this render)")
+    return "; and ".join(parts) if parts else "no text of this script"
+
+
 def gemini_tried(fallback):
-    """The transcript page's words for a fallback whose script text reached Gemini first."""
+    """The transcript page's words for a fallback: Gemini was tried first, and what it had."""
     if not isinstance(fallback, dict):
         return ""
-    n = max(fallback.get("chunks_sent_to_gemini") or 0, fallback.get("gemini_chunks_cached") or 0)
-    return (f". Gemini, tried first, failed; the text of {n} part(s) of the transcript had been "
-            "sent to it" if n else "")
+    return f". Gemini, tried first, failed; it had been sent {gemini_had(fallback, page=True)}"
 
 
 def what_was_sent(backend, gemini, fallback):
@@ -3497,13 +3578,8 @@ def what_was_sent(backend, gemini, fallback):
     said = "nothing for this audio: made on HIVE with Kokoro, and heard back there with Whisper"
     if not fallback:
         return said
-    n, k = fallback["chunks_sent_to_gemini"], fallback.get("gemini_chunks_cached") or 0
-    return (said + ". In this render, before it failed, Gemini was " + (
-        f"sent the transcript of {n} chunk(s) of this script (after pronunciation "
-        "substitutions)" if n else "sent no text of this script (at most its two-line test)")
-        + (f"; {k} chunk(s) it made, in this render or an earlier one, are in the cache, so "
-           "their text went to it then" if k else "")
-        + "; under the consent in cloud_tts_consent")
+    return (said + ". Gemini, asked first in this render or an earlier one, was sent "
+            + gemini_had(fallback) + ", under the consent in cloud_tts_consent")
 
 
 def cmd_render(a):
@@ -3642,8 +3718,9 @@ def cmd_render(a):
            "what_was_sent": what_was_sent(backend, gemini, fallback)}
     if backend.name == "kokoro":
         tts.update(engine=backend.engine(s), fallback=fallback,
-                   consent=("not needed for this audio: made offline on HIVE; Gemini, asked "
-                            "first, went under cloud_tts_consent (what_was_sent)" if fallback else
+                   consent=("not needed for this audio, which was made offline on HIVE; Gemini, "
+                            f"asked first, was sent {gemini_had(fallback)} under "
+                            "cloud_tts_consent" if fallback else
                             "not needed: made offline on HIVE, nothing was sent to any service"))
     man = {
         "show": s.show, "title": s.title,
@@ -3709,9 +3786,11 @@ def cmd_render(a):
                 run_verify_local(target, out, runner=backend.runner)
                 heard = True
             except Exception as e:
-                why = scrub(e)
-                log(f"[WARN] verify skipped: {why} (the render is fine; run {retry} to retry)")
-                verify_not_run(out, f"verify failed: {why}", retry)
+                # the detail goes to the log only: it can name a HIVE folder or account, and
+                # verify.txt and podcast.json are delivered
+                log(f"[WARN] verify skipped: {scrub(e)} (the render is fine; run {retry} to retry)")
+                verify_not_run(out, "the local check (Whisper on HIVE) could not run; the render "
+                                    "log says why", retry)
         if fallback:
             log(f"[render] {fallback['note']}. Nothing was sent to Google for the audio"
                 + (" or its check." if heard else "."))
@@ -3771,7 +3850,7 @@ def prune_cache(cache, used, model, explicit=False):
                 pass
     for f in files:
         stem = f.split(".", 1)[0]
-        if f in (STALL_FILE, TIER_FILE):
+        if f in (STALL_FILE, TIER_FILE, SENT_FILE):
             continue                             # the memories are not a chunk's sidecar
         if f.endswith(".part"):
             pass
@@ -5449,7 +5528,8 @@ def write_job(path, py, script, out, consent_args, models, queue, log_path, name
     q = shlex.quote
     L = ["#!/bin/bash -l", f"#SBATCH --job-name=podcast_{name}",
          f'#SBATCH --output="{log_path}"', "#SBATCH --open-mode=append", "#SBATCH --ntasks=1",
-         f"#SBATCH --cpus-per-task={pl.JOB_CPUS}", f"#SBATCH --mem={pl.JOB_MEM}",
+         f"#SBATCH --cpus-per-task={pl.JOB_CPUS if tts == 'local' else JOB_CPUS}",
+         f"#SBATCH --mem={pl.JOB_MEM if tts == 'local' else JOB_MEM}",
          f"#SBATCH --time={JOB_HOURS}:00:00"]
     L += [f"#SBATCH --{k}={v}" for k, v in (("partition", part), ("account", acct), ("qos", qos))
           if v]
@@ -5457,7 +5537,8 @@ def write_job(path, py, script, out, consent_args, models, queue, log_path, name
         L.append("#SBATCH --requeue")
     L += (["# Written by make_podcast.py job: the episode in Gemini voices (render; verify, the ASR",
            "# round trip, follows by itself; when Gemini fails in a way waiting cannot fix, the",
-           "# local voice -- Kokoro on HIVE -- makes the whole episode instead, in this job's CPUs),"]
+           "# local voice -- Kokoro on HIVE -- makes the whole episode instead, each step in an",
+           "# allocation of its own asked for only then),"]
           if tts == "gemini" else
           ["# Written by make_podcast.py job: the episode in the local voice (render --tts local:",
            "# Kokoro on HIVE, then Whisper's check on HIVE; nothing is sent anywhere),"])
@@ -5551,7 +5632,8 @@ def cmd_job(a):
         log(f"[job] cannot choose a SLURM queue: {e}. The skill's scripts are incomplete here; "
             "put them again (hive_exec.sh --put-skill).")
         return 2
-    part, acct, qos = run_search.slurm_queue(peak_cpus=pl.JOB_CPUS, preemptible_ok=True)
+    part, acct, qos = run_search.slurm_queue(peak_cpus=pl.JOB_CPUS if local else JOB_CPUS,
+                                             preemptible_ok=True)
     requeue = diann_parallel.needs_requeue(part, qos)
     session = _session_of(out)
     jobs = os.path.join(pipeline_home(), "jobs")
@@ -5587,8 +5669,9 @@ def cmd_job(a):
                                    + "): CORE_CLOUD_OK") if core_rec else "--cloud-ok"),
                       "queue": {"partition": part, "account": acct, "qos": qos,
                                 "requeue": requeue},
-                      "resources": {"cpus": pl.JOB_CPUS, "mem": pl.JOB_MEM,
-                                    "hours": JOB_HOURS},
+                      "resources": ({"cpus": pl.JOB_CPUS, "mem": pl.JOB_MEM, "hours": JOB_HOURS}
+                                    if local else
+                                    {"cpus": JOB_CPUS, "mem": JOB_MEM, "hours": JOB_HOURS}),
                       "steps": (["render --tts local (then the check: Whisper on HIVE)"]
                                 if local else
                                 ["render --tts gemini (then verify; the local voice makes the "

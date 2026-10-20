@@ -71,9 +71,14 @@ THREADS_PER_WORKER = 2
 GB_PER_WORKER = 2.5
 RESERVE_GB = 3.0                # the main process and the container's start-up
 MIN_GB = GB_PER_WORKER + RESERVE_GB
-# A container call sent to a compute node (from a login node, or from another computer)
-JOB_CPUS, JOB_MEM = 16, "24G"
-SPEAK_MINUTES, HEAR_MINUTES = 30, 45
+# Each step is a right-sized allocation of its own when it cannot run where render runs (a login
+# node; a job too small, such as the 1-CPU Gemini podcast job; another computer): Kokoro speaking
+# (8 workers of 2 threads at ~2.5 GB), and Whisper hearing it back (two models at once, ~3 GB).
+STEPS = {"speak": (16, "24G", 30), "hear": (16, "12G", 45)}        # CPUs, memory, minutes
+# What a job that runs the local voice itself asks for (`job --tts local`, `render --tts local`
+# moved off a login node); a job with less than HERE_MIN sends each step to its own allocation
+JOB_CPUS, JOB_MEM = STEPS["speak"][:2]
+HERE_MIN = (8, 12.0)                                                 # CPUs, GB
 REMOTE_DIR = "~/.proteomics-pipeline/podcast-local"    # on HIVE; private (700), emptied after
 EXIT_WORKER_DIED, EXIT_NOT_PINNED = 3, 4               # synth.py 1.2's; the image check's
 
@@ -184,23 +189,36 @@ def _image_check(path, sha):
             f"sha256 $got, expected {sha}\" >&2; exit {EXIT_NOT_PINNED}; }}")
 
 
+_UNBINDABLE = re.compile(r"[,:]")            # apptainer --bind splits its value on , and :
+
+
+def _bindable(path):
+    """A folder that `apptainer exec --bind` can take: no , or : in its path."""
+    return bool(path) and not _UNBINDABLE.search(os.path.realpath(path))
+
+
 class Runner(object):
     """Runs one shell script that calls the containers, where they can run. A call's folder is
     `local` here and `run_dir` (a shell word) where the script runs; send/fetch move files
-    between them (nothing to do on HIVE itself)."""
+    between them (nothing to do on HIVE itself). resources(step) are the CPUs and GB that step
+    runs with (STEPS: "speak", "hear")."""
     remote = False
     scratch = None
 
-    def resources(self):
-        return self.cpus, self.mem_gb
+    def resources(self, step="speak"):
+        cpus, mem, _ = STEPS[step]
+        return cpus, _gb(mem)
 
     def open(self):
-        d = tempfile.mkdtemp(prefix="podcast-local-", dir=self._base())
+        base = self._base()
+        d = tempfile.mkdtemp(prefix="podcast-local-", dir=base)
         os.chmod(d, 0o700)
         return d, shlex.quote(d)
 
     def _base(self):
-        return os.environ.get("TMPDIR") or None
+        """A folder for the call's files that the container can be given (_bindable)."""
+        tmp = os.environ.get("TMPDIR")
+        return tmp if _bindable(tmp) else "/tmp"
 
     def send(self, local, names):
         return
@@ -212,54 +230,61 @@ class Runner(object):
         shutil.rmtree(local, ignore_errors=True)
 
     def describe(self):
-        return {"where": self.where, "cpus": self.cpus, "memory_gb": self.mem_gb}
+        return {"where": self.where}
 
 
 class Here(Runner):
-    """A HIVE compute node: the containers run in this job's own allocation."""
+    """A HIVE job with room for the local voice (HERE_MIN): the containers run in its own
+    allocation, Kokoro's workers sized from it."""
 
     def __init__(self, env=None):
         self.cpus, self.mem_gb = job_resources(env)
         mem = f"{self.mem_gb:.0f} GB" if self.mem_gb else "memory not known"
         self.where = f"this HIVE job ({self.cpus} CPUs, {mem})"
 
-    def run(self, script, minutes):
-        if self.mem_gb is not None and self.mem_gb < MIN_GB:
-            raise LocalError(
-                f"this job has {self.mem_gb:.1f} GB of memory; the local voice needs at least "
-                f"{MIN_GB:g} GB. Write the podcast job again (`make_podcast.py job`, which asks "
-                f"for {JOB_CPUS} CPUs and {JOB_MEM}) and submit it: finished chunks are cached")
-        return _run(["bash", "-c", script], minutes)
+    def resources(self, step="speak"):
+        return self.cpus, self.mem_gb
+
+    def run(self, script, step):
+        return _run(["bash", "-c", script], STEPS[step][2])
 
 
-class LoginSrun(Runner):
-    """A HIVE login node: each container call goes to a compute node in one blocking srun (the
-    queue written out). Its folder must be one the node can see -- never this node's own /tmp:
-    the episode's cache (`scratch`, set by render and verify), else the private
-    podcast-local/ folder in the pipeline home."""
+class Srun(Runner):
+    """Each step on a compute node in an allocation of its own, sized for it (STEPS), in one
+    blocking srun with the queue written out (on_compute.srun_argv): from a HIVE login node, or
+    from inside a job too small for the local voice -- the Gemini podcast job (1 CPU, 2 GB)
+    asks for these resources only when it falls back. SLURM's variables of the job it runs in
+    are left out, so srun asks for a new allocation instead of a step of this one. Its folder
+    must be one the node can see -- never node-local /tmp: the episode's cache (`scratch`, set
+    by render and verify), else the private podcast-local/ folder in the pipeline home."""
 
-    def __init__(self):
-        self.cpus, self.mem_gb = JOB_CPUS, _gb(JOB_MEM)
-        self.where = (f"a HIVE compute node (one srun per step, {JOB_CPUS} CPUs and {JOB_MEM}, "
-                      "sent from this login node)")
+    def __init__(self, inside_job=False):
+        self.inside_job = inside_job
+        self.where = ("a HIVE allocation of its own for each step (srun from this job, "
+                      f"{STEPS['speak'][0]} CPUs and {STEPS['speak'][1]} to speak)" if inside_job
+                      else "a HIVE compute node (one srun per step, sent from this login node)")
 
     def _base(self):
-        if self.scratch:
+        if _bindable(self.scratch):
             return self.scratch
         home = os.environ.get("PROTEOMICS_PIPELINE_HOME") or os.path.join(
             os.path.expanduser("~"), ".proteomics-pipeline")
         d = os.path.join(home, "podcast-local")
+        if not _bindable(d):
+            raise LocalError(f"no folder for the local voice's files that apptainer can bind: "
+                             f"{self.scratch} and {d} hold a , or :")
         os.makedirs(d, mode=0o700, exist_ok=True)
         return d
 
-    def run(self, script, minutes):
+    def run(self, script, step):
         import on_compute
+        cpus, mem, minutes = STEPS[step]
         try:
-            argv = on_compute.srun_argv(["bash", "-c", script], minutes, JOB_MEM, JOB_CPUS,
-                                        name="pp_podcast_local")
+            argv = on_compute.srun_argv(["bash", "-c", script], minutes, mem, cpus,
+                                        name=f"pp_podcast_{step}")
         except (ValueError, on_compute.QueueChoice) as e:
             raise LocalError(f"no compute node could be asked for: {e}")
-        return _run(argv, minutes + 15)
+        return _run(argv, minutes + 15, drop_slurm=True)
 
 
 def _remote(sub=""):
@@ -277,9 +302,7 @@ class Remote(Runner):
 
     def __init__(self, user):
         self.user = user
-        self.cpus, self.mem_gb = JOB_CPUS, _gb(JOB_MEM)
-        self.where = (f"a HIVE job sent from this computer (hive_exec.sh --job, {JOB_CPUS} CPUs "
-                      f"and {JOB_MEM})")
+        self.where = "a HIVE job sent from this computer for each step (hive_exec.sh --job)"
         self._ids = {}
 
     def _hx(self, *args, timeout=600):
@@ -309,9 +332,10 @@ class Remote(Runner):
             if rc:
                 raise LocalError(f"could not copy {n} to HIVE: {_tail(err or out)}")
 
-    def run(self, script, minutes):
-        return self._hx("--job", "--time", str(minutes), "--mem", JOB_MEM, "--cpus",
-                        str(JOB_CPUS), script, timeout=(minutes + 30) * 60)
+    def run(self, script, step):
+        cpus, mem, minutes = STEPS[step]
+        return self._hx("--job", "--time", str(minutes), "--mem", mem, "--cpus", str(cpus),
+                        script, timeout=(minutes + 30) * 60)
 
     def fetch(self, local, names):
         """`names` ending in "/" are folders: each lands as local/<name> (never its contents
@@ -347,10 +371,13 @@ class Remote(Runner):
 PRIVATE_ENV = ("GEMINI_API_KEY", "GOOGLE_API_KEY")
 
 
-def _run(argv, minutes):
+def _run(argv, minutes, drop_slurm=False):
     """-> (exit status, stdout, stderr); a run past `minutes` is killed and is a LocalError. The
-    child gets this environment without PRIVATE_ENV."""
-    env = {k: v for k, v in os.environ.items() if k not in PRIVATE_ENV}
+    child gets this environment without PRIVATE_ENV; `drop_slurm`, also without the SLURM job's
+    variables (an srun then asks for an allocation of its own, never a step of this job) and
+    on_compute's re-run marker."""
+    env = {k: v for k, v in os.environ.items() if k not in PRIVATE_ENV and not (
+        drop_slurm and (k.startswith("SLURM") or k == "PROTEOMICS_ON_COMPUTE"))}
     try:
         # its own process group, so a timeout stops apptainer and its workers, not only bash
         p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -389,7 +416,12 @@ def find_runner(probe=True):
             if why:
                 raise Unavailable(why)
         import on_compute
-        return LoginSrun() if on_compute.on_login_node() else Here()
+        if on_compute.on_login_node():
+            return Srun()
+        cpus, mem = job_resources()
+        if mem is not None and cpus >= HERE_MIN[0] and mem >= HERE_MIN[1]:
+            return Here()
+        return Srun(inside_job=True)
     try:
         from record_run import hive_login
         user = hive_login()
@@ -456,19 +488,19 @@ def speak(runner, voices, lines, log=None):
             json.dump({"voices": voices, "speed": 1.0,
                        "turns": [{"speaker": sp, "text": tx} for sp, tx in lines]},
                       fh, ensure_ascii=False)
-        workers, threads = layout(*runner.resources())
+        workers, threads = layout(*runner.resources("speak"))
         img = shlex.quote(KOKORO_IMAGE)
         script = "\n".join([
             "set -eo pipefail", f"D={run_dir}", _apptainer_setup(),
             _image_check(KOKORO_IMAGE, KOKORO_SHA256),
-            f'apptainer exec --bind "$D" {img} python3 /opt/kokoro/synth.py "$D/job.json" - '
+            f'apptainer exec --cleanenv --bind "$D" {img} python3 /opt/kokoro/synth.py "$D/job.json" - '
             f'--per-turn "$D/turns" --timing "$D/timing.json" --threads {threads} '
             f"--workers {workers}"])
         runner.send(local, ["job.json"])
         log(f"[render] Kokoro: {len(lines)} line(s) in one container call, on {runner.where}: "
             f"{workers} worker(s) x {THREADS_PER_WORKER} threads")
         t0 = time.time()
-        rc, out, err = runner.run(script, SPEAK_MINUTES)
+        rc, out, err = runner.run(script, "speak")
         if rc:
             raise LocalError(_failed("Kokoro", rc, err, workers))
         runner.fetch(local, ["turns/", "timing.json"])
@@ -504,13 +536,13 @@ def hear(runner, audio, log=None):
         name = "episode" + (os.path.splitext(audio)[1].lower() or ".m4a")
         shutil.copyfile(audio, os.path.join(local, name))
         runner.send(local, [name])
-        cpus = runner.resources()[0]
+        cpus = runner.resources("hear")[0]
         each = max(1, cpus // len(WHISPER_MODELS))
         img = shlex.quote(WHISPER_IMAGE)
         script = "\n".join([
             "set -eo pipefail", f"D={run_dir}", f'A="$D"/{name}',
             _apptainer_setup(), _image_check(WHISPER_IMAGE, WHISPER_SHA256),
-            f'one() {{ apptainer exec --bind "$D" {img} python3 '
+            f'one() {{ apptainer exec --cleanenv --bind "$D" {img} python3 '
             f'/opt/whisper/transcribe.py "$A" "$D/asr_$1.json" --model "$1" --threads {each} '
             '> "$D/asr_$1.log" 2>&1; }']
             + [f"one {m} & p{k}=$!" for k, m in enumerate(WHISPER_MODELS)]
@@ -519,7 +551,7 @@ def hear(runner, audio, log=None):
         log(f"[verify] Whisper ({' and '.join(WHISPER_MODELS)}) hears the episode back, on "
             f"{runner.where}; nothing is sent anywhere")
         t0 = time.time()
-        rc, out, err = runner.run(script, HEAR_MINUTES)
+        rc, out, err = runner.run(script, "hear")
         if rc:
             raise LocalError(_failed("Whisper", rc, err))
         names = [f"asr_{m}.json" for m in WHISPER_MODELS]

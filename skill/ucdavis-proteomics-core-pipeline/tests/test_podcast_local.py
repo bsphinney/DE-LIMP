@@ -226,8 +226,15 @@ class WhenItFallsBack(Local):
                                         "--model", ANSWERS, preflight=True)
         man = self.assert_fell_back(rc, err, "billing")
         self.assertEqual(man["tts"]["fallback"]["stopped_at"], "preflight")
-        self.assertEqual(man["tts"]["fallback"]["chunks_sent_to_gemini"], 0)
-        self.assertIn("sent no text of this script", man["tts"]["what_was_sent"])
+        fb = man["tts"]["fallback"]
+        self.assertEqual((fb["chunks_sent_to_gemini"], fb["gemini_chunks_sent"],
+                          fb["preflight_requests"]), (0, 0, 1))
+        # exactly what Google had: its sound check, none of this script
+        self.assertIn("was sent 1 two-line sound check(s), generic sentences that are not this "
+                      "script (1 in this render)", man["tts"]["what_was_sent"])
+        self.assertNotIn("chunk(s) of this script", man["tts"]["what_was_sent"])
+        self.assertIn("only a sound check, none of this transcript",
+                      read(os.path.join(self.pod, "transcript.html")))
 
     def test_an_auth_failure(self):
         for where, pre in (("chunk", False), ("preflight", True)):
@@ -266,7 +273,9 @@ class WhenItFallsBack(Local):
 class TimeoutBudget(Local):
     """Review: with the defaults (600 s, twice per model, a 30 min budget) the budget ran out on
     the second model's first timeout, so "every model stalled" mid-episode never handed over.
-    The same 3:1 ratio here: 0.3 s timeouts, a 0.9 s budget."""
+    The defaults' own ratio here (budget / timeout = 3), at 0.3 s a timeout."""
+    TIMEOUT = 0.3
+    BUDGET_MIN = TIMEOUT * (mp.REQUEST_TIMEOUT_BUDGET_MIN * 60 / mp.REQUEST_TIMEOUT) / 60
 
     def setUp(self):
         super().setUp()
@@ -277,9 +286,10 @@ class TimeoutBudget(Local):
         self.addCleanup(p.stop)
 
     def test_the_budget_after_a_stall_hand_over_is_every_model_stalled(self):
+        self.assertEqual(mp.REQUEST_TIMEOUT_BUDGET_MIN * 60 / mp.REQUEST_TIMEOUT, 3.0)
         rc, out, err, log = self.render(stuck(self.release), "--model", STALLS, "--model",
-                                        ANSWERS, "--request-timeout", "0.3",
-                                        "--request-timeout-budget", "0.015")
+                                        ANSWERS, "--request-timeout", str(self.TIMEOUT),
+                                        "--request-timeout-budget", str(self.BUDGET_MIN))
         self.assertEqual(rc, 0, err)
         fb = self.manifest()["tts"]["fallback"]
         self.assertEqual(fb["why"], "stalled")
@@ -358,6 +368,23 @@ class WhenItWaits(Local):
         self.assertNotIn("local voice", err)
         self.assertEqual(self.container_calls(), [])
 
+    def assert_waits(self, rc, err):
+        self.assertEqual(rc, 1, err)
+        self.assertIn("no Gemini TTS model answered a two-line test", err)
+        self.assertNotIn("local voice", err)
+        self.assertEqual(self.container_calls(), [])
+
+    def test_an_empty_answer_at_the_preflight_waits(self):
+        rc, out, err, log = self.render(lambda m, c, k: b"", "--model", ANSWERS, preflight=True)
+        self.assertIn("held no audio", err)
+        self.assert_waits(rc, err)
+
+    def test_a_reset_connection_at_the_preflight_waits(self):
+        def reset(model, contents, config):
+            raise ConnectionResetError("Connection reset by peer")
+        rc, out, err, log = self.render(reset, preflight=True)
+        self.assert_waits(rc, err)
+
     def test_one_transient_model_among_ones_with_no_quota_waits_too(self):
         def behaviour(model, contents, config):
             if model == ANSWERS:
@@ -421,9 +448,16 @@ class EveryChunkAgain(Local):
                                         "--model", ANSWERS)
         self.assertEqual(rc, 0, err)
         fb = self.manifest()["tts"]["fallback"]
-        self.assertEqual((fb["chunks_sent_to_gemini"], fb["gemini_chunks_cached"]), (1, 1))
-        self.assertIn("1 chunk(s) it made, in this render or an earlier one, are in the cache",
+        # render 1 sent chunks 1 and 2 (chunk 2 failed); render 2 sent chunk 2 again
+        self.assertEqual((fb["gemini_chunks_sent"], fb["chunks"], fb["chunks_sent_to_gemini"],
+                          fb["gemini_chunks_cached"]), (2, 2, 1, 1))
+        self.assertIn("the text of 2 of this script's 2 chunk(s), after pronunciation "
+                      "substitutions (1 of them in this render)",
                       self.manifest()["tts"]["what_was_sent"])
+
+    def test_the_record_survives_the_cache_pruning(self):
+        self.test_what_was_sent_counts_chunks_from_an_earlier_render()
+        self.assertTrue(os.path.isfile(os.path.join(self.pod, ".cache", mp.SENT_FILE)))
 
     def test_a_later_gemini_render_resumes_from_its_own_chunk(self):
         self.test_gemini_chunks_are_never_in_the_kokoro_episode_and_stay_cached()
@@ -447,9 +481,11 @@ class Record(Local):
         tts = man["tts"]
         self.assertEqual((tts["backend"], tts["model"], tts["sent_to_cloud"]),
                          ("kokoro", pl.KOKORO_LABEL, False))
-        self.assertEqual(tts["consent"], "not needed for this audio: made offline on HIVE; "
-                                         "Gemini, asked first, went under cloud_tts_consent "
-                                         "(what_was_sent)")
+        self.assertEqual(tts["consent"], "not needed for this audio, which was made offline on "
+                                         "HIVE; Gemini, asked first, was sent the text of 1 of "
+                                         "this script's 2 chunk(s), after pronunciation "
+                                         "substitutions (1 of them in this render) under "
+                                         "cloud_tts_consent")
         eng = tts["engine"]
         self.assertEqual((eng["image"], eng["image_sha256"], eng["synth"]),
                          (pl.KOKORO_IMAGE, pl.KOKORO_SHA256, "1.2"))
@@ -465,7 +501,8 @@ class Record(Local):
         self.assertEqual(man["warnings"][0], fb["note"])
         # what went to Google before it failed, and the consent it went under
         self.assertEqual(man["cloud_tts_consent"], "PI, 2026-10-20")
-        self.assertIn("Gemini was sent the transcript of 1 chunk(s)", tts["what_was_sent"])
+        self.assertIn("was sent the text of 1 of this script's 2 chunk(s)", tts["what_was_sent"])
+        self.assertNotIn("sound check", tts["what_was_sent"], "--no-preflight: none was sent")
         self.assertEqual([h["name"] for h in man["hosts"]], ["Maya", "Leo"])      # labels kept
         self.assertEqual([h["voice"] for h in man["hosts"]], ["bf_emma", "af_heart"])
         self.assertNotIn(FAKE_KEY, read(os.path.join(self.pod, "podcast.json")) + err)
@@ -491,10 +528,8 @@ class Record(Local):
         self.fall_back()
         page = read(os.path.join(self.pod, "transcript.html"))
         self.assertIn("Leo: af_heart (said as Lena)", page)
-        self.assertIn("Gemini, tried first, failed; the text of 1 part(s) of the transcript had "
-                      "been sent to it", page)
-        self.assertIn("Gemini, asked first, went under cloud_tts_consent",
-                      self.manifest()["tts"]["consent"])
+        self.assertIn("Gemini, tried first, failed; it had been sent the text of 1 of the 2 "
+                      "parts of this transcript", page)
         self.assertIn("<b>Leo</b>", page)
         self.assertNotIn("<b>Lena</b>", page)
 
@@ -616,6 +651,22 @@ class TtsLocal(Local):
                          [("number", "small.en")])
 
 
+class CheckFails(Local):
+    def test_the_delivered_files_name_no_hive_folder(self):
+        def fail(*a, **k):
+            raise pl.LocalError("could not copy episode.m4a to HIVE: rsync: mkdir "
+                                "\"/home/staff1/.proteomics-pipeline/podcast-local/ab12\" failed")
+        with mock.patch.object(pl, "hear", fail):
+            rc, out, err, log = self.render(None, tts="local")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("/home/staff1/", err)                      # the log says why
+        delivered = read(os.path.join(self.pod, "verify.txt")) + read(
+            os.path.join(self.pod, "podcast.json"))
+        self.assertNotIn("/home/", delivered)
+        self.assertNotIn("staff1", delivered)
+        self.assertEqual(self.manifest()["verify"]["status"], "NOT RUN")
+
+
 class NotAvailable(Local):
     WHY = "this computer has no HIVE login saved (check_access.sh saves it)"
 
@@ -671,8 +722,8 @@ class WhereItRuns(unittest.TestCase):
                     mock.patch.object(pl, "WHISPER_IMAGE", os.path.join(d, "w.sif")), \
                     mock.patch("on_compute.on_login_node", return_value=True):
                 r = pl.find_runner()
-        self.assertIsInstance(r, pl.LoginSrun)
-        self.assertEqual(r.resources(), (16, 24.0))
+        self.assertIsInstance(r, pl.Srun)
+        self.assertEqual((r.resources("speak"), r.resources("hear")), ((16, 24.0), (16, 12.0)))
         # never this login node's own /tmp, which the compute node cannot see (HIVE, 2026-10-20)
         with tempfile.TemporaryDirectory() as home:
             with mock.patch.dict(os.environ, {"PROTEOMICS_PIPELINE_HOME": home, "TMPDIR": "/tmp"}):
@@ -685,9 +736,49 @@ class WhereItRuns(unittest.TestCase):
                 self.assertEqual(os.path.dirname(d2), r.scratch)
                 r.close(d2)
         with mock.patch("on_compute.srun_argv", return_value=["true"]) as srun:
-            self.assertEqual(r.run("echo hi", 30)[0], 0)
+            self.assertEqual(r.run("echo hi", "speak")[0], 0)
         argv, minutes, mem, cpus = srun.call_args[0][:4]
         self.assertEqual((argv[:2], minutes, mem, cpus), (["bash", "-c"], 30, "24G", 16))
+        with mock.patch("on_compute.srun_argv", return_value=["true"]) as srun:
+            r.run("echo hi", "hear")
+        self.assertEqual(srun.call_args[0][1:4], (45, "12G", 16))
+
+    def images(self, d):
+        for name in ("k.sif", "w.sif"):
+            write(os.path.join(d, name), "x")
+        return (mock.patch.object(pl, "_on_hive", return_value=True),
+                mock.patch.object(pl, "KOKORO_IMAGE", os.path.join(d, "k.sif")),
+                mock.patch.object(pl, "WHISPER_IMAGE", os.path.join(d, "w.sif")),
+                mock.patch("on_compute.on_login_node", return_value=False))
+
+    def test_a_job_with_room_runs_it_itself_and_a_small_one_asks_for_its_own(self):
+        """Review (ucd-hpc): the Gemini podcast job (1 CPU, 2 GB) must not hold Kokoro's 16 CPUs
+        just in case; the local voice asks for them only when it takes over."""
+        small = {"SLURM_JOB_ID": "7", "SLURM_CPUS_PER_TASK": "1", "SLURM_MEM_PER_NODE": "2048"}
+        with tempfile.TemporaryDirectory() as d:
+            a, b, c, e = self.images(d)
+            with a, b, c, e:
+                with mock.patch.dict(os.environ, JOB_ENV):
+                    self.assertIsInstance(pl.find_runner(), pl.Here)
+                with mock.patch.dict(os.environ, small):
+                    r = pl.find_runner()
+        self.assertIsInstance(r, pl.Srun)
+        self.assertTrue(r.inside_job)
+        self.assertIn("allocation of its own", r.where)
+
+    def test_an_srun_from_a_job_asks_for_a_new_allocation_and_no_key(self):
+        """srun inside a job makes a step of that job unless the job's SLURM variables are left
+        out; and neither srun nor the container gets the Gemini key."""
+        env = dict(JOB_ENV, SLURM_JOBID="1", SLURM_NODELIST="n1", PROTEOMICS_ON_COMPUTE="1",
+                   GEMINI_API_KEY=FAKE_KEY)
+        with mock.patch.dict(os.environ, env), \
+                mock.patch("on_compute.srun_argv", return_value=["/usr/bin/env"]):
+            rc, out, err = pl.Srun(inside_job=True).run("true", "speak")
+        self.assertEqual(rc, 0)
+        self.assertNotIn("SLURM", out)
+        self.assertNotIn("PROTEOMICS_ON_COMPUTE", out)
+        self.assertNotIn(FAKE_KEY, out)
+        self.assertIn("PATH=", out)
 
     def test_from_another_computer_hive_is_asked(self):
         def answer(said):
@@ -812,12 +903,28 @@ class Sizing(unittest.TestCase):
         self.assertEqual(pl.layout(pl.JOB_CPUS, pl._gb(pl.JOB_MEM)), (8, 16),
                          "the podcast job holds 8 workers")
 
-    def test_a_job_too_small_says_so(self):
-        r = pl.Here({"SLURM_JOB_ID": "1", "SLURM_CPUS_PER_TASK": "1", "SLURM_MEM_PER_NODE": "2048"})
-        with self.assertRaises(pl.LocalError) as e:
-            r.run("true", 1)
-        self.assertIn("needs at least 5.5 GB", str(e.exception))
-        self.assertIn("make_podcast.py job", str(e.exception))
+    def test_work_folders_apptainer_can_bind(self):
+        """Review: a , or : in a path breaks apptainer's --bind (it splits on them)."""
+        self.assertFalse(pl._bindable("/quobyte/x/PROT 0807, v2/output/podcast/.cache"))
+        self.assertTrue(pl._bindable("/quobyte/x/Core service/PROT 0807 (v2)/.cache"))
+        with tempfile.TemporaryDirectory() as home:
+            bad = os.path.join(home, "a,b")
+            os.makedirs(bad)
+            r = pl.Srun()
+            r.scratch = bad
+            with mock.patch.dict(os.environ, {"PROTEOMICS_PIPELINE_HOME": home}):
+                d, word = r.open()
+            self.assertEqual(os.path.dirname(d), os.path.join(home, "podcast-local"))
+            r.close(d)
+            with mock.patch.dict(os.environ, {"TMPDIR": bad}):
+                d, _ = pl.Here(JOB_ENV).open()
+            self.assertEqual(os.path.dirname(d), "/tmp")
+            pl.Here(JOB_ENV).close(d)
+            r.scratch = bad
+            with mock.patch.dict(os.environ, {"PROTEOMICS_PIPELINE_HOME": bad}):
+                with self.assertRaises(pl.LocalError) as e:
+                    r.open()
+            self.assertIn("hold a , or :", str(e.exception))
 
 
 class ContainerCall(FakeContainers, unittest.TestCase):
@@ -833,6 +940,7 @@ class ContainerCall(FakeContainers, unittest.TestCase):
         self.addCleanup(self.runner.close, d)
         self.assertEqual([os.path.basename(p) for p in paths], ["turn-0001.wav", "turn-0002.wav"])
         call = self.kokoro_calls()[0]
+        self.assertIn("--cleanenv", call)
         self.assertEqual(call[call.index("--workers") + 1], "8")
         self.assertEqual(call[call.index("--threads") + 1], "16")
         self.assertIn(pl.KOKORO_IMAGE, call)
@@ -871,6 +979,7 @@ class ContainerCall(FakeContainers, unittest.TestCase):
         calls = [c for c in self.container_calls() if any(a.endswith("transcribe.py") for a in c)]
         self.assertEqual([c[c.index("--threads") + 1] for c in calls], ["8", "8"])
         for c in calls:          # review: never the episode's folder, read-only, over the work one
+            self.assertIn("--cleanenv", c)
             binds = [c[i + 1] for i, a in enumerate(c) if a == "--bind"]
             self.assertEqual(len(binds), 1, c)
             audio = c[c.index("/opt/whisper/transcribe.py") + 1]

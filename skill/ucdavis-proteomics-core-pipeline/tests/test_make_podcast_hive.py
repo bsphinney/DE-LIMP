@@ -524,9 +524,10 @@ class Job(CoreKeyFile, T.Workspace):
         text = T.read(self.job_path)
         lines = text.splitlines()
         self.assertEqual(lines[0], "#!/bin/bash -l", "a login shell: HIVE's `module` command")
-        # sized for the local voice, which takes over in this job when Gemini cannot be used
+        # the Gemini job's size as before 2.14: when the local voice takes over, its steps ask
+        # for their own allocations then (podcast_local.Srun), never this job's
         for want in ("#SBATCH --open-mode=append",              # a requeued job keeps its log
-                     "#SBATCH --ntasks=1", "#SBATCH --cpus-per-task=16", "#SBATCH --mem=24G",
+                     "#SBATCH --ntasks=1", "#SBATCH --cpus-per-task=1", "#SBATCH --mem=2G",
                      "#SBATCH --time=2:00:00",
                      "#SBATCH --partition=high", "#SBATCH --account=genome-center-grp",
                      "#SBATCH --qos=genome-center-grp-high-qos",

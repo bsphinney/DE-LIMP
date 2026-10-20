@@ -81,7 +81,8 @@ Where the report was finished, so the podcast's checks read the report it links 
   on HIVE whose report was made there. You write the script here and put it beside the report
   in `$S/output/podcast/`. `check` runs there through `hive_exec.sh`, and a SLURM job
   (`make_podcast.py job`) renders it in Gemini voices, verifies it, links it and shares it
-  ("Commands", "On HIVE"); when Gemini cannot be used, the local voice makes it in the same job.
+  ("Commands", "On HIVE"); when Gemini cannot be used, the local voice makes it, from that job,
+  in allocations of its own.
   A Core run uses the Core's shared key. Anyone else needs their own key on HIVE,
   `~/.config/ucdavis-proteomics/gemini_key` with mode 600, saved in their own terminal and never
   in this chat; `say` does not exist there. `job --tts local` makes it in the local voice from
@@ -583,9 +584,10 @@ bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.t
   `..._<jobid>.log` beside it; `job` prints both. That folder is yours alone (mode 700). Core
   session folders are group-writable with no sticky bit, so a script there could be swapped for
   another member's before `sbatch` reads it, and the job would run as you. The script is written
-  without following a link, and a link where it goes is refused. The job asks for 16 CPUs, 24 GB
-  and 2 hours -- what the local voice needs if it takes over in the job (Kokoro speaks a 24-min
-  episode in about 2 minutes on 16 CPUs; Whisper hears it back in about 6) -- on the queue
+  without following a link, and a link where it goes is refused. The job asks for 1 CPU, 2 GB
+  and 2 hours: it is network calls. If the local voice takes over, each of its steps asks for an
+  allocation of its own only then ("The local voice", "Where it runs"), so the job never holds
+  Kokoro's CPUs just in case. It runs on the queue
   `run_search.slurm_queue` picks for this account (as every job the skill writes; `--requeue`
   on a preemptible one, with `--open-mode=append` so a requeued job adds to its log). Its
   `--output` path is in double quotes, so a space in it is fine (single quotes leave no log in a
@@ -596,8 +598,9 @@ bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.t
   gemini --core-run` (verify follows by itself; the local voice takes over if Gemini fails in
   a way waiting cannot fix), `link` and `share`; a failed step stops it there. Submitting it
   again resumes: finished chunks are cached. An episode takes minutes; rate limits can stretch
-  that to an hour. `job --tts local` writes the same job with `render --tts local`, and needs no
-  consent, key or google-genai.
+  that to an hour. `job --tts local` writes the same job with `render --tts local`, asking for
+  16 CPUs and 24 GB (Kokoro speaks a 24-min episode in about 2 minutes on 16 CPUs; Whisper hears
+  it back in about 6), and needs no consent, key or google-genai.
 - **Never run render, verify or share on the login node**: they are minutes of network calls.
   HIVE's compute nodes reach Google's API (checked 2026-10-15). `check`, the preview, `link`
   and `key` are light, so they may run through `hive_exec.sh` directly. `render --tts local`
@@ -864,12 +867,23 @@ the start.
   "91 to 97%". Each fixes a misreading found in Core episodes, and `render --tts local
   --dry-run` shows the result. A symbol that still comes out wrong gets a Pronunciation row,
   as for Gemini.
-- **Where it runs** (`podcast_local.find_runner`): in a HIVE job (the podcast job) the
-  containers run in the job itself. On a HIVE login node each step runs in one blocking srun
-  (16 CPUs, 24 GB). On another computer with the skill's HIVE login, each step is a HIVE job
-  (`hive_exec.sh --job`): the lines (or the episode) go to a private folder in your HIVE home
-  (`~/.proteomics-pipeline/podcast-local/`, mode 700), the results come back, and the folder is
-  removed. No container call, srun or HIVE job is handed the Gemini key. Nowhere else: render
+- **Where it runs** (`podcast_local.find_runner`), each step sized for itself: speaking 16 CPUs,
+  24 GB, 30 min; hearing back 16 CPUs, 12 GB, 45 min.
+  - In a HIVE job with room (8 CPUs and 12 GB or more: `job --tts local`, or `render --tts
+    local` moved off a login node) the containers run in the job itself.
+  - From a job too small for it -- the Gemini podcast job (1 CPU, 2 GB) when it falls back --
+    or from a HIVE login node, each step is one blocking srun with the queue written out
+    (`on_compute.srun_argv`), an allocation of its own; from inside a job, that job's SLURM
+    variables are left out so srun asks for a new allocation, never a step of the small one. Its
+    files sit in the episode's `podcast/.cache` (never a node's own `/tmp`).
+  - On another computer with the skill's HIVE login, each step is a HIVE job (`hive_exec.sh
+    --job`): the lines (or the episode) go to a private folder in your HIVE home
+    (`~/.proteomics-pipeline/podcast-local/`, mode 700), the results come back, and the folder
+    is removed.
+  - The containers run with `--cleanenv`, and no container call, srun or HIVE job is handed the
+    Gemini key. The one folder bound into a container never has a `,` or `:` in its path
+    (apptainer's `--bind` splits on them): the episode is copied into it to be heard back.
+  - Nowhere else: render
   says so, with the reason -- no HIVE login on this computer, a
   HIVE account that cannot read the Core's containers (they are for members of
   proteomics-grp), or the skill not on HIVE or older than 2.13.2, which has the `on_compute.py`
@@ -878,9 +892,8 @@ the start.
   must be in proteomics-grp.
 - **Speed and size.** Every line still to make goes to Kokoro in **one** container call
   (start-up about 20–30 s once). Workers of 2 threads, each holding its own model, about
-  **2.5 GB each**, are sized from the job's CPUs and memory: 8 workers on the podcast job's
-  **16 CPUs and 24 GB**, a 24-minute episode in about 2 minutes. A job with less than 5.5 GB is
-  told to write the job again. The container's `synth.py` 1.2 ends the call at once (exit 3,
+  **2.5 GB each**, are sized from the CPUs and memory the step has: 8 workers on **16 CPUs and
+  24 GB**, a 24-minute episode in about 2 minutes. The container's `synth.py` 1.2 ends the call at once (exit 3,
   with the reason) when a worker dies, for example killed for memory; 1.1 hung there. A free
   GPU is never waited for: the free tier's GPUs waited over 10 minutes in 12 of 12 tries.
 - **The check.** A local-voice episode is always heard back on HIVE, never by Gemini: Whisper
@@ -896,16 +909,26 @@ the start.
   episode the same way.
 - **What `podcast.json` says.** `tts.backend` "kokoro", `tts.model` "Kokoro-82M (on HIVE)",
   `tts.sent_to_cloud` false, `tts.consent` "not needed: made offline on HIVE, nothing was sent
-  to any service". `tts.engine`: the model and its commit, the licence, the image and its
+  to any service" (after a fallback: not needed for this audio, and what Gemini, asked first,
+  was sent). `tts.engine`: the model and its commit, the licence, the image and its
   sha256, `synth` 1.2, the voices, `spoken_names` ({"Leo": "Lena"}), where it ran, the lines the
   text rules changed and the container call (workers, threads, memory, timings).
   `tts.fallback` (null for `--tts local`): `from` "gemini", `to` "kokoro", `why`
   (billing / auth / quota / stalled / none), `reason`, `google_said` (Google's own words,
   scrubbed of any key), `stopped_at` (the chunk, or the preflight), `at`, the Gemini models
-  tried and any hand-overs, `chunks_sent_to_gemini` (this render), `gemini_chunks_cached`
-  (chunks Gemini made, now or in an earlier render, whose text it therefore had), and the
-  `note`. `tts.what_was_sent` says
-  what reached Gemini before it failed, and `cloud_tts_consent` the consent it went under. The
+  tried and any hand-overs; exactly what Google had of this script: `gemini_chunks_sent` of
+  `chunks` (their text, in this render or an earlier one), `chunks_sent_to_gemini` of them in
+  this render, `gemini_chunks_cached`, and the two-line sound checks
+  (`preflight_requests` in this render, `preflight_requests_before`: generic sentences, not the
+  script); and the `note`. These come from `podcast/.cache/gemini_sent.json`, where every
+  request to Gemini for the episode is noted before it is sent (each chunk by a hash of its text,
+  whatever the model) and which is kept with the cache; for renders before 2.14 a chunk counts
+  when its Gemini audio is in the cache. `tts.what_was_sent` and `tts.consent` say the same in
+  words, and the transcript page's Speech row says that Gemini, tried first, failed and what it
+  had been sent ("only a sound check, none of this transcript", or "the text of k of the n parts
+  of this transcript"). `cloud_tts_consent` is the consent it went under. When the check cannot
+  run, `verify.txt` says so plainly and the render log says why (a HIVE folder or account name
+  never goes into the delivered files). The
   `verify` block names Whisper, the image and its sha256, `audio_sent` "nothing sent:
   transcribed on HIVE", and the spots both transcriptions agree on.
 - **The images**, each pinned in `podcast_local.py` by its sha256 and checked in the job before
