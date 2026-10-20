@@ -13,6 +13,7 @@ podcast_local's real job scripts through the Here runner, sized as a 16-CPU, 24 
 """
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -760,6 +761,104 @@ class CheckFails(Local):
         self.assertEqual(self.manifest()["verify"]["status"], "NOT RUN")
 
 
+class NoKey(Local):
+    """Q2 (Brett, 2026-10-20): no Gemini key falls back like a refused key, said plainly."""
+
+    def setUp(self):
+        super().setUp()
+        self.env.stop()                                          # no GEMINI_API_KEY
+        for k in ("GEMINI_API_KEY",):
+            p = mock.patch.dict(os.environ)
+            p.start()
+            self.addCleanup(p.stop)
+            os.environ.pop(k, None)
+        p = mock.patch.object(mp, "KEY_FILE", os.path.join(self.d, "no", "gemini_key"))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def render_no_key(self, *extra):
+        mods = {"google": None, "google.genai": None, "google.genai.types": None}
+        with mock.patch.dict(sys.modules, mods):              # never imported without a key
+            return run("render", self.script, "--tts", "gemini", "--cloud-ok", "PI, 2026-10-20",
+                       *extra)
+
+    def test_no_key_makes_the_episode_with_the_local_voice(self):
+        rc, out, err = self.render_no_key()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("No Gemini key was set, which waiting cannot fix: making the WHOLE episode "
+                      "with the local voice", err)
+        self.assertNotIn("Gemini's chunks stay in the cache", err)
+        man = self.manifest()
+        fb = man["tts"]["fallback"]
+        self.assertEqual((fb["why"], fb["reason"]), ("nokey", "No Gemini key was set"))
+        self.assertEqual(man["tts"]["what_was_sent"],
+                         "nothing for this audio: made on HIVE with Kokoro, and heard back there "
+                         "with Whisper. Gemini was not asked: no Gemini key was set")
+        self.assertEqual(man["tts"]["consent"], "not needed: made offline on HIVE, nothing was "
+                                                "sent to any service")
+        self.assertFalse(man["cloud_tts_consent"], "nothing was sent")
+        self.assertNotIn("Gemini, tried first", read(os.path.join(self.pod, "transcript.html")))
+        self.assertIn("No Gemini key was set; the whole episode was made with Kokoro", fb["note"])
+
+    def test_no_fallback_still_stops(self):
+        rc, out, err = self.render_no_key("--no-fallback")
+        self.assertEqual(rc, 1)
+        self.assertIn("no Gemini key was set", err)
+        self.assertEqual(self.container_calls(), [])
+
+    def test_no_key_and_no_local_voice_says_both(self):
+        self.reach.stop()
+        self.reach = mock.patch.object(pl, "find_runner", side_effect=pl.Unavailable(
+            "this computer has no HIVE login saved"))
+        self.reach.start()
+        rc, out, err = self.render_no_key()
+        self.assertEqual(rc, 1)
+        self.assertIn("No Gemini key was set, and the local voice could not make the episode "
+                      "instead: this computer has no HIVE login saved", err)
+
+
+class QuotaHandOver(Local):
+    """Q3 (Brett, 2026-10-20): one model out of its daily quota mid-episode hands over to the
+    next Gemini model, which makes every chunk again; only when every model is out of quota or
+    stalled does the local voice take over."""
+    DAILY = "GenerateRequestsPerDayPerProjectPerModel-FreeTier"
+
+    def test_the_next_gemini_model_makes_every_chunk_again(self):
+        seen = {"n": 0}
+
+        def behaviour(model, contents, config):
+            if model == STALLS:
+                seen["n"] += 1
+                if seen["n"] > 1:                                # chunk 2: out for the day
+                    raise ApiError(429, "RESOURCE_EXHAUSTED", rpc_error(self.DAILY))
+            return pcm_for(contents)
+        rc, out, err, log = self.render(behaviour, "--model", STALLS, "--model", ANSWERS)
+        self.assertEqual(rc, 0, err)
+        man = self.manifest()
+        self.assertEqual(man["tts"]["backend"], "gemini")
+        self.assertEqual(man["tts"]["models_used"], [ANSWERS])
+        self.assertEqual(man["chunks_synthesized"], 2)
+        self.assertEqual([(x["from"], x["to"], x["kind"]) for x in man["tts"]["switched"]],
+                         [(STALLS, ANSWERS, "quota")])
+        self.assertIn("ran out of its daily quota", man["warnings"][0])
+        self.assertEqual(self.container_calls(), [], "Gemini still had a model")
+
+    def test_every_model_out_of_quota_falls_back(self):
+        seen = {"n": 0}
+
+        def behaviour(model, contents, config):
+            seen["n"] += 1
+            if seen["n"] > 1:
+                raise ApiError(429, "RESOURCE_EXHAUSTED", rpc_error(self.DAILY))
+            return pcm_for(contents)
+        rc, out, err, log = self.render(behaviour, "--model", STALLS, "--model", ANSWERS)
+        self.assertEqual(rc, 0, err)
+        man = self.manifest()
+        self.assertEqual((man["tts"]["backend"], man["tts"]["fallback"]["why"]), ("kokoro", "quota"))
+        self.assertIn(f"{STALLS} ran out of its daily quota",
+                      " ".join(man["tts"]["fallback"]["gemini_switched"]))
+
+
 class NotAvailable(Local):
     WHY = "this computer has no HIVE login saved (check_access.sh saves it)"
 
@@ -893,6 +992,7 @@ class WhereItRuns(unittest.TestCase):
                 with self.assertRaises(pl.Unavailable) as e:
                     pl.find_runner()
             self.assertIn("the skill on HIVE is older than this one", str(e.exception))
+            self.assertIn("needs skill 2.13.2 or later", str(e.exception))
             with mock.patch.object(pl.Remote, "_hx", answer(
                     "PODCAST_LOCAL_IMAGES_OK\nPODCAST_LOCAL_SKILL_OK\n")):
                 self.assertIsInstance(pl.find_runner(), pl.Remote)
@@ -1039,6 +1139,37 @@ class Sizing(unittest.TestCase):
         self.assertEqual(pl.layout(pl.JOB_CPUS, pl._gb(pl.JOB_MEM)), (8, 16),
                          "the podcast job holds 8 workers")
 
+    def test_an_srun_step_says_its_job_id_and_cleans_up_the_note(self):
+        """Q1: the podcast job (1 CPU) asks for the step's own job; its id is said in the log
+        and kept beside the episode's cache while it runs, for whoever cancels the podcast."""
+        with tempfile.TemporaryDirectory() as d:
+            r = pl.Srun(inside_job=True)
+            r.scratch = d
+            said, seen = [], {}
+
+            def srun(cmd, *a, **k):
+                return ["env", "SLURM_JOB_ID=4242", "bash", "-c",
+                        cmd[2] + "\nsleep 3\ncat " + shlex.quote(os.path.join(d, pl.JOB_FILE))]
+            with mock.patch("on_compute.srun_argv", side_effect=srun):
+                rc, out, err = r.run("true", "speak", said.append)
+            self.assertEqual(rc, 0, err)
+            self.assertTrue(out.startswith("4242 speak "), out)
+            self.assertTrue(any("runs as HIVE job 4242" in m and "`scancel 4242`" in m
+                                for m in said), said)
+            self.assertFalse(os.path.exists(os.path.join(d, pl.JOB_FILE)), "removed after")
+
+    def test_a_job_hive_refuses_is_said_plainly(self):
+        with tempfile.TemporaryDirectory() as d:
+            r = pl.Srun(inside_job=True)
+            r.scratch = d
+            refused = ["bash", "-c", "echo 'srun: error: Unable to allocate resources: Invalid "
+                                     "qos specification' >&2; exit 1"]
+            with mock.patch("on_compute.srun_argv", return_value=refused):
+                with self.assertRaises(pl.LocalError) as e:
+                    r.run("true", "speak")
+        self.assertIn("HIVE did not give the local voice a job (srun: error: Unable to allocate "
+                      "resources: Invalid qos specification)", str(e.exception))
+
     def test_work_folders_apptainer_can_bind(self):
         """Review: a , or : in a path breaks apptainer's --bind (it splits on them)."""
         self.assertFalse(pl._bindable("/quobyte/x/PROT 0807, v2/output/podcast/.cache"))
@@ -1130,7 +1261,7 @@ class ContainerCall(FakeContainers, unittest.TestCase):
 
     def test_cleanup_on_any_exception(self):
         class Stop(pl.Here):
-            def run(self, script, minutes):
+            def run(self, script, step, log=None):
                 raise KeyboardInterrupt
         r = Stop(JOB_ENV)
         made = []
@@ -1193,7 +1324,7 @@ class Job(unittest.TestCase):
         self.assertIn("#SBATCH --cpus-per-task=16", text)
         self.assertEqual(subprocess.run(["bash", "-n", got["job"]]).returncode, 0)
 
-    def test_a_gemini_job_without_a_key_names_the_local_voice(self):
+    def test_a_gemini_job_without_a_key_is_written_for_the_local_voice(self):
         import test_make_podcast_hive as H
         t = H.Job("test_the_job_script")
         t.setUp()
@@ -1201,8 +1332,8 @@ class Job(unittest.TestCase):
         self.addCleanup(t.tearDown)
         os.remove(t.core_file)
         rc, out, err = t.job("--core-run")
-        self.assertEqual(rc, 2)
-        self.assertIn("Or --tts local", err)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("the job's render will make the episode with the local voice", err)
 
 
 class Documented(unittest.TestCase):

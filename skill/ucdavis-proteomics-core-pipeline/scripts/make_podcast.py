@@ -2018,7 +2018,16 @@ FALLBACK_WHY = {"billing": "its prepay credits are depleted (402)",
                 "auth": "it refused the key (authentication or permission)",
                 "quota": "none of the Gemini TTS models had quota (or could be used)",
                 "stalled": "every Gemini TTS model stopped answering",
-                "none": "every Gemini TTS model had no quota or stopped answering"}
+                "none": "every Gemini TTS model had no quota or stopped answering",
+                "nokey": "no Gemini key was set"}
+
+
+def fallback_cause(why):
+    """The fallback's cause as a person says it: "Gemini failed (...)", or that there was no
+    key to ask it with."""
+    if why == "nokey":
+        return "No Gemini key was set"
+    return f"Gemini failed ({FALLBACK_WHY.get(why, why)})"
 # What a model can fail with that waiting does not clear (with "stalled": it stopped answering)
 FOR_GOOD = ("missing", "exhausted", "rejected")
 
@@ -2082,6 +2091,12 @@ class GeminiTTS(object):
             f"TTS the following conversation between {self.hosts[0]} and {self.hosts[1]}, two "
             f"hosts of a lively, natural science podcast. {self.hosts[0]} sounds "
             f"{self.styles[self.hosts[0]]}; {self.hosts[1]} sounds {self.styles[self.hosts[1]]}")
+        # No key is not a failure waiting can fix: the local voice takes over (Brett, 2026-10-20)
+        key, _src, why = find_key(core=bool(getattr(a, "core_run", None)))
+        if not key:
+            raise GeminiUnusable(
+                f"no Gemini key was set: set GEMINI_API_KEY or put it in {KEY_FILE} (chmod 600)"
+                + (f"; {why}" if why else ""), "nokey", "start")
         try:
             from google import genai
             from google.genai import types
@@ -2562,12 +2577,38 @@ class GeminiTTS(object):
             return None
         note = (f"{was} stopped answering ({label}: {why}); switched to {nxt}, which made every "
                 "chunk again, so the episode has one model's voices")
-        self.switches.append({"from": was, "to": nxt, "at": label, "why": why, "note": note})
+        self.switches.append({"from": was, "to": nxt, "at": label, "why": why, "note": note,
+                              "kind": "stalled"})
         log(f"[render] {was} stopped answering ({label}: {why}). Switching to {nxt} and making "
             f"EVERY chunk again with it, so the episode never mixes two models' voices")
         self.model, self.produced, self.models_used = nxt, 0, []
         self.pinned = False        # the next model made nothing yet: a model it cannot use hands over
         return RestartRender(note)
+
+    def quota_switch(self, label, err):
+        """This model ran out of its daily quota after it made (or the cache holds) chunks of this
+        episode: hand over to the next candidate, which makes EVERY chunk again, as for a stall
+        (Brett, 2026-10-20). -> RestartRender; with no other model, GeminiUnusable("quota") when
+        every model is out of quota or stalled (for_good), else the resume message."""
+        was = self.model
+        if was not in self.unusable:
+            self.unusable.append(was)
+        self.failed_kind[was] = "exhausted"
+        nxt = self._next_model()
+        if nxt:
+            note = (f"{was} ran out of its daily quota ({label}); switched to {nxt}, which made "
+                    "every chunk again, so the episode has one model's voices")
+            self.switches.append({"from": was, "to": nxt, "at": label, "why": "daily quota",
+                                  "note": note, "kind": "quota"})
+            log(f"[render] {was} is out of its daily quota ({label}: {why_line(err)}). Switching "
+                f"to {nxt} and making EVERY chunk again with it, so the episode never mixes two "
+                "models' voices")
+            self.model, self.produced, self.models_used = nxt, 0, []
+            self.pinned = False
+            return RestartRender(note)
+        stop = self._stop(label, err, "is out of its daily quota")
+        why = self.for_good()
+        return GeminiUnusable(str(stop), why, label, err) if why else stop
 
     def switch_notes(self):
         """One line per hand-over in this render, for podcast.json's warnings."""
@@ -2707,7 +2748,7 @@ class GeminiTTS(object):
                     # the second model's first timeout, before stall_switch can find no model
                     # left: so when every model asked has stalled (or failed for good), that is
                     # "every model stalled" (review of the Kokoro fallback)
-                    stalled = any(x.get("at") != "preflight" for x in self.switches)
+                    stalled = any(x.get("kind") == "stalled" for x in self.switches)
                     if stalled and self.model not in self.stalled:
                         self.stalled.append(self.model)
                     why = self.for_good(asked_only=True) if stalled else None
@@ -2755,11 +2796,11 @@ class GeminiTTS(object):
                     if why:
                         raise GeminiUnusable(msg, why, label, err)
                     raise RenderError(msg)
-                if kind in ("missing", "exhausted", "rejected") and self.pinned and not self.produced:
+                if kind == "exhausted":              # mid-episode, or a resume pinned to it
+                    raise self.quota_switch(label, err)
+                if kind in ("missing", "rejected") and self.pinned and not self.produced:
                     raise self._stop(label, err, "made this episode's cached chunks, so the "
                                                  "render stays on it, but it failed")
-                if kind == "exhausted":
-                    raise self._stop(label, err, "is out of its daily quota")
                 if kind == "rate":
                     waits += 1
                     wait = (err["delay"] if err["delay"] is not None else 60.0) + 5.0
@@ -3532,7 +3573,7 @@ def fallback_record(e, gemini, chunks=(), speak=None, cache=None):
     the two-line tests (generic sentences, not the script) in this render and before."""
     why = FALLBACK_WHY.get(e.why, e.why)
     sent, made, other = 0, 0, 0
-    if speak and cache:
+    if speak and cache and gemini is not None:
         record = (gemini.sent_record() if hasattr(gemini, "sent_record") else {}).get("chunks") or {}
         record = record if isinstance(record, dict) else {}
         models = list(getattr(gemini, "candidates", None) or [])
@@ -3547,7 +3588,7 @@ def fallback_record(e, gemini, chunks=(), speak=None, cache=None):
     this = len(getattr(gemini, "sent_chunks", None) or ())
     before = (getattr(gemini, "sent_before", None) or {}).get("preflight") or {}
     before = before if isinstance(before, dict) else {}
-    return {"from": "gemini", "to": "kokoro", "why": e.why, "reason": f"Gemini failed: {why}",
+    return {"from": "gemini", "to": "kokoro", "why": e.why, "reason": fallback_cause(e.why),
             "google_said": scrub(e.said) if e.said else None, "stopped_at": e.where,
             "message": scrub(e)[:600], "at": now_iso(),
             "gemini_models": list(getattr(gemini, "candidates", None) or []),
@@ -3558,7 +3599,7 @@ def fallback_record(e, gemini, chunks=(), speak=None, cache=None):
             "chunks_sent_to_gemini": this, "gemini_chunks_cached": made,
             "preflight_requests": getattr(gemini, "preflight_sent", 0),
             "preflight_requests_before": before.get("requests") or 0,
-            "note": f"Gemini failed ({why}); the whole episode was made with Kokoro on HIVE "
+            "note": f"{fallback_cause(e.why)}; the whole episode was made with Kokoro on HIVE "
                     "instead, so it has one voice throughout"}
 
 
@@ -3593,8 +3634,9 @@ def gemini_had(fallback, page=False):
 
 
 def gemini_tried(fallback):
-    """The transcript page's words for a fallback: Gemini was tried first, and what it had."""
-    if not isinstance(fallback, dict):
+    """The transcript page's words for a fallback: Gemini was tried first, and what it had.
+    Nothing when it was never asked (no key)."""
+    if not isinstance(fallback, dict) or fallback.get("why") == "nokey":
         return ""
     return f". Gemini, tried first, failed; it had been sent {gemini_had(fallback, page=True)}"
 
@@ -3610,6 +3652,8 @@ def what_was_sent(backend, gemini, fallback):
     said = "nothing for this audio: made on HIVE with Kokoro, and heard back there with Whisper"
     if not fallback:
         return said
+    if fallback.get("why") == "nokey":
+        return said + ". Gemini was not asked: no Gemini key was set"
     return (said + ". Gemini, asked first in this render or an earlier one, was sent "
             + gemini_had(fallback) + ", under the consent in cloud_tts_consent")
 
@@ -3670,9 +3714,9 @@ def cmd_render(a):
     out = os.path.abspath(a.out or os.path.dirname(s.path))
     cache = os.path.join(out, ".cache")
     os.makedirs(cache, exist_ok=True)
-    backend = backend_cls(s, a)
-    fallback, gemini = None, None
+    fallback, gemini, backend = None, None, None
     try:
+        backend = backend_cls(s, a)
         pieces, n_cached, n_new, used, warnings, preflight = make_pieces(backend, chunks, speak,
                                                                          cache, a)
     except GeminiUnusable as e:
@@ -3681,9 +3725,9 @@ def cmd_render(a):
         if getattr(a, "no_fallback", False):
             raise
         gemini, fallback = backend, fallback_record(e, backend, chunks, speak, cache)
-        log(f"[render] Gemini failed ({FALLBACK_WHY.get(e.why, e.why)}), which waiting cannot "
-            "fix: making the WHOLE episode with the local voice (Kokoro on HIVE) instead, so it "
-            "has one voice throughout; Gemini's chunks stay in the cache")
+        log(f"[render] {fallback_cause(e.why)}, which waiting cannot fix: making the WHOLE "
+            "episode with the local voice (Kokoro on HIVE) instead, so it has one voice "
+            "throughout" + ("; Gemini's chunks stay in the cache" if gemini else ""))
         try:
             backend = KokoroTTS(s, a)
             speak = local_speaker(s, backend.voices)
@@ -3691,7 +3735,7 @@ def cmd_render(a):
                                                                              speak, cache, a)
         except RenderError as u:
             raise RenderError(
-                f"{e}\n[render] Gemini failed ({FALLBACK_WHY.get(e.why, e.why)}), and the local "
+                f"{e}\n[render] {fallback_cause(e.why)}, and the local "
                 f"voice could not make the episode instead: "
                 + (u.why if isinstance(u, LocalUnavailable) else str(u))
                 + ". No episode this time: clear Gemini's failure (above) and re-run, or run "
@@ -3754,7 +3798,7 @@ def cmd_render(a):
         tts.update(engine=backend.engine(s), fallback=fallback,
                    consent=("not needed for this audio, which was made offline on HIVE; Gemini, "
                             f"asked first, was sent {gemini_had(fallback)} under "
-                            "cloud_tts_consent" if fallback else
+                            "cloud_tts_consent" if fallback and fallback.get("why") != "nokey" else
                             "not needed: made offline on HIVE, nothing was sent to any service"))
     man = {
         "show": s.show, "title": s.title,
@@ -5645,19 +5689,20 @@ def cmd_job(a):
                                   "it is. Or --tts local: the local voice on HIVE, which sends "
                                   "nothing."))
         return 2
-    py, version, why = job_python(a.python, genai=not local)
-    if not py:
-        log(f"[job] refusing: {why}")
-        return 2
-    src = None
+    src, nokey = None, None
     if not local:
         key, src, why = find_key(bool(core_rec))
         if not key:
-            log(f"[job] refusing: no Gemini API key for the job: set GEMINI_API_KEY or put it in "
-                f"{KEY_FILE} (chmod 600)" + (f"; {why}" if why else "")
-                + ". Or --tts local: the local voice on HIVE needs no key.")
-            return 2
+            # no key: the job's render makes the episode with the local voice (Brett, 2026-10-20)
+            nokey = (f"no Gemini key was set (GEMINI_API_KEY or {KEY_FILE})"
+                     + (f"; {why}" if why else ""))
+            log(f"[job] {nokey}: the job's render will make the episode with the local voice "
+                "(Kokoro on HIVE) instead. To use Gemini, save a key and write the job again.")
         del key                                      # only where it is was needed
+    py, version, why = job_python(a.python, genai=not (local or nokey))
+    if not py:
+        log(f"[job] refusing: {why}")
+        return 2
     import podcast_local as pl
     try:
         import diann_parallel                      # needs_requeue: the one rule
@@ -5697,6 +5742,7 @@ def cmd_job(a):
     print(json.dumps({"job": path, "submit": f"sbatch {shlex.quote(path)}",
                       "log": log_path.replace("%j", "<jobid>"),
                       "python": py, "google_genai": version, "key": src,
+                      "no_key": nokey,
                       "consent": ("not needed: the local voice sends nothing" if local else
                                   (f"Core run ({core_rec['kind']}"
                                    + (f", {core_rec['prot']}" if core_rec.get("prot") else "")

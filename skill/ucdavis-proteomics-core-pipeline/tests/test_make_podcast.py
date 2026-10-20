@@ -1073,7 +1073,10 @@ class Gemini(Workspace):
         self.assertEqual(mp.GeminiTTS.api("gemini-2.5-pro-preview-tts"), "generate_content")
 
     # --- podcast-reviewer follow-ups, 2026-09-25 (PASS on c16e77d)
-    def test_a_resume_or_redo_never_hands_over_or_prunes_the_other_models_chunks(self):
+    def test_a_resume_whose_model_is_out_of_quota_hands_over_and_prunes_nothing(self):
+        """Since 2.14 (Brett, 2026-10-20) a model out of its daily quota part-way -- here the
+        model a resume and --redo are pinned to -- hands over to the next, which makes every
+        chunk again, as for a stall. The pinned model's other chunks are never pruned."""
         models = ("gemini-2.5-pro-preview-tts", "gemini-2.5-flash-preview-tts")
 
         def pro_dead(m, c, k):
@@ -1090,12 +1093,14 @@ class Gemini(Workspace):
                 raise ApiError(429, "RESOURCE_EXHAUSTED", rpc_error(PER_DAY))
             return pcm_for(c)
         rc, out, err, log = self.render(flash_daily, "--cloud-ok", "--redo", "1", models=models)
-        self.assertEqual(rc, 1)
-        self.assertEqual({m for m, _, _ in log["calls"]}, {"gemini-2.5-flash-preview-tts"})
-        self.assertIn("made this episode's cached chunks, so the render stays on it", err)
+        self.assertEqual(rc, 0, err)
+        man = json.loads(read(os.path.join(self.pod, "podcast.json")))
+        self.assertNotIn("gemini-2.5-flash-preview-tts", man["tts"]["models_used"])
+        self.assertEqual(man["chunks_synthesized"], 2, "every chunk made again by the next model")
+        self.assertEqual([x["kind"] for x in man["tts"]["switched"]], ["quota"])
+        self.assertIn("is out of its daily quota", err)
         left = {f for f in os.listdir(cache) if f.endswith(".wav")}
-        self.assertEqual(len(left), 1)                            # segment 2's chunk survives
-        self.assertTrue(left < flash_chunks)
+        self.assertEqual(len(flash_chunks - left), 1)             # only the --redo chunk went
         # an explicit --model re-renders everything on it, and only then drops flash's chunks
         rc, out, err, log = self.render(lambda m, c, k: pcm_for(c), "--cloud-ok", "--model",
                                         "gemini-2.5-pro-preview-tts", models=models)

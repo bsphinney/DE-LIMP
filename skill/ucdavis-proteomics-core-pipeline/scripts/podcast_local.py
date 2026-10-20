@@ -251,7 +251,7 @@ class Here(Runner):
     def resources(self, step="speak"):
         return self.cpus, self.mem_gb
 
-    def run(self, script, step):
+    def run(self, script, step, log=None):
         return _run(["bash", "-c", script], STEPS[step][2])
 
 
@@ -282,15 +282,37 @@ class Srun(Runner):
         os.makedirs(d, mode=0o700, exist_ok=True)
         return d
 
-    def run(self, script, step):
+    def run(self, script, step, log=None):
+        """The step as a HIVE job of its own, waited for. Its job id is written to JOB_FILE
+        beside the episode's cache as soon as it starts, and said in the log, so a person (or a
+        cleanup) that cancels the podcast job can cancel this one too; the file goes when the
+        step ends. A job HIVE refuses, or that never starts, is a LocalError saying so."""
         import on_compute
         cpus, mem, minutes = STEPS[step]
+        note = os.path.join(self._base(), JOB_FILE)
+        script = (f"echo \"$SLURM_JOB_ID {step} $(date -u +%Y-%m-%dT%H:%M:%SZ)\" > "
+                  f"{shlex.quote(note)}\n" + script)
         try:
             argv = on_compute.srun_argv(["bash", "-c", script], minutes, mem, cpus,
                                         name=f"pp_podcast_{step}")
         except (ValueError, on_compute.QueueChoice) as e:
-            raise LocalError(f"no compute node could be asked for: {e}")
-        return _run(argv, minutes + 15, drop_slurm=True)
+            raise LocalError(f"HIVE did not give the local voice a job: {e}")
+
+        def started(job):
+            if log:
+                log(f"[render] the local voice's {step} step runs as HIVE job {job} ({cpus} CPUs, "
+                    f"{mem}); `scancel {job}` stops it (also noted in {note})")
+        try:
+            rc, out, err = _run(argv, minutes + 15, drop_slurm=True, watch=(note, started))
+        finally:
+            ran = os.path.isfile(note)
+            try:
+                os.remove(note)
+            except OSError:
+                pass
+        if rc and not ran:
+            raise LocalError(f"HIVE did not give the local voice a job ({_tail(err, 300)})")
+        return rc, out, err
 
 
 def _remote(sub=""):
@@ -338,7 +360,7 @@ class Remote(Runner):
             if rc:
                 raise LocalError(f"could not copy {n} to HIVE: {_tail(err or out)}")
 
-    def run(self, script, step):
+    def run(self, script, step, log=None):
         cpus, mem, minutes = STEPS[step]
         return self._hx("--job", "--time", str(minutes), "--mem", mem, "--cpus", str(cpus),
                         script, timeout=(minutes + 30) * 60)
@@ -377,13 +399,17 @@ class Remote(Runner):
 PRIVATE_ENV = ("GEMINI_API_KEY", "GOOGLE_API_KEY")
 # The SLURM variables an srun of its own keeps: where SLURM's configuration is, not the job's
 SLURM_KEEP = ("SLURM_CONF",)
+# The HIVE job a local-voice step runs as (Srun): its id, the step and when it started, beside the
+# episode's cache while it runs, so cancelling the podcast job can cancel it too
+JOB_FILE = "local_voice.job"
 
 
-def _run(argv, minutes, drop_slurm=False):
+def _run(argv, minutes, drop_slurm=False, watch=None):
     """-> (exit status, stdout, stderr); a run past `minutes` is killed and is a LocalError. The
     child gets this environment without PRIVATE_ENV; `drop_slurm`, also without the SLURM job's
     variables (an srun then asks for an allocation of its own, never a step of this job) and
-    on_compute's re-run marker."""
+    on_compute's re-run marker. `watch` (path, callback): callback(first word of the file) once,
+    as soon as the file appears while the command runs."""
     env = {k: v for k, v in os.environ.items() if k not in PRIVATE_ENV and not (
         drop_slurm and ((k.startswith("SLURM") and k not in SLURM_KEEP)
                         or k == "PROTEOMICS_ON_COMPUTE"))}
@@ -393,6 +419,21 @@ def _run(argv, minutes, drop_slurm=False):
                              stdin=subprocess.DEVNULL, env=env, start_new_session=True)
     except OSError as e:
         raise LocalError(f"cannot run {argv[0]}: {e}")
+    if watch:
+        import threading
+
+        def look():
+            while p.poll() is None:
+                try:
+                    with open(watch[0], encoding="utf-8") as fh:
+                        words = fh.read().split()
+                    if words:
+                        watch[1](words[0])
+                        return
+                except OSError:
+                    pass
+                time.sleep(2.0)
+        threading.Thread(target=look, name="podcast-local-watch", daemon=True).start()
     try:
         out, err = p.communicate(timeout=max(60.0, minutes * 60.0))
     except subprocess.TimeoutExpired:
@@ -477,7 +518,8 @@ def find_runner(probe=True):
                 ("the skill on HIVE is older than this one: it has no on_compute.py, which runs "
                  "the HIVE job" if "PODCAST_LOCAL_SKILL_THERE" in out else
                  "the skill is not on HIVE, which runs the HIVE job")
-                + ": bash scripts/hive_exec.sh --put-skill")
+                + " (the local voice needs skill 2.13.2 or later there): bash "
+                "scripts/hive_exec.sh --put-skill")
     return r
 
 
@@ -526,7 +568,7 @@ def speak(runner, voices, lines, log=None):
         log(f"[render] Kokoro: {len(lines)} line(s) in one container call, on {runner.where}: "
             f"{workers} worker(s) x {THREADS_PER_WORKER} threads")
         t0 = time.time()
-        rc, out, err = runner.run(script, "speak")
+        rc, out, err = runner.run(script, "speak", log)
         if rc:
             raise LocalError(_failed("Kokoro", rc, err, workers))
         runner.fetch(local, ["turns/", "timing.json"])
@@ -577,7 +619,7 @@ def hear(runner, audio, log=None):
         log(f"[verify] Whisper ({' and '.join(WHISPER_MODELS)}) hears the episode back, on "
             f"{runner.where}; nothing is sent anywhere")
         t0 = time.time()
-        rc, out, err = runner.run(script, "hear")
+        rc, out, err = runner.run(script, "hear", log)
         if rc:
             raise LocalError(_failed("Whisper", rc, err))
         names = [f"asr_{m}.json" for m in WHISPER_MODELS]

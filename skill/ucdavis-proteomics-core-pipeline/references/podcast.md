@@ -58,15 +58,17 @@ ones, not wrong sentences (see "What check cannot catch" below).
   the report? It also explains how the measurement and the statistics work, using their data."
   Make it only on a yes. Their data, their consent: cloud voices need it too ("Privacy and
   consent").
-- **It never holds up the report or the delivery.** When Gemini fails in a way waiting cannot fix
-  (prepay credits used up, the key refused, no quota on any model, every model stalled), the
-  local voice makes the episode instead ("The local voice (Kokoro on HIVE)"). No key, a render
-  or a job that fails anyway, or no local voice where it runs: say so in one line ("No podcast
-  this time: Gemini's prepay credits are used up, and the local voice needs HIVE.") and deliver
-  without it. On HIVE, submit the job as soon as `job` writes it. If
+- **It never holds up the report or the delivery.** When Gemini cannot be used and waiting would
+  not help (no key, prepay credits used up, the key refused, no quota on any model, every model
+  stalled), the local voice makes the episode instead ("The local voice (Kokoro on HIVE)"). A
+  render or a job that fails anyway, or no local voice where it runs: say so in one line ("No
+  podcast this time: Gemini's prepay credits are used up, and the local voice needs HIVE.") and
+  deliver without it. On HIVE, submit the job as soon as `job` writes it. If
   it has not ended when everything else is ready to deliver, do not wait: cancel it (`scancel
   <jobid>`; the chunks it made are cached), say so in one line, and finalize and deliver
-  without it. A job left running would change the report while `deliver` copies it.
+  without it. If it had handed over to the local voice, also cancel that step's own job: its
+  log names it ("runs as HIVE job N"), and so does `podcast/.cache/local_voice.job` while it
+  runs. A job left running would change the report while `deliver` copies it.
 - **Adding it later.** Make it (submitting the job again resumes from its cache), run
   `finalize` again, then deliver again with a new `--label` (SKILL.md step 12b): the new delivery
   goes beside the first, which is never changed.
@@ -579,7 +581,8 @@ bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.t
   `--cloud-ok` for anyone else), a python must have
   google-genai >= 2.25.0 (the pipeline env's, from `setup.json`; `bash
   ~/proteomics-pipeline/scripts/setup.sh` installs it, and `setup.sh --check` reports it as
-  `podcast`), and there must be a key (for a Core run, the Core's shared key).
+  `podcast`). With no key (for a Core run, the Core's shared key) it writes the job anyway and
+  says so: its render makes the episode with the local voice, and google-genai is not needed.
 - **The job** is `~/.proteomics-pipeline/jobs/podcast_<PROT or session>_<hash>.sh`, its log
   `..._<jobid>.log` beside it; `job` prints both. That folder is yours alone (mode 700). Core
   session folders are group-writable with no sticky bit, so a script there could be swapped for
@@ -615,8 +618,9 @@ bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.t
 - Then finalize (step 12) and deliver (step 12b), which find `podcast/` and
   `Analysis_Report_with_audio.html` in `$S/output`. **They never wait for it.** A job that
   failed: one line to the staff member, then finalize and deliver without it. A job still
-  running when everything else is ready: `scancel` it, one line, then finalize and deliver
-  without it, and add the audio later ("When it is made").
+  running when everything else is ready: `scancel` it (and the local voice's step job, if its
+  log names one), one line, then finalize and deliver without it, and add the audio later
+  ("When it is made").
 
 - **Sources.** Pass the delivered report text you wrote from, all from the session's `output/`
   folder: `AI_Analysis_Report.md` (or the report's `Analysis_Report.md` twin, or
@@ -657,10 +661,11 @@ bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.t
     request before it has made its first chunk hands over to the next.
   - **One model per episode.** Once a model has made a chunk, the episode stays on it, because
     a second model's voices sound different. A resume (chunks already in the cache) and
-    `--redo` are pinned to the model that made the cache: they never hand over. If that model
-    is out of quota, render stops, names the chunk and keeps the cache. Re-run later to
-    resume, or pass `--model <other>` to re-render every chunk with that model. Only an
-    explicit `--model` render prunes another model's cached chunks.
+    `--redo` are pinned to the model that made the cache. If that model is out of its daily
+    quota, the next model makes every chunk again (since 2.14; with no model left, the local
+    voice does); if it is missing or rejects the request, render stops, names the chunk and
+    keeps the cache: re-run later to resume, or pass `--model <other>` to re-render every chunk
+    with that model. Only an explicit `--model` render prunes another model's cached chunks.
   - **A model that stops answering is left, and every chunk is made again.** A staff render
     (2026-10-16) sat 28 minutes on a stalled `gemini-3.8-flash-tts` while
     `gemini-2.5-flash-preview-tts` answered a two-line test in 2.9 s; its first chunks were
@@ -827,11 +832,16 @@ costs nothing and has no daily limit. Brett Phinney (Core director) decided on 2
 voice is its **automatic fallback**. `--tts local` (render, and `job --tts local`) uses it from
 the start.
 
-- **When it takes over.** During `render --tts gemini`, when Gemini fails in a way waiting
-  cannot fix (`GeminiUnusable` in `make_podcast.py`):
+- **When it takes over.** During `render --tts gemini`, when Gemini cannot be used and waiting
+  would not help (`GeminiUnusable` in `make_podcast.py`):
+  - no Gemini key was set (`nokey`; Brett, 2026-10-20): nothing is sent to Google, and
+    `podcast.json` says "Gemini was not asked: no Gemini key was set";
   - a 402, "prepay credits are depleted" (`billing`);
   - the key refused: 401/403, `PERMISSION_DENIED`, "API key not valid" (`auth`);
-  - no quota, or not usable, on every candidate model (`quota`);
+  - no quota, or not usable, on every candidate model (`quota`). One model out of its daily quota
+    part-way through the episode (or the model a resume is pinned to) first hands over to the
+    next Gemini model, which makes every chunk again, as for a stall; only when every model is
+    out of quota or stalled does the local voice take over;
   - every candidate model stopped answering (`stalled`) -- also when the time lost to
     unanswered requests (`--request-timeout-budget`, 30 min) runs out after a model that
     stalled mid-episode has handed over (a hand-over at the two-line test does not count), which
@@ -841,11 +851,10 @@ the start.
   later run may succeed, so it never hands over.
   It does **not** take over for what waiting or another Gemini model clears: a per-minute rate
   limit (waited out), one model that stops answering (the next Gemini model makes every chunk
-  again), a transient error, the rate-limit budget, the timeout budget with no stalled model, a
-  resume pinned to the model that
-  made its chunks, or one model out of its daily quota mid-episode. Those stop with the resume
-  message, as before. No consent and no key are not Gemini failures either: render refuses as
-  before. `--no-fallback` keeps the old stop for all four.
+  again), one model out of its daily quota (the same), a transient error, the rate-limit budget,
+  the timeout budget with no stalled model, or a resume whose model is missing or rejects the
+  request. Those stop with the resume message, as before. No consent is not a Gemini failure:
+  render refuses as before. `--no-fallback` keeps the old stop for all of them.
 - **One voice per episode.** On a fallback the local voice makes **every chunk again**, those
   Gemini already made included, so an episode never mixes voices. Gemini's chunks stay in
   `podcast/.cache` (another model's chunks are never pruned), so a later Gemini render resumes
@@ -874,10 +883,14 @@ the start.
   - In a HIVE job with room (8 CPUs and 12 GB or more: `job --tts local`, or `render --tts
     local` moved off a login node) the containers run in the job itself.
   - From a job too small for it -- the Gemini podcast job (1 CPU, 2 GB) when it falls back --
-    or from a HIVE login node, each step is one blocking srun with the queue written out
-    (`on_compute.srun_argv`), an allocation of its own; from inside a job, that job's SLURM
-    variables are left out so srun asks for a new allocation, never a step of the small one. Its
-    files sit in the episode's `podcast/.cache` (never a node's own `/tmp`).
+    or from a HIVE login node, each step is a HIVE job of its own, right-sized and asked for
+    only then: one blocking srun with the queue written out (`on_compute.srun_argv`); from
+    inside a job, that job's SLURM variables are left out so srun asks for a new allocation,
+    never a step of the small one. Its files sit in the episode's `podcast/.cache` (never a
+    node's own `/tmp`). As soon as it starts, its job id is said in the log ("runs as HIVE job
+    N … `scancel N` stops it") and kept in `podcast/.cache/local_voice.job` until it ends, so
+    whoever cancels the podcast job can cancel it too. A job HIVE refuses or never starts is
+    said plainly ("HIVE did not give the local voice a job (…)").
   - On another computer with the skill's HIVE login, each step is a HIVE job (`hive_exec.sh
     --job`): the lines (or the episode) go to a private folder in your HIVE home
     (`~/.proteomics-pipeline/podcast-local/`, mode 700), the results come back, and the folder
