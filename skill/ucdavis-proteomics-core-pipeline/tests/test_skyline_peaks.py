@@ -407,6 +407,13 @@ class TestDisagreements(unittest.TestCase):
         s = sp.agreement_summary(compared)
         self.assertEqual(s["compared"], 4)
 
+    def test_a_shared_peptide_is_drawn_once(self):
+        row = {"FileName": "r1.raw", "PeptideModifiedSequence": "PEPTIDEK", "PrecursorCharge": "2",
+               "FragmentIon": "y4", "ProductCharge": "1", "Times": "1,2", "Intensities": "3,4"}
+        ch = sp.chromatograms([row, dict(row), dict(row, FragmentIon="precursor")])
+        self.assertEqual([lab for lab, _t, _y in ch[(sp.precursor_key("PEPTIDEK", 2), "r1")]],
+                         ["y4+"])
+
     def test_keys_match_across_the_two_spellings(self):
         self.assertEqual(sp.precursor_key("AC[+57]DM[+16]K", 2),
                          sp.precursor_key("AC(UniMod:4)DM(UniMod:35)K", "2"))
@@ -573,6 +580,49 @@ class TestNotRun(unittest.TestCase):
             self.assertTrue(os.path.islink(os.path.join(w, "search",
                                                         "report-lib.parquet.skyline.speclib")))
             self.assertIn("submit with", json.loads(so.getvalue()))
+            # a second plan before the first has a result is refused; --replan clears the old
+            # run's outputs, caches and status files
+            with open(os.path.join(w, "status", "import_1.json"), "w") as fh:
+                fh.write('{"rc": 0}')
+            with open(os.path.join(out, "peaks_OLD.png"), "w") as fh:
+                fh.write("x")
+            with mock.patch.dict(os.environ, env), mock.patch("sys.stdout", new=io.StringIO()), \
+                    mock.patch("run_search._associations", return_value=[]):
+                with self.assertRaises(SystemExit):
+                    sp.main(["plan", "--search", search, "--out", out, "--sif", sif,
+                             "--python", sys.executable, "--partition", "high", "--account",
+                             "acct", "--qos", "acct-high-qos"])
+                rc = sp.main(["plan", "--search", search, "--out", out, "--sif", sif,
+                              "--python", sys.executable, "--partition", "high", "--account",
+                              "acct", "--qos", "acct-high-qos", "--replan"])
+            self.assertEqual(rc, 0)
+            self.assertFalse(os.path.exists(os.path.join(w, "status", "import_1.json")))
+            self.assertFalse(os.path.exists(os.path.join(out, "peaks_OLD.png")))
+
+
+class TestBrief(unittest.TestCase):
+    """The analysis brief tells the report's writer the page adds the section, and the words."""
+
+    def test_brief(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as td:
+            tables, figs, sky = (os.path.join(td, x) for x in ("tables", "figures", "skyline"))
+            for d in (tables, figs, sky):
+                os.makedirs(d)
+            with open(os.path.join(tables, "de_provenance.json"), "w") as fh:
+                json.dump({"adjp": 0.05}, fh)
+            with open(os.path.join(sky, sp.RECORD), "w") as fh:
+                json.dump(sp.skipped_record("the container is not reachable here", "plan"), fh)
+            out = os.path.join(td, "brief.md")
+            r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "analysis_prompt.py"),
+                                "--out", out, "--de-dir", tables, "--figures-dir", figs],
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            with open(out, encoding="utf-8") as fh:
+                brief = fh.read()
+        self.assertIn('Do not write a "Peak check (Skyline)" section', brief)
+        self.assertIn("it was not run: the container is not reachable here", brief)
+        self.assertIn("a matching peak is not independent confirmation", brief)
 
 
 class TestFollowUp(unittest.TestCase):
