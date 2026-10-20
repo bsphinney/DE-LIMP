@@ -293,6 +293,17 @@ class TestCommandBuilders(unittest.TestCase):
         low = sp.job_script(p, "join", ("low", "publicgrp", "publicgrp-low-qos"))
         self.assertIn("#SBATCH --requeue", low)
 
+    def test_every_job_runs_a_subcommand_that_exists(self):
+        p = plan_for()
+        queue = ("high", "acct", "acct-high-qos")
+        for step, sub in sp.JOB_SUBCOMMAND.items():
+            t = sp.job_script(p, step, queue)
+            self.assertIn(f"skyline_peaks.py {sub} --work ", t)
+            with mock.patch("sys.stdout", new=io.StringIO()), self.assertRaises(SystemExit) as e:
+                sp.main([sub, "--help"])
+            self.assertEqual(e.exception.code, 0, sub)
+        self.assertIn("prm-run --work", sp.job_script(p, "prm", queue))
+
     def test_submit_chains_the_three_jobs(self):
         t = sp.submit_script(plan_for())
         self.assertIn("--dependency=afterok:$j1 --kill-on-invalid-dep=yes", t)

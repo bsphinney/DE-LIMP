@@ -121,6 +121,8 @@ PRM_INSTRUMENTS = {
     "thermo_srm": ("transition", "Thermo Quantiva", "triple_quad"),
 }
 PRM_NOT_OFFERED = {"thermo_exploris": "Exploris", "thermo_astral": "Astral"}
+FAMILY_WORDS = {"timstof": "a Bruker timsTOF", "orbitrap": "a Thermo Orbitrap or Astral",
+                "ion_trap": "a Thermo Stellar (ion trap)", "triple_quad": "a triple quadrupole"}
 SRM_CE_PREDICTOR = "Thermo TSQ Quantiva"
 
 # Skyline 26.1's predefined enzymes, name -> (cleaves, not before, N-terminal), from its source
@@ -594,13 +596,18 @@ def sbatch_header(name, log_dir, minutes, queue, cpus=JOB_CPUS, mem=JOB_MEM, arr
     return h
 
 
+# The subcommand each job runs (main() has them, each with --work).
+JOB_SUBCOMMAND = {"build": "build", "import": "import", "join": "join", "prm": "prm-run"}
+
+
 def job_script(plan, step, queue, array=None):
     """A thin wrapper: modules, apptainer, then this script's `step` subcommand."""
     name = {"build": "sky_build", "import": "sky_import", "join": "sky_join", "prm": "sky_prm"}[step]
+    sub_cmd = JOB_SUBCOMMAND[step]
     h = sbatch_header(name, os.path.join(plan["work"], "logs"), JOB_MINUTES[step], queue,
                       array=array)
     q = shlex.quote
-    sub = f"{q(plan['python'])} {q(plan['script'])} {step} --work {q(plan['work'])}"
+    sub = f"{q(plan['python'])} {q(plan['script'])} {sub_cmd} --work {q(plan['work'])}"
     if step == "import":
         sub += ' --task "$SLURM_ARRAY_TASK_ID"'
     body = ["# written by skyline_peaks.py plan: the peak check (references/skyline.md)",
@@ -1143,25 +1150,25 @@ def skipped_record(reason, stage, base=None):
 def selection_sentence(rec):
     top = rec.get("top") or {}
     n = top.get("value", TOP_N_DEFAULT)
-    tag = "" if top.get("source") == "user" else f" {default_tag()}"
+    n_note = "" if top.get("source") == "user" else f" N = {n} {default_tag()}."
     sel = rec.get("selection") or {}
     mode = sel.get("mode")
     if mode == "de_hits":
         cut = sel.get("adjp")
         cut_s = f"{fmt_num(cut)}" + ("" if sel.get("adjp_source") == "de_provenance.json"
                                      else f" {default_tag()}")
-        return (f"The proteins checked are the up to {n}{tag} significant proteins with the "
-                f"smallest adjusted p in any comparison (adjusted p < {cut_s}, the DE's own "
-                f"cutoff; ties broken by the raw p-value; contaminant entries left out).")
+        return (f"The proteins checked are the up to {n} significant proteins with the smallest "
+                f"adjusted p in any comparison (adjusted p < {cut_s}, the DE's own cutoff; ties "
+                f"broken by the raw p-value; contaminant entries left out).{n_note}")
     if mode == "abundance_no_hits":
-        return (f"No protein was significant, so the proteins checked are the {n}{tag} most "
-                f"abundant proteins measured in every run (the mean of the DE's log2 matrix; "
-                f"contaminant entries left out). They were not chosen for a change.")
+        return (f"No protein was significant, so the proteins checked are the {n} most abundant "
+                f"proteins measured in every run (the mean of the DE's log2 matrix; contaminant "
+                f"entries left out). They were not chosen for a change.{n_note}")
     if mode == "abundance_no_de":
-        return (f"This search has no differential expression, so the proteins checked are the "
-                f"{n}{tag} most abundant protein groups measured in every run (DIA-NN's PG.MaxLFQ, "
-                f"at least 3 precursors; contaminant entries left out).")
-    return f"The proteins checked: {SELECTION_RULE.format(n=n)}"
+        return (f"This search has no differential expression, so the proteins checked are the {n} "
+                f"most abundant protein groups measured in every run (DIA-NN's PG.MaxLFQ, at least "
+                f"3 precursors; contaminant entries left out).{n_note}")
+    return f"The proteins checked: {SELECTION_RULE.format(n=n)}{n_note}"
 
 
 CAVEAT = ("These pictures are a visual check of DIA-NN's peaks. Skyline reuses DIA-NN's peak "
@@ -1224,7 +1231,7 @@ def report_section(rec, rel="skyline"):
           "different peak |", "|---|---|---|---|---|"]
     for p in rec.get("proteins") or []:
         why = (f"{p['contrast']}, adj. p {p['adj_p']:.2g}" if p.get("adj_p") is not None
-               else "abundance")
+               else "among the most abundant")
         L.append(f"| {p['gene']} ({p['protein_group']}) | {why} | {p.get('drawn', 0)} | "
                  f"{p.get('compared', 0)} | {p.get('flagged', 0)} |")
     L.append("")
@@ -1232,7 +1239,7 @@ def report_section(rec, rel="skyline"):
     if worst:
         L += [f"Where Skyline picked a different peak (the first {len(worst)} of {flagged}; all "
               f"in `{rel}/disagreements.tsv`):", "",
-              "| Protein | Precursor | Run | Apex difference (s) | Why flagged |",
+              "| Protein | Precursor | Run | Apex, Skyline minus DIA-NN (s) | Why flagged |",
               "|---|---|---|---|---|"]
         for w in worst:
             d = w.get("apex_difference_s")
@@ -1908,12 +1915,13 @@ def prm_plan(rec, keys, same_gradient, run_length):
         kind, name, fam = PRM_INSTRUMENTS[k]
         same_family = fam == rec.get("family")
         scheduled = same_family and same_gradient
+        here = FAMILY_WORDS.get(rec.get("family"), str(rec.get("family")))
         if scheduled:
-            why = (f"scheduled: the same instrument family as the search ({fam}) and, as staff "
-                   f"stated, the same gradient; windows from the measured retention times")
+            why = (f"scheduled: the search also ran on {here} and, as staff stated, on the same "
+                   f"gradient; windows from the measured retention times")
         elif not same_family:
-            why = (f"unscheduled: the search ran on a {rec.get('family')} instrument and this list "
-                   f"is for a {fam} one, so its retention times do not transfer")
+            why = (f"unscheduled: the search ran on {here} and this list is for "
+                   f"{FAMILY_WORDS.get(fam, fam)}, so its retention times do not transfer")
         else:
             why = ("unscheduled: the same instrument family, but the same gradient was not "
                    "confirmed (--same-gradient)")
