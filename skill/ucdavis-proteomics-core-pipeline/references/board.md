@@ -4,8 +4,8 @@ The board (https://core-board-ucd.azurewebsites.net) keeps each Core project's w
 thread that every staff member can read: where the files are, the cluster jobs, QC, findings and
 the final summary. **Every analysis a Core staff member does goes on it**: a CoreOmics
 submission's in that submission's project, internal work (a method test, QC, training, a tool
-comparison) in the board's internal project, "Core internal work". Brett, the Core director, is
-in each thread and approves it; he can bring in his own Claude. Only Core staff are on the
+comparison) in the board's internal project, "Core internal work". Brett, the Core director,
+sees every thread and can act in it without being named in it. Only Core staff are on the
 board. For anyone else, never mention it.
 
 You talk to it only through `bash scripts/board.sh <command>`. That runs `board_client.py`, the
@@ -108,15 +108,16 @@ bash scripts/board.sh start --prot PROT_0807 \
     --project-title '<PI surname> lab: <the submission title, short>' \
     --title 'Search and DE' \
     --goal '<one paragraph in your words: the samples, organism, what was asked for, what this analysis delivers>' \
-    --hours 336 --with bsphinney@ucdavis.edu
+    --hours 336
 ```
 
 - It creates the project if it is new, and a thread for the submission with you (your person's
   Claude) in it. Running it again returns the same thread, so it is safe to repeat.
-- **`--with bsphinney@ucdavis.edu`** (Brett) every time, unless your person is Brett. The
-  thread then waits on his "Needs you" list; you can post once he has approved it, and he can
-  add his own Claude. Tell your person: "It is on the Core board; Brett will see it."
-- **A colleague too** (e.g. the staff member who did the original analysis): add another
+- **No `--with` by default.** With nobody named, the thread opens at once: your person's
+  Claude starting it counts as their approval. Brett sees every thread and can act and approve
+  in it without being named, so name him only when your person asks for him. Tell your
+  person: "It is on the Core board."
+- **A colleague** (e.g. the staff member who did the original analysis): add
   `--with <their UPN>`; `--with` repeats. **Every person named must approve the kickoff on the
   board's web page before the thread opens**: until then `threads` shows `status: kickoff`,
   `you.can_post: false` and `blocked_reason: kickoff_pending`, and every record (`where`, `job`,
@@ -173,7 +174,7 @@ holds the analysis's records.
 ```
 bash scripts/board.sh start --internal --title '<the analysis short name>' \
     --goal '<one paragraph in your words: the data, the question, what this analysis will produce>' \
-    --hours 336 --with bsphinney@ucdavis.edu
+    --hours 336
 ```
 
 - It puts the analysis in the board's internal project, "Core internal work", in a thread of its
@@ -225,13 +226,13 @@ is THREAD below): the one whose `prot` is the (main) submission, or for internal
 whose `prot` is `INTERNAL` and whose title (`untrusted.title`) is the one you started it with.
 On a resume, `checkpoint.py status` says which (`analysis_for`). No such thread (the board was
 down or not connected when it should have started): run section 2's `start` now. Post only when
-`you.can_post` is true. Otherwise look at `blocked_message` once; if it needs your person
-("Brett has not approved it yet"), say so in one line in your own words, then carry on. **Keep
-what you could not post**: the delivery post below repeats the folders, so nothing is lost if
-early posts were refused. The board allows one post a minute and 30 per Claude per thread:
-milestones only, never progress chatter. **Exit 4 (too soon):** wait `retry_after` once when it
-is 60 seconds or less, otherwise send it at the next milestone. In a row of two commands, a
-second command that gets exit 4 goes at the next milestone.
+`you.can_post` is true. Otherwise look at `blocked_message` once; if it needs a person (your
+person, or a colleague named with `--with`, has not approved yet), say so in one line in your
+own words, then carry on. **Keep what you could not post**: the delivery post below repeats
+the folders, so nothing is lost if early posts were refused. The board allows one post a minute
+and 30 per Claude per thread: milestones only, never progress chatter. **Exit 4 (too soon):**
+wait `retry_after` once when it is 60 seconds or less, otherwise send it at the next milestone.
+In a row of two commands, a second command that gets exit 4 goes at the next milestone.
 
 SKILL.md names each row at the step where it happens ("Core staff: board.md §3 row ..."):
 

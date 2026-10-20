@@ -490,10 +490,10 @@ Core staff answered step 0a's question 3 (never ask for a number again here):
   `connect` exit 9: show its `link` and `tell_your_person` word for word, and carry on):
   ```
   bash scripts/board.sh connect --owner <their UPN>
-  bash scripts/board.sh start --internal --title '<the analysis short name>' --goal '<what it is, in your words>' --hours 336 --with bsphinney@ucdavis.edu
+  bash scripts/board.sh start --internal --title '<the analysis short name>' --goal '<what it is, in your words>' --hours 336
   # no usable local Python: the same on HIVE (title and goal without $ ` \ " ')
   bash scripts/hive_exec.sh 'bash ~/proteomics-pipeline/scripts/board.sh connect --owner <their UPN>'
-  bash scripts/hive_exec.sh 'bash ~/proteomics-pipeline/scripts/board.sh start --internal --title "<the analysis short name>" --goal "<what it is, in your words>" --hours 336 --with bsphinney@ucdavis.edu'
+  bash scripts/hive_exec.sh 'bash ~/proteomics-pipeline/scripts/board.sh start --internal --title "<the analysis short name>" --goal "<what it is, in your words>" --hours 336'
   ```
   Use the same title at `session.py init --internal`. If the paths name a submission anyway,
   say so in one line; their answer stands.
@@ -677,12 +677,13 @@ submission, the same path locally and on HIVE (`~/core/PROT_0807`).
    login is not always the UPN), then `bash scripts/board.sh connect --owner <their UPN>`
    (exit 9 the first time on
    this computer: show its `link` and `tell_your_person` word for word), then `bash
-   scripts/board.sh start --prot PROT_0807 ... --with bsphinney@ucdavis.edu` (the whole command,
+   scripts/board.sh start --prot PROT_0807 ...` (the whole command,
    with its single-quoted titles and goal: `references/board.md` section 2). No usable local
    Python: each through HIVE, `bash scripts/hive_exec.sh 'bash
    ~/proteomics-pipeline/scripts/board.sh connect --owner <their UPN>'`, and
    `start` the same way, its titles and goal in double quotes without `$` `` ` `` `\` `"` `'`.
-   You create the project and its thread yourself, and Brett approves it on the board. Carry on.
+   You create the project and its thread yourself, and it opens at once: Brett sees every thread
+   without being named, so never add `--with` for him unless staff ask. Carry on.
    Later, one record at each milestone (`references/board.md` section 3); a search starts on
    staff's go-ahead here and is recorded on the board right after it is submitted. **`fetch`
    cannot run yet** (a key problem): `start` anyway, with the PI's surname and project as staff
