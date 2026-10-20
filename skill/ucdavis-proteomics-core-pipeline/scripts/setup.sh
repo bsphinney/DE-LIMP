@@ -72,7 +72,7 @@ NOTES=()
 # --is-login-node: no SLURM job, and SLURM or HPCCF's cluster file here) setup.sh runs itself
 # again through on_compute.py: one blocking srun with the queue spelled out, on a queue that does
 # not preempt, and waits. HIVE's compute nodes reach conda-forge, Bioconductor, CRAN and
-# Microsoft's .NET downloads (srun job 24827776, 2026-10-16).
+# Microsoft's .NET downloads (a compute-node job, 2026-10-16).
 # Exit 3: that run did not finish (SLURM refused it, a time limit), so setup.json -- which would
 # otherwise be read as current -- was not rewritten. Exit 2: no way to a compute node here.
 UCD_SLURM_BIN="${HPCCF_SLURM_BIN:-/cvmfs/hpc.ucdavis.edu/sw/spack/environments/core/view/generic/slurm/bin}"

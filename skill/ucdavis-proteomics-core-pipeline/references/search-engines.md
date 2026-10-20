@@ -311,7 +311,7 @@ module) is **rejected**, and a .NET 9 runtime is **not** used (rollForward is
 LatestMinor — it won't cross the major version). Fix, done for you by
 **`scripts/ensure_dotnet8.sh`** (idempotent; it needs internet only to install, and on a
 cluster login node that download runs itself on a compute node through `on_compute.py` —
-HIVE's compute nodes reach Microsoft's downloads, srun job 24827776, 2026-10-16):
+HIVE's compute nodes reach Microsoft's downloads, a compute-node job, 2026-10-16):
 ```
 export DOTNET_ROOT="$(bash scripts/ensure_dotnet8.sh | tail -1)"   # installs 8.0.latest if missing
 export PATH="$DOTNET_ROOT:$PATH"

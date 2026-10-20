@@ -26,8 +26,8 @@
 # runtime that is missing (an existing NETCore-only DEST gets AspNetCore added in place).
 # It needs internet only when it has something to install. On a cluster login node that part runs
 # on a compute node (on_compute.py, one blocking srun): HPC@UCD's ucd-hpc rules keep downloads and
-# installs off login nodes, and HIVE's compute nodes reach Microsoft's downloads (srun job 24827776,
-# 2026-10-16). It installs to a shared path so compute nodes can read it at run time.
+# installs off login nodes, and HIVE's compute nodes reach Microsoft's downloads (a compute-node
+# job, 2026-10-16). It installs to a shared path so compute nodes can read it at run time.
 #
 # If AspNetCore cannot be installed but a NETCore >= 8.0.17 root exists, that root is still
 # printed (exit 0) with a WARNING: DIA-NN's callers (run_search.py, diann_parallel.py) read

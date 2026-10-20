@@ -6,7 +6,7 @@ that may not run on a login node; downloads and package builds go "inside a job"
 `hive_exec.sh 'bash ~/proteomics-pipeline/scripts/setup.sh'` -- a micromamba solve, R source
 installs and a .NET download on HIVE's login node -- and its printed fixes said to run them
 "where there is internet (a login node)". HIVE's compute nodes reach conda-forge, Bioconductor,
-CRAN and Microsoft's .NET downloads (srun job 24827776, 2026-10-16), so that reason is gone.
+CRAN and Microsoft's .NET downloads (a compute-node job, 2026-10-16), so that reason is gone.
 
 On a login node (sbatch on PATH, SLURM_JOB_ID unset) both scripts now run themselves again
 through on_compute.py: one blocking srun with the queue spelled out. ensure_dotnet8.sh only when
