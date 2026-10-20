@@ -682,9 +682,15 @@ class TestFollowUp(unittest.TestCase):
                                  "Thermo Stellar", "Thermo Quantiva"))
 
     def test_readme_says_ce_is_left_for_the_method(self):
-        spec = {"targets": sp.prm_plan({"family": "timstof"}, ["bruker_timstof"], True, None)}
-        text = sp.followup_readme(spec, {"name": "T"}, {spec["targets"][0]["file"]: 15})
+        rec = {"name": "T", "family": "timstof"}
+        spec = {"targets": sp.prm_plan(rec, ["bruker_timstof"], True, None)}
+        text = sp.followup_readme(spec, rec, {spec["targets"][0]["file"]: 15})
         self.assertIn("leaves the collision energy at 0", text)
+        self.assertIn("1/K0 window measured", text)
+        rec = {"name": "T", "family": "orbitrap"}           # no ion mobility in the search
+        spec = {"targets": sp.prm_plan(rec, ["bruker_timstof"], True, None)}
+        text = sp.followup_readme(spec, rec, {spec["targets"][0]["file"]: 15})
+        self.assertIn("Skyline's default, NOT a measurement", text)
 
 
 class TestPinsAndPlumbing(unittest.TestCase):

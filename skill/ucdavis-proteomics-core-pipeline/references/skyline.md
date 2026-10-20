@@ -70,6 +70,10 @@ commands on a login node. Everything heavy runs in the three jobs.
   64-CPU cap on HIVE's `high`).
 - `--partition / --account / --qos`: the queue (default: the skill's queue rule,
   `run_search.slurm_queue`).
+- `--replan`: plan again although the last plan has not written its result. Cancel its jobs
+  first. Without it, `plan` refuses.
+- **Every plan starts clean.** It removes the last run's pictures, tables, `.sky.zip` and its whole
+  `skyline_work/`, so a stale per-file cache or status file is never taken for this run's.
 - Without `--session`: `--search <DIA-NN output folder> --out <folder>`, plus `--de-dir`,
   `--manifest` and `--conditions` as available.
 

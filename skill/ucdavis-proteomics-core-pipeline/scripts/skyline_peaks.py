@@ -2012,16 +2012,25 @@ def followup_readme(spec, rec, counts):
          "", "| File | Instrument | Targets (rows) | Retention-time scheduling |", "|---|---|---|---|"]
     for t in spec["targets"]:
         L.append(f"| {t['file']} | {t['instrument']} | {counts.get(t['file'], '?')} | {t['why']} |")
+    bruker = [t for t in spec["targets"] if t["key"] == "bruker_timstof"]
     L += ["", "Notes:",
           "- A scheduled list uses Skyline's default window around the measured retention time; "
-          "SkylineCmd has no option to change it.",
-          "- The Bruker timsTOF list carries the 1/K0 window from the search's runs and leaves the "
-          "collision energy at 0: the prm-PASEF method sets it.",
-          "- The Thermo isolation lists give Skyline's default normalised collision energy; the "
-          "SRM list's collision energies are predicted per precursor "
-          f"(\"{SRM_CE_PREDICTOR}\"), and the precursor-as-product (\"p\") ion type was left out "
-          "before the transitions were chosen.",
-          "- The proteins and peptides come from this study's DIA data. They are a starting point "
+          "SkylineCmd has no option to change it."]
+    if bruker and rec.get("family") == "timstof":
+        L.append("- The Bruker timsTOF list carries the 1/K0 window measured in the search's runs, "
+                 "and leaves the collision energy at 0: the prm-PASEF method sets it.")
+    elif bruker:
+        L.append("- The Bruker timsTOF list's 1/K0 window is Skyline's default, NOT a measurement: "
+                 "this search had no ion mobility. Set the window in the prm-PASEF method; its "
+                 "collision energy is left at 0 for the method to set too.")
+    if any(t["kind"] == "isolation" and t["instrument"].startswith("Thermo")
+           for t in spec["targets"]):
+        L.append("- The Thermo isolation lists give Skyline's default collision energy.")
+    if any(t["kind"] == "transition" for t in spec["targets"]):
+        L.append(f"- The SRM list's collision energies are predicted per precursor "
+                 f"(\"{SRM_CE_PREDICTOR}\"), and the precursor-as-product (\"p\") ion type was "
+                 f"left out before the transitions were chosen.")
+    L += ["- The proteins and peptides come from this study's DIA data. They are a starting point "
           "for an assay; each list still needs a test injection on the target instrument.", ""]
     return "\n".join(L)
 
