@@ -198,14 +198,22 @@ Nothing HT-specific. Pass `files.txt` to the normal flow and `run_search.py` rou
 a plate is far more than five files on a machine with SLURM, so it takes the **5-step
 parallel chain** (per-file passes as a job array) rather than one long single-node job.
 
-Two things the chain requires, both of which matter more at plate scale — read
-`references/diann_parallel.md` before submitting:
+The chain keeps the two settings DIA-NN would otherwise optimise per file the same across
+the plate (steps 3/5 reuse the per-file `.quant` files, so per-file values would be stitched
+together inconsistently). Nobody measures anything by hand first:
 
-* **Mass accuracy must be pinned**, not auto. Steps 3/5 reuse the per-file `.quant` files,
-  so anything DIA-NN auto-optimises per file gets stitched together inconsistently.
-* **Scan-window radius must be measured**, not left to auto — `probe_window.py`, once, on
-  one file. On an 18-file run DIA-NN inferred radius 7 for seventeen files and 8 for one,
-  and the chain combined them. With 120 files the chance of a split is higher, not lower.
+* **Mass accuracy** is pinned in the cfg by `estimate_params.py` (step 6b). When it planned
+  `measure_with_diann` instead (an Orbitrap level outside DIA-NN's table), the chain's step 1b
+  measures it on the same representative runs as the window and pins max(measured, SOP).
+* **The scan-window radius** is measured by the chain's step 1b: `probe_window.py` is handed the
+  whole plate, measures three representative runs (the median and quartile runs; never a blank,
+  wash, failed injection or damaged `.d`) and pins the median radius into steps 2–5. It never
+  probes just one file: left to DIA-NN per file, an 18-file run got radius 7 for seventeen files
+  and 8 for one, and with 120 files a split is more likely, not less. An omitted `--window` does
+  not decline the chain.
+
+Both are described in SKILL.md step 7 and `references/diann_parallel.md` ("Scan window MUST be
+pinned", "Which runs step 1b measures").
 
 Watch it with `watch_run.sh --all` (step 7b). A plate-sized array will usually lose a file
 or two to a stalled node; the documented playbook is to retry once, then drop that file and
