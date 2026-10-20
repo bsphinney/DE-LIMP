@@ -412,9 +412,9 @@ class TestDisagreements(unittest.TestCase):
         compared, flagged = sp.disagreements(sky, dia)
         self.assertEqual(len(compared), 4)            # the shared peptide counted once
         why = {(r["precursor"], r["run"]): r["reason"] for r in flagged}
-        self.assertEqual(set(why), {("PEPCTIDEK/2+", "r2"), ("LMNOPR/3+", "r1"),
+        self.assertEqual(set(why), {("PEPC[+57]TIDEK/2+", "r2"), ("LMNOPR/3+", "r1"),
                                     ("LMNOPR/3+", "r2")})
-        self.assertIn("12.0 s from DIA-NN's", why[("PEPCTIDEK/2+", "r2")])
+        self.assertIn("12.0 s from DIA-NN's", why[("PEPC[+57]TIDEK/2+", "r2")])
         self.assertEqual(why[("LMNOPR/3+", "r1")], "apex outside DIA-NN's peak edges")
         self.assertEqual(why[("LMNOPR/3+", "r2")], "Skyline found no peak")
         s = sp.agreement_summary(compared)
@@ -846,6 +846,36 @@ class TestReviewFindings(unittest.TestCase):
             sp.main(["join", "--work", w])
             self.assertIn("build job ended without a result", sp.load_record(td)["reason"])
 
+    def test_labels_carry_the_modifications(self):
+        k = sp.precursor_key
+        self.assertEqual(sp.key_label(k("PEPM[+16]K", 2)), "PEPM[+16]K/2+")
+        self.assertNotEqual(sp.key_label(k("PEPM[+16]K", 2)), sp.key_label(k("PEPMK", 2)))
+        self.assertEqual(sp.key_label(k("(UniMod:1)M(UniMod:35)ACK", 3)), "M[+58]ACK/3+")
+
+    def test_the_searchs_own_mod_masses_match(self):
+        # GlyGly is in no table of the skill: the search's --var-mod gives its mass
+        flags = sp.command_flags(CMD + " --var-mod UniMod:121,114.042927,K")
+        st = sp.search_settings(flags)
+        self.assertEqual(st["mod_masses"], {121: 114.042927})
+        sp.use_search_mod_masses(st["mod_masses"])
+        self.assertEqual(sp.precursor_key("PEPK[+114]R", 2),
+                         sp.precursor_key("PEPK(UniMod:121)R", 2))
+
+    def test_submit_runs_once_per_plan(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as td:
+            w = os.path.join(td, sp.WORK)
+            os.makedirs(w)
+            with open(os.path.join(w, "jobs.txt"), "w") as fh:
+                fh.write("build\t1\n")
+            t = sp.submit_script(plan_for(work=w))
+            r = subprocess.run(["bash", "-c", t], capture_output=True, text=True,
+                               env=dict(os.environ, PATH="/usr/bin:/bin"))
+            self.assertEqual(r.returncode, 2)
+            self.assertIn("already submitted", r.stderr)
+            with open(os.path.join(w, "jobs.txt")) as fh:
+                self.assertEqual(fh.read(), "build\t1\n")             # never emptied
+
     def test_a_job_of_an_earlier_plan_does_nothing(self):
         with tempfile.TemporaryDirectory() as td:
             w = os.path.join(td, sp.WORK)
@@ -924,6 +954,22 @@ class TestReviewFindings(unittest.TestCase):
             self.assertEqual(rc, 3)                       # this plan cannot run: no search
             self.assertIn(["scancel", "302"], calls)
             self.assertFalse(os.path.isdir(os.path.join(out, sp.WORK)))
+
+    def test_the_record_says_not_finished_before_the_old_run_is_removed(self):
+        with tempfile.TemporaryDirectory() as td:
+            out = os.path.join(td, "output", "skyline")
+            os.makedirs(out)
+            with open(sp.record_path(out), "w") as fh:
+                json.dump(dict(OK_REC), fh)
+            seen = []
+
+            def clear(o):
+                seen.append(sp.load_record(o)["status"])
+                raise PermissionError("cannot remove")
+            with mock.patch.object(sp, "clear_previous", clear), self.assertRaises(PermissionError):
+                sp.main(["plan", "--search", os.path.join(td, "s"), "--out", out])
+            self.assertEqual(seen, ["skipped"])               # not the old "ok"
+            self.assertIn("PermissionError", sp.load_record(out)["reason"])
 
     def test_a_plan_stopped_by_an_error_says_so(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1006,6 +1052,10 @@ class TestReviewFindings(unittest.TestCase):
                 fh.write("Run\tProtein.Group\tModified.Sequence\tPrecursor.Charge\n")
             with self.assertRaises(sp.Skip):
                 sp.finish(p, build, ["/d/r1.raw"], [])
+
+    def test_what_could_not_be_compared_is_said(self):
+        md = sp.report_section(dict(OK_REC, results=dict(OK_REC["results"], not_compared=7)))["md"]
+        self.assertIn("Another 7 of Skyline's precursor-runs had no DIA-NN identification", md)
 
     def test_the_median_is_over_the_rows_skyline_agreed_on(self):
         # the reviewer's numbers: 1, 2, 50, 60 and 70 s -> 50, 60, 70 flagged; median of 1, 2

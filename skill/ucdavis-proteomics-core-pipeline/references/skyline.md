@@ -51,10 +51,13 @@ them, and lists the peaks where Skyline and DIA-NN disagree.
 **Matching the two programs' precursors** (`precursor_key`): the stripped sequence, the charge,
 and each modified residue with its mass shift, summed per residue and rounded to a whole dalton.
 Skyline writes `PEPM[+16]K` and an N-terminal acetyl with an oxidised M as one shift (`M[+58]`);
-DIA-NN writes `PEPM(UniMod:35)K` and `(UniMod:1)M(UniMod:35)`, whose masses come from the skill's
+DIA-NN writes `PEPM(UniMod:35)K` and `(UniMod:1)M(UniMod:35)`. Their masses come from the
+search's own `--var-mod` / `--fixed-mod` flags (`UniMod:<id>,<mass>,<sites>`), then from the skill's
 UniMod tables (`make_methods.UNIMOD`, `silac.LABELS`). A residue with one of two modifications
-never matches the residue with both, and a UniMod id the tables lack matches nothing (it is not
-compared rather than compared wrongly).
+never matches the residue with both, and a modification neither names is not compared rather than
+compared wrongly. The report counts the Skyline precursor-runs that had no DIA-NN identification
+to compare with, and the labels in the tables and pictures carry the modifications
+(`PEPM[+16]K/2+`).
 - **A session with a DE but no record** gets `[SKIPPED] Peak check (Skyline, output/skyline) --
   not run` in `MANIFEST.txt`: run `plan`, or `skip` with the user's reason.
 
@@ -101,7 +104,7 @@ commands on a login node. Everything heavy runs in the three jobs.
 - **Jobs belong to their plan.** Each job is written with its plan's id (`--plan-id`) and does
   nothing when `plan.json` is another plan's; the record and the status files carry the id too.
   `submit.sh` writes each job to `jobs.txt` the moment it is submitted, so a submission refused
-  half way still names the jobs it made.
+  half way still names the jobs it made, and it refuses to submit a plan a second time.
 - Without `--session`: `--search <DIA-NN output folder> --out <folder>`, plus `--de-dir`,
   `--manifest` and `--conditions` as available.
 

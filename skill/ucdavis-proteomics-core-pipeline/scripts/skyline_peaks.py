@@ -405,6 +405,12 @@ def search_settings(flags):
            "max_length": num("max-pep-len"), "charges": list(range(zmin, zmax + 1)),
            "fragment_mz": [num("min-fr-mz", float), num("max-fr-mz", float)],
            "var_mods": [v for v in flags.get("var-mod", []) if v],
+           # UniMod:<id>,<mass>,<sites> from --var-mod / --fixed-mod: the masses DIA-NN
+           # searched, so its (UniMod:<id>) matches Skyline's [+mass] whatever the mod
+           "mod_masses": {int(m.group(1)): float(m.group(2))
+                          for f in ("var-mod", "fixed-mod") for v in flags.get(f, [])
+                          for m in [re.match(r"\s*UniMod:(\d+)\s*,\s*([-+]?\d+(?:\.\d+)?)", v)]
+                          if m},
            "max_var_mods": num("var-mods") if flags.get("var-mods") else None,
            "fixed_mods": ["Carbamidomethyl (C)"],
            "not_carried_over": []}
@@ -654,7 +660,9 @@ def submit_script(plan):
         # each job is recorded the moment sbatch returns it, so a submission refused half way
         # (a per-user limit) still names the jobs that were made, for status and --replan
         f"J={q(os.path.join(w, 'jobs.txt'))}",
-        ': > "$J"',
+        # submitted once per plan: a second run would start a second copy in the same folder
+        'if [ -s "$J" ]; then echo "already submitted (jobs.txt names the jobs): plan again to '
+        'run it again" >&2; exit 2; fi',
         f"j1=$(sbatch --parsable {q(os.path.join(w, 'sky_1_build.sbatch'))} | cut -d';' -f1)",
         'printf \'build\\t%s\\n\' "$j1" >> "$J"',
         # a failed build cancels the imports (--kill-on-invalid-dep); the join runs after the
@@ -853,9 +861,17 @@ _MOD = re.compile(r"(\[[^\]]*\]|\([^)]*\))")
 _UNIMOD_MASS = None
 
 
+def use_search_mod_masses(masses):
+    """The search's own --var-mod / --fixed-mod masses (search_settings' mod_masses), on top of
+    the skill's tables: a modification DIA-NN searched is matched by the mass it searched."""
+    unimod_mass(0)                             # the tables, loaded once
+    _UNIMOD_MASS.update({int(k): float(v) for k, v in (masses or {}).items()})
+
+
 def unimod_mass(uid):
     """A UniMod id's monoisotopic delta, from the skill's own tables (make_methods.UNIMOD, which
-    takes in every cysteine reagent; silac.LABELS), or None."""
+    takes in every cysteine reagent; silac.LABELS) and the search's flags
+    (use_search_mod_masses), or None."""
     global _UNIMOD_MASS
     if _UNIMOD_MASS is None:
         _UNIMOD_MASS = {}
@@ -898,9 +914,12 @@ def precursor_key(modified_seq, charge):
         if _MOD.fullmatch(part):
             p = max(n, 1)
             v = _mod_shift(part)
-            prev = at.get(p, 0.0)
-            at[p] = (prev + v) if isinstance(v, float) and isinstance(prev, float) else \
-                f"{prev}+{v}"
+            if p not in at:
+                at[p] = v
+            elif isinstance(v, float) and isinstance(at[p], float):
+                at[p] += v
+            else:
+                at[p] = f"{at[p]}+{v}"
         else:
             letters = re.sub(r"[^A-Z]", "", part)
             seq.append(letters)
@@ -914,8 +933,13 @@ def precursor_key(modified_seq, charge):
 
 
 def key_label(key):
-    seq, z, _ = key
-    return f"{seq}/{z}+"
+    """A precursor as people read it, its modifications included (PEPM[+16]K/2+), so an oxidised
+    form and the unmodified one are never the same label in the table or the pictures."""
+    seq, z, mods = key
+    at = dict(mods)
+    out = "".join(c + (f"[{at[i]:+d}]" if isinstance(at.get(i), int) else
+                       f"[{at[i]}]" if i in at else "") for i, c in enumerate(seq, 1))
+    return f"{out}/{z}+"
 
 
 def run_of(name):
@@ -1310,12 +1334,15 @@ def report_section(rec, rel="skyline"):
          f"there is no peak at all.", "", selection_sentence(rec), ""]
     flagged, compared = res.get("flagged", 0), res.get("compared", 0)
     pct = f" ({100.0 * flagged / compared:.1f}%)" if compared else ""
+    nc = res.get("not_compared") or 0
     L += [f"**Result.** Of {compared} precursor-runs compared, Skyline picked a different peak in "
           f"{flagged}{pct}"
           + (f"; where it picked the same peak, the median difference between the two "
              f"programs' apexes was {fmt_num(res['apex_median_abs_s'])} s."
              if res.get("apex_median_abs_s") is not None else ".")
-          + (" Look at these before relying on the numbers they feed." if flagged else ""), ""]
+          + (" Look at these before relying on the numbers they feed." if flagged else "")
+          + (f" Another {nc} of Skyline's precursor-runs had no DIA-NN identification in that run "
+             f"to compare with." if nc else ""), ""]
     L += ["| Protein | Why checked | Peptides drawn | Precursor-runs compared | Skyline picked a "
           "different peak |", "|---|---|---|---|---|"]
     for p in rec.get("proteins") or []:
@@ -1781,13 +1808,13 @@ def cmd_plan(a):
     if os.path.isfile(os.path.join(out, WORK, "jobs.txt")):
         _stop_last_plan(out, "plan" + (" --replan" if a.replan else ""),
                         bool(rec) and rec.get("status") == "planned")
-    # whatever happens next, nothing of the last run is left to be delivered as this one's, and
-    # the record says so until this plan replaces it
-    clear_previous(out)
+    # the record says planning has not finished BEFORE anything of the last run is removed, and
+    # then nothing of the last run is left to be delivered as this one's
     write_json(record_path(out), skipped_record(
         "planning the peak check did not finish (see the output of skyline_peaks.py plan)",
         "plan"))
     try:
+        clear_previous(out)
         plan = make_plan(a, inp)
         import run_search
         queue = run_search.slurm_queue(a.partition, a.account, a.qos, peak_cpus=JOB_CPUS,
@@ -2077,6 +2104,7 @@ def cmd_join(a):
 def finish(plan, build, imported, failed):
     """Disagreements, pictures and the record, from Skyline's exports and DIA-NN's rows."""
     w, out = plan["work"], plan["out"]
+    use_search_mod_masses((plan.get("settings") or {}).get("mod_masses"))
     sky = skyline_precursors(read_tsv(os.path.join(out, "skyline_precursors.tsv")))
     dia = diann_index(read_tsv(os.path.join(w, "diann_targets.tsv")))
     targets = build["selection"]["targets"]
@@ -2161,6 +2189,9 @@ def finish(plan, build, imported, failed):
                                        "Skyline's apex and DIA-NN's: grey band = Skyline's peak, "
                                        "dashed lines = DIA-NN's peak edges." + wshown})
     summ = agreement_summary(compared)
+    # Skyline precursor-runs with no DIA-NN row to compare with (not identified in that run, or a
+    # modification neither table names): counted, never silently dropped
+    summ["not_compared"] = len({(s["key"], s["run"]) for s in sky}) - len(compared)
     worst = [dict(r, gene=gene_by_acc.get(r["protein"], "")) for r in flagged[:15]]
     rec = {"schema": SCHEMA, "status": "ok", "written": now(),
            "skill_version": plan.get("skill_version"), "name": plan["name"],
