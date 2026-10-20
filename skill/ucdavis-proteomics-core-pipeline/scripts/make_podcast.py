@@ -1020,21 +1020,38 @@ def robustness_tables(out, depth=3):
 # inside a list a colon opened ("It survives everything: Ryr2, Jph3, and Actb").
 _COMMA_CUT = re.compile(r",\s+(?:and|so|while|which|whereas)\b(?!\s+so\s+(?:does|did|do|is|are|was|"
                         r"were)\b)", re.I)
+# ...but a comma clause after the claim that only names more proteins (", and Ryr2 too", ", and
+# for Jph3", ", so does Ryr2") or points back at it (", and they are Ryr2, Jph3 and Actb",
+# ", which are Ryr2 and Jph3") carries the claim on: its names are a WARN, never a FAIL (review of
+# 2.13.2, round 3). Its words are names (a capital or a digit) and these, nothing else.
+_CARRY_WORDS = {"and", "or", "they", "these", "those", "it", "are", "is", "were", "was", "include",
+                "includes", "including", "does", "do", "did", "too", "also", "as", "well", "both",
+                "alike", "for", "in", "with", "of", "the", "same", "goes", "true", "again", "even"}
 # English words that are also (mouse) gene symbols, read as English at the start of a sentence:
-# "Was that robust?", "Set against that, ..." (review of 2.13.2, round 2).
+# "Was that robust?", "Set against that, ..." (review of 2.13.2, round 2). Said straight before
+# the claim in a statement ("Set holds up", "Max survives every check") it may be the gene: a WARN
+# (round 3).
 SENTENCE_START_WORDS = {"was", "set", "max", "son", "rest", "impact", "cat", "arc", "star", "can",
                         "far", "ran", "gas", "spin", "pole", "tan", "lot", "not", "per", "top",
                         "act", "aim", "bad", "cap", "end", "fat", "fit", "ill", "key", "kit",
                         "mad", "met", "net", "pan", "ret", "tor", "via", "wars", "wise", "yes"}
+_SENTENCE_END = re.compile(r"[.!?](?=\s|$)")
 
 
-def _robust_rows(robust, tok, sentence_start=False):
+def _carries_on(cut, tail):
+    """True when the comma clause `tail` that `cut` (a _COMMA_CUT match) opens carries the claim
+    before it on (_CARRY_WORDS); never one ", while" or ", whereas" opens."""
+    if cut.group(0).split()[-1].lower() in ("while", "whereas"):
+        return False
+    words = _NAME_TOK.findall(tail)
+    return bool(words) and all(w.lower() in _CARRY_WORDS or w[0].isupper() or re.search(r"\d", w)
+                               for w in words)
+
+
+def _robust_rows(robust, tok):
     """The table rows for a token: as written (a symbol that is also an English word -- SET, WAS,
     MAX -- is never matched by "set" or "was"); a token with a digit, or in capitals (ACTB for a
-    mouse table's Actb), in either case. The first word of a sentence that is a common English
-    word ("Was", "Set"; not in capitals: SET is the gene) is read as English."""
-    if sentence_start and tok.lower() in SENTENCE_START_WORDS and not tok.isupper():
-        return None
+    mouse table's Actb), in either case."""
     rows = robust.get(tok)
     if rows or not (re.search(r"\d", tok) or (tok.isupper() and len(tok) >= 3)):
         return rows
@@ -1046,8 +1063,9 @@ def robust_claims(text, robust):
     """-> [(level, protein, claim, detail)]: a protein named in the same clause as a robust claim
     ("robust", "survives", "holds up") that no negation turns around, whose robustness tables
     say not robust in every row (FAIL), robust in some only (WARN), or something not understood
-    (WARN). The meaning check reads the rest."""
-    out, seen = [], set()
+    (WARN). A name that may not be the claim's -- after a comma that carries it on, or an English
+    word that starts the sentence -- is a WARN at most. The meaning check reads the rest."""
+    out, seen, maybe = [], set(), {}       # maybe: a name's WARN that only a doubt made (its index)
     if not robust:
         return out
     starts = {0} | {m.end() for m in re.finditer(r"[.!?]\s+", text)}     # sentence starts
@@ -1058,41 +1076,78 @@ def robust_claims(text, robust):
             if _CLAUSE_NEG.search(clause[:m.start()]):
                 continue
             # the claim's reach: its clause, less a second one a comma opens -- after the claim,
-            # unless a colon opened a list; before it, unless what precedes is a list of names
-            # ("Ryr2, Jph3, and Actb all survive")
-            begin, end = 0, len(clause)
+            # unless a colon opened a list (or a WARN, when it carries the claim on); before it,
+            # unless what precedes is a list of names ("Ryr2, Jph3, and Actb all survive")
+            begin, end, carried = 0, len(clause), []
             c = _COMMA_CUT.search(clause, m.end())
             if c and ":" not in clause[m.end():c.start()]:
                 end = c.start()
+                while c:
+                    nxt = _COMMA_CUT.search(clause, c.end())
+                    stop = nxt.start() if nxt else len(clause)
+                    if not _carries_on(c, clause[c.end():stop]):
+                        break
+                    carried.append((c.end(), stop))
+                    c = nxt
             for c in _COMMA_CUT.finditer(clause, 0, m.start()):
                 words = [w for w in _NAME_TOK.findall(clause[begin:c.start()])
                          if w.lower() not in ("and", "or")]
                 if not words or not all(_robust_rows(robust, w) for w in words):
                     begin = c.end()
-            for t in _NAME_TOK.finditer(clause, begin, end):
-                rows = _robust_rows(robust, t.group(0), sentence_start=(a + t.start()) in starts)
-                if not rows or rows[0][2] in seen:
-                    continue
-                # a negation beside the name -- after it, but never past the claim word ("Ryr2
-                # holds up, which doesn't happen often" is a claim)
-                after = clause[t.end():m.start()] if t.start() < m.start() else clause[t.end():end]
-                if _NAME_NEG_AFTER.search(after) or _NAME_NEG_BEFORE.search(clause[:t.start()]):
-                    continue
-                seen.add(rows[0][2])
-                said = [(tbl, v, robust_value(v)) for tbl, v, _ in rows]
-                yes = [x for x in said if x[2] == "yes"]
-                no = [x for x in said if x[2] == "no"]
-                odd = [x for x in said if x[2] is None]
-                where = "; ".join(f"{tbl}: robust = {v or 'blank'}" for tbl, v, _ in (no + odd)[:3])
-                if odd and not yes:
-                    out.append(("WARN", rows[0][2], m.group(0),
-                                f"robust value not understood -- {where}; the meaning check "
-                                "decides"))
-                elif not yes:
-                    out.append(("FAIL", rows[0][2], m.group(0), where))
-                elif no or odd:
-                    out.append(("WARN", rows[0][2], m.group(0),
-                                f"robust in {', '.join(t for t, _, _ in yes[:3])}; not in {where}"))
+            spans = [(begin, end, None)] + [(x, y, "named after a comma, which may open a new "
+                                                   "clause") for x, y in carried]
+            for lo, hi, doubt in spans:
+                for t in _NAME_TOK.finditer(clause, lo, hi):
+                    tok, why = t.group(0), doubt
+                    rows = _robust_rows(robust, tok)
+                    if not rows or rows[0][2] in seen:
+                        continue
+                    if ((a + t.start()) in starts and tok.lower() in SENTENCE_START_WORDS
+                            and not tok.isupper()):
+                        # the English word ("Was that robust?", "Set against that, Gapdh holds
+                        # up"), unless said straight before the claim in a statement
+                        e = _SENTENCE_END.search(text, a + t.end())
+                        if (e and e.group(0) == "?") or re.search(r"[,:;(–—]",
+                                                                  clause[t.end():m.start()]):
+                            continue
+                        why = f"'{tok}' starts the sentence and may be the English word"
+                    if why and rows[0][2] in maybe:
+                        continue
+                    # a negation beside the name -- after it, but never past the claim word ("Ryr2
+                    # holds up, which doesn't happen often" is a claim)
+                    after = clause[t.end():m.start() if t.start() < m.start() else hi]
+                    if (_NAME_NEG_AFTER.search(after)
+                            or _NAME_NEG_BEFORE.search(clause[:t.start()])):
+                        continue
+                    said = [(tbl, v, robust_value(v)) for tbl, v, _ in rows]
+                    yes = [x for x in said if x[2] == "yes"]
+                    no = [x for x in said if x[2] == "no"]
+                    odd = [x for x in said if x[2] is None]
+                    where = "; ".join(f"{tbl}: robust = {v or 'blank'}"
+                                      for tbl, v, _ in (no + odd)[:3])
+                    if odd and not yes:
+                        found = ("WARN", f"robust value not understood -- {where}; the meaning "
+                                         "check decides")
+                    elif not yes:
+                        found = ("FAIL", where)
+                    elif no or odd:
+                        found = ("WARN", f"robust in {', '.join(x for x, _, _ in yes[:3])}; "
+                                         f"not in {where}")
+                    else:
+                        found = None
+                    if why:
+                        if found:
+                            maybe[rows[0][2]] = len(out)
+                            out.append(("WARN", rows[0][2], m.group(0),
+                                        f"{found[1]}; {why} -- the meaning check decides"))
+                        continue
+                    seen.add(rows[0][2])
+                    if found:                          # replaces a WARN only a doubt made
+                        hit = (found[0], rows[0][2], m.group(0), found[1])
+                        if rows[0][2] in maybe:
+                            out[maybe.pop(rows[0][2])] = hit
+                        else:
+                            out.append(hit)
     return out
 
 

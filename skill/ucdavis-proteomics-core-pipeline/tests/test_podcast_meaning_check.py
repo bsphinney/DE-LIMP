@@ -329,6 +329,51 @@ class Mechanical(Base):
             with self.subTest(line=line):
                 self.assertEqual(self.claims(table, line), [])
 
+    def test_round_three_shapes_are_warnings(self):
+        """Review of 2.13.2, round 3 (R3-M1): round 2's comma rule and sentence-start rule
+        dropped these. A comma clause that only names more proteins, or points back at the
+        claim, carries it on; an English-word symbol said straight before the claim may be the
+        gene. Both are a WARN (for the writer and the meaning check), never a FAIL."""
+        table = ('"Genes","robust"\n"Actb","no"\n"Jph3","no"\n"Ryr2","no"\n"Set","no"\n'
+                 '"Max","no"\n"Gapdh","yes"\n')
+        warn = {"Three proteins survive every check, and they are Ryr2, Jph3 and Actb.":
+                ["Ryr2", "Jph3", "Actb"],
+                "Only a few survive every check, which are Ryr2 and Jph3.": ["Ryr2", "Jph3"],
+                "Gapdh survives every check, and Ryr2 too.": ["Ryr2"],
+                "Gapdh survives every check, so does Ryr2.": ["Ryr2"],
+                "Set holds up in every check.": ["Set"],
+                "Max survives every check.": ["Max"]}
+        for line, names in warn.items():
+            with self.subTest(line=line):
+                got = self.claims(table, line)
+                self.assertEqual([(c[0], c[1]) for c in got], [("WARN", n) for n in names])
+                self.assertIn("the meaning check decides", got[0][3])
+        # the name before the comma is still a FAIL; the one after it no longer goes missing
+        got = self.claims(table, "It holds up for Ryr2, and for Jph3.")
+        self.assertEqual([(c[0], c[1]) for c in got], [("FAIL", "Ryr2"), ("WARN", "Jph3")])
+        # a doubtful WARN gives way to a FAIL for the same name later on
+        got = self.claims(table, "Set holds up, and Ryr2 and Set both survive.")
+        self.assertEqual([(c[0], c[1]) for c in got], [("FAIL", "Set"), ("FAIL", "Ryr2")])
+        # still nothing: an independent clause after the comma, a question, the English word
+        # with more said between it and the claim
+        for line in ("Gapdh survives every check, and Ryr2 is the biggest mover.",
+                     "Gapdh holds up, and Ryr2 does not.",
+                     "Gapdh survives every check, which is why Ryr2 matters.",
+                     "Max survives every check? Not quite.",
+                     "Max, that's a good point: Gapdh survives every check.",
+                     "Right. Set against that, Gapdh holds up."):
+            with self.subTest(line=line):
+                self.assertEqual(self.claims(table, line), [])
+
+    def test_a_round_three_warning_reaches_check_txt_and_does_not_block(self):
+        self.tables()
+        write(os.path.join(self.out, "tables", "robustness", "Robustness_A.B.csv"),
+              '"Genes","robust"\n"Ryr2","no"\n"Gapdh","yes"\n')
+        rc, txt = self.checked(self.script_saying("Gapdh survives every check, and Ryr2 too."))
+        self.assertEqual(rc, 0, txt)                                  # a warning, never a FAIL
+        self.assertIn("Ryr2 is named next to 'survives'", txt)
+        self.assertIn("named after a comma", txt)
+
     def test_an_honest_script_passes_without_unchecked(self):
         self.tables()
         rc, txt = self.checked(self.script_saying(
