@@ -1182,12 +1182,14 @@ def methods_paragraph(rec):
     fam = "TOF analysers, with the library's ion mobility" if rec.get("family") == "timstof" \
         else "centroided spectra"
     return (
-        f"Peak check. For the proteins described below, chromatograms were extracted again from "
-        f"the raw files with Skyline {t['version']} (MacLean et al., Bioinformatics 2010;26:966-968; "
+        f"Peak check. For selected proteins (how they were chosen follows), chromatograms were "
+        f"extracted again from the raw files with Skyline {t['version']} (MacLean et al., "
+        f"Bioinformatics 2010;26:966-968; "
         f"SkylineCmd in the ProteoWizard container {SKYLINE_PIN['image']}, image digest "
         f"{SKYLINE_PIN['docker_digest']}, run under Wine), from DIA-NN's spectral library for this "
-        f"search and the search's digest settings ({s['enzyme']}, {s['missed_cleavages']} missed "
-        f"cleavage(s), {s['min_length']}-{s['max_length']} residues, precursor charges "
+        f"search and the search's digest settings ({s['enzyme']}, up to {s['missed_cleavages']} "
+        f"missed cleavage{'' if s['missed_cleavages'] == 1 else 's'}, "
+        f"{s['min_length']}-{s['max_length']} residues, precursor charges "
         f"{s['charges'][0]}-{s['charges'][-1]}, fragments {fmt_num(s['fragment_mz'][0])}-"
         f"{fmt_num(s['fragment_mz'][1])} m/z), {fam}, with a tolerance of +-{fmt_num(ma['ms1_ppm'])} "
         f"ppm (MS1) and +-{fmt_num(ma['ms2_ppm'])} ppm (MS2): {ma['source']}. "
