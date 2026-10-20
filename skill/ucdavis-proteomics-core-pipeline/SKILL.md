@@ -2774,6 +2774,14 @@ Not for data from other labs: STAN matches on instrument model, not serial numbe
 Core staff: board.md §3 row "QC".
 → detail: `references/qc-bracket.md`.
 
+### 8f. Peak check (Skyline) — by default, after the final DE
+Skyline draws DIA-NN's peaks for the top 10 DE proteins (none significant: the most abundant), as
+SLURM jobs in the pinned container: `python3 scripts/skyline_peaks.py plan --session <S>`, then
+submit what it prints under "submit with". Exit 3 = not run here: its record says why, and so does
+the report. A user who does not want it: `skyline_peaks.py skip --session <S> --reason '<their
+words>'`. It is a visual check of DIA-NN's peaks, never "confirmed by Skyline". Core staff may ask
+for a PRM/SRM follow-up list from it. → `references/skyline.md`.
+
 ### 9. Analyze the data (you write the report)
 Generate the analysis brief (it lists the figures to embed), then **do the analysis
 yourself** — you are the consultant the brief addresses:

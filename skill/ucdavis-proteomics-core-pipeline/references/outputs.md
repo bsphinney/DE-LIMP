@@ -50,6 +50,15 @@ The orchestrator asks where results should live (SKILL.md step 3b):
                             #   p-value panel (qc_pvalue_panel.png) + figures.json ("figures":
                             #   captions; "failed": what was not drawn and why) +
                             #   sample_labels.csv (short sample names -> full run names)
+    skyline/                # the peak check (skyline_peaks.py, step 8f; references/skyline.md):
+                            #   peaks_<gene>.png + areas_<gene>.png per checked protein,
+                            #   peaks_disagreements.png, skyline_precursors.tsv, disagreements.tsv
+                            #   (where Skyline picked a different peak from DIA-NN's),
+                            #   <name>_top_hits.sky.zip (the Skyline document), and
+                            #   skyline_provenance.json (the record: ok / skipped + why / planned).
+                            #   skyline_work/ inside it is scratch: never zipped or delivered
+    skyline_followup/       # Core staff, on request: PRM/SRM lists from the peak check, README.md,
+                            #   followup_assay.json (not in a collaborator delivery by default)
     reproducibility/        # the pinned bundle (reproduce.sh, env lock, sessionInfo, skill.txt, checksums)
     AI_Analysis_Report.md   # the interpretation the agent wrote (step 9); an input to the report
     Analysis_Report.html    # THE report of record: one self-contained page (no Word copy)
