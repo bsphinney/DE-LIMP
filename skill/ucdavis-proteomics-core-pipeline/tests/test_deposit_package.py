@@ -340,6 +340,13 @@ class FullSession(unittest.TestCase):
         with mock.patch.dict(os.environ, {"SKILL_CONFIG_DIR": os.path.join(cls.tmp, "cfg")}):
             log_decision.append(cls.p["session_dir"], "Groups: Control vs Treated",
                                 "the user confirmed the design table")
+        # ... and a session with a DE has its peak check (skyline_peaks.py, step 8f); without a
+        # record of it, finalize says [SKIPPED] "not run"
+        sky = os.path.join(cls.p["output_dir"], "skyline")
+        os.makedirs(sky)
+        with open(os.path.join(sky, "skyline_provenance.json"), "w") as fh:
+            json.dump({"schema": "skyline_peak_check/1", "status": "ok", "proteins": [{}],
+                       "runs": {"imported": ["r1"]}, "results": {"compared": 3, "flagged": 0}}, fh)
         cls.res = finalize(cls.p["session_dir"], "--zip")
         cls.out = json.loads(cls.res.stdout) if cls.res.returncode == 0 else {}
         cls.pkg = cls.p["deposit_dir"]
@@ -355,6 +362,7 @@ class FullSession(unittest.TestCase):
         # .docx needs pandoc or python-docx, which a bare test interpreter may lack; that is
         # recorded, never silent. Everything else must be [OK].
         self.assertTrue(all("Word" in ln for ln in skipped), skipped)
+        self.assertTrue(any(ln.startswith("[OK]      Peak check (Skyline") for ln in lines), lines)
         for part in ("Publication methods (output/methods.md)", "sdrf.tsv", "protocols.txt",
                      "files_to_upload.tsv", "prepare_upload.sbatch", "HOW_TO_SUBMIT.md",
                      "HOW_TO_SUBMIT.html"):
