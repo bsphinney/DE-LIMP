@@ -2177,7 +2177,7 @@ class GeminiTTS(object):
         try:
             with open(os.path.join(self.cache_dir or "", SENT_FILE), encoding="utf-8") as fh:
                 got = json.load(fh)
-        except (OSError, ValueError, TypeError):
+        except Exception:                    # unreadable, not JSON, nested past the recursion limit
             return {}
         return got if isinstance(got, dict) else {}
 
@@ -2187,9 +2187,9 @@ class GeminiTTS(object):
         got = self._sent_file()
         chunks = got.get("chunks") if isinstance(got.get("chunks"), dict) else {}
         pre = got.get("preflight") if isinstance(got.get("preflight"), dict) else {}
-        try:
-            n = max(0, int(pre.get("requests") or 0))
-        except (TypeError, ValueError):
+        try:                                  # 1e400 is inf: OverflowError
+            n = min(max(0, int(pre.get("requests") or 0)), 10 ** 6)
+        except (TypeError, ValueError, OverflowError):
             n = 0
         return {"chunks": {k: (v if isinstance(v, dict) else {}) for k, v in chunks.items()},
                 "preflight": dict(pre, requests=n)}
@@ -3571,15 +3571,14 @@ def gemini_had(fallback, page=False):
     tests = (fallback.get("preflight_requests") or 0) + (fallback.get("preflight_requests_before")
                                                          or 0)
     if page:
+        if tests and not (k or other):
+            return "only a sound check, none of this transcript"
         had = ([f"the text of {k} of the {total} parts of this transcript"] if k else [])
         had += [f"the text of {other} part(s) not in this transcript"] if other else []
-        if not k:
-            if tests and not other:
-                return "only a sound check, none of this transcript"
-            had = (["a sound check"] if tests else []) + had
-            return (" and ".join(had) + ", none of this transcript" if had else
-                    "none of this transcript")
-        return " and ".join(had)
+        had += ["a sound check"] if tests else []
+        said = ", ".join(had[:-1]) + " and " + had[-1] if len(had) > 1 else "".join(had)
+        return (said or "none of this transcript") + (
+            ", none of this transcript" if said and not k else "")
     parts = []
     if k:
         parts.append(f"the text of {k} of this script's {total} chunk(s), after pronunciation "

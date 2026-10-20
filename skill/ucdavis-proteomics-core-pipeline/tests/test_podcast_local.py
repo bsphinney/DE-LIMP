@@ -513,6 +513,40 @@ class EveryChunkAgain(Local):
         self.assertEqual(got["from_a_later_version"], {"kept": True})
         self.assertEqual(got["preflight"]["requests"], 1)
 
+    def test_no_value_in_the_record_can_break_a_render(self):
+        """Review of 4664ebd7: 1e400 read as inf (OverflowError); deep nesting (RecursionError)."""
+        g = mp.GeminiTTS.__new__(mp.GeminiTTS)
+        g.cache_dir = os.path.join(self.pod, ".cache")
+        os.makedirs(g.cache_dir, exist_ok=True)
+        path = os.path.join(g.cache_dir, mp.SENT_FILE)
+        for raw in ('{"preflight": {"requests": 1e400}}', '{"preflight": {"requests": Infinity}}',
+                    '{"preflight": {"requests": NaN}}', '{"preflight": {"requests": -3}}',
+                    '{"preflight": {"requests": %s}}' % ("9" * 4000), "[" * 100000, "[1, 2]",
+                    '{"chunks": {"k": null}, "preflight": []}'):
+            with self.subTest(raw=raw[:40]):
+                write(path, raw)
+                rec = g.sent_record()
+                self.assertTrue(0 <= rec["preflight"]["requests"] <= 10 ** 6)
+                self.assertTrue(all(isinstance(v, dict) for v in rec["chunks"].values()))
+
+    def test_the_page_names_everything_google_had(self):
+        cases = {(2, 0, 0): "the text of 2 of the 2 parts of this transcript",
+                 (2, 1, 0): "the text of 2 of the 2 parts of this transcript and the text of 1 "
+                            "part(s) not in this transcript",
+                 (2, 0, 1): "the text of 2 of the 2 parts of this transcript and a sound check",
+                 (2, 1, 1): "the text of 2 of the 2 parts of this transcript, the text of 1 "
+                            "part(s) not in this transcript and a sound check",
+                 (0, 0, 1): "only a sound check, none of this transcript",
+                 (0, 1, 0): "the text of 1 part(s) not in this transcript, none of this transcript",
+                 (0, 1, 1): "the text of 1 part(s) not in this transcript and a sound check, none "
+                            "of this transcript",
+                 (0, 0, 0): "none of this transcript"}
+        for (k, other, tests), want in cases.items():
+            with self.subTest(k=k, other=other, tests=tests):
+                fb = {"gemini_chunks_sent": k, "chunks": 2, "gemini_chunks_not_in_script": other,
+                      "preflight_requests": tests, "preflight_requests_before": 0}
+                self.assertEqual(mp.gemini_had(fb, page=True), want)
+
     def test_the_record_survives_the_cache_pruning(self):
         self.test_what_was_sent_counts_chunks_from_an_earlier_render()
         self.assertTrue(os.path.isfile(os.path.join(self.pod, ".cache", mp.SENT_FILE)))

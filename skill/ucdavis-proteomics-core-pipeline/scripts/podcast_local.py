@@ -399,7 +399,13 @@ def _run(argv, minutes, drop_slurm=False):
         _stop_group(p)
         raise LocalError(f"no answer in {minutes:g} min: stopped")
     except BaseException:                    # Ctrl-C: the same, with less patience
-        _stop_group(p, grace=5.0)
+        try:
+            _stop_group(p, grace=5.0)
+        finally:                             # a second Ctrl-C mid-wait: still nothing left
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except OSError:
+                pass
         raise
     return p.returncode, out, err
 
