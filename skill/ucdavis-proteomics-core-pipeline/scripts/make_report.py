@@ -41,11 +41,12 @@ CATALOG = [
      "peak edges (minutes), areas (MS1, fragments), dot products and mass error."),
     (r"^disagreements\.tsv$", PEAKS,
      "The precursor-runs where Skyline picked a different peak from DIA-NN's: no peak, its apex "
-     "more than 6 s from DIA-NN's, or outside DIA-NN's peak edges -- the peaks to look at before "
-     "trusting their numbers."),
+     "further from DIA-NN's than the record's results.apex_diff_s, or outside DIA-NN's peak edges "
+     "-- the peaks to look at before trusting their numbers."),
     (r".*_top_hits\.sky\.zip$", PEAKS,
      "The Skyline document of the checked proteins, with the results of every run: open it in "
-     "Skyline 26.1 or later (Windows) to look at any peak, or upload it to Panorama."),
+     "the Skyline version its record names (tool.version) or later, on Windows, to look at any "
+     "peak, or upload it to Panorama."),
     (r"^skyline_provenance\.json$", PEAKS,
      "The peak check's record: Skyline version, container and its sha256, the tolerance and its "
      "source, how the proteins were chosen, the settings copied from the search, the outcome."),

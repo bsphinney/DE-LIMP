@@ -30,18 +30,22 @@ them, and lists the peaks where Skyline and DIA-NN disagree.
   cluster) can reach the pinned container. Run `plan` right after step 8's final DE; the jobs take
   minutes, so they are done long before the report (step 9).
 - **The user can turn it off:** `skyline_peaks.py skip --session <S> --reason '<their words>'`.
-  The report then says it was turned off and why.
+  The report then says it was turned off and why. Jobs still running are cancelled, and an earlier
+  run's pictures and document are removed, so none is delivered as current.
 - **When it cannot run**, `plan` exits 3 and writes the record with the reason. The report's
   "Peak check (Skyline)" section starts "**Not run.**" with that reason, and so does finalize's
   `MANIFEST.txt` line. Reasons include:
   - no container here;
   - not a DIA-NN 2.x search, or no Skyline library beside the report;
+  - DDA data (DIA-NN `--dda`): the document extracts DIA;
   - DIA-NN's mass accuracy is not recorded (see below);
   - the search's command does not state a setting the document must copy;
   - no carbamidomethyl cysteine (`--unimod4`) in the search;
   - not a Bruker timsTOF `.d` or Thermo `.raw` search;
   - ion-trap MS2;
-  - no SLURM.
+  - no SLURM;
+  - none of Skyline's precursors matched DIA-NN's by peptide, charge and run name, so nothing
+    could be compared (the join's check; never an "ok" with 0 of 0).
 - **A session with a DE but no record** gets `[SKIPPED] Peak check (Skyline, output/skyline) --
   not run` in `MANIFEST.txt`: run `plan`, or `skip` with the user's reason.
 
@@ -70,8 +74,14 @@ commands on a login node. Everything heavy runs in the three jobs.
   64-CPU cap on HIVE's `high`).
 - `--partition / --account / --qos`: the queue (default: the skill's queue rule,
   `run_search.slurm_queue`).
-- `--replan`: plan again although the last plan has not written its result. Cancel its jobs
-  first. Without it, `plan` refuses.
+- `--replan`: plan again although the last plan has not written its result. Its jobs (named
+  in `skyline_work/jobs.txt`) are cancelled first. Without it, `plan` refuses. Each plan has an
+  id, and a job writes the record only while it is its own plan's, so a job of an earlier plan
+  never overwrites a newer record or a `skip`.
+- **A DE run again** after the check makes the record **out of date**: the record keeps the
+  sha256 of the `de_provenance.json` its proteins were chosen from. The report then says "Out of
+  date", and `MANIFEST.txt` says to plan again. A record that cannot be read is said too ("Could
+  not be read").
 - **Every plan starts clean.** It removes the last run's pictures, tables, `.sky.zip` and its whole
   `skyline_work/`, so a stale per-file cache or status file is never taken for this run's.
 - Without `--session`: `--search <DIA-NN output folder> --out <folder>`, plus `--de-dir`,
@@ -204,7 +214,10 @@ report.
 - **Paths go in as Windows paths**, `Z:\...` (Wine maps `Z:` to `/`).
 - **Binds:**
   - the output folder is bound read-write;
-  - the search folder, the FASTA's folder and every raw-data folder are bound read-only;
+  - the search folder, the FASTA's folder and every raw-data folder are bound read-only, each as
+    given and as its real path (a raw file reached through a link is visible both ways);
+  - parents are bound first. The session usually sits inside the raw-data folder, and a later
+    read-only bind of that folder would cover the read-write output folder below it;
   - DIA-NN's library and report are seen through symlinks in `skyline_work/search/`. Skyline finds
     the report beside the library by name, and nothing is written into the search folder.
 - **Protein accessions come from the FASTA names** (`sp|P02768|ALBU_HUMAN`): offline, Skyline
@@ -228,7 +241,8 @@ Plus queue waits. A 12-run timsTOF project should take about 10-15 min of wall t
   most 12, shared across the groups). Each coloured line is a fragment ion. The grey band is the
   peak Skyline integrated; the dashed lines are DIA-NN's peak edges. An empty panel says why
   ("DIA-NN: not reported in this run", "Skyline: no peak").
-- `peaks_disagreements.png`: the precursors with the largest apex difference, when there are any.
+- `peaks_disagreements.png`: the precursors with the largest apex difference, when there are any,
+  in the runs where Skyline disagreed first (at most 12).
 - `areas_<gene>.png`: fragment peak areas per run, stacked by ion, with Skyline's dotp above each
   bar.
 - `skyline_precursors.tsv`: Skyline's precursor report (apex, peak edges, areas, dotp, idotp,

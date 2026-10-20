@@ -611,6 +611,123 @@ class TestNotRun(unittest.TestCase):
             self.assertFalse(os.path.exists(os.path.join(out, "peaks_OLD.png")))
 
 
+class TestReviewFindings(unittest.TestCase):
+    """What a review of the branch found, each held here."""
+
+    def test_dda_is_not_planned_as_dia(self):
+        with tempfile.TemporaryDirectory() as td:
+            search = TestNotRun().make_search(td)
+            log = os.path.join(search, "report.log.txt")
+            with open(log) as fh:
+                text = fh.read()
+            with open(log, "w") as fh:
+                fh.write(text.replace("--unimod4", "--unimod4 --dda"))
+            out = os.path.join(td, "output", "skyline")
+            with mock.patch("sys.stdout", new=io.StringIO()):
+                self.assertEqual(sp.main(["plan", "--search", search, "--out", out]), 3)
+            self.assertIn("DDA", sp.load_record(out)["reason"])
+
+    def test_output_folder_inside_a_raw_folder_stays_writable(self):
+        # the session's default place is inside the raw-data folder: its read-only bind must come
+        # first, or it covers the read-write output folder below it
+        p = dict(plan_for(), out="/raw/proj/session/output/skyline",
+                 ro_binds=["/raw/proj", "/search"])
+        argv = sp.apptainer_argv(p)
+        binds = [argv[i + 1] for i, x in enumerate(argv) if x == "--bind"]
+        self.assertLess(binds.index("/raw/proj:/raw/proj:ro"),
+                        binds.index("/raw/proj/session/output/skyline:"
+                                    "/raw/proj/session/output/skyline"))
+
+    def test_two_mods_on_one_residue(self):
+        self.assertEqual(sp.precursor_key("M[+58]ACK", 2),
+                         sp.precursor_key("(UniMod:1)M(UniMod:35)ACK", 2))
+
+    def write_record(self, out_dir, rec):
+        os.makedirs(os.path.join(out_dir, "skyline"), exist_ok=True)
+        with open(os.path.join(out_dir, "skyline", sp.RECORD), "w") as fh:
+            json.dump(rec, fh) if isinstance(rec, dict) else fh.write(rec)
+
+    def test_a_de_run_again_makes_the_record_out_of_date(self):
+        with tempfile.TemporaryDirectory() as td:
+            os.makedirs(os.path.join(td, "tables"))
+            with open(os.path.join(td, "tables", "de_provenance.json"), "w") as fh:
+                fh.write('{"adjp": 0.05}')
+            self.write_record(td, dict(OK_REC, de_record_sha256=sp.de_fingerprint(td)))
+            self.assertEqual(sp.manifest_line(td, True)[0], "OK")
+            with open(os.path.join(td, "tables", "de_provenance.json"), "w") as fh:
+                fh.write('{"adjp": 0.05, "rerun": true}')
+            self.assertEqual(sp.record_state(td)[0], "stale")
+            self.assertTrue(sp.report_data(td)["md"].startswith("**Out of date.**"))
+            level, _n, note = sp.manifest_line(td, True)
+            self.assertEqual(level, "SKIPPED")
+            self.assertIn("run again", note)
+
+    def test_an_unreadable_record_is_said(self):
+        with tempfile.TemporaryDirectory() as td:
+            self.write_record(td, "{not json")
+            self.assertTrue(sp.report_data(td)["md"].startswith("**Could not be read.**"))
+            self.assertEqual(sp.manifest_line(td, False)[0], "SKIPPED")
+
+    def test_a_job_of_an_earlier_plan_never_writes_the_record(self):
+        with tempfile.TemporaryDirectory() as td:
+            plan = dict(plan_for(work=os.path.join(td, sp.WORK)), out=td, plan_id="old")
+            with open(sp.record_path(td), "w") as fh:
+                json.dump(dict(sp.skipped_record("turned off", "user")), fh)
+            with mock.patch("sys.stderr", new=io.StringIO()):
+                self.assertFalse(sp.write_owned(plan, dict(OK_REC)))
+            self.assertEqual(sp.load_record(td)["status"], "skipped")
+            with open(sp.record_path(td), "w") as fh:
+                json.dump({"schema": sp.SCHEMA, "status": "planned", "plan_id": "old"}, fh)
+            self.assertTrue(sp.write_owned(plan, dict(OK_REC)))
+            self.assertEqual(sp.load_record(td)["status"], "ok")
+
+    def test_skip_cancels_the_jobs_and_clears_the_last_run(self):
+        with tempfile.TemporaryDirectory() as td:
+            os.makedirs(os.path.join(td, sp.WORK))
+            with open(os.path.join(td, sp.WORK, "jobs.txt"), "w") as fh:
+                fh.write("build\t101\nimport\t102\njoin\t103\n")
+            with open(sp.record_path(td), "w") as fh:
+                json.dump({"schema": sp.SCHEMA, "status": "planned", "plan_id": "p"}, fh)
+            for f in ("peaks_G.png", "T_top_hits.sky.zip", "notes.txt"):
+                with open(os.path.join(td, f), "w") as fh:
+                    fh.write("x")
+            calls = []
+            with mock.patch.object(sp.subprocess, "run",
+                                   lambda argv, **k: calls.append(argv)), \
+                    mock.patch("sys.stdout", new=io.StringIO()), \
+                    mock.patch("sys.stderr", new=io.StringIO()):
+                sp.main(["skip", "--out", td, "--reason", "not wanted"])
+            self.assertEqual(calls, [["scancel", "101", "102", "103"]])
+            self.assertFalse(os.path.exists(os.path.join(td, "peaks_G.png")))
+            self.assertFalse(os.path.exists(os.path.join(td, "T_top_hits.sky.zip")))
+            self.assertTrue(os.path.exists(os.path.join(td, "notes.txt")))   # not its own: kept
+            self.assertFalse(os.path.isdir(os.path.join(td, sp.WORK)))
+
+    def test_nothing_matched_is_not_ok(self):
+        with tempfile.TemporaryDirectory() as td:
+            w = os.path.join(td, sp.WORK)
+            os.makedirs(w)
+            with open(os.path.join(td, "skyline_precursors.tsv"), "w", newline="") as fh:
+                wr = csv.DictWriter(fh, SKY_HEADER, delimiter="\t")
+                wr.writeheader()
+                wr.writerow(sky_row("sp|P1|A_HUMAN", "PEPTIDEK", 2, "other_run", 10, 9.9, 10.1))
+            with open(os.path.join(w, "diann_targets.tsv"), "w", newline="") as fh:
+                wr = csv.DictWriter(fh, list(dia_row("P1", "PEPTIDEK", 2, "r1", 1, 1, 1)),
+                                    delimiter="\t")
+                wr.writeheader()
+                wr.writerow(dia_row("P1", "PEPTIDEK", 2, "r1", 10.0, 9.9, 10.1))
+            p = dict(plan_for(work=w), out=td)
+            build = {"selection": {"targets": [{"protein_group": "P1", "gene": "G1"}]}}
+            with self.assertRaises(sp.Skip) as e:
+                sp.finish(p, build, ["/d/r1.raw"], [])
+            self.assertIn("nothing could be compared", str(e.exception))
+
+    def test_the_median_is_said_over_all_compared(self):
+        md = sp.report_section(dict(OK_REC))["md"]
+        self.assertIn("over all of them, the median difference", md)
+        self.assertNotIn("for the others", md)
+
+
 class TestBrief(unittest.TestCase):
     """The analysis brief tells the report's writer the page adds the section, and the words."""
 
