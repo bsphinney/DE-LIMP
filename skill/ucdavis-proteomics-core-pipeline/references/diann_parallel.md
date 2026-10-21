@@ -3,6 +3,22 @@
 DIA-NN's high-throughput workflow — **poorly documented upstream**, so it is encoded
 here (`diann_parallel.py`), ported faithfully from DE-LIMP's `generate_parallel_scripts()`.
 
+<!-- contents: tests/test_skill_structure.py --toc -->
+**Contents** (section: line)
+- 22: When it is used — automatic above 5 files
+- 55: The 5 steps (chained with `afterok` dependencies)
+- 72: Critical details (don't change these)
+- 169: Usage
+- 192: CPUs per array task — sized to the queue's per-user cap
+- 262: Parallelizing semi-tryptic / non-specific / InfinDIA searches (`--seed-lib`)
+- 328: Notes
+- 336: Scan window MUST be pinned (not just mass accuracy)
+- 633: Orbitrap mass accuracy with no documented tier: measured with DIA-NN
+- 941: DIA-NN exits 0 on fatal errors — never trust the job state alone
+- 1056: Golden rule 6: never a hand-written engine command
+- 1069: 7. The chain as step 7 runs it: routing, the probe and its fallback
+<!-- /contents -->
+
 ## When it is used — automatic above 5 files
 
 `run_search.py` decides this for you; you rarely call `diann_parallel.py` by hand. It
@@ -1036,3 +1052,155 @@ report `no_norm_report.parquet`); `--no-probe-window` (skip step 1b's radius mea
 default — the cfg must then pin `--window`). `probe_window.py --max-probes 1|3` (runs measured: 3 = median +
 quartiles, the default; 1 cannot measure mass accuracy) and `--max-failures <n>` (stop after n
 runs give no radius; default 3).
+
+## Golden rule 6: never a hand-written engine command
+
+6. **Never hand-write the engine command line — always go through `run_search.py`.**
+   Not even for "just one quick search" with known paths. `--threads` parallelises *within*
+   one run, not across runs, so a hand-rolled `sbatch` + `diann-linux` searches the raw files
+   **one at a time**: measured at ~30 min per file, that is ~12 h for 24 files and ~19.5 h for
+   39, where the 5-step chain runs them concurrently. `run_search.py` routes there by itself
+   (DIA-NN, >5 files, SLURM, fixed mass accuracy — step 7), and also pins the engine version,
+   forces `--xic`, creates the `--temp` dirs, picks a queue you can actually submit to, and
+   writes `search_provenance.json`. A hand-written command silently has none of that. This
+   happened for real: ~3 h of cluster time across 7 nodes was discarded and resubmitted
+   through the chain.
+
+## 7. The chain as step 7 runs it: routing, the probe and its fallback
+
+- **DIA-NN parallel — AUTOMATIC above 5 files.** `run_search.py` routes to the **5-step
+  parallel chain** by itself whenever the run is DIA-NN with **more than 5 files** on a
+  machine that has SLURM and a `--cfg` with **fixed** mass accuracy. You don't decide
+  this; it prints `parallel routing: YES|no -- <reason>` and records the reason in
+  `search_provenance.json`. This matches facility practice in DE-LIMP: per-file passes
+  run as a SLURM array instead of one long single-node job.
+  - It falls back to a single search, with the reason printed, when there's **no SLURM**
+    (the chain is job arrays — nothing to fall back to) or when the cfg is **not
+    parallel-safe**. Steps 3/5 reuse the `.quant` files, so *anything* DIA-NN
+    auto-optimises per file gets stitched together inconsistently — DIA-NN's own warning
+    names **mass accuracy AND scan window**. The two are not equally recoverable:
+    - **mass accuracy — pinned by the cfg, or measured with DIA-NN when
+      `estimate_params.py` planned it.** For an Orbitrap with one level outside DIA-NN's table
+      (e.g. the common 15k MS2) and the other inside it, the cfg omits
+      both flags, its `<cfg>.rationale.json` says `measure_with_diann` (keep the two files
+      together), and any level that has a tier is listed under `mass_accuracy_documented`.
+      Step 1b then runs DIA-NN in automatic mode on the same representative runs as the
+      window and writes `<out>/massacc.txt` — the median `Optimised mass accuracy` (MS2) /
+      `Recommended MS1 mass accuracy setting` (MS1) for a measured level, the documented
+      value for the other (MS1 7 at 120k), each measured level floored at the SOP
+      (`max(measured, SOP)`) — which steps 2–5 and `params.resolved.cfg` get. **Tell the
+      user both numbers** when they differ: `mass_acc.measured_ms2_ppm` is what the
+      instrument measured and `mass_acc.pinned_ms2_ppm` is what the search ran at. A
+      run that does not log all of it is replaced like a run with no radius, and an
+      implausible result (MS2 outside 3–30 ppm, MS1 outside 1.5–25, or runs disagreeing by
+      more than 50%) **fails step 1b** rather than being pinned — never retried, never
+      bypassed (it normally means the wrong FASTA, species or calibration); a value outside the
+      band logged by **any** run, one that logged nothing else included, fails it too. A
+      disagreement whose median is at or below the SOP floor, every run inside the band and none
+      above 1.5× the floor, only **warns** (the floor is pinned either way; sparse controls of a pull-down cohort are a
+      known benign cause) — relay the warning. Fewer than 2 runs answering fails or falls back
+      by why the others failed (below); a **one-file** search pins its one run's measurement,
+      floored as usual. An Orbitrap of unknown resolution is not measured at all. That is the
+      *tolerance*; DIA-NN still recalibrates every run, pinned or not. A single-shot search
+      runs the same probe between its library and its search, so a machine without SLURM
+      measures it too. Steps 2–5 **refuse to start** without a valid `massacc.txt` /
+      `window.txt`. **Tell the user**: on a 120k/15k Exploris 480 cohort the measured MS2
+      (14 ppm) makes DIA-NN 2.7.0 log `WARNING: the MS2 mass accuracy setting (14 ppm)
+      deviates significantly from the value recommended (25 ppm) for the Orbitrap
+      resolution of this run (15000)` — the measurement and DIA-NN's own resolution-based
+      value disagree, and which to pin is an open question (→
+      this file). Every other omitted mass accuracy (no sidecar,
+      instrument not identified, only one of the two flags, `--no-probe-window`,
+      `--seed-lib`) declines the chain: re-run `estimate_params.py` with the **real
+      instrument** (step 6b). `0` is **not** auto — DIA-NN reads it as a literal 0 ppm
+      tolerance and returns 0 IDs (auto is the flag *omitted*) — so `0`, negative,
+      non-numeric, or set twice with different values also declines, plan or no plan; fix
+      the value.
+    - **`--window` — the chain handles it; do nothing.** `estimate_params.py` omits it by
+      design, because the radius depends on the acquisition scheme and has to be
+      *measured*. **Step 1b** does that automatically: after library prediction it hands
+      `probe_window.py` the whole cohort, which measures **three representative runs** —
+      the median, lower- and upper-quartile runs (a Bruker `.d` ranked by acquisition time
+      from its `analysis.tdf`, anything else by size), never a blank, wash or failed
+      injection (under half a typical run **of its own kind** — a `.d`'s bytes and a
+      `.raw`'s are not the same quantity, and a cohort holding both is `WARNING`ed about
+      instead, because one radius is not valid for two instruments), and never a `.d` whose
+      `analysis.tdf` index is
+      damaged (WAL-mode header, a non-empty `-wal`/`-journal` beside it, or an index that
+      stops short of `analysis.tdf_bin`) — and pins the **median** radius into steps 2–5 (and, when planned, the mass accuracy). A
+      run that logs no radius is replaced by the next run nearest the median. Every probe,
+      and every run left out and why, is in `<out>/window.json`; the job log names damaged
+      `.d` (they are still searched — look at them). If a WAL-mode header is the *only*
+      objection to a run and **no** run in the cohort can be probed, those runs are probed
+      with a `WARNING` rather than failing the chain over files steps 2–5 will search
+      anyway. The job log also warns when the median run is under half the largest run left
+      (a cohort that is mostly washes) and when the measured radii differ by more than 2. It never probes just the first file:
+      DIA-NN's README warns auto-optimised values "depend on which run is first in the
+      list". Once a radius (and a planned mass accuracy) is measured it writes
+      `<out>/params.resolved.cfg`. **Only when the probe's own machinery failed** — it
+      could not read its own DIA-NN log (an I/O error, e.g. an NFS `Stale file handle`), it
+      crashed, or the runs hit its time limit — does step 1b go on without a measurement: it
+      **retries** a crash or an unreadable log **once** in the same job, and if that fails too
+      (or at once, for a time limit) it **falls back** instead of failing the chain:
+      `window.txt` says `auto` (steps 2–5 accept it only beside `probe_fallback.json`, and pass
+      no `--window`, so DIA-NN chooses the radius per run), a planned mass accuracy is the
+      documented level plus the facility SOP for the other (tagged DEFAULT), and it exits 0
+      so steps 2–5 run. It is recorded as a fallback — `<out>/probe_fallback.json`,
+      `search_provenance.json` `probe_fallback` / `scan_window` — and the Methods say the
+      measurement failed and DIA-NN set the window itself; AUDIT.md (the report's Audit &
+      caveats), the report's Results at a glance, the run record, `watch_run.sh --all`,
+      `checkpoint.py status` and the Slack post carry a CAUTION; `scan_window.mode` is
+      `fallback_auto` (a stable value FRAN reads — `references/environment.md`). **Tell the
+      user** when a search fell back (the job log says `FALLBACK`), and why
+      (`probe_fallback.json` `reason`, which also lists any value a run did log):
+      per-run windows are what the chain normally exists to avoid, so re-run the chain if
+      the reason was transient (an NFS `Stale file handle`). Before 2.9 a failed probe failed
+      step 1b and left steps 2–5 `DependencyNeverSatisfied` (fran-5b, 2026-09-30: 62 of 261
+      jobs, over an `ESTALE` in the probe's log tail on Flinders NFS; the live log is now on
+      node-local storage). **Everything else still fails step 1b**, never retried or fallen
+      back past, because no fallback can fix it and one would hide it: a refused mass
+      accuracy; the environment (missing .NET, DIA-NN cannot start or will not optimise under
+      these flags — every step 2–5 task would fail on it too); the probe's own arguments;
+      runs DIA-NN **finished without logging** a radius (3 such runs: a wrong FASTA or
+      library, a large miscalibration, failed injections); DIA-NN **out of memory** (raise
+      `--mem-per-file`; one run is enough to know); a signal. The job log names which
+      (`probe_window.EXIT_*`). Steps 2–5 then sit `DependencyNeverSatisfied`, so after the
+      fix resubmit step 1b **and** steps 2–5 (ids in `<out>/jobs.txt`; →
+      `references/watcher.md`), not step 1b alone. An omitted `--window` therefore does **not**
+      decline the chain — don't send the user off to measure it by hand, and don't read
+      such a routing decline as a window problem. `--window 0` routes the same way: it is
+      **not** a valid radius (DIA-NN logs `scan window radius should be a positive
+      integer` and optimises per file — seen on the 18-file poplar run, radius 7 for
+      seventeen files and 8 for one), and the chain removes it. Anything else that is not
+      a positive integer (`0.5`, `7.0`, `-1`, `wide`) is a typo and declines — fix the cfg.
+      The decline message names the fix for its actual cause. To measure it yourself
+      anyway, e.g. with `--no-probe-window`, after step 1 has built the library:
+      ```bash
+      python3 scripts/probe_window.py --diann "<diann cmd>" --raw <ALL the runs> \
+          --fasta <f.fasta> --lib <step1.predicted.speclib> --write-cfg <params.cfg> \
+          --workdir <scratch dir> > window.json
+      ```
+
+      Hand it every run, not one: it picks the representative runs itself. It stops each
+      DIA-NN as soon as it logs `Scan window radius set to N` (during calibration), so it
+      costs minutes per run. For `.raw`, DIA-NN needs a .NET 8 ≥ 8.0.17 — export it
+      explicitly: `export DOTNET_ROOT="$(bash scripts/ensure_dotnet8.sh | tail -1)"; export
+      PATH="$DOTNET_ROOT:$PATH"` (don't rely on `activate.sh` alone: one written before 2.5.1
+      does not export it). Without it DIA-NN cannot open the files. HIVE's
+      `dotnet-core-sdk/8.0.4` module is too old for DIA-NN (step 2's `detect_acquisition.py`
+      resolves its own .NET and needs none of this).
+  - **DDA (`--dda` in the cfg): no step 1b.** Mass accuracy must be pinned, and
+    `estimate_params.py` pins it for DDA. A sidecar that still plans `measure_with_diann`
+    beside `--dda` (a cfg from before 2.9, or `--dda` added by hand) declines the chain
+    (`mass_acc_dda`): re-run step 6b with `--acquisition DDA`. `--window` stays unset:
+    DIA-NN logs no radius in DDA mode, so nothing can measure one, and
+    `search_provenance.json` `scan_window` says so. Steps 3 and 5 then print DIA-NN's
+    `.quant`-reuse warning about automatic scan-window optimisation. That is expected for
+    DDA; tell the user. `probe_window.py` refuses a `--dda` run outright.
+  - Override either way with `--no-parallel` (force one job) or `--parallel-threshold N`.
+  - It **generates** the chain but does not submit it. Its `submit.sh` writes
+    `<out>/jobs.txt` and the checkpoint (`RECOVERY.md`) straight after the last `sbatch`,
+    before it prints anything. So reading only its first line (`bash submit.sh | head -1`)
+    no longer loses them. Submit `<out>/submit.sh` (over
+    `hive_exec.sh` on HIVE), then watch the **step-5** job — that's the one that writes
+    `report.parquet`.
