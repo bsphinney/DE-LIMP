@@ -10,6 +10,17 @@ channels, independent samples per channel, label swaps, label-check injections.
 spectral library (`--seed-lib`); chemical labels (mTRAQ, dimethyl); a turnover / pulsed-SILAC
 *analysis* (the search runs, `run_silac.R` refuses); protein-set tests on the ratios.
 
+<!-- contents: tests/test_skill_structure.py --toc -->
+**Contents** (section: line)
+- 24: 1. What to ask (step 3)
+- 91: 2. The search (steps 6b and 7)
+- 161: 3. The ratio analysis (step 8)
+- 223: 4. Reading the results (say these in the report)
+- 285: 5. The rest of the pipeline
+- 304: 6. Statistical review (2026-10-15) and what is still open
+- 324: Step 8 for a SILAC session
+<!-- /contents -->
+
 ## 1. What to ask (step 3)
 
 Ask; never guess. Each answer goes into `logs/decisions.md` (`log_decision.py`).
@@ -309,3 +320,28 @@ count is reported instead. Still open:
   `Channel.Evidence`, or the light channel's intensity distribution) could give one.
 - **Power reading** uses the median posterior variance; a simulation from the fitted prior
   would be better.
+
+## Step 8 for a SILAC session
+
+**A SILAC session (`--labels` in step 6b) does not use `run_de.R` or the normalisation check.**
+Its comparison is a ratio inside each run:
+
+```
+python3 scripts/silac.py design --validate input/silac_design.csv --against ./search_out/report.parquet \
+    [--exclude <run> --reason "<why, in the user's words>"]   # only on the user's decision
+Rscript scripts/run_silac.R --input ./search_out/report.parquet --design input/silac_design.csv \
+    --outdir <S>/output/tables --figures-dir <S>/output/figures --params ./wf/params.cfg \
+    --fasta ./search.fasta [--comparisons "KO-WT,DKO-WT"] [--replicates biological] \
+    [--min-replicates N] [--run-level-only]
+```
+
+It writes the `DE_silac_*.csv` tables, the channel-specific detections, the figures and a
+`de_provenance.json` that the report, Methods, audit, delivery gate and reproducibility bundle
+read like any DE record (its normalisation check is recorded as not applicable, with why).
+Skip 8a (no set tests yet) and 8b (it drew its own figures); in 8c run the audit without
+`--conditions`, and `sample_quality.py` on `SILAC_sample_matrix.csv` + `SILAC_samples.csv`.
+Ask which comparisons the user wants (the default, every pair heavier/lighter, is tagged).
+It filters on every q-value column the report has, like the label-free path; `--run-level-only`
+(recorded) keeps the run-specific two only. Unset minimum replicates = max(3, half), tagged.
+→ sections 3–4 above, which also say how to read centred vs uncentred ratios and the
+detection patterns ("detected in X (k/n); not detected in Y (0/n)" — not a test).
