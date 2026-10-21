@@ -552,6 +552,14 @@ class Documented(unittest.TestCase):
         md = self.read("SKILL.md")
         return " ".join(md[md.index("### 0. "):md.index("### 0b.")].split())
 
+    def access_step0(self):
+        """access.md's step-0 section: the update route in full (SKILL.md step 0 is a router
+        since the slim-down)."""
+        ref = self.read("references", "access.md")
+        i = ref.index("\n## Step 0: is this skill current?")
+        j = ref.find("\n## ", i + 1)
+        return " ".join(ref[i:j if j > 0 else len(ref)].split())
+
     def section(self, start, end):
         md = self.read("SKILL.md")
         return " ".join(md[md.index(start):md.index(end)].split())
@@ -561,16 +569,16 @@ class Documented(unittest.TestCase):
         out. The check sat in the middle of "### 0. One-time setup", after setup.sh: a heading
         an agent on an already-set-up computer skips, and a resume never ran it."""
         s = self.step0()
-        self.assertLess(s.index("bash scripts/skill_version.sh --check-update"),
+        self.assertLess(s.index("bash scripts/skill_version.sh --session-start"),
                         s.index("bash scripts/setup.sh"))
-        head = s[:s.index("bash scripts/skill_version.sh --check-update")]
+        head = s[:s.index("bash scripts/skill_version.sh --session-start")]
         self.assertIn("every conversation", head.lower())
         self.assertIn("already set up", head)
         self.assertIn("resume", head)
 
     def test_a_resume_and_the_milestones_check_again(self):
         resume = self.section("### 0c.", "### 1. ")
-        self.assertIn("--check-update", resume)
+        self.assertIn("--session-start", resume)       # it runs --check-update first
         s = self.step0()
         again = s[s.index("**Check again**"):]
         self.assertIn("skill_version.sh --check-update", again)
@@ -579,13 +587,14 @@ class Documented(unittest.TestCase):
 
     def test_step_0_checks_main_first_in_every_mode(self):
         s = self.step0()
-        self.assertIn("bash scripts/skill_version.sh --check-update", s)
-        self.assertLess(s.index("--check-update"),
-                        s.index("bash scripts/skill_version.sh --check-hive --mode hive_remote"))
+        self.assertIn("bash scripts/skill_version.sh --session-start [--mode hive_remote]", s)
         self.assertIn("every mode", s.lower())
+        ref = self.access_step0()           # --session-start: --check-update, then --check-hive
+        self.assertLess(ref.index("bash scripts/skill_version.sh --check-update"),
+                        ref.index("bash scripts/skill_version.sh --check-hive --mode hive_remote"))
 
     def test_step_0_updates_through_the_https_route_and_checks_it(self):
-        s = self.step0()
+        s = self.access_step0()
         for text in ("bash scripts/skill_version.sh --update",
                      "git -C ~/.claude/plugins/marketplaces/ucdavis-proteomics-core pull --ff-only",
                      "marketplace not refreshed",
@@ -593,7 +602,8 @@ class Documented(unittest.TestCase):
                      "already at the latest version",
                      "CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1"):
             self.assertIn(text, s)
-        self.assertIn("Never tell the user the skill is up to date", s)
+        self.assertIn("bash scripts/skill_version.sh --update", self.step0())
+        self.assertIn("Never tell the user the skill is up to date", self.step0())
 
     def test_the_install_docs_describe_the_refresh_route(self):
         for rel in (("references", "install.md"), ("references", "access.md")):

@@ -1234,6 +1234,16 @@ class SkillDocAsksAtStep3(unittest.TestCase):
         nxt = re.search(r"^### ", self.doc[start + len(head):], re.M)
         return self.doc[start:start + len(head) + (nxt.start() if nxt else len(self.doc))]
 
+    @staticmethod
+    def ref_section(name, head):
+        """A reference's ## section, whitespace-flattened: SKILL.md is a router since the
+        slim-down, and each step's detail lives in the reference section it names."""
+        with open(os.path.join(SKILL, "references", name), encoding="utf-8") as fh:
+            ref = fh.read()
+        i = ref.index("\n## " + head)
+        j = ref.find("\n## ", i + 1)
+        return " ".join(ref[i:j if j > 0 else len(ref)].split())
+
     def test_step3_asks_the_sample_type(self):
         s3 = " ".join(self.section("### 3. Ask organism + experimental design").split())
         # asked since 2.10 -- of Core staff since 2.12 only when a choice depends on it
@@ -1247,7 +1257,10 @@ class SkillDocAsksAtStep3(unittest.TestCase):
         for tissue in ("hair", "wool", "feather", "skin", "nail"):
             self.assertIn(tissue, s3)
         self.assertIn("Deciding it after the search is too late", s3)
-        self.assertIn("fetch_fasta.KERATIN_SAMPLE_TISSUES", s3)
+        self.assertIn("study-questions.md", s3)
+        ker = self.ref_section("study-questions.md", "Keratin samples")
+        self.assertIn("fetch_fasta.KERATIN_SAMPLE_TISSUES", ker)
+        self.assertIn("Deciding it after the search is too late", ker)
 
     def test_each_step_carries_it(self):
         s6 = self.section("### 6. Build the FASTA")
@@ -1256,15 +1269,15 @@ class SkillDocAsksAtStep3(unittest.TestCase):
         s7 = self.section("### 7. Run the search")
         self.assertIn("[--keratin-sample]", s7)
         self.assertIn("REFUSED", s7)
-        self.assertIn("pass `--keratin-sample`", self.section("### 8. Differential expression"))
-        self.assertIn("read it from `--fasta-meta`",
-                      self.section("### 8c. Audit the results"))
+        self.assertIn("pass `--keratin-sample`",
+                      self.ref_section("de-analysis.md", "Step 8: keratin samples and contaminants"))
+        self.assertIn("read it from `--fasta-meta`", self.ref_section("audit.md", "8c."))
 
     def test_the_limits_are_documented(self):
-        s3 = self.section("### 3. Ask organism + experimental design")
+        ker = self.ref_section("study-questions.md", "Keratin samples")
         for part in ("KRT1/2/9/10", "FLG/FLG2/HRNR/DMKN", "Poorly annotated species"):
-            self.assertIn(part, s3)
-        s8 = self.section("### 8. Differential expression")
+            self.assertIn(part, ker)
+        s8 = self.ref_section("de-analysis.md", "Step 8: keratin samples and contaminants")
         self.assertIn("refuses a FragPipe search on such a database", s8)
         self.assertNotIn("FragPipe adds when it searches", s8)
 

@@ -747,19 +747,39 @@ class Documented(unittest.TestCase):
         with open(os.path.join(SKILL, *rel), encoding="utf-8") as fh:
             return fh.read()
 
+    def access_step0(self):
+        """access.md's step-0 section: the full check, every exit code (SKILL.md step 0 is a
+        router since the slim-down: one --session-start call and its fields)."""
+        ref = self.read("references", "access.md")
+        i = ref.index("\n## Step 0: is this skill current?")
+        j = ref.find("\n## ", i + 1)
+        return ref[i:j if j > 0 else len(ref)]
+
     def test_skill_md_step_0_runs_the_check_and_says_what_each_exit_means(self):
         md = self.read("SKILL.md")
-        step0 = md[md.index("### 0. "):md.index("### 0b.")]
-        self.assertIn("bash scripts/skill_version.sh --check-hive --mode hive_remote", step0)
+        step0 = " ".join(md[md.index("### 0. "):md.index("### 0b.")].split())
+        self.assertIn("bash scripts/skill_version.sh --session-start [--mode hive_remote]", step0)
+        for field in ("relay_first", "ask_update", "`next`", "`ask`", "`say`", "up_to_date"):
+            self.assertIn(field, step0)
+        self.assertIn('access.md "Step 0: is this skill current?"', step0)
+        ref = self.access_step0()
+        self.assertIn("bash scripts/skill_version.sh --check-hive --mode hive_remote", ref)
         for code in ("exit 0", "exit 3", "exit 4", "exit 5", "exit 6"):
-            self.assertIn(code, step0)
-        self.assertIn("--put-skill", step0)
+            self.assertIn(code, ref)
+        self.assertIn("--put-skill", ref)
+        self.assertIn("--session-start", ref)
 
     def test_step_0_puts_the_update_question_first(self):
         """Brett: staff must hear it plainly -- relayed before any other work, an offer to
         update now (the steps that work), the decline recorded, and auto-update recommended."""
         md = self.read("SKILL.md")
-        step0 = " ".join(md[md.index("### 0. "):md.index("### 0b.")].split())
+        router = " ".join(md[md.index("### 0. "):md.index("### 0b.")].split())
+        for text in ("before any other work", "ask whether to update now", "/reload-plugins",
+                     "record that they declined", "Never tell the user the skill is up to date",
+                     "recommend turning on auto-update",
+                     "Marketplaces → ucdavis-proteomics-core → Enable auto-update"):
+            self.assertIn(text, router)
+        step0 = " ".join(self.access_step0().split())
         for text in ("Relay it FIRST, before any other work",
                      "Your copy of the skill is older than the Core's current release",
                      "ask whether to update now",

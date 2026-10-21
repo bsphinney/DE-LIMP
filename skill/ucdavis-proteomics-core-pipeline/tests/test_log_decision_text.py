@@ -146,9 +146,12 @@ class TextAsData(unittest.TestCase):
                                    "evidence>\n- **Step:** 3. design"), 2)
 
     def test_every_documented_example_reads_standard_input(self):
-        examples = [(where, line) for where, doc in (("SKILL.md", _read("SKILL.md")),
-                                                     ("core-submissions.md",
-                                                      _read("references", "core-submissions.md")))
+        # SKILL.md and every reference (step 0's "declined" example lives in access.md since
+        # the slim-down)
+        docs = [("SKILL.md", _read("SKILL.md"))] + [
+            (f, _read("references", f))
+            for f in sorted(os.listdir(os.path.join(SKILL, "references"))) if f.endswith(".md")]
+        examples = [(where, line) for where, doc in docs
                     for line in doc.splitlines() if "log_decision.py --session" in line]
         self.assertGreaterEqual(len(examples), 4, examples)
         for where, line in examples:

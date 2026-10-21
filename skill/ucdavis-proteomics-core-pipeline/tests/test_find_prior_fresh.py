@@ -91,7 +91,7 @@ class FindPriorIsFreshByDefault(unittest.TestCase):
     def test_skill_md_step_1b_says_fresh_by_default(self):
         with open(os.path.join(SKILL, "SKILL.md"), encoding="utf-8") as fh:
             md = fh.read()
-        step = md[md.index("### 1b."):md.index("### 1c.")]
+        step = " ".join(md[md.index("### 1b."):md.index("### 1c.")].split())   # layout-free
         self.assertIn("fresh analysis by default", step)
         self.assertIn("read nothing from that session", step)
         self.assertIn("only when the user asks", step)

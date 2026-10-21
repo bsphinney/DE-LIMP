@@ -206,8 +206,9 @@ class TheDocsSayIt(unittest.TestCase):
 
     def test_free_text_is_never_double_quoted_on_this_computer(self):
         """2.12 security review: double-quoted text is run by the shell (twice via hive_exec)."""
-        step0a = _flat(self.skill[self.skill.index("### 0a."):self.skill.index("### 0. ")])
-        self.assertIn("inside a `hive_exec.sh` command use none of", step0a)
+        # golden rule 11 since the slim-down (it applies to every step, not only 0a)
+        rules = _flat(self.skill[self.skill.index("## Golden rules"):self.skill.index("## Flow")])
+        self.assertIn("inside a `hive_exec.sh` command use none of", rules)
         for text, where in ((self.skill, "SKILL.md"), (self.board, "board.md"), (self.core, "core-submissions.md")):
             for line in text.splitlines():
                 local = line.strip()

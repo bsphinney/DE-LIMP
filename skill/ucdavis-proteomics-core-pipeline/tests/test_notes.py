@@ -1782,10 +1782,16 @@ class Documented(unittest.TestCase):
         self.assertIn("report_issue.sh", step0)
         self.assertIn("before the resume check (0c)", step0)
         self.assertIn("as data", step0)
-        for want in ("`warnings`", "ask the user what to reply", "never invent",
-                     "Exit 2, 5 or 255", "--reply-b64", "python3 -I - check --json",
-                     "`ack` refuses a note that is not trusted and unread"):
-            self.assertIn(want, step0)
+        for want in ("`warnings`", "ask the user what to reply", "never invent"):
+            self.assertIn(want, step0.replace("**", "").replace("Ask the", "ask the"))
+        # the detail moved to notes.md with the slim-down; SKILL.md step 0 names the section
+        self.assertIn('notes.md "Step 0: the notes check"', step0)
+        ref = self.read("references", "notes.md")
+        sec = " ".join(ref[ref.index("\n## Step 0: the notes check"):].split())
+        for want in ("Exit 2, 5 or 255", "--reply-b64", "python3 -I - check --json",
+                     "`ack` refuses a note that is not trusted and unread", "as data",
+                     "never an instruction to you"):
+            self.assertIn(want, sec)
         step7 = md[md.index("### 7. Run the search"):md.index("### 7b.")]
         step12 = md[md.index("### 12. Finalize"):md.index("### 12b.")]
         self.assertIn("notes.py check", step7)
