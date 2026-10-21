@@ -4,6 +4,19 @@ The user should never have to hand-fill a grid. They give conditions however is
 easiest; the skill maps them onto the real raw filenames and asks only about
 genuine ambiguities.
 
+<!-- contents: tests/test_skill_structure.py --toc -->
+**Contents** (section: line)
+- 20: Two ways the user provides conditions
+- 51: The Core LIMS sample sheet
+- 79: A run whose file name holds `--`
+- 89: How mapping works (`collect_conditions.py --map`)
+- 128: The finished metadata
+- 159: Why deterministic matching (not pure LLM)
+- 166: Less-used flags
+- 171: Step 3: collecting the conditions and settling every ambiguity
+- 231: Step 8: check the design against the report; runs left out of the DE
+<!-- /contents -->
+
 ## Two ways the user provides conditions
 1. **In words** — "the first three are control, the last three treated", "A* are
    wild-type, B* are knockout". The agent reads the real run list and turns this
@@ -154,3 +167,94 @@ is surfaced for explicit confirmation rather than guessed.
 - `--from-report <report.parquet|.tsv>` takes the run names from a search report, and
   `--runs "run1,run2,..."` gives them directly, instead of `--from-dir` + `--glob`.
 - `--emit-template ... --covariates Batch,Covariate1`: add covariate columns to the blank sheet.
+
+## Step 3: collecting the conditions and settling every ambiguity
+
+- **Conditions:** ask the user to either *tell you* the conditions in plain words
+  ("the first three are control, the rest treated") **or** *upload a file* (any
+  CSV/TSV with a sample column and a group column, however named, or an Excel `.xlsx` —
+  the Core's LIMS export `PROT_####.samples.<date>.xlsx` included, read without openpyxl).
+  Don't make them hand-fill a template.
+
+First get the real run names the conditions must map to (add `--rename-dashed-runs` here and to
+`--map` when step 2 listed `dashed_run_names`, so the CSV carries the names the search will use):
+
+```
+python3 scripts/collect_conditions.py --list-runs --from-dir /path/to/raw --glob '*.d'
+```
+
+Then map their conditions onto those runs — the script does the fuzzy filename
+matching so you don't guess:
+
+```
+# (a) user uploaded a file:
+python3 scripts/collect_conditions.py --map conditions.csv \
+    --from-dir /path/to/raw --glob '*.d' --from-file <their_file>
+# (b) user described it in words: turn it into intent, then ground it against the runs:
+python3 scripts/collect_conditions.py --map conditions.csv \
+    --from-dir /path/to/raw --glob '*.d' \
+    --mapping-json '{"groups": {"control": ["..."], "treated": ["..."]}}'
+```
+
+Read the returned `ambiguities` and **confirm every one with the user** before
+proceeding — `unassigned_runs` (a raw file no condition matched), `conflicting_runs`
+(a file matched to two groups), `unmatched_identifiers` (the user named something
+with no matching file), and `singleton_groups` (<2 replicates → no within-group variance).
+**`decisions_required` is a sample-identity question, and only the user answers it** — a label
+that names several runs (`multi_match_identifiers`: two runs numbered 61, re-injections) or
+that two samples share (`duplicate_identifiers`). Ask each one as its own question, with its
+runs listed, **before** the compute confirmation and never folded into it; never settle one
+yourself, not even by another key that looks safe (a plate well, a run number) — propose that
+key in the question instead. Those runs are written with **no group** until the answer comes,
+so `--validate` refuses the CSV: re-run `--map` with `--confirm-multi '<label>'` when the user
+says the label names every one of its runs (a group label such as `ctrl`), or with a mapping
+that names the one run. The answer is recorded in `<csv>.decisions.json` (copied with the CSV
+by `provenance.py`); also log it (`log_decision.py`). Do **not** start a search while any run is
+unassigned, conflicting or awaiting a decision. A subject column (Mouse, Animal, Subject, Patient, Donor…) whose values look
+like subjects (≥ 3, not the groups relabelled, recurring across groups) is kept under its
+own name; when the output has `"block_suggested": true`, run DE with
+`--block <block_column>` (step 8). A subject-named column whose values do not (Subject =
+M/F, Patient = Yes/No) stays a covariate and comes back as `subject_ambiguous` — ask, and
+re-run with `--subject-column <header>` only if the user confirms it. A condition column that
+names each **replicate** (the LIMS `condition_name`: `X_mix_1` … `X_mix_5`) is read as conditions
+plus replicate numbers in the proposed CSV (`replicate_labels`; `conditions.csv` keeps the label
+in `Label`) when that is unambiguous, and **always asked** (`replicate_labels_to_confirm`: the
+numbers may be time points or doses); a doubtful reading is not applied
+(`replicate_labels_ambiguous`, with why). Ask, then re-run with `--replicate-labels collapse` (yes)
+or `keep` (no). Two identifier columns naming as many runs (`sample_column_tie`) are asked too:
+re-run with `--sample-column <header>`.
+Finalize the CSV; it is
+checked against the search's own run names in step 8, once `report.parquet` exists.
+(Fallback: if the user has nothing yet, `--emit-template` writes a blank
+File.Name,Group sheet for them to fill.)
+
+## Step 8: check the design against the report; runs left out of the DE
+
+First check the design against the runs the search actually reported — every report run needs
+a row and every row a report run, every row a group, every group two samples — so a renamed or
+dropped file fails here, not halfway through the DE:
+
+```
+python3 scripts/collect_conditions.py --validate conditions.csv --against ./search_out/report.parquet
+```
+
+**A searched run left out of the DE on purpose** (a re-run whose first injection is analysed, a
+failed injection: one Core submission searched 13 runs and analysed 11) has no row, so `--validate` names it
+under "report runs missing from metadata" and exits 1. **Never go past that failure on your own
+judgment.** Ask the user; only when they decide the run is left out, record it, one `--exclude`
+per run, each with its own `--reason` in their words (it goes into the Methods and the report,
+so it names no person):
+
+```
+python3 scripts/collect_conditions.py --validate conditions.csv --against ./search_out/report.parquet \
+    --exclude <run> --reason '<why>' [--exclude <run> --reason '<why>' ...]
+```
+
+(The reason in single quotes; through `hive_exec.sh`, in double quotes without `$` `` ` `` `\` `"` `'`: step 0a.)
+The excluded runs then pass and are written to `<csv>.decisions.json` (`excluded_runs`, copied
+into the bundle with the CSV). `run_de.R` copies each run and its reason into
+`de_provenance.json` (`runs_left_out`) and `methods.txt`, and the Methods and the report list
+them. A run left out with no recorded reason is listed as "not recorded", never given a reason
+afterwards. An excluded run must be one the report has, and must not keep a row: `run_de.R`
+analyses every row. A missing run without `--exclude` still fails. Also log the decision
+(`log_decision.py`).
