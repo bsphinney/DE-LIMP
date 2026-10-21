@@ -470,7 +470,9 @@ LIST
       printf '%s' "$s_rf" | LC_ALL=C grep -Eq '^\{("[a-z_]+": (true|false)(, )?)+\}$' || s_rf=null
       HIVE_SETUP="{\"ready_for\": $s_rf, \"skill_version\": $(sv_js "$s_sv"), \"written\": $(sv_js "$(sv_field setup_written)")}"
       if [ -n "$hive" ] && [ "$s_sv" != "$hive" ]; then
-        say="${say:+$say }HIVE's setup.json (its ready_for) was written by ${s_sv:+the setup.sh of skill $s_sv}${s_sv:-a setup.sh that did not record its version (before 2.13.1)}, not that of HIVE's skill $hive, so it may be out of date (a limpa or nanoparquet the skill now needs). Refresh it, installing nothing: bash scripts/hive_exec.sh 'bash ~/proteomics-pipeline/scripts/setup.sh --check', then read its ready_for and notes."
+        local s_by="a setup.sh that did not record its version (before 2.13.1)"
+        [ -z "$s_sv" ] || s_by="the setup.sh of skill $s_sv"   # not ${s_sv:-...}: that is $s_sv again
+        say="${say:+$say }HIVE's setup.json (its ready_for) was written by $s_by, not that of HIVE's skill $hive, so it may be out of date (a limpa or nanoparquet the skill now needs). Refresh it, installing nothing: bash scripts/hive_exec.sh 'bash ~/proteomics-pipeline/scripts/setup.sh --check', then read its ready_for and notes."
       fi
     fi
     if [ "$behind" = true ] && [ "$status" != hive_ahead ]; then

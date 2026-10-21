@@ -217,6 +217,15 @@ class CheckHive(Harness):
         j = self.check(0, "--mode", "hive_remote")
         self.assertEqual((j["hive_setup"]["skill_version"], j["hive_setup"]["written"], j["say"]),
                          ("2.13.1", "2026-10-16T08:00:00Z", None))
+        # written by another release's setup.sh: its version said once (2026-10-20 on HIVE: the
+        # message read "the setup.sh of skill 2.13.12.13.1")
+        with open(sj, "w") as fh:
+            fh.write('{\n  "skill_version": "2.13.0", "written": "2026-10-15T08:00:00Z", '
+                     '"check_only": true,\n' + rf + '  "notes": []\n}\n')
+        j = self.check(0, "--mode", "hive_remote")
+        self.assertIn("written by the setup.sh of skill 2.13.0, not that of HIVE's skill 2.13.1",
+                      j["say"])
+        self.assertNotIn("2.13.02.13.0", j["say"])
 
     def test_a_hive_copy_without_claude_plugin_is_put_again(self):
         """msalemi's HIVE copy: scripts/ but no .claude-plugin/ -- every record said 'unknown'."""
