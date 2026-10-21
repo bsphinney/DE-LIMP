@@ -139,8 +139,11 @@ class SetupNextSteps(limpa_t.SetupLimpaGate):
 
     def test_nothing_built_yet(self):
         _r, s = self.check()
-        expected = {"de", "limpa", "dda", "thermo_raw"} | ({"dia"} if IS_MAC else set())
-        self.assertEqual(set(s["next_steps"]), expected)
+        # DIA needs R as well as DIA-NN, so ready_for.dia is false here on every OS: on macOS
+        # for Docker too, elsewhere only for R (CI caught the Linux case)
+        self.assertEqual(set(s["next_steps"]), {"de", "limpa", "dda", "thermo_raw", "dia"})
+        if not IS_MAC:
+            self.assertIn("R is not installed yet", s["next_steps"]["dia"])
         self.assertIn("is not built yet", s["next_steps"]["limpa"])
         self.assertNotIn("director", s["next_steps"]["limpa"])     # no env yet: nothing shared
         self.assertIn("Sage and R not found", s["next_steps"]["dda"])
