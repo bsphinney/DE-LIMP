@@ -1800,6 +1800,7 @@ def main():
     empirical = f"{D}/empirical.parquet"
     first_pass = f"{D}/{FIRST_PASS_REPORT}"
     pass_cmp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pass_comparison.py")
+    import contaminant_competition       # the record's name and the job's line: its own
     run_check = os.path.join(os.path.dirname(os.path.abspath(__file__)), "check_report_runs.py")
 
     # QUEUE CHOICE, ported from DE-LIMP's select_best_partition()
@@ -2127,8 +2128,10 @@ def main():
         header("s5_report", a.assembly_cpus, a.assembly_mem, a.assembly_time, _ps, _as_, qos=_qs,
                exclude=a.exclude_nodes), "",
         f'echo "Step 5/5 cross-run report"; date', *measured_guard, tmpguard("quant_step4"),
-        # the report AND its stats file: check_report_runs.stats_path() names the latter
-        clear_stale(f'{D}/{report}', stats_path(f'{D}/{report}')),
+        # the report AND its stats file: check_report_runs.stats_path() names the latter; and
+        # the contaminant record, which must never describe a previous search's report
+        clear_stale(f'{D}/{report}', stats_path(f'{D}/{report}'),
+                    f'{D}/{contaminant_competition.RECORD}'),
         # A step-4 task that failed silently leaves no .quant, and step 5 happily
         # reports on whatever survived. Count them: fewer quants than inputs means a
         # sample was dropped, which must never pass as success. BEFORE DIA-NN runs: counted
@@ -2189,7 +2192,11 @@ def main():
         f'--out {shlex.quote(D + "/pass_comparison.json")} '
         f'--provenance {shlex.quote(D + "/search_provenance.json")} '
         '|| echo "WARNING: the first-pass / final-pass comparison could not be made -- the '
-        'messages above say why" >&2']),
+        'messages above say why" >&2',
+        # Which sample proteins did the contaminant list take away (contaminant_competition.py)?
+        # Named in contaminant_competition.json and search_provenance.json, read by the watcher
+        # and AUDIT.md. A report, never a gate: it does not fail the job.
+        *contaminant_competition.job_lines(f"{D}/{report}", fasta, D)]),
         stage="step 5/5 cross-run report", hours=a.assembly_time, final=True)
 
     # submit.sh — chain the steps with afterok dependencies.
@@ -2354,6 +2361,10 @@ def main():
         "pass_comparison": {"file": f"{D}/pass_comparison.json", "produced": "runtime",
                             "by": s5, "first_pass_report": first_pass,
                             "final_report": f"{D}/{report}"},
+        # made at run time by step 5 (contaminant_competition.py), also copied into
+        # search_provenance.json as `contaminant_competition`
+        "contaminant_competition": {"file": f"{D}/{contaminant_competition.RECORD}",
+                                    "produced": "runtime", "by": s5},
         "seeded": bool(seed), "seed_lib": predicted if seed else None,
         # CPUs per array task, how many run at once, and why (run_search.array_task_cpus)
         "cpu_sizing": cpu_sizing,

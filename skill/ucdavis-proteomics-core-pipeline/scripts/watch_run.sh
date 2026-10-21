@@ -359,6 +359,14 @@ outdir_progress
 # and the identifications stand -- so it is reported beside the state, never as error_class.
 lfq_rec=""
 [ -n "$OUTDIR" ] && lfq_rec="$(run "cat $(printf %q "$OUTDIR/sage_lfq_check.json") 2>/dev/null" 2>/dev/null)"
+# ---- DIA-NN: the sample proteins the contaminant list took (contaminant_competition.py, the
+# search's last job). Not a failure either. Read into a file, not a variable: a 400-run record
+# is larger than one environment variable may be.
+cc_file=""
+if [ -n "$OUTDIR" ]; then
+  cc_file="$(mktemp 2>/dev/null || echo "${TMPDIR:-/tmp}/watch_run_cc.$$")"
+  run "cat $(printf %q "$OUTDIR/contaminant_competition.json") 2>/dev/null" > "$cc_file" 2>/dev/null
+fi
 
 # ---- narration: what this stage is doing, plus something to read while waiting
 if $q_failed; then err_class="watcher_query_failed"; fix="$fix_qf"; fi
@@ -368,7 +376,8 @@ notes="$(python3 "$HERE/pipeline_notes.py" --stage "$stage" --index "$POLL" 2>/d
 STATE="$state" DONE="$done" FAILED="$failed" STALLED="$stalled" JOB="$JOB" MODE="$MODE" \
 ECLASS="$err_class" FIX="$fix" TAIL="$tail_txt" ATASKS="${array_summary:-}" \
 STAGE="$stage" NDONE="${n_done:-0}" NTOTAL="${n_total:-0}" NOTES="$notes" \
-REASON="${reason:-}" ATERM="${a_term:-0}" LFQ_REC="$lfq_rec" NF_JSON="$nf_json" python3 - <<'PY'
+REASON="${reason:-}" ATERM="${a_term:-0}" LFQ_REC="$lfq_rec" NF_JSON="$nf_json" CC_FILE="$cc_file" \
+python3 - <<'PY'
 import os, json, re
 n_done, n_total = int(os.environ.get("NDONE") or 0), int(os.environ.get("NTOTAL") or 0)
 stage = os.environ.get("STAGE", "single")
@@ -443,6 +452,23 @@ if not (isinstance(lfq, dict) and lfq.get("status")):
     for ln in tail.splitlines():
         if "[sage_lfq_check] WARNING:" in ln:
             out.setdefault("warnings", []).append(ln.split("WARNING:", 1)[1].strip())
+try:
+    with open(os.environ.get("CC_FILE") or "") as fh:
+        cc = json.load(fh)
+except (OSError, ValueError):
+    cc = None
+if isinstance(cc, dict) and cc.get("status"):
+    out["contaminant_competition"] = {
+        "status": cc["status"], "reason": cc.get("reason"),
+        "competed_out": [x.get("gene") for x in cc.get("competed_out") or []],
+        "siphoned": [x.get("gene") for x in cc.get("siphoned") or []],
+        "drop_contaminant": cc.get("drop_contaminant") or []}
+    if (cc.get("competed_out") or cc.get("siphoned") or cc["status"] == "not_run") \
+            and cc.get("message"):
+        out.setdefault("warnings", []).append(cc["message"])
 out["log_tail"] = tail[-1500:]
 print(json.dumps(out, indent=2))
 PY
+rc=$?                                   # the poll's own status, as before the record was read
+[ -z "$cc_file" ] || rm -f "$cc_file"
+exit "$rc"

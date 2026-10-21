@@ -979,12 +979,18 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
     # were byte-identical afterwards, and both guards passed on them. The stats file goes too:
     # it is check_report_runs.py's fallback evidence when there is no parquet reader.
     import check_report_runs
-    report_files = (report, check_report_runs.stats_path(report))
+    import contaminant_competition
+    # ...and the contaminant record, which must never describe a previous search's report
+    report_files = (report, check_report_runs.stats_path(report),
+                    os.path.join(out, contaminant_competition.RECORD))
     lib_job = "\n".join([dp.clear_stale(predicted), lib_cmd,
                          dp.must_exist(predicted, "the predicted spectral library")])
     guard = report_guard(report, listing)
-    search_job = "\n".join([dp.clear_stale(*report_files), *measure_lines, search_cmd, guard])
-    one_job = "\n".join([dp.clear_stale(*report_files), onecmd, guard])
+    # then which sample proteins the contaminant list took away: a report, never a gate
+    competition = contaminant_competition.job_lines(report, fasta, out)
+    search_job = "\n".join([dp.clear_stale(*report_files), *measure_lines, search_cmd, guard,
+                            *competition])
+    one_job = "\n".join([dp.clear_stale(*report_files), onecmd, guard, *competition])
 
     # Every refusal is behind us (single_shot_mass_acc's is the last): an earlier search's probe
     # outputs must not describe this one -- set aside, never deleted (dda-review N1, R1). Inline,
@@ -1096,7 +1102,24 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
         sys.exit(msg)
     print(f"  [run_diann] {msg}")
     return {"engine": "diann", "report": report, "ran": True, "dda": bool(dda),
-            "previous_artefacts_moved_to": moved, **ma_rec}
+            "previous_artefacts_moved_to": moved, **ma_rec,
+            "contaminant_competition": competition_inline(report, fasta, out)}
+
+
+def competition_inline(report, fasta, out):
+    """An inline search's contaminant competition check, as the jobs run it
+    (contaminant_competition.job_lines): <out>/contaminant_competition.json, and the record
+    returned for search_provenance.json, which main() writes after the search. Never stops the
+    search: a check that fails is said, and recorded as not run."""
+    import contaminant_competition as cc
+    try:
+        rec = cc.check(report, fasta, cc.resolve_inputs(None, report, fasta)[2])
+        cc.write(rec, os.path.join(out, cc.RECORD))
+    except Exception as e:      # a report, never a gate; AUDIT.md checks the report again
+        rec = {"check": "contaminant_competition", "status": "not_run",
+               "reason": f"the check failed ({type(e).__name__}: {e})"}
+    cc.say(rec)
+    return rec
 
 
 # ------------------------------------------------- quantity declarations -----
@@ -3641,8 +3664,10 @@ def main():
                        # here itself)
                        # cpu_sizing: the chain's CPUs per array task and how many run at once,
                        # and why (array_task_cpus) -- `threads` above is what was ASKED
+                       # contaminant_competition: an inline DIA-NN search's (a job merges
+                       # its own in here)
                        **{k: res[k] for k in ("sage_lfq_check", "sage_adapt", "probe_fallback",
-                                              "cpu_sizing")
+                                              "cpu_sizing", "contaminant_competition")
                           if isinstance(res, dict) and res.get(k)}},
                       fh, indent=2)
     except Exception as e:

@@ -78,6 +78,13 @@ Before 2.13.2 it printed `failed: true, done: true` for a healthy search. With `
 Bash's path conversion is off (`MSYS_NO_PATHCONV=1`), so a `/nfs/...` folder is never
 rewritten into `C:/Program Files/Git/nfs/...` (which read as `no_jobs_file`).
 
+## Warnings that are not failures: proteins the contaminant list took
+
+Every DIA-NN search's last job runs `contaminant_competition.py` (`references/audit.md`). Once
+`<out>/contaminant_competition.json` exists the watcher adds `contaminant_competition`
+(`status`, `competed_out`, `siphoned`, `drop_contaminant`) and, when a gene was taken, its
+message to `warnings`. Not a failure, nothing to resubmit: tell the user which genes.
+
 ## Warnings that are not failures: Sage LFQ
 
 A Sage search can finish cleanly and still have quantities it could not measure. With
