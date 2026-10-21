@@ -445,8 +445,6 @@ FIELD_SPLIT = re.compile(r"\s+-\s*|\s*-\s+")
 # says nothing about which animal a sample came from.
 UNIT = re.compile(r"^(?P<noun>mouse|mice|rat|animal|pig|dog|monkey|fish|patient|donor|subject|"
                   r"individual|participant|plant|tree)\s*#?\s*(?P<n>\d+)$", re.I)
-REPLICATE_FIELD = re.compile(r"^(?:(?:bio(?:logical)?|tech(?:nical)?)\s*)?(?:rep(?:licate)?|r)?\s*#?\s*\d+$",
-                             re.I)
 
 
 def _key(s):
@@ -457,45 +455,47 @@ def _fields(name):
     return [f.strip() for f in FIELD_SPLIT.split(name)]
 
 
-def replicate_base(name, known=()):
+def replicate_base(name, known=(), among=()):
     """The condition without a trailing replicate index ("Old - A - Rep 2" -> "Old - A",
     "Control 3" -> "Control", "ATG5_R2" -> "ATG5"), or None when it has none. The index is
-    marked (collect_conditions.split_replicate): digits glued to letters are part of the name
-    (ATG5, HSP90, CD45, IgG1). A name in `known` (_key'd: the sheet's own conditions) is that
-    condition whatever its ending ("Mutant-1" beside "Mutant-2")."""
+    marked (collect_conditions.split_replicate; `among`: the sheet's names): digits glued to
+    letters are part of the name (ATG5, HSP90, CD45, IgG1). A name in `known` (_key'd: the
+    sheet's own conditions) is that condition whatever its ending ("Mutant-1" beside
+    "Mutant-2")."""
     if _key(name) in known:
         return None
-    f = _fields(name)
-    if len(f) > 1 and REPLICATE_FIELD.match(f[-1]):
-        return " - ".join(f[:-1])
-    m = split_replicate(cs._s(name))
+    m = split_replicate(cs._s(name), among=among)
     return m[0].strip() if m else None
 
 
 def known_conditions(names):
     """The sheet's condition names that are conditions as written: those more than one sample
     carries ("Mutant-1" x3 beside "Mutant-2" x3), unless it is a slip in a numbered series --
-    WT_1, WT_2, WT_2, WT_3: its base is also a name only one sample carries -> {_key(name)}."""
+    carried by exactly two samples, its base shared by at least two names one sample carries
+    each (WT_1, WT_2, WT_2, WT_3) -> {_key(name)}."""
+    names = list(names)
     counts = Counter(_key(c) for c in names)
-    base = {_key(c): _key(replicate_base(c) or c) for c in names}
-    once = {base[k] for k, n in counts.items() if n == 1}
-    return {k for k, n in counts.items() if n > 1 and base[k] not in once}
+    base = {_key(c): _key(replicate_base(c, among=names) or c) for c in names}
+    singles = Counter(base[k] for k, n in counts.items() if n == 1)
+    return {k for k, n in counts.items() if n > 1 and not (n == 2 and singles[base[k]] >= 2)}
 
 
 def sheet_bases(names, known=()):
     """{name: the condition it names} for the sheet's condition names, one per sample: without a
-    marked replicate index (replicate_base). When that leaves every sample its own condition,
-    numbers glued to the names are read as replicate numbers ("WT1".."WT3", "KO1".."KO3") -- only
-    when collect_conditions.replicate_reading's checks pass (>= 2 conditions of >= 2 samples, no
-    replicate number twice, numbers running 1..n), so one-sample conditions named after genes
-    (ATG5, ATG7, CD45, HSP90) keep their names; a name with no number keeps it too ("Pool")."""
-    out = {c: replicate_base(c, known) or c for c in names}
-    if len({_key(b) for b in out.values()}) < len(names):
-        return out
-    reading = replicate_reading(names, glued=True)
-    if not reading["groups"] or any(k != "not_numbered" for k, _why in reading["doubts"]):
-        return out
-    return {c: (reading["parsed"][c] or (c,))[0] for c in names}
+    marked replicate index (replicate_base). When every name is its own sample's, numbers glued
+    to the names are read as replicate numbers too, as 2.13.2 read them ("WT1".."WT3" beside
+    "KO_1".."KO_3"; a gap is a missing replicate) -- except for a condition that
+    collect_conditions.replicate_reading finds with one sample or numbered from neither 0 nor 1:
+    gene names (ATG5 and ATG7 are no "ATG" replicates 5 and 7; CD45 alone) keep their names."""
+    names = list(names)
+    marked = {c: replicate_base(c, known, names) or c for c in names}
+    if len({_key(c) for c in names}) < len(names):
+        return marked
+    reading = replicate_reading(names, glued=True, fold=_key)
+    no = {g for kind, _why, conditions in reading["doubts"] if kind in ("one_sample", "start")
+          for g in conditions}
+    return {c: v[0] if v and _key(v[0]) not in no else marked[c]
+            for c, v in ((c, reading["parsed"][c]) for c in names)}
 
 
 def _ranges(nums):

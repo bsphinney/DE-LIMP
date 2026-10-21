@@ -589,9 +589,11 @@ def intent_from_json(blob):
 # THE one definition of a trailing replicate index (submission_report's sheet check reads
 # condition names with it too). MARKED as one: digits after a separator ("WT_2", "KO-3",
 # "Ctrl 2", "WT – 2", "CtrlA_mix_3"); a replicate word after a separator -- rep / replicate, with
-# bio / tech before it, or R ("WT_rep2", "Ctrl rep 2", "WT_BioRep2", "ATG5_R2"); or # ("WT#2"). A
-# replicate word glued to the name counts only where a new word visibly starts ("WTrep2",
-# "KORep2"), never at the end of a word ("Strep_2", "SamplePrep_2", "Prep2" keep their names).
+# or without bio / tech before it, or R ("WT_rep2", "Ctrl rep 2", "WT_BioRep2", "Old - Bio 2",
+# "ATG5_R2"); or # ("WT#2"). An R is a level, not a replicate, when another label of the set has
+# a different letter there (Brain_L1 beside Brain_R1, Cis_S1 beside Cis_R1). A replicate word
+# glued to the name counts only where a new word visibly starts ("WTrep2", "KORep2"), never at
+# the end of a word ("Strep_2", "SamplePrep_2", "Prep2" keep their names).
 # Digits glued to letters are part of a name -- ATG5, HSP90, CD45, IgG1, CXCR4 -- and so is the
 # number after a dot (Kv2.1): split_replicate(glued=True) reads them as a replicate number, and
 # its callers use that reading only when replicate_reading's checks pass (collapse_replicates,
@@ -599,8 +601,9 @@ def intent_from_json(blob):
 # ATG5 as ATG replicate 5 and HSP90 as HSP replicate 90.
 _SEP = r"[\s_.\-–—]"
 _REP_WORD = r"(?:(?:bio(?:logical)?|tech(?:nical)?)" + _SEP + r"*)?(?:replicate|rep)"
-_REP_MARKED = re.compile(r"^(?P<stem>.+?)(?:" + _SEP + r"+(?:" + _REP_WORD + r"|r)|" + _SEP
-                         + r"*#|[\s_\-–—]+)" + _SEP + r"*#?\s*(?P<n>\d+)$", re.I)
+_REP_MARKED = re.compile(r"^(?P<stem>.+?)(?:" + _SEP + r"+(?P<r>r)|" + _SEP + r"+(?:" + _REP_WORD
+                         + r"|bio(?:logical)?|tech(?:nical)?)|" + _SEP + r"*#|[\s_\-–—]+)"
+                         + _SEP + r"*#?\s*(?P<n>\d+)$", re.I)
 _REP_GLUED_WORD = re.compile(r"^(?P<stem>.+?)(?P<word>" + _REP_WORD + r")\s*#?\s*(?P<n>\d+)$", re.I)
 _REP_GLUED = re.compile(r"^(?P<stem>.*?[A-Za-z])(?P<n>\d+)$|^(?P<dstem>.+?)\.+(?P<dn>\d+)$")
 _SEP_CHARS = " \t_.-–—"
@@ -614,14 +617,24 @@ def _starts_a_word(stem, word):
                                or (word.islower() and caps >= 2))
 
 
-def split_replicate(label, glued=False):
+def _r_is_a_level(stem, among):
+    """True when another of the labels has `stem`, a separator and a letter other than R
+    (Brain_L1 beside Brain_R1): the R is then a level -- right, resistant -- not "replicate"."""
+    other = re.compile(re.escape(stem) + _SEP + r"+(?![rR])[A-Za-z]" + _SEP + r"*\d+$", re.I)
+    return any(other.match(str(x).strip()) for x in among)
+
+
+def split_replicate(label, glued=False, among=()):
     """(condition, replicate number) for a label ending in a marked replicate index:
     'CtrlA_mix_3' -> ('CtrlA_mix', 3), 'WT_rep2' -> ('WT', 2), 'ATG5_R2' -> ('ATG5', 2),
-    'Strep_2' -> ('Strep', 2); 'ATG5' and 'Kv2.1' -> None. glued=True also reads a number glued
-    to a letter or after a dot: 'Control1' -> ('Control', 1). None when the label has no such
-    index, or nothing would be left of it."""
+    'Strep_2' -> ('Strep', 2); 'ATG5' and 'Kv2.1' -> None. `among`: the labels of the set it
+    belongs to (_r_is_a_level). glued=True also reads a number glued to a letter or after a
+    dot: 'Control1' -> ('Control', 1). None when the label has no such index, or nothing would
+    be left of it."""
     s = (label or "").strip()
     m = _REP_MARKED.match(s)
+    if m and m.group("r") and _r_is_a_level(m.group("stem"), among):
+        m = None
     stem, n = (m.group("stem"), m.group("n")) if m else (None, None)
     w = None if m else _REP_GLUED_WORD.match(s)
     if w and _starts_a_word(w.group("stem"), w.group("word")):
@@ -633,55 +646,63 @@ def split_replicate(label, glued=False):
     return (stem, int(n)) if stem else None
 
 
-def replicate_reading(labels, glued=False):
+def replicate_reading(labels, glued=False, fold=None):
     """THE checks that labels, one per sample, read as conditions + replicate numbers (one
     definition: collapse_replicates and submission_report's sheet check) -> {"parsed": {label:
     (condition, n) or None}, "groups": {condition: {n: label}}, "not_numbered": [labels],
-    "doubts": [(kind, why)]}. No doubts when the reading is unambiguous: every label ends in a
-    replicate number (not_numbered), no two claim the same replicate of a condition (duplicate),
-    they make >= 2 conditions (one_condition) of >= 2 samples (one_sample), no two conditions
-    differ only in case or punctuation (case), and each condition's numbers run 1..n or 0..n-1
-    (numbering)."""
-    parsed = {lab: split_replicate(lab, glued=glued) for lab in dict.fromkeys(labels)}
-    groups, dup = defaultdict(dict), []
+    "doubts": [(kind, why, the conditions it concerns)]}. No doubts when the reading is
+    unambiguous: every label ends in a replicate number (not_numbered), no two claim the same
+    replicate of a condition (duplicate), they make >= 2 conditions (one_condition) of >= 2
+    samples (one_sample), no two conditions differ only in case or punctuation (case), and each
+    condition's numbers run 1..n or 0..n-1 (start: from another number -- ATG 5, 7; gap: a
+    number missing). `fold`: what makes two conditions one (the sheet check's _key); exact if
+    None, and the conditions in `groups` and the doubts are folded too."""
+    labels = list(labels)
+    parsed = {lab: split_replicate(lab, glued=glued, among=labels) for lab in dict.fromkeys(labels)}
+    groups, dup, dup_of = defaultdict(dict), [], set()
     for lab, v in sorted(parsed.items()):
         if v is None:
             continue
-        if v[1] in groups[v[0]]:
-            dup.append(f"{groups[v[0]][v[1]]} / {lab} (both {v[0]} replicate {v[1]})")
+        g = fold(v[0]) if fold else v[0]
+        if v[1] in groups[g]:
+            dup.append(f"{groups[g][v[1]]} / {lab} (both {v[0]} replicate {v[1]})")
+            dup_of.add(g)
         else:
-            groups[v[0]][v[1]] = lab
+            groups[g][v[1]] = lab
     unparsed = sorted(lab for lab, v in parsed.items() if v is None)
     doubts = []
     if unparsed:
         doubts.append(("not_numbered", f"{len(unparsed)} label(s) end in no replicate number: "
-                                       + ", ".join(unparsed[:8])))
+                                       + ", ".join(unparsed[:8]), ()))
     if dup:
         doubts.append(("duplicate", "two labels give the same condition and replicate: "
-                                    + "; ".join(dup[:5])))
+                                    + "; ".join(dup[:5]), tuple(sorted(dup_of))))
     if len(groups) < 2:
         doubts.append(("one_condition", f"they make {len(groups)} condition(s) "
                                         f"({', '.join(sorted(groups)) or '-'}): nothing to compare "
                                         "-- the numbers may be the conditions themselves (time "
-                                        "points, doses, sample IDs)"))
+                                        "points, doses, sample IDs)", tuple(sorted(groups))))
     small = sorted(g for g, m in groups.items() if len(m) < 2)
     if small:
         doubts.append(("one_sample", "condition(s) with one sample: " + ", ".join(small)
-                                     + " -- the number may be part of the condition's name"))
+                                     + " -- the number may be part of the condition's name",
+                       tuple(small)))
     variants = defaultdict(list)
     for g in groups:
         variants[norm(g)].append(g)
     clash = [sorted(v) for v in variants.values() if len(v) > 1]
     if clash:
         doubts.append(("case", "conditions that differ only in case or punctuation: "
-                               + "; ".join(" / ".join(v) for v in clash)))
+                               + "; ".join(" / ".join(v) for v in clash),
+                       tuple(g for v in clash for g in v)))
     for g, m in sorted(groups.items()):
         nums = sorted(m)
         if len(nums) > 1 and (nums[0] not in (0, 1)
                               or nums != list(range(nums[0], nums[0] + len(nums)))):
-            doubts.append(("numbering", f"{g}: replicate numbers {', '.join(map(str, nums))} do "
-                                        f"not run {nums[0]}..{nums[0] + len(nums) - 1} -- a "
-                                        "missing replicate, or not replicate numbers"))
+            doubts.append(("start" if nums[0] not in (0, 1) else "gap",
+                           f"{g}: replicate numbers {', '.join(map(str, nums))} do not run "
+                           f"{nums[0]}..{nums[0] + len(nums) - 1} -- a missing replicate, or not "
+                           "replicate numbers", (g,)))
     return {"parsed": parsed, "groups": dict(groups), "not_numbered": unparsed, "doubts": doubts}
 
 
@@ -707,7 +728,7 @@ def collapse_replicates(intent, mode="auto"):
                         if mode == "keep" and per_sample else None)
     reading = replicate_reading(labels, glued=True)
     parsed, groups, unparsed = reading["parsed"], reading["groups"], reading["not_numbered"]
-    reasons = [why for _kind, why in reading["doubts"]]
+    reasons = [why for _kind, why, _conditions in reading["doubts"]]
     # forced (the user confirmed) or unambiguous -- and only if any label has a number at all
     collapse = (mode == "collapse" or not reasons) and bool(groups)
     rec = {"detected": True, "per_sample_labels": per_sample, "mode": mode,

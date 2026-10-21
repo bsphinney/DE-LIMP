@@ -38,6 +38,7 @@ KEEP = ("ATG5", "HSP90", "CD45", "IgG1", "ATG5_IP", "CXCR4", "Kv2.1", "Prep2", "
 STRIP = {"ATG5_2": "ATG5", "ATG5-rep2": "ATG5", "ATG5_R2": "ATG5", "WT_2": "WT", "KO-3": "KO",
          "Ctrl rep 2": "Ctrl", "WT#2": "WT", "WTrep2": "WT", "KORep2": "KO", "WT_replicate_3": "WT",
          "WT_BioRep2": "WT", "WT - Tech Rep 2": "WT", "WT \u2013 2": "WT", "WT \u20132": "WT",
+         "Old - A - Bio 2": "Old - A", "WT - Biological 2": "WT", "WT - Tech 2": "WT",
          "Control 3": "Control", "Old - A - Rep 2": "Old - A", "Old - A - Bio Rep 2": "Old - A",
          # a word that ends in "rep" keeps it
          "Strep_2": "Strep", "SamplePrep_2": "SamplePrep", "NoPrep-1": "NoPrep",
@@ -59,13 +60,25 @@ class OneMarkedIndex(unittest.TestCase):
         self.assertEqual(cc.split_replicate("Control1", glued=True), ("Control", 1))
         self.assertEqual(cc.split_replicate("CtrlA_mix_3", glued=True), ("CtrlA_mix", 3))
 
+    def test_an_r_beside_another_letter_is_a_level(self):
+        """Brain_L / Brain_R, Cis_R / Cis_S: left and right, resistant and sensitive."""
+        for a, b in (("Brain_L", "Brain_R"), ("Cis_R", "Cis_S")):
+            labels = [f"{g}{n}" for g in (a, b) for n in (1, 2, 3)]
+            rec = cc.collapse_replicates([{"sample": f"S{i}", "group": g, "extras": {}}
+                                          for i, g in enumerate(labels)])[1]
+            self.assertEqual(sorted(rec["conditions"]), [a, b])
+            self.assertEqual(set(sr.sheet_groups(record(labels)).values()), {a, b})
+        self.assertEqual(cc.split_replicate("ATG5_R2", among=["ATG5_R1", "ATG7_R1"]), ("ATG5", 2))
+
     def test_the_known_condition_list_decides(self):
         self.assertEqual(sr.replicate_base("Mutant-1"), "Mutant")
         self.assertIsNone(sr.replicate_base("Mutant-1", {"mutant-1", "mutant-2"}))
         self.assertEqual(sr.replicate_base("Mutant-1_2", {"mutant-1"}), "Mutant-1")
         self.assertEqual(sr.known_conditions(["Mutant-1", "Mutant-1", "WT_1", "WT_2"]), {"mutant-1"})
-        # a slip in a numbered series is not a condition of its own
+        # a slip in a numbered series is not a condition of its own; a third level is no slip
         self.assertEqual(sr.known_conditions(["WT_1", "WT_2", "WT_2", "WT_3"]), set())
+        self.assertEqual(sr.known_conditions(["Mutant-1"] * 3 + ["Mutant-2"] * 3 + ["Mutant-3"]),
+                         {"mutant-1", "mutant-2"})
 
 
 def record(names):
@@ -100,6 +113,21 @@ class TheSheetsGroups(unittest.TestCase):
             rec = record(names)
             self.assertEqual(set(sr.sheet_groups(rec).values()), groups, names)
             self.assertNotIn("sheet_conditions_unique", notes_by_id(rec), names)
+        # mixed formats, and case the sheet check ignores anyway
+        for names in ([f"WT{n}" for n in (1, 2, 3)] + [f"KO_{n}" for n in (1, 2, 3)],
+                      ["wt1", "wt2", "WT3", "KO1", "KO2", "KO3"]):
+            rec = record(names)
+            self.assertEqual({sr._key(g) for g in sr.sheet_groups(rec).values()}, {"wt", "ko"})
+            self.assertNotIn("sheet_conditions_unique", notes_by_id(rec), names)
+        # as 2.13.2 read them: a gap is a missing replicate; gene names beside a series keep theirs
+        for names, groups in (
+                (["WT1", "WT2", "WT3", "KO1", "KO2", "KO4"], {"wt", "ko"}),
+                (["HSP70", "HSP90", "WT1", "WT2"], {"hsp70", "hsp90", "wt"})):
+            self.assertEqual({sr._key(g) for g in sr.sheet_groups(record(names)).values()}, groups)
+        # numbered conditions the sheet repeats are not merged, with a third level beside them
+        groups = set(sr.sheet_groups(record(["Mutant-1"] * 3 + ["Mutant-2"] * 3 + ["Mutant-3"]))
+                     .values())
+        self.assertTrue({"Mutant-1", "Mutant-2"} <= groups, groups)
         # a numbered series is not a set of replicates: Day1..Day4 stay four conditions
         rec = record(["Day1", "Day2", "Day3", "Day4"])
         self.assertIn("sheet_conditions_unique", notes_by_id(rec))
@@ -112,7 +140,7 @@ class TheSheetsGroups(unittest.TestCase):
 class NoFalseConditionsDiffer(unittest.TestCase):
     """End to end: the analysed groups match the sheet, so no "conditions differ" note."""
 
-    def session(self, tmp, names):
+    def session(self, tmp, names, group=lambda c: c.replace("-", "_")):
         s = os.path.join(tmp, "2026-10-20_conditions")
         os.makedirs(os.path.join(s, "input"))
         os.makedirs(os.path.join(s, "output"))
@@ -125,7 +153,7 @@ class NoFalseConditionsDiffer(unittest.TestCase):
             w = csv.writer(fh)
             w.writerow(["File.Name", "Group"])
             for smp in rec["samples"]:
-                w.writerow([runs[smp["unique_id"]], smp["condition_name"].replace("-", "_")])
+                w.writerow([runs[smp["unique_id"]], group(smp["condition_name"])])
         with open(os.path.join(s, "input", "locate_decisions.json"), "w") as fh:
             json.dump({"assignments": [{"sample": u, "file": f"{r}.d"} for u, r in runs.items()]},
                       fh)
@@ -136,6 +164,14 @@ class NoFalseConditionsDiffer(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             s = self.session(tmp, ["ATG5"] * 3 + ["ATG7"] * 3 + ["WT"] * 3)
             self.assertNotIn("conditions_differ", notes_by_id(sr.load(s), s))
+
+    def test_mixed_formats_and_left_right_levels(self):
+        for names in ([f"WT{n}" for n in (1, 2, 3)] + [f"KO_{n}" for n in (1, 2, 3)],
+                      [f"Brain_{s}{n}" for s in "LR" for n in (1, 2, 3)]):
+            with tempfile.TemporaryDirectory() as tmp:
+                s = self.session(tmp, names, group=lambda c: cc.split_replicate(
+                    c, glued=True, among=names)[0])
+                self.assertNotIn("conditions_differ", notes_by_id(sr.load(s), s), names)
 
     def test_numbered_conditions_the_sheet_repeats(self):
         with tempfile.TemporaryDirectory() as tmp:

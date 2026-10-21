@@ -102,7 +102,7 @@ The orchestrator asks where results should live (SKILL.md step 3b):
   instrument, engine + version), which file is authoritative for what, the columns of `DE_*.csv`
   / `Expression_Matrix.csv` / `Detection_Matrix.csv` / `QC_detected_vs_inferred.csv`, the traps (significance as
   `de_provenance.json` records it, inferred vs measured values, contaminants, pull-down controls
-  by group name), the AUDIT / SAMPLE_QUALITY notes, how to reproduce, and what not to do. The
+  as recorded or by group name -- a guess said to be one), the AUDIT / SAMPLE_QUALITY notes, how to reproduce, and what not to do. The
   pipeline is described in `de_provenance.json`'s own words -- never a description written here.
 - **"Where this lives on HIVE"** (both): the session folder, the session the analysis ran in when
   this is a copy, the raw data folder(s) + file count, the search output, the FASTA the search

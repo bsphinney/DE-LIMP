@@ -2350,7 +2350,7 @@ data agree with the type's default — use it. **Exit 3 (TRIPPED, no experiment 
 recorded, or CONTROLS NOT CONFIRMED): STOP before the final DE.** With no type recorded nothing
 is decided for the user: ask what the experiment is (step 3) and which quantities to use. With
 the controls only read from names such as Ctrl or KO, confirm them and record them
-(`experiment_type.py set --controls`), then run the check again. Show the Core staff member
+(`experiment_type.py set --controls`), then run the check again (`decide` refuses this one). Show the Core staff member
 `NORMALIZATION_CHECK.md` (side by side, normalised vs non-normalised, with a recommendation),
 ask which to use, and record their answer. **The decision is the person's, never Claude's.**
 Never choose, and never fill in `--by` yourself. `--by` is their HIVE login, never a full name.

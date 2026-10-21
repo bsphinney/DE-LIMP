@@ -71,7 +71,7 @@ QC_COLUMNS = {
     "Total": "proteins in the matrix", "PctDetected": "Detected / Total, %",
     "PctInferred": "Inferred / Total, %",
 }
-# The control groups (experiment_type.controls_in): only ever used to POINT at contrasts
+# The control groups (experiment_type.pulldown_design): only ever used to POINT at contrasts
 # against them; the user's design says what they are.
 import experiment_type  # noqa: E402
 
@@ -391,15 +391,16 @@ def gather(session_dir, registry=None, registry_note=None, pending=(), located_a
     f["n_samples"] = de.get("n_samples") or (len(conds) if conds else None)
     f["contrasts"] = de.get("contrasts") or []
     f["sig"] = _sig_counts(de)
-    # the control groups as the analysis decides them (experiment_type.controls_in: the
-    # recorded --controls, else the control names) -- the brief's own rule
+    # the control groups as the analysis decides them (experiment_type.pulldown_design: the
+    # recorded --controls, else the control names, and which of the two) -- the brief's own rule
     try:
         etype = experiment_type.load(session_dir)
     except (OSError, ValueError) as e:
         etype = None
         print(f"[session_docs] the experiment-type record could not be read ({e}): control "
               "groups taken from their names", file=sys.stderr)
-    f["controls"] = sorted(experiment_type.controls_in(list(groups), etype))
+    pulldown = experiment_type.pulldown_design(etype, list(groups), f["contrasts"])
+    f["controls"], f["controls_from"] = sorted(pulldown["controls"]), pulldown["controls_from"]
 
     # --- files that exist (links are only ever to these)
     out = p["output_dir"]
@@ -909,13 +910,16 @@ def agents_md(f, for_delivery=False):
         vs = [c for c in f["contrasts"] if any(re.search(rf"(^|-){re.escape(g)}$", c)
                                                for g in f["controls"])]
         if vs:
-            L.append(f"- **Pull-down controls, by group name: {', '.join(f['controls'])}.** "
+            said = experiment_type.CONTROLS_FROM.get(f.get("controls_from"), "by group name")
+            L.append(f"- **Pull-down controls, {said}: {', '.join(f['controls'])}.** "
                      f"{len(vs)} contrast(s) compare against them ({', '.join(vs[:4])}"
                      f"{', …' if len(vs) > 4 else ''}): a positive logFC there is enrichment "
                      "over that control, not a change in abundance. A protein never observed in "
                      "the control gets its control values from the missing-value policy above, "
-                     "so its logFC rests on that policy, not on a measured baseline. (Check "
-                     "conditions.csv: the name is the only evidence these are controls.)")
+                     "so its logFC rests on that policy, not on a measured baseline."
+                     + ("" if f.get("controls_from") == "recorded" else
+                        " (Check conditions.csv: the name is the only evidence these are "
+                        "controls.)"))
     if f.get("sets_files") and (f.get("sets") or {}).get("reading"):
         L.append("- **Protein-set tests** (`Sets_*.csv`): read them by run_sets.R's rules "
                  "(`sets_provenance.json` `reading`):")

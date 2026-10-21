@@ -585,17 +585,14 @@ def main():
     w("")
     if pulldown:
         w("## Pull-down design — enrichment over a control")
-        # where the controls came from (experiment_type.pulldown_design): a name that can also
-        # name an ordinary condition is a guess, said so (rule 2)
-        src = {"recorded": "as recorded (`experiment_type.py set --controls`)",
-               "enrichment_name": "read from their names — NOT confirmed; raise it with the "
-                                  "user before reading these contrasts as enrichment"
-               }.get(design.get("controls_from"), "by name")
-        w(f"Control group(s), {src}: {', '.join(controls)}. Contrasts against them "
-          f"({', '.join(contrast_label(c) for c in vs_control)}) measure **enrichment over the "
-          "control**, not abundance change.")
-        w("- Do NOT write a blanket sentence such as \"the IgG value is a model-inferred floor\". "
-          "Name the proteins that were never measured in the control, per contrast:")
+        if vs_control:
+            # where the controls came from, a guess said to be one (etm.CONTROLS_FROM, rule 2)
+            said = etm.CONTROLS_FROM.get(design.get("controls_from"), "by group name")
+            w(f"Control group(s), {said}: {', '.join(controls)}. Contrasts against them "
+              f"({', '.join(contrast_label(c) for c in vs_control)}) measure **enrichment over "
+              "the control**, not abundance change.")
+            w("- Do NOT write a blanket sentence such as \"the IgG value is a model-inferred "
+              "floor\". Name the proteins that were never measured in the control, per contrast:")
         for c in vs_control:
             ctrl = c.split("-", 1)[1]
             f = next((x for x in de_files if x.endswith(f"_{_make_names(c)}.csv")), None)

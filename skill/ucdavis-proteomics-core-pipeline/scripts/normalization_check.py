@@ -974,19 +974,21 @@ def run(report, conditions, de_norm, de_raw, session=None, bait=None, out=None, 
     # is decided for them -- the check asks, whatever the data say. Nor when the control groups
     # are only read from names that can also name an ordinary condition (Ctrl, KO, Mock ...):
     # which contrasts are enrichments, and so which volcano anomalies are expected, is a guess.
-    guessed = design.get("controls_from") == "enrichment_name" and bool(design.get("vs_control"))
-    rec["needs_decision"] = rec["tripped"] or rec_type is None or guessed
+    # That one is answered by recording the controls and running the check again, never by
+    # `decide` (controls_unconfirmed): a decision would be reported as the type's default.
+    rec["controls_unconfirmed"] = (design.get("controls_from") == "enrichment_name"
+                                   and bool(design.get("vs_control")))
+    rec["needs_decision"] = rec["tripped"] or rec_type is None or rec["controls_unconfirmed"]
     if rec_type is None:
         rec["needs_decision_why"] = ("no experiment type is recorded for this session, so there is "
                                      "no default to apply: ask the user what kind of experiment "
                                      "this is (experiment_type.py set) and which quantities to use")
-    elif guessed:
+    elif rec["controls_unconfirmed"]:
         rec["needs_decision_why"] = (f"the control group(s) {', '.join(design['controls'])} were "
                                      "read from their names only, and those names can also name an "
-                                     "ordinary condition: confirm them with the user (record them "
-                                     "with experiment_type.py set --controls and run this check "
-                                     "again), and which quantities to use")
-    if design.get("note"):
+                                     "ordinary condition: confirm them with the user, record them "
+                                     "(experiment_type.py set --controls) and run this check again")
+    if design.get("note") and not rec["controls_unconfirmed"]:   # else said by needs_decision_why
         rec["design_note"] = design["note"]
     rec["decision"] = None if rec["needs_decision"] else {
         "quantities": default["quantities"], "source": "default",
@@ -1224,6 +1226,10 @@ def decide(path, quantities, by, reason):
     if not (reason and reason.strip()):
         raise ValueError("--reason is required: why they chose it, in their words")
     rec = load(path)
+    if rec.get("controls_unconfirmed") and not rec.get("tripped"):
+        raise ValueError(f"nothing to decide yet: {rec.get('needs_decision_why')}. A decision "
+                         "here would be reported as the type's default with the data check "
+                         "agreeing, and the guess about the controls would stand")
     c = staff.require(by)
     at = staff.now()
     where, named = decision_staff_record(path, rec)

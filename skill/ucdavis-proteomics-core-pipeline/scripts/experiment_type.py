@@ -74,6 +74,12 @@ ENRICHMENT_CONTROL_NAME = re.compile(_CONTROL_TOKEN.format(
 GENERIC_CONTROL_NAME = re.compile(_CONTROL_TOKEN.format(r"ctrls?|controls?"))
 CONTROL_NAME_TIERS = ((IP_CONTROL_NAME, "name"), (ENRICHMENT_CONTROL_NAME, "enrichment_name"),
                       (GENERIC_CONTROL_NAME, "enrichment_name"))
+# How the brief and the session README say where the controls came from (pulldown_design's
+# controls_from): a guess is said to be one (rule 2).
+CONTROLS_FROM = {"recorded": "as recorded (`experiment_type.py set --controls`)",
+                 "name": "by group name",
+                 "enrichment_name": "read from their names — NOT confirmed; raise it with the "
+                                    "user before reading these contrasts as enrichment"}
 
 RAW, NORMALISED = "raw", "normalised"
 # type -> (label, default quantities, why). The defaults are Brett's (Core director, 2026-10-01):
@@ -486,6 +492,10 @@ def pulldown_design(rec, groups, contrasts):
                 + " the control group(s), but no contrast has one as its reference (e.g. "
                 f"<bait>-{controls[0]}): check the contrasts' direction, or record the right "
                 "control groups (experiment_type.py set --controls ...)")
+    elif enr and not vs_control and how == "recorded":
+        note = (f"the experiment type is {rec['label']}, but the recorded control groups "
+                f"({', '.join(rec['controls'])}) are none of this design's groups: record the "
+                "right ones (experiment_type.py set --controls ...)")
     elif enr and not vs_control:
         note = (f"the experiment type is {rec['label']}, but no contrast is against a control "
                 "group (none is named like one -- IgG, beads, isotype, parental, untagged, mock, "
