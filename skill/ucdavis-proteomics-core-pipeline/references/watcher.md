@@ -8,6 +8,25 @@ authorization for this — see golden rule #1's compute confirmation is for *sta
 the search, not for recovering a run that's already approved and in flight). Surface
 what you did afterwards; don't ask permission to unstick a job.
 
+<!-- contents: tests/test_skill_structure.py --toc -->
+**Contents** (section: line)
+- 30: Watch the WHOLE chain, not its last job
+- 49: Two failure modes it catches
+- 58: Loop pattern
+- 72: Error classes → fixes (what `watch_run.sh` detects)
+- 100: Warnings that are not failures: Sage LFQ
+- 117: Warnings that are not failures: protein inference in step 5
+- 132: SLURM specifics (HIVE)
+- 141: Node faults: the node check every chain job runs first
+- 155: Keeping a search off nodes known to be bad (`--exclude`)
+- 180: Auto-recovery playbook (apply autonomously; log every action to `commands.log`)
+- 203: Don't
+- 220: Progress reporting (`--out`, `--poll`)
+- 255: 0c. Is this a resume? (step 0c)
+- 291: A closed laptop: `RECOVERY.md` (step 0c)
+- 300: 7b. The watch loop as SKILL.md runs it (step 7b)
+<!-- /contents -->
+
 ## Watch the WHOLE chain, not its last job
 
 For any multi-step chain (`diann_parallel.py`, `radiant_parallel.py`), watch with:
@@ -232,3 +251,143 @@ it, do not add it.
 (the job and log the watcher follows for that stage). `check_report_runs.py --files-list <file>` gives the input paths
 one per line; `pipeline_notes.py --index <n>` rotates the progress notes (`--no-fact` leaves out
 the proteomics fact).
+
+## 0c. Is this a resume? (step 0c)
+
+A cluster search runs for hours and the user **will** close their laptop. The SLURM
+jobs survive that; the conversation does not. So before doing any work, check whether
+an earlier session already submitted something (step 0's version check,
+`skill_version.sh --check-update` and in `hive_remote` `--check-hive`, runs on a resume too,
+first; then its notes check, with `--session <dir>` once the session is found):
+
+```
+python3 scripts/checkpoint.py find --base <the project folder>   # never ~ or a whole share; HIVE: in the background
+python3 scripts/checkpoint.py status --session <session dir> --resume   # live sacct re-query
+```
+
+`status` returns each stage's real state, whether the expected output file exists, and
+`next_commands` — the exact commands still outstanding.
+
+**A run found here is a resume only when it is unfinished work the user is coming back to**
+("pick up where we left off", "is my search done?"). A new request (new settings, or "analyse
+these files") is fresh even when an unfinished run exists: mention it in one line, and still
+never resubmit one that is RUNNING without asking. A finished earlier analysis is never a resume
+(step 1b); nothing is reused from either unless the user asks. For a resume:
+
+- **Still RUNNING** → say so, give the job ids, and offer to wait (`watch_run.sh`) rather
+  than resubmitting. **Never resubmit a search that is already running** — it wastes hours
+  of cluster time and the user's budget.
+- **COMPLETED and the output exists** → skip the search entirely and continue from
+  `next_commands` (usually DE onward).
+- **FAILED or stalled** → apply the `watch_run.sh` playbook (step 7b) and resubmit only the
+  incomplete steps; finished `.quant` files and the predicted library are reused.
+
+**Core staff: a resume asks no submission question.** `status` prints the session's
+`analysis_for` (the submissions or the internal work's board title, from `session.py init`);
+`bash scripts/board.sh threads` (no usable local Python: `bash scripts/hive_exec.sh 'bash
+~/proteomics-pipeline/scripts/board.sh threads'`) gives its thread for the next milestone's
+record (`references/board.md` section 3).
+
+## A closed laptop: `RECOVERY.md` (step 0c)
+
+`submit.sh` writes `RECOVERY.md` + `.recovery.json` into the session directory
+automatically (a search whose `--out` is not inside a session gets them beside `--out`, and
+`submit.sh` says where; `node_fault.py retry` updates them in the same place), so this works
+even if the previous session ended mid-sentence. Tell the
+user, in plain words, that they can close their terminal and that the jobs will keep
+going — they do not need `tmux` or `screen` for this.
+
+## 7b. The watch loop as SKILL.md runs it (step 7b)
+
+**The moment a search starts, watch it — never leave a multi-hour search
+unmonitored.** Poll with `watch_run.sh` in a loop until it finishes:
+
+```
+# local: python3 scripts/run_search.py ... run_in_background, then loop:
+bash scripts/watch_run.sh --log <search log> --out <search out dir> --poll <n>
+# SLURM on HIVE:
+bash scripts/watch_run.sh --slurm <jobid> --log <job log> --out <out> --poll <n> --hive
+# multi-step chains (diann_parallel / radiant_parallel): watch EVERY step, never just the last
+bash scripts/watch_run.sh --all <search out dir> --hive
+```
+
+With `--hive` and no usable `python3` on this computer (Windows' Store stub), the watcher
+runs the poll on HIVE and prints HIVE's answer. `watcher_query_failed` and
+`watcher_no_python` are never a job failure: never resubmit on them; fix the connection and
+poll again (this file).
+
+**Always pass `--out` and increment `--poll` each time.** `--out` is what turns "still
+running" into real progress: the chain drops a `.quant` per finished file, so the watcher
+reports the actual step and file count rather than guessing. `--poll` rotates the note.
+
+**Report progress to the user on every poll — a search is hours long and silence reads as
+a hang.** Give them one short line from `progress.summary` plus `doing`, and pass along
+`note` (with `note_source`) so there's something to read while waiting. For example:
+
+> Step 2 of 5 — searching each file against the predicted library. 34 of 66 files done
+> (52%). *While you wait: decoy sequences exist to be wrong on purpose. How often a search
+> prefers a decoy is what calibrates the false discovery rate. (Elias & Gygi 2007)*
+
+Keep it to a couple of lines; don't dump the JSON. Never present the note as a finding
+about **their** data — it is general background, and it must not be mistaken for a result.
+It returns `{state, done, failed, stalled, error_class, fix}`. While `done` is false,
+keep polling: about every minute for a local run; **on SLURM every 5 minutes or more**, or a
+scheduled wake-up (each `--hive` poll is several logins and `sacct` calls on HIVE's shared login
+node, and a stall is only called after 15 minutes anyway).
+Pass `--log` so it can also catch **stalls** — a job stuck in `RUNNING` with its log
+frozen (a hung file; `sacct` will show RUNNING forever). **If `failed` OR `stalled` is
+true, apply the `fix` and resubmit AUTONOMOUSLY — do not wait for the user.** Starting
+the search needed confirmation (golden rule #1); recovering a run that's already in
+flight does not. Common auto-fixes (→ the playbook above):
+
+- **stalled/hung file:** `scancel` that task, retry once on a fresh node; if it stalls
+  again, **drop that one file** and continue (step 4 of the parallel chain auto-skips a
+  file with no `.quant`); note the dropped file in **Data Quality Notes**.
+- **failed step in the 5-step chain:** resubmit from the earliest incomplete step,
+  **reusing completed `.quant` and `step1.predicted.speclib`** — never restart the whole
+  cohort; broken `afterok` after a killed task → resubmit steps 3→4→5 fresh.
+- **`node_fault`** (a node could not reach the storage: exit 75 from the job's node check,
+  `NODE_FAIL`, or `Transport endpoint is not connected` / `Stale file handle` in a failed
+  job): tell the user it is a **node problem, not DIA-NN and not their data**, and run
+  `node_fault.py retry --out <out> --job <id>` on HIVE — it resubmits that step and the steps
+  waiting on it with `--exclude=<node>`, at most twice per step.
+- **Nodes already known to be bad** (the user says so, the HIVE status page, an earlier
+  failure): generate the search with `run_search.py ... --exclude <node[,node...]>` (ranges
+  like `hive-dc-7-4-[50-54]` work). Every job script then carries `#SBATCH --exclude`, so no
+  job can land there, and `search_provenance.json` records it. Do not `export SBATCH_EXCLUDE`:
+  sbatch ignores it. A later `node_fault.py retry` keeps these nodes excluded as well
+- OOM → raise `--mem`; timeout → raise `--time`; missing temp dir → `mkdir -p` first.
+- **A failed search is recorded in the Core run registry. When the chain dies before its last
+  job, record it yourself.** A job that SLURM kills (OOM, TIMEOUT, node failure, `scancel`)
+  never runs its own job-end hook. The jobs queued after it never start at all. So whenever the
+  watcher reports `failed`, run this on HIVE, then fix and resubmit. Recording again is safe:
+  it updates the same record.
+  `python3 scripts/record_run.py search-done --out <search out dir> --status failed
+  [--exit-code <N>] [--step <failed step's job name>]`.
+  → `references/run-registry.md`
+
+**Every search — single-shot or parallel array — must run under this watch loop.** Stop
+and tell the user only after 2 failed auto-fixes of the same class (dropping 1 pathological
+file out of many is success, not a failure). Report what you recovered. Only proceed to DE
+once `COMPLETED` and `report.parquet` exists.
+
+**5-step chain: check what the final pass kept before DE.** Step 5 compares its report with the
+chain's first pass (step 3's `step3_assembly.parquet`) run by run, prints the table in its log,
+and writes it to `<out>/pass_comparison.json` and `search_provenance.json` (`pass_comparison`).
+A run whose final pass kept less than half its first-pass precursors is flagged with a
+`WARNING`. DIA-NN's README says to compare the two and use the first pass when it performs
+better. **Those counts are before protein-group FDR; compare the post-filter rows before
+switching.** The table's "rows after q" columns count each report's rows that pass
+`run_de.R`'s q-value filter (the same definition, from `diann_q_columns.py`; they need pyarrow,
+and read "n/a" without it). On SET28 (hair DDA) 4 of 6 runs fell by more than half (126 -> 0,
+165 -> 1). At 1% on every q-column those four had 0 rows in BOTH reports; with `run_de.R`'s own
+filter, which holds PG.Q.Value at 5%, the first pass kept 109–160 rows for them against 0–9 --
+protein groups with a run-specific q between 1% and 5%, all of the gain. Tell the user where a
+gain comes from. **Show the table, and offer the first-pass report only for the runs
+`switch_recommended_for` names** -- those with more post-filter rows in the first pass:
+`run_de.R --input <out>/step3_assembly.parquet …`. That report is each run searched
+once against the predicted library, with no match-between-runs, and it has no DDA MS1 q columns.
+If they take it, `make_methods.py` says so in the Methods, from `de_provenance.json`'s `input`
+(never write that by hand), and `audit_results.py` reports the comparison in AUDIT.md either way.
+
+Core staff: board.md §3 row "search finished", once its last job has ended.
