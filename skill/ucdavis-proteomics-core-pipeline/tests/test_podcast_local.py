@@ -1486,12 +1486,12 @@ class Sizing(unittest.TestCase):
         # every model missing the test twice; discover() gives each pro model, one flash 3
         # model and the fallback model: four in this suite's list of Google's (two pro). This
         # is a bound on the budgets, not on a real run (the steps take minutes, not their
-        # limits): 178 of 180 min, so up to five models fit
+        # limits): 178 of 240 min, an hour to spare
         models = max(len(mp.KNOWN_TTS_MODELS), 4)
         preflight = (2 * models * mp.PREFLIGHT_TIMEOUT + mp.PREFLIGHT_RETRY_WAIT) / 60
         need = (preflight + mp.RATE_WAIT_BUDGET_MIN + mp.REQUEST_TIMEOUT_BUDGET_MIN
                 + sum(m + 15 for _, _, m in pl.STEPS.values()))
-        self.assertLessEqual(need, mp.JOB_HOURS * 60)
+        self.assertLessEqual(need + 60, mp.JOB_HOURS * 60, "an hour to spare")
         self.assertEqual((mp.JOB_CPUS, mp.JOB_MEM), (1, "2G"), "never Kokoro's CPUs just in case")
 
     def test_the_jobs_resources(self):
@@ -1720,7 +1720,7 @@ class Job(unittest.TestCase):
         got = json.loads(out)
         self.assertEqual(got["consent"], "not needed: the local voice sends nothing")
         self.assertIsNone(got["key"])
-        self.assertEqual(got["resources"], {"cpus": 16, "mem": "24G", "hours": 3})
+        self.assertEqual(got["resources"], {"cpus": 16, "mem": "24G", "hours": 4})
         text = read(got["job"])
         self.assertIn(f"render {t.script} --tts local || exit $?", text)
         self.assertNotIn("--core-run", text)

@@ -205,10 +205,11 @@ GENAI_MIN = "2.25.0"
 # (podcast_local.JOB_CPUS, JOB_MEM). HIVE's ffmpeg (verified 2026-10-15, AAC encoder present) and
 # apptainer are modules, so the job is a login shell (#!/bin/bash -l) that sources modules.sh
 # first (HPC@UCD's ucd-hpc rule).
-# 3 hours: Gemini's own waits (rate limits, timeouts) can take an hour, and a fallback then waits
-# in the queue for each of its two steps (up to 45 and 60 min with the queue); the time limit holds
-# nothing while the job does not run
-JOB_HOURS, JOB_CPUS, JOB_MEM = 3, 1, "2G"
+# 4 hours: Gemini's own waits (the two-line test twice, 5 min apart; rate limits; timeouts) can
+# take well over an hour, and a fallback then waits in the queue for each of its two steps (up to
+# 45 and 60 min with the queue): every budget at its limit is about 3 hours, so 3 left too thin a
+# margin (2026-10-21). The time limit holds nothing while the job does not run
+JOB_HOURS, JOB_CPUS, JOB_MEM = 4, 1, "2G"
 HIVE_FFMPEG_MODULE = "ffmpeg/7.0.2"
 
 RATE = 24000                                        # Hz, 16-bit mono throughout

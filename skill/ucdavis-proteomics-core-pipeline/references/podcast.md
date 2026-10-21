@@ -588,9 +588,10 @@ bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.t
   session folders are group-writable with no sticky bit, so a script there could be swapped for
   another member's before `sbatch` reads it, and the job would run as you. The script is written
   without following a link, and a link where it goes is refused. The job asks for 1 CPU, 2 GB
-  and 3 hours: it is network calls. If the local voice takes over, each of its steps asks for an
+  and 4 hours: it is network calls. If the local voice takes over, each of its steps asks for an
   allocation of its own only then ("The local voice", "Where it runs"), so the job never holds
-  Kokoro's CPUs just in case; the third hour is room to wait for those in the queue. It runs on
+  Kokoro's CPUs just in case; the time is room for Gemini's own waits (every budget at its
+  limit is about 3 hours) and to wait for those in the queue. It runs on
   the queue
   `run_search.slurm_queue` picks for this account (as every job the skill writes; `--requeue`
   on a preemptible one, with `--open-mode=append` so a requeued job adds to its log). Its

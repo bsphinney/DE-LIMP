@@ -528,7 +528,7 @@ class Job(CoreKeyFile, T.Workspace):
         # for their own allocations then (podcast_local.Srun), never this job's
         for want in ("#SBATCH --open-mode=append",              # a requeued job keeps its log
                      "#SBATCH --ntasks=1", "#SBATCH --cpus-per-task=1", "#SBATCH --mem=2G",
-                     "#SBATCH --time=3:00:00",      # room to wait for a fallback's allocations
+                     "#SBATCH --time=4:00:00",      # room to wait for a fallback's allocations
                      "#SBATCH --partition=high", "#SBATCH --account=genome-center-grp",
                      "#SBATCH --qos=genome-center-grp-high-qos",
                      f'#SBATCH --output="{self.log_path}"', "module load ffmpeg/7.0.2",
