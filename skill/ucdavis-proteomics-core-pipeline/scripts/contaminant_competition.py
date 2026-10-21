@@ -105,7 +105,7 @@ REPORT_COLUMNS = ("Run", "Precursor.Id", "Protein.Ids", "Stripped.Sequence")
 ADAPTED_META = b"delimp.quantity."
 LIST_MAX = 12
 # The most a search job spends on this check (seconds): 710k rows take 4 s on HIVE. Inside a
-# SLURM job it also stops two minutes before the job's own time limit (job_budget): a search job
+# SLURM job it also stops before the time the job still needs for its end (job_budget): a job
 # that ran out of time over this report would read as a failed search, and its fix -- more time,
 # resubmit -- would redo a search that was complete (review of 2.14). Stopped, it records why,
 # and the audit checks the report itself.
@@ -426,9 +426,9 @@ def check(report, fasta=None, meta=None, q_cutoff=DEFAULT_Q_CUTOFF, q_columns=No
     from the search's records (keratin_exemption). `meta_path`: the sidecar's path.
     `keratin_sample`: whether this search is a keratin sample, when the caller knows it (an inline
     search, whose search_provenance.json is written after this check)."""
-    rec = {"check": "contaminant_competition", "report": report, "fasta": fasta,
-           "report_stat": report_stat(report)}
+    rec = {"check": "contaminant_competition", "report": report, "fasta": fasta}
     try:
+        rec["report_stat"] = report_stat(report)
         return _check(rec, report, fasta, meta, q_cutoff, q_columns, no_fasta_reason, exempt,
                       meta_path, keratin_sample)
     except OutOfTime as e:
@@ -695,7 +695,9 @@ def classify(ev, kept_rows, accs, cont_seq, on_target):
     # what --drop-contaminant takes for a re-search: the entries behind the lost genes -- never a
     # digestion enzyme in use, which fetch_fasta.py keeps on purpose
     behind = sorted({c for x in competed + siphoned for c in x["contaminants"]})
-    share = {run: round(100 * c / t, 2) for run, (t, c) in sorted(ev["runs"].items()) if t > 0}
+    # max(): after an exemption is taken off, float residue must not read as -0%
+    share = {run: max(0.0, round(100 * c / t, 2)) for run, (t, c) in sorted(ev["runs"].items())
+             if t > 0}
     pcts = list(share.values())
     return {"n_runs": len(ev["runs"]),
             "contaminant_share_pct": {"per_run": share,
@@ -935,9 +937,9 @@ def plain_masked(rec, de=None):
     if fate(rec, de)[1]:
         return (head + ": those shared peptides are left out of the measurements, so these "
                 "proteins are measured from their remaining peptides only, and one with none "
-                "left is not in the results. No other protein lost its peptides to the "
-                "contaminant list.")
-    return head + ". No other protein lost its peptides to the contaminant list."
+                "left is not in the results. No other protein lost all or most of its signal to "
+                "the contaminant list.")
+    return head + ". No other protein lost all or most of its signal to the contaminant list."
 
 
 def say(rec, stream=None):
@@ -1015,7 +1017,10 @@ def job_budget(limit):
     except Exception as e:           # noqa: BLE001 -- the job's time is then not known: said
         return limit, f"the check's own limit of {limit} s (the job's time left: {e})"
     left = _slurm_seconds(got.splitlines()[0] if got else "")
-    if left is None or left - margin >= limit:
+    if left is None:
+        return limit, (f"the check's own limit of {limit} s (squeue gave no time left for job "
+                       f"{jid}: {got or 'nothing'})")
+    if left - margin >= limit:
         return limit, f"the check's own limit of {limit} s"
     return left - margin, f"{left} s were left in job {jid}, {margin} s of them for its end"
 
@@ -1082,9 +1087,9 @@ def main(argv=None):
     ap.add_argument("--out", help="write the record here (JSON)")
     ap.add_argument("--provenance", help="search_provenance.json to record it in")
     ap.add_argument("--job-budget", type=int,
-                    help="inside a search job: stop after this many seconds, or two minutes "
-                         "before the job's own time limit, whichever comes first; the record "
-                         "then says the check did not run, and why")
+                    help="inside a search job: stop after this many seconds, or before the time "
+                         "the job still needs for its end (job_margin), whichever comes first; "
+                         "the record then says the check did not run, and why")
     a = ap.parse_args(argv)
     if not (a.report or a.search_out):
         ap.error("give --report or --search-out")
@@ -1099,15 +1104,18 @@ def main(argv=None):
             def stop(_signum, _frame):
                 raise OutOfTime(f"stopped after {budget} s, before the search job's time ran out "
                                 f"({bound}); the audit checks the report itself")
-            signal.signal(signal.SIGALRM, stop)
+            before = signal.signal(signal.SIGALRM, stop)
             signal.alarm(budget)
         try:
             rec = check(report, fasta, meta, a.q_cutoff, no_fasta_reason=why,
                         meta_path=a.fasta_meta)
+        except OutOfTime as e:       # landed outside check()'s own handlers: still a record
+            rec = {"check": "contaminant_competition", "report": report, "status": "not_run",
+                   "reason": str(e)}
         finally:
             if budget:
                 signal.alarm(0)
-                signal.signal(signal.SIGALRM, signal.SIG_DFL)
+                signal.signal(signal.SIGALRM, before)
     out = a.out or (os.path.join(a.search_out, RECORD) if a.search_out else None)
     prov = a.provenance or (os.path.join(a.search_out, PROVENANCE) if a.search_out else None)
     written, problems = write(rec, out, prov)

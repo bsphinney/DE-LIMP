@@ -310,7 +310,7 @@ class TheCheck(Fixture):
         rec = self.run_check(CLEAN + MASKED)
         (f,) = cc.audit_findings(rec, DE_REMOVED)
         self.assertIn("one with none left is not in the results", f[3])
-        self.assertNotIn("lost all or most", f[3])
+        self.assertIn("No other protein lost all or most of its signal", f[3])
         (f,) = cc.audit_findings(rec, DE_KEPT)
         self.assertNotIn("left out of the measurements", f[3])
 
