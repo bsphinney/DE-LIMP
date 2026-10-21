@@ -4,6 +4,14 @@ Generates a drop-in LC-MS/MS Methods section straight from facility raw data, pl
 the correct UC Davis Proteomics Core instrument-grant acknowledgment. Can run as
 part of a full analysis or **standalone** (just `--raw` at the facility data).
 
+<!-- contents: tests/test_skill_structure.py --toc -->
+**Contents** (section: line)
+- 15: What it extracts vs. defaults
+- 118: Instrument grant acknowledgments (verified 2026-06)
+- 142: Output + workflow
+- 153: 9d. The Methods section (step 9d)
+<!-- /contents -->
+
 ## What it extracts vs. defaults
 - **Extracted from the raw metadata** (shown with its source in a parameter table):
   - Bruker `.d`, read by `bruker_method.py`. It reads small metadata files only, never the
@@ -141,3 +149,70 @@ The agent should **verify the draft against the parameter table and polish the
 prose** (the example in `~/Documents/DataAnalysis/.../timsTOF_Methods` shows the
 target quality), resolve each `[facility default — confirm]`, and keep the
 acknowledgment verbatim.
+
+## 9d. The Methods section (step 9d)
+
+Generate a drop-in LC-MS/MS Methods section from the facility raw data and the session's own
+records, with the correct UC Davis Proteomics Core instrument-grant acknowledgment:
+
+```
+python3 scripts/make_methods.py --raw /path/to/*.d \
+    --fasta-meta <session>/input/search.fasta.meta.json \
+    --params <session>/input/wf/<params_file> \
+    --search-prov <session>/output/search/search_provenance.json \
+    --workflow-manifest <session>/input/wf/workflow.manifest.json \
+    --out <session>/output/methods.md --de-dir <session>/output/tables \
+    [--submission <session>] \
+    [--qc-bracket <session>/logs/qc_bracket.json]     # Core staff runs (step 8e)
+python3 scripts/to_docx.py --in <session>/output/methods.md \
+    --out <session>/output/methods.docx
+```
+
+(Step 12's `finalize` runs this for you when `output/methods.md` does not exist yet, passing
+`--submission` itself when one is attached, and `--qc-bracket <session>/logs/qc_bracket.json`
+when step 8e ran: an **Instrument performance** paragraph of ONE fixed sentence, the same
+whatever the verdict. The verdict itself is staff-only.) `--submission` adds **Sample preparation** from
+the CoreOmics record: when the lab sent peptides it says the submitting laboratory prepared
+them, with no Core-side placeholder; when the Core prepared them the protocol stays a tagged
+blank to fill.
+
+What it extracts, and what it only defaults:
+
+- It extracts the acquisition parameters from the raw metadata (Thermo by facility filename
+  prefix). From a Bruker `.d` it reads the LC system, its method and run time, the ion source
+  and its settings, the TIMS ramp, the dia-PASEF window scheme, the cycle time and the
+  collision-energy ramp. It writes them in the order published timsTOF Methods use.
+- The analytical column comes from `--lc-column`, else from HyStar's ColumnInfo, else from
+  `--column-log`. That flag takes an export of STAN's column-change log, and the column in place
+  at the first acquisition is used. With none of these, the facility's standard column (PepSep
+  MAX C18, 10 cm × 150 µm, 1.5 µm) is printed **tagged `[facility default — confirm]`**.
+  STAN keeps that log in PG Farm, which needs credentials, so the script never connects to it.
+- It tags what no file records: column temperature, emitter, mobile phases, Evotip loading and
+  peptide amount. STAN's 50 °C and the 20 µm emitter are given as facility defaults, tagged;
+  anything else unknown is tagged `[not recorded — confirm]`.
+- It builds parameter tables showing the source of each value.
+- It appends the instrument's grant acknowledgment (Fusion Lumos → S10OD021801; Exploris 480 →
+  S10OD026918-01A1; timsTOF → Dr. Neil Hunter / HHMI).
+
+What each input adds:
+
+- `--fasta-meta` writes the **Sequence database** paragraph: organism, proteome ID, UniProt
+  release, database type, entry count, and the contaminant library with its citation. The
+  database's build warnings are not in `methods.md`: tell the user the ones it prints under
+  `database_build_warnings` (step 12's `finalize`, when it writes the Methods, prints them under
+  the same key).
+- `--params` / `--search-prov` / `--workflow-manifest` write the **Database search** paragraph
+  from the parameters the search actually ran with: engine, the version that ran, cleavage rule,
+  missed cleavages, peptide/charge/m/z ranges, modifications, mass tolerances, precursor FDR,
+  library mode, and MBR.
+- `--de-dir` writes the **Differential expression** paragraph from `de_provenance.json`. It states
+  significance as run_de.R applies it: adj.P.Val only, with |log2FC| a volcano reference line,
+  never presented as a filter.
+
+A value in no record prints as `____ [not recorded — confirm]`, never as a guess. If the raw files
+are not readable where you run it, add `--instrument "<name>" --acquisition <DIA|DDA>` from the
+workflow manifest: the Methods are then written from the session record, with the acquisition
+values blank and tagged. **Verify the draft against the parameter tables and polish the prose;
+keep the acknowledgment exact** (confirm the wording at the source URL). This can also be run
+standalone — point `--raw` at facility data; no search or DE is needed. → detail:
+`references/methods.md`.
