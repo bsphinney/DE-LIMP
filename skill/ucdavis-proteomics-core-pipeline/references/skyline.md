@@ -19,7 +19,9 @@ them, and lists the peaks where Skyline and DIA-NN disagree.
 - **Never write** "confirmed by Skyline", "validated", "verified", "corroborated" or "independent
   evidence" about it. `client_text.peak_check_overclaims()` finds those (a negation in the same
   clause clears a sentence: "not independent confirmation" is fine). `make_analysis_html.py` warns
-  on them in `AI_Analysis_Report.md`, and `make_podcast.py check` fails a podcast script on them.
+  on them in `AI_Analysis_Report.md`, and `make_podcast.py check` fails a podcast script on them;
+  where the verb belongs to another check or person in the sentence, or the reader is asked to
+  verify the peaks themselves (`peak_check_overclaims_loose`), both only warn.
   The report section (`report_section()`) is tested to have none.
 - What Skyline does measure on its own: the apex, the areas, the library dot product (dotp) and
   the isotope dot product (idotp).

@@ -341,8 +341,11 @@ Claims section):
 - **The Skyline peak check is not confirmation.** It is a visual check of DIA-NN's peaks
   (`references/skyline.md`), so no host says a result was "confirmed by Skyline", "validated" or
   "verified" by the peak check. `check` FAILS on it (`client_text.peak_check_overclaims`, the
-  same list the report builder warns on); a negation in the same clause clears it ("the peak
-  check is not independent confirmation").
+  same words the report builder warns on); a negation in the same clause clears it ("the peak
+  check is not independent confirmation"). When the verb belongs to another check or person in
+  the sentence ("..., and the contaminant check confirmed that ...") or the listener is asked to
+  do it ("open the Skyline file to verify the peaks yourself"), `check` WARNS instead, and the
+  meaning check decides.
 
 ### The meaning check: a separate reader, before render
 

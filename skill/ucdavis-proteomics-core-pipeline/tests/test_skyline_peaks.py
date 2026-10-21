@@ -489,6 +489,7 @@ class TestWording(unittest.TestCase):
             rec = dict(OK_REC, status=status, reason="the container is not reachable here")
             text = sp.report_section(rec)["md"]
             self.assertEqual(client_text.peak_check_overclaims(text), [], status)
+            self.assertEqual(client_text.peak_check_overclaims_loose(text), [], status)
             self.assertNotRegex(text.lower(), r"confirmed by|validated|verified by")
         rec = dict(OK_REC)
         rec["methods_paragraph"] = sp.methods_paragraph(rec)
@@ -505,6 +506,21 @@ class TestWording(unittest.TestCase):
                      "edges.", "GAPDH was validated by western blot.",
                      "These pictures are a visual check of DIA-NN's peaks."):
             self.assertEqual(client_text.peak_check_overclaims(fine), [], fine)
+        # review of 2.14 (LOW-2): the verb is another check's, or the reader is asked to do it --
+        # loose (a warning for a person), never strict
+        for honest in ("The peak check drew the actin peaks, and the contaminant check confirmed "
+                       "that bovine actin took ACTB peptides.",
+                       "Open the Skyline file to verify the peaks yourself.",
+                       "Looking at the Skyline pictures, we confirmed the peak edges by eye."):
+            with self.subTest(sentence=honest):
+                self.assertEqual(client_text.peak_check_overclaims(honest), [])
+                self.assertTrue(client_text.peak_check_overclaims_loose(honest))
+        for bad in ("The peaks were confirmed by Skyline.",
+                    "Skyline agreed for 9 proteins, which confirms the quantities.",
+                    "The contaminant check and Skyline both confirmed the ACTB loss."):
+            with self.subTest(sentence=bad):
+                self.assertTrue(client_text.peak_check_overclaims(bad))
+                self.assertEqual(client_text.peak_check_overclaims_loose(bad), [])
 
 
 @unittest.skipUnless(pq, "pyarrow is not installed")

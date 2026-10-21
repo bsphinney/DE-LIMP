@@ -141,28 +141,64 @@ def draft_history_loose(text):
 # matches is not independent confirmation. A client text never says the results were confirmed,
 # validated, verified or corroborated by Skyline (or by "the peak check"). A sentence that SAYS it
 # is not ("... is not independent confirmation") is fine: a negation earlier in the same clause
-# clears it. skyline_peaks.report_section() is tested to have none; make_analysis_html.py warns on
-# them in AI_Analysis_Report.md.
+# clears it. Two tiers, as for draft history:
+#   peak_check_overclaims        STRICT: the claim is about the peak check -- its verb in the
+#                                same clause as Skyline / the peak check, or in a clause that
+#                                names no other actor ("Skyline agreed, which confirms ...").
+#                                make_podcast.py check FAILS on them.
+#   peak_check_overclaims_loose  LOOSE: the verb belongs to another check or actor in the
+#                                sentence ("..., and the contaminant check confirmed that ...";
+#                                "..., we confirmed ..."), or the reader is asked to do it ("open
+#                                the Skyline file to verify the peaks yourself"). check WARNS
+#                                (review of 2.14, LOW-2).
+# skyline_peaks.report_section() is tested to have neither; make_analysis_html.py warns on both
+# in AI_Analysis_Report.md.
 _PEAK_SUBJECT = re.compile(r"\b(?:skyline|peak[\s-]+checks?|second\s+program)\b", re.I)
 _OVERCLAIM = re.compile(r"\b(?:confirm\w*|validat\w*|verif\w*|corroborat\w*|prov(?:e|es|ed|en)\b|"
                         r"proof|independent(?:ly)?\s+(?:check\w*|evidence|measure\w*))", re.I)
 _NEGATION = re.compile(r"\b(?:not|no|never|nor|without|cannot|isn['’]t|aren['’]t|doesn['’]t|"
                        r"don['’]t|wasn['’]t|weren['’]t|neither)\b|n['’]t\b", re.I)
 _SENTENCE = re.compile(r"[^.!?\n]+[.!?]?")
+_CLAUSE_BREAKS = ",;:—("
+# another check, method or person that a clause's verb can belong to
+_OTHER_ACTOR = re.compile(r"\b(?!peak\b)[\w-]+\s+(?:checks?|tests?|audit|analys[ie]s|blots?|"
+                          r"assays?)\b|\b(?:we|they|DIA-NN|the\s+(?:audit|DE|data|statistics|"
+                          r"review(?:ers?)?))\b", re.I)
+# the reader is invited to do it: not a claim of what was done
+_INVITATION = re.compile(r"\byourself\b|\byou\s+(?:can|could|may|might|will)\b", re.I)
 
 
-def peak_check_overclaims(text):
-    """Each sentence that claims Skyline (or the peak check) confirmed, validated, verified,
-    corroborated or proved a result -- a snippet per sentence; [] when there is none."""
-    out = []
+def _peak_check_tiers(text):
+    """-> (strict, loose): one snippet per sentence, in its stricter tier."""
+    strict, loose = [], []
     for m in _SENTENCE.finditer(text or ""):
         sent = m.group(0)
         if not _PEAK_SUBJECT.search(sent):
             continue
+        tier = None
         for c in _OVERCLAIM.finditer(sent):
-            clause_start = max(sent.rfind(ch, 0, c.start()) for ch in ",;:—(") + 1
-            if _NEGATION.search(sent[clause_start:c.start()]):
+            start = max(sent.rfind(ch, 0, c.start()) for ch in _CLAUSE_BREAKS) + 1
+            if _NEGATION.search(sent[start:c.start()]):
                 continue
-            out.append(" ".join(sent.split()))
-            break
-    return out
+            ends = [i for i in (sent.find(ch, c.end()) for ch in _CLAUSE_BREAKS) if i >= 0]
+            clause = sent[start:min(ends) if ends else len(sent)]
+            mine = _PEAK_SUBJECT.search(clause) or not _OTHER_ACTOR.search(clause)
+            if mine and not _INVITATION.search(clause):
+                tier = "strict"
+                break
+            tier = "loose"
+        if tier:
+            (strict if tier == "strict" else loose).append(" ".join(sent.split()))
+    return strict, loose
+
+
+def peak_check_overclaims(text):
+    """STRICT: each sentence that claims Skyline (or the peak check) confirmed, validated,
+    verified, corroborated or proved a result -- a snippet per sentence; [] when there is none."""
+    return _peak_check_tiers(text)[0]
+
+
+def peak_check_overclaims_loose(text):
+    """LOOSE: sentences with such a verb near Skyline or the peak check that belongs to another
+    check or actor, or that asks the reader to do it -- for a person to read, never a failure."""
+    return _peak_check_tiers(text)[1]

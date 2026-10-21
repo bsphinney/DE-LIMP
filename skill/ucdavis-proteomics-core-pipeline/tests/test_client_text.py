@@ -181,6 +181,21 @@ class Podcast(Workspace):
         self.assertIn("Skyline confirmed every one of those peaks", txt)
         self.assertIn("not independent confirmation", txt)
 
+    def test_another_check_s_verb_or_an_invitation_is_a_warning(self):
+        """Review of 2.14 (LOW-2): a sentence about the peak check whose "confirmed" is another
+        check's, or that asks the listener to verify the peaks, is honest: a warning for the
+        meaning check, never a failure."""
+        for line in ("The peak check drew the actin peaks, and the contaminant check confirmed "
+                     "that bovine actin took ACTB peptides.",
+                     "Open the Skyline file to verify the peaks yourself."):
+            with self.subTest(line=line):
+                seg = list(SEG2) + [("LEO", line)]
+                write(self.script, script_text(segs=(SEG1, seg)))
+                run("check", self.script, "--source", self.report)
+                txt = read(os.path.join(self.pod, "check.txt"))
+                self.assertNotIn("not independent confirmation: never say", txt)
+                self.assertIn("near the Skyline peak check", txt)
+
     def test_saying_it_is_not_confirmation_passes(self):
         seg = list(SEG2) + [("LEO", "The peak check is a visual check, not independent "
                                     "confirmation.")]

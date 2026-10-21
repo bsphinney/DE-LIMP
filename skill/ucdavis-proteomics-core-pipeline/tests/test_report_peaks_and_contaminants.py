@@ -125,6 +125,7 @@ class OneSessionWithBoth(unittest.TestCase):
 
     def test_nothing_in_the_report_overclaims_the_peak_check(self):
         self.assertEqual(client_text.peak_check_overclaims(self.twin), [])
+        self.assertEqual(client_text.peak_check_overclaims_loose(self.twin), [])
         self.assertNotIn("claims more for the Skyline peak check", self.build.stderr)
 
     def test_the_record_of_the_search_is_the_one_the_audit_read(self):

@@ -45,7 +45,7 @@ import report_style as rs  # noqa: E402  -- the ONE look shared by the skill's H
 import html_to_pdf  # noqa: E402  -- the PDF: the same page printed by a headless browser
 import make_podcast       # noqa: E402  -- an optional audio discussion keeps its Listen card
 from client_text import draft_history, draft_history_loose  # noqa: E402  -- the ONE list (podcast too)
-from client_text import peak_check_overclaims  # noqa: E402  -- "confirmed by Skyline" and the like
+from client_text import peak_check_overclaims, peak_check_overclaims_loose  # noqa: E402  -- "confirmed by Skyline"
 import skyline_peaks      # noqa: E402  -- the peak check's section (step 8f), from its own record
 import audit_results      # noqa: E402  -- the audit's plain words: the client's Audit & caveats
 from session_docs import IP_CONTROL_NAME  # noqa: E402  -- which groups are pull-down controls
@@ -1796,7 +1796,7 @@ def main():
                     "deals with it, in the present tense; the review history goes in "
                     "logs/decisions.md (SKILL.md step 8d)", file=sys.stderr)
         # The peak check is a visual check of DIA-NN's peaks: never "confirmed by Skyline"
-        over = peak_check_overclaims(md_orig)
+        over = peak_check_overclaims(md_orig) + peak_check_overclaims_loose(md_orig)
         if over:
             print(f"[make_analysis_html] WARNING: {os.path.basename(a.report)} claims more for the "
                   f"Skyline peak check than it shows ({len(over)} place(s)): "
