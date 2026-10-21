@@ -5,6 +5,22 @@ proteins of one complex each up by 20% may pass no single-protein test and still
 clearest biology in the run. Set tests look for that. They also make it easy to fool
 yourself, so the skill runs them one way only.
 
+<!-- contents: tests/test_skill_structure.py --toc -->
+**Contents** (section: line)
+- 24: What it runs
+- 73: One model — the DE model
+- 153: Which sets
+- 197: Why camera estimates the correlation (the default)
+- 254: Run depth
+- 277: Blocked designs: pooled between-subject comparisons
+- 288: Pulldowns (`--ip-map`)
+- 419: Known limitations and backlog
+- 440: How to read the results
+- 472: Outputs
+- 486: PROT_0756 v2 (validation, 2026-09-28; after the statistician's review; HIVE job 24182898)
+- 537: 8a. Running them (step 8a)
+<!-- /contents -->
+
 ## What it runs
 
 ```
@@ -517,3 +533,63 @@ with a symbol mapped.
     −0.74 / −0.70 (Kv2.1), −1.31 / −1.26 (RyR) log2 by the interactome / bait references.
   - The old "enriched at every condition" rule rested, for JPH3, on 225 Old against 974 Young
     enriched proteins — the selection bias the pooled rule removes.
+
+## 8a. Running them (step 8a)
+
+When a comparison has **fewer than 10 significant proteins**, `run_de.R` says so and names it
+(`de_provenance.json` `set_tests.suggested_for`; `--sets-trigger` changes the 10): **offer the
+user protein-set tests** for it — a set of proteins can shift together when too few change enough
+on their own. They can be run for any analysis the user asks about pathways for.
+
+```
+Rscript scripts/run_sets.R --de-dir ./de_results [--sets go[,reactome]] \
+    [--gmt sets.gmt --gmt-origin "<where the file came from, and when>" [--gmt-kind public|own]] \
+    [--ip-map ip_map.csv]
+```
+
+- **One model.** It reads `set_test_inputs.rds`, which `run_de.R` writes: each contrast's
+  moderated t, the expression, weights, design, contrasts and block. Nothing is refitted for
+  the main tests (run_sets.R checks its refit route reproduces run_de's t to 1e-6).
+- **camera AND fry, side by side, never one alone** — competitive (more changed than the other
+  proteins?) and self-contained (changed at all?); never `geneSetTest`. A random `--block`:
+  fry gets the block and correlation; camera, which cannot take a block, uses the blocked fit's
+  statistics and block-whitened residuals (the Smyth-lab route). BH across sets per contrast.
+- **A-priori sets only**: GO (offline, `setup.sh` installs it), Reactome if installed, or a
+  GMT file (`--gmt-origin` required; `--gmt-kind public` for a published collection named with
+  its version, `own` for a list someone drew up — dated against the FIRST DE run into that
+  folder and flagged if newer; a run_de into a new folder starts that date again). **Never a list drawn up from the results** (selection: it finds what selected
+  it), and never gene-permutation GSEA as a second test. Organism from the FASTA sidecar's
+  taxid or `--organism`; no OrgDb for it → human symbols, with the mapping rate recorded.
+- Every test is repeated with **log2 run depth** in the model (one slope per run type in a
+  pulldown); a set that does not survive is "not separable from run depth", with its p and
+  effect under depth. DPC: each set's **presence-call** fraction, and a measured-only version
+  of both tests. Each fry call is re-tested on four other residual bases; one that does not
+  hold on all is flagged.
+- **camera's power is measured per comparison** (random-set correlation across runs). In
+  pulldowns it is low: its count of zero is then not a result, and "significant in both" is
+  not the headline.
+- **Pulldowns** — the experiment type says so (IP or proximity labelling, step 3); the brief
+  and AGENTS.md take the design from the same record (`experiment_type.pulldown_design`):
+  add the control-vs-control contrast (e.g. `Old_IgG-Young_IgG`) to run_de's
+  `--contrasts` — the lysate-background question — and pass `--ip-map` (Group, Role
+  bait|control, Bait, Condition, Bait_gene) for between-condition tests relative to each bait's
+  complex: the interactome is chosen on the bait's enrichment over the control POOLED over
+  conditions (never "enriched at every condition", which selects on the answer), at least
+  4-fold; the interactome median is the reference, the bait protein the cross-check. The
+  4-fold minimum makes it one-sided: a protein that falls in one condition has a lower pooled
+  enrichment and can drop out before the test, so **losses from the complex are harder to
+  detect than gains** — each bait reading gives its own numbers, and finding nothing there is
+  not evidence that the complex lost nothing.
+- Writes `Sets_<contrast>.csv`, `Sets_baitnorm_<contrast>.csv`, `sets_provenance.json`,
+  `sets_methods.txt` (tables) and `sets_<contrast>.png` (figures); the HTML report, the analysis
+  brief, AGENTS.md and methods.md pick them up.
+- **Each comparison's reading** (`sets_provenance.json`) is the wording to use: "not detectable
+  in this design" with n and residual df (never "unchanged"); "a broad shift" only when the
+  proteins themselves moved that way (not from fry sets alone); one that cannot be separated
+  from run depth is said to be so, never picked apart into a named signature.
+  One-test sets are not pathway findings.
+- **In one job with the final DE, the job must fail when `run_sets.R` does** (it exits non-zero,
+  e.g. when no annotation package loads): start the job script with `set -euo pipefail` (or join
+  the steps with `&&`), never `run_sets.R ...; echo DONE` — a DE job printed DONE after it failed.
+  `setup.sh --check` says whether the GO packages load (`setup.json` `set_annotation`).
+
