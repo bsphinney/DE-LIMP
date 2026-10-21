@@ -1368,6 +1368,8 @@ def main():
         text, rationale = build_sage(a.acquisition, cls, var_mods, overrides, analyzer,
                                      override_meta=override_meta, cys=cys)
 
+    # a new session's wf/ may not exist yet: make --out's folder rather than crash on it
+    os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
     with open(a.out, "w") as fh:
         fh.write(text)
     # who set the overrides, by name: staff-only, beside the cfg (never in the sidecar)
