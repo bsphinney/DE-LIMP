@@ -354,7 +354,7 @@ def dotnet_env_for(files):
 # genome-center-grp-high-qos; publicgrp-low-qos has none -- `sacctmgr show qos`, 2026-10-01).
 HIVE_USER_CPU_CAP = int(os.environ.get('HIVE_USER_CPU_CAP', '64'))
 # The fewest CPUs array_task_cpus() gives an array task it sizes itself. MEASURED (HIVE,
-# 2026-10-01, jobs 24276579-82): the chain's step-2 first pass of one 50 ng HeLa QC run
+# 2026-10-01, four test jobs): the chain's step-2 first pass of one 50 ng HeLa QC run
 # (timsTOF HT diaPASEF, 60 SPD, 1.9 GB .d; the Core's human 2026-09 predicted library, 3.5 M
 # precursors; DIA-NN 2.7.0), each thread count alone on an AMD EPYC 7532 node (zen2, the
 # commonest CPU on `high`), identical IDs at every count (43,123 precursors, 5,287 groups):
@@ -974,7 +974,7 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
     # the same contract every step of the 5-step chain has (references/diann_parallel.md).
     # And each job first DELETES that artefact, because an existence check cannot tell this
     # run's file from the previous search's in the same --out. Reproduced on HIVE, DIA-NN
-    # 2.7.0 (review srun 23512013): a re-run with no DOTNET_ROOT logged "ERROR: cannot read
+    # 2.7.0 (in a review run): a re-run with no DOTNET_ROOT logged "ERROR: cannot read
     # .raw files", exited 0 and wrote nothing; the old report.parquet and report.stats.tsv
     # were byte-identical afterwards, and both guards passed on them. The stats file goes too:
     # it is check_report_runs.py's fallback evidence when there is no parquet reader.
@@ -1431,7 +1431,7 @@ def radiant_cys(params):
     from the library it searches (its config has none), so cysteine is fixed there, as
     make_presets.py recorded it in <params>.provenance.json. A config without that record gets the
     default, cam, said on stderr. Before 2.12 no Radiant library fixed anything on C: on HIVE
-    (DIA-NN 2.7.0, job 24807967) 0 of 6,044 C-peptides carried UniMod:4."""
+    (DIA-NN 2.7.0, a test job) 0 of 6,044 C-peptides carried UniMod:4."""
     try:
         with open(f"{params}.provenance.json") as fh:
             value = (json.load(fh).get("cys_alkylation") or {}).get("value")
@@ -2160,7 +2160,7 @@ def refuse_fragpipe_dashed(params, files, fasta, out, acquisition):
     """A FragPipe search whose DIA-NN step would be handed a path with '--' is REFUSED before
     anything is written. FragPipe 24.0 (CmdDiann.java) writes each run as a `--f <absolute path>`
     line of filelist_diann.txt and hands DIA-NN `--cfg <filelist>--`, and DIA-NN cuts a cfg's text
-    at every '--' exactly as it does its command line: on HIVE (srun 24807938) DIA-NN 2.7.0 and
+    at every '--' exactly as it does its command line: on HIVE (in a test run) DIA-NN 2.7.0 and
     FragPipe 24.0's bundled 1.8.2 beta 8 both logged "unrecognised option [--sampA_S3.mzML]" for a
     `x_DIA--sampA_S3.mzML` in that list, skipped it, and searched the other run. The path DIA-NN
     gets is the run's link in <out>/diatracer_stage/ on the diaTracer route (dia-PASEF .d,
@@ -2189,7 +2189,7 @@ def refuse_fragpipe_dashed(params, files, fasta, out, acquisition):
         f"{params}), and DIA-NN would be handed a path with '--' in it. FragPipe lists the runs "
         f"for DIA-NN in a file DIA-NN reads like a command line, cutting it at every '--', so it "
         f"would skip the run and search the others (DIA-NN 2.7.0 and FragPipe's bundled 1.8.2 "
-        f"both did, HIVE srun 24807938):\n" + "\n".join(lines) + "\n"
+        f"both did, in a test run on HIVE):\n" + "\n".join(lines) + "\n"
         f"Ways out: search with DIA-NN directly (--engine diann, which links such inputs and, with "
         f"{crr.RENAME_DASHED_FLAG}, renames a run whose file name holds '--' as shown); or link "
         f"each file under a name and a folder without '--' and give FragPipe the links (use the "
@@ -3162,7 +3162,7 @@ def emit_sbatch(path, command, out, threads, job, preamble="",
         f"#SBATCH --job-name={job}",
         # in double quotes: a session folder with a space made sbatch refuse the whole script
         # ("Invalid directive found in batch script"); quoted, HIVE's SLURM accepts it and writes
-        # the log there (job 24808508, 2026-10-15). --out cannot hold a '"' (refuse_unsafe_path).
+        # the log there (a test job, 2026-10-15). --out cannot hold a '"' (refuse_unsafe_path).
         f'#SBATCH --output="{os.path.join(out, job)}_%j.log"',
         f"#SBATCH --cpus-per-task={threads}",
         f"#SBATCH --mem={mem}",

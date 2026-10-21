@@ -535,7 +535,7 @@ class RepresentativeSelectionTests(unittest.TestCase):
             self.assertRegex(small["blank.d"]["why"], r"size")
 
     def test_an_empty_failed_acquisition_does_not_switch_a_timstof_cohort_to_size(self):
-        """HIVE, garg cohort (srun job 23537237): the folder's failed acquisition is a .d with
+        """HIVE, garg cohort (a test run): the folder's failed acquisition is a .d with
         neither analysis.tdf nor tdf_bin. It has no acquisition time, and deciding the ranking
         before the size floor dropped it made all eight real runs rank by bytes."""
         with tempfile.TemporaryDirectory() as d:

@@ -275,7 +275,7 @@ def completion_marker(out, engine, report):
     DIA-NN needs none here: every skill route writes the report last, behind must_exist().
 
     Found by LOOKING at every Radiant and FragPipe output under the Core trees on HIVE (read-only
-    find, job 23992239, 2026-09-24):
+    find in a job, 2026-09-24):
       FragPipe  16 workdirs; dia-quant-output/report.tsv exists in ALL of them, including 2 whose
                 log says "Cancelling N remaining tasks" and 3 that never finished -- so a report
                 is no evidence at all. The newest log_<date>.txt in the workdir ends "ALL JOBS
@@ -3081,7 +3081,7 @@ def write_backfill_sbatch(a):
         "#!/bin/bash -l",
         "#SBATCH --job-name=fran_backfill",
         # double-quoted: an unquoted space makes sbatch refuse the script ("Invalid directive");
-        # quoted, HIVE's SLURM writes the log there (job 24808508, 2026-10-15)
+        # quoted, HIVE's SLURM writes the log there (a test job, 2026-10-15)
         f'#SBATCH --output="{d}/fran_backfill_%j.log"',
         "#SBATCH --cpus-per-task=1",
         "#SBATCH --mem=2G",

@@ -1669,7 +1669,7 @@ writeLines(methods_txt, file.path(outdir, "methods.txt"))
 # changed; the same family reproduces bit for bit (references/reproducibility.md). So the record
 # names the CPU, the BLAS/LAPACK libraries and, on a SLURM node, its CPU-family feature (what
 # `sbatch --constraint=` selects). OPENBLAS_CORETYPE is recorded, never set: forcing it
-# segfaulted dpcQuant on an EPYC 9734 (sbatch 24180764).
+# segfaulted dpcQuant on an EPYC 9734 (a test job).
 compute_record <- function() {
   sh <- function(cmd, args) tryCatch(suppressWarnings(system2(cmd, args, stdout = TRUE, stderr = FALSE)),
                                      error = function(e) character(0))

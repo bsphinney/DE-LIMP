@@ -270,8 +270,8 @@ The design follows two measurements on HIVE (bash 5.1.16, 2026-09-24):
 - **At the time limit, SLURM sends SIGTERM to the batch shell only.** Bash runs a trap only
   after the foreground command returns. With DIA-NN in the foreground, the trap never ran, and
   SIGKILL followed 130 s later (`KillWait`). `wait` is interrupted by a trapped signal, so the
-  handler runs at once and then re-raises SIGTERM: the job still dies by the signal (job
-  23990802: `TIMEOUT`, batch `0:15`).
+  handler runs at once and then re-raises SIGTERM: the job still dies by the signal (a test
+  job: `TIMEOUT`, batch `0:15`).
 - **Without a TERM trap, bash's EXIT trap sees `$? = 0` on SIGTERM.** A timed-out search would
   have been treated as finished, and staged.
 

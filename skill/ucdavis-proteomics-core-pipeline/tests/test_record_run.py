@@ -139,8 +139,8 @@ def make_search(root, name="search_out", report=True, runs=RUNS, secrets=False, 
           "[1:45] Optimised mass accuracy: 24 ppm\n"
           "[0:57] Recommended MS1 mass accuracy setting: 8 ppm\n"
           "[4:20] Recommended MS1 mass accuracy setting: 7 ppm\n" + log_extra)
-    write(os.path.join(out, "diann_libpred_23978018.log"), "library predicted\n")
-    write(os.path.join(out, "diann_search_23978112.log"), "searching\n" + log_extra)
+    write(os.path.join(out, "diann_libpred_9900001.log"), "library predicted\n")
+    write(os.path.join(out, "diann_search_9900002.log"), "searching\n" + log_extra)
     write(os.path.join(out, "job_input_files.txt"), "\n".join(files) + "\n")
     for r in runs:
         write(os.path.join(out, "quant", f"{r}.quant"), "Q" * 2048)
@@ -354,7 +354,7 @@ class Layout(Base):
                      "input/workflow.manifest.json", "input/search.fasta.meta.json",
                      "input/raw_files.txt", "output/search/search_provenance.json",
                      "output/search/report.stats.tsv", "output/search/report.log.txt",
-                     "output/search/fran_deposit.json", "output/search/diann_search_23978112.log",
+                     "output/search/fran_deposit.json", "output/search/diann_search_9900002.log",
                      "SEARCH_LOG.md", "run_record.json"):
             self.assertIn(want, files)
         with open(os.path.join(folder, "input", "raw_files.txt")) as fh:
@@ -432,16 +432,16 @@ class Layout(Base):
     def test_intermediate_failure_then_success_is_one_record(self):
         out = make_search(self.d, report=False,
                           log_extra="ERROR: DIA-NN tried but failed to load the following files\n")
-        write(os.path.join(out, "s2_firstpass_23977910_4.log"), "ERROR: task 4 died\n")
+        write(os.path.join(out, "s2_firstpass_9900003_4.log"), "ERROR: task 4 died\n")
         res = self.run_it("search-done", "--out", out, "--status", "failed", "--exit-code", "1",
-                          SLURM_JOB_ID="23977911", SLURM_JOB_NAME="s3_assembly")
+                          SLURM_JOB_ID="9900004", SLURM_JOB_NAME="s3_assembly")
         self.assertTrue(res["recorded"], res)
         folder = self.only_folder()
         log = self.read(folder)
         self.assertIn("**FAILED** (exit 1) at step `s3_assembly`", log)
-        self.assertIn("job 23977911 `s3_assembly`", log)
+        self.assertIn("job 9900004 `s3_assembly`", log)
         self.assertIn("failed to load the following files", log)
-        self.assertIn("output/search/s2_firstpass_23977910_4.log", self.all_files(folder))
+        self.assertIn("output/search/s2_firstpass_9900003_4.log", self.all_files(folder))
         # the fixed search completes: same folder, a dated update line, a new activity row
         write(os.path.join(out, "report.parquet"), "P" * 4096)
         write(os.path.join(out, "report.stats.tsv"), STATS)
@@ -1032,9 +1032,9 @@ class Sacct(Base):
     def test_times_and_state_come_from_sacct(self):
         out = make_search(self.d, report=False)
         exe = self.fake_sacct([
-            "23978018|diann_libpred|COMPLETED|0:0|2026-09-23T17:22:43|2026-09-23T17:22:45|"
+            "9900001|diann_libpred|COMPLETED|0:0|2026-09-23T17:22:43|2026-09-23T17:22:45|"
             "2026-09-23T17:28:38|00:05:53|hive-as-11-3-71|high|genome-center-grp|u",
-            "23978112|diann_search|OUT_OF_MEMORY|0:125|2026-09-23T17:31:34|2026-09-23T17:31:35|"
+            "9900002|diann_search|OUT_OF_MEMORY|0:125|2026-09-23T17:31:34|2026-09-23T17:31:35|"
             "2026-09-23T17:42:01|00:10:26|hive-dc-7-4-18|high|genome-center-grp|u"])
         self.run_it("search-done", "--out", out, RECORD_RUN_SACCT=exe)
         folder = self.only_folder()

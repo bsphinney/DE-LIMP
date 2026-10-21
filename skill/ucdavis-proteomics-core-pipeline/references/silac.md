@@ -120,7 +120,7 @@ lines without writing a cfg.
 is `--fixed-mod SILAC,0.0,KR,label --lib-fixed-mod SILAC`, for a *label-free library* that the
 label must be pasted into. Every route of this skill predicts its library from the FASTA, and
 `--fixed-mod` already applies the label during that digest ("applying fixed modifications during
-FASTA digest", README `--fixed-mod`). Measured on DIA-NN 2.7.0 (HIVE srun 24808559,
+FASTA digest", README `--fixed-mod`). Measured on DIA-NN 2.7.0 (on HIVE,
 2026-10-15, a 6-protein FASTA): `--fixed-mod` alone gives `K(SILAC)`; with `--lib-fixed-mod`,
 `K(SILAC)(SILAC)`. A hand-set triple-SILAC search (2026-10-14) carried both: its library read
 `K(SILAC)(SILAC)`, the search step applied the label again (`K(SILAC)(SILAC)(SILAC)`), and DIA-NN

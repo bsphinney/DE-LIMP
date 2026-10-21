@@ -139,7 +139,7 @@ class Env:
             os.utime(p, (self.now - age_h * H, self.now - age_h * H))
         return p
 
-    def submit(self, age_h=0.2, line="Submitted batch job 23990862"):
+    def submit(self, age_h=0.2, line="Submitted batch job 9900005"):
         p = os.path.join(self.logs, fd.SUBMIT_LOG)
         with open(p, "w") as fh:
             fh.write(f"{ts(self.now - age_h * H - 420)} {line}\n")
@@ -2227,7 +2227,7 @@ class Tree:
         self.session = search_dir(os.path.join(svc, "LabB", "2026", "sess", "output"), "search")
         # a 5-step chain run through hive_remote: no provenance on HIVE, only the chain's logs
         self.chain = search_dir(os.path.join(svc, "LabC", "run"), "search_out", prov=False,
-                                extra=("step5_report.sbatch", "s5_report_23945276.log"))
+                                extra=("step5_report.sbatch", "s5_report_9900006.log"))
         # the DE-LIMP app writes the same step names, but its jobs are diann_<name>_<step>
         self.app = search_dir(os.path.join(svc, "LabD", "app"), "out", prov=False,
                               extra=("step5_report.sbatch", "diann_proj_step5_1.log"))
@@ -2320,7 +2320,7 @@ class PlanTests(unittest.TestCase):
             self.assertEqual(rows[t.skill]["decision"], "would_stage")
             self.assertEqual(rows[t.session]["decision"], "would_stage")
             self.assertEqual(rows[t.chain]["decision"], "would_stage")
-            self.assertEqual(rows[t.chain]["marker"], "s5_report_23945276.log")
+            self.assertEqual(rows[t.chain]["marker"], "s5_report_9900006.log")
             self.assertEqual(rows[t.app]["reason"], "not_a_skill_search")
             self.assertEqual(rows[t.failed]["reason"], "search_incomplete")
             self.assertEqual(rows[t.sage]["reason"], "engine_unsupported")

@@ -368,7 +368,7 @@ def detect_mzml(path):
 #
 # The command lines below are the only ones this parser accepts. The previous code called
 # `ThermoRawFileParser metadata -i <raw>` and `ThermoRawFileParser query -i <raw>`; on
-# TRFP 2.0.0.0 (HIVE srun job 23510571) both exit 255 -- "Unexpected extra arguments"
+# TRFP 2.0.0.0 (measured on HIVE) both exit 255 -- "Unexpected extra arguments"
 # (there is no `metadata` subcommand) and "specify a valid scan range" (query needs -n).
 # The exit codes were ignored and the empty stdout grepped for "dia", so EVERY .raw came
 # back unknown / instrument null / range null and estimate_params.py searched 380-980 on
@@ -974,7 +974,7 @@ def query_scan_range(meta):
 
 # An MS1 survey scan's filter string names the m/z range it was acquired over -- "FTMS + p NSI
 # Full ms [350.0000-1500.0000]" in the Exploris 480 DDA fixture (real TRFP 2.0.0.0 output, HIVE
-# srun job 23510571), the range a Core member confirmed for SET28. "Full ms" then the bracket: "Full ms2
+# test run), the range a Core member confirmed for SET28. "Full ms" then the bracket: "Full ms2
 # 572.3181@hcd30.00 [...]" is an MS2 and never matches; SIM scans are not survey scans.
 FULL_MS1_RE = re.compile(r"\bFull\s+ms\s+\[([^\]]+)\]")
 MZ_PAIR_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*-\s*([0-9]+(?:\.[0-9]+)?)")
@@ -996,8 +996,8 @@ def thermo_isolation_windows(spectra):
     Edges are target -/+ the lower/upper offsets TRFP reports, which already fold in the
     instrument's isolation-width offset -- the same values it writes to mzML, so the two
     readers agree: detect_mzml() on the full TRFP 2.0.0.0 mzML of the runs above gave
-    350.0-1201.0 and 350.04999389648435-1200.9499755859374 (HIVE srun jobs 23508203/23508208),
-    this reader 350.0-1201.0 and 350.05-1200.95 after rounding (job 23511567).
+    350.0-1201.0 and 350.04999389648435-1200.9499755859374 (two test runs on HIVE),
+    this reader 350.0-1201.0 and 350.05-1200.95 after rounding (a test run on HIVE).
     """
     w = {"widths": [], "centres": [], "los": [], "his": [],
          "n_ms2": 0, "n_filter": 0, "n_dependent": 0, "n_ms1": 0, "ms1_ranges": []}
@@ -1263,7 +1263,7 @@ def classify(path):
 # A cohort of .raw on a cluster login node.
 #
 # Reading a .raw is two parser processes that read the raw. Measured on HIVE compute nodes
-# (srun jobs 23511567, 23512661, 23513356, 23515380; TRFP 2.0.0.0, 3.5 GB raws): 3.1-7.0 s
+# (four test runs; TRFP 2.0.0.0, 3.5 GB raws): 3.1-7.0 s
 # per file, ~1 core (68-98% CPU), 286-354 MB peak RSS, a 1.2-8.8 MB query JSON in $TMPDIR
 # (deleted per file); 6 files in one call took 27-33 s. With the old command line the calls died at
 # argument parsing, so step 2 cost nothing -- and SKILL.md 0a drives step 2 over SSH, i.e.
@@ -1295,7 +1295,7 @@ CANNOT_START_SEE_ABOVE = ("not read -- ThermoRawFileParser cannot start on this 
 # scan's trailer has it -- 'Orbitrap Resolution:' on a Fusion Lumos, 'FT Resolution:' on an
 # Exploris 480. thermo_resolution.py reads it with the RawFileReader DLLs TRFP ships, through
 # pythonnet, in ONE subprocess for all files (a CoreCLR load or crash cannot take this script
-# down). Measured on HIVE (job 23989170): three Lumos DIA runs 60000/15000, an Exploris 480 DIA
+# down). Measured on HIVE (a test job): three Lumos DIA runs 60000/15000, an Exploris 480 DIA
 # run 120000/15000 and a DDA run 60000/15000 -- 5 files in 18 s including the runtime start.
 # Read only for `orbitrap_generic`: an Astral's documented tolerances do not use it.
 # A file it cannot read stays in `orbitrap_resolution_unknown`, and the user is asked. Not a
@@ -1312,14 +1312,14 @@ RAWFILEREADER_DLLS = ("ThermoFisher.CommonCore.RawFileReader.dll",
 RES_PYTHON_ENV = "THERMO_RESOLUTION_PYTHON"
 # The RawFileReader DLLs target .NETCoreApp 8.0, and a SELF-CONTAINED parser's bundled runtime
 # cannot host pythonnet (hostfxr: "Initialization for self-contained components is not
-# supported", job 23989170) -- so a separate root with Microsoft.NETCore.App 8+ is needed.
+# supported", in that test job) -- so a separate root with Microsoft.NETCore.App 8+ is needed.
 RES_DOTNET_NEEDS = [("Microsoft.NETCore.App", (8, 0, 0), True)]
 # Batches, each with its own timeout: one timeout for a whole cohort let a stall inside a .NET
 # call (where the reader's own walk budget is never checked) block for 120 + 90 s x N -- ~5 h
 # for 200 files -- and then lose every answer. A hang now costs its batch; two batches in a row
 # that hang (a stalled mount, not one bad file) stop the rest, which say so.
 RES_BATCH = 10
-RES_TIMEOUT_BASE_S = 60       # starting .NET: ~3 s measured (HIVE jobs 23989170, 23989291)
+RES_TIMEOUT_BASE_S = 60       # starting .NET: ~3 s measured (two test jobs on HIVE)
 RES_TIMEOUT_EACH_S = 30       # per file: ~3 s measured; the reader's own walk stops at 20 s
 RES_HUNG_BATCHES_STOP = 2
 RESOLUTION_ASK = (

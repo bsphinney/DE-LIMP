@@ -360,8 +360,8 @@ SRC_MEASURE = ("measured with DIA-NN before the search: one DIA-NN per represent
 # A lone --mass-acc or --mass-acc-ms1 FIXES BOTH levels in DIA-NN 2.7.0: "WARNING: note the mass
 # accuracy settings used by DIA-NN, automatic optimisation will not be performed as at least one
 # of MS1/MS2 mass accuracies is user-provided", and the other level falls to 20 ppm -- `--window 7
-# --mass-acc-ms1 7` logged "Mass accuracy will be fixed to 2e-05 (MS2) and 7e-06 (MS1)" (HIVE srun
-# job 23528991, 2026-09-16). So a documented level is never written into the cfg on its own.
+# --mass-acc-ms1 7` logged "Mass accuracy will be fixed to 2e-05 (MS2) and 7e-06 (MS1)" (measured on
+# HIVE, 2026-09-16). So a documented level is never written into the cfg on its own.
 LONE_FLAG_NOTE = ("not written into the cfg on its own: DIA-NN 2.7.0 fixes BOTH levels when either "
                   "flag is given, the other at 20 ppm; it is pinned together with the measured "
                   "level")
@@ -1176,7 +1176,7 @@ def sage_fragment_mismatch(ms2_analyzer, sage_cfg):
     (this script -> the Sage cfg); only the second changes the search. Given in step 4 and
     forgotten in 6b, the manifest said ITMS while sage_config.json kept a +/-10 ppm fragment
     window -- which on an ion-trap spectrum matches nothing (a +0.25 Da synthetic spectrum: 0 PSMs
-    at 10 ppm, the target at 0.4 Da; Sage 0.14.7, HIVE job 23990274)."""
+    at 10 ppm, the target at 0.4 Da; Sage 0.14.7, a test job on HIVE)."""
     tol = (sage_cfg or {}).get("fragment_tol") or {}
     unit = "da" if "da" in tol else "ppm" if "ppm" in tol else None
     rerun = ("re-run estimate_params.py --engine sage with the same --ms2-analyzer that "

@@ -1205,8 +1205,8 @@ def clear_stale(*paths):
 
     must_exist() checks that a file is there, not that this run made it. A search re-run into
     the same --out still has the previous run's artefacts, and a DIA-NN that exits 0 having
-    written nothing leaves them untouched. Measured on HIVE, DIA-NN 2.7.0 (review srun
-    23512013): a re-run with no DOTNET_ROOT logged "ERROR: cannot read .raw files", exited 0,
+    written nothing leaves them untouched. Measured on HIVE, DIA-NN 2.7.0 (in a review
+    run): a re-run with no DOTNET_ROOT logged "ERROR: cannot read .raw files", exited 0,
     the old report.parquet and report.stats.tsv were unchanged by md5, and every guard passed
     on them -- a COMPLETED job reporting results from different parameters. Deleting beats a
     marker file checked with `-newer`: after a failed run the marker approach still leaves a
@@ -1247,7 +1247,7 @@ def refuse_unsafe_path(path, flag="--out", prog="diann_parallel"):
 # so the rest of the path becomes an "option" of its own. DIA-NN 2.7.0 does exactly that: a Core run
 # named `<date>__60SPD_DIA--sampA_<well>.d` logged "unrecognised option [--sampA_<well>.d]" and
 # "skipping .../<date>__60SPD_DIA - invalid raw MS data format", and searched the other runs (a
-# staff report, 2026-10-14). Re-run on HIVE (DIA-NN 2.7.0, srun 24807838): `--f <d>/x_DIA--sampA_S3
+# staff report, 2026-10-14). Re-run on HIVE (DIA-NN 2.7.0, a test run): `--f <d>/x_DIA--sampA_S3
 # .mzML --f <d>/plate--1/s1.mzML --f <d>/x_DIA-sampA_S3.mzML` (the last a link to the first) logged
 # "unrecognised option" for `--sampA_S3.mzML` and `--1/s1.mzML`, skipped `<d>/x_DIA` and
 # `<d>/plate`, and processed 1 file: the link. A '--' in a FOLDER is cut the same way. A single
@@ -1379,7 +1379,7 @@ def input_links_note(plan, prog):
 # source). A file name with no extension is therefore cut inside a FOLDER whose name has a '.': on
 # 2026-10-02 (DIA-NN 2.7.0) `--out-lib .../species_check/S07_A01.01dup2/diann_lib` wrote
 # species_check/S07_A01.predicted.speclib and S07_A01.log.txt one folder up, and the job's
-# guard failed. Re-run on HIVE (DIA-NN 2.7.0, job 24560319): `--out-lib <dot folder>/diann_lib`
+# guard failed. Re-run on HIVE (DIA-NN 2.7.0, a test job): `--out-lib <dot folder>/diann_lib`
 # -> both one level up; `<dot folder>/diann_lib.speclib` -> diann_lib.predicted.speclib and
 # diann_lib.log.txt inside it; a conversion's `<dot folder>/conv.parquet` -> conv.parquet and
 # conv.log.txt inside it. So every output file this skill names for DIA-NN has an extension, and a
@@ -1879,7 +1879,7 @@ def main():
     #
     # MASS ACCURACY ("mass-acc" in measure): only for a cfg estimate_params.py planned that way
     # -- an Orbitrap with a level outside DIA-NN's table (see parallel_safe). The same DIA-NN run
-    # per probe logs it: measured on HIVE with DIA-NN 2.7.0 (srun job 23522741, Exploris 480
+    # per probe logs it: measured on HIVE with DIA-NN 2.7.0 (a test run, Exploris 480
     # 120k/15k, full mouse library) the radius came at 1:34, "Recommended MS1 mass accuracy
     # setting: 4.1 ppm" at 1:35 and "Optimised mass accuracy: 14 ppm" at 2:27, of a 5:13 search.
     # The probes run with BOTH flags omitted -- DIA-NN 2.7.0 fixes both levels when either is

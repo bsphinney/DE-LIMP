@@ -159,7 +159,7 @@ class ConfoundTestRespectsTheBlock(unittest.TestCase):
 
 
 class WithinAndBetweenBlockQuestions(unittest.TestCase):
-    """PROT_9756 v2 (a rerun, job 24175676): 6 mice x 5 IPs, age between mice. The
+    """PROT_9756 v2 (a rerun): 6 mice x 5 IPs, age between mice. The
     within-mouse relabelling test flagged hemolysis at p = 0.001 -- a BAIT effect (Kv2.1 IPs) --
     and the message read like an age confound it can never detect. Now the two questions are
     separate tests with separate words."""

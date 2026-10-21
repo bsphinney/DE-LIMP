@@ -4,7 +4,7 @@ Step 1b measures Orbitrap mass accuracy with DIA-NN, on the same representative 
 same DIA-NN run per probe as the scan-window radius.
 
 DIA-NN logs all three during calibration of a run whose --mass-acc, --mass-acc-ms1 and --window
-are omitted. Verbatim from DIA-NN 2.7.0 on HIVE (srun job 23522741, 2026-09-16; Exploris 480
+are omitted. Verbatim from DIA-NN 2.7.0 on HIVE (a test run, 2026-09-16; Exploris 480
 120k/15k run of the Set1-30-34-mouse cohort, full mouse predicted library, 32 threads):
 
     [0:36] Calibrating with mass accuracies 25 (MS1), 25 (MS2)
@@ -22,7 +22,7 @@ real one where it matters, each point checked against DIA-NN 2.7.0 on HIVE:
   * with EITHER --mass-acc or --mass-acc-ms1 given it fixes both -- "WARNING: note the mass
     accuracy settings used by DIA-NN, automatic optimisation will not be performed as at least
     one of MS1/MS2 mass accuracies is user-provided", then "Mass accuracy will be fixed to ..."
-    (srun 23528991: `--mass-acc-ms1 7` alone fixed MS2 at 2e-05) -- does not announce automatic
+    (a test run on HIVE: `--mass-acc-ms1 7` alone fixed MS2 at 2e-05) -- does not announce automatic
     optimisation and prints no "Optimised mass accuracy", but STILL prints "Recommended MS1 mass
     accuracy setting" (compare/pilot_override, pinned 20/7: "[1:50] Recommended MS1 mass
     accuracy setting: 4.3 ppm");
@@ -57,7 +57,7 @@ import diann_parallel as dp  # noqa: E402
 
 GB = 1024 ** 3
 
-# DIA-NN 2.7.0 log of run TT34, captured on HIVE (srun job 23522741) with mass accuracy and
+# DIA-NN 2.7.0 log of run TT34, captured on HIVE (in a test run) with mass accuracy and
 # --window omitted: from the banner to the start of the search proper. Paths shortened; every
 # other character is verbatim.
 REAL_TT34 = """DIA-NN 2.7.0 Academia  (Data-Independent Acquisition by Neural Networks)
@@ -142,7 +142,7 @@ REAL_FIXED_LINES = """Mass accuracy will be fixed to 2e-05 (MS2) and 7e-06 (MS1)
 """
 
 
-# DIA-NN 2.7.0 with ONLY --mass-acc-ms1 7 (and --window 7), run TT34, HIVE srun job 23528991
+# DIA-NN 2.7.0 with ONLY --mass-acc-ms1 7 (and --window 7), run TT34, measured on HIVE
 # (2026-09-16), verbatim from the settings to the search proper. One flag fixes both levels, MS2 at
 # DIA-NN's 20 ppm default, and the MS1 recommendation is printed all the same.
 REAL_ONE_FLAG_LINES = """Modification UniMod:35 with mass delta 15.9949 at M will be considered as variable
@@ -352,7 +352,7 @@ class LogParsingTests(unittest.TestCase):
         """Measured on HIVE, same three runs, same library, radius 7 both times: with --window
         auto, TT32 gave MS2 14 / MS1 4.2; with --window 7 pinned it gave MS2 12 / MS1 4.5 (TT34
         and TT33 were unchanged). That is not noise: the pinned-window values reproduced exactly
-        in two separate sruns (23524590 and 23526415). Pinning the window changes the conditions
+        in two separate test runs on HIVE. Pinning the window changes the conditions
         DIA-NN optimises under. The pinned MS2 does not move; a measured MS1 moves by 0.1 ppm."""
         auto = probe_window.pin_mass_acc([{"ms2_ppm": 14.0, "ms1_ppm": 4.1},
                                           {"ms2_ppm": 17.0, "ms1_ppm": 4.3},

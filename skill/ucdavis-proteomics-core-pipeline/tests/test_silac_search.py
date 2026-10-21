@@ -9,7 +9,7 @@ recorded the study design as one person's override. Its declaration also carried
 FASTA, where `--fixed-mod SILAC,0.0,KR,label` had already labelled K and R, the precursor ids read
 K(SILAC)(SILAC), and K(SILAC)(SILAC)(SILAC) once the search step applied it again (DIA-NN: "contains
 more than one channel family label, this is not supported"). With no channel-normalisation flag
-DIA-NN stopped and fell back to --channel-run-norm. Checked on DIA-NN 2.7.0 (HIVE srun 24808559,
+DIA-NN stopped and fell back to --channel-run-norm. Checked on DIA-NN 2.7.0 (on HIVE,
 2026-10-15): --fixed-mod alone labels the predicted library once.
 
 These tests pin:

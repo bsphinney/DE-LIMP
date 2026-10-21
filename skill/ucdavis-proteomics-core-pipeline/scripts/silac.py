@@ -18,7 +18,7 @@ the client report was made outside the skill. Everything SILAC now comes from he
   read_design()             the channel design (silac_design.csv) run_silac.R analyses
   methods_search_sentence() the Methods' plexDIA sentence (make_methods.py)
 
-THE DECLARATION, verified on DIA-NN 2.7.0 (HIVE srun 24808559, 2026-10-15, a 6-protein FASTA): a
+THE DECLARATION, verified on DIA-NN 2.7.0 (on HIVE, 2026-10-15, a 6-protein FASTA): a
 library predicted from a FASTA with `--fixed-mod SILAC,0.0,KR,label` alone reads K(SILAC) -- the
 fixed mod is applied during the digest (README, --fixed-mod: "applying fixed modifications during
 FASTA digest") -- and adding `--lib-fixed-mod SILAC` makes it K(SILAC)(SILAC). Every DIA-NN route

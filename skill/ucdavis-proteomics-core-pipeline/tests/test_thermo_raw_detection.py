@@ -8,7 +8,7 @@ ThermoRawFileParser with a command line the parser does not accept -- `metadata 
 `query -i <raw>` (query requires -n: exit 255, "specify a valid scan range") -- ignored the
 exit codes, and grepped the empty stdout for "dia". Every .raw therefore came back
 acquisition unknown / confidence low / instrument null / precursor_mz_range null, so
-estimate_params.py searched its 380-980 FALLBACK. Measured on HIVE (srun job 23510571)
+estimate_params.py searched its 380-980 FALLBACK. Measured on HIVE (in a test run)
 against both FRAN pilot Orbitraps, whose methods acquire much wider than that:
 
     Orbitrap Exploris 480   25 x 35.0 m/z windows   350.0 -1201.0
@@ -642,7 +642,7 @@ class SkillMdExplainsTheDdaRange(_FakeParserCase):
 
 class ThermoRawCohortOnALoginNode(_FakeParserCase):
     """Reading a .raw is now real work: two .NET parser processes per file that read the raw
-    (3.1-7.0 s per file on HIVE compute nodes, srun jobs 23511567 to 23515380). With the
+    (3.1-7.0 s per file on HIVE compute nodes, four test runs). With the
     old command line the parser calls died at argument parsing, so step 2 cost nothing --
     and SKILL.md 0a drives step 2 over SSH, i.e. on the cluster login node. A 200-file cohort
     there is ~20 min of parser I/O on a shared host, which golden rule #3 forbids. So a
@@ -709,7 +709,7 @@ class ThermoRawCohortOnALoginNode(_FakeParserCase):
         self.assertIn("not found", res.stderr)
 
     def test_inside_a_slurm_allocation_the_cohort_is_read(self):
-        os.environ["SLURM_JOB_ID"] = "23511567"
+        os.environ["SLURM_JOB_ID"] = "9900008"
         n = da.LOGIN_NODE_MAX_RAW + 1
         res = self._run(*self.cohort(n))
         self.assertEqual(res.returncode, 0, res.stderr)

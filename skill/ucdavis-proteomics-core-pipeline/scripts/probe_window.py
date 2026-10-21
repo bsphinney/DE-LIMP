@@ -130,7 +130,7 @@ checked and review the 'Averaged recommended settings for this experiment' value
 end of the log") -- adapted, not followed: it uses the predicted library, one DIA-NN per run
 instead of one "Unrelated runs" search, and pins the median of what each run printed instead of
 DIA-NN's averaged line. The same DIA-NN run per probe logs the values, after the radius and
-before the search proper (DIA-NN 2.7.0 on HIVE, srun job 23522741, Exploris 480 120k/15k, full
+before the search proper (DIA-NN 2.7.0 on HIVE, a test run, Exploris 480 120k/15k, full
 mouse predicted library, 32 threads):
 
     DIA-NN will automatically optimise the mass accuracy for the first run of the experiment, ...
@@ -191,7 +191,7 @@ says both numbers when a floor applies.
 The flags must not set EITHER mass-accuracy flag: DIA-NN 2.7.0 fixes both levels when one is
 given ("automatic optimisation will not be performed as at least one of MS1/MS2 mass accuracies
 is user-provided"; `--mass-acc-ms1 7` alone -> "Mass accuracy will be fixed to 2e-05 (MS2) and
-7e-06 (MS1)", HIVE srun job 23528991). And a pinned run still prints "Recommended MS1 mass
+7e-06 (MS1)", measured on HIVE). And a pinned run still prints "Recommended MS1 mass
 accuracy setting". So values are accepted only from a run that ANNOUNCED automatic optimisation;
 a run whose settings block ends without that line is stopped at once, and no other run is tried:
 they all get the same flags. The two ways that happens are reported SEPARATELY, because their
@@ -245,7 +245,7 @@ from estimate_params import DIANN_DDA_FLAG                         # noqa: E402
 WINDOW_RE = re.compile(r"window\s+radius\s+set\s+to\s+(\d+)", re.I)
 
 # Mass accuracy, when --mass-acc/--mass-acc-ms1 are omitted (DIA-NN's auto mode). Verbatim from
-# DIA-NN 2.7.0 on HIVE (srun job 23522741; Exploris 480, 120k/15k, full mouse predicted library):
+# DIA-NN 2.7.0 on HIVE (a test run; Exploris 480, 120k/15k, full mouse predicted library):
 #
 #     [0:36] Calibrating with mass accuracies 25 (MS1), 25 (MS2)
 #     [1:34] Scan window radius set to 7
@@ -282,7 +282,7 @@ SETTINGS_END_RE = re.compile(r"^\s*\d+\s+files?\s+will\s+be\s+processed", re.I)
 # Every number below is DIA-NN's own, none is ours:
 #   * its README's Orbitrap resolution table spans 4 ppm (240k) to 15 ppm (30k), MS1 and MS2;
 #   * it begins every analysis at 25 ppm on both levels -- "Calibrating with mass accuracies
-#     25 (MS1), 25 (MS2)" (DIA-NN 2.7.0, HIVE srun job 23522741);
+#     25 (MS1), 25 (MS2)" (DIA-NN 2.7.0, measured on HIVE);
 #   * its runtime value for a 15,000-resolution MS2 -- the very case this probe exists for -- is
 #     also 25 ppm ("deviates significantly from the value recommended (25 ppm) for the Orbitrap
 #     resolution of this run (15000)").
@@ -306,7 +306,7 @@ MASS_ACC_BAND = {"ms2_ppm": (3.0, 30.0), "ms1_ppm": (1.5, 25.0)}
 # round number. On HIVE (DIA-NN 2.7.0, three Exploris 480 runs of one cohort, one library) the
 # same three runs gave MS2 14, 17, 14 ppm with the window left to DIA-NN -- 21% of the median --
 # and 12, 17, 14 with `--window 7` pinned, which is 36%. That second set is not noise: it
-# reproduced exactly in two separate sruns (23524590, 23526415), pinning the window simply
+# reproduced exactly in two separate test runs on HIVE, pinning the window simply
 # changes the conditions DIA-NN optimises under, and probing under a pinned window is a
 # supported mode. A 35% rule would refuse the cohort this branch was validated on, so the rule
 # sits at 50%: wide enough for every per-run disagreement seen from correctly-configured runs,
@@ -352,7 +352,7 @@ LOG_LINE_OF = {"ms2_ppm": "Optimised mass accuracy",
 MEASURES = {"window": ("radius",), "mass-acc": ("ms2_ppm", "ms1_ppm")}
 
 # Printed by DIA-NN when it has no usable .NET 8 runtime -- and it still exits 0. Measured on
-# HIVE with DIA-NN 2.7.0 (srun job 23509324). Not a property of the run: nothing else will read.
+# HIVE with DIA-NN 2.7.0 (in a test run). Not a property of the run: nothing else will read.
 DOTNET_RE = re.compile(r"cannot read \.raw files", re.I)
 
 # A run under this fraction of a typical run OF ITS OWN KIND (see _size_scale) is treated as a

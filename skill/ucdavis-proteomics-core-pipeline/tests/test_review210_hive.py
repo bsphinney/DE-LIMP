@@ -11,7 +11,7 @@ Evidence for the first two (HIVE, read-only sacct, 2026-10-01; every chain task 
   * MEMORY: MaxRSS on HIVE includes page cache (Slurm cgroup/v2 reads memory.current;
     JobAcctGatherParams=NoOverMemoryKill, no NoFileCache), so the lower bound of a task's own
     memory is MaxRSS - MaxDiskRead - MaxDiskWrite. That bound is > 32 GB for 65 step-2 tasks
-    (22 arrays) and 9 step-1b jobs, up to 61 GB (24265766_0: a blank-like injection, 1.2 GB .d,
+    (22 arrays) and 9 step-1b jobs, up to 61 GB (one of them: a blank-like injection, 1.2 GB .d,
     the standard 1.7 GB human library, MaxRSS 64.0 GB at its 64 GB limit, 2.8 GB read).
 Everything SLURM is stubbed; nothing contacts a cluster, Slack, FRAN or the run log.
 """

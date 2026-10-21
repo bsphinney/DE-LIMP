@@ -415,7 +415,7 @@ class StaleArtefactTests(unittest.TestCase):
     search", "re-search with different parameters"). If DIA-NN then exits 0 without writing --
     no .NET on the node, an unmounted path -- the previous report is still there, the guards
     read it, and the job reports success on results from other parameters. Reproduced on HIVE
-    with DIA-NN 2.7.0 (review srun 23512013): an old report.parquet + report.stats.tsv, a search
+    with DIA-NN 2.7.0 (in a review run): an old report.parquet + report.stats.tsv, a search
     with no DOTNET_ROOT, "ERROR: cannot read .raw files", exit 0, both files unchanged by md5,
     and check_report_runs.py printed "OK: report holds all 2 runs"."""
 

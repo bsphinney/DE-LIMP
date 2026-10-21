@@ -351,7 +351,7 @@ specific signal (0.3–3 log2 over background), on the linear scale; noise 0.4 l
 the bait 1 log2 unit less; the Old runs' background 0 or +0.6 log2 higher. "kept" is how many of
 a planted set's 20 members enter the interactome; "tested" how often that is run_sets.R's
 10-member minimum; power and false-positive rates are over **all** replicates (an untested set is
-not significant), so they are the whole pipeline's (HIVE job 24182369; fry / camera):
+not significant), so they are the whole pipeline's (a test job on HIVE; fry / camera):
 
 | Old background | set | enriched at every condition | pooled | pooled ≥ 2-fold | pooled ≥ 4-fold (default) |
 |---|---|---|---|---|---|

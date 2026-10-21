@@ -6,7 +6,7 @@ estimate_params.py pins DIA-NN's documented Orbitrap tolerances from the resolut
 an Orbitrap is `orbitrap_generic`, DIA-NN calibrates per run and the 5-step parallel chain
 declines (gstaff 2026-09-23, 15 Fusion Lumos .raw). ThermoRawFileParser never outputs the
 resolution, but every scan's trailer carries it ('Orbitrap Resolution:' on a Fusion Lumos,
-'FT Resolution:' on an Exploris 480; HIVE jobs 23989081, 23989170: Lumos 60000/15000, Exploris
+'FT Resolution:' on an Exploris 480; two test jobs on HIVE: Lumos 60000/15000, Exploris
 480 DIA 120000/15000). scripts/thermo_resolution.py reads it through pythonnet and Thermo's
 RawFileReader DLLs, in a subprocess of detect_acquisition.py.
 

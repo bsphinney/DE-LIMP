@@ -13,7 +13,7 @@ step 3 from the raw names, so learning that at step 7 meant rebuilding the desig
     names into conditions.csv; --validate passes them against the report and names a row that
     still holds the raw name;
   * FragPipe's DIA-NN step reads its runs from a --cfg file list that DIA-NN also cuts at '--'
-    (HIVE srun 24807938), and has no renaming: run_search.py refuses such a path there;
+    (measured on HIVE), and has no renaming: run_search.py refuses such a path there;
   * a run missing from the report says what to do, and not to resubmit.
 """
 import csv
@@ -157,7 +157,7 @@ class Conditions(unittest.TestCase):
 
 class FragPipeRoute(unittest.TestCase):
     """FragPipe 24.0's CmdDiann writes `--f <path>` lines to filelist_diann.txt and hands DIA-NN
-    `--cfg <filelist>--`; DIA-NN cuts that text at every '--' (HIVE srun 24807938)."""
+    `--cfg <filelist>--`; DIA-NN cuts that text at every '--' (measured on HIVE)."""
 
     def generate(self, d, files, runs_diann=True, acquisition="DIA"):
         tools = write(os.path.join(d, "tools.json"), json.dumps(

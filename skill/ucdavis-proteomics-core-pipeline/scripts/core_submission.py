@@ -4474,7 +4474,7 @@ def write_deliver_job(a, session_dir, where_dir: str, label: str, total: int, wa
         raise Stop(EXIT_DECIDE, {"error": f"the delivery job's log path holds a quote or a line "
                                           f"break, which #SBATCH --output cannot carry: {log!r}"})
     # the log path double-quoted: an unquoted space makes sbatch refuse the script ("Invalid
-    # directive"); quoted, HIVE's SLURM writes the log there (job 24808508, 2026-10-15)
+    # directive"); quoted, HIVE's SLURM writes the log there (a test job, 2026-10-15)
     L = ["#!/bin/bash", f"#SBATCH --job-name=deliver_{label}",
          f'#SBATCH --output="{log}"',
          "#SBATCH --cpus-per-task=1", "#SBATCH --mem=2G", "#SBATCH --time=24:00:00"]

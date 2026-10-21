@@ -58,10 +58,10 @@ README requires:
 | `query -i=<raw> -n=<a>-<b> -b=<tmp>/q.json` | isolation target + lower/upper offsets per MS2 scan; filter string (`MS:1000512`, or `MS:10000512` from v1.3.0–v1.4.4) | 1.1–5.8 s for 200–2000 scans |
 
 A `.raw` took **3.1–7.0 s** on the Exploris 480, Fusion Lumos and a DDA Exploris run
-(HIVE srun jobs 23511567, 23512661, 23513356, 23515380), at ~1 core and 286–354 MB peak RSS,
+(four test runs on HIVE), at ~1 core and 286–354 MB peak RSS,
 writing a 1.2–8.8 MB query JSON to `$TMPDIR` that is deleted before the next file. Six files
-in one call took 27–33 s. A busy mount stretches it: two reads took 11.1 and 12.6 s in job
-23515809. Compare ~3 min to write one full mzML.
+in one call took 27–33 s. A busy mount stretches it: two reads took 11.1 and 12.6 s in a
+test run. Compare ~3 min to write one full mzML.
 
 - **Which scans.** The middle of the run, 4 acquisition cycles (cycle = MS2/MS1 count
   ratio + 1, so 26 scans on a 25-window Exploris method), clamped to 200–1500 scans.
@@ -69,8 +69,8 @@ in one call took 27–33 s. A busy mount stretches it: two reads took 11.1 and 1
 - **Range = window edges, never centres.** `precursor_mz_range` is
   min(target − lower offset) … max(target + upper offset): **350.0–1201.0** (Exploris
   480, 25 × 35 m/z) and **350.05–1200.95** (Fusion Lumos, 19 × 45.7 m/z) — the same edges
-  the mzML reader got from the full TRFP 2.0.0.0 mzML of those runs (HIVE srun jobs
-  23508203/23508208), rounded to 0.001 m/z: the parser writes float32 targets, so the
+  the mzML reader got from the full TRFP 2.0.0.0 mzML of those runs (two test runs
+  on HIVE), rounded to 0.001 m/z: the parser writes float32 targets, so the
   mzML path shows `350.04999389648435–1200.9499755859374` for the Lumos. The
   metadata JSON's `MS min MZ`/`MS max MZ` (367.5 / 1183.5 on that Exploris run) and FRAN's
   `raw_files.mass_range_min/max` are the extreme window **centres**; using them clips half
@@ -280,7 +280,7 @@ writes, two-job route, `--matrices`) logged the same and wrote none either. For 
 and cuts the result at every `--`, quoted or not (`arguments()`, `diann.cpp` at tag 1.8), and
 2.7.0 behaves the same: a Core run named `…_DIA--sampA_<well>.d` logged `unrecognised option
 [--sampA_<well>.d]` and `skipping …_DIA - invalid raw MS data format`, and the search went on with
-the other runs; a `--` in a folder is cut the same way (HIVE srun 24807838). `run_search.py` (and `diann_parallel.py` run directly) search a run whose
+the other runs; a `--` in a folder is cut the same way (measured on HIVE). `run_search.py` (and `diann_parallel.py` run directly) search a run whose
 **folder** holds `--` through a link in `<out>/input_links/` under the same file name, so the run
 keeps its name; one whose **file name** holds `--` is refused with the name it would get, unless
 `--rename-dashed-runs` (the link is then named with each run of dashes made one, and
@@ -296,7 +296,7 @@ Radiant's own search and the converters take each run's path as one argument, so
 does not affect them (Radiant's DIA-NN library step is given only the FASTA and an output folder).
 **FragPipe's own DIA-NN step is affected:** FragPipe 24.0 writes each run as a `--f <path>` line of `filelist_diann.txt` and
 hands DIA-NN `--cfg <filelist>--` (`CmdDiann.java`), and DIA-NN cuts that text at every `--` too —
-on HIVE (srun 24807938) DIA-NN 2.7.0 and FragPipe's bundled 1.8.2 beta 8 both skipped a
+on HIVE (in a test run) DIA-NN 2.7.0 and FragPipe's bundled 1.8.2 beta 8 both skipped a
 `x_DIA--sampA_S3.mzML` listed that way. So when a FragPipe workflow runs DIA-NN
 (`diann.run-dia-nn=true`), `run_search.py` refuses any `--` in the path DIA-NN would get (on the
 diaTracer route that is the staged link in `<out>/diatracer_stage/`, so only the file name
@@ -391,7 +391,7 @@ Every job is held to the same contract as the 5-step chain
   bad").
 - **Each job deletes its artefact before DIA-NN runs, then asserts it.** An existence check
   cannot tell this run's file from the previous search's in the same `--out`: reproduced on
-  2.7.0 (review srun 23512013), a re-run with no .NET logged `ERROR: cannot read .raw files`,
+  2.7.0 (in a review run on HIVE), a re-run with no .NET logged `ERROR: cannot read .raw files`,
   exited 0, left the old `report.parquet`/`report.stats.tsv` byte-identical, and both checks
   passed on them. So job 1 removes, then requires, `<out>/diann_lib.predicted.speclib` (the
   name 2.7.0 writes for `--out-lib <out>/diann_lib.speclib`); job 2 removes `report.parquet` and
@@ -406,7 +406,7 @@ Every job is held to the same contract as the 5-step chain
   rows with `Precursors.Identified > 0` (failed files are listed there too, with zeros;
   `report.pg_matrix.tsv`'s header named all three, so it is no evidence). With no parquet
   reader **and** `--no-stats` it cannot count, and fails. A run counts as present with a
-  single row: a wash injection searched beside a real run (2.7.0, srun 23512769) was read
+  single row: a wash injection searched beside a real run (2.7.0, a test run on HIVE) was read
   (`MS1.Signal` 3.5e11), identified 1 precursor, had 1 row in the report, and passes — this
   catches dropped runs, not poor ones. For each missing run the message says what the stats
   file shows: MS1/MS2 signal means DIA-NN **read** it and nothing passed the q-value filter (a

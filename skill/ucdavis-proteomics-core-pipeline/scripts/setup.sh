@@ -166,7 +166,7 @@ create_env() {
   # NAME` built the env under $PWD/quobyte/... -- env_ready never found it, and setup.json said
   # rscript "" after a successful create.
   # --override-channels: the skill names its own channels. A user .condarc with `defaults`
-  # and channel_priority strict (HIVE, a Core admin's account, sbatch 24154212) made libmamba consider only
+  # and channel_priority strict (HIVE, a Core admin's account, in a test job) made libmamba consider only
   # defaults' r-statmod, built for R <= 4.3, and bioconductor-limma 3.66 was unsolvable.
   case "$CONDA" in
     *micromamba)
@@ -191,7 +191,7 @@ fi
 # ---- 2a. limpa >= 1.4.0 -------------------------------------------------------
 # run_de.R reads DIA-NN with readDIANN(annotation.columns =): limpa >= 1.4.0, Bioconductor
 # 3.23. bioconda's only build is 1.2.5 (Bioconductor 3.22, R 4.5), and a 2.8.0 run_de.R died
-# on it (HIVE sbatch 24154221). limpa is pure R -- github.com/bioc/limpa RELEASE_3_23 has no
+# on it (in a test job on HIVE). limpa is pure R -- github.com/bioc/limpa RELEASE_3_23 has no
 # src/, Depends limma with no version and no R floor, Imports data.table / statmod -- and
 # every limma function it imports (lmFit, duplicateCorrelation, squeezeVar, arrayWeights,
 # asMatrixWeights, chooseLowessSpan, loessFit, plotMDS) is in bioconda's limma 3.66. So the

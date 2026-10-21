@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """run_de.R reads the DIA-NN report whatever this limpa calls readDIANN()'s annotation argument.
 
-HIVE sbatch 24154221 (2026-09-27): the 2.8.0 run_de.R passed readDIANN(annotation.columns =),
+A test job on HIVE (2026-09-27): the 2.8.0 run_de.R passed readDIANN(annotation.columns =),
 an argument of limpa >= 1.4.0 (Bioconductor 3.23). setup.sh's env had bioconda's only build,
 limpa 1.2.5, whose readDIANN() calls it extra.columns -- so every dpc DE died with "unused
 argument". limpa_compat.R now passes the annotation under the name this limpa has, and only a

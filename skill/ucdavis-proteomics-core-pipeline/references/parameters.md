@@ -80,7 +80,7 @@ from the value recommended (7 ppm) for the Orbitrap resolution of this run (1200
 **Neither flag is written on its own.** DIA-NN 2.7.0 fixes BOTH levels when either is given —
 `WARNING: note the mass accuracy settings used by DIA-NN, automatic optimisation will not be
 performed as at least one of MS1/MS2 mass accuracies is user-provided`, and `--mass-acc-ms1 7`
-alone gave `Mass accuracy will be fixed to 2e-05 (MS2) and 7e-06 (MS1)` (HIVE srun 23528991) — so
+alone gave `Mass accuracy will be fixed to 2e-05 (MS2) and 7e-06 (MS1)` (measured on HIVE) — so
 a cfg with only `--mass-acc-ms1 7` would silently search MS2 at 20 ppm. The cfg omits both; the
 measurement writes both. A search that cannot measure (`--one-step`: no library exists before the
 search) says so and leaves DIA-NN's first-run optimisation. The same holds for an SOP override

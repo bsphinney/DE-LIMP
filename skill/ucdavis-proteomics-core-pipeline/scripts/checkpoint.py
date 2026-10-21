@@ -14,8 +14,8 @@ Writes two files in the session directory:
 Usage
   # after submitting jobs
   checkpoint.py record --session <dir> --stage search \
-      --jobs 19477495,19477496 --desc "DIA-NN 5-step chain" \
-      --watch-job 19477500 --watch-log <path> \
+      --jobs 9900009,9900010 --desc "DIA-NN 5-step chain" \
+      --watch-job 9900011 --watch-log <path> \
       --next "Rscript run_de.R --input <report> --metadata <conditions> --outdir <tables>"
 
   # on reconnect — queries SLURM live and says what is left

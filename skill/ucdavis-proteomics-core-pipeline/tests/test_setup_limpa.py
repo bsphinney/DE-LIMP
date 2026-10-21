@@ -2,9 +2,9 @@
 """setup.sh builds an env whose limpa is >= 1.4.0, solves with its own channels, and says
 plainly when limpa is too old.
 
-HIVE bstaff, 2026-09-27: (1) sbatch 24154212 -- ~/.condarc with `defaults` and
+HIVE bstaff, 2026-09-27: (1) a test job -- ~/.condarc with `defaults` and
 channel_priority strict left libmamba only defaults' r-statmod (R <= 4.3), and bioconductor-limma
-3.66 was unsolvable: setup.sh now passes --override-channels. (2) sbatch 24154221 -- the env had
+3.66 was unsolvable: setup.sh now passes --override-channels. (2) a second test job -- the env had
 bioconda's only limpa, 1.2.5, and run_de.R died in readDIANN(annotation.columns =), limpa >= 1.4.0.
 setup.sh now installs limpa from the Bioconductor 3.23 source repository (pure R), checks
 packageVersion("limpa") >= 1.4.0 last, reports it in setup.json, and exits 1 when it is short.

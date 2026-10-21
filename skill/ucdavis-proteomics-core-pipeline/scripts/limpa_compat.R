@@ -1,7 +1,7 @@
 # =============================================================================
 # limpa_compat.R -- limpa::readDIANN() across limpa versions.
 #
-# Why (HIVE job 24154221, 2026-09-27): run_de.R passed readDIANN(annotation.columns =)
+# Why (a test job on HIVE, 2026-09-27): run_de.R passed readDIANN(annotation.columns =)
 # unconditionally. That argument is limpa >= 1.4.0 (Bioconductor 3.23). bioconda's only
 # build is limpa 1.2.5 (Bioconductor 3.22), which setup.sh installed -- so every dpc DE on a
 # setup.sh env died with "unused argument (annotation.columns = dpc_ann)".

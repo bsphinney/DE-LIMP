@@ -251,7 +251,7 @@ class MeasuredDefaultsTests(unittest.TestCase):
                       "(`run_search.ARRAY_TASK_MIN_CPUS`)", doc)
         self.assertIn(f"(`diann_parallel.TIME_PER_FILE_HOURS` = {diann_parallel.TIME_PER_FILE_HOURS}"
                       f" h at `TIME_REFERENCE_CPUS` = {diann_parallel.TIME_REFERENCE_CPUS} CPUs", doc)
-        self.assertIn("jobs 24276579–82", doc)
+        self.assertIn("(HIVE, 2026-10-01, four test jobs)", doc)
         self.assertIn(f"(default {diann_parallel.MEM_PER_FILE_GB} GB, "
                       "`diann_parallel.MEM_PER_FILE_GB`;", doc)
         self.assertIn(f"({diann_parallel.MEM_FINAL_PASS_GB} GB, "

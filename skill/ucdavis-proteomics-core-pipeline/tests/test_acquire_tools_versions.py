@@ -510,7 +510,7 @@ class HiveRadiantSifTests(AcquireHarness):
         return p
 
     def test_an_unpinned_hive_sif_records_the_release_its_name_carries(self):
-        """HIVE's real layout. origin/main recorded "latest" here (srun 23512217)."""
+        """HIVE's real layout. origin/main recorded "latest" here (in a test run on HIVE)."""
         p = self.sif("radiant-fulcrum-2.3.3.sif")
         t = self.acquire("hpc", extra_env={"ACQUIRE_RADIANT": "1"})
         self.assertEqual(t["radiant_image"], p)

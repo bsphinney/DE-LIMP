@@ -331,7 +331,7 @@ class UnreadableReport(unittest.TestCase):
 class OtherRoutes(unittest.TestCase):
     """Review of 2.12 (proteomics, P2): Radiant never searched carbamidomethyl-C -- its DIA-NN
     library was predicted without --unimod4 and its config has no modifications (HIVE, DIA-NN
-    2.7.0 job 24807967: 0 of 6,044 C-peptides carried UniMod:4) -- and FragPipe's presets fixed
+    2.7.0, a test job: 0 of 6,044 C-peptides carried UniMod:4) -- and FragPipe's presets fixed
     carbamidomethyl whatever --cys-alkylation said."""
 
     def presets(self, d, engine, *more):

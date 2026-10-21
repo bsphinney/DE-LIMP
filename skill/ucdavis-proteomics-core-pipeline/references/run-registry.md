@@ -301,7 +301,7 @@ run's `run_record.json`. **`flock` does not work across nodes on /quobyte.** Mea
 torn JSON.
 
 The registry uses FRAN's lock instead (`ingest/auto_ingest_state.py`), which lost 0 of 800 in
-the same test. Re-measured for this registry's own appends on 2026-09-24 (job 23991970, two
+the same test. Re-measured for this registry's own appends on 2026-09-24 (a test job on two
 nodes, 400 appends each to one `activity_log.csv`-shaped file on /quobyte):
 
 | Lock | Result |

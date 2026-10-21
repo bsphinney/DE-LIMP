@@ -166,7 +166,7 @@ an instrument, extend the `ACKS` table in `make_methods.py`.
 - Render to Word with `to_docx.py --in methods.md --out methods.docx`.
 
 The agent should **verify the draft against the parameter table and polish the
-prose** (the example in `~/Documents/DataAnalysis/.../timsTOF_Methods` shows the
+prose** (the example in `<your folder of instrument method files>` shows the
 target quality), resolve each `[facility default — confirm]`, and keep the
 acknowledgment verbatim.
 

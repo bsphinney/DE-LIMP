@@ -1461,7 +1461,7 @@ def wrap_job_script(script, out, *, final, time_limit_h, stage, slack=True, fran
 
     * The time limit. SLURM ends a job with SIGTERM to the BATCH SHELL ONLY, and bash runs a
       trap only after the foreground command returns -- so with the work in the foreground
-      (DIA-NN, for hours) the trap never ran: measured on HIVE 2026-09-24 (job 23990731, a
+      (DIA-NN, for hours) the trap never ran: measured on HIVE 2026-09-24 (a test job, a
       1-minute limit), TERM at 1:15, no trap, SIGKILL 130 s later (KillWait). `wait` IS
       interrupted by a trapped signal, so the TERM handler runs at once, reports, and re-raises
       TERM so the job still dies by the signal. (Without a TERM trap, bash's EXIT trap sees
