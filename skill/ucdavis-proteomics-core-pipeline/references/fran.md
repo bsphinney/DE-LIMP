@@ -10,6 +10,21 @@ somebody remembered.
 So: **the orchestrator hands over every eligible HIVE search, without being asked.** The
 user does not have to request it and is not prompted for it; they are *told* it happened.
 
+<!-- contents: tests/test_skill_structure.py --toc -->
+**Contents** (section: line)
+- 28: The skill does not ingest anything
+- 39: Who is handed over — and who must never be
+- 119: The three commands
+- 154: Staged is not ingested — `health`
+- 240: Backfill — searches that were never staged
+- 305: What gets linked
+- 367: Pass the organism — it is the one thing only the skill knows
+- 426: Why `check` refuses (stable codes, never an exception)
+- 471: Idempotency
+- 496: Follow-ups
+- 508: 7c. Hand the search to FRAN (step 7c)
+<!-- /contents -->
+
 ## The skill does not ingest anything
 
 FRAN runs its own ingest cron on HIVE that scans for new searches. All the skill has to do
@@ -489,3 +504,108 @@ Less-used flags: `health --no-code` skips the GitHub comparison of FRAN's ingest
 network); `backfill --sbatch --sbatch-dir <dir>` (default `~/fran_backfill`) and
 `--sbatch-minutes <n>` (default: the time budget plus 10 min) set where the job script goes and
 its time limit.
+
+## 7c. Hand the search to FRAN (step 7c)
+
+Every search the **UC Davis Proteomics Core** runs on HIVE goes into
+[FRAN](https://fran.stan-proteomics.org), the Core's cross-search corpus. **The last job of a
+DIA-NN search stages it itself** when the search finishes (the job-end hook, step 7), so it
+reaches FRAN even with the laptop closed. Its result is the `fran_deposit stage:` line in that
+job's log and `<out>/fran_deposit.json`. Some searches are **left to you**:
+
+- FragPipe and Radiant searches, which have no completeness guard in the job
+  (`left_to_agent`);
+- a job that ended too close to its time limit (`near_time_limit`);
+- a stage that shows `error`.
+
+For those, once the search is done, run `check` and, when eligible, `stage` below.
+`already_staged` means the job did it. **Do this without being asked**, unless the user opted
+out (`--no-fran`). The user is told it happened, never prompted for it. A corpus filled only
+with the searches somebody remembered answers "has anyone seen this peptide?" with a *no*
+that is really a *don't know*.
+
+FRAN runs its own ingest cron on HIVE, so the skill does **not** ingest: it symlinks the
+search into FRAN's drop directory (`/quobyte/proteomics-grp/fran/incoming/`) and stops.
+Nothing is copied, no database or credential is involved, and it takes a second whatever the
+size of the search.
+
+**A collaborator's search must never be handed over.** The gate is write permission on that
+directory — it lives inside `/quobyte/proteomics-grp`, so a HIVE account outside the group
+physically cannot stage. Run the check and believe it.
+
+```bash
+# on HIVE (hive_remote → through hive_exec.sh), once the search is COMPLETED and verified
+python3 scripts/fran_deposit.py check --out <hive search out dir>
+python3 scripts/fran_deposit.py stage --out <hive search out dir> \
+    --organism "<the organism the user CONFIRMED>" --taxon <taxid> --name "<analysis name>" \
+    [--qc | --not-qc]
+python3 scripts/fran_deposit.py verify --out <hive search out dir>   # later: did the cron take it?
+python3 scripts/fran_deposit.py health     # is FRAN's cron taking anything at all? (reads its logs)
+```
+
+- Works for all three DIA routes — **DIA-NN, FragPipe, Radiant/Fulcrum** — and links each
+  engine's own quant of record. DIA-NN `--xic` chromatograms (`report_xic/`) ride along when
+  the search produced them.
+- **QC runs are never handed over** (reason `qc_run`). The rule is FRAN's own, applied to the
+  analysis name, the session name and the out-dir path: a `QC` token catches
+  "chkLUppm_HeLa50_2026 Lumos QC", and so does the Core's HeLa standard beside a run method
+  ("07162026_HE50_60-spd-dia", "FL030926_HeL50_90m_3"), while "HeLa" alone is NOT QC. A
+  QC-looking name that also carries a PROT_#### id gets `needs_agent_check` instead: nothing is
+  staged or recorded. Decide from what the user told you and re-run `stage` with `--qc` or
+  `--not-qc`; ask only if you cannot tell. The decision is made at
+  GENERATION (step 7, `run_search.py`): `--fran-name` always, plus `--qc` for a QC run, bakes it into the job-end
+  hook, so a QC run never reaches FRAN's queue. Pass the same `--name` / `--qc` / `--not-qc`
+  here. A search that turns out to be QC after it was staged is withdrawn (manifest
+  `qc: true`, and `verify` says `qc_excluded`), and it stays withdrawn: a later `stage` without an explicit `--not-qc` leaves it out. If the rule misfires on a real experiment, use
+  `--not-qc`.
+- **`check` first, and treat an ineligible run as normal.** `not_core_facility`,
+  `not_on_hive`, `engine_unsupported` (Sage/AlphaDIA — the corpus is DIA),
+  `search_incomplete` and `qc_run` are correct outcomes, not errors. (`search_incomplete` also covers a FragPipe or Radiant run without its completion marker, FragPipe's log `ALL JOBS DONE` or Fulcrum's `_SUCCESS`: a cancelled FragPipe run keeps its report. `not_core_facility` also covers a teaching account's coursework, `proteomics-class-NN`.) `drop_dir_not_writable` and `entry_not_writable` are permission problems, not decisions: say so in one line with the `chmod` the detail names. Nothing is recorded, so the next stage retries. Say one line and move on
+  to DE — never block, retry, or ask the user to fix it.
+- **Pass `--organism`/`--taxon`.** A DIA-NN `report.parquet` has no organism column, so
+  without it the corpus row is `NULL` and the search is invisible on FRAN's species page. The
+  user already confirmed the organism at step 3 and it is in `<fasta>.meta.json` (read
+  automatically, but only a sidecar tied to the search's own `--fasta`; a `--fasta-meta` that does not match it is ignored with a warning, and the search's own sidecar is used if there is one). Never invent one
+  (architectural rule #2).
+- **Staged is not ingested.** Run `health` at this step: it reads FRAN's cron logs, compares
+  the ingest code HIVE runs with FRAN's GitHub `main` (10 s cap, no credential), and records
+  its verdict in `/quobyte/proteomics-grp/fran/ingest_health.json`. `stage` only reads
+  that file; it makes no network call. When the last verdict is `stuck`, `not_running` or
+  `stale_code` and was checked within the last 12 h, stage's JSON carries `health_warning` (the same line is
+  on stderr). An older verdict is just `unknown`, with no warning. The search **is** staged. Tell the user in one line: handed over, but FRAN's
+  ingest is stuck/stale **on FRAN's side** (quote the warning). Never re-stage, retry, or
+  touch FRAN's code, its HIVE copy or its database over it.
+- **`verify`:** `staged_pending_cron` is success, not failure — "handed over, the cron
+  ingests on its next scan"; if its `cron.verdict` is `stuck`, add that FRAN's cron is stuck.
+  `qc_excluded` is a QC run kept out, as intended. `ingest_failed` means the cron tried and
+  failed: give its one-line reason, say it is FRAN-side, and do not re-stage. The one state to act on is a `broken_links` warning:
+  re-run `stage --force` with the same `--name` (and `--qc` / `--not-qc`) the search was staged
+  with. Without a corpus token (the usual case) `verify` answers from the
+  cron's logs.
+- **Searches that were never handed over** (before staging was automatic, or a session that
+  ended early): `backfill` finds them. Only when the user asks for it. Run
+  `backfill --sbatch`, submit the job it writes (never walk the service trees on a login
+  node), show the user the dry-run list, and run `backfill --sbatch --apply` only after they
+  say yes. Searches listed `needs_agent_check` (FragPipe/Radiant with no completion marker to
+  read) are never staged by `--apply`: confirm each one finished, then `stage --out <dir>`.
+- Re-staging is safe and converges on one entry. `--no-fran` at generation, `FRAN_DEPOSIT=off`
+  or `--skip` opts a run out, and the receipt records it so a later backfill honours it. → detail:
+  `references/fran.md`.
+- **HT submission (step 1a)? Nothing to record — just confirm the loop closed.** There is
+  deliberately **no write-back**: STAN v1.0.43 reverted the `ht_searches` table because it
+  would be a stale second copy of what FRAN already knows. The submission number is in the
+  raw filenames, so FRAN answers by submission on its own.
+  ```bash
+  python3 scripts/ht_manifest.py link 0793
+  ```
+
+  **Exit 4 is not a search failure** — it means "not visible in FRAN yet", the expected
+  answer while `fran_deposit.py` says `staged_pending_cron`. Re-run later. And a **404 is
+  not proof of "not ingested"**: that endpoint is internal-only and returns 404 to anyone
+  not signed in, so never report it as a failed handover.
+  ⚠ **Never write HT output under `/quobyte/proteomics-grp/STAN/`** — it's on FRAN's
+  `DEFAULT_EXCLUDES` because STAN writes a `report.parquet` per QC run, and ingesting those
+  as customer searches would corrupt every corpus count.
+  → detail: `references/ht-submissions.md`.
+
+Core staff: board.md §3 row "FRAN hand-over", once per search folder.
