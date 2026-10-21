@@ -3,6 +3,25 @@
 Acquisition detection, engine routing, and normalizing each engine's output to the
 DE-input contract.
 
+<!-- contents: tests/test_skill_structure.py --toc -->
+**Contents** (section: line)
+- 25: Acquisition detection (`detect_acquisition.py`)
+- 193: Parameters
+- 198: Routing
+- 204: Licensing — pick a commercial-OK engine for non-academic users
+- 216: Public program sources (anyone, any OS — cite these for non-Core / external users)
+- 239: Per-engine invocation & output adapter (`run_search.py`)
+- 843: The adapters are the test surface
+- 850: Less-used flags
+- 870: 2. Detect acquisition + instrument (step 2)
+- 968: 4a. DIA: the three routes (step 4a)
+- 1006: 7. Running the search: the command, `--` paths, keratin (step 7)
+- 1040: 7. Radiant + Fulcrum in the pipeline (step 7)
+- 1081: 7. Licensing, AlphaDIA, chromatograms and DIA-NN settings (step 7)
+- 1114: 7. On a cluster: submitting, Sage conversion and the LFQ gate (step 7)
+- 1163: 7. After submitting: the DE contract and the conversation (step 7)
+<!-- /contents -->
+
 ## Acquisition detection (`detect_acquisition.py`)
 
 | format | how DIA/DDA is decided | instrument |
@@ -847,3 +866,304 @@ intensities are in the expected (linear, pre-log) scale before trusting DE outpu
 - De novo: `denovo_search_cmd.py --sif <riffle.sif> --taxonlist <ids>` (2759 = Eukaryota; empty for
   all of nr); `denovo_homology_fdr.py --fdr <q>` (default 0.01), `--no-model` (E-value alone),
   `--features default` (the others only reproduce the comparison).
+
+## 2. Detect acquisition + instrument (step 2)
+
+```
+python3 scripts/detect_acquisition.py /path/to/*.d /path/to/*.raw
+```
+
+Returns per-file `acquisition` (DIA/DDA/unknown) + `confidence`, plus an overall
+`instrument`. **If `needs_confirmation` is true, ask the user** before continuing
+— mixed/unknown/low-confidence must not silently pick an engine.
+**Tell the user what every file's `warnings` say** (also printed to stderr; any warning
+sets `needs_confirmation`).
+**A file name with `--` in it (`dashed_run_names`).** DIA-NN reads `--` as the start of an
+option, quoted or not, so such a run can be searched only under another name, its
+`renamed_run_name` (each run of dashes made one; Sage is not affected). Decide it **now**, with
+the user (Core staff for a submission) — the run keeps its data, only its name changes. Then
+build `conditions.csv` with the new names: `collect_conditions.py … --rename-dashed-runs` (step 3),
+or `core_submission.py conditions … --rename-dashed-runs` for a submission (re-run it if step 1c
+already built the CSV); and pass `--rename-dashed-runs` to `run_search.py` at step 7.
+`collect_conditions.py --validate` names any row still holding the raw name. FragPipe's DIA-NN
+route cannot rename and refuses such a run.
+Thermo `.raw` is read through **ThermoRawFileParser**, looked for in this order:
+`$THERMORAWFILEPARSER` (a whole command, e.g. `"dotnet …/ThermoRawFileParser.dll"`), PATH,
+the pipeline env (`setup.sh` installs bioconda's self-contained build there), then
+`$THERMORAWFILEPARSER_SHARED` (default: the UC Davis Core's
+`/quobyte/proteomics-grp/tools/ThermoRawFileParser/ThermoRawFileParser`). Public sources:
+https://github.com/compomics/ThermoRawFileParser/releases, or `conda install -c bioconda
+thermorawfileparser`. A framework-dependent build (the Core's copy, or the release's `-net8`
+zip) needs .NET 8 with **both** Microsoft.NETCore.App and Microsoft.AspNetCore.App; the
+script finds an install that has both and hands it to the parser itself — **don't export
+DOTNET_ROOT for step 2**. If none has both, it prints one `ERROR: … cannot start` up front
+and reads nothing (every `.raw` comes back `unknown` with that reason): run `bash
+scripts/ensure_dotnet8.sh` (installs both into `~/.proteomics-pipeline/dotnet8`; needs
+internet; on a cluster login node its download runs itself on a compute node), and re-run
+step 2; or on HIVE load the module inside step 2's own job: `bash scripts/hive_exec.sh --job …
+'module load dotnet-core-sdk/8.0.4 && python3 ~/proteomics-pipeline/scripts/detect_acquisition.py
+…'` (`hive_local`: `python3 scripts/on_compute.py … -- bash -lc 'module load
+dotnet-core-sdk/8.0.4 && python3 scripts/detect_acquisition.py …'`). From a laptop the job is a
+new ssh and a new shell on the compute node, so a module loaded in your own shell never reaches
+it. Re-running step 2 without one of these gives the same answer on any node. Each file's
+`reader` records the parser, its version and the `DOTNET_ROOT` used. A `.raw` that is `unknown`
+for any other reason says why in its `warnings`; without a measured precursor range step 6b
+falls back to 380–980 for DIA, and refuses a DIA-NN DDA cfg.
+**The Orbitrap resolution is read from the `.raw` itself.** For every Orbitrap `.raw` (not
+the Astral — its DIA-NN tolerances do not use it) `detect_acquisition.py` reads the MS1 and
+MS2 resolution from the scan trailer through `thermo_resolution.py` (Thermo's RawFileReader
+DLLs via pythonnet, in one subprocess; the key is `Orbitrap Resolution:` on a Fusion Lumos,
+`FT Resolution:` on an Exploris 480 — ThermoRawFileParser itself never outputs it). Each
+file gets `ms1_resolution`, `ms2_resolution` and a `resolution_note` naming the scans they
+came from, or why not. At the top level:
+
+- `ms1_resolution` / `ms2_resolution` — set only when every Orbitrap file agrees. **Pass them
+  to steps 4 and 6b with `--resolution-source detected`.**
+- `resolution_mixed` — non-empty when files disagree (e.g. 120k/15k DIA runs with a 60k/15k
+  DDA run); it sets `needs_confirmation`. **Tell the user which files read what; search the
+  groups separately or agree one setting with them — never pick one silently.**
+- `orbitrap_resolution_unknown` — only the files that could NOT be read, with `reasons`
+  (pythonnet missing, no .NET 8, no DLLs, two resolutions in one file, …), per-file `levels`
+  and `read_in_other_files`. **Ask the user for just the levels `levels` names for each of
+  those files** (it is in the instrument method), or fix the reason and re-run step 2.
+- `ms2_ion_trap` — runs whose MS2 is read in the ion trap (e.g. Fusion Lumos OT/IT DDA): only
+  the MS1 Orbitrap resolution applies. **Never ask for or pass an MS2 resolution for them**;
+  pass `--ms2-analyzer ITMS` in steps 4/6b and confirm their search settings with the user
+  (see its `note`). Files in its `mixed_files` read MS2 in BOTH analyzers (e.g. a Tribrid
+  decision-tree method); they set `needs_confirmation` — confirm the method with the user, then
+  pass `--ms2-analyzer mixed` (Sage's ±0.4 Da ion-trap window also covers the Orbitrap
+  fragments).
+A missing resolution never changes the acquisition, the range or `needs_confirmation`.
+Each file also gets **`acquired_at`** (the start of acquisition, UTC) with `acquired_at_source`
+and `acquired_at_note`, read in the same pass: from a `.d`'s `AcquisitionDateTime`, and from a
+`.raw`'s ThermoRawFileParser creation date, which records no time zone and is read as the Core's
+Pacific time (the note says so). Step 8e uses them. **Keep this step's JSON**: save it as
+`<session>/input/acquisition.json` at step 3b.
+Each `.raw` costs ~3–7 s of parser I/O (more on a busy mount). **On a cluster, run step 2 on
+a compute node whenever there is a `.raw`**, in the background: `bash scripts/hive_exec.sh --job
+--preemptible --time <T> --mem 2G 'python3 ~/proteomics-pipeline/scripts/detect_acquisition.py …'` with `<T>`
+= the number of `.raw` ÷ 4 in minutes, at least 10 (`hive_local`: `python3
+scripts/on_compute.py --preemptible --time <T> --mem 2G -- python3 scripts/detect_acquisition.py …`). A
+`.d`-only input is an SQLite lookup per file and may stay on the login node. On a login node the
+script itself refuses more than 5 `.raw` before reading anything and prints the `srun` line. Do not add
+`--allow-login-node` yourself to get past the refusal; it is for a user who chooses that.
+For a Bruker `.d` the
+`warnings` come from `tdf_integrity`: `truncated` means `analysis.tdf` indexes only
+part of the run and a search would silently read just that part — **do not search
+that run**; find an intact copy. `stale_side_file` (a non-empty `-wal`/`-journal`
+beside a complete index, whatever the header says): **do not search it as it is** —
+an engine that opens the tdf without `immutable`, even read-only, reads a stale `-wal`
+as part of the database, and backing up `analysis.tdf` does not stop that. With the
+user's agreement, copy the side files (and any `-shm`) to a backup outside the `.d`,
+remove them from the `.d` **once acquisition has finished and nothing holds the `.d`
+open**, and re-run detection. `at_risk` (WAL-mode header, complete index, nothing beside
+it) can be searched as it is. Open any `analysis.tdf` yourself
+only with `sqlite3 "file:<tdf>?mode=ro&immutable=1"` — a read-write open (a plain
+`sqlite3 <tdf>`, for one) replays a stale `-wal` into the file and truncates it,
+which is the state the 342 truncated tdfs on HIVE were found in.
+`run_search.py` runs the same check on its own inputs and **refuses** a non-`ok` `.d`
+(`--allow-damaged-tdf` overrides) — so this is enforced even when this step is skipped,
+which is what "re-run this search" and "the paths are already known" do.
+
+## 4a. DIA: the three routes (step 4a)
+
+**DIA-NN is the default. Use it unless the user asks otherwise** — don't make them
+adjudicate a tooling question to get their proteins. Name the alternatives in a
+clause ("FragPipe and Radiant are also available") and move on.
+
+| Route | Engine | Instruments | Runs on a Mac? | Notes |
+|---|---|---|---|---|
+| **DIA-NN** — *the default* | `diann` | Thermo + Bruker | Docker only (**emulated** on Apple Silicon) | Reads `.raw` and `.d` natively. |
+| **FragPipe DIA** | `fragpipe` | Thermo *or* Bruker — **different presets** | **No — no macOS build at all** | Thermo → `DIA_SpecLib_Quant`. Bruker → `DIA_SpecLib_Quant_diaPASEF` **with diaTracer**. Not interchangeable. |
+| **Radiant + Fulcrum** | `radiant` | **Thermo Orbitrap only** | **Yes — natively, incl. Apple Silicon** | Container reads mzML/Parquet, so `.raw` is converted first and Bruker `.d` is refused. Needs a DIA-NN-generated library. Licence-restricted — see below. |
+
+**Platform gating (verified against each project's released artifacts).**
+`detect_env.sh` emits an `engines` map; `resolve_defaults.py --env` enforces it.
+
+- **FragPipe has no macOS build, Intel or ARM** — 24.0 ships only a Windows
+  installer and a Linux zip. On any Mac this route is unavailable; point at HIVE.
+- **DIA-NN has no macOS build either** and runs only in a linux/amd64 container. On
+  **Apple Silicon that means Rosetta emulation** — correct results, but far slower.
+  Say so before a big cohort, and offer HIVE.
+- **Radiant's image is multi-arch**, so on an M-series Mac it is the **only DIA
+  engine that runs natively**. Worth naming when someone is working locally.
+- **Sage** ships a native `aarch64-apple-darwin` build, so DDA on a Mac is fine.
+- **diaTracer is Bruker-only.** It converts dia-PASEF `.d` into pseudo-MS/MS
+  spectra; it has no role on Thermo data and is switched off in the Thermo preset
+  (`diatracer.run-diatracer=false`). The two FragPipe presets also differ in MBR,
+  missed cleavages, precursor charge, mass tolerance, and topN peaks — never swap
+  one for the other by flipping the diaTracer flag.
+- **Presets are generated, not stored per organism.** `make_presets.py` picks the
+  vendor template by data type and patches only what's run-specific (FASTA, threads)
+  — see step 6c. If a route can't apply to the data (Radiant on Bruker `.d`), it
+  refuses with a pointer instead of producing a config no vendor validated.
+- **Radiant licence:** Apache-2.0 **+ Commons Clause + mandatory grant-back**. The
+  Commons Clause restricts *selling* a service whose value derives substantially
+  from the software. **Say this before running it for anything fee-for-service** —
+  it surfaces in `tools.json` `notes` too. Don't advise on the legal question;
+  point at it and let them decide.
+
+## 7. Running the search: the command, `--` paths, keratin (step 7)
+
+```
+python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \
+    --bundle ./wf/workflow.manifest.json --params ./wf/params.<cfg|json> \
+    --fasta ./search.fasta --out ./search_out --files /path/to/*.d --threads 16 \
+    [--keratin-sample]
+```
+
+- **On the 5-step chain `--threads` is a ceiling.** Each array task is sized to the queue's
+  per-user CPU cap so more files run at once (8 CPUs, 8 files at a time on
+  `genome-center-grp/high`); relay the `[diann_parallel] array steps 2 and 4: …` line.
+  `--threads-per-file N` pins it (`references/diann_parallel.md`, "CPUs per array task").
+- **A path with `--` in it (DIA-NN).** DIA-NN cuts its command line at every `--`, quoted or
+  not, so such a run is skipped and the search goes on without it. A run whose *folder* holds
+  `--` is searched through a link in `<out>/input_links/` with the same file name (nothing
+  changes downstream). A run whose *file name* holds `--` is **refused** unless
+  `--rename-dashed-runs` is given — decided at step 2 (`dashed_run_names`), with `conditions.csv`
+  built on the new names. An `--out`/`--fasta`/`--params` with `--` is refused, and so is any
+  `--` path DIA-NN would get on the FragPipe route (no renaming there). A DIA-NN search
+  **fails** unless its report holds every input run (`check_report_runs.py`, in the single-shot
+  search job and the chain's step 5); **do not resubmit** it, and do not edit `file_list.txt`
+  (step 5's list is fixed at generation) — the message says what to do: a blank the user or staff
+  agree to leave out is recorded with `check_report_runs.py … --accept-missing <run> --reason
+  "<why>"` (re-checks the report already written, runs nothing), dropped from `conditions.csv`,
+  and the report used.
+- **Keratin sample (step 3) → `--keratin-sample`.** The search is then REFUSED, before
+  anything is written or submitted, if `--fasta` still holds a keratin-family `Cont_` entry;
+  the message prints the `fetch_fasta.py fetch … --keratin-sample` command to rebuild it. A
+  FASTA whose sidecar says `keratin_sample: true` makes the search a keratin sample even
+  without the flag. `search_provenance.json` records `keratin_sample`, which `run_de.R` reads.
+- DIA → whichever of the three routes the user chose in step 4a (**default DIA-NN**);
+  DDA → Sage; FragPipe/Radiant when the bundle names them or the user asks.
+
+## 7. Radiant + Fulcrum in the pipeline (step 7)
+
+- **Radiant + Fulcrum (Thermo Orbitrap DIA).** Add `--engine radiant`:
+  ```
+  python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \
+      --bundle ./wf/workflow.manifest.json --params ./wf/default.radiantConfig \
+      --fasta ./search.fasta --out ./search_out --files /path/to/*.raw \
+      --engine radiant --threads 16
+  ```
+  - **Thermo only.** Bruker `.d` is refused with an error pointing at the DIA-NN or
+    diaTracer route. `.raw` is converted to mzML first, the same way as for Sage
+    (ThermoRawFileParser; see the Sage bullet under "On `hpc`" below). With `--sbatch`
+    the conversion **and** the DIA-NN predicted library run inside the job, never before
+    it is submitted.
+  - **A spectral library is always required**, and `run_search.py` generates one with
+    **DIA-NN's predictor** (`--fasta-search --predictor --gen-spec-lib --out-lib
+    …tsv`) because Radiant reads DIA-NN's library TSV schema natively. Pass
+    `--library` to reuse an existing DIA-NN `.tsv` library instead. This means the
+    Radiant route **also needs DIA-NN acquired**.
+  - ⚠ **`--libfree` is a misnomer.** In Radiant's CLI it is the same switch as
+    `--no-mbr`, so it selects single-pass vs match-between-runs — it does **not**
+    mean "no library". **MBR is ON by default in this skill** (`--no-mbr` to disable),
+    because the DIA-NN chain builds an empirical library from all runs and re-searches
+    against it; leaving Radiant single-pass makes it the only engine without cross-run
+    information and understates it. Seer's shipped example TOML has `mbr = false`.
+  - **On a cluster, this parallelises automatically.** Radiant's own backend is
+    serial (`NotImplementedError` for parallel mode), so N files would cost N × one
+    file. But the *search* is per-file independent — only rescoring/FDR/inference/
+    rollup need the whole set. With >1 file and `sbatch` on PATH, `run_search.py`
+    emits a **3-step chain** via `radiant_parallel.py`:
+    1. DIA-NN predicts the library (1 job)
+    2. **one `RadiantDIA` per file as a SLURM array** (N tasks) → `.radiantDIA` results
+    3. **one Fulcrum job** rescores the whole set (`reuse_existing = true` makes it
+       skip re-searching and go straight to FDR + inference + rollup)
+
+    Submit with dependencies (the JSON output prints the exact lines), then
+    `run_search.py --adapt-only --engine radiant` to build `report.parquet`. Step 2 is
+    idempotent, so a preempted `publicgrp/low` task requeues without redoing work.
+    Use `--no-parallel` to force the single serial search.
+  - Licence: Apache-2.0 + **Commons Clause** + mandatory grant-back — see step 4a.
+
+## 7. Licensing, AlphaDIA, chromatograms and DIA-NN settings (step 7)
+
+- **⚠ DIA-NN licensing (ask before a DIA run):** DIA-NN's free "Academia" build is
+  licensed for **academic / non-profit use only**. If the user is in a **commercial /
+  non-academic** setting, do NOT use DIA-NN — **offer AlphaDIA** (`--engine alphadia`,
+  Apache-2.0, commercial-OK; the open-source DIA alternative) or Sage (MIT, also
+  commercial-OK). A quick question: *"Is this academic/non-profit, or commercial?"* —
+  commercial → AlphaDIA. (AlphaDIA is deep-learning based; a GPU is strongly
+  recommended — best on a HIVE GPU node or a GPU workstation.)
+- **⚠ AlphaDIA limitation — timsTOF whole-proteome directDIA:** AlphaDIA does **not**
+  work on **timsTOF** `.d` files for **whole-proteome library-free (directDIA)**
+  searches. So for timsTOF + whole-proteome + library-free, AlphaDIA is NOT an option.
+  In that case: academic → DIA-NN; commercial → use a **spectral-library** approach
+  (predicted/empirical library) rather than directDIA, or Sage — and tell the user the
+  constraint. (Non-timsTOF instruments, or library-based timsTOF runs, are fine for AlphaDIA.)
+- **Every DIA-NN search extracts chromatograms — this is not optional.** `run_search.py`
+  forces `--xic 10 --mobilograms` into the cfg if it isn't already there (writing an
+  augmented copy to `<out>/params_with_xic.cfg`; your file is never edited). XICs are what
+  let a person *look* at an identification instead of trusting a q-value, and they are the
+  input to FRAN's chromatogram lane (step 7c). Budget the disk: measured **27 GB of XIC for
+  399 runs (~69 MB/run, ~10× the report)**. `--mobilograms` travels with `--xic` because
+  `--xic` alone can leave the mobilogram parquets empty; DIA-NN ignores it on instruments
+  with no ion mobility. Where they land depends on the route — single-shot writes
+  `<out>/report_xic/`, the parallel chain writes `<out>/xic/t<N>_xic/` one per file
+  (→ `references/diann_parallel.md`).
+- **DIA-NN search settings:** always use the **estimated cfg** (step 6b) — it encodes
+  DIA-NN's official recommended per-instrument mass tolerances (timsTOF → MS1/MS2 15
+  ppm; Orbitrap Astral → 4/10 ppm; Orbitrap by resolution 240k→4, 120k→7, 60k→10,
+  30k→15; an Orbitrap level outside that table is measured with DIA-NN before the
+  search, never extrapolated).
+  Don't override these unless the user asks, and then record who and why
+  (`--override-by`, `--override-reason`): an override is the user's choice, recorded as such.
+
+## 7. On a cluster: submitting, Sage conversion and the LFQ gate (step 7)
+
+- **On `hpc`:** add `--sbatch job.sh`, then submit **what `run_search.py` prints under
+  "submit with:"** (over `hive_exec.sh` for a remote HIVE run). Re-run with `--adapt-only`
+  afterward for Sage/FragPipe/AlphaDIA to build `report.parquet`.
+  - **Sage (and single-job Radiant) with `.raw`/`.d` input:** nothing is converted on the
+    login node. The job converts each file to mzML on the compute node first: `.raw` with
+    ThermoRawFileParser (`-f=2`, found the way step 2 finds it), `.d` with msconvert. A
+    file the converter leaves incomplete stops the job before the search
+    (`FAILED: no mzML from …`; watcher class `sage_no_mzml`).
+  - **Sage LFQ check.** After Sage (in the job, and again at `--adapt-only`),
+    `sage_lfq_check.py` compares each run's median precursor mass error with Sage's LFQ
+    window (`quant.lfq_settings.ppm_tolerance`, default ±5 ppm). It also reads how many
+    target MS1 peaks Sage kept at 5% FDR. A run whose MS1 is off by more than the window
+    minus 2 ppm, or 0 or very few peaks, gives `[sage_lfq_check] WARNING:`. **Tell the
+    user before any DE:** the identifications stand, but the quantities do not.
+    **Runs outside the window are a gate, not only a warning.** The check computes the
+    corrected window from the measured offsets (the worst run's median + 2 ppm, rounded up),
+    writes it into a copy of the search's config (`<out>/sage_config.lfq_ppm<N>.json`), and
+    records the exact `run_search.py` command that repeats the search with it into
+    `<out>_lfq_ppm<N>` (`rerun.command` in `sage_lfq_check.json` and `search_provenance.json`;
+    the job prints it). Until one of two things happens, `--adapt-only` (and an inline search)
+    **refuses** to build `report.parquet`, and `run_de.R` refuses a report beside such a record:
+    - **the user agrees to re-run:** submit that command as printed (it is a new search —
+      golden rule 1), then `--adapt-only` on the new folder. Compare its target MS1 peaks and
+      its target/decoy separation with the first search before using it: a wider window also
+      admits more interference. Above 20 ppm Sage warns, and recalibrating the mzML is the
+      better fix;
+    - **or the user accepts these quantities as they are** (e.g. only the identifications
+      matter): `--adapt-only --accept-lfq-window "<who accepted, and why>"`. That is recorded
+      (`accepted`), and AUDIT.md says it.
+    Never re-run, and never accept, without asking. A low peak count with a fitting window
+    stays a warning: its cause is unknown, so there is no corrected search to point to. The
+    record is `<out>/sage_lfq_check.json` (also in `search_provenance.json`), and
+    `watch_run.sh --out`, `checkpoint.py status` and `audit_results.py --search-out` report it.
+  - **A DIA-NN search with no `--lib`** (library predicted from the FASTA — the usual case
+    for ≤5 files) is **two jobs**, library then search, chained by **`bash
+    <out>/submit.sh`**; `job.sh` itself is not written (a `job.sh` left from an earlier
+    search is renamed `job.sh.stale-<time>`). `submit.sh` writes `<out>/jobs.txt`, so watch
+    both with `watch_run.sh --all <out>`. Exit 0 here.
+  - **Except when it routed to the 5-step chain** (DIA-NN, >5 files, SLURM — i.e. most
+    real cohorts). The chain generates six scripts plus its own `submit.sh`, so there is
+    no single job to submit: `--sbatch` is **not** written, `run_search.py` **exits 3**
+    (so `--sbatch job.sh && sbatch job.sh` stops), and any existing `job.sh` from an
+    earlier search is renamed to `job.sh.stale-<time>` so it cannot be resubmitted by
+    mistake. The chain *is* generated — run **`bash <out>/submit.sh`**. Exit 3 here is
+    that message, not a failed search; check the routing line it prints. Want one job
+    script anyway? `--no-parallel`.
+
+## 7. After submitting: the DE contract and the conversation (step 7)
+
+- Output is normalized to the **DE contract**: a DIA-NN-shaped `report.parquet`.
+- **Once the search is submitted, save the conversation so far**:
+  `python3 scripts/save_transcript.py <S>` (hive_remote: `--hive "$S"`). See "Keeping the record
+  of the analysis".
+- Core staff: board.md §3 row "search submitted", right after it is submitted (`cpu_hours_reserved` of 10,000 or more: ask there first).
