@@ -313,6 +313,17 @@ class TheCheck(Fixture):
         self.assertIn("No other protein lost all or most of its signal", f[3])
         (f,) = cc.audit_findings(rec, DE_KEPT)
         self.assertNotIn("left out of the measurements", f[3])
+        self.assertTrue(f[3].endswith("No other protein lost all or most of its signal to the "
+                                      "contaminant list."), f[3])
+        # true also when a gene lost a minority of its signal (verification of 2.14, L-new-1)
+        minor = self.run_check(CLEAN + MASKED + COMPETED + [("P60709", "EEEEEEEK", 5000)])
+        self.assertEqual((minor["competed_out"], minor["siphoned"]), ([], []))
+        self.assertEqual(minor["n_genes_lost_minority"], 1)
+        for de in (DE_REMOVED, DE_KEPT):
+            (f,) = cc.audit_findings(minor, de)
+            self.assertEqual(f[0], "PASS")
+            self.assertIn("No other protein lost all or most of its signal", f[3])
+            self.assertNotIn("lost its peptides", f[3])
 
     def test_only_a_true_il_twin_is_listed_as_one(self):
         rec = self.run_check(CLEAN + [("Cont_Q90002", "ASEDLKK", 100)])
