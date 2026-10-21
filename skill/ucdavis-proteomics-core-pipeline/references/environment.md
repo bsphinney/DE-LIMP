@@ -2,6 +2,18 @@
 
 How the skill adapts to where it's running, plus FASTA resolution.
 
+<!-- contents: tests/test_skill_structure.py --toc -->
+**Contents** (section: line)
+- 17: Platform classes (`detect_env.sh`)
+- 30: DIA-NN by environment
+- 69: The R stack: limpa >= 1.4.0 (`setup.sh`)
+- 145: Version pinning (reproducibility)
+- 250: FASTA resolution (`fetch_fasta.py`)
+- 423: SLURM submission (hpc)
+- 493: 5. Acquiring the pinned engine (step 5)
+- 526: 6. Building the FASTA (step 6)
+<!-- /contents -->
+
 ## Platform classes (`detect_env.sh`)
 
 | class | how detected | engine acquisition | execution |
@@ -477,3 +489,185 @@ instead, which has no single job script: `job.sh` is not written, an existing re
 that name is renamed to `job.sh.stale-<time>` once the chain is generated, and
 `run_search.py` exits 3. Submit `<out>/submit.sh`
 (→ `references/diann_parallel.md`).
+
+## 5. Acquiring the pinned engine (step 5)
+
+Honor the manifest's exact version — not "latest":
+
+```
+PIN_ENGINE=diann PIN_VERSION=2.7.0 bash scripts/acquire_tools.sh <platform_class>
+```
+
+Reads/writes `~/.proteomics-pipeline/tools/tools.json`. On HIVE it reuses the Core's
+native DIA-NN build for that version (downloading it if the Core has none — a download runs
+itself on a compute node, so run the call in the background); on mac it uses
+Docker for DIA-NN. **Read `tools.json` `notes`** — license gates (FragPipe, Radiant) and
+missing-runtime warnings surface there. `tools.json` `versions` is the build it found,
+never `latest` and never the version that was ASKED for (`""` when it cannot tell, `env` for
+a `sage` on PATH). `run_search.py` records it as the engine version only if it is shaped
+like one — `2.6.1`, `v0.14.7` — so any other word there ends as `version: null`, not as a
+version deposited to FRAN. If `run_search.py`
+later prints an **engine version mismatch WARNING**, the version the user confirmed is not
+the one about to run — say so before submitting (both land in `search_provenance.json`). If
+it prints that the record is **`version: null`**, say that too: the search will be recorded
+and deposited with no engine version.
+
+Radiant is a ~3 GB image pull, so it is **not** acquired unless asked for:
+
+```
+ACQUIRE_RADIANT=1 PIN_ENGINE=radiant PIN_VERSION=2.3.3 bash scripts/acquire_tools.sh <platform_class>
+```
+
+It needs Docker or Apptainer — Seer ships no native binary. On HIVE the `.sif` must
+already exist; building one pulls ~3 GB and **must run on a compute node, never the
+login node** (the note in `tools.json` gives the exact line: `on_compute.py` with the queue
+spelled out, and the pull's cache in the job's `$TMPDIR`, off the 20 GB home).
+
+## 6. Building the FASTA (step 6)
+
+Use the proteome, database type, and contaminant set the **user confirmed in
+step 3**:
+
+```
+python3 scripts/fetch_fasta.py fetch --proteome <confirmed UPID> \
+    --content <one_per_gene|reviewed|reviewed_isoforms|full|full_isoforms> \
+    --contaminants <universal|cell_culture|...|none> \
+    [--enzyme trypsin,lysc] --keratin-sample|--no-keratin-sample --out ./search.fasta [--hive]
+```
+
+Pass the step-3 answer every time: `--no-keratin-sample` when the samples are not keratin. With
+neither, the sidecar records `keratin_sample_source: default` and every downstream step tags the
+"not keratin" as an assumption (`run_de.R` writes one `DEFAULT — not user-confirmed` methods line
+when keratin precursors were removed on it).
+`--keratin-sample` for a keratin sample (step 3): every keratin-family `Cont_` entry (gene
+KRT*/KRTAP*, or a protein name starting "Keratin" — the sheep wool keratins have no gene
+name) leaves the contaminant set; a `--path` database that already carries `Cont_` entries loses
+its keratin ones too (still build with `--proteome`, as below).
+The sidecar records `keratin_sample: true`, the removed entries under
+`contaminants_dropped_keratin_sample` (each with its `source`) and
+`keratin_contaminants_in_database: []`. Every other build records `keratin_sample: false` and
+lists the keratin-family `Cont_` accessions its database still holds.
+`--enzyme` names the digestion enzyme(s) actually used (trypsin, lysc, gluc, chymotrypsin,
+aspn, argc, lysn, pepsin; comma- or slash-separated — `Trypsin/P` and `Trypsin/Lys-C` work). The default `trypsin,lysc` is the Core's usual
+mix — leave it unless the user says otherwise; change it for a different digest (`--enzyme
+gluc`, `--enzyme trypsin,pepsin`). Only those enzymes' contaminant entries stay `Cont_` when
+they match a protein of the searched organism (their autolysis peptides stay out of quant);
+any other protease is treated as sample protein — which matters for organisms that make the
+enzyme themselves (S. aureus's own SspA is the Glu-C entry, quantified on a trypsin digest).
+Defaults are `--content one_per_gene` (the canonical set, from UniProt's
+reference-proteome FTP tree) and `--contaminants universal`. **Do not pass
+`--content full` casually** — for human that is 147,506 sequences instead of
+20,652, a 7× larger search space. UniProt's REST `onePerGene` parameter is
+silently ignored, which is why the canonical set must come from FTP.
+
+Pass `--hive` when `uc_davis_hive` is true to reuse pre-staged proteomes +
+contaminants under `/quobyte/proteomics-grp/MRS/` instead of downloading.
+A staged copy's UniProt release is unknown (it was downloaded earlier), so
+`uniprot_release` stays empty; the sidecar records the copy's date and sha256 under
+`staged_file`, fills organism/taxid from UniProt (or, offline, from the filename taxid —
+see `organism_source`), and reports `content_inferred`, a one-per-gene check of the entry
+count against UniProt's geneCount — an inference, not a verification. `--content` is not
+applied to a staged file; if it matters, omit `--hive`.
+
+**Non-model organisms → NCBI.** UniProt reference proteomes cover a few thousand
+species; wildlife, agricultural and other non-model organisms often have an
+annotated RefSeq genome and no UniProt proteome. `resolve` searches NCBI
+automatically when UniProt returns nothing and lists hits under `ncbi_candidates`:
+
+```
+python3 scripts/fetch_fasta.py fetch --ncbi-accession GCF_007827085.1 \
+    --ncbi-organism "Peromyscus californicus insignis" --ncbi-taxid 42520 \
+    --contaminants universal --out ./search.fasta
+```
+
+- **Confirm the assembly with the user — never auto-pick one.** It's a different
+  kind of database and they need to know that's what they're searching.
+- **Use the RefSeq `GCF_` accession.** A GenBank `GCA_` record usually reports no
+  protein count and its download ZIP contains no `protein.faa` at all.
+- **It includes every isoform** — the analogue of UniProt `full_isoforms`, *not*
+  the `one_per_gene` default. The Core's Peromyscus assembly is 51,825 sequences
+  against 21,877 protein-coding genes. `fetch` counts them and warns; carry that
+  into the methods rather than calling it a "reference proteome".
+
+**A database you supply (`--path`) needs its organism named** — nothing else reports it, and
+Methods, the report and FRAN read it from the sidecar: `--organism '<scientific name>' --taxid
+<taxid>` (the step-3 answer; `--ncbi-organism/--ncbi-taxid` work too), or `--organism none` for
+a database with no single organism (several species, synthetic). Without them `fetch` stops and
+asks. With `--proteome` the organism is UniProt's, and an organism flag there is refused.
+
+**The user's own sequences — a bait (EGFP, a BirA/TurboID construct), a tag — go in with
+`--add-fasta <file>`** (repeatable), on top of the usual `--proteome` build; never by
+concatenating files by hand, which bypasses the contaminant rules and loses the organism and
+release. They are TARGETS, written after the proteome. A contaminant entry **most of which is an
+added protein** — identical, contained, or with at least half of its own peptides in one
+(`fetch_fasta.ADDED_SEQUENCE_SHARED_FRACTION` = 0.5, the search's digest) — is removed, so the
+added sequence keeps those peptides: the Universal set's wild-type GFP (`Cont_P42212`) shares 21
+of its 28 peptides with EGFP (75%), and the ordinary 2-own-peptide rule had kept it. An entry
+sharing fewer **stays** — its own peptides are the evidence of real contamination with it — and
+the peptides it shares are flagged **by name** as ambiguous between the two
+(`contaminants_sharing_peptides_with_added_sequences`, the Methods and a report callout). The
+digestion enzymes in use stay. The sidecar records each file (path, sha256) and entry
+(`added_sequences`) and the removed entries (`contaminants_dropped_for_added_sequences`);
+`reproduce.sh` replays `--add-fasta`. An entry with a `Cont_` tag, an accession used twice or
+already in the proteome is refused. Tell the user which contaminant entries left, and which
+peptides of the added sequences are ambiguous.
+**Then the bait, once the database is built** (an enrichment with added sequences): put the
+FASTA sidecar in the session (`<session>/input/search.fasta.meta.json`), run
+`python3 scripts/experiment_type.py propose --session <session>`, and when its `ask_bait` is not
+null (it is null when the bait is already answered) ask it in its own words and record the answer:
+
+```
+python3 scripts/experiment_type.py set-bait --session <session> --bait <accession>   # the bait
+python3 scripts/experiment_type.py set-bait --session <session> --bait none          # none is
+```
+
+It is kept as `bait_confirmed` (the answer, who, when) in `input/experiment_type.json`, and a
+re-recorded type keeps it. Without an answer the data check would take the ONE added sequence as
+the bait, unconfirmed -- never leave it there. More than 10 added sequences (a whole proteome) are
+counted, not listed (`n_added_sequences`): ask for the bait by name, and `set-bait` takes its
+accession, entry name or gene.
+
+**Read the returned JSON** (also written to `<out>.meta.json` for the repro
+bundle) and act on it:
+
+- `warnings` non-empty → tell the user before searching; a one-per-gene→full
+  fallback changes the database out from under them.
+- `diann_cont_quant_exclude` → pass as `--cont-quant-exclude Cont_` to DIA-NN in
+  step 7 so contaminants are identified but kept out of DIA-NN's normalisation. That flag
+  does NOT reach the DE, which re-quantifies from the report: `run_de.R` removes them
+  itself (step 8).
+- `n_contaminants_dropped_as_target` > 0 is normal, not a failure. The universal
+  contaminant set holds sequences identical to real proteins (human keratins; bovine
+  ACTB/EEF1A1/tubulins that are residue-for-residue the human proteins) and near-identical to
+  others (bovine EEF1A1 and YWHAZ each differ from the MOUSE protein by one residue). Left in,
+  DIA-NN reports those proteins ONLY as `Cont_` groups, which `--cont-quant-exclude` and
+  `run_de.R`'s contaminant filter (step 8) then drop from quant — ACTB, EEF1A1 and KRT8
+  vanished from a real HeLa search this way, and EEF1A1 and
+  YWHAZ from every run of a mouse-brain study. `fetch` removes every contaminant entry
+  identical to (or contained in) a target entry, and every entry that shares peptides with a
+  target but has fewer than 2 non-overlapping peptides of its own in the search's digest (I =
+  L; `--min-unique-peptides`, 0 = identity rule only), lists them under
+  `contaminants_dropped_as_target` with each one's `reason`, target and `n_unique_peptides`,
+  and warns (expect ~161 for human: 152 identical + 1 contained + 8 by peptide; ~41 for mouse:
+  31 + 10 — bovine EEF1A1, YWHAZ, TUBA1D and seven hair KRTAPs);
+  the digestion enzyme(s) named by `--enzyme` are the exception and stay contaminants
+  (`contaminants_kept_despite_target_match`; a warning naming a protease dropped as "not in
+  --enzyme" means: if that enzyme WAS used, re-run `fetch` with it in `--enzyme`). Tell the user those proteins — skin keratins
+  included — are now quantified and count toward normalisation; step 8c flags them.
+  An entry with 2+ peptides of its own **stays**, even when the sample shows only the peptides it
+  shares with a target (horse myoglobin `Cont_P68082` has 9 of its own; in human heart its group
+  rested on human MB's peptides, one differing only by I/L): which peptides a sample shows only
+  the search can say, so step 8c's `contaminant_evidence` flags such a group. `--drop-contaminant
+  <accession>` (repeatable) then leaves that entry out of a rebuild: recorded in the sidecar, named
+  in the Methods, replayed by `reproduce.sh`; an accession that matches no contaminant entry stops
+  the build.
+- A `--path` database that already contains `Cont_` entries cannot be fixed: `fetch` warns
+  and lists them under `contaminants_identical_to_target_kept` — rebuild it with
+  `--proteome` instead. The Core's Sep-2025 `MRS/UP000005640_9606_plus_universal_contam.fasta`
+  (kept only for old searches' provenance) has this problem: do not pass it with `--path`.
+  Its rebuild, `MRS/UP000005640_9606_plus_universal_contam_2026-09.fasta`, was made by this
+  `fetch` (sidecar beside it, state `current`) with a DIA-NN 2.7.0
+  `..._2026-09.predicted.speclib`, for searches run outside the skill. Inside the skill keep
+  building the database with `fetch --proteome`.
+- Contaminants that can't be fetched are a **hard stop**, not a warning. Fix the
+  source or have the user explicitly choose `--contaminants none`.
