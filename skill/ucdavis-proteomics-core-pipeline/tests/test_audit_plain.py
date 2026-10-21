@@ -90,7 +90,9 @@ class PlainTable(unittest.TestCase):
         src = open(os.path.join(SCRIPTS, "audit_results.py"), encoding="utf-8").read()
         made = set(re.findall(r'add\(findings,\s*"([a-z_]+)",\s*"(PASS|WARN|FAIL|INFO)"', src))
         made |= {("contamination", "PASS"), ("contamination", "WARN"),   # status computed
-                 ("sage_lfq", "PASS"), ("sage_lfq", "WARN"), ("sage_lfq", "INFO")}
+                 ("sage_lfq", "PASS"), ("sage_lfq", "WARN"), ("sage_lfq", "INFO"),
+                 ("contaminant_competition", "PASS"), ("contaminant_competition", "WARN"),
+                 ("contaminant_competition", "INFO")}
         self.assertGreater(len(made), 30)
         for check, status in sorted(made - set(ar.AMBIGUOUS)):     # those: per site, below
             with self.subTest(check=check, status=status):

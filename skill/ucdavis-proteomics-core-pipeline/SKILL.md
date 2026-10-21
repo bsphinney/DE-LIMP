@@ -2154,6 +2154,11 @@ once against the predicted library, with no match-between-runs, and it has no DD
 If they take it, `make_methods.py` says so in the Methods, from `de_provenance.json`'s `input`
 (never write that by hand), and `audit_results.py` reports the comparison in AUDIT.md either way.
 
+**Every DIA-NN search: the proteins the contaminant list took.** Its last job runs
+`contaminant_competition.py` (a report, never a gate); the watcher's `contaminant_competition`
+names COMPETED OUT genes (no quantity left) and SIPHONED ones. Tell the user; AUDIT.md carries
+it to the report. → `references/audit.md`.
+
 Core staff: board.md §3 row "search finished", once its last job has ended.
 
 ### 7c. Hand the search to FRAN — automatic, Core searches only

@@ -1790,6 +1790,45 @@ def lost_to_contaminants_message(tc, seen=()):
     return msg
 
 
+def fasta_accessions_and_targets(fasta_text):
+    """({accession (upper case): (entry name, gene)}, [target records]) of a searched FASTA's text.
+    A contaminant entry (either tag) is keyed by the accession as the report carries it
+    (Cont_P68082) and is never a target."""
+    accs, targets = {}, []
+    for header, lines in _fasta_records(fasta_text or ""):
+        c = _contaminant_ids(header)
+        if c:
+            accs[c[1].upper()] = (c[2], c[3])
+            continue
+        acc, entry, gene = _header_ids(header)
+        targets.append((header, lines))
+        accs.setdefault(acc.upper(), (entry, gene))
+    return accs, targets
+
+
+def target_peptide_hits(peptides, targets, digest=DIANN_DIGEST):
+    """{peptide (upper case): {how, target_acc, target_entry, gene, target_peptide}} for each of
+    `peptides` that is one of the peptides the search's digest makes from a target record
+    (target_digest_peptides: the build's own rule): as written ("shared"), else only with I = L
+    ("il_twin"). The one reading of "a target protein's peptide" for the audit's
+    contaminant-evidence check and contaminant_competition.py. One pass over the targets' digest,
+    holding only the peptides asked about (as peptide_overlap holds only the contaminants'): the
+    first target peptide equal to each as written, else the first equal with I = L."""
+    asked = {}
+    for p in peptides:
+        asked.setdefault(il_equal(p), set()).add(p.upper())
+    on_target = {}
+    for ti, seq, s, e, k in target_digest_peptides(targets, digest):
+        for pep in asked.get(k, ()):
+            how = "shared" if seq[s:e] == pep else "il_twin"
+            if pep in on_target and (on_target[pep]["how"] == "shared" or how == "il_twin"):
+                continue
+            acc, entry, gene = _header_ids(targets[ti][0])
+            on_target[pep] = {"how": how, "target_acc": acc, "target_entry": entry, "gene": gene,
+                              "target_peptide": seq[s:e]}
+    return on_target
+
+
 def contaminant_groups_on_target_peptides(groups, fasta_text, digest=DIANN_DIGEST):
     """The contaminant protein groups a search reported on peptides of the sample organism's
     proteins alone: not evidence of the contaminant's species -- that protein, the sample's own or
@@ -1815,31 +1854,8 @@ def contaminant_groups_on_target_peptides(groups, fasta_text, digest=DIANN_DIGES
     MB's GHHEAEIKPLAQSHATK with I/L, and ASEDLKK, which is human MB's too: the group, reported in
     every run above human MB, was the heart's own myoglobin, removed as a contaminant and read as
     an added horse standard. Which peptides a sample shows only the report can say."""
-    accs, targets = {}, []
-    for header, lines in _fasta_records(fasta_text or ""):
-        c = _contaminant_ids(header)          # either tag: never a target here
-        if c:
-            accs[c[1].upper()] = (c[2], c[3])
-            continue
-        acc, entry, gene = _header_ids(header)
-        targets.append((header, lines))
-        accs.setdefault(acc.upper(), (entry, gene))
-    # One pass over the targets' digest, holding only the peptides asked about (as peptide_overlap
-    # holds only the contaminants'): the first target peptide equal to each as written, else the
-    # first equal with I = L.
-    asked = {il_equal(p): set() for peps in groups.values() for p in peps}
-    for peps in groups.values():
-        for p in peps:
-            asked[il_equal(p)].add(p.upper())
-    on_target = {}                             # peptide (upper) -> its target hit
-    for ti, seq, s, e, k in target_digest_peptides(targets, digest):
-        for pep in asked.get(k, ()):
-            how = "shared" if seq[s:e] == pep else "il_twin"
-            if pep in on_target and (on_target[pep]["how"] == "shared" or how == "il_twin"):
-                continue
-            acc, entry, gene = _header_ids(targets[ti][0])
-            on_target[pep] = {"how": how, "target_acc": acc, "target_entry": entry, "gene": gene,
-                              "target_peptide": seq[s:e]}
+    accs, targets = fasta_accessions_and_targets(fasta_text)
+    on_target = target_peptide_hits((p for peps in groups.values() for p in peps), targets, digest)
 
     out = []
     for group, peps in groups.items():

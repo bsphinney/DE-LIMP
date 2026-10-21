@@ -39,6 +39,13 @@ Checks:
                     but for I/L, which no spectrum tells apart (horse myoglobin on human heart):
                     not attributable to the contaminant's species -- the sample's own protein or
                     handling contamination (WARN); INFO when it could not be checked
+  contaminant_competition
+                    (a DIA-NN report) sample genes the contaminant list took away
+                    (contaminant_competition.py, run by the search's last job): COMPETED OUT,
+                    no precursor left of their own; SIPHONED, most of their signal taken as
+                    contaminant -- each a WARN naming the genes and the --drop-contaminant
+                    re-search, worded from the DE's own contaminant record; PASS; INFO, with
+                    the reason, when it could not run
   de_signal         0 significant (WARN: underpowered) or >50% significant
                     (WARN: likely batch/normalization/confounding artefact)
   first_vs_final_pass
@@ -245,6 +252,13 @@ PLAIN = {
         "WARN": "Some proteins listed as contaminants rest only on peptides the sample's own "
                 "proteins also have: they are the sample's own proteins or handling contamination "
                 "(such as skin keratin), not evidence of the contaminant species.",
+        "INFO": NOT_CHECKED}),
+    # its WARNs name the proteins in their own words (contaminant_competition.py); these WARN
+    # words are for an older session's AUDIT.md read without them
+    "contaminant_competition": ("Sample proteins taken by the contaminant list", {
+        "PASS": "Checked: no protein of the sample lost all or most of its signal to the "
+                "contaminant list.",
+        "WARN": "Some of the sample's proteins lost their peptides to the contaminant list.",
         "INFO": NOT_CHECKED}),
     "de_signal": ("Number of significant proteins", {
         "PASS": "The number of proteins called significant is in a plausible range in every "
@@ -781,7 +795,7 @@ def report_contaminant_peptides(report, q_cutoff, q_columns=None):
 
 
 def _contaminant_peptides(report, q_cutoff, q_columns):
-    from diann_q_columns import fdr_columns, cutoff_for
+    from diann_q_columns import fdr_columns, cutoff_for, keep_expression, row_passes
     name = os.path.basename(report)
     groups, runs = defaultdict(dict), defaultdict(set)
 
@@ -810,8 +824,8 @@ def _contaminant_peptides(report, q_cutoff, q_columns):
         # cast: a dictionary-encoded column has no regex kernel (DIA-NN writes plain strings)
         keep = pc.match_substring_regex(pads.field("Protein.Ids").cast(pa.string()),
                                         f"(^|;)({tags})")
-        for c, cut in cuts.items():
-            keep = keep & ((pads.field(c) <= cut) | pads.field(c).is_null())
+        q_keep = keep_expression(cuts)              # run_de.R's filter: the one reading of it
+        keep = keep if q_keep is None else keep & q_keep
         for b in d.to_batches(columns=list(REPORT_PEPTIDE_COLUMNS), filter=keep):
             for row in zip(*(b.column(c).to_pylist() for c in REPORT_PEPTIDE_COLUMNS)):
                 take(*row)
@@ -820,13 +834,8 @@ def _contaminant_peptides(report, q_cutoff, q_columns):
             for r in csv.DictReader(fh, delimiter="\t"):
                 if not any(is_contaminant_accession(t) for t in _split_ids(r.get("Protein.Ids"))):
                     continue
-                try:
-                    if any((r.get(c) or "").strip() not in ("", "NA", "NaN")
-                           and float(r[c]) > cut for c, cut in cuts.items()):
-                        continue
-                except ValueError:
-                    continue
-                take(*(r.get(c) for c in REPORT_PEPTIDE_COLUMNS))
+                if row_passes(r, cuts):
+                    take(*(r.get(c) for c in REPORT_PEPTIDE_COLUMNS))
     return dict(groups), dict(runs), qcols, None
 
 
@@ -961,6 +970,79 @@ def audit_contaminant_evidence(findings, de_prov, meta_path):
           f"same fetch_fasta.py command plus "
         + " ".join(f"--drop-contaminant {a}" for a in drop)
         + " and search again.", dict(detail, drop_contaminant=drop))
+
+
+def audit_contaminant_competition(findings, de_prov, search_out=None, search_prov=None,
+                                  meta_path=None, meta_explicit=True):
+    """Sample proteins the contaminant list took away (contaminant_competition.py: COMPETED OUT,
+    SIPHONED). The search's last job recorded them; that record is read only when it describes
+    the report the DE read (contaminant_competition.describes: name, size, modification time) with
+    the DE's q-value filter -- else the report is checked here (a search from before skill 2.14,
+    a record that could not run, a re-search, a DE of another report or with other cutoffs). With
+    no DE record, the search's own report (--search-out). What was done with the shared precursors
+    is said from the DE's own contaminant record (rule 1), and so is a keratin sample's exemption.
+    `meta_explicit`: the sidecar was named (--fasta-meta), not this folder's default -- which never
+    replaces the FASTA a search recorded when there is no DE. A DIA-NN report only. It reports and
+    never stops the analysis: a WARN at most, and a check that could not run is an INFO that says
+    why -- never nothing, and never a traceback that leaves no AUDIT.md."""
+    import contaminant_competition as cc
+    inp = (de_prov or {}).get("input")
+    _path, sprov = load_search_prov(de_prov, search_prov)
+    sprov = sprov if isinstance(sprov, dict) else {}
+    fasta = meta = why = None
+    if not inp and search_out:
+        try:
+            with open(os.path.join(search_out, cc.PROVENANCE)) as fh:
+                sprov = json.load(fh)
+        except (OSError, ValueError):
+            sprov = {}
+        sprov = sprov if isinstance(sprov, dict) else {}
+        inp, fasta, meta, why = cc.resolve_inputs(search_out)
+        meta_path = meta_path if meta_explicit else None
+    if not inp:
+        return                      # no DE record and no search folder: no report to ask about
+    if sprov.get("engine") and str(sprov["engine"]).lower() != "diann":
+        return                      # another engine's report: DIA-NN's question does not apply
+    cont = (de_prov or {}).get("contaminants")
+    cont = cont if isinstance(cont, dict) else None
+    rec = None
+    for cand in (cc.load(search_out) if search_out else None,
+                 sprov.get("contaminant_competition"),
+                 cc.load(os.path.dirname(str(inp)))):
+        if isinstance(cand, dict) and cand.get("status") in ("ok", "not_applicable") and \
+                cc.describes(cand, inp) and cc.agrees_with_de(cand, de_prov):
+            rec = cand
+            break
+    if rec is None:
+        if not meta:
+            meta_path = meta_path or (cont or {}).get("fasta_meta")
+            try:
+                with open(meta_path) as fh:
+                    meta = json.load(fh)
+            except (OSError, TypeError, ValueError):
+                meta = None
+            meta = meta if isinstance(meta, dict) else None
+            if meta:
+                fasta, why = searched_fasta(meta, meta_path)
+            elif sprov.get("fasta") and os.path.isfile(str(sprov["fasta"])):
+                fasta, why = sprov["fasta"], None   # the search's own record of its FASTA
+            else:
+                why = "no readable <fasta>.meta.json (pass --fasta-meta)"
+        q = (de_prov or {}).get("q_cutoff")
+        from diann_q_columns import DEFAULT_Q_CUTOFF
+        # check() never raises; a check that could not run is its not_run record
+        rec = cc.check(inp, fasta, meta, float(q) if isinstance(q, (int, float)) else
+                       DEFAULT_Q_CUTOFF, (de_prov or {}).get("q_columns") or None,
+                       no_fasta_reason=why, exempt=cc.de_exemption(de_prov),
+                       meta_path=meta_path)
+        rec["checked_by"] = "audit_results.py: no record of the search describes this report"
+    try:
+        hits = cc.audit_findings(rec, cont)
+    except Exception as e:          # a record this version cannot read: said, never a traceback
+        hits = [("INFO", f"Not run: the record could not be read ({type(e).__name__}: {e}).",
+                 {}, None)]
+    for status, msg, detail, plain in hits:
+        add(findings, "contaminant_competition", status, msg, detail, plain=plain)
 
 
 def audit_pipeline_checks(findings, prov):
@@ -1306,6 +1388,13 @@ def main():
         audit_target_contaminants(findings, fasta_meta, em, a.de_dir, a.adjp, keratin)
         audit_contaminant_evidence(findings, prov, fasta_meta)
         audit_de(findings, a.de_dir, a.adjp, a.logfc, prov)
+    try:
+        audit_contaminant_competition(findings, prov, a.search_out if a.search_out and
+                                      os.path.isdir(a.search_out) else None, a.search_prov,
+                                      fasta_meta, meta_explicit=bool(a.fasta_meta))
+    except Exception as e:          # a report, never a gate: AUDIT.md is written whatever happens
+        add(findings, "contaminant_competition", "INFO",
+            f"Not run: the check failed ({type(e).__name__}: {e}).", plain=NOT_CHECKED)
     audit_search_measurement(findings, prov, a.search_prov)
     audit_passes(findings, prov, a.search_prov)
     audit_normalization_check(findings, prov)
