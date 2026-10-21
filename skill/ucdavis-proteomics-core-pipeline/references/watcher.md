@@ -84,7 +84,8 @@ Every DIA-NN search's last job runs `contaminant_competition.py` (`references/au
 the search has finished, the watcher reads `<out>/contaminant_competition.json` and adds
 `contaminant_competition` (`status`, `competed_out`, `siphoned`, `drop_contaminant`) and, when a
 gene was taken, its message to `warnings`. A record whose report has since changed (a re-search
-into the same folder) reads `status: stale` and is not shown. Not a failure, nothing to
+into the same folder) reads `status: stale` and is not shown; `unchecked` when the report could
+not be looked at (poll again). Not a failure, nothing to
 resubmit: tell the user which genes.
 
 ## Warnings that are not failures: Sage LFQ

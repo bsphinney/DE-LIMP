@@ -37,13 +37,17 @@ DIA-NN's --cont-quant-exclude rule, which run_de.R applies too.
     shared precursors, and the genes are grouped as protein inference groups them (parsimony: the
     fewest genes that explain the precursors). A peptide shared by paralogs (actins, keratins)
     then names one gene, not each, and a paralog's own peptides take the ones it shares.
-  * COMPETED OUT: a sample gene with such precursors and no precursor of its own left: under the
-    contaminant rule it has no quantity.
+  * COMPETED OUT: a sample gene with such precursors and no precursor of its own left (one it
+    shares with another sample protein counts for that protein): under the contaminant rule it
+    has no quantity.
   * SIPHONED: a sample gene that kept precursors of its own, but whose taken precursors carry
     more signal than those it kept: it is quantified from the minority of its signal.
   * A precursor shared with a contaminant entry that does show itself (bovine albumin in a
-    cell-culture sample) cannot be attributed to either: such a gene is listed for staff as
-    `masked`, never as lost.
+    cell-culture sample) cannot be attributed to either: a gene seen only, or mostly, through
+    such precursors is listed for staff as `masked`, never as lost.
+  * A keratin sample's keratin-family entries keep their precursors, as the DE keeps them
+    (contaminants.R is_contaminant(exempt=), mirrored by exempted()).
+  * Not applied: run_de.R's optional QuantUMS cutoffs and a run subset.
   * The contaminant share of the precursor signal, per run, as contaminants.R's
     contaminant_share() computes it (Precursor.Quantity, else Precursor.Normalised).
 The record carries the report's size and modification time (`report_stat`): a record is read
@@ -69,7 +73,9 @@ import math
 import os
 import re
 import shlex
+import signal
 import statistics
+import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -81,7 +87,8 @@ if HERE not in sys.path:
 from fetch_fasta import (CONTAMINANT_TAGS, MIN_UNIQUE_PEPTIDES, REBUILD_ADVICE,  # noqa: E402
                          _contaminant_ids, _digestion_enzyme, _fasta_records, _header_ids,
                          _independent_count, fasta_accessions_and_targets,
-                         is_contaminant_accession, sidecar_state, target_peptide_hits)
+                         is_contaminant_accession, keratin_database_check,
+                         keratin_sample_recorded, sidecar_state, target_peptide_hits)
 from diann_q_columns import (DEFAULT_Q_CUTOFF, cutoff_for, fdr_columns,  # noqa: E402
                              keep_expression, row_passes)
 
@@ -97,10 +104,13 @@ REPORT_COLUMNS = ("Run", "Precursor.Id", "Protein.Ids", "Stripped.Sequence")
 # is not DIA-NN's protein inference, so DIA-NN's question does not apply to it.
 ADAPTED_META = b"delimp.quantity."
 LIST_MAX = 12
-# The most a search job spends on this check (seconds): 710k rows take 5 s on HIVE, and a job
-# that ran out of time over a report would read as a failed search. Past it the job goes on, and
-# the audit checks the report itself.
+# The most a search job spends on this check (seconds): 710k rows take 4 s on HIVE. Inside a
+# SLURM job it also stops two minutes before the job's own time limit (job_budget): a search job
+# that ran out of time over this report would read as a failed search, and its fix -- more time,
+# resubmit -- would redo a search that was complete (review of 2.14). Stopped, it records why,
+# and the audit checks the report itself.
 JOB_TIME_LIMIT = 900
+JOB_MARGIN_S = 120
 RULE = ("a precursor is a contaminant's when any accession in its Protein.Ids carries the tag "
         "(DIA-NN's --cont-quant-exclude rule, applied by run_de.R too); a contaminant entry shows "
         f"itself with at least {MIN_UNIQUE_PEPTIDES} non-overlapping peptides that name no sample "
@@ -126,6 +136,19 @@ def _targets(cell):
 
 def _is_cont(cell):
     return any(is_contaminant_accession(a) for a in _ids(cell))
+
+
+def exempted(cell, exempt):
+    """True when a keratin sample's exemption keeps this precursor -- contaminants.R's
+    is_contaminant(exempt=), mirrored: every tagged accession is one of the keratin-family entries
+    (`shared`), and it also names a sample protein or every tagged one is the searched species'
+    own (`alone`)."""
+    if not exempt or not exempt.get("shared"):
+        return False
+    ids = _ids(cell)
+    tagged = [a for a in ids if is_contaminant_accession(a)]
+    return bool(tagged) and all(a in exempt["shared"] for a in tagged) and (
+        len(tagged) < len(ids) or all(a in exempt.get("alone", ()) for a in tagged))
 
 
 def _new():
@@ -179,6 +202,11 @@ def _scan_parquet(report, cuts, qcol, ev):
         if not b.num_rows:
             continue
         t = pa.Table.from_batches([b])
+        # a NaN or infinite quantity counts as nothing, as in the text reader: arrow's sum would
+        # carry a NaN into the run's whole total (review of 2.14)
+        q = pc.cast(t[qcol], pa.float64())
+        t = t.set_column(t.schema.get_field_index(qcol), qcol,
+                         pc.if_else(pc.is_finite(q), q, pa.scalar(None, pa.float64())))
         is_cont = pc.fill_null(pc.match_substring_regex(
             pc.cast(t["Protein.Ids"], pa.string()), tag_rx), False)
         for sub, slot in ((t, 0), (t.filter(is_cont), 1)):
@@ -188,11 +216,16 @@ def _scan_parquet(report, cuts, qcol, ev):
                     ev["runs"].setdefault(str(run), [0.0, 0.0])[slot] += _num(s) or 0.0
         sub = t.filter(pc.invert(is_cont))
         if sub.num_rows:
-            g = sub.group_by(["Protein.Ids", "Precursor.Id"]).aggregate([(qcol, "sum")])
-            for ids, prec, s in zip(g["Protein.Ids"].to_pylist(), g["Precursor.Id"].to_pylist(),
-                                    g[f"{qcol}_sum"].to_pylist()):
+            # one entry per protein set and batch, not per row (a 1,000-run report)
+            g = sub.group_by("Protein.Ids").aggregate([("Precursor.Id", "distinct"),
+                                                       (qcol, "sum")])
+            for ids, precs, s in zip(g["Protein.Ids"].to_pylist(),
+                                     g["Precursor.Id_distinct"].to_pylist(),
+                                     g[f"{qcol}_sum"].to_pylist()):
                 if ids:
-                    _add(ev["kept"], ids, prec, s)
+                    rec = ev["kept"].setdefault(ids, _new())
+                    rec["precursors"].update(precs)
+                    rec["signal"] += _num(s) or 0.0
 
 
 def read_report(report, q_cutoff=DEFAULT_Q_CUTOFF, q_columns=None):
@@ -252,11 +285,28 @@ def describes(rec, report):
 
 def agrees_with_de(rec, de_prov):
     """True when the record's q-value filter is the DE's (de_provenance.json q_cutoff /
-    q_columns, where recorded): a search-time record uses run_de.R's defaults."""
+    q_columns, where recorded) and so is its keratin exemption: a search-time record uses
+    run_de.R's defaults. (Not compared: run_de.R's optional QuantUMS cutoffs and a run subset,
+    which this check does not apply.)"""
     q, cols = (de_prov or {}).get("q_cutoff"), (de_prov or {}).get("q_columns")
     if isinstance(q, (int, float)) and rec.get("q_cutoff") != float(q):
         return False
-    return not (isinstance(cols, list) and cols and set(cols) != set(rec.get("q_columns") or ()))
+    if isinstance(cols, list) and cols and set(cols) != set(rec.get("q_columns") or ()):
+        return False
+    ex = de_exemption(de_prov)
+    return ex is None or ex["shared"] == set((rec.get("keratin_exempt") or {}).get("shared") or ())
+
+
+def de_exemption(de_prov):
+    """The keratin exemption the DE applied (de_provenance.json contaminants.keratin_sample:
+    exempt_accessions / exempt_alone_accessions) -- {"shared", "alone"}, empty when it applied
+    none -- or None when the DE record does not say."""
+    cont = (de_prov or {}).get("contaminants")
+    k = cont.get("keratin_sample") if isinstance(cont, dict) else None
+    if not isinstance(k, dict):
+        return None
+    return {"shared": set(k.get("exempt_accessions") or ()),
+            "alone": set(k.get("exempt_alone_accessions") or ())}
 
 
 # ---- the searched FASTA and the sidecar --------------------------------------------------------
@@ -311,6 +361,28 @@ def resolve_inputs(search_out=None, report=None, fasta=None, fasta_meta=None):
     return report, fasta, meta, (None if fasta else why)
 
 
+def keratin_exemption(meta, meta_path, report):
+    """(exemption or None, where it comes from) for a search not yet analysed: a keratin sample
+    (search_provenance.json `keratin_sample`) whose database was not built with fetch_fasta.py
+    --keratin-sample keeps the precursors of its keratin-family contaminant entries, which
+    contaminants.R reads from fetch_fasta.keratin_database_check -- read here from the same place.
+    A DE says its own (de_provenance.json contaminants.keratin_sample), and the audit uses that."""
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(report)), PROVENANCE)) as fh:
+            sp = json.load(fh)
+    except (OSError, ValueError, TypeError):
+        return None, None
+    if not isinstance(sp, dict) or sp.get("keratin_sample") is not True:
+        return None, None
+    if keratin_sample_recorded(meta) is True:
+        return None, "a keratin sample's database: its keratin entries were removed at build"
+    q = keratin_database_check(meta_path, os.path.dirname(os.path.abspath(report)))
+    if not q.get("checked"):
+        return None, (f"a keratin sample, but its keratin-family entries are unknown "
+                      f"({q.get('why')})")
+    return {"shared": set(q["accessions"]), "alone": set(q["own_species"])}, q.get("why")
+
+
 def cont_quant_exclude(report):
     """DIA-NN's --cont-quant-exclude for this report, as make_methods.py's one reader reads it
     (the DIA-NN log's command line, else the search's parameters file): {"value": tag or None,
@@ -325,15 +397,18 @@ def cont_quant_exclude(report):
 
 # ---- the check ---------------------------------------------------------------------------------
 def check(report, fasta=None, meta=None, q_cutoff=DEFAULT_Q_CUTOFF, q_columns=None,
-          no_fasta_reason=None):
+          no_fasta_reason=None, exempt=None, meta_path=None):
     """The record (a dict, always): status ok | not_run (with `reason`) | not_applicable. Never
     raises: this check reports, so whatever goes wrong is a not_run record that says what (a
     parquet column of an unexpected type made pyarrow raise ArrowNotImplementedError, review of
-    2.14). `no_fasta_reason`: why there is no FASTA, when the caller knows."""
+    2.14). `no_fasta_reason`: why there is no FASTA, when the caller knows. `exempt`: a keratin
+    sample's exemption as the DE recorded it ({"shared", "alone"}; empty: none) -- None reads it
+    from the search's records (keratin_exemption). `meta_path`: the sidecar's path."""
     rec = {"check": "contaminant_competition", "report": report, "fasta": fasta,
            "report_stat": report_stat(report)}
     try:
-        return _check(rec, report, fasta, meta, q_cutoff, q_columns, no_fasta_reason)
+        return _check(rec, report, fasta, meta, q_cutoff, q_columns, no_fasta_reason, exempt,
+                      meta_path)
     except Exception as e:
         name = os.path.basename(str(report or ""))
         why = " ".join(str(e).replace(str(report), name).split())
@@ -343,7 +418,7 @@ def check(report, fasta=None, meta=None, q_cutoff=DEFAULT_Q_CUTOFF, q_columns=No
         return rec
 
 
-def _check(rec, report, fasta, meta, q_cutoff, q_columns, no_fasta_reason):
+def _check(rec, report, fasta, meta, q_cutoff, q_columns, no_fasta_reason, exempt, meta_path):
     rec.update({"organism": (meta or {}).get("organism") or None, "rule": RULE,
                 # which fetch_fasta.py rule built the database (legacy / identity_only / current)
                 "database_state": sidecar_state(meta) if meta else None})
@@ -366,6 +441,22 @@ def _check(rec, report, fasta, meta, q_cutoff, q_columns, no_fasta_reason):
                    reason=f"no row of {os.path.basename(report)} passes the q-value filter "
                           f"(q-columns {', '.join(ev['q_columns']) or 'none'})")
         return rec
+    # a keratin sample's keratin entries keep their precursors in the DE: not taken (review of 2.14)
+    why = "as the DE recorded it"
+    if exempt is None:
+        meta_path = meta_path or (fasta + ".meta.json" if fasta else None)
+        exempt, why = keratin_exemption(meta, meta_path if meta_path and os.path.isfile(meta_path)
+                                        else None, report)
+    if exempt and exempt.get("shared"):
+        for key in [k for k in ev["cont"] if exempted(k[0], exempt)]:
+            ag = ev["cont"].pop(key)
+            kept = ev["kept"].setdefault(key[0], _new())
+            kept["precursors"] |= ag["precursors"]
+            kept["signal"] += ag["signal"]
+    rec["keratin_exempt"] = ({"shared": sorted(exempt["shared"]),
+                              "alone": sorted(exempt.get("alone", ())), "source": why}
+                             if exempt and exempt.get("shared") else
+                             ({"shared": [], "source": why} if why else None))
     fa, rec["fasta_note"] = None, None
     if fasta:
         try:
@@ -430,7 +521,7 @@ def _lead_key(gene):
     return (len(gene), gene)
 
 
-def parsimony(feats, kind):
+def parsimony(feats):
     """Which genes the precursors evidence, as protein inference groups them (the fewest genes
     that explain every precursor): repeatedly the gene that names the most precursors not yet
     explained takes all of them -- with every gene naming exactly the same ones, which the data
@@ -438,7 +529,7 @@ def parsimony(feats, kind):
     each paralog it also matches. Features hold disjoint precursors (a precursor has one
     Protein.Ids), so a gene's count is the sum of its features'; a heap with lazy updates keeps
     this fast for a large connected family. -> [{"genes": [lead, indistinguishable ...],
-    "feats": [...]}] for each group that holds a feature of `kind`."""
+    "feats": [...]}], every feature in exactly one group."""
     size = [len(f["precursors"]) for f in feats]
     of_gene = {}
     for i, f in enumerate(feats):
@@ -448,9 +539,8 @@ def parsimony(feats, kind):
     heap = [(-n, _lead_key(g), g) for g, n in count.items()]
     heapq.heapify(heap)
     left = set(range(len(feats)))
-    todo = sum(1 for f in feats if f["kind"] == kind)
     groups = []
-    while todo and heap:
+    while left and heap:
         n, _key, g = heapq.heappop(heap)
         if -n != count[g]:                     # stale: counts only fall, so re-queue it
             heapq.heappush(heap, (-count[g], _lead_key(g), g))
@@ -464,10 +554,7 @@ def parsimony(feats, kind):
         for i in mine:
             for h in feats[i]["genes"]:
                 count[h] -= size[i]
-        hit = sum(1 for i in mine if feats[i]["kind"] == kind)
-        if hit:
-            todo -= hit
-            groups.append({"genes": [g] + same, "feats": [feats[i] for i in sorted(mine)]})
+        groups.append({"genes": [g] + same, "feats": [feats[i] for i in sorted(mine)]})
     return groups
 
 
@@ -483,6 +570,7 @@ def classify(ev, kept_rows, accs, cont_seq, on_target):
         twin = on_target.get(pep) if not targets else None
         if twin:
             targets = [twin["target_acc"]]
+            twin = twin if twin["how"] == "il_twin" else None
         if not targets:
             for c in conts:
                 own.setdefault(c, set()).add(pep)
@@ -517,37 +605,59 @@ def classify(ev, kept_rows, accs, cont_seq, on_target):
         feats.append({"kind": "kept", "genes": {_gene(t, accs) for t in targets},
                       "accs": set(targets), "conts": set(), "twin": None, **ev["kept"][ids]})
 
-    def entry(grp):
+    # 3. the genes, grouped as protein inference groups them; each feature belongs to one group
+    groups = parsimony(feats)
+    owner = {id(f): gi for gi, grp in enumerate(groups) for f in grp["feats"]}
+    of_gene = {}
+    for i, f in enumerate(feats):
+        for g in f["genes"]:
+            of_gene.setdefault(g, []).append(i)
+
+    def entry(gi, grp):
         lost = [f for f in grp["feats"] if f["kind"] == "lost"]
         kept = [f for f in grp["feats"] if f["kind"] == "kept"]
+        masked = [f for f in grp["feats"] if f["kind"] == "masked"]
         ls, ks = sum(f["signal"] for f in lost), sum(f["signal"] for f in kept)
         mine = set(grp["genes"])
+        # precursors naming this gene that another gene explains (a paralog's): not this gene's,
+        # so "every peptide of it" would be false (review of 2.14)
+        elsewhere = [feats[i] for i in {i for g in mine for i in of_gene.get(g, ())}
+                     if owner[id(feats[i])] != gi]
         return {"gene": grp["genes"][0], "indistinguishable": grp["genes"][1:],
                 "accessions": sorted({a for f in grp["feats"] for a in f["accs"]
                                       if _gene(a, accs) in mine}),
                 "contaminants": sorted({c for f in lost for c in f["conts"]}),
                 "n_removed_precursors": sum(len(f["precursors"]) for f in lost),
                 "n_kept_precursors": sum(len(f["precursors"]) for f in kept),
+                "n_masked_precursors": sum(len(f["precursors"]) for f in masked),
+                "masked_signal": sum(f["signal"] for f in masked),
+                "masked_by": sorted({c for f in masked for c in f["conts"]}),
+                "n_precursors_explained_by_other_genes":
+                    sum(len(f["precursors"]) for f in elsewhere),
+                "other_genes": sorted({groups[owner[id(f)]]["genes"][0] for f in elsewhere}),
                 "removed_signal_pct": round(100 * ls / (ls + ks), 1) if ls + ks else None,
                 "removed_signal": ls, "kept_signal": ks,
                 **({"il_twin_peptides": sorted({f["twin"] for f in lost if f["twin"]})}
                    if any(f["twin"] for f in lost) else {})}
-    competed, siphoned, minority = [], [], 0
-    for grp in parsimony([f for f in feats if f["kind"] in ("lost", "kept")], "lost"):
-        e = entry(grp)
-        if e["n_removed_precursors"] and not e["n_kept_precursors"]:
-            competed.append(e)
-        elif e["removed_signal"] > e["kept_signal"]:
-            siphoned.append(e)
-        else:
-            minority += 1
-    # genes seen ONLY through precursors shared with an entry that shows itself
-    named = {g for f in feats if f["kind"] != "masked" for g in f["genes"]}
-    masked = [{"gene": grp["genes"][0], "indistinguishable": grp["genes"][1:],
-               "contaminants": sorted({c for f in grp["feats"] for c in f["conts"]}),
-               "n_shared_precursors": sum(len(f["precursors"]) for f in grp["feats"])}
-              for grp in parsimony([f for f in feats if f["kind"] == "masked"
-                                    and not f["genes"] & named], "masked")]
+    competed, siphoned, masked, minority = [], [], [], 0
+    for gi, grp in enumerate(groups):
+        if all(f["kind"] == "kept" for f in grp["feats"]):
+            continue                     # a connected protein the contaminant rule left alone
+        e = entry(gi, grp)
+        if e["n_removed_precursors"]:
+            if not e["n_kept_precursors"]:
+                competed.append(e)
+            elif e["removed_signal"] > e["kept_signal"]:
+                siphoned.append(e)
+            else:
+                minority += 1
+        elif e["n_masked_precursors"] and e["masked_signal"] >= e["kept_signal"]:
+            # most of it, or all, rests on precursors shared with an entry that shows itself:
+            # cannot be attributed, so never "lost" -- but said (review of 2.14: a gene that kept a
+            # few peptides was reported nowhere)
+            masked.append({k: e[k] for k in ("gene", "indistinguishable", "n_kept_precursors")}
+                          | {"contaminants": e["masked_by"],
+                             "n_shared_precursors": e["n_masked_precursors"]})
     competed.sort(key=lambda x: (-x["removed_signal"], x["gene"]))
     siphoned.sort(key=lambda x: (-x["removed_signal"], x["gene"]))
     masked.sort(key=lambda x: (-x["n_shared_precursors"], x["gene"]))
@@ -619,37 +729,47 @@ def fate(rec, de=None):
             + (f" ({cq['not_recorded']})" if cq.get("not_recorded") else "") + ".", False)
 
 
-def competed_text(rec, de=None):
+def _others(x):
+    k, who = x.get("n_precursors_explained_by_other_genes") or 0, x.get("other_genes") or []
+    if not k:
+        return ""
+    return (f"; {_n(k, 'more precursor', 'more precursors')} shared with "
+            f"{', '.join(who[:3])}{' ...' if len(who) > 3 else ''}, counted there")
+
+
+def competed_text(rec):
+    """COMPETED OUT, for staff. What was then done with the precursors is fate()'s to say."""
     co, org = rec.get("competed_out") or [], rec.get("organism") or "sample"
     if not co:
         return ""
     one = len(co) == 1
     return (f"COMPETED OUT: {_n(len(co), org + ' gene has', org + ' genes have')} no precursor "
-            f"of {'its' if one else 'their'} own: every precursor of {'it' if one else 'theirs'} "
-            "that passes the q-value filter is shared with a contaminant entry that shows no "
-            "peptides of its own here, so the contaminant rule (any contaminant accession in "
-            f"Protein.Ids) leaves {'it' if one else 'them'} no quantity: "
+            f"of {'its' if one else 'their'} own left: every precursor that identifies "
+            f"{'it' if one else 'them'} and passes the q-value filter (one shared with another "
+            "sample protein counts for that protein) is shared with a contaminant entry that "
+            "shows no peptides of its own here, so where the contaminant rule (any contaminant "
+            f"accession in Protein.Ids) is applied {'it has' if one else 'they have'} no "
+            "quantity: "
             + "; ".join(f"{x['gene']} ({_same(x)}"
-                        f"{_n(x['n_removed_precursors'], 'precursor', 'precursors')} via {_via(x)})"
-                        for x in co[:LIST_MAX])
-            + (f"; +{len(co) - LIST_MAX} more" if len(co) > LIST_MAX else "") + ". "
-            + fate(rec, de)[0])
+                        f"{_n(x['n_removed_precursors'], 'precursor', 'precursors')} via {_via(x)}"
+                        f"{_others(x)})" for x in co[:LIST_MAX])
+            + (f"; +{len(co) - LIST_MAX} more" if len(co) > LIST_MAX else "") + ".")
 
 
-def siphoned_text(rec, de=None):
+def siphoned_text(rec):
+    """SIPHONED, for staff. What was then done with the precursors is fate()'s to say."""
     si, org = rec.get("siphoned") or [], rec.get("organism") or "sample"
     if not si:
         return ""
     one = len(si) == 1
     return (f"SIPHONED: {_n(len(si), org + ' gene', org + ' genes')} kept precursors of "
             f"{'its' if one else 'their'} own, but most of {'its' if one else 'their'} signal "
-            "is on precursors shared with an entry that shows no peptides of its own here, which the "
-            f"contaminant rule takes from {'it' if one else 'them'}: "
+            "is on precursors shared with an entry that shows no peptides of its own here, which "
+            f"the contaminant rule, where it is applied, takes from {'it' if one else 'them'}: "
             + "; ".join(f"{x['gene']} ({_same(x)}{x['removed_signal_pct']:g}% of its signal "
                         f"taken; {x['n_removed_precursors']} taken, "
                         f"{x['n_kept_precursors']} kept; via {_via(x)})" for x in si[:LIST_MAX])
-            + (f"; +{len(si) - LIST_MAX} more" if len(si) > LIST_MAX else "") + ". "
-            + fate(rec, de)[0])
+            + (f"; +{len(si) - LIST_MAX} more" if len(si) > LIST_MAX else "") + ".")
 
 
 def fix_text(rec):
@@ -673,10 +793,14 @@ def notes_text(rec):
         out.append(f"{_n(rec['n_genes_lost_minority'], 'gene', 'genes')} lost a minority of "
                    "their signal to shared precursors (in the record).")
     if ma:
-        out.append(f"Not counted as lost: {_n(len(ma), 'gene is', 'genes are')} seen only "
-                   "through precursors shared with a contaminant entry that does show peptides "
-                   "of its own, so the data cannot say whether "
-                   f"{'it is' if len(ma) == 1 else 'they are'} in the sample: {_names(ma)}.")
+        out.append(f"Not counted as lost: {_n(len(ma), 'gene is', 'genes are')} seen only, or "
+                   "mostly, through precursors shared with a contaminant entry that does show "
+                   "peptides of its own, so the data cannot say how much of that signal is the "
+                   f"sample's: {_names(ma)}.")
+    if (rec.get("keratin_exempt") or {}).get("shared"):
+        out.append(f"A keratin sample: precursors of its {len(rec['keratin_exempt']['shared'])} "
+                   "keratin-family contaminant entries are kept, as the DE keeps them "
+                   f"({rec['keratin_exempt'].get('source')}); the share below counts them.")
     if rec.get("fasta_note"):
         out.append(f"({rec['fasta_note']}.)")
     s = rec.get("contaminant_share_pct") or {}
@@ -694,8 +818,10 @@ def staff_message(rec, de=None):
         return f"Not run: {rec.get('reason')}."
     if st == "not_applicable":
         return f"Not applicable: {rec.get('reason')}."
-    head = " ".join(x for x in (competed_text(rec, de), siphoned_text(rec, de)) if x)
-    if not head:
+    head = " ".join(x for x in (competed_text(rec), siphoned_text(rec)) if x)
+    if head:
+        head += " " + fate(rec, de)[0]             # once, for both
+    else:
         org = rec.get("organism") or "sample"
         quiet = len(rec.get("contaminants_not_showing_themselves") or [])
         head = (f"Checked: no {org} gene lost all or most of its signal to a contaminant entry "
@@ -708,15 +834,17 @@ def plain_competed(rec, de=None):
     co = rec.get("competed_out") or []
     one = len(co) == 1
     it, its = ("it", "its") if one else ("them", "their")
+    # "the peptides that tell it apart": true also when a paralog explains its other peptides
     if fate(rec, de)[1]:
         return (f"{_names(co)} {'is' if one else 'are'} missing from the results because the "
-                f"contaminant list absorbed {its} peptides: every peptide of {it} that the search "
-                "found is shared with an entry of the contaminant list, and those peptides are "
-                "left out of the measurements. The Core can search again without those "
-                f"contaminant entries to recover {it}.")
-    return (f"Every peptide of {_names(co)} that the search found is shared with an entry of the "
-            f"contaminant list, so the data cannot tell {its} signal from that entry's. The Core "
-            f"can search again without those contaminant entries to measure {it} on {its} own.")
+                f"contaminant list absorbed {its} peptides: the peptides that tell {it} apart from "
+                "other proteins are all shared with an entry of the contaminant list, and those "
+                "peptides are left out of the measurements. The Core can search again without "
+                f"those contaminant entries to recover {it}.")
+    return (f"The peptides that tell {_names(co)} apart from other proteins are all shared with an "
+            f"entry of the contaminant list, so the data cannot tell {its} signal from that "
+            f"entry's. The Core can search again without those contaminant entries to measure "
+            f"{it} on {its} own.")
 
 
 def plain_siphoned(rec, de=None):
@@ -751,14 +879,25 @@ def audit_findings(rec, de=None):
     detail.update({k: [x["gene"] for x in rec.get(k) or []]
                    for k in ("competed_out", "siphoned", "masked")})
     tail = " ".join(x for x in (fix_text(rec), notes_text(rec)) if x)
+    said = fate(rec, de)[0]
     out = []
     if rec.get("competed_out"):
-        out.append(("WARN", f"{competed_text(rec, de)} {tail}", detail, plain_competed(rec, de)))
+        out.append(("WARN", f"{competed_text(rec)} {said} {tail}", detail, plain_competed(rec, de)))
     if rec.get("siphoned"):
         # the fix and the notes once, in the first of the two
-        out.append(("WARN", siphoned_text(rec, de) + ("" if out else f" {tail}"), detail,
+        out.append(("WARN", f"{siphoned_text(rec)} {said}" + ("" if out else f" {tail}"), detail,
                     plain_siphoned(rec, de)))
-    return out or [("PASS", staff_message(rec), detail, None)]
+    if out:
+        return out
+    # a gene whose signal rests mostly on an entry that shows itself (bovine serum proteins in
+    # cell culture): nothing taken, but its amount is uncertain, so the client is told
+    return [("PASS", staff_message(rec, de), detail, PLAIN_MASKED if rec.get("masked") else None)]
+
+
+PLAIN_MASKED = ("Checked: no protein of the sample lost all or most of its signal to the "
+                "contaminant list. A few proteins share peptides with a contaminant that is "
+                "present in the samples (such as serum proteins from cell culture), so how much "
+                "of their signal is the sample's own is uncertain.")
 
 
 def say(rec, stream=None):
@@ -798,6 +937,40 @@ def write(rec, out=None, provenance=None):
     return written, problems
 
 
+def _slurm_seconds(text):
+    """squeue's %L ([days-]hours:minutes:seconds, minutes:seconds, or seconds) -> seconds, or
+    None (UNLIMITED, NOT_SET, INVALID, nothing)."""
+    try:
+        days, _, rest = text.strip().rpartition("-")
+        parts = [int(x) for x in rest.split(":")]
+        if not 1 <= len(parts) <= 3:
+            return None
+        parts = [0] * (3 - len(parts)) + parts
+        return int(days or 0) * 86400 + parts[0] * 3600 + parts[1] * 60 + parts[2]
+    except ValueError:
+        return None
+
+
+def job_budget(limit):
+    """(seconds this check may take, what bounded it): at most `limit`, and inside a SLURM job
+    never past the job's own time limit less JOB_MARGIN_S (squeue -o %L for SLURM_JOB_ID)."""
+    jid = os.environ.get("SLURM_JOB_ID")
+    if not jid:
+        return limit, None
+    import shutil
+    from on_compute import SLURM_BIN_DEFAULT
+    squeue = shutil.which("squeue") or os.path.join(SLURM_BIN_DEFAULT, "squeue")
+    try:
+        got = subprocess.run([squeue, "-h", "-j", jid, "-o", "%L"], capture_output=True,
+                             text=True, timeout=30).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return limit, "the job's time left could not be read"
+    left = _slurm_seconds(got.splitlines()[0] if got else "")
+    if left is None:
+        return limit, None
+    return min(limit, left - JOB_MARGIN_S), f"{left} s were left in job {jid}"
+
+
 def set_aside_record(out):
     """A search generated into `out`: an earlier search's record there does not describe it --
     set aside (diann_parallel.set_aside: renamed .stale-<time>, never deleted), and said. The
@@ -807,7 +980,7 @@ def set_aside_record(out):
     path = os.path.join(out, RECORD)
     try:
         new = set_aside(path)
-    except ValueError as e:              # never a reason to stop a generated search: it is said
+    except (ValueError, OSError) as e:   # never a reason to stop a generated search: it is said
         sys.stderr.write(f"{TAG} WARNING: {e}; left in place\n")
         return None
     if new:
@@ -823,11 +996,14 @@ def job_lines(report, fasta, out_dir):
     exists. It never fails the job; a check that does not finish is said in the log, and the
     audit then checks the report itself."""
     report, fasta, out_dir = (os.path.abspath(p) for p in (report, fasta, out_dir))
+    # --job-budget stops it in time and records why; `timeout` is only the backstop
+    hard = JOB_TIME_LIMIT + JOB_MARGIN_S
     return [f'PY={shlex.quote(sys.executable)}; [ -x "$PY" ] || PY=python3; '
-            f'T=""; command -v timeout >/dev/null 2>&1 && T="timeout {JOB_TIME_LIMIT}"; '
+            f'T=""; command -v timeout >/dev/null 2>&1 && T="timeout {hard}"; '
             f'$T "$PY" {shlex.quote(os.path.abspath(__file__))} --report {shlex.quote(report)} '
             f'--fasta {shlex.quote(fasta)} --out {shlex.quote(os.path.join(out_dir, RECORD))} '
             f'--provenance {shlex.quote(os.path.join(out_dir, PROVENANCE))} '
+            f'--job-budget {JOB_TIME_LIMIT} '
             '|| echo "WARNING: the contaminant competition check did not finish (exit $?; at most '
             f'{JOB_TIME_LIMIT // 60} min in the search job) -- the messages above say why; the '
             'audit checks the report itself" >&2']
@@ -856,11 +1032,30 @@ def main(argv=None):
                     help="run_de.R's --q-cutoff (default %(default)s)")
     ap.add_argument("--out", help="write the record here (JSON)")
     ap.add_argument("--provenance", help="search_provenance.json to record it in")
+    ap.add_argument("--job-budget", type=int,
+                    help="inside a search job: stop after this many seconds, or two minutes "
+                         "before the job's own time limit, whichever comes first; the record "
+                         "then says the check did not run, and why")
     a = ap.parse_args(argv)
     if not (a.report or a.search_out):
         ap.error("give --report or --search-out")
     report, fasta, meta, why = resolve_inputs(a.search_out, a.report, a.fasta, a.fasta_meta)
-    rec = check(report, fasta, meta, a.q_cutoff, no_fasta_reason=why)
+    budget, bound = job_budget(a.job_budget) if a.job_budget else (None, None)
+    if budget is not None and budget < 30:
+        rec = {"check": "contaminant_competition", "report": report,
+               "report_stat": report_stat(report), "status": "not_run",
+               "reason": f"too little of the search job's time was left for it ({bound})"}
+    else:
+        if budget:
+            def stop(_signum, _frame):
+                raise TimeoutError(f"stopped after {budget} s so the search job ends in its "
+                                   f"time ({bound or 'the check limit'})")
+            signal.signal(signal.SIGALRM, stop)
+            signal.alarm(budget)
+        rec = check(report, fasta, meta, a.q_cutoff, no_fasta_reason=why,
+                    meta_path=a.fasta_meta)
+        if budget:
+            signal.alarm(0)
     out = a.out or (os.path.join(a.search_out, RECORD) if a.search_out else None)
     prov = a.provenance or (os.path.join(a.search_out, PROVENANCE) if a.search_out else None)
     written, problems = write(rec, out, prov)

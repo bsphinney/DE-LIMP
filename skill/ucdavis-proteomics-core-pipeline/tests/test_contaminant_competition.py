@@ -68,6 +68,8 @@ FASTA = "".join([
     entry("Q90001", "TGT_HUMAN", "TGT", TGT),
     entry("Q80001", "XG_HUMAN", "XG", "MKWQWQWQWQK"),
     entry("Q80002", "YG_HUMAN", "YG", "MRQWQWQWR"),
+    entry("Q70001", "K1H1_HUMAN", "KRT31", "MCCCCDDDKFFFFGGGGR"),
+    entry("Q70009", "K1H1_SHEEP", "KRT31", "MCCCCDDDKMMMMNNNNR", True),
     entry("P60712", "ACTB_BOVIN", "ACTB", ACTB, True),
     entry("Q9XSJ4", "ENOA_BOVIN", "ENO1", ENO1_BOVIN, True),
     entry("P02769", "ALBU_BOVIN", "ALB", BSA, True),
@@ -92,6 +94,14 @@ IL_TWIN = [("Cont_Q90002", "GHHEAELKPLAQSHATK", 600), ("Q90001;Cont_Q90002", "AS
 # name YG alone, in rows that name no seed accession.
 CLOSURE = [("Q80001;Cont_P60712", "WQWQWQWQK", 900), ("Q80001;Q80002", "QWQWQWQK", 2000),
            ("Q80002", "QQWWQQWK", 50), ("Q80002", "WWQQWWQK", 50), ("Q80002", "QWWQQWWK", 50)]
+
+# A hair sample's keratin, shared with the sheep wool keratin entry, in a database not built with
+# --keratin-sample: the DE keeps it (contaminants.R is_contaminant(exempt=)).
+KERATIN = [("Q70001;Cont_Q70009", "CCCCDDDK", 800)]
+# ACTA1's one peptide of its own is shared with bovine actin; its others it shares with ACTB,
+# which has one of its own.
+SHARED_ELSEWHERE = [("P68133;Cont_P60712", "PPPPPPPK", 500), ("P60709;P68133", "GGGGGGGK", 900),
+                    ("P60709;P68133", "HHHHHHHR", 700), ("P60709", "EEEEEEEK", 300)]
 
 # The DE's contaminant record (de_provenance.json `contaminants`, contaminants.R)
 DE_REMOVED = {"policy": "removed", "removed": True,
@@ -191,6 +201,59 @@ class TheCheck(Fixture):
         kept = {ids: v for ids, v in cc.read_report(os.path.join(self.d, "report.tsv"))[0]
                 ["kept"].items()}
         self.assertEqual(cc.connected(kept, {"Q80001"}, {}, {}), {"Q80001;Q80002", "Q80002"})
+
+    def test_a_keratin_sample_s_exempt_keratin_is_not_taken(self):
+        """Re-review of 2.14 (H1): the DE keeps a keratin sample's keratin-family precursors, and
+        the client read "KRT31 is missing from the results"."""
+        self.assertEqual([c["gene"] for c in self.run_check(CLEAN + KERATIN)["competed_out"]],
+                         ["KRT31"])
+        rep = os.path.join(self.d, "report.tsv")
+        ex = {"shared": {"Cont_Q70009"}, "alone": set()}
+        rec = cc.check(rep, self.fasta, self.meta, exempt=ex)
+        self.assertEqual(rec["competed_out"], [])
+        self.assertEqual(rec["keratin_exempt"]["shared"], ["Cont_Q70009"])
+        self.assertIn("A keratin sample", cc.staff_message(rec))
+        # the same exemption read from the search's records when there is no DE yet
+        write(os.path.join(self.d, "search_provenance.json"), json.dumps({"keratin_sample": True}))
+        write(self.fasta + ".meta.json", json.dumps(dict(
+            self.meta, keratin_contaminants_in_database=["Cont_Q70009"])))
+        self.assertEqual(cc.check(rep, self.fasta, self.meta)["competed_out"], [])
+
+    def test_the_exemption_mirrors_contaminants_r(self):
+        ex = {"shared": {"Cont_K1", "Cont_K2"}, "alone": {"Cont_K1"}}
+        for ids, kept in (("P1;Cont_K2", True), ("Cont_K1", True), ("Cont_K2", False),
+                          ("P1;Cont_K2;Cont_X", False), ("P1;Cont_X", False), ("P1", False)):
+            with self.subTest(ids=ids):
+                self.assertEqual(cc.exempted(ids, ex), kept)
+        self.assertFalse(cc.exempted("P1;Cont_K2", None))
+
+    def test_peptides_a_paralog_explains_are_not_called_the_gene_s(self):
+        """Re-review of 2.14 (M1): ACTA1's other peptides are shared with ACTB, so "every peptide
+        of it is shared with the contaminant list" was false."""
+        rec = self.run_check(CLEAN + SHARED_ELSEWHERE)
+        (co,) = rec["competed_out"]
+        self.assertEqual((co["gene"], co["n_precursors_explained_by_other_genes"],
+                          co["other_genes"]), ("ACTA1", 2, ["ACTB"]))
+        self.assertIn("ACTA1 (1 precursor via Cont_P60712; 2 more precursors shared with ACTB, "
+                      "counted there)", cc.staff_message(rec))
+        plain = cc.plain_competed(rec, DE_REMOVED)
+        self.assertIn("the peptides that tell it apart from other proteins are all shared", plain)
+        self.assertNotIn("every peptide", plain)
+
+    def test_a_gene_mostly_on_a_contaminant_that_shows_itself_is_said(self):
+        """Re-review of 2.14 (L1): ALB with one weak peptide of its own and most of its signal on
+        one shared with bovine albumin was reported nowhere."""
+        rec = self.run_check(CLEAN + MASKED + [("P02768", "TTTTTTTK", 5)])
+        self.assertEqual([(m["gene"], m["n_kept_precursors"]) for m in rec["masked"]],
+                         [("ALB", 1)])
+        (f,) = cc.audit_findings(rec)
+        self.assertEqual((f[0], f[3]), ("PASS", cc.PLAIN_MASKED))
+
+    def test_only_a_true_il_twin_is_listed_as_one(self):
+        rec = self.run_check(CLEAN + [("Cont_Q90002", "ASEDLKK", 100)])
+        (co,) = rec["competed_out"]
+        self.assertEqual(co["gene"], "TGT")                  # a TGT digest peptide, as written
+        self.assertNotIn("il_twin_peptides", co)
 
     def test_a_clean_search_finds_nothing(self):
         rec = self.run_check(CLEAN)
@@ -597,6 +660,40 @@ class TheRecordAndTheAudit(Fixture):
 class TheJobsRunIt(unittest.TestCase):
     """Every DIA-NN search's last job ends with the check; it never fails the job."""
 
+    def test_squeue_s_time_left_reads(self):
+        for text, secs in (("1-02:03:04", 93784), ("02:03:04", 7384), ("05:00", 300), ("45", 45),
+                           ("UNLIMITED", None), ("INVALID", None), ("", None)):
+            with self.subTest(text=text):
+                self.assertEqual(cc._slurm_seconds(text), secs)
+
+    def test_the_check_stops_before_the_search_job_s_time_runs_out(self):
+        """Re-review of 2.14 (M2): 15 minutes appended to a job that had used nearly all its time
+        ended a complete search in TIMEOUT, whose fix is a resubmit."""
+        done = subprocess.CompletedProcess([], 0, stdout="05:00\n", stderr="")
+        with mock.patch.dict(os.environ, {"SLURM_JOB_ID": "42"}), \
+                mock.patch.object(cc.subprocess, "run", return_value=done):
+            self.assertEqual(cc.job_budget(900),
+                             (300 - cc.JOB_MARGIN_S, "300 s were left in job 42"))
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(cc.job_budget(900), (900, None))
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "rec.json")
+            left = (10, "130 s were left in job 7")
+            with mock.patch.object(cc, "job_budget", return_value=left), \
+                    mock.patch("sys.stdout"), mock.patch("sys.stderr"):
+                self.assertEqual(cc.main(["--report", os.path.join(d, "report.parquet"),
+                                          "--out", out, "--job-budget", "900"]), 0)
+            rec = json.loads(read(out))
+        self.assertEqual(rec["status"], "not_run")
+        self.assertIn("too little of the search job's time was left", rec["reason"])
+
+    def test_setting_a_record_aside_never_stops_a_generated_search(self):
+        import diann_parallel
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(diann_parallel, "set_aside", side_effect=OSError("read-only")), \
+                mock.patch("sys.stderr"):
+            self.assertIsNone(cc.set_aside_record(d))
+
     def test_the_chain_s_step5_runs_it_after_the_pass_comparison(self):
         import test_chain_pass_comparison as tcp
         with tempfile.TemporaryDirectory() as d:
@@ -610,7 +707,8 @@ class TheJobsRunIt(unittest.TestCase):
             self.assertIn(f"--fasta {os.path.join(d, 'db.fasta')}", line)
             self.assertIn(f"--out {rec}", line)
             self.assertIn(f"--provenance {os.path.join(out, 'search_provenance.json')}", line)
-            self.assertIn(f'T="timeout {cc.JOB_TIME_LIMIT}"', line)       # bounded in the job
+            self.assertIn(f'T="timeout {cc.JOB_TIME_LIMIT + cc.JOB_MARGIN_S}"', line)  # backstop
+            self.assertIn(f"--job-budget {cc.JOB_TIME_LIMIT}", line)       # bounded in the job
             self.assertIn('|| echo "WARNING', line)
             self.assertLess(s5.index("pass_comparison.py"), s5.index("contaminant_competition.py"))
             self.assertIn(f'"{rec}"', next(ln for ln in s5.splitlines() if ln.startswith("rm -f")))
@@ -691,6 +789,12 @@ class TheWatcherSaysIt(Fixture):
         self.assertEqual(got["contaminant_competition"]["status"], "stale")
         self.assertFalse(any("COMPETED OUT" in w for w in got.get("warnings", [])))
 
+    def test_a_report_that_cannot_be_read_here_is_unchecked_not_stale(self):
+        out, rec = self.recorded()
+        os.rename(rec["report"], rec["report"] + ".moved")
+        got = self.watch(out)
+        self.assertEqual(got["contaminant_competition"]["status"], "unchecked")
+
     def test_no_record_no_key(self):
         os.makedirs(os.path.join(self.d, "out"))
         self.assertNotIn("contaminant_competition", self.watch(os.path.join(self.d, "out")))
@@ -728,6 +832,20 @@ class TheParquetReader(Fixture):
         write(tsv, "\t".join(COLS) + "\n" + "".join("\t".join(str(v) for v in r) + "\n"
                                                      for r in rows))
         self.assertEqual(cc.check(tsv, self.fasta, self.meta)["siphoned"], rec["siphoned"])
+
+    def test_a_nan_quantity_counts_as_nothing_in_both_readers(self):
+        """Re-review of 2.14 (L2): arrow's sum carried one NaN quantity into a run's whole total,
+        and that run's share vanished."""
+        rows = report_rows(CLEAN + COMPETED + SIPHONED)
+        rows[1][COLS.index("Precursor.Quantity")] = float("nan")
+        tsv = os.path.join(self.d, "report.tsv")
+        write(tsv, "\t".join(COLS) + "\n" + "".join("\t".join(str(v) for v in r) + "\n"
+                                                     for r in rows))
+        a, b = cc.check(tsv, self.fasta, self.meta), cc.check(self.parquet(rows), self.fasta,
+                                                               self.meta)
+        self.assertEqual(sorted(a["contaminant_share_pct"]["per_run"]), ["r1", "r2"])
+        self.assertEqual(a["contaminant_share_pct"], b["contaminant_share_pct"])
+        self.assertEqual(a["siphoned"], b["siphoned"])
 
     def test_a_q_value_stored_as_text_is_a_check_that_did_not_run(self):
         rows = report_rows(CLEAN + COMPETED)

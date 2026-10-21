@@ -973,14 +973,16 @@ def audit_contaminant_evidence(findings, de_prov, meta_path):
 
 
 def audit_contaminant_competition(findings, de_prov, search_out=None, search_prov=None,
-                                  meta_path=None):
+                                  meta_path=None, meta_explicit=True):
     """Sample proteins the contaminant list took away (contaminant_competition.py: COMPETED OUT,
     SIPHONED). The search's last job recorded them; that record is read only when it describes
     the report the DE read (contaminant_competition.describes: name, size, modification time) with
     the DE's q-value filter -- else the report is checked here (a search from before skill 2.14,
     a record that could not run, a re-search, a DE of another report or with other cutoffs). With
     no DE record, the search's own report (--search-out). What was done with the shared precursors
-    is said from the DE's own contaminant record (rule 1). A DIA-NN report only. It reports and
+    is said from the DE's own contaminant record (rule 1), and so is a keratin sample's exemption.
+    `meta_explicit`: the sidecar was named (--fasta-meta), not this folder's default -- which never
+    replaces the FASTA a search recorded when there is no DE. A DIA-NN report only. It reports and
     never stops the analysis: a WARN at most, and a check that could not run is an INFO that says
     why -- never nothing, and never a traceback that leaves no AUDIT.md."""
     import contaminant_competition as cc
@@ -996,6 +998,7 @@ def audit_contaminant_competition(findings, de_prov, search_out=None, search_pro
             sprov = {}
         sprov = sprov if isinstance(sprov, dict) else {}
         inp, fasta, meta, why = cc.resolve_inputs(search_out)
+        meta_path = meta_path if meta_explicit else None
     if not inp:
         return                      # no DE record and no search folder: no report to ask about
     if sprov.get("engine") and str(sprov["engine"]).lower() != "diann":
@@ -1030,7 +1033,8 @@ def audit_contaminant_competition(findings, de_prov, search_out=None, search_pro
         # check() never raises; a check that could not run is its not_run record
         rec = cc.check(inp, fasta, meta, float(q) if isinstance(q, (int, float)) else
                        DEFAULT_Q_CUTOFF, (de_prov or {}).get("q_columns") or None,
-                       no_fasta_reason=why)
+                       no_fasta_reason=why, exempt=cc.de_exemption(de_prov),
+                       meta_path=meta_path)
         rec["checked_by"] = "audit_results.py: no record of the search describes this report"
     try:
         hits = cc.audit_findings(rec, cont)
@@ -1387,7 +1391,7 @@ def main():
     try:
         audit_contaminant_competition(findings, prov, a.search_out if a.search_out and
                                       os.path.isdir(a.search_out) else None, a.search_prov,
-                                      fasta_meta)
+                                      fasta_meta, meta_explicit=bool(a.fasta_meta))
     except Exception as e:          # a report, never a gate: AUDIT.md is written whatever happens
         add(findings, "contaminant_competition", "INFO",
             f"Not run: the check failed ({type(e).__name__}: {e}).", plain=NOT_CHECKED)
