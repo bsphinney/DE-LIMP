@@ -2,6 +2,21 @@
 
 Every run is packaged into a tidy **session directory** so people can find things.
 
+<!-- contents: tests/test_skill_structure.py --toc -->
+**Contents** (section: line)
+- 20: Where the session goes — ask the user
+- 31: Session layout (`session.py`)
+- 296: Re-analysis of the same dataset
+- 327: Comparing analyses (`compare_analyses.R`)
+- 346: 1b. A prior analysis: a new session is fresh (step 1b)
+- 358: 1b. A re-analysis, only when the user asks for one (step 1b)
+- 367: 3b. Creating the analysis session (step 3b)
+- 457: 11. The output-files report (step 11)
+- 478: 11b. A re-analysis: compare to the original (step 11b)
+- 495: 12. Finalize the session, and the summary to the user (step 12)
+- 571: Keeping the record of the analysis: the decisions log and the conversation
+<!-- /contents -->
+
 ## Where the session goes — ask the user
 The orchestrator asks where results should live (SKILL.md step 3b):
 - **Default (recommended): in the folder with the raw data** being analyzed. The
@@ -327,3 +342,311 @@ merged-protein CSVs. Use it whenever two analyses of the same dataset exist
 
 `session.py init --date YYYY-MM-DD` dates the session folder (default: today) — for a session
 created after the day the analysis actually ran.
+
+## 1b. A prior analysis: a new session is fresh (step 1b)
+
+```
+python3 scripts/session.py find-prior --raw /path/to/*.d
+```
+
+**A new session is a fresh analysis by default**, match or no match. When `matches` is not
+empty, tell the user in one line that these files were analysed before, and where. Then carry
+on fresh: read nothing from that session (conditions, FASTA, parameters, search output,
+results) and do not nest under it. A Core staff member starting a fresh run was steered into
+the old results by the earlier wording here.
+
+## 1b. A re-analysis, only when the user asks for one (step 1b)
+
+It is a **re-analysis** only when the user asks for one ("re-analyse", "redo that analysis
+with…", "compare with the earlier run"). Then pass that session to `session.py init
+--reanalysis-of` (step 3b), so the run nests under `<prior>/reanalysis/` and gets a
+`DIFFERENCES.md`, and run the Comparator at the end (step 11b). When the earlier session is a
+delivered folder that must not be written to, add `--beside`: the run goes **beside** it as
+`<date>_<name>_v<N>` (never an existing folder), linked to it by `reanalysis.json`.
+
+## 3b. Creating the analysis session (step 3b)
+
+**Ask the user where the results should go** — two choices:
+- **In the folder with their raw data** (default, recommended — keeps results next
+  to the data): pass `--raw` and omit `--base`.
+- **A central location** (e.g. their Documents folder, or a path they give): pass
+  `--base <that path>` (results land under `<path>/sessions/`).
+
+Then scaffold the session and route **everything** into it:
+
+```
+# default — results live with the raw data:
+python3 scripts/session.py init --name "<short study name>" --raw /path/to/*.d \
+    [--reanalysis-of <prior session dir -- only when the user asked to re-analyse it, step 1b>
+     [--beside]]
+# or central, if the user chose one:
+python3 scripts/session.py init --name "<short study name>" --raw /path/to/*.d \
+    --base ~/Documents/DataAnalysis
+```
+
+**Core staff:** add step 0a's answer to either form: `--submission PROT_0807` (once per number,
+the main one first) or `--internal '<its title on the board>'`. Its JSON's `transcript` says
+whether this conversation was recorded for the session; `recorded: false` with a `reason` other
+than "not a Claude Code conversation here": tell the user, and do what the reason says.
+**`--call-id` whenever any subagent or teammate of this conversation ran in the last 6 hours**
+(a team, or step 8d's reviewers -- so `finalize` after them too): add `--call-id <token>` to
+`init`, `finalize`, `checkpoint.py status` and `save_transcript.py`. It is how they tell whose
+conversation is calling. Type the token literally in the command (never `$(uuidgen)` or a
+variable from an earlier call), fresh for every call and unlikely to collide:
+`<your agent name, or main>-<6 random letters/digits>`, e.g. `main-k7f3x9`. Run the call in the
+foreground: a background call is never counted.
+
+**Core data with a CoreOmics submission (step 1)? Attach it now -- BEFORE the experiment type below**, where the session lives (`experiment_type.py set --source submission` reads the attached record and refuses without one; set before attach, the submission's ASK never fired):
+
+```
+python3 scripts/submission_report.py attach --session <session> --record ~/core/PROT_0756   # fetch's folder
+python3 scripts/submission_report.py attach --session <session> --given '{"internal_id": "PROT_0756", ...}'  # no token
+```
+
+It stores ONE allowlisted record (`input/submission.json` + `session.json`; never an email,
+phone or billing field). The report's Submission section, the Methods' Sample preparation,
+the analysis brief and the run log all read it. It is also what makes this a Core run, so the
+report, README, AGENTS.md, delivery README and email draft end with the Core's "How did we do?"
+feedback survey (`core_submission.feedback_url`); a run outside the Core never shows it.
+The record's `notes` are Data Quality Notes for the report: organism vs the FASTA, blank
+UniProt, sheet IDs vs raw files, conditions vs the design analysed, and pairing in the sheet (e.g. every mouse under all five IPs — samples from
+one mouse are not independent). Re-run `submission_report.py notes --session <S>` once the
+FASTA and `conditions.csv` exist.
+
+**Record the experiment type now** (step 3's confirmed answer):
+
+```
+python3 scripts/experiment_type.py set --session <session> --type <whole_proteome|ip|proximity|secretome|fractions_depth|fractions_separation|other> \
+    --source <submission|user> [--stated "<their words>"] [--bait <gene>] [--controls <group,...>]
+```
+
+**Ask the bait once.** With sequences added by `fetch_fasta.py --add-fasta` (EGFP, a TurboID
+fusion), ask it **after step 6** (the database is built): `experiment_type.py propose`'s
+`ask_bait`, recorded with `experiment_type.py set-bait --bait <accession>` (or `--bait none`), kept
+as `bait_confirmed` (who, when). Otherwise ask it here, with `--bait`. `propose` asks nothing
+(`ask_bait` null, `bait_recorded` says why) when set-bait was answered or the `--bait` recorded
+here names one of the added sequences. Never leave the one added sequence as an unconfirmed bait.
+**Record the sample type now** (step 3's answer, in the user's words — or that they did not
+say), so the brief and report never fill it in from file names:
+
+```
+python3 scripts/sample_type.py set --session <session> --stated "<what the user said the samples are>"
+python3 scripts/sample_type.py set --session <session> --not-stated     # asked; the user does not know
+python3 scripts/sample_type.py set --session <session> --not-asked      # Core staff, any analysis: not asked (step 3)
+```
+
+A later answer (a flagged panel in 8c) replaces it with `--stated`.
+**Save step 2's JSON as `<session>/input/acquisition.json`** (the whole `detect_acquisition.py`
+output). Step 8e reads each file's instrument and acquisition time from it instead of reading
+every `.raw` again, and the run record takes its detection facts from it.
+
+`init` also records this conversation for the transcript hook, and from here on **log each
+decision** with `log_decision.py` (see "Keeping the record of the analysis" below).
+Core staff, internal work: board.md §3 row "session made" (a submission's is at step 1c.7).
+
+The output's `placement` tells you which was used. **Use the printed `paths` map for
+every later step** — put
+`conditions.csv` and the FASTA in `paths.input_dir`, search output in
+`paths.search_out`, DE results in `paths.de_dir` (= `output/tables`), the
+reproducibility bundle in `paths.repro_dir`, the report in
+`paths.analysis_report`, and append commands to `paths.commands_log`. Raw files
+are recorded (in `input/raw_files.txt`), never copied. With `--reanalysis-of`, the
+session nests under `<prior>/reanalysis/<date>_<name>/`; with `--beside` too, it sits next to the
+prior as `<date>_<name>_v<N>` and nothing is written into the prior.
+
+## 11. The output-files report (step 11)
+
+`session.py finalize` (step 12) builds this catalog itself when step 11 was not run, from the
+same folders, and says so in MANIFEST.txt (`[OK] OUTPUT_FILES.md -- written at finalize`); one
+that exists is never rewritten, only appended to. Run step 11 by hand when the user wants the
+catalog before finalize:
+
+Catalog everything the run produced so the user knows what each file is:
+
+```
+python3 scripts/make_report.py --out OUTPUT_FILES.md \
+  --search-out ./search_out --de-dir ./de_results --repro ./reproducibility \
+  --extra ./conditions.csv ./search.fasta ./wf ./figures ./AUDIT.md ./SAMPLE_QUALITY.md \
+          ./AI_Analysis_Report.md ./Analysis_Report.html ./Analysis_Report.md \
+          ./Analysis_Report.pdf ./methods.md
+```
+
+`OUTPUT_FILES.md` lists every file (figures, audit, search/DE outputs, the bundle)
+with its size and a plain-language description, grouped by purpose, and flags
+anything unrecognized (never silently omitted).
+
+## 11b. A re-analysis: compare to the original (step 11b)
+
+When the user asked to re-analyse an earlier session (step 1b), compare the two with the
+Comparator (a faithful port of DE-LIMP's Run Comparator):
+
+```
+Rscript scripts/compare_analyses.R --out <session>/output/comparison \
+  --adjp 0.05 --logfc 0 \
+  --analysis "Original:<prior>/output/tables" \
+  --analysis "Reanalysis:<this session>/output/tables"
+```
+
+It writes `COMPARISON.md` + CSVs: protein-universe overlap, the 3×3 Up/Down/NS
+concordance per shared contrast, direction concordance on co-significant proteins,
+and logFC correlation. (`session.py finalize` already wrote `DIFFERENCES.md` —
+what *settings* changed; the Comparator shows how the *results* changed.)
+
+## 12. Finalize the session, and the summary to the user (step 12)
+
+First check the notes from the Core again (step 0: `notes.py check --json --session <dir>`).
+
+```
+python3 scripts/session.py finalize --dir <session> --zip
+```
+
+(On HIVE's login node it moves itself to a compute node: run it in the background.) This tidies `output/` (tables→`tables/`, figures→`figures/`) and makes sure the session carries
+**publication Methods**: `output/methods.md` + `.docx`, covering LC-MS acquisition, the search
+(engine, pinned version, parameters, FDR), the sequence database and contaminants, the DE, and the
+instrument-grant acknowledgment. If step 9d did not write them, `make_methods.py` does it here. An
+existing `methods.md` is never overwritten; if it lacks a section, a complete draft is written
+beside it as `methods_complete_draft.md`. Finalize then writes the **repository-deposit package**
+`output/DATA_SUBMISSION/`: `HOW_TO_SUBMIT.md`/`.html`, a pre-filled SDRF `sdrf.tsv`,
+`protocols.txt`, `files_to_upload.tsv`, and `prepare_upload.sbatch`. Never run
+`prepare_upload.sbatch` yourself: it reads every raw file, so the user submits it with `sbatch`
+when ready. Finalize also writes, at the session root, **`README.html`** (the page collaborators
+open: summary, links, and where the folder, raw data, search output and FASTA are on HIVE with
+their Windows/Mac paths), the same text as `README.md`, **`AGENTS.md`** (a guide for an AI agent
+given the folder), `input/raw_files.txt` if it was missing, `DIFFERENCES.md` for a re-analysis,
+and **`MANIFEST.txt`**, which lists every part as `[OK]` or `[SKIPPED] <name> -- <reason>`
+(→ this file). Then it zips the session, leaving out the raw data, `upload_staging/`, DIA-NN's
+`.quant` intermediates (~30 MB per run) and the predicted spectral library (`*.predicted.speclib`,
+~0.7 GB; rebuilt from the FASTA + params). Both stay on disk; `zip_excluded` counts them.
+`--no-deposit` skips only the package. → detail: `references/deposit.md`.
+Finally it logs the run in the Core's run log (`record_run.py`) and posts **"analysis
+complete"** to the Core's Slack channel. The post carries the session, instrument, engine +
+version, significant proteins per contrast, and where the folder, the zip and
+`HOW_TO_SUBMIT.md` are. Neither step can fail finalize, and `--no-notify` skips only the post.
+Their outcomes are the last two lines of `MANIFEST.txt`. → `references/notifications.md`.
+
+**Read `MANIFEST.txt` and relay every `[SKIPPED]` line with its reason** (e.g. "the Word copy of
+the Methods was skipped: pandoc/python-docx not installed"). `[INFO]` lines are notices, not
+missing parts, so do not relay them. Examples are the run log and Slack lines such as "Core
+notification -- not configured for this user". Then summarize: data type (instrument
++ acquisition), engine + **pinned version**, mass accuracy **and its source**, the skill
+version (`reproducibility/environment/skill.txt`), FASTA source, DE method, and per-contrast significant counts. Point them at the
+**session folder** and its **`README.html`** — tell collaborators to open that (double-click);
+`AGENTS.md` is for an AI assistant they hand the folder to. Then:
+
+- **`output/Analysis_Report.html`** (the report of record: QC, figures and the interpretation in
+  one page; README.html links it first), with `Analysis_Report.pdf` (when a browser printed it)
+  and `Analysis_Report.md` (the plain-text twin for NotebookLM)
+- `output/OUTPUT_FILES.md` (what every file is)
+- **`output/methods.md`** (the publication Methods; its `[... — confirm]` tags must be resolved
+  before publishing)
+- `output/tables/methods.txt` verbatim (the DE record — don't paraphrase)
+- **`output/tables/reproducibility_log.R`** (the analysis as plain R — say this is where the code
+  is; it is what most people mean when they ask)
+- `output/reproducibility/REPRODUCE.md` (the pinned recipe, for re-running the search too)
+- **`output/DATA_SUBMISSION/HOW_TO_SUBMIT.md`** (how to deposit the data in PRIDE or MassIVE from
+  HIVE). Say how many `TO-FILL` cells `sdrf.tsv` has (`deposit.sdrf_to_fill` in finalize's
+  output), and that these are facts only the user knows — tissue, disease, sex, age, what the
+  groups are — which the skill never guesses.
+- for a re-analysis, `DIFFERENCES.md` + `comparison/COMPARISON.md`.
+- if one was made (9e), `output/podcast/podcast.m4a` and its `transcript.html`: say it is
+  AI-generated, that you could not listen to it, and that someone should before it is shared.
+  To send the report with the audio, they send `output/Analysis_Report_with_audio.html` alone
+  (say its size; above ~18 MB, ~25 MB attached, Bioshare rather than email).
+  If none was made: a submission's was skipped, failed or left out (say which, in one line);
+  internal Core work, and anyone else whose results go to a collaborator or the lab, are
+  offered it once (step 9e).
+
+If anything was recorded with `report_issue.sh` this session, say so in one line and where
+it went (`report_issue.sh --where`), so the user knows the Core will see it.
+
+For a Core HIVE run, close with the **FRAN handover** (step 7c) in one line — that the search
+was staged for FRAN's ingest cron, or, if it was not eligible, the reason in plain words
+("this is a collaborator account, so it stays out of the Core corpus"). Say "handed over,
+FRAN ingests on its next pass" rather than implying it is already in the corpus.
+If `stage` returned a `health_warning`, add it to that line: the search is handed over, but
+FRAN's ingest is stuck (or its code is stale) on FRAN's side.
+
+Core staff, internal work: board.md §3 row "finished".
+
+## Keeping the record of the analysis: the decisions log and the conversation
+
+Two records let an AI (or a person) review later how the analysis was done — another
+reproducibility check. Both stay in the session's `logs/`, and AGENTS.md's "Reviewing this
+analysis" checklist reads them.
+
+- **The decisions log** — any agent, every analysis. At each decision point, one line:
+
+```
+python3 scripts/log_decision.py --session <S> --step '3. design' --what-file - --why-file - <<'EOF'
+<what was decided>
+---
+<the user's words, or the evidence>
+EOF
+# no usable local Python: the same on HIVE (the text goes over ssh on standard input)
+bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/log_decision.py --session <S> --step "3. design" --what-file - --why-file -' <<'EOF'
+<what was decided>
+---
+<the user's words, or the evidence>
+EOF
+```
+
+  The text goes in on **standard input** — the what, a line `---`, the why — in a heredoc
+  quoted `<<'EOF'` (`EOF` alone at the start of its line), where nothing is expanded: the
+  user's own words are full of quotes, and in `--what "…"` bash would run anything in
+  backticks or `$(…)`, here and again on HIVE.
+  Log: submissions analysed together and which is the main one (step 1c), the conditions
+  confirmed (step 3), the defaults confirmed or changed (step 4), the
+  contrasts chosen (step 8), every override (`--unchecked`, `--force`, a gate accepted), and
+  anything the user declined or asked for beyond the defaults. → `logs/decisions.md`. It is the
+  quickest thing for a reviewer to read, so write it on Claude Code too.
+- **The conversation** — Claude Code only. `save_transcript.py` copies this conversation's
+  transcript into `logs/conversation/`, **redacted** (the skill's secret patterns, the tokens and
+  keys this computer holds, and anything named like a key, token, password or webhook), with
+  `index.json` and a readable `conversation.md`. Redaction cannot catch a secret written as
+  ordinary prose ("my password is …"), so the conversation and the decisions log are
+  **Core-internal**: `deliver` never ships them, the session zip leaves them out, and they are
+  readable by the owner and group only. Run it after the search is submitted (step 7), after
+  DE (step 8); `session.py finalize` runs it itself and records it in `MANIFEST.txt`:
+  ```
+  python3 scripts/save_transcript.py <S>                    # the session is on this computer
+  python3 scripts/save_transcript.py --hive "$S"            # hive_remote: redacted here, then put on HIVE
+  ```
+
+  In hive_remote mode run `save_transcript.py --hive "$S" --remember [--call-id <token>]` right after
+  `session.py init` (on HIVE), and the `--hive` save before `finalize`: `init` on HIVE cannot
+  see this conversation. **No usable local Python** (Windows staff): skip it. It must redact
+  the conversation here, before anything leaves this computer, so it has no HIVE route; the
+  decisions log is then the record, as `finalize`'s MANIFEST.txt says. Between those calls, the
+  plugin's hook (`hooks/hooks.json` → `transcript_hook.py`) saves it before a compaction and
+  when the session ends — a no-op in any conversation not recorded for an analysis.
+  No transcript (another agent), or none found: it says so and exits 0. It never fails a step.
+- **Run by a subagent or teammate** (an Agent call): it shares the parent's session id, and
+  nothing in its environment names it. Whenever any subagent of the conversation ran in the last
+  6 hours, every call takes `--call-id <token>` (typed into the command, fresh each time, run in
+  the foreground; step 3b): the transcript whose RUNNING call carries it is saved -- a subagent's
+  own (`agent-<id>.jsonl`), never the parent's, which holds other work. Without a token, or with
+  one found in no running call or in two, it records nothing and says so (`init` and
+  `checkpoint.py status` put that in their JSON's `transcript`): re-run with a fresh
+  `--call-id`, or name the transcript, as its message says (a subagent's:
+  `--transcript <…/subagents/agent-<id>.jsonl> --session-id agent-<id>`).
+  The hook saves only the main conversation, so a subagent saves its own before it reports back.
+- **One conversation, several analyses** (an orchestrator, or staff looking at another client's
+  run): each analysis keeps only its own part.
+  - The first part starts at the user's request that loaded the skill (only when the skill call
+    answered it directly), or at the load itself. It starts at `init` instead when the talk
+    before it names another submission number.
+  - `session.py init`, `checkpoint.py status --resume` and `save_transcript.py <S> --remember`
+    say "the conversation is now working on <S>". A plain `status` is a peek and moves nothing.
+  - A copy that is not the whole conversation keeps only the messages, tool results and
+    compaction boundaries; every other entry type is one "[N other entries omitted]" line. A
+    compaction summary is kept only when the copy holds everything before it.
+    `--transcript-from-now` starts the copy at init; compaction summaries and other
+    whole-conversation entries are then left out of it, because they cover what came before.
+  - **Another client mentioned only by name, not by PROT number, before `init` is not detected
+    and lands in this analysis's copy. When the conversation has touched another client, always
+    use `--transcript-from-now`** (`session.py init … --transcript-from-now`, or
+    `save_transcript.py <S> --remember --from-now`).
+  - These also land in the active analysis's copy: a peek's output (a plain `checkpoint.py
+    status` on another session), the compaction summaries of a single-analysis conversation,
+    and any tool output in this analysis's part that lists other clients (`ls` of the service
+    tree, `checkpoint.py find`, `locate`) stays in its copy.
