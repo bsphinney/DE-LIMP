@@ -8,13 +8,13 @@ files); every pattern below was actually observed in that data.
 <!-- contents: tests/test_skill_structure.py --toc -->
 **Contents** (section: line)
 - 20: Get the design right before computing anything
-- 48: Interpretation patterns that recur
-- 94: Building the report
-- 118: Charts: load the `dataviz` skill first
-- 143: Deliver the HTML
-- 150: 4b. Offering the bake-off (step 4b)
-- 163: 11a. Comparing two searches of the same files (step 11a)
-- 188: 11c. The cross-tool report (step 11c)
+- 50: Interpretation patterns that recur
+- 96: Building the report
+- 120: Charts: load the `dataviz` skill first
+- 145: Deliver the HTML
+- 152: 4b. Offering the bake-off (step 4b)
+- 165: 11a. Comparing two searches of the same files (step 11a)
+- 190: 11c. The cross-tool report (step 11c)
 <!-- /contents -->
 
 ## Get the design right before computing anything
@@ -31,8 +31,10 @@ unchanged because the `Run` column carries the original `.d` basenames.
 The big one for this pair: FragPipe 24 bundles **DIA-NN 1.8.2 beta 8** while the
 `diann_*` workflows pin **2.x**. Both routes end in DIA-NN, so part of any gap is two
 major versions of quant engine, not the approach under test. A head-to-head that omits
-this silently attributes version lag to the method. Control it with `--config-diann`
-pointing at an external 2.x, or state it.
+this silently attributes version lag to the method. State it; or, if the user chooses to,
+control it by pointing FragPipe at a DIA-NN 2.x (`fragpipe_bootstrap.py --diann <2.x binary>`:
+`run_search.py` passes no `--config-diann`; the 2.x licence is why it is their call —
+`references/search-engines.md`, "Do not choose a DIA-NN 2.x for FragPipe yourself").
 
 **Compare at both levels; they answer different questions.**
 

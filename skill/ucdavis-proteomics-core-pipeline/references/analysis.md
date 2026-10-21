@@ -11,11 +11,11 @@ inline instead of shipping the prompt to an external API.
 - 21: The flow
 - 55: The CoreOmics submission (Core data)
 - 68: Report sections (faithful to DE-LIMP's export prompt)
-- 75: Pipeline self-description (DE-LIMP rule #1)
-- 85: No fabrication (DE-LIMP rule, and the viz-data feedback)
-- 94: Output-files report
-- 100: Less-used flags
-- 115: 9. Writing the report (step 9)
+- 79: Pipeline self-description (DE-LIMP rule #1)
+- 89: No fabrication (DE-LIMP rule, and the viz-data feedback)
+- 98: Output-files report
+- 104: Less-used flags
+- 119: 9. Writing the report (step 9)
 <!-- /contents -->
 
 ## The flow
@@ -66,11 +66,15 @@ The record is allowlisted — no email, phone, billing or internal field can rea
 report describes the samples in the submitter's words and adds nothing they did not state.
 
 ## Report sections (faithful to DE-LIMP's export prompt)
-Overview · QC Assessment (if QC present) · Key Findings Per Comparison ·
+
+> Superseded by "9. Writing the report (step 9)" below.
+
+Overview · QC Assessment · Key Findings Per Comparison ·
 Specificity (pull-down designs) or Cross-Comparison Biomarkers + High-Confidence
-Findings · Pathway/GSEA (if present) · Biological Interpretation · How This Analysis
-Works (LC-MS/MS, DIA/DDA, the engine, the stats framework, key terms — written for a
-biologist with no MS background) · Methods & Reproducibility · Next steps.
+Findings · Pathway/GSEA (if present) · Protein-set tests (if they ran) · Biological
+Interpretation · How This Analysis Works (LC-MS/MS, DIA/DDA, the engine, the stats
+framework, key terms — written for a biologist with no MS background) · Methods &
+Reproducibility · Next steps · Instrument & Acquisition (when `--instrument` is given).
 
 ## Pipeline self-description (DE-LIMP rule #1)
 
@@ -132,10 +136,12 @@ With a CoreOmics submission attached (step 3b), pass `--submission <session>`: t
 quotes the record and its Data Quality Notes. Describe the samples in the submitter's words
 and add nothing they did not state ("cross-linked" must not become "chemically cross-linked").
 Then **read `ANALYSIS_PROMPT.md` and every data file + figure it lists, and write a
-complete `AI_Analysis_Report.md`** with ALL its OUTPUT sections (Overview, QC, Key
-Findings Per Comparison, Cross-Comparison Biomarkers, High-Confidence Biomarkers,
-Pathway/GSEA if present, Biological Interpretation, How This Analysis Works, Methods
-& Reproducibility), a **Data
+complete `AI_Analysis_Report.md`** with ALL its OUTPUT sections (Overview, QC Assessment,
+Key Findings Per Comparison, then Specificity for a pull-down or else Cross-Comparison
+Biomarkers + High-Confidence Findings, Pathway & Gene Set Enrichment if GSEA ran,
+Protein-set tests if they ran, Biological Interpretation, How This Analysis Works, Methods
+& Reproducibility, Next steps, and Instrument & Acquisition when `--instrument` is given;
+the brief lists the ones that apply), a **Data
 Quality Notes** section (the 5-part anomalies from steps 8c/8d + `SAMPLE_QUALITY.md`,
 even if "nothing anomalous observed"), and — if a review panel ran (8d) — an **Expert
 Review Notes** section. **Do not write an "Audit & caveats" section:** `make_analysis_html.py`

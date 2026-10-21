@@ -105,7 +105,7 @@ It writes two files into `--out`:
 | **0** | safe | proceed to step 2 of the normal flow |
 | **2** | **HARD GATE FAILED** | **do not search.** Show the operator the failing gate and stop |
 | **3** | STAN unreachable, or too old to have `ht-manifest` | fix STAN; nothing was searched |
-| **4** | (`record` only) write-back failed | the **search is fine**; only STAN's HT tab is stale |
+| **4** | (`link` only) the search is not visible under the submission in FRAN yet, or FRAN could not be asked (not signed in, HTTP error, unreachable) | the **search is fine**; re-run `link` later (section 5) |
 
 The hard gates exist because each one otherwise produces a search that **succeeds while
 covering the wrong files**:
@@ -434,7 +434,8 @@ latest` knows STAN's `needs_rerun`); samples that share a name get `choose_run` 
 
 Then continue with step 2 exactly as normal — nothing after this point is HT-specific.
 **Organism is still asked, never inferred**: STAN does not know it. Reuse a pre-staged
-proteome from `/quobyte/proteomics-grp/de-limp/fasta/` (step 6, `--hive`). The plate will
+proteome from `/quobyte/proteomics-grp/MRS/` (step 6, `--hive`, which looks only there); for
+any other organism let `fetch` download it. The plate will
 route itself to the **5-step DIA-NN parallel chain** at step 7, whose step 1b measures the scan
 window (and a planned mass accuracy) on representative runs itself; nothing is measured by hand
 first (section 4 above).

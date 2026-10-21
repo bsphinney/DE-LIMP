@@ -13,7 +13,7 @@ over-interpret anything. FAILs should stop interpretation; WARNs go in the repor
 - 56: How the orchestrator uses it
 - 69: Why deterministic, not LLM-judged
 - 77: Tuning
-- 83: 8c. The audit and the sample-quality check (step 8c)
+- 85: 8c. The audit and the sample-quality check (step 8c)
 <!-- /contents -->
 
 ## What it checks
@@ -75,8 +75,10 @@ matter most. It complements DE-LIMP's architectural rules (no fabricated values;
 pipeline self-describes) and its "Error handling & UX audit" review.
 
 ## Tuning
-`--adjp` should match the DE significance cutoff and `--logfc` the volcano's reference
-line (it is counted descriptively, never used to call significance); `--min-proteins` and
+`--adjp` and `--logfc` default to the DE's own cutoffs, read from `de_provenance.json` (0.05 / 1,
+tagged DEFAULT in `AUDIT.json` `cutoffs.source`, only when it records none). `--adjp` is the DE
+significance cutoff and `--logfc` the volcano's reference line (it is counted descriptively,
+never used to call significance); `--min-proteins` and
 `--max-missing` are soft thresholds — adjust for very small samples or enriched
 fractions (e.g. a phospho or secretome experiment legitimately quantifies fewer).
 
@@ -84,9 +86,12 @@ fractions (e.g. a phospho or secretome experiment legitimately quantifies fewer)
 
 ```
 python3 scripts/audit_results.py --out AUDIT.md --conditions ./conditions.csv \
-    --de-dir ./de_results --acquisition-json /tmp/acq.json --adjp 0.05 --logfc 1 \
+    --de-dir ./de_results --acquisition-json /tmp/acq.json \
     --fasta-meta ./search.fasta.meta.json --search-out ./search_out
 ```
+
+`--adjp` / `--logfc` are left out on purpose: they default to the cutoffs `run_de.R` recorded
+in `de_provenance.json`. Pass them only to audit at other cutoffs ("Tuning" above).
 
 Checks for the classic new-user pitfalls: too few/no replicates, imbalanced or
 **confounded** design, **mixed acquisition or mixed instruments** in one analysis,

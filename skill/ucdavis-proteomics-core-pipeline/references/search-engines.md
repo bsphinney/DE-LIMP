@@ -11,15 +11,15 @@ DE-input contract.
 - 215: Licensing — pick a commercial-OK engine for non-academic users
 - 230: Public program sources (anyone, any OS — cite these for non-Core / external users)
 - 253: Per-engine invocation & output adapter (`run_search.py`)
-- 873: The adapters are the test surface
-- 880: Less-used flags
-- 900: 2. Detect acquisition + instrument (step 2)
-- 998: 4a. DIA: the three routes (step 4a)
-- 1036: 7. Running the search: the command, `--` paths, keratin (step 7)
-- 1070: 7. Radiant + Fulcrum in the pipeline (step 7)
-- 1111: 7. Licensing, AlphaDIA, chromatograms and DIA-NN settings (step 7)
-- 1144: 7. On a cluster: submitting, Sage conversion and the LFQ gate (step 7)
-- 1193: 7. After submitting: the DE contract and the conversation (step 7)
+- 877: The adapters are the test surface
+- 884: Less-used flags
+- 904: 2. Detect acquisition + instrument (step 2)
+- 1002: 4a. DIA: the three routes (step 4a)
+- 1040: 7. Running the search: the command, `--` paths, keratin (step 7)
+- 1074: 7. Radiant + Fulcrum in the pipeline (step 7)
+- 1116: 7. Licensing, AlphaDIA, chromatograms and DIA-NN settings (step 7)
+- 1149: 7. On a cluster: submitting, Sage conversion and the LFQ gate (step 7)
+- 1198: 7. After submitting: the DE contract and the conversation (step 7)
 <!-- /contents -->
 
 ## Acquisition detection (`detect_acquisition.py`)
@@ -705,8 +705,9 @@ FragPipe branches on the DIA-NN version (`CmdDiann.java`):
 
 - **Bundled DIA-NN 1.8.2 Beta 8 (the default) → `dia-quant-output/report.tsv` only. There is
   no `report.parquet`.** Also produces `MSstats.csv` (gated on DIA-NN < 2.0).
-- Only if you point `--config-diann` at your own **DIA-NN 2.x** does it write
-  `report.parquet` (and convert it to TSV as well).
+- Only if you point it at your own **DIA-NN 2.x** (`--config-diann`, or the cache entry
+  `fragpipe_bootstrap.py --diann` writes) does it write `report.parquet` (and convert it to TSV
+  as well).
 
 So `adapt_fragpipe_dia()` reads whichever exists, preferring parquet and otherwise
 converting the TSV. In the stock configuration the TSV path is the one that runs.
@@ -825,8 +826,11 @@ executable still runs during rescoring unless MSBooster is switched to Koina mod
 on non-Windows (`Skyline.java`) and only ships `SkylineRunner.exe`, so DIA-NN off means IDs
 and a library but no quant matrix.
 
-**⚠ Do not swap in your own DIA-NN 2.x via `--config-diann`.** Beyond breaking the output
-shape (2.x writes parquet), the DIA-NN 2.x licence adds: *"Usage of DIA-NN in the cloud or
+**⚠ Do not choose a DIA-NN 2.x for FragPipe yourself.** `run_search.py` passes no
+`--config-diann`: FragPipe runs the DIA-NN that `fragpipe-ui.cache` names
+(`fragpipe_bootstrap.py --diann`; on HIVE the bundled 1.8.2 Beta 8). A 2.x there would not break
+the pipeline — it writes `report.parquet`, which `adapt_fragpipe_dia()` reads as is — but it is
+the user's call, because the DIA-NN 2.x licence adds: *"Usage of DIA-NN in the cloud or
 on any computer setups that are not in your immediate possession is only permitted under
 Collaborative use."* A shared cluster is arguably not "in your immediate possession". The
 bundled 1.8.2 Beta 8 carries no such clause. This clause is **also worth knowing for the
@@ -848,7 +852,7 @@ Say so rather than crediting it all to the method.
   with DIA-NN in `compare_searches.py`. FragPipe's own contaminants keep their tag
   (`contam_P00167`: `Protein ID` alone drops it); `Gene` and `Entry Name` go to `Genes` and
   `Protein.Names` (`scripts/protein_ids.py`).
-- Needs Java 9+; MSFragger/IonQuant must already be licensed/present.
+- Needs Java 11+ (FragPipe 24.0 release notes); MSFragger/IonQuant must already be licensed/present.
 - **Reading Thermo `.raw`:** MSFragger reads `.raw` directly via
   `tools/ext/thermo/BatmassIoThermoServer.exe` — a **Windows .NET-Framework** exe that on
   **Linux needs `mono` on PATH** (the .NET 8 runtime does NOT run it — Framework ≠ Core).
@@ -1081,9 +1085,10 @@ python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \
     (ThermoRawFileParser; see the Sage bullet under "On `hpc`" below). With `--sbatch`
     the conversion **and** the DIA-NN predicted library run inside the job, never before
     it is submitted.
-  - **A spectral library is always required**, and `run_search.py` generates one with
-    **DIA-NN's predictor** (`--fasta-search --predictor --gen-spec-lib --out-lib
-    …tsv`) because Radiant reads DIA-NN's library TSV schema natively. Pass
+  - **A spectral library is always required**, and `run_search.py` builds one with
+    `make_radiant_library.py` (**DIA-NN's predictor** → parquet → a TSV renamed to Radiant's
+    columns), because DIA-NN cannot write a TSV library and Radiant cannot read DIA-NN 2.x's
+    `.speclib` ("DIA-NN and Radiant share no library format directly" above). Pass
     `--library` to reuse an existing DIA-NN `.tsv` library instead. This means the
     Radiant route **also needs DIA-NN acquired**.
   - ⚠ **`--libfree` is a misnomer.** In Radiant's CLI it is the same switch as

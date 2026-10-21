@@ -1132,15 +1132,18 @@ runs give no radius; default 3).
       *tolerance*; DIA-NN still recalibrates every run, pinned or not. A single-shot search
       runs the same probe between its library and its search, so a machine without SLURM
       measures it too. Steps 2–5 **refuse to start** without a valid `massacc.txt` /
-      `window.txt`. **Tell the user**: on a 120k/15k Exploris 480 cohort the measured MS2
-      (14 ppm) makes DIA-NN 2.7.0 log `WARNING: the MS2 mass accuracy setting (14 ppm)
-      deviates significantly from the value recommended (25 ppm) for the Orbitrap
-      resolution of this run (15000)` — the measurement and DIA-NN's own resolution-based
-      value disagree, and which to pin is an open question (→
-      this file). Every other omitted mass accuracy (no sidecar,
-      instrument not identified, only one of the two flags, `--no-probe-window`,
-      `--seed-lib`) declines the chain: re-run `estimate_params.py` with the **real
-      instrument** (step 6b). `0` is **not** auto — DIA-NN reads it as a literal 0 ppm
+      `window.txt`. On a 120k/15k Exploris 480 cohort the runs measured MS2 14 ppm, which is
+      pinned at the SOP's 20 (`mass_acc.floored`). Pinned at 14, DIA-NN 2.7.0 logs `WARNING:
+      the MS2 mass accuracy setting (14 ppm) deviates significantly from the value recommended
+      (25 ppm) for the Orbitrap resolution of this run (15000)`; at 20 it logs nothing. Which
+      value to pin is settled ("Settled — measure, but floor at the SOP" above): **tell the
+      user** both numbers. Every other omitted mass accuracy declines the chain, and the
+      decline names the fix for its cause: no sidecar plan, instrument not identified, or only
+      one of the two flags (`mass_acc_unset`) → re-run `estimate_params.py` with the **real
+      instrument** (step 6b); `--no-probe-window` (`mass_acc_no_probe`) → drop it, and step 1b
+      measures it; `--seed-lib` (`mass_acc_seeded`) → drop it, or pin `--mass-acc` and
+      `--mass-acc-ms1` in the cfg from a validated SOP (which also answers
+      `--no-probe-window`). `0` is **not** auto — DIA-NN reads it as a literal 0 ppm
       tolerance and returns 0 IDs (auto is the flag *omitted*) — so `0`, negative,
       non-numeric, or set twice with different values also declines, plan or no plan; fix
       the value.
@@ -1230,5 +1233,6 @@ runs give no radius; default 3).
     `<out>/jobs.txt` and the checkpoint (`RECOVERY.md`) straight after the last `sbatch`,
     before it prints anything. So reading only its first line (`bash submit.sh | head -1`)
     no longer loses them. Submit `<out>/submit.sh` (over
-    `hive_exec.sh` on HIVE), then watch the **step-5** job — that's the one that writes
-    `report.parquet`.
+    `hive_exec.sh` on HIVE), then watch the **whole chain** (`watch_run.sh --all <out> --hive`,
+    step 7b; watching only step 5 hides an upstream failure as a permanent `PENDING`). Step 5
+    is the one that writes `report.parquet`.

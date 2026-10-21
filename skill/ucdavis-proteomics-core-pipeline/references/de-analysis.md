@@ -25,7 +25,7 @@ bundle's `de.method` says `maxlfq`).
 - 764: Step 8: blocks and numeric covariates
 - 797: Step 8: keratin samples and contaminants
 - 833: Step 8: the method, what `run_de.R` writes, QuantUMS
-- 901: 8b. Figures, and what counts as significant (step 8b)
+- 905: 8b. Figures, and what counts as significant (step 8b)
 <!-- /contents -->
 
 ## Invocation
@@ -363,8 +363,8 @@ as information rather than as a hole to filter around.
 
 `--method maxlfq` is for two situations only:
 
-1. **The user asked** — usually because they want QuantUMS quality filtering, or to
-   match an earlier MaxLFQ analysis.
+1. **The user asked** — usually to match an earlier MaxLFQ analysis. QuantUMS quality
+   filtering is not a reason: its cutoffs work on `dpc` too ("Step 8: the method…" below).
 2. **The file you point at is protein-level.** `readDIANN()` keys on `Precursor.Id`
    and `Precursor.Normalised`. This is a property of the FILE, not of the engine —
    most engines can feed limpa if you use the right output:
@@ -840,8 +840,8 @@ say `maxlfq`; switch only for the two reasons below.
 
 Use `maxlfq` when **either**:
 
-1. **The user asks for it** — e.g. they want QuantUMS quality filtering (below), or
-   to match a previous MaxLFQ-based analysis.
+1. **The user asks for it** — e.g. to match a previous MaxLFQ-based analysis. QuantUMS
+   quality filtering is not a reason: its cutoffs work on `dpc` too (below).
 2. **The input cannot support limpa.** `readDIANN()` needs PRECURSOR-level columns
    (`Precursor.Id`, `Precursor.Normalised`). What matters is *which file you point at*,
    not which engine ran:
@@ -873,7 +873,7 @@ a user who asks "what did you do?" or "can I have the R code?"** — not the
 `reproducibility/` bundle, which pins the environment and re-runs the multi-hour
 search. Mention it when you hand over results.
 
-**QuantUMS quality filtering — opt-in, `--method maxlfq`, DIA-NN input only.**
+**QuantUMS quality filtering — opt-in, either method, DIA-NN input only.**
 Only reach for this when the user asks. DIA-NN's
 QuantUMS scores how well MS1 and MS2 agree for each measurement, and filtering on it
 trades depth for quantitative reliability:
@@ -882,14 +882,18 @@ trades depth for quantitative reliability:
 |---|---|---|---|
 | `--eq-cutoff` | `Empirical.Quality` | 0 (off) | drop precursors whose empirical quality is below this |
 | `--pgq-cutoff` | `PG.MaxLFQ.Quality` | 0 (off) | drop protein groups whose MaxLFQ quality is below this |
-| `--coverage-min` | — | 0.5 | require a protein in ≥ this fraction of samples before testing |
+| `--coverage-min` | — | 0.5 | (`maxlfq` only) require a protein in ≥ this fraction of samples before testing |
 
 Both QuantUMS cutoffs are **off by default** — they discard real measurements, so
 they are the user's call, not a silent default. Offer them when quantitative
 precision matters more than depth (small fold-changes, few replicates), say roughly
 how many proteins each costs, and record the choice: the counts land in
 `filters_applied` and flow into `methods.txt`. They need DIA-NN input — the columns
-don't exist in Sage/FragPipe/Radiant output, and the filter is skipped if absent.
+don't exist in Sage/FragPipe/Radiant output. On `maxlfq` a filter whose column is absent is
+skipped. On `dpc` the cutoffs pre-filter the report before limpa reads it, so they need a
+parquet report and a missing column stops the run; prefer `--eq-cutoff` there, because
+`--pgq-cutoff` deletes whole protein × run cells that limpa's detection model then imputes
+back (`run_de.R` warns).
 
 `--coverage-min` is different: it is **on** at 0.5 because a protein seen in one or
 two samples is an on/off observation, and letting such rows into `eBayes` destabilises

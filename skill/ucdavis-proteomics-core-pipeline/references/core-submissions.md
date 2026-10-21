@@ -32,10 +32,10 @@ A **high-throughput plate** is a different route: STAN knows its file list
 - 998: Several submissions in one analysis
 - 1045: Troubleshooting by exit code
 - 1063: The linked-share lesson
-- 1075: Less-used flags
-- 1085: Step 1 for Core staff: where the CoreOmics steps run, and `identify`
-- 1116: 1c. The service run, step by step (step 1c)
-- 1312: 12b. Deliver to the collaborator (step 12b)
+- 1076: Less-used flags
+- 1086: Step 1 for Core staff: where the CoreOmics steps run, and `identify`
+- 1117: 1c. The service run, step by step (step 1c)
+- 1313: 12b. Deliver to the collaborator (step 12b)
 <!-- /contents -->
 
 ## Why this needs its own script
@@ -1070,7 +1070,8 @@ share looked complete. Over SMB it showed **0** raw entries. The `search/` links
 collaborator nothing, because Bioshare streams files through an Apache module whose allowed-folder list had `/quobyte` for http (port 80) but not https (443) — fixed 2026-09-16 by the Bioshare admins. Nothing about the share was wrong on
 HIVE, and nothing reported an error.
 That is why `deliver` copies real files, makes only relative Flinders-to-Flinders links, and
-refuses to call a delivery done until it has walked the whole share and found no other symlink.
+refuses to call a delivery done until it has walked the whole share and found no symlink inside
+the delivery and no bad `raw/` link of its own (older links in the share are listed as warnings).
 
 ## Less-used flags
 - `identify --no-lookup`: read ids from the names and the message only; never ask CoreOmics.
@@ -1388,11 +1389,12 @@ python3 scripts/core_submission.py email-draft --summary ~/core/PROT_0807/submis
   group- and world-readable. A raw-only delivery holds README.html/.md, MANIFEST, checksums and any
   methods (no AGENTS.md: there is no session), with the raw files as relative links in
   `<share>/raw/`.
-- **Verification walks the whole share**: any symlink other than a relative `raw/` link under
-  the Flinders root, any file this run did not deliver, or anything unreadable fails it. An
-  error mid-copy still writes the MANIFEST and `delivery.json` with `verified: false`. **Exit 2
-  from `--apply` means do not share.** Over 5 GB it exits 5 with a `deliver_job.sh` (golden
-  rule #3).
+- **Verification walks the whole share**: a symlink inside this delivery, a `raw/` link this
+  run made that is absolute, broken or outside the Flinders root, any file in the delivery this
+  run did not deliver, or anything unreadable fails it. Links already in the share that this run
+  did not make are listed as warnings and left alone. An error mid-copy still writes the
+  MANIFEST and `delivery.json` with `verified: false`. **Exit 2 from `--apply` means do not
+  share.** Over 5 GB it exits 5 with a `deliver_job.sh` (golden rule #3).
 - **Check raw links once in Bioshare.** Brett reported an earlier submission's (absolute) raw links download
   from Bioshare; relative links resolve to the same files, but nobody has yet opened one there.
   On the first raw-link delivery, open the Bioshare link and download one raw file before `send`.

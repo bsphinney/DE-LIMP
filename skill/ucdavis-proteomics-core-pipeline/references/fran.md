@@ -574,7 +574,7 @@ python3 scripts/fran_deposit.py health     # is FRAN's cron taking anything at a
   GENERATION (step 7, `run_search.py`): `--fran-name` always, plus `--qc` for a QC run, bakes it into the job-end
   hook, so a QC run never reaches FRAN's queue. Pass the same `--name` / `--qc` / `--not-qc`
   here. A search that turns out to be QC after it was staged is withdrawn (manifest
-  `qc: true`, and `verify` says `qc_excluded`), and it stays withdrawn: a later `stage` without an explicit `--not-qc` leaves it out. If the rule misfires on a real experiment, use
+  `qc: true`, and `verify` says `qc_excluded`), and it stays withdrawn: a later `stage` without an explicit `--not-qc` leaves it out, unless the name rule made it QC; that verdict is re-judged by today's rule. If the rule misfires on a real experiment, use
   `--not-qc`.
 - **`check` first, and treat an ineligible run as normal.** `not_core_facility`,
   `not_on_hive`, `engine_unsupported` (Sage/AlphaDIA — the corpus is DIA),

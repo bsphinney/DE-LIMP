@@ -22,9 +22,10 @@
 #           as qualitative on/off calls.
 #
 # Input contract: a DIA-NN report (report.parquet preferred, or report.tsv).
-# For Sage / FragPipe DDA results, first convert to a DIA-NN-shaped precursor
-# report or a peptide matrix (see references/de-analysis.md, "Feeding non
-# DIA-NN engines into the DE step"); then point --input at that.
+# For Sage / FragPipe / AlphaDIA / Radiant results, use the DIA-NN-shaped report.parquet
+# run_search.py's adapter writes (--method maxlfq), or for --method dpc a precursor-level
+# report (see references/de-analysis.md, "DE-input contract (§8.3)" and "Method choice —
+# limpa/DPC is the default"); then point --input at that.
 #
 # Usage:
 #   Rscript run_de.R --input report.parquet --metadata conditions.csv \

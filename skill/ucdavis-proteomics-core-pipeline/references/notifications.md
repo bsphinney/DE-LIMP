@@ -302,16 +302,19 @@ the route's last job: post only a failure) and `--fran-stage` (stage a finished 
 - **Just before submitting, check the notes from the Core again** (step 0: `notes.py check
   --json --session <dir>`). A note about this search changes it only if the user agrees.
 - **Every search job ends with the job-end hook**, on the cluster, whether or not anyone is
-  watching. The last job:
-  - logs the run in the Core's run log (`record_run.py`);
+  watching. The last job, in this order:
   - if it is a DIA-NN search that succeeded, hands it to FRAN (step 7c);
+  - logs the run in the Core's run log (`record_run.py`), after FRAN so the record carries the
+    FRAN outcome;
   - posts "finished" or "FAILED" to the Core's Slack channel.
 
   Earlier chain jobs report only a failure. The job's exit status is unchanged and no webhook
   is ever in it. **Before submitting a Core search, tell the user in one line** that its end
   will be posted to the Core Slack channel and staged for FRAN. **If they say not to**, pass
-  `--no-notify` (no post) and/or `--no-fran` (not to FRAN) to `run_search.py`. Pass them at
-  generation, never as environment variables, which do not reach a job in `hive_remote`.
+  `--no-notify` (no post) and/or `--no-fran` (not to FRAN) to `run_search.py`. Pass them as
+  flags at generation. An environment variable (`SKILL_SLACK=0`, `FRAN_DEPOSIT=off`) counts only
+  in the same call as `run_search.py`; one set in an earlier `hive_exec.sh` call (`hive_remote`)
+  never reaches the job.
   **Always pass `--fran-name "<the session's descriptive name>"`**: the job-end hook hands the
   search to FRAN under that name. Also pass **`--qc`** when the user describes the run as QC, or
   it is an instrument QC standard (e.g. a HeLa QC series), so it is never handed to FRAN. If

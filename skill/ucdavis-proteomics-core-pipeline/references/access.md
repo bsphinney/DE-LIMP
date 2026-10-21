@@ -27,9 +27,9 @@ jobs** on HIVE — nothing depends on an interactive session staying open.
 - 444: Notes
 - 465: On HIVE: the login node or a compute node (golden rule 3, step 0a)
 - 513: Step 0a: the questions, the check and the modes
-- 585: Step 0: is this skill current? (every conversation)
-- 707: Step 1: locating the raw files
-- 712: Step 1: a path the user gave on a network drive
+- 588: Step 0: is this skill current? (every conversation)
+- 710: Step 1: locating the raw files
+- 715: Step 1: a path the user gave on a network drive
 <!-- /contents -->
 
 ## Step 0a asks two questions (Core staff, three) → pick a mode
@@ -516,6 +516,9 @@ your own copy in your HIVE home. Run all of this **on HIVE** (via `hive_exec.sh`
 are driven on **HIVE over SSH with the user's private key** — they do NOT run Claude
 Code on HIVE. Ask two questions, verify, and ask Core staff a third:
 
+1. **"Do you have access to UC Davis HIVE (an account + an SSH private key)?"** If yes, ask
+   where their private key is (e.g. `~/.ssh/id_ed25519`).
+2. **"Do you work for the UC Davis Proteomics Core (staff)?"**
 3. **Core staff only — yes to 2 AND `check_access.sh` below says `core_member: true` — right
    after that check: "Which CoreOmics submission is this analysis for?"** A number (807 or
    PROT_0807), several numbers when the analysis combines submissions, or "none" for internal

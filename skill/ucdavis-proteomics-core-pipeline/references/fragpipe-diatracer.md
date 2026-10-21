@@ -8,12 +8,12 @@ an example** — a laptop or a generic Linux box hits the same four gates.
 <!-- contents: tests/test_skill_structure.py --toc -->
 **Contents** (section: line)
 - 19: The four gates, in the order you hit them
-- 126: Parallelising the conversion
-- 151: Output contract
-- 166: When comparing against the DIA-NN route, say this out loud
-- 175: The verified working invocation
-- 197: 6c. FragPipe / Radiant: the config is generated, not stored (step 6c)
-- 235: 7. Running the FragPipe + diaTracer route (step 7)
+- 127: Parallelising the conversion
+- 152: Output contract
+- 167: When comparing against the DIA-NN route, say this out loud
+- 181: The verified working invocation
+- 203: 6c. FragPipe / Radiant: the config is generated, not stored (step 6c)
+- 246: 7. Running the FragPipe + diaTracer route (step 7)
 <!-- /contents -->
 
 ## The four gates, in the order you hit them
@@ -56,8 +56,9 @@ cp search.fasta target.fasta
 # -> <date>-decoys-target.fasta.fas   (targets + decoys)
 ```
 
-Point `database.db-path` at the `.fas`, not the original FASTA. A 55,245-sequence
-proteome becomes 110,490 entries.
+Pass the `.fas`, not the original FASTA, as `make_presets.py --fasta` (step 6c below), which
+writes it to `database.db-path`; never hand-edit the workflow. A 55,245-sequence proteome
+becomes 110,490 entries.
 
 ### 3. Headless FragPipe needs a per-user config cache — THE BIG ONE
 
@@ -169,8 +170,13 @@ never uses it.
 
 FragPipe's bundled DIA-NN 1.8.2 beta 8 is **two major versions behind** the 2.x the
 `diann_*` workflows pin. Some of any difference is version lag, not the spectrum-centric
-approach. To control for it, pass an external DIA-NN 2.x via `--config-diann`. Reporting
-a head-to-head without noting this attributes the version gap to the method.
+approach. To control for it, point FragPipe at a DIA-NN 2.x: `run_search.py` passes no
+`--config-diann`, so FragPipe uses the DIA-NN in `fragpipe-ui.cache` — re-run
+`fragpipe_bootstrap.py --diann <DIA-NN 2.x binary>` (its `report.parquet` is read as is). That
+is the user's call, because DIA-NN 2.x's licence limits use on shared computers
+(`references/search-engines.md`, "Do not choose a DIA-NN 2.x for FragPipe yourself").
+Otherwise state the gap: reporting a head-to-head without noting it attributes the version
+gap to the method.
 
 ## The verified working invocation
 
@@ -202,9 +208,14 @@ These two are driven by a whole config file rather than flags, so
 ```
 python3 scripts/make_presets.py --engine <fragpipe|radiant> \
     --instrument "<detected instrument>" --acquisition DIA \
-    [--fasta ./search.fasta] [--threads N] [--cys-alkylation <agent>|none] \
+    [--fasta <target+decoy .fas>] [--threads N] [--cys-alkylation <agent>|none] \
     --out ./wf/<engine>.<workflow|radiantConfig>
 ```
+
+For FragPipe, `--fasta` becomes `database.db-path`, so it must be the target+decoy `.fas` from
+"The four gates" gate 2 above, not `./search.fasta`: MSFragger stops with `No decoys found` on a
+target-only FASTA, and `run_search.py` builds no decoy database. Radiant's config does not use
+`--fasta`.
 
 Re-run it directly if the FASTA or thread count changed after step 4, or with
 `--cys-alkylation` when step 3 asked about alkylation: FragPipe's presets fix carbamidomethyl-C

@@ -14,7 +14,7 @@ genuine ambiguities.
 - 174: Why deterministic matching (not pure LLM)
 - 181: Less-used flags
 - 186: Step 3: collecting the conditions and settling every ambiguity
-- 246: Step 8: check the design against the report; runs left out of the DE
+- 247: Step 8: check the design against the report; runs left out of the DE
 <!-- /contents -->
 
 ## Two ways the user provides conditions
@@ -226,7 +226,8 @@ says the label names every one of its runs (a group label such as `ctrl`), or wi
 that names the one run. The answer is recorded in `<csv>.decisions.json` (copied with the CSV
 by `provenance.py`); also log it (`log_decision.py`). Do **not** start a search while any run is
 unassigned, conflicting or awaiting a decision. A subject column (Mouse, Animal, Subject, Patient, Donor…) whose values look
-like subjects (≥ 3, not the groups relabelled, recurring across groups) is kept under its
+like subjects (≥ 3, not the groups relabelled, and recurring across groups where they span
+groups) is kept under its
 own name; when the output has `"block_suggested": true`, run DE with
 `--block <block_column>` (step 8). A subject-named column whose values do not (Subject =
 M/F, Patient = Yes/No) stays a covariate and comes back as `subject_ambiguous` — ask, and

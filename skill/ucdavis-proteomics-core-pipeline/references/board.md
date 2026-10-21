@@ -397,7 +397,10 @@ long steps; `session.py init --submission | --internal` records the answer. **Re
   10,000 GPU-hours, so the work runs unattended overnight.
 - **10,000 or more of either: ask on the board before submitting** (`ask ... --cpu-hours N`),
   and submit only once a person has approved it there; then record it with `--decision <id>`.
-  The same when the board answers `job_needs_decision` (its 24-hour safety net).
+  `job_needs_decision` (exit 3, the 24-hour safety net) comes when you record a job already
+  submitted: `ask` for its hours at once and tell your person; approved, record it with
+  `--decision <id>`; declined, `scancel` it and say so. Until a person has looked, ask before
+  each further job (§3 above).
 - **Otherwise never let the board hold up the analysis.** If it is down, not connected, or the
   thread is not approved yet, carry on and try again at the next milestone.
 - **Posts go on standard input** (`--body-file -`), never on the command line. Posts from

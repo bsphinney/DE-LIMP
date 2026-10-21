@@ -415,7 +415,7 @@ acquire_fragpipe() {
     [ -z "$FRAGPIPE_VER" ] && [ -n "$asset" ] && FRAGPIPE_VER="$(fragpipe_version_of "$asset")"
     [ -z "$FRAGPIPE_VER" ] && NOTES+=("FragPipe ($fp): cannot tell which release this is (neither the install path nor the downloaded asset names one), so tools.json records no FragPipe version.")
   fi
-  if ! have java; then NOTES+=("FragPipe: requires Java 9+ on PATH. Install a JDK first."); fi
+  if ! have java; then NOTES+=("FragPipe: requires Java 11+ on PATH (FragPipe 24.0). Install a JDK first."); fi
   local tools="${FRAGPIPE_TOOLS_FOLDER:-$dir/tools}"
   if [ -n "$fp" ] && ls "$tools"/MSFragger*.jar >/dev/null 2>&1; then
     FRAGPIPE_CMD="$fp"

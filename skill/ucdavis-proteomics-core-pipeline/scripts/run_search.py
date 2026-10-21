@@ -1378,8 +1378,9 @@ def adapt_alphadia(out):
 # ("--mbr/--no-mbr", "--no-libfree/--libfree"), so it selects single-pass vs
 # match-between-runs and has nothing to do with running without a library.
 # `--library` is `required=True` either way. We generate that library with DIA-NN's
-# predictor, because Radiant's TSV reader takes DIA-NN's library schema directly
-# (FragLibTsvReader test fixture header == DIA-NN report-lib.tsv columns).
+# predictor, converted by make_radiant_library.py (predict -> parquet -> TSV with the
+# columns renamed to the ones Radiant's FragLibTsvReader keys on): DIA-NN 2.x cannot write
+# a TSV library, and Radiant rejects its .speclib (see radiant_library() below).
 
 def _container_argv(tools, mounts, inner):
     """Build a docker/apptainer invocation, binding each host dir given in `mounts`.
