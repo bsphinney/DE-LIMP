@@ -13,8 +13,8 @@ immediately, not buried.
 - 37: Anomaly-check decision tree — run only the branches that apply
 - 79: Contamination diagnostics — `sample_quality.py`
 - 145: Conditional expert review — spawn only on triggers
-- 185: Collaborator deliverable — 3 reproduction options
-- 193: 8d. The expert review (step 8d)
+- 187: Collaborator deliverable — 3 reproduction options
+- 195: 8d. The expert review (step 8d)
 <!-- /contents -->
 
 ## Core principles
@@ -143,6 +143,8 @@ top is expected biology. (Blood/hemolysis and muscle panels still apply — a na
 can still be blood-contaminated.)
 
 ## Conditional expert review — spawn only on triggers
+
+> Superseded by "8d. The expert review (step 8d)" below.
 
 Most analyses don't need a review panel. Spawn one when **any** trigger fires:
 - the session produces a **statistical claim going to a collaborator** (DE, enrichment,

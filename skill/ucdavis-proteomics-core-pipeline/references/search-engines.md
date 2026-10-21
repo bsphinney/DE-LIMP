@@ -6,20 +6,20 @@ DE-input contract.
 <!-- contents: tests/test_skill_structure.py --toc -->
 **Contents** (section: line)
 - 25: Acquisition detection (`detect_acquisition.py`)
-- 193: Parameters
-- 198: Routing
-- 204: Licensing — pick a commercial-OK engine for non-academic users
-- 216: Public program sources (anyone, any OS — cite these for non-Core / external users)
-- 239: Per-engine invocation & output adapter (`run_search.py`)
-- 843: The adapters are the test surface
-- 850: Less-used flags
-- 870: 2. Detect acquisition + instrument (step 2)
-- 968: 4a. DIA: the three routes (step 4a)
-- 1006: 7. Running the search: the command, `--` paths, keratin (step 7)
-- 1040: 7. Radiant + Fulcrum in the pipeline (step 7)
-- 1081: 7. Licensing, AlphaDIA, chromatograms and DIA-NN settings (step 7)
-- 1114: 7. On a cluster: submitting, Sage conversion and the LFQ gate (step 7)
-- 1163: 7. After submitting: the DE contract and the conversation (step 7)
+- 202: Parameters
+- 207: Routing
+- 215: Licensing — pick a commercial-OK engine for non-academic users
+- 230: Public program sources (anyone, any OS — cite these for non-Core / external users)
+- 253: Per-engine invocation & output adapter (`run_search.py`)
+- 873: The adapters are the test surface
+- 880: Less-used flags
+- 900: 2. Detect acquisition + instrument (step 2)
+- 998: 4a. DIA: the three routes (step 4a)
+- 1036: 7. Running the search: the command, `--` paths, keratin (step 7)
+- 1070: 7. Radiant + Fulcrum in the pipeline (step 7)
+- 1111: 7. Licensing, AlphaDIA, chromatograms and DIA-NN settings (step 7)
+- 1144: 7. On a cluster: submitting, Sage conversion and the LFQ gate (step 7)
+- 1193: 7. After submitting: the DE contract and the conversation (step 7)
 <!-- /contents -->
 
 ## Acquisition detection (`detect_acquisition.py`)
@@ -31,12 +31,16 @@ DE-input contract.
 | Thermo `.raw` | ThermoRawFileParser `query` of a mid-run slice of scans → MS2 isolation windows → the **same** width/centre rule as mzML, then the filter string's data-dependent `d` flag, which outranks window shape. Parser missing or failing → `unknown`/`low` + `warnings` | ThermoRawFileParser metadata JSON, `MS:1000494` (e.g. "Orbitrap Exploris 480") |
 | `.wiff` | convert to mzML first | none |
 
+> Superseded by "2. Detect acquisition + instrument (step 2)" below.
+
 Confidence is `high`/`medium`/`low`. **Anything not `high`, mixed, with
 disagreeing instruments, or with any per-file `warnings` sets `needs_confirmation` —
 ask the user.** Instrument may be null; that's fine (matcher falls back to score 0
 and the user confirms).
 
 ### Thermo `.raw`: what is read, and how it fails
+
+> Superseded by "2. Detect acquisition + instrument (step 2)" below.
 
 `.raw` is read through **ThermoRawFileParser** (public source below; v1.4.0+). The
 parser is `$THERMORAWFILEPARSER` if set — a whole command, for the builds that are not
@@ -107,8 +111,9 @@ in one call took 27–33 s. A busy mount stretches it: two reads took 11.1 and 1
   The per-file `reader` field records the parser command and `--version`.
 - **A cohort on a cluster login node is refused.** Before this reader worked, the two
   parser calls died at argument parsing, so step 2 cost nothing wherever it ran. Now it is
-  the per-file cost above, and SKILL.md 0a drives step 2 over SSH — on the login node,
-  where 200 files would be ~20 min of parser I/O on a shared host (golden rule #3). With
+  the per-file cost above: on a login node, a shared host, 200 files would be ~20 min of
+  parser I/O (golden rule #3), so step 2 runs on a compute node whenever there is a `.raw`
+  ("2. Detect acquisition + instrument" below). With
   `sbatch` on PATH and `SLURM_JOB_ID` unset (the test `run_search.py` uses), more than 5
   Thermo `.raw` files are refused **before any is read**, with an `srun` line to use
   instead; `--allow-login-node` overrides. Without a scheduler, or without a parser (each
@@ -131,6 +136,8 @@ truncate, but still reads the stale `-wal` and writes an `-shm` beside the tdf. 
 header does not protect a file: SQLite uses a `-wal` whenever one exists, so a finished
 1,1 file with a stale `-wal` beside it is read as the mid-acquisition database by every
 open that is not immutable.
+
+> Superseded by "2. Detect acquisition + instrument (step 2)" below.
 
 So every tdf the skill reads is opened through `bruker_tdf.connect_tdf()`
 (`file:<tdf>?mode=ro&immutable=1`), and every `.d` gets a per-file `tdf_integrity`
@@ -181,6 +188,8 @@ gives the shortfall in bytes either way.
 
 ### Where the check runs
 
+> Superseded by "2. Detect acquisition + instrument (step 2)" below.
+
 Two places, because step 2 is skippable:
 
 - `detect_acquisition.py` — every `.d` in the cohort, as a per-file `warning`.
@@ -197,11 +206,16 @@ Search parameters are derived from the data type (instrument + acquisition) by
 
 ## Routing
 
+> Superseded by "7. Running the search: the command, `--` paths, keratin (step 7)" below.
+
 Default by acquisition: **DIA → DIA-NN, DDA → Sage.** `--engine` overrides. The
 bundle's `engine.name` is authoritative when present. FragPipe is opt-in only (the
 bundle names it or the user asks) because MSFragger/IonQuant are license-gated.
 
 ## Licensing — pick a commercial-OK engine for non-academic users
+
+> Superseded by "7. Licensing, AlphaDIA, chromatograms and DIA-NN settings (step 7)" below.
+
 | Engine | License | Commercial use | Notes |
 |---|---|---|---|
 | **DIA-NN** (Academia build) | academic / non-profit only | ❌ **no** | the free build the skill downloads is academic-only |
@@ -226,7 +240,7 @@ Windows, or Linux). `setup.sh`/`acquire_tools.sh` fetch the free ones automatica
 | **Sage** | https://github.com/lazear/sage/releases | Win, macOS, Linux | MIT; single static binary. |
 | **AlphaDIA** | https://github.com/MannLabs/alphadia | Win, macOS, Linux | Apache-2.0 (commercial-OK); `pip install alphadia`, GPU recommended. |
 | **Radiant DIA + Fulcrum** (Seer) | https://github.com/seerbio/radiant-fulcrum-container · image `seerbio/radiant-fulcrum` | container only (multi-arch amd64+arm64) | **Thermo Orbitrap only** here (mzML/Parquet input). Needs a DIA-NN-generated library. **Apache-2.0 + Commons Clause + grant-back** — restricts selling a derived service. |
-| **FragPipe** (MSFragger/IonQuant) | https://github.com/Nesvilab/FragPipe/releases | Win, macOS, Linux | Java GUI; MSFragger/IonQuant need the user's own (free-academic) license. |
+| **FragPipe** (MSFragger/IonQuant) | https://github.com/Nesvilab/FragPipe/releases | Windows, Linux (no macOS build) | Java GUI; MSFragger/IonQuant need the user's own (free-academic) license. |
 | **ThermoRawFileParser** | https://github.com/compomics/ThermoRawFileParser/releases | Win, macOS, Linux | Reads `.raw` for `detect_acquisition.py`, and `.raw`→mzML. v2.0.0-dev: self-contained Linux/macOS/Windows zips, or the `-net8` zip run as `dotnet ThermoRawFileParser.dll` (.NET 8 runtime); `conda install -c bioconda thermorawfileparser` (Linux/macOS; that build is self-contained — no .NET — and `setup.sh` installs it). 1.4.x needs Mono off Windows. Not a single executable on PATH → `export THERMORAWFILEPARSER="dotnet /path/ThermoRawFileParser.dll"`. Its mzML carries **no resolving power** (see `parameters.md`). |
 | **ProteoWizard / msconvert** | https://proteowizard.sourceforge.io/ | Windows (native); Linux/macOS via Docker | vendor→mzML; Linux via the `chambm/pwiz-...` Docker image. |
 | **.NET 8 runtime** | https://dotnet.microsoft.com/download/dotnet/8.0 · installer script https://dot.net/v1/dotnet-install.sh | Win, macOS, Linux | needed by the **Linux** DIA-NN binary to read `.raw` (Microsoft.NETCore.App ≥ 8.0.17) and by a framework-dependent ThermoRawFileParser (the Core's shared copy, the `-net8` zip), which also needs Microsoft.AspNetCore.App 8; `ensure_dotnet8.sh` installs both. **Native Windows DIA-NN doesn't need it.** |
@@ -259,6 +273,8 @@ the second MBR pass or without MBR. So build any per-protein, per-channel table 
 search. A second plexDIA search (2026-10-15: the declaration `estimate_params.py --labels`
 writes, two-job route, `--matrices`) logged the same and wrote none either. For SILAC,
 `run_silac.R` builds the per-protein tables (`references/silac.md`).
+
+> Superseded by "7. Running the search: the command, `--` paths, keratin (step 7)" below.
 
 **A path with `--` in it cannot be given to DIA-NN.** Its reader joins the arguments with spaces
 and cuts the result at every `--`, quoted or not (`arguments()`, `diann.cpp` at tag 1.8), and
@@ -342,6 +358,8 @@ run, and baked into the emitted sbatch as a preamble). When it's right, DIA-NN l
 msconvert if you don't already have them. A ThermoRawFileParser mzML has no
 `MS:1000800` resolving-power terms, so `estimate_params.py --from-mzml` cannot pin
 Orbitrap mass accuracy from it — pass the resolutions explicitly (`parameters.md`).
+
+> Superseded by "7. On a cluster: submitting, Sage conversion and the LFQ gate (step 7)" below.
 
 **Single-shot on SLURM (`--sbatch`, ≤ 5 files or no chain).** A library-free cfg becomes
 **two jobs**, `<job>_1_lib.sh` (predict the library) → `<job>_2_search.sh` (search it with
@@ -450,7 +468,7 @@ one timsTOF run, a library predicted at each level; HIVE, 2026-10-16):
   step); reusing `.quant` files does not change it.
 
 To set it, put it in the cfg as a user choice with who and why:
-`estimate_params.py ... --overrides '{"--pg-level": 0}' --override-reason '<their words>'`
+`estimate_params.py ... --overrides '{"--pg-level": 0}' --override-by '<who chose it>' --override-reason '<their words>'`
 (or `{"--no-prot-inf": true}`). It reaches every step of both routes. `search_provenance.json`
 `protein_inference` records what ran (the flag, or DIA-NN's measured default), and the Methods
 state it (`diann_parallel.protein_inference`, one reading).
@@ -505,11 +523,15 @@ Radiant source (`seerbio/radiant`, internal name **Pythia**), not inferred from 
   because `run_search.py` has to inject bind mounts, and `-v` vs `--bind` differ.
   Not acquired by default (~3 GB) — set `ACQUIRE_RADIANT=1` or pin the engine.
 
+> Superseded by "4a. DIA: the three routes (step 4a)" below.
+
 **⚠ Licence.** Apache-2.0 as modified by a **mandatory grant-back** and the
 **Commons Clause**. The Commons Clause removes the right to *Sell* — including
 selling a service whose value derives substantially from the software. That is a
 live question for a fee-for-service core; surface it before running and let the
 institution decide. It also appears in `tools.json` `notes`.
+
+> Superseded by "7. Radiant + Fulcrum in the pipeline (step 7)" below.
 
 **Cluster parallelism (`radiant_parallel.py`).** The serial limit is in Radiant's
 *orchestration*, not in the science: each file is searched independently, and only
@@ -558,6 +580,9 @@ reads it as a dataset, collapses PSM-level rows to one protein×run (max intensi
 best q-value), and writes the usual `report.parquet`.
 
 ### AlphaDIA (commercial-OK DIA; adapter required)
+
+> Superseded by "7. Licensing, AlphaDIA, chromatograms and DIA-NN settings (step 7)" below.
+
 Apache-2.0 — the open-source alternative to DIA-NN for non-academic users. Library-free:
 ```
 <cmd> -o <out> -f <raw> [-f ...] --fasta <fasta> [-c <config.yaml>]
@@ -578,6 +603,9 @@ Apache-2.0 — the open-source alternative to DIA-NN for non-academic users. Lib
   runs are unaffected.
 
 ### Sage (mzML-first; adapter required)
+
+> Superseded by "7. On a cluster: submitting, Sage conversion and the LFQ gate (step 7)" below.
+
 1. Convert to mzML if needed: `.raw` with **ThermoRawFileParser** (`-i=<raw> -b=<out>/mzml/
    <name>.mzML -f=2`, indexed mzML). The parser is found and given its .NET exactly as
    `detect_acquisition.py` finds it (above). msconvert is used only if no parser is usable,
@@ -663,6 +691,8 @@ data*, Nat Commun 16, 95 (2025).
 | Manifest data type | **`DIA`** | `InputLcmsFile.java` |
 | Output dir | `<workdir>/dia-quant-output/` | `CmdDiann.java` |
 | Bundled DIA-NN | 1.8.2 Beta 8 | `tools/diann/` |
+
+> Superseded by "4a. DIA: the three routes (step 4a)" below.
 
 Other presets that enable diaTracer: `DIA_SpecLib_Quant_Phospho_diaPASEF`,
 `Nonspecific-HLA-diaPASEF`, `chemprot-ABPP-IADTB-diaPASEF`. Plain `DIA_SpecLib_Quant` and

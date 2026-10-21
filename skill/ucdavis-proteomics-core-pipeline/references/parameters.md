@@ -10,18 +10,18 @@ stale and hide which values were actually chosen vs. guessed).
 **Contents** (section: line)
 - 27: Where the defaults come from (the skill version pins the search)
 - 37: What actually varies by data type
-- 45: Known-good mass tolerances (DIA-NN README, verified 2026-06)
-- 137: Sage tolerances are derived
-- 145: Defaults that are NOT data-dependent (universal)
-- 151: SILAC labels (`--labels silac2|silac3 --label-preset ... [--channel-norm spec|run]`)
-- 159: Cysteine: which alkylating agent, or none (`--cys-alkylation`)
-- 196: CPU-hours a search reserves (`cpu_hours_reserved`)
-- 210: Golden rule 2: never fabricate parameters
-- 217: Provenance (DE-LIMP rule #2)
-- 241: Overriding a setting (the user's choice)
-- 259: Golden rule 1: confirm before committing compute
-- 276: 4. Resolving the defaults, and the one confirmation (step 4)
-- 350: 6b. Estimating the search parameters (step 6b)
+- 47: Known-good mass tolerances (DIA-NN README, verified 2026-06)
+- 143: Sage tolerances are derived
+- 151: Defaults that are NOT data-dependent (universal)
+- 157: SILAC labels (`--labels silac2|silac3 --label-preset ... [--channel-norm spec|run]`)
+- 167: Cysteine: which alkylating agent, or none (`--cys-alkylation`)
+- 207: CPU-hours a search reserves (`cpu_hours_reserved`)
+- 221: Golden rule 2: never fabricate parameters
+- 228: Provenance (DE-LIMP rule #2)
+- 254: Overriding a setting (the user's choice)
+- 275: Golden rule 1: confirm before committing compute
+- 292: 4. Resolving the defaults, and the one confirmation (step 4)
+- 366: 6b. Estimating the search parameters (step 6b)
 <!-- /contents -->
 
 ## Where the defaults come from (the skill version pins the search)
@@ -36,6 +36,8 @@ time. Every number carries its source; surface it rather than asserting it.
 
 ## What actually varies by data type
 
+> Superseded by "6b. Estimating the search parameters (step 6b)" below.
+
 Only two things genuinely depend on the data; everything else is a stable
 trypsin/LFQ default:
 
@@ -43,6 +45,8 @@ trypsin/LFQ default:
 2. **DIA vs DDA window mode** — `wide_window`/`--window` and chimera handling.
 
 ## Known-good mass tolerances (DIA-NN README, verified 2026-06)
+
+> Superseded by "6b. Estimating the search parameters (step 6b)" below.
 
 | Instrument class | DIA-NN MS1 / MS2 | matched on |
 |---|---|---|
@@ -112,6 +116,8 @@ slow single-shot path. TRFP's other outputs do not carry it either: its metadata
 `mass resolution` (`MS:1000011`) is `0.5` on every run checked (a header tolerance, not
 resolving power), and its `query` JSON has no resolution attribute.
 
+> Superseded by "4. Resolving the defaults, and the one confirmation (step 4)" below.
+
 Where the numbers do live: the instrument method text (`Orbitrap Resolution = 60000`
 then `= 15000` on that Exploris; `= 120K` then `= 15K` on the Lumos) and every scan's
 trailer (`FT Resolution:` on Exploris, `Orbitrap Resolution:` on Fusion Lumos — not
@@ -150,6 +156,8 @@ in the workflow (or `--var-mods ox`) to add Ox(M).
 
 ## SILAC labels (`--labels silac2|silac3 --label-preset ... [--channel-norm spec|run]`)
 
+> Superseded by "6b. Estimating the search parameters (step 6b)" below.
+
 DIA-NN plexDIA for SILAC samples (DIA only): writes `--fixed-mod SILAC,0.0,KR,label`,
 `--channels` (masses from UniMod), `--original-mods` and the channel-normalisation flag, each
 tagged, and the sidecar's `labels` record; never `--lib-fixed-mod` (it would label a
@@ -157,6 +165,9 @@ FASTA-predicted library twice). SILAC flags in `--overrides` are refused. The pr
 question and why: `references/silac.md`.
 
 ## Cysteine: which alkylating agent, or none (`--cys-alkylation`)
+
+> Superseded by "6b. Estimating the search parameters (step 6b)" below.
+
 Each alkylating agent leaves its own fixed modification on C, and a search for the wrong one (or
 for one at all, on samples never alkylated) identifies almost no cysteine peptide: three on-bead
 Core searches had 0.03–0.5% of identified peptides with a C, against 7.8% on an S-Trap prep with
@@ -234,11 +245,16 @@ Every emitted value is tagged in the `rationale`:
   `<params>.staff.json` (`staff.py`; never delivered, never zipped), which `overrides.*.staff_record`
   names. No reason: "reason not given [ask the user -- confirm]"
 
+> Superseded by "6b. Estimating the search parameters (step 6b)" below.
+
 The rationale is written to `<params>.rationale.json` and is pulled into the
 reproducibility bundle automatically. Surface it to the user so a derived default
 is never mistaken for a confirmed setting.
 
 ## Overriding a setting (the user's choice)
+
+> Superseded by "6b. Estimating the search parameters (step 6b)" below.
+
 Two ways, both honored:
 - `param_overrides` in the workflow.yaml, or `--overrides` (e.g. `{"--mass-acc": 8}` or
   `{"fragment_tol": {"ppm": [-15, 15]}}`) — merged on top of the estimate, tagged as a user

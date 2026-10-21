@@ -1,5 +1,7 @@
 # The audio discussion of the results ("Signal to Noise")
 
+> Superseded by "9e. The audio discussion (step 9e)" below.
+
 A two-host, roughly 20-minute audio episode in which a cell biologist and a statistician talk
 through ONE finished analysis. It sits beside the report, and a "Listen" card near the top of
 `Analysis_Report.html` links to it. **You write the script** from the report you have already
@@ -22,6 +24,8 @@ log2 fold change (log2FC), adjusted p (adj.P), the IgG control (or whatever the 
 protein group, precursor, DIA, and the per-group detection counts (`Detected_<group>`: detected in
 k of n runs). A term used before it is defined loses this listener.
 
+> Superseded by "9e. The audio discussion (step 9e)" below.
+
 **Discuss only what the lab was given.** Every fact comes from the files in the session's
 `output/` folder, which the lab receives: the report, `methods.md`, `SAMPLE_QUALITY.md`,
 `AUDIT.md`. The Listen card says the episode "discusses this report and methods; items beyond
@@ -41,21 +45,23 @@ ones, not wrong sentences (see "What check cannot catch" below).
 
 <!-- contents: tests/test_skill_structure.py --toc -->
 **Contents** (section: line)
-- 58: When it is made
-- 88: Where it is made
-- 111: Privacy and consent (read before any cloud voice)
-- 185: The hosts
-- 211: Structure
-- 276: Fidelity rules
-- 428: The script file (`<session>/output/podcast/podcast_script.md`)
-- 493: Commands
-- 803: Sending the report with the audio (`share`)
-- 845: What ends up in `output/podcast/`
-- 862: Known limitations
-- 881: 9e. The audio discussion (step 9e)
+- 62: When it is made
+- 94: Where it is made
+- 119: Privacy and consent (read before any cloud voice)
+- 195: The hosts
+- 221: Structure
+- 286: Fidelity rules
+- 442: The script file (`<session>/output/podcast/podcast_script.md`)
+- 507: Commands
+- 827: Sending the report with the audio (`share`)
+- 871: What ends up in `output/podcast/`
+- 888: Known limitations
+- 909: 9e. The audio discussion (step 9e)
 <!-- /contents -->
 
 ## When it is made
+
+> Superseded by "9e. The audio discussion (step 9e)" below.
 
 - **Only after the report is final**: `Analysis_Report.html` is written, and any expert-review
   or data-quality changes are in. A podcast of a draft goes stale.
@@ -87,6 +93,8 @@ ones, not wrong sentences (see "What check cannot catch" below).
 
 ## Where it is made
 
+> Superseded by "9e. The audio discussion (step 9e)" below.
+
 Where the report was finished, so the podcast's checks read the report it links into.
 
 - **On HIVE** when the report was built there: this computer cannot run the skill's Python
@@ -109,6 +117,8 @@ Where the report was finished, so the podcast's checks read the report it links 
   no key `verify` cannot run either, so say that someone must listen to it.
 
 ## Privacy and consent (read before any cloud voice)
+
+> Superseded by "9e. The audio discussion (step 9e)" below.
 
 Two things can leave the machine, and nothing else: the **transcript** (render: the turns,
 after pronunciation substitutions, plus one line of voice direction) and the **rendered
@@ -340,6 +350,8 @@ Claims section):
 
 ### The meaning check: a separate reader, before render
 
+> Superseded by "9e. The audio discussion (step 9e)" below.
+
 `check` matches tokens. A staff episode (2026-10-16) passed it with 0 problems and 0 warnings,
 and a separate read of every line against the report then found: a hit from one comparison told
 as part of another comparison's story and called "nearly absent" (it was detected in 2 of 3
@@ -412,6 +424,8 @@ WARN for the meaning check to confirm. The mechanical lines are a floor, not the
 meaning reviewer reads robust status across sentences too.
 
 ### What check cannot catch
+
+> Superseded by "9e. The audio discussion (step 9e)" below.
 
 Read the script against the report for these; a PASS says nothing about them:
 
@@ -494,6 +508,8 @@ Read the script against the report for these; a PASS says nothing about them:
 
 ### Here (a Mac, or `local` mode)
 
+> Superseded by "9e. The audio discussion (step 9e)" below.
+
 ```bash
 S=<session>; P=$S/output/podcast
 # 1. write $P/podcast_script.md (above), then check it until it passes
@@ -533,6 +549,8 @@ push (step 1c.7's lines) puts `podcast/`, the linked `Analysis_Report.html` and 
 read them.
 
 ### On HIVE (the report was built there; Windows staff)
+
+> Superseded by "9e. The audio discussion (step 9e)" below.
 
 Every step runs in the session of record `$S` on HIVE, once the finished report is there
 (`Analysis_Report.html`, `AI_Analysis_Report.md`, `methods.md`, `AUDIT.md`,
@@ -602,7 +620,9 @@ bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.t
   running when everything else is ready: `scancel` it, one line, then finalize and deliver
   without it, and add the audio later ("When it is made").
 
-- **Sources.** Pass the delivered report text you wrote from, all from the session's `output/`
+- > Superseded by "9e. The audio discussion (step 9e)" below.
+
+  **Sources.** Pass the delivered report text you wrote from, all from the session's `output/`
   folder: `AI_Analysis_Report.md` (or the report's `Analysis_Report.md` twin, or
   `Analysis_Report.html`, whose embedded images and scripts are ignored), `methods.md` (the
   teaching segment's instrument, search and FDR numbers come from it), `AUDIT.md` and
@@ -617,7 +637,9 @@ bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.t
   by its path relative to `check.txt` (an extra source by its file name and label), each with
   its sha256; forbidden names are counted, not listed. `podcast.json` copies those. A render
   into another folder rewrites the relative paths so the check still holds there.
-- **Render refuses** unless `check.txt` says PASS for this exact script and every source is
+- > Superseded by "9e. The audio discussion (step 9e)" below.
+
+  **Render refuses** unless `check.txt` says PASS for this exact script and every source is
   unchanged since (each is hashed without any podcast block, so link's own Listen line does
   not count). `--unchecked` overrides this and is recorded in `podcast.json`; use it only when
   the user asks. `link` refuses the same way (the card vouches for the episode), with its own
@@ -728,7 +750,9 @@ bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.t
     boundaries), so about 8–12 requests, and at least 3–4 minutes with pacing. Google does not
     publish the free-tier TTS limits. They are per Cloud project and shown at
     <https://aistudio.google.com/rate-limit>.
-- **Verify: the audio heard back.** You cannot listen, so `verify` has a Gemini text model
+- > Superseded by "9e. The audio discussion (step 9e)" below.
+
+  **Verify: the audio heard back.** You cannot listen, so `verify` has a Gemini text model
   transcribe the rendered episode and compares that with the spoken script (the text after
   pronunciation).
   - The audio goes to Google downsampled to 16 kHz mono AAC at 32 kbps (about 6 MB for 24
@@ -802,6 +826,8 @@ bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.t
 
 ## Sending the report with the audio (`share`)
 
+> Superseded by "9e. The audio discussion (step 9e)" below.
+
 The Listen card's links are relative (`podcast/podcast.m4a`, `podcast/transcript.html`), so
 `Analysis_Report.html` sent by itself has no audio. `share` writes
 `output/Analysis_Report_with_audio.html`: the same report, with the card built by the same code
@@ -869,7 +895,9 @@ Listen card points at: the audio, the transcript, the script, `check.txt` and `p
 - **Synthetic voices.** There are no real interruptions or laughter. Gemini voices a whole
   segment at once, so it flows better than one call per turn.
 - **Figures only through the report**, or through the PNGs you looked at.
-- **The check is mechanical.** It catches invented tokens -- numbers, symbols, capitalised names,
+- > Superseded by "9e. The audio discussion (step 9e)" below.
+
+  **The check is mechanical.** It catches invented tokens -- numbers, symbols, capitalised names,
   quantities in words -- plus a missing disclosure, a claimed specialty, forbidden names and
   pronunciation rows that add content. It cannot catch the list under "What check cannot
   catch", so your own read against the report is the other half.

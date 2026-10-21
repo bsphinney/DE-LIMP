@@ -1,5 +1,7 @@
 # The job-end hook and Slack notifications (`notify_slack.py`)
 
+> Superseded by "7. Before submitting: the notes again, and the job-end hook (step 7)" below.
+
 Every search job this skill writes ends by running one hook, from the compute node, however the
 job ends. It does three things, in this order: FRAN, then the run log, then Slack. A failed job
 skips FRAN and goes straight to the run log and Slack.
@@ -48,21 +50,23 @@ The job hook's `record_run` stays at 60 s.
 
 <!-- contents: tests/test_skill_structure.py --toc -->
 **Contents** (section: line)
-- 65: Telling the user, and opting out
-- 90: Setting up the webhook (once, by a Core admin)
-- 112: Where the webhook is looked for (first one set wins)
-- 131: What finalize writes to MANIFEST.txt
-- 156: Which job does what
-- 182: What a message contains
-- 204: Rules the code keeps (from STAN's `stan/notify.py`)
-- 237: Notes from the Core (`note`)
-- 245: Posting from another script (`send_alert`)
-- 257: How the hook is wired into a job (`wrap_job_script`)
-- 277: Running the skill's tests
-- 296: 7. Before submitting: the notes again, and the job-end hook (step 7)
+- 67: Telling the user, and opting out
+- 94: Setting up the webhook (once, by a Core admin)
+- 116: Where the webhook is looked for (first one set wins)
+- 135: What finalize writes to MANIFEST.txt
+- 160: Which job does what
+- 186: What a message contains
+- 208: Rules the code keeps (from STAN's `stan/notify.py`)
+- 241: Notes from the Core (`note`)
+- 249: Posting from another script (`send_alert`)
+- 261: How the hook is wired into a job (`wrap_job_script`)
+- 281: Running the skill's tests
+- 300: 7. Before submitting: the notes again, and the job-end hook (step 7)
 <!-- /contents -->
 
 ## Telling the user, and opting out
+
+> Superseded by "7. Before submitting: the notes again, and the job-end hook (step 7)" below.
 
 Before submitting a Core search, the agent says in one line that its end will be posted to the
 Core's Slack channel and handed to FRAN. If the user says not to, the agent passes the flags at
@@ -70,8 +74,8 @@ Core's Slack channel and handed to FRAN. If the user says not to, the agent pass
 
 | What | How | Effect |
 |---|---|---|
-| No Slack post | `run_search.py … --no-notify` (or `SKILL_SLACK=0` when generating); `finalize --no-notify` | The job carries `--no-slack`. The run is still logged and staged. |
-| No FRAN hand-over | `run_search.py … --no-fran` (or `FRAN_DEPOSIT=off` when generating) | The job carries `--no-fran`. On success it runs `stage --out <out> [--name …] --skip`, with the same time bounds as any stage, which stages nothing but records `opted_out` in `<out>/fran_deposit.json`, so a later `fran_deposit.py backfill` leaves the search alone. The post says `skipped: off for this search`. Step 7c must then not stage it either. |
+| No Slack post | `run_search.py … --no-notify`; `finalize --no-notify` | The job carries `--no-slack`. The run is still logged and staged. |
+| No FRAN hand-over | `run_search.py … --no-fran` | The job carries `--no-fran`. On success it runs `stage --out <out> [--name …] --skip`, with the same time bounds as any stage, which stages nothing but records `opted_out` in `<out>/fran_deposit.json`, so a later `fran_deposit.py backfill` leaves the search alone. The post says `skipped: off for this search`. Step 7c must then not stage it either. |
 | An instrument QC / standard run | `run_search.py … --qc` | The job never stages it. On success it runs `stage --out <out> --name … --qc`, which stages nothing and records the QC decision, so a later stage or backfill honours it. The post says `skipped: instrument QC / standard run`. The decision is made at generation, because a QC session named without a "QC" token would otherwise be staged by the hook before the agent's own `stage --name "... QC"`. |
 | FRAN's name for the search | `run_search.py … --fran-name "<the session's descriptive name>"` (always) | Passed to the job's `stage --name`. `--not-qc` (the user said it is not a QC run, whatever its name) is passed through to `stage` as well. |
 | The run log | — | It always runs where `record_run.py` is installed, which is what makes it complete. |

@@ -8,20 +8,22 @@ yourself, so the skill runs them one way only.
 <!-- contents: tests/test_skill_structure.py --toc -->
 **Contents** (section: line)
 - 24: What it runs
-- 73: One model — the DE model
-- 153: Which sets
-- 197: Why camera estimates the correlation (the default)
-- 254: Run depth
-- 277: Blocked designs: pooled between-subject comparisons
-- 288: Pulldowns (`--ip-map`)
-- 419: Known limitations and backlog
-- 440: How to read the results
-- 472: Outputs
-- 486: Mouse-brain IP cohort v2 (validation, 2026-09-28; after the statistician's review)
-- 537: 8a. Running them (step 8a)
+- 75: One model — the DE model
+- 163: Which sets
+- 209: Why camera estimates the correlation (the default)
+- 268: Run depth
+- 293: Blocked designs: pooled between-subject comparisons
+- 304: Pulldowns (`--ip-map`)
+- 437: Known limitations and backlog
+- 460: How to read the results
+- 494: Outputs
+- 510: Mouse-brain IP cohort v2 (validation, 2026-09-28; after the statistician's review)
+- 561: 8a. Running them (step 8a)
 <!-- /contents -->
 
 ## What it runs
+
+> Superseded by "8a. Running them (step 8a)" below.
 
 ```
 Rscript scripts/run_sets.R --de-dir <run_de outdir> [--sets go|reactome|go,reactome|none]
@@ -71,6 +73,8 @@ fry call — whether it holds on other reference bases. Each comparison gets a *
 generated sentence the report and the brief quote (below).
 
 ## One model — the DE model
+
+> Superseded by "8a. Running them (step 8a)" below.
 
 `run_de.R` writes `set_test_inputs.rds`: each contrast's moderated t as reported (from the fit
 that reported it), the expression matrix, the precision weights of each fit (DPC: limpa's
@@ -122,6 +126,8 @@ basis does and does not change (the statistician's review, rel-stats check1):
   up to 0.04 in p, fry from weighted `limma::fry()` by up to 0.1 — a difference from limma, not a
   dependence on the reference.
 
+> Superseded by "8a. Running them (step 8a)" below.
+
 The fixed reference makes the result reproducible, not right: another reference is equally
 valid. So every fry-significant set is re-tested on four other references (seeds 1–4);
 `fry_Reference_Stable` says `stable` or on how many it held, and a call that did not hold on
@@ -129,6 +135,8 @@ all is flagged "fry call depends on the residual basis" — read it as borderlin
 two other seeds changed 267 and 332 of 10,542 fry calls.)
 
 ### A random block (`--block`, e.g. several IPs per mouse)
+
+> Superseded by "8a. Running them (step 8a)" below.
 
 `limma::camera()` has no block argument. Gordon Smyth (support.bioconductor.org/p/78299):
 "you can't use duplicateCorrelation() with camera()"; for a blocked design the route is
@@ -143,6 +151,8 @@ with samples independent (`--block-scope within`, between-mouse) use that fit.
 
 ### DPC and fry
 
+> Superseded by "8a. Running them (step 8a)" below.
+
 limpa reduces the residual df of a protein whose whole group was imputed
 (`voomaLmFitWithImputation`); that reaches camera through run_de's t, but fry works from the
 values and weights, so for those proteins it sees the model's values as data. That is what
@@ -151,6 +161,8 @@ the presence-call columns are for: `Presence_Call_Fraction` (from the DE table's
 proteins removed from the sets and from the background.
 
 ## Which sets
+
+> Superseded by "8a. Running them (step 8a)" below.
 
 A-priori sets only.
 
@@ -237,6 +249,8 @@ factor (random sets then correlate at 0.22–0.24); rate of p < 0.05:
 | 6 | own factor, no shift | 0.057 | **0.553** | 0.060 |
 | 6 | shifted 0.5 | 0.180 | 0.940 | 0.223 |
 
+> Superseded by "8a. Running them (step 8a)" below.
+
 The estimated correlation stays calibrated but finds a real shift 7–18% of the time. On
 the mouse-brain IP cohort, random sets correlated at 0.13–0.145, which inflates a 54-protein set's variance about
 8-fold: camera missed Kv2.1's own potassium-channel complex (FDR 0.25 / 0.63, where fry gave
@@ -252,6 +266,8 @@ positives 0.10–0.15 on the review's simulation), and a fix goes in only when a
 validates it AND it recovers the Kv2.1 channel complex. For now the limitation is stated.
 
 ## Run depth
+
+> Superseded by "8a. Running them (step 8a)" below.
 
 The Dog CSF lesson: a complement set gave p = 2 × 10⁻⁴, and 0.81 once log run depth was a
 covariate — the groups differed in depth and the set tracked it. Here depth is
@@ -286,6 +302,8 @@ the reading. Prefer between-mouse comparisons with one sample per mouse (per bai
 `--block-scope within` reports from the independent fit.
 
 ## Pulldowns (`--ip-map`)
+
+> Superseded by "8a. Running them (step 8a)" below.
 
 `ip_map.csv`: one row per group — `Group`, `Role` (`bait` | `control`), `Bait`, `Condition`,
 optional `Bait_gene` (the bait protein's gene symbol).
@@ -418,6 +436,8 @@ prior rests on few proteins (the mouse-brain IP cohort, JPH4: 35 at the old rule
 
 ## Known limitations and backlog
 
+> Superseded by "8a. Running them (step 8a)" below.
+
 - **Losses from a complex are harder to detect than gains** with the 4-fold minimum (above) —
   nearly undetectable in the simulation, less so in the mouse-brain IP cohort's interactomes. Each bait's reading
   states its own cost; not fixed in 2.9.
@@ -438,6 +458,8 @@ prior rests on few proteins (the mouse-brain IP cohort, JPH4: 35 at the old rule
   interactors or a spike-in), and choose the floor there. Tracked in `docs/TODO.md`.
 
 ## How to read the results
+
+> Superseded by "8a. Running them (step 8a)" below.
 
 `sets_provenance.json` `reading` holds the rules, and each comparison's record holds a generated
 `reading` sentence; the report, the analysis brief and AGENTS.md quote them from there, so the
@@ -470,6 +492,8 @@ wording cannot be strengthened on the way:
   is not evidence that the complex lost nothing.
 
 ## Outputs
+
+> Superseded by "8a. Running them (step 8a)" below.
 
 | file | what |
 |---|---|

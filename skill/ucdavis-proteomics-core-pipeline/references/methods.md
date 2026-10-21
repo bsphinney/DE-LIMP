@@ -7,12 +7,15 @@ part of a full analysis or **standalone** (just `--raw` at the facility data).
 <!-- contents: tests/test_skill_structure.py --toc -->
 **Contents** (section: line)
 - 15: What it extracts vs. defaults
-- 118: Instrument grant acknowledgments (verified 2026-06)
-- 142: Output + workflow
-- 153: 9d. The Methods section (step 9d)
+- 131: Instrument grant acknowledgments (verified 2026-06)
+- 159: Output + workflow
+- 173: 9d. The Methods section (step 9d)
 <!-- /contents -->
 
 ## What it extracts vs. defaults
+
+> Superseded by "9d. The Methods section (step 9d)" below.
+
 - **Extracted from the raw metadata** (shown with its source in a parameter table):
   - Bruker `.d`, read by `bruker_method.py`. It reads small metadata files only, never the
     `analysis.tdf_bin`, and opens every sqlite file read-only and immutable.
@@ -71,6 +74,8 @@ part of a full analysis or **standalone** (just `--raw` at the facility data).
     When it is the only run, its values are tagged `[raw file not readable here — confirm]`.
   - The ddaPASEF precursor-selection settings are not extracted, and the text says so.
 
+> Superseded by "9d. The Methods section (step 9d)" below.
+
 With `--fasta-meta` (fetch_fasta.py's `<fasta>.meta.json`), it adds the **Sequence database**
 paragraph. Sequences added with `fetch_fasta.py --add-fasta` are named one by one only when there
 are at most 10 (`ADDED_SEQUENCES_NAMED_MAX`: a bait, a tag); more are given as a count with the
@@ -88,12 +93,16 @@ bracket, and starts with a file-system root (`make_methods.FS_ROOTS`), `~/` or a
 has three file-name segments, so prose such as `S-Trap (ProtiFi)/Trypsin/Lys-C` or
 `0.1%/80%/20%` is left alone.
 
+> Superseded by "9d. The Methods section (step 9d)" below.
+
 With `--params` / `--search-prov` / `--workflow-manifest`, it adds a **Database search**
 paragraph and a search-parameter table (engine, the version that ran, cleavage rule, missed
 cleavages, peptide length, charge and m/z range, fixed/variable modifications, mass tolerances,
 precursor FDR, library mode, MBR), read by `search_record()` — the same reader
 `make_deposit.py` uses for the SDRF. A value in no record prints as
 `____ [not recorded — confirm]`, never as a default.
+
+> Superseded by "9d. The Methods section (step 9d)" below.
 
 With `--submission <session>` (a CoreOmics submission attached by `submission_report.py`),
 it adds a **Sample preparation** section from the record, through `prepared_by()`, the one
@@ -104,10 +113,14 @@ Core prepared them, the protocol is `____ [not recorded — confirm]`. `make_dep
 the flag itself, and its PRIDE sample-processing protocol uses this section instead of its
 TO-FILL.
 
+> Superseded by "9d. The Methods section (step 9d)" below.
+
 With `--de-dir`, it adds a **Differential expression** paragraph from the run's
 `de_provenance.json` (pipeline, quantification, the q-value filters as applied, design,
 contrasts, significance rule, citation). Significance is stated as run_de.R applies it —
 adj.P.Val only; |log2FC| is a volcano reference line, not a filter.
+
+> Superseded by "9d. The Methods section (step 9d)" below.
 
 When the raw files cannot be read from where it runs (e.g. finalize away from the data), pass
 `--instrument` / `--acquisition` from the session record: the Methods are then written with
@@ -125,6 +138,8 @@ unknown and every file is a Thermo `.raw` with that prefix. It is never used for
 a timsTOF run named `FLAG_IP_1.d` or `Exp3_HeLa.d` is not a Thermo run. A named instrument that
 is not in the registry gets the placeholder below, not a guess from the filename.
 
+> Superseded by "9d. The Methods section (step 9d)" below.
+
 | Instrument | Prefix | Acknowledgment |
 |---|---|---|
 | Orbitrap Fusion Lumos | `FL` | NIH S10 grant **S10OD021801** |
@@ -134,12 +149,17 @@ is not in the registry gets the placeholder below, not a guess from the filename
 The web page names only the timsTOF Pro 2 for the HHMI acknowledgment. Brett confirmed on
 2026-09-25 that it covers the timsTOF HT too.
 
+> Superseded by "9d. The Methods section (step 9d)" below.
+
 An instrument not in this registry yields a placeholder pointing at the source URL.
 **Grant wording must be exact** — the script cites the verified grant numbers and
 links the source page; confirm the current wording there before publishing. To add
 an instrument, extend the `ACKS` table in `make_methods.py`.
 
 ## Output + workflow
+
+> Superseded by "9d. The Methods section (step 9d)" below.
+
 - `methods.md` — the drop-in prose (LC, MS, sequence database, [database search],
   [differential expression], parameter tables, Acknowledgments).
 - `methods_params.json` — the extracted parameters, machine-readable.

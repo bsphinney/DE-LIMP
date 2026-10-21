@@ -1,33 +1,37 @@
 # Differential expression reference
 
 The DE step (`run_de.R` + `build_maxlfq.R`) is a faithful port of what DE-LIMP logs
-in `R/server_data.R` / `R/helpers.R`. Two pipelines, picked by the bundle's
-`de.method`.
+in `R/server_data.R` / `R/helpers.R`. Two pipelines, picked with `--method`: `dpc` (the
+default) or `maxlfq` (only for the two reasons in "Method choice" below, never because a
+bundle's `de.method` says `maxlfq`).
 
 <!-- contents: tests/test_skill_structure.py --toc -->
 **Contents** (section: line)
-- 30: Invocation
-- 96: `--method dpc` (limpa DPC-Quant + limma) — DE-LIMP default, use with DIA-NN
-- 115: `--method maxlfq` (MaxLFQ + limma) — use with Sage/FragPipe (or DIA-NN MaxLFQ)
-- 160: DE-input contract (§8.3)
-- 165: Design matrix
-- 216: Paired / repeated designs — `--block <column>`
-- 335: Method choice — limpa/DPC is the default
-- 371: Normalised or non-normalised quantities: the experiment type and the data check
-- 470: Contaminant filter (both paths, on by default)
-- 559: Coverage filter (maxlfq path)
-- 573: Provenance (self-describing — DE-LIMP architectural rule #1)
-- 586: Top-protein violins (`make_figures.R` → `violin_top_<contrast>.png`)
-- 617: Citations (verified June 2026)
-- 635: Less-used flags
-- 639: Step 8: the normalisation check and the final DE
-- 732: Step 8: blocks and numeric covariates
-- 765: Step 8: keratin samples and contaminants
-- 801: Step 8: the method, what `run_de.R` writes, QuantUMS
-- 869: 8b. Figures, and what counts as significant (step 8b)
+- 31: Invocation
+- 109: `--method dpc` (limpa DPC-Quant + limma) — DE-LIMP default, use with DIA-NN
+- 128: `--method maxlfq` (MaxLFQ + limma) — use with Sage/FragPipe (or DIA-NN MaxLFQ)
+- 174: DE-input contract (§8.3)
+- 179: Design matrix
+- 233: Paired / repeated designs — `--block <column>`
+- 355: Method choice — limpa/DPC is the default
+- 393: Normalised or non-normalised quantities: the experiment type and the data check
+- 494: Contaminant filter (both paths, on by default)
+- 585: Coverage filter (maxlfq path)
+- 601: Provenance (self-describing — DE-LIMP architectural rule #1)
+- 616: Top-protein violins (`make_figures.R` → `violin_top_<contrast>.png`)
+- 649: Citations (verified June 2026)
+- 667: Less-used flags
+- 671: Step 8: the normalisation check and the final DE
+- 764: Step 8: blocks and numeric covariates
+- 797: Step 8: keratin samples and contaminants
+- 833: Step 8: the method, what `run_de.R` writes, QuantUMS
+- 901: 8b. Figures, and what counts as significant (step 8b)
 <!-- /contents -->
 
 ## Invocation
+
+> Superseded by "Step 8: the normalisation check and the final DE" below.
+
 ```
 Rscript scripts/run_de.R --input report.parquet [--format parquet|tsv] \
         --metadata conditions.csv --method {dpc|maxlfq} --outdir de_results \
@@ -35,11 +39,12 @@ Rscript scripts/run_de.R --input report.parquet [--format parquet|tsv] \
         [--coverage-min 0.5] [--logfc 1.0] [--adjp 0.05] \
         [--fasta-meta search.fasta.meta.json] [--keep-contaminants] \
         [--numeric-covariates Covariate1[,Covariate2]] \
-        [--block Mouse [--block-scope within|all] [--block-effect auto|fixed|random]]
+        [--block Mouse [--block-scope within|all] [--block-effect auto|fixed|random]] \
+        [--quantities normalised|raw] [--check-input | --normalization-check <normalization_check.json>]
 ```
 - `--q-cutoff` is the q-value filter on the report; `--eq-cutoff` / `--pgq-cutoff` the
-  empirical-library and protein-group q-value filters (0 = off; `de_provenance.json` records
-  each as applied).
+  QuantUMS quality filters on `Empirical.Quality` and `PG.MaxLFQ.Quality` (0 = off, the
+  default: they are the user's call; `de_provenance.json` records each as applied).
 - `--coverage-min` (MaxLFQ only): the fraction of samples a protein must be quantified in to
   be tested.
 - `--fasta-meta` (`fetch_fasta.py`'s sidecar) tells the contaminant step whether real
@@ -49,9 +54,15 @@ Rscript scripts/run_de.R --input report.parquet [--format parquet|tsv] \
 - `--numeric-covariates`: covariates that are continuous measurements, fitted as numbers
   (below, "Continuous covariates").
 - `--block` / `--block-scope` / `--block-effect`: paired and repeated designs, below.
+- `--quantities` / `--check-input` / `--normalization-check`: the step-8 normalisation check and
+  the final DE it holds (below, "Normalised or non-normalised quantities"). In a session that
+  records an experiment type, a DE with neither `--check-input` nor `--normalization-check` is
+  refused.
 `metadata` CSV: `File.Name,Group[,Batch,Covariate1,Covariate2][,<block column>]`. `File.Name` must
 match the `Run` / column names in the report. Default contrasts = every group vs
 the first factor level.
+
+> Superseded by "8b. Figures, and what counts as significant (step 8b)" below.
 
 **`--logfc` is a reference line, not a filter.** Significance is `adj.P.Val < --adjp`
 (BH) and nothing else. `--logfc` is drawn and labelled on the volcano so a reader can see
@@ -64,6 +75,8 @@ estimate, proteins whose true effect is below the line pass it routinely. If a g
 fold-change threshold is ever wanted, use `limma::treat()` + `topTreat()`, whose interval
 null tests it properly; note that `treat` is far more stringent than the same cut applied
 post hoc, so limma recommends a *small* threshold there (fc 1.1–1.5, not 2).
+
+> Superseded by "8b. Figures, and what counts as significant (step 8b)" below.
 
 **A protein measured in neither group of a contrast is not tested in it (2.12.0).** With more
 than two groups, a protein can be measured only in groups a contrast does not compare (seen in
@@ -115,7 +128,8 @@ missingness, then mean) in 1.4. On the mouse-brain IP cohort v2 that moved |logF
 ## `--method maxlfq` (MaxLFQ + limma) — use with Sage/FragPipe (or DIA-NN MaxLFQ)
 `build_maxlfq.R`: filter `Q/Lib.Q/Lib.PG.Q ≤ q` (+ optional QuantUMS `eQ`/`pgQ`),
 pivot `PG.MaxLFQ` to a protein×run matrix, log2, quantile-normalize
-(`limma::normalizeBetweenArrays`), then `lmFit → contrasts.fit → eBayes →
+(`limma::normalizeBetweenArrays`; not with `--quantities raw`, which reads a `--no-norm`
+report and has no quantile step), then `lmFit → contrasts.fit → eBayes →
 topTable(BH)`. NAs are left in place; limma drops them per row.
 
 **A Sage report is not MaxLFQ, and is not described as MaxLFQ.** `adapt_sage` writes one row
@@ -169,6 +183,9 @@ or empty groups. Groups with <2 replicates have no within-group variance — war
 user at the design step (`collect_conditions.py --validate` flags singletons).
 
 ### Continuous covariates — `--numeric-covariates Covariate1[,Covariate2]` (2.12)
+
+> Superseded by "Step 8: blocks and numeric covariates" below.
+
 Every covariate column is a **factor** unless named here: one design column per level. A
 continuous measurement (a centred log2 bait intensity, an age, a run depth) as a factor gets a
 level per distinct value — a staff analysis's 11-value TurboID intensity became an 11-level
@@ -214,6 +231,9 @@ more distinct values, the error names the flag.
   and `reproducibility_log.R` writes the values as numbers and fits `as.numeric(...)`.
 
 ## Paired / repeated designs — `--block <column>`
+
+> Superseded by "Step 8: blocks and numeric covariates" below.
+
 When several samples come from one source — the IPs cut from one mouse brain, the
 biopsies from one patient, before/after samples from one animal — they are correlated,
 and fitting them as independent throws the pairing away. Put the unit in its own
@@ -334,6 +354,8 @@ be combined, not just its means. To keep one injection per sample instead: `loca
 
 ## Method choice — limpa/DPC is the default
 
+> Superseded by "Step 8: the method, what `run_de.R` writes, QuantUMS" below.
+
 `--method dpc` (limpa) is the default and should stay that way. It models the
 detection-probability curve and quantifies from precursor intensities, so it uses the
 whole measurement instead of a pre-collapsed protein number, and it handles missingness
@@ -369,6 +391,8 @@ Do not read a bundle's `de.method: maxlfq` as a recommendation — it records wh
 engine's adapted output can support, not which method is better.
 
 ## Normalised or non-normalised quantities: the experiment type and the data check
+
+> Superseded by "Step 8: the normalisation check and the final DE" below.
 
 Global normalisation — DIA-NN's, and the maxlfq path's quantile step — assumes most proteins
 do not change between samples. An IP / pull-down breaks that: its IgG or bead controls carry
@@ -469,6 +493,8 @@ turned into depletion. So the DE's input is a decision, made once and recorded:
 
 ## Contaminant filter (both paths, on by default)
 
+> Superseded by "Step 8: keratin samples and contaminants" below.
+
 `run_de.R` drops every precursor that maps to a `Cont_` (or FragPipe `contam_`) entry
 before quantification. That is any accession in `Protein.Ids` (`Protein.Group` for an adapted
 report), the rule of DIA-NN's own `--cont-quant-exclude`: a peptide shared between a sample
@@ -558,6 +584,8 @@ are then tested too).
 
 ## Coverage filter (maxlfq path)
 
+> Superseded by "Step 8: the method, what `run_de.R` writes, QuantUMS" below.
+
 `--coverage-min` (default 0.5) drops proteins quantified in fewer than that fraction
 of samples **before** limma. The MaxLFQ matrix keeps every protein seen in *any* run,
 so rows with 1-2 finite values otherwise reach `eBayes`, which then moderates variance
@@ -574,6 +602,8 @@ what emptied the matrix.
 Each method path returns a `descriptor` (pipeline_id, display_label, rollup_method,
 de_engine, missing_policy, citation). `methods.txt` is built from it — **never
 hardcode a description of what ran**, and hand `methods.txt` to the user verbatim.
+
+> Superseded by "Step 8: the method, what `run_de.R` writes, QuantUMS" below.
 
 `run_de.R` also writes **`reproducibility_log.R`** (via `repro_script.R`): the same
 analysis emitted as flat, literal R — the report path, the q-cutoff and the q-columns
@@ -597,6 +627,8 @@ inferred values or removes a block effect. For a within-block contrast (`--block
 as `within` in `de_provenance.json`) grey lines join each block's runs: the paired changes
 the model tested. Other groups are left out on purpose: `heatmap_top.png` already shows the
 top proteins across every group.
+
+> Superseded by "8b. Figures, and what counts as significant (step 8b)" below.
 
 **Each point is marked measured or not** (DE-LIMP's expression-grid violin):
 filled teal = at least one precursor observed in that run; hollow amber = no precursor

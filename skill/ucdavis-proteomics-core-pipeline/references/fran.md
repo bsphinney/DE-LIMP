@@ -7,25 +7,29 @@ holes answers "has anyone ever seen this peptide?" with a *no* that is really a 
 know*. Handing searches over by hand guarantees holes, because it happens for the ones
 somebody remembered.
 
+> Superseded by "7c. Hand the search to FRAN (step 7c)" below.
+
 So: **the orchestrator hands over every eligible HIVE search, without being asked.** The
 user does not have to request it and is not prompted for it; they are *told* it happened.
 
 <!-- contents: tests/test_skill_structure.py --toc -->
 **Contents** (section: line)
-- 28: The skill does not ingest anything
-- 39: Who is handed over — and who must never be
-- 119: The three commands
-- 154: Staged is not ingested — `health`
-- 240: Backfill — searches that were never staged
-- 305: What gets linked
-- 367: Pass the organism — it is the one thing only the skill knows
-- 426: Why `check` refuses (stable codes, never an exception)
-- 471: Idempotency
-- 496: Follow-ups
-- 508: 7c. Hand the search to FRAN (step 7c)
+- 30: The skill does not ingest anything
+- 43: Who is handed over — and who must never be
+- 127: The three commands
+- 164: Staged is not ingested — `health`
+- 252: Backfill — searches that were never staged
+- 319: What gets linked
+- 381: Pass the organism — it is the one thing only the skill knows
+- 442: Why `check` refuses (stable codes, never an exception)
+- 489: Idempotency
+- 514: Follow-ups
+- 526: 7c. Hand the search to FRAN (step 7c)
 <!-- /contents -->
 
 ## The skill does not ingest anything
+
+> Superseded by "7c. Hand the search to FRAN (step 7c)" below.
 
 FRAN runs its own ingest cron on HIVE that scans for new searches. All the skill has to do
 is put the search where that scan will find it:
@@ -38,6 +42,8 @@ whoever owns the corpus token.
 
 ## Who is handed over — and who must never be
 
+> Superseded by "7c. Hand the search to FRAN (step 7c)" below.
+
 **Proteomics Core searches only.** A collaborator with their own HIVE account is running
 their own data through this skill; their results are theirs and never enter the Core corpus.
 
@@ -47,6 +53,8 @@ physically cannot create an entry there. The filesystem enforces the policy; `fr
 only reports it. (Same group `check_access.sh` reports as `core_member`.)
 
 ### QC runs are never handed over
+
+> Superseded by "7c. Hand the search to FRAN (step 7c)" below.
 
 A QC run (a HeLa series watching an instrument) is not a customer search, and FRAN keeps QC
 out of the corpus, as it does STAN. FRAN's scanner can only recognise QC by path, and a drop
@@ -118,6 +126,8 @@ skips at ingest time. Nothing in the shared drop dir is deleted, and `verify` th
 
 ## The three commands
 
+> Superseded by "7c. Hand the search to FRAN (step 7c)" below.
+
 All run **on HIVE** — in `hive_remote` mode through `hive_exec.sh`, like every other
 HIVE-side step. Each prints one JSON object.
 
@@ -128,7 +138,7 @@ bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/fran_deposit.py
 # 2. hand it over (symlinks; instant, regardless of search size)
 bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/fran_deposit.py stage \
     --out <hive search out dir> --organism "<the organism the USER confirmed>" --taxon <taxid> \
-    --name "<analysis name>"'
+    --name "<analysis name>" [--qc | --not-qc]'
 
 # 3. later — did the cron take it?
 bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/fran_deposit.py verify --out <hive search out dir>'
@@ -152,6 +162,8 @@ the database. `broken_links` is the one entry problem to act on: an entry whose 
 moved looks staged but the cron will skip it in silence. Re-run `stage --force`.
 
 ## Staged is not ingested — `health`
+
+> Superseded by "7c. Hand the search to FRAN (step 7c)" below.
 
 Staging puts the search where FRAN's cron looks. Whether the cron gets to it is a separate
 fact, and for a week it was false while everything looked fine. After 2026-09-17 13:55 the
@@ -239,6 +251,8 @@ database.
 
 ## Backfill — searches that were never staged
 
+> Superseded by "7c. Hand the search to FRAN (step 7c)" below.
+
 Staging became automatic partway through the skill's life, and a session that ended early
 never reached step 7c, so some Core searches on HIVE were never handed over. FRAN's cron scans
 only `incoming/` and `FRAN_reports/`, never the service trees, so it will not find them by
@@ -248,7 +262,7 @@ itself.
 # on HIVE: write the job (dry run), then submit it -- never walk NFS on a login node
 python3 ~/proteomics-pipeline/scripts/fran_deposit.py backfill --sbatch
 sbatch ~/fran_backfill/fran_backfill_<stamp>.sbatch
-# read ~/fran_backfill/fran_backfill_<jobid>.json; then, if the list is right:
+# read ~/fran_backfill/fran_backfill_<jobid>.json and show the user the list; only after they say yes:
 python3 ~/proteomics-pipeline/scripts/fran_deposit.py backfill --sbatch --apply
 ```
 
@@ -366,6 +380,8 @@ neither.
 
 ## Pass the organism — it is the one thing only the skill knows
 
+> Superseded by "7c. Hand the search to FRAN (step 7c)" below.
+
 A DIA-NN `report.parquet` carries **no organism column**. Staged without one, the corpus row
 is `NULL` and the search is invisible on FRAN's species page. Spectronaut reports self-resolve
 from `PEP.AllOccurringOrganisms`; DIA-NN cannot.
@@ -424,6 +440,8 @@ everything:
   recorded as `organism_warning` and printed on stderr, never silently resolved.
 
 ## Why `check` refuses (stable codes, never an exception)
+
+> Superseded by "7c. Hand the search to FRAN (step 7c)" below.
 
 | reason | meaning |
 |---|---|

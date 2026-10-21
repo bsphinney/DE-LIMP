@@ -6,20 +6,22 @@ here (`diann_parallel.py`), ported faithfully from DE-LIMP's `generate_parallel_
 <!-- contents: tests/test_skill_structure.py --toc -->
 **Contents** (section: line)
 - 22: When it is used — automatic above 5 files
-- 55: The 5 steps (chained with `afterok` dependencies)
-- 72: Critical details (don't change these)
-- 169: Usage
-- 192: CPUs per array task — sized to the queue's per-user cap
-- 262: Parallelizing semi-tryptic / non-specific / InfinDIA searches (`--seed-lib`)
-- 328: Notes
-- 336: Scan window MUST be pinned (not just mass accuracy)
-- 633: Orbitrap mass accuracy with no documented tier: measured with DIA-NN
-- 941: DIA-NN exits 0 on fatal errors — never trust the job state alone
-- 1056: Golden rule 6: never a hand-written engine command
-- 1069: 7. The chain as step 7 runs it: routing, the probe and its fallback
+- 57: The 5 steps (chained with `afterok` dependencies)
+- 74: Critical details (don't change these)
+- 177: Usage
+- 200: CPUs per array task — sized to the queue's per-user cap
+- 270: Parallelizing semi-tryptic / non-specific / InfinDIA searches (`--seed-lib`)
+- 336: Notes
+- 344: Scan window MUST be pinned (not just mass accuracy)
+- 653: Orbitrap mass accuracy with no documented tier: measured with DIA-NN
+- 969: DIA-NN exits 0 on fatal errors — never trust the job state alone
+- 1084: Golden rule 6: never a hand-written engine command
+- 1097: 7. The chain as step 7 runs it: routing, the probe and its fallback
 <!-- /contents -->
 
 ## When it is used — automatic above 5 files
+
+> Superseded by "7. The chain as step 7 runs it: routing, the probe and its fallback" below.
 
 `run_search.py` decides this for you; you rarely call `diann_parallel.py` by hand. It
 routes to the chain when **all** of these hold, and prints the reason either way:
@@ -70,7 +72,9 @@ nodes simultaneously instead of one long single-node job; MBR is replaced by the
 empirical-library round-trip.
 
 ## Critical details (don't change these)
-- **Mass accuracy is FIXED, never auto.** Steps 3/5 reuse `.quant` files, so
+- > Superseded by "7. The chain as step 7 runs it: routing, the probe and its fallback" below.
+
+  **Mass accuracy is FIXED, never auto.** Steps 3/5 reuse `.quant` files, so
   auto-calibration would be inconsistent (per DIA-NN dev guidance). So the `--cfg` you
   pass **must** have real `--mass-acc`/`--mass-acc-ms1` values — i.e. estimate params
   from a **known instrument** (timsTOF → 15/15, Astral → 4/10, Orbitrap by resolution;
@@ -131,7 +135,9 @@ empirical-library round-trip.
   `mkdir -p <out>/quant_step2 <out>/quant_step4` before submitting. (This bit us on the
   first DDA cohort run — every first-pass array task died in ~7 s until the dirs existed.
   If you ever hand-edit or hand-run a step script, create the temp dirs first.)
-- **DDA:** `estimate_params.py --acquisition DDA` puts `--dda` in the `--cfg`. It is not
+- > Superseded by "7. The chain as step 7 runs it: routing, the probe and its fallback" below.
+
+  **DDA:** `estimate_params.py --acquisition DDA` puts `--dda` in the `--cfg`. It is not
   stripped, so it flows into every step, library prediction included (proven on the nail
   chain, 2.6.0). `run_search.py` refuses a cfg whose `--dda` disagrees with the bundle's
   acquisition. **A DDA chain has no step 1b.** DIA-NN logs no scan-window radius in DDA mode,
@@ -160,7 +166,9 @@ empirical-library round-trip.
   `report.parquet`, `report.stats.tsv`, `report-lib.parquet` and `report.log.txt` into `<out>`
   itself, concurrently: a one-run report at the path the DE step reads if steps 3–5 never
   finished. Steps 3 and 5 read only the `.quant` folders, so nothing downstream moved.
-- **`submit.sh` records before it prints.** It writes `jobs.txt` and the checkpoint straight
+- > Superseded by "7. The chain as step 7 runs it: routing, the probe and its fallback" below.
+
+  **`submit.sh` records before it prints.** It writes `jobs.txt` and the checkpoint straight
   after the last `sbatch`, and every message goes through a `say()` that cannot fail with
   SIGPIPE ignored. Under `set -euo pipefail`, `bash submit.sh | head -1` used to kill it at
   the second echo, after all the jobs were queued but before `jobs.txt` and `RECOVERY.md`
@@ -341,6 +349,8 @@ Steps 3/5 reuse the `.quant` files written by steps 2/4. DIA-NN warns:
 > accuracies **or scan window** will lead to results that are different from those of
 > the original analysis that produced the .quant files and is strongly not recommended
 
+> Superseded by "7. The chain as step 7 runs it: routing, the probe and its fallback" below.
+
 `estimate_params.py` pins mass accuracy but omits `--window`, which means DIA-NN
 optimises the radius **per file**. On a real 18-file poplar run that gave a radius of
 **7 for seventeen files and 8 for one**, and the chain combined them anyway.
@@ -364,6 +374,8 @@ when `estimate_params.py` planned to measure it (both flags omitted and
 `measure_with_diann` in `<cfg>.rationale.json`: an Orbitrap with a level outside DIA-NN's
 table; see "Orbitrap mass accuracy" below). The plan never rescues an invalid value, one flag
 of the two, or a bad `--window`.
+
+> Superseded by "7. The chain as step 7 runs it: routing, the probe and its fallback" below.
 
 `--window` must be a **positive integer**. DIA-NN does not accept `0` — it logs
 `scan window radius should be a positive integer` and optimises per file (the poplar run
@@ -390,6 +402,8 @@ Only after a radius (and a planned mass accuracy) is measured does step 1b write
 `--mass-acc-ms1`) — so a "resolved" cfg without them never exists unless the probe fell back
 (below); a resubmitted step 1b first removes the previous run's `window.txt`, `massacc.txt`,
 `window.json`, fallback record, resolved cfg and probe logs.
+
+> Superseded by "7. The chain as step 7 runs it: routing, the probe and its fallback" below.
 
 **A probe whose own machinery failed no longer fails the chain** (`probe_attempts()`, the one
 definition, shared with the single-shot search's probe). Between 2026-09-29 17:00 and 09-30
@@ -429,6 +443,8 @@ DIA-NN run. DIA-NN itself succeeded; afterok then left 183 downstream jobs
   CAUTION (`probe_fallback.caution()`). Its `reason` lists any value a run did log before the
   probe failed (a lone measured mass accuracy included), which the fallback does not use.
 
+> Superseded by "7. The chain as step 7 runs it: routing, the probe and its fallback" below.
+
 Everything else still **fails** step 1b — `FAILED:`, the cause named from the exit status,
 `window.json` kept as the evidence — never retried or fallen back past, because no fallback can
 fix it and one would hide it (dda-review, 2026-09-30):
@@ -461,6 +477,8 @@ along with the rest of the chain, so `watch_run.sh --all` sees it fail.
 `--no-probe-window` disables step 1b, in which case a pinned `--window` in the cfg is
 required or the chain refuses to generate.
 
+> Superseded by "7. The chain as step 7 runs it: routing, the probe and its fallback" below.
+
 To measure it yourself instead, never by guessing — it depends on the acquisition scheme
 (cycle time vs peak width), not the instrument model:
 
@@ -478,6 +496,8 @@ calibration, well before the search completes), so it costs minutes per run, not
 pass. Re-probe for a different gradient, cycle time, or instrument.
 
 ### Which runs step 1b measures
+
+> Superseded by "7. The chain as step 7 runs it: routing, the probe and its fallback" below.
 
 Not the first file. DIA-NN's README ("Changing default settings") says automatic
 optimisation "is inherently noisy: even replicate injections may not produce identical
@@ -640,6 +660,8 @@ whose resolution is outside 30k–240k it writes `mass_accuracy_plan:
 measure_with_diann` into `<cfg>.rationale.json`, and records any level that **does** have a tier
 under `mass_accuracy_documented` (MS1 7 ppm at 120k, 10 at 60k).
 
+> Superseded by "7. The chain as step 7 runs it: routing, the probe and its fallback" below.
+
 **An Orbitrap of UNKNOWN resolution is not measured** (`estimate_params.MEASURE_CLASSES` holds
 `orbitrap_untabled` only). With no resolution neither level has a tier, so both would be
 measured — and a measured MS1 is the one thing the evidence below says not to pin: at 120k it
@@ -701,6 +723,8 @@ predicted library (no empirical library exists yet), runs one DIA-NN per represe
 rather than one "Unrelated runs" search, and pins the **median** of what each run printed rather
 than DIA-NN's averaged line. On the validation cohort the two disagree — DIA-NN's averaged line
 says MS2 16 / MS1 4, the per-run median is MS2 14 (below).
+
+> Superseded by "7. The chain as step 7 runs it: routing, the probe and its fallback" below.
 
 **What step 1b does.** `probe_window.py --measure window mass-acc --ms1-ppm 7` runs one DIA-NN
 per chosen run with both mass-accuracy flags and `--window` omitted, and stops it once it has
@@ -784,6 +808,8 @@ when they carry neither flag it says so and points at the log wording instead: `
 `FIXED_ACC_RE` were written against DIA-NN 2.7.0's exact words, so a release that rewords or
 reorders that announcement lands here with nothing wrong with the flags at all. Telling the
 reader to remove flags that are not there is the one thing the message must not do.
+
+> Superseded by "7. The chain as step 7 runs it: routing, the probe and its fallback" below.
 
 **Steps 2–5 refuse to start without what step 1b measured.** `$(cat massacc.txt)` expands to
 nothing when the file is missing, and DIA-NN then optimises mass accuracy per file and still
@@ -903,6 +929,8 @@ and a `sources` line naming both. The job log says both when a floor applies
 (`MS2: measured 14 ppm, PINNED 20 ppm -- the SOP floor`). In `search_provenance.json`,
 `result.mass_acc.measured: true` means **the tolerance was measured**, not that the search ran at
 the measured number; `result.mass_acc.floor_note` says so and points at the two fields.
+
+> Superseded by "7. The chain as step 7 runs it: routing, the probe and its fallback" below.
 
 **Single-shot searches measure it too.** A machine without SLURM always searches single-shot
 (`parallel_decision` returns "no SLURM here" before it reads the cfg), whatever the cohort size;

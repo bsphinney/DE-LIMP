@@ -15,14 +15,16 @@ command prints JSON; nothing waits unless you pass `--wait`.
 <!-- contents: tests/test_skill_structure.py --toc -->
 **Contents** (section: line)
 - 25: Ground rules
-- 73: 1. Connect, once per computer (right before the first `start`)
-- 107: 2. Put the analysis on the board (right after `connect`)
-- 231: 3. While the analysis runs: a record at each milestone
-- 348: Step 1 for Core staff: internal work, one number or several
-- 375: The rules in short (SKILL.md)
+- 75: 1. Connect, once per computer (right before the first `start`)
+- 109: 2. Put the analysis on the board (right after `connect`)
+- 233: 3. While the analysis runs: a record at each milestone
+- 352: Step 1 for Core staff: internal work, one number or several
+- 379: The rules in short (SKILL.md)
 <!-- /contents -->
 
 ## Ground rules
+
+> Superseded by "The rules in short (SKILL.md)" below.
 
 1. **Only `scripts/board.sh`.** Never open the board's web pages in a browser, not even your
    person's signed-in one. Starting threads, approving, deciding, changing limits and
@@ -263,6 +265,8 @@ hand-over, "results ready" and "finished".
 
 **Several submissions:** all of these rows go to the main submission's thread; the other
 threads get only the three records of section 2.
+
+> Superseded by "The rules in short (SKILL.md)" below.
 
 **Recording a job: its hours, and who approves it.** Every new job record carries the CPU-hours
 the job reserves (`--cpu-hours`, at least 0.1: the board refuses a new job without it, exit 2),

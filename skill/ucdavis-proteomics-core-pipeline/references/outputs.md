@@ -5,19 +5,22 @@ Every run is packaged into a tidy **session directory** so people can find thing
 <!-- contents: tests/test_skill_structure.py --toc -->
 **Contents** (section: line)
 - 20: Where the session goes — ask the user
-- 31: Session layout (`session.py`)
-- 296: Re-analysis of the same dataset
-- 327: Comparing analyses (`compare_analyses.R`)
-- 346: 1b. A prior analysis: a new session is fresh (step 1b)
-- 358: 1b. A re-analysis, only when the user asks for one (step 1b)
-- 367: 3b. Creating the analysis session (step 3b)
-- 457: 11. The output-files report (step 11)
-- 478: 11b. A re-analysis: compare to the original (step 11b)
-- 495: 12. Finalize the session, and the summary to the user (step 12)
-- 571: Keeping the record of the analysis: the decisions log and the conversation
+- 34: Session layout (`session.py`)
+- 306: Re-analysis of the same dataset
+- 343: Comparing analyses (`compare_analyses.R`)
+- 365: 1b. A prior analysis: a new session is fresh (step 1b)
+- 377: 1b. A re-analysis, only when the user asks for one (step 1b)
+- 386: 3b. Creating the analysis session (step 3b)
+- 476: 11. The output-files report (step 11)
+- 497: 11b. A re-analysis: compare to the original (step 11b)
+- 514: 12. Finalize the session, and the summary to the user (step 12)
+- 590: Keeping the record of the analysis: the decisions log and the conversation
 <!-- /contents -->
 
 ## Where the session goes — ask the user
+
+> Superseded by "3b. Creating the analysis session (step 3b)" below.
+
 The orchestrator asks where results should live (SKILL.md step 3b):
 - **Default (recommended): in the folder with the raw data** being analyzed. The
   session folder is created right inside that directory, so results sit next to the
@@ -93,10 +96,14 @@ The orchestrator asks where results should live (SKILL.md step 3b):
                             #   Claude Code transcripts), index.json, conversation.md
 ```
 
-- `session.py init --name "..." --raw <globs> [--base <path>] [--reanalysis-of <prior> [--beside]]`
+- > Superseded by "3b. Creating the analysis session (step 3b)" below.
+
+  `session.py init --name "..." --raw <globs> [--base <path>] [--reanalysis-of <prior> [--beside]]`
   makes the folders and prints a `paths` map; **route every step's
   `--out`/`--outdir`/`--dest` into those paths**.
-- `session.py finalize --dir <session> [--zip]` ensures the Methods, writes the deposit package,
+- > Superseded by "12. Finalize the session, and the summary to the user (step 12)" below.
+
+  `session.py finalize --dir <session> [--zip]` ensures the Methods, writes the deposit package,
   `README.md` + `README.html` + `AGENTS.md` and `MANIFEST.txt`, prints the report PDF when it is
   missing and a browser is there, moves any loose tables/figures into their subdirs, (for a
   re-analysis) writes `DIFFERENCES.md`, and with `--zip` zips the session, then logs the run and
@@ -239,6 +246,9 @@ unreadable or has a wrong field never stops the report: it is reported as a `[WA
 report, README and AGENTS.md are made without the podcast.
 
 ### The record for a reviewer: `logs/decisions.md` and `logs/conversation/`
+
+> Superseded by "Keeping the record of the analysis: the decisions log and the conversation" below.
+
 Two records let an AI (or a person) check later how the analysis was done; AGENTS.md's
 "Reviewing this analysis" section is the checklist (groups and contrasts as confirmed, every
 number traced to a command, nothing skipped or re-run unrecorded, no warning ignored).
@@ -297,13 +307,19 @@ number traced to a command, nothing skipped or re-run unrecorded, no warning ign
 Re-running the same raw data (different engine, version, parameters, FASTA, or
 design) is common and must not clobber or be confused with the original.
 
-- **Detection:** `session.py find-prior --raw <globs>` scans existing sessions'
+- > Superseded by "1b. A prior analysis: a new session is fresh (step 1b)" below.
+
+  **Detection:** `session.py find-prior --raw <globs>` scans existing sessions'
   `input/raw_files.txt` for an overlapping raw-file set and reports matches
   (`same_dataset` true when the sets are identical).
-- **Fresh by default:** a match is mentioned to the user in one line, nothing more
+- > Superseded by "1b. A prior analysis: a new session is fresh (step 1b)" below.
+
+  **Fresh by default:** a match is mentioned to the user in one line, nothing more
   (`"default": "fresh"`). The new session reads nothing from the earlier one and does not nest
   under it. It becomes a re-analysis only when the user asks for one.
-- **Placement:** with `--reanalysis-of <prior>`, the new run nests under
+- > Superseded by "1b. A re-analysis, only when the user asks for one (step 1b)" below.
+
+  **Placement:** with `--reanalysis-of <prior>`, the new run nests under
   `<prior>/reanalysis/<date>_<name>/` — same internal layout — so all re-analyses
   live with their original. With `--beside` as well, it goes **next to** the prior, in the
   prior's parent folder, as `<date>_<name>_v<N>`: N is one above the prior's version and every
@@ -325,6 +341,9 @@ design) is common and must not clobber or be confused with the original.
   neither session records is listed as "not compared", never counted as unchanged.
 
 ## Comparing analyses (`compare_analyses.R`)
+
+> Superseded by "11b. A re-analysis: compare to the original (step 11b)" below.
+
 `DIFFERENCES.md` says what *settings* changed; the Comparator shows how the
 *results* changed. `compare_analyses.R` is a faithful port of DE-LIMP's Run
 Comparator core (`normalize_protein_id`, `classify_de`, the 3×3 concordance) so the

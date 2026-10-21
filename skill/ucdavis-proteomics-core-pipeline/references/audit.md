@@ -11,9 +11,9 @@ over-interpret anything. FAILs should stop interpretation; WARNs go in the repor
 - 19: What it checks
 - 37: What the client reads: a plain-language table
 - 56: How the orchestrator uses it
-- 65: Why deterministic, not LLM-judged
-- 73: Tuning
-- 79: 8c. The audit and the sample-quality check (step 8c)
+- 69: Why deterministic, not LLM-judged
+- 77: Tuning
+- 83: 8c. The audit and the sample-quality check (step 8c)
 <!-- /contents -->
 
 ## What it checks
@@ -54,9 +54,13 @@ are wrong. A report's own `## Audit & caveats` section still replaces the table 
 when staff ask, and in plain words).
 
 ## How the orchestrator uses it
+
+> Superseded by "8c. The audit and the sample-quality check (step 8c)" below.
+
 - Run it with `--conditions`, `--de-dir`, and the `detect_acquisition` JSON
-  (`--acquisition-json`) so it can see acquisition/instrument mixing, and `--search-out`
-  (the search's output dir) so a Sage search's LFQ check reaches the report.
+  (`--acquisition-json`) so it can see acquisition/instrument mixing, `--search-out`
+  (the search's output dir) so a Sage search's LFQ check reaches the report, and
+  `--fasta-meta` (the searched FASTA's `.meta.json`).
 - **STOP on any `FAIL`** — e.g. a singleton group or a confounded batch means the
   differential results aren't trustworthy; tell the user plainly and how to fix it
   (add replicates, de-confound the design, split by acquisition/instrument).

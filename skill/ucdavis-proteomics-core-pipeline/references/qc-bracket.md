@@ -5,6 +5,8 @@ The Core injects a QC standard on each instrument between projects, and STAN
 good as the instrument was while its samples ran. `qc_bracket.py` finds, for each instrument the
 project used, the QC runs around the samples, grades them, and gives one verdict.
 
+> Superseded by "8e. QC runs around this project (step 8e)" below.
+
 **The verdict is staff-only** (Brett, 2026-10-01). It and everything behind it go to staff:
 
 - the session's `logs/` folder, which is Core-internal (never delivered, kept out of the
@@ -16,27 +18,29 @@ until a staff member records an acknowledgement (see "The delivery gate").
 
 <!-- contents: tests/test_skill_structure.py --toc -->
 **Contents** (section: line)
-- 32: When to run it
-- 69: Exit codes, and what to do
-- 83: What it checks
-- 122: The verdict
-- 161: The maintenance log
-- 210: The delivery gate
-- 271: Telling people
-- 311: What it cannot know, and says
-- 323: Time zones (`acq_time.py`)
-- 348: Where it goes
-- 365: 8e. QC runs around this project (step 8e)
+- 34: When to run it
+- 73: Exit codes, and what to do
+- 89: What it checks
+- 130: The verdict
+- 169: The maintenance log
+- 220: The delivery gate
+- 283: Telling people
+- 325: What it cannot know, and says
+- 337: Time zones (`acq_time.py`)
+- 362: Where it goes
+- 381: 8e. QC runs around this project (step 8e)
 <!-- /contents -->
 
 ## When to run it
+
+> Superseded by "8e. QC runs around this project (step 8e)" below.
 
 - **Only on a Core staff route:** a CoreOmics submission (step 1c, fetched with the Core's
   CoreOmics key) or a Core HT submission (step 1a), the routes the other staff-only steps
   key on. **Never for anyone else**, including a user who says the data came off the Core's
   instruments: this skill is public and clients run it. Skip the step for them, and never
   show them a verdict.
-- **After step 2, before the delivery (step 12b).** Running it before step 9 gives staff the
+- **After step 2, before the Methods (step 1c.7 / 9d).** Running it before step 9 gives staff the
   verdict while there is still time to re-inject samples; the client report does not change
   either way.
 - **Not for data from elsewhere.** STAN records the instrument model, not its serial number. A
@@ -68,6 +72,8 @@ of them. In that case, save step 2's JSON or run the script under `srun`.
 
 ## Exit codes, and what to do
 
+> Superseded by "8e. QC runs around this project (step 8e)" below.
+
 | exit | meaning | do |
 |---|---|---|
 | 0 | checked; `verdict` is set | tell the staff member the summary |
@@ -81,6 +87,8 @@ A record is written for exits 0, 3 and 4 (`status`: `ok` / `stan_unreachable` /
 is held or the input was bad.
 
 ## What it checks
+
+> Superseded by "8e. QC runs around this project (step 8e)" below.
 
 For each instrument it checks:
 
@@ -160,6 +168,8 @@ data.
 
 ## The maintenance log
 
+> Superseded by "8e. QC runs around this project (step 8e)" below.
+
 Long QC gaps are often the instrument being down, not QC that was missed. STAN keeps a
 maintenance log: `GET /api/instruments/<model>/events`, which is anonymous. It records column
 changes and clogs, source cleaning, calibration, LC service and PM, and downtime with an end
@@ -208,6 +218,8 @@ one of STAN's QC runs, the change is pinned to that run.
 unexplained.
 
 ## The delivery gate
+
+> Superseded by "8e. QC runs around this project (step 8e)" below.
 
 `core_submission.py deliver` (step 12b) asks `qc_bracket.delivery_gate()` before every delivery
 of the session's report -- an analysis delivery or a no-de one (a report without differential
@@ -270,6 +282,8 @@ and never goes into the session zip.
 
 ## Telling people
 
+> Superseded by "8e. QC runs around this project (step 8e)" below.
+
 **Core staff** get the whole record:
 
 - the staff page `logs/qc_bracket.md` (and its copy in the run registry, `qc/qc_bracket.md`):
@@ -331,7 +345,7 @@ instruments' clock and the one STAN's dashboard shows.
   (`FileHeader.CreationDate.ToString()`) has no time zone. It is printed in the parser's
   culture: `09/30/2026 03:06:18` on HIVE (invariant culture), or `9/30/2026 3:06:18 AM` on a
   US-English Windows.
-  - It was checked on HIVE (srun job 24264231). An Exploris 480 QC run on a 120-minute gradient
+  - It was checked on HIVE (in an srun job). An Exploris 480 QC run on a 120-minute gradient
     printed 03:06:18, and its file was last written at 05:06:20 PDT. A Fusion Lumos run printed
     13:39:43 and was last written at 15:39:46 PDT.
   - The value was the same with `TZ=UTC` and `TZ=Asia/Tokyo`. So it is the instrument PC's own
@@ -346,6 +360,8 @@ instruments' clock and the one STAN's dashboard shows.
 `acquired_at_source` and `acquired_at_note`.
 
 ## Where it goes
+
+> Superseded by "8e. QC runs around this project (step 8e)" below.
 
 | Where | Who reads it | What it holds |
 |---|---|---|

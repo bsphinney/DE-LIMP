@@ -1,5 +1,7 @@
 # Reproducibility contract
 
+> Superseded by "Golden rule 5: every run reproducible, at two levels" below.
+
 Reproducibility here has **two levels**, and they answer different questions.
 
 | | Artifact | Answers | Needs |
@@ -13,14 +15,16 @@ at the R script first.
 
 <!-- contents: tests/test_skill_structure.py --toc -->
 **Contents** (section: line)
-- 23: Level 1 — the analysis as plain R
-- 51: Level 2 — the pinned bundle
-- 226: Golden rule 5: every run reproducible, at two levels
-- 246: For maintainers: adding a new `--method` or analysis path
-- 270: 10. The bundle (step 10)
+- 25: Level 1 — the analysis as plain R
+- 55: Level 2 — the pinned bundle
+- 241: Golden rule 5: every run reproducible, at two levels
+- 261: For maintainers: adding a new `--method` or analysis path
+- 285: 10. The bundle (step 10)
 <!-- /contents -->
 
 ## Level 1 — the analysis as plain R
+
+> Superseded by "Golden rule 5: every run reproducible, at two levels" below.
 
 `run_de.R` writes `reproducibility_log.R` into the DE output directory: the whole
 differential-expression analysis top to bottom, with every value written out
@@ -50,11 +54,15 @@ DIA-NN/Sage identically is level 2.
 
 ## Level 2 — the pinned bundle
 
+> Superseded by "Golden rule 5: every run reproducible, at two levels" below.
+
 Every run also produces a `reproducibility/` bundle. A result without one is
 incomplete. This is the skill's implementation of DE-LIMP architectural rules #1 and
 #4 (no silent gaps — `MANIFEST.txt` logs `[OK]`/`[SKIPPED]`).
 
 ### The five things that make a run reproducible
+
+> Superseded by "Golden rule 5: every run reproducible, at two levels" below.
 
 1. **Parameters pinned by the skill version.** `resolve_defaults.py` derives them
    from the data type and they ship *with* the skill, so nothing is fetched at run
@@ -153,6 +161,8 @@ difference rather than hiding behind an unchanged sequence count.
 
 ### What the orchestrator must do during the run
 
+> Superseded by "10. The bundle (step 10)" below.
+
 - **Log every command.** Append each command you execute (verbatim, full args) to
   `commands.log` and pass it via `--commands`. This is the audit trail.
 - **Pass a timestamp** (`--timestamp "$(date -u +%FT%TZ)"`) — the scripts can't read
@@ -162,6 +172,9 @@ difference rather than hiding behind an unchanged sequence count.
   over a bundle that silently dropped a critical artifact.
 
 ### Bundle layout
+
+> Superseded by "10. The bundle (step 10)" below.
+
 ```
 reproducibility/
 ├── run_manifest.json        # full machine-readable record (the master file)
@@ -204,6 +217,8 @@ filters, and `dpcCN`, were bit-identical across families; `dpcQuant` differed (p
 up to 0.0026, standard errors by 7e-5), and was reproduced exactly within a family; limma
 (`dpcDE`, `eBayes`) given the same protein values agreed to 2e-12.
 
+> Superseded by "Golden rule 5: every run reproducible, at two levels" below.
+
 What the skill does about it:
 - `run_de.R` records the machine in `de_provenance.json` `compute` and at the top of
   `sessionInfo.txt`: the CPU model, the BLAS and LAPACK libraries, `OPENBLAS_CORETYPE` (as found,
@@ -216,7 +231,7 @@ What the skill does about it:
   `sinfo -N -o '%N %f'` lists each node's.
 - **Do not pin `OPENBLAS_CORETYPE`** to force one kind of kernel: on the EPYC 9734 node,
   `OPENBLAS_CORETYPE=Haswell` (8 threads or 1) and `=Zen` all segfaulted in `dpcQuant`
-  (sbatch 24180764, 24180793, 24180794).
+  (three test jobs on HIVE).
 
 A difference at this level is not an error in either run, and it is far below what would
 change a conclusion; but "reproduces exactly" means "on the same CPU family", and the record now

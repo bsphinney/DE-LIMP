@@ -6,12 +6,12 @@ How the skill adapts to where it's running, plus FASTA resolution.
 **Contents** (section: line)
 - 17: Platform classes (`detect_env.sh`)
 - 30: DIA-NN by environment
-- 69: The R stack: limpa >= 1.4.0 (`setup.sh`)
-- 145: Version pinning (reproducibility)
-- 250: FASTA resolution (`fetch_fasta.py`)
-- 423: SLURM submission (hpc)
-- 493: 5. Acquiring the pinned engine (step 5)
-- 526: 6. Building the FASTA (step 6)
+- 71: The R stack: limpa >= 1.4.0 (`setup.sh`)
+- 147: Version pinning (reproducibility)
+- 258: FASTA resolution (`fetch_fasta.py`)
+- 443: SLURM submission (hpc)
+- 513: 5. Acquiring the pinned engine (step 5)
+- 546: 6. Building the FASTA (step 6)
 <!-- /contents -->
 
 ## Platform classes (`detect_env.sh`)
@@ -32,7 +32,9 @@ Container runtime preference: hpc→apptainer, mac→docker, linux→native.
 - **No native macOS build exists.** On mac you must run DIA-NN through Docker. Set
   `DIANN_DOCKER_IMAGE` to a built image, or build one from the Academia Linux zip's
   bundled Dockerfile. `acquire_tools.sh` writes a note when this is unresolved.
-- **HIVE (Proteomics Core):** DIA-NN is kept under `/quobyte/proteomics-grp/dia-nn/`
+- > Superseded by "5. Acquiring the pinned engine (step 5)" below.
+
+  **HIVE (Proteomics Core):** DIA-NN is kept under `/quobyte/proteomics-grp/dia-nn/`
   as **native builds** at `build_<nnn>/diann-<version>/diann-linux` — **2.5.1, 2.6.0,
   2.6.1 and 2.7.0** (`build_270`, added 2026-09-23) — plus one older Apptainer image,
   `diann_2.3.0.sif`. The skill pins **2.7.0** (`resolve_defaults.py`). `acquire_tools.sh` resolves the
@@ -144,6 +146,8 @@ Container runtime preference: hpc→apptainer, mac→docker, linux→native.
 
 ## Version pinning (reproducibility)
 
+> Superseded by "5. Acquiring the pinned engine (step 5)" below.
+
 `acquire_tools.sh` honors `PIN_ENGINE`/`PIN_VERSION` from the workflow bundle and
 caches under `~/.proteomics-pipeline/tools/<engine>/<version>/`. Different pinned
 versions coexist. The written `tools.json` records `pinned` (what was asked for) and
@@ -169,6 +173,8 @@ key is worse than an empty one: it makes every search that engine ever runs reco
 For a Radiant image on mac/linux the recorded release is the image **tag**
 (`seerbio/radiant-fulcrum:2.3.3`), which is what will be pulled — but nothing here pulls it,
 so the tag is the only evidence of what is inside; the note beside it says so.
+
+> Superseded by "5. Acquiring the pinned engine (step 5)" below.
 
 The manifest and `tools.json` can still disagree — `resolve_defaults.py` pins one version,
 but `tools.json` holds whatever was last acquired (the FRAN pilot: manifest 2.6.1,
@@ -199,6 +205,8 @@ A `tools.json` whose `versions` contradicts its own command (says 2.6.1, runs
 `diann-2.6.0/diann-linux`) records `version: null` with a WARNING: one is wrong and nothing
 tells which. A version *directory* (`sage/0.14.6/sage`, `fragpipe/24.0/`) is not read,
 because `acquire_tools.sh` names cache folders after the request, not the build inside.
+
+> Superseded by "5. Acquiring the pinned engine (step 5)" below.
 
 A mismatch WARNING means the version the user confirmed (SKILL.md golden rule #1) is not
 the one about to run: say so before submitting, and either re-acquire the pin (the WARNING
@@ -282,6 +290,9 @@ Common IDs (still confirm with `resolve`): human `UP000005640`, mouse
 `UP000000589`, rat `UP000002494`, yeast `UP000002311`, E. coli `UP000000625`.
 
 ### `fetch` — proteome → search FASTA
+
+> Superseded by "6. Building the FASTA (step 6)" below.
+
 Priority, cheapest/most-trusted first:
 1. `--path` override → used verbatim (pre-staged proteome). Its organism is the user's answer:
    `--organism '<scientific name>' --taxid <taxid>` (or `--organism none` for a database with
@@ -295,6 +306,9 @@ Priority, cheapest/most-trusted first:
 3. **UniProt.**
 
 ### Database type (`--content`, default `one_per_gene`)
+
+> Superseded by "6. Building the FASTA (step 6)" below.
+
 | value | what you get | human size |
 |---|---|---|
 | `one_per_gene` | canonical, one protein per gene — **the default** | 20,652 |
@@ -327,6 +341,9 @@ script warn loudly, record the warning in its output, and fall back to the REST 
 never swaps databases silently. If REST also fails it exits with the reason.
 
 ### User-supplied target sequences (`--add-fasta <file>`, repeatable)
+
+> Superseded by "6. Building the FASTA (step 6)" below.
+
 A bait, a tag or a construct the experiment is about (EGFP, TurboID). Each entry is a TARGET,
 written after the proteome and before the contaminants, and recorded in the sidecar under
 `added_sequences` (the file's path and sha256; each entry's accession, name, length and sequence
@@ -350,6 +367,9 @@ accession (`protein_ids.header_accession`) used twice or already in the database
 identical to a proteome entry is warned. Methods and `reproduce.sh` carry them.
 
 ### Contaminants (`--contaminants`, default `universal`)
+
+> Superseded by "6. Building the FASTA (step 6)" below.
+
 Sets: `universal` (default; what the Core stages on HIVE), `cell_culture`,
 `mouse_tissue`, `rat_tissue`, `neuron_culture`, `stem_cell_culture`, `none`.
 Source order: `--contaminants-path` → HIVE (matching the *requested* set) →

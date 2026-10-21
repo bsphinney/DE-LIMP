@@ -15,14 +15,14 @@ message metadata (`skill_agent_post`: agent, person, session, sequence number).
 - 137: Each person, once: tell your Claude who you are
 - 182: Using it: the people's side
 - 225: Using it: the agent's side
-- 346: Rules the code keeps
-- 448: Scopes (the minimum, each for one method)
-- 468: Message metadata
-- 503: Limits
-- 514: Residual risks
-- 552: The Slack API facts this relies on (checked 2026-09-29)
-- 570: Tests
-- 576: The rules in short (SKILL.md)
+- 348: Rules the code keeps
+- 450: Scopes (the minimum, each for one method)
+- 470: Message metadata
+- 505: Limits
+- 516: Residual risks
+- 554: The Slack API facts this relies on (checked 2026-09-29)
+- 572: Tests
+- 578: The rules in short (SKILL.md)
 <!-- /contents -->
 
 ## Setting it up (once, by Brett)
@@ -292,6 +292,8 @@ Keep it running in one of these two ways:
   the interval each time ([scheduled tasks](https://code.claude.com/docs/en/scheduled-tasks)),
   about every 2 minutes. Or run `watch` with `run_in_background` and read its output file on each
   wake-up. `--once` prints the new events, or one `idle` line.
+
+> Superseded by "The rules in short (SKILL.md)" below.
 
 **Do not answer every line.** For each event:
 

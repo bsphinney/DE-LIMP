@@ -8,12 +8,12 @@ an example** — a laptop or a generic Linux box hits the same four gates.
 <!-- contents: tests/test_skill_structure.py --toc -->
 **Contents** (section: line)
 - 19: The four gates, in the order you hit them
-- 124: Parallelising the conversion
-- 147: Output contract
-- 160: When comparing against the DIA-NN route, say this out loud
-- 167: The verified working invocation
-- 189: 6c. FragPipe / Radiant: the config is generated, not stored (step 6c)
-- 227: 7. Running the FragPipe + diaTracer route (step 7)
+- 126: Parallelising the conversion
+- 151: Output contract
+- 166: When comparing against the DIA-NN route, say this out loud
+- 175: The verified working invocation
+- 197: 6c. FragPipe / Radiant: the config is generated, not stored (step 6c)
+- 235: 7. Running the FragPipe + diaTracer route (step 7)
 <!-- /contents -->
 
 ## The four gates, in the order you hit them
@@ -29,6 +29,8 @@ only the three jars is not enough — FragPipe looks for `speclib/gen_con_spec_l
 alongside them. On a stock install that is `<fragpipe>/tools`, which already contains all
 three jars plus `speclib/`, `Philosopher/` and `diann/`. Handing it a curated
 "licensed jars only" folder fails.
+
+> Superseded by "7. Running the FragPipe + diaTracer route (step 7)" below.
 
 > The DIA-NN that FragPipe bundles is explicitly *"available for both academic and
 > commercial use within FragPipe"* — DIA-NN is **not** the restriction. Never tell a
@@ -123,6 +125,8 @@ own `--help` advertises. All seven must be passed:
 
 ## Parallelising the conversion
 
+> Superseded by "7. Running the FragPipe + diaTracer route (step 7)" below.
+
 FragPipe runs diaTracer serially inside its own job — ~20 min per file, so ~3 hours for
 nine. The conversion is per-file and independent, so on a cluster it should be an array:
 
@@ -146,6 +150,8 @@ mzML still only need building once.
 
 ## Output contract
 
+> Superseded by "7. Running the FragPipe + diaTracer route (step 7)" below.
+
 FragPipe 24 bundles **DIA-NN 1.8.2 beta 8**, which has **no parquet writer**. The output
 is `<workdir>/dia-quant-output/report.tsv` — there is no `report.parquet` unless someone
 configured DIA-NN 2.x. `adapt_fragpipe` handles either, and `compare_searches.py` reads
@@ -158,6 +164,8 @@ as the quant of record** — it is not equivalent to the DIA-NN numbers and the 
 never uses it.
 
 ## When comparing against the DIA-NN route, say this out loud
+
+> Superseded by "7. Running the FragPipe + diaTracer route (step 7)" below.
 
 FragPipe's bundled DIA-NN 1.8.2 beta 8 is **two major versions behind** the 2.x the
 `diann_*` workflows pin. Some of any difference is version lag, not the spectrum-centric

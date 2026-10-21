@@ -8,16 +8,18 @@ files); every pattern below was actually observed in that data.
 <!-- contents: tests/test_skill_structure.py --toc -->
 **Contents** (section: line)
 - 20: Get the design right before computing anything
-- 46: Interpretation patterns that recur
-- 92: Building the report
-- 114: Charts: load the `dataviz` skill first
-- 139: Deliver the HTML
-- 144: 4b. Offering the bake-off (step 4b)
-- 157: 11a. Comparing two searches of the same files (step 11a)
-- 182: 11c. The cross-tool report (step 11c)
+- 48: Interpretation patterns that recur
+- 94: Building the report
+- 118: Charts: load the `dataviz` skill first
+- 143: Deliver the HTML
+- 150: 4b. Offering the bake-off (step 4b)
+- 163: 11a. Comparing two searches of the same files (step 11a)
+- 188: 11c. The cross-tool report (step 11c)
 <!-- /contents -->
 
 ## Get the design right before computing anything
+
+> Superseded by "11c. The cross-tool report (step 11c)" below.
 
 **Run both engines through the SAME downstream pipeline.** Identical `run_de.R --method`,
 identical contrasts, identical thresholds. Otherwise you are comparing search × DE
@@ -91,6 +93,8 @@ set**, and check per-protein claims at peptide level first.
 
 ## Building the report
 
+> Superseded by "11c. The cross-tool report (step 11c)" below.
+
 Follow the structure DE-LIMP's Run Comparator prompt defines
 (`docs/AI_PROMPTS.md` §1) — `make_comparison_report.py` emits it as a skeleton:
 
@@ -137,6 +141,8 @@ method, and a future chart must re-derive them the same way:
   on a cluster with no browser network access.
 
 ## Deliver the HTML
+
+> Superseded by "11c. The cross-tool report (step 11c)" below.
 
 `COMPARISON_REPORT.html` is the report: one self-contained page. No Word copy is made — Word
 mangled the figures (2026-09-24) — and `COMPARISON_REPORT.md` is the same text for editing.

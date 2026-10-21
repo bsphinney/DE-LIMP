@@ -1,21 +1,23 @@
 # Study questions (SKILL.md step 3)
 
 What to ask the user before the database is built and before the one compute confirmation,
-and what each answer changes. Every one of these is asked, never inferred from file or folder
-names, a sample ID or an earlier session. Each answer is recorded once the session exists
-(step 3b: `experiment_type.py set`, `sample_type.py set`, `log_decision.py`).
+and what each answer changes. None of them is ever inferred from file or folder names, a
+sample ID or an earlier session; each is asked as its section below says (some only for some
+experiments, and Core staff are asked the sample type only when a step depends on it). Each
+answer is recorded once the session exists (step 3b: `experiment_type.py set`,
+`sample_type.py set`, `log_decision.py`).
 
 <!-- contents: tests/test_skill_structure.py --toc -->
 **Contents** (section: line)
-- 21: Golden rule 4: the organism and the sample type are asked
-- 42: Organism
-- 63: Database type
-- 85: Contaminants
-- 98: SILAC (plexDIA)
-- 112: Experiment type
-- 141: Reduced and alkylated? (enrichment experiments only)
-- 155: Sample type
-- 177: Keratin samples
+- 23: Golden rule 4: the organism and the sample type are asked
+- 44: Organism
+- 65: Database type
+- 87: Contaminants
+- 100: SILAC (plexDIA)
+- 114: Experiment type
+- 143: Reduced and alkylated? (enrichment experiments only)
+- 157: Sample type
+- 179: Keratin samples
 <!-- /contents -->
 
 ## Golden rule 4: the organism and the sample type are asked

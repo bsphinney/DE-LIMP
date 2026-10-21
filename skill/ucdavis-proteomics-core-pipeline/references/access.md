@@ -1,9 +1,12 @@
 # Access & where the skill runs (HIVE runbook)
 
+> Superseded by "Step 0a: the questions, the check and the modes" below.
+
 **Model: Claude Code runs LOCALLY on the user's computer.** When a step should run on
 HIVE, the local Claude Code drives HIVE **over SSH using the user's private key**
 (`ssh -i <key> <user>@hive.hpc.ucdavis.edu '<command>'`, wrapped by `hive_exec.sh`).
-The skill is never installed *on* HIVE for the user; it submits work there.
+The plugin is never installed *on* HIVE for the user; its scripts are put there
+(`hive_exec.sh --put-skill`, at this computer's version), and it submits work there.
 
 **Why local (not Claude Code on HIVE):** running Claude Code on a HIVE interactive
 node ties up that node and the session **times out** mid-analysis. Keeping Claude Code
@@ -12,24 +15,27 @@ jobs** on HIVE — nothing depends on an interactive session staying open.
 
 <!-- contents: tests/test_skill_structure.py --toc -->
 **Contents** (section: line)
-- 32: Step 0a asks two questions (Core staff, three) → pick a mode
-- 65: HPC@UCD's `ucd-hpc` skill (anyone on a UC Davis cluster)
-- 90: hive_remote runbook (Claude Code local → HIVE over SSH)
-- 159: Keeping the skill current (hive_remote)
-- 277: Data already on a network drive (check BEFORE any upload)
-- 310: Windows (Git Bash)
-- 330: HIVE host key (first contact)
-- 344: Core staff — submission workflow prerequisites
-- 385: Rebuild on HIVE (non-Core users) — exact steps, no guessing
-- 419: Notes
-- 438: On HIVE: the login node or a compute node (golden rule 3, step 0a)
-- 486: Step 0a: the questions, the check and the modes
-- 558: Step 0: is this skill current? (every conversation)
-- 680: Step 1: locating the raw files
-- 685: Step 1: a path the user gave on a network drive
+- 35: Step 0a asks two questions (Core staff, three) → pick a mode
+- 71: HPC@UCD's `ucd-hpc` skill (anyone on a UC Davis cluster)
+- 101: hive_remote runbook (Claude Code local → HIVE over SSH)
+- 175: Keeping the skill current (hive_remote)
+- 296: Data already on a network drive (check BEFORE any upload)
+- 332: Windows (Git Bash)
+- 355: HIVE host key (first contact)
+- 369: Core staff — submission workflow prerequisites
+- 410: Rebuild on HIVE (non-Core users) — exact steps, no guessing
+- 444: Notes
+- 465: On HIVE: the login node or a compute node (golden rule 3, step 0a)
+- 513: Step 0a: the questions, the check and the modes
+- 585: Step 0: is this skill current? (every conversation)
+- 707: Step 1: locating the raw files
+- 712: Step 1: a path the user gave on a network drive
 <!-- /contents -->
 
 ## Step 0a asks two questions (Core staff, three) → pick a mode
+
+> Superseded by "Step 0a: the questions, the check and the modes" below.
+
 1. **"Do you have access to UC Davis HIVE (account + SSH private key)?"**
    If yes, **ask where the private key is** (e.g. `~/.ssh/id_ed25519`).
 2. **"Do you work for the UC Davis Proteomics Core (staff)?"**
@@ -63,12 +69,17 @@ Then:
 | no | yes | **local** | The Core software is on HIVE; without HIVE access you can't reach it → run locally with public engines and tell the user to request a HIVE account. |
 
 ## HPC@UCD's `ucd-hpc` skill (anyone on a UC Davis cluster)
+
+> Superseded by "On HIVE: the login node or a compute node (golden rule 3, step 0a)" below.
+
 HPC@UCD (HPCCF) made its own agent skill mandatory on Farm, Franklin and Hive on 2026-10-16:
 "agents that do not follow it put the user's account at risk of suspension". On cluster policy
 (what may run on a login node, `--account`/`--partition`/`--time`/memory, software installs,
 home vs group storage, one writer per file on Quobyte) it supersedes this skill: where they
 disagree, follow `ucd-hpc`, tell the user which instruction you set aside, and record it
 (`report_issue.sh`).
+
+> Superseded by "Step 0a: the questions, the check and the modes" below.
 
 Claude reads a skill only from the computer Claude Code runs on, so it belongs on the laptop in
 `hive_remote` and on HIVE in `hive_local`. `check_access.sh` reports `ucd_hpc_skill`
@@ -88,6 +99,9 @@ ln -s ~/ucdhpc-cluster-skill/ucd-hpc ~/.claude/skills/ucd-hpc
   few days.
 
 ## hive_remote runbook (Claude Code local → HIVE over SSH)
+
+> Superseded by "Step 0a: the questions, the check and the modes" below.
+
 Set the connection once, then everything HIVE-side goes through `hive_exec.sh`:
 ```
 export HIVE_USER=<hive_user>
@@ -125,7 +139,9 @@ bash scripts/hive_exec.sh 'hostname; sbatch --version | head -1'   # confirm
    (`id -Gn` lists the `…grp` groups; `qinfo quota /quobyte/<grp>` its space); a Core session
    is already on `/quobyte/proteomics-grp`. Below, `<work>` is that folder. Only a user with no
    group share (free tier only) uses `~/proteomics-pipeline`, and then watches `df -h ~`.
-3. **Stage the raw data** — usually there is nothing to stage. See "Data already on a
+3. > Superseded by "Step 1: a path the user gave on a network drive" below.
+
+   **Stage the raw data** — usually there is nothing to stage. See "Data already on a
    network drive" below: run `hive_path.sh` on the raw folder FIRST, and use the HIVE
    path it verifies in place. Upload only when the data is on the laptop's own disk:
    ```
@@ -157,6 +173,9 @@ bash scripts/hive_exec.sh 'hostname; sbatch --version | head -1'   # confirm
    folder (e.g. `--get '<out>/report.parquet' ./<session>/output/`).
 
 ## Keeping the skill current (hive_remote)
+
+> Superseded by "Step 0: is this skill current? (every conversation)" below.
+
 Three copies of the skill must agree: the plugin on the laptop (it runs SKILL.md), its copy
 in `~/proteomics-pipeline/` on HIVE (it runs the scripts), and the Core's current release. On
 2026-09-29 two Core staff were on 2.6.0 in both places while 2.8.0 was out, so none of the
@@ -174,7 +193,7 @@ three in one SSH call and prints one JSON object: `status`, `local`, `hive`, `re
 | 3 | `hive_missing`, `hive_behind`, `hive_differs` | Run `next` (`hive_exec.sh --put-skill`), then the check again. |
 | 4 | `hive_ahead` | Stop. Relay `say`: update the plugin here, or, for an unreleased build on HIVE, ask the user which to keep. |
 | 5 | `no_login`, `unreachable`, `local_unknown` | One line saying the check could not run; carry on. `no_login`: run `check_access.sh`, which saves the login. |
-| 6 | as 3 | `jobs` of the user's `jobs_total` SLURM jobs use the copy, or squeue answered with an error: do not put now. Ask the user; put after they finish. |
+| 6 | as 3 | `jobs` of the user's `jobs_total` SLURM jobs use the copy, or squeue answered with an error: do not put it now. Relay `say`, and ask the user whether to put it now or after they finish. |
 
 - **The login.** The check needs the HIVE login in the environment or in
   `~/.config/ucdavis-proteomics/hive.env`, and the environment does not survive from one tool
@@ -275,6 +294,9 @@ and a maintainer's HIVE copy often holds an unreleased build. Publishing from th
 staff to update to a version the marketplace does not have yet.
 
 ## Data already on a network drive (check BEFORE any upload)
+
+> Superseded by "Step 1: a path the user gave on a network drive" below.
+
 Core data lives on shares that HIVE mounts. A path the user gives from a mapped drive
 (`T:\Data\lab\service\...`) or a Mac SMB mount (`/Volumes/proteomics/...`) is usually
 already on HIVE under a different name. Real case (2026-09-23): `T:` was
@@ -308,13 +330,16 @@ printing the path to use (override: `HIVE_PUT_FORCE=1`). For an ordinary local p
 check makes no SSH call.
 
 ## Windows (Git Bash)
+
+> Superseded by "Step 0a: the questions, the check and the modes" below.
+
 `hive_remote` from Windows needs only Git Bash + the private key. Nothing runs locally:
 - **Every script runs on HIVE** through `hive_exec.sh` — including the Python ones. On
   Windows `python3` is often the Microsoft Store stub (`...\WindowsApps\python3`), which
   opens the Store instead of running; `check_access.sh` reports it as
-  `local_python3.usable: false`. Never run a skill script locally with it. The one
-  exception is Core staff's CoreOmics lookups (`core_submission.py check` / `identify` /
-  `fetch` / `bioshare`): the key stays on this computer, so they need a real local Python 3
+  `local_python3.usable: false`. Never run a skill script locally with it. Core staff's
+  CoreOmics steps (`core_submission.py check` / `identify` / `fetch` / `bioshare` /
+  `email-draft`) then run on HIVE too (`coreomics_runs_on: hive`), with the key there
   (section "Core staff" below).
 - **No rsync** in Git Bash: `--put/--get` fall back to `scp` on their own. A trailing
   slash on the source (`dir/`, rsync's "copy the contents") is refused — drop the slash.
@@ -417,7 +442,9 @@ your own copy in your HIVE home. Run all of this **on HIVE** (via `hive_exec.sh`
    reproducibility) is identical to a local run.
 
 ## Notes
-- **Never run computationally intensive work on the login/head node** — the search
+- > Superseded by "On HIVE: the login node or a compute node (golden rule 3, step 0a)" below.
+
+  **Never run computationally intensive work on the login/head node** — the search
   and any heavy DE/figure/conversion step go through `sbatch`. The login node is only
   for submitting jobs, `squeue`/`sacct` polling, small file moves and the bookkeeping
   scripts SKILL.md step 0a lists; anything else runs on a compute node through

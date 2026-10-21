@@ -9,16 +9,19 @@ inline instead of shipping the prompt to an external API.
 <!-- contents: tests/test_skill_structure.py --toc -->
 **Contents** (section: line)
 - 21: The flow
-- 52: The CoreOmics submission (Core data)
-- 62: Report sections (faithful to DE-LIMP's export prompt)
-- 69: Pipeline self-description (DE-LIMP rule #1)
-- 76: No fabrication (DE-LIMP rule, and the viz-data feedback)
-- 82: Output-files report
-- 88: Less-used flags
-- 103: 9. Writing the report (step 9)
+- 55: The CoreOmics submission (Core data)
+- 68: Report sections (faithful to DE-LIMP's export prompt)
+- 75: Pipeline self-description (DE-LIMP rule #1)
+- 85: No fabrication (DE-LIMP rule, and the viz-data feedback)
+- 94: Output-files report
+- 100: Less-used flags
+- 115: 9. Writing the report (step 9)
 <!-- /contents -->
 
 ## The flow
+
+> Superseded by "9. Writing the report (step 9)" below.
+
 1. `analysis_prompt.py` writes `ANALYSIS_PROMPT.md` — the brief, parameterized by
    what's present (QC, GSEA) and by the actual engine + DE method.
 2. **The agent reads the brief and the data files and writes `AI_Analysis_Report.md`.**
@@ -50,6 +53,9 @@ inline instead of shipping the prompt to an external API.
    plain-language description, grouped by purpose.
 
 ## The CoreOmics submission (Core data)
+
+> Superseded by "9. Writing the report (step 9)" below.
+
 When `submission_report.py attach` has stored the submission in the session,
 `make_analysis_html.py` opens the report with a **Submission** section by default: the PROT id
 linked to CoreOmics, PI, submitter, date, organism and UniProt as specified, the description
@@ -67,6 +73,9 @@ Works (LC-MS/MS, DIA/DDA, the engine, the stats framework, key terms — written
 biologist with no MS background) · Methods & Reproducibility · Next steps.
 
 ## Pipeline self-description (DE-LIMP rule #1)
+
+> Superseded by "9. Writing the report (step 9)" below.
+
 The brief takes the pipeline label, quantification, DE engine, missing-value
 policy, and citation from `de_results/de_provenance.json` (written by `run_de.R`),
 not from hardcoded strings. The educational + stats sections are chosen by engine
@@ -74,6 +83,9 @@ not from hardcoded strings. The educational + stats sections are chosen by engin
 whichever pipeline actually ran, and never contradicts `methods.txt`.
 
 ## No fabrication (DE-LIMP rule, and the viz-data feedback)
+
+> Superseded by "9. Writing the report (step 9)" below.
+
 Every claim must trace to a value in the attached files or to established biology.
 Don't invent fold-changes, pathways, p-values, or citations. If something isn't in
 the data (e.g. no GSEA was run), the corresponding section is simply omitted by the

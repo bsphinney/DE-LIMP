@@ -8,12 +8,12 @@ genuine manual fallback.
 **Contents** (section: line)
 - 19: Installing the SKILL itself — marketplace only
 - 76: What `setup.sh` installs automatically (no admin / no sudo)
-- 159: The search engines
-- 171: The ONE manual step: Docker on macOS (only for DIA-NN / DIA data)
-- 185: macOS + Sage + Bruker/Thermo
-- 197: Windows
-- 228: Assume nothing about the user's computer (golden rule 7)
-- 263: Step 0: the one-time setup, and what `setup.json` says
+- 169: The search engines
+- 181: The ONE manual step: Docker on macOS (only for DIA-NN / DIA data)
+- 197: macOS + Sage + Bruker/Thermo
+- 209: Windows
+- 240: Assume nothing about the user's computer (golden rule 7)
+- 275: Step 0: the one-time setup, and what `setup.json` says
 <!-- /contents -->
 
 ## Installing the SKILL itself — marketplace only
@@ -94,6 +94,8 @@ a `~/.condarc` listing `defaults` cannot pull in its R ≤ 4.3 builds — contai
 | `pythonnet` (conda-forge, 3.1.0, noarch) | lets `thermo_resolution.py` read the **Orbitrap MS1/MS2 resolution** from each `.raw`'s scan trailer with the RawFileReader DLLs the parser ships — ThermoRawFileParser itself never outputs it, and `estimate_params.py` needs it to pin DIA-NN's documented Orbitrap tolerances. Same separate, non-fatal step as the parser; only what is missing is installed. It runs on a .NET 8 root with `Microsoft.NETCore.App` (`ensure_dotnet8.sh`'s; a self-contained parser's bundled runtime cannot host it) |
 | `pandas` (conda-forge) | ad-hoc tables in Python (a user's first reach). In the same separate step — not the main solve — so an env that already exists gets it on a re-run of `setup.sh` |
 
+> Superseded by "Step 0: the one-time setup, and what `setup.json` says" below.
+
 `setup.sh` also runs **`ensure_dotnet8.sh`** (Linux and macOS; not with `--check`): one .NET 8
 root with `Microsoft.NETCore.App` ≥ 8.0.17 + `Microsoft.AspNetCore.App` in
 `~/.proteomics-pipeline/dotnet8`, which DIA-NN's `.raw` reader, a framework-dependent
@@ -107,14 +109,19 @@ CoreOmics submission gets the podcast by default, and on HIVE its job runs with 
 installs it in its own step (not with `--check`), so a failure is a note that nothing else
 depends on. `setup.json`'s `podcast` (`google_genai`, `required`, `ok`) reports it.
 
+> Superseded by "Step 0: the one-time setup, and what `setup.json` says" below.
+
 **limpa ≥ 1.4.0** (`run_de.R` reads the report with its `readDIANN(annotation.columns =)`): step
 2a installs it into the env from the Bioconductor 3.23 source repository (`PROTEOMICS_LIMPA_BIOC`
 overrides the release; limpa is pure R, so no compiler). The env stays on R 4.5. The last check
 of `setup.sh` is `packageVersion("limpa") >= "1.4.0"`; `setup.json` → `limpa` =
-`{version, required, ok, source}`, and on failure it prints `ERROR: limpa ...` with the exact
-`install.packages()` line to run where there is internet, and exits 1. An env still on limpa
-1.2.x runs `run_de.R` anyway (the argument was `extra.columns` there; `limpa_compat.R`) and
-records it in `de_provenance.json`. → `references/environment.md`, "The R stack".
+`{version, required, ok, source}`, and on failure it prints `ERROR: limpa ...` with its fix
+(re-run `setup.sh`, which on a cluster runs itself on a compute node, or the exact
+`install.packages()` line, on a cluster inside a job, never on a login node), and exits 1. An
+env still on limpa 1.2.x runs `run_de.R` anyway (the argument was `extra.columns` there;
+`limpa_compat.R`) and records it in `de_provenance.json`. → `references/environment.md`, "The R stack".
+
+> Superseded by "Step 0: the one-time setup, and what `setup.json` says" below.
 
 Everything lands under `~/.proteomics-pipeline/`. `source activate.sh` puts it on
 PATH so `Rscript`, `python`, `sage`, `msconvert`, `ThermoRawFileParser` resolve to the env,
@@ -123,6 +130,8 @@ already set is kept). Nothing is installed system-wide; deleting `~/.proteomics-
 fully uninstalls it.
 
 `setup.sh --check` reports readiness without installing anything.
+
+> Superseded by "Step 0: the one-time setup, and what `setup.json` says" below.
 
 **Thermo `.raw` readiness** — `setup.json` has `ready_for.thermo_raw` and a
 `thermo_raw_reader` object (`command`, `source`, `version`, `dotnet_needs`, `dotnet_root`,
@@ -149,9 +158,10 @@ checks this before reading anything, and picks the first place that has both —
 `$DOTNET_ROOT`, `ensure_dotnet8.sh`'s install (`$PROTEOMICS_DOTNET_DIR`, default
 `~/.proteomics-pipeline/dotnet8`), `$DOTNET_CORE_SDK_ROOT` (HIVE: `module load
 dotnet-core-sdk/8.0.4`), the `dotnet` on PATH, .NET's default location. With none it stops
-once, up front, with the fix. `bash scripts/ensure_dotnet8.sh` (needs internet; fine on a login
-node) installs both runtimes there, and adds `AspNetCore` in place to an older NETCore-only
-install. The same install serves DIA-NN 2.6, which needs `Microsoft.NETCore.App` ≥ 8.0.17 to read
+once, up front, with the fix. `bash scripts/ensure_dotnet8.sh` (needs internet; on a cluster login
+node its download moves itself to a compute node) installs both runtimes there, and adds
+`AspNetCore` in place to an older NETCore-only install. The same install serves DIA-NN 2.6,
+which needs `Microsoft.NETCore.App` ≥ 8.0.17 to read
 `.raw` on Linux (HIVE's 8.0.4 module is fine for the parser but *not* for DIA-NN). Public
 source: https://dotnet.microsoft.com/download/dotnet/8.0 (the ASP.NET Core Runtime 8.0 includes
 both).
@@ -169,6 +179,8 @@ both).
   and can't be auto-downloaded — `acquire_tools.sh` says so if you opt in.
 
 ## The ONE manual step: Docker on macOS (only for DIA-NN / DIA data)
+
+> Superseded by "Assume nothing about the user's computer (golden rule 7)" below.
 
 DIA-NN can't run natively on a Mac. `build_diann_docker.sh` builds an image from
 DIA-NN's **own official** Academia zip + Dockerfile (no third-party images), but
@@ -216,9 +228,9 @@ R or engines; every script runs on HIVE through `hive_exec.sh`. Git Bash is enou
   drop the slash.
 - **`python3` may be the Microsoft Store stub** (`...\WindowsApps\python3`), which opens
   the Store instead of running. `check_access.sh` reports it as
-  `local_python3.usable: false`; in `hive_remote` that is fine, except for Core staff's
-  CoreOmics lookups, which run locally (`references/core-submissions.md` "Python on this
-  computer").
+  `local_python3.usable: false`; in `hive_remote` that is fine: Core staff's CoreOmics steps
+  then run on HIVE too (`coreomics_runs_on: hive`; `references/core-submissions.md` "Python
+  on this computer").
 - **The HIVE username is the plain UC Davis id**, not the Windows login (`AD3+<your HIVE user>`);
   see `references/access.md` → "Windows (Git Bash)".
 

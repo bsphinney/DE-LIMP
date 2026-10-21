@@ -7,17 +7,20 @@ genuine ambiguities.
 <!-- contents: tests/test_skill_structure.py --toc -->
 **Contents** (section: line)
 - 20: Two ways the user provides conditions
-- 51: The Core LIMS sample sheet
-- 79: A run whose file name holds `--`
-- 89: How mapping works (`collect_conditions.py --map`)
-- 128: The finished metadata
-- 159: Why deterministic matching (not pure LLM)
-- 166: Less-used flags
-- 171: Step 3: collecting the conditions and settling every ambiguity
-- 231: Step 8: check the design against the report; runs left out of the DE
+- 54: The Core LIMS sample sheet
+- 84: A run whose file name holds `--`
+- 97: How mapping works (`collect_conditions.py --map`)
+- 138: The finished metadata
+- 174: Why deterministic matching (not pure LLM)
+- 181: Less-used flags
+- 186: Step 3: collecting the conditions and settling every ambiguity
+- 246: Step 8: check the design against the report; runs left out of the DE
 <!-- /contents -->
 
 ## Two ways the user provides conditions
+
+> Superseded by "Step 3: collecting the conditions and settling every ambiguity" below.
+
 1. **In words** — "the first three are control, the last three treated", "A* are
    wild-type, B* are knockout". The agent reads the real run list and turns this
    into an intent JSON: `{"groups": {"control": [...], "treated": [...]}}` or
@@ -56,6 +59,8 @@ runs, is the sample column; `condition_name` the group. `internal_id` (the submi
 every row), `internal_notes` and `amt_2_inject` are bookkeeping, never covariates: they are listed
 in `columns_skipped` with why, as is the identifier column not used.
 
+> Superseded by "Step 3: collecting the conditions and settling every ambiguity" below.
+
 **`condition_name` names each replicate** (`X_mix_1` … `X_mix_5`): taken literally it is one
 singleton group per sample and no DE at all. When every sample has its own label, `--map` reads
 the column as **conditions + replicate numbers** — the condition is the label without its
@@ -77,6 +82,9 @@ to `--mapping-json` intent, which is how `core_submission.py conditions` hands C
 condition names to `--map`.
 
 ## A run whose file name holds `--`
+
+> Superseded by "Step 3: collecting the conditions and settling every ambiguity" below.
+
 DIA-NN cannot be given such a path, so `run_search.py --rename-dashed-runs` searches the run
 under a new name, each run of dashes made one (`x_DIA--sampA_S3` → `x_DIA-sampA_S3`), and that is
 its `Run` in the report. `detect_acquisition.py` lists these runs at step 2 (`dashed_run_names`).
@@ -103,6 +111,8 @@ Matching is grounded in the actual run names (never guessed):
 Never a bare substring, and **never the plate position**: the slot-well words of a run name
 (`_S3-A1_`) say where a tube sat on the Core's plate, so a sample labelled `A1` does not match
 the run in well A1.
+
+> Superseded by "Step 3: collecting the conditions and settling every ambiguity" below.
 
 It then reports, for confirmation:
 - `unassigned_runs` — a raw file no condition matched. **Blocking**: every run
@@ -134,6 +144,8 @@ bait intensity, an age, a run depth), ask the user, and run DE with `--numeric-c
 Covariate1` (`references/de-analysis.md`, "Continuous covariates"). Never decide it from the
 values: a batch numbered 1/2/3 is a factor. A numeric covariate needs a number for every sample.
 
+> Superseded by "Step 3: collecting the conditions and settling every ambiguity" below.
+
 **Samples from the same animal / patient?** (five IPs from one mouse brain, paired
 before/after samples.) Ask. If so, keep that unit in its own column under its own name
 (`Mouse`, `Patient`) and run DE with `--block Mouse` (`references/de-analysis.md`,
@@ -146,6 +158,9 @@ holds ≥ 2 runs (all singletons = a sample id, not a block) and the values look
 subjects or were confirmed (`subject_confirmed`). Ambiguities add
 `subject_conflicting_runs`, `runs_without_subject` and `single_run_subjects`. run_de.R
 prints a note when a column recurs across groups and no `--block` was given.
+
+> Superseded by "Step 8: check the design against the report; runs left out of the DE" below.
+
 `File.Name` must equal the Run names in the search report. `--validate` checks
 column presence, blank groups, singleton groups, and that the report runs and
 metadata rows line up exactly. A report run the user decided to leave out of the DE

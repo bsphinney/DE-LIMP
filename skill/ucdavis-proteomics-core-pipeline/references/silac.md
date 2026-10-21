@@ -13,12 +13,12 @@ spectral library (`--seed-lib`); chemical labels (mTRAQ, dimethyl); a turnover /
 <!-- contents: tests/test_skill_structure.py --toc -->
 **Contents** (section: line)
 - 24: 1. What to ask (step 3)
-- 91: 2. The search (steps 6b and 7)
-- 161: 3. The ratio analysis (step 8)
-- 223: 4. Reading the results (say these in the report)
-- 285: 5. The rest of the pipeline
-- 304: 6. Statistical review (2026-10-15) and what is still open
-- 324: Step 8 for a SILAC session
+- 97: 2. The search (steps 6b and 7)
+- 167: 3. The ratio analysis (step 8)
+- 231: 4. Reading the results (say these in the report)
+- 293: 5. The rest of the pipeline
+- 312: 6. Statistical review (2026-10-15) and what is still open
+- 332: Step 8 for a SILAC session
 <!-- /contents -->
 
 ## 1. What to ask (step 3)
@@ -59,6 +59,9 @@ Ask; never guess. Each answer goes into `logs/decisions.md` (`log_decision.py`).
    `Replicate` defaults to `File.Name`. Runs that share a `Replicate` are re-injections of one
    mix: they must hold the same samples in the same channels, their ratios are averaged, and they
    count as one replicate (question 5). A channel that holds no sample has no row. Group names: letters, digits, `_` or `.`, starting with a letter.
+
+   > Superseded by "Step 8 for a SILAC session" below.
+
    `python3 scripts/silac.py design --validate input/silac_design.csv --against
    ./search_out/report.parquet` checks it (every report run needs rows and every row a run, no
    group twice in a run, at least one run with two groups). A searched run the user decides to
@@ -78,6 +81,9 @@ Ask; never guess. Each answer goes into `logs/decisions.md` (`log_decision.py`).
    The ratio analysis reads raw `Precursor.Quantity`, so this setting does not change its
    numbers; it changes DIA-NN's normalised columns (`Precursor.Normalised`, `PG.MaxLFQ`), which
    a client may use.
+
+> Superseded by "Step 8 for a SILAC session" below.
+
 4. **The comparisons** (step 8): which group over which. A ratio A/B reads "higher in A" when
    positive. The default, every pair with the group in the heavier channel over the lighter, is
    recorded as a DEFAULT, and the Methods and the report name each comparison with its direction.
@@ -159,6 +165,8 @@ R), `Channel.Q.Value`, a channel-specific `PG.Q.Value`, and `Precursor.Id`, whic
 every channel of a precursor (README: "channel-oblivious").
 
 ## 3. The ratio analysis (step 8)
+
+> Superseded by "Step 8 for a SILAC session" below.
 
 ```
 Rscript scripts/run_silac.R --input ./search_out/report.parquet --design input/silac_design.csv \

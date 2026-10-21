@@ -1,5 +1,7 @@
 # Run watcher — monitor searches and auto-correct errors
 
+> Superseded by "7b. The watch loop as SKILL.md runs it (step 7b)" below.
+
 A search is long (often hours) and runs detached (a background process locally, a
 SLURM job on HIVE). **Always watch every search — this is mandatory, not optional.**
 The orchestrator must never start a search and walk away, and must **auto-correct
@@ -10,24 +12,26 @@ what you did afterwards; don't ask permission to unstick a job.
 
 <!-- contents: tests/test_skill_structure.py --toc -->
 **Contents** (section: line)
-- 30: Watch the WHOLE chain, not its last job
-- 49: Two failure modes it catches
-- 58: Loop pattern
-- 72: Error classes → fixes (what `watch_run.sh` detects)
-- 100: Warnings that are not failures: Sage LFQ
-- 117: Warnings that are not failures: protein inference in step 5
-- 132: SLURM specifics (HIVE)
-- 141: Node faults: the node check every chain job runs first
-- 155: Keeping a search off nodes known to be bad (`--exclude`)
-- 180: Auto-recovery playbook (apply autonomously; log every action to `commands.log`)
-- 203: Don't
-- 220: Progress reporting (`--out`, `--poll`)
-- 255: 0c. Is this a resume? (step 0c)
-- 291: A closed laptop: `RECOVERY.md` (step 0c)
-- 300: 7b. The watch loop as SKILL.md runs it (step 7b)
+- 32: Watch the WHOLE chain, not its last job
+- 53: Two failure modes it catches
+- 65: Loop pattern
+- 84: Error classes → fixes (what `watch_run.sh` detects)
+- 114: Warnings that are not failures: Sage LFQ
+- 131: Warnings that are not failures: protein inference in step 5
+- 146: SLURM specifics (HIVE)
+- 155: Node faults: the node check every chain job runs first
+- 169: Keeping a search off nodes known to be bad (`--exclude`)
+- 196: Auto-recovery playbook (apply autonomously; log every action to `commands.log`)
+- 219: Don't
+- 239: Progress reporting (`--out`, `--poll`)
+- 276: 0c. Is this a resume? (step 0c)
+- 312: A closed laptop: `RECOVERY.md` (step 0c)
+- 321: 7b. The watch loop as SKILL.md runs it (step 7b)
 <!-- /contents -->
 
 ## Watch the WHOLE chain, not its last job
+
+> Superseded by "7b. The watch loop as SKILL.md runs it (step 7b)" below.
 
 For any multi-step chain (`diann_parallel.py`, `radiant_parallel.py`), watch with:
 
@@ -47,6 +51,9 @@ pointed at step 5 alone reported "pending" for hours. `--all` returns
 until the run finishes, and on `failed` **or** `stalled` apply the fix and resubmit.
 
 ## Two failure modes it catches
+
+> Superseded by "7b. The watch loop as SKILL.md runs it (step 7b)" below.
+
 1. **Hard failure** — `sacct` reports FAILED / TIMEOUT / OUT_OF_MEMORY / NODE_FAIL /
    CANCELLED. Matched against known error signatures → a fix.
 2. **Stall** — the job stays **RUNNING** but its log stops advancing (a hung file, e.g. a
@@ -56,10 +63,15 @@ until the run finishes, and on `failed` **or** `stalled` apply the fix and resub
    `stalled: true`. **This is the NA41-class failure the first nail cohort hit.**
 
 ## Loop pattern
+
+> Superseded by "7b. The watch loop as SKILL.md runs it (step 7b)" below.
+
 ```
 # start the search (background locally, or sbatch on HIVE), capture the log path / job id
+n=0
 while true; do
-  status=$(bash scripts/watch_run.sh --slurm <jobid> --log <log> --hive)   # or --log <log> locally
+  n=$((n+1))      # --poll: one more each poll; --out: real progress
+  status=$(bash scripts/watch_run.sh --slurm <jobid> --log <log> --out <out> --poll $n --hive)   # or --log <log> --out <out> --poll $n locally
   echo "$status" | grep -qE '"done": ?true' && break      # no python needed (Windows)
   sleep 300       # SLURM: 5 min or more (each poll is several logins + sacct on the login
                   # node); a local run: 60. For long jobs, schedule a wake-up instead
@@ -89,6 +101,8 @@ any auto-fix you applied to the user.
 | `unknown_failure` | job FAILED with no known signature | read the full log; diagnose; fix; resubmit (and add the new signature here) |
 | `watcher_query_failed` | the watcher could not ask HIVE (unreachable, `HIVE_USER`/`HIVE_KEY` unset, or — with no local python3 — the skill not on HIVE: exit 3), or for `--slurm <id>` sacct and squeue both answered nothing (`state: query_failed`: SLURM tools not on PATH, or a wrong or aged-out id). Always `failed: false` | **not a job failure: never resubmit on it.** Fix the connection (or `bash scripts/hive_exec.sh --put-skill`), or check the id with `hive_exec.sh 'sacct -j <id> -X'`, then poll again |
 | `watcher_no_python` | no usable `python3` on this computer and no `--hive` | **not a job failure** (`failed: false`). Install Python 3, or for a search on HIVE add `--hive` |
+
+> Superseded by "7b. The watch loop as SKILL.md runs it (step 7b)" below.
 
 **No python3 on this computer** (Windows, where `python3` is often the Microsoft Store stub
 that prints "Python was not found"): with `--hive` the watcher runs the whole poll on HIVE,
@@ -154,6 +168,8 @@ probe rereads its own log on `Stale file handle`, retries and falls back
 
 ## Keeping a search off nodes known to be bad (`--exclude`)
 
+> Superseded by "7b. The watch loop as SKILL.md runs it (step 7b)" below.
+
 When the user, the HIVE status page or an earlier failure says which nodes are bad, keep the
 whole search off them **when it is generated**:
 `run_search.py ... --exclude hive-dc-7-4-50,hive-dc-7-4-[52-54]` (names, or SLURM ranges in
@@ -197,10 +213,13 @@ and nothing is written) and recorded in `search_provenance.json` as `queue.exclu
   this itself**, so a step resubmitted directly (as this playbook tells you to) cannot hit it;
   you should only ever see this from a hand-written sbatch or a cfg-supplied `--temp` on the
   single-shot path (which `run_search.ensure_temp_dirs` also creates).
-- **Whole-cohort restart is rarely needed** — resume from the earliest incomplete step,
+- **Never restart the whole cohort** — resume from the earliest incomplete step,
   reusing everything already computed.
 
 ## Don't
+
+> Superseded by "7b. The watch loop as SKILL.md runs it (step 7b)" below.
+
 - Don't declare a run "done" on a non-COMPLETED state, and don't proceed to DE until
   `report.parquet` exists.
 - Don't silently retry forever — after 2 failed auto-fix attempts of the same class,
@@ -218,6 +237,8 @@ and nothing is written) and recorded in `search_provenance.json` as `queue.exclu
   the expected OUTPUT file exists (`report.parquet`, `combined_peptide.tsv`), not just the state.
 
 ## Progress reporting (`--out`, `--poll`)
+
+> Superseded by "7b. The watch loop as SKILL.md runs it (step 7b)" below.
 
 `--out <search out dir>` makes the watcher report **real** progress instead of "still
 running". It counts what the 5-step chain leaves on disk — one `.quant` per finished file —

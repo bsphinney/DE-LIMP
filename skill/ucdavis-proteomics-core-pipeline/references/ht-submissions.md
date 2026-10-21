@@ -8,17 +8,19 @@ acquisition detection, same defaults, same confirmation, same FRAN handover.
 <!-- contents: tests/test_skill_structure.py --toc -->
 **Contents** (section: line)
 - 21: Why a submission is not a folder
-- 69: 1. Get the file list
-- 93: 2. Honour the exit code — this is the whole point of the gates
-- 194: 3. Organism and FASTA — still asked, never inferred
-- 208: 4. Search — the DIA-NN parallel chain, automatically
-- 235: 5. Deposit to FRAN, then tell STAN
-- 273: Deployment status
-- 286: Two ways in — and which one a Core member can actually use
-- 361: 1a. The HT steps as the pipeline runs them (step 1a)
+- 73: 1. Get the file list
+- 99: 2. Honour the exit code — this is the whole point of the gates
+- 202: 3. Organism and FASTA — still asked, never inferred
+- 216: 4. Search — the DIA-NN parallel chain, automatically
+- 243: 5. Deposit to FRAN, then tell STAN
+- 281: Deployment status
+- 294: Two ways in — and which one a Core member can actually use
+- 371: 1a. The HT steps as the pipeline runs them (step 1a)
 <!-- /contents -->
 
 ## Why a submission is not a folder
+
+> Superseded by "1a. The HT steps as the pipeline runs them (step 1a)" below.
 
 Globbing a directory gets an HT submission wrong in four ways, none of which announce
 themselves:
@@ -61,12 +63,16 @@ were samples. Neither shows up as an error; the search just succeeds on the wron
 * **Tray labels repeat.** `S6` is a tray *position*, reused every month since December. It
   is not a submission identifier.
 
+> Superseded by "1a. The HT steps as the pipeline runs them (step 1a)" below.
+
 Since 2.12.0 a tray named without the number (0807's S5 above) is **not** searched from STAN's
 list: `named_for_submission` fails and lists its runs, and the operator confirms them through a
 curated list (`core_submission.py locate --files-from`) — because a tray STAN joins by position
 can just as well be another project's (2026-10-05, below).
 
 ## 1. Get the file list
+
+> Superseded by "1a. The HT steps as the pipeline runs them (step 1a)" below.
 
 `ht_manifest.py` runs **on HIVE** (like `fran_deposit.py`), because that is where STAN,
 its credential, and the raw files are. Drive it through `hive_exec.sh`:
@@ -91,6 +97,8 @@ It writes two files into `--out`:
 | `ht_manifest.json` | the full STAN payload (plates, wells, per-run class, verdicts) **plus** the gate results |
 
 ## 2. Honour the exit code — this is the whole point of the gates
+
+> Superseded by "1a. The HT steps as the pipeline runs them (step 1a)" below.
 
 | code | meaning | what to do |
 |---|---|---|
@@ -317,6 +325,8 @@ looks there.
 2. `$STAN_PG_TOKEN` (a file)
 3. `~/.pgfarm_token`
 4. `/quobyte/proteomics-grp/brett/.pgfarm_token` (readable by its owner only)
+
+> Superseded by "1a. The HT steps as the pipeline runs them (step 1a)" below.
 
 Every other Core member gets *permission denied* at (4). That is expected, and it does not mean
 "that submission does not exist".
