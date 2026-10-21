@@ -39,7 +39,7 @@ SYNTHETIC = {(os.path.join("tests", "fixtures", "podcast"), "04" + "21")}
 NAMES = re.compile("|".join((
     "brett" + "sp", "msal" + "emi", "sal" + "emi", r"(?<![a-z])gab" + "rig", "gabri" + "ela",
     "mich" + "elle", "frag" + "matics", "dick" + "son", "sil" + r"va(?=[0-9_])", "adam " + "schaal",
-    "0022066" + "cd85f")), re.I)
+    "0022066" + "cd85f", "dupan" + "loup", r"\bga" + r"rg\b")), re.I)
 
 # (path under the skill, the line exactly, why it must stay)
 ALLOWED = (
@@ -80,7 +80,7 @@ class NoRealIdentifiers(unittest.TestCase):
                  "20260929T231000Z_" + "brett" + "sp" + "_x.md", "x.read." + "msal" + "emi",
                  "info@" + "frag" + "matics.com", "Mich" + "elle's Claude", "Gabri" + "ela",
                  "the " + "Dick" + "son lab", "Sil" + "va08172026", "Adam " + "Schaal",
-                 "MSAL" + "EMI", "0022066" + "cd85f"]
+                 "MSAL" + "EMI", "0022066" + "cd85f", "the " + "Dupan" + "loup search", "HIVE, " + "ga" + "rg cohort"]
         for s in names:
             self.assertTrue(problems("scripts/x.py", f"# {s} 2026-09-23"), s)
 

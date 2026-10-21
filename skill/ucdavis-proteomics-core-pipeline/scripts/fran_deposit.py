@@ -482,7 +482,7 @@ def fasta_from_meta(out, explicit_meta=None):
         # The PATH is the file the search READ, when the search says so; the sidecar describes the
         # content (md5, count) but records wherever fetch_fasta.py first wrote it. Two ways that
         # differs, both seen in the drop dir on 2026-09-24: hive_remote writes the sidecar on the
-        # laptop (Dupanloup: a /Users/... path), and a session's sidecar can name the user's
+        # laptop (one Core search: a /Users/... path), and a session's sidecar can name the user's
         # staging copy (~/proteomics-pipeline/staging/search.fasta, overwritten by the next
         # session) while the search read <session>/input/search.fasta. Same md5 in all three.
         sib = os.path.realpath(c[:-len(".meta.json")]) if c.endswith(".meta.json") else None
@@ -2699,7 +2699,7 @@ SEARCH_HINTS = {"search_provenance.json", RECEIPT, "report.parquet", "report.tsv
                 "step5_report.sbatch", "step3_fulcrum.sbatch", "dia-quant-output",
                 "radiant_results", "fulcrum-results"}
 # What proves THIS skill ran a search, from file names alone. search_provenance.json is not enough
-# by itself: in hive_remote mode run_search.py writes it on the laptop, and the Dupanloup search on
+# by itself: in hive_remote mode run_search.py writes it on the laptop, and one Core search on
 # HIVE has none. The DE-LIMP app writes the same step*_*.sbatch names, but its jobs are called
 # diann_<name>_<step>, while diann_parallel.py's are s1_libpred / s1b_window / s5_report -- so the
 # SLURM logs tell the two apart without opening a file.
