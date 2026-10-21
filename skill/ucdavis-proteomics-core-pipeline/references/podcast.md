@@ -338,6 +338,11 @@ Claims section):
   effect that we then corrected with ComBat", "we used the previous version, 2.6.1", "the tube
   label was wrong and has been corrected in the sample sheet"). What neither tier catches is the
   meaning check's (f).
+- **The Skyline peak check is not confirmation.** It is a visual check of DIA-NN's peaks
+  (`references/skyline.md`), so no host says a result was "confirmed by Skyline", "validated" or
+  "verified" by the peak check. `check` FAILS on it (`client_text.peak_check_overclaims`, the
+  same list the report builder warns on); a negation in the same clause clears it ("the peak
+  check is not independent confirmation").
 
 ### The meaning check: a separate reader, before render
 

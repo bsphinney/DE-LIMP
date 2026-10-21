@@ -132,6 +132,7 @@ if HERE not in sys.path:
 from notify_slack import REDACTED, redact as _redact    # noqa: E402  the ONE secret list
 from report_files import SHARE_NAME, SHARE_STALE    # noqa: E402  names defined once
 from client_text import draft_history, draft_history_loose  # noqa: E402  the ONE list
+from client_text import peak_check_overclaims  # noqa: E402  "confirmed by Skyline" and the like
 
 SHOW = "Signal to Noise"
 HOSTS = (("Maya", "cell biologist"), ("Leo", "statistician"))
@@ -1494,6 +1495,10 @@ def check(s, sources, forbid=(), core=False, robust=None):
             warns.append(f"{where}: possible draft history '{snip}' -- if it tells of an earlier "
                          "draft or a fix, say what the report finds instead; the meaning check "
                          "(f) decides")
+        for snip in peak_check_overclaims(t.text):
+            fails.append(f"{where}: '{snip}' -- the Skyline peak check is a visual check of "
+                         "DIA-NN's peaks, not independent confirmation: never say Skyline (or the "
+                         "peak check) confirmed or validated a result (references/skyline.md)")
 
     seen = {}
     for i, t in enumerate(turns, 1):

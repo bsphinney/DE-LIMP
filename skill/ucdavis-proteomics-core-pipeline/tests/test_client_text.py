@@ -170,6 +170,25 @@ class Podcast(Workspace):
         self.assertEqual(rc, 0, txt)
         self.assertIn("possible draft history", txt)
 
+    def test_a_peak_check_overclaim_fails_the_check(self):
+        """skyline_peaks.py: the peak check reuses DIA-NN's peak edges, so a podcast never says the
+        results were confirmed by Skyline (the same list make_analysis_html.py warns on)."""
+        seg = list(SEG2) + [("LEO", "And Skyline confirmed every one of those peaks.")]
+        write(self.script, script_text(segs=(SEG1, seg)))
+        rc, _out, _err = run("check", self.script, "--source", self.report)
+        txt = read(os.path.join(self.pod, "check.txt"))
+        self.assertEqual(rc, 1, txt)
+        self.assertIn("Skyline confirmed every one of those peaks", txt)
+        self.assertIn("not independent confirmation", txt)
+
+    def test_saying_it_is_not_confirmation_passes(self):
+        seg = list(SEG2) + [("LEO", "The peak check is a visual check, not independent "
+                                    "confirmation.")]
+        write(self.script, script_text(segs=(SEG1, seg)))
+        run("check", self.script, "--source", self.report)
+        txt = read(os.path.join(self.pod, "check.txt"))
+        self.assertNotIn("Skyline peak check is a visual check of DIA-NN", txt)
+
     def test_a_clean_script_still_passes(self):
         write(self.script, script_text())
         rc, _out, _err = run("check", self.script, "--source", self.report)
