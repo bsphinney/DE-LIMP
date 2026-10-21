@@ -17,7 +17,7 @@ Documents). The orchestrator asks the user which they want (see SKILL.md).
         figures/                # plots (reserved)
         reproducibility/        # the full reproducibility bundle
         AI_Analysis_Report.md   # the interpretation
-        OUTPUT_FILES.md         # catalog of every file
+        OUTPUT_FILES.md         # catalog of every file (written at finalize when step 11 was not)
         methods.md / .docx      # publication Methods (ensured at finalize)
         DATA_SUBMISSION/        # PRIDE/MassIVE deposit package (written at finalize)
       MANIFEST.txt              # [OK]/[SKIPPED] log of what finalize produced, and why not
@@ -41,7 +41,8 @@ Subcommands:
   #   -> prints JSON with every canonical path + "placement"; route later steps into them
 
   # at the end — ensure the publication Methods, write the deposit package
-  # (output/DATA_SUBMISSION, see make_deposit.py), README + MANIFEST.txt, optionally zip,
+  # (output/DATA_SUBMISSION, see make_deposit.py), the file catalog (output/OUTPUT_FILES.md,
+  # when step 11 did not write it; never rewritten), README + MANIFEST.txt, optionally zip,
   # then log the run (record_run.py) and post "analysis complete" to the Core's Slack channel
   # (notify_slack.py)
   python3 session.py finalize --dir <session_dir> [--zip] [--no-deposit] [--no-notify]
@@ -658,9 +659,9 @@ def _write_docs(session_docs, p, man, registry, registry_note, ok_lines=True, pe
         if os.path.isfile(p["output_files_md"]) and man is not None:
             n = make_report.add_finalize_files(p["output_files_md"], listed, p["session_dir"])
             man.ok("OUTPUT_FILES.md: files written at finalize", f"{n} listed")
-        elif man is not None:
+        elif man is not None:                   # finalize could not write it (output_files_step)
             man.info("OUTPUT_FILES.md: files written at finalize",
-                     "no output/OUTPUT_FILES.md (step 11 was not run)")
+                     "no output/OUTPUT_FILES.md to add them to (its own line says why)")
     except Exception as e:
         if man is not None:
             man.skip("OUTPUT_FILES.md: files written at finalize", f"{type(e).__name__}: {e}")
@@ -783,6 +784,46 @@ def conversation_step(p, man, call_id=None):
                        "how this analysis was done -- " + (got.get("skipped") or "nothing saved"))
 
 
+# What SKILL.md step 11 hands make_report.py as --extra, beside the search, tables and
+# reproducibility folders: output/ files by name, plus the Methods' Word copy, draft and
+# parameters that finalize itself may have written by the time output_files_step runs.
+CATALOG_OUTPUT_FILES = ("AUDIT.md", "SAMPLE_QUALITY.md", "AI_Analysis_Report.md",
+                        "Analysis_Report.html", "Analysis_Report.md", "Analysis_Report.pdf",
+                        "methods.md", "methods.docx", "methods_complete_draft.md",
+                        "methods_params.json")
+
+
+def output_files_step(p):
+    """output/OUTPUT_FILES.md, the catalog of every file (make_report.py), when SKILL.md step 11
+    was not run: built here from the session's own folders -- step 11's inputs -- so a delivered
+    folder always has one. It runs after the Methods, the deposit package and the report PDF, so
+    it lists them; README, AGENTS.md, the raw-file list (and MANIFEST.txt, once it exists) are
+    added to it after (_write_docs: make_report.add_finalize_files), as to a catalog step 11
+    wrote. One that exists is never rewritten. Returns the MANIFEST.txt line (level, part, note),
+    or None when the catalog was already there. Never fatal."""
+    name = "OUTPUT_FILES.md"
+    if os.path.isfile(p["output_files_md"]):
+        return None
+    extra = [p["conditions"], p["fasta"], p["workflow_dir"], p["figures_dir"],
+             *(os.path.join(p["output_dir"], n) for n in CATALOG_OUTPUT_FILES)]
+    try:
+        # the deposit package, less upload_staging/: raw archives prepare_upload.sbatch stages
+        # there, which the zip leaves out too
+        if os.path.isdir(p["deposit_dir"]):
+            extra += [os.path.join(p["deposit_dir"], n)
+                      for n in sorted(os.listdir(p["deposit_dir"])) if n != "upload_staging"]
+        import make_report
+        got = make_report.write_catalog(
+            p["output_files_md"], search_out=p["search_out"], de_dir=p["de_dir"],
+            repro=p["repro_dir"], extra=[e for e in extra if os.path.exists(e)],
+            root=p["session_dir"])
+    except Exception as e:                      # recorded, never swallowed
+        return ("SKIPPED", name, f"not written at finalize (step 11 had not run): "
+                                 f"{type(e).__name__}: {e}")
+    return ("OK", name, f"written at finalize (step 11 had not run); {got['n_files']} file(s) "
+                        "listed")
+
+
 def do_finalize(a):
     p = paths_for(a.dir)
     if not os.path.isdir(p["session_dir"]):
@@ -848,6 +889,11 @@ def do_finalize(a):
         report_pdf_step(p, man)
         podcast_share_step(p, man)             # before the README, which lists it
         conversation_step(p, man, getattr(a, "call_id", None))
+    # The file catalog when step 11 was not run: after every part above, which it lists, and
+    # before README, AGENTS.md and MANIFEST.txt, which _write_docs then adds to it.
+    catalog = output_files_step(p)
+    if catalog and man is not None:
+        {"OK": man.ok, "SKIPPED": man.skip}[catalog[0]](catalog[1], catalog[2])
     registry, registry_note = _registry_lookup(p["session_dir"])
     docs = _write_docs(session_docs, p, man, registry, registry_note,
                        pending=("manifest",))        # MANIFEST.txt is written right below
@@ -860,6 +906,8 @@ def do_finalize(a):
                      f"{import_error}\n")
         _append_manifest(p["manifest_txt"], raw_list[0], "input/raw_files.txt (where the raw data are)",
                          raw_list[1])
+        if catalog:
+            _append_manifest(p["manifest_txt"], *catalog)
         for level, part, note in docs["manifest"]:
             _append_manifest(p["manifest_txt"], level, part, note)
 

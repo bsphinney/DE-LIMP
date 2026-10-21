@@ -346,24 +346,19 @@ def collect(paths):
     return sorted(seen.values())
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--out", default="OUTPUT_FILES.md")
-    ap.add_argument("--search-out")
-    ap.add_argument("--de-dir")
-    ap.add_argument("--repro")
-    ap.add_argument("--extra", nargs="*", default=[])
-    ap.add_argument("--root", default=".", help="base dir to show paths relative to")
-    a = ap.parse_args()
-
+def write_catalog(out, search_out=None, de_dir=None, repro=None, extra=(), root="."):
+    """Write the catalog to `out` and return the summary the CLI prints. THE one build: the CLI
+    (SKILL.md step 11) and session.py finalize, which builds it when step 11 was not run, both
+    come here. Written to `out`.part and renamed, so a failure never leaves half a catalog that
+    a later finalize would keep (finalize never rewrites an existing one)."""
     # the podcast (make_podcast.py) sits in podcast/ beside OUTPUT_FILES.md: listed when present
-    podcast = os.path.join(os.path.dirname(os.path.abspath(a.out)), "podcast")
-    files = collect([a.search_out, a.de_dir, a.repro, *a.extra,
+    podcast = os.path.join(os.path.dirname(os.path.abspath(out)), "podcast")
+    files = collect([search_out, de_dir, repro, *extra,
                      podcast if os.path.isdir(podcast) else None])
-    root = os.path.abspath(a.root)
+    root = os.path.abspath(root)
     rows, by_cat, kinds = [], {}, {}
     for f in files:
-        if os.path.basename(f) == os.path.basename(a.out):
+        if os.path.basename(f) == os.path.basename(out):
             continue
         rel = os.path.relpath(f, root)
         try:
@@ -424,12 +419,32 @@ def main():
                  "*search* too (pinned engine, environment lock, checksums).")
     lines.append("")
 
-    with open(a.out, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(lines) + "\n")
+    part = out + ".part"                     # scratch (scratch_files.py): never zipped
+    try:
+        with open(part, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+        os.replace(part, out)
+    except BaseException:
+        if os.path.isfile(part):
+            os.remove(part)
+        raise
 
-    print(json.dumps({"report": os.path.abspath(a.out), "n_files": n_files,
-                      "categories": {c: len(by_cat.get(c, [])) for c in CATEGORY_ORDER if by_cat.get(c)},
-                      "unrecognized": n_unknown}, indent=2))
+    return {"report": os.path.abspath(out), "n_files": n_files,
+            "categories": {c: len(by_cat.get(c, [])) for c in CATEGORY_ORDER if by_cat.get(c)},
+            "unrecognized": n_unknown}
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--out", default="OUTPUT_FILES.md")
+    ap.add_argument("--search-out")
+    ap.add_argument("--de-dir")
+    ap.add_argument("--repro")
+    ap.add_argument("--extra", nargs="*", default=[])
+    ap.add_argument("--root", default=".", help="base dir to show paths relative to")
+    a = ap.parse_args()
+    print(json.dumps(write_catalog(a.out, a.search_out, a.de_dir, a.repro, a.extra, a.root),
+                     indent=2))
 
 
 if __name__ == "__main__":
