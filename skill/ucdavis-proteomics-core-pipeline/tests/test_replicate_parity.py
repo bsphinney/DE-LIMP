@@ -13,9 +13,11 @@ condition, known by construction -- never computed with the code under test.
 
 fixtures/replicate_parity_2_13_2.json holds each sheet with 2.13.2's sheet groups, its "every
 sample has its own condition" note and its "conditions differ" note, made by 2.13.2's own code
-(dd932cc), so the test needs no git. The only difference allowed: a sheet where 2.13.2's groups
-merged two names that several samples carry each -- there today's groups may only split 2.13.2's,
-and those names must be apart.
+(dd932cc), so the test needs no git. The only difference allowed is the guard's: a group in
+which 2.13.2 merged two names that several samples carry each, the numbers it took off them
+being no replicate run (not consecutive from 0 or 1: ATG 5, 7). Such a group must read as
+written, every other group exactly as 2.13.2's, and the "conditions differ" note must follow
+from those groups.
 
 Regenerate the fixture (new shapes; 2.13.2's code is what must answer):
   git -C <repo> archive dd932cc skill/ucdavis-proteomics-core-pipeline/scripts | tar -x -C <dir>
@@ -28,6 +30,7 @@ import importlib
 import json
 import os
 import random
+import re
 import sys
 import tempfile
 import unittest
@@ -36,7 +39,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
 FIXTURE = os.path.join(HERE, "fixtures", "replicate_parity_2_13_2.json")
 RECORD = os.path.join(HERE, "fixtures", "coreomics_prot0756", "submission.json")
-SEED, N_GENERATED = 20261020, 420
+SEED, N_GENERATED = 20261020, 440
 
 # The reviews' sheets: (condition names, the analysed group of each sample -- by hand).
 REVIEWS = [
@@ -91,13 +94,32 @@ REVIEWS = [
     (["WT"] * 3 + ["WT4"] + ["KO"] * 3, ["WT"] * 4 + ["KO"] * 3),
     (["Strep_1", "Strep_2", "SamplePrep_1", "SamplePrep_2"], ["Strep"] * 2 + ["SamplePrep"] * 2),
     (["ATG5", "ATG5", "ATG7", "ATG8"], ["ATG5", "ATG5", "ATG7", "ATG8"]),
+    ([f"{g}_{n}" for g in ("ATG5", "ATG7") for n in (1, 2, 3)], ["ATG5"] * 3 + ["ATG7"] * 3),
+    ([f"{g}-{n}" for g in ("HSP70", "HSP90") for n in (1, 2, 3)], ["HSP70"] * 3 + ["HSP90"] * 3),
+    ([f"{g}{n}" for g in ("WT", "KO") for n in (1, 2, 3)] + ["Pool"],
+     ["WT"] * 3 + ["KO"] * 3 + ["Pool"]),
+    (["WT1", "WT2", "WT3", "KO1", "KO2", "KO4"], ["WT"] * 3 + ["KO"] * 3),
+    ([f"{g} \u2013 {n}" for g in ("WT", "KO") for n in (1, 2)], ["WT"] * 2 + ["KO"] * 2),
+    ([f"{g}.{n}" for g in ("WT", "KO") for n in (1, 2)], ["WT"] * 2 + ["KO"] * 2),
+    (["Mutant-1"] * 2 + ["WT_1", "WT_2"], ["Mutant_1"] * 2 + ["WT"] * 2),
+    (["WT_1", "WT_2", "WT_2", "WT_3"], ["WT"] * 4),
+    (["WT1"] * 2 + ["WT2"] * 2 + ["KO"] * 2, ["WT"] * 4 + ["KO"] * 2),
+    (["ATG5"] * 3 + ["ATG7"] * 3 + ["ATG8"] + ["WT"] * 2,
+     ["ATG5"] * 3 + ["ATG7"] * 3 + ["ATG8"] + ["WT"] * 2),
+    (["ATG5"] * 3 + ["ATG7"] * 3 + ["WT_1", "WT_2", "WT_3"],
+     ["ATG5"] * 3 + ["ATG7"] * 3 + ["WT"] * 3),
+    ([f"Dox(+)_{n}" for n in (1, 2, 3)] + [f"Dox(-)_{n}" for n in (1, 2, 3)],
+     ["Dox(+)"] * 3 + ["Dox(-)"] * 3),
+    (["WT_Rep1", "WT_Rep2", "KO replicate 1", "KO replicate 2"], ["WT"] * 2 + ["KO"] * 2),
+    (["WTrep1", "WTrep2", "KORep1", "KORep2"], ["WT"] * 2 + ["KO"] * 2),
 ]
 STEMS = ("WT", "KO", "Ctrl", "Control", "Treated", "ATG5", "ATG7", "HSP70", "HSP90", "CD45",
          "IgG1", "Cis", "Brain", "Mutant", "Mutant-1", "Mutant-2", "T0", "T24", "Day", "A549",
-         "Kv2.1", "Strep", "Prep", "Old - IgG", "Bait_IP", "sample", "WT1", "WT2")
+         "Kv2.1", "Strep", "Prep", "Old - IgG", "Bait_IP", "sample", "WT1", "WT2", "Dox(+)")
 LEVELS = (("L", "R"), ("R", "S"), ("A", "B"))
 STYLES = ("{b}", "{b}_{n}", "{b}-{n}", "{b} {n}", "{b}{n}", "{b}_rep{n}", "{b} rep {n}",
-          "{b}_R{n}", "{b}#{n}", "{b}.{n}", "{b} - Rep {n}", "{b}-rep{n}")
+          "{b}_R{n}", "{b}#{n}", "{b}.{n}", "{b} - Rep {n}", "{b}-rep{n}", "{b}_Rep{n}",
+          "{b} replicate {n}", "{b}_REP{n}", "{b} \u2013 {n}", "{b}rep{n}", "{b}Rep{n}")
 NUMBERING = ((1, 2, 3), (0, 1, 2), (2, 3, 4), (1, 2, 4), (1, 2))
 
 
@@ -131,7 +153,7 @@ def corpus():
             analysed.insert(i, analysed[i])
         elif r < 0.3:                                  # one name in another case
             i = rnd.randrange(len(names))
-            names[i] = names[i].lower()
+            names[i] = (names[i].lower() if rnd.random() < 0.5 else names[i].upper())
         elif r < 0.4:                                  # every name twice (technical duplicates)
             names = [x for x in names for _ in (0, 1)]
             analysed = [x for x in analysed for _ in (0, 1)]
@@ -176,16 +198,35 @@ def _key(s):
     return " ".join(str(s).split()).casefold()
 
 
-def merged_shared_names(names, groups):
-    """The names several samples carry that `groups` puts in one group with another such name."""
+def expected_groups(names, base_groups):
+    """2.13.2's groups with the guard applied, from its groups alone: a group in which it merged
+    two names that several samples carry each, the numbers taken off its names being no run
+    (consecutive from 0 or 1), reads as written."""
     counts = {}
     for c in names:
         counts[_key(c)] = counts.get(_key(c), 0) + 1
-    by_group = {}
-    for c, g in zip(names, groups):
+    shared, numbers = {}, {}
+    for c, g in zip(names, base_groups):
         if counts[_key(c)] > 1:
-            by_group.setdefault(_key(g), set()).add(_key(c))
-    return {c for cs in by_group.values() if len(cs) > 1 for c in cs}
+            shared.setdefault(_key(g), set()).add(_key(c))
+        m = re.search(r"(\d+)$", c.strip())
+        if m and _key(c) != _key(g):
+            numbers.setdefault(_key(g), set()).add(int(m.group(1)))
+
+    def run(ns):
+        ns = sorted(ns)
+        return bool(ns) and ns[0] in (0, 1) and ns == list(range(ns[0], ns[0] + len(ns)))
+    apart = {g for g, cs in shared.items() if len(cs) > 1 and not run(numbers.get(g, ()))}
+    return [c if _key(g) in apart else g for c, g in zip(names, base_groups)]
+
+
+def partition(labels):
+    """The groups of sample positions that `labels` makes (labels compared as written, as the
+    "conditions differ" note compares them)."""
+    by = {}
+    for i, g in enumerate(labels):
+        by.setdefault(g, set()).add(i)
+    return sorted(sorted(v) for v in by.values())
 
 
 def write_fixture(scripts):
@@ -223,19 +264,17 @@ class SameAsTwoThirteenTwo(unittest.TestCase):
             names = b["names"]
             with tempfile.TemporaryDirectory() as tmp:
                 groups, unique, differ = outcome(self.sr, names, b["analysed"], tmp)
-            merged = merged_shared_names(names, b["groups"])
-            if not merged:
+            expected = expected_groups(names, b["groups"])
+            if expected == b["groups"]:
                 self.assertEqual((groups, unique, differ), (b["groups"], b["unique"], b["differ"]),
                                  names)
                 continue
             guarded += 1
-            # the guard's case: today's groups only split 2.13.2's, and keep those names apart
-            within = {}
-            for g, old in zip(groups, b["groups"]):
-                within.setdefault(_key(g), set()).add(_key(old))
-            self.assertTrue(all(len(v) == 1 for v in within.values()), names)
-            self.assertEqual(merged_shared_names(names, groups), set(), names)
+            # the guard's case: exactly these groups, and the note follows from them
+            self.assertEqual(groups, expected, names)
             self.assertEqual(unique, b["unique"], names)
+            self.assertEqual(differ is None, partition(expected) == partition(b["analysed"]),
+                             (names, differ))
         self.assertGreater(guarded, 0)
 
 

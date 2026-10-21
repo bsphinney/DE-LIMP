@@ -977,11 +977,10 @@ def run(report, conditions, de_norm, de_raw, session=None, bait=None, out=None, 
     # No experiment type recorded: the default above is the skill's, not the user's, so nothing
     # is decided for them -- the check asks, whatever the data say. Nor when the control groups
     # are only read from names that can also name an ordinary condition (Ctrl, KO, Mock ...):
-    # which contrasts are enrichments, and so which volcano anomalies are expected, is a guess.
-    # That one is answered by recording the controls and running the check again, never by
-    # `decide` (controls_unconfirmed): a decision would be reported as the type's default.
-    rec["controls_unconfirmed"] = (design.get("controls_from") == "enrichment_name"
-                                   and bool(design.get("vs_control")))
+    # which contrasts are enrichments, and so which volcano anomalies are expected (and which
+    # trip), is a guess. That one is answered by recording the controls and running the check
+    # again, never by `decide` (waiting_for_controls): a decision would rest on the guess.
+    rec["controls_unconfirmed"] = design.get("controls_from") == "enrichment_name"
     rec["needs_decision"] = rec["tripped"] or rec_type is None or rec["controls_unconfirmed"]
     if rec_type is None:
         rec["needs_decision_why"] = ("no experiment type is recorded for this session, so there is "
@@ -1185,13 +1184,11 @@ def summary_md(rec):
         said = (d.get("statement")
                 or f"{d['quantities']} quantities -- {d.get('by')}: {d.get('reason')}")
         L.append(f"**Decision:** {said}")
-    elif only_controls_unconfirmed(rec):
-        L.append("**Decision: not needed yet.** The control groups are a guess: "
-                 + CONFIRM_CONTROLS + ". The check then applies the type's default if the data "
-                 "agree, or asks.")
+    elif waiting_for_controls(rec):
+        L.append("**Decision: not possible yet.** The control groups are a guess, and the check "
+                 "above read them as the controls: " + CONFIRM_CONTROLS + ". The check then "
+                 "applies the type's default if the data agree, or asks.")
     else:
-        if rec.get("controls_unconfirmed"):
-            L.append("**Also confirm the control groups:** " + CONFIRM_CONTROLS + ".")
         L.append("**Decision: not made.** Show this to the Core staff member, ask which quantities "
                  "to use -- the decision is theirs, never Claude's -- and record their answer: "
                  "`normalization_check.py decide --check <this json> --quantities raw|normalised "
@@ -1228,26 +1225,43 @@ def decision_staff_record(path, rec):
     return os.path.join(here, STAFF_RECORD), STAFF_RECORD
 
 
-def controls_changed(rec):
-    """A refusal when the session's control groups are no longer the ones this check read
-    (set-controls or set since it ran: its volcano treated other contrasts as enrichments), else
-    None. A check from before 2.14 records no controls_from and is not compared."""
+def controls_changed(rec, design=None):
+    """A refusal when the check no longer describes the session as the final DE reads it, else
+    None: the experiment type or the control groups changed since it ran (set, set-controls), or
+    the final DE's contrasts (`design`: run_de.R's design_request) put other contrasts against a
+    control than the check's volcanoes did -- the check treated other contrasts as enrichments.
+    A check from before 2.14 records no controls_from and is not compared."""
     d = rec.get("design") if isinstance(rec.get("design"), dict) else {}
     if not rec.get("session") or "controls_from" not in d:
         return None
+    again = "Run normalization_check.py run again."
     try:
-        now = et.pulldown_design(et.load(rec["session"]), list(rec.get("groups") or {}), [])
+        now_rec = et.load(rec["session"])
     except (OSError, ValueError) as e:
         return (f"REFUSED: the experiment-type record could not be read ({e}), so it is not known "
-                "whether the control groups are the ones this check read. Fix it and run the "
-                "check again.")
+                f"whether this check still describes the session. Fix it. {again}")
+    was_type = (rec.get("experiment_type") or {}).get("type")
+    if now_rec is None and was_type:
+        return (f"REFUSED: this check read the experiment type {was_type}, and there is no "
+                f"experiment-type record at {et.path_for(rec['session'])} now. {again}")
+    if (now_rec or {}).get("type") != was_type:
+        return (f"REFUSED: the experiment type changed since this check ran ({was_type or 'none'} "
+                f"-> {(now_rec or {}).get('type')}). {again}")
+    contrasts = ((design or {}).get("contrasts")
+                 or (rec.get("check_design") or {}).get("contrasts") or [])
+    now = et.pulldown_design(now_rec, list(rec.get("groups") or {}), list(contrasts))
     was = (sorted(d.get("controls") or []), d.get("controls_from"))
-    if (sorted(now["controls"]), now["controls_from"]) == was:
-        return None
     said = lambda c, f: f"{', '.join(c) or 'none'} ({f or 'none named'})"  # noqa: E731
-    return (f"REFUSED: the control groups changed since this check ran ({said(*was)} -> "
-            f"{said(sorted(now['controls']), now['controls_from'])}): its volcano read the old "
-            "ones. Run normalization_check.py run again.")
+    if (sorted(now["controls"]), now["controls_from"]) != was:
+        return (f"REFUSED: the control groups changed since this check ran ({said(*was)} -> "
+                f"{said(sorted(now['controls']), now['controls_from'])}): its volcano read the "
+                f"old ones. {again}")
+    if contrasts and sorted(now["vs_control"]) != sorted(d.get("vs_control") or []):
+        return (f"REFUSED: this DE's contrasts against a control ("
+                f"{', '.join(now['vs_control']) or 'none'}) are not the check's ("
+                f"{', '.join(d.get('vs_control') or []) or 'none'}): the check read other "
+                f"contrasts as enrichments. {again[:-1]} with this DE's contrasts.")
+    return None
 
 
 # The way out of the one hold that is not a decision: controls only read from their names.
@@ -1256,10 +1270,10 @@ CONFIRM_CONTROLS = ("once the user has confirmed them, record them (`experiment_
                     "check again")
 
 
-def only_controls_unconfirmed(rec):
-    """True when the check waits only for the control groups (controls_unconfirmed, not
-    tripped): `decide` cannot stand in for them."""
-    return bool(rec.get("controls_unconfirmed")) and not rec.get("tripped")
+def waiting_for_controls(rec):
+    """True when the control groups this check read are only a guess (controls_unconfirmed):
+    no `decide` -- the volcanoes, and so any trip, were read with the guess."""
+    return bool(rec.get("controls_unconfirmed"))
 
 
 def decide(path, quantities, by, reason):
@@ -1271,10 +1285,11 @@ def decide(path, quantities, by, reason):
     if not (reason and reason.strip()):
         raise ValueError("--reason is required: why they chose it, in their words")
     rec = load(path)
-    if only_controls_unconfirmed(rec):
-        raise ValueError(f"nothing to decide yet: {rec.get('needs_decision_why')}. A decision "
-                         "here would be reported as the type's default with the data check "
-                         "agreeing, and the guess about the controls would stand")
+    if waiting_for_controls(rec):
+        raise ValueError(f"nothing to decide yet: {rec.get('needs_decision_why')}. The check "
+                         "read the guessed groups as the controls"
+                         + (", and its trips with them" if rec.get("tripped") else "")
+                         + ": a decision now would rest on that guess")
     c = staff.require(by)
     at = staff.now()
     where, named = decision_staff_record(path, rec)
@@ -1311,14 +1326,14 @@ def gate(path, quantities, report=None, conditions=None, design=None):
                            + f", not on this DE's {what} {given} (sha256 differs). Run the check "
                            "again on this DE's report and conditions -- a decision about one "
                            "report never authorises another."), rec
-    changed = controls_changed(rec)
+    changed = controls_changed(rec, design)
     if changed:
         return False, changed, rec
     dc = design_check(rec, design)
     if dc["refusal"]:
         return False, dc["refusal"], rec
     d = rec.get("decision")
-    if not d and only_controls_unconfirmed(rec):
+    if not d and waiting_for_controls(rec):
         return False, (f"REFUSED: the normalisation check is waiting for the control groups "
                        f"({rec.get('needs_decision_why')})."), rec
     if not d:
@@ -1394,8 +1409,8 @@ def main():
                               "default": rec["default"], "decision": rec["decision"],
                               "recommendation": rec["recommendation"]}, indent=2))
             if rec["needs_decision"]:
-                why = ("TRIPPED" if rec["tripped"] else "NO EXPERIMENT TYPE"
-                       if rec["experiment_type"]["type"] is None else "CONTROLS NOT CONFIRMED")
+                why = ("CONTROLS NOT CONFIRMED" if rec.get("controls_unconfirmed") else "TRIPPED"
+                       if rec["tripped"] else "NO EXPERIMENT TYPE")
                 print(f"[normalization_check] {why}"
                       f" -- stop before the final DE: show {os.path.join(out, SUMMARY)} to the "
                       "user and ask.", file=sys.stderr)

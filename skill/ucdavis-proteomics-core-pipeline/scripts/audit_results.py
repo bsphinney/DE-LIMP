@@ -1167,10 +1167,19 @@ def audit_normalization_check(findings, de_prov):
             f"agree with its default ({'; '.join(nc.get('trips') or [])}); {chose}", detail,
             plain=f"The usual normalisation for this kind of experiment did not fit these "
                   f"samples, so the Core chose which quantities to use. {chose}")
+    elif d.get("source") == "user" and nc.get("quantities_applied") != detail["default"]:
+        # the data agreed with the default, and a person chose otherwise: their decision, said
+        add(findings, "normalization_check", "WARN",
+            f"Experiment type {et_.get('label')} ({et_.get('source')}): the data check agreed "
+            f"with its default ({detail['default']} quantities), and "
+            f"{nc.get('quantities_applied')} quantities were used; {chose}", detail,
+            plain=f"The usual normalisation for this kind of experiment fitted these samples, and "
+                  f"the Core chose other quantities. {chose}")
     else:
         add(findings, "normalization_check", "PASS",
             f"Experiment type {et_.get('label')} ({et_.get('source')}): "
-            f"{nc.get('quantities_applied')} quantities, its default; the data check agreed.",
+            f"{nc.get('quantities_applied')} quantities, its default; the data check agreed"
+            + (f"; {chose}" if d.get("source") == "user" else "."),
             detail, plain=P_NORM_AGREED)
 
 

@@ -6,10 +6,12 @@ Before: submission_report's REPLICATE_SUFFIX read ATG5 as ATG replicate 5 and HS
 replicate 90, so a sheet with ATG5 x3, ATG7 x3 and WT x3 became "ATG" and "WT", and the report
 said the analysed groups split the sheet's "ATG" ("conditions differ"), which was false. Now
 (sheet_groups, _own_conditions_apart): two names that several samples carry each are never
-merged into one base -- every name with that base keeps its name. Everything else reads exactly
-as 2.13.2 read it; the sheets in AsTwoThirteenTwo are the ones three reviews of a broader rule
-found broken, pinned to 2.13.2's groups. Known limit: one-sample names still read as 2.13.2
-read them (ATG5 and ATG7 alone are "ATG").
+merged into one base when the numbers taken off are no replicate run (ATG 5, 7) -- every name
+with that base keeps its name. Everything else reads exactly as 2.13.2 read it
+(test_replicate_parity holds that on a corpus); the sheets in AsTwoThirteenTwo are the ones the
+reviews of broader rules found broken. Known limits, as 2.13.2: one-sample names (ATG5 and ATG7
+alone are "ATG"), and numbered conditions that are a run (Mutant-1 x3 / Mutant-2 x3 are
+"Mutant").
 
 Stdlib only.
 """
@@ -68,7 +70,7 @@ class TheReportedCase(unittest.TestCase):
         for names, want in (
                 (["ATG5"] * 3 + ["ATG7"] * 3 + ["WT"] * 3, {"ATG5", "ATG7", "WT"}),
                 (["HSP70"] * 3 + ["HSP90"] * 3 + ["WT"] * 3, {"HSP70", "HSP90", "WT"}),
-                (["Mutant-1"] * 3 + ["Mutant-2"] * 3 + ["WT"] * 3, {"Mutant-1", "Mutant-2", "WT"}),
+                (["ATG5"] * 3 + ["ATG7"] * 3, {"ATG5", "ATG7"}),
                 # every name with the merged base keeps its own
                 (["ATG5"] * 3 + ["ATG7"] * 3 + ["ATG8", "WT", "WT"],
                  {"ATG5", "ATG7", "ATG8", "WT"})):
@@ -78,13 +80,19 @@ class TheReportedCase(unittest.TestCase):
         self.assertEqual(groups(["ATG5"] * 3 + ["ATG7"] * 3 + ["WT_1", "WT_2", "WT_3"]),
                          {"ATG5", "ATG7", "WT"})
 
-    def test_deliberate_repeated_numbered_names_stay_as_written(self):
-        """From the names alone WT1 x2 / WT2 x2 is Mutant-1 x3 / Mutant-2 x3 (2.13.2: "WT")."""
-        self.assertEqual(groups(["WT1"] * 2 + ["WT2"] * 2 + ["KO"] * 2), {"WT1", "WT2", "KO"})
+    def test_every_replicate_listed_twice_reads_as_2_13_2(self):
+        """IP-MS sheets often list each replicate twice (IP and input rows): a run is replicates."""
+        for names in (["WT1"] * 2 + ["WT2"] * 2 + ["KO"] * 2,
+                      ["WT1"] * 2 + ["WT2"] * 2 + ["KO1"] * 2 + ["KO2"] * 2,
+                      ["WT_1"] * 2 + ["WT_2"] * 2 + ["KO_1"] * 2 + ["KO_2"] * 2):
+            self.assertEqual(groups(names), {"WT", "KO"}, names)
 
-    def test_known_limit_one_sample_names_read_as_before(self):
-        """No name repeated: nothing says ATG5 and ATG7 are conditions, so 2.13.2's reading."""
+    def test_known_limits_read_as_before(self):
+        """No name repeated: nothing says ATG5 and ATG7 are conditions. A run (Mutant-1, -2):
+        replicates, as 2.13.2 read them."""
         self.assertEqual(groups(["ATG5", "ATG7", "WT_1", "WT_2"]), {"ATG", "WT"})
+        self.assertEqual(groups(["Mutant-1"] * 3 + ["Mutant-2"] * 3 + ["WT"] * 3),
+                         {"Mutant", "WT"})
 
 
 class AsTwoThirteenTwo(unittest.TestCase):
@@ -133,10 +141,9 @@ class NoFalseConditionsDiffer(unittest.TestCase):
         for names, analysed, _want in SAME_AS_2_13_2:
             self.assertIsNone(self.note(names, analysed), names)
 
-    def test_deliberate_repeated_numbered_names_pooled_are_said_so(self):
-        """WT_1 x2 / WT_2 x2 analysed as WT: true of the sheet as written (2.13.2 said nothing)."""
+    def test_every_replicate_listed_twice_gets_no_note(self):
         names = ["WT_1"] * 2 + ["WT_2"] * 2 + ["KO_1"] * 2 + ["KO_2"] * 2
-        self.assertIn("pools the sheet's WT_1, WT_2", self.note(names, ["WT"] * 4 + ["KO"] * 4))
+        self.assertIsNone(self.note(names, ["WT"] * 4 + ["KO"] * 4))
 
     def test_a_real_difference_is_still_reported(self):
         names = ["ATG5"] * 3 + ["ATG7"] * 3 + ["WT"] * 3

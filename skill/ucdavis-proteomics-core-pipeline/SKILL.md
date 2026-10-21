@@ -2353,7 +2353,8 @@ recorded, or CONTROLS NOT CONFIRMED): STOP before the final DE.** With no type r
 is decided for the user: ask what the experiment is (step 3) and which quantities to use. With
 the controls only read from names such as Ctrl or KO, confirm them, record them
 (`experiment_type.py set-controls --session <S> --controls <groups, or none>`) and run the check
-again; `decide` refuses this one. Otherwise show the Core staff member
+again; `decide` refuses until then, even when the check also tripped. Otherwise show the Core
+staff member
 `NORMALIZATION_CHECK.md` (side by side, normalised vs non-normalised, with a recommendation),
 ask which to use, and record their answer. **The decision is the person's, never Claude's.**
 Never choose, and never fill in `--by` yourself. `--by` is their HIVE login, never a full name.

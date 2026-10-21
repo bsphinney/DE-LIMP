@@ -78,7 +78,7 @@ CONTROL_NAME_TIERS = ((IP_CONTROL_NAME, "name"), (ENRICHMENT_CONTROL_NAME, "enri
                       (GENERIC_CONTROL_NAME, "enrichment_name"))
 # How the brief and the session README say where the controls came from (pulldown_design's
 # controls_from): a guess is said to be one (rule 2).
-CONTROLS_FROM = {"recorded": "as recorded (`input/experiment_type.json`)",
+CONTROLS_FROM = {"recorded": "as recorded by the user",
                  "name": "by group name",
                  "enrichment_name": "read from their names — NOT confirmed; raise it with the "
                                     "user before reading these contrasts as enrichment"}
@@ -204,21 +204,30 @@ def reconcile(etype, submission_answer):
 
 # An enrichment the user recorded with no control group (set-controls --controls none): the
 # type's default stands, for a reason that names no control (the team lead, 2026-10-20).
-NO_CONTROL_WHY = {
-    "ip": "a pull-down enriches a few proteins, so normalisation's assumption that most proteins "
-          "do not change does not hold; no negative control was recorded",
-    "proximity": "the samples are usually loaded by equal protein, so standard normalisation "
-                 "holds; no negative control was recorded",
+# The wording of the "ip" reason is Brett's to choose (alternatives sent 2026-10-20).
+NO_CONTROL = {
+    "ip": ("immunoprecipitation / affinity purification / pull-down, with no negative control "
+           "group", "pull-down eluates are not loaded to equal protein, so normalisation would "
+                    "equalise a real difference in how much each pull-down captured"),
+    "proximity": ("proximity labelling (TurboID / BioID / APEX), with no negative control group",
+                  "the samples are usually loaded by equal protein, so standard normalisation "
+                  "holds"),
 }
+
+
+def has_no_control(rec):
+    """THE test that the user recorded an enrichment with no control group (set-controls
+    --controls none: controls [])."""
+    return bool(rec) and rec.get("type") in ENRICHMENT and rec.get("controls") == []
 
 
 def default_for(etype, no_control=False):
     """{"quantities", "why", "label"} for a type; the standard default, tagged, when unknown.
-    no_control: the user recorded that the design has no control group (pulldown_design)."""
+    no_control (has_no_control): the label and the reason name no control."""
     if etype in DEFAULTS:
         label, q, why = DEFAULTS[etype]
-        if no_control and etype in NO_CONTROL_WHY:
-            why = NO_CONTROL_WHY[etype]
+        if no_control and etype in NO_CONTROL:
+            label, why = NO_CONTROL[etype]
         return {"quantities": q, "why": why, "label": label}
     return {"quantities": NORMALISED, "label": "NOT RECORDED",
             "why": "DEFAULT -- not user-confirmed: no experiment type was recorded, so the "
@@ -284,11 +293,18 @@ def record(session, etype, source, stated=None, bait=None, controls=None, submis
            **_kept_controls(session, controls, etype),
            "recorded_at": when or datetime.datetime.now(datetime.timezone.utc).strftime(
                "%Y-%m-%dT%H:%M:%SZ")}
+    _refresh_default(rec)
     with open(p + ".tmp", "w", encoding="utf-8") as fh:
         json.dump(rec, fh, indent=2)
         fh.write("\n")
     os.replace(p + ".tmp", p)
     return p
+
+
+def _refresh_default(rec):
+    """The record's label and default, for its type and whether it has a control group."""
+    d = default_for(rec["type"], has_no_control(rec))
+    rec.update(label=d["label"], default=d)
 
 
 def load(session):
@@ -487,9 +503,12 @@ def session_groups(session):
         return None
     try:
         with open(p, newline="", encoding="utf-8-sig", errors="replace") as fh:
-            return {(r.get("Group") or "").strip() for r in csv.DictReader(fh)} - {""}
+            rows = csv.DictReader(fh)
+            if "Group" not in (rows.fieldnames or []):
+                raise ValueError(f"{p} has no Group column")
+            return {(r.get("Group") or "").strip() for r in rows} - {""}
     except (OSError, csv.Error) as e:
-        raise ValueError(f"{p} could not be read ({e})")
+        raise ValueError(f"{p} could not be read ({e})") from e
 
 
 def record_controls(session, controls, when=None):
@@ -501,6 +520,9 @@ def record_controls(session, controls, when=None):
     if rec is None:
         raise ValueError("no experiment type recorded for this session: record it first "
                          "(experiment_type.py set), then the controls")
+    if rec["type"] not in ENRICHMENT:
+        raise ValueError(f"the experiment type is {rec['label']}, not an enrichment: control "
+                         "groups mean a pull-down's controls (record the type first)")
     named = _control_list(controls)
     if named is None:
         raise ValueError("--controls needs the control groups, comma-separated, or 'none'")
@@ -516,6 +538,11 @@ def record_controls(session, controls, when=None):
     rec.update(controls=named, controls_confirmed={
         "answer": named or NO_CONTROLS, "by": "the user",
         "at": when or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")})
+    _refresh_default(rec)
+    check = os.path.join(session, "output", "norm_check", "normalization_check.json")
+    if os.path.isfile(check):
+        print(f"[experiment_type] a normalisation check exists ({check}): it read the earlier "
+              "control groups, so run it again (normalization_check.py run)", file=sys.stderr)
     return _save(session, rec)
 
 
@@ -603,7 +630,7 @@ def pulldown_design(rec, groups, contrasts):
                 f"experiment type is {rec['label']}: confirm the type with the user")
     return {"pulldown": enr, "controls": controls, "controls_from": how, "vs_control": vs_control,
             # the user recorded that the design has no control group (set-controls ... none)
-            "no_control": enr and how == "recorded" and not rec["controls"],
+            "no_control": has_no_control(rec),
             "source": f"experiment type ({rec['source']})", "note": note}
 
 
@@ -685,7 +712,8 @@ def main():
                 print(f"[experiment_type] ASK: {rec['reconcile']}", file=sys.stderr)
         else:
             rec = load(a.session)
-            print(json.dumps({"record": rec, "default": default_for((rec or {}).get("type"))},
+            print(json.dumps({"record": rec, "default": default_for((rec or {}).get("type"),
+                                                                    has_no_control(rec))},
                              indent=2))
     except (ValueError, OSError) as e:
         sys.exit(f"[experiment_type] {e}")

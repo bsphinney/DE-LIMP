@@ -1593,6 +1593,8 @@ def de_normalisation_sentence(prov):
         out += (" A check of the data (normalisation factors against the groups, the fold-change "
                 "balance before normalisation, identifications per group, DIA-NN's normalisation "
                 "stability and the volcano's shape) agreed with it.")
+        if d.get("source") == "user":           # a person's decision all the same: say it
+            out += f" {chose}"
     return out
 
 

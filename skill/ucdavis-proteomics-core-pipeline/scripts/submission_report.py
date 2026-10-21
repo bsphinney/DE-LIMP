@@ -556,8 +556,8 @@ def design(samples):
 def sheet_groups(rec):
     """unique_id -> the group the sheet puts it in: the condition with the blocking unit set
     aside when the names carry one, else without a trailing replicate index when that leaves
-    real groups (never merging two of the sheet's own conditions: _own_conditions_apart), else
-    the condition as written."""
+    real groups (never merging two of the sheet's own conditions numbered like genes, not
+    replicates: _own_conditions_apart), else the condition as written."""
     named = {s["unique_id"]: s["condition_name"] for s in rec["samples"] if s["condition_name"]}
     d = design(rec["samples"])
     if d["unit"]:
@@ -571,18 +571,30 @@ def sheet_groups(rec):
 
 def _own_conditions_apart(named, bases):
     """The sheet's own conditions -- the names more than one sample carries -- are never merged by
-    taking a replicate index off them: when two would share a base (ATG5 x3 and ATG7 x3 -> "ATG",
-    Mutant-1 x3 and Mutant-2 x3 -> "Mutant"), every name with that base keeps its name. A staff
-    report, 2026-10-20: REPLICATE_SUFFIX read ATG5 as ATG replicate 5, and the report said the
-    analysed groups split the sheet's "ATG". With no name repeated nothing changes, so one-sample
-    names still read as 2.13.2 read them (ATG5 and ATG7 alone are "ATG")."""
+    taking a replicate index off them when the numbers taken off are no replicate run: when two
+    would share a base whose numbers are not consecutive from 0 or 1 (ATG5 x3 and ATG7 x3 ->
+    "ATG" 5, 7; HSP70 / HSP90), every name with that base keeps its name. A staff report,
+    2026-10-20: REPLICATE_SUFFIX read ATG5 as ATG replicate 5, and the report said the analysed
+    groups split the sheet's "ATG". Everything else reads as 2.13.2 read it: a run is replicates
+    (WT1 x2 / WT2 x2 -- every replicate listed twice -- is WT; so, a known limit, is Mutant-1 x3 /
+    Mutant-2 x3), and with no name repeated nothing changes (ATG5 and ATG7 alone are "ATG")."""
     counts = Counter(_key(c) for c in named.values())
-    own = defaultdict(set)
+    own, numbers = defaultdict(set), defaultdict(set)
     for uid, c in named.items():
+        b = _key(bases[uid])
         if counts[_key(c)] > 1:
-            own[_key(bases[uid])].add(_key(c))
-    merged = {b for b, names in own.items() if len(names) > 1}
-    return {uid: c if _key(bases[uid]) in merged else bases[uid] for uid, c in named.items()}
+            own[b].add(_key(c))
+        n = re.search(r"(\d+)$", cs._s(c))
+        if n and _key(c) != b:                 # the number the replicate index took off
+            numbers[b].add(int(n.group(1)))
+    apart = {b for b, names in own.items() if len(names) > 1 and not _a_run(numbers[b])}
+    return {uid: c if _key(bases[uid]) in apart else bases[uid] for uid, c in named.items()}
+
+
+def _a_run(numbers):
+    """Replicate numbers: consecutive from 0 or 1 (1, 2, 3)."""
+    n = sorted(numbers)
+    return bool(n) and n[0] in (0, 1) and n == list(range(n[0], n[0] + len(n)))
 
 
 # ------------------------------------------------------------ matching sheet to runs --
