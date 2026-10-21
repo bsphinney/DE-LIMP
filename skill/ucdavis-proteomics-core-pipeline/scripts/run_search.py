@@ -997,6 +997,7 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
     # they go with the report files in the loop below, after its own refusal.
     if sbatch:
         dp.set_aside_probe_outputs(out)
+        contaminant_competition.set_aside_record(out)    # and an earlier search's record
     # TWO JOBS + dependency when emitting sbatch: the library is expensive and
     # reusable, so a failed search requeues against it instead of rebuilding.
     if libfree and sbatch:
@@ -1106,19 +1107,35 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
             "contaminant_competition": competition_inline(report, fasta, out)}
 
 
+def search_records(res):
+    """What a search's result adds to search_provenance.json beside `result`: the records some
+    routes make while the search runs (sage_lfq_check, sage_adapt, probe_fallback, cpu_sizing), and
+    an inline DIA-NN search's contaminant record -- only a record with a status, never the
+    chain's plan of one (diann_parallel's {file, produced: runtime}), so the key has one shape (a
+    job merges its own in here)."""
+    if not isinstance(res, dict):
+        return {}
+    out = {k: res[k] for k in ("sage_lfq_check", "sage_adapt", "probe_fallback", "cpu_sizing")
+           if res.get(k)}
+    cc = res.get("contaminant_competition")
+    if isinstance(cc, dict) and cc.get("status"):
+        out["contaminant_competition"] = cc
+    return out
+
+
 def competition_inline(report, fasta, out):
     """An inline search's contaminant competition check, as the jobs run it
     (contaminant_competition.job_lines): <out>/contaminant_competition.json, and the record
     returned for search_provenance.json, which main() writes after the search. Never stops the
     search: a check that fails is said, and recorded as not run."""
     import contaminant_competition as cc
-    try:
-        rec = cc.check(report, fasta, cc.resolve_inputs(None, report, fasta)[2])
-        cc.write(rec, os.path.join(out, cc.RECORD))
-    except Exception as e:      # a report, never a gate; AUDIT.md checks the report again
-        rec = {"check": "contaminant_competition", "status": "not_run",
-               "reason": f"the check failed ({type(e).__name__}: {e})"}
+    # check() and write() never raise: a check that could not run is a not_run record
+    rec = cc.check(report, fasta, cc.resolve_inputs(None, report, fasta)[2])
+    _written, problems = cc.write(rec, os.path.join(out, cc.RECORD))
     cc.say(rec)
+    for p in problems:
+        sys.stderr.write(f"{cc.TAG} NOTE: could not write {p}; the record is in "
+                         "search_provenance.json only.\n")
     return rec
 
 
@@ -3664,11 +3681,7 @@ def main():
                        # here itself)
                        # cpu_sizing: the chain's CPUs per array task and how many run at once,
                        # and why (array_task_cpus) -- `threads` above is what was ASKED
-                       # contaminant_competition: an inline DIA-NN search's (a job merges
-                       # its own in here)
-                       **{k: res[k] for k in ("sage_lfq_check", "sage_adapt", "probe_fallback",
-                                              "cpu_sizing", "contaminant_competition")
-                          if isinstance(res, dict) and res.get(k)}},
+                       **search_records(res)},
                       fh, indent=2)
     except Exception as e:
         sys.stderr.write(f"[run_search] could not write search_provenance.json: {e}\n")

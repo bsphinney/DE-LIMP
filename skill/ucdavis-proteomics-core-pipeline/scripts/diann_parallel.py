@@ -1780,8 +1780,10 @@ def main():
     xic = xic_flag(a.cfg)          # step 4 only -- see xic_flag() docstring
 
     # Every refusal is behind us: an earlier search's probe outputs must not describe this one
-    # (set aside, not deleted -- they are that search's evidence)
+    # (set aside, not deleted -- they are that search's evidence), nor its contaminant record
     set_aside_probe_outputs(out)
+    import contaminant_competition       # the record's name and the job's line: its own
+    contaminant_competition.set_aside_record(out)
     # ...so the '--' links can be made now; every step reads the runs from the file list
     try:
         linked = make_input_links(links_plan)
@@ -1800,7 +1802,6 @@ def main():
     empirical = f"{D}/empirical.parquet"
     first_pass = f"{D}/{FIRST_PASS_REPORT}"
     pass_cmp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pass_comparison.py")
-    import contaminant_competition       # the record's name and the job's line: its own
     run_check = os.path.join(os.path.dirname(os.path.abspath(__file__)), "check_report_runs.py")
 
     # QUEUE CHOICE, ported from DE-LIMP's select_best_partition()

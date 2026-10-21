@@ -42,10 +42,11 @@ Checks:
   contaminant_competition
                     (a DIA-NN report) sample genes the contaminant list took away
                     (contaminant_competition.py, run by the search's last job): COMPETED OUT,
-                    no precursor left of their own; SIPHONED, most of their signal removed as
+                    no precursor left of their own; SIPHONED, most of their signal taken as
                     contaminant -- each a WARN naming the genes and the --drop-contaminant
-                    re-search; PASS; INFO, with the reason, when it could not run
-  de_signal        0 significant (WARN: underpowered) or >50% significant
+                    re-search, worded from the DE's own contaminant record; PASS; INFO, with
+                    the reason, when it could not run
+  de_signal         0 significant (WARN: underpowered) or >50% significant
                     (WARN: likely batch/normalization/confounding artefact)
   first_vs_final_pass
                     5-step DIA-NN chain only: runs whose final pass kept less than half
@@ -252,9 +253,10 @@ PLAIN = {
                 "proteins also have: they are the sample's own proteins or handling contamination "
                 "(such as skin keratin), not evidence of the contaminant species.",
         "INFO": NOT_CHECKED}),
-    # its WARNs name the proteins, so each carries its own words (contaminant_competition.py)
+    # its WARNs name the proteins in their own words (contaminant_competition.py); these WARN
+    # words are for an older session's AUDIT.md read without them
     "contaminant_competition": ("Sample proteins taken by the contaminant list", {
-        "PASS": "Checked: no protein of the sample was found to have lost its peptides to the "
+        "PASS": "Checked: no protein of the sample lost all or most of its signal to the "
                 "contaminant list.",
         "WARN": "Some of the sample's proteins lost their peptides to the contaminant list.",
         "INFO": NOT_CHECKED}),
@@ -300,7 +302,7 @@ AMBIGUOUS = {("replication", "FAIL"), ("id_depth", "WARN"), ("contamination", "P
              ("first_vs_final_pass", "WARN"), ("search_measurement", "WARN"),
              ("normalization_check", "PASS"), ("normalization_check", "WARN"),
              ("normalisation_stability", "INFO"), ("contaminant_evidence", "INFO"),
-             ("target_contaminants", "INFO"), ("contaminant_competition", "WARN")}
+             ("target_contaminants", "INFO")}
 _STATEMENT = re.compile(r"(Core staff chose [^.]*\.)")
 
 
@@ -793,7 +795,7 @@ def report_contaminant_peptides(report, q_cutoff, q_columns=None):
 
 
 def _contaminant_peptides(report, q_cutoff, q_columns):
-    from diann_q_columns import fdr_columns, cutoff_for
+    from diann_q_columns import fdr_columns, cutoff_for, keep_expression, row_passes
     name = os.path.basename(report)
     groups, runs = defaultdict(dict), defaultdict(set)
 
@@ -822,8 +824,8 @@ def _contaminant_peptides(report, q_cutoff, q_columns):
         # cast: a dictionary-encoded column has no regex kernel (DIA-NN writes plain strings)
         keep = pc.match_substring_regex(pads.field("Protein.Ids").cast(pa.string()),
                                         f"(^|;)({tags})")
-        for c, cut in cuts.items():
-            keep = keep & ((pads.field(c) <= cut) | pads.field(c).is_null())
+        q_keep = keep_expression(cuts)              # run_de.R's filter: the one reading of it
+        keep = keep if q_keep is None else keep & q_keep
         for b in d.to_batches(columns=list(REPORT_PEPTIDE_COLUMNS), filter=keep):
             for row in zip(*(b.column(c).to_pylist() for c in REPORT_PEPTIDE_COLUMNS)):
                 take(*row)
@@ -832,13 +834,8 @@ def _contaminant_peptides(report, q_cutoff, q_columns):
             for r in csv.DictReader(fh, delimiter="\t"):
                 if not any(is_contaminant_accession(t) for t in _split_ids(r.get("Protein.Ids"))):
                     continue
-                try:
-                    if any((r.get(c) or "").strip() not in ("", "NA", "NaN")
-                           and float(r[c]) > cut for c, cut in cuts.items()):
-                        continue
-                except ValueError:
-                    continue
-                take(*(r.get(c) for c in REPORT_PEPTIDE_COLUMNS))
+                if row_passes(r, cuts):
+                    take(*(r.get(c) for c in REPORT_PEPTIDE_COLUMNS))
     return dict(groups), dict(runs), qcols, None
 
 
@@ -978,48 +975,69 @@ def audit_contaminant_evidence(findings, de_prov, meta_path):
 def audit_contaminant_competition(findings, de_prov, search_out=None, search_prov=None,
                                   meta_path=None):
     """Sample proteins the contaminant list took away (contaminant_competition.py: COMPETED OUT,
-    SIPHONED), as the search's last job recorded them for the report the DE read -- else checked
-    here on that report (a search from before skill 2.14, or a DE of another report). A DIA-NN
-    report only; a check that could not run is an INFO that says why, never nothing. It reports
-    and never stops the analysis: a WARN at most."""
+    SIPHONED). The search's last job recorded them; that record is read only when it describes
+    the report the DE read (contaminant_competition.describes: name, size, modification time) with
+    the DE's q-value filter -- else the report is checked here (a search from before skill 2.14,
+    a record that could not run, a re-search, a DE of another report or with other cutoffs). With
+    no DE record, the search's own report (--search-out). What was done with the shared precursors
+    is said from the DE's own contaminant record (rule 1). A DIA-NN report only. It reports and
+    never stops the analysis: a WARN at most, and a check that could not run is an INFO that says
+    why -- never nothing, and never a traceback that leaves no AUDIT.md."""
     import contaminant_competition as cc
     inp = (de_prov or {}).get("input")
     _path, sprov = load_search_prov(de_prov, search_prov)
     sprov = sprov if isinstance(sprov, dict) else {}
+    fasta = meta = why = None
+    if not inp and search_out:
+        try:
+            with open(os.path.join(search_out, cc.PROVENANCE)) as fh:
+                sprov = json.load(fh)
+        except (OSError, ValueError):
+            sprov = {}
+        sprov = sprov if isinstance(sprov, dict) else {}
+        inp, fasta, meta, why = cc.resolve_inputs(search_out)
+    if not inp:
+        return                      # no DE record and no search folder: no report to ask about
+    if sprov.get("engine") and str(sprov["engine"]).lower() != "diann":
+        return                      # another engine's report: DIA-NN's question does not apply
+    cont = (de_prov or {}).get("contaminants")
+    cont = cont if isinstance(cont, dict) else None
     rec = None
     for cand in (cc.load(search_out) if search_out else None,
                  sprov.get("contaminant_competition"),
-                 cc.load(os.path.dirname(str(inp))) if inp else None):
-        # a record that could not run is tried again here, where the report may be readable
-        if isinstance(cand, dict) and cand.get("status") in ("ok", "not_applicable") and (
-                not inp or os.path.basename(str(cand.get("report") or "")) ==
-                os.path.basename(str(inp))):
+                 cc.load(os.path.dirname(str(inp)))):
+        if isinstance(cand, dict) and cand.get("status") in ("ok", "not_applicable") and \
+                cc.describes(cand, inp) and cc.agrees_with_de(cand, de_prov):
             rec = cand
             break
     if rec is None:
-        if not inp:
-            return                  # no search record and no DE record: nothing to read
-        if sprov.get("engine") and str(sprov["engine"]).lower() != "diann":
-            return                  # another engine's report: DIA-NN's question does not apply
-        cont = (de_prov or {}).get("contaminants")
-        meta_path = meta_path or (cont.get("fasta_meta") if isinstance(cont, dict) else None)
-        try:
-            with open(meta_path) as fh:
-                meta = json.load(fh)
-        except (OSError, TypeError, ValueError):
-            meta = None
-        meta = meta if isinstance(meta, dict) else None
-        fasta, why = searched_fasta(meta, meta_path) if meta else (
-            None, "no readable <fasta>.meta.json (pass --fasta-meta)")
-        if not fasta and sprov.get("fasta") and os.path.isfile(str(sprov["fasta"])) and not meta:
-            fasta, why = sprov["fasta"], None       # the search's own record of its FASTA
+        if not meta:
+            meta_path = meta_path or (cont or {}).get("fasta_meta")
+            try:
+                with open(meta_path) as fh:
+                    meta = json.load(fh)
+            except (OSError, TypeError, ValueError):
+                meta = None
+            meta = meta if isinstance(meta, dict) else None
+            if meta:
+                fasta, why = searched_fasta(meta, meta_path)
+            elif sprov.get("fasta") and os.path.isfile(str(sprov["fasta"])):
+                fasta, why = sprov["fasta"], None   # the search's own record of its FASTA
+            else:
+                why = "no readable <fasta>.meta.json (pass --fasta-meta)"
         q = (de_prov or {}).get("q_cutoff")
         from diann_q_columns import DEFAULT_Q_CUTOFF
+        # check() never raises; a check that could not run is its not_run record
         rec = cc.check(inp, fasta, meta, float(q) if isinstance(q, (int, float)) else
                        DEFAULT_Q_CUTOFF, (de_prov or {}).get("q_columns") or None,
                        no_fasta_reason=why)
-        rec["checked_by"] = "audit_results.py: the search left no record for this report"
-    for status, msg, detail, plain in cc.audit_findings(rec):
+        rec["checked_by"] = "audit_results.py: no record of the search describes this report"
+    try:
+        hits = cc.audit_findings(rec, cont)
+    except Exception as e:          # a record this version cannot read: said, never a traceback
+        hits = [("INFO", f"Not run: the record could not be read ({type(e).__name__}: {e}).",
+                 {}, None)]
+    for status, msg, detail, plain in hits:
         add(findings, "contaminant_competition", status, msg, detail, plain=plain)
 
 
@@ -1366,9 +1384,13 @@ def main():
         audit_target_contaminants(findings, fasta_meta, em, a.de_dir, a.adjp, keratin)
         audit_contaminant_evidence(findings, prov, fasta_meta)
         audit_de(findings, a.de_dir, a.adjp, a.logfc, prov)
-    audit_contaminant_competition(findings, prov, a.search_out if a.search_out and
-                                  os.path.isdir(a.search_out) else None, a.search_prov,
-                                  fasta_meta)
+    try:
+        audit_contaminant_competition(findings, prov, a.search_out if a.search_out and
+                                      os.path.isdir(a.search_out) else None, a.search_prov,
+                                      fasta_meta)
+    except Exception as e:          # a report, never a gate: AUDIT.md is written whatever happens
+        add(findings, "contaminant_competition", "INFO",
+            f"Not run: the check failed ({type(e).__name__}: {e}).", plain=NOT_CHECKED)
     audit_search_measurement(findings, prov, a.search_prov)
     audit_passes(findings, prov, a.search_prov)
     audit_normalization_check(findings, prov)

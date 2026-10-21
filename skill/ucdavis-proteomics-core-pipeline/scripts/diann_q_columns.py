@@ -131,6 +131,38 @@ def fdr_columns(available=None):
     return [c for c in (FDR_REQUIRED + FDR_OPTIONAL) if c in have]
 
 
+# How run_de.R's filter treats a value, as limpa's EListFromLongFormatFile applies it:
+# `which(Report[[col]] > cutoff)` is dropped, so a row is dropped only when a value EXCEEDS its
+# cutoff -- a missing value and a NaN stay. The ONE Python reading of that rule, for parquet
+# (keep_expression) and for a text report (row_passes); pass_comparison.py, audit_results.py and
+# contaminant_competition.py read reports through them. The parquet readers used `<= cutoff OR
+# null`, which drops a NaN that limpa and the text reader keep (review of skill 2.14).
+def keep_expression(cuts):
+    """{column: cutoff} -> the pyarrow.dataset filter keeping the rows run_de.R keeps, or None
+    when there is no column to filter on."""
+    import pyarrow.dataset as pads
+    keep = None
+    for c, cut in cuts.items():
+        f = ~(pads.field(c) > cut) | pads.field(c).is_null()
+        keep = f if keep is None else keep & f
+    return keep
+
+
+def row_passes(row, cuts):
+    """The same rule for one row of a text report (a dict, as csv reads it): an empty, NA or NaN
+    value stays; a value that is not a number drops the row."""
+    for c, cut in cuts.items():
+        v = (row.get(c) or "").strip()
+        if v in ("", "NA", "NaN", "nan"):
+            continue
+        try:
+            if float(v) > cut:
+                return False
+        except ValueError:
+            return False
+    return True
+
+
 def protein_q_column(available):
     """The single best protein-level q-column present, or None."""
     have = set(available)

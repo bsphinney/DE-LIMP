@@ -4,23 +4,26 @@ contaminant_competition.py  --  Which of the sample's proteins did the contamina
 
 The Core searches every sample with its universal contaminant list (human and bovine entries,
 Cont_-tagged). Several entries share identical or near-identical tryptic peptides with abundant
-human and mouse proteins. DIA-NN can then report those peptides under the Cont_ entry, and
-`--cont-quant-exclude Cont_` (and run_de.R's contaminant filter, the same rule) removes every
-peptide that maps to a Cont_ entry from quantification and normalisation. Nothing errors and
-nothing warns; the protein count just looks a little low. Measured incidents:
+human and mouse proteins. DIA-NN can then report those peptides under the Cont_ entry, and the
+contaminant rule -- DIA-NN's `--cont-quant-exclude Cont_`, and a DE that removes contaminant
+precursors -- takes every peptide that maps to a Cont_ entry out of quantification and
+normalisation. Nothing errors and nothing warns; the protein count just looks a little low.
+Measured incidents:
   * a mouse tissue search: mouse Actb and Eef1a1 had no protein group at all, and 28% of the ion
     current sat on Cont_ entries, most of it the mouse proteins' own;
   * a human IP: 68 human genes were lost the same way.
 fetch_fasta.py already drops contaminant entries identical to a target, and those the search
 cannot tell apart from one (its peptide rule). Which peptides a sample shows only the search can
 say, so this check reads the report after every DIA-NN search. It reports; it never changes the
-contaminant list or the search, and never fails a job (the Core director's decision, 2026-10-20:
-keep the universal list for every search, and name what it takes).
+contaminant list or the search, and never fails a job or an audit (the Core director's decision,
+2026-10-20: keep the universal list for every search, and name what it takes).
 
 WHAT IT READS. DIA-NN's report (report.parquet, or a .tsv report), rows kept as run_de.R keeps
-them (diann_q_columns: the q-columns present, cutoff_for() each, a row dropped only when a value
-exceeds its cutoff), and the searched FASTA (gene names; I/L twins), with its fetch_fasta.py
-sidecar when there is one (organism, the digest the build used).
+them (diann_q_columns: the q-columns present, cutoff_for() each, keep_expression / row_passes),
+and the searched FASTA (gene names; I/L twins), with its fetch_fasta.py sidecar when there is one
+(organism, the digest the build used, which rule built the database). What took the shared
+precursors is said from the records, never assumed (DE-LIMP rule 1): the DE's own contaminant
+record when an audit has one, else DIA-NN's --cont-quant-exclude as make_methods.py reads it.
 
 THE RULES. A precursor is a contaminant's when ANY accession in its Protein.Ids carries the tag:
 DIA-NN's --cont-quant-exclude rule, which run_de.R applies too.
@@ -29,32 +32,38 @@ DIA-NN's --cont-quant-exclude rule, which run_de.R applies too.
     not one of a sample protein's digest peptides, as written or with I = L
     (fetch_fasta.target_peptide_hits). The build keeps an entry by the same count in its digest.
   * A precursor shared between sample protein(s) and contaminant entries that do NOT show
-    themselves is the sample's: the contaminant rule removed the sample's own signal.
-  * Genes are grouped as protein inference groups them (parsimony: the fewest genes that explain
-    the precursors), so a peptide shared by paralogs (actins, keratins) names one gene, not each.
-  * COMPETED OUT: a sample gene with such precursors and no precursor of its own left: it has no
-    quantity, so it is missing from the results.
-  * SIPHONED: a sample gene that kept precursors of its own, but whose removed precursors carry
+    themselves is the sample's: the contaminant rule takes the sample's own signal.
+  * The kept (contaminant-free) precursors are read for every protein connected to those through
+    shared precursors, and the genes are grouped as protein inference groups them (parsimony: the
+    fewest genes that explain the precursors). A peptide shared by paralogs (actins, keratins)
+    then names one gene, not each, and a paralog's own peptides take the ones it shares.
+  * COMPETED OUT: a sample gene with such precursors and no precursor of its own left: under the
+    contaminant rule it has no quantity.
+  * SIPHONED: a sample gene that kept precursors of its own, but whose taken precursors carry
     more signal than those it kept: it is quantified from the minority of its signal.
   * A precursor shared with a contaminant entry that does show itself (bovine albumin in a
     cell-culture sample) cannot be attributed to either: such a gene is listed for staff as
     `masked`, never as lost.
   * The contaminant share of the precursor signal, per run, as contaminants.R's
     contaminant_share() computes it (Precursor.Quantity, else Precursor.Normalised).
+The record carries the report's size and modification time (`report_stat`): a record is read
+only for the report it describes (describes()), never for a later search in the same folder.
 
 Usage:
   contaminant_competition.py --report <out>/report.parquet --fasta <searched FASTA>
                              [--fasta-meta <fasta>.meta.json] [--q-cutoff 0.01]
                              [--out <out>/contaminant_competition.json]
                              [--provenance <out>/search_provenance.json]
-  contaminant_competition.py --search-out <out>     # an existing search: the report and FASTA
-                                                    # from its search_provenance.json; writes
+  contaminant_competition.py --search-out <out>     # an existing search (in a job on a cluster:
+                                                    # it reads report.parquet): the report and
+                                                    # FASTA from its search_provenance.json; writes
                                                     # <out>/contaminant_competition.json there
 Exit 0 whenever a record was made, findings or not (a check that could not run is a record that
 says why); 2 for a usage error.
 """
 import argparse
 import csv
+import heapq
 import json
 import math
 import os
@@ -68,12 +77,13 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 # The tags, the evidence threshold, the digest and the target-peptide test are fetch_fasta.py's,
-# never a copy here (DE-LIMP rule 3).
+# the q-value filter diann_q_columns.py's -- never a copy here (DE-LIMP rule 3).
 from fetch_fasta import (CONTAMINANT_TAGS, MIN_UNIQUE_PEPTIDES, REBUILD_ADVICE,  # noqa: E402
                          _contaminant_ids, _digestion_enzyme, _fasta_records, _header_ids,
                          _independent_count, fasta_accessions_and_targets,
                          is_contaminant_accession, sidecar_state, target_peptide_hits)
-from diann_q_columns import DEFAULT_Q_CUTOFF, cutoff_for, fdr_columns  # noqa: E402
+from diann_q_columns import (DEFAULT_Q_CUTOFF, cutoff_for, fdr_columns,  # noqa: E402
+                             keep_expression, row_passes)
 
 RECORD = "contaminant_competition.json"
 PROVENANCE = "search_provenance.json"
@@ -87,11 +97,15 @@ REPORT_COLUMNS = ("Run", "Precursor.Id", "Protein.Ids", "Stripped.Sequence")
 # is not DIA-NN's protein inference, so DIA-NN's question does not apply to it.
 ADAPTED_META = b"delimp.quantity."
 LIST_MAX = 12
+# The most a search job spends on this check (seconds): 710k rows take 5 s on HIVE, and a job
+# that ran out of time over a report would read as a failed search. Past it the job goes on, and
+# the audit checks the report itself.
+JOB_TIME_LIMIT = 900
 RULE = ("a precursor is a contaminant's when any accession in its Protein.Ids carries the tag "
         "(DIA-NN's --cont-quant-exclude rule, applied by run_de.R too); a contaminant entry shows "
         f"itself with at least {MIN_UNIQUE_PEPTIDES} non-overlapping peptides that name no sample "
         "protein and are not a sample protein's digest peptide (I = L); a precursor shared only "
-        "with entries that do not show themselves is the sample's")
+        "with entries that do not show themselves is the sample's; genes grouped by parsimony")
 
 
 def _num(v):
@@ -106,6 +120,10 @@ def _ids(cell):
     return [t.strip() for t in str(cell or "").split(";") if t.strip()]
 
 
+def _targets(cell):
+    return [a for a in _ids(cell) if not is_contaminant_accession(a)]
+
+
 def _is_cont(cell):
     return any(is_contaminant_accession(a) for a in _ids(cell))
 
@@ -114,139 +132,131 @@ def _new():
     return {"precursors": set(), "signal": 0.0}
 
 
+def _add(store, key, prec, q):
+    rec = store.setdefault(key, _new())
+    rec["precursors"].add(prec)
+    rec["signal"] += _num(q) or 0.0
+
+
 # ---- reading the report ------------------------------------------------------------------------
 def _tsv_rows(report, cuts):
     with open(report, newline="") as fh:
         for r in csv.DictReader(fh, delimiter="\t"):
-            try:
-                if any((r.get(c) or "").strip() not in ("", "NA", "NaN")
-                       and float(r[c]) > cut for c, cut in cuts.items()):
-                    continue
-            except ValueError:
-                continue
-            yield r
+            if row_passes(r, cuts):
+                yield r
 
 
-def _scan_tsv(report, cuts, qcol, ev, wanted):
+def _scan_tsv(report, cuts, qcol, ev):
     for r in _tsv_rows(report, cuts):
-        if _is_cont(r.get("Protein.Ids")):
-            _take_cont(ev, r.get("Precursor.Id"), r.get("Protein.Ids"), r.get("Stripped.Sequence"),
-                       r.get(qcol))
-    want = wanted(ev)
-    for r in _tsv_rows(report, cuts):
-        ids, q = r.get("Protein.Ids"), r.get(qcol)
-        cont = _is_cont(ids)
-        _take_run(ev, r.get("Run"), q, cont)
-        if not cont and want:
-            _take_kept(ev, want, ids, r.get("Precursor.Id"), q)
+        ids, q = r.get("Protein.Ids") or "", r.get(qcol)
+        run = ev["runs"].setdefault(str(r.get("Run")), [0.0, 0.0])
+        run[0] += _num(q) or 0.0
+        if _is_cont(ids):
+            run[1] += _num(q) or 0.0
+            _add(ev["cont"], (ids, (r.get("Stripped.Sequence") or "").upper()),
+                 r.get("Precursor.Id"), q)
+        elif ids:
+            _add(ev["kept"], ids, r.get("Precursor.Id"), q)
 
 
-def _scan_parquet(report, cuts, qcol, ev, wanted):
-    """Two scans, filtered by the q-columns: the contaminant rows (few) row by row; then every
-    row's signal per run, and the kept rows of the wanted sample accessions -- aggregated by
-    arrow, so a 400-run report is never held whole."""
+def _scan_parquet(report, cuts, qcol, ev):
+    """Two scans of the rows run_de.R keeps: the contaminant rows (few) row by row; then every
+    row's signal per run, and the kept rows' distinct precursors and signal per Protein.Ids --
+    aggregated by arrow batch by batch, so a 400-run report is never held whole."""
     import pyarrow as pa
     import pyarrow.compute as pc
     import pyarrow.dataset as pads
     d = pads.dataset(report, format="parquet")
-    keep = None
-    for c, cut in cuts.items():
-        f = (pads.field(c) <= cut) | pads.field(c).is_null()
-        keep = f if keep is None else keep & f
+    keep = keep_expression(cuts)
     tag_rx = "(^|;)(" + "|".join(re.escape(t) for t in CONTAMINANT_TAGS) + ")"
     # cast: a dictionary-encoded column has no regex kernel (DIA-NN writes plain strings)
     cont = pc.match_substring_regex(pads.field("Protein.Ids").cast(pa.string()), tag_rx)
     cols = ["Precursor.Id", "Protein.Ids", "Stripped.Sequence", qcol]
     for b in d.to_batches(columns=cols, filter=cont if keep is None else keep & cont):
         for prec, ids, pep, q in zip(*(b.column(c).to_pylist() for c in cols)):
-            _take_cont(ev, prec, ids, pep, q)
-    want = wanted(ev)
-    want_rx = ("(^|;)(" + "|".join(re.escape(a) for a in sorted(want)) + ")(;|$)") if want else None
+            _add(ev["cont"], (ids or "", (pep or "").upper()), prec, q)
     for b in d.to_batches(columns=["Run", "Protein.Ids", "Precursor.Id", qcol], filter=keep):
         if not b.num_rows:
             continue
         t = pa.Table.from_batches([b])
-        ids = pc.cast(t["Protein.Ids"], pa.string())
-        is_cont = pc.fill_null(pc.match_substring_regex(ids, tag_rx), False)
-        for sub, flag in ((t, False), (t.filter(is_cont), True)):
+        is_cont = pc.fill_null(pc.match_substring_regex(
+            pc.cast(t["Protein.Ids"], pa.string()), tag_rx), False)
+        for sub, slot in ((t, 0), (t.filter(is_cont), 1)):
             if sub.num_rows:
                 g = sub.group_by("Run").aggregate([(qcol, "sum")])
                 for run, s in zip(g["Run"].to_pylist(), g[f"{qcol}_sum"].to_pylist()):
-                    _take_run(ev, run, s, flag, summed=not flag)
-        if want_rx:
-            hit = pc.and_(pc.invert(is_cont), pc.fill_null(
-                pc.match_substring_regex(ids, want_rx, ignore_case=True), False))
-            sub = t.filter(hit)
-            for ids_, prec, q in zip(*(sub.column(c).to_pylist()
-                                       for c in ("Protein.Ids", "Precursor.Id", qcol))):
-                _take_kept(ev, want, ids_, prec, q)
+                    ev["runs"].setdefault(str(run), [0.0, 0.0])[slot] += _num(s) or 0.0
+        sub = t.filter(pc.invert(is_cont))
+        if sub.num_rows:
+            g = sub.group_by(["Protein.Ids", "Precursor.Id"]).aggregate([(qcol, "sum")])
+            for ids, prec, s in zip(g["Protein.Ids"].to_pylist(), g["Precursor.Id"].to_pylist(),
+                                    g[f"{qcol}_sum"].to_pylist()):
+                if ids:
+                    _add(ev["kept"], ids, prec, s)
 
 
-def _take_cont(ev, prec, ids, pep, q):
-    rec = ev["cont"].setdefault((ids or "", (pep or "").upper()), _new())
-    rec["precursors"].add(prec)
-    rec["signal"] += _num(q) or 0.0
-
-
-def _take_run(ev, run, q, is_cont, summed=True):
-    """`summed`: a total over every row (the TSV path adds each row to the total itself)."""
-    r = ev["runs"].setdefault(str(run), [0.0, 0.0])
-    if summed or not is_cont:
-        r[0] += _num(q) or 0.0
-    if is_cont:
-        r[1] += _num(q) or 0.0
-
-
-def _take_kept(ev, want, ids, prec, q):
-    if {x.upper() for x in _ids(ids)} & want:
-        rec = ev["kept"].setdefault(ids, _new())
-        rec["precursors"].add(prec)
-        rec["signal"] += _num(q) or 0.0
-
-
-def read_report(report, wanted, q_cutoff=DEFAULT_Q_CUTOFF, q_columns=None):
+def read_report(report, q_cutoff=DEFAULT_Q_CUTOFF, q_columns=None):
     """(evidence, None), ({"not_applicable": True}, None) or (None, why not). evidence: the
     q-columns and cutoffs applied, the quantity column, per-run [total, contaminant] signal, the
-    contaminant precursors by (Protein.Ids, peptide), and by Protein.Ids the kept
-    (contaminant-free) precursors of rows naming a sample accession wanted(evidence) returns
-    (upper case) once the contaminant rows are read. A report that cannot be read is a why-not,
-    never a traceback."""
+    contaminant precursors by (Protein.Ids, peptide), and the kept (contaminant-free) precursors
+    by Protein.Ids. A report that cannot be read is a why-not."""
     if not report or not os.path.isfile(report):
         return None, f"the report ({report or 'none given'}) is not readable here"
     name = os.path.basename(report)
     parquet = report.endswith(".parquet")
-    try:
-        if parquet:
-            try:
-                import pyarrow.parquet as pq
-            except ImportError:
-                return None, ("pyarrow is not installed in this Python, so the report could not "
-                              "be read")
-            schema = pq.read_schema(report)
-            if any(k.startswith(ADAPTED_META) for k in (schema.metadata or {})):
-                return {"not_applicable": True}, None
-            names = schema.names
-        else:
-            with open(report, newline="") as fh:
-                names = next(csv.reader(fh, delimiter="\t"), [])
-        missing = [c for c in REPORT_COLUMNS if c not in names]
-        if missing:
-            return None, (f"{name} has no {', '.join(missing)} column (not a DIA-NN precursor "
-                          "report)")
-        qcol = next((c for c in SHARE_COLUMNS if c in names), None)
-        if not qcol:
-            return None, f"{name} has neither {' nor '.join(SHARE_COLUMNS)} (no precursor signal)"
-        qcols = [c for c in (q_columns or fdr_columns(names)) if c in names]
-        cuts = {c: cutoff_for(c, q_cutoff) for c in qcols}
-        ev = {"report": report, "quantity_column": qcol, "q_cutoff": q_cutoff, "q_columns": qcols,
-              "cutoffs": cuts, "runs": {}, "cont": {}, "kept": {}}
-        (_scan_parquet if parquet else _scan_tsv)(report, cuts, qcol, ev, wanted)
-    except (OSError, ValueError, csv.Error, AttributeError) as e:
-        # ValueError: pyarrow's ArrowInvalid; AttributeError: a pyarrow older than group_by (7.0)
-        why = " ".join(str(e).replace(report, name).split())
-        return None, (f"{name} could not be read ({type(e).__name__}: {why[:200]}"
-                      f"{'...' if len(why) > 200 else ''})")
+    if parquet:
+        try:
+            import pyarrow.parquet as pq
+        except ImportError:
+            return None, "pyarrow is not installed in this Python, so the report could not be read"
+        schema = pq.read_schema(report)
+        if any(k.startswith(ADAPTED_META) for k in (schema.metadata or {})):
+            return {"not_applicable": True}, None
+        names = schema.names
+    else:
+        with open(report, newline="") as fh:
+            names = next(csv.reader(fh, delimiter="\t"), [])
+    missing = [c for c in REPORT_COLUMNS if c not in names]
+    if missing:
+        return None, f"{name} has no {', '.join(missing)} column (not a DIA-NN precursor report)"
+    qcol = next((c for c in SHARE_COLUMNS if c in names), None)
+    if not qcol:
+        return None, f"{name} has neither {' nor '.join(SHARE_COLUMNS)} (no precursor signal)"
+    qcols = [c for c in (q_columns or fdr_columns(names)) if c in names]
+    cuts = {c: cutoff_for(c, q_cutoff) for c in qcols}
+    ev = {"report": report, "quantity_column": qcol, "q_cutoff": q_cutoff, "q_columns": qcols,
+          "cutoffs": cuts, "runs": {}, "cont": {}, "kept": {}}
+    (_scan_parquet if parquet else _scan_tsv)(report, cuts, qcol, ev)
     return ev, None
+
+
+def report_stat(report):
+    """{size, mtime} of a report as it is now, or None: what describes() compares."""
+    try:
+        st = os.stat(report)
+    except (OSError, TypeError):
+        return None
+    return {"size": st.st_size, "mtime": int(st.st_mtime)}
+
+
+def describes(rec, report):
+    """True when `rec` is this check's record of the report at `report` as it is now: the same
+    file name, size and modification time. A re-search into the same folder writes a new report,
+    so an earlier search's record is never read for it -- nor a record without `report_stat`."""
+    if not isinstance(rec, dict) or not report:
+        return False
+    st = rec.get("report_stat")
+    return (isinstance(st, dict) and st == report_stat(report)
+            and os.path.basename(str(rec.get("report") or "")) == os.path.basename(str(report)))
+
+
+def agrees_with_de(rec, de_prov):
+    """True when the record's q-value filter is the DE's (de_provenance.json q_cutoff /
+    q_columns, where recorded): a search-time record uses run_de.R's defaults."""
+    q, cols = (de_prov or {}).get("q_cutoff"), (de_prov or {}).get("q_columns")
+    if isinstance(q, (int, float)) and rec.get("q_cutoff") != float(q):
+        return False
+    return not (isinstance(cols, list) and cols and set(cols) != set(rec.get("q_columns") or ()))
 
 
 # ---- the searched FASTA and the sidecar --------------------------------------------------------
@@ -271,18 +281,23 @@ def read_fasta(fasta):
 
 
 def resolve_inputs(search_out=None, report=None, fasta=None, fasta_meta=None):
-    """(report, fasta, sidecar) -- what was given, else what the search recorded in its
-    search_provenance.json (`result.report`, `fasta`), and <fasta>.meta.json."""
+    """(report, fasta, sidecar, why there is no FASTA) -- what was given, else what the search
+    recorded in its search_provenance.json (`result.report`, `fasta`), and <fasta>.meta.json."""
+    why = None
     if search_out:
         try:
             with open(os.path.join(search_out, PROVENANCE)) as fh:
                 prov = json.load(fh)
-        except (OSError, ValueError):
+        except (OSError, ValueError) as e:
             prov = {}
+            why = f"{PROVENANCE} in {search_out} could not be read ({type(e).__name__})"
+        prov = prov if isinstance(prov, dict) else {}
         res = prov.get("result") if isinstance(prov.get("result"), dict) else {}
         cands = [report, res.get("report"), os.path.join(search_out, "report.parquet")]
         report = next((p for p in cands if p and os.path.isfile(p)), report or cands[-1])
         fasta = fasta or prov.get("fasta")
+        if not fasta and not why:
+            why = f"{PROVENANCE} in {search_out} names no FASTA"
     meta = None
     meta_path = fasta_meta or (fasta + ".meta.json" if fasta else None)
     if meta_path:
@@ -292,56 +307,51 @@ def resolve_inputs(search_out=None, report=None, fasta=None, fasta_meta=None):
         except (OSError, ValueError):
             meta = None
     meta = meta if isinstance(meta, dict) else None
-    return report, fasta or (meta or {}).get("fasta"), meta
+    fasta = fasta or (meta or {}).get("fasta")
+    return report, fasta, meta, (None if fasta else why)
+
+
+def cont_quant_exclude(report):
+    """DIA-NN's --cont-quant-exclude for this report, as make_methods.py's one reader reads it
+    (the DIA-NN log's command line, else the search's parameters file): {"value": tag or None,
+    "source"} or {"not_recorded": why}."""
+    try:
+        from make_methods import diann_cont_quant_exclude_why
+        got, why = diann_cont_quant_exclude_why(report)
+    except Exception as e:           # its reasons are said, never a stop
+        return {"not_recorded": f"the reader failed ({type(e).__name__}: {e})"}
+    return got if isinstance(got, dict) else {"not_recorded": why or "nothing recorded it"}
 
 
 # ---- the check ---------------------------------------------------------------------------------
 def check(report, fasta=None, meta=None, q_cutoff=DEFAULT_Q_CUTOFF, q_columns=None,
           no_fasta_reason=None):
-    """The record (a dict, always): status ok | not_run (with `reason`) | not_applicable.
-    `no_fasta_reason`: why there is no FASTA, when the caller knows (its sha256 changed ...)."""
+    """The record (a dict, always): status ok | not_run (with `reason`) | not_applicable. Never
+    raises: this check reports, so whatever goes wrong is a not_run record that says what (a
+    parquet column of an unexpected type made pyarrow raise ArrowNotImplementedError, review of
+    2.14). `no_fasta_reason`: why there is no FASTA, when the caller knows."""
     rec = {"check": "contaminant_competition", "report": report, "fasta": fasta,
-           "organism": (meta or {}).get("organism") or None, "rule": RULE,
-           # which fetch_fasta.py rule built the database (legacy / identity_only / current)
-           "database_state": sidecar_state(meta) if meta else None}
+           "report_stat": report_stat(report)}
+    try:
+        return _check(rec, report, fasta, meta, q_cutoff, q_columns, no_fasta_reason)
+    except Exception as e:
+        name = os.path.basename(str(report or ""))
+        why = " ".join(str(e).replace(str(report), name).split())
+        rec.update(status="not_run",
+                   reason=(f"the check failed on {name or 'the report'} ({type(e).__name__}: "
+                           f"{why[:200]}{'...' if len(why) > 200 else ''})"))
+        return rec
+
+
+def _check(rec, report, fasta, meta, q_cutoff, q_columns, no_fasta_reason):
+    rec.update({"organism": (meta or {}).get("organism") or None, "rule": RULE,
+                # which fetch_fasta.py rule built the database (legacy / identity_only / current)
+                "database_state": sidecar_state(meta) if meta else None})
     from estimate_params import DIANN_DIGEST
     dig = (meta or {}).get("contaminant_digest")
     digest = dig if isinstance(dig, dict) and {"cut", "missed_cleavages", "min_pep_len",
                                                "max_pep_len"} <= set(dig) else DIANN_DIGEST
-    fa, rec["fasta_note"] = None, None
-    if fasta:
-        try:
-            fa = read_fasta(fasta)
-        except OSError as e:
-            rec["fasta_note"] = f"the searched FASTA could not be read ({e})"
-    else:
-        rec["fasta_note"] = no_fasta_reason or "no searched FASTA was given"
-    if fa is None:
-        rec["fasta_note"] += (": genes are named by accession, and a contaminant's peptide is "
-                              "checked against Protein.Ids only (no I/L twins)")
-    found = {}
-
-    def wanted(ev):
-        # the peptides that name no sample protein: is any of them a sample digest peptide?
-        lone = {p for (ids, p) in ev["cont"] if not any(not is_contaminant_accession(a)
-                                                         for a in _ids(ids))}
-        found["on_target"] = {}
-        if fa:
-            try:
-                found["on_target"] = target_peptide_hits(lone, fa["targets"], digest)
-            except ValueError as e:              # a --cut this digest cannot read
-                rec["fasta_note"] = (f"the search's digest could not be applied ({e}): a "
-                                     "contaminant's peptide is checked against Protein.Ids only "
-                                     "(no I/L twins)")
-        accs = {a.upper() for ids, _p in ev["cont"] for a in _ids(ids)
-                if not is_contaminant_accession(a)}
-        accs |= {h["target_acc"].upper() for h in found["on_target"].values()}
-        if fa:        # every accession of those genes: an isoform may keep the gene's peptides
-            for g in {_gene(a, fa["accs"]) for a in accs}:
-                accs |= fa["by_gene"].get(g, set())
-        return accs
-
-    ev, why = read_report(report, wanted, q_cutoff, q_columns)
+    ev, why = read_report(report, q_cutoff, q_columns)
     if ev is None:
         rec.update(status="not_run", reason=why)
         return rec
@@ -356,14 +366,62 @@ def check(report, fasta=None, meta=None, q_cutoff=DEFAULT_Q_CUTOFF, q_columns=No
                    reason=f"no row of {os.path.basename(report)} passes the q-value filter "
                           f"(q-columns {', '.join(ev['q_columns']) or 'none'})")
         return rec
-    rec.update(classify(ev, (fa or {}).get("accs") or {}, (fa or {}).get("cont_seq") or {},
-                        found.get("on_target") or {}))
+    fa, rec["fasta_note"] = None, None
+    if fasta:
+        try:
+            fa = read_fasta(fasta)
+        except OSError as e:
+            rec["fasta_note"] = f"the searched FASTA could not be read ({e})"
+    else:
+        rec["fasta_note"] = no_fasta_reason or "no searched FASTA was given"
+    on_target = {}
+    if fa:
+        # the peptides that name no sample protein: is any of them a sample digest peptide?
+        lone = {p for (ids, p) in ev["cont"] if not _targets(ids)}
+        try:
+            on_target = target_peptide_hits(lone, fa["targets"], digest)
+        except ValueError as e:              # a --cut this digest cannot read
+            rec["fasta_note"] = f"the search's digest could not be applied ({e})"
+    if rec["fasta_note"]:
+        rec["fasta_note"] += (": " + ("genes are named by accession, and " if fa is None else "")
+                              + "a contaminant's peptide is checked against Protein.Ids only "
+                                "(no I/L twins)")
+    accs = (fa or {}).get("accs") or {}
+    seeds = {a.upper() for ids, _p in ev["cont"] for a in _targets(ids)}
+    seeds |= {h["target_acc"].upper() for h in on_target.values()}
+    kept = connected(ev["kept"], seeds, accs, (fa or {}).get("by_gene") or {})
+    rec.update(classify(ev, kept, accs, (fa or {}).get("cont_seq") or {}, on_target))
+    rec["cont_quant_exclude"] = cont_quant_exclude(report)
     rec["status"] = "ok"
     return rec
 
 
 def _gene(acc, accs):
     return (accs.get(acc.upper()) or ("", ""))[1] or acc
+
+
+def connected(kept, seeds, accs, by_gene):
+    """The kept rows (Protein.Ids keys of `kept`) connected to the seed accessions: a row naming
+    one, then every row naming an accession those rows name, and a gene's other accessions, to
+    closure. A paralog that shares a precursor with a taken gene brings its own peptides too, so
+    the grouping sees all the evidence (review of 2.14: reading only the rows that named a seed
+    let a paralog's shared peptides count for the taken gene)."""
+    index = {}
+    for ids in kept:
+        for a in _targets(ids):
+            index.setdefault(a.upper(), []).append(ids)
+    seen, rows, todo = set(), set(), list(seeds)
+    while todo:
+        a = todo.pop()
+        if a in seen:
+            continue
+        seen.add(a)
+        todo.extend(by_gene.get((accs.get(a) or ("", ""))[1], ()))
+        for ids in index.get(a, ()):
+            if ids not in rows:
+                rows.add(ids)
+                todo.extend(x.upper() for x in _targets(ids))
+    return rows
 
 
 def _lead_key(gene):
@@ -376,29 +434,44 @@ def parsimony(feats, kind):
     """Which genes the precursors evidence, as protein inference groups them (the fewest genes
     that explain every precursor): repeatedly the gene that names the most precursors not yet
     explained takes all of them -- with every gene naming exactly the same ones, which the data
-    cannot tell apart from it. A precursor shared by paralogs (actins, keratins) then counts for
-    one gene, never for each paralog it also matches. -> [{"genes": [lead, indistinguishable ...],
+    cannot tell apart from it. A precursor shared by paralogs then counts for one gene, never for
+    each paralog it also matches. Features hold disjoint precursors (a precursor has one
+    Protein.Ids), so a gene's count is the sum of its features'; a heap with lazy updates keeps
+    this fast for a large connected family. -> [{"genes": [lead, indistinguishable ...],
     "feats": [...]}] for each group that holds a feature of `kind`."""
-    left, groups = list(feats), []
-    while any(f["kind"] == kind for f in left):
-        by_gene = {}
-        for i, f in enumerate(left):
-            for g in f["genes"]:
-                by_gene.setdefault(g, set()).add(i)
-        n = {g: len(set().union(*(left[i]["precursors"] for i in idx)))
-             for g, idx in by_gene.items()}
-        best = max(n.values())
-        lead = min((g for g in n if n[g] == best), key=_lead_key)
-        same = sorted((g for g in by_gene if by_gene[g] == by_gene[lead] and g != lead),
-                      key=_lead_key)
-        mine = [left[i] for i in sorted(by_gene[lead])]
-        left = [f for i, f in enumerate(left) if i not in by_gene[lead]]
-        if any(f["kind"] == kind for f in mine):
-            groups.append({"genes": [lead] + same, "feats": mine})
+    size = [len(f["precursors"]) for f in feats]
+    of_gene = {}
+    for i, f in enumerate(feats):
+        for g in f["genes"]:
+            of_gene.setdefault(g, set()).add(i)
+    count = {g: sum(size[i] for i in idx) for g, idx in of_gene.items()}
+    heap = [(-n, _lead_key(g), g) for g, n in count.items()]
+    heapq.heapify(heap)
+    left = set(range(len(feats)))
+    todo = sum(1 for f in feats if f["kind"] == kind)
+    groups = []
+    while todo and heap:
+        n, _key, g = heapq.heappop(heap)
+        if -n != count[g]:                     # stale: counts only fall, so re-queue it
+            heapq.heappush(heap, (-count[g], _lead_key(g), g))
+            continue
+        mine = of_gene[g] & left
+        if not mine:
+            continue
+        same = sorted({h for i in mine for h in feats[i]["genes"]
+                       if h != g and of_gene[h] & left == mine}, key=_lead_key)
+        left -= mine
+        for i in mine:
+            for h in feats[i]["genes"]:
+                count[h] -= size[i]
+        hit = sum(1 for i in mine if feats[i]["kind"] == kind)
+        if hit:
+            todo -= hit
+            groups.append({"genes": [g] + same, "feats": [feats[i] for i in sorted(mine)]})
     return groups
 
 
-def classify(ev, accs, cont_seq, on_target):
+def classify(ev, kept_rows, accs, cont_seq, on_target):
     """The findings from the evidence: the share, which contaminant entries show themselves, and
     the sample genes COMPETED OUT / SIPHONED / masked (and how many only lost a minority)."""
     # 1. each contaminant precursor's entries and sample proteins (an I/L twin of a sample digest
@@ -406,7 +479,7 @@ def classify(ev, accs, cont_seq, on_target):
     own, rows = {}, []
     for (ids, pep), ag in ev["cont"].items():
         conts = [a for a in _ids(ids) if is_contaminant_accession(a)]
-        targets = [a for a in _ids(ids) if not is_contaminant_accession(a)]
+        targets = _targets(ids)
         twin = on_target.get(pep) if not targets else None
         if twin:
             targets = [twin["target_acc"]]
@@ -430,19 +503,19 @@ def classify(ev, accs, cont_seq, on_target):
     seen = {c for conts, *_ in rows for c in conts}
     shows = {c for c in seen if n_own(c) >= MIN_UNIQUE_PEPTIDES}
 
-    # 2. the features: the sample's precursors the rule removed ("lost"), those shared with an
-    # entry that shows itself ("masked"), and the kept (contaminant-free) ones -- each with the
-    # genes it names
+    # 2. the features: the sample's precursors the rule takes ("lost"), those shared with an entry
+    # that shows itself ("masked"), and the connected kept (contaminant-free) ones -- each with
+    # the genes it names
     feats = []
     for conts, targets, pep, ag, twin in rows:
         if targets:
             feats.append({"kind": "masked" if any(c in shows for c in conts) else "lost",
                           "genes": {_gene(t, accs) for t in targets}, "accs": set(targets),
                           "conts": set(conts), "twin": pep if twin else None, **ag})
-    for ids, ag in ev["kept"].items():
-        targets = [a for a in _ids(ids) if not is_contaminant_accession(a)]
+    for ids in sorted(kept_rows):
+        targets = _targets(ids)
         feats.append({"kind": "kept", "genes": {_gene(t, accs) for t in targets},
-                      "accs": set(targets), "conts": set(), "twin": None, **ag})
+                      "accs": set(targets), "conts": set(), "twin": None, **ev["kept"][ids]})
 
     def entry(grp):
         lost = [f for f in grp["feats"] if f["kind"] == "lost"]
@@ -453,8 +526,8 @@ def classify(ev, accs, cont_seq, on_target):
                 "accessions": sorted({a for f in grp["feats"] for a in f["accs"]
                                       if _gene(a, accs) in mine}),
                 "contaminants": sorted({c for f in lost for c in f["conts"]}),
-                "n_removed_precursors": len(set().union(*(f["precursors"] for f in lost))),
-                "n_kept_precursors": len(set().union(*(f["precursors"] for f in kept))),
+                "n_removed_precursors": sum(len(f["precursors"]) for f in lost),
+                "n_kept_precursors": sum(len(f["precursors"]) for f in kept),
                 "removed_signal_pct": round(100 * ls / (ls + ks), 1) if ls + ks else None,
                 "removed_signal": ls, "kept_signal": ks,
                 **({"il_twin_peptides": sorted({f["twin"] for f in lost if f["twin"]})}
@@ -472,7 +545,7 @@ def classify(ev, accs, cont_seq, on_target):
     named = {g for f in feats if f["kind"] != "masked" for g in f["genes"]}
     masked = [{"gene": grp["genes"][0], "indistinguishable": grp["genes"][1:],
                "contaminants": sorted({c for f in grp["feats"] for c in f["conts"]}),
-               "n_shared_precursors": len(set().union(*(f["precursors"] for f in grp["feats"])))}
+               "n_shared_precursors": sum(len(f["precursors"]) for f in grp["feats"])}
               for grp in parsimony([f for f in feats if f["kind"] == "masked"
                                     and not f["genes"] & named], "masked")]
     competed.sort(key=lambda x: (-x["removed_signal"], x["gene"]))
@@ -492,6 +565,7 @@ def classify(ev, accs, cont_seq, on_target):
             "n_contaminant_entries_seen": len(seen),
             "contaminants_showing_themselves": sorted(shows),
             "contaminants_not_showing_themselves": sorted(seen - shows),
+            "n_kept_protein_sets_read": len(kept_rows),
             "competed_out": competed, "siphoned": siphoned, "masked": masked,
             "n_genes_lost_minority": minority,
             "drop_contaminant": [c for c in behind if not _digestion_enzyme(c)],
@@ -517,33 +591,65 @@ def _via(x):
     return ", ".join(x["contaminants"][:4]) + (" ..." if len(x["contaminants"]) > 4 else "")
 
 
-def competed_text(rec):
+def fate(rec, de=None):
+    """(staff sentence, taken) -- what was done with the shared precursors, as the records say
+    (DE-LIMP rule 1: never one pipeline's words for every case). `de`: the DE's own contaminant
+    record (de_provenance.json `contaminants`) when there is one; else DIA-NN's
+    --cont-quant-exclude as the search recorded it. taken: True when they were left out of the
+    quantities, else False (the client then reads the neutral words)."""
+    if isinstance(de, dict) and de.get("policy") in ("removed", "kept"):
+        if de.get("removed"):
+            owner = (str(de.get("rule_origin") or "").strip()
+                     or "[the filter's origin not recorded -- confirm]")
+            return (f"The DE removed every contaminant precursor before quantification ({owner}), "
+                    "so they are not in its results.", True)
+        return ("The DE kept contaminant precursors (--keep-contaminants), so it did not remove "
+                "these; which protein group DIA-NN put each one in is in the report's "
+                "Protein.Group.", False)
+    cq = rec.get("cont_quant_exclude") if isinstance(rec.get("cont_quant_exclude"), dict) else {}
+    if cq.get("value"):
+        return (f"DIA-NN's --cont-quant-exclude {cq['value']} ({cq.get('source')}) left them out "
+                "of its own quantities and normalisation, and a DE that applies the same rule "
+                "leaves them out too.", True)
+    if "value" in cq:
+        return (f"DIA-NN ran without --cont-quant-exclude ({cq.get('source')}), so its own "
+                "quantities kept them; a DE that removes contaminant precursors leaves them out.",
+                False)
+    return ("Whether DIA-NN left them out of its own quantities: [not recorded -- confirm]"
+            + (f" ({cq['not_recorded']})" if cq.get("not_recorded") else "") + ".", False)
+
+
+def competed_text(rec, de=None):
     co, org = rec.get("competed_out") or [], rec.get("organism") or "sample"
     if not co:
         return ""
-    return (f"COMPETED OUT: {_n(len(co), org + ' gene has', org + ' genes have')} no quantity "
-            "left: "
-            "every precursor of theirs that passes the q-value filter is shared with a contaminant "
-            "entry that shows no peptides of its own here, so DIA-NN's --cont-quant-exclude and "
-            "run_de.R's contaminant filter removed them all, and they are missing from the "
-            "results: "
+    one = len(co) == 1
+    return (f"COMPETED OUT: {_n(len(co), org + ' gene has', org + ' genes have')} no precursor "
+            f"of {'its' if one else 'their'} own: every precursor of {'it' if one else 'theirs'} "
+            "that passes the q-value filter is shared with a contaminant entry that shows no "
+            "peptides of its own here, so the contaminant rule (any contaminant accession in "
+            f"Protein.Ids) leaves {'it' if one else 'them'} no quantity: "
             + "; ".join(f"{x['gene']} ({_same(x)}"
                         f"{_n(x['n_removed_precursors'], 'precursor', 'precursors')} via {_via(x)})"
                         for x in co[:LIST_MAX])
-            + (f"; +{len(co) - LIST_MAX} more" if len(co) > LIST_MAX else "") + ".")
+            + (f"; +{len(co) - LIST_MAX} more" if len(co) > LIST_MAX else "") + ". "
+            + fate(rec, de)[0])
 
 
-def siphoned_text(rec):
+def siphoned_text(rec, de=None):
     si, org = rec.get("siphoned") or [], rec.get("organism") or "sample"
     if not si:
         return ""
-    return (f"SIPHONED: {_n(len(si), org + ' gene', org + ' genes')} kept precursors of their own, "
-            "but most of their signal was on precursors removed as contaminant (shared with an "
-            "entry that shows no peptides of its own here): "
+    one = len(si) == 1
+    return (f"SIPHONED: {_n(len(si), org + ' gene', org + ' genes')} kept precursors of "
+            f"{'its' if one else 'their'} own, but most of {'its' if one else 'their'} signal "
+            "is on precursors shared with an entry that shows no peptides of its own here, which the "
+            f"contaminant rule takes from {'it' if one else 'them'}: "
             + "; ".join(f"{x['gene']} ({_same(x)}{x['removed_signal_pct']:g}% of its signal "
-                        f"removed; {x['n_removed_precursors']} removed, "
+                        f"taken; {x['n_removed_precursors']} taken, "
                         f"{x['n_kept_precursors']} kept; via {_via(x)})" for x in si[:LIST_MAX])
-            + (f"; +{len(si) - LIST_MAX} more" if len(si) > LIST_MAX else "") + ".")
+            + (f"; +{len(si) - LIST_MAX} more" if len(si) > LIST_MAX else "") + ". "
+            + fate(rec, de)[0])
 
 
 def fix_text(rec):
@@ -580,7 +686,7 @@ def notes_text(rec):
     return " ".join(out)
 
 
-def staff_message(rec):
+def staff_message(rec, de=None):
     """The technical record: AUDIT.md, the job log, the watcher. Check codes and accessions
     allowed; never the client's words."""
     st = rec.get("status")
@@ -588,40 +694,49 @@ def staff_message(rec):
         return f"Not run: {rec.get('reason')}."
     if st == "not_applicable":
         return f"Not applicable: {rec.get('reason')}."
-    head = " ".join(x for x in (competed_text(rec), siphoned_text(rec)) if x)
+    head = " ".join(x for x in (competed_text(rec, de), siphoned_text(rec, de)) if x)
     if not head:
         org = rec.get("organism") or "sample"
         quiet = len(rec.get("contaminants_not_showing_themselves") or [])
-        head = (f"Checked: no {org} gene lost most of its signal, or all of it, to a contaminant "
-                f"entry ({_n(quiet, 'contaminant entry', 'contaminant entries')} seen without "
+        head = (f"Checked: no {org} gene lost all or most of its signal to a contaminant entry "
+                f"({_n(quiet, 'contaminant entry', 'contaminant entries')} seen without "
                 "peptides of their own).")
     return " ".join(x for x in (head, fix_text(rec), notes_text(rec)) if x)
 
 
-def plain_competed(rec):
+def plain_competed(rec, de=None):
     co = rec.get("competed_out") or []
     one = len(co) == 1
     it, its = ("it", "its") if one else ("them", "their")
-    return (f"{_names(co)} {'is' if one else 'are'} missing from the results because the "
-            f"contaminant list absorbed {its} peptides: every peptide of {it} that the search "
-            "found is shared with an entry of the contaminant list, and those peptides are left "
-            "out of the measurements. The Core can search again without those contaminant "
-            f"entries to recover {it}.")
+    if fate(rec, de)[1]:
+        return (f"{_names(co)} {'is' if one else 'are'} missing from the results because the "
+                f"contaminant list absorbed {its} peptides: every peptide of {it} that the search "
+                "found is shared with an entry of the contaminant list, and those peptides are "
+                "left out of the measurements. The Core can search again without those "
+                f"contaminant entries to recover {it}.")
+    return (f"Every peptide of {_names(co)} that the search found is shared with an entry of the "
+            f"contaminant list, so the data cannot tell {its} signal from that entry's. The Core "
+            f"can search again without those contaminant entries to measure {it} on {its} own.")
 
 
-def plain_siphoned(rec):
+def plain_siphoned(rec, de=None):
     si = rec.get("siphoned") or []
     one = len(si) == 1
-    return (f"Most of the signal of {_names(si)} was on peptides "
-            f"{'it shares' if one else 'they share'} with an entry of the contaminant list, which "
-            f"are left out of the measurements, so {'it is' if one else 'they are'} measured from "
-            f"{'its' if one else 'their'} remaining peptides only. The Core can search again "
-            "without those contaminant entries.")
+    shares, its = ("it shares", "its") if one else ("they share", "their")
+    if fate(rec, de)[1]:
+        return (f"Most of the signal of {_names(si)} was on peptides {shares} with an entry of the "
+                "contaminant list, which are left out of the measurements, so "
+                f"{'it is' if one else 'they are'} measured from {its} remaining peptides only. "
+                "The Core can search again without those contaminant entries.")
+    return (f"Most of the signal of {_names(si)} was on peptides {shares} with an entry of the "
+            f"contaminant list, so that part of {its} signal cannot be told apart from the "
+            "contaminant. The Core can search again without those contaminant entries.")
 
 
-def audit_findings(rec):
+def audit_findings(rec, de=None):
     """[(status, message, detail, plain)] for audit_results.py; [] for a record that does not
-    apply (another engine's report). COMPETED OUT and SIPHONED are each a WARN, never a FAIL: the
+    apply (another engine's report). `de`: the DE's contaminant record, which says what was done
+    with the shared precursors. COMPETED OUT and SIPHONED are each a WARN, never a FAIL: the
     check reports and never stops an analysis. A check that could not run is an INFO saying why.
     plain None = the check's usual words (audit_results.PLAIN)."""
     if not isinstance(rec, dict) or rec.get("status") == "not_applicable":
@@ -630,17 +745,19 @@ def audit_findings(rec):
         return [("INFO", staff_message(rec), {"reason": rec.get("reason"),
                                               "report": rec.get("report")}, None)]
     keys = ("report", "fasta", "organism", "contaminant_share_pct", "drop_contaminant",
-            "contaminants_not_showing_themselves", "q_columns", "cutoffs", "record_file")
+            "contaminants_not_showing_themselves", "q_columns", "cutoffs", "record_file",
+            "checked_by")
     detail = {k: rec.get(k) for k in keys if rec.get(k) is not None}
     detail.update({k: [x["gene"] for x in rec.get(k) or []]
                    for k in ("competed_out", "siphoned", "masked")})
     tail = " ".join(x for x in (fix_text(rec), notes_text(rec)) if x)
     out = []
     if rec.get("competed_out"):
-        out.append(("WARN", f"{competed_text(rec)} {tail}", detail, plain_competed(rec)))
+        out.append(("WARN", f"{competed_text(rec, de)} {tail}", detail, plain_competed(rec, de)))
     if rec.get("siphoned"):
-        out.append(("WARN", f"{siphoned_text(rec)} {fix_text(rec) if out else tail}".strip(),
-                    detail, plain_siphoned(rec)))
+        # the fix and the notes once, in the first of the two
+        out.append(("WARN", siphoned_text(rec, de) + ("" if out else f" {tail}"), detail,
+                    plain_siphoned(rec, de)))
     return out or [("PASS", staff_message(rec), detail, None)]
 
 
@@ -654,38 +771,66 @@ def say(rec, stream=None):
 # ---- the record --------------------------------------------------------------------------------
 def write(rec, out=None, provenance=None):
     """<out> (JSON) and search_provenance.json `contaminant_competition` (merged in place: a .tmp
-    then a rename, so a reader never sees half a file). -> the files written."""
-    written = []
+    then a rename, so a reader never sees half a file). -> ([files written], [what could not be
+    written, and why]); never raises."""
     rec["message"] = staff_message(rec)            # what the watcher and a person read
+    written, problems = [], []
     if out:
         rec["record_file"] = os.path.abspath(out)
-        with open(out + ".tmp", "w") as fh:
-            json.dump(rec, fh, indent=2)
-        os.replace(out + ".tmp", out)
-        written.append(out)
+        try:
+            with open(out + ".tmp", "w") as fh:
+                json.dump(rec, fh, indent=2)
+            os.replace(out + ".tmp", out)
+            written.append(out)
+        except (OSError, TypeError, ValueError) as e:
+            problems.append(f"{out} ({e})")
     if provenance and os.path.isfile(provenance):
-        with open(provenance) as fh:
-            prov = json.load(fh)
-        prov["contaminant_competition"] = rec
-        with open(provenance + ".tmp", "w") as fh:
-            json.dump(prov, fh, indent=2)
-        os.replace(provenance + ".tmp", provenance)
-        written.append(provenance)
-    return written
+        try:
+            with open(provenance) as fh:
+                prov = json.load(fh)
+            prov["contaminant_competition"] = rec
+            with open(provenance + ".tmp", "w") as fh:
+                json.dump(prov, fh, indent=2)
+            os.replace(provenance + ".tmp", provenance)
+            written.append(provenance)
+        except (OSError, TypeError, ValueError, AttributeError) as e:
+            problems.append(f"{provenance} ({e})")
+    return written, problems
+
+
+def set_aside_record(out):
+    """A search generated into `out`: an earlier search's record there does not describe it --
+    set aside (diann_parallel.set_aside: renamed .stale-<time>, never deleted), and said. The
+    watcher would otherwise show the earlier search's genes while this one queues and runs (review
+    of 2.14). -> the new path, or None."""
+    from diann_parallel import set_aside
+    path = os.path.join(out, RECORD)
+    try:
+        new = set_aside(path)
+    except ValueError as e:              # never a reason to stop a generated search: it is said
+        sys.stderr.write(f"{TAG} WARNING: {e}; left in place\n")
+        return None
+    if new:
+        sys.stderr.write(f"{TAG} an earlier search's {RECORD} in {out} does not describe this "
+                         f"search: set aside as {os.path.basename(new)}\n")
+    return new
 
 
 def job_lines(report, fasta, out_dir):
     """The bash a DIA-NN search job ends with (diann_parallel.py step 5, run_search.py's
     single-shot job): this check on its report, under the generator's own python (the pipeline
-    env's, which has pyarrow), else python3. It never fails the job; a check that cannot start is
-    said in the log, and AUDIT.md then checks the report itself."""
+    env's, which has pyarrow), else python3, for at most JOB_TIME_LIMIT seconds where `timeout`
+    exists. It never fails the job; a check that does not finish is said in the log, and the
+    audit then checks the report itself."""
     report, fasta, out_dir = (os.path.abspath(p) for p in (report, fasta, out_dir))
     return [f'PY={shlex.quote(sys.executable)}; [ -x "$PY" ] || PY=python3; '
-            f'"$PY" {shlex.quote(os.path.abspath(__file__))} --report {shlex.quote(report)} '
+            f'T=""; command -v timeout >/dev/null 2>&1 && T="timeout {JOB_TIME_LIMIT}"; '
+            f'$T "$PY" {shlex.quote(os.path.abspath(__file__))} --report {shlex.quote(report)} '
             f'--fasta {shlex.quote(fasta)} --out {shlex.quote(os.path.join(out_dir, RECORD))} '
             f'--provenance {shlex.quote(os.path.join(out_dir, PROVENANCE))} '
-            '|| echo "WARNING: the contaminant competition check could not run -- the messages '
-            'above say why" >&2']
+            '|| echo "WARNING: the contaminant competition check did not finish (exit $?; at most '
+            f'{JOB_TIME_LIMIT // 60} min in the search job) -- the messages above say why; the '
+            'audit checks the report itself" >&2']
 
 
 def load(search_out):
@@ -714,17 +859,14 @@ def main(argv=None):
     a = ap.parse_args(argv)
     if not (a.report or a.search_out):
         ap.error("give --report or --search-out")
-    report, fasta, meta = resolve_inputs(a.search_out, a.report, a.fasta, a.fasta_meta)
-    rec = check(report, fasta, meta, a.q_cutoff)
+    report, fasta, meta, why = resolve_inputs(a.search_out, a.report, a.fasta, a.fasta_meta)
+    rec = check(report, fasta, meta, a.q_cutoff, no_fasta_reason=why)
     out = a.out or (os.path.join(a.search_out, RECORD) if a.search_out else None)
     prov = a.provenance or (os.path.join(a.search_out, PROVENANCE) if a.search_out else None)
-    try:
-        written = write(rec, out, prov)
-    except (OSError, ValueError) as e:
-        written = []
-        print(f"{TAG} NOTE: the record could not be written ({e}); it is in this log only.",
-              file=sys.stderr)
+    written, problems = write(rec, out, prov)
     say(rec)
+    for p in problems:
+        print(f"{TAG} NOTE: could not write {p}.", file=sys.stderr)
     if written:
         print(f"{TAG} recorded in {', '.join(written)}", file=sys.stderr)
     summary = {k: rec.get(k) for k in ("status", "reason", "drop_contaminant")}

@@ -87,7 +87,11 @@ node_fault_fix() {
 # the laptop is, so a darwin check here would send BSD syntax to a GNU stat. Getting
 # this wrong is silent -- stat writes to stderr, the substitution yields "", and stall
 # detection below just never fires.
-if $HIVE || [ "$(uname -s)" = "Linux" ]; then STAT_MTIME="stat -c %Y"; else STAT_MTIME="stat -f %m"; fi
+if $HIVE || [ "$(uname -s)" = "Linux" ]; then
+  STAT_MTIME="stat -c %Y"; STAT_SIZE_MTIME="stat -c %s:%Y"
+else
+  STAT_MTIME="stat -f %m"; STAT_SIZE_MTIME="stat -f %z:%m"
+fi
 
 # ---- real progress (outdir_progress: both modes) ----------------------------
 # Counted from what the 5-step chain actually leaves on disk, not guessed from the log:
@@ -360,12 +364,20 @@ outdir_progress
 lfq_rec=""
 [ -n "$OUTDIR" ] && lfq_rec="$(run "cat $(printf %q "$OUTDIR/sage_lfq_check.json") 2>/dev/null" 2>/dev/null)"
 # ---- DIA-NN: the sample proteins the contaminant list took (contaminant_competition.py, the
-# search's last job). Not a failure either. Read into a file, not a variable: a 400-run record
-# is larger than one environment variable may be.
-cc_file=""
-if [ -n "$OUTDIR" ]; then
+# search's last job). Not a failure either. Read only once the search has finished, and shown
+# only when it describes the report as it is now (size and mtime, as the record states them): a
+# re-search into the same folder must never show the previous search's genes (review of 2.14).
+# Into a file, not a variable: a 400-run record is larger than one environment variable may be.
+cc_file=""; cc_py=""; cc_stat=""
+if [ -n "$OUTDIR" ] && [ "$done" = true ] && [ "$failed" = false ]; then
   cc_file="$(mktemp 2>/dev/null || echo "${TMPDIR:-/tmp}/watch_run_cc.$$")"
   run "cat $(printf %q "$OUTDIR/contaminant_competition.json") 2>/dev/null" > "$cc_file" 2>/dev/null
+  # Git Bash: a native Windows python3 reads C:/..., not /tmp/...
+  cc_py="$cc_file"; command -v cygpath >/dev/null 2>&1 && cc_py="$(cygpath -m "$cc_file")"
+  cc_rep="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("report") or "")' \
+            "$cc_py" 2>/dev/null | tr -d '\r')"
+  [ -n "$cc_rep" ] && cc_stat="$(run "$STAT_SIZE_MTIME $(printf %q "$cc_rep") 2>/dev/null" \
+                                 2>/dev/null | tr -dc '0-9:')"
 fi
 
 # ---- narration: what this stage is doing, plus something to read while waiting
@@ -376,7 +388,8 @@ notes="$(python3 "$HERE/pipeline_notes.py" --stage "$stage" --index "$POLL" 2>/d
 STATE="$state" DONE="$done" FAILED="$failed" STALLED="$stalled" JOB="$JOB" MODE="$MODE" \
 ECLASS="$err_class" FIX="$fix" TAIL="$tail_txt" ATASKS="${array_summary:-}" \
 STAGE="$stage" NDONE="${n_done:-0}" NTOTAL="${n_total:-0}" NOTES="$notes" \
-REASON="${reason:-}" ATERM="${a_term:-0}" LFQ_REC="$lfq_rec" NF_JSON="$nf_json" CC_FILE="$cc_file" \
+REASON="${reason:-}" ATERM="${a_term:-0}" LFQ_REC="$lfq_rec" NF_JSON="$nf_json" CC_FILE="$cc_py" \
+CC_STAT="$cc_stat" \
 python3 - <<'PY'
 import os, json, re
 n_done, n_total = int(os.environ.get("NDONE") or 0), int(os.environ.get("NTOTAL") or 0)
@@ -457,7 +470,13 @@ try:
         cc = json.load(fh)
 except (OSError, ValueError):
     cc = None
-if isinstance(cc, dict) and cc.get("status"):
+st = cc.get("report_stat") if isinstance(cc, dict) else None
+fresh = isinstance(st, dict) and f"{st.get('size')}:{st.get('mtime')}" == os.environ.get("CC_STAT")
+if isinstance(cc, dict) and cc.get("status") and not fresh:
+    out["contaminant_competition"] = {
+        "status": "stale", "reason": "the record does not describe the report as it is now (its "
+                                     "size or modification time differ), so it was not read"}
+elif isinstance(cc, dict) and cc.get("status"):
     out["contaminant_competition"] = {
         "status": cc["status"], "reason": cc.get("reason"),
         "competed_out": [x.get("gene") for x in cc.get("competed_out") or []],

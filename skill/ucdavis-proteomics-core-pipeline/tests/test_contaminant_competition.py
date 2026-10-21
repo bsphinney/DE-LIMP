@@ -9,7 +9,7 @@ to keep the list and have every DIA-NN search report what it takes: contaminant_
 run by the search's last job, recorded in search_provenance.json and AUDIT.md, and read to the
 client in the report's Audit & caveats table. It never blocks.
 
-Stdlib only; the parquet reader's test is skipped without pyarrow.
+Stdlib only; the parquet reader's tests are skipped without pyarrow.
 """
 import json
 import os
@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SKILL = os.path.dirname(HERE)
@@ -27,11 +28,13 @@ sys.path.insert(0, SCRIPTS)
 
 import audit_results as ar  # noqa: E402
 import contaminant_competition as cc  # noqa: E402
+import diann_q_columns as dq  # noqa: E402
+import run_search  # noqa: E402
 
 try:
     import pyarrow as pa
     import pyarrow.parquet as pq
-except ImportError:                       # the stdlib-only CI: that test is skipped
+except ImportError:                       # the stdlib-only CI: those tests are skipped
     pa = pq = None
 
 CHECK = os.path.join(SCRIPTS, "contaminant_competition.py")
@@ -63,6 +66,8 @@ FASTA = "".join([
     entry("P68133", "ACTS_HUMAN", "ACTA1", ACTA1),
     entry("P02768", "ALBU_HUMAN", "ALB", ALB), entry("P04406", "G3P_HUMAN", "GAPDH", GAPDH),
     entry("Q90001", "TGT_HUMAN", "TGT", TGT),
+    entry("Q80001", "XG_HUMAN", "XG", "MKWQWQWQWQK"),
+    entry("Q80002", "YG_HUMAN", "YG", "MRQWQWQWR"),
     entry("P60712", "ACTB_BOVIN", "ACTB", ACTB, True),
     entry("Q9XSJ4", "ENOA_BOVIN", "ENO1", ENO1_BOVIN, True),
     entry("P02769", "ALBU_BOVIN", "ALB", BSA, True),
@@ -83,6 +88,15 @@ MASKED = [("P02768;Cont_P02769", "VVVVVVVK", 300), ("Cont_P02769", "NNNNNNNK", 2
 PARALOGS = [("P60709;P68133;Cont_P60712", "GGGGGGGK", 900),
             ("P60709;P68133;Cont_P60712", "HHHHHHHR", 700)]
 IL_TWIN = [("Cont_Q90002", "GHHEAELKPLAQSHATK", 600), ("Q90001;Cont_Q90002", "ASEDLKK", 100)]
+# The review's case: XG's one taken precursor, one it shares with YG -- whose own three peptides
+# name YG alone, in rows that name no seed accession.
+CLOSURE = [("Q80001;Cont_P60712", "WQWQWQWQK", 900), ("Q80001;Q80002", "QWQWQWQK", 2000),
+           ("Q80002", "QQWWQQWK", 50), ("Q80002", "WWQQWWQK", 50), ("Q80002", "QWWQQWWK", 50)]
+
+# The DE's contaminant record (de_provenance.json `contaminants`, contaminants.R)
+DE_REMOVED = {"policy": "removed", "removed": True,
+              "rule_origin": "the rule of DIA-NN's --cont-quant-exclude, applied here"}
+DE_KEPT = {"policy": "kept", "removed": False}
 
 
 def read(path):
@@ -157,7 +171,7 @@ class TheCheck(Fixture):
         (co,) = rec["competed_out"]
         self.assertEqual((co["gene"], co["indistinguishable"]), ("ACTB", ["ACTA1"]))
         self.assertIn("ACTB (= ACTA1; 2 precursors via Cont_P60712)", cc.staff_message(rec))
-        self.assertTrue(cc.plain_competed(rec).startswith("ACTB is missing"))
+        self.assertTrue(cc.plain_competed(rec, DE_REMOVED).startswith("ACTB is missing"))
 
     def test_a_paralog_that_keeps_peptides_of_its_own_takes_the_shared_ones(self):
         rec = self.run_check(CLEAN + PARALOGS + [("P68133", "PPPPPPPK", 10)])
@@ -165,6 +179,18 @@ class TheCheck(Fixture):
         (si,) = rec["siphoned"]
         self.assertEqual((si["gene"], si["indistinguishable"], si["n_kept_precursors"]),
                          ("ACTA1", [], 1))
+
+    def test_the_kept_evidence_is_read_to_closure(self):
+        """Review of 2.14 (M1): only the kept rows naming a seed accession were read, so YG's own
+        peptides were never seen, XG took the peptide it shares with YG, and came out SIPHONED --
+        or, with that peptide's signal above the taken one, as a PASS while XG had nothing left."""
+        rec = self.run_check(CLEAN + CLOSURE)
+        self.assertEqual([c["gene"] for c in rec["competed_out"]], ["XG"])
+        self.assertEqual(rec["siphoned"], [])
+        self.assertEqual(rec["n_genes_lost_minority"], 0)
+        kept = {ids: v for ids, v in cc.read_report(os.path.join(self.d, "report.tsv"))[0]
+                ["kept"].items()}
+        self.assertEqual(cc.connected(kept, {"Q80001"}, {}, {}), {"Q80001;Q80002", "Q80002"})
 
     def test_a_clean_search_finds_nothing(self):
         rec = self.run_check(CLEAN)
@@ -235,6 +261,19 @@ class TheCheck(Fixture):
         self.assertEqual(rec["status"], "not_run")
         self.assertIn("not a DIA-NN precursor report", rec["reason"])
 
+    def test_the_check_never_raises(self):
+        """Review of 2.14 (M3): a parquet Q.Value stored as text made pyarrow raise
+        ArrowNotImplementedError out of check(), and the audit died before AUDIT.md."""
+        rep = write_tsv(os.path.join(self.d, "report.tsv"), CLEAN + COMPETED)
+        for exc in (RuntimeError("boom"), KeyError("Run"), NotImplementedError("less_equal")):
+            with self.subTest(exc=type(exc).__name__), \
+                    mock.patch.object(cc, "read_report", side_effect=exc):
+                rec = cc.check(rep, self.fasta, self.meta)
+                self.assertEqual(rec["status"], "not_run")
+                self.assertIn(f"the check failed on report.tsv ({type(exc).__name__}",
+                              rec["reason"])
+                self.assertEqual(cc.audit_findings(rec)[0][0], "INFO")
+
     def test_a_digestion_enzyme_is_never_offered_for_dropping(self):
         rec = self.run_check(CLEAN + [("P04406;Cont_P00761", "SSSSSSSSK", 9000)])
         self.assertEqual([s["gene"] for s in rec["siphoned"]], ["GAPDH"])
@@ -242,16 +281,59 @@ class TheCheck(Fixture):
                          ([], ["Cont_P00761"]))
 
 
+class TheRecordDescribesOneReport(Fixture):
+    def test_a_changed_report_is_not_described_by_the_old_record(self):
+        rec = self.run_check(CLEAN + COMPETED)
+        rep = rec["report"]
+        self.assertTrue(cc.describes(rec, rep))
+        write_tsv(rep, CLEAN)                         # a re-search into the same folder
+        os.utime(rep, (1, 1))
+        self.assertFalse(cc.describes(rec, rep))
+        self.assertFalse(cc.describes(dict(rec, report_stat=None), rep))
+        self.assertFalse(cc.describes(rec, os.path.join(self.d, "gone.tsv")))
+
+    def test_a_record_made_with_other_cutoffs_does_not_stand_for_the_de(self):
+        rec = self.run_check(CLEAN + COMPETED)
+        self.assertTrue(cc.agrees_with_de(rec, {}))
+        self.assertTrue(cc.agrees_with_de(rec, {"q_cutoff": 0.01}))
+        self.assertFalse(cc.agrees_with_de(rec, {"q_cutoff": 0.05}))
+        self.assertFalse(cc.agrees_with_de(rec, {"q_columns": ["Q.Value"]}))
+
+
+class TheQFilterIsOne(unittest.TestCase):
+    """Review of 2.14 (M6): three copies of run_de.R's q filter, and the parquet ones dropped a
+    NaN that limpa (and the text reader) keep."""
+
+    def test_a_row_is_dropped_only_when_a_value_exceeds_its_cutoff(self):
+        cuts = {"Q.Value": 0.01, "PG.Q.Value": 0.05}
+        for row, keep in (({"Q.Value": "0.01", "PG.Q.Value": "0.05"}, True),
+                          ({"Q.Value": "nan", "PG.Q.Value": ""}, True),
+                          ({"Q.Value": "NA"}, True),
+                          ({"Q.Value": "0.02", "PG.Q.Value": "0.01"}, False),
+                          ({"Q.Value": "x"}, False)):
+            with self.subTest(row=row):
+                self.assertEqual(dq.row_passes(row, cuts), keep)
+
+    def test_every_reader_uses_it(self):
+        for name in ("contaminant_competition.py", "audit_results.py", "pass_comparison.py"):
+            src = read(os.path.join(SCRIPTS, name))
+            with self.subTest(script=name):
+                self.assertIn("keep_expression", src)
+                self.assertNotIn("<= cut", src)
+
+
 class TheWords(Fixture):
     TECHNICAL = ("Cont_", "precursor", "--drop", "q-value", "COMPETED", "SIPHONED", "P60712",
-                 "fetch_fasta", "run_de")
+                 "fetch_fasta", "run_de", "DIA-NN")
 
     def test_competed_out_names_the_genes_says_why_and_offers_the_re_search(self):
         rec = self.run_check(CLEAN + COMPETED + IL_TWIN)
-        (f,) = cc.audit_findings(rec)
+        (f,) = cc.audit_findings(rec, DE_REMOVED)
         status, msg, detail, plain = f
         self.assertEqual(status, "WARN")
         self.assertIn("COMPETED OUT", msg)
+        self.assertIn("The DE removed every contaminant precursor before quantification (the rule "
+                      "of DIA-NN's --cont-quant-exclude, applied here)", msg)
         self.assertIn("--drop-contaminant Cont_P60712 --drop-contaminant Cont_Q90002", msg)
         self.assertIn("search again", msg)
         self.assertEqual(detail["competed_out"], ["ACTB", "TGT"])
@@ -260,6 +342,39 @@ class TheWords(Fixture):
         self.assertIn("The Core can search again without those contaminant entries", plain)
         for t in self.TECHNICAL:
             self.assertNotIn(t, plain)
+
+    def test_the_words_follow_the_records_never_one_pipeline(self):
+        """Review of 2.14 (M2, rule 1): "--cont-quant-exclude and run_de.R's contaminant filter
+        removed them all" was said for a DE with --keep-contaminants, a cfg without the flag and
+        any other DE pipeline alike."""
+        rec = self.run_check(CLEAN + COMPETED + SIPHONED)
+        cases = {
+            "kept": (DE_KEPT, "--keep-contaminants", False),
+            "flag recorded": (None, "DIA-NN's --cont-quant-exclude Cont_ (x.log.txt)", True),
+            "flag absent": (None, "DIA-NN ran without --cont-quant-exclude", False),
+            "not recorded": (None, "[not recorded -- confirm] (no DIA-NN log)", False)}
+        cq = {"flag recorded": {"value": "Cont_", "source": "x.log.txt"},
+              "flag absent": {"value": None, "source": "x.log.txt"},
+              "not recorded": {"not_recorded": "no DIA-NN log"}}
+        for name, (de, said, taken) in cases.items():
+            with self.subTest(case=name):
+                r = dict(rec, cont_quant_exclude=cq.get(name, rec.get("cont_quant_exclude")))
+                (co, si) = cc.audit_findings(r, de)
+                for f in (co, si):
+                    self.assertIn(said, f[1])
+                    self.assertNotIn("run_de.R's contaminant filter removed", f[1])
+                    for t in self.TECHNICAL:
+                        self.assertNotIn(t, f[3])
+                self.assertEqual(co[3].startswith("ACTB is missing from the results"), taken)
+                self.assertEqual("remaining peptides only" in si[3], taken)
+                if not taken:
+                    self.assertIn("cannot tell its signal from that entry's", co[3])
+                    self.assertIn("cannot be told apart from the contaminant", si[3])
+
+    def test_the_search_record_says_what_its_own_reader_found(self):
+        rec = self.run_check(CLEAN + COMPETED)
+        self.assertIn("not_recorded", rec["cont_quant_exclude"])      # no DIA-NN log here
+        self.assertIn("[not recorded -- confirm]", cc.staff_message(rec))
 
     def test_a_database_built_by_an_older_rule_is_told_to_be_rebuilt(self):
         rep = write_tsv(os.path.join(self.d, "report.tsv"), CLEAN + COMPETED)
@@ -270,22 +385,23 @@ class TheWords(Fixture):
         self.assertNotIn("older", cc.audit_findings(self.run_check(CLEAN + COMPETED))[0][1])
 
     def test_one_gene_reads_in_the_singular(self):
-        plain = cc.audit_findings(self.run_check(CLEAN + COMPETED))[0][3]
+        plain = cc.audit_findings(self.run_check(CLEAN + COMPETED), DE_REMOVED)[0][3]
         self.assertTrue(plain.startswith("ACTB is missing from the results because the "
                                          "contaminant list absorbed its peptides"), plain)
 
     def test_siphoned_is_a_caveat_naming_the_genes(self):
-        (f,) = cc.audit_findings(self.run_check(CLEAN + SIPHONED))
+        (f,) = cc.audit_findings(self.run_check(CLEAN + SIPHONED), DE_REMOVED)
         self.assertEqual(f[0], "WARN")
-        self.assertIn("SIPHONED: 1 Homo sapiens gene kept", f[1])
+        self.assertIn("SIPHONED: 1 Homo sapiens gene kept precursors of its own", f[1])
         self.assertIn("ENO1", f[3])
         self.assertIn("remaining peptides only", f[3])
         for t in self.TECHNICAL:
             self.assertNotIn(t, f[3])
 
     def test_both_are_two_rows_of_findings_and_never_a_fail(self):
-        fs = cc.audit_findings(self.run_check(CLEAN + COMPETED + SIPHONED))
+        fs = cc.audit_findings(self.run_check(CLEAN + COMPETED + SIPHONED), DE_REMOVED)
         self.assertEqual([f[0] for f in fs], ["WARN", "WARN"])
+        self.assertEqual(sum("--drop-contaminant" in f[1] for f in fs), 1)   # the fix once
         md = ar.client_section_md([{"check": "contaminant_competition", "status": s,
                                     "message": m, "plain": p} for s, m, _d, p in fs])
         row = [ln for ln in md.splitlines() if ln.startswith("| Sample proteins")][0]
@@ -296,11 +412,18 @@ class TheWords(Fixture):
     def test_clean_is_a_short_checked_none(self):
         (f,) = cc.audit_findings(self.run_check(CLEAN))
         self.assertEqual((f[0], f[3]), ("PASS", None))
-        self.assertTrue(f[1].startswith("Checked: no Homo sapiens gene lost"), f[1])
+        self.assertTrue(f[1].startswith("Checked: no Homo sapiens gene lost all or most"), f[1])
         label, meaning = ar.client_row({"check": "contaminant_competition", "status": "PASS",
                                         "message": f[1]})
         self.assertEqual(label, "Sample proteins taken by the contaminant list")
-        self.assertTrue(meaning.startswith("Checked: no protein of the sample"), meaning)
+        self.assertEqual(meaning, "Checked: no protein of the sample lost all or most of its "
+                                  "signal to the contaminant list.")
+
+    def test_an_older_audit_md_reads_the_check_s_words(self):
+        label, meaning = ar.client_row({"check": "contaminant_competition", "status": "WARN",
+                                        "message": "COMPETED OUT: ..."})
+        self.assertNotEqual(meaning, ar.GENERIC_MEANING["WARN"])
+        self.assertIn("contaminant list", meaning)
 
     def test_not_run_reads_as_not_checked(self):
         label, meaning = ar.client_row({"check": "contaminant_competition", "status": "INFO",
@@ -312,18 +435,21 @@ class TheWords(Fixture):
 
 
 class TheRecordAndTheAudit(Fixture):
-    def search_out(self, rows, prov_extra=None):
+    def search_out(self, rows, prov_extra=None, failing=()):
         out = os.path.join(self.d, "search_out")
-        rep = write_tsv(os.path.join(out, "report.tsv"), rows)
+        rep = write_tsv(os.path.join(out, "report.tsv"), rows, failing)
         write(os.path.join(out, "search_provenance.json"), json.dumps(
             dict({"engine": "diann", "fasta": self.fasta, "result": {"report": rep}},
                  **(prov_extra or {}))))
         return out, rep
 
+    def cli(self, out):
+        return subprocess.run([sys.executable, CHECK, "--search-out", out], capture_output=True,
+                              text=True, timeout=120)
+
     def test_the_cli_writes_the_record_and_the_provenance_and_exits_0(self):
         out, rep = self.search_out(CLEAN + COMPETED)
-        r = subprocess.run([sys.executable, CHECK, "--search-out", out], capture_output=True,
-                           text=True, timeout=120)
+        r = self.cli(out)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("[contaminant_competition] WARNING: COMPETED OUT", r.stderr)
         rec = json.loads(read(os.path.join(out, cc.RECORD)))
@@ -332,6 +458,7 @@ class TheRecordAndTheAudit(Fixture):
         self.assertEqual(prov["contaminant_competition"]["competed_out"], rec["competed_out"])
         self.assertEqual(prov["engine"], "diann")                 # merged, never replaced
         self.assertEqual(json.loads(r.stdout)["competed_out"], ["ACTB"])
+        self.assertTrue(cc.describes(rec, rep))
 
     def test_the_cli_on_a_missing_report_records_not_run_and_exits_0(self):
         r = subprocess.run([sys.executable, CHECK, "--report", os.path.join(self.d, "none.parquet"),
@@ -341,11 +468,20 @@ class TheRecordAndTheAudit(Fixture):
         self.assertIn("NOTE: Not run", r.stderr)
         self.assertEqual(json.loads(read(os.path.join(self.d, "rec.json")))["status"], "not_run")
 
-    def audit(self, de_prov, search_out=None):
-        de = os.path.join(self.d, "de")
-        write(os.path.join(de, "de_provenance.json"), json.dumps(de_prov))
-        args = [sys.executable, AUDIT, "--out", os.path.join(self.d, "AUDIT.md"), "--de-dir", de,
+    def test_an_unreadable_search_record_is_named_as_the_reason(self):
+        out, rep = self.search_out(CLEAN)
+        write(os.path.join(out, "search_provenance.json"), "{not json")
+        _rep, fasta, _meta, why = cc.resolve_inputs(out)
+        self.assertIsNone(fasta)
+        self.assertIn("search_provenance.json in", why)
+
+    def audit(self, de_prov=None, search_out=None):
+        args = [sys.executable, AUDIT, "--out", os.path.join(self.d, "AUDIT.md"),
                 "--fasta-meta", self.fasta + ".meta.json"]
+        if de_prov is not None:
+            de = os.path.join(self.d, "de")
+            write(os.path.join(de, "de_provenance.json"), json.dumps(de_prov))
+            args += ["--de-dir", de]
         if search_out:
             args += ["--search-out", search_out]
         r = subprocess.run(args, capture_output=True, text=True, timeout=180, cwd=self.d)
@@ -354,23 +490,24 @@ class TheRecordAndTheAudit(Fixture):
         md = read(os.path.join(self.d, "AUDIT.md"))
         return [f for f in audit["findings"] if f["check"] == "contaminant_competition"], md
 
-    def test_the_audit_quotes_the_search_s_record(self):
+    def test_the_audit_quotes_the_search_s_record_in_the_de_s_words(self):
         out, rep = self.search_out(CLEAN + COMPETED)
-        subprocess.run([sys.executable, CHECK, "--search-out", out], capture_output=True,
-                       timeout=120)
-        fs, md = self.audit({"input": rep}, out)
+        self.cli(out)
+        fs, md = self.audit({"input": rep, "contaminants": DE_REMOVED}, out)
         (f,) = fs
         self.assertEqual(f["status"], "WARN")
         self.assertIn("ACTB is missing from the results", f["plain"])
         self.assertIn("**contaminant_competition** — COMPETED OUT", md)
-        self.assertNotIn("checked_by", json.dumps(f))
+        self.assertIn("The DE removed every contaminant precursor", f["message"])
+        self.assertNotIn("checked_by", f["detail"])
         self.assertIn("ACTB is missing", ar.client_section_md([f]))
 
     def test_a_search_without_a_record_is_checked_by_the_audit(self):
         out, rep = self.search_out(CLEAN + SIPHONED)
-        (f,), _md = self.audit({"input": rep, "q_cutoff": 0.01})
+        (f,), _md = self.audit({"input": rep, "q_cutoff": 0.01, "contaminants": DE_REMOVED})
         self.assertEqual(f["status"], "WARN")
         self.assertIn("ENO1", f["plain"])
+        self.assertIn("checked_by", f["detail"])
 
     def test_a_record_of_another_report_is_not_used_for_this_one(self):
         out, rep = self.search_out(CLEAN)
@@ -380,12 +517,61 @@ class TheRecordAndTheAudit(Fixture):
         (f,), _md = self.audit({"input": rep}, out)
         self.assertEqual(f["status"], "PASS")
 
+    def test_a_previous_search_s_record_is_not_read_for_a_re_search(self):
+        """Review of 2.14 (M4): the step-5 job deletes the record but not its copy in
+        search_provenance.json, and the audit matched the report by name alone."""
+        out, rep = self.search_out(CLEAN + COMPETED)
+        self.cli(out)                                 # ACTB taken in the first search
+        write_tsv(rep, CLEAN)                         # the re-search's report, same name
+        os.utime(rep, (1, 1))
+        os.remove(os.path.join(out, cc.RECORD))       # step 5 cleared the file, not the copy
+        (f,), _md = self.audit({"input": rep}, out)
+        self.assertEqual(f["status"], "PASS")
+
+    def test_a_record_made_with_other_cutoffs_is_checked_again(self):
+        out, rep = self.search_out(CLEAN + COMPETED, failing=[("P60709", "EEEEEEEK", 50)])
+        self.cli(out)                                 # at 1%: ACTB's own peptide fails
+        (f,), _md = self.audit({"input": rep, "q_cutoff": 0.6, "contaminants": DE_REMOVED}, out)
+        self.assertIn("SIPHONED", f["message"])       # at the DE's 60% it is kept
+        self.assertIn("checked_by", f["detail"])
+
     def test_a_check_that_could_not_run_is_in_the_audit_with_its_reason(self):
         gone = os.path.join(self.d, "gone", "report.parquet")
         (f,), md = self.audit({"input": gone})
         self.assertEqual(f["status"], "INFO")
         self.assertIn("Not run: the report", f["message"])
         self.assertIn("ℹ️ **contaminant_competition** — Not run", md)
+
+    def test_a_search_only_audit_still_says_a_check_did_not_run(self):
+        """Review of 2.14 (M5): with no DE record a not_run record was dropped, so the audit
+        said nothing at all."""
+        out, rep = self.search_out(CLEAN)
+        os.remove(rep)
+        write(os.path.join(out, cc.RECORD), json.dumps(
+            {"status": "not_run", "report": rep, "reason": "pyarrow is not installed"}))
+        (f,), _md = self.audit(None, out)
+        self.assertEqual(f["status"], "INFO")
+        self.assertIn("Not run:", f["message"])
+
+    def test_a_search_only_audit_reads_the_search_s_report(self):
+        out, rep = self.search_out(CLEAN + COMPETED)
+        (f,), _md = self.audit(None, out)
+        self.assertEqual(f["status"], "WARN")
+        self.assertIn("ACTB", f["plain"])
+
+    def test_the_audit_is_written_whatever_the_check_does(self):
+        out, rep = self.search_out(CLEAN + COMPETED)
+        de = os.path.join(self.d, "de")
+        write(os.path.join(de, "de_provenance.json"), json.dumps({"input": rep}))
+        argv = ["audit_results.py", "--out", os.path.join(self.d, "AUDIT.md"), "--de-dir", de]
+        with mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(cc, "audit_findings", side_effect=RuntimeError("boom")), \
+                mock.patch("sys.stdout"):
+            ar.main()
+        audit = json.loads(read(os.path.join(self.d, "AUDIT.json")))
+        (f,) = [x for x in audit["findings"] if x["check"] == "contaminant_competition"]
+        self.assertEqual(f["status"], "INFO")
+        self.assertIn("boom", f["message"])
 
     def test_another_engine_s_search_is_not_asked(self):
         out, rep = self.search_out(CLEAN + COMPETED, {"engine": "sage"})
@@ -394,11 +580,18 @@ class TheRecordAndTheAudit(Fixture):
 
     def test_a_record_that_could_not_run_is_tried_again_by_the_audit(self):
         out, rep = self.search_out(CLEAN + COMPETED)
-        write(os.path.join(out, cc.RECORD), json.dumps(
-            {"status": "not_run", "report": rep, "reason": "pyarrow is not installed"}))
+        rec = cc.check(rep, self.fasta, self.meta)
+        rec.update(status="not_run", reason="pyarrow is not installed")
+        cc.write(rec, os.path.join(out, cc.RECORD))
         (f,), _md = self.audit({"input": rep}, out)
         self.assertEqual(f["status"], "WARN")
         self.assertIn("ACTB", f["plain"])
+
+    def test_only_a_record_with_a_status_goes_into_the_search_provenance(self):
+        plan = {"contaminant_competition": {"file": "x", "produced": "runtime", "by": "s5"}}
+        self.assertEqual(run_search.search_records(plan), {})
+        rec = {"contaminant_competition": {"status": "ok"}, "cpu_sizing": {"x": 1}}
+        self.assertEqual(run_search.search_records(rec), rec)
 
 
 class TheJobsRunIt(unittest.TestCase):
@@ -417,6 +610,7 @@ class TheJobsRunIt(unittest.TestCase):
             self.assertIn(f"--fasta {os.path.join(d, 'db.fasta')}", line)
             self.assertIn(f"--out {rec}", line)
             self.assertIn(f"--provenance {os.path.join(out, 'search_provenance.json')}", line)
+            self.assertIn(f'T="timeout {cc.JOB_TIME_LIMIT}"', line)       # bounded in the job
             self.assertIn('|| echo "WARNING', line)
             self.assertLess(s5.index("pass_comparison.py"), s5.index("contaminant_competition.py"))
             self.assertIn(f'"{rec}"', next(ln for ln in s5.splitlines() if ln.startswith("rm -f")))
@@ -430,6 +624,12 @@ class TheJobsRunIt(unittest.TestCase):
             self.assertEqual(json.loads(read(rec))["status"], "not_run")
             self.assertEqual(json.loads(read(os.path.join(out, "search_provenance.json")))
                              ["contaminant_competition"]["status"], "not_run")
+            # generating the chain again sets the record aside: it described another search
+            p, out2 = tcp.generate(d, tcp.PINNED)
+            self.assertEqual((p.returncode, out2), (0, out), p.stderr)
+            self.assertFalse(os.path.exists(rec))
+            self.assertTrue([f for f in os.listdir(out) if f.startswith(cc.RECORD + ".stale-")])
+            self.assertIn("does not describe this search", p.stderr)
 
     def test_the_single_shot_search_job_runs_it_after_its_guard(self):
         import test_single_shot_sbatch as tss
@@ -446,14 +646,16 @@ class TheJobsRunIt(unittest.TestCase):
             self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
             self.assertIn("[contaminant_competition]", p.stderr)
             self.assertTrue(os.path.isfile(os.path.join(w.out, cc.RECORD)))
+            w.generate()                              # a re-search into the same folder
+            self.assertFalse(os.path.isfile(os.path.join(w.out, cc.RECORD)))
 
 
 class TheWatcherSaysIt(Fixture):
     WATCH = os.path.join(SCRIPTS, "watch_run.sh")
 
-    def watch(self, out):
+    def watch(self, out, state="COMPLETED"):
         bindir = os.path.join(self.d, "bin")
-        for name, body in (("sacct", 'echo "  COMPLETED"'), ("squeue", "true")):
+        for name, body in (("sacct", f'echo "  {state}"'), ("squeue", "true")):
             write(os.path.join(bindir, name), f"#!/bin/bash\n{body}\n")
             os.chmod(os.path.join(bindir, name), 0o755)
         env = dict(os.environ, PATH=bindir + os.pathsep + os.environ.get("PATH", ""))
@@ -462,15 +664,32 @@ class TheWatcherSaysIt(Fixture):
         self.assertEqual(r.returncode, 0, r.stderr)
         return json.loads(r.stdout)
 
-    def test_a_finished_search_names_the_genes(self):
+    def recorded(self):
         out = os.path.join(self.d, "out")
         os.makedirs(out)
-        cc.write(self.run_check(CLEAN + COMPETED), os.path.join(out, cc.RECORD))
+        rec = self.run_check(CLEAN + COMPETED)
+        cc.write(rec, os.path.join(out, cc.RECORD))
+        return out, rec
+
+    def test_a_finished_search_names_the_genes(self):
+        out, _rec = self.recorded()
         got = self.watch(out)
         self.assertEqual(got["contaminant_competition"]["competed_out"], ["ACTB"])
         self.assertEqual(got["contaminant_competition"]["drop_contaminant"], ["Cont_P60712"])
         self.assertTrue(any("COMPETED OUT" in w for w in got["warnings"]))
         self.assertFalse(got["failed"])
+
+    def test_a_running_search_shows_no_record(self):
+        out, _rec = self.recorded()
+        self.assertNotIn("contaminant_competition", self.watch(out, "RUNNING"))
+
+    def test_a_record_of_an_earlier_report_is_stale(self):
+        out, rec = self.recorded()
+        write_tsv(rec["report"], CLEAN)               # the report as a re-search left it
+        os.utime(rec["report"], (1, 1))
+        got = self.watch(out)
+        self.assertEqual(got["contaminant_competition"]["status"], "stale")
+        self.assertFalse(any("COMPETED OUT" in w for w in got.get("warnings", [])))
 
     def test_no_record_no_key(self):
         os.makedirs(os.path.join(self.d, "out"))
@@ -479,18 +698,46 @@ class TheWatcherSaysIt(Fixture):
 
 @unittest.skipUnless(pq, "pyarrow is not installed")
 class TheParquetReader(Fixture):
+    def parquet(self, rows):
+        par = os.path.join(self.d, "report.parquet")
+        pq.write_table(pa.table({c: list(v) for c, v in zip(COLS, zip(*rows))}), par)
+        return par
+
     def test_parquet_and_tsv_give_the_same_record(self):
-        rows = CLEAN + COMPETED + SIPHONED + MASKED + IL_TWIN
+        rows = CLEAN + COMPETED + SIPHONED + MASKED + IL_TWIN + CLOSURE
         failing = [("P60709", "EEEEEEEK", 50)]
         tsv = write_tsv(os.path.join(self.d, "report.tsv"), rows, failing)
-        data = list(zip(*report_rows(rows, failing=failing)))
-        par = os.path.join(self.d, "report.parquet")
-        pq.write_table(pa.table({c: list(v) for c, v in zip(COLS, data)}), par)
+        par = self.parquet(report_rows(rows, failing=failing))
         a, b = cc.check(tsv, self.fasta, self.meta), cc.check(par, self.fasta, self.meta)
         for k in ("competed_out", "siphoned", "masked", "drop_contaminant",
-                  "contaminant_share_pct", "contaminants_showing_themselves"):
+                  "contaminant_share_pct", "contaminants_showing_themselves",
+                  "n_kept_protein_sets_read"):
             self.assertEqual(a[k], b[k], k)
-        self.assertEqual([c["gene"] for c in b["competed_out"]], ["ACTB", "TGT"])
+        self.assertEqual([c["gene"] for c in b["competed_out"]], ["ACTB", "XG", "TGT"])
+
+    def test_a_nan_q_value_is_kept_as_limpa_keeps_it(self):
+        rows = report_rows(CLEAN + COMPETED + [("P60709", "EEEEEEEK", 50)])
+        qi = COLS.index("Q.Value")
+        for r in rows:
+            if r[3] == "EEEEEEEK":
+                r[qi] = float("nan")              # not above the cutoff: limpa keeps the row
+        rec = cc.check(self.parquet(rows), self.fasta, self.meta)
+        self.assertEqual(rec["competed_out"], [])
+        self.assertEqual([s["gene"] for s in rec["siphoned"]], ["ACTB"])
+        tsv = os.path.join(self.d, "report.tsv")
+        write(tsv, "\t".join(COLS) + "\n" + "".join("\t".join(str(v) for v in r) + "\n"
+                                                     for r in rows))
+        self.assertEqual(cc.check(tsv, self.fasta, self.meta)["siphoned"], rec["siphoned"])
+
+    def test_a_q_value_stored_as_text_is_a_check_that_did_not_run(self):
+        rows = report_rows(CLEAN + COMPETED)
+        t = pa.table({c: [str(x) if c == "Q.Value" else x for x in v]
+                      for c, v in zip(COLS, zip(*rows))})
+        par = os.path.join(self.d, "report.parquet")
+        pq.write_table(t, par)
+        rec = cc.check(par, self.fasta, self.meta)
+        self.assertEqual(rec["status"], "not_run")
+        self.assertIn("the check failed on report.parquet", rec["reason"])
 
     def test_an_adapted_report_is_not_dianns_question(self):
         par = os.path.join(self.d, "adapted.parquet")
