@@ -107,11 +107,45 @@ class RouterPointsAtRealSections(unittest.TestCase):
         for ref, title in re.findall(r"([a-z][a-z_-]+\.md),? \"([^\"]+)\"", flat):
             if ref not in self.refs:
                 continue
-            heads = [h for _, h in headings(self.refs[ref])]
-            if not any(h.startswith(title.rstrip(".")) or h.replace("`", "").startswith(title.replace("`", "").rstrip("."))
+            heads = [h.replace("`", "") for _, h in headings(self.refs[ref])]
+            want = title.replace("`", "").rstrip(".")
+            # the title is the start of a heading, ending where a word ends: "4." names
+            # "4. Resolving ...", never "4a. DIA ..."
+            if not any(h == want or (h.startswith(want) and h[len(want)] in " .:(—,")
                        for h in heads):
                 bad.append(f'{ref} "{title}"')
         self.assertEqual(bad, [], "SKILL.md names a section its reference does not have")
+
+
+class StepLevelRemindersStayAtTheirStep(unittest.TestCase):
+    """2.13.1/2.13.2 rules that bite at a particular step stay AT that step in the router, not only
+    in a general sentence or a reference (independent review of the slim-down, H1-H3, M1-M3)."""
+
+    def step(self, head, nxt):
+        skill = read(os.path.join(SKILL, "SKILL.md"))
+        i = skill.index(head)
+        return " ".join(skill[i:skill.index(nxt, i)].split())
+
+    def test_each_step_keeps_its_reminder(self):
+        cases = {
+            ("### 0a.", "### 0. "): ["These move themselves to a compute node", "setup.sh",
+                                     "`session.py finalize`", "`core_submission.py locate`/`stage`/`deliver`",
+                                     "provenance.py", "never the 2-minute default"],
+            ("### 0. ", "### 0b."): ["**Check again**", "--session-start", "then `--session-start` again"],
+            ("### 1c.", "### 2. "): ['save_transcript.py --hive "$S" --remember'],
+            ("### 2. ", "### 3. "): ["--resolution-source detected", "--ms2-analyzer ITMS", "in the background",
+                                     "dotnet-core-sdk/8.0.4"],
+            ("### 7b.", "### 7c."): ["every 5 minutes or more"],
+            ("### 8. ", "### 8a."): ["on_compute.py --header", "lint-jobscript.sh", "--fasta-meta"],
+            ("### 10. ", "### 11a."): ["in the background on HIVE"],
+            ("### 12. ", "### 12b."): ["in the background on HIVE", "[--call-id <token>]"],
+            ("### 12b.", "## Keeping the record"): ["in the background", "70 minutes", "bioshare ensure"],
+        }
+        for (head, nxt), wants in cases.items():
+            text = self.step(head, nxt)
+            for w in wants:
+                with self.subTest(step=head, want=w):
+                    self.assertIn(w, text)
 
 
 class LongReferencesHaveContents(unittest.TestCase):

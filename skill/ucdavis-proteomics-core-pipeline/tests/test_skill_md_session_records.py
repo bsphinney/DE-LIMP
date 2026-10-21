@@ -58,7 +58,13 @@ class CallIdIsExplained(unittest.TestCase):
         6 hours (finalize after 8d's reviewers too), typed literally, fresh, in the foreground."""
         s = text()
         router = " ".join(s[s.index("### 3b."):s.index("### 4.")].split())
-        self.assertIn("`--call-id <token>` when a subagent ran in the last 6 hours", router)
+        self.assertIn("When a subagent ran in the last 6 hours, `--call-id <token>` on `init`, "
+                      "`finalize`, `checkpoint.py status` and `save_transcript.py`", router)
+        for want in ("typed literally", "fresh each call", "in the foreground"):
+            self.assertIn(want, router)
+        # and the finalize line carries it (review of the slim-down, H3)
+        twelve = " ".join(s[s.index("### 12. "):s.index("### 12b.")].split())
+        self.assertIn("finalize --dir <session> --zip [--call-id <token>]", twelve)
         with open(os.path.join(os.path.dirname(SKILL), "references", "outputs.md"),
                   encoding="utf-8") as fh:
             ref = fh.read()

@@ -1263,7 +1263,7 @@ class SkillDocAsksAtStep3(unittest.TestCase):
         self.assertIn("Deciding it after the search is too late", ker)
 
     def test_each_step_carries_it(self):
-        s6 = self.section("### 6. Build the FASTA")
+        s6 = " ".join(self.section("### 6. Build the FASTA").split())       # layout-free
         self.assertIn("--keratin-sample|--no-keratin-sample --out ./search.fasta", s6)
         self.assertIn("DEFAULT — not user-confirmed", s6)
         s7 = self.section("### 7. Run the search")

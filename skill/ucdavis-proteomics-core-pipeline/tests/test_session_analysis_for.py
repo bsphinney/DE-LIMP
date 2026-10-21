@@ -282,7 +282,7 @@ class TheDocsSayIt(unittest.TestCase):
             with self.subTest(step=head):
                 i = self.skill.index(head)
                 j = min([h for h in heads if h > i] + [len(self.skill)])
-                self.assertIn(f'board.md §3 row "{row}"', self.skill[i:j])
+                self.assertIn(f'board.md §3 row "{row}"', _flat(self.skill[i:j]))
                 self.assertIn(f"| {row} |", self.board)
 
     def test_several_submissions_attach_the_main_record_only(self):
