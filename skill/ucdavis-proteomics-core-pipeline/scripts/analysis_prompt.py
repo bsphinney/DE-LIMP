@@ -50,12 +50,15 @@ PLACED_TYPES = ("volcano", "pca", "qc", "heatmap", "violin", "pvalue")
 def submission_brief(w, source):
     """The CoreOmics submission, quoted for the writer: the report must describe the samples in
     the submitter's words. A report once turned the record's "cross-linked" into "chemically
-    cross-linked"; every added word like that is a claim about the lab's samples nobody made."""
+    cross-linked"; every added word like that is a claim about the lab's samples nobody made.
+    -> the staff-only cautions about the sample sheet (submission_report.staff_cautions), for this
+    script's JSON: never written here, since the brief (output/ANALYSIS_PROMPT.md) is in the
+    session zip that goes to collaborators."""
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import submission_report as sr
     rec, session = sr.resolve(source)
     if rec is None:
-        return
+        return {}
     who, why = sr.prepared_by(rec)
     w(f"## The submission ({sr.label(rec)}) — quote it, add nothing")
     w("The HTML report opens with this record (make_analysis_html.py renders it from the "
@@ -77,19 +80,11 @@ def submission_brief(w, source):
           "whether paired samples were analysed as independent):")
         for n in notes:
             w(f"  - {n['text']}")
-    # what rests on reading names like ATG5, ATG7 as replicates of "ATG": a possibility, for
-    # staff (submission_report.sheet_cautions), logged in logs/decisions.md as well
-    cautions = sr.sheet_cautions(rec, session)
-    if cautions:
-        sr.log_cautions(session, cautions)
-        w("- **For the Core staff member only -- never in the report, not even in Data Quality "
-          "Notes:** the sheet's names carry a number glued to them, which the sheet check read as "
-          "a replicate number; gene names look the same. Raise this with them before the DE is "
-          "trusted (it is also in logs/decisions.md):")
-        for c in cautions:
-            w(f"  - {c['text']}")
     w("")
     w(sr.render_markdown(rec, (), heading="### The record, as submitted"))
+    # what rests on reading names like ATG5, ATG7 as replicates of "ATG": a possibility, for
+    # staff only -- this script's JSON and logs/decisions.md, never the brief
+    return sr.staff_cautions(rec, session)
 
 
 def sample_type_brief(w, session):
@@ -448,8 +443,7 @@ def main():
     # the sample type, as the user stated it -- or NOT STATED, which forbids a guess
     sample_type_brief(w, session)
     normalisation_brief(w, prov, etype, etype_err, design)
-    if a.submission:
-        submission_brief(w, a.submission)
+    staff = submission_brief(w, a.submission) if a.submission else {}
 
     unread_at = len(L)                       # records that could not be read: listed here, last
     w("## Attached data files — read these")
@@ -944,6 +938,9 @@ def main():
         "figures_appendix": [f["file"] for f in appendix],
         "figures_failed": [f["file"] for f in failed], "figures_error": fig_error,
         "has_qc": has_qc, "has_gsea": has_gsea, "records_unreadable": dict(_UNREADABLE),
+        # for the Core staff member only: never in the report, nor in the brief (it is zipped)
+        "staff_cautions": staff.get("staff_cautions") or [],
+        "staff_cautions_logged": staff.get("staff_cautions_logged"),
         "next": f"Read {a.out} + the data files + figures, then write {a.report_out} "
                 f"(ALL sections, embed all {len(embed)} figures, expert interpretation), "
                 "then render it with make_analysis_html.py into Analysis_Report.html "

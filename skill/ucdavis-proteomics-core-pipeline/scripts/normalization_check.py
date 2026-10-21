@@ -1230,11 +1230,17 @@ def decision_staff_record(path, rec):
     session's logs/ (the session the check ran with, else the one its folder is in), else beside
     the check."""
     here = os.path.dirname(os.path.abspath(path))
-    s = rec.get("session") or (os.path.dirname(os.path.dirname(here))
-                               if here.endswith(os.path.join("output", "norm_check")) else None)
+    s = rec.get("session") or folder_session(path)
     if s:
         return staff_record_path(s), os.path.join("logs", STAFF_RECORD)
     return os.path.join(here, STAFF_RECORD), STAFF_RECORD
+
+
+def folder_session(path):
+    """The session a check file sits in (<session>/output/norm_check/), else None."""
+    here = os.path.dirname(os.path.abspath(path))
+    return (os.path.dirname(os.path.dirname(here))
+            if here.endswith(os.path.join("output", "norm_check")) else None)
 
 
 def controls_changed(rec, design=None, session=None, legacy=True):
@@ -1252,6 +1258,9 @@ def controls_changed(rec, design=None, session=None, legacy=True):
     if not session or not d or (old and not legacy):
         return None
     again = "Run normalization_check.py run again."
+    if not os.path.isdir(session):
+        return (f"REFUSED: the session this check ran in ({session}) is not there any more, so "
+                f"its experiment type and control groups cannot be read. {again}")
     try:
         now_rec = et.load(session)
     except (OSError, ValueError) as e:
@@ -1348,7 +1357,9 @@ def gate(path, quantities, report=None, conditions=None, design=None):
                            + f", not on this DE's {what} {given} (sha256 differs). Run the check "
                            "again on this DE's report and conditions -- a decision about one "
                            "report never authorises another."), rec
-    changed = controls_changed(rec, design)
+    # the session as it is now: the one the check sits in (a session moved since the check ran
+    # is the same session), else the one it ran in
+    changed = controls_changed(rec, design, session=folder_session(path))
     if changed:
         return False, changed, rec
     dc = design_check(rec, design)

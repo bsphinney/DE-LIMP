@@ -14,12 +14,15 @@ This test holds today's code to 2.13.2's on a corpus of sheet shapes: the review
 then stems x separators x numbering (per condition, on across conditions, sample IDs) x levels
 (L/R, R/S, A/B) x mixed formats x slips x case x duplicated names, generated with a fixed seed.
 The groups the analysis used are each sample's true condition, known by construction -- never
-computed with the code under test. fixtures/replicate_parity_2_13_2.json holds each sheet with
-2.13.2's sheet groups, its "every sample has its own condition" note and its "conditions
+computed with the code under test -- and then, in variants of the same sheets, other groupings
+an analysis can have: the names as written, one pooled group, two conditions merged, and
+samples left out of conditions.csv. fixtures/replicate_parity_2_13_2.json holds each sheet
+with 2.13.2's sheet groups, its "every sample has its own condition" note and its "conditions
 differ" note, made by 2.13.2's own code (dd932cc), so the test needs no git. Groups and the
 "every sample" note must be identical, always. The "conditions differ" note must be 2.13.2's
 less exactly the parts about a glued-number group, and those parts must be in the staff
-caution -- which is there only then.
+caution -- which is there only then -- where what it says of the other reading (the names as
+separate conditions) is checked against this test's own reading of the sheet.
 
 Regenerate the fixture (new shapes; 2.13.2's code is what must answer):
   git -C <repo> archive dd932cc skill/ucdavis-proteomics-core-pipeline/scripts | tar -x -C <dir>
@@ -36,6 +39,7 @@ import re
 import sys
 import tempfile
 import unittest
+from collections import Counter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
@@ -181,6 +185,21 @@ REVIEWS = [
     (twice(["WT_replicate5", "WT_replicate7"]) + ["KO"] * 4, ["WT"] * 4 + ["KO"] * 4),
     (twice(["WT.S5", "WT.S7"]) + ["KO"] * 4, ["WT"] * 4 + ["KO"] * 4),
 ]
+# Analyses that do not follow the sheet: (names, analysed, samples left out of conditions.csv).
+VARIANTS = [
+    (twice(["Dox(+)3", "Dox(+)5"]) + ["Ctrl"] * 4, twice(["Dox(+)3", "Dox(+)5"]) + ["Ctrl"] * 4,
+     []),
+    (["ATG5"] * 3 + ["ATG7"] * 3 + ["WT"] * 3, ["All"] * 9, []),
+    (["ATG5"] * 3 + ["ATG7"] * 3 + ["WT_1", "WT_2", "WT_3"], ["All"] * 9, []),
+    (["ATG5"] * 2 + ["ATG7"] * 2 + ["HSP70"] * 2 + ["HSP90"] * 2, ["All"] * 8, []),
+    (["ATG5"] * 2 + ["ATG7"] * 2 + ["ATG9"] * 2 + ["WT"] * 2, ["A"] * 4 + ["B"] * 2 + ["WT"] * 2,
+     []),
+    (["ATG5"] * 3 + ["ATG7"] * 3 + ["WT"] * 3, ["ATG5"] * 3 + ["ATG7"] * 3 + ["WT"] * 3, [4]),
+    (twice(["WT3", "WT4", "WT6"]) + ["KO"] * 6,
+     ["WT_IP", "WT_Input"] * 3 + ["KO_IP", "KO_Input"] * 3, []),
+    (twice(["WT3", "WT4", "WT6"]) + ["KO"] * 6, twice(["WT3", "WT4", "WT6"]) + ["KO"] * 6, [0, 7]),
+    (twice(["Parental12", "Parental51"]) + ["Dox(+)"] * 4, ["All"] * 8, [2]),
+]
 STEMS = ("WT", "KO", "Ctrl", "Control", "Treated", "ATG5", "ATG7", "HSP70", "HSP90", "CD45",
          "IgG1", "Cis", "Brain", "Mutant", "Mutant-1", "Mutant-2", "T0", "T24", "Day", "A549",
          "Kv2.1", "Strep", "Prep", "Old - IgG", "Bait_IP", "sample", "WT1", "WT2", "Dox(+)")
@@ -193,7 +212,8 @@ NUMBERING = ((1, 2, 3), (0, 1, 2), (2, 3, 4), (1, 2, 4), (1, 2), (3, 4, 5), (1, 
 
 
 def corpus():
-    """[(names, analysed)]: REVIEWS, then N_GENERATED generated sheets (fixed seed, no repeats)."""
+    """[(names, analysed, left out)]: REVIEWS, N_GENERATED generated sheets (fixed seed, no
+    repeats), then VARIANTS and a variant of each of those sheets (variants())."""
     rnd = random.Random(SEED)
     sheets, seen = [], set()
     for names, analysed in REVIEWS:
@@ -235,14 +255,36 @@ def corpus():
         if tuple(names) not in seen:
             seen.add(tuple(names))
             sheets.append((names, analysed))
-    return sheets
+    return ([(n, a, []) for n, a in sheets] + [(list(n), list(a), list(d)) for n, a, d in VARIANTS]
+            + variants(sheets))
 
 
-def outcome(sr, names, analysed, tmp):
+def variants(sheets):
+    """One other analysis of each sheet (its own seed): the names as written, one pooled group,
+    two of its conditions merged, or one or two samples left out of conditions.csv."""
+    rnd, out = random.Random(SEED + 1), []
+    for names, analysed in sheets:
+        kind, drop = rnd.choice(("written", "pooled", "merged", "left_out")), []
+        if kind == "written":
+            other = [x.strip() for x in names]
+        elif kind == "pooled":
+            other = ["All"] * len(names)
+        elif kind == "merged" and len(set(analysed)) > 1:
+            a, b = rnd.sample(sorted(set(analysed)), 2)
+            other = [f"{a}+{b}" if x in (a, b) else x for x in analysed]
+        else:
+            other = list(analysed)
+            drop = sorted(rnd.sample(range(len(names)), 1 if len(names) < 6 else 2))
+        if other != analysed or drop:
+            out.append((list(names), other, drop))
+    return out
+
+
+def outcome(sr, names, analysed, tmp, drop=()):
     """(the sheet's groups in sample order, "every sample has its own condition" note or not,
     the "conditions differ" note or None, the staff caution or None) from submission_report
-    module `sr`, end to end: a
-    session whose conditions.csv holds `analysed`, each run assigned to its sample."""
+    module `sr`, end to end: a session whose conditions.csv holds `analysed` (less the samples
+    at the indexes in `drop`), each run assigned to its sample."""
     with open(RECORD, encoding="utf-8") as fh:
         r = json.load(fh)
     r["submission_data"]["samples"] = [
@@ -260,8 +302,9 @@ def outcome(sr, names, analysed, tmp):
     with open(os.path.join(s, "input", "conditions.csv"), "w", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(["File.Name", "Group"])
-        for x, g in zip(rec["samples"], analysed):
-            w.writerow([runs[x["unique_id"]], g])
+        for i, (x, g) in enumerate(zip(rec["samples"], analysed)):
+            if i not in drop:
+                w.writerow([runs[x["unique_id"]], g])
     with open(os.path.join(s, "input", "locate_decisions.json"), "w") as fh:
         json.dump({"assignments": [{"sample": u, "file": f"{x}.d"} for u, x in runs.items()]}, fh)
     sr.attach(s, rec)
@@ -275,20 +318,22 @@ def _key(s):
     return " ".join(str(s).split()).casefold()
 
 
+def is_glued(c, g):
+    """Was sheet group `g` (as 2.13.2 labels it) made from name `c` by taking a number glued
+    straight to the name's letters off it: no separator, ')', '#', rep / replicate or single ID
+    letter after a separator before the number (the rule, as specified)?"""
+    c = c.strip()
+    if not (c != g and c.startswith(g) and c[len(g):].isdigit() and g[-1:].isalpha()):
+        return False
+    word = re.search(r"[A-Za-z]*$", g).group(0)
+    before = g[:len(g) - len(word)]
+    return not re.search(r"rep(?:licate)?$", word, re.I) and not (
+        len(word) == 1 and before[-1:] in (" ", "_", ".", "-"))
+
+
 def glued_groups(names, groups):
-    """The sheet groups (as 2.13.2 labels them) made by taking a number glued straight to the
-    name's letters off it: no separator, ')', '#', rep / replicate or single ID letter after a
-    separator before the number (the rule, as specified)."""
-    out = set()
-    for c, g in zip(names, groups):
-        c = c.strip()
-        if c != g and c.startswith(g) and c[len(g):].isdigit() and g[-1:].isalpha():
-            word = re.search(r"[A-Za-z]*$", g).group(0)
-            before = g[:len(g) - len(word)]
-            if not re.search(r"rep(?:licate)?$", word, re.I) and not (
-                    len(word) == 1 and before[-1:] in (" ", "_", ".", "-")):
-                out.add(g)
-    return out
+    """The sheet groups made from names with a number glued to them (is_glued)."""
+    return {g for c, g in zip(names, groups) if is_glued(c, g)}
 
 
 def bits(note):
@@ -298,14 +343,37 @@ def bits(note):
     return note.split(": ", 1)[1].rstrip(".").split("; ")
 
 
-def names_a_glued_group(bit, glued):
-    """Does this part of the note name a group made from glued numbers?"""
+def quoted(bit):
+    return bit.split("“", 1)[1].split("”", 1)[0]
+
+
+def glued_named(bit, glued, sheet):
+    """The groups made from glued numbers that this part of the note is about -- a pool's from
+    the sheet itself (`sheet`: [(sheet group, analysed group)] of the samples analysed), not from
+    its "and N more" text."""
     if bit.startswith("the sheet's “"):
-        return bit.split("“", 1)[1].split("”", 1)[0] in glued
+        return {quoted(bit)} & glued
     if " pools the sheet's " in bit:
-        listed = re.sub(r" and \d+ more$", "", bit.split(" pools the sheet's ", 1)[1])
-        return any(x in glued for x in listed.split(", "))
-    return False
+        return {g for g, a in sheet if a == quoted(bit)} & glued
+    return set()
+
+
+def nothing_differs(names, groups, analysed, drop, glued, named):
+    """This test's own reading: with every name with a number glued to it its own condition,
+    do the samples of the `named` sheet groups make no pool or split?"""
+    other = {i: names[i].strip() if g in glued and is_glued(names[i], g) else g
+             for i, g in enumerate(groups) if i not in drop}
+    mine = {other[i] for i in other if groups[i] in named}
+    split = any(len({analysed[i].strip() for i in other if other[i] == c}) > 1 for c in mine)
+    pools = any(len({other[i] for i in other if analysed[i].strip() == a}) > 1
+                for a in {analysed[i].strip() for i in other if other[i] in mine})
+    return not (split or pools)
+
+
+def sentence(caution, bit):
+    """The caution's sentence about this part of the note ("" when there is none)."""
+    return next((x for x in caution.split("Read as replicates (")[1:]
+                 if f"), {bit}; read as separate conditions, " in x), "")
 
 
 def write_fixture(scripts):
@@ -314,10 +382,10 @@ def write_fixture(scripts):
     sr = importlib.import_module("submission_report")
     assert os.path.dirname(os.path.abspath(sr.__file__)) == os.path.abspath(scripts), sr.__file__
     rows = []
-    for names, analysed in corpus():
+    for names, analysed, drop in corpus():
         with tempfile.TemporaryDirectory() as tmp:
-            g, unique, differ, _caution = outcome(sr, names, analysed, tmp)
-        rows.append(json.dumps({"names": names, "analysed": analysed, "groups": g,
+            g, unique, differ, _caution = outcome(sr, names, analysed, tmp, drop)
+        rows.append(json.dumps({"names": names, "analysed": analysed, "drop": drop, "groups": g,
                                 "unique": unique, "differ": differ}, ensure_ascii=False))
     with open(FIXTURE, "w", encoding="utf-8") as fh:
         fh.write('{"made_by": "skill 2.13.2 (dd932cc) submission_report.py", "seed": %d,\n'
@@ -334,27 +402,44 @@ class SameAsTwoThirteenTwo(unittest.TestCase):
             cls.base = json.load(fh)["sheets"]
 
     def test_the_fixture_is_this_corpus(self):
-        self.assertGreater(len(self.base), 400)
-        self.assertEqual([(b["names"], b["analysed"]) for b in self.base], corpus())
+        self.assertGreater(len(self.base), 1000)
+        self.assertEqual([(b["names"], b["analysed"], b["drop"]) for b in self.base], corpus())
 
     def test_every_sheet_reads_as_2_13_2_and_glued_parts_go_to_staff(self):
-        withheld = 0
+        seen = Counter()
         for b in self.base:
-            names = b["names"]
+            names, analysed, drop = b["names"], b["analysed"], b["drop"]
             with tempfile.TemporaryDirectory() as tmp:
-                groups, unique, differ, caution = outcome(self.sr, names, b["analysed"], tmp)
+                groups, unique, differ, caution = outcome(self.sr, names, analysed, tmp, drop)
             self.assertEqual((groups, unique), (b["groups"], b["unique"]), names)
-            glued = glued_groups(names, b["groups"])
-            to_staff = [x for x in bits(b["differ"]) if names_a_glued_group(x, glued)]
-            self.assertEqual(bits(differ), [x for x in bits(b["differ"]) if x not in to_staff],
-                             names)
-            if to_staff:
-                withheld += 1
-                for x in to_staff:
-                    self.assertIn(x, caution or "", names)
-            else:
+            glued = glued_groups(names, groups)
+            sheet = [(g, a.strip()) for i, (g, a) in enumerate(zip(groups, analysed))
+                     if i not in drop]
+            to_staff = [x for x in bits(b["differ"]) if glued_named(x, glued, sheet)]
+            kept = [x for x in bits(b["differ"]) if x not in to_staff]
+            self.assertEqual(bits(differ), kept, (names, analysed, drop))
+            if not to_staff:
                 self.assertIsNone(caution, names)
-        self.assertGreater(withheld, 0)
+                continue
+            seen["withheld"] += 1
+            seen["kept beside it"] += bool(kept)
+            seen["left out beside it"] += any(" not in the analysed design " in x for x in kept)
+            for x in to_staff:
+                said = sentence(caution or "", x)       # each part in it, said on both readings
+                self.assertTrue(said, (x, caution))
+                named = glued_named(x, glued, sheet)
+                self.assertEqual("nothing differs for these samples" in said,
+                                 nothing_differs(names, groups, analysed, drop, glued, named),
+                                 (x, said))
+                pool = " pools the sheet's " in x
+                self.assertEqual("this pooling holds on either reading" in said, pool, said)
+                seen["a pool with a group not glued"] += pool and any(
+                    g not in glued for g, a in sheet if a == quoted(x))
+                seen["something differs"] += "nothing differs" not in said
+        # the corpus reaches the cases a weaker rule would get wrong
+        for what in ("withheld", "kept beside it", "left out beside it",
+                     "a pool with a group not glued", "something differs"):
+            self.assertGreater(seen[what], 0, what)
 
 
 if __name__ == "__main__":

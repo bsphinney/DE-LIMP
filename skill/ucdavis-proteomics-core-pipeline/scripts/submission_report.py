@@ -886,19 +886,23 @@ def _conditions_vs_analysed(rec, p):
     A bit about a sheet group made by taking a number glued to the names off them (ATG5, ATG7 ->
     "ATG") is a possibility, not a finding: it goes to staff, never the report (sheet_cautions)."""
     glued = set(_glued_groups(rec))
-    bits = [b for b, named, _kind in _conditions_bits(rec, p) if not named & glued]
+    bits = [b for b, named, _kind, _a in _conditions_bits(rec, p) if not named & glued]
     if not bits:
         return []
     return [("conditions_differ", "Conditions analysed vs the sample sheet: " + "; ".join(bits) + ".")]
 
 
-def _conditions_bits(rec, p):
+def _conditions_bits(rec, p, sheet=None):
     """[(a bit of the comparison of the analysed groups with the sheet's, the sheet groups it
-    names, its kind: "pools" | "split" | "left_out")]."""
+    names, its kind: "pools" | "split" | "left_out", the analysed groups it is about)].
+    `sheet`: {sample id: its sheet group} read another way (sheet_cautions); default
+    sheet_groups."""
     rows = _read_conditions(p)
     d = design(rec["samples"])
-    sheet = sheet_groups(rec)
-    if not rows or not sheet or (not d["unit"] and len({_key(g) for g in sheet.values()}) == len(sheet)):
+    own = sheet is None
+    sheet = sheet_groups(rec) if own else sheet
+    if not rows or not sheet or (own and not d["unit"]
+                                 and len({_key(g) for g in sheet.values()}) == len(sheet)):
         return []
     owners = run_assignment(rec, p, [r["File.Name"] for r in rows])[0]
     groups_of, in_design = defaultdict(set), set()
@@ -917,76 +921,110 @@ def _conditions_bits(rec, p):
     for a, ss in sorted(a2s.items()):
         if len(ss) > 1:
             bits.append((f"group “{a}” pools the sheet's {_examples(sorted(ss), 4)}", set(ss),
-                         "pools"))
+                         "pools", {a}))
     for s, aa in sorted(s2a.items()):
         if len(aa) > 1:
             bits.append((f"the sheet's “{s}” is split across groups {_examples(sorted(aa), 4)}",
-                         {s}, "split"))
+                         {s}, "split", set(aa)))
     left_out = [u for u in sheet if u not in in_design]
     if left_out and in_design:
         n = len(left_out)
         bits.append((f"{n} sheet sample{'s are' if n > 1 else ' is'} not in the analysed design "
-                     f"({_examples(left_out)})", set(), "left_out"))
+                     f"({_examples(left_out)})", set(), "left_out", set()))
     return bits
 
 
+def _glued(c, g):
+    """Was the sheet group `g` made from the name `c` by taking a number glued straight to the
+    name's letters off it -- ATG5 -> "ATG", WT3 -> "WT" -- with no separator, ")", "#",
+    rep / replicate or ID letter (WT_R5, Mock_S5) to say it is a replicate number?"""
+    rest = c[len(g):] if g and c.startswith(g) else ""
+    if not (c != g and rest.isdigit() and g[-1:].isalpha()):
+        return False
+    word = re.search(r"[A-Za-z]*$", g).group(0)
+    before = g[:len(g) - len(word)]
+    return not re.search(r"rep(?:licate)?$", word, re.I) and not (
+        len(word) == 1 and before[-1:] in (" ", "_", ".", "-"))
+
+
 def _glued_groups(rec):
-    """{a sheet group: the names it was read from} for the groups sheet_groups made by taking a
-    number glued straight to the name's letters off it -- ATG5, ATG7 -> "ATG"; WT3, WT4 -> "WT" --
-    with no separator, ")", "#", rep / replicate or ID letter (WT_R5, Mock_S5) to say it is a
-    replicate number. Gene names look the same (a staff report, 2026-10-20), so what rests on
-    such a group is a possibility (sheet_cautions)."""
+    """{a sheet group: the names it was read from} for the groups sheet_groups made from names
+    with a number glued to them (_glued). Gene names look the same (a staff report, 2026-10-20),
+    so what rests on such a group is a possibility (sheet_cautions)."""
     out, sheet = defaultdict(set), sheet_groups(rec)
     for s in rec["samples"]:
         c, g = cs._s(s.get("condition_name")), sheet.get(s["unique_id"])
-        rest = c[len(g):] if g and c.startswith(g) else ""
-        if g and c != g and rest.isdigit() and g[-1:].isalpha():
-            word = re.search(r"[A-Za-z]*$", g).group(0)
-            before = g[:len(g) - len(word)]
-            if not re.search(r"rep(?:licate)?$", word, re.I) and not (
-                    len(word) == 1 and before[-1:] in (" ", "_", ".", "-")):
-                out[g].add(c)
+        if g and _glued(c, g):
+            out[g].add(c)
     return {g: sorted(v) for g, v in out.items()}
 
 
+CAUTION_LEAD = ("Conditions analysed vs the sample sheet, where the sheet's names have a number "
+                "glued to them (staff only, a possibility, never in the report). The sheet check "
+                "read those numbers as replicate numbers, and gene names and sample IDs look the "
+                "same: ask the submitter which they are, and make conditions.csv say what they "
+                "meant before the DE.")
+
+
 def sheet_cautions(rec, session=None):
-    """Staff-only cautions -- never in the report: the parts of "Conditions analysed vs the sample
-    sheet" that rest on reading names with a number glued to them as replicates
-    (_glued_groups), worded as a possibility. [{"id", "text"}]."""
+    """Staff-only cautions -- never in the report, nor in any file a collaborator gets: the parts
+    of "Conditions analysed vs the sample sheet" that rest on reading names with a number glued
+    to them as replicates (_glued_groups). Each part is said on both readings, from the data:
+    read as separate conditions, what the analysed groups pool or split instead -- or that
+    nothing differs for those samples. [{"id", "text"}]."""
     p = paths_for(os.path.expanduser(session)) if session else None
     if not p:
         return []
     glued = _glued_groups(rec)
-    said = []
-    for bit, named, kind in _conditions_bits(rec, p):
-        for g in sorted(named & set(glued)):
-            then = ("nothing differs, and if they are replicates, correct conditions.csv before "
-                    "the DE" if kind == "split" else "correct conditions.csv before the DE")
-            said.append(f"{bit}: the sheet's {', '.join(glued[g])} were read as replicates of "
-                        f"“{g}”; if they are separate conditions, {then}")
-    if not said:
+    held = [b for b in _conditions_bits(rec, p) if b[1] & set(glued)]
+    if not held:
         return []
+    sheet = sheet_groups(rec)
+    # the other reading: each name with a number glued to it is its own condition
+    names = {s["unique_id"]: cs._s(s.get("condition_name")) for s in rec["samples"]}
+    other = {u: (names[u] if g in glued and _glued(names[u], g) else g) for u, g in sheet.items()}
+    other_bits = _conditions_bits(rec, p, other)
+    said = []
+    for text, named, kind, about in held:
+        gs = sorted(named & set(glued))
+        written = {other[u] for u, g in sheet.items() if g in gs}
+        also = [t for t, n, _k, a in other_bits if n & written or kind == "pools" and a == about]
+        either = kind == "pools" and any(k == "pools" and a == about for _t, _n, k, a in other_bits)
+        read = "; ".join(f"{', '.join(glued[g])} as “{g}”" for g in gs)
+        said.append(f"Read as replicates ({read}), {text}; read as separate conditions, "
+                    + ("; ".join(also[:4]) + (f"; and {len(also) - 4} more" if len(also) > 4
+                                              else "")
+                       if also else "nothing differs for these samples")
+                    + (": this pooling holds on either reading." if either else "."))
     return [{"id": "conditions_glued_names",
-             "text": "Conditions analysed vs the sample sheet, read from names with a number "
-                     "glued to them (staff only, a possibility, never in the report): "
-                     + "; ".join(dict.fromkeys(said)) + "."}]
+             "text": CAUTION_LEAD + " " + " ".join(dict.fromkeys(said))}]
 
 
 def log_cautions(session, cautions):
-    """Each caution into the session's decisions log (logs/decisions.md, Core-internal), once."""
+    """Each caution into the session's decisions log (logs/decisions.md, Core-internal), once.
+    -> "yes" (logged now), "already" (logged before), "no: <why>" or None (nothing to log). A
+    log this user cannot read or write (0640: a colleague's session, a delivered copy) is said
+    on stderr and in the result, never a crash: the caution itself is still printed."""
     if not (session and cautions):
-        return
+        return None
     import log_decision
-    path = os.path.join(os.path.abspath(os.path.expanduser(session)), "logs", "decisions.md")
+    session = os.path.abspath(os.path.expanduser(session))
+    path = os.path.join(session, "logs", "decisions.md")
     try:
-        with open(path, encoding="utf-8") as fh:
-            seen = fh.read()
-    except OSError:
-        seen = ""
-    for c in cautions:
-        if log_decision.one(c["text"]) not in seen:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                seen = fh.read()
+        except FileNotFoundError:
+            seen = ""
+        new = [c for c in cautions if log_decision.one(c["text"]) not in seen]
+        for c in new:
             log_decision.append(session, "Sample sheet: a possible difference, for staff",
                                 c["text"], step="3b. submission")
+    except OSError as e:
+        print(f"[submission_report] the staff caution was not logged in {path}: {e}",
+              file=sys.stderr)
+        return f"no: {e}"
+    return "yes" if new else "already"
 
 
 def _no_groups(rec, d):
@@ -1293,8 +1331,7 @@ def cmd_attach(a):
     who, why = prepared_by(rec)
     return _emit({"attached": label(rec), "source": rec["source"], "prepared_by": who,
                   "prepared_by_basis": why, "n_samples": len(rec["samples"]),
-                  "notes": quality_notes(rec, session),
-                  "staff_cautions": _cautions(rec, session),
+                  "notes": quality_notes(rec, session), **staff_cautions(rec, session),
                   "warnings": warnings, "outputs": paths})
 
 
@@ -1311,7 +1348,7 @@ def cmd_show(a):
         print(render_markdown(rec, notes), end="")
         return 0
     return _emit({"record": rec, "prepared_by": prepared_by(rec)[0], "notes": notes,
-                  "staff_cautions": sheet_cautions(rec, sess)})
+                  **staff_cautions(rec, sess)})
 
 
 def cmd_notes(a):
@@ -1319,14 +1356,15 @@ def cmd_notes(a):
     if rec is None:
         return _emit({"error": "no submission is attached to this session"}, 2)
     return _emit({"submission": label(rec), "notes": quality_notes(rec, sess),
-                  "staff_cautions": _cautions(rec, sess)})
+                  **staff_cautions(rec, sess)})
 
 
-def _cautions(rec, session):
-    """sheet_cautions, logged in the decisions log as they are found."""
+def staff_cautions(rec, session):
+    """sheet_cautions for a command's JSON (the agent's terminal), logged in the decisions log as
+    they are printed -- never written into a session file that is delivered or zipped. The md
+    and html forms of `show` are report text: no caution there."""
     cautions = sheet_cautions(rec, session)
-    log_cautions(session, cautions)
-    return cautions
+    return {"staff_cautions": cautions, "staff_cautions_logged": log_cautions(session, cautions)}
 
 
 def main(argv=None):

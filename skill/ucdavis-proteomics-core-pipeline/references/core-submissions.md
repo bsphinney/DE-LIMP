@@ -280,6 +280,9 @@ sheet's; beads blank on an affinity experiment; a form that contradicts itself a
 prepared the samples; and **pairing** — PROT_0756's names are `Old - JPH3 - Mouse 1`: every mouse
 gave all five IPs (JPH3, JPH4, Kv2.1, RyR, IgG) and mice 1–3 are Old, 4–6 Young, so samples from
 one mouse are not independent, and the note says whether the design analysed carries the mouse.
+A part of "conditions analysed" that rests on names with a number glued to them (ATG5, ATG7 read
+as replicates of "ATG") is not a note: it is in `staff_cautions`, for the Core staff member only
+(the JSON and `logs/decisions.md`, never the report, the brief or the zip).
 
 ## 1. `fetch` — the submission, its neighbours, its shares (where the key is)
 

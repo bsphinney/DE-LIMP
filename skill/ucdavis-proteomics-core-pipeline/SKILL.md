@@ -1158,9 +1158,10 @@ UniProt, sheet IDs vs raw files, conditions vs the design analysed, and pairing 
 one mouse are not independent). Re-run `submission_report.py notes --session <S>` once the
 FASTA and `conditions.csv` exist. Its `staff_cautions` are for the Core staff member only, never
 the report: a difference that rests on reading names with a number glued to them (ATG5, ATG7)
-as replicates of one condition, which gene names and sample IDs look alike in. Raise each one
-before the DE (it is logged in `logs/decisions.md`), and correct `conditions.csv` if the
-submitter meant otherwise.
+as replicates of one condition, which gene names and sample IDs look alike in, said on both
+readings. Raise each one before the DE, and make `conditions.csv` say what the submitter meant.
+`attach`, `notes`, `show` and `analysis_prompt.py` print them in their JSON and log them in
+`logs/decisions.md`; no file a collaborator gets carries them (not the brief, not the zip).
 
 **Record the experiment type now** (step 3's confirmed answer):
 ```

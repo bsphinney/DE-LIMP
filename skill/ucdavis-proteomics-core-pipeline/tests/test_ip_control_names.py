@@ -319,6 +319,23 @@ class TheGuessIsHeldForTheUser(unittest.TestCase):
         os.remove(et.path_for(s))
         self.assertIn("there is no experiment-type record at", nc.gate(path, q)[1])
 
+    def test_a_moved_session_is_the_same_session(self):
+        """The gate reads the session the check sits in: moving it changes nothing. A check
+        whose session is gone says so, not that the type changed."""
+        report, cond, dn, dr, s = self.inputs("IgG")
+        out = os.path.join(s, "output", "norm_check")
+        os.makedirs(out)
+        rec, _out = nc.run(report, cond, dn, dr, session=s, out=out)
+        q = rec["decision"]["quantities"]
+        moved = s + "_moved"
+        shutil.move(s, moved)
+        self.assertTrue(nc.gate(os.path.join(moved, "output", "norm_check", nc.RECORD), q)[0])
+        elsewhere = os.path.join(os.path.dirname(s), "check_copy")
+        shutil.copytree(os.path.join(moved, "output", "norm_check"), elsewhere)
+        ok, msg, _rec = nc.gate(os.path.join(elsewhere, nc.RECORD), q)
+        self.assertFalse(ok)
+        self.assertIn(f"the session this check ran in ({s}) is not there any more", msg)
+
     def test_a_check_from_before_2_14_1_is_compared_too(self):
         """It recorded controls and vs_control but no controls_from: a guess since is refused."""
         report, cond, dn, dr, s = self.inputs("Parental", controls="Parental")
