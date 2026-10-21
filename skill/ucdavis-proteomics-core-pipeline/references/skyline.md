@@ -277,10 +277,22 @@ Plus queue waits. A 12-run timsTOF project should take about 10-15 min of wall t
 - `disagreements.tsv`: the table above, one row per flagged precursor-run. The report's median
   apex difference is over the precursor-runs where Skyline picked the same peak, so a flagged 50 s
   never moves it.
-- `<name>_top_hits.sky.zip`: the Skyline document with every run's results. It opens in Skyline
-  26.1 or later and can be uploaded to Panorama. It is shared "minimal": the library and cache are
-  cut to the checked proteins. On the HeLa test it was 3.2 MB against 12.5 MB for "complete", and
-  reopened with the same 348 precursor rows.
+- `<name>_top_hits.sky.zip`: the Skyline document with every run's results; it can be uploaded to
+  Panorama. **The report, OUTPUT_FILES.md and both READMEs name it by its delivered path and say how
+  to open it** (`open_document_text`, one wording):
+  - in Skyline 26.1 or later on Windows (free from https://skyline.ms), by double-clicking it or
+    File › Open, and Skyline unpacks it;
+  - it already holds the chromatograms, so the raw files are needed only to re-pick peaks or add
+    peptides.
+
+  **Why 26.1 or later:** SkylineCmd 26.1's `--help` has no option to write an older document
+  format (only `--share-zip` and `--share-type`), and the document inside says
+  `format_version="26.1"`.
+
+  **Shared "minimal":** the library and cache are cut to the checked proteins. Both test
+  documents reopened with SkylineCmd `--in` and gave the same precursor reports as "complete":
+  - HeLa: 3.2 MB against 12.5 MB, 348 precursor rows;
+  - NIST: 21.5 MB against 23.0 MB, 2,824 precursor rows, with byte-identical chromatogram exports.
 - `skyline_provenance.json` (schema `skyline_peak_check/1`), the record. It holds:
   - the status (`ok`, `skipped` with the reason and stage, or `planned`), and the plan's id: a job
     writes the record only while it is its own plan's;

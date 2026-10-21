@@ -1282,6 +1282,40 @@ def selection_sentence(rec):
     return f"The proteins checked: {SELECTION_RULE.format(n=n)}{n_note}"
 
 
+# How to open the shared Skyline document: the ONE wording, in the report, OUTPUT_FILES.md and
+# both READMEs. SkylineCmd 26.1's --help has no option to write an older document format (only
+# --share-zip and --share-type), so the oldest desktop Skyline is the pinned release's.
+SKYLINE_DOWNLOAD = "https://skyline.ms"
+
+
+def desktop_version():
+    """The oldest desktop Skyline that opens the shared document: the pinned release (26.1)."""
+    return ".".join(SKYLINE_PIN["version"].split(".")[:2])
+
+
+def open_document_text(path=None):
+    """How to open the shared document, for a reader who has never used Skyline."""
+    first = (f"The Skyline document is `{path}`. Open it" if path else "Open it")
+    return (f"{first} in Skyline {desktop_version()} or later on Windows (free from "
+            f"{SKYLINE_DOWNLOAD}): double-click it, or use File › Open, and Skyline unpacks it. "
+            f"It already holds the chromatograms, so the raw files are not needed to look at the "
+            f"peaks; they are needed only to re-pick peaks or add peptides.")
+
+
+def readme_rows(skyline_dir, shown_as):
+    """README rows (path, what it is) for the peak check's folder and its Skyline document --
+    session_docs (shown_as "output/skyline") and the delivery's README ("skyline")."""
+    if not os.path.isdir(skyline_dir):
+        return []
+    rows = [(shown_as, "the peak check: pictures of the checked proteins' peaks, drawn with "
+                       "Skyline, its tables and the Skyline document")]
+    for f in sorted(os.listdir(skyline_dir)):
+        if f.endswith("_top_hits.sky.zip"):
+            rows.append((f"{shown_as}/{f}", "the Skyline document of the checked proteins. "
+                         + open_document_text()))
+    return rows
+
+
 CAVEAT = ("These pictures are a visual check of DIA-NN's peaks. Skyline reuses DIA-NN's peak "
           "edges by default, so a peak that matches is not independent confirmation of it. The "
           "real warning signs are the peaks where Skyline picked a different peak.")
@@ -1374,11 +1408,13 @@ def report_section(rec, rel="skyline"):
         caps[f["file"]] = f.get("caption") or ""
         L += [f"![{f.get('title') or f['file']}]({rel}/{f['file']})", ""]
     files = rec.get("files") or {}
-    L += [f"In `{rel}/`: the Skyline document `{files.get('share_zip', '')}` (open it in "
-          f"Skyline {t['version']} or later), Skyline's precursor report "
-          f"`{files.get('precursor_report', '')}`, `{files.get('disagreements', '')}`, and a "
-          f"peak-area chart per protein (`areas_<gene>.png`). Tolerance: +-{fmt_num(ma['ms1_ppm'])} "
-          f"ppm (MS1) and +-{fmt_num(ma['ms2_ppm'])} ppm (MS2), {ma['source']}."]
+    if files.get("share_zip"):
+        L += ["**Look at the peaks yourself.** " + open_document_text(f"{rel}/{files['share_zip']}"),
+              ""]
+    L += [f"Also in `{rel}/`: Skyline's precursor report `{files.get('precursor_report', '')}`, "
+          f"`{files.get('disagreements', '')}`, and a peak-area chart per protein "
+          f"(`areas_<gene>.png`). Tolerance: +-{fmt_num(ma['ms1_ppm'])} ppm (MS1) and "
+          f"+-{fmt_num(ma['ms2_ppm'])} ppm (MS2), {ma['source']}."]
     runs = rec.get("runs") or {}
     if runs.get("failed"):
         L += ["", "Runs Skyline could not import, left out of the pictures and tables: "

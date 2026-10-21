@@ -4272,6 +4272,16 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
                        (name.endswith("/") and any(x.startswith(name) for x in delivered)))
             if present:
                 L.append(f"| {item(name)} | {text} |")
+            if name == "figures/" and any(x.startswith("skyline/") for x in delivered):
+                # the peak check (skyline_peaks.py): its folder, and how to open its document
+                sp = sibling("skyline_peaks")
+                L.append(f"| {item('skyline/')} | the peak check: pictures of the checked "
+                         "proteins' peaks, drawn with Skyline, its tables and the Skyline "
+                         "document |")
+                for x in sorted(delivered):
+                    if x.startswith("skyline/") and x.endswith("_top_hits.sky.zip"):
+                        L.append(f"| {item(x)} | the Skyline document of the checked proteins. "
+                                 f"{sp.open_document_text()} |")
         if raw_names:
             L.append(f"| {item('../raw/')} | your raw instrument files, in the `raw` folder next to this one |")
         methods = []

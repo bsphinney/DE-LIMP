@@ -33,6 +33,7 @@ from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
 sys.path.insert(0, SCRIPTS)
+sys.path.insert(0, HERE)
 
 import client_text      # noqa: E402
 import scratch_files    # noqa: E402
@@ -1066,6 +1067,62 @@ class TestReviewFindings(unittest.TestCase):
         self.assertEqual(s["within_s_pct"], 40.0)
         md = sp.report_section(dict(OK_REC))["md"]
         self.assertIn("where it picked the same peak, the median difference", md)
+
+
+OPEN_WORDS = ("Skyline 26.1 or later on Windows", "https://skyline.ms",
+              "double-click it, or use File › Open, and Skyline unpacks it",
+              "the raw files are not needed to look at the peaks",
+              "needed only to re-pick peaks or add peptides")
+
+
+class TestOpeningTheDocument(unittest.TestCase):
+    """Brett: the Skyline file easy to find, and openable by people with Skyline on Windows.
+    SkylineCmd 26.1's --help has no option to write an older document format, so the oldest
+    desktop Skyline is 26.1."""
+
+    def test_the_version_is_the_pinned_release(self):
+        self.assertEqual(sp.desktop_version(), "26.1")
+
+    def test_the_report_names_the_file_by_its_delivered_path(self):
+        md = sp.report_section(dict(OK_REC))["md"]
+        self.assertIn("The Skyline document is `skyline/T_top_hits.sky.zip`.", md)
+        for w in OPEN_WORDS:
+            self.assertIn(w, md)
+        self.assertEqual(client_text.peak_check_overclaims(md), [])
+
+    def test_output_files_md(self):
+        import make_report
+        desc = make_report.describe("T_top_hits.sky.zip")[1]
+        for w in OPEN_WORDS:
+            self.assertIn(w, desc)
+
+    def test_the_delivery_readme(self):
+        import core_submission as cs
+        from test_core_submission import write_summary
+        with tempfile.TemporaryDirectory() as td:
+            _p, summary = write_summary(td)
+            delivered = {"Analysis_Report.html", "figures/pca.png", "skyline/peaks_G.png",
+                         "skyline/T_top_hits.sky.zip"}
+            for for_html in (False, True):
+                text = cs.build_readme(summary, delivered, [], "analysis", for_html=for_html)
+                self.assertIn("skyline/T_top_hits.sky.zip", text)
+                for w in OPEN_WORDS:
+                    self.assertIn(w, text)
+            self.assertNotIn("Skyline", cs.build_readme(summary, {"Analysis_Report.html"}, [],
+                                                         "analysis"))
+
+    def test_the_session_readme(self):
+        import session_docs
+        from test_session_docs import Agents, DPC
+        with tempfile.TemporaryDirectory() as td:
+            p = Agents().build(td, DPC)
+            sky = os.path.join(p["output_dir"], "skyline")
+            os.makedirs(sky)
+            open(os.path.join(sky, "T_top_hits.sky.zip"), "w").close()
+            md = session_docs.readme_md(session_docs.gather(p["session_dir"]))
+        self.assertIn("| `output/skyline/T_top_hits.sky.zip` | the Skyline document", md)
+        for w in OPEN_WORDS:
+            self.assertIn(w, md)
 
 
 class TestBrief(unittest.TestCase):
