@@ -401,6 +401,7 @@ def gather(session_dir, registry=None, registry_note=None, pending=(), located_a
               "groups taken from their names", file=sys.stderr)
     pulldown = experiment_type.pulldown_design(etype, list(groups), f["contrasts"])
     f["controls"], f["controls_from"] = sorted(pulldown["controls"]), pulldown["controls_from"]
+    f["vs_control"] = pulldown["vs_control"]
 
     # --- files that exist (links are only ever to these)
     out = p["output_dir"]
@@ -906,20 +907,18 @@ def agents_md(f, for_delivery=False):
                      "submission as recorded (its `source`: the CoreOmics form, or facts the user "
                      "gave). Describe the samples only as it does and add no detail it does not "
                      f"state; {who}.")
-    if f["controls"] and f["contrasts"]:
-        vs = [c for c in f["contrasts"] if any(re.search(rf"(^|-){re.escape(g)}$", c)
-                                               for g in f["controls"])]
-        if vs:
-            said = experiment_type.CONTROLS_FROM[f["controls_from"]]
-            L.append(f"- **Pull-down controls, {said}: {', '.join(f['controls'])}.** "
-                     f"{len(vs)} contrast(s) compare against them ({', '.join(vs[:4])}"
-                     f"{', …' if len(vs) > 4 else ''}): a positive logFC there is enrichment "
-                     "over that control, not a change in abundance. A protein never observed in "
-                     "the control gets its control values from the missing-value policy above, "
-                     "so its logFC rests on that policy, not on a measured baseline."
-                     + ("" if f.get("controls_from") == "recorded" else
-                        " (Check conditions.csv: the name is the only evidence these are "
-                        "controls.)"))
+    vs = f.get("vs_control") or []   # pulldown_design's: the contrasts against a control
+    if vs:
+        said = experiment_type.CONTROLS_FROM[f["controls_from"]]
+        L.append(f"- **Pull-down controls, {said}: {', '.join(f['controls'])}.** "
+                 f"{len(vs)} contrast(s) compare against them ({', '.join(vs[:4])}"
+                 f"{', …' if len(vs) > 4 else ''}): a positive logFC there is enrichment "
+                 "over that control, not a change in abundance. A protein never observed in "
+                 "the control gets its control values from the missing-value policy above, "
+                 "so its logFC rests on that policy, not on a measured baseline."
+                 + ("" if f.get("controls_from") == "recorded" else
+                    " (Check conditions.csv: the name is the only evidence these are "
+                    "controls.)"))
     if f.get("sets_files") and (f.get("sets") or {}).get("reading"):
         L.append("- **Protein-set tests** (`Sets_*.csv`): read them by run_sets.R's rules "
                  "(`sets_provenance.json` `reading`):")

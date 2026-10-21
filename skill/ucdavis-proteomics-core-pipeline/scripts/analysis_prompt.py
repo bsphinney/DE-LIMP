@@ -272,8 +272,9 @@ def main():
               file=sys.stderr)
     design = etm.pulldown_design(etype, groups_all, contrasts)
     controls, vs_control, pulldown = design["controls"], design["vs_control"], design["pulldown"]
-    # the user recorded that this pull-down has no control group: nothing is enriched over one
-    over_control = pulldown and not design.get("no_control")
+    # contrasts against a control: none when the user recorded that the design has no control
+    # group (pulldown_design no_control), or when no control group is named or recorded
+    over_control = pulldown and bool(vs_control) and not design.get("no_control")
     det, det_groups = _detection(a.de_dir, a.conditions)
     has_detmat = os.path.exists(os.path.join(a.de_dir, "Detection_Matrix.csv"))
     zero_word = ("missing" if (prov.get("detection_matrix") or {}).get("zero_means") == "missing"
@@ -587,13 +588,14 @@ def main():
     w("")
     if pulldown:
         w("## Pull-down design — " + ("enrichment over a control" if over_control else
-                                      "no control group"))
-        if not over_control:
-            w("The user recorded that this design has no control group (`experiment_type.py "
-              "set-controls --controls none`): no contrast measures enrichment over a control. "
-              "Read each contrast as a comparison between pull-downs, and never call a protein "
-              "enriched over a control.")
-        if vs_control:
+                                      "no negative control group" if design.get("no_control")
+                                      else "no contrast against a control"))
+        if design.get("no_control"):
+            w("The user recorded that this design has no negative control group "
+              "(`experiment_type.py set-controls --controls none`). Read each contrast as a "
+              "comparison between pull-downs: no protein can be called specific to a bait "
+              "against a control.")
+        if over_control:
             # where the controls came from, a guess said to be one (etm.CONTROLS_FROM, rule 2)
             said = etm.CONTROLS_FROM[design["controls_from"]]
             w(f"Control group(s), {said}: {', '.join(controls)}. Contrasts against them "

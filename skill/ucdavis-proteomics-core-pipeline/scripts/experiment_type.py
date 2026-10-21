@@ -202,10 +202,23 @@ def reconcile(etype, submission_answer):
     return None
 
 
-def default_for(etype):
-    """{"quantities", "why", "label"} for a type; the standard default, tagged, when unknown."""
+# An enrichment the user recorded with no control group (set-controls --controls none): the
+# type's default stands, for a reason that names no control (the team lead, 2026-10-20).
+NO_CONTROL_WHY = {
+    "ip": "a pull-down enriches a few proteins, so normalisation's assumption that most proteins "
+          "do not change does not hold; no negative control was recorded",
+    "proximity": "the samples are usually loaded by equal protein, so standard normalisation "
+                 "holds; no negative control was recorded",
+}
+
+
+def default_for(etype, no_control=False):
+    """{"quantities", "why", "label"} for a type; the standard default, tagged, when unknown.
+    no_control: the user recorded that the design has no control group (pulldown_design)."""
     if etype in DEFAULTS:
         label, q, why = DEFAULTS[etype]
+        if no_control and etype in NO_CONTROL_WHY:
+            why = NO_CONTROL_WHY[etype]
         return {"quantities": q, "why": why, "label": label}
     return {"quantities": NORMALISED, "label": "NOT RECORDED",
             "why": "DEFAULT -- not user-confirmed: no experiment type was recorded, so the "
@@ -222,14 +235,19 @@ def _kept_bait_answer(session, bait):
     return {"bait": prior.get("bait"), "bait_confirmed": ans} if ans else {}
 
 
-def _kept_controls_answer(session, controls):
-    """{"controls", "controls_confirmed"} from an earlier record_controls answer, when this `set`
-    names no --controls; {} otherwise -- as for the bait."""
-    if _control_list(controls) is not None or not os.path.isfile(path_for(session)):
+def _kept_controls(session, controls, etype):
+    """{"controls"[, "controls_confirmed"]} recorded before (set --controls or set-controls), when
+    this `set` names no --controls and the type is still an enrichment; {} otherwise -- as for
+    the bait. Under another type, recorded controls would mark its contrasts as enrichments."""
+    if (_control_list(controls) is not None or etype not in ENRICHMENT
+            or not os.path.isfile(path_for(session))):
         return {}
     prior = load(session) or {}
-    ans = prior.get("controls_confirmed")
-    return {"controls": prior.get("controls"), "controls_confirmed": ans} if ans else {}
+    if prior.get("controls") is None:
+        return {}
+    return {"controls": prior["controls"],
+            **({"controls_confirmed": prior["controls_confirmed"]}
+               if prior.get("controls_confirmed") else {})}
 
 
 def record(session, etype, source, stated=None, bait=None, controls=None, submission=None,
@@ -260,10 +278,10 @@ def record(session, etype, source, stated=None, bait=None, controls=None, submis
            "reconcile": reconcile(etype, sub.get("normalisation")) if sub else None,
            "bait": bait or None,
            "controls": _control_list(controls),
-           # the user's answers to ask_bait (record_bait) and set-controls (record_controls)
-           # survive a re-recorded type
+           # the user's answers to ask_bait (record_bait) and the recorded controls survive a
+           # re-recorded type
            **_kept_bait_answer(session, bait),
-           **_kept_controls_answer(session, controls),
+           **_kept_controls(session, controls, etype),
            "recorded_at": when or datetime.datetime.now(datetime.timezone.utc).strftime(
                "%Y-%m-%dT%H:%M:%SZ")}
     with open(p + ".tmp", "w", encoding="utf-8") as fh:
@@ -462,14 +480,16 @@ def _control_list(controls):
 
 
 def session_groups(session):
-    """The groups in the session's input/conditions.csv (its Group column); empty when there is
-    none yet."""
+    """The groups in the session's input/conditions.csv (its Group column), or None when there is
+    none yet. An unreadable one raises ValueError."""
+    p = os.path.join(session, "input", "conditions.csv")
+    if not os.path.isfile(p):
+        return None
     try:
-        with open(os.path.join(session, "input", "conditions.csv"), newline="",
-                  encoding="utf-8-sig", errors="replace") as fh:
+        with open(p, newline="", encoding="utf-8-sig", errors="replace") as fh:
             return {(r.get("Group") or "").strip() for r in csv.DictReader(fh)} - {""}
-    except OSError:
-        return set()
+    except (OSError, csv.Error) as e:
+        raise ValueError(f"{p} could not be read ({e})")
 
 
 def record_controls(session, controls, when=None):
@@ -484,8 +504,12 @@ def record_controls(session, controls, when=None):
     named = _control_list(controls)
     if named is None:
         raise ValueError("--controls needs the control groups, comma-separated, or 'none'")
-    groups = session_groups(session)
-    unknown = [c for c in named if groups and c not in groups]
+    groups = session_groups(session) if named else set()
+    if groups is None:
+        raise ValueError("this session has no input/conditions.csv to check the names against: "
+                         "write it first, or record the controls at step 3 (experiment_type.py "
+                         "set --controls)")
+    unknown = [c for c in named if c not in groups]
     if unknown:
         raise ValueError(f"--controls {', '.join(unknown)}: not a group in this session's "
                          f"conditions.csv ({', '.join(sorted(groups))}); give its exact name")

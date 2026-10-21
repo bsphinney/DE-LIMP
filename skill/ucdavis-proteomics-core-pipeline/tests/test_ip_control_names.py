@@ -36,7 +36,8 @@ import experiment_type as et  # noqa: E402
 import normalization_check as nc  # noqa: E402
 import session_docs  # noqa: E402
 import test_deposit_package as tdp  # noqa: E402
-from test_normalization_check import session  # noqa: E402
+import make_methods  # noqa: E402
+from test_normalization_check import no_staff_list, session  # noqa: E402
 from test_normalization_check_hold import BALANCED, fake_de  # noqa: E402
 
 ANY_STUDY = ("IgG", "Old_IgG", "IgG1", "IgG2a", "IgG2b", "IgG3", "IgG4", "mIgG", "RbIgG",
@@ -164,7 +165,7 @@ class TheGuessIsHeldForTheUser(unittest.TestCase):
         with open(report, "w") as fh:
             fh.write("Run\tPrecursor.Id\tProtein.Group\tPrecursor.Quantity\t"
                      "Precursor.Normalised\tQ.Value\n")
-        cond = os.path.join(d, "conditions.csv")
+        cond = os.path.join(s, "input", "conditions.csv")      # set-controls checks names here
         with open(cond, "w", newline="") as fh:
             w = csv.writer(fh)
             w.writerow(["File.Name", "Group"])
@@ -237,8 +238,46 @@ class TheGuessIsHeldForTheUser(unittest.TestCase):
         rec = nc.run(report, cond, dn, dr, session=s)[0]
         self.assertEqual((rec["needs_decision"], rec["decision"]["source"]), (False, "default"))
         pd = rec["design"]
-        self.assertEqual((pd["controls"], pd["controls_from"], pd["vs_control"], pd["note"]),
-                         ([], "recorded", [], None))
+        self.assertEqual((pd["controls"], pd["controls_from"], pd["vs_control"], pd["note"],
+                          pd["no_control"]), ([], "recorded", [], None, True))
+        # the default stands, for a reason that names no control -- and the Methods say so
+        self.assertIn("no negative control was recorded", rec["default"]["why"])
+        methods = make_methods.de_normalisation_sentence(
+            {"normalisation": "non-normalised",
+             "normalization_check": dict(rec, status="decided")})
+        self.assertIn("no negative control was recorded", methods)
+        self.assertNotIn("the controls carry", methods)
+
+    def test_the_gate_refuses_controls_changed_since_the_check(self):
+        report, cond, dn, dr, s = self.inputs("Parental", controls="Parental")
+        rec, out = nc.run(report, cond, dn, dr, session=s)
+        path = os.path.join(out, nc.RECORD)
+        self.assertTrue(nc.gate(path, rec["decision"]["quantities"])[0])
+        # a later `set` that names no --controls keeps them: the check still stands
+        et.record(s, "ip", "user")
+        self.assertEqual(et.load(s)["controls"], ["Parental"])
+        self.assertTrue(nc.gate(path, rec["decision"]["quantities"])[0])
+        # set-controls none: the check's volcano read Parental as a control -- run it again
+        et.record_controls(s, et.NO_CONTROLS)
+        ok, msg, _rec = nc.gate(path, rec["decision"]["quantities"])
+        self.assertFalse(ok)
+        self.assertIn("the control groups changed since this check ran", msg)
+
+    def test_a_tripped_check_with_guessed_controls_is_decided(self):
+        """A trip is the person's to decide even when the controls are a guess too."""
+        report, cond, dn, dr, s = self.inputs("Parental")
+        no_staff_list(self, os.path.dirname(s))
+        _rec, out = nc.run(report, cond, dn, dr, session=s)
+        path = os.path.join(out, nc.RECORD)
+        with open(path) as fh:
+            rec = json.load(fh)
+        rec.update(tripped=True, trips=["B1 a stand-in trip"])
+        with open(path, "w") as fh:
+            json.dump(rec, fh)
+        nc.decide(path, et.NORMALISED, "canalyst", "the staff member's reason")
+        ok, msg, _rec = nc.gate(path, et.NORMALISED)
+        self.assertTrue(ok, msg)
+        self.assertIn("tripped", msg)
 
     def test_a_check_that_trips_still_asks_for_the_controls(self):
         rec, _out = self.check("Parental")
@@ -264,6 +303,11 @@ class TheGuessIsHeldForTheUser(unittest.TestCase):
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d, True)
         s = session(d, "ip", bait="BAITX", stated="an IP of BAITX")
+        with self.assertRaisesRegex(ValueError, "no input/conditions.csv"):
+            et.record_controls(s, "Parental")
+        with open(os.path.join(s, "input", "conditions.csv"), "w", newline="") as fh:
+            csv.writer(fh).writerows([["File.Name", "Group"], ["r1", "Bait"], ["r2", "Parental"],
+                                      ["r3", "Mock"]])
         before = et.load(s)
         et.record_controls(s, "Parental, Mock")
         after = et.load(s)
@@ -322,9 +366,11 @@ class TheGuessIsSaidWhereItIsRead(unittest.TestCase):
     def test_a_design_recorded_with_no_control_group_says_so(self):
         d, p = self.session(controls="none", other="Ctrl")
         brief = self.brief(d, p)
-        self.assertIn("## Pull-down design — no control group", brief)
-        self.assertIn("no contrast measures enrichment over a control", brief)
-        self.assertNotIn("enriched over the control for one bait only", brief)
+        self.assertIn("## Pull-down design — no negative control group", brief)
+        self.assertIn("Read each contrast as a comparison between pull-downs", brief)
+        for never in ("enrichment over a control", "enrichment over the control",
+                      "enriched over the control", "### Specificity"):
+            self.assertNotIn(never, brief)
         self.assertIn("### Cross-Comparison Biomarkers", brief)
 
     def test_recorded_controls_are_not_called_a_name_guess(self):

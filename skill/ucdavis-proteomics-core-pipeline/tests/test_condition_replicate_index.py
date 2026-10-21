@@ -133,6 +133,11 @@ class NoFalseConditionsDiffer(unittest.TestCase):
         for names, analysed, _want in SAME_AS_2_13_2:
             self.assertIsNone(self.note(names, analysed), names)
 
+    def test_deliberate_repeated_numbered_names_pooled_are_said_so(self):
+        """WT_1 x2 / WT_2 x2 analysed as WT: true of the sheet as written (2.13.2 said nothing)."""
+        names = ["WT_1"] * 2 + ["WT_2"] * 2 + ["KO_1"] * 2 + ["KO_2"] * 2
+        self.assertIn("pools the sheet's WT_1, WT_2", self.note(names, ["WT"] * 4 + ["KO"] * 4))
+
     def test_a_real_difference_is_still_reported(self):
         names = ["ATG5"] * 3 + ["ATG7"] * 3 + ["WT"] * 3
         self.assertIn("pools the sheet's ATG5, ATG7", self.note(names, ["ATG"] * 6 + ["WT"] * 3))
