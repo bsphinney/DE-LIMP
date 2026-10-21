@@ -164,6 +164,10 @@ class Fallback(StallBase):
         self.assertEqual(rc, 1)
         self.assertIn("no Gemini TTS model answered a two-line test", err)
         self.assertEqual([c for _, c, _ in log["calls"] if not is_probe(c)], [])
+        # each was asked once more after PREFLIGHT_RETRY_WAIT (a short outage, Brett 2026-10-20)
+        self.assertEqual([m for m, c, _ in log["calls"] if is_probe(c)],
+                         [STALLS, ANSWERS, STALLS, ANSWERS])
+        self.assertIn(f"asked again 5 min later: {STALLS}: no answer in 0 s", err)
 
     def test_a_rate_limited_model_counts_as_answering(self):
         state = {"n": 0}

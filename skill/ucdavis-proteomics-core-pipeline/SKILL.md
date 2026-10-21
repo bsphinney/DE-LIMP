@@ -2960,9 +2960,13 @@ checks it, renders it, verifies the audio and links it in.
   need the person running it on the Core staff list.
 - **Anyone else:** offer it in one line when the results go to a collaborator or the lab; make
   it only on a yes, with their consent recorded: `--cloud-ok "<who agreed, when>"`.
-- **It never holds up the report or the delivery.** No key, Gemini down or out of quota, a
-  failed render or job, a job still running when all else is ready (`scancel` it): one line to
-  the user, then deliver without it; the audio can be added later.
+- **It never holds up the report or the delivery.** Gemini down, a failed render or job, a job
+  still running when all else is ready (`scancel` it, and the local voice's job its log names):
+  one line to the user, then deliver without it; the audio can be added later. When Gemini
+  cannot be used and waiting would not help (no key, 402 prepay credits, the key refused, no
+  quota or no answer on any model), render makes the whole episode with the local voice (Kokoro
+  on HIVE, nothing sent) and says so; `--tts local` uses it from the start
+  (`references/podcast.md`, "The local voice").
 
 **Make it where the report was built.** Built here (a Mac, `local` mode, or a pulled copy of a
 HIVE session, step 1c.7): make it here. With a session of record on HIVE, it then goes back with
