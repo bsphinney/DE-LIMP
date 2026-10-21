@@ -971,12 +971,21 @@ def run(report, conditions, de_norm, de_raw, session=None, bait=None, out=None, 
     rec["tripped"] = bool(rec["trips"])
     rec["data_check_agrees"] = not rec["tripped"]
     # No experiment type recorded: the default above is the skill's, not the user's, so nothing
-    # is decided for them -- the check asks, whatever the data say.
-    rec["needs_decision"] = rec["tripped"] or rec_type is None
+    # is decided for them -- the check asks, whatever the data say. Nor when the control groups
+    # are only read from names that can also name an ordinary condition (Ctrl, KO, Mock ...):
+    # which contrasts are enrichments, and so which volcano anomalies are expected, is a guess.
+    guessed = design.get("controls_from") == "enrichment_name" and bool(design.get("vs_control"))
+    rec["needs_decision"] = rec["tripped"] or rec_type is None or guessed
     if rec_type is None:
         rec["needs_decision_why"] = ("no experiment type is recorded for this session, so there is "
                                      "no default to apply: ask the user what kind of experiment "
                                      "this is (experiment_type.py set) and which quantities to use")
+    elif guessed:
+        rec["needs_decision_why"] = (f"the control group(s) {', '.join(design['controls'])} were "
+                                     "read from their names only, and those names can also name an "
+                                     "ordinary condition: confirm them with the user (record them "
+                                     "with experiment_type.py set --controls and run this check "
+                                     "again), and which quantities to use")
     if design.get("note"):
         rec["design_note"] = design["note"]
     rec["decision"] = None if rec["needs_decision"] else {
@@ -1328,7 +1337,9 @@ def main():
                               "default": rec["default"], "decision": rec["decision"],
                               "recommendation": rec["recommendation"]}, indent=2))
             if rec["needs_decision"]:
-                print(f"[normalization_check] {'TRIPPED' if rec['tripped'] else 'NO EXPERIMENT TYPE'}"
+                why = ("TRIPPED" if rec["tripped"] else "NO EXPERIMENT TYPE"
+                       if rec["experiment_type"]["type"] is None else "CONTROLS NOT CONFIRMED")
+                print(f"[normalization_check] {why}"
                       f" -- stop before the final DE: show {os.path.join(out, SUMMARY)} to the "
                       "user and ask.", file=sys.stderr)
                 return TRIPPED_EXIT

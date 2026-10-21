@@ -46,7 +46,6 @@ import html_to_pdf  # noqa: E402  -- the PDF: the same page printed by a headles
 import make_podcast       # noqa: E402  -- an optional audio discussion keeps its Listen card
 from client_text import draft_history, draft_history_loose  # noqa: E402  -- the ONE list (podcast too)
 import audit_results      # noqa: E402  -- the audit's plain words: the client's Audit & caveats
-from session_docs import IP_CONTROL_NAME  # noqa: E402  -- which groups are pull-down controls
 from fetch_fasta import CONTAMINANT_TAGS  # noqa: E402  -- Cont_ and FragPipe's contam_: one definition
 
 # Galleries (no report only): QC first, then overview, then per-contrast results, and the

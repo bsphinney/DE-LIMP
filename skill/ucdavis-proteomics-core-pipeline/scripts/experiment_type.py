@@ -51,8 +51,29 @@ SCHEMA = "experiment_type/1"
 FASTA_META = os.path.join("input", "search.fasta.meta.json")
 
 # The group names that read as a pull-down's controls. THE one definition: session_docs.py,
-# analysis_prompt.py and normalization_check.py import it from here.
-IP_CONTROL_NAME = re.compile(r"(?i)(^|[_\-. ])(igg|beads?)($|[_\-. ])")
+# analysis_prompt.py and normalization_check.py use them through controls_in / pulldown_design.
+# A name is a whole token of the group name ("Old_IgG1", "Empty-beads"), never letters inside a
+# word ("SKOR1", "Controller"). Read in this order, the first list that names any group giving
+# the controls, because with no experiment type recorded the names alone decide whether the
+# design is a pull-down (pulldown_design):
+#   IP_CONTROL_NAME          a pull-down's control in any study: IgG and its subclasses (IgG1,
+#                            IgG2a ...) or species (mIgG, RbIgG), beads (EmptyBeads, BeadsOnly),
+#                            isotype;
+#   ENRICHMENT_CONTROL_NAME  a control in an IP but an ordinary group elsewhere -- KO vs WT, Mock
+#                            vs infected, Parental vs engineered, Empty vector (EV) vs
+#                            overexpression are whole-proteome comparisons;
+#   GENERIC_CONTROL_NAME     Ctrl / Control: in an IP as often the untreated bait as the control.
+# The last two are read only when the RECORDED type is an enrichment, and as a guess to confirm
+# (controls_from "enrichment_name"): in Bait_Ctrl / Bait_Drug / IgG the control is IgG, and in
+# Bait_Ctrl / Bait_Drug / Parental it is Parental (Core IP-MS guide review, 2026-10-20).
+_CONTROL_TOKEN = r"(?i)(^|[_\-. ])({})($|[_\-. ])"
+IP_CONTROL_NAME = re.compile(_CONTROL_TOKEN.format(
+    r"(?:m|ms|r|rb|h)?igg(?:[1-4][a-d]?)?|(?:empty)?beads?(?:only)?|isotype"))
+ENRICHMENT_CONTROL_NAME = re.compile(_CONTROL_TOKEN.format(
+    r"parental|untagged|mock|empty(?:vector)?|ev|ko|knock[ _.\-]?out"))
+GENERIC_CONTROL_NAME = re.compile(_CONTROL_TOKEN.format(r"ctrls?|controls?"))
+CONTROL_NAME_TIERS = ((IP_CONTROL_NAME, "name"), (ENRICHMENT_CONTROL_NAME, "enrichment_name"),
+                      (GENERIC_CONTROL_NAME, "enrichment_name"))
 
 RAW, NORMALISED = "raw", "normalised"
 # type -> (label, default quantities, why). The defaults are Brett's (Core director, 2026-10-01):
@@ -425,32 +446,60 @@ def bait_for_check(session, bait=None, rec=None):
                   "not given"), cands
 
 
-def controls_in(groups, rec=None):
-    """The control groups: the recorded --controls, else the groups named like IgG / beads."""
+def _controls(groups, rec):
+    """(the control groups, where they came from: "recorded" (--controls), "name"
+    (IP_CONTROL_NAME), "enrichment_name" (a guess to confirm), or None when there are none)."""
     named = (rec or {}).get("controls")
-    return [g for g in groups if g in named] if named else \
-        [g for g in groups if IP_CONTROL_NAME.search(g)]
+    if named:
+        return [g for g in groups if g in named], "recorded"
+    tiers = CONTROL_NAME_TIERS if (rec or {}).get("type") in ENRICHMENT else CONTROL_NAME_TIERS[:1]
+    for pat, source in tiers:
+        found = [g for g in groups if pat.search(g)]
+        if found:
+            return found, source
+    return [], None
+
+
+def controls_in(groups, rec=None):
+    """The control groups: the recorded --controls, else the groups named like a pull-down's
+    control (CONTROL_NAME_TIERS)."""
+    return _controls(groups, rec)[0]
 
 
 def pulldown_design(rec, groups, contrasts):
-    """THE pull-down decision the analysis uses: {"pulldown", "source", "controls", "vs_control",
-    "note"}. From the experiment type when recorded -- an enrichment type is a pull-down design --
-    else from the group names, said so; a disagreement between the two is a note to raise."""
-    controls = controls_in(groups, rec)
+    """THE pull-down decision the analysis uses: {"pulldown", "source", "controls",
+    "controls_from", "vs_control", "note"}. From the experiment type when recorded -- an
+    enrichment type is a pull-down design -- else from the group names, said so; a disagreement
+    between the two is a note to raise. controls_from (_controls): "enrichment_name" is a guess
+    that the brief tags and normalization_check holds for the user."""
+    controls, how = _controls(groups, rec)
     vs_control = [c for c in contrasts if "-" in c and c.split("-", 1)[1].strip() in controls]
     if not rec:
-        return {"pulldown": bool(vs_control), "controls": controls, "vs_control": vs_control,
+        return {"pulldown": bool(vs_control), "controls": controls, "controls_from": how,
+                "vs_control": vs_control,
                 "source": "group names only (no experiment type recorded)", "note": None}
     enr = rec["type"] in ENRICHMENT
     note = None
-    if enr and not vs_control:
+    if enr and not vs_control and controls:
+        note = (f"the experiment type is {rec['label']}, and {', '.join(controls)} "
+                + ("were recorded as" if how == "recorded" else "read as")
+                + " the control group(s), but no contrast has one as its reference (e.g. "
+                f"<bait>-{controls[0]}): check the contrasts' direction, or record the right "
+                "control groups (experiment_type.py set --controls ...)")
+    elif enr and not vs_control:
         note = (f"the experiment type is {rec['label']}, but no contrast is against a control "
-                "group (none is named like IgG/beads, and no --controls were recorded): "
+                "group (none is named like one -- IgG, beads, isotype, parental, untagged, mock, "
+                "empty, KO, ctrl -- and no --controls were recorded): "
                 "record the control groups (experiment_type.py set --controls ...)")
+    elif enr and how == "enrichment_name":
+        note = (f"the control group(s) {', '.join(controls)} were taken from their names, which "
+                "can also name an ordinary condition (untreated, knockout, mock-infected): "
+                "confirm with the user that they are the pull-down's negative controls, or "
+                "record the right ones (experiment_type.py set --controls ...)")
     elif not enr and vs_control:
         note = (f"the groups {', '.join(controls)} read as a pull-down's controls, but the "
                 f"experiment type is {rec['label']}: confirm the type with the user")
-    return {"pulldown": enr, "controls": controls, "vs_control": vs_control,
+    return {"pulldown": enr, "controls": controls, "controls_from": how, "vs_control": vs_control,
             "source": f"experiment type ({rec['source']})", "note": note}
 
 
@@ -466,7 +515,9 @@ def main():
     s.add_argument("--source", required=True, choices=("submission", "user"))
     s.add_argument("--stated", help="the user's own words for the experiment")
     s.add_argument("--bait", help="the bait / fusion protein (gene or accession), when known")
-    s.add_argument("--controls", help="comma-separated control groups, when not named IgG/beads")
+    s.add_argument("--controls", help="comma-separated control groups, when their names do not "
+                                      "say so (IgG, beads, isotype; in an enrichment also "
+                                      "parental, untagged, mock, empty, KO, ctrl)")
     sb = sub.add_parser("set-bait", help="record the user's answer to ask_bait (after step 6)")
     sb.add_argument("--session", required=True)
     sb.add_argument("--bait", required=True,

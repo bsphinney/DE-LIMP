@@ -71,10 +71,9 @@ QC_COLUMNS = {
     "Total": "proteins in the matrix", "PctDetected": "Detected / Total, %",
     "PctInferred": "Inferred / Total, %",
 }
-# Group names that are, by name, the negative control of a pull-down / IP (IgG, beads-only).
-# Only ever used to POINT at contrasts against them; the user's design says what they are.
-from experiment_type import IP_CONTROL_NAME  # noqa: E402,F401  one definition, re-exported
-import experiment_type  # noqa: E402  the control groups (controls_in)
+# The control groups (experiment_type.controls_in): only ever used to POINT at contrasts
+# against them; the user's design says what they are.
+import experiment_type  # noqa: E402
 
 
 # ---------------------------------------------------------------------------- reading
@@ -393,7 +392,7 @@ def gather(session_dir, registry=None, registry_note=None, pending=(), located_a
     f["contrasts"] = de.get("contrasts") or []
     f["sig"] = _sig_counts(de)
     # the control groups as the analysis decides them (experiment_type.controls_in: the
-    # recorded --controls, else the IgG/beads names) -- the brief's own rule
+    # recorded --controls, else the control names) -- the brief's own rule
     try:
         etype = experiment_type.load(session_dir)
     except (OSError, ValueError) as e:

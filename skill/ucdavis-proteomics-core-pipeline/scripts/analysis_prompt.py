@@ -585,7 +585,13 @@ def main():
     w("")
     if pulldown:
         w("## Pull-down design — enrichment over a control")
-        w(f"Control group(s), by name: {', '.join(controls)}. Contrasts against them "
+        # where the controls came from (experiment_type.pulldown_design): a name that can also
+        # name an ordinary condition is a guess, said so (rule 2)
+        src = {"recorded": "as recorded (`experiment_type.py set --controls`)",
+               "enrichment_name": "read from their names — NOT confirmed; raise it with the "
+                                  "user before reading these contrasts as enrichment"
+               }.get(design.get("controls_from"), "by name")
+        w(f"Control group(s), {src}: {', '.join(controls)}. Contrasts against them "
           f"({', '.join(contrast_label(c) for c in vs_control)}) measure **enrichment over the "
           "control**, not abundance change.")
         w("- Do NOT write a blanket sentence such as \"the IgG value is a model-inferred floor\". "
