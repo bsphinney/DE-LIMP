@@ -6,6 +6,16 @@ the real data — never guessed) and **surfaces every issue to the user** before
 over-interpret anything. FAILs should stop interpretation; WARNs go in the report's
 "Audit & caveats" section.
 
+<!-- contents: tests/test_skill_structure.py --toc -->
+**Contents** (section: line)
+- 19: What it checks
+- 37: What the client reads: a plain-language table
+- 56: How the orchestrator uses it
+- 65: Why deterministic, not LLM-judged
+- 73: Tuning
+- 79: 8c. The audit and the sample-quality check (step 8c)
+<!-- /contents -->
+
 ## What it checks
 | check | FAIL | WARN |
 |---|---|---|
@@ -65,3 +75,79 @@ pipeline self-describes) and its "Error handling & UX audit" review.
 line (it is counted descriptively, never used to call significance); `--min-proteins` and
 `--max-missing` are soft thresholds — adjust for very small samples or enriched
 fractions (e.g. a phospho or secretome experiment legitimately quantifies fewer).
+
+## 8c. The audit and the sample-quality check (step 8c)
+
+```
+python3 scripts/audit_results.py --out AUDIT.md --conditions ./conditions.csv \
+    --de-dir ./de_results --acquisition-json /tmp/acq.json --adjp 0.05 --logfc 1 \
+    --fasta-meta ./search.fasta.meta.json --search-out ./search_out
+```
+
+Checks for the classic new-user pitfalls: too few/no replicates, imbalanced or
+**confounded** design, **mixed acquisition or mixed instruments** in one analysis,
+suspiciously low ID depth, very high missingness, contaminant dominance, DE
+results that are too-empty or implausibly-large (batch/normalization artefacts), for a
+Sage search (`--search-out`), an LFQ window that did not fit the runs' MS1 mass error
+(`sage_lfq`), and, for a DIA-NN report, DIA-NN's own per-run `Normalisation.Instability`
+(`normalisation_stability`, read from the `<report>.stats.tsv` beside the DE input).
+**A `normalisation_stability` WARN** names every run above 0.3 (DIA-NN documents no cutoff;
+the skill's is between cohorts measured at 0.04–0.07 and 0.67–1.00). The DE used DIA-NN's
+normalised quantities, so tell the user, and offer a sensitivity analysis on a
+re-quantification with the alternatives DIA-NN documents: `--global-norm` (one global factor
+per run instead of RT-dependent normalisation) or `--no-norm` (none; `Precursor.Normalised`
+and `PG.MaxLFQ` are then not normalised). `--global-norm` goes in the cfg on either route;
+`--no-norm` goes in the cfg of a single-shot search, while the 5-step chain strips it from the
+cfg and takes `diann_parallel.py --no-norm` instead (its report is `no_norm_report.parquet`).
+Run the DE on both reports into separate output folders, compare, and
+report which one the results come from — never swap one for the other silently.
+**Surface every `WARN` to the user, and STOP on any `FAIL`** (e.g. a group with no
+replicate, or a batch confounded with the biology) until they resolve it — don't
+let a new user over-interpret a broken design. The findings also become the
+report's "Audit & caveats" section, as a plain-language table (step 9). → detail:
+`references/audit.md`.
+`target_contaminants` lists quantified proteins whose sequence is also a common contaminant
+— **KEPT in quantification**: a possible contamination source, reported rather than
+excluded. Name any that are significant in DE, and judge them by type: skin/hair keratins
+(KRT1/2/9/10, KRTAPs, FLG) are usually handling contamination; ACTB, EEF1A1, tubulins and
+KRT8/18/19/7 in epithelial cells are usually endogenous. `contaminant_overlap` means real
+proteins are missing from quant — rebuild the FASTA and re-search. `contaminant_evidence` names a
+contaminant protein group whose every peptide is also one of a sample protein's digest peptides
+(shared, or the same but for I/L): the data cannot attribute it to the contaminant's species.
+Report it as the sample organism's protein — its own, or handling contamination (skin keratin) —
+never as that species' signal or an added standard, and tell the user it was removed with the
+contaminants. To quantify it as the organism's (the user's call: a new search), rebuild the FASTA
+with the same `fetch` command plus the `--drop-contaminant` the finding names, and search again.
+`sample_quality.py`'s CONTAMINANT_IDENTICAL panel uses the same list as `target_contaminants`; a
+group-confounded result there is a STOP like any other panel. A `numeric_covariate` WARN (a
+covariate fitted as a number that the groups nearly determine) quotes run_de.R's caution: tell
+the user, and offer the DE without that covariate to compare.
+
+Then run the **biological sample-quality** check (contamination that mimics biology —
+hemolysis, tissue cross-contamination, skin) — and **read `references/anomaly-checks.md`
+and walk its decision tree** (the judgment branches `audit_results.py` can't automate:
+intensity-distribution outliers, replicate/condition ID overlap, mass/RT/CCS shifts,
+p-value-distribution shape, largest-FC-in-low-abundance, log2FC>5 artefacts, PCA sample
+swaps, GSEA background; plus XL-MS / phospho / non-model branches):
+
+```
+python3 scripts/sample_quality.py --matrix ./de_results/Expression_Matrix.csv \
+    --conditions ./conditions.csv --report ./search_out/report.parquet --out SAMPLE_QUALITY.md \
+    --fasta-meta ./search.fasta.meta.json
+```
+
+**If a contamination panel is confounded with a group, STOP** — DE may be contamination,
+not biology, and protein-level filtering will not fix it (→ `references/anomaly-checks.md`).
+Read the panels against the **stated** sample type (`sample_type.py show --session <session>`),
+never one guessed from file names: muscle proteins are the analyte in a muscle sample and a
+contaminant in a liver biopsy; hemolysis matters for plasma/serum. When the panels or the most
+abundant proteins disagree with the stated type, ask the user — do not change it yourself. With
+none stated (Core staff, `--not-asked`), ask what the samples are only when a panel flags
+something whose meaning depends on it, and record the answer (`sample_type.py set --stated`).
+**If the sample IS keratin** (step 3), both auditors read it from `--fasta-meta` (a database
+built with `fetch_fasta.py --keratin-sample`); pass **`--keratin-sample`** to `sample_quality.py`
+**and** `audit_results.py` only for a database that does not record it — keratin is the analyte
+there, not a contaminant, and must not be flagged. This is a check, not the fix: a keratin
+sample must be decided at step 3, before the database is built.
+Flag every anomaly in the 5-part format (*what · where · why · likely cause · fix*); the
+report **always** gets a **Data Quality Notes** section, even if "nothing anomalous observed."
