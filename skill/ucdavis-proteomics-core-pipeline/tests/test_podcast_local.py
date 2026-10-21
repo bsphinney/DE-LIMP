@@ -1043,8 +1043,8 @@ class ShortOutage(Local):
         self.assertEqual(self.container_calls(), [])
 
     def test_a_model_used_after_the_wait_can_still_hand_over(self):
-        """The models asked again are no longer counted as stalled: one that answers after the
-        wait and then stops mid-episode hands over to the next, which answers."""
+        """Every model that missed the first test has a fresh chance after the wait, asked again
+        or not: one that answers then and stops mid-episode hands over to the next."""
         seen = {"n": 0}
 
         def behaviour(model, contents, config):
@@ -1086,6 +1086,61 @@ class ShortOutage(Local):
         with open(os.path.join(cache, mp.STALL_FILE)) as fh:
             self.assertEqual(sorted(json.load(fh)), [STALLS])
         self.assertEqual(self.manifest()["tts"]["models_used"], [ANSWERS])
+
+    def remember(self, *models):
+        cache = os.path.join(self.pod, ".cache")
+        os.makedirs(cache, exist_ok=True)
+        with open(os.path.join(cache, mp.STALL_FILE), "w") as fh:
+            json.dump({m: {"at": mp.now_iso(), "where": "chunk 2/2 (segment 2)",
+                           "why": "2 requests of 600 s unanswered"} for m in models}, fh)
+
+    @staticmethod
+    def pro_exhausted(model):
+        if "pro" in model:
+            raise ApiError(429, "RESOURCE_EXHAUSTED", rpc_error(
+                "GenerateRequestsPerDayPerProjectPerModel-FreeTier", value="0"))
+
+    def test_a_remembered_model_not_asked_again_stays_out(self):
+        """Second review: a model an earlier render saw stall, which missed this test and was
+        not asked again (another answered first), is not handed the episode mid-way."""
+        self.remember(STALLS, ANSWERS)
+        state = {"used": None, "n": 0}
+
+        def behaviour(model, contents, config):
+            self.pro_exhausted(model)
+            probe = mp.PREFLIGHT_LINES[0] in json.dumps(contents)
+            if not self.waits() or model not in (STALLS, ANSWERS):
+                self.release.wait(30)                            # the lite model never answers
+            elif probe and state["used"] in (None, model):
+                state["used"] = model
+            elif model == state["used"]:
+                state["n"] += 1
+                if state["n"] >= 2:                              # chunk 2 never answers
+                    self.release.wait(30)
+            return pcm_for(contents)
+        rc, out, err, log = self.render(behaviour, "--request-timeout", "0.3", preflight=True)
+        other = ANSWERS if state["used"] == STALLS else STALLS
+        self.assertEqual(rc, 0, err)
+        self.assertIsNotNone(state["used"], err)
+        self.assertEqual(self.probes(log).count(other), 1, "asked once, before the wait")
+        self.assertNotIn(other, [m for m, c, _ in log["calls"]
+                                 if mp.PREFLIGHT_LINES[0] not in json.dumps(c)])
+        self.assertEqual(self.manifest()["tts"]["backend"], "kokoro")
+
+    def test_the_fallback_message_keeps_its_advice(self):
+        """Second review: the longest realistic shape (pro models out of free-tier quota, the
+        flash models missing twice, remembered stalls) still ends with the advice."""
+        self.remember(STALLS, ANSWERS)
+
+        def behaviour(model, contents, config):
+            self.pro_exhausted(model)
+            self.release.wait(30)
+            return pcm_for(contents)
+        rc, out, err, log = self.render(behaviour, preflight=True)
+        self.assertEqual(rc, 0, err)
+        fb = self.manifest()["tts"]["fallback"]
+        self.assertIn("asked again 5 min later", fb["message"])
+        self.assertTrue(fb["message"].endswith("--tts say"), fb["message"][-200:])
 
     def test_a_resume_whose_cached_model_misses_twice_makes_every_chunk_again(self):
         rc, out, err, log = self.render(None, "--model", STALLS)
@@ -1377,8 +1432,11 @@ class Sizing(unittest.TestCase):
         self.assertLessEqual(workers * pl.GB_PER_WORKER + pl.RESERVE_GB, 100)
 
     def test_the_gemini_job_has_time_to_wait_for_a_fallback(self):
-        """Gemini's own waits, then each local-voice step with up to 15 min in the queue."""
-        need = (mp.RATE_WAIT_BUDGET_MIN + mp.REQUEST_TIMEOUT_BUDGET_MIN
+        """Gemini's own waits (the two-line test twice, 5 min apart, then the budgets), then
+        each local-voice step with up to 15 min in the queue."""
+        preflight = (2 * len(mp.KNOWN_TTS_MODELS) * mp.PREFLIGHT_TIMEOUT
+                     + mp.PREFLIGHT_RETRY_WAIT) / 60
+        need = (preflight + mp.RATE_WAIT_BUDGET_MIN + mp.REQUEST_TIMEOUT_BUDGET_MIN
                 + sum(m + 15 for _, _, m in pl.STEPS.values()))
         self.assertLessEqual(need, mp.JOB_HOURS * 60)
         self.assertEqual((mp.JOB_CPUS, mp.JOB_MEM), (1, "2G"), "never Kokoro's CPUs just in case")

@@ -2671,6 +2671,12 @@ class GeminiTTS(object):
             m, secs = self._probe_each(missed, [], probe, again, [])
             tried.append(f"asked again {pause} later: "
                          + "; ".join(again + ([f"{m} answered"] if m else [])))
+            # a model not asked again (one before it answered) has its fresh chance, except one
+            # an earlier render saw stall mid-episode: that stays out until it answers, as
+            # without the wait
+            if m:
+                self.stalled += [x for x in missed[missed.index(m) + 1:]
+                                 if x in self.remembered and x not in self.stalled]
         if m is None:
             before = [x for x in self.candidates if x in self.remembered]
             msg = (
@@ -3641,7 +3647,7 @@ def fallback_record(e, gemini, chunks=(), speak=None, cache=None):
                            plain=True)
     return {"from": "gemini", "to": "kokoro", "why": e.why, "reason": cause,
             "google_said": scrub(e.said) if e.said else None, "stopped_at": e.where,
-            "message": cause if e.why == "nokey" else scrub(e)[:1000], "at": now_iso(),
+            "message": cause if e.why == "nokey" else scrub(e)[:2000], "at": now_iso(),
             "gemini_models": list(getattr(gemini, "candidates", None) or []),
             "gemini_switched": list(gemini.switch_notes()) if hasattr(gemini, "switch_notes")
             else [],

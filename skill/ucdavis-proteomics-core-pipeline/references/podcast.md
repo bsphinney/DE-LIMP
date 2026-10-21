@@ -679,9 +679,10 @@ bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.t
       against the key's daily quota (a free-tier key's TTS quota is small), and a resume walks
       the models until one answers (up to 60 s each). When none answers and some gave no
       answer (the others out of quota or missing, as on a free-tier key, count too), the
-      render says so in the log, waits **5 minutes** and asks those models once more (one more
-      request each), so a one-minute outage at Google does not count as "every model
-      stalled"; only a second miss does. `tts.preflight.waited_s` records the wait, or
+      render says so in the log, waits **5 minutes** and asks those models once more, in the
+      same order (at most one more request each; the first that answers is used), so a
+      one-minute outage at Google does not count as "every model stalled"; only a second miss
+      does. `tts.preflight.waited_s` records the wait, or
       `tts.fallback.preflight_waited_s` when the local voice then made the episode.
       `--no-preflight` skips the test; `podcast.json` `tts.preflight` records which.
     - **Mid-episode.** When a chunk's request goes unanswered twice (`--request-timeout`), the
@@ -944,7 +945,8 @@ the start.
   this render, `gemini_chunks_cached`, `gemini_chunks_not_in_script` (chunks whose text it
   had that this script no longer holds, after an edit), and the two-line sound checks
   (`preflight_requests` in this render, `preflight_requests_before`: generic sentences, not the
-  script); and the `note`. These come from `podcast/.cache/gemini_sent.json`, where every
+  script), `preflight_waited_s` (the 5-minute wait before asking the models again, or 0); and
+  the `note`. These come from `podcast/.cache/gemini_sent.json`, where every
   request to Gemini for the episode is noted before it is sent (each chunk by a hash of its text,
   whatever the model) and which is kept with the cache; for renders before 2.14 a chunk counts
   when its Gemini audio is in the cache. `tts.what_was_sent` and `tts.consent` say the same in
