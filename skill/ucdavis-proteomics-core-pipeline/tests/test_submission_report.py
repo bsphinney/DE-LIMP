@@ -817,8 +817,7 @@ class TestNotes(unittest.TestCase):
         self.assertNotIn("pairing", notes_by_id(sr.sanitize(r)))
 
     def test_replicate_indexes_are_replicate_groups(self):
-        # "{g}{n}" (Control1..3): glued numbers, read only because replicate_reading's checks pass
-        for fmt in ("{g} - Rep {n}", "{g} {n}", "{g}_{n}", "{g}{n}"):
+        for fmt in ("{g} - Rep {n}", "{g} {n}", "{g}_{n}"):
             r = fixture()
             r["submission_data"]["samples"] = [
                 {"unique_id": f"S{g}{n}", "sample_name": "", "condition_name": fmt.format(g=g, n=n)}

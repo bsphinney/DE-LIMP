@@ -272,6 +272,8 @@ def main():
               file=sys.stderr)
     design = etm.pulldown_design(etype, groups_all, contrasts)
     controls, vs_control, pulldown = design["controls"], design["vs_control"], design["pulldown"]
+    # the user recorded that this pull-down has no control group: nothing is enriched over one
+    over_control = pulldown and not design.get("no_control")
     det, det_groups = _detection(a.de_dir, a.conditions)
     has_detmat = os.path.exists(os.path.join(a.de_dir, "Detection_Matrix.csv"))
     zero_word = ("missing" if (prov.get("detection_matrix") or {}).get("zero_means") == "missing"
@@ -584,7 +586,13 @@ def main():
                   "with a P.Value (`de_provenance.json` de_tables n_tested).")
     w("")
     if pulldown:
-        w("## Pull-down design — enrichment over a control")
+        w("## Pull-down design — " + ("enrichment over a control" if over_control else
+                                      "no control group"))
+        if not over_control:
+            w("The user recorded that this design has no control group (`experiment_type.py "
+              "set-controls --controls none`): no contrast measures enrichment over a control. "
+              "Read each contrast as a comparison between pull-downs, and never call a protein "
+              "enriched over a control.")
         if vs_control:
             # where the controls came from, a guess said to be one (etm.CONTROLS_FROM, rule 2)
             said = etm.CONTROLS_FROM[design["controls_from"]]
@@ -632,7 +640,8 @@ def main():
             place.append(" + ".join(qc_named) + " in **QC Assessment**")
         if "heatmap" in types:
             place.append("the heatmap in "
-                         + ("**Specificity**" if pulldown else "**Cross-Comparison Biomarkers**")
+                         + ("**Specificity**" if over_control else
+                            "**Cross-Comparison Biomarkers**")
                          + " or **Biological Interpretation**")
         others = [f["file"] for f in embed if f["type"] not in PLACED_TYPES]
         if others:
@@ -708,7 +717,7 @@ def main():
       + (f", and name it if its p-value histogram (*{APPENDIX}*) looks miscalibrated — no "
          "p-value figure in this section." if appendix or legacy_pv else "."))
     w("")
-    if pulldown:
+    if over_control:
         w("### Specificity: bait-specific, shared, background")
         w("Sort the enriched proteins into three groups, naming them: **bait-specific** "
           "(enriched over the control for one bait only), **shared across baits** (enriched for "

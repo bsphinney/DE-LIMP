@@ -36,6 +36,7 @@ data check uses.
 Stdlib only.
 """
 import argparse
+import csv
 import datetime
 import json
 import os
@@ -77,7 +78,7 @@ CONTROL_NAME_TIERS = ((IP_CONTROL_NAME, "name"), (ENRICHMENT_CONTROL_NAME, "enri
                       (GENERIC_CONTROL_NAME, "enrichment_name"))
 # How the brief and the session README say where the controls came from (pulldown_design's
 # controls_from): a guess is said to be one (rule 2).
-CONTROLS_FROM = {"recorded": "as recorded (`experiment_type.py set-controls`)",
+CONTROLS_FROM = {"recorded": "as recorded (`input/experiment_type.json`)",
                  "name": "by group name",
                  "enrichment_name": "read from their names — NOT confirmed; raise it with the "
                                     "user before reading these contrasts as enrichment"}
@@ -221,6 +222,16 @@ def _kept_bait_answer(session, bait):
     return {"bait": prior.get("bait"), "bait_confirmed": ans} if ans else {}
 
 
+def _kept_controls_answer(session, controls):
+    """{"controls", "controls_confirmed"} from an earlier record_controls answer, when this `set`
+    names no --controls; {} otherwise -- as for the bait."""
+    if _control_list(controls) is not None or not os.path.isfile(path_for(session)):
+        return {}
+    prior = load(session) or {}
+    ans = prior.get("controls_confirmed")
+    return {"controls": prior.get("controls"), "controls_confirmed": ans} if ans else {}
+
+
 def record(session, etype, source, stated=None, bait=None, controls=None, submission=None,
            when=None):
     """Write the session's record -> its path. `source`: "submission" (proposed from the record
@@ -249,8 +260,10 @@ def record(session, etype, source, stated=None, bait=None, controls=None, submis
            "reconcile": reconcile(etype, sub.get("normalisation")) if sub else None,
            "bait": bait or None,
            "controls": _control_list(controls),
-           # the user's answer to ask_bait (record_bait) survives a re-recorded type
+           # the user's answers to ask_bait (record_bait) and set-controls (record_controls)
+           # survive a re-recorded type
            **_kept_bait_answer(session, bait),
+           **_kept_controls_answer(session, controls),
            "recorded_at": when or datetime.datetime.now(datetime.timezone.utc).strftime(
                "%Y-%m-%dT%H:%M:%SZ")}
     with open(p + ".tmp", "w", encoding="utf-8") as fh:
@@ -448,6 +461,17 @@ def _control_list(controls):
     return [c.strip() for c in text.split(",") if c.strip()] or None
 
 
+def session_groups(session):
+    """The groups in the session's input/conditions.csv (its Group column); empty when there is
+    none yet."""
+    try:
+        with open(os.path.join(session, "input", "conditions.csv"), newline="",
+                  encoding="utf-8-sig", errors="replace") as fh:
+            return {(r.get("Group") or "").strip() for r in csv.DictReader(fh)} - {""}
+    except OSError:
+        return set()
+
+
 def record_controls(session, controls, when=None):
     """The user's answer to which groups are the pull-down's negative controls (or NO_CONTROLS),
     written into the session's record and nothing else -- `set` rewrites the whole record. Asked
@@ -460,6 +484,11 @@ def record_controls(session, controls, when=None):
     named = _control_list(controls)
     if named is None:
         raise ValueError("--controls needs the control groups, comma-separated, or 'none'")
+    groups = session_groups(session)
+    unknown = [c for c in named if groups and c not in groups]
+    if unknown:
+        raise ValueError(f"--controls {', '.join(unknown)}: not a group in this session's "
+                         f"conditions.csv ({', '.join(sorted(groups))}); give its exact name")
     rec.update(controls=named, controls_confirmed={
         "answer": named or NO_CONTROLS, "by": "the user",
         "at": when or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")})
@@ -512,19 +541,19 @@ def controls_in(groups, rec=None):
 
 def pulldown_design(rec, groups, contrasts):
     """THE pull-down decision the analysis uses: {"pulldown", "source", "controls",
-    "controls_from", "vs_control", "note"}. From the experiment type when recorded -- an
-    enrichment type is a pull-down design -- else from the group names, said so; a disagreement
-    between the two is a note to raise. controls_from (_controls): "enrichment_name" is a guess
-    that the brief tags and normalization_check holds for the user."""
+    "controls_from", "vs_control", "no_control", "note"}. From the experiment type when
+    recorded -- an enrichment type is a pull-down design -- else from the group names, said so; a
+    disagreement between the two is a note to raise. controls_from (_controls): "enrichment_name"
+    is a guess that the brief tags and normalization_check holds for the user."""
     controls, how = _controls(groups, rec)
     vs_control = [c for c in contrasts if "-" in c and c.split("-", 1)[1].strip() in controls]
     if not rec:
         return {"pulldown": bool(vs_control), "controls": controls, "controls_from": how,
-                "vs_control": vs_control,
+                "vs_control": vs_control, "no_control": False,
                 "source": "group names only (no experiment type recorded)", "note": None}
     enr = rec["type"] in ENRICHMENT
     note = None
-    cmd = "experiment_type.py set-controls --controls <groups, or none>"
+    cmd = "experiment_type.py set-controls --session <session> --controls <groups, or none>"
     fix = f"record the right ones ({cmd})"
     if enr and how == "recorded" and not rec["controls"]:
         pass                             # the user said the design has no control group
@@ -549,6 +578,8 @@ def pulldown_design(rec, groups, contrasts):
         note = (f"the groups {', '.join(controls)} read as a pull-down's controls, but the "
                 f"experiment type is {rec['label']}: confirm the type with the user")
     return {"pulldown": enr, "controls": controls, "controls_from": how, "vs_control": vs_control,
+            # the user recorded that the design has no control group (set-controls ... none)
+            "no_control": enr and how == "recorded" and not rec["controls"],
             "source": f"experiment type ({rec['source']})", "note": note}
 
 

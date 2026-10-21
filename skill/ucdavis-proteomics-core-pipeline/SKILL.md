@@ -994,8 +994,8 @@ python3 scripts/fetch_fasta.py resolve --organism "<what they said>"   # or --ta
   then Ctrl/Control — only once the type is an enrichment and no group is named like
   IgG/beads/isotype. Those are a guess (KO vs WT is otherwise a whole-proteome study): the brief
   and step 8's normalisation check ask you to confirm them, then record them with
-  `experiment_type.py set-controls --controls <groups>` (`none` when the design has no control
-  group), which changes nothing else in the record.
+  `experiment_type.py set-controls --session <S> --controls <groups>` (`none` when the design has
+  no control group), which changes nothing else in the record.
   When the submission's "Normalization" answer (how the samples were loaded) contradicts the
   default, `set` prints `ASK:` — ask before going on.
 - **Reduced and alkylated? Ask ONLY for an enrichment experiment** — IP / AP-MS / pull-down or

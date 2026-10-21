@@ -52,8 +52,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 import core_submission as cs  # noqa: E402  ids, dates and sample-id matching live there
-# a trailing replicate index, and when numbered names read as replicates: one definition there
-from collect_conditions import replicate_reading, split_replicate  # noqa: E402
 from session import paths_for, read_raw_list  # noqa: E402  the session layout, one place
 
 SCHEMA = "submission_record/1"
@@ -445,6 +443,9 @@ FIELD_SPLIT = re.compile(r"\s+-\s*|\s*-\s+")
 # says nothing about which animal a sample came from.
 UNIT = re.compile(r"^(?P<noun>mouse|mice|rat|animal|pig|dog|monkey|fish|patient|donor|subject|"
                   r"individual|participant|plant|tree)\s*#?\s*(?P<n>\d+)$", re.I)
+REPLICATE_FIELD = re.compile(r"^(?:(?:bio(?:logical)?|tech(?:nical)?)\s*)?(?:rep(?:licate)?|r)?\s*#?\s*\d+$",
+                             re.I)
+REPLICATE_SUFFIX = re.compile(r"^(?P<base>.*?[A-Za-z)])[\s_-]*(?:rep(?:licate)?\s*)?#?\d+$", re.I)
 
 
 def _key(s):
@@ -455,61 +456,14 @@ def _fields(name):
     return [f.strip() for f in FIELD_SPLIT.split(name)]
 
 
-def replicate_base(name, known=(), among=()):
+def replicate_base(name):
     """The condition without a trailing replicate index ("Old - A - Rep 2" -> "Old - A",
-    "Control 3" -> "Control", "ATG5_R2" -> "ATG5"), or None when it has none. The index is
-    marked (collect_conditions.split_replicate; `among`: the sheet's names): digits glued to
-    letters are part of the name (ATG5, HSP90, CD45, IgG1). A name in `known` (_key'd: the
-    sheet's own conditions) is that condition whatever its ending ("Mutant-1" beside
-    "Mutant-2")."""
-    if _key(name) in known:
-        return None
-    m = split_replicate(cs._s(name), among=among)
-    return m[0].strip() if m else None
-
-
-def known_conditions(names):
-    """The sheet's condition names that are conditions as written: those more than one sample
-    carries ("Mutant-1" x3 beside "Mutant-2" x3), unless it is a slip in a numbered series --
-    carried by exactly two samples, its base (glued numbers read too) shared by at least two
-    names one sample carries each (WT_1, WT_2, WT_2, WT_3; WT1, WT2, WT2, WT3) -> {_key(name)}."""
-    names = list(names)
-    counts = Counter(_key(c) for c in names)
-    base = {_key(c): _key((split_replicate(cs._s(c), glued=True, among=names, dot=False)
-                           or (c,))[0])
-            for c in names}
-    singles = Counter(base[k] for k, n in counts.items() if n == 1)
-    return {k for k, n in counts.items() if n > 1 and not (n == 2 and singles[base[k]] >= 2)}
-
-
-def sheet_bases(names, known=()):
-    """{name: the condition it names} for the sheet's condition names, one per sample (`known`:
-    known_conditions). A known name is that condition as written, and so is a name in the same
-    numbered series as one (Mutant-3 beside Mutant-1 x3). The rest lose a marked replicate index
-    (replicate_base), and numbers glued to them are read as replicate numbers too, as 2.13.2 read
-    them ("WT1".."WT3" beside "KO_1".."KO_3" or "KO" x3; a gap is a missing replicate; WT4 beside
-    WT x3 joins it; never a number after a dot: Kv2.1) -- except in a condition that
-    collect_conditions.replicate_reading finds with one sample or numbered from neither 0 nor 1:
-    gene names keep theirs (ATG5 and ATG7 are no
-    "ATG" replicates 5 and 7; CD45 alone)."""
-    uniq = list(dict.fromkeys(names))
-    glued = {c: split_replicate(cs._s(c), glued=True, among=uniq, dot=False) for c in uniq}
-    series = {_key(glued[c][0]) for c in uniq if _key(c) in known and glued[c]}
-    reading = replicate_reading([c for c in uniq if _key(c) not in known], glued=True, fold=_key,
-                                dot=False)
-    no = {g for kind, _why, conditions in reading["doubts"] if kind in ("one_sample", "start")
-          for g in conditions}
-    out = {}
-    for c in uniq:
-        v = reading["parsed"].get(c)
-        b = _key(v[0]) if v else None
-        if _key(c) in known or b in series:
-            out[c] = c
-        elif v and (b not in no or b in known):
-            out[c] = v[0]
-        else:
-            out[c] = replicate_base(c, known, uniq) or c
-    return out
+    "Control 3" -> "Control"), or None when it has none."""
+    f = _fields(name)
+    if len(f) > 1 and REPLICATE_FIELD.match(f[-1]):
+        return " - ".join(f[:-1])
+    m = REPLICATE_SUFFIX.match(cs._s(name))
+    return m.group("base").strip() if m else None
 
 
 def _ranges(nums):
@@ -602,8 +556,8 @@ def design(samples):
 def sheet_groups(rec):
     """unique_id -> the group the sheet puts it in: the condition with the blocking unit set
     aside when the names carry one, else without a trailing replicate index when that leaves
-    real groups, else the condition as written. A name several samples carry is a condition
-    as written (known_conditions)."""
+    real groups (never merging two of the sheet's own conditions: _own_conditions_apart), else
+    the condition as written."""
     named = {s["unique_id"]: s["condition_name"] for s in rec["samples"] if s["condition_name"]}
     d = design(rec["samples"])
     if d["unit"]:
@@ -611,9 +565,24 @@ def sheet_groups(rec):
         for g in d["unit"]["groups"]:
             out.update({uid: g["name"] for uid in g["samples"]})
         return out
-    base = sheet_bases(list(named.values()), known_conditions(named.values()))
-    bases = {uid: base[c] for uid, c in named.items()}
+    bases = _own_conditions_apart(named, {uid: replicate_base(c) or c for uid, c in named.items()})
     return bases if 1 < len({_key(b) for b in bases.values()}) < len(named) else named
+
+
+def _own_conditions_apart(named, bases):
+    """The sheet's own conditions -- the names more than one sample carries -- are never merged by
+    taking a replicate index off them: when two would share a base (ATG5 x3 and ATG7 x3 -> "ATG",
+    Mutant-1 x3 and Mutant-2 x3 -> "Mutant"), every name with that base keeps its name. A staff
+    report, 2026-10-20: REPLICATE_SUFFIX read ATG5 as ATG replicate 5, and the report said the
+    analysed groups split the sheet's "ATG". With no name repeated nothing changes, so one-sample
+    names still read as 2.13.2 read them (ATG5 and ATG7 alone are "ATG")."""
+    counts = Counter(_key(c) for c in named.values())
+    own = defaultdict(set)
+    for uid, c in named.items():
+        if counts[_key(c)] > 1:
+            own[_key(bases[uid])].add(_key(c))
+    merged = {b for b, names in own.items() if len(names) > 1}
+    return {uid: c if _key(bases[uid]) in merged else bases[uid] for uid, c in named.items()}
 
 
 # ------------------------------------------------------------ matching sheet to runs --
@@ -971,7 +940,7 @@ def _no_groups(rec, d):
     if d["unit"] or d["n_named"] < 2 or d["n_distinct"] < d["n_named"]:
         return False
     names = [s["condition_name"] for s in rec["samples"] if s["condition_name"]]
-    bases = {_key(b) for b in sheet_bases(names).values()}
+    bases = {_key(replicate_base(c) or c) for c in names}
     return len(bases) in (1, len(names))
 
 

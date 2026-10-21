@@ -54,6 +54,9 @@ differently from a classic IP?); run_de.R copies it into de_provenance.json
   # is a Core staff member's, never Claude's: --by is their HIVE login (staff.py checks it)
   python3 normalization_check.py decide --check <S>/output/norm_check/normalization_check.json \\
       --quantities raw|normalised --by <their HIVE login> --reason "<why, in their words>"
+  # CONTROLS NOT CONFIRMED (exit 3; the control groups only read from their names): no decision --
+  # confirm them, record them, and run the check again (`decide` refuses this one)
+  python3 experiment_type.py set-controls --session <S> --controls <groups, or none>
   # the final DE, held to the decision
   Rscript run_de.R ... --quantities <decided> --normalization-check <the json> --outdir <S>/output/tables
   # a DE from before 2.10 (no check record) that staff say stands: lets the delivery through
@@ -1184,6 +1187,8 @@ def summary_md(rec):
                  "member: " + CONFIRM_CONTROLS + ". The check then applies the type's default if "
                  "the data agree, or asks.")
     else:
+        if rec.get("controls_unconfirmed"):
+            L.append("**Also confirm the control groups:** " + CONFIRM_CONTROLS + ".")
         L.append("**Decision: not made.** Show this to the Core staff member, ask which quantities "
                  "to use -- the decision is theirs, never Claude's -- and record their answer: "
                  "`normalization_check.py decide --check <this json> --quantities raw|normalised "

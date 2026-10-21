@@ -240,6 +240,26 @@ class TheGuessIsHeldForTheUser(unittest.TestCase):
         self.assertEqual((pd["controls"], pd["controls_from"], pd["vs_control"], pd["note"]),
                          ([], "recorded", [], None))
 
+    def test_a_check_that_trips_still_asks_for_the_controls(self):
+        rec, _out = self.check("Parental")
+        rec.update(tripped=True, trips=["B1 a stand-in trip"])
+        summary = nc.summary_md(rec)
+        self.assertIn("**Also confirm the control groups:**", summary)
+        self.assertIn("normalization_check.py decide", summary)    # a trip is still decided
+
+    def test_set_controls_names_the_sessions_groups(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        s = session(d, "ip")
+        with open(os.path.join(s, "input", "conditions.csv"), "w", newline="") as fh:
+            csv.writer(fh).writerows([["File.Name", "Group"], ["r1", "Bait"], ["r2", "Parental"]])
+        with self.assertRaisesRegex(ValueError, "parental: not a group.*Bait, Parental"):
+            et.record_controls(s, "parental")
+        et.record_controls(s, "Parental")
+        # and a re-recorded type keeps the answer, as it keeps the bait's
+        et.record(s, "ip", "user", stated="an IP")
+        self.assertEqual(et.load(s)["controls"], ["Parental"])
+
     def test_set_controls_changes_nothing_else(self):
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d, True)
@@ -298,6 +318,14 @@ class TheGuessIsSaidWhereItIsRead(unittest.TestCase):
         self.assertNotIn("Control group(s)", brief)
         self.assertNotIn("Contrasts against them ()", brief)
         self.assertIn("no contrast is against a control group", brief)    # the design's note
+
+    def test_a_design_recorded_with_no_control_group_says_so(self):
+        d, p = self.session(controls="none", other="Ctrl")
+        brief = self.brief(d, p)
+        self.assertIn("## Pull-down design — no control group", brief)
+        self.assertIn("no contrast measures enrichment over a control", brief)
+        self.assertNotIn("enriched over the control for one bait only", brief)
+        self.assertIn("### Cross-Comparison Biomarkers", brief)
 
     def test_recorded_controls_are_not_called_a_name_guess(self):
         d, p = self.session(controls="Parental")
