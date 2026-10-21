@@ -776,6 +776,11 @@ class NoKey(Local):
         p = mock.patch.object(mp, "KEY_FILE", os.path.join(self.d, "no", "gemini_key"))
         p.start()
         self.addCleanup(p.stop)
+        # ... and no Core key either: on HIVE the real one exists, and find_key then names it
+        # ("... is used only for a Core run"), which changes the words these tests read
+        p = mock.patch.object(mp, "CORE_KEY_FILE", os.path.join(self.d, "no", "core_gemini_key"))
+        p.start()
+        self.addCleanup(p.stop)
 
     def render_no_key(self, *extra):
         mods = {"google": None, "google.genai": None, "google.genai.types": None}
