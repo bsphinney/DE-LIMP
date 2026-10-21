@@ -1412,7 +1412,7 @@ def predicted_speclib(out_lib):
 
 # Wall clock per array task (steps 2 and 4), hours, for a task of TIME_REFERENCE_CPUS CPUs -- the
 # default every chain ran at before 2.10 -- and SCALED UP for fewer (array_task_hours). Real Core
-# runs (HIVE sacct, every brettsp step-2 task since 2026-07-01 at 16 CPUs, 6,182 completed):
+# runs (HIVE sacct, every Core-admin-account step-2 task since 2026-07-01 at 16 CPUs, 6,182 completed):
 # median 20 min, p95 65 min, p99 160 min, p99.5 248 min; 414 over 60 min, 84 over 120 min, 54
 # over 180 min, 32 over 240 min (blank and failed injections are the slowest). The base is 4 h:
 # all but those 32 -- the 2 h of 2.9.1 killed ~1% of real files even at 16 CPUs -- and staff pass
@@ -1432,7 +1432,7 @@ def array_task_hours(cpus, base=TIME_PER_FILE_HOURS):
 # Memory per task, GB: steps 1b and 2 (the predicted library), and step 4 (the smaller empirical
 # one). From real Core runs, not the one QC file 2.10 first measured (7.4-9.7 GB RSS): HIVE's sacct
 # MaxRSS counts page cache, so the lower bound of a task's own memory is MaxRSS - MaxDiskRead -
-# MaxDiskWrite, and for every brettsp chain task since 2026-07-01 that bound is over 32 GB for 65
+# MaxDiskWrite, and for every Core-admin-account chain task since 2026-07-01 that bound is over 32 GB for 65
 # step-2 tasks and 9 step-1b jobs, up to 61 GB (a blank-like 1.2 GB .d against the standard human
 # library hit its 64 GB limit, 2026-10-01); step 4's stays under 32. 64 GB costs no concurrency on
 # genome-center-grp/high: 8 tasks x 64 GB = 512 GB, under the 1 TB per-user cap. --mem-per-file
@@ -2197,7 +2197,7 @@ def main():
     # It runs under `set -euo pipefail`, and the orchestrator often reads only the first line of
     # what it prints (`bash submit.sh | head -1`). The reader then closes the pipe, and the next
     # echo killed bash with SIGPIPE -- after every sbatch had succeeded, but before the checkpoint
-    # and jobs.txt were written (msalemi, SET28 2026-09-25: a whole chain queued with no jobs.txt
+    # and jobs.txt were written (a Core member, SET28 2026-09-25: a whole chain queued with no jobs.txt
     # and no RECOVERY.md). So SIGPIPE is ignored, every message goes through say(), which cannot
     # fail, and jobs.txt and the checkpoint are written straight after the last sbatch, before
     # anything else is printed -- the order run_search.py's two-job submit.sh already uses.

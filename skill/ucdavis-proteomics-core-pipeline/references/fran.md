@@ -76,11 +76,11 @@ change the other. The precedence is FRAN's; the first match wins:
    which carries no SPD). Neither token alone counts: `HeLa50ng_titration` is an experiment.
 
    **A PROT_#### id overrides the name rule.** A name that trips it but also carries a Core
-   submission id (`PROT_0812 plasma + pooled QC`) is a customer study that mentions its pooled QC.
+   submission id (`PROT_0807 plasma + pooled QC`) is a customer study that mentions its pooled QC.
    The reason is then `needs_agent_check`, not `qc_run`: `stage` refuses, records nothing, and
    blocks nothing. Decide it and re-run `stage` with `--qc` or `--not-qc`. The id is read with
-   `core_submission.PROT_TOKEN`, the regex `identify` uses (PROT plus 3-5 digits, so PROT_10234
-   counts), in the names and in **every** folder of the out dir's path, not only the last three
+   `core_submission.PROT_TOKEN`, the regex `identify` uses (PROT plus 3-5 digits, so a 5-digit
+   PROT_91234 counts), in the names and in **every** folder of the out dir's path, not only the last three
    the QC token is read on: a PROT id can only send the call to a person, never exclude a run.
 
 A QC run gets reason `qc_run`, with a `why` in FRAN's wording, e.g. `QC run: excluded by policy
@@ -222,7 +222,7 @@ says what would page). The alert goes through `scripts/notify_slack.py` when tha
 installed (a no-op otherwise). The same alert is not re-posted within 24 h. The webhook is
 that module's business and is never read or printed here.
 
-**Suggested schedule** (in the deploy bundle, for Brett's OK; not installed). Add to brettsp's
+**Suggested schedule** (in the deploy bundle, for Brett's OK; not installed). Add to a Core admin's
 crontab, half an hour after FRAN's own `23 */4` submit, on the login node. It reads logs and
 a few small files, plus at most 10 s of GitHub:
 
@@ -378,7 +378,7 @@ rule #2).
 **Which sidecar is read.** It has to be tied to the FASTA the search actually used: `fasta` in
 `search_provenance.json`, or `--fasta` on the command line DIA-NN echoes at the top of
 `report.log.txt`. The old rule took the first `*.fasta.meta.json` near the search in sort order,
-and `PROT_0793/` holds human, mouse and mouse+contaminant sidecars side by side. The mouse
+and one submission's folder (`PROT_####/`) holds human, mouse and mouse+contaminant sidecars side by side. The mouse
 search's manifest recorded the **human** database (seen in the drop dir, 2026-09-24). Now:
 
 - the search's own FASTA + `.meta.json`, then a nearby sidecar whose file name or recorded
@@ -393,7 +393,7 @@ search's manifest recorded the **human** database (seen in the drop dir, 2026-09
   `~/proteomics-pipeline/staging/search.fasta`, which the next session overwrites (twice), where
   the search read `<session>/input/search.fasta`.
 
-A sidecar that itself records `organism: ""` (PROT_0793's human one does) gives no organism.
+A sidecar that itself records `organism: ""` (that submission's human one does) gives no organism.
 That is honest, not a bug.
 
 **No sidecar at all: read the FASTA the search names** (`fasta_from_search`). A search whose
@@ -596,7 +596,7 @@ python3 scripts/fran_deposit.py health     # is FRAN's cron taking anything at a
   would be a stale second copy of what FRAN already knows. The submission number is in the
   raw filenames, so FRAN answers by submission on its own.
   ```bash
-  python3 scripts/ht_manifest.py link 0793
+  python3 scripts/ht_manifest.py link 0807
   ```
 
   **Exit 4 is not a search failure** — it means "not visible in FRAN yet", the expected

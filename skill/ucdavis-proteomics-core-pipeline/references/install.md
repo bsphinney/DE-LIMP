@@ -187,7 +187,7 @@ is already in mzML never touches Docker at all.
 Thermo `.raw` is converted to mzML with ThermoRawFileParser, which bioconda builds for
 macOS too (`setup.sh` installs it). Bruker `.d` goes to `msconvert`, which is Linux-only on
 bioconda. Bioconda's recipe also builds it from ProteoWizard's `pwiz-src-without-v` source,
-without the vendor readers, and on HIVE it failed at once on a `.raw` (gabrig 2026-09-29).
+without the vendor readers, and on HIVE it failed at once on a `.raw` (a Core member, 2026-09-29).
 Don't count on it for vendor files anywhere. For `.d` with Sage, options in order of
 preference:
 1. If the data is DIA, use DIA-NN (reads `.d`/`.raw` natively) — no conversion.
@@ -219,7 +219,7 @@ R or engines; every script runs on HIVE through `hive_exec.sh`. Git Bash is enou
   `local_python3.usable: false`; in `hive_remote` that is fine, except for Core staff's
   CoreOmics lookups, which run locally (`references/core-submissions.md` "Python on this
   computer").
-- **The HIVE username is the plain UC Davis id**, not the Windows login (`AD3+gabrig`);
+- **The HIVE username is the plain UC Davis id**, not the Windows login (`AD3+<your HIVE user>`);
   see `references/access.md` → "Windows (Git Bash)".
 
 Public download links for every program are in `references/search-engines.md`

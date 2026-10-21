@@ -2,10 +2,10 @@
 """
 The CoreOmics key on HIVE (coreomics_key_to_hive.sh), for staff with no usable Python.
 
-Michelle (msalemi, 2026-10-08, Windows + Git Bash, skill 2.11.2) saved her CoreOmics key with the
+Morgan (mstaff, 2026-10-08, Windows + Git Bash, skill 2.11.2) saved her CoreOmics key with the
 skill's own line, on her laptop. The CoreOmics steps (check / identify / fetch / bioshare /
 email-draft) were documented as LOCAL, but her laptop's python3 is the Microsoft Store stub, so
-nothing could run them there -- and HIVE "deliberately has none". Gabriela reported the same on
+nothing could run them there -- and HIVE "deliberately has none". Riley reported the same on
 2026-10-02. Now the steps run on HIVE, from ~/.coreomics_token, and the agent puts the key there
 once:
 
@@ -128,7 +128,7 @@ class Harness(unittest.TestCase):
 
 class StdinTransferTests(Harness):
     def test_the_laptop_key_goes_over_stdin_to_a_mode_600_file(self):
-        """Michelle's case: the key saved with the skill's own line, no Python."""
+        """Morgan's case: the key saved with the skill's own line, no Python."""
         src = self.laptop_key()
         r = self.run_script()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -161,12 +161,12 @@ class StdinTransferTests(Harness):
     def test_git_bash_reads_the_profile_folder_first(self):
         """On Windows the skill's line saves to $USERPROFILE (Python's ~), which Git Bash's $HOME
         need not be (a domain account)."""
-        profile = os.path.join(self.d, "Users", "msalemi")
+        profile = os.path.join(self.d, "Users", "mstaff")
         os.makedirs(profile)
         self.laptop_key(where=profile)
         self.laptop_key(text="an-older-key-in-git-bash-home\n")
         _exe(os.path.join(self.bin, "cygpath"), FAKE_CYGPATH)
-        r = self.run_script(FAKE_UNAME="MINGW64_NT-10.0-22631", USERPROFILE="C:\\Users\\msalemi",
+        r = self.run_script(FAKE_UNAME="MINGW64_NT-10.0-22631", USERPROFILE="C:\\Users\\mstaff",
                             FAKE_PROFILE=profile)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(json.loads(r.stdout)["sent_from"], os.path.join(profile, ".coreomics_token"))
@@ -463,7 +463,7 @@ class RouteTests(unittest.TestCase):
     def test_the_table(self):
         cases = [
             # mode          python  key here  key on HIVE   -> runs on
-            ("hive_remote", "false", "true", "false", "hive"),        # Michelle, before setup
+            ("hive_remote", "false", "true", "false", "hive"),        # Morgan, before setup
             ("hive_remote", "false", "true", "true", "hive"),         # ... and after
             ("hive_remote", "false", "false", "null", "hive"),
             ("hive_remote", "false", "false", "mode-wrong", "hive"),

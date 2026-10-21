@@ -3,7 +3,7 @@
 submission_report.py  --  The CoreOmics submission a session answers: stored once in the
 session, shown in every report.
 
-A Core analysis answers a request. A lab filled in a CoreOmics form (PROT_0756) saying what
+A Core analysis answers a request. A lab filled in a CoreOmics form (PROT_0807) saying what
 the samples are, who prepared them, which organism, and what they want done. That record is
 the only thing that ties a report back to what was asked for, so the report shows it by
 default, and the Methods, the analysis brief and the run log read the same record.
@@ -30,8 +30,8 @@ SOURCE. A record read from CoreOmics says `source: CoreOmics`. With no CoreOmics
 agent asks the key facts, and `attach --given` records them as `source: given by the user`.
 They are never presented as the CoreOmics record.
 
-    python3 submission_report.py attach --session <S> --record ~/core/PROT_0756
-    python3 submission_report.py attach --session <S> --given '{"internal_id": "PROT_0756",
+    python3 submission_report.py attach --session <S> --record ~/core/PROT_0807
+    python3 submission_report.py attach --session <S> --given '{"internal_id": "PROT_0807",
         "organism": "mouse", "prot_or_pep": "peptides", "sample_prep": "lab"}'
     python3 submission_report.py show  --session <S> [--format md|html|json]
     python3 submission_report.py notes --session <S>
@@ -59,7 +59,7 @@ SOURCE_COREOMICS = "CoreOmics"
 SOURCE_USER = "given by the user"
 
 # The CoreOmics form fields that may leave CoreOmics: (key in the record, key in the form's
-# submission_data). Verified against PROT_0756's form schema (2026-09-24).
+# submission_data). Verified against a real submission's form schema (2026-09-24).
 FORM_FIELDS = (
     ("organism", "organism"),               # "Organism and Organism Expressed In"
     ("uniprot", "uniprot"),                 # free text: a link, an accession, or blank
@@ -75,7 +75,7 @@ FORM_FIELDS = (
 TEXT_KEYS = tuple(k for k, _ in FORM_FIELDS)
 SAMPLE_KEYS = ("unique_id", "sample_name", "condition_name")
 
-# sample_prep's two answers on the form (PROT_0756's schema enum). A record given by the user
+# sample_prep's two answers on the form (a real submission's schema enum). A record given by the user
 # says "lab" or "core" instead.
 LAB_PREP = "i have prepped my samples"
 CORE_PREP = "i want the proteomics core to prepare"

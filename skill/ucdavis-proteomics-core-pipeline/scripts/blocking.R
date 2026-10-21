@@ -3,7 +3,7 @@
 #
 # Samples that share a source -- the IPs cut from one mouse brain, the biopsies from one
 # patient -- are correlated. Modelling them as independent throws that pairing away.
-# Why (PROT_0756, Dickson lab, 2026-09): 30 IPs from 6 mouse brains, one JPH3/JPH4/
+# Why (a mouse-brain IP cohort, 2026-09): 30 IPs from 6 mouse brains, one JPH3/JPH4/
 # Kv2.1/RyR/IgG IP per mouse. Every bait-vs-IgG contrast compares IPs from the SAME
 # mice, yet run_de.R fitted all 30 as independent samples.
 #
@@ -36,7 +36,7 @@
 #           block holds two samples of one group, the independent fit's variance is itself
 #           pseudo-replicated, so every contrast comes from the blocked fit.
 #   all     every contrast from the blocked fit.
-# Why "within" is the default (PROT_0756, 6 mice x 5 IPs, consensus correlation 0.17): a
+# Why "within" is the default (a mouse-brain IP cohort, 6 mice x 5 IPs, consensus correlation 0.17): a
 # between-block contrast that already uses one sample per block (each bait, 3 vs 3 mice)
 # compares independent samples, and in a balanced design the independent fit's variance is
 # unbiased for every protein. It is not exact: its pooled residuals come from the same mice
@@ -58,7 +58,7 @@
 # per-protein correlation. The random effect drifts (type I 0.078 -> 0.010 from
 # correlation 0.05 to 0.85, power 0.96 -> 0.76) because one consensus correlation is
 # applied to every protein. So auto = fixed there; random (duplicateCorrelation) stays for
-# nested / multi-level designs such as PROT_0756 (mice within age), where a fixed mouse
+# nested / multi-level designs such as a mouse-brain IP cohort (mice within age), where a fixed mouse
 # term is aliased with the age groups and between-mouse contrasts need the random effect.
 #
 # POOLED between-block contrasts (review C3, blocksim/between.R): a contrast between blocks

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A peptide shared across a paralog family does not make the family a contaminant.
 
-PROT_0756 v2 (2026-09-28): AUDIT.md's target_contaminants listed Ywhab/Ywhae/Ywhag/Ywhah/Ywhaq,
+PROT_9756 v2 (2026-09-28): AUDIT.md's target_contaminants listed Ywhab/Ywhae/Ywhag/Ywhah/Ywhaq,
 Sfn, Tuba8, Tubal3 and Eef1a2 -- abundant endogenous brain proteins -- as possible contamination.
 The shared_peptides records for 1433Z_BOVIN / TBA1D_BOVIN / EF1A1_BOVIN carry target_accs = every
 target sharing >= 1 peptide (the paralogs), and target_contaminants() flagged all of them. Only a

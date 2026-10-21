@@ -72,7 +72,7 @@ def entries(sid=SID, day="2026-09-28", hour=10):
         dict(LOAD, timestamp=t(0)),
         {"type": "permission-mode", "permissionMode": "default", "sessionId": sid},
         dict(base, type="user", timestamp=t(0), uuid="u1",
-             message={"role": "user", "content": "Analyse PROT_0756 please. My Gemini key is "
+             message={"role": "user", "content": "Analyse PROT_9756 please. My Gemini key is "
                                                  f"{s['google']} and the webhook {s['slack_webhook']}"}),
         dict(base, type="user", timestamp=t(1), isMeta=True,
              message={"role": "user", "content": "<the skill's SKILL.md text>"}),
@@ -136,7 +136,7 @@ class Env(unittest.TestCase):
         os.makedirs(self.home)
         with open(os.path.join(self.home, ".coreomics_token"), "w") as fh:
             fh.write(SECRETS["file_value"] + "\n")
-        self.session = os.path.join(self.d, "PROT_0756", "session")    # PROT_0756 is its own
+        self.session = os.path.join(self.d, "PROT_9756", "session")    # PROT_9756 is its own
         os.makedirs(os.path.join(self.session, "logs"))
         self.env = {"HOME": self.home, "CLAUDE_CONFIG_DIR": self.claude,
                     "SKILL_CONFIG_DIR": self.cfg, "CLAUDE_CODE_SESSION_ID": SID,
@@ -218,7 +218,7 @@ class Saving(Env):
         self.cli(self.session)
         md = self.read("conversation.md")
         self.assertIn("### 2026-09-28 10:00:00 UTC -- User", md)
-        self.assertIn("Analyse PROT_0756 please.", md)
+        self.assertIn("Analyse PROT_9756 please.", md)
         self.assertIn("### 2026-09-28 10:02:00 UTC -- Assistant\n\nI will run the search.", md)
         self.assertIn("**Tool: Bash** -- Run the search", md)
         self.assertIn("python3 scripts/run_search.py --out o", md)
@@ -475,17 +475,17 @@ class Segments(Env):
         return r                                   # no checkpoint record: exit 1 after remember
 
     def test_a_client_named_before_init_stays_out_of_the_next_clients_copy(self):
-        # the reviewer's (a): client A (PROT_0801) discussed, then `init` for client B
+        # the reviewer's (a): client A (PROT_9801) discussed, then `init` for client B
         self.lines.append(LOAD)
-        self.add(("user", "For PROT_0801, drop sample 7 -- the PI asked."),
-                 ("assistant", "Noted: PROT_0801 without sample 7."),
+        self.add(("user", "For PROT_9801, drop sample 7 -- the PI asked."),
+                 ("assistant", "Noted: PROT_9801 without sample 7."),
                  ("user", "Now the other one, PROT_0807."))
         b = self.sess(os.path.join("PROT_0807", "session"))
         entry, warn = st.remember(b)                              # session.py init for B
-        self.assertIn("names PROT_0801, not this session's submission", warn)
+        self.assertIn("names PROT_9801, not this session's submission", warn)
         self.add(("assistant", "PROT_0807: 12 runs, two groups."))
         got = self.copy(b)
-        for other in ("PROT_0801", "drop sample 7", "the PI asked"):
+        for other in ("PROT_9801", "drop sample 7", "the PI asked"):
             self.assertNotIn(other, got)
         self.assertIn("PROT_0807: 12 runs, two groups.", got)
 
@@ -518,37 +518,37 @@ class Segments(Env):
         write_lines(self.t, self.lines)
 
     def test_the_opening_request_of_an_auto_invoked_skill_is_kept(self):
-        self.add(("user", "Analyse PROT_0802, groups Old vs Young."))
+        self.add(("user", "Analyse PROT_9802, groups Old vs Young."))
         self.skill_call()
-        self.add(("assistant", "PROT_0802: 12 runs."))
-        b = self.sess(os.path.join("PROT_0802", "session"))
+        self.add(("assistant", "PROT_9802: 12 runs."))
+        b = self.sess(os.path.join("PROT_9802", "session"))
         entry, warn = st.remember(b)
         self.assertIsNone(warn)
-        self.assertIn("Analyse PROT_0802, groups Old vs Young.", self.copy(b))
+        self.assertIn("Analyse PROT_9802, groups Old vs Young.", self.copy(b))
 
     def test_an_opening_request_naming_another_client_is_left_out(self):
-        self.add(("user", "Compare with PROT_0801 later; now analyse PROT_0802."))
+        self.add(("user", "Compare with PROT_9801 later; now analyse PROT_9802."))
         self.skill_call()
-        self.add(("assistant", "PROT_0802: 12 runs."))
-        b = self.sess(os.path.join("PROT_0802", "session"))
+        self.add(("assistant", "PROT_9802: 12 runs."))
+        b = self.sess(os.path.join("PROT_9802", "session"))
         entry, warn = st.remember(b)
         self.assertIsNone(warn)                                    # the load: after the request
         got = self.copy(b)
-        self.assertNotIn("PROT_0801", got)
-        self.assertIn("PROT_0802: 12 runs.", got)
+        self.assertNotIn("PROT_9801", got)
+        self.assertIn("PROT_9802: 12 runs.", got)
 
     def test_a_compaction_after_a_switch_carries_no_other_analysis(self):
         # re-verification of 85eddbe: a compaction summary sums up the whole conversation, so
-        # one made in Y after X's segment put "CLIENT-X PROT_0801 (Dr. Smith, dropped sample
+        # one made in Y after X's segment put "CLIENT-X PROT_9801 (Dr. Smith, dropped sample
         # 7)" in Y's copy
         self.lines.append(LOAD)
-        x, y = self.sess(os.path.join("PROT_0801", "X")), self.sess(os.path.join("PROT_0802", "Y"))
-        self.add(("user", "CLIENT-X PROT_0801: Dr. Smith wants sample 7 dropped."))
+        x, y = self.sess(os.path.join("PROT_9801", "X")), self.sess(os.path.join("PROT_9802", "Y"))
+        self.add(("user", "CLIENT-X PROT_9801: Dr. Smith wants sample 7 dropped."))
         st.remember(x)
         self.add(("assistant", "Dropped sample 7 for Dr. Smith."))
         st.remember(y)
         self.add(("assistant", "Y: search submitted."))
-        summary = "Summary: worked on CLIENT-X PROT_0801 (Dr. Smith, dropped sample 7), then Y."
+        summary = "Summary: worked on CLIENT-X PROT_9801 (Dr. Smith, dropped sample 7), then Y."
         self.lines += [
             {"type": "system", "subtype": "compact_boundary", "content": "Conversation compacted",
              "timestamp": "2026-09-28T12:00:00Z", "uuid": "cb"},
@@ -559,7 +559,7 @@ class Segments(Env):
             {"type": "ai-title", "aiTitle": "CLIENT-X Dr. Smith sample 7 and Y", "sessionId": SID}]
         self.add(("assistant", "Y: DE done."))
         cy, md = self.copy(y), self.read_md(y)
-        for other in ("CLIENT-X", "Dr. Smith", "sample 7", "PROT_0801"):
+        for other in ("CLIENT-X", "Dr. Smith", "sample 7", "PROT_9801"):
             self.assertNotIn(other, cy)
             self.assertNotIn(other, md)
         self.assertEqual(cy.count(st.SUMMARY_OMITTED), 1)          # the compaction summary
@@ -581,15 +581,15 @@ class Segments(Env):
     def test_from_now_then_a_compaction_carries_no_earlier_client(self):
         # the reviewer's A: an unmapped client before --from-now survived inside a later summary
         self.lines.append(LOAD)
-        self.add(("user", "About CLIENT-A PROT_0801: Dr. Jones wants the outlier kept."),
+        self.add(("user", "About CLIENT-A PROT_9801: Dr. Jones wants the outlier kept."),
                  ("assistant", "Noted for CLIENT-A."))
         x = self.sess("X")
         self.cli(x, "--remember", "--from-now")
         self.add(("assistant", "X: 12 runs."))
-        self.compaction("Summary: CLIENT-A PROT_0801 (Dr. Jones, keep the outlier); then X.")
+        self.compaction("Summary: CLIENT-A PROT_9801 (Dr. Jones, keep the outlier); then X.")
         self.add(("assistant", "X: DE done."))
         got, md = self.copy(x), self.read_md(x)
-        for other in ("CLIENT-A", "PROT_0801", "Dr. Jones", "outlier"):
+        for other in ("CLIENT-A", "PROT_9801", "Dr. Jones", "outlier"):
             self.assertNotIn(other, got)
             self.assertNotIn(other, md)
         self.assertIn(st.SUMMARY_OMITTED, got)
@@ -611,23 +611,23 @@ class Segments(Env):
         self.assertIn("Groups: Old vs Young.", got)
 
     def test_a_tool_result_before_the_skill_is_not_the_opening_request(self):
-        # the reviewer's B: the request -> a Bash call naming PROT_0801 -> the Skill call
+        # the reviewer's B: the request -> a Bash call naming PROT_9801 -> the Skill call
         self.add(("user", "Check Dr. Smith's tau results, then set up the new analysis."))
         self.lines += [
             {"type": "assistant", "uuid": "b1", "timestamp": "2026-09-28T11:20:00Z",
              "message": {"role": "assistant", "content": [
                  {"type": "tool_use", "id": "bash1", "name": "Bash",
-                  "input": {"command": "cat ~/core/PROT_0801/tau_summary.txt"}}]}},
+                  "input": {"command": "cat ~/core/PROT_9801/tau_summary.txt"}}]}},
             {"type": "user", "uuid": "b2", "timestamp": "2026-09-28T11:20:05Z",
              "message": {"role": "user", "content": [
                  {"type": "tool_result", "tool_use_id": "bash1",
-                  "content": "PROT_0801 tau: Dr. Smith's knockout lowers pTau 40%."}]}}]
+                  "content": "PROT_9801 tau: Dr. Smith's knockout lowers pTau 40%."}]}}]
         self.skill_call()
         self.add(("user", "Groups: WT vs KO."))
-        b = self.sess(os.path.join("PROT_0802", "session"))
+        b = self.sess(os.path.join("PROT_9802", "session"))
         st.remember(b)
         got = self.copy(b)
-        for other in ("Dr. Smith", "PROT_0801", "tau", "pTau"):
+        for other in ("Dr. Smith", "PROT_9801", "tau", "pTau"):
             self.assertNotIn(other, got)
         self.assertIn("Groups: WT vs KO.", got)
 
@@ -680,15 +680,15 @@ class Segments(Env):
         # Claude Code writes permission-mode, mode ... before the first message: nothing to leak
         self.lines += [{"type": "permission-mode", "permissionMode": "default"},
                        {"type": "mode", "mode": "normal"}]
-        self.add(("user", "Analyse PROT_0802, groups Old vs Young."))
+        self.add(("user", "Analyse PROT_9802, groups Old vs Young."))
         self.skill_call()
-        b = self.sess(os.path.join("PROT_0802", "session"))
+        b = self.sess(os.path.join("PROT_9802", "session"))
         st.remember(b)
-        self.compaction("Summary: PROT_0802, Old vs Young.")
-        self.lines.append({"type": "custom-title", "customTitle": "PROT_0802 run"})
+        self.compaction("Summary: PROT_9802, Old vs Young.")
+        self.lines.append({"type": "custom-title", "customTitle": "PROT_9802 run"})
         self.add(("assistant", "done."))
         got = self.copy(b)
-        self.assertIn("Summary: PROT_0802, Old vs Young.", got)
+        self.assertIn("Summary: PROT_9802, Old vs Young.", got)
         self.assertIn("customTitle", got)                          # whole: everything kept
         self.assertNotIn("omitted", got)
 
@@ -827,7 +827,7 @@ class Segments(Env):
 
     def test_from_now(self):
         self.lines.append(LOAD)
-        self.add(("user", "About client A, PROT_0801."), ("assistant", "A: fine."))
+        self.add(("user", "About client A, PROT_9801."), ("assistant", "A: fine."))
         x = self.sess("X")
         rc, out = self.cli(x, "--remember", "--from-now")          # an orchestrator's init
         self.assertIsNone(out.get("warning"))
@@ -845,7 +845,7 @@ class Segments(Env):
 
     def test_session_init_takes_from_now(self):
         self.lines.append(LOAD)
-        self.add(("user", "About client A, PROT_0801."))
+        self.add(("user", "About client A, PROT_9801."))
         import test_deposit_package as tdp
         raw = os.path.join(self.d, "raw")
         os.makedirs(raw)
@@ -1241,7 +1241,7 @@ esac
         fake = os.path.join(self.d, "hive_exec.sh")
         with open(fake, "w") as fh:
             fh.write(self.FAKE)
-        remote = os.path.join(self.d, "PROT_0756", "hive session's dir")   # quoting, for real
+        remote = os.path.join(self.d, "PROT_9756", "hive session's dir")   # quoting, for real
         os.makedirs(remote)
         write_transcript(self.claude, SID2, project="-p2", hour=9)
         write_transcript(self.claude)
@@ -1268,7 +1268,7 @@ class HiveFailures(Env):
         self.fake = os.path.join(self.d, "hive_exec.sh")
         with open(self.fake, "w") as fh:
             fh.write(Hive.FAKE)
-        self.remote = os.path.join(self.d, "PROT_0756", "hive")
+        self.remote = os.path.join(self.d, "PROT_9756", "hive")
         self.rconv = os.path.join(self.remote, "logs", "conversation")
         write_transcript(self.claude, SID2, project="-p2", hour=9)
         write_transcript(self.claude)

@@ -192,7 +192,7 @@ def fasta_info_for_bundle(info):
         {k: f.get(k) for k in ("file", "sha256", "n_entries")} for f in info["added_sequences"]])
 
 
-# PROT_0756 v2 (2026-09-28): identical inputs, software and flags on a zen4 and a zen2 HIVE node.
+# A mouse-brain IP cohort, v2 (2026-09-28): identical inputs, software and flags on a zen4 and a zen2 HIVE node.
 CPU_FAMILY_EVIDENCE = ("|ΔlogFC| ≤ 0.0022 and |Δt| ≤ 0.0064 across 12 contrasts, no significance "
                        "call changed; each family reproduced its own tables exactly")
 
@@ -274,7 +274,7 @@ The DE ran on {where}, BLAS `{compute.get('blas')}`, LAPACK `{compute.get('lapac
 (de_provenance.json `compute`). DPC-Quant fits each protein with an optimiser that stops at a
 tolerance, and the BLAS library's CPU-specific kernels round the last bit differently, so the
 same inputs and software give slightly different numbers on another CPU family. Measured on
-PROT_0756 v2 (a zen4 and a zen2 HIVE node): {CPU_FAMILY_EVIDENCE}. {how} Do not set
+a mouse-brain IP cohort, v2 (a zen4 and a zen2 HIVE node): {CPU_FAMILY_EVIDENCE}. {how} Do not set
 `OPENBLAS_CORETYPE` to force one kind of kernel: it crashed limpa's dpcQuant on an EPYC 9734.
 """
 

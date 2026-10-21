@@ -1,5 +1,5 @@
 {
-  "id": "0022066cd85f",
+  "id": "9a7e5c3b1d0f",
   "contacts": [],
   "editable": true,
   "participants": [],
@@ -27,7 +27,7 @@
   },
   "permissions": null,
   "participant_names": [],
-  "url": "https://ucdavis.coreomics.com/submissions/0022066cd85f",
+  "url": "https://ucdavis.coreomics.com/submissions/9a7e5c3b1d0f",
   "received_by_name": null,
   "users": [],
   "pi": {
@@ -41,7 +41,7 @@
     "last_name": "Example",
     "department": "SOM: Example Department"
   },
-  "internal_id": "PROT_0756",
+  "internal_id": "PROT_9756",
   "status": "Submitted",
   "locked": false,
   "cancelled": null,

@@ -165,7 +165,7 @@ def detect_bruker_d(path):
         dia-PASEF 09112026__60SPD_DIA-NS10 MsMsType {0: 1146, 9: 12598}; DiaFrameMsMsInfo
                                           12,598 rows, 36 windows; no Pasef tables
     The detector used to key on the dia-PASEF tables EXISTING, so the first came back "DIA,
-    high confidence" (msalemi, 2026-09-29) -- a DDA run headed for a library-free DIA search
+    high confidence" (a Core member, 2026-09-29) -- a DDA run headed for a library-free DIA search
     with nothing asking the user.
 
     Evidence that disagrees -- frames of both types, or typed frames with the OTHER kind's
@@ -388,7 +388,7 @@ TRFP_RELEASES = "https://github.com/compomics/ThermoRawFileParser/releases"
 TRFP_ENV = "THERMORAWFILEPARSER"     # a full command, e.g. "dotnet /opt/trfp/ThermoRawFileParser.dll"
 TRFP_NAMES = ("ThermoRawFileParser", "thermorawfileparser")   # release binary / bioconda link
 # The last place looked: shared copies a site already keeps, as an os.pathsep list (empty =
-# none). gabrig 2026-09-23 (15 Fusion Lumos .raw on HIVE, a Core member): the Core has kept
+# none). A Core member, 2026-09-23 (15 Fusion Lumos .raw on HIVE): the Core has kept
 # TRFP 2.0.0.0 at the path below all along, but nothing looked there, so every file came back
 # "not found" -- acquisition unknown, and a search that would have run 380-980 on a method
 # that acquired 357-1105. Other sites set their own; the tests set it to mock the layout.
@@ -519,7 +519,7 @@ def _trfp_not_found():
 # framework-dependent one: the `-net8` zip run as `dotnet ThermoRawFileParser.dll`, or an
 # apphost beside a ThermoRawFileParser.runtimeconfig.json -- the Core's shared copy on HIVE,
 # whose runtimeconfig lists Microsoft.NETCore.App 8.0.0 AND Microsoft.AspNetCore.App 8.0.0.
-# gabrig 2026-09-23, 15 Fusion Lumos .raw: with no .NET the apphost exits 131 "You must install
+# A Core member, 2026-09-23, 15 Fusion Lumos .raw: with no .NET the apphost exits 131 "You must install
 # .NET to run this application."; with ensure_dotnet8.sh's old NETCore-only install as
 # DOTNET_ROOT it exits 150 "You must install or update .NET to run this application." Both
 # came back as 15 identical per-file read failures, one srun after another.
@@ -974,7 +974,7 @@ def query_scan_range(meta):
 
 # An MS1 survey scan's filter string names the m/z range it was acquired over -- "FTMS + p NSI
 # Full ms [350.0000-1500.0000]" in the Exploris 480 DDA fixture (real TRFP 2.0.0.0 output, HIVE
-# srun job 23510571), the range msalemi confirmed for SET28. "Full ms" then the bracket: "Full ms2
+# srun job 23510571), the range a Core member confirmed for SET28. "Full ms" then the bracket: "Full ms2
 # 572.3181@hcd30.00 [...]" is an MS2 and never matches; SIM scans are not survey scans.
 FULL_MS1_RE = re.compile(r"\bFull\s+ms\s+\[([^\]]+)\]")
 MZ_PAIR_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*-\s*([0-9]+(?:\.[0-9]+)?)")
@@ -1274,7 +1274,7 @@ def classify(path):
 # scheduler => no refusal: a laptop is not a shared login node, and gets progress lines
 # instead. No parser => no refusal either: each .raw fails at once with the not-found
 # warning, and a detour through srun would only delay that message. The same for a parser
-# that cannot start (trfp_launch: its .NET is missing) -- gabrig's 15 .raw went through two
+# that cannot start (trfp_launch: its .NET is missing) -- a Core member's 15 .raw went through two
 # srun jobs to learn what a directory check on the login node already knew.
 # ---------------------------------------------------------------------------
 LOGIN_NODE_MAX_RAW = 5
@@ -1289,7 +1289,7 @@ CANNOT_START_SEE_ABOVE = ("not read -- ThermoRawFileParser cannot start on this 
 # ---------------------------------------------------------------------------
 # Orbitrap resolution. estimate_params.py pins DIA-NN's documented Orbitrap tolerances from the
 # MS1/MS2 RESOLUTION; without it an Orbitrap classes as `orbitrap_generic`, DIA-NN calibrates
-# mass accuracy per run, and the 5-step parallel chain declines the cfg (gabrig 2026-09-23,
+# mass accuracy per run, and the 5-step parallel chain declines the cfg (a Core member, 2026-09-23,
 # 15 Fusion Lumos .raw). ThermoRawFileParser never outputs it (TRFP master cf548e4: nothing in
 # metadata, mzML, MGF or `query`; its "mass resolution" MS:1000011 is a generic 0.5), but every
 # scan's trailer has it -- 'Orbitrap Resolution:' on a Fusion Lumos, 'FT Resolution:' on an

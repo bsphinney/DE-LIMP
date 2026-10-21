@@ -474,7 +474,7 @@ if (file.exists(em_path)) {
               if (file.exists(file.path(de_dir, "QC_detected_vs_inferred.csv")))
                 "; qc_detected_vs_inferred.png shows per-sample depth" else "")
       # Not a failure -- nothing to show -- so not listed in "failed". A copy from an earlier
-      # run was already removed by the sweep at the top (Silva08172026's re-rendered report
+      # run was already removed by the sweep at the top (a mouse-brain IP cohort's re-rendered report
       # had shown the identical-bar plot again).
     } else {
       p <- ggplot(cnt, aes(reorder(Sample, n), n, fill = Group)) +

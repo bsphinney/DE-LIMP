@@ -14,6 +14,7 @@ stand-in (SKILL_SQUEUE) that prints the batch-script paths listed in $FAKE_SQUEU
 fails like a timed-out slurmctld with FAKE_SQUEUE_FAIL=1 -- the release folder is a temporary
 one, and a separate case drives the real hive_exec.sh through a fake `ssh`.
 """
+import hashlib
 import json
 import os
 import pwd
@@ -29,6 +30,10 @@ SKILL = os.path.dirname(HERE)
 SCRIPTS = os.path.join(SKILL, "scripts")
 sys.path.insert(0, HERE)
 from job_env import job_env     # noqa: E402
+
+# The shipped scripts/core_admins.txt, pinned without naming anyone (the repository is public):
+# sha256 of its names joined by "\n". Changing the list is a code change: update this with it.
+SHIPPED_ADMINS_SHA256 = "b73e182de1908f14f15c49a634638160874dd42c0019a629cab14c9c3ce7a327"
 
 PUT = "bash scripts/hive_exec.sh --put-skill"
 UPDATE = "claude plugin update ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core"
@@ -49,10 +54,12 @@ class Harness(unittest.TestCase):
         os.makedirs(os.path.join(self.laptop, "scripts"))
         for f in ("skill_version.sh", "hive_exec.sh", "hive_path.sh", "hive_shares.tsv"):
             shutil.copy(os.path.join(SCRIPTS, f), os.path.join(self.laptop, "scripts"))
-        # the admins: the shipped list plus whoever runs the suite -- `id -un` on the stand-in
-        # HIVE -- so the publish tests can publish (PublishRelease.test_only_an_admin_... not)
+        # the admins: the shipped list, bstaff (the stand-in admin the fake stat names as owner:
+        # the shipped list's real login is not spelled out in this public repository) and
+        # whoever runs the suite -- `id -un` on the stand-in HIVE -- so the publish tests can
+        # publish (PublishRelease.test_only_an_admin_... not)
         self.me = pwd.getpwuid(os.getuid()).pw_name
-        self.admins([self.me])
+        self.admins(["bstaff", self.me])
         # $HOME on "HIVE", reached through a symlink (as /home -> /quobyte/home can be)
         self.hive_home_real = os.path.realpath(os.path.join(self.d, "hive_home_real"))
         os.makedirs(self.hive_home_real)
@@ -80,8 +87,8 @@ class Harness(unittest.TestCase):
         # who owns a path on "HIVE": the release file FAKE_FILE_OWNER, anything else (the
         # folder) FAKE_DIR_OWNER -- an admin unless a test says otherwise
         self.owner = sh_exe(os.path.join(self.d, "fake_owner"),
-                            'case "$1" in */CURRENT_VERSION) echo "${FAKE_FILE_OWNER-brettsp}" ;;\n'
-                            '  *) echo "${FAKE_DIR_OWNER-brettsp}" ;; esac\n')
+                            'case "$1" in */CURRENT_VERSION) echo "${FAKE_FILE_OWNER-bstaff}" ;;\n'
+                            '  *) echo "${FAKE_DIR_OWNER-bstaff}" ;; esac\n')
         # squeue -h -u <user> -o %o: one batch-script path (or command) per job
         self.squeue = sh_exe(os.path.join(self.d, "fake_squeue"),
                              'if [ "${FAKE_SQUEUE_FAIL:-0}" = 1 ]; then\n'
@@ -117,7 +124,7 @@ class Harness(unittest.TestCase):
 
     def hive_copy(self, version, scripts=True):
         """~/proteomics-pipeline on HIVE as --put-skill leaves it: this computer's scripts/ and a
-        plugin.json with `version` (None: no .claude-plugin/, as msalemi's copy had)."""
+        plugin.json with `version` (None: no .claude-plugin/, as mstaff's copy had)."""
         if scripts:
             shutil.rmtree(os.path.join(self.hive_root, "scripts"), ignore_errors=True)
             shutil.copytree(os.path.join(self.laptop, "scripts"),
@@ -136,7 +143,7 @@ class Harness(unittest.TestCase):
                     FAKE_HIVE_HOME=self.hive_home, FAKE_CALLS=self.calls, TMPDIR=self.d,
                     LC_ALL="C.UTF-8", LANG="C.UTF-8")
         if login:
-            e.update(HIVE_USER="gabrig", HIVE_KEY=self.key, HIVE_EXEC=self.fake)
+            e.update(HIVE_USER="gstaff", HIVE_KEY=self.key, HIVE_EXEC=self.fake)
         e.update({k: str(v) for k, v in extra.items()})
         return e
 
@@ -228,7 +235,7 @@ class CheckHive(Harness):
         self.assertNotIn("2.13.02.13.0", j["say"])
 
     def test_a_hive_copy_without_claude_plugin_is_put_again(self):
-        """msalemi's HIVE copy: scripts/ but no .claude-plugin/ -- every record said 'unknown'."""
+        """mstaff's HIVE copy: scripts/ but no .claude-plugin/ -- every record said 'unknown'."""
         self.plugin(self.laptop, "2.9.0")
         self.hive_copy(None)
         j = self.check(3)
@@ -394,7 +401,7 @@ class CheckHive(Harness):
         self.assertIn("test build", j["say"])
 
     def test_a_laptop_behind_the_release_is_warned_with_the_update_that_works(self):
-        """gabrig: laptop 2.6.0, HIVE 2.6.0 (in step with each other), release 2.9.0. The update
+        """gstaff: laptop 2.6.0, HIVE 2.6.0 (in step with each other), release 2.9.0. The update
         is `claude plugin update` -- `/plugin marketplace update` only refreshes the catalogue
         (checked on Claude Code 2.1.285)."""
         self.plugin(self.laptop, "2.6.0")
@@ -519,7 +526,7 @@ class CheckHive(Harness):
         self.hive_copy("2.9.0")
         cfg = os.path.join(self.d, "hive.env")
         with open(cfg, "w") as fh:
-            fh.write(f"HIVE_USER='gabrig'\nHIVE_KEY='{self.key}'\n")
+            fh.write(f"HIVE_USER='gstaff'\nHIVE_KEY='{self.key}'\n")
         j = self.check(0, "--mode", "hive_remote", HIVE_ENV_FILE=cfg, HIVE_EXEC=self.fake,
                        login=False)
         self.assertEqual(j["status"], "in_step")
@@ -563,7 +570,7 @@ class ReleaseTrust(Harness):
                          ("2.9.0", "published", True))
 
     def test_a_members_file_or_folder_is_not(self):
-        for who in ({"FAKE_FILE_OWNER": "gabrig"}, {"FAKE_DIR_OWNER": "gabrig"},
+        for who in ({"FAKE_FILE_OWNER": "gstaff"}, {"FAKE_DIR_OWNER": "gstaff"},
                     {"FAKE_FILE_OWNER": "", "FAKE_DIR_OWNER": ""}):   # owner unknown: not trusted
             with self.subTest(**who):
                 j = self.check(0, **who)
@@ -574,7 +581,7 @@ class ReleaseTrust(Harness):
         """No stand-in: GNU `stat -c %U` on HIVE, BSD `stat -f %Su` here on a Mac."""
         j = self.check(0, SKILL_OWNER_CMD="")
         self.assertEqual(j["release_state"], "published")      # the runner is an admin here
-        self.admins(text="# nobody who runs this suite\nbrettsp-not-me\n")
+        self.admins(text="# nobody who runs this suite\nbstaff-not-me\n")
         self.hive_copy("2.6.0")
         self.assertEqual(self.check(0, SKILL_OWNER_CMD="")["release_state"], "untrusted")
 
@@ -588,24 +595,27 @@ class CoreAdmins(unittest.TestCase):
         return r.stdout.splitlines()
 
     def test_the_shipped_list(self):
-        self.assertEqual(self.admins(), ["brettsp"])
+        admins = self.admins()
+        self.assertEqual(len(admins), 1, admins)
+        self.assertEqual(hashlib.sha256("\n".join(admins).encode()).hexdigest(), SHIPPED_ADMINS_SHA256)
 
     def test_comments_blank_lines_spaces_and_crlf(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = os.path.join(tmp, "core_admins.txt")
             with open(p, "w", newline="") as fh:
-                fh.write("# admins\r\n\r\n  brettsp  \r\n\t# indented comment\n"
-                         "gabrig # staff, 2026\n\n#msalemi\n")
-            self.assertEqual(self.admins(p), ["brettsp", "gabrig"])
+                fh.write("# admins\r\n\r\n  bstaff  \r\n\t# indented comment\n"
+                         "gstaff # staff, 2026\n\n#mstaff\n")
+            self.assertEqual(self.admins(p), ["bstaff", "gstaff"])
             self.assertEqual(self.admins(os.path.join(tmp, "missing.txt")), [])
 
     def test_membership_is_the_whole_name(self):
-        r = subprocess.run(["bash", "-c", '. "$1"; for u in brettsp brett rettsp ""; do '
+        admin = self.admins()[0]                     # the shipped admin, its name cut both ways
+        r = subprocess.run(["bash", "-c", '. "$1"; for u in "$2" "$3" "$4" ""; do '
                             'skill_is_core_admin "$u" && echo "$u"; done', "bash",
-                            os.path.join(SCRIPTS, "skill_version.sh")],
+                            os.path.join(SCRIPTS, "skill_version.sh"), admin, admin[:-2], admin[1:]],
                            capture_output=True, text=True, timeout=30,
                            env=job_env(tempfile.gettempdir()))
-        self.assertEqual(r.stdout.split(), ["brettsp"])
+        self.assertEqual(r.stdout.split(), [admin])
 
 
 class VersionCompare(unittest.TestCase):
@@ -719,9 +729,9 @@ class PublishRelease(Harness):
     def test_a_folder_a_member_made_is_not_published_into(self):
         self.plugin(self.laptop, "2.9.0")
         os.makedirs(self.release_dir)
-        r = self.run_sv("--publish-release", FAKE_DIR_OWNER="gabrig")
+        r = self.run_sv("--publish-release", FAKE_DIR_OWNER="gstaff")
         self.assertEqual(r.returncode, 2)
-        self.assertIn("owned by 'gabrig', not a Core admin", r.stderr)
+        self.assertIn("owned by 'gstaff', not a Core admin", r.stderr)
         self.assertEqual(os.listdir(self.release_dir), [])
 
     def test_an_account_outside_the_core_cannot_publish(self):

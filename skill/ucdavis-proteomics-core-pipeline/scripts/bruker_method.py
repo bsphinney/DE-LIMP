@@ -15,7 +15,7 @@ them, in small files beside the spectra:
   HyStarMetadata.xml            the LC modules (device, vendor) and the LC method they ran
   SampleInfo.xml (UTF-16)       HyStar version, LC/MS method names, autosampler tray type
 
-Verified against a timsTOF HT + Evosep One series (timsControl 6.0, HyStar 6.3.1.8; PROT_0756,
+Verified against a timsTOF HT + Evosep One series (timsControl 6.0, HyStar 6.3.1.8; a mouse-brain IP cohort,
 2026-08-13). Nothing here opens analysis.tdf_bin, and every sqlite file is opened read-only and
 immutable (bruker_tdf.connect_tdf). A value the files do not record is None -- never a plausible
 default (DE-LIMP rule 2) -- and each value carries the file and field it came from, in
@@ -46,7 +46,7 @@ PROPS = ("Source_Type", "Source_CapillarySetValue", "Source_DryGasSetValue",
          "Energy_Ramping_Advanced_ListMobilityValues",
          "Energy_Ramping_Advanced_ListCollisionEnergyValues")
 # A per-window collision energy may differ from the method's ramp at the window's 1/K0 midpoint
-# by this much and the ramp is still what was applied (PROT_0756: at most 0.3 eV; a 20->59 eV
+# by this much and the ramp is still what was applied (a mouse-brain IP cohort: at most 0.3 eV; a 20->59 eV
 # ramp instead of the 20->65 eV one that ran misses the same windows by up to 3.7 eV).
 CE_CHECK_EV = 1.0
 MS_FRAME_TYPES = {0: "MS1", 8: "ddaPASEF", 9: "dia-PASEF"}

@@ -161,12 +161,12 @@ create_env() {
   if [ "$OS" = "linux" ]; then pkgs+=(proteowizard); fi
 
   say "[setup] solving + installing the analysis environment (this can take a few minutes)..."
-  # -p, not -n: a user .condarc `envs_dirs` outranks -r for a NAMED env. On HIVE (brettsp,
+  # -p, not -n: a user .condarc `envs_dirs` outranks -r for a NAMED env. On HIVE (a Core admin's account,
   # 2026-09-23) envs_dirs is the relative "quobyte/proteomics-grp/conda_envs/", so `-r ROOT -n
   # NAME` built the env under $PWD/quobyte/... -- env_ready never found it, and setup.json said
   # rscript "" after a successful create.
   # --override-channels: the skill names its own channels. A user .condarc with `defaults`
-  # and channel_priority strict (HIVE brettsp, sbatch 24154212) made libmamba consider only
+  # and channel_priority strict (HIVE, a Core admin's account, sbatch 24154212) made libmamba consider only
   # defaults' r-statmod, built for R <= 4.3, and bioconductor-limma 3.66 was unsolvable.
   case "$CONDA" in
     *micromamba)
@@ -234,7 +234,7 @@ if env_ready && ! $LIMPA_OK; then
 fi
 
 # ---- 2b. ThermoRawFileParser + pythonnet + pandas: their own install ---------
-# gabrig 2026-09-23 (15 Fusion Lumos .raw, HIVE): nothing had installed a parser, step 2 read
+# A Core member, 2026-09-23 (15 Fusion Lumos .raw, HIVE): nothing had installed a parser, step 2 read
 # every file as "not found" while setup.json said ready_for.dia, and the search would have run
 # the 380-980 FALLBACK on a method that acquired 357-1105. bioconda's build is the
 # self-contained .NET 8 one (run deps icu, libzlib, openssl, wget -- no dotnet), for linux-64,
@@ -246,7 +246,7 @@ fi
 # with the RawFileReader DLLs TRFP ships -- TRFP never outputs it, and without it
 # estimate_params.py cannot pin DIA-NN's documented tolerances. Its .NET is ensure_dotnet8.sh's
 # (a self-contained TRFP's bundled runtime cannot host it). Installed = its conda-meta record.
-# pandas (conda-forge) rides along: gabrig's follow-up (#15) found none in the HIVE env, and
+# pandas (conda-forge) rides along: a Core member's follow-up (#15) found none in the HIVE env, and
 # ad-hoc analysis reaches for it first. Here, not in create_env, because create_env only runs
 # for a MISSING env -- this step is how an env that already exists gets it on a re-run.
 trfp_in_env() { [ -x "$ENV_PREFIX/bin/ThermoRawFileParser" ] || [ -x "$ENV_PREFIX/bin/thermorawfileparser" ]; }

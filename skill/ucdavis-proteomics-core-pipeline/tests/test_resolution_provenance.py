@@ -2,7 +2,7 @@
 """
 Where an Orbitrap's resolution came from, and what happens when nobody knows it.
 
-From a real Fusion Lumos session (gabrig, skill 2.5.0):
+From a real Fusion Lumos session (gstaff, skill 2.5.0):
 
   #11 resolve_defaults.py took --ms1-res/--ms2-res and estimate_params.py
       --ms1-resolution/--ms2-resolution, so the same numbers needed two spellings. And values
@@ -117,7 +117,7 @@ class SourceLabelTests(Scripts):
     RES = ("--ms1-res", "60000", "--ms2-res", "15000")
 
     def test_numbers_on_the_command_line_are_the_users_by_default(self):
-        """gabrig's exact case: typed-in 60k/15k came out 'read from the data'."""
+        """gstaff's exact case: typed-in 60k/15k came out 'read from the data'."""
         out, man, _ = self.resolve(*self.RES)
         self.assertEqual(man["resolution"],
                          {"ms1": 60000, "ms2": 15000, "ms2_analyzer": None, "source": "user",

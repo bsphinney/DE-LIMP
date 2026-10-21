@@ -48,11 +48,11 @@ EXAMPLES = {
     "google key AQ": "key AQ." + "Ab8RN6FAKEFAKEFAKEFAKEFAKE",
     "key=": "https://api.example.org/v1?key=" + "abcdefghijklmnopqrstuvwx",
     "slack token": "token xoxb-" + "1234567890-abcdefghij",
-    "share token in a URL": "https://ucd.stan-proteomics.org/api/ht/manifest?q=0793&token=" + FAKE_T,
-    "share token argv": "ht_manifest.py fetch 0793 --share-token " + FAKE_T + " --out ~/ht0793",
+    "share token in a URL": "https://ucd.stan-proteomics.org/api/ht/manifest?q=9793&token=" + FAKE_T,
+    "share token argv": "ht_manifest.py fetch 9793 --share-token " + FAKE_T + " --out ~/ht9793",
     "share token argv, quoted": "--share-token '" + FAKE_T + "'",
     "share token argv, =": "--share-token=" + FAKE_T,
-    "share token env": "STAN_HT_SHARE_TOKEN=" + FAKE_T + " python3 ht_manifest.py fetch 0793",
+    "share token env": "STAN_HT_SHARE_TOKEN=" + FAKE_T + " python3 ht_manifest.py fetch 9793",
     "cookie argv": "--cookie 'AppServiceAuthSession=" + FAKE_T + "'",
     # release verification, 2.8.0: report_issue.sh recorded all of these
     "anthropic key": "export KEY=sk-ant-" + "api03-FAKEfakeFAKEfake0123456789abcdef",
@@ -73,14 +73,14 @@ EXAMPLES = {
 }
 # Look-alikes that must pass: file NAMES (the documented forms), placeholders, prose.
 BENIGN = [
-    "--share-token-file ~/.stan/share_0793",
-    "--share-token-file=/home/u/.stan/share_0793",
+    "--share-token-file ~/.stan/share_9793",
+    "--share-token-file=/home/u/.stan/share_9793",
     "STAN_PG_TOKEN=$HOME/.stan/pg_credential",
     "--token ~/.stan/pg_credential",
     "--share-token <tok>",
     "--cookie-file ~/.stan/cookie",
-    "the query takes token=~/.stan/share_0793",
-    "STAN_HT_SHARE_TOKEN=$HOME/.stan/share_0793 python3 ht_manifest.py",
+    "the query takes token=~/.stan/share_9793",
+    "STAN_HT_SHARE_TOKEN=$HOME/.stan/share_9793 python3 ht_manifest.py",
     "a token= field with no value",
     "key=short",
     "set the webhook up at hooks.slack.com",
@@ -192,15 +192,15 @@ class RegistryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "commands.log")
             with open(p, "w") as fh:
-                fh.write("bash scripts/hive_exec.sh 'python3 ht_manifest.py fetch 0793 "
-                         f"--http https://ucd.stan-proteomics.org {text} --out ~/ht0793'\n")
+                fh.write("bash scripts/hive_exec.sh 'python3 ht_manifest.py fetch 9793 "
+                         f"--http https://ucd.stan-proteomics.org {text} --out ~/ht9793'\n")
             return rr.secret_reason(p)
 
     def test_a_logged_share_token_is_refused(self):
         self.assertIn("token", self.check(f"--share-token {FAKE_T}"))
 
     def test_the_documented_file_form_is_copied(self):
-        self.assertIsNone(self.check("--share-token-file ~/.stan/share_0793"))
+        self.assertIsNone(self.check("--share-token-file ~/.stan/share_9793"))
 
     def test_without_the_list_nothing_is_copied_unchecked(self):
         saved = rr.contains_secret
@@ -223,7 +223,7 @@ class _Echo(http.server.BaseHTTPRequestHandler):
             # a reply that echoes what it was sent into every field fetch() prints or keeps
             tok = (urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("token")
                    or [""])[0]
-            body = json.dumps({"submission": "0793", "include": "samples", "files": [],
+            body = json.dumps({"submission": "9793", "include": "samples", "files": [],
                                "plates": [f"P1-{tok}"], "counts": {"sample": 1, f"x{tok}": 2},
                                "missing_paths": [f"/raw/{tok}.d"], "note": self.path}).encode()
         else:
@@ -246,7 +246,7 @@ class HtManifestTests(unittest.TestCase):
         self.srv = http.server.HTTPServer(("127.0.0.1", 0), _Echo)
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
         self.base = f"http://127.0.0.1:{self.srv.server_port}"
-        self.tokfile = os.path.join(self.d, "share_0793")
+        self.tokfile = os.path.join(self.d, "share_9793")
         with open(self.tokfile, "w") as fh:
             fh.write(FAKE_T + "\n")
         os.chmod(self.tokfile, 0o600)
@@ -260,7 +260,7 @@ class HtManifestTests(unittest.TestCase):
         _Echo.status = status
         env = {k: v for k, v in os.environ.items() if not k.startswith("STAN_")}
         return subprocess.run([sys.executable, os.path.join(SCRIPTS, "ht_manifest.py"), "fetch",
-                               "0793", "--http", self.base, "--out", self.d, *args],
+                               "9793", "--http", self.base, "--out", self.d, *args],
                               capture_output=True, text=True, env=env, timeout=60)
 
     def test_an_http_error_never_prints_the_token(self):
@@ -327,7 +327,7 @@ class HtManifestTests(unittest.TestCase):
         os.chmod(stan, 0o755)
         env = {k: v for k, v in os.environ.items() if not k.startswith(("STAN_", "PG"))}
         p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "ht_manifest.py"), "--stan", stan,
-                            "--token", pg, "fetch", "0793", "--out", self.d],
+                            "--token", pg, "fetch", "9793", "--out", self.d],
                            capture_output=True, text=True, env=env, timeout=60)
         self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
         self.assertNotIn(fake_pg, p.stdout + p.stderr)

@@ -175,7 +175,7 @@ open(os.path.join(t, os.path.splitext(os.path.basename(f))[0] + ".quant"), "w").
 
 class RetryRunsOnce(unittest.TestCase):
     """MEDIUM-LOW. node_fault.py retry has no lock: two retries started together (two sessions on
-    the shared brettsp account, or a resumed session beside the original) both read the old
+    the shared bstaff account, or a resumed session beside the original) both read the old
     jobs.txt, both resubmit the failed step and every dependant, and two copies of steps 3-5
     then write the same search folder (and post and stage twice). flock does not lock across
     HIVE's login nodes on /quobyte, so the lock has to be an mkdir in the search folder."""

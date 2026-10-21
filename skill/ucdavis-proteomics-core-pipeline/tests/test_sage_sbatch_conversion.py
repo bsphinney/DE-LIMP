@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 `run_search.py --engine sage --sbatch` converted .raw -> mzML BEFORE writing the job: run_sage()
-called ensure_mzml() first, so msconvert ran on the HIVE login node for every file (gabrig
+called ensure_mzml() first, so msconvert ran on the HIVE login node for every file (gstaff
 2026-09-29, 4 Fusion Lumos .raw, ~2.4 GB, login2). It failed at once only because bioconda's
 Linux msconvert has no vendor readers; had it worked it would have broken golden rule 3.
 

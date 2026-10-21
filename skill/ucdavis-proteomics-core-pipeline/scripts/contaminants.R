@@ -1,7 +1,7 @@
 # =============================================================================
 # contaminants.R -- the contaminant filter run_de.R applies before quantification.
 #
-# Why (msalemi, 2026-09-24, Silva08172026): run_de.R re-quantifies from the DIA-NN
+# Why (a Core member, 2026-09-24, a mouse-brain IP cohort): run_de.R re-quantifies from the DIA-NN
 # report with limpa and had no contaminant filter. DIA-NN's --cont-quant-exclude
 # Cont_ only shapes DIA-NN's OWN quantities, so all 121 Cont_ protein groups (bovine
 # serum proteins from the antibody prep) entered the DE model and BH, and came out as
@@ -230,7 +230,7 @@ contaminant_census <- function(group, is_cont, feature = NULL, genes = NULL, exe
 
 # The intensity the per-run share is computed on, most meaningful first. Precursor.Quantity
 # is the measured signal; Precursor.Normalised has DIA-NN's RT-dependent normalisation on
-# it, which does not preserve a run's signal fractions -- on Silva08172026 the contaminant
+# it, which does not preserve a run's signal fractions -- on a mouse-brain IP cohort the contaminant
 # share was median 12.7% of Precursor.Quantity but 28.3% of Precursor.Normalised.
 CONTAMINANT_SHARE_COLUMNS <- c("Precursor.Quantity", "Precursor.Normalised")
 
@@ -447,7 +447,7 @@ database_check_without_sidecar <- function(search_dir, n_groups_removed) {
 }
 
 # Is this a keratin sample (hair, wool, feather, skin, nail ...: keratin is the ANALYTE), and
-# which contaminant entries must the filter then leave in? Why (msalemi's hair benchmark SET28,
+# which contaminant entries must the filter then leave in? Why (a Core member's hair benchmark SET28,
 # skill 2.8.0): every precursor naming a Cont_ entry was removed, and ~46 keratin-family Cont_
 # entries (KRT34, KRTAPs, mouse hair and sheep wool keratins) took the hair's own keratin
 # peptides with them. Read, first that says so: run_de.R --keratin-sample; the FASTA sidecar's
@@ -705,7 +705,7 @@ contaminant_sample_loss <- function(census, tag) {
                                "%s lost some of them, %s lost all of them."),
                         tag, fmt(part), fmt(whole)),
     # "keep other peptides": in any kept group, their own or one shared with other proteins (on
-    # gabrig's HeL50 Sage run 57 = 36 as their own group + 21 only inside a shared one)
+    # a Core member's HeL50 Sage run 57 = 36 as their own group + 21 only inside a shared one)
     peptide = sprintf(paste0("Sample proteins named by a removed peptide (a peptide shared with a ",
                              "%s entry): %s keep other peptides, %s have no other peptide and are ",
                              "not quantified."), tag, fmt(part), fmt(whole)),

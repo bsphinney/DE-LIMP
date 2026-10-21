@@ -171,7 +171,7 @@ So:
   (`core_submission.key_mode_problem`, the skill's one rule for key files): chmod 600 it, and if
   it was readable for a while, make a new key. On a laptop the tool only warns. And, **for a
   Core run only**, the Core's shared key on HIVE,
-  `/quobyte/proteomics-grp/.config/gemini_key`. Brett installs that one: owner brettsp, group
+  `/quobyte/proteomics-grp/.config/gemini_key`. Brett installs that one: owner a Core admin, group
   proteomics-grp, mode 640, in the Core's `.config` folder (mode 2750). It is used only while a
   Core admin (`scripts/core_admins.txt`) owns the file and its folder and nobody else can write
   either (the Core's rule for its files on HIVE, `slack_collab.trust_problem`), and only while
@@ -309,7 +309,7 @@ Claims section):
   the claims, a host's name or the show's name. A capitalised word that starts a sentence
   cannot be told from an ordinary one ("Gapdh went up." / "The gel ran."), so it is not
   failed; `check.txt` lists the ones not in the sources as INFO -- read that line.
-- **Names**: no person's name except the hosts; the lab name ("the Dickson lab") is the most
+- **Names**: no person's name except the hosts; the lab name ("the <PI surname> lab") is the most
   you may use. Pass people's full and first names to `check --forbid-name` (the PI, the
   submitter, lab members, Core staff). They are searched in the transcript, the header lines,
   the claims, the styles and the Pronunciation table.
@@ -754,7 +754,7 @@ bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.t
     `--cloud-ok`; `--no-verify` skips it). It never fails the render and never touches the
     report. It **sends the audio** to Google, so the same consent rules apply: nothing without
     that consent. Run by hand, `verify` needs the same `--core-run` or `--cloud-ok`.
-  - Calibration, PROT_0756: a first render scored 0.969 with no gaps and found one real
+  - Calibration, the mouse-brain IP cohort: a first render scored 0.969 with no gaps and found one real
     misread (the voice said "5,244" for "5,024"), which a Pronunciation row fixed. The clean
     26-minute episode on gemini-3.8-flash-tts then scored ratio 0.965, coverage 0.957, 0 gaps,
     no numbers flagged. A perfectly heard episode scores about 0.96-0.97, not 1: a respelled
@@ -813,7 +813,7 @@ when someone asks for "the report with the audio".
 - **Audio.** Re-encoded for speech to AAC, 24 kHz mono, `--kbps` 32 to 64 (default 48), from a
   24 kHz WAV, by afconvert and otherwise ffmpeg; with neither, `podcast.m4a` goes in as rendered
   (larger). A 21-minute episode at 48 kbps is about 7.5 MB of audio, 10 MB as base64: the
-  PROT_0756 v2 report came to 20.0 MB.
+  the mouse-brain IP cohort v2 report came to 20.0 MB.
 - **Checked before it is kept.** The written file is read back. The base64 must decode to
   exactly the audio that was put in, and that audio must be an MP4 with an AAC (`mp4a`) track of
   the episode's length (`podcast.json` `duration_s`, within 1 s or 1%). afconvert or ffmpeg must

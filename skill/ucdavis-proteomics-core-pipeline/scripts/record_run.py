@@ -17,7 +17,7 @@ plus a line in an append-only master log and rows in an activity log.
   # after `session.py finalize` -- the finalize hook calls this
   python3 record_run.py analysis-done --session <session dir> [--out <dir>] [--zip <zip>] [--prot ..]
   # the registry, from every run_record.json (the logs are for people; this is the index)
-  python3 record_run.py list [--since 2026-09-01] [--user gabrig] [--status failed] [--tsv|--json]
+  python3 record_run.py list [--since 2026-09-01] [--user <user>] [--status failed] [--tsv|--json]
   python3 record_run.py --where        # which route and destination from here, and nothing else
   python3 record_run.py locate --session <dir>   # the record already holding it, read-only, here
   ... --dry-run                        # what it would write, written nowhere (preview on stderr)
@@ -3108,7 +3108,7 @@ def run_bounded(argv, timeout, stdin=None):
 
 def kill_tree(p):
     """Kill a child and everything it started. POSIX: its process group (start_new_session gave it
-    one). Windows has no killpg/SIGKILL -- gabrig's laptop is Windows -- so taskkill /T takes the
+    one). Windows has no killpg/SIGKILL -- a Core member's laptop is Windows -- so taskkill /T takes the
     tree (bash -> ssh) there. Best effort; never raises."""
     if hasattr(os, "killpg") and hasattr(signal, "SIGKILL"):
         try:

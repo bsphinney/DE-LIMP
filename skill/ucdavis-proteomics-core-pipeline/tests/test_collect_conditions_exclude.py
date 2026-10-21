@@ -95,7 +95,7 @@ class ExcludedRunsValidate(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_prot_0803_validates_and_records_the_reasons(self):
+    def test_prot_9803_validates_and_records_the_reasons(self):
         p = validate(self.csv, self.report, *exclude_args(REASONS))
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         out = json.loads(p.stdout)

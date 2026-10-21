@@ -18,7 +18,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(os.path.dirname(HERE), "scripts", "make_figures.R")
-MICHELLE_GROUPS = ["Old_IgG", "Old_JPH3", "Old_JPH4", "Old_Kv21", "Old_RyR",
+MORGAN_GROUPS = ["Old_IgG", "Old_JPH3", "Old_JPH4", "Old_Kv21", "Old_RyR",
                    "Young_IgG", "Young_JPH3", "Young_JPH4", "Young_Kv21", "Young_RyR"]
 
 
@@ -85,7 +85,7 @@ class TwoFactorSplit(unittest.TestCase):
         return {ln.split("|")[0]: tuple(ln.split("|")[1:]) for ln in out.strip().splitlines()}
 
     def test_age_by_bait_is_detected(self):
-        tf = self.split(MICHELLE_GROUPS)
+        tf = self.split(MORGAN_GROUPS)
         self.assertIsNotNone(tf)
         self.assertEqual(tf["Old_JPH3"], ("JPH3", "Old"))       # 5 baits = colour, 2 ages = shape
         self.assertEqual(tf["Young_IgG"], ("IgG", "Young"))

@@ -110,7 +110,7 @@ DIANN_DIGEST = {"cut": "K*,R*", "missed_cleavages": 1, "min_pep_len": 7, "max_pe
 # cfg that does not match the bundle's acquisition, probe_window.py's refusal to measure).
 # It used to live nowhere: run_search.py appended it to the single-shot command only, so every
 # DDA cohort of more than 5 files went to the 5-step chain WITHOUT it and DIA-NN searched DDA
-# spectra as DIA, with no error (msalemi, SET28 / PROT_0000, 28 Exploris .raw, 2026-09-25).
+# spectra as DIA, with no error (a Core member, SET28 / PROT_0000, 28 Exploris .raw, 2026-09-25).
 DIANN_DDA_FLAG = "--dda"
 SRC_DDA = ("DDA acquisition: DIA-NN README, '--dda process data as DDA -- must be used with DDA "
            "data, must not be used with DIA data' (beta DDA support since DIA-NN 2.3)")
@@ -506,7 +506,7 @@ def ppm_for_resolution(res):
 
 # Where an Orbitrap's MS1/MS2 resolution came from. The phrase goes into the class label, and
 # from there into workflow.manifest.json, <cfg>.rationale.json and every mass-accuracy rationale
-# line. gabrig 2026-09-23 (Fusion Lumos, skill 2.5.0): resolutions the user TYPED IN came out as
+# line. A Core member, 2026-09-23 (Fusion Lumos, skill 2.5.0): resolutions the user TYPED IN came out as
 # "MS1 60,000 / MS2 15,000 resolution read from the data" -- a value presented as something it
 # is not (DE-LIMP rule #2). The caller says where the numbers came from; a number given on the
 # command line is "user" unless the caller says otherwise.
@@ -546,7 +546,7 @@ def ms2_in_ion_trap(analyzer):
 
 def add_resolution_args(ap):
     """The resolution flags, defined once for estimate_params.py, resolve_defaults.py and
-    make_presets.py. gabrig 2026-09-23: resolve_defaults.py took --ms1-res/--ms2-res and this
+    make_presets.py. A Core member, 2026-09-23: resolve_defaults.py took --ms1-res/--ms2-res and this
     script --ms1-resolution/--ms2-resolution, so one of the two commands failed whichever
     spelling was used. Both spellings are accepted everywhere; --ms1-resolution is canonical."""
     for lvl in ("ms1", "ms2"):
@@ -604,7 +604,7 @@ RESOLUTION_ENGINES = ("diann", "radiant")
 
 def resolution_question(instr_class, engine, ms1_res=None, ms2_res=None):
     """What to ask the user when an Orbitrap's resolution is unknown and the engine uses it,
-    else None. gabrig 2026-09-23: a Fusion Lumos with no resolution got a manifest saying
+    else None. A Core member, 2026-09-23: a Fusion Lumos with no resolution got a manifest saying
     "resolution unknown", exit 0, and no prompt -- so nobody asked. The class test is
     classify_instrument()'s own: orbitrap_generic IS "an Orbitrap with no usable resolution"
     (the Astral is its own class and assumes 240k).

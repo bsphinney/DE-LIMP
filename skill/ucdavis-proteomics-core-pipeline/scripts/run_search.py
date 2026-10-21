@@ -1730,7 +1730,7 @@ def adapt_radiant(out):
 # Sage and Radiant read mzML. The conversion is PLANNED here (mzml_plan -- nothing is run) and
 # RUN wherever the search runs: in this process for an inline search (convert_inline), inside
 # the job for --sbatch (conversion_lines), on the compute node. It used to run right here,
-# before the job script was even written: gabrig 2026-09-29, 4 Fusion Lumos .raw (~2.4 GB) on
+# before the job script was even written: a Core member, 2026-09-29, 4 Fusion Lumos .raw (~2.4 GB) on
 # HIVE login2 -- `run_search.py --engine sage --sbatch` started msconvert on the LOGIN NODE for
 # every file (golden rule 3). It failed at once only because bioconda's Linux msconvert is built
 # from ProteoWizard's source WITHOUT the vendor readers (recipe: pwiz-src-without-v), so it
@@ -2006,7 +2006,7 @@ def keratin_sample_check(fasta, flag, engine="diann"):
     that still holds keratin-family Cont_ entries. Keratin is the analyte there, and those entries
     take its peptides away: DIA-NN's --cont-quant-exclude Cont_ keeps every peptide they share with
     the sample's keratins out of quantification, and run_de.R removes every precursor that names a
-    Cont_ entry. msalemi's hair benchmark (SET28, skill 2.8.0) lost them exactly this way, with
+    Cont_ entry. A Core member's hair benchmark (SET28, skill 2.8.0) lost them exactly this way, with
     --keratin-sample reaching only the auditors after the search.
 
     The sample is a keratin sample when --keratin-sample says so OR the FASTA's sidecar was built
@@ -2345,7 +2345,7 @@ def adapt_sage(out):
     keeps it) AND its stored q_value <= sage_lfq_check.LFQ_Q_MAX. The q_value Sage stores is
     shared with the precursor's decoy (the lower-scoring member's q -- see LFQ_Q_MAX), so this
     keeps a conservative subset of Sage's own count; Sage's logged count is recorded beside what
-    was kept. Until 2.9 every row went through, decoys included (gabrig 2026-09-29: a cohort whose
+    was kept. Until 2.9 every row went through, decoys included (a Core member, 2026-09-29: a cohort whose
     targets all sat at q 0.128 still produced a full matrix). What was kept and dropped, per file,
     goes to <out>/sage_adapt.json and search_provenance.json `sage_adapt`.
     """
@@ -2408,7 +2408,7 @@ def adapt_sage(out):
         # Sage's `proteins` is a ';' list of full FASTA IDs (sp|Cont_P02769|ALBU_BOVIN): written
         # as DIA-NN writes Protein.Group -- bare accessions -- so the contaminant filter, whose
         # rule is "an accession starts with Cont_/contam_", sees them. Written as Sage gave it,
-        # no Sage DE ever had a contaminant removed (gabrig HeL50 UnvPe: 171 Cont_ groups tested,
+        # no Sage DE ever had a contaminant removed (a Core member's HeL50 UnvPe: 171 Cont_ groups tested,
         # methods "Contaminants : none"). The entry names go where DIA-NN puts them.
         prots.append(group_accessions(p))
         names.append(group_entry_names(p))

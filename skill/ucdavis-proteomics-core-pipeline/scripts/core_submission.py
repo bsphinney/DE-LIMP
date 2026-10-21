@@ -9,11 +9,11 @@ Bioshare folder the collaborator opens. Every step in between is a place where t
 silently attach to the wrong thing:
 
   * The sample sheet's `unique_id`s are the ONLY link to the raw files, and they are short,
-    reused by other submissions (BN1-6 in both PROT_0794 and PROT_0776), and collide with
+    reused by other submissions (BN1-6 in two different submissions), and collide with
     plate wells (A3, H10) that match thousands of files.
   * The service directory is organized by human-named folders (`Doe jane`,
     `Institution_X/Lab_Y`), so "where does this project live" is a lookup, not a formula.
-  * A share built from links depends on server settings. PROT_0793's links into /quobyte
+  * A share built from links depends on server settings. One submission's links into /quobyte
     served nothing over https because Bioshare's Apache file-streaming allowed /quobyte on
     port 80 but not 443 (fixed 2026-09-16); absolute /nfs links are invisible over SMB. So deliverables are
     copied as real files, and the only links this script makes are relative raw/ links.
@@ -144,7 +144,7 @@ SYNC_HINT = ("the scripts directory is incomplete: sync the whole scripts/ direc
              ".claude-plugin/ beside it, to ~/proteomics-pipeline/ (bash scripts/hive_exec.sh "
              "--put-skill)")
 RAW_WHITELIST_WARNING = (
-    "Check once: Brett reported (2026-09-16) that PROT_0793's raw/ links download from Bioshare, "
+    "Check once: Brett reported (2026-09-16) that an earlier submission's raw/ links download from Bioshare, "
     "and relative links resolve to the same files, but nobody has checked a relative raw/ link "
     "in Bioshare itself. Before `bioshare send`, open the link and download one raw file.")
 
@@ -597,7 +597,7 @@ def local_share_dir(summary: dict, warnings: list) -> str:
 # users/get_token/ and users/create_token/ calls), and the API takes the key as
 # `Authorization: Token <key>`. The key lives where the CoreOmics steps run: on the staff
 # member's computer, or -- in hive_remote from a computer with no usable Python (the Windows
-# Store stub: Michelle, 2026-10-08) -- on HIVE, as ~/.coreomics_token with mode 600, put there
+# Store stub: a Core member, 2026-10-08) -- on HIVE, as ~/.coreomics_token with mode 600, put there
 # once by scripts/coreomics_key_to_hive.sh over ssh stdin.
 KEY_NAME = ".coreomics_token"
 KEY_TO_HIVE = "bash scripts/coreomics_key_to_hive.sh"
@@ -618,7 +618,7 @@ SAVE_KEY_LINE = {
     "windows": ("read -rs TOK && [ -n \"$TOK\" ] && F=\"$(cygpath \"$USERPROFILE\")/.coreomics_token\" "
                 "&& (umask 077; printf '%s\\n' \"$TOK\" > \"$F\") && chmod 600 \"$F\"; unset TOK"),
 }
-LAB_ADMIN = "a Core admin (Brett Phinney, brettsp)"
+LAB_ADMIN = "a Core admin (Brett Phinney, the Core director)"
 CHECK_ON_HIVE = "bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/core_submission.py check'"
 
 
@@ -1690,7 +1690,7 @@ def token_pattern(uid: str):
     separator on both sides, so EB_001 finds EB-001; letters/digits may not touch either
     end, so KG1 does not find KG13.
 
-    Where letters meet digits a separator may also be added or dropped: PROT_0756's sheet
+    Where letters meet digits a separator may also be added or dropped: a mouse-brain IP cohort's sheet
     says LRS96 and every one of its 30 runs says DIA-LRS-96 (measured on the share), so LRS96
     finds LRS-96 and EB_001 finds EB001. Between two runs of digits, or two of letters, the
     separator stays required -- SG-001-2 must not find SG0012."""
@@ -1818,10 +1818,10 @@ def prepare_entry(e: dict) -> dict:
 
 def ht_pattern(internal_id):
     """HT plate filenames put the submission number straight after the leading date, bare or
-    with its `PROT_` prefix: `20260827_793_100spd_...`, `20260901_0793_rerun_...`,
+    with its `PROT_` prefix: `20260827_807_100spd_...`, `20260901_0807_rerun_...`,
     `20260930_PROT_0807_...` (`PROT0807` too, any case). Anchoring there (rather than anywhere
-    in the name) keeps run counters such as Exploris `Ex08312026_380_JE21` from impersonating
-    submission 0380, and the number must end there: `PROT_08070` is not 0807. Before 2.9.1 the
+    in the name) keeps run counters such as Exploris `Ex08312026_9380_XY21` from impersonating
+    submission 9380, and the number must end there: `PROT_08070` is not 0807. Before 2.9.1 the
     prefix was not allowed, so a plate named `<date>_PROT_<n>_...` was not recognised and
     locate found 0 of its 96 samples."""
     m = re.search(r"(\d+)$", _s(internal_id))
@@ -2987,9 +2987,9 @@ def cmd_locate(a) -> int:
 # can carry the submission. Named ids are read only where they are written on purpose: a
 # PROT_#### token in a path or message, a 12-hex CoreOmics id, or "submission 807" typed by the
 # user. A bare number in a FILE name is never read as one -- Exploris runs carry counters
-# (Ex08312026_380_JE21). Everything else goes through the same sample-id matching as `locate`.
+# (Ex08312026_9380_XY21). Everything else goes through the same sample-id matching as `locate`.
 # 3-5 digits after PROT: "Total_prot_10ug" and "WT_prot1" are protein amounts and names, not
-# submissions; 5 because SUBMISSION_NUMBER (and record_run's --prot) take up to 5, so PROT_10234
+# submissions; 5 because SUBMISSION_NUMBER (and record_run's --prot) take up to 5, so PROT_91234
 # is one. PROT_TOKEN is THE definition of a submission id written in a name or path: fran_deposit's
 # QC rule imports it, and FRAN's find_uningested.PROT_ID_RE is a pinned literal copy of it.
 # A hex id preceded by "xxxx-" is the tail of a UUID/GUID, not a CoreOmics id.
@@ -3003,7 +3003,7 @@ STALE_SNAPSHOT = "/quobyte/proteomics-grp/coreomics/.submissions_db"
 
 
 def ids_in(text: str, typed: bool = False) -> list:
-    """[("internal_id", "PROT_0756") | ("id", "0022066cd85f"), ...] written in a path or name,
+    """[("internal_id", "PROT_0807") | ("id", "a1b2c3d4e5f6"), ...] written in a path or name,
     or -- typed=True -- in what the user wrote. A 12-hex token counts only with a letter AND a
     digit in it: a 12-digit timestamp is not a CoreOmics id."""
     s, hits = _s(text), []
@@ -3076,13 +3076,13 @@ def cmd_identify(a) -> int:
     for hit in ids_in(a.text or "", typed=True):
         named.setdefault(hit, []).append("in the user's message")
     base = {"never_search": f"{STALE_SNAPSHOT} is a stale snapshot -- never search it for a "
-                            f"submission (a search for 0756 there matched an unrelated 2019 record)"}
+                            f"submission (a search for 0807 there matched an unrelated 2019 record)"}
     # No evidence of Core data: ask whether the Core ran the samples at all -- an outside user
     # asked "which submission?" answers with a number, and the run becomes the Core's.
     ask_none = ("Were these samples run by the UC Davis Proteomics Core? If so, what is the PROT "
                 "number?")
     ask_number = ("Which CoreOmics submission is this data from? Give the PROT number (e.g. "
-                  "PROT_0756) or the 12-character CoreOmics id.")
+                  "PROT_0807) or the 12-character CoreOmics id.")
 
     def label_of(kind, key):
         return key if kind == "internal_id" else f"CoreOmics id {key}"
@@ -4393,7 +4393,7 @@ def verify_delivery(delivery_dir: str, share_dir: str, froot: str, expected=None
     by name) must be relative and resolve under the Flinders root.
 
     Links already in the share that this run did not create are reported as NOTES and left
-    alone. PROT_0793's share/search -> /quobyte links are the model case: they are valid, and
+    alone. An earlier submission's share/search -> /quobyte links are the model case: they are valid, and
     stopped serving only because of a Bioshare server setting (fixed 2026-09-16), so treating
     them as a failure would block every later delivery into that share for something this run
     neither made nor can fix."""
@@ -5178,7 +5178,7 @@ def main(argv=None) -> int:
                                           "(names first, then sample ids; never guesses)")
     idn.add_argument("paths", nargs="*", help="raw files and/or their folder, as the user gave them")
     idn.add_argument("--files-from", default=None, help="a file listing raw paths, one per line")
-    idn.add_argument("--text", default="", help="the user's message, for 'PROT_0756' / 'submission 756'")
+    idn.add_argument("--text", default="", help="the user's message, for 'PROT_0807' / 'submission 807'")
     idn.add_argument("--max-days", type=int, default=240,
                      help="a run counts for a submission made up to this many days before it (default 240)")
     idn.add_argument("--no-lookup", action="store_true",

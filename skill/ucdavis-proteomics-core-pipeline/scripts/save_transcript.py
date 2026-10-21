@@ -225,7 +225,7 @@ def _user_text(e):
 
 def _opening_request(lines, load):
     """When Claude invoked the skill itself (a Skill tool call), the user's request that led to
-    it ("analyse PROT_0802, Old vs Young") -- but only when the Skill call DIRECTLY answers it:
+    it ("analyse PROT_0807, Old vs Young") -- but only when the Skill call DIRECTLY answers it:
     the assistant's first turn after the request, with no tool call and no tool result between
     (a tool's output there -- another client's results -- is not this analysis's). Else None. A
     slash command or an injected load carries the request itself."""

@@ -6,7 +6,7 @@ scan trailer with Thermo's own RawFileReader (.NET), through pythonnet.
 Why this exists: estimate_params.py pins DIA-NN's documented Orbitrap mass tolerances from the
 MS1/MS2 resolution (240k->4, 120k->7, 60k->10, 30k->15 ppm). Without it an Orbitrap classes as
 `orbitrap_generic`: DIA-NN calibrates per run and the 5-step parallel chain declines the cfg
-(gabrig 2026-09-23, 15 Fusion Lumos .raw). The instrument writes the resolution into every
+(a Core member, 2026-09-23, 15 Fusion Lumos .raw). The instrument writes the resolution into every
 scan's trailer, but ThermoRawFileParser never outputs it -- TRFP master cf548e4 reads trailer
 keys internally and writes no resolution to metadata, mzML, MGF or `query`; its
 "mass resolution" (MS:1000011) is a generic 0.5. Verified on HIVE: a Fusion Lumos writes

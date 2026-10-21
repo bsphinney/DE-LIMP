@@ -1,7 +1,7 @@
 """make_figures.R: short sample names on the heatmap / PCA / QC plots.
 
 Raw run names ("08132026__60SPD_DIA-LRS-124_S3-F4_1_23659") took ~40% of the heatmap and
-buried the PCA (Silva08172026). short_sample_names() is the one definition: a Label/Sample
+buried the PCA (the mouse-brain IP cohort). short_sample_names() is the one definition: a Label/Sample
 column in conditions.csv wins; otherwise the tokens every run shares are dropped and the
 shortest distinguishing stretch is kept; any empty or colliding label falls back to the full
 run name. The mapping is written to sample_labels.csv so no label is ambiguous.
@@ -19,7 +19,7 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(os.path.dirname(HERE), "scripts", "make_figures.R")
 
-MICHELLE = ["08132026__60SPD_DIA-LRS-96_S3-B1_1_23630", "08132026__60SPD_DIA-LRS-100_S3-F1_1_23648",
+MORGAN = ["08132026__60SPD_DIA-LRS-96_S3-B1_1_23630", "08132026__60SPD_DIA-LRS-100_S3-F1_1_23648",
             "08132026__60SPD_DIA-LRS-124_S3-F4_1_23659", "08132026__60SPD_DIA-LRS-125_S3-G4_1_23639"]
 
 
@@ -63,7 +63,7 @@ def short_names(runs, meta=None):
 @unittest.skipUnless(have_r(), "Rscript not available")
 class ShortSampleNames(unittest.TestCase):
     def test_shared_prefix_and_suffix_are_stripped(self):
-        rows = short_names(MICHELLE)
+        rows = short_names(MORGAN)
         # "08132026__60SPD_DIA-" and "_S3-..._1_<id>" go; the bare number keeps its "LRS-"
         self.assertEqual([r["Label"] for r in rows], ["LRS-96", "LRS-100", "LRS-124", "LRS-125"])
         self.assertTrue(all(r["Source"] == "derived from the run name" for r in rows))
@@ -81,16 +81,16 @@ class ShortSampleNames(unittest.TestCase):
         self.assertTrue(all(labels))
 
     def test_conditions_label_column_takes_precedence(self):
-        meta = [{"File.Name": r, "Group": "A", "Label": f"mouse{i}"} for i, r in enumerate(MICHELLE, 1)]
-        rows = short_names(MICHELLE, meta)
+        meta = [{"File.Name": r, "Group": "A", "Label": f"mouse{i}"} for i, r in enumerate(MORGAN, 1)]
+        rows = short_names(MORGAN, meta)
         self.assertEqual([r["Label"] for r in rows], ["mouse1", "mouse2", "mouse3", "mouse4"])
         self.assertTrue(all(r["Source"] == "conditions.csv Label" for r in rows))
 
     def test_empty_or_colliding_labels_fall_back_to_the_full_run_name(self):
         given = ["dup", "dup", "", "ok"]
-        meta = [{"File.Name": r, "Group": "A", "Label": g} for r, g in zip(MICHELLE, given)]
-        rows = short_names(MICHELLE, meta)
-        self.assertEqual([r["Label"] for r in rows], MICHELLE[:3] + ["ok"])
+        meta = [{"File.Name": r, "Group": "A", "Label": g} for r, g in zip(MORGAN, given)]
+        rows = short_names(MORGAN, meta)
+        self.assertEqual([r["Label"] for r in rows], MORGAN[:3] + ["ok"])
         self.assertTrue(all("full run name" in r["Source"] for r in rows[:3]))
 
 

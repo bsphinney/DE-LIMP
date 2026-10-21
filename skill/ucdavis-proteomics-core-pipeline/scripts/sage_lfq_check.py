@@ -8,7 +8,7 @@ build_feature_map: Tolerance::Ppm(-ppm_tolerance, ppm_tolerance) around `calcmas
 LfqSettings::default). The search itself uses precursor_tol (+/-10 ppm here), so a run whose MS1
 sits a few ppm off identifies normally and quantifies badly -- and nothing says so.
 
-gabrig 2026-09-29 (HeLa, Fusion Lumos, Sage 0.14.7, skill 2.6.0): runs with a systematic MS1
+A Core member, 2026-09-29 (HeLa, Fusion Lumos, Sage 0.14.7, skill 2.6.0): runs with a systematic MS1
 offset of +7.1/+7.7 ppm searched fine (29,846 PSMs) but LFQ logged "discovered 0 target MS1 peaks
 at 5% FDR" -- target and decoy MS1 intensities were the same (1.85e5 vs 1.89e5). Runs at +1.8 to
 +5.8 ppm quantified, but with run-dependent loss: protein CV 50% against MSFragger's 14% on the
@@ -67,7 +67,7 @@ import sys
 # Sage's results.json nor the config states one, and then tagged as the default in the record.
 SAGE_DEFAULT_LFQ_PPM = 5.0
 # How much room the median needs inside the window: the envelope is spread around the median,
-# so a median right at the edge leaves about half of it outside. 2 ppm is the margin gabrig's
+# so a median right at the edge leaves about half of it outside. 2 ppm is the margin a Core member's
 # diagnosis used (runs at +1.8..+5.8 ppm already quantified worse than MSFragger against 5 ppm).
 MARGIN_PPM = 2.0
 # Heuristic, not measured: a healthy search quantifies most of what it identified, so under 10%
@@ -88,7 +88,7 @@ PSM_Q = 0.01            # the peptide_q Sage's LFQ feature map takes (lfq.rs bui
 # The q_value Sage STORES is not the one it counted with: picked_precursor keys its q map by
 # PrecursorId alone, so a target and its decoy end with ONE shared q -- the lower-scoring member's
 # (the map is filled in score order, and a later insert wins). Stored q >= the target's own q, so
-# filtering the stored q keeps a conservative SUBSET of Sage's logged count: gabrig's HeL50 UnvPe
+# filtering the stored q keeps a conservative SUBSET of Sage's logged count: a Core member's HeL50 UnvPe
 # (2026-09-29) had 1,489 of 1,489 target/decoy pairs with identical q, and 16,649 targets kept
 # against Sage's logged 17,288. No FDR harm; Sage's count is recorded beside what was kept.
 LFQ_Q_MAX = 0.05

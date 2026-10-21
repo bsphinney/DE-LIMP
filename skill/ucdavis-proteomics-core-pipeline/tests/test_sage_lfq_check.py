@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Sage's LFQ integrates MS1 only within +/- quant.lfq_settings.ppm_tolerance (default 5 ppm) of the
-theoretical mass. gabrig 2026-09-29 (HeLa, Fusion Lumos, Sage 0.14.7): runs whose MS1 sat +7.1 /
+theoretical mass. gstaff 2026-09-29 (HeLa, Fusion Lumos, Sage 0.14.7): runs whose MS1 sat +7.1 /
 +7.7 ppm off searched normally (29,846 PSMs) but LFQ logged "discovered 0 target MS1 peaks at 5%
 FDR", and nothing warned. sage_lfq_check.py now reads each run's median precursor mass error and
 Sage's MS1-peak count after every Sage search and WARNS; the record reaches search_provenance.json,
@@ -122,7 +122,7 @@ class LfqWindowCheck(unittest.TestCase):
         self.out = os.path.join(self.d, "search")
 
     def test_plus_seven_ppm_warns_and_names_the_fix(self):
-        """gabrig's cohort: +7.1/+7.7 ppm against Sage's default 5 ppm window, 0 peaks kept."""
+        """gstaff's cohort: +7.1/+7.7 ppm against Sage's default 5 ppm window, 0 peaks kept."""
         write_sage_outputs(self.out, {"HeLa_1.mzML": 7.1, "HeLa_2.mzML": 7.7}, peaks=0,
                            lfq_q=0.128)
         rec = slc.check(self.out)

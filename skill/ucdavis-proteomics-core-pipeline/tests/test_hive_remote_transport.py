@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-hive_remote from a Windows laptop: what one real session (gabrig, 2026-09-23, Windows 11 +
+hive_remote from a Windows laptop: what one real session (gstaff, 2026-09-23, Windows 11 +
 Git Bash) ran into, and what now stops it.
 
   1. The raw folder was T:\\Data\\lab\\service\\..., and T: is \\\\128.120.208.24\\proteomics --
@@ -11,7 +11,7 @@ Git Bash) ran into, and what now stops it.
   2. Git Bash has no rsync, so --put/--get died. They fall back to scp -- keeping rsync's
      meaning, which scp -r does not have on its own.
   3. First contact failed "Host key verification failed"; the default ssh user was the AD
-     login `AD3+gabrig` ("Permission denied"); python3 was the Microsoft Store stub.
+     login `AD3+gstaff` ("Permission denied"); python3 was the Microsoft Store stub.
      check_access.sh now says which of these it is, instead of hive_ssh: "failed".
 
 No test contacts a real host: ssh, scp, rsync, ssh-keygen and ssh-keyscan are recorders on a
@@ -210,7 +210,7 @@ class HivePathWindowsTests(Harness):
         return r, json.loads(r.stdout)
 
     def test_a_mapped_drive_resolves_to_the_flinders_mount_and_is_verified(self):
-        """gabrig's exact path shape. One ssh call, and HIVE having an extra file the laptop
+        """gstaff's exact path shape. One ssh call, and HIVE having an extra file the laptop
         has not seen yet (an instrument still writing) does not break the match."""
         for form in ("T:\\Data\\lab\\service\\P1", "T:/Data/lab/service/P1"):
             with self.subTest(form=form):
@@ -273,7 +273,7 @@ class HivePathWindowsTests(Harness):
         self.assertEqual(j["hive_path"].lower(), f"{FLINDERS}/Data/lab/service/P1".lower())
 
     def test_a_local_disk_is_not_a_share_and_makes_no_ssh_call(self):
-        r, j = self.resolve("C:\\Users\\gabrig\\raw")
+        r, j = self.resolve("C:\\Users\\gstaff\\raw")
         self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
         self.assertEqual(j["candidates"], [])
         self.assertEqual(self.hive_calls(), 0)
@@ -394,11 +394,11 @@ class PutGuardTests(Harness):
         self.assertIn("ControlMaster=auto", ssh_e)
 
     def test_a_windows_domain_login_is_refused_before_ssh(self):
-        for user in ("AD3+gabrig", "AD3\\gabrig"):
+        for user in ("AD3+gstaff", "AD3\\gstaff"):
             with self.subTest(user=user):
                 r = self.run_script(HIVE_EXEC, "hostname", HIVE_USER=user)
                 self.assertEqual(r.returncode, 2)
-                self.assertIn("'gabrig'", r.stderr)
+                self.assertIn("'gstaff'", r.stderr)
         self.assertEqual(self.calls("ssh"), [])
 
     def test_every_ssh_call_accepts_a_new_host_key(self):
@@ -561,8 +561,8 @@ class CheckAccessTests(Harness):
                 self.assertIn(text, j["hive_ssh_error"]["detail"])      # not the banner line
 
     def test_a_windows_domain_login_is_flagged_and_not_tried(self):
-        j = self.check(user="AD3+gabrig")
-        self.assertIn("'gabrig'", j["hive_user_warning"])
+        j = self.check(user="AD3+gstaff")
+        self.assertIn("'gstaff'", j["hive_user_warning"])
         self.assertEqual(j["hive_ssh"], "failed")
         self.assertEqual(self.calls("ssh"), [])
 
@@ -586,7 +586,7 @@ class CheckAccessTests(Harness):
 
 class CheckAccessCoreOmicsKeyTests(Harness):
     """check_access.sh reports the CoreOmics key on HIVE -- asked in the SAME ssh call (HIVE
-    throttles new connections) -- and where the CoreOmics steps run (Michelle, 2026-10-08: a
+    throttles new connections) -- and where the CoreOmics steps run (Morgan, 2026-10-08: a
     Windows laptop whose python3 is the Store stub, the key on the laptop, none on HIVE)."""
 
     FAKE_KEY = "c0reFAKE" + "00112233445566778899aabbccdd"
@@ -618,7 +618,7 @@ class CheckAccessCoreOmicsKeyTests(Harness):
         self.assertIn("mode 600", j["coreomics_key_on_hive_detail"])
         self.assertEqual(j["recommended_mode"], "hive_remote")
 
-    def test_michelle_before_setup_runs_on_hive_and_is_told_to_move_the_key(self):
+    def test_morgan_before_setup_runs_on_hive_and_is_told_to_move_the_key(self):
         j = self.check(laptop_key=True, FAKE_CK="absent")
         self.assertIs(j["local_python3"]["usable"], False)
         self.assertIs(j["coreomics_key_on_hive"], False)
@@ -764,9 +764,9 @@ class HiveLoginSavedTests(Harness):
                 os.environ["HIVE_ENV_FILE"] = old
 
     def test_a_windows_key_path_is_saved_as_git_bash_spells_it(self):
-        """Review: C:\\Users\\gabrig\\.ssh\\id_ed25519 has no "/", so dirname said "." and
+        """Review: C:\\Users\\gstaff\\.ssh\\id_ed25519 has no "/", so dirname said "." and
         "$PWD/C:\\Users\\..." was saved. cygpath -u gives the path Git Bash reads."""
-        win = "C:\\Users\\gabrig\\.ssh\\id_ed25519"
+        win = "C:\\Users\\gstaff\\.ssh\\id_ed25519"
         open(os.path.join(self.d, win), "w").close()        # what -f sees, here, for that path
         j = self.check(key=win, FAKE_CYGPATH_OUT=self.key, FAKE_KNOWN_FP=PUBLISHED_ED25519)
         self.assertIs(j["hive_login_saved"]["saved"], True, j["hive_login_saved"])
@@ -774,7 +774,7 @@ class HiveLoginSavedTests(Harness):
         self.assertNotIn(self.d + "/C:", self.read())
 
     def test_a_path_that_resolves_to_no_file_is_saved_as_given(self):
-        win = "C:\\Users\\gabrig\\.ssh\\id_ed25519"
+        win = "C:\\Users\\gstaff\\.ssh\\id_ed25519"
         open(os.path.join(self.d, win), "w").close()
         j = self.check(key=win, FAKE_CYGPATH_OUT=os.path.join(self.d, "not", "there"),
                        FAKE_KNOWN_FP=PUBLISHED_ED25519)
@@ -798,7 +798,7 @@ class HiveLoginSavedWithoutCygpathTests(HiveLoginSavedTests):
     SKIP_SHIMS = ("cygpath",)
 
     def test_a_windows_key_path_is_saved_as_git_bash_spells_it(self):
-        win = "C:\\Users\\gabrig\\.ssh\\id_ed25519"
+        win = "C:\\Users\\gstaff\\.ssh\\id_ed25519"
         open(os.path.join(self.d, win), "w").close()
         j = self.check(key=win, FAKE_KNOWN_FP=PUBLISHED_ED25519)
         self.assertIs(j["hive_login_saved"]["saved"], True)

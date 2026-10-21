@@ -25,7 +25,7 @@ brett."
 
 **On HIVE:**
 ```
-python3 ~/proteomics-pipeline/scripts/notes.py send --to msalemi \
+python3 ~/proteomics-pipeline/scripts/notes.py send --to <their HIVE user> \
     --subject "Keratin in PROT_0807" --body-file note.md \
     [--session /quobyte/proteomics-grp/.../2026-09-28_PROT0807]
 ```
@@ -35,11 +35,11 @@ open, the note is shown first and flagged. The folder name alone matches too.
 
 **From a laptop** (`hive_remote`, a HIVE login in `hive.env`), in the skill folder:
 ```
-python3 scripts/notes.py send --to msalemi --subject "Keratin in PROT_0807" --body-file note.md
+python3 scripts/notes.py send --to <their HIVE user> --subject "Keratin in PROT_0807" --body-file note.md
 ```
 This is one SSH call through `hive_exec.sh`. The body file is read on the laptop and sent with
 the call, and `notes.py` sends itself along on stdin, so the HIVE copy of the skill does not
-need to have it. You can also ask your own Claude: "leave a note for Michelle: ...".
+need to have it. You can also ask your own Claude: "leave a note for <colleague>: ...".
 
 - **`--dry-run`** shows the note's name and the Slack line, and writes and posts nothing.
 - **`--no-slack`** writes the note without the Slack line.
@@ -63,7 +63,7 @@ python3 scripts/notes.py list                   # one line: unread, sent, replie
 - **A receipt or a reply is by its file's owner.** It counts only when that owner is the user
   its file name gives, and, for a note to one person, only when it comes from that person; for
   `all/`, it may come from anyone. Any other receipt or reply is still listed, with its owner
-  and a `flag` such as `its file is named for msalemi, but it belongs to mallory`. A flagged
+  and a `flag` such as `its file is named for staff2, but it belongs to mallory`. A flagged
   receipt does not count as read.
 - **A note in your record that has gone from the inbox** is flagged `missing from the inbox:
   deleted by someone?`. One whose file no longer matches the recorded sha256 is flagged
@@ -144,7 +144,7 @@ note posts. Both need the current skill on HIVE (`hive_exec.sh --put-skill`): a 
 - **The sender is the file's owner on disk,** never its `From:` line, which anyone can type. A
   note whose `From:` names someone else is still shown if its owner is trusted, with a warning.
 - **The trust anchor is `scripts/core_admins.txt`,** the Core admins, one HIVE user per line
-  with `#` comments (today `brettsp`). **Changing it is a code change, shipped with the
+  with `#` comments (today the Core director). **Changing it is a code change, shipped with the
   skill.** It is never taken from the shared folder, because `/quobyte/proteomics-grp` is
   writable by the whole group and not sticky: any member could rename `skill_notes/` and make
   a new one of their own, and so become its owner. It has two readers, kept line for line
@@ -194,12 +194,12 @@ note posts. Both need the current skill on HIVE (`hive_exec.sh --put-skill`): a 
 ## Layout and permissions
 
 ```
-/quobyte/proteomics-grp/skill_notes/                 3770, group proteomics-grp, owned by brettsp
-  SENDERS                                            644, owned by brettsp (optional)
-  msalemi/                                           3770; one folder per recipient HIVE user
-    20260929T231000Z_brettsp_keratin-in-prot-0807.md                        the note, 0640
-    20260929T231000Z_brettsp_keratin-in-prot-0807.read.msalemi.20260930T160500Z   her receipt
-    20260929T231000Z_brettsp_keratin-in-prot-0807.reply.msalemi.20260930T160500Z.md   her reply
+/quobyte/proteomics-grp/skill_notes/                 3770, group proteomics-grp, owned by a Core admin
+  SENDERS                                            644, owned by a Core admin (optional)
+  staff2/                                            3770; one folder per recipient HIVE user
+    20260929T231000Z_staff1_keratin-in-prot-0807.md                         the note, 0640
+    20260929T231000Z_staff1_keratin-in-prot-0807.read.staff2.20260930T160500Z    her receipt
+    20260929T231000Z_staff1_keratin-in-prot-0807.reply.staff2.20260930T160500Z.md    her reply
   all/                                               notes for everyone; one receipt per reader
 ~/.config/ucdavis-proteomics/notes_sent.jsonl       the sender's own record, 0600, on the computer
                                                      the note was sent from
@@ -207,8 +207,8 @@ note posts. Both need the current skill on HIVE (`hive_exec.sh --put-skill`): a 
 - **A note's name** is `<UTC time>_<sender>_<subject slug>.md`. Its id, which `ack` takes, is
   the name without `.md`. A note is header lines, a blank line, then Markdown:
   ```
-  From: brettsp
-  To: msalemi
+  From: staff1
+  To: staff2
   Date: 2026-09-29T23:10:00Z
   Subject: Keratin in PROT_0807
   Session: /quobyte/proteomics-grp/.../2026-09-28_PROT0807
@@ -243,7 +243,7 @@ folder no Core admin owns is not trusted, and nothing in it is shown.
 install -d -m 3770 -g proteomics-grp /quobyte/proteomics-grp/skill_notes
 ls -ld /quobyte/proteomics-grp/skill_notes     # drwxrws--T  <you>  proteomics-grp
 # optional -- anyone else who may send notes, one HIVE user per line:
-( umask 022; printf '%s\n' gabrig > /quobyte/proteomics-grp/skill_notes/SENDERS )
+( umask 022; printf '%s\n' <their HIVE user> > /quobyte/proteomics-grp/skill_notes/SENDERS )
 chmod 644 /quobyte/proteomics-grp/skill_notes/SENDERS
 ```
 Then try it by sending a note to yourself, reading it, and acknowledging it:

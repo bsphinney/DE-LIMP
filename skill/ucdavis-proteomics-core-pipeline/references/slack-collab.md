@@ -1,7 +1,7 @@
 # Claudes working together in Slack (`slack_collab.py`)
 
 Two people's Claude Code sessions can work on one analysis in **one Slack thread**, for example
-Brett's Claude on a Mac and Michelle's Claude on a Windows laptop. Each agent proposes, runs and
+the Core director's Claude on a Mac and a staff member's Claude on a Windows laptop. Each agent proposes, runs and
 checks work, and posts what it finds. Both people read the thread and can step in at any time.
 It runs unattended **only when the people ask for it**.
 
@@ -27,12 +27,12 @@ message metadata (`skill_agent_post`: agent, person, session, sequence number).
 
 ## Setting it up (once, by Brett)
 
-Do every step on HIVE **as `brettsp`**. `brettsp` is the Core admin named in
+Do every step on HIVE **as a Core admin**: an account named in
 `scripts/core_admins.txt`. The token file, the Slack-people list and the folder holding them count
 only when a Core admin owns them.
 
 **Why the owner is pinned.** `/quobyte/proteomics-grp` is `drwxrws---
-brettsp:proteomics-grp`: group-writable, with no sticky bit. So any member could rename
+<Core admin>:proteomics-grp`: group-writable, with no sticky bit. So any member could rename
 `.config` and put a folder of their own in its place, holding their own app's token and their own
 people list. The only thing that tells the real folder apart is who owns it, so the skill trusts
 `.config`, `skill_slack_bot_token` and `slack_people` only when all three are owned by a
@@ -58,7 +58,7 @@ Core admin and nobody else can write them. The token is not used otherwise:
    out of the shell history:
    ```bash
    install -d -m 2750 -g proteomics-grp /quobyte/proteomics-grp/.config
-   ls -ld /quobyte/proteomics-grp/.config   # must show: drwxr-s--- brettsp proteomics-grp
+   ls -ld /quobyte/proteomics-grp/.config   # must show: drwxr-s--- <you> proteomics-grp
    read -rs TOK      # paste the xoxb- token, press Enter (nothing is echoed)
    ( umask 027; printf '%s\n' "$TOK" > /quobyte/proteomics-grp/.config/skill_slack_bot_token )
    unset TOK
@@ -66,11 +66,11 @@ Core admin and nobody else can write them. The token is not used otherwise:
    chmod 640 /quobyte/proteomics-grp/.config/skill_slack_bot_token
    ```
    If `ls -ld` shows another owner, `.config` was made by someone else, for example for the
-   Slack webhook. Then create it afresh as `brettsp`: move the old one aside, run `install -d`
+   Slack webhook. Then create it afresh as a Core admin: move the old one aside, run `install -d`
    again, and copy its files back in.
 5. **Invite the app to `#proteomics-analysis`, and to no other channel.** In that channel, type
    `/invite @Proteomics Skill` and pick it from the list.
-   - `#proteomics-analysis` has only Brett, Michelle and Gabriela in it, and is used only to talk
+   - `#proteomics-analysis` has only the Core director and two staff members in it, and is used only to talk
      about analyses. That is why it is the collaboration channel.
    - The app can read **everything** in any channel it joins. Its token is readable by **every
      `proteomics-grp` member on HIVE**. So anything said in a channel the app is in can be read by
@@ -83,13 +83,13 @@ Core admin and nobody else can write them. The token is not used otherwise:
    hard-codes a channel: `--channel` on any command, or `$SKILL_SLACK_COLLAB_CHANNEL`, overrides the
    saved one.
 7. **List who is who.** Create the Slack-people list, which binds each Slack member ID to its
-   HIVE account. Create it as `brettsp`, and make it writable by nobody else:
+   HIVE account. Create it as a Core admin, and make it writable by nobody else:
    ```bash
    ( umask 022; cat > /quobyte/proteomics-grp/.config/slack_people <<'EOF'
    # Slack member id   HIVE user
-   U0BRETTXXXX         brettsp
-   U0MICHELLEX         msalemi
-   U0GABRIELAX         gabrig
+   U0AAAAAAAA1         staff1
+   U0AAAAAAAA2         staff2
+   U0AAAAAAAA3         staff3
    EOF
    )
    chmod 644 /quobyte/proteomics-grp/.config/slack_people
@@ -97,11 +97,11 @@ Core admin and nobody else can write them. The token is not used otherwise:
    Put in the real member IDs (see "Each person, once"). The list counts only while it stays
    as follows; otherwise it is ignored, with a warning:
    - a plain file, not a link;
-   - owned by a Core admin (`brettsp`), like the token file;
+   - owned by a Core admin, like the token file;
    - in the same folder as the token file;
    - not writable by the group or others.
 
-   The folder, `.config`, must also stay owned by `brettsp` and writable by nobody else (`2750`
+   The folder, `.config`, must also stay owned by a Core admin and writable by nobody else (`2750`
    as created in step 4, or `755`).
 8. **Test it.** On HIVE: `python3 ~/proteomics-pipeline/scripts/slack_collab.py test`. From a
    laptop set up for `hive_remote`, in the skill folder: `python3 scripts/slack_collab.py test`.
@@ -139,7 +139,7 @@ requires for JSON bodies ([Web API basics](https://docs.slack.dev/apis/web-api))
 In Slack, open your own profile, click the three dots (**⋮**), and click **Copy member ID**. It
 starts with `U`. Then have your Claude run:
 ```
-python3 scripts/slack_collab.py whoami --set U01ABCDEF --channel C0123ABCD [--name Michelle]
+python3 scripts/slack_collab.py whoami --set U01ABCDEF --channel C0123ABCD [--name <your first name>]
 ```
 The `--channel` value is `#proteomics-analysis`'s ID. Both go into
 `~/.config/ucdavis-proteomics/slack_collab_identity.json`. The agent's name is "Claude (<your
@@ -164,7 +164,7 @@ unique: two people called Chris get two different names. People and agents can s
       Core admin to add them. Nothing on the laptop overrides a trusted list: `whoami --force`
       only replaces the person set on this computer.
 
-    So Michelle's Claude cannot claim to be Brett, nor to be an outside collaborator.
+    So a staff member's Claude cannot claim to be Brett, nor to be an outside collaborator.
   - **Unverified, with a loud warning:** there is no list, the list is not trusted (see setup
     step 7), or there is no HIVE to ask. That last case covers a collaborator outside the Core, or
     a Core member who cannot read the list. The collaboration still runs.
@@ -181,8 +181,8 @@ unique: two people called Chris get two different names. People and agents can s
 
 ## Using it: the people's side
 
-- **Start.** Tell your Claude, for example: "Start a Slack collaboration with Michelle
-  (U0MICHELLE) in #proteomics-analysis to compare the DIA-NN and Spectronaut runs of PROT_0807.
+- **Start.** Tell your Claude, for example: "Start a Slack collaboration with <colleague>
+  (<their member ID>) in #proteomics-analysis to compare the DIA-NN and Spectronaut runs of PROT_0807.
   Level analyze, scratch folder /quobyte/proteomics-grp/collab/2026-09-29_PROT0807." It posts a
   **kickoff card**, which gives:
   - the goal;
@@ -513,8 +513,8 @@ read asks for it with `include_all_metadata=true`, and `slack_collab.py` always 
 
 ## Residual risks
 
-- **The channel.** The app is invited only to `#proteomics-analysis` (Brett, Michelle and
-  Gabriela), and that must stay so.
+- **The channel.** The app is invited only to `#proteomics-analysis` (the Core director and two
+  staff members), and that must stay so.
   - The app can read everything in any channel it joins.
   - Its token is readable by every `proteomics-grp` member on HIVE, so any of them could read that
     channel through it.
@@ -530,8 +530,8 @@ read asks for it with `include_all_metadata=true`, and `slack_collab.py` always 
   approve for that person's Claude. So can an agent that has a Slack connector acting as that
   person, which the rules forbid; the `app_id` check above is only a backstop.
 - **The trust anchor is one account.** The token, the people list and their folder are trusted
-  only when owned by an account in `scripts/core_admins.txt` (`brettsp`), because `/quobyte/proteomics-grp` is
-  group-writable with no sticky bit. Whoever controls `brettsp` controls who is who.
+  only when owned by an account in `scripts/core_admins.txt`, because `/quobyte/proteomics-grp` is
+  group-writable with no sticky bit. Whoever controls that account controls who is who.
 - **Identity is bound to a HIVE account, not proved beyond it.** With the Slack-people list in
   place, a Claude cannot claim to be a listed person it does not run as. What remains:
   - **Someone with their own HIVE account can still act as themselves.** A person in the list

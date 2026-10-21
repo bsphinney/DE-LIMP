@@ -1162,7 +1162,7 @@ def diann_contaminant_sentence(srec):
     """What DIA-NN did with the contaminant entries, from the parameters the search ran with.
     It used to be read off the FASTA sidecar's diann_cont_quant_exclude -- a recommendation,
     not a record -- and worded as "excluded from quantification and normalisation" although
-    run_de.R then re-quantified them (msalemi, 2026-09-24). Empty for a non-DIA-NN search."""
+    run_de.R then re-quantified them (a Core member, 2026-09-24). Empty for a non-DIA-NN search."""
     srec = srec or {}
     if srec.get("engine") not in (None, "diann"):
         return ""
@@ -2101,7 +2101,7 @@ def main():
                 else "proteome")
         staged = fmeta.get("staged_file") if isinstance(fmeta.get("staged_file"), dict) else None
         if content_phrase is None and staged:
-            # 'as_staged' (--hive), from a sidecar that describes the copy (gabrig,
+            # 'as_staged' (--hive), from a sidecar that describes the copy (a Core member,
             # 2026-09-23). Proteome and organism are known; the release it was cut from
             # is not -- name the copy's date rather than invent a release, and label a
             # composition inferred from entry counts as inferred.

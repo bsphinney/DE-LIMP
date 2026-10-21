@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The LC-MS paragraphs of the Methods must come from the run, in the published order.
 
-PROT_0756 (Dickson lab, timsTOF HT + Evosep One, 2026-08-13) got a Methods section that left
+PROT_9756 (a lab, timsTOF HT + Evosep One, 2026-08-13) got a Methods section that left
 "[LC system / gradient — confirm]" although every .d names the Evosep One and its "60 samples
 per day" method; reported m/z 99.993933-1700; said the collision energy was "ramped from ≈26.3
 to ≈49.4 eV" when the method ramps 20 eV at 1/K0 0.6 to 65 eV at 1/K0 1.6 (26.3-49.4 are the
@@ -50,7 +50,7 @@ SOURCE_CODES = ("0:No Source;1:ESI;2:APCI;3:Nano ESI Offline;4:Nano ESI Online;5
 
 
 def scheme_windows():
-    """The PROT_0756 dia-PASEF scheme: 11 ramps, 36 windows of 26 Th at 25 Th spacing over
+    """The PROT_9756 dia-PASEF scheme: 11 ramps, 36 windows of 26 Th at 25 Th spacing over
     m/z 299.5-1200.5 -- (group, centre)."""
     out = []
     for g in range(1, 12):
@@ -74,7 +74,7 @@ def blob(*xs):
 def make_timstof_d(path, method="DIA_11x3-k07t13Ra85.m", ce_hi=65.0, ramp_hi=65.0,
                    acquired="2026-08-14T01:30:04.726-07:00", column_info="",
                    source_codes=SOURCE_CODES, side_files=True):
-    """A synthetic timsTOF HT + Evosep One dia-PASEF .d carrying the metadata PROT_0756's
+    """A synthetic timsTOF HT + Evosep One dia-PASEF .d carrying the metadata PROT_9756's
     runs carry. `ce_hi` sets the window energies' ramp end, `ramp_hi` the method's."""
     os.makedirs(path)
     tdf = os.path.join(path, "analysis.tdf")

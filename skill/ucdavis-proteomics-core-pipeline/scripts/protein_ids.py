@@ -29,7 +29,7 @@ A whole group, written the way DIA-NN writes Protein.Group, is group_accessions(
 read by header_accession(), isoform suffixes KEPT (the accession as the database has it). Sage's
 `proteins` is a ';' list of full FASTA IDs, and the contaminant filter (contaminants.R
 contaminant_regex: an accession STARTS with Cont_/contam_) matched none of them -- a Sage DE
-tested 171 Cont_ groups on gabrig's HeL50 UnvPe (2026-09-29) while its methods said "none":
+tested 171 Cont_ groups on a Core member's HeL50 UnvPe (2026-09-29) while its methods said "none":
 
     Sage proteins   sp|P12345|ALBU_HUMAN;sp|Cont_P02769|ALBU_BOVIN  -> P12345;Cont_P02769
     its entry names                                                  -> ALBU_HUMAN;ALBU_BOVIN

@@ -21,7 +21,7 @@ an example** — a laptop or a generic Linux box hits the same four gates.
 ### 1. The three engines are licence-gated and cannot be scripted
 
 MSFragger, IonQuant and diaTracer come from a web form plus a licence key (one shared
-academic licence; commercial via fragmatics.com). `acquire_tools.sh` can fetch FragPipe
+academic licence; commercial through the tools' commercial licensor). `acquire_tools.sh` can fetch FragPipe
 itself but never these. Point FragPipe at wherever you unpacked them.
 
 **The tools folder must be the one that also contains `speclib/`.** A directory holding
@@ -234,14 +234,14 @@ right template by data type.
   behaviour that library-free DIA-NN handles poorly.
   - **⚠ Licensing — get this right, it is easy to state wrongly.** The gate is
     **MSFragger / IonQuant / diaTracer** (one shared academic licence; commercial users
-    license via fragmatics.com). The DIA-NN that FragPipe bundles is explicitly *"available
+    license through the tools' commercial licensor). The DIA-NN that FragPipe bundles is explicitly *"available
     for both academic and commercial use within FragPipe"*, so DIA-NN is **not** the
     restriction here. A commercial user is not locked out — they must license the three
     gated tools. **Never tell them the route is closed to them.**
   - **⚠ The clause that matters for a core facility:** the academic licence forbids *"any
     work product, report or deliverable by LICENSEE, for a commercial or for-profit
     organization"* — which reads on fee-for-service work for an industry client. If asked
-    whether their work qualifies, send them to info@fragmatics.com and their licensing
+    whether their work qualifies, send them to the tools' commercial licensor and their licensing
     office. Do **not** rule on it yourself. → `references/search-engines.md`.
   - Output is DIA-NN's own, in `<workdir>/dia-quant-output/`. With FragPipe's bundled
     DIA-NN 1.8.2 Beta 8 that is **`report.tsv` — there is no `report.parquet`** unless

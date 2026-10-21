@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """run_de.R removes contaminants before quantification, records it, and the Methods follow.
 
-msalemi, 2026-09-24 (Silva08172026, mouse brain IPs): run_de.R re-quantified the DIA-NN
+mstaff, 2026-09-24 (the mouse-brain IP cohort, mouse brain IPs): run_de.R re-quantified the DIA-NN
 report with limpa and had no contaminant filter. DIA-NN's --cont-quant-exclude Cont_ only
 shapes DIA-NN's own quantities, so all 121 Cont_ protein groups (bovine serum proteins from
 the antibody prep) entered the DE and BH and came out as hits (bovine HBB +10.5 log2 in the
@@ -89,7 +89,7 @@ write.csv(data.frame(File.Name = runs, Group = grp), file.path(OUT, "conditions.
 '''
 
 # What an old sidecar looks like: contaminants appended, no contaminant_target_rule
-# (Silva08172026's own search.fasta.meta.json has exactly these keys).
+# (the mouse-brain IP cohort's own search.fasta.meta.json has exactly these keys).
 LEGACY_SIDECAR = {"organism": "Mus musculus", "taxid": 10090, "n_contaminants_appended": 381,
                   "contaminant_set": "universal", "diann_cont_quant_exclude": "Cont_"}
 CLEAN_SIDECAR = dict(LEGACY_SIDECAR, contaminant_target_rule=ff.CONTAMINANT_TARGET_RULE,
@@ -436,7 +436,7 @@ class MethodsFollowTheRecord(unittest.TestCase):
             self.assertIsNone(mm.search_record(params=cfg)["cont_quant_exclude"]["value"])
 
     def test_methods_md_no_longer_claims_exclusion_from_the_sidecar(self):
-        """The Silva08172026 shape: the sidecar recommends --cont-quant-exclude, the DE kept
+        """The mouse-brain IP cohort's shape: the sidecar recommends --cont-quant-exclude, the DE kept
         contaminants. Nothing in the Methods may say they were excluded."""
         with tempfile.TemporaryDirectory() as tmp:
             meta = os.path.join(tmp, "search.fasta.meta.json")

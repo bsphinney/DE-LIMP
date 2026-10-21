@@ -60,7 +60,7 @@ PUBLISHED_FP="SHA256:b5nv86Ciaqg1yrUVai6bZ0Hk4IpzAFLWtIPDBdacbQM SHA256:AmJ+z2mi
 ON_HIVE=false; have sbatch && ON_HIVE=true
 GRP=false; [ -d /quobyte/proteomics-grp ] && ls /quobyte/proteomics-grp >/dev/null 2>&1 && GRP=true
 
-# gabrig 2026-09-23, Git Bash on Windows 11: python3 was the Microsoft Store alias in
+# A Core member, 2026-09-23, Git Bash on Windows 11: python3 was the Microsoft Store alias in
 # ...\WindowsApps, which opens the Store instead of running anything. hive_remote was fine --
 # every script ran on HIVE -- but the orchestrator has to know not to run Python locally.
 # A macOS /usr/bin/python3 without the Command Line Tools is the same kind of stub (it pops
@@ -79,7 +79,7 @@ if [ -n "$PY" ] && [ -z "$PY_NOTE" ]; then
   else PY_NOTE="python3 is on PATH but did not run"; fi
 fi
 
-# gabrig 2026-09-23: on Windows ssh's default user is the AD login (`AD3+gabrig`), and every
+# A Core member, 2026-09-23: on Windows ssh's default user is the AD login (`AD3+<user>`), and every
 # call that relied on it got "Permission denied". HIVE usernames are plain UC Davis ids, so a
 # domain-style name is never right -- say so instead of spending a throttled connection on it.
 USER_WARN=""
@@ -96,7 +96,7 @@ KNOWN=null; FPS=""; FP_MATCH=null
 if [ -n "$USER_WARN" ] && ! $ON_HIVE; then
   HIVE_SSH="failed"; ERR_KIND="permission_denied"; ERR_DETAIL="not attempted: $USER_WARN"
 elif ! $ON_HIVE && [ -n "$HU" ] && [ "$KEY_FOUND" = true ]; then
-  # gabrig 2026-09-23: the first BatchMode connection from a new laptop died "Host key
+  # A Core member, 2026-09-23: the first BatchMode connection from a new laptop died "Host key
   # verification failed" -- HIVE was not in known_hosts and BatchMode cannot ask. Report
   # whether it is known and, if not, its fingerprint so the user can compare it with the
   # published one; then connect with accept-new, which records an unknown key but still
@@ -198,7 +198,7 @@ ENV_FILE="${HIVE_ENV_FILE:-$HOME/.config/ucdavis-proteomics/hive.env}"
 ENV_SAVED=false; ENV_NOTE="not saved: the SSH login to HIVE was not confirmed"
 if [ "$HIVE_SSH" = ok ]; then
   # An absolute form of the key path, when one can be made that names the same file. A Windows
-  # path (C:\Users\gabrig\.ssh\id_ed25519) has no "/", so dirname said "." and a broken path was
+  # path (C:\Users\<user>\.ssh\id_ed25519) has no "/", so dirname said "." and a broken path was
   # saved: Git Bash spells it /c/Users/... (cygpath, as hive_exec.sh's winpath does). A path that
   # does not resolve to a file is saved as given -- never a made-up one.
   case "$KEY" in
@@ -235,7 +235,7 @@ if   $ON_HIVE;                  then MODE="hive_local"   # already on HIVE -> su
 elif [ "$SSH_SBATCH" = true ];  then MODE="hive_remote"  # local Claude Code -> drive HIVE over SSH (the intended HIVE mode)
 else                                 MODE="local"; fi     # run on the user's own machine
 
-# The CoreOmics key (Michelle, 2026-10-08: no Python on her Windows laptop, so the CoreOmics steps
+# The CoreOmics key (a Core member, 2026-10-08: no Python on her Windows laptop, so the CoreOmics steps
 # could not run there, and HIVE had no key). Its state on HIVE -- read here when this IS HIVE --
 # then where the steps run and what to do: coreomics_key_to_hive.sh decides, for every caller.
 CK_JSON=null; CK_DETAIL_JSON=null; CK_HERE_KEY=false; CK_ROUTE=this_computer

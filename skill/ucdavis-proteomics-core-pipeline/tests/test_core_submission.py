@@ -4,7 +4,7 @@ The CoreOmics submission workflow: every check here guards a failure that does N
 A service run attaches a PI's name, a sample sheet and a Bioshare folder to a set of raw
 files. When any link in that chain is wrong the pipeline still succeeds -- it searches the
 next lab's BN1, files the results under the wrong month, or hands the collaborator a share
-full of symlinks they cannot open (PROT_0793). So the assertions are on the exit codes the
+full of symlinks they cannot open (PROT_9793). So the assertions are on the exit codes the
 orchestrator branches on and on the filesystem state a collaborator will actually see.
 
 Stdlib only, no network, no SSH: temp dirs, env overrides, and an in-process fake CoreOmics.
@@ -232,8 +232,8 @@ class TestSubmissionIds(unittest.TestCase):
 
     def test_garbage_is_refused_not_guessed(self):
         # review of f18d95e: Python's \d matched Arabic-Indic and fullwidth digits, which int()
-        # reads, so `attach --given '{"internal_id": "٧٥٦"}'` made PROT_0756
-        for s in ("", "abc", "PROT_", "0", "12345678", HEX[:-1], "807a", "٧٥٦", "PROT_٠٧٥٦",
+        # reads, so `attach --given '{"internal_id": "٩٧٥٦"}'` made PROT_9756
+        for s in ("", "abc", "PROT_", "0", "12345678", HEX[:-1], "807a", "٩٧٥٦", "PROT_٩٩٧٥٦",
                   "１２３", "prot-８０７", "PROT\u00a0807"):
             with self.assertRaises(ValueError, msg=s):
                 cs.normalize_submission(s)
@@ -305,8 +305,8 @@ class TestFilenameDates(unittest.TestCase):
     def test_each_naming_convention(self):
         cases = {
             "09012026__60SPD_DIA-KG1_S3-A5_1_24026.d": dt.date(2026, 9, 1),     # tims MMDDYYYY
-            "20260827_793_100spd_Hel50_S6-A12_1_24026.d": dt.date(2026, 8, 27),  # HT YYYYMMDD
-            "Ex08312026_380_JE21.raw": dt.date(2026, 8, 31),                     # Exploris MMDDYYYY
+            "20260827_9793_100spd_Hel50_S6-A12_1_24026.d": dt.date(2026, 8, 27),  # HT YYYYMMDD
+            "Ex08312026_9380_XY21.raw": dt.date(2026, 8, 31),                     # Exploris MMDDYYYY
             "Ex040826_HeL50_1.raw": dt.date(2026, 8, 4),                         # Exploris DDMMYY
             "Ex070225_x.raw": dt.date(2025, 2, 7),
             "FL280826_HeL50.raw": dt.date(2026, 8, 28),                          # Lumos DDMMYY
@@ -343,8 +343,8 @@ class TestHtPattern(unittest.TestCase):
                 self.assertFalse(p.match(name))
 
     def test_a_run_counter_does_not_impersonate_a_submission(self):
-        self.assertFalse(cs.ht_pattern("PROT_0380").match("Ex08312026_380_JE21.raw"))
-        self.assertFalse(cs.ht_pattern("PROT_0380").match("Ex08312026_PROT_0380_JE21.raw"))
+        self.assertFalse(cs.ht_pattern("PROT_9380").match("Ex08312026_9380_XY21.raw"))
+        self.assertFalse(cs.ht_pattern("PROT_9380").match("Ex08312026_PROT_9380_XY21.raw"))
 
 
 class TestTokens(unittest.TestCase):
@@ -360,7 +360,7 @@ class TestTokens(unittest.TestCase):
         self.assertTrue(cs.token_pattern("kg1").search("DIA-KG1_S3.d"))
 
     def test_a_separator_between_letters_and_digits_is_optional(self):
-        """PROT_0756: the sheet says LRS96, every run says DIA-LRS-96."""
+        """PROT_9756: the sheet says LRS96, every run says DIA-LRS-96."""
         name = "08132026__60SPD_DIA-LRS-96_S3-B1_1_23630.d"
         self.assertTrue(cs.token_pattern("LRS96").search(cs.match_space(name)))
         self.assertTrue(cs.token_pattern("EB_001").search("x_EB001.raw"))
@@ -371,8 +371,8 @@ class TestTokens(unittest.TestCase):
         self.assertFalse(cs.token_pattern("SG-001-2").search("x_SG0012.raw"))
         self.assertFalse(cs.token_pattern("KG1").search("x_KG-13.raw"))
 
-    def test_prot0756_runs_each_find_their_own_sample(self):
-        """All 30 PROT_0756 runs (names as on the share) match 1:1 with the sheet's ids."""
+    def test_prot9756_runs_each_find_their_own_sample(self):
+        """All 30 PROT_9756 runs (names as on the share) match 1:1 with the sheet's ids."""
         runs = {f"LRS{n}": f"08132026__60SPD_DIA-LRS-{n}_S3-A1_1_{23600 + n}.d" for n in range(96, 126)}
         samples = [{"unique_id": u, "sample_name": u, "condition_name": "c"} for u in runs]
         entries = [{"path": "/x/" + f, "name": f, "instrument_folder": "tTOF_HT"} for f in runs.values()]
@@ -383,14 +383,14 @@ class TestTokens(unittest.TestCase):
     def test_weak_ids(self):
         for uid in ("A5", "H10", "B2", "001", "7", ""):
             self.assertIsNotNone(cs.weak_reason(uid), uid)
-        for uid in ("KG1", "EB_001", "JE21", "I13"):
+        for uid in ("KG1", "EB_001", "XY21", "I13"):
             self.assertIsNone(cs.weak_reason(uid), uid)
 
     def test_timstof_names_expose_only_the_sample_field(self):
         """Defect 3: the `_S3-A1_1_` plate position must not be matchable."""
         self.assertEqual(cs.match_space("09012026__60SPD_DIA-KG1_S3-A1_1_24026.d"), "KG1")
         self.assertEqual(cs.match_space("070622026__60SPD_DIA-EB_001_S3-B2_1_24026.d"), "EB_001")
-        self.assertEqual(cs.match_space("Ex08312026_380_JE21.raw"), "Ex08312026_380_JE21.raw")
+        self.assertEqual(cs.match_space("Ex08312026_9380_XY21.raw"), "Ex08312026_9380_XY21.raw")
 
 
 class TestShareName(unittest.TestCase):
@@ -464,19 +464,19 @@ class TestLocate(unittest.TestCase):
         for i, u in enumerate(("KG2", "KG13", "KG14"), 2):
             tims(self.tmp, "03122025", u, i)
         tims(self.tmp, "03252025", "KG1", 1)
-        neighbor = {"internal_id": "PROT_0810", "id": "aaaaaaaaaaaa",
+        neighbor = {"internal_id": "PROT_9810", "id": "aaaaaaaaaaaa",
                     "submitted": "2025-03-20T09:00:00-07:00", "unique_ids": ["KG1", "KG9"]}
         summary, _ = write_summary(self.tmp, neighbors=[neighbor])
         rc, out, _ = self.locate(summary)
         self.assertEqual(rc, 2)
         g = gates(out)["ambiguous_label"]
         self.assertEqual(g["status"], "FAIL")
-        self.assertEqual(g["samples"][0]["files"][0]["contenders"][0]["submission"], "PROT_0810")
+        self.assertEqual(g["samples"][0]["files"][0]["contenders"][0]["submission"], "PROT_9810")
 
     def test_a_same_day_neighbour_makes_the_run_ambiguous(self):
         """Defect 2: `lo < nd` missed a neighbour submitted the same day."""
         self.clean_tree()
-        neighbor = {"internal_id": "PROT_0808", "id": "aaaaaaaaaaaa",
+        neighbor = {"internal_id": "PROT_9808", "id": "aaaaaaaaaaaa",
                     "submitted": "2025-03-10T09:00:00-07:00", "unique_ids": ["KG2"]}
         summary, _ = write_summary(self.tmp, neighbors=[neighbor])
         rc, out, _ = self.locate(summary)
@@ -484,23 +484,23 @@ class TestLocate(unittest.TestCase):
         self.assertEqual(gates(out)["ambiguous_label"]["samples"][0]["unique_id"], "KG2")
 
     def test_an_older_neighbour_is_named_with_its_earlier_unambiguous_runs(self):
-        """Defect 2, the PROT_0794/0776 shape: an OLDER submission used the label first and
+        """Defect 2, the PROT_9794/9776 shape: an OLDER submission used the label first and
         already has its own runs. Labels alone cannot decide; the detail gives staff the facts."""
         self.clean_tree()
         tims(self.tmp, "02252025", "KG1", 8, month="feb25")          # the older lab's own run
-        neighbor = {"internal_id": "PROT_0776", "id": "aaaaaaaaaaaa",
+        neighbor = {"internal_id": "PROT_9776", "id": "aaaaaaaaaaaa",
                     "submitted": "2025-02-20T09:00:00-08:00", "unique_ids": ["KG1"]}
         summary, _ = write_summary(self.tmp, neighbors=[neighbor])
         rc, out, _ = self.locate(summary)
         self.assertEqual(rc, 2)
         contender = gates(out)["ambiguous_label"]["samples"][0]["files"][0]["contenders"][0]
-        self.assertEqual(contender["submission"], "PROT_0776")
+        self.assertEqual(contender["submission"], "PROT_9776")
         self.assertTrue(contender["has_earlier_unambiguous_files"])
         self.assertEqual(contender["earlier_files"], 1)
 
     def test_accept_ambiguous_takes_the_runs_and_is_recorded(self):
         files = self.clean_tree()
-        neighbor = {"internal_id": "PROT_0776", "id": "aaaaaaaaaaaa",
+        neighbor = {"internal_id": "PROT_9776", "id": "aaaaaaaaaaaa",
                     "submitted": "2025-02-20T09:00:00-08:00", "unique_ids": ["KG1"]}
         summary, _ = write_summary(self.tmp, neighbors=[neighbor])
         rc, out, _ = self.locate(summary, "--accept-ambiguous")
@@ -514,7 +514,7 @@ class TestLocate(unittest.TestCase):
         IS the sample is a question about identity, so staff answer it (2.10)."""
         files = self.clean_tree()
         later = tims(self.tmp, "03252025", "KG1", 7)
-        neighbor = {"internal_id": "PROT_0810", "id": "aaaaaaaaaaaa",
+        neighbor = {"internal_id": "PROT_9810", "id": "aaaaaaaaaaaa",
                     "submitted": "2025-03-20T09:00:00-07:00", "unique_ids": ["kg1"]}
         summary, _ = write_summary(self.tmp, neighbors=[neighbor])
         rc, out, _ = self.locate(summary)
@@ -527,7 +527,7 @@ class TestLocate(unittest.TestCase):
         (smp,) = g["samples"]
         self.assertEqual(smp["unique_id"], "KG1")
         self.assertEqual([(c["file"], c["acquired"], c["label_also_used_by"]) for c in smp["candidates"]],
-                         [(later, "2025-03-25", ["PROT_0810"]), (files["KG1"], "2025-03-12", [])])
+                         [(later, "2025-03-25", ["PROT_9810"]), (files["KG1"], "2025-03-12", [])])
         self.assertNotIn("ambiguous_files_excluded", gates(out))
         rc, out, p = self.locate(summary, "--choose", f"KG1={files['KG1']}")
         self.assertEqual(rc, 0, p.stderr)
@@ -590,7 +590,7 @@ class TestLocate(unittest.TestCase):
     def test_accepting_an_ambiguous_label_still_asks_which_of_several_runs(self):
         self.clean_tree()
         later = tims(self.tmp, "03252025", "KG1", 7)
-        neighbor = {"internal_id": "PROT_0810", "id": "aaaaaaaaaaaa",
+        neighbor = {"internal_id": "PROT_9810", "id": "aaaaaaaaaaaa",
                     "submitted": "2025-02-20T09:00:00-08:00", "unique_ids": ["KG1"]}
         summary, _ = write_summary(self.tmp, neighbors=[neighbor])
         rc, out, _ = self.locate(summary, "--accept-ambiguous")
@@ -662,7 +662,7 @@ class TestLocate(unittest.TestCase):
 
     def test_a_run_counter_that_equals_the_number_is_not_an_ht_plate(self):
         self.clean_tree()
-        raw(self.tmp, "Exploris480", "mar25", "Ex03152025_807_JE21.raw")
+        raw(self.tmp, "Exploris480", "mar25", "Ex03152025_807_XY21.raw")
         summary, _ = write_summary(self.tmp)
         self.assertEqual(self.locate(summary)[0], 0)
 
@@ -700,7 +700,7 @@ class TestLocate(unittest.TestCase):
         for i, u in enumerate(("KG1", "KG2", "KG13"), 1):
             tims(self.tmp, "03122025", u, i)
         other = tims(self.tmp, "03122025", "DH1-1", 5)
-        neighbor = {"internal_id": "PROT_0790", "id": "aaaaaaaaaaaa",
+        neighbor = {"internal_id": "PROT_9790", "id": "aaaaaaaaaaaa",
                     "submitted": "2025-01-15T09:00:00-08:00", "unique_ids": ["DH1-1"]}
         rec = record(samples=[("KG1", "a"), ("KG2", "a"), ("KG13", "b"), ("DH1", "b")])
         summary, _ = write_summary(self.tmp, rec, neighbors=[neighbor])
@@ -841,15 +841,15 @@ class TestNumberAfterTheName(unittest.TestCase):
     def test_another_submissions_id_that_fits_is_shown_on_the_proposal(self):
         mine = self.run_named(4, "A1")
         self.run_named(5, "A2")
-        neighbor = {"internal_id": "PROT_0810", "id": "aaaaaaaaaaaa",
+        neighbor = {"internal_id": "PROT_9810", "id": "aaaaaaaaaaaa",
                     "submitted": "2025-02-20T09:00:00-08:00", "unique_ids": ["QP4", "ZZ5"]}
         rec = record(samples=[("QP4", "ctrl"), ("QP5", "treat")])
         summary, _ = write_summary(self.tmp, rec, neighbors=[neighbor])
         rc, out, _ = self.locate(summary)
         self.assertEqual(rc, 2)
         rows = self.rows()
-        self.assertEqual(rows["QP4"]["proposed"][0]["contested_by"], ["QP4 (PROT_0810)"])
-        self.assertIn("another submission's id fits too: QP4 (PROT_0810)", rows["QP4"]["note"])
+        self.assertEqual(rows["QP4"]["proposed"][0]["contested_by"], ["QP4 (PROT_9810)"])
+        self.assertIn("another submission's id fits too: QP4 (PROT_9810)", rows["QP4"]["note"])
         self.assertEqual(rows["QP5"]["proposed"][0]["contested_by"], [])
         rc, out, p = self.locate(summary, "--choose", f"QP4={mine}", "--choose",
                                  f"QP5={rows['QP5']['proposed'][0]['file']}")
@@ -1077,7 +1077,7 @@ class TestReinjections(unittest.TestCase):
             kinds = {x["key"]: x["kind"] for x in gates(out)["choose_run"]["samples"]}
             self.assertEqual(kinds, {"KG1#1": "collision", "kg-1#2": "collision"}, policy)
         # another submission's label on one of the runs is a collision too, unless accepted
-        neighbor = {"internal_id": "PROT_0810", "id": "aaaaaaaaaaaa",
+        neighbor = {"internal_id": "PROT_9810", "id": "aaaaaaaaaaaa",
                     "submitted": "2025-03-11T09:00:00-07:00", "unique_ids": ["RJ4"]}
         summary2, _ = write_summary(self.tmp, record(samples=[(u, "c") for u in self.IDS]),
                                     neighbors=[neighbor], name="neighbour.json")
@@ -2037,13 +2037,13 @@ class TestDeliver(DeliverBase):
         self.assertEqual(rc, 0)
 
     def test_a_session_under_another_submissions_work_dir_is_refused(self):
-        other = os.path.join(self.tmp, "work", "on_campus", "Other", "PROT_0806")
-        write(other, cs.MARKER, json.dumps({"id": "bbbbbbbbbbbb", "internal_id": "PROT_0806"}))
+        other = os.path.join(self.tmp, "work", "on_campus", "Other", "PROT_9806")
+        write(other, cs.MARKER, json.dumps({"id": "bbbbbbbbbbbb", "internal_id": "PROT_9806"}))
         session = os.path.join(other, "sessions", "s")
         shutil.copytree(self.session, session, symlinks=True)
         rc, out, _ = run(["deliver", "--summary", self.summary, "--session", session, "--include-raw", "no"], self.env)
         self.assertEqual(rc, 2)
-        self.assertIn("PROT_0806", out["error"])
+        self.assertIn("PROT_9806", out["error"])
 
     def test_without_a_stage_record_force_is_required(self):
         os.remove(os.path.join(self.service_project, cs.MARKER))
@@ -2073,7 +2073,7 @@ class TestDeliver(DeliverBase):
 
     # -- defect 6: symlinks anywhere in the share, and never writing through one
     def test_an_existing_link_elsewhere_in_the_share_is_noted_and_left_untouched(self):
-        # PROT_0793: share/search -> /quobyte links are valid (they stopped serving only because of
+        # PROT_9793: share/search -> /quobyte links are valid (they stopped serving only because of
         # a Bioshare https setting). They must not block a later delivery, and are never "repaired".
         os.makedirs(self.share)
         link = os.path.join(self.share, "search")
@@ -2475,7 +2475,7 @@ class TestBioshare(unittest.TestCase):
             self.assertEqual(self.bs(fake, "send", "--apply", "--delivery", self.delivery(verified=False))[0], 2)
             self.assertEqual(self.bs(fake, "send", "--apply", "--delivery",
                                      self.delivery(share_dir="/nfs/lssc0/other/share"))[0], 2)
-            self.assertEqual(self.bs(fake, "send", "--apply", "--delivery", self.delivery(internal_id="PROT_0806"))[0], 2)
+            self.assertEqual(self.bs(fake, "send", "--apply", "--delivery", self.delivery(internal_id="PROT_9806"))[0], 2)
             self.assertEqual(fake.posts(), [])
             self.assertEqual(self.bs(fake, "send", "--apply", "--delivery", self.delivery())[0], 0)
             self.assertEqual(len(fake.posts()), 1)
@@ -2527,15 +2527,15 @@ class TestFetch(unittest.TestCase):
                 return 200, {"count": len(hits), "next": None, "results": hits}
             page = int(q.get("page", 1))
             pages = {
-                1: [record(internal_id="PROT_0900", sid="cccccccccccc", submitted="2025-12-01T10:00:00-08:00",
+                1: [record(internal_id="PROT_9900", sid="cccccccccccc", submitted="2025-12-01T10:00:00-08:00",
                            samples=[("KG1", "x")]),
-                    record(internal_id="PROT_0810", sid="aaaaaaaaaaaa", submitted="2025-04-01T10:00:00-07:00",
+                    record(internal_id="PROT_9810", sid="aaaaaaaaaaaa", submitted="2025-04-01T10:00:00-07:00",
                            samples=[("KG1", "x"), ("BN1", "y")]),
                     rec,
-                    record(internal_id="PROT_0700", sid="dddddddddddd", submitted="2024-09-01T10:00:00-07:00",
+                    record(internal_id="PROT_9700", sid="dddddddddddd", submitted="2024-09-01T10:00:00-07:00",
                            samples=[("SG001", "x")])],
-                2: [record(internal_id="PROT_0500", sid="eeeeeeeeeeee", submitted="2024-05-01T10:00:00-07:00")],
-                3: [record(internal_id="PROT_0400", sid="ffffffffffff", submitted="2024-01-01T10:00:00-08:00")],
+                2: [record(internal_id="PROT_9500", sid="eeeeeeeeeeee", submitted="2024-05-01T10:00:00-07:00")],
+                3: [record(internal_id="PROT_9400", sid="ffffffffffff", submitted="2024-01-01T10:00:00-08:00")],
             }
             nxt = f"{fake.base}/submissions/?page={page + 1}" if page < 3 else None
             return 200, {"count": 6, "next": nxt, "results": pages[page]}
@@ -2575,7 +2575,7 @@ class TestFetch(unittest.TestCase):
             for f in ("submission.json", "samples.tsv", "submission_summary.json"):
                 self.assertTrue(os.path.isfile(os.path.join(out_dir, f)), f)
             s = load(os.path.join(out_dir, "submission_summary.json"))
-            self.assertEqual({n["internal_id"] for n in s["neighbors"]}, {"PROT_0810", "PROT_0700"})
+            self.assertEqual({n["internal_id"] for n in s["neighbors"]}, {"PROT_9810", "PROT_9700"})
             self.assertEqual(s["neighbors"][0]["unique_ids"], ["KG1", "BN1"])
             self.assertFalse(any(r["query"].get("page") == "3" for r in fake.requests),
                              "paging must stop once past the old edge of the window")
@@ -2620,11 +2620,11 @@ class TestFeedbackSurvey(unittest.TestCase):
 
     def test_the_url_prefills_only_a_real_prot_number(self):
         self.assertEqual(cs.FEEDBACK_URL, SURVEY)
-        for given in ("PROT_0756", "prot-756", "756", "#756", "PROT_756"):
+        for given in ("PROT_0807", "prot-807", "807", "#807", "PROT_807"):
             with self.subTest(given):
-                self.assertEqual(cs.feedback_url("report", given), SURVEY + "?prot=PROT_0756&src=report")
-        for given in (None, "", "99922f5337f8", "submission", "PROT_0756&src=web", "PROT_0000",
-                      "PROT_123456", "PROT_0756 x"):
+                self.assertEqual(cs.feedback_url("report", given), SURVEY + "?prot=PROT_0807&src=report")
+        for given in (None, "", "99922f5337f8", "submission", "PROT_0807&src=web", "PROT_0000",
+                      "PROT_123456", "PROT_0807 x"):
             with self.subTest(given):
                 self.assertEqual(cs.feedback_url("readme", given), SURVEY + "?src=readme")
         for src in cs.FEEDBACK_SOURCES:
@@ -2652,7 +2652,7 @@ class TestFeedbackSurvey(unittest.TestCase):
             self.assertEqual(cs.refresh_feedback(text, fmt, podcast=True), (text, 0))
 
     def test_the_md_twins_line_is_stripped_with_its_rule(self):
-        line = cs.feedback_line("report", "PROT_0756")
+        line = cs.feedback_line("report", "PROT_9756")
         body = "# R\n\nText.\n"
         self.assertEqual(cs.strip_feedback(body + "\n---\n\n" + line + "\n"), body + "\n")
         self.assertEqual(cs.strip_feedback(body + line + "\n"), body)
@@ -2665,17 +2665,17 @@ class TestFeedbackSurvey(unittest.TestCase):
         self.assertEqual(cs.FEEDBACK_SOURCES, ("report", "readme", "email", "share", "web"))
         with self.assertRaises(ValueError):
             cs.feedback_url("podcast")
-        html_line = cs.feedback_line("report", "PROT_0756", fmt="html")
+        html_line = cs.feedback_line("report", "PROT_9756", fmt="html")
         new, n = cs.refresh_feedback(html_line, "html", podcast=False, src="share")
-        self.assertEqual((n, new), (1, cs.feedback_line("share", "PROT_0756", fmt="html")))
+        self.assertEqual((n, new), (1, cs.feedback_line("share", "PROT_9756", fmt="html")))
         # what make_podcast's check hashes: the line gone in either form, so link rewording
         # it never makes a check stale
         body = "<main><p>Body 6,112.</p>{}</main>"
         for podcast in (False, True):
             self.assertEqual(cs.without_feedback(body.format(cs.feedback_line(
-                "report", "PROT_0756", podcast, fmt="html"))), body.format(""))
+                "report", "PROT_9756", podcast, fmt="html"))), body.format(""))
             self.assertEqual(cs.without_feedback("# R\n\nText.\n\n---\n\n" + cs.feedback_line(
-                "report", "PROT_0756", podcast) + "\n"), "# R\n\nText.\n\n")
+                "report", "PROT_9756", podcast) + "\n"), "# R\n\nText.\n\n")
 
     def test_a_share_state_that_cannot_be_read_is_skipped_not_fatal(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2686,16 +2686,16 @@ class TestFeedbackSurvey(unittest.TestCase):
                                 "reason": "cannot check it is current (Permission denied)"})
 
     def test_the_line_in_each_format(self):
-        self.assertEqual(cs.feedback_line("report", "PROT_0756"),
+        self.assertEqual(cs.feedback_line("report", "PROT_9756"),
                          "**How did we do?** Tell us what you thought of this report: [a 5-minute "
-                         f"survey]({SURVEY}?prot=PROT_0756&src=report).")
-        self.assertEqual(cs.feedback_line("report", "PROT_0756", podcast=True, fmt="html"),
+                         f"survey]({SURVEY}?prot=PROT_9756&src=report).")
+        self.assertEqual(cs.feedback_line("report", "PROT_9756", podcast=True, fmt="html"),
                          '<p class="feedback"><strong>How did we do?</strong> Tell us what you '
-                         f'thought of this report and the podcast: <a href="{SURVEY}?prot=PROT_0756'
+                         f'thought of this report and the podcast: <a href="{SURVEY}?prot=PROT_9756'
                          '&amp;src=report">a 5-minute survey</a></p>')
-        self.assertEqual(cs.feedback_line("email", "PROT_0756", fmt="text"),
+        self.assertEqual(cs.feedback_line("email", "PROT_9756", fmt="text"),
                          "How did we do? Tell us what you thought of the report: a 5-minute survey "
-                         f"at {SURVEY}?prot=PROT_0756&src=email")
+                         f"at {SURVEY}?prot=PROT_9756&src=email")
 
     def test_the_star_line_reads_its_address_from_plugin_json(self):
         # Brett (2026-09-29): every report asks for a GitHub star. The address is plugin.json's
@@ -2722,7 +2722,7 @@ class TestFeedbackSurvey(unittest.TestCase):
                 self.assertEqual((cs.star_line(), cs.star_line("html")), ("", ""), meta)
 
     def test_the_star_line_is_stripped_but_never_reworded(self):
-        star, survey = cs.star_line(), cs.feedback_line("report", "PROT_0756")
+        star, survey = cs.star_line(), cs.feedback_line("report", "PROT_9756")
         body = "# R\n\nText.\n"
         # the .md twin's footer (render_md): a rule, the star line, then a Core run's survey
         for tail in ("\n---\n\n" + star + "\n\n" + survey + "\n", "\n---\n\n" + star + "\n"):
@@ -2732,10 +2732,10 @@ class TestFeedbackSurvey(unittest.TestCase):
         self.assertEqual(cs.strip_feedback(other), other)
         page = "<main><p>Body.</p>{}{}</main>"
         self.assertEqual(cs.without_feedback(page.format(cs.star_line("html"), cs.feedback_line(
-            "report", "PROT_0756", fmt="html"))), page.format("", ""))
+            "report", "PROT_9756", fmt="html"))), page.format("", ""))
         # link rewording the survey line (and share's src=share) leaves the star line as it is
         for fmt in ("html", "md"):
-            text = cs.star_line(fmt) + "\n\n" + cs.feedback_line("report", "PROT_0756", fmt=fmt)
+            text = cs.star_line(fmt) + "\n\n" + cs.feedback_line("report", "PROT_9756", fmt=fmt)
             for src in (None, "share"):
                 new, n = cs.refresh_feedback(text, fmt, podcast=True, src=src)
                 self.assertEqual(n, 1)
@@ -2858,11 +2858,11 @@ class TestEmailDraft(unittest.TestCase):
 
 # ---------------------------------------------------------------------- identify --
 LRS_RUNS = [f"/data/JUL26/08132026__60SPD_DIA-LRS-{n}_S3-A1_1_{23600 + n}.d" for n in range(96, 126)]
-HEX_0756 = "0022066cd85f"
+HEX_9756 = "9a7e5c3b1d0f"
 
 
-def rec_0756(**kw):
-    return record(internal_id="PROT_0756", sid=HEX_0756, submitted="2026-07-15T16:09:50.151363-07:00",
+def rec_9756(**kw):
+    return record(internal_id="PROT_9756", sid=HEX_9756, submitted="2026-07-15T16:09:50.151363-07:00",
                   samples=[(f"LRS{n}", "c") for n in range(96, 126)], **kw)
 
 
@@ -2870,30 +2870,30 @@ class TestIdentifyByName(unittest.TestCase):
     """SKILL.md step 1: the submission is read from the names or the message, never guessed."""
 
     def test_prot_number_in_a_folder_name(self):
-        self.assertEqual(cs.ids_in("/Data/lab/service/on_campus/Lab/PROT_0756/raw/x.d"),
-                         [("internal_id", "PROT_0756")])
-        self.assertEqual(cs.ids_in("prot-756_rerun"), [("internal_id", "PROT_0756")])
+        self.assertEqual(cs.ids_in("/Data/lab/service/on_campus/Lab/PROT_9756/raw/x.d"),
+                         [("internal_id", "PROT_9756")])
+        self.assertEqual(cs.ids_in("prot-9756_rerun"), [("internal_id", "PROT_9756")])
 
     def test_12_hex_id_in_a_path(self):
-        self.assertEqual(cs.ids_in(f"/coreomics/projects/2026/07/{HEX_0756}/share/a.d"), [("id", HEX_0756)])
+        self.assertEqual(cs.ids_in(f"/coreomics/projects/2026/07/{HEX_9756}/share/a.d"), [("id", HEX_9756)])
 
     def test_numbers_that_are_not_ids(self):
         # a 12-digit timestamp, an Exploris run counter, a hex-looking word with no digit, PROTEOMICS
-        for s in ("FLsep26_wa_202609090050.raw", "Ex08312026_380_JE21.raw", "/x/deadbeefcafe/a.raw",
+        for s in ("FLsep26_wa_202609090050.raw", "Ex08312026_9380_XY21.raw", "/x/deadbeefcafe/a.raw",
                   "/Volumes/proteomics/PROTEOMICS/a.d", "08132026__60SPD_DIA-LRS-96_S3-B1_1_23630.d"):
             self.assertEqual(cs.ids_in(s), [], s)
         for s in ("Total_prot_10ug_rep1.raw", "WT_prot1.raw", "Nuclear_Prot_50ug.raw",
                   "/tmp/2a31667e-609f-4d85-85ae-f9773f03ff76/raw/a.d"):
             self.assertEqual(cs.ids_in(s), [], s)
         self.assertEqual(cs.ids_in("the 2nd submission 3 weeks later", typed=True), [])
-        self.assertEqual(cs.ids_in("submission 756 please"), [], "file-name rules for a path")
-        self.assertEqual(cs.ids_in("please search submission #756", typed=True), [("internal_id", "PROT_0756")])
+        self.assertEqual(cs.ids_in("submission 9756 please"), [], "file-name rules for a path")
+        self.assertEqual(cs.ids_in("please search submission #9756", typed=True), [("internal_id", "PROT_9756")])
 
     def test_cli_named_none_and_ambiguous_without_a_lookup(self):
         with tempfile.TemporaryDirectory() as tmp:
             env = child_env(tmp)
-            rc, out, p = run(["identify", "--no-lookup", "/svc/PROT_0756/raw/" + os.path.basename(LRS_RUNS[0])], env)
-            self.assertEqual((rc, out["status"], out["submission"]), (0, "named", "PROT_0756"), p.stderr)
+            rc, out, p = run(["identify", "--no-lookup", "/svc/PROT_9756/raw/" + os.path.basename(LRS_RUNS[0])], env)
+            self.assertEqual((rc, out["status"], out["submission"]), (0, "named", "PROT_9756"), p.stderr)
             self.assertIn("Is that right?", out["ask"])
             self.assertIn(".submissions_db", out["never_search"])
             rc, out, _ = run(["identify", "--no-lookup"] + LRS_RUNS, env)
@@ -2902,9 +2902,9 @@ class TestIdentifyByName(unittest.TestCase):
             # (an outside user answering with any number would become a Core run)
             self.assertEqual(out["ask"], "Were these samples run by the UC Davis Proteomics "
                                          "Core? If so, what is the PROT number?")
-            rc, out, _ = run(["identify", "--no-lookup", "/svc/PROT_0756/a.d", "--text", "or is it PROT_0757?"], env)
+            rc, out, _ = run(["identify", "--no-lookup", "/svc/PROT_9756/a.d", "--text", "or is it PROT_9757?"], env)
             self.assertEqual((rc, out["status"]), (2, "ambiguous"))
-            self.assertEqual({c["submission"] for c in out["candidates"]}, {"PROT_0756", "PROT_0757"})
+            self.assertEqual({c["submission"] for c in out["candidates"]}, {"PROT_9756", "PROT_9757"})
 
     def test_no_token_asks_and_says_how_to_get_one(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2932,50 +2932,50 @@ class TestIdentifyBySampleIds(unittest.TestCase):
             for r in p:
                 fake.routes[("GET", f"/server/api/submissions/{r['id']}/")] = (lambda r: lambda q, b: (200, r))(r)
 
-    def test_prot0756_runs_name_one_submission(self):
-        other = record(internal_id="PROT_0760", sid="bbbbbbbbbbb1", submitted="2026-07-20T10:00:00-07:00",
+    def test_prot9756_runs_name_one_submission(self):
+        other = record(internal_id="PROT_9760", sid="bbbbbbbbbbb1", submitted="2026-07-20T10:00:00-07:00",
                        samples=[("KG1", "x"), ("A3", "y")])
-        old = record(internal_id="PROT_0600", sid="bbbbbbbbbbb2", submitted="2026-02-01T10:00:00-08:00",
+        old = record(internal_id="PROT_9600", sid="bbbbbbbbbbb2", submitted="2026-02-01T10:00:00-08:00",
                      samples=[("LRS66", "x")])
         with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
-            self.serve(fake, [[other, rec_0756(), old]])
+            self.serve(fake, [[other, rec_9756(), old]])
             rc, out, p = run(["identify"] + LRS_RUNS, child_env(tmp, fake.base))
-            self.assertEqual((rc, out["status"], out["submission"]), (0, "matched", "PROT_0756"), p.stderr)
+            self.assertEqual((rc, out["status"], out["submission"]), (0, "matched", "PROT_9756"), p.stderr)
             c = out["candidates"][0]
             self.assertEqual((c["files_matched"], c["sample_ids_matched"], c["samples_on_sheet"]), (30, 30, 30))
             self.assertIn("30 of 30", out["ask"])
 
     def test_a_label_two_submissions_use_is_ambiguous(self):
         """locate's ambiguous_label, in reverse: both were submitted before the runs."""
-        twin = record(internal_id="PROT_0755", sid="bbbbbbbbbbb3", submitted="2026-07-10T10:00:00-07:00",
+        twin = record(internal_id="PROT_9755", sid="bbbbbbbbbbb3", submitted="2026-07-10T10:00:00-07:00",
                       samples=[(f"LRS{n}", "c") for n in range(96, 100)])
         with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
-            self.serve(fake, [[rec_0756(), twin]])
+            self.serve(fake, [[rec_9756(), twin]])
             rc, out, _ = run(["identify"] + LRS_RUNS, child_env(tmp, fake.base))
             self.assertEqual((rc, out["status"]), (2, "ambiguous"))
             self.assertEqual({f["file"] for f in out["ambiguous_files"]},
                              {os.path.basename(x) for x in LRS_RUNS[:4]})
-            self.assertIn("PROT_0755", out["ask"])
+            self.assertIn("PROT_9755", out["ask"])
 
     def test_a_submission_made_after_the_runs_does_not_claim_them(self):
-        later = record(internal_id="PROT_0799", sid="bbbbbbbbbbb4", submitted="2026-09-01T10:00:00-07:00",
+        later = record(internal_id="PROT_9799", sid="bbbbbbbbbbb4", submitted="2026-09-01T10:00:00-07:00",
                        samples=[(f"LRS{n}", "c") for n in range(96, 126)])
         with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
-            self.serve(fake, [[later, rec_0756()]])
+            self.serve(fake, [[later, rec_9756()]])
             rc, out, _ = run(["identify"] + LRS_RUNS, child_env(tmp, fake.base))
-            self.assertEqual((rc, out["submission"]), (0, "PROT_0756"))
+            self.assertEqual((rc, out["submission"]), (0, "PROT_9756"))
 
     def test_one_generic_id_in_thirty_files_is_not_enough(self):
-        qc = record(internal_id="PROT_0801", sid="bbbbbbbbbbb6", submitted="2026-07-01T10:00:00-07:00",
+        qc = record(internal_id="PROT_9801", sid="bbbbbbbbbbb6", submitted="2026-07-01T10:00:00-07:00",
                     samples=[("HeLa", "x"), ("Blank", "y"), ("KG77", "z")])
         with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
             self.serve(fake, [[qc]])
             names = ["/d/08132026__60SPD_DIA-HeLa_S3-A1_1_1.d"] + LRS_RUNS[:29]
             rc, out, _ = run(["identify"] + names, child_env(tmp, fake.base))
-            self.assertEqual((rc, out["status"], out["submission"]), (2, "weak", "PROT_0801"))
+            self.assertEqual((rc, out["status"], out["submission"]), (2, "weak", "PROT_9801"))
 
     def test_weak_ids_are_no_evidence(self):
-        wells = record(internal_id="PROT_0761", sid="bbbbbbbbbbb5", submitted="2026-07-01T10:00:00-07:00",
+        wells = record(internal_id="PROT_9761", sid="bbbbbbbbbbb5", submitted="2026-07-01T10:00:00-07:00",
                        samples=[("A1", "x"), ("001", "y")])
         with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
             self.serve(fake, [[wells]])
@@ -2985,23 +2985,23 @@ class TestIdentifyBySampleIds(unittest.TestCase):
 
     def test_a_prot_number_and_its_hex_id_are_merged_by_lookup(self):
         with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
-            self.serve(fake, [[rec_0756()]])
-            rc, out, p = run(["identify", f"/coreomics/projects/2026/07/{HEX_0756}/share/x.d"] + LRS_RUNS
-                             + ["--text", "this is PROT_0756"], child_env(tmp, fake.base))
-            self.assertEqual((rc, out["status"], out["submission"]), (0, "named", "PROT_0756"), p.stderr)
+            self.serve(fake, [[rec_9756()]])
+            rc, out, p = run(["identify", f"/coreomics/projects/2026/07/{HEX_9756}/share/x.d"] + LRS_RUNS
+                             + ["--text", "this is PROT_9756"], child_env(tmp, fake.base))
+            self.assertEqual((rc, out["status"], out["submission"]), (0, "named", "PROT_9756"), p.stderr)
             self.assertTrue(out["verified"])
             self.assertEqual(out["files_matched"], 30)
 
     def test_a_named_submission_whose_ids_are_in_no_file_name_is_asked_about(self):
         with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
-            self.serve(fake, [[rec_0756()]])
-            rc, out, _ = run(["identify", "/svc/PROT_0756/Ex08152026_1_other.raw"], child_env(tmp, fake.base))
+            self.serve(fake, [[rec_9756()]])
+            rc, out, _ = run(["identify", "/svc/PROT_9756/Ex08152026_1_other.raw"], child_env(tmp, fake.base))
             self.assertEqual((rc, out["status"]), (2, "named_unconfirmed"))
             self.assertIn("none of its 30 sample IDs", out["ask"])
 
     def test_a_named_submission_that_does_not_exist_is_asked_about(self):
         with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
-            self.serve(fake, [[rec_0756()]])
+            self.serve(fake, [[rec_9756()]])
             rc, out, _ = run(["identify", "/svc/PROT_9999/a.d"], child_env(tmp, fake.base))
             self.assertEqual((rc, out["status"]), (2, "not_found"))
 
@@ -3015,18 +3015,18 @@ class TestIdentifyBySampleIds(unittest.TestCase):
 
     def test_a_folder_is_listed_for_its_raw_file_names(self):
         with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
-            self.serve(fake, [[rec_0756()]])
+            self.serve(fake, [[rec_9756()]])
             folder = os.path.join(tmp, "JUL26")
             for r in LRS_RUNS:
                 os.makedirs(os.path.join(folder, os.path.basename(r)))
             rc, out, p = run(["identify", folder], child_env(tmp, fake.base))
-            self.assertEqual((rc, out["status"], out["submission"]), (0, "matched", "PROT_0756"), p.stderr)
+            self.assertEqual((rc, out["status"], out["submission"]), (0, "matched", "PROT_9756"), p.stderr)
 
     def test_a_cut_off_submission_list_never_confirms(self):
         with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
-            later = record(internal_id="PROT_0799", sid="bbbbbbbbbbb7", submitted="2026-06-01T10:00:00-07:00",
+            later = record(internal_id="PROT_9799", sid="bbbbbbbbbbb7", submitted="2026-06-01T10:00:00-07:00",
                            samples=[("ZZ1", "x")])
-            self.serve(fake, [[rec_0756()], [later]])
+            self.serve(fake, [[rec_9756()], [later]])
             with mock.patch.object(cs, "NEIGHBOR_MAX_PAGES", 1):
                 with mock.patch.dict(os.environ, child_env(tmp, fake.base), clear=True):
                     with contextlib.redirect_stdout(io.StringIO()) as buf:
@@ -3099,7 +3099,7 @@ class TestPartialScriptsDirectory(unittest.TestCase):
 
 # ------------------------------------------------------------ the CoreOmics API key --
 KEY = "k3yNotReal0a1b2c3d4e5f60718293a4b5c6d7e8"     # a planted key: it must never be printed
-WIN_ENV = {"USERPROFILE": "C:\\Users\\msalemi", "HOMEDRIVE": "H:", "HOMEPATH": "\\"}
+WIN_ENV = {"USERPROFILE": "C:\\Users\\mstaff", "HOMEDRIVE": "H:", "HOMEPATH": "\\"}
 
 
 def key_home(tmp, content=None, name=".coreomics_token", raw=None):
@@ -3129,36 +3129,36 @@ def windows_places(env):
 
 class TestKeyPlaces(unittest.TestCase):
     """Windows: Python's ~ is USERPROFILE, Git Bash's ~ is HOME, and on a domain account
-    (Michelle's, "AD3+msalemi") they can differ -- a key saved with Git Bash's ~ must be found."""
+    (Morgan's, "AD3+mstaff") they can differ -- a key saved with Git Bash's ~ must be found."""
 
     def test_windows_reads_the_profile_folder_then_git_bash_home(self):
         read, _, target = windows_places(dict(WIN_ENV, HOME="H:\\"))
-        self.assertEqual(read, ["C:\\Users\\msalemi\\.coreomics_token", "H:\\.coreomics_token"])
-        self.assertEqual(target, "C:\\Users\\msalemi\\.coreomics_token", "save where Python reads first")
+        self.assertEqual(read, ["C:\\Users\\mstaff\\.coreomics_token", "H:\\.coreomics_token"])
+        self.assertEqual(target, "C:\\Users\\mstaff\\.coreomics_token", "save where Python reads first")
 
     def test_windows_home_in_the_profile_folder_is_one_place(self):
-        for home in ("C:\\Users\\msalemi", "c:/users/MSALEMI/", "/c/Users/msalemi"):
+        for home in ("C:\\Users\\mstaff", "c:/users/MSTAFF/", "/c/Users/mstaff"):
             read, _, _ = windows_places(dict(WIN_ENV, HOME=home))
-            self.assertEqual(read, ["C:\\Users\\msalemi\\.coreomics_token"], home)
+            self.assertEqual(read, ["C:\\Users\\mstaff\\.coreomics_token"], home)
 
     def test_windows_an_msys_spelled_home_is_its_drive(self):
         read, _, _ = windows_places(dict(WIN_ENV, HOME="/h/"))
         self.assertEqual(read[1], "H:\\.coreomics_token")
-        self.assertEqual(cs._drive_path("/home/msalemi"), "/home/msalemi", "not a drive letter")
+        self.assertEqual(cs._drive_path("/home/mstaff"), "/home/mstaff", "not a drive letter")
 
     def test_windows_without_home_reads_the_profile_only(self):
         read, stray, _ = windows_places(WIN_ENV)
-        self.assertEqual(read, ["C:\\Users\\msalemi\\.coreomics_token"])
+        self.assertEqual(read, ["C:\\Users\\mstaff\\.coreomics_token"])
         # the home drive and Notepad's .txt are looked at by check, never read as the key
         self.assertIn("H:\\.coreomics_token", stray)
-        self.assertIn("C:\\Users\\msalemi\\.coreomics_token.txt", stray)
-        self.assertIn("C:\\Users\\msalemi\\coreomics_token", stray)
-        self.assertNotIn("C:\\Users\\msalemi\\.coreomics_token", stray)
+        self.assertIn("C:\\Users\\mstaff\\.coreomics_token.txt", stray)
+        self.assertIn("C:\\Users\\mstaff\\coreomics_token", stray)
+        self.assertNotIn("C:\\Users\\mstaff\\.coreomics_token", stray)
 
     def test_posix_reads_home_and_ignores_userprofile(self):
-        with mock.patch.dict(os.environ, {"HOME": "/Users/msalemi", "USERPROFILE": "C:\\Users\\x"},
+        with mock.patch.dict(os.environ, {"HOME": "/Users/mstaff", "USERPROFILE": "C:\\Users\\x"},
                              clear=True), mock.patch.object(cs.os, "name", "posix"):
-            self.assertEqual(cs.key_files(), ["/Users/msalemi/.coreomics_token"])
+            self.assertEqual(cs.key_files(), ["/Users/mstaff/.coreomics_token"])
 
     def test_the_save_line_writes_where_python_reads(self):
         self.assertIn('cygpath "$USERPROFILE"', cs.SAVE_KEY_LINE["windows"])
@@ -3174,15 +3174,15 @@ class TestKeyPlaces(unittest.TestCase):
 
     def test_windows_documents_and_onedrive_are_looked_at(self):
         """Notepad's Save As usually starts in Documents -- OneDrive's, on a OneDrive PC."""
-        _, stray, _ = windows_places(dict(WIN_ENV, OneDrive="C:\\Users\\msalemi\\OneDrive - UC Davis"))
-        for p in ("C:\\Users\\msalemi\\Documents\\.coreomics_token.txt",
-                  "C:\\Users\\msalemi\\OneDrive\\Documents\\coreomics_token.txt",
-                  "C:\\Users\\msalemi\\OneDrive - UC Davis\\Documents\\.coreomics_token.txt"):
+        _, stray, _ = windows_places(dict(WIN_ENV, OneDrive="C:\\Users\\mstaff\\OneDrive - UC Davis"))
+        for p in ("C:\\Users\\mstaff\\Documents\\.coreomics_token.txt",
+                  "C:\\Users\\mstaff\\OneDrive\\Documents\\coreomics_token.txt",
+                  "C:\\Users\\mstaff\\OneDrive - UC Davis\\Documents\\.coreomics_token.txt"):
             self.assertIn(p, stray)
 
     def test_macos_documents_is_never_looked_at(self):
         """~/Documents on a Mac is privacy-guarded (a prompt) and often iCloud: not for a guess."""
-        with mock.patch.dict(os.environ, {"HOME": "/Users/msalemi"}, clear=True), \
+        with mock.patch.dict(os.environ, {"HOME": "/Users/mstaff"}, clear=True), \
                 mock.patch.object(cs.os, "name", "posix"):
             self.assertFalse([p for p in cs.stray_key_files() if "Documents" in p])
 
@@ -3439,7 +3439,7 @@ class TestCheck(unittest.TestCase):
                 self.lab(fake, reply)
                 rc, out, _ = self.check(key_env(tmp, fake.base, COREOMICS_TOKEN=KEY))
                 self.assertEqual((rc, out["status"]), (3, "no_lab_access"), reply)
-                self.assertIn("brettsp", out["fix"])
+                self.assertIn(cs.LAB_ADMIN, out["fix"])
                 self.assertIn("Proteomics lab", out["fix"])
 
     def test_a_web_page_401_or_403_is_not_about_the_key_or_the_lab(self):
@@ -3454,7 +3454,7 @@ class TestCheck(unittest.TestCase):
                 self.assertEqual((rc, out["status"], out["http_status"]), (3, "unexpected", status))
                 self.assertIn(f"HTTP {status}", out["say"])
                 self.assertNotIn("<", out["say"] + out["detail"])
-                self.assertNotIn("brettsp", out["fix"])           # not an account problem
+                self.assertNotIn("bstaff", out["fix"])           # not an account problem
 
     def test_another_coreomics_refusal_is_quoted_not_guessed(self):
         with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
@@ -3462,7 +3462,7 @@ class TestCheck(unittest.TestCase):
             rc, out, _ = self.check(key_env(tmp, fake.base, COREOMICS_TOKEN=KEY))
             self.assertEqual((rc, out["status"]), (3, "unexpected"))
             self.assertIn("User inactive or deleted.", out["say"])
-            self.assertIn("brettsp", out["fix"])
+            self.assertIn(cs.LAB_ADMIN, out["fix"])
 
     def test_a_redirect_to_another_server_never_carries_the_key(self):
         """urllib copies Authorization to wherever a redirect points: before the fix a 302 to a
@@ -3615,7 +3615,7 @@ class TestKeyNeverPrinted(unittest.TestCase):
     def test_identify_lookup_failure_that_echoes_the_key(self):
         with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
             fake.routes[("GET", "/server/api/submissions/")] = lambda q, b: (403, {"detail": f"Invalid token {KEY}."})
-            rc, out, p = run(["identify", "/svc/PROT_0756/a.d"], key_env(tmp, fake.base, COREOMICS_TOKEN=KEY))
+            rc, out, p = run(["identify", "/svc/PROT_9756/a.d"], key_env(tmp, fake.base, COREOMICS_TOKEN=KEY))
             self.assertEqual((rc, out["status"]), (3, "lookup_failed"), p.stderr)
             self.assert_clean(p)
 
@@ -3648,7 +3648,7 @@ class TestKeyHelpElsewhere(unittest.TestCase):
 # ------------------------------------------------------- the CoreOmics key ON HIVE --
 @unittest.skipIf(os.name == "nt", "POSIX file modes")
 class TestKeyOnHive(unittest.TestCase):
-    """Michelle (2026-10-08, Windows, no Python) saved her key on her laptop, where nothing could
+    """Morgan (2026-10-08, Windows, no Python) saved her key on her laptop, where nothing could
     run the CoreOmics steps, and HIVE had no key. Now the steps run on HIVE from ~/.coreomics_token
     -- in a home folder that is drwxrwsr-x there, open to every account, so the file's own mode is
     the key's only protection: a key anyone else can read is refused, and never sent."""
@@ -3892,13 +3892,13 @@ class TestFullSummaryIsThisSubmissions(unittest.TestCase):
         self.fetch()
         priv = os.path.join(self.out_dir, "private", "submission_summary.json")
         other = load(priv)
-        other["id"], other["internal_id"] = "b" * 12, "PROT_0001"
+        other["id"], other["internal_id"] = "b" * 12, "PROT_9101"
         with open(priv, "w") as fh:
             json.dump(other, fh)
         rc, js, p = self.draft()
         self.assertEqual(rc, 2, p.stderr)
         self.assertIn("is another submission's", js["error"])
-        self.assertIn("PROT_0001", js["error"])
+        self.assertIn("PROT_9101", js["error"])
         self.assertFalse(os.path.exists(os.path.join(self.out_dir, "EMAIL_DRAFT.md")))
 
     def test_the_private_files_are_replaced_whole(self):

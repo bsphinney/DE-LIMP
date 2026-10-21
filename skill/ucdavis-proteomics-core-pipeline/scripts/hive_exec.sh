@@ -4,7 +4,7 @@
 # private key. Claude Code runs LOCALLY; this is how the HIVE steps execute.
 #
 #   Set once per session:
-#     export HIVE_USER=brettsp
+#     export HIVE_USER=<your HIVE user>
 #     export HIVE_KEY=~/.ssh/id_ed25519     # the path the user gave you
 #
 #   Run a command on HIVE:
@@ -43,7 +43,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 CFG="${HIVE_ENV_FILE:-$HOME/.config/ucdavis-proteomics/hive.env}"
 if [ -z "${HIVE_USER:-}" ] && [ -f "$CFG" ]; then . "$CFG"; fi
 HU="${HIVE_USER:?set HIVE_USER, or save it once: mkdir -p ~/.config/ucdavis-proteomics && printf \'HIVE_USER=<user>\\nHIVE_KEY=~/.ssh/id_ed25519\\n\' > ~/.config/ucdavis-proteomics/hive.env}"
-# gabrig 2026-09-23, Windows 11: ssh's default user there is the AD login `AD3+gabrig`, and
+# A Core member, 2026-09-23, Windows 11: ssh's default user there is the AD login `AD3+<user>`, and
 # every call that relied on it got "Permission denied". The same name in HIVE_USER fails the
 # same way, after spending one of HIVE's throttled connection attempts -- so stop here.
 case "$HU" in
@@ -81,7 +81,7 @@ if [ "${HIVE_SSH_MUX:-1}" != "0" ]; then
   MUX=(-o ControlMaster=auto -o "ControlPath=$HOME/.ssh/cm-%C" -o ControlPersist=10m)
   MUX_E=" -o ControlMaster=auto -o 'ControlPath=$HOME/.ssh/cm-%C' -o ControlPersist=10m"
 fi
-# StrictHostKeyChecking=accept-new: gabrig 2026-09-23, the first call from a new laptop died
+# StrictHostKeyChecking=accept-new: a Core member, 2026-09-23, the first call from a new laptop died
 # "Host key verification failed" -- HIVE was not in known_hosts yet and there is no prompt
 # to answer in a non-interactive call. accept-new records an UNKNOWN key and still refuses
 # a CHANGED one. check_access.sh prints the fingerprint for the user to compare.
@@ -123,7 +123,7 @@ winpath() {
 
 usage() { echo "usage: hive_exec.sh '<command>' | --job [--time MIN] [--mem SIZE] [--cpus N] [--preemptible] '<command>' | --put <local> <remote> | --get <remote> <local> | --put-skill" >&2; exit 2; }
 
-# gabrig 2026-09-23: T:\Data\lab\service\... went up by scp (7.1 GB, ~20 min) although T: is
+# A Core member, 2026-09-23: T:\Data\lab\service\... went up by scp (7.1 GB, ~20 min) although T: is
 # the Flinders share HIVE mounts at /nfs/lssc0/flinders/proteomics. hive_path.sh makes no
 # ssh call for an ordinary local path, so this costs nothing unless the source is on a share.
 put_guard() {
@@ -146,7 +146,7 @@ put_guard() {
 # remote path is relative to home under both protocols, so drop it.
 rpath() { local r="$1"; case "$r" in "~") r=. ;; "~/"*) r="${r#\~/}"; [ -n "$r" ] || r=. ;; esac; echo "$r"; }
 
-# rsync, which the rest of the skill assumes, is not in Git Bash on Windows (gabrig
+# rsync, which the rest of the skill assumes, is not in Git Bash on Windows (a Core member,
 # 2026-09-23: "rsync: command not found", then scp commands hand-built by the agent). These
 # keep rsync's meaning, which scp -r does not have on its own:
 #   - a directory lands INSIDE <dest>, and <dest> is created if missing. scp -r to a

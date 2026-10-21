@@ -254,7 +254,7 @@ class QueueTests(unittest.TestCase):
 
 
 # HIVE's real associations for a facility member who is also in publicgrp, read with
-# `sacctmgr -nP show assoc user=brettsp format=account,partition,qos` on 2026-09-16.
+# `sacctmgr -nP show assoc user=bstaff format=account,partition,qos` on 2026-09-16.
 HIVE_ASSOCIATIONS = """genome-center-grp|gpu-a100|genome-center-grp-gpu-a100-qos
 genome-center-grp|high|genome-center-grp-high-qos
 publicgrp|high|publicgrp-high-qos

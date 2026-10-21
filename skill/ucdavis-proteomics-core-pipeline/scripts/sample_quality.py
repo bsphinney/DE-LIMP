@@ -88,7 +88,7 @@ PANELS = {
 # ortholog tables and the UP000000589 (mouse) / UP000002494 (rat) one-per-gene FASTAs:
 # every other panel gene's ortholog IS the human symbol in title case (Ca1, Cat, Prdx2,
 # Myh1, Ckm, Krt10, ...), so case-insensitive matching already covers it. Only the adult
-# globins differ. (msalemi 2026-09-24, mouse brain: Hbb-bs at ~15 log2 matched nothing.)
+# globins differ. (a Core member, 2026-09-24, mouse brain: Hbb-bs at ~15 log2 matched nothing.)
 PANEL_ORTHOLOGS = {
     10090: {   # Mus musculus. UP000000589 GN=: Hba (P01942), Hbb-b1, Hbb-b2, Hbb-bs (A8DUK4)
         "HBA1": ("Hba", "Hba-a1", "Hba-a2"),
@@ -491,7 +491,7 @@ def _stem(x):
 # Why not the old rule (flag when the highest and lowest GROUP MEANS differ by >= --z SD and
 # barely overlap): with k groups it compares the extremes of k noisy means, and their spread
 # grows with k even when nothing differs -- the expected range of 10 means is ~3.1 standard
-# errors against ~1.1 for 2. Silva08172026 (10 groups x 3) flagged all three panels that way
+# errors against ~1.1 for 2. A mouse-brain IP cohort (10 groups x 3) flagged all three panels that way
 # (gaps 1.55-2.74). The test's null distribution comes from the design itself, so k, group
 # sizes and non-normal scores are all accounted for. 1% because three panels are tested.
 CONFOUND_P = 0.01
@@ -655,7 +655,7 @@ def confound_check(z, gmap, samples, thr, n_perm=N_PERM, seed=20260925, bmap=Non
 
 
 def _between_levels(blocks, labels):
-    """Groups joined by a shared block (union-find) -> the BETWEEN-block factor: PROT_0756's
+    """Groups joined by a shared block (union-find) -> the BETWEEN-block factor: the mouse-brain IP cohort's
     mice join all Old_* groups into one level and all Young_* into another; a paired design
     (every patient in both groups) joins everything into one level (no between factor);
     technical replicates (each mouse in one group) leave every group its own level."""
@@ -694,7 +694,7 @@ def _between_levels(blocks, labels):
 def block_confound_checks(z, gmap, bmap, samples, thr, block_name="block", n_perm=N_PERM,
                           seed=20260925):
     """Two different questions once samples come in blocks (animals), each tested the way its
-    samples are exchangeable (PROT_0756 v2: a hemolysis p of 0.001 from within-mouse
+    samples are exchangeable (the mouse-brain IP cohort, v2,: a hemolysis p of 0.001 from within-mouse
     relabelling was read as an AGE confound it could never detect):
       within   -- does the panel differ among the samples of ONE block (bait vs IgG IPs of the
                   same mouse)? Group labels relabelled within each block. It flags what
@@ -876,7 +876,7 @@ def main():
             pass   # keratin IS the analyte for a keratin-matrix sample: report for QC, never flag
         else:
             # Each message says which question it answers: a within-block flag cannot speak
-            # to the between-block factor, and vice versa (PROT_0756 v2). A caution is worded
+            # to the between-block factor, and vice versa (the mouse-brain IP cohort, v2,). A caution is worded
             # as one everywhere (review round 2): the same weak evidence, the same words.
             unit = f"block ({blk})"
             caution_tail = ("so this is a caution, not a finding: treat {} proteins in {} with "
@@ -925,7 +925,7 @@ def main():
     # matrix's gene names are ones the panels know. If NO curated panel matched a single
     # sample protein -- each lists markers (CAT, PRDX2, TPM1, DSP ...) found in nearly any
     # cell or tissue proteome -- the names did not match, and "0 detected" means nothing.
-    # (msalemi 2026-09-24: all three read "0 panel proteins -- not assessable" on a mouse
+    # (a Core member, 2026-09-24: all three read "0 panel proteins -- not assessable" on a mouse
     # brain matrix with haemoglobin at ~15 log2.)
     any_match = any(results[n]["n_panel_proteins"] for n in PANELS)
     covered = taxid in PANEL_ORGANISMS

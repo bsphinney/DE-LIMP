@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A keratin sample (hair, wool, feather, skin, nail) keeps its keratin: it is the analyte.
 
-msalemi's hair benchmark (SET28, skill 2.8.0): the Universal contaminant set carries ~190
+mstaff's hair benchmark (SET28, skill 2.8.0): the Universal contaminant set carries ~190
 keratin-family Cont_ entries. The target-identity rule removes the ones identical to human
 proteins, but ~46 survive for human -- KRT34, KRTAPs, mouse hair and sheep wool keratins -- and
 for a hair sample those are the analyte's paralogs. DIA-NN's --cont-quant-exclude Cont_ keeps

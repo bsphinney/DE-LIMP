@@ -584,7 +584,7 @@ Apache-2.0 — the open-source alternative to DIA-NN for non-academic users. Lib
    and on Linux with a warning: bioconda's `proteowizard` is built from ProteoWizard's source
    **without vendor readers** (its recipe downloads `pwiz-src-without-v`), so it cannot open a
    `.raw`. `.d` goes to msconvert as before. With `--sbatch` the conversion runs **in the
-   job**, first, never at generation (gabrig 2026-09-29: msconvert had run on the HIVE login
+   job**, first, never at generation (a Core member, 2026-09-29: msconvert had run on the HIVE login
    node). A converter that leaves no complete file (an indexed mzML must end in
    `</indexedmzML>`) stops the job before Sage. With no converter at all, `run_search.py`
    refuses before anything is written.
@@ -595,7 +595,7 @@ Apache-2.0 — the open-source alternative to DIA-NN for non-academic users. Lib
    Sage integrates MS1 only within ±`quant.lfq_settings.ppm_tolerance` of the theoretical
    mass (default 5 ppm, `lfq.rs`). The search itself uses `precursor_tol` (±10 ppm). So a
    cohort with a +7 ppm MS1 offset identifies normally, and Sage logs "discovered 0 target
-   MS1 peaks at 5% FDR" (gabrig 2026-09-29, Fusion Lumos). The check reads each run's
+   MS1 peaks at 5% FDR" (a Core member, 2026-09-29, Fusion Lumos). The check reads each run's
    median `precursor_ppm` (Sage writes it **unsigned**; the signed offset,
    `(expmass − isotope_error − calcmass)/calcmass`, is reported for direction) from
    confident target PSMs (`peptide_q` ≤ 0.01, rank 1). It also reads that MS1-peak count
@@ -622,7 +622,7 @@ Apache-2.0 — the open-source alternative to DIA-NN for non-academic users. Lib
    `q_value` ≤ 0.05 (`fdr.rs picked_precursor`).
    - **The `q_value` Sage *stores* is not the one it counted with.** `picked_precursor`
      keys its q map by precursor, so a target and its decoy end up with one shared q, the
-     lower-scoring member's (≥ the target's own). In gabrig's HeL50 UnvPe, 1,489 of 1,489
+     lower-scoring member's (≥ the target's own). In a Core member's HeL50 UnvPe, 1,489 of 1,489
      pairs were identical.
    - The adapter keeps a row only when `is_decoy` is false **and** the stored `q_value` ≤
      0.05 (`sage_lfq_check.LFQ_Q_MAX`, the one definition). That is a **conservative
@@ -765,12 +765,12 @@ to diaTracer's `-Xmx`, and real OOMs are reported, so be generous in `sbatch --m
 
 | Tool | Terms |
 |---|---|
-| MSFragger, IonQuant, **diaTracer** | Free for **academic / non-commercial / educational** use under one shared academic licence ("MSFragger + IonQuant + diaTracer Suite", The Regents of the University of Michigan — the PDF is byte-identical for all three). Commercial users license via **Fragmatics** (fragmatics.com, info@fragmatics.com). |
+| MSFragger, IonQuant, **diaTracer** | Free for **academic / non-commercial / educational** use under one shared academic licence ("MSFragger + IonQuant + diaTracer Suite", The Regents of the University of Michigan — the PDF is byte-identical for all three). Commercial users license through the tools' commercial licensor (named on the MSFragger licence page). |
 | **DIA-NN inside FragPipe** | *"Available for both academic and commercial use **within FragPipe**"* (`FRAGPIPE-THIRD-PARTY-LICENSES.txt`). The academic-only limit on Demichev's *standalone* DIA-NN does not apply to the bundled binary — **but the grant is scoped to use within FragPipe**, so do not treat `tools/diann/` as a commercially-usable standalone DIA-NN. |
 
 The commercial gate on this route is MSFragger/IonQuant/diaTracer, **not** DIA-NN. A
-commercial user is not locked out; they license the three gated tools via Fragmatics.
-Existing University of Michigan commercial licences must be re-confirmed with Fragmatics.
+commercial user is not locked out; they license the three gated tools through that licensor.
+Existing University of Michigan commercial licences must be re-confirmed with that licensor.
 
 **⚠ The core-facility clause — the most important line here.** The academic licence
 prohibits *"any work product, report or deliverable by LICENSEE, for a commercial or
@@ -778,7 +778,7 @@ for-profit organization."* That wording reaches an **academic core delivering re
 industry client**, which is ordinary fee-for-service work. The quote is verbatim; whether it
 binds a given engagement is a legal question, not one for this skill. If a user asks whether
 their fee-for-service or industry-funded work is covered, tell them to ask
-info@fragmatics.com and their own licensing office. **Do not answer it for them.**
+the tools' commercial licensor and their own licensing office. **Do not answer it for them.**
 
 **You cannot fully script the install.** MSFragger/IonQuant/diaTracer come from a web form
 requiring name, academic email, organization and licence acceptance. There is a separate

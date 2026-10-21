@@ -17,7 +17,7 @@ yourself, so the skill runs them one way only.
 - 419: Known limitations and backlog
 - 440: How to read the results
 - 472: Outputs
-- 486: PROT_0756 v2 (validation, 2026-09-28; after the statistician's review)
+- 486: Mouse-brain IP cohort v2 (validation, 2026-09-28; after the statistician's review)
 - 537: 8a. Running them (step 8a)
 <!-- /contents -->
 
@@ -78,7 +78,7 @@ that reported it), the expression matrix, the precision weights of each fit (DPC
 consensus correlation. `run_sets.R` tests on exactly these. It refits only for the
 sensitivity analyses (depth, bait normalisation), with `fit_like_run_de()` — the call
 `run_de.R` makes — and first checks that this refit reproduces run_de's t for every tested
-contrast (PROT_0756: max |Δt| 3e-12); it stops if it does not.
+contrast (the mouse-brain IP cohort: max |Δt| 3e-12); it stops if it does not.
 
 - **camera** ranks the contrast's moderated t (as z-scores, `zscoreT`, Hill's approximation,
   df = the fit's `df.total`) and takes its inter-protein correlations from the same model's
@@ -95,7 +95,7 @@ camera's correlation estimate and fry's set statistic average a set's residual e
 coordinate by coordinate, and fry's robust variance takes each protein's largest squared
 coordinate. limma takes the residual basis from a Householder QR — of the design, or with
 precision weights of each protein's own weighted design — and that basis is **not unique**: on
-PROT_0756, R's `qr()` of the same 30 × 10 design matrix came out with different reflection signs
+the mouse-brain IP cohort, R's `qr()` of the same 30 × 10 design matrix came out with different reflection signs
 on an AMD EPYC 9554 HIVE node than on EPYC 7532/7763 nodes (floating-point zeros in a 0/1
 design landing either side of zero). Residual effects came out rotated, and camera and fry
 p-values moved by up to 0.09 between otherwise identical runs. `lm_effects()` fixes the basis:
@@ -125,7 +125,7 @@ basis does and does not change (the statistician's review, rel-stats check1):
 The fixed reference makes the result reproducible, not right: another reference is equally
 valid. So every fry-significant set is re-tested on four other references (seeds 1–4);
 `fry_Reference_Stable` says `stable` or on how many it held, and a call that did not hold on
-all is flagged "fry call depends on the residual basis" — read it as borderline. (On PROT_0756,
+all is flagged "fry call depends on the residual basis" — read it as borderline. (On the mouse-brain IP cohort,
 two other seeds changed 267 and 332 of 10,542 fry calls.)
 
 ### A random block (`--block`, e.g. several IPs per mouse)
@@ -238,7 +238,7 @@ factor (random sets then correlate at 0.22–0.24); rate of p < 0.05:
 | 6 | shifted 0.5 | 0.180 | 0.940 | 0.223 |
 
 The estimated correlation stays calibrated but finds a real shift 7–18% of the time. On
-PROT_0756 random sets correlated at 0.13–0.145, which inflates a 54-protein set's variance about
+the mouse-brain IP cohort, random sets correlated at 0.13–0.145, which inflates a 54-protein set's variance about
 8-fold: camera missed Kv2.1's own potassium-channel complex (FDR 0.25 / 0.63, where fry gave
 9e-6 / 6e-8) and called nothing in any comparison. So `run_sets.R` measures it for every
 comparison — `camera_global_correlation`, the mean estimated correlation of 300 random sets of
@@ -259,7 +259,7 @@ covariate — the groups differed in depth and the set tracked it. Here depth is
 quantified), log2, centred, added to the design with everything else unchanged
 (`fit_like_run_de`). In a pulldown it gets **one slope per run type** (bait IPs, control IPs),
 each centred within its runs: a control's depth and a bait IP's depth are not the same thing,
-and one shared slope let the bait runs' slope stand in for the controls'. (PROT_0756, IgG Old vs
+and one shared slope let the bait runs' slope stand in for the controls'. (the mouse-brain IP cohort, IgG Old vs
 Young: with one shared slope 124 of 2,407 fry sets "held"; with the IgG runs' own slope, 0 —
 the 124 were the largest movers of the same shift, not a signature.)
 
@@ -295,7 +295,7 @@ lysate background every IP carries. A shift here is in everything the controls p
 nonspecifically, and it sits under every bait-vs-control and between-condition comparison.
 
 **(b) Between conditions, relative to the bait's complex** (`Sets_baitnorm_<contrast>.csv`).
-Bait recovery differs between conditions (PROT_0756: the Old IPs brought down 0.7–1.3 log2
+Bait recovery differs between conditions (the mouse-brain IP cohort: the Old IPs brought down 0.7–1.3 log2
 units less of each complex), so an unnormalised Old-vs-Young IP comparison is mostly recovery.
 For each bait:
 
@@ -312,12 +312,12 @@ For each bait:
 5. `Weak_Fraction`: the share of a set's proteins in the interactome's **bottom quarter** of
    pooled enrichment over the control; above one half the set is flagged "mostly weak
    interactors". (Until the review this was "within 1 log2 of the minimum", which flagged 73–88%
-   of PROT_0756's tested sets and every simulated one, random nulls included — so with the
+   of the mouse-brain IP cohort's tested sets and every simulated one, random nulls included — so with the
    defaults a finding could never stand unflagged. It is now relative to the interactome.)
 
 **Why pooled, not "enriched at every condition".** An earlier version of this page claimed the
 every-condition rule "cannot favour" either direction. That was wrong. When recovery differs,
-"still enriched in Old" keeps a protein that fell in Old only if it did not fall far: PROT_0756's
+"still enriched in Old" keeps a protein that fell in Old only if it did not fall far: the mouse-brain IP cohort's
 JPH3 had 225 Old against 974 Young proteins enriched, so its interactome was "the proteins that
 did not drop". The pooled comparison is uncorrelated with the between-condition comparison under
 the null when the conditions have equal runs (independent filtering, Bourgon et al. 2010), so it
@@ -413,13 +413,13 @@ Old background +0.6, 1,000 replicates, untested sets not significant; fry / came
 So the median is the reference, the bait the cross-check, and a set whose call changes with the
 reference is reported as unresolved. The table in the report gives, per bait, the recovery
 difference each reference implies. When the interactome is small the empirical-Bayes variance
-prior rests on few proteins (PROT_0756 JPH4: 35 at the old rule), and the reading says so below
+prior rests on few proteins (the mouse-brain IP cohort, JPH4: 35 at the old rule), and the reading says so below
 100.
 
 ## Known limitations and backlog
 
 - **Losses from a complex are harder to detect than gains** with the 4-fold minimum (above) —
-  nearly undetectable in the simulation, less so in PROT_0756's interactomes. Each bait's reading
+  nearly undetectable in the simulation, less so in the mouse-brain IP cohort's interactomes. Each bait's reading
   states its own cost; not fixed in 2.9.
 - **Random null sets run at about 0.07**, not 0.05, in the pulldown simulation (above).
 - **camera has little power in pulldowns** (whole IPs move together); its zero there is not a
@@ -434,7 +434,7 @@ prior rests on few proteins (PROT_0756 JPH4: 35 at the old rule), and the readin
   set 0.999 / 0.986; random nulls 0.065 / 0.085; the 20 least-enriched interactors 0.094 /
   0.094 (against 0.29 / 0.67 with no correction at all). **But that simulation generates the
   data with the same additive background + signal model the method assumes, so it cannot
-  validate the method: validate it on real pulldowns first** (PROT_0756; a pulldown with known
+  validate the method: validate it on real pulldowns first** (the mouse-brain IP cohort; a pulldown with known
   interactors or a spike-in), and choose the floor there. Tracked in `docs/TODO.md`.
 
 ## How to read the results
@@ -454,7 +454,7 @@ wording cannot be strengthened on the way:
 - GO terms nest and overlap: neighbouring significant terms are largely the same proteins.
 - **"A broad shift" — most proteins moved together — is said only when the proteins did**: at
   least 60% of them in that direction and their median log2 fold change too. fry sets alone do
-  not make one (PROT_0756 Old_JPH3 vs Young_JPH3: 45 fry sets lower in Old, but 53% of proteins
+  not make one (the mouse-brain IP cohort, Old_JPH3 vs Young_JPH3: 45 fry sets lower in Old, but 53% of proteins
   lower and a median of 0.000 — the complex's recovery, not the proteome). A broad shift that
   cannot be separated from run depth is said to be exactly that. The sets that happen to survive
   depth adjustment are its largest movers, not a named signature.
@@ -483,7 +483,7 @@ wording cannot be strengthened on the way:
 `make_analysis_html.py` adds a "Protein-set tests" section from the record (a report section of
 the same name replaces it); `make_methods.py` adds the paragraph to `methods.md`.
 
-## PROT_0756 v2 (validation, 2026-09-28; after the statistician's review)
+## Mouse-brain IP cohort v2 (validation, 2026-09-28; after the statistician's review)
 
 Read-only on the v2 session (its report, conditions and FASTA sidecar); `run_de.R` re-run to a
 scratch folder with the 12 v2 contrasts plus `Old_IgG-Young_IgG` (random Mouse block, scope

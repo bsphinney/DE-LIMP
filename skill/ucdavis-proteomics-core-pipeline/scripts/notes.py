@@ -6,16 +6,16 @@ member, and that person's Claude shows it when they next run the skill, and writ
 WHY THIS EXISTS
 ---------------
 report_issue.sh is the one channel from staff to the Core (skill_issues/). Nothing went the
-other way: on 2026-09-29 Brett wanted Michelle's Claude to read what he had to say about her
+other way: on 2026-09-29 Brett wanted a staff member's Claude to read what he had to say about her
 runs while she was in the middle of one, without her having to notice an email or a Slack
 message first. This is that channel in reverse, beside skill_issues/ and skill_runs/:
 
   /quobyte/proteomics-grp/skill_notes/        (SKILL_NOTES_DIR overrides it -- for the tests)
     SENDERS                                   who else may send (TRUST, below)
-    msalemi/                                  one folder per recipient HIVE user; all/ = everyone
-      20260929T231000Z_brettsp_keratin.md                               a note
-      20260929T231000Z_brettsp_keratin.read.msalemi                     her read receipt (JSON)
-      20260929T231000Z_brettsp_keratin.reply.msalemi.20260930T160500Z.md  her reply
+    staff2/                                   one folder per recipient HIVE user; all/ = everyone
+      20260929T231000Z_staff1_keratin.md                                a note
+      20260929T231000Z_staff1_keratin.read.staff2                       her read receipt (JSON)
+      20260929T231000Z_staff1_keratin.reply.staff2.20260930T160500Z.md    her reply
 
 A note is header lines -- From:, To:, Date:, Subject:, and Session: when it concerns one session
 folder -- then a blank line, then Markdown.
@@ -781,7 +781,7 @@ class Inbox:
         when both do, neither is acknowledged (send never makes such a pair itself)."""
         if not NOTE_ID_RE.match(note_id or ""):
             raise NotesError(f"'{note_id}' is not a note id "
-                             "(e.g. 20260929T231000Z_brettsp_keratin)")
+                             "(e.g. 20260929T231000Z_staff1_keratin)")
         untrusted = self.root_problem()
         if untrusted:
             raise NotesError(untrusted)

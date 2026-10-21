@@ -1,8 +1,8 @@
 """
 ht_manifest.py  --  Turn a Core high-throughput submission number into a search file list.
 
-A high-throughput submission is not a folder. Submission 0793 can occupy two trays, and
-the second tray's filenames may never mention 0793 at all -- the extent of a submission is
+A high-throughput submission is not a folder. Submission 0807 can occupy two trays, and
+the second tray's filenames may never mention 0807 at all -- the extent of a submission is
 inferred from the acquisition counter, not stored as a directory. It also contains runs
 that must NOT be searched as customer samples (well blanks, HeLa standards), and runs the
 operator already knows came out badly. Globbing a directory gets all of this wrong,
@@ -16,8 +16,8 @@ After that, nothing about the run is HT-specific -- step 2 onward is the ordinar
 **Runs ON HIVE**, like fran_deposit.py -- the orchestrator invokes it through
 `hive_exec.sh`, because that is where STAN, its database credential and the raw files are.
 
-    bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/ht_manifest.py fetch 0793 --out ~/ht0793'
-    bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/ht_manifest.py link 0793'
+    bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/ht_manifest.py fetch 0807 --out ~/ht0807'
+    bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/ht_manifest.py link 0807'
 
 The share token and the Entra cookie are read from a FILE (--share-token-file, --cookie-file).
 On the command line they are in the process list and in the session's commands.log, which the
@@ -44,7 +44,7 @@ every run a sample (`sample_list`). Each FAILS closed, naming every file or samp
 `ht_searches` table and an `ht-record-search` command, and v1.0.43 reverted both, because
 a table in STAN is a second copy of what FRAN already knows and the copy is the one that
 goes stale. The submission number is in the raw filenames, so FRAN's
-`/api/internal/submission/{id}` already answers "what was searched for 0793". `link` just
+`/api/internal/submission/{id}` already answers "what was searched for 0807". `link` just
 confirms that loop closed.
 
 EXIT CODES -- the orchestrator must honour these:
@@ -773,7 +773,7 @@ def link(a) -> int:
     skipped. It would also mean re-implementing FRAN's authorization.
 
     So the link is implicit: the submission number is in the raw filenames, so FRAN's
-    `/api/internal/submission/{id}` already answers "what was searched for 0793" with the
+    `/api/internal/submission/{id}` already answers "what was searched for 0807" with the
     search id, engine, organism and counts. Nothing needs recording. This just *checks*
     the loop closed, so a plate that silently failed to ingest is visible.
     """
@@ -832,7 +832,7 @@ def main() -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     f = sub.add_parser("fetch", help="get + validate the file list for a submission")
-    f.add_argument("submission", help="submission number, e.g. 0793 (793 also works)")
+    f.add_argument("submission", help="submission number, e.g. 0807 (807 also works)")
     f.add_argument("--include", default="samples",
                    choices=["samples", "rerun", "standards", "all"],
                    help="samples (default) excludes blanks and HeLa standards")

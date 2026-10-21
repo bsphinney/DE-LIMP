@@ -122,7 +122,7 @@ class Catalog(unittest.TestCase):
 
 
 class RealSessionLayout(unittest.TestCase):
-    """PROT_0756 v2 (a 5-step DIA-NN chain, 30 runs): OUTPUT_FILES.md left out output/podcast/
+    """PROT_9756 v2 (a 5-step DIA-NN chain, 30 runs): OUTPUT_FILES.md left out output/podcast/
     and marked 298 of the chain's files "unrecognized"."""
 
     CHAIN = ["quant_step2/r1.quant", "quant_step2/r2.quant", "quant_step4/r1.quant",

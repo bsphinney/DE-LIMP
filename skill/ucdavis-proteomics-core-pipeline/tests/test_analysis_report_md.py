@@ -85,7 +85,7 @@ class MarkdownTwin(unittest.TestCase):
                      "1. **Something.**\n   - detail\n")
         # the Submission section and header fact come from the attached record
         import submission_report
-        submission_report.attach(s, {"internal_id": "PROT_0001", "organism": "Mouse"})
+        submission_report.attach(s, {"internal_id": "PROT_9101", "organism": "Mouse"})
         cls.html_path = os.path.join(out, "Analysis_Report.html")
         r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "make_analysis_html.py"),
                             "--session", s, "--out", cls.html_path, "--no-pdf"],
@@ -114,9 +114,9 @@ class MarkdownTwin(unittest.TestCase):
         self.assertIn("Results at a glance", md_h2)
         self.assertIn("Top proteins per contrast", md_h2)
         self.assertTrue(self.md.startswith("# Twin study\n"))
-        self.assertIn("**Submission:** PROT_0001", self.md)
+        self.assertIn("**Submission:** PROT_9101", self.md)
         self.assertEqual(md_h2[0], "Submission")          # the record, first, in both renderings
-        self.assertIn("| Submission | PROT_0001 |", self.md)
+        self.assertIn("| Submission | PROT_9101 |", self.md)
 
     def test_no_html_tags(self):
         self.assertIsNone(re.search(r"</?[A-Za-z][A-Za-z0-9]*\b[^>]*>", self.md), self.md[:500])

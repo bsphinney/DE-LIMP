@@ -195,7 +195,7 @@ zen2), and they round the last bit differently; that moves where BFGS stops, ins
 tolerance. So identical inputs, software and flags give slightly different numbers on a
 different CPU family — and identical numbers on the same one.
 
-Measured on PROT_0756 v2 (2026-09-28): v2's DE ran on a zen4 node (EPYC 9734), the re-runs on
+Measured on the mouse-brain IP cohort v2 (2026-09-28): v2's DE ran on a zen4 node (EPYC 9734), the re-runs on
 zen2 nodes (EPYC 7532/7662), same env (R 4.6.1, limpa 1.4.0, limma 3.68.5, OpenBLAS 0.3.34), same
 input md5s and command. Across 12 contrasts **|ΔlogFC| ≤ 0.0022, |Δt| ≤ 0.0064, 0 significance
 calls changed**. v2's command re-run on its own zen4 node reproduced its tables exactly, and a

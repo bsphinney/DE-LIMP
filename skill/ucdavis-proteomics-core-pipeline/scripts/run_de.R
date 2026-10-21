@@ -1663,7 +1663,7 @@ writeLines(methods_txt, file.path(outdir, "methods.txt"))
 # Faithful capture of the stack that actually ran this DE (not re-derived later).
 # The machine the numbers came from. DPC-Quant's per-protein fits (limpa dpcQuant: optim BFGS
 # at its default tolerance) stop at slightly different points on different CPU families, because
-# OpenBLAS picks CPU-specific kernels whose last-bit rounding differs: PROT_0756 v2, zen4 vs zen2
+# OpenBLAS picks CPU-specific kernels whose last-bit rounding differs: a mouse-brain IP cohort, v2, zen4 vs zen2
 # HIVE nodes, identical inputs and software -- |dlogFC| <= 0.0022, |dt| <= 0.0064, no call
 # changed; the same family reproduces bit for bit (references/reproducibility.md). So the record
 # names the CPU, the BLAS/LAPACK libraries and, on a SLURM node, its CPU-family feature (what

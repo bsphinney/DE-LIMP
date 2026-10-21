@@ -31,7 +31,7 @@ A **high-throughput plate** is a different route: STAN knows its file list
 - 907: 8. `email-draft`
 - 942: Several submissions in one analysis
 - 989: Troubleshooting by exit code
-- 1005: The PROT_0793 lesson
+- 1005: The linked-share lesson
 - 1015: Less-used flags
 - 1025: Step 1 for Core staff: where the CoreOmics steps run, and `identify`
 - 1056: 1c. The service run, step by step (step 1c)
@@ -49,7 +49,7 @@ When any link in that chain is wrong, nothing errors:
 - **The service directory is organized by people, not a formula** (`Doe jane`,
   `Institution_X/Lab_Y`), so "where does PROT_0807 live" is a lookup that can be wrong.
 - **A share built from links depends on server settings nobody watches.** Links into
-  `/quobyte` served nothing over https, and SMB hides absolute links (the PROT_0793 lesson,
+  `/quobyte` served nothing over https, and SMB hides absolute links (the linked-share lesson,
   below).
 
 `scripts/core_submission.py` does the bookkeeping deterministically and hands every judgment
@@ -65,7 +65,7 @@ Windows' `python3` is usually the Microsoft Store stub. `check_access.sh` says w
 (`python3 ~/proteomics-pipeline/scripts/core_submission.py …`). `none` means the user is not
 Core staff (`core_member: false`): no CoreOmics step runs, and none is mentioned to them. Until 2026-10-08 these were
 "local" and HIVE deliberately had no key, so staff with no Python on their laptop could not
-look a submission up at all (Gabriela 2026-10-02, Michelle 2026-10-08).
+look a submission up at all (two Core members, 2026-10-02 and 2026-10-08).
 
 | step | runs | why there |
 |---|---|---|
@@ -237,10 +237,10 @@ refused, because urllib would send the `Authorization` header with it.
 | `key_malformed` | the file holds more than the key: the word `Token`, a space or line break, quotes, odd characters | save it again, the key alone |
 | `key_unreadable` | the key file exists but cannot be opened (permissions) | save it again |
 | `key_mode_wrong` | **on HIVE only:** the key file can be read by other accounts (any group or other permission bit), or another account owns it. The key was not used | `bash scripts/hive_exec.sh 'chmod 600 ~/.coreomics_token'`, then `check` again; a file not yours → delete it and `coreomics_key_to_hive.sh` again. Readable for long → Regenerate the key in CoreOmics and put the new one on HIVE |
-| `key_rejected` | CoreOmics' own JSON reply to a 401/403 is `Invalid token.`: copied wrongly, or replaced in CoreOmics since | copy the current key and save it again. `COREOMICS_TOKEN`, if set, wins over the file: fix or unset it. A freshly copied key refused too → ask Brett (brettsp) |
-| `no_lab_access` | the key works, but the account sees no Proteomics submissions (count 0 on `submissions/?lab=PROTEOMICS&page_size=1`, or CoreOmics' JSON 403 "You do not have permission…") | ask Brett (brettsp) to add the CoreOmics account to the Proteomics lab; nothing changes on the computer |
+| `key_rejected` | CoreOmics' own JSON reply to a 401/403 is `Invalid token.`: copied wrongly, or replaced in CoreOmics since | copy the current key and save it again. `COREOMICS_TOKEN`, if set, wins over the file: fix or unset it. A freshly copied key refused too → ask Brett (the Core director) |
+| `no_lab_access` | the key works, but the account sees no Proteomics submissions (count 0 on `submissions/?lab=PROTEOMICS&page_size=1`, or CoreOmics' JSON 403 "You do not have permission…") | ask Brett (the Core director) to add the CoreOmics account to the Proteomics lab; nothing changes on the computer |
 | `unreachable` | no answer (DNS, timeout, TLS, refused) or a CoreOmics 5xx | check the network and retry later. Off campus the UC Davis VPN might be needed (not confirmed). A TLS failure can be a network that inspects traffic |
-| `unexpected` | something other than CoreOmics answered: a web page (a Wi-Fi sign-in, or a 401/403 page from a proxy or firewall — its HTTP status is named, and it says nothing about the key), a redirect to another server (never followed: the key would go with it), a reply that is not HTTP; a proxy removed the key; a CoreOmics refusal not listed above (quoted); a `COREOMICS_BASE_URL` that is not a web address; or a bug (check reports it rather than crash) | finish any network sign-in or try another network; check or unset `COREOMICS_BASE_URL`; a quoted CoreOmics refusal → ask Brett (brettsp); otherwise `report_issue.sh` |
+| `unexpected` | something other than CoreOmics answered: a web page (a Wi-Fi sign-in, or a 401/403 page from a proxy or firewall — its HTTP status is named, and it says nothing about the key), a redirect to another server (never followed: the key would go with it), a reply that is not HTTP; a proxy removed the key; a CoreOmics refusal not listed above (quoted); a `COREOMICS_BASE_URL` that is not a web address; or a bug (check reports it rather than crash) | finish any network sign-in or try another network; check or unset `COREOMICS_BASE_URL`; a quoted CoreOmics refusal → ask Brett (the Core director); otherwise `report_issue.sh` |
 
 `users/me/` answers 403 even with a valid key, so `check` never uses it.
 
@@ -256,10 +256,10 @@ through `hive_exec.sh`, double quotes and none of `$` `` ` `` `\` `"` `'`):
 python3 scripts/core_submission.py identify <raw files and/or their folder> --text 'submission 807'
 ```
 
-1. **Named ids.** A `PROT_####` token (`PROT_0756`, `prot-756`) or a 12-character CoreOmics id
+1. **Named ids.** A `PROT_####` token (`PROT_0807`, `prot-807`) or a 12-character CoreOmics id
    (with a letter and a digit — a 12-digit timestamp is not one) anywhere in the paths, or
-   "submission 756" in the message (3-4 digits; `prot_10ug` is an amount, not PROT_0010). A bare number in a FILE name never counts: Exploris
-   runs carry counters (`Ex08312026_380_JE21`), and a 12-hex tail of a UUID/GUID is not an id.
+   "submission 807" in the message (3-4 digits; `prot_10ug` is an amount, not a submission). A bare number in a FILE name never counts: Exploris
+   runs carry counters (`Ex08312026_9380_XY21`), and a 12-hex tail of a UUID/GUID is not an id.
    With a token every named id is looked up: several that are one submission are merged; one
    CoreOmics does not know is `not_found`; one whose sample IDs are in none of the file names
    is `named_unconfirmed`. Without a token a single named id is `named` (unverified).
@@ -279,13 +279,13 @@ python3 scripts/core_submission.py identify <raw files and/or their folder> --te
 | 3 | `needs_token`, `lookup_failed` (CoreOmics refused or unreachable) | ask for the number, relay `token_help`; ask the key facts and `attach --given` (below) |
 
 **Never search `/quobyte/proteomics-grp/coreomics/.submissions_db`.** It is a stale snapshot
-(March 2026), and a free-text search for `0756` there matched an unrelated 2019 record.
+(March 2026), and a free-text search for `0807` there matched an unrelated 2019 record.
 
 **The record goes into the session once** (SKILL.md step 3b):
 ```
-python3 scripts/submission_report.py attach --session <S> --record ~/core/PROT_0756
+python3 scripts/submission_report.py attach --session <S> --record ~/core/PROT_0807
 python3 scripts/submission_report.py attach --session <S> --given \
-    '{"internal_id": "PROT_0756", "organism": "mouse", "prot_or_pep": "peptides", "sample_prep": "lab"}'
+    '{"internal_id": "PROT_0807", "organism": "mouse", "prot_or_pep": "peptides", "sample_prep": "lab"}'
 ```
 `input/submission.json` holds an **allowlisted** copy (identity, PI name/department/institution,
 submitter name, submitted date, organism, UniProt, description, experiment type, proteins or
@@ -301,7 +301,7 @@ read that one record. `--given` records are labelled "given by the user" everywh
 blank or disagreeing with the FASTA searched; UniProt blank (the Core chose the database); sheet
 ids with no raw file, and raw files with no sheet id; conditions analysed that pool or split the
 sheet's; beads blank on an affinity experiment; a form that contradicts itself about who
-prepared the samples; and **pairing** — PROT_0756's names are `Old - JPH3 - Mouse 1`: every mouse
+prepared the samples; and **pairing** — a mouse-brain IP cohort's names are `Old - JPH3 - Mouse 1`: every mouse
 gave all five IPs (JPH3, JPH4, Kv2.1, RyR, IgG) and mice 1–3 are Old, 4–6 Young, so samples from
 one mouse are not independent, and the note says whether the design analysed carries the mouse.
 
@@ -329,8 +329,8 @@ line) -- never a `~/core` that is a link or another account's.
 
 - **Look up by number with the exact filter:**
   `GET submissions/?lab=PROTEOMICS&internal_id=PROT_0807` returns exactly one record.
-  **Never `search=`** — `search=0807` returns two. Numbers are `PROT_%04d` (PROT_0763 …
-  PROT_0807 seen). The script accepts `PROT_0807`, `prot-807`, `0807`, `807`, `#807`, or the
+  **Never `search=`** — `search=0807` returns two. Numbers are `PROT_%04d` (four digits,
+  e.g. PROT_0807). The script accepts `PROT_0807`, `prot-807`, `0807`, `807`, `#807`, or the
   12-hex CoreOmics id (`GET submissions/<id>/`), and re-checks `internal_id` client-side.
 - **List:** `GET submissions/?lab=PROTEOMICS&page=N&page_size=100&ordering=-submitted`
   (DRF `count/next/results`). List results **already include** `submission_data.samples`,
@@ -396,7 +396,7 @@ free-form** — `sep26`, `Aug26`, `JUL26`, `June26`, `jan25AndPM`, `Std_He_...` 
 folder is scanned. About 20k `.raw`/`.d` entries in total; a listing is fine on the login
 node. The requested instrument's folder is scanned first but never exclusively: staff
 sometimes run a sample on another instrument (gate `instrument` warns). Compute nodes can
-read this tree (the PROT_0793 search did).
+read this tree (an earlier submission's search did).
 
 **Filename conventions (measured on the full listing):**
 
@@ -429,22 +429,22 @@ find `KG13`. Four further rules, each from a failure found by review:
   240, never more than fetch's neighbour window) count.
 
 **Measured on the 45 newest submissions:** token matching found 1:1 files for many timsTOF
-submissions (PROT_0772 4/4, 0771 12/12, 0768 10/10, 0764 6/6). It failed in four ways, and
+submissions (four of them 4/4, 12/12, 10/10 and 6/6). It failed in four ways, and
 each has a gate:
 
 | failure mode seen | example | handling |
 |---|---|---|
 | short / well-like / numeric / too-common ids match hundreds–thousands of files | `A3`, `H10`, `001` | **weak id** (alnum < 3, all digits, `^[A-H](1-12)$`, or > 10 files overall): never auto-assigned → `weak_ids` FAIL |
-| the same ids reused by another submission | `BN1–6` in 0794 **and** 0776; `SG001`; `GV1` | **ambiguous label**: a run is ambiguous when ANY other submission — older, same day or newer — uses the label and was submitted on or before the run. Only ambiguous runs → `ambiguous_label` FAIL; an unambiguous run as well → `choose_run` FAIL (staff say which) |
+| the same ids reused by another submission | `BN1–6` in two different submissions; `SG001`; `GV1` | **ambiguous label**: a run is ambiguous when ANY other submission — older, same day or newer — uses the label and was submitted on or before the run. Only ambiguous runs → `ambiguous_label` FAIL; an unambiguous run as well → `choose_run` FAIL (staff say which) |
 | older runs of the same label | 2025 files for a 2026 submission | date window; counted in `out_of_window` INFO |
 | several files per sample | re-injections | **staff decide, once** — none is picked by default: `choose_run` FAIL (`kind: reinjections`) lists each candidate; `--reinjections latest` (newest injection) or `--reinjections all` (technical replicates) settles every such sample, `--choose <key>=<file>` one |
 
 **Labels alone cannot decide an ambiguous run, so staff do.** The `ambiguous_label` detail
 names each other submission and whether it already has **earlier unambiguous runs** of that
 label (runs acquired after it was submitted and before anyone else used the label). Measured
-example: PROT_0776 and PROT_0794 both use BN1–6. For 0776, the Aug-24 BN runs are unambiguous
-(0794 had not been submitted) and are chosen. For 0794, the Sep-8 BN runs are ambiguous —
-0776 was submitted first — so `locate` fails, and the detail says 0776 already has its own
+example: two submissions, an earlier A and a later B, both use BN1–6. For A, the Aug-24 BN runs
+are unambiguous (B had not been submitted) and are chosen. For B, the Sep-8 BN runs are ambiguous —
+A was submitted first — so `locate` fails, and the detail says A already has its own
 Aug-24 runs. That fact is what lets staff decide: re-run with `--accept-ambiguous` (recorded in
 `locate.json` under `accepted`) if these runs are this submission's, `--choose` the one run that
 is, or `--files-from` their own list.
@@ -533,7 +533,7 @@ run is recorded as `accepted_ambiguous`. With no surname in the summary nothing 
 (`_807_`, `_0807_`, `_PROT_0807_` or `_PROT0807_`, any case), `locate` exits **4**: use
 `ht_manifest.py`. The number is matched only right after the leading date and must end there
 (`_PROT_08070_` is not 0807), because anywhere else it collides with run counters —
-Exploris `Ex08312026_380_JE21.raw` would otherwise impersonate submission 0380. Before 2.9.1
+Exploris `Ex08312026_9380_XY21.raw` would otherwise impersonate submission 9380. Before 2.9.1
 the `PROT_` form was not recognised, so such a plate went to sample matching and found none
 of its samples. Its `next_step` passes this summary to `ht_manifest.py` (`--summary`), which then
 checks STAN's list against the record: only runs named for the submission go into its
@@ -642,15 +642,15 @@ Folders it creates are `g+rwxs,o+rx` (the tree is shared; umask 077 would lock c
 | link | on HIVE | over SMB (Mac/Windows) | Bioshare |
 |---|---|---|---|
 | **relative**, source and target both under the Flinders root (CoreOmics `views/`, e.g. `../../../../../../projects/2019/02/<id>`) | works | **visible and followable** — verified for a relative link to a `.raw` file and to a `.d` folder: both visible and readable | untested for `Data/raw_data` (see step 6) |
-| **absolute** `/nfs/lssc0/...` | works | **invisible** — PROT_0793 `share/raw`: 210 links on HIVE, 0 entries on the Mac mount; an absolute link placed beside the relative ones above was invisible too | — |
-| **into `/quobyte/...`** | works | **invisible** | **works only if Bioshare's file-streaming allows `/quobyte`** — PROT_0793 `share/search`: 59 links → `/quobyte/proteomics-grp/brett/PROT_0793` served nothing because Bioshare streams files through an Apache module whose allowed-folder list had `/quobyte` for http (port 80) but not https (443) — fixed 2026-09-16 (Adam Schaal) |
+| **absolute** `/nfs/lssc0/...` | works | **invisible** — an earlier submission's `share/raw`: 210 links on HIVE, 0 entries on the Mac mount; an absolute link placed beside the relative ones above was invisible too | — |
+| **into `/quobyte/...`** | works | **invisible** | **works only if Bioshare's file-streaming allows `/quobyte`** — the same submission's `share/search`: 59 links → `/quobyte/proteomics-grp/…/PROT_####` served nothing because Bioshare streams files through an Apache module whose allowed-folder list had `/quobyte` for http (port 80) but not https (443) — fixed 2026-09-16 by the Bioshare admins |
 
 Bioshare (`bioshareX/sendfile.py`) also serves a file only if its **realpath** is under the
 server's `DIRECTORY_WHITELIST`, and `check_symlinks_dfs` raises `IllegalPathException` for a
 symlink whose target is outside it — on the older code path that **locks the share**. Which
 paths are allowed is server configuration, and it can differ between http and https: Bioshare
 hands downloads to an Apache module with its own allowed-folder list, which had `/quobyte` for
-port 80 but not 443 until 2026-09-16. Brett reports PROT_0793's absolute `Data/raw_data` links
+port 80 but not 443 until 2026-09-16. Brett reports an earlier submission's absolute `Data/raw_data` links
 download.
 
 So: **links between two Flinders paths are relative. Deliverables in a share are real files,
@@ -754,7 +754,7 @@ with YYYY and MM the **literal** first two `-`-separated fields of `submitted` (
 `build_views.ensure_canonical`: `y, m = submitted.split()[0].split("-")[:2]`) — no timezone
 conversion, so `2026-08-31T23:30:00-07:00` is `2026/08`. **Verified live:** all 6 CoreOmics
 submissions made on the last evening of a month (already the next month in UTC) are filed under
-their LOCAL, literal month. Directories are `amschaal:proteomics-grp 2775`. The builder had
+their LOCAL, literal month. Directories are `<Bioshare admin>:proteomics-grp 2775`. The builder had
 **not** created `2026/09/` by 2026-09-16, so `deliver --apply` creates `<id>/share` itself —
 and never writes `<id>/.submission/`, which the builder owns. `/quobyte/proteomics-grp/coreomics/`
 is a **stale** copy (stops at 2026/03); never use it. Existing shares (4 of the 200 newest
@@ -766,8 +766,8 @@ submissions) have
 - **the session is not this submission's.** It must sit under the staged `work_dir`, or its
   `input/raw_files.txt` must list exactly the staged files. A stage record for a DIFFERENT
   submission above the session is refused outright. With no stage record at all, only
-  `--force`, after staff confirm (recorded as `session_ownership: NOT CHECKED`). A PROT_0806
-  session once delivered into PROT_0807's share with `verified: true`.
+  `--force`, after staff confirm (recorded as `session_ownership: NOT CHECKED`). A session of one
+  submission once delivered into another submission's share with `verified: true`.
 - **the delivery folder already has files.** Two deliveries mixed in one folder leave stale
   results beside new ones — use a new `--label`. (A size-guard job resuming its own interrupted
   folder is recognised by the `.core_delivery.json` it left.)
@@ -849,7 +849,7 @@ once let a copy overwrite a file outside the share).
 relative links in `<share>/raw/` to the staged files. The service project gets a relative
 `results_<date>` link to the delivery (a failure there is `[SKIPPED]`, not fatal).
 
-> ⚠ **Check once: relative `raw/` links in Bioshare.** Brett reports PROT_0793's absolute raw
+> ⚠ **Check once: relative `raw/` links in Bioshare.** Brett reports an earlier submission's absolute raw
 > links download from Bioshare, and a relative link resolves to the same files, but nobody has
 > opened a relative one in Bioshare yet. For the first raw-link delivery, **open the Bioshare
 > link yourself and download one raw file before `bioshare send`**. `deliver` prints this
@@ -860,7 +860,7 @@ relative links in `<share>/raw/` to the staged files. The service project gets a
 
 **Verification on `--apply` walks the WHOLE share:** a symlink inside this delivery, or a
 `raw/` link this run created that is absolute, broken or outside the Flinders root, fails.
-Links already in the share that this run did not create (PROT_0793's `search/ -> /quobyte`)
+Links already in the share that this run did not create (an earlier submission's `search/ -> /quobyte`)
 are listed as warnings and left untouched. Inside the delivery folder every file must be one this
 run delivered and readable by group and other. An error part-way still writes the MANIFEST,
 checksums and `delivery.json` with `verified: false`. **Exit 2 means do not share.**
@@ -884,7 +884,7 @@ python3 scripts/core_submission.py bioshare send   --summary ~/core/PROT_0807/su
 - **`status`** — `GET plugins/bioshare/submissions/<id>/submission_shares/` (verified with a
   staff token; paginated or a bare list, both handled). Keys: `id, submission, bioshare_id,
   name, notes, sub_folder, link_to_path, url`. The share whose `link_to_path` equals this
-  submission's share dir is marked linked (verified live on PROT_0793's real share). (`GET
+  submission's share dir is marked linked (verified live on a real submission's share). (`GET
   plugins/bioshare/shares/?lab_id=PROTEOMICS` returns **403** for lab members — not used.)
 - **`ensure`** — if nothing is linked, `POST` the same endpoint with
   `{"submission": <id>, "name": ..., "notes": ..., "link_to_path": <share_dir>}`, exactly what
@@ -1002,12 +1002,12 @@ EOF
 | 4 | `locate` | the submission is an HT plate | `ht_manifest.py` (step 1a) |
 | 5 | `deliver` | more than `--max-gb` to copy | `sbatch deliver_job.sh` |
 
-## The PROT_0793 lesson
+## The linked-share lesson
 
-PROT_0793 was searched and "shared" by linking: `share/raw` held 210 absolute `/nfs/...` links
-and `share/search` held 59 links into `/quobyte/proteomics-grp/brett/PROT_0793`. On HIVE the
+One submission was searched and "shared" by linking: `share/raw` held 210 absolute `/nfs/...` links
+and `share/search` held 59 links into `/quobyte/proteomics-grp/…/PROT_####`. On HIVE the
 share looked complete. Over SMB it showed **0** raw entries. The `search/` links served the
-collaborator nothing, because Bioshare streams files through an Apache module whose allowed-folder list had `/quobyte` for http (port 80) but not https (443) — fixed 2026-09-16 (Adam Schaal). Nothing about the share was wrong on
+collaborator nothing, because Bioshare streams files through an Apache module whose allowed-folder list had `/quobyte` for http (port 80) but not https (443) — fixed 2026-09-16 by the Bioshare admins. Nothing about the share was wrong on
 HIVE, and nothing reported an error.
 That is why `deliver` copies real files, makes only relative Flinders-to-Flinders links, and
 refuses to call a delivery done until it has walked the whole share and found no other symlink.
@@ -1049,7 +1049,7 @@ and run identify again; if that cannot be done now, carry on with the number sta
 them, buffer, beads, sample sheet) and record them with `submission_report.py attach --given`
 (step 3b) — labelled "given by the user", never as the CoreOmics record. **Never search
 `/quobyte/proteomics-grp/coreomics/.submissions_db`**: a stale snapshot, where a search for
-0756 matched an unrelated 2019 record. Then fetch the record where the key is
+0807 matched an unrelated 2019 record. Then fetch the record where the key is
 (`core_submission.py fetch <number> --out ~/core/PROT_####`, step 1c) and attach it once the
 session exists (step 1c.7, or 3b).
 
@@ -1058,8 +1058,8 @@ session exists (step 1c.7, or 3b).
 When Core staff answer step 0a's question with a **CoreOmics submission**, or name one ("search
 the data from submission 807", "analyze PROT_0807"), the PI, sample sheet, conditions and
 delivery folder come from CoreOmics — but the raw files must be *found*: a submission records
-`unique_id`s, not paths. Those ids are short, reused by other submissions (BN1–6 in both
-PROT_0794 and PROT_0776) and collide with plate wells (`A3` matches hundreds of files), so a
+`unique_id`s, not paths. Those ids are short, reused by other submissions (BN1–6 in two
+different submissions) and collide with plate wells (`A3` matches hundreds of files), so a
 glob quietly searches another lab's runs. `scripts/core_submission.py` does the bookkeeping and
 hands every judgment call back as an exit code. It never runs an engine. Keep one folder per
 submission, the same path locally and on HIVE (`~/core/PROT_0807`).
@@ -1097,7 +1097,7 @@ submission, the same path locally and on HIVE (`~/core/PROT_0807`).
 
    **Never ask for the key in the chat, echo it, or print the file**; a key pasted here anyway
    must be Regenerated in CoreOmics. `key_in_wrong_place` → the `mv` in `fix`. `no_lab_access`
-   → ask Brett (brettsp) to add their CoreOmics account to the Proteomics lab.
+   → ask Brett (the Core director) to add their CoreOmics account to the Proteomics lab.
    ```
    # coreomics_runs_on: this_computer
    python3 scripts/core_submission.py fetch 807 --out ~/core/PROT_0807
@@ -1253,7 +1253,7 @@ submission, the same path locally and on HIVE (`~/core/PROT_0807`).
 
 Only for a step-1c run. Core staff: board.md §3 row "delivered", once delivered.
 Deliverables go into the share as **real files**, so a delivery depends
-on no server setting. PROT_0793's `search/` was 59 links into `/quobyte`, and they silently
+on no server setting. One submission's `search/` was 59 links into `/quobyte`, and they silently
 served nothing to the collaborator because Bioshare's Apache file-streaming allowed `/quobyte`
 over http but not https (fixed 2026-09-16); links into `/quobyte` are also invisible to staff
 over SMB. So `deliver` copies (about 0.5 GB per search), and the only links it makes are
@@ -1333,7 +1333,7 @@ python3 scripts/core_submission.py email-draft --summary ~/core/PROT_0807/submis
   error mid-copy still writes the MANIFEST and `delivery.json` with `verified: false`. **Exit 2
   from `--apply` means do not share.** Over 5 GB it exits 5 with a `deliver_job.sh` (golden
   rule #3).
-- **Check raw links once in Bioshare.** Brett reported PROT_0793's (absolute) raw links download
+- **Check raw links once in Bioshare.** Brett reported an earlier submission's (absolute) raw links download
   from Bioshare; relative links resolve to the same files, but nobody has yet opened one there.
   On the first raw-link delivery, open the Bioshare link and download one raw file before `send`.
 - `bioshare ensure --apply` registers the share dir with CoreOmics' Bioshare plugin (after

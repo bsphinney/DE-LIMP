@@ -6,7 +6,7 @@ the humans ask for it.
 WHY THIS EXISTS
 ---------------
 Brett (2026-09-29): "can we build a function where our claudes can work together in slack
-unattended if we ask them to?" Brett's Claude (a Mac) and Michelle's Claude (Windows, Git Bash)
+unattended if we ask them to?" Brett's Claude (a Mac) and a staff member's Claude (Windows, Git Bash)
 work on one analysis in a thread both people read and can step into at any time. Each agent
 proposes, runs and checks work; everything it says goes through the Core's Slack app, with a
 name ("Claude (Brett)") and machine-readable metadata.

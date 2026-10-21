@@ -247,7 +247,7 @@ def main():
     ppm_source = ("; ".join(sop) if len(sop) == 2 else derived if not sop else
                   f"{sop[0]}; the instrument's own values: {derived}")
 
-    # gabrig 2026-09-23: a Fusion Lumos with no resolution exited 0 with "resolution unknown" in
+    # A Core member, 2026-09-23: a Fusion Lumos with no resolution exited 0 with "resolution unknown" in
     # the manifest and nothing asked the user. Still exit 0 -- callers rely on it -- but say so
     # on stderr and at the top of the manifest and stdout, where step 4's confirmation reads.
     ask = resolution_question(cls, engine, r1, r2)

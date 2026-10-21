@@ -7,7 +7,7 @@ standing approval, make_podcast.CORE_CLOUD_OK, the one place that text lives. Wi
 no usable local Python, so their podcast runs on HIVE: check through hive_exec.sh, then a SLURM
 job (make_podcast.py job) that renders in Gemini voices, verifies, links and shares -- minutes of
 network calls never run on the login node. On HIVE the key is the Core's shared one
-(/quobyte/proteomics-grp/.config/gemini_key: owner brettsp, group proteomics-grp, mode 640),
+(/quobyte/proteomics-grp/.config/gemini_key: owner bstaff, group proteomics-grp, mode 640),
 read last, for a Core run only, and only while the Core's trust rule holds and accounts outside
 the group cannot read it. setup.sh puts google-genai >= GENAI_MIN in the pipeline env.
 
@@ -351,9 +351,9 @@ class CoreRunConsent(CoreKeyFile, T.Workspace):
             calls.append(argv)
             return subprocess.CompletedProcess(argv, 0, stdout=self.hive_answer, stderr="")
         answers = [
-            (json.dumps({"ok": True, "by": "brettsp", "checked": "on the Core staff list (/q)"}),
+            (json.dumps({"ok": True, "by": "bstaff", "checked": "on the Core staff list (/q)"}),
              0, None),
-            (json.dumps({"ok": True, "by": "brettsp", "checked": "NOT VERIFIED: no list"}), 2,
+            (json.dumps({"ok": True, "by": "bstaff", "checked": "NOT VERIFIED: no list"}), 2,
              "NOT VERIFIED"),
             (json.dumps({"ok": False, "error": "--by 'x' is not on the Core staff list"}), 2,
              "is not on the Core staff list"),
@@ -374,7 +374,7 @@ class CoreRunConsent(CoreKeyFile, T.Workspace):
         self.assertEqual(calls[0][-1], 'python3 ~/proteomics-pipeline/scripts/staff.py check '
                                        '--by "$(id -un)"')
         self.assertTrue(calls[0][1].endswith("hive_exec.sh"))
-        self.assertEqual(self.staff_record()[0]["by"], "brettsp")
+        self.assertEqual(self.staff_record()[0]["by"], "bstaff")
 
     def test_cloud_ok_never_reaches_the_core_key(self):
         self.core_session()

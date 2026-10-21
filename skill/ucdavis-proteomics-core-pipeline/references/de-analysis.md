@@ -107,7 +107,7 @@ Needs **R 4.5+ / Bioconductor 3.22+**; setup.sh pins **limpa ≥ 1.4.0**.
 
 **The numbers depend on the limpa version.** On > 2,000 precursors `dpcCN()` fits the curve
 on a 2,000-row subset: a seeded random sample in limpa 1.2.x, a systematic one (ordered by
-missingness, then mean) in 1.4. On PROT_0756 v2 that moved |logFC| by at most 0.064 (median
+missingness, then mean) in 1.4. On the mouse-brain IP cohort v2 that moved |logFC| by at most 0.064 (median
 ≤ 0.006) and the significant sets by Jaccard 0.958–1.000. `de_provenance.json` records
 `limpa_version`: **compare analyses only within one limpa version** (detail and numbers:
 `references/environment.md`, "Results depend on the limpa version").
@@ -231,7 +231,7 @@ and fitting them as independent throws the pairing away. Put the unit in its own
   correlation is applied to every protein.
 - **Otherwise → random**, the way limma fits multi-level experiments: one consensus
   within-block correlation estimated across all proteins by `duplicateCorrelation()`, used
-  by `lmFit(block =, correlation =)`. This is the nested case (mice within age, PROT_0756):
+  by `lmFit(block =, correlation =)`. This is the nested case (mice within age, the mouse-brain IP cohort):
   a fixed mouse term would be aliased with the age groups and between-mouse contrasts need
   the random effect. `--block-effect fixed` on a nested block stops before quantification.
 - **Nested in a covariate, not the groups** (each patient's pre/post pair run in one
@@ -276,7 +276,7 @@ and fitting them as independent throws the pairing away. Put the unit in its own
     simulation; a follow-up.)
   - `all`: every contrast from the blocked fit.
 
-  **Why `within` is the default** (PROT_0756: 6 mice × 5 IPs, consensus correlation
+  **Why `within` is the default** (the mouse-brain IP cohort: 6 mice × 5 IPs, consensus correlation
   0.17). A one-sample-per-mouse age contrast compares independent samples, and in a
   balanced design the independent fit's variance is unbiased for every protein. It is not
   exact: the pooled residuals come from the same mice across groups, so they share the mouse
@@ -486,7 +486,7 @@ protein and a contaminant entry can carry the contaminant's signal.
   then every protein under `Indistinguishable Proteins`, so a `Cont_` entry listed only there is
   seen, as any member of a DIA-NN group is (before 2.10 only the leading protein was read).
 - **Before 2.9 Sage slipped past.** `adapt_sage` wrote Sage's full FASTA IDs
-  (`sp|Cont_P02769|ALBU_BOVIN`), so no Sage DE ever had a contaminant removed. gabrig's HeL50
+  (`sp|Cont_P02769|ALBU_BOVIN`), so no Sage DE ever had a contaminant removed. A Core member's HeL50
   UnvPe tested 171 `Cont_` groups, while methods.txt said "none".
 - **Counts are distinct items in the report's own unit** (`contaminant_unit` in contaminants.R,
   from the declared quantity level): DIA-NN precursors, Sage peptides (`Peptide.Id`, written by
@@ -514,7 +514,7 @@ live in `scripts/contaminants.R` (the tag mirrors `fetch_fasta.py`'s `CONT_TAG`;
 asserts it).
 
 Why it exists: DIA-NN's `--cont-quant-exclude` only shapes DIA-NN's OWN quantities, and
-`run_de.R` re-quantifies from the report. On Silva08172026 (mouse brain IPs, 2026-09-24)
+`run_de.R` re-quantifies from the report. On the mouse-brain IP cohort (2026-09-24)
 all 121 `Cont_` groups — bovine serum proteins from the antibody prep — went into the DE
 and came out as hits, while the Methods said they were excluded. With the filter the same
 report loses 2,196 precursors: the 121 `Cont_` groups, plus the shared peptides of 47
@@ -741,13 +741,13 @@ they are fitted as independent and the pairing is lost. Give the unit its own
   subject): a **fixed** subject effect (`~ 0 + groups + Patient`) — the exact paired
   analysis (type I 0.050 and power 0.95 at every per-protein correlation, where the
   random effect drifts 0.078 → 0.010 and loses power to 0.76).
-- **Nested / multi-level** (mice within age, as PROT_0756): a **random** effect via limma
+- **Nested / multi-level** (mice within age, as the mouse-brain IP cohort): a **random** effect via limma
   `duplicateCorrelation` (limpa's `dpcDE` takes it natively). `--block-scope within` (the
   default) reports within-mouse contrasts (bait vs IgG) from the blocked fit and
   between-mouse contrasts that use one sample per mouse (Old vs Young for one bait) from
   the fit with samples independent — one run, one record (`block.contrast_model`). The
   single consensus correlation understates between-mouse variance for proteins that vary
-  strongly animal to animal (PROT_0756: SE 0.86× where it should be 1×), so a
+  strongly animal to animal (the mouse-brain IP cohort: SE 0.86× where it should be 1×), so a
   between-mouse contrast that must use the blocked fit (pooled over baits, or
   `--block-scope all`) carries a `CAUTION` — define age contrasts per bait instead.
 State n per group in mice, not IPs. run_de.R prints a note when a column looks like a

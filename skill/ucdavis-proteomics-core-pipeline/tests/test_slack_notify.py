@@ -1181,7 +1181,7 @@ class RunLogOutcomes(unittest.TestCase):
                      "out_not_found", "session_not_found"):
             res, _ = self._rr({"recorded": False, "reason": code,
                                "detail": "PermissionError: [Errno 13] Permission denied: "
-                                         "'/quobyte/proteomics-grp/skill_runs/x' (brettsp@hive)"})
+                                         "'/quobyte/proteomics-grp/skill_runs/x' (bstaff@hive)"})
             self.assertIs(res.get("error"), True, code)
             self.assertTrue(res["detail"].startswith(f"{code}: PermissionError"), res)
             self.assertIn("/quobyte/", res["detail"])          # the full text stays in the result
@@ -1193,13 +1193,13 @@ class RunLogOutcomes(unittest.TestCase):
         """MANIFEST.txt goes to collaborators in the zip: the failure's KIND only."""
         for detail in ("error: FileExistsError: [Errno 17] File exists: "
                        "'/quobyte/proteomics-grp/skill_runs/sessions'",
-                       "ssh_failed: brettsp@hive.hpc.ucdavis.edu: Permission denied (publickey)",
+                       "ssh_failed: bstaff@hive.hpc.ucdavis.edu: Permission denied (publickey)",
                        "out_not_found: /quobyte/proteomics-grp/SERVICE/x/search_out",
-                       "record_run.py exit 1: Traceback ... /home/brettsp/x.py"):
+                       "record_run.py exit 1: Traceback ... /home/bstaff/x.py"):
             reason = detail.split(":")[0].replace("record_run.py exit 1", "error")
             note = ns.run_log_manifest({"logged": False, "error": True, "reason": reason,
                                         "detail": detail})[2]
-            for leak in ("/quobyte", "/home", "brettsp", "hive.hpc", "@"):
+            for leak in ("/quobyte", "/home", "bstaff", "hive.hpc", "@"):
                 self.assertNotIn(leak, note, (detail, note))
             self.assertTrue(note.endswith("-- see the finalize output"), note)
 
@@ -1345,10 +1345,10 @@ class JobEndChoices(unittest.TestCase):
         """The shape of fran_deposit.stage_argv() (the FRAN side's builder, on its branch):
         stage --out O [--fasta-meta M] [--name N] [--qc | --not-qc]; a blank name dropped."""
         py = sys.executable
-        self.assertEqual(ns._stage_argv("/s/fran_deposit.py", "/o", name=" PROT_0793 mouse — x ",
+        self.assertEqual(ns._stage_argv("/s/fran_deposit.py", "/o", name=" PROT_9793 mouse — x ",
                                         qc=True, fasta_meta="/m"),
                          [py, "/s/fran_deposit.py", "stage", "--out", "/o", "--fasta-meta", "/m",
-                          "--name", "PROT_0793 mouse — x", "--qc"])
+                          "--name", "PROT_9793 mouse — x", "--qc"])
         self.assertEqual(ns._stage_argv("/f", "/o", name="  ", qc=False),
                          [py, "/f", "stage", "--out", "/o", "--not-qc"])
         self.assertEqual(ns._stage_argv("/f", "/o"), [py, "/f", "stage", "--out", "/o"])
@@ -1359,7 +1359,7 @@ class JobEndChoices(unittest.TestCase):
         Both ship in this skill, so pin them to each other on every input shape."""
         import fran_deposit as fd
         path = os.path.abspath(fd.__file__)
-        for kw in ({}, {"name": " PROT_0793 mouse — x "}, {"name": "  "}, {"qc": True},
+        for kw in ({}, {"name": " PROT_9793 mouse — x "}, {"name": "  "}, {"qc": True},
                    {"qc": False}, {"fasta_meta": "/m"},
                    {"name": "Lumos QC", "qc": True, "fasta_meta": "/m"},
                    {"name": "HeLa study", "qc": False}):

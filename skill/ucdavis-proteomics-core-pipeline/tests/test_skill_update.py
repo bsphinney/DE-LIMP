@@ -173,7 +173,7 @@ class Harness(unittest.TestCase):
         return root
 
     def laptop(self, main="2.11.2", installed="2.10.0"):
-        """msalemi's laptop on 2026-10-07: main at 2.11.2, installed and catalogue at 2.10.0."""
+        """mstaff's laptop on 2026-10-07: main at 2.11.2, installed and catalogue at 2.10.0."""
         self.release(installed)
         self.catalogue()
         self.release(main)
@@ -302,7 +302,7 @@ class CheckUpdate(Harness):
 class UpdateOverHttps(Harness):
     def test_the_fake_reproduces_the_laptop(self):
         """Without the refresh, `claude plugin update` alone says 'already at the latest
-        version (2.10.0)' with main at 2.11.2 -- what msalemi saw."""
+        version (2.10.0)' with main at 2.11.2 -- what mstaff saw."""
         self.laptop()
         r = subprocess.run([self.claude, "plugin", "update", ID], capture_output=True, text=True,
                            env=self.env(FAKE_CLAUDE_SSH=1), timeout=30)

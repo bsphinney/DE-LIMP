@@ -386,7 +386,7 @@ def _meta_candidates(out, explicit_meta=None):
     """The <fasta>.meta.json files that describe THIS search's database, best first.
 
     Globbing the neighbourhood and taking the first hit is how a mouse search was handed to FRAN
-    with the HUMAN database: PROT_0793/ holds human_, mouse_ and mouse_mousecont .fasta.meta.json
+    with the HUMAN database: one submission's folder holds human_, mouse_ and mouse_mousecont .fasta.meta.json
     side by side, `sorted()` puts human first, and search_mouse_mousecont's manifest recorded
     human_UP000005640.fasta (seen in the drop dir on 2026-09-24). So a neighbouring meta is only
     used when it can be tied to a FASTA the search really used (search_fastas), and when the
@@ -781,7 +781,7 @@ def write_receipt(out, data):
 #             "07162026_HE50_60-spd-dia-_S1-A1_1_23036", "FL030926_HeL50_90m_3"
 #   kept:     "HeLa_digest_timecourse", "aqc_buffer_study", "QCM_study", "Plasma_liver2",
 #             "HeLa50ng_titration"
-#   agent:    "PROT_0812 plasma + pooled QC" -> needs_agent_check
+#   agent:    "PROT_0807 plasma + pooled QC" -> needs_agent_check
 # "HeLa" alone is deliberately NOT a QC signal: HeLa digests are real experiments too.
 QC_NAME_RE = re.compile(r"(?i)(?<![a-z0-9])qc(?![a-z])")
 # The Core's HeLa STANDARD -- 50 ng of HeLa digest, named HE50 / HeL50 / Hel-50 / HeLa50(ng) on its
@@ -792,7 +792,7 @@ QC_NAME_RE = re.compile(r"(?i)(?<![a-z0-9])qc(?![a-z])")
 HELA_STD_RE = re.compile(r"(?i)(?<![a-z0-9])he(?:la?)?[-_]?50(?:ng)?(?!\d)")
 RUN_METHOD_RE = re.compile(r"(?i)(?<![a-z0-9])\d{2,3}[-_]?(?:spd|m|min)(?![a-z0-9])")
 # A Core submission id (PROT_ID_RE, imported above). A name or path that carries one is a
-# CUSTOMER study, whatever QC word it also carries ("PROT_0812 plasma + pooled QC"), so the name
+# CUSTOMER study, whatever QC word it also carries ("PROT_0807 plasma + pooled QC"), so the name
 # rule refers it to a person (needs_agent_check) instead of deciding qc_run -- and qc_run, once
 # recorded, blocks later stages.
 # What a NAME-rule verdict says in its reason text. A qc_run recorded on one of these is re-judged
@@ -908,7 +908,7 @@ def is_qc_run(out, session=None, *, names=(), override=None):
     labelled += [("output_dir", c) for c in [x for x in real.split("/") if x][-3:]]
     # The QC signal is read on the last three path components, as FRAN reads them; a PROT id on
     # EVERY component. The Core files a search wherever the submission's tree puts it (in
-    # SERVICE/<lab>/PROT_0812/diann/2.7.0/search_out it is 4th from the end), and a PROT id can
+    # SERVICE/<lab>/PROT_0807/diann/2.7.0/search_out it is 4th from the end), and a PROT id can
     # only turn qc_run into needs_agent_check -- reading further can never exclude anything.
     prot_texts = [t for _, t in labelled] + [c for p in dict.fromkeys((out, real))
                                              for c in p.split("/") if c]
@@ -941,7 +941,7 @@ def _recorded_qc(receipt, manifest):
 
     EXCEPT a verdict the NAME rule reached (NAME_RULE_MARKS in its qc_rule): that is not binding.
     decide_qc re-judges it by today's rule, with the name it was judged on. Otherwise a rule fix
-    could never reach a search it had already misjudged -- "PROT_0812 plasma + pooled QC", recorded
+    could never reach a search it had already misjudged -- "PROT_0807 plasma + pooled QC", recorded
     qc_run, stayed blocked for every later stage."""
     if receipt.get("status") == "qc_run" and not _name_rule_verdict(receipt.get("qc_rule")):
         return True, (f"QC run: excluded by policy (recorded by {receipt.get('decided_by') or '?'} "
@@ -1686,7 +1686,7 @@ def verify(a):
 
 INGEST_LOG_DIR = "/quobyte/proteomics-grp/de-limp/fran_refresh/logs"
 SUBMIT_LOG = "auto_ingest_submit.log"
-# The cron's own cadence and limits (brettsp crontab `23 */4 * * *`; fran_auto_ingest.sbatch
+# The cron's own cadence and limits (a Core admin's crontab `23 */4 * * *`; fran_auto_ingest.sbatch
 # `--time=08:00:00`). A run is "overdue" after three missed 4-hourly ticks.
 NOT_RUNNING_AFTER_H = 12
 JOB_TIME_LIMIT_H = 8
@@ -2650,7 +2650,7 @@ def health(a):
 
 # Where Core searches live. The Quobyte SERVICE tree and the Flinders service tree hold the facility's
 # customer work; ~/proteomics-pipeline is the skill's install on HIVE (verified 2026-09-24 to hold
-# only presets/, references/, scripts/ for brettsp -- kept so a member's sessions there are found).
+# only presets/, references/, scripts/ for the Core admin -- kept so a member's sessions there are found).
 # The Flinders share's HIVE path and its service tree are hive_shares.tsv's (share_map.py), read
 # when a backfill needs them -- never a second copy here.
 
@@ -2915,7 +2915,7 @@ def plan_backfill(dirs, apply=False, members=None, prefixes=None, runs=None):
     and then check() -- the same gate `stage` uses, with its reason codes.
 
     The log check matters: searches have reached FRAN by other routes than the drop dir. On
-    2026-09-08 FRAN's own queue ingested PROT_0793/search_mouse and search_hela by their real paths,
+    2026-09-08 FRAN's own queue ingested a submission's search_mouse and search_hela by their real paths,
     and neither has a receipt -- staging them again would only put two duplicates in front of the
     cron's duplicate guard."""
     prefixes = core_prefixes() if prefixes is None else prefixes      # read once, not per dir

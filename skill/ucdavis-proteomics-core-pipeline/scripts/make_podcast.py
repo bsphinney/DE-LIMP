@@ -160,7 +160,7 @@ TIER_MEMORY_DAYS = 7.0
 PREFLIGHT_LINES = ("This is a short sound check.", "And this is the second voice.")
 TERMS_URL = "https://ai.google.dev/gemini-api/terms"
 KEY_FILE = os.path.join("~", ".config", "ucdavis-proteomics", "gemini_key")
-# The Core's shared key on HIVE (Brett installs it: owner brettsp, group proteomics-grp, mode
+# The Core's shared key on HIVE (Brett installs it: owner a Core admin, group proteomics-grp, mode
 # 640). Read last, for a Core run only (--core-run), and only while slack_collab.trust_problem
 # holds (a Core admin owns it and its folder; nobody else can write either) and other accounts
 # cannot read it. Tests replace this constant; nothing in the environment can.
@@ -812,8 +812,8 @@ def title_tokens(text, initial=False):
 
 def spoken_digits(spoken):
     """The digits a spoken form says, in order: numerals as written, number words read the way
-    verify reads them ("two point eight six" -> 286, "sep two fifty" -> 250, "zero seven five
-    six" -> 0756, "oh" as 0)."""
+    verify reads them ("two point eight six" -> 286, "sep two fifty" -> 250, "zero eight zero
+    seven" -> 0807, "oh" as 0)."""
     words = [[("zero" if w.lower() == "oh" else w.lower()), 0, 0]
              for w in re.findall(r"[A-Za-z]+|\d+", spoken or "")]
     return "".join(c for t in _spoken_numbers(words) for c in t[0] if c.isdigit())
@@ -3503,8 +3503,8 @@ _MULT = {"hundred": 100, "thousand": 1000, "million": 1000000}
 def _spoken_numbers(words):
     """Runs of number words as one number, the way a transcript that "writes numbers as digits"
     has them. Read the way people say numbers: "five thousand and twenty four" -> 5024, "forty
-    six" -> 46, "two fifty" -> 250, "nineteen ninety" -> 1990, and digit by digit, "zero seven
-    five six" -> 0756. A tens word takes a following unit; any other pair of number words
+    six" -> 46, "two fifty" -> 250, "nineteen ninety" -> 1990, and digit by digit, "zero eight
+    zero seven" -> 0807. A tens word takes a following unit; any other pair of number words
     without a multiplier between them starts a new group of digits."""
     out, i = [], 0
     isnum = lambda w: w in _UNITS or w in _TENS or w in _MULT        # noqa: E731

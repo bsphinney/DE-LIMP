@@ -667,7 +667,7 @@ def infer_staged_content(n_entries, gene_count, n_isoform=0, tol=GENE_COUNT_TOLE
 def describe_staged(proteome, path, text, content_requested):
     """-> (meta, staged_file, content_check, warnings) for a pre-staged proteome.
 
-    Why (gabrig, 2026-09-23, human HeLa as a HIVE Core member): the --hive branch used to
+    Why (a HIVE Core member, 2026-09-23, human HeLa): the --hive branch used to
     leave `meta` empty, so reusing UP000005640_9606.fasta wrote organism "", taxid 0 and
     no release into the sidecar -- although the proteome ID was known. make_methods.py
     and fran_deposit.py both read organism/taxid from that sidecar.
@@ -837,7 +837,7 @@ def resolve_contaminants(set_name, explicit_path, use_hive, workdir):
 # contaminant entry that adds no sequence of its own is removed before the database is
 # written, and every removal is recorded in the sidecar.
 #
-# Identity is not enough (PROT_0756, mouse brain IPs, 30 timsTOF runs, 2026-09-25): bovine
+# Identity is not enough (a mouse-brain IP cohort, 30 timsTOF runs, 2026-09-25): bovine
 # EF1A1 (Cont_P68103) and 1433Z (Cont_P63103) each differ from the mouse protein by ONE
 # residue, so the exact rule kept them -- and in the v1 search both were Cont_-only protein
 # groups in all 30 runs while mouse Eef1a1 had no protein group at all. So a second, peptide-
@@ -1744,7 +1744,7 @@ def matched_target_accs(rec):
     that sequence, or that contains it. A shared_peptides record's target_accs are every target
     sharing even ONE peptide with it -- a whole paralog family -- so only its matched pair,
     target_acc (the target sharing the most peptides), is the protein it cannot be told apart
-    from. Why (PROT_0756 v2, 2026-09-28): with the family flattened into the flagged set, AUDIT
+    from. Why (a mouse-brain IP cohort, v2, 2026-09-28): with the family flattened into the flagged set, AUDIT
     listed Ywhab/e/g/h/q, Sfn, Tuba8, Tubal3 and Eef1a2 -- abundant endogenous brain proteins --
     as possible contamination, because 1433Z_BOVIN, TBA1D_BOVIN and EF1A1_BOVIN each share a
     conserved peptide with them. target_accs stays in the sidecar as information."""
@@ -2432,7 +2432,7 @@ def cmd_fetch(a):
     # A keratin sample (hair, wool, feather, skin, nail ...): keratin is the ANALYTE. A keratin-
     # family Cont_ entry left in the database takes its peptides away from the sample -- DIA-NN's
     # --cont-quant-exclude Cont_ keeps every peptide it shares out of quantification, and run_de.R
-    # removes every precursor that names a Cont_ entry (msalemi's hair benchmark SET28, 2026-09-29:
+    # removes every precursor that names a Cont_ entry (a Core member's hair benchmark SET28, 2026-09-29:
     # ~46 keratin-family Cont_ entries survived the target-identity rule for human -- KRT34,
     # KRTAPs, mouse hair and sheep wool keratins). So they come out here, where the database is
     # built -- from a supplied database's own Cont_ entries too (a --path / --hive file that already

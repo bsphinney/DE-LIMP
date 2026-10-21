@@ -399,8 +399,8 @@ foreground: a background call is never counted.
 **Core data with a CoreOmics submission (step 1)? Attach it now -- BEFORE the experiment type below**, where the session lives (`experiment_type.py set --source submission` reads the attached record and refuses without one; set before attach, the submission's ASK never fired):
 
 ```
-python3 scripts/submission_report.py attach --session <session> --record ~/core/PROT_0756   # fetch's folder
-python3 scripts/submission_report.py attach --session <session> --given '{"internal_id": "PROT_0756", ...}'  # no token
+python3 scripts/submission_report.py attach --session <session> --record ~/core/PROT_0807   # fetch's folder
+python3 scripts/submission_report.py attach --session <session> --given '{"internal_id": "PROT_0807", ...}'  # no token
 ```
 
 It stores ONE allowlisted record (`input/submission.json` + `session.json`; never an email,

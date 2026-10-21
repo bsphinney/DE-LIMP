@@ -3,7 +3,7 @@
 
 Brett, 2026-09-24: collaborators cannot read a .md, an AI agent handed the folder needs a guide
 to it, and nothing said where the files and the raw data are on HIVE. A real hive_remote session
-(Silva08172026) had a README that named no HIVE path and claimed an input/raw_files.txt that did
+(the mouse-brain IP cohort) had a README that named no HIVE path and claimed an input/raw_files.txt that did
 not exist -- the raw paths were only in output/search/file_list.txt and search_provenance.json.
 
 What these tests pin:
@@ -307,13 +307,13 @@ class Agents(unittest.TestCase):
             self.assertNotIn("input/submission.json", text)        # no record, no line
 
             import submission_report
-            submission_report.attach(p["session_dir"], {"internal_id": "PROT_0001",
+            submission_report.attach(p["session_dir"], {"internal_id": "PROT_9101",
                                                         "sample_prep": "lab",
                                                         "prot_or_pep": "peptides"})
             text = session_docs.agents_md(session_docs.gather(p["session_dir"]))
             self.assertIn("`input/submission.json` |", text)
             self.assertIn("the submitting lab prepared the samples and sent peptides", text)
-            self.assertIn("- CoreOmics submission: PROT_0001", text)
+            self.assertIn("- CoreOmics submission: PROT_9101", text)
 
     def test_dpc_in_its_own_words(self):
         with tempfile.TemporaryDirectory() as d:
@@ -349,7 +349,7 @@ class Agents(unittest.TestCase):
             self.assertNotIn("reference line on the volcano only", text)
 
     def test_the_rule_is_written_for_people_with_the_recorded_value(self):
-        """PROT_0756 v2's README read "Significance: adj.P.Val < adjp (BH); no fold-change
+        """PROT_9756 v2's README read "Significance: adj.P.Val < adjp (BH); no fold-change
         filter (adjp = 0.05)" -- the record's variable name, printed as is."""
         want = ("adjusted p < 0.05 (Benjamini–Hochberg, within each comparison); no fold-change "
                 "filter")

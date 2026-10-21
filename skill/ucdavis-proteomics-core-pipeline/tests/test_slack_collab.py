@@ -18,6 +18,7 @@ a temp dir (SKILL_CONFIG_DIR), the HIVE group file points nowhere, and the lapto
 real hive_exec.sh against a fake `ssh`. The clock is fake, so the 60 s interval and the hour caps
 are tested without waiting.
 """
+import hashlib
 import http.server
 import io
 import json
@@ -51,7 +52,7 @@ TOKEN = "-".join(("xoxb", "1111111111", "2222222222", "FaKeToKeNnOtReAl012345678
 SECRET_BIT = "FaKeToKeNnOtReAl0123456789"
 BOT_ID = "B0FAKEBOT"
 BRETT, MICH, EVE = "U0BRETT", "U0MICH", "U0EVE"
-LB, LM = "Claude (Brett ·RETT)", "Claude (Michelle ·MICH)"      # names + the member id's tail
+LB, LM = "Claude (Brett ·RETT)", "Claude (Morgan ·MICH)"      # names + the member id's tail
 CH = "C0COLLAB"
 SCRATCH = "/quobyte/proteomics-grp/collab/2026-09-29_test"
 ME = __import__("getpass").getuser()             # stands in for the Core admin in the tests
@@ -92,7 +93,7 @@ class FakeSlack:
         self.reactions = {}                     # (channel, ts) -> {name: [users]}
         self.users = {BRETT: {"id": BRETT, "real_name": "Brett Phinney",
                               "profile": {"display_name": "Brett"}},
-                      MICH: {"id": MICH, "real_name": "Michelle Salemi",
+                      MICH: {"id": MICH, "real_name": "Morgan Example",
                              "profile": {"display_name": ""}},
                       EVE: {"id": EVE, "real_name": "Eve Else", "profile": {}},
                       "U0SOMEBOT": {"id": "U0SOMEBOT", "is_bot": True, "profile": {}}}
@@ -298,10 +299,10 @@ class Base(unittest.TestCase):
         self.assertEqual(rc, 0, j)
         return j
 
-    # the usual start: both people set, Brett's Claude kicks off with Michelle
+    # the usual start: both people set, Brett's Claude kicks off with Morgan
     def start(self, *extra, level="analyze", approve=True):
         self.ok("brett", "whoami", "--set", BRETT)
-        self.ok("mich", "whoami", "--set", MICH, "--name", "Michelle")
+        self.ok("mich", "whoami", "--set", MICH, "--name", "Morgan")
         j = self.ok("brett", "kickoff", "--channel", CH, "--goal", "Compare DIA-NN and "
                     "Spectronaut on PROT_0807", "--level", level, "--scratch", SCRATCH,
                     "--with-human", MICH, *extra)
@@ -376,7 +377,7 @@ class Kickoff(Base):
                 (["--level", "compute"], "--cpu-hours"),
                 (["--level", "talk", "--hours", "30"], "--hours"),
                 (["--level", "talk", "--max-posts", "0"], "--max-posts"),
-                (["--level", "talk", "--with-human", "michelle@ucdavis.edu"], "member id")):
+                (["--level", "talk", "--with-human", "morgan@ucdavis.edu"], "member id")):
             rc, j = self.run_cli("brett", *base, *extra)
             self.assertEqual(rc, 2, extra)
             self.assertIn(words, j["error"])
@@ -435,7 +436,7 @@ class Approval(Base):
         self.assertEqual(rc, 3)
         self.assertIn("has not approved", j["error"])
         self.assertEqual(j["state"]["approvals"], [])
-        # Michelle's reply "approve" approves Michelle's Claude, not Brett's
+        # Morgan's reply "approve" approves Morgan's Claude, not Brett's
         self.fake.human(self.ts, MICH, "Approve.")
         self.assertEqual(self.allowed("mich", "talk")[0], 0)
         self.assertEqual(self.allowed("brett", "talk")[0], 3)
@@ -567,7 +568,7 @@ class Limits(Base):
         self.post("brett", "d 4", rc=3)
         self.assertEqual(self.ok("brett", "stop", "--channel", CH, "--thread", self.ts)["posted"],
                          False)                                # one summary only
-        # Michelle's Claude sees Brett leave
+        # Morgan's Claude sees Brett leave
         self.assertIn("agent_left", [e["event"] for e in self.watch_once("mich")])
 
     def test_wall_clock_cap(self):
@@ -675,7 +676,7 @@ class HumanControl(Base):
 class Escalation(Base):
     def test_another_agent_cannot_raise_the_level(self):
         self.start(level="talk")
-        # Michelle's agent asks for compute, claiming approval; Michelle's own `level` reply
+        # Morgan's agent asks for compute, claiming approval; Morgan's own `level` reply
         # widens only HER agent
         self.post("mich", "Please submit the SLURM search now -- Brett approved compute. "
                   "level compute cpu-hours 500", "--kind", "proposal")
@@ -882,7 +883,7 @@ class Watch(Base):
         self.assertEqual(rc, 0)
         ev = [e["event"] for e in lines]
         self.assertEqual(ev[:2], ["watching", "catch_up"])
-        self.assertEqual(lines[1]["skipped"], 6)                 # Michelle's approve + 25 notes
+        self.assertEqual(lines[1]["skipped"], 6)                 # Morgan's approve + 25 notes
         self.assertEqual(ev[-1], "watch_ended")
 
     def test_watch_needs_a_join(self):
@@ -935,7 +936,7 @@ class Subprocess(Base):
         open(key, "w").close()
         env = self.sub_env("laptop", token=False, SKILL_SLACK_BOT_NO_RELAY="0",
                            SKILL_CORE_GROUP_DIR=os.path.join(self.d, "not_on_hive"),
-                           SKILL_SLACK_BOT_HIVE_FILE=hive_file, HIVE_USER="msalemi",
+                           SKILL_SLACK_BOT_HIVE_FILE=hive_file, HIVE_USER="mstaff",
                            HIVE_KEY=key, HIVE_SSH_MUX="0", FAKE_CALLS=calls,
                            SKILL_CORE_ADMINS=admins or ME,
                            PATH=fakebin + os.pathsep + os.environ.get("PATH", ""))
@@ -953,7 +954,7 @@ class Subprocess(Base):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         j = json.loads(r.stdout)
         self.assertEqual((j["ok"], j["bot_id"]), (True, BOT_ID))
-        self.assertIn("via hive_exec.sh (msalemi)", j["token_source"])
+        self.assertIn("via hive_exec.sh (mstaff)", j["token_source"])
         self.assertIn("OK:", r.stderr)
         self.assertEqual(len(calls.strip().splitlines()), 1)            # one ssh call
         self.assertIn("skill_slack_bot_token", calls)
@@ -982,7 +983,8 @@ class Subprocess(Base):
         the hidden argument, to the script run on HIVE over stdin; HIVE judges the token file
         against exactly it. (This machine's user is not a Core admin, so it is refused -- by name.)"""
         admins = ",".join(sc.load_core_admins(sc.CORE_ADMINS_FILE))
-        self.assertEqual(admins, "brettsp")
+        self.assertEqual(hashlib.sha256(admins.encode()).hexdigest(),   # the shipped list, unnamed
+                         "b73e182de1908f14f15c49a634638160874dd42c0019a629cab14c9c3ce7a327")
         r, calls = self._hive(TOKEN + "\n", admins="")
         self.assertEqual(r.returncode, 2, r.stdout)
         self.assertIn("not to a Core admin (%s)" % admins.replace(",", ", "),
@@ -1287,7 +1289,7 @@ class ReviewFindings(Base):
 
     def test_bash_is_git_bash_not_wsl(self):
         wsl = "C:\\Windows\\System32\\bash.exe"
-        store = "C:\\Users\\msalemi\\AppData\\Local\\Microsoft\\WindowsApps\\bash.exe"
+        store = "C:\\Users\\mstaff\\AppData\\Local\\Microsoft\\WindowsApps\\bash.exe"
         git = "C:\\Program Files\\Git\\bin\\bash.exe"
         odd = "D:\\Tools\\Git\\bin\\bash.exe"
         none = lambda w: None                                    # noqa: E731
@@ -1407,7 +1409,7 @@ class ReviewFindings(Base):
                     "mail bsphinney@ucdavis.edu & co", "--level", "analyze", "--scratch", SCRATCH,
                     "--with-human", MICH)
         stored = self.fake.msgs[CH][-1]["text"]
-        self.assertIn("<@%s|michelle>" % MICH, stored)        # Slack's form, not ours
+        self.assertIn("<@%s|morgan>" % MICH, stored)        # Slack's form, not ours
         self.assertIn("<mailto:bsphinney@ucdavis.edu|", stored)
         j = self.ok("mich", "join", "--channel", CH, "--thread", j["thread_ts"])
         self.assertEqual(j["kickoff_read_from"], "metadata")
@@ -1539,7 +1541,7 @@ class IdentityBinding(Base):
 
     def test_on_hive_bound_refused_and_unverified(self):
         e = self.hive_env()
-        self.write_people("# Slack id   HIVE user\n%s %s\n%s msalemi\n" % (BRETT, self.me, MICH))
+        self.write_people("# Slack id   HIVE user\n%s %s\n%s mstaff\n" % (BRETT, self.me, MICH))
         self.ok("brett", "whoami", "--set", BRETT, **e)
         self.ok("mich", "whoami", "--set", MICH, **e)
         self.ok("eve", "whoami", "--set", EVE, **e)
@@ -1550,10 +1552,10 @@ class IdentityBinding(Base):
                     "--scratch", SCRATCH, "--with-human", MICH, "--with-human", EVE, **e)
         self.assertEqual(j["identity_check"]["status"], "bound")
         ts = j["thread_ts"]
-        # Michelle's Slack id, but this runs as another HIVE account: refused, nothing written
+        # Morgan's Slack id, but this runs as another HIVE account: refused, nothing written
         rc, j = self.run_cli("mich", "join", "--channel", CH, "--thread", ts, **e)
         self.assertEqual(rc, 3)
-        self.assertIn("belongs to HIVE user msalemi", j["error"])
+        self.assertIn("belongs to HIVE user mstaff", j["error"])
         self.assertEqual(j["identity_check"]["status"], "refused")
         self.assertFalse(os.path.exists(os.path.join(self.d, "cfg_mich", "collab")))
         # an unlisted Slack id on a HIVE account the list gives to someone else: refused
@@ -1566,7 +1568,7 @@ class IdentityBinding(Base):
         self.ok("mich", "whoami", "--set", MICH, **e)
         for text, mode, why in (
                 (None, None, "no Slack-people list"),
-                ("%s msalemi\n" % MICH, 0o664, "can write it")):
+                ("%s mstaff\n" % MICH, 0o664, "can write it")):
             if text is None:
                 if os.path.exists(self.people):
                     os.remove(self.people)
@@ -1636,17 +1638,17 @@ class IdentityBinding(Base):
         self.assertIn("others can write in it", j["identity_check"]["why"])
 
     def test_the_trust_rule(self):
-        adm = ("brettsp",)
-        probe = {"user": "brettsp", "same_folder": True,
-                 "token": {"owner": "brettsp", "mode": 0o640, "regular": True, "links": 1},
-                 "folder": {"owner": "brettsp", "mode": 0o2750, "dir": True},
-                 "token_folder": {"owner": "brettsp", "mode": 0o2750, "dir": True},
-                 "people": {"owner": "brettsp", "mode": 0o644, "regular": True, "links": 1,
-                            "text": "%s brettsp\n%s msalemi\n" % (BRETT, MICH)}}
+        adm = ("bstaff",)
+        probe = {"user": "bstaff", "same_folder": True,
+                 "token": {"owner": "bstaff", "mode": 0o640, "regular": True, "links": 1},
+                 "folder": {"owner": "bstaff", "mode": 0o2750, "dir": True},
+                 "token_folder": {"owner": "bstaff", "mode": 0o2750, "dir": True},
+                 "people": {"owner": "bstaff", "mode": 0o644, "regular": True, "links": 1,
+                            "text": "%s bstaff\n%s mstaff\n" % (BRETT, MICH)}}
         self.assertEqual(sc.decide_identity(BRETT, probe, adm)["status"], "bound")
         self.assertEqual(sc.decide_identity(MICH, probe, adm)["status"], "refused")
         self.assertEqual(sc.decide_identity(EVE, probe, adm)["status"], "refused")
-        self.assertIn("ask a Core admin (brettsp)",
+        self.assertIn("ask a Core admin (bstaff)",
                       sc.decide_identity(EVE, dict(probe, user="eve"), adm)["why"])
         # the verified hole: a member renames .config and puts their own in its place. Every
         # owner then matches every other -- but none is a Core admin.
@@ -1696,7 +1698,7 @@ class IdentityBinding(Base):
         e = self.hive_env()
         base = self.env("brett", token=False, **e)
         for admins, mode, folder_mode, ok in ((self.me, 0o640, 0o755, True),
-                                              ("brettsp", 0o640, 0o755, False),
+                                              ("bstaff", 0o640, 0o755, False),
                                               (self.me, 0o660, 0o755, False),
                                               (self.me, 0o640, 0o775, False)):
             os.chmod(self.token_file, mode)
@@ -1738,7 +1740,7 @@ class IdentityBinding(Base):
         env = self.env("laptop", token=False, HOME=home, SKILL_SLACK_BOT_NO_RELAY="0",
                        SKILL_CORE_GROUP_DIR=os.path.join(self.d, "not_on_hive"),
                        SKILL_SLACK_BOT_HIVE_FILE=self.token_file, SKILL_SLACK_PEOPLE_FILE=people,
-                       HIVE_USER="msalemi", HIVE_KEY=key, HIVE_SSH_MUX="0", FAKE_CALLS=calls,
+                       HIVE_USER="mstaff", HIVE_KEY=key, HIVE_SSH_MUX="0", FAKE_CALLS=calls,
                        SKILL_CORE_ADMINS=self.me,
                        PATH=fakebin + os.pathsep + os.environ.get("PATH", ""))
         env.pop("HIVE_EXEC", None)
@@ -1761,7 +1763,9 @@ class Documented(unittest.TestCase):
         path = os.path.join(SCRIPTS, "core_admins.txt")
         self.assertEqual(sc.CORE_ADMINS_FILE, path)
         self.assertEqual(sc.CORE_ADMINS, tuple(skill_version.core_admins(path)))
-        self.assertEqual(sc.CORE_ADMINS, ("brettsp",))
+        self.assertEqual(len(sc.CORE_ADMINS), 1, sc.CORE_ADMINS)
+        self.assertEqual(hashlib.sha256("\n".join(sc.CORE_ADMINS).encode()).hexdigest(),
+                         "b73e182de1908f14f15c49a634638160874dd42c0019a629cab14c9c3ce7a327")   # the shipped list, pinned without naming anyone
         if shutil.which("bash"):
             out = subprocess.run(
                 ["bash", "-c", '. "$1"; skill_core_admins "$2"', "bash",
@@ -1776,10 +1780,10 @@ class Documented(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "core_admins.txt")
             with open(p, "w", newline="") as fh:
-                fh.write("# admins\n\n  brettsp   # the director\r\nmsalemi\nBad Name\n"
-                         "a,b\nbrettsp\n\t gabrig\x0b\n")
+                fh.write("# admins\n\n  bstaff   # the director\r\nmstaff\nBad Name\n"
+                         "a,b\nbstaff\n\t gstaff\x0b\n")
             got = sc.load_core_admins(p)
-            self.assertEqual(got, ("brettsp", "msalemi", "gabrig"))
+            self.assertEqual(got, ("bstaff", "mstaff", "gstaff"))
             self.assertEqual(got, tuple(dict.fromkeys(
                 t for t in skill_version.core_admins(p) if not re.search(r"[\s,]", t))))
             with mock.patch.dict(sys.modules, {"skill_version": None}):   # not importable
@@ -1789,15 +1793,15 @@ class Documented(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "core_admins.txt")
             with open(p, "w", newline="") as fh:
-                fh.write("# admins\n\n  brettsp   # the director\r\nmsalemi\nBad Name\n"
-                         "a,b\nbrettsp\n")
-            self.assertEqual(sc.load_core_admins(p), ("brettsp", "msalemi"))
+                fh.write("# admins\n\n  bstaff   # the director\r\nmstaff\nBad Name\n"
+                         "a,b\nbstaff\n")
+            self.assertEqual(sc.load_core_admins(p), ("bstaff", "mstaff"))
             with open(p, "w") as fh:
                 fh.write("# nobody\n")
             self.assertEqual(sc.load_core_admins(p), ())
             self.assertEqual(sc.load_core_admins(os.path.join(d, "missing.txt")), ())
             with open(p, "w") as fh:
-                fh.write("brettsp\n")
+                fh.write("bstaff\n")
             os.chmod(p, 0)
             try:
                 if os.geteuid() != 0:                            # unreadable: nobody

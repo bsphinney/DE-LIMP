@@ -4,7 +4,7 @@
 adapt_fragpipe_dda (IonQuant combined_protein.tsv), adapt_alphadia (pg.matrix) and adapt_radiant
 (Fulcrum) write one engine-made value per protein and run into the DE contract's PG.MaxLFQ
 column. build_maxlfq.R used to describe every such DE as "MaxLFQ + limma" / "DIA-NN
-PG.MaxLFQ" / "Quantification: DIA-NN MaxLFQ (Demichev et al. 2020)" -- Michelle's SET28
+PG.MaxLFQ" / "Quantification: DIA-NN MaxLFQ (Demichev et al. 2020)" -- Morgan's SET28
 FragPipe 23 session (2026-09-25) carries exactly that. Each adapter now declares its quantity
 (level "protein", the engine's own name and version, its FDR, the Crossref-verified citation),
 and maxlfq_descriptor()'s protein branch passes it through with no re-rollup described.

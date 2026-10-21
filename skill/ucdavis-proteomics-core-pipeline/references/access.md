@@ -199,7 +199,7 @@ three in one SSH call and prints one JSON object: `status`, `local`, `hive`, `re
   (run log, Slack, FRAN) run those scripts hours after it started, so a copy is never swapped
   under them (exit 6). The bare word `proteomics-pipeline` is not enough: it also matches
   `~/.proteomics-pipeline` (the toolchain) and `~/proteomics-pipeline-280-*`. On 2026-09-29, 1 of
-  Brett's 225 jobs used the copy (a PROT_0002 step, through its job-end hook), so counting every
+  Brett's 225 jobs used the copy (one submission's step, through its job-end hook), so counting every
   job would have stopped every session with a false message.
   - A script that cannot be read counts: fail closed. A job with no script path (an
     interactive `srun`) does not count.
@@ -216,7 +216,7 @@ three in one SSH call and prints one JSON object: `status`, `local`, `hive`, `re
   runs `claude plugin update ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core` and
   compares the version that landed with main. Exit 1 means the update did not happen, and it
   never says "latest" while behind. Then `/reload-plugins`.
-  - Why: on 2026-10-07 (msalemi, Windows, Git Bash, no GitHub SSH key) `claude plugin update`
+  - Why: on 2026-10-07 (a Core member, Windows, Git Bash, no GitHub SSH key) `claude plugin update`
     alone warned "marketplace not refreshed: SSH host key is not in your known_hosts", then
     "SSH authentication failed", and said "already at the latest version (2.10.0)" while main
     shipped 2.11.2. The catalogue's remote was HTTPS. The same `git pull` and update took it
@@ -259,7 +259,7 @@ check trusts `CURRENT_VERSION` only while the file AND its folder are owned by a
 Anything else reads `release_state: untrusted`: no release, no warning, as if nothing were
 published.
 - **The admins** are listed in `scripts/core_admins.txt`, one HIVE username per line (`#`
-  comments and blank lines allowed), currently `brettsp`. It is the one list, with two
+  comments and blank lines allowed), currently the Core director's. It is the one list, with two
   readers kept equal by `tests/test_skill_version.py`: `skill_version.sh`'s
   `skill_core_admins` (bash) and `skill_version.py`'s `core_admins()` (Python: `notes.py`,
   `slack_collab.py`).
@@ -318,9 +318,9 @@ check makes no SSH call.
   (section "Core staff" below).
 - **No rsync** in Git Bash: `--put/--get` fall back to `scp` on their own. A trailing
   slash on the source (`dir/`, rsync's "copy the contents") is refused — drop the slash.
-- **Username:** ssh's default user on Windows is the AD login, e.g. `AD3+gabrig`, and
+- **Username:** ssh's default user on Windows is the AD login, e.g. `AD3+<your HIVE user>`, and
   HIVE answers "Permission denied". HIVE usernames are the plain UC Davis id
-  (`gabrig`). Always set `HIVE_USER`; `hive_exec.sh` and `check_access.sh` refuse a name
+  (`<your HIVE user>`). Always set `HIVE_USER`; `hive_exec.sh` and `check_access.sh` refuse a name
   containing `+`, `\` or `@`.
 - **Mapped drives** (`T:`, `R:`) are Flinders or quobyte shares — run `hive_path.sh`
   before any upload (section above).
@@ -365,7 +365,7 @@ SKILL.md steps 1c + 12b) splits across two machines, so it needs three things in
      default. macOS/Linux: `F="$HOME/.coreomics_token"`, and `chmod 600` makes it yours alone.
   3. `python3 scripts/core_submission.py check` → `ok`. Anything else: its `fix`, and the table
      in `references/core-submissions.md` "Troubleshooting `check`". `no_lab_access` means the
-     key works but the CoreOmics account is not in the Proteomics lab: ask Brett (brettsp).
+     key works but the CoreOmics account is not in the Proteomics lab: ask Brett (the Core director).
 
   Never paste the key into the chat. With no working local Python 3 (the Windows Store stub:
   `local_python3.usable: false`) they run on HIVE instead, with the key there — nothing to

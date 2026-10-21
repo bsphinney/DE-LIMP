@@ -160,9 +160,9 @@ def check_record(path, sess=None, **extra):
 
 class TheCoresStaffFile(StaffEnv):
     # The Core's list on HIVE, byte for byte as written 2026-10-02
-    # (/quobyte/proteomics-grp/.config/core_staff.txt: brettsp, 644, in a 2750 folder of his).
+    # (/quobyte/proteomics-grp/.config/core_staff.txt: bstaff, 644, in a 2750 folder of his).
     REAL = (b"# Core staff HIVE logins allowed to sign off (QC ack, normalization decide, "
-            b"ack-legacy). Admin-owned; one login per line.\nbrettsp\nmsalemi\ngabrig\n")
+            b"ack-legacy). Admin-owned; one login per line.\nbstaff\nmstaff\ngstaff\n")
 
     def test_the_hive_format_is_read_exactly(self):
         d = os.path.join(self.tmp, "config")
@@ -174,8 +174,8 @@ class TheCoresStaffFile(StaffEnv):
         os.chmod(path, 0o644)
         os.environ.update({staff.STAFF_FILE_ENV: path, "SKILL_SLACK_TEST_LOOPBACK": "1",
                            "SKILL_CORE_ADMINS": ME})
-        self.assertEqual(staff.load_staff(), (["brettsp", "msalemi", "gabrig"], None))
-        for login in ("brettsp", "msalemi", "gabrig", "MSALEMI"):
+        self.assertEqual(staff.load_staff(), (["bstaff", "mstaff", "gstaff"], None))
+        for login in ("bstaff", "mstaff", "gstaff", "MSTAFF"):
             c = staff.check_by(login)
             self.assertTrue(c["ok"], c)
             self.assertEqual(c["checked"], f"on the Core staff list ({path})")

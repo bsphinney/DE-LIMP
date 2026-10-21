@@ -399,7 +399,7 @@ class TopTies(unittest.TestCase):
         self.assertEqual([r["Genes"] for r in t.top("Bait.IgG", 2)], ["A1", "B1"])
 
 
-# PROT_0756 v2: IgG-side chains with NO gene name -- DIA-NN's Protein.Names is the UniProt entry
+# PROT_9756 v2: IgG-side chains with NO gene name -- DIA-NN's Protein.Names is the UniProt entry
 # name (verified in the run's DE tables: P06330 HVM51_MOUSE, Genes empty)
 NAMELESS_IG = [("P01647", "KV5AE_MOUSE"), ("P01636", "KV5A4_MOUSE"), ("P06330", "HVM51_MOUSE"),
                ("P18528", "HVM57_MOUSE"), ("P01630", "KV2A6_MOUSE")]

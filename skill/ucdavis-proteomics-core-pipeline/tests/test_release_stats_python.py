@@ -159,14 +159,14 @@ class ConfoundTestRespectsTheBlock(unittest.TestCase):
 
 
 class WithinAndBetweenBlockQuestions(unittest.TestCase):
-    """PROT_0756 v2 (michelle-rerun, job 24175676): 6 mice x 5 IPs, age between mice. The
+    """PROT_9756 v2 (a rerun, job 24175676): 6 mice x 5 IPs, age between mice. The
     within-mouse relabelling test flagged hemolysis at p = 0.001 -- a BAIT effect (Kv2.1 IPs) --
     and the message read like an age confound it can never detect. Now the two questions are
     separate tests with separate words."""
 
     BAITS = ("JPH3", "JPH4", "Kv21", "RyR", "IgG")
 
-    def prot0756(self, age_blood=3.0, bait_blood=2.0, mice_per_age=3, seed=7):
+    def prot9756(self, age_blood=3.0, bait_blood=2.0, mice_per_age=3, seed=7):
         rng = random.Random(seed)
         samples, gmap, bmap, vals = [], {}, {}, {}
         for m in range(1, 2 * mice_per_age + 1):
@@ -179,7 +179,7 @@ class WithinAndBetweenBlockQuestions(unittest.TestCase):
         return samples, gmap, bmap, vals
 
     def tests(self, **kw):
-        samples, gmap, bmap, vals = self.prot0756(**kw)
+        samples, gmap, bmap, vals = self.prot9756(**kw)
         z = sq.zscore(vals, samples)
         return {t["question"]: t for t in sq.block_confound_checks(z, gmap, bmap, samples, 1.5, "Mouse")}
 
@@ -243,7 +243,7 @@ class WithinAndBetweenBlockQuestions(unittest.TestCase):
         self.assertEqual(qs, ["within"])
 
     def test_the_report_words_each_question_apart(self):
-        samples, gmap, bmap, vals = self.prot0756()        # age AND bait blood
+        samples, gmap, bmap, vals = self.prot9756()        # age AND bait blood
         genes = ["HBB", "HBA1", "CA1", "CA2", "CAT", "AHSP"]
         rng = random.Random(3)
         with tempfile.TemporaryDirectory() as tmp:

@@ -60,7 +60,7 @@ class Harness(unittest.TestCase):
         else:
             env["SKILL_ISSUES_DIR"] = FAKE_ROOT + "/skill_issues"
         if route == "ssh":
-            env.update(HIVE_USER="gabrig", HIVE_KEY=self.key, HIVE_EXEC=self.fake_exec)
+            env.update(HIVE_USER="gstaff", HIVE_KEY=self.key, HIVE_EXEC=self.fake_exec)
         env.update(extra_env or {})
         return subprocess.run(["bash", SCRIPT, *args], capture_output=True, text=True, env=env,
                               input=stdin)
@@ -133,9 +133,9 @@ class ReportIssue(Harness):
         os.makedirs(os.path.join(self.remote, "skill_issues"))
         p = self.run_it("--title", "over ssh", "--what", "w", "--fix", "f", route="ssh")
         self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertIn("recorded: gabrig@hive:", p.stdout)
+        self.assertIn("recorded: gstaff@hive:", p.stdout)
         name, text = self.read_only_file(os.path.join(self.remote, "skill_issues"))
-        self.assertTrue(name.startswith(tuple("0123456789")) and "_gabrig" in name, name)
+        self.assertTrue(name.startswith(tuple("0123456789")) and "_gstaff" in name, name)
         self.assertIn("hive_remote", text)
         self.assertEqual(self.files(self.local), [])
 
@@ -216,7 +216,7 @@ class TextFromAFile(Harness):
         what = self.hostile()
         p = self.run_it("--title", "t", "--what-file", "-", stdin=what, route="ssh")
         self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertIn("recorded: gabrig@hive", p.stdout)
+        self.assertIn("recorded: gstaff@hive", p.stdout)
         for f in self.ran:
             self.assertFalse(os.path.exists(f))
         _name, text = self.read_only_file(os.path.join(self.remote, "skill_issues"))

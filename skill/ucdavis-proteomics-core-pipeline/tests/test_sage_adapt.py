@@ -32,7 +32,7 @@ except ImportError:
 # (peptide, proteins, is_decoy, q_value, {file: intensity}) -- Sage writes one row per
 # precursor per file, and the decoy of a peptide carries the target's proteins string. Each
 # target and its decoy share ONE q_value, as Sage stores it (fdr.rs picked_precursor keys the q
-# map by precursor: 1,489 of 1,489 pairs identical in gabrig's HeL50 UnvPe lfq.parquet).
+# map by precursor: 1,489 of 1,489 pairs identical in gstaff's HeL50 UnvPe lfq.parquet).
 ROWS = [
     ("PEPTIDEAK", "sp|P1|A_HUMAN", False, 0.001, {"r1.mzML": 100.0, "r2.mzML": 110.0}),
     ("PEPTIDEAK", "sp|P1|A_HUMAN", True, 0.001, {"r1.mzML": 900.0, "r2.mzML": 950.0}),
@@ -140,7 +140,7 @@ class AdaptSageKeepsOnlyValidMs1Rows(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.d, "report.parquet")))
 
     def test_nothing_passing_is_said_not_passed_off(self):
-        """gabrig's +7 ppm cohort: every target at q 0.128. The old adapter still handed the DE
+        """gstaff's +7 ppm cohort: every target at q 0.128. The old adapter still handed the DE
         a full matrix of decoy and failing-target intensities."""
         write_lfq(os.path.join(self.d, "lfq.parquet"),
                   rows=[r for r in ROWS if r[3] == 0.128])

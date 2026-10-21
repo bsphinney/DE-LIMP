@@ -332,7 +332,7 @@ SPREAD_BENIGN = ("A spread like this has one known benign cause: an enrichment o
 #
 # EXCEPT when the cohort IS one run (mass_acc_min_runs): a one-file search -- a QC run, a method
 # test -- has no second run to measure, so the rule refused every one of them after the library
-# was built (Exploris 480, 60k/15k, msalemi 2026-10-05: MS2 measured 12 ppm, refused, nothing
+# was built (Exploris 480, 60k/15k, a Core member, 2026-10-05: MS2 measured 12 ppm, refused, nothing
 # searched). Its own measurement is the measurement of the whole cohort; it still has to be inside
 # the band, and the SOP floor still applies, so a 12 is pinned at 20.
 MASS_ACC_MIN_RUNS = 2
