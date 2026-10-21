@@ -454,11 +454,13 @@ class TheQFilterIsOne(unittest.TestCase):
                 self.assertEqual(dq.row_passes(row, cuts), keep)
 
     def test_every_reader_uses_it(self):
-        for name in ("contaminant_competition.py", "audit_results.py", "pass_comparison.py"):
+        for name in ("contaminant_competition.py", "audit_results.py", "pass_comparison.py",
+                     "skyline_peaks.py"):
             src = read(os.path.join(SCRIPTS, name))
             with self.subTest(script=name):
                 self.assertIn("keep_expression", src)
                 self.assertNotIn("<= cut", src)
+                self.assertNotIn("pc.less_equal", src)
 
 
 class TheWords(Fixture):

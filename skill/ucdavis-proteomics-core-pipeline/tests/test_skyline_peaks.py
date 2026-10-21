@@ -45,6 +45,11 @@ try:
     HAVE_MPL = True
 except ImportError:
     HAVE_MPL = False
+try:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+except ImportError:                       # the stdlib-only CI: those tests are skipped
+    pa = pq = None
 
 CMD = ("/opt/diann/diann-linux --qvalue 0.01 --xic 10 --cut K*,R* --missed-cleavages 1 "
        "--min-pep-len 7 --max-pep-len 30 --min-pr-mz 357 --max-pr-mz 1105 --min-pr-charge 2 "
@@ -500,6 +505,34 @@ class TestWording(unittest.TestCase):
                      "edges.", "GAPDH was validated by western blot.",
                      "These pictures are a visual check of DIA-NN's peaks."):
             self.assertEqual(client_text.peak_check_overclaims(fine), [], fine)
+
+
+@unittest.skipUnless(pq, "pyarrow is not installed")
+class TestQFilter(unittest.TestCase):
+    """Review of 2.14 (MED-1): the peak check had its own copy of run_de.R's q filter, and it
+    dropped a NaN or missing q-value that the DE keeps. It now reads through
+    diann_q_columns.keep_expression, the one definition."""
+
+    def test_nan_and_null_stay_as_in_the_de(self):
+        with tempfile.TemporaryDirectory() as td:
+            rep = os.path.join(td, "report.parquet")
+            ok = [0.001] * 4
+            pq.write_table(pa.table({
+                "Run": ["r1"] * 4, "Protein.Group": ["P1"] * 4,
+                "Precursor.Id": ["a", "b", "c", "d"],
+                "Q.Value": pa.array([0.001, float("nan"), None, 0.5], pa.float64()),
+                "Lib.Q.Value": ok, "Lib.PG.Q.Value": ok, "PG.Q.Value": ok}), rep)
+            t, cols = sp._q_filtered(rep, ["Run", "Precursor.Id", "Missing.Column"], 0.01)
+        self.assertEqual(cols, ["Run", "Precursor.Id"])
+        self.assertEqual(sorted(t["Precursor.Id"].to_pylist()), ["a", "b", "c"])
+
+    def test_pg_q_value_keeps_its_own_cutoff(self):
+        with tempfile.TemporaryDirectory() as td:
+            rep = os.path.join(td, "report.parquet")
+            pq.write_table(pa.table({"Precursor.Id": ["a", "b"], "Q.Value": [0.001, 0.001],
+                                     "PG.Q.Value": [0.04, 0.06]}), rep)
+            t, _cols = sp._q_filtered(rep, ["Precursor.Id"], 0.01)
+        self.assertEqual(t["Precursor.Id"].to_pylist(), ["a"])     # 0.05, not 0.01
 
 
 class TestNotRun(unittest.TestCase):

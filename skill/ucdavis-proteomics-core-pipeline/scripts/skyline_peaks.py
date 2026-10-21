@@ -73,6 +73,7 @@ from resolve_defaults import SKYLINE_PIN, family as _instrument_family  # noqa: 
 from protein_ids import header_accession, group_accessions              # noqa: E402
 from fetch_fasta import CONTAMINANT_TAGS                                 # noqa: E402
 from probe_window import MS2_ACC_RE, MS1_ACC_RE                         # noqa: E402  DIA-NN's log
+import diann_q_columns as dq     # noqa: E402  run_de.R's q-value filter and default, defined once
 
 SCHEMA = "skyline_peak_check/1"
 RECORD = "skyline_provenance.json"
@@ -757,20 +758,19 @@ def select_abundant_de(de_dir, n):
 
 def _q_filtered(report, cols, q_cutoff):
     """report.parquet's `cols` (those it has), only the rows that pass the DE's q-value filter
-    (diann_q_columns: every q column the report has, each at its cutoff) -- filtered in Arrow, so
-    a report of millions of rows is never turned into Python objects. -> (table, columns read)."""
-    import pyarrow.compute as pc
+    (diann_q_columns: every q column the report has, each at its cutoff, and keep_expression --
+    the ONE reading of run_de.R's rule, so a NaN or missing q-value stays as it does in the DE)
+    -- filtered in Arrow, so a report of millions of rows is never turned into Python objects.
+    -> (table, columns read)."""
+    import pyarrow.dataset as pads
     import pyarrow.parquet as pq
-    import diann_q_columns as dq
     have = pq.read_schema(report).names
     qcols = dq.fdr_columns(have)
     cols = [c for c in cols if c in have]
-    t = pq.read_table(report, columns=list(dict.fromkeys(cols + qcols)))
-    mask = None
-    for c in qcols:
-        m = pc.less_equal(t[c], dq.cutoff_for(c, q_cutoff))
-        mask = m if mask is None else pc.and_(mask, m)
-    return (t.filter(mask) if mask is not None else t), cols
+    keep = dq.keep_expression({c: dq.cutoff_for(c, q_cutoff) for c in qcols})
+    t = pads.dataset(report, format="parquet").to_table(
+        columns=list(dict.fromkeys(cols + qcols)), filter=keep)
+    return t, cols
 
 
 def select_abundant_report(report, n, q_cutoff):
@@ -1648,7 +1648,7 @@ def make_plan(a, inp):
     de_dir = inp["de_dir"] if inp["de_dir"] and os.path.isfile(
         os.path.join(inp["de_dir"], "de_provenance.json")) else None
     de_prov = load_json(os.path.join(de_dir, "de_provenance.json")) if de_dir else {}
-    q = _float((de_prov or {}).get("q_cutoff")) or 0.01
+    q = _float((de_prov or {}).get("q_cutoff")) or dq.DEFAULT_Q_CUTOFF    # run_de.R's own default
     out, work = inp["out"], os.path.join(inp["out"], WORK)
     doc = os.path.join(work, f"{inp['name']}_top_hits.sky")
     group_of = {}
