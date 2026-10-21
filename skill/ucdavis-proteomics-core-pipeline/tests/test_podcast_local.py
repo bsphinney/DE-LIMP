@@ -1043,8 +1043,9 @@ class ShortOutage(Local):
         self.assertEqual(self.container_calls(), [])
 
     def test_a_model_used_after_the_wait_can_still_hand_over(self):
-        """Every model that missed the first test has a fresh chance after the wait, asked again
-        or not: one that answers then and stops mid-episode hands over to the next."""
+        """Every model that missed the first test, and that no earlier render saw stall, has a
+        fresh chance after the wait, asked again or not: one that answers then and stops
+        mid-episode hands over to the next."""
         seen = {"n": 0}
 
         def behaviour(model, contents, config):
@@ -1109,8 +1110,8 @@ class ShortOutage(Local):
         def behaviour(model, contents, config):
             self.pro_exhausted(model)
             probe = mp.PREFLIGHT_LINES[0] in json.dumps(contents)
-            if not self.waits() or model not in (STALLS, ANSWERS):
-                self.release.wait(30)                            # the lite model never answers
+            if not self.waits():
+                self.release.wait(30)
             elif probe and state["used"] in (None, model):
                 state["used"] = model
             elif model == state["used"]:
@@ -1127,20 +1128,59 @@ class ShortOutage(Local):
                                  if mp.PREFLIGHT_LINES[0] not in json.dumps(c)])
         self.assertEqual(self.manifest()["tts"]["backend"], "kokoro")
 
-    def test_the_fallback_message_keeps_its_advice(self):
-        """Second review: the longest realistic shape (pro models out of free-tier quota, the
-        flash models missing twice, remembered stalls) still ends with the advice."""
+    def test_an_empty_answer_from_a_remembered_model_keeps_it_out(self):
+        """Third review: a remembered model whose two-line test came back empty, after the model
+        that answers the retry, is not handed the episode mid-way either."""
         self.remember(STALLS, ANSWERS)
+        seen = {"n": 0}
 
         def behaviour(model, contents, config):
             self.pro_exhausted(model)
+            probe = mp.PREFLIGHT_LINES[0] in json.dumps(contents)
+            if model == ANSWERS:
+                return b"" if probe else pcm_for(contents)       # empty test; would answer
+            if not self.waits():
+                self.release.wait(30)
+            elif not probe:
+                seen["n"] += 1
+                if seen["n"] >= 2:                               # chunk 2 never answers
+                    self.release.wait(30)
+            return pcm_for(contents)
+        rc, out, err, log = self.render(behaviour, "--request-timeout", "0.3", preflight=True)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.waits(), [300.0])
+        self.assertNotIn(ANSWERS, [m for m, c, _ in log["calls"]
+                                   if mp.PREFLIGHT_LINES[0] not in json.dumps(c)])
+        self.assertEqual(self.manifest()["tts"]["backend"], "kokoro")
+
+    def test_the_fallback_message_keeps_its_advice(self):
+        """Second review: a long shape (pro models out of free-tier quota with Google's whole
+        answer in the error, as google-genai gives it, the flash models missing twice,
+        remembered stalls) still ends with the advice in podcast.json."""
+        self.remember(STALLS, ANSWERS)
+
+        def behaviour(model, contents, config):
+            if "pro" in model:
+                body = rpc_error("GenerateRequestsPerDayPerProjectPerModel-FreeTier", value="0",
+                                 delay="40s")
+                raise ApiError(429, "RESOURCE_EXHAUSTED. " + json.dumps(body), body)
             self.release.wait(30)
             return pcm_for(contents)
         rc, out, err, log = self.render(behaviour, preflight=True)
         self.assertEqual(rc, 0, err)
         fb = self.manifest()["tts"]["fallback"]
+        self.assertGreater(len(fb["message"]), 1000)
         self.assertIn("asked again 5 min later", fb["message"])
         self.assertTrue(fb["message"].endswith("--tts say"), fb["message"][-200:])
+
+    def test_a_long_message_loses_its_middle_not_its_end(self):
+        text = "start " + "x" * 3000 + " re-run later, or --tts say"
+        got = mp.clip_middle(text, 2000)
+        self.assertEqual(len(got), 2000)
+        self.assertTrue(got.startswith("start "))
+        self.assertTrue(got.endswith(" re-run later, or --tts say"))
+        self.assertIn(" [...] ", got)
+        self.assertEqual(mp.clip_middle("short", 2000), "short")
 
     def test_a_resume_whose_cached_model_misses_twice_makes_every_chunk_again(self):
         rc, out, err, log = self.render(None, "--model", STALLS)
@@ -1434,8 +1474,10 @@ class Sizing(unittest.TestCase):
     def test_the_gemini_job_has_time_to_wait_for_a_fallback(self):
         """Gemini's own waits (the two-line test twice, 5 min apart, then the budgets), then
         each local-voice step with up to 15 min in the queue."""
-        preflight = (2 * len(mp.KNOWN_TTS_MODELS) * mp.PREFLIGHT_TIMEOUT
-                     + mp.PREFLIGHT_RETRY_WAIT) / 60
+        # every model missing the test twice; discover() gives each pro model, one flash 3
+        # model and the fallback model: four in this suite's list of Google's (two pro)
+        models = max(len(mp.KNOWN_TTS_MODELS), 4)
+        preflight = (2 * models * mp.PREFLIGHT_TIMEOUT + mp.PREFLIGHT_RETRY_WAIT) / 60
         need = (preflight + mp.RATE_WAIT_BUDGET_MIN + mp.REQUEST_TIMEOUT_BUDGET_MIN
                 + sum(m + 15 for _, _, m in pl.STEPS.values()))
         self.assertLessEqual(need, mp.JOB_HOURS * 60)
