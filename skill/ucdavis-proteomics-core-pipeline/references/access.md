@@ -10,6 +10,25 @@ node ties up that node and the session **times out** mid-analysis. Keeping Claud
 on the laptop means it stays alive while the actual compute runs as detached **SLURM
 jobs** on HIVE — nothing depends on an interactive session staying open.
 
+<!-- contents: tests/test_skill_structure.py --toc -->
+**Contents** (section: line)
+- 32: Step 0a asks two questions (Core staff, three) → pick a mode
+- 65: HPC@UCD's `ucd-hpc` skill (anyone on a UC Davis cluster)
+- 90: hive_remote runbook (Claude Code local → HIVE over SSH)
+- 159: Keeping the skill current (hive_remote)
+- 277: Data already on a network drive (check BEFORE any upload)
+- 310: Windows (Git Bash)
+- 330: HIVE host key (first contact)
+- 344: Core staff — submission workflow prerequisites
+- 385: Rebuild on HIVE (non-Core users) — exact steps, no guessing
+- 419: Notes
+- 438: On HIVE: the login node or a compute node (golden rule 3, step 0a)
+- 486: Step 0a: the questions, the check and the modes
+- 558: Step 0: is this skill current? (every conversation)
+- 680: Step 1: locating the raw files
+- 685: Step 1: a path the user gave on a network drive
+<!-- /contents -->
+
 ## Step 0a asks two questions (Core staff, three) → pick a mode
 1. **"Do you have access to UC Davis HIVE (account + SSH private key)?"**
    If yes, **ask where the private key is** (e.g. `~/.ssh/id_ed25519`).
@@ -415,3 +434,265 @@ your own copy in your HIVE home. Run all of this **on HIVE** (via `hive_exec.sh`
 - Laptop→HIVE staging of large raw data is real bandwidth; prefer pointing at data
   already on HIVE/the proteomics share — `hive_path.sh` finds the HIVE path of a folder
   on a mapped drive or SMB mount.
+
+## On HIVE: the login node or a compute node (golden rule 3, step 0a)
+
+3. **Never run computationally intensive work on a cluster login/head node — EVER.**
+   On any cluster (HIVE/SLURM, or any other scheduler), **every** heavy step — the
+   search, and any large DE / figure / conversion (e.g. msconvert) — must run as a
+   **scheduled job** (`run_search.py --sbatch` → `sbatch`; a DIA-NN search of >5 files on
+   SLURM instead routes to the 5-step chain, exits 3 without writing `--sbatch`, and is
+   submitted with `bash <out>/submit.sh`), not inline on the login node. Login nodes are shared; running compute there gets the user flagged/killed.
+   The **only** things allowed on the login node are tiny orchestration commands —
+   submitting jobs, `squeue`/`sacct` polling (`watch_run.sh`), small file moves and the
+   bookkeeping scripts step 0a lists. Everything else runs on a compute node:
+   `hive_exec.sh --job '<cmd>'` (one blocking `srun`) or an sbatch job (step 0a, "On HIVE").
+   If you're unsure whether a step is heavy, submit it as a job. (No SLURM but a big
+   dataset locally? Warn the user it may be slow rather than hammering a shared host.)
+   **On a UC Davis cluster (HIVE, Farm, Franklin), HPC@UCD's own `ucd-hpc` skill is
+   mandatory, and on cluster policy it wins over this skill**: what may run on a login node,
+   resource requests (`--account`/`--partition`/`--time`/memory), software installs and
+   storage. Load it (Skill `ucd-hpc`) before the first command on the cluster. Where the two
+   disagree, follow `ucd-hpc`, tell the user which instruction of this skill you set aside, and
+   record it (`report_issue.sh`). Step 0a checks that it is installed.
+
+
+- **On HIVE: the login node or a compute node** (golden rule #3, HPC@UCD's `ucd-hpc` rules).
+  A plain `hive_exec.sh '<cmd>'` runs on HIVE's shared login node, where only seconds of light
+  work belong: `sbatch`/`squeue`/`sacct`/`scancel`, `watch_run.sh`, `ls`/`cat` of one folder or
+  a small file, `mkdir`, `--put`/`--get`, writing a job (`run_search.py --sbatch`,
+  `diann_parallel.py`, `make_podcast.py check`/`job`), and the bookkeeping scripts (`board.sh`,
+  `notes.py`, `log_decision.py`, `report_issue.sh`, `skill_version.sh`, `session.py init`,
+  `checkpoint.py status`, `submission_report.py attach`, `core_submission.py check`/`identify`/
+  `fetch`/`bioshare`/`email-draft`, `node_fault.py retry`, `cpu_hours.py`). **Everything else
+  goes to a compute node** — whatever reads `report.parquet` or raw files, runs R, walks a
+  share, installs, renders or zips: `bash scripts/hive_exec.sh --job [--time MIN] [--mem SIZE]
+  [--cpus N] [--preemptible] '<cmd>'` (one blocking `srun` on a queue that does not preempt,
+  spelled out; defaults 30 min, 4G, 1 CPU; its output and exit status are the command's; when
+  your own searches fill your 64-CPU cap on `high` it says it waits behind them, and
+  `--preemptible` — only for a command that just reads and can be run again, as step 2 — runs it
+  on `low` instead) for minutes of work, or an sbatch job for
+  longer work and anything that must survive a closed laptop (step 8: `on_compute.py --header`).
+  These move themselves when started on the login node: `setup.sh`, `ensure_dotnet8.sh`,
+  `fetch_fasta.py fetch`/`check-db`, `core_submission.py locate`/`stage`/`deliver`,
+  `provenance.py`, `session.py finalize`, `checkpoint.py find`, and `acquire_tools.sh` when it
+  downloads. **Each of these blocks until its job ends (queue wait + the work): run the call
+  with `run_in_background` and wait for it, or with a Bash timeout of at least its `--time` plus
+  10 minutes — never the 2-minute default. A killed call kills the ssh, which cancels the srun
+  half way (in the middle of an `--apply` copy or an install).** Unsure → `--job`. In
+  `hive_local` (Claude Code on HIVE) the same split, with `python3 scripts/on_compute.py [--time
+  MIN] [--mem SIZE] -- <cmd>` for `--job`.
+
+## Step 0a: the questions, the check and the modes
+
+**Claude Code runs locally on the user's machine.** Heavy steps either run locally or
+are driven on **HIVE over SSH with the user's private key** — they do NOT run Claude
+Code on HIVE. Ask two questions, verify, and ask Core staff a third:
+
+3. **Core staff only — yes to 2 AND `check_access.sh` below says `core_member: true` — right
+   after that check: "Which CoreOmics submission is this analysis for?"** A number (807 or
+   PROT_0807), several numbers when the analysis combines submissions, or "none" for internal
+   work (a method test, QC, training, a tool comparison). Skip it when they already said (the
+   request names a submission, or says it is a method test) and when the user is coming back to
+   an earlier analysis (step 0c checks it). Every analysis by Core staff goes on the Core
+   Project Board before its long steps: a number → step 1c, internal work → step 1. Pass the
+   answer to `session.py init` at step 3b: `--submission PROT_0807` (once per number, the main
+   one first) or `--internal '<its title on the board>'`. → `references/board.md` section 2.
+   **Anyone else (no to 2, or `core_member: false`): never ask it, skip every board step, and
+   never mention the board, CoreOmics or a submission number** (`check_access.sh` then says
+   `coreomics_runs_on: none`).
+
+Verify (don't just trust the answers):
+
+```
+bash scripts/check_access.sh <hive_user> <private_key_path>
+```
+
+Read `recommended_mode` + `core_member`, then pick the mode below. **`ucd_hpc_skill`**: when
+`required` is true and `installed` is false, tell the user in one line that HPC@UCD requires its
+`ucd-hpc` skill for any agent on its clusters, ask, then run its `install` line here (it goes in
+their own `~/.claude/skills`; relay `note` for Windows) and ask them to type `/reload-plugins`.
+Until it loads, follow golden rule #3 to the letter. Once the SSH login works,
+`check_access.sh` saves the user and the key's path (never the key) to
+`~/.config/ucdavis-proteomics/hive.env` (`hive_login_saved`). Later calls read the login there,
+because the environment does not carry over from one command to the next.
+
+- **HIVE = yes → `hive_remote`:** drive HIVE over SSH from the local Claude Code
+  (`export HIVE_USER=… HIVE_KEY=…`; use `bash scripts/hive_exec.sh '<cmd>'`). **Every
+  script runs ON HIVE through `hive_exec.sh` — the laptop needs no Python, R or engines.**
+  **Free text in a command** (a title, a `--text`, `--reason` or `--why`) is read by the shell
+  here and, through `hive_exec.sh`, again on HIVE, so a backtick or `$(...)` in it would run:
+  on this computer put it in single quotes with no `'` in it; inside a `hive_exec.sh` command
+  use none of `$` `` ` `` `\` `"` `'` in it. Longer text goes in a file, on standard input.
+  On Windows, Git Bash + the key is enough: `python3` there is often the Microsoft Store
+  stub (`check_access.sh` → `local_python3.usable: false` → never run a skill script
+  locally; the CoreOmics steps then run on HIVE too, `coreomics_runs_on: hive`, step 1c.1), rsync is absent (`--put/--get` fall back to scp by themselves), and
+  `HIVE_USER` is the plain UC Davis id, never the Windows `DOMAIN+user` login. If
+  `hive_ssh` is `failed`, relay `hive_ssh_error.kind` (host_key / permission_denied /
+  timeout) as the `kind` table at the top of this file describes. The search runs as **SLURM jobs**, never
+  the login node: `run_search.py --sbatch job.sh`, then submit **what it prints under
+  "submit with:"** — `hive_exec.sh 'bash <out>/submit.sh'` for a DIA-NN search that
+  predicts its library from the FASTA (two jobs: library, then search — the usual case) or
+  that routed to the 5-step chain (>5 files; exit 3), `hive_exec.sh 'sbatch job.sh'` only
+  when a single `job.sh` was written. **The skill must be there, at this computer's
+  version:** `bash scripts/hive_exec.sh --put-skill` (`scripts/` and `.claude-plugin/` into
+  `~/proteomics-pipeline/`; the latter carries the version every record states). Step 0's
+  `skill_version.sh --check-hive` says when that is needed. HIVE gives **compute**; the Core
+  software is separate (next).
+
+
+- **Core member = yes (with HIVE) → reuse the installed software** in
+  `/quobyte/proteomics-grp/`: `acquire_tools.sh` finds the Core's DIA-NN builds,
+  `fetch_fasta.py --hive` reuses pre-staged FASTAs. No rebuilding.
+- **HIVE = yes but NOT Core → rebuild the toolchain in your own HIVE home** (you can't
+  read the group dir). Follow "Rebuild on HIVE" (this file) (run
+  `setup.sh` + `acquire_tools.sh` + `fetch_fasta.py` on HIVE via `hive_exec.sh`). **List
+  these steps for the user — do not guess.**
+- **Core = yes but NO HIVE →** the Core software is on HIVE, unreachable without HIVE
+  access → fall back to **local**; suggest requesting a HIVE account.
+- **Both = no → `local`:** `setup.sh` installs the toolchain on the user's machine
+  (no admin); public engines (DIA-NN Academia, Sage). Self-contained, works fully.
+
+Tell the user which mode you're using and why.
+
+## Step 0: is this skill current? (every conversation)
+
+**One call does both checks** (SKILL.md step 0 runs it at the start of every conversation):
+```
+bash scripts/skill_version.sh --session-start [--mode hive_remote]
+```
+It runs `--check-update` and then, only with `--mode hive_remote`, `--check-hive` (not while a
+reload is pending), and prints one JSON object. Act on its fields in this order:
+
+| Field | What to do |
+|---|---|
+| `up_to_date` | `true` only when `--check-update` exited 0 and HIVE's release check is not behind: the one case in which the skill may be called up to date. |
+| `relay_first` | Relay it before any other work (older than `main` or the Core's release; or the `/reload-plugins` line of `reload_needed`). |
+| `ask_update` | Ask whether to update now. Yes → `bash scripts/skill_version.sh --update`, then `/reload-plugins`, then start again. No → record that they declined, once the session exists (below). |
+| `ask` | A question for the user: HIVE has a newer build the update would not bring here (never put the older copy over it unasked), or HIVE's copy is in use by the user's jobs (put it now or after they finish). |
+| `next` | Run it at once, without asking (`hive_exec.sh --put-skill`: the user's own copy), after any question, then `--session-start` again. |
+| `say` | One line to relay: a check that could not run, HIVE's other notes. |
+| `update`, `hive` | The two checks' own objects, each with its `exit` (`hive` is null when it did not run). |
+
+Exit 2: the user must answer or act first; 3: `next` is set; 0: carry on. Every exit code of the
+two checks, and why each exists, follows; `--check-update` alone is what step 0's "Check again"
+runs before steps 7 and 12.
+
+**The version check comes first, in every conversation: also when this computer is already set up
+(the setup, install.md "Step 0: the one-time setup", then only verifies), also on a resume (0c), and again before step 7 and step 12
+(SKILL.md step 0, "Check again").** Staff reports of 2026-10-16 still came from 2.11.2, the day after 2.12.0 and
+2.13.0 were released: conversations begun before a release ran on into the next day without
+checking again, and the check sat in the middle of a step titled "One-time setup", easy to skip
+on a computer already set up.
+
+**Every mode, first: is this computer's skill behind GitHub `main`?** One HTTPS read of
+`main`'s `plugin.json` (bash and curl, which Git Bash has; no Python, no GitHub SSH key):
+
+```
+bash scripts/skill_version.sh --check-update
+```
+
+- `0` → this copy is what `main` ships, or newer (a test build). Say nothing.
+- `3` → `behind_main` true: the update question below, with `main` as the newer version.
+  `status: reload_needed` means the new version is installed already and only this session runs
+  the old one: ask the user to type `/reload-plugins` (or restart Claude Code), then start again.
+- `5` → `main` could not be read (offline, no curl) → relay `say` in one line and carry on.
+
+**Never tell the user the skill is up to date** unless `--check-update` exited 0, and never take
+it from `claude plugin update`. On 2026-10-07 a Windows laptop with no GitHub SSH key ran
+`claude plugin update ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core`: it warned
+"marketplace not refreshed: SSH host key is not in your known_hosts", then "SSH authentication
+failed", and printed "already at the latest version (2.10.0)" while `main` shipped 2.11.2. It
+had compared against its own stale catalogue (the marketplace clone).
+
+**In `hive_remote`, then check that HIVE runs this same skill** (one SSH call). Core staff once
+ran 2.6.0 on their laptops and on HIVE two releases after it, so none of the fixes in between
+ran, and a HIVE copy without `.claude-plugin/` wrote "v0.0.0" into sdrf.tsv:
+
+```
+bash scripts/skill_version.sh --check-hive --mode hive_remote
+```
+
+**`behind_main` true (above) or `behind_release` true** means this computer's skill is older
+than the Core's current release. `behind_release` can come with exit 0, 3, 4 or 6. **Relay it
+FIRST, before any other work**, in plain words: "Your copy of the skill is older than the Core's
+current release (you have `local`, the Core is on `main` / `release`). Updating takes a minute."
+Then **ask whether to update now**:
+
+- **Yes** → run the update yourself; the user types nothing:
+  ```
+  bash scripts/skill_version.sh --update
+  ```
+
+  When the catalogue is behind `main` it refreshes it over HTTPS:
+  `git -C ~/.claude/plugins/marketplaces/ucdavis-proteomics-core pull --ff-only`, the route that
+  worked on that laptop. A catalogue with an SSH remote is pulled from
+  `https://github.com/bsphinney/DE-LIMP.git` instead. Then it runs
+  `claude plugin update ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core` with
+  `CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1` (Claude Code's documented switch for machines without a
+  GitHub SSH key). Last, it reads the version that landed and compares it with `main`:
+  - exit 0, `updated` → ask the user to type `/reload-plugins` (or restart Claude Code), then
+    start again with `--check-update`. `current` or `reload_needed`: nothing, or only the
+    reload, was needed.
+  - exit 1, `not_updated` → **The update did NOT happen**. Say it in those words and relay `say`
+    (why, plus the by-hand line in `manual`), then record it (`report_issue.sh`). Never relay
+    claude's "already at the latest version" as the answer; `claude_said` keeps its words for
+    the record.
+  - exit 5, `unverified` → it ran, but the result could not be checked against `main`. Relay
+    `say`: it is not a confirmation.
+- **No** → carry on. Once the session exists (step 3b), record that they declined:
+
+```
+python3 scripts/log_decision.py --session <S> --step '0. skill version' --what-file - --why-file - <<'EOF'
+Skill update declined: ran <local>, the Core's release is <release>
+---
+<the user's words>
+EOF
+```
+
+Either way, **always recommend turning on auto-update**: `/plugin` → Marketplaces →
+ucdavis-proteomics-core → Enable auto-update. It is off by default for this marketplace, which
+is how staff fell two releases behind. A new install should add the marketplace by its HTTPS
+URL, which Claude Code clones over HTTPS without probing SSH (`references/install.md`).
+
+Then, by exit code:
+
+- **exit 0** → carry on (after the update question above, when `behind_release` is true).
+- **exit 3** → `~/proteomics-pipeline` on HIVE is missing, has no `.claude-plugin/`, is older, or
+  is another build (its files differ) → run `bash scripts/hive_exec.sh --put-skill` without
+  asking (it is the user's own copy), then the check again, which must exit 0; if it does not,
+  record it (`report_issue.sh`) and tell the user before going on. Relay `say` in one line.
+- **exit 4** → HIVE has a NEWER skill than this computer → stop and relay `say`. With
+  `behind_release` true, that is the update question above. Otherwise HIVE holds an unreleased
+  build: ask the user which to keep. `--put-skill` the older one over it only if the user says
+  so.
+- **exit 5** → the check could not run (no saved HIVE login, HIVE unreachable) → say so in one
+  line and carry on. With no login, `check_access.sh` (step 0a) saves one; then check again.
+- **exit 6** → as exit 3, but `jobs` of the user's SLURM jobs have batch scripts that use
+  `~/proteomics-pipeline`, and their end-of-job steps run its scripts hours later. Or squeue
+  answered with an error, so they could not be counted. → Do NOT put it now. Relay `say`, and
+  ask the user whether to put it now or after those jobs finish (`watch_run.sh` shows when);
+  until then HIVE runs the older scripts.
+
+Only `hive_remote` runs `--check-hive`. Without `--mode hive_remote`, a computer with no HIVE
+login skips it silently; the release is compared only for Core accounts.
+
+## Step 1: locating the raw files
+
+Ask the user for a directory or file list if not given. Recognized: `.d` (Bruker),
+`.raw` (Thermo), `.mzML[.gz]`, `.wiff` (convert first). Glob to a concrete list.
+
+## Step 1: a path the user gave on a network drive
+
+**`hive_remote`: before any upload, run `bash scripts/hive_path.sh '<path the user gave>'`.**
+A mapped drive (`T:\…`) or SMB mount (`/Volumes/proteomics/…`) is usually a Flinders or
+quobyte share that HIVE already mounts. `verified: true` → use `hive_path` in place and
+glob on HIVE (`hive_exec.sh 'ls <hive_path>'`) — upload nothing. `verified: false` → show
+`candidates` and **ask the user** where that share lives on HIVE; do not search HIVE for
+it (a `find` over the Flinders NFS mount does not finish). Exit 3 (the laptop's own disk)
+→ `hive_exec.sh --put`, which itself refuses a source it verifies on HIVE.
+
+- **Any** drive letter (`R:`, `T:`, …), UNC path (`\\server\share\…`) or SMB mount gets this
+  check first — never search `/quobyte` (or anywhere on HIVE) instead: not finding the files
+  there does not mean HIVE lacks them. `R:` was `/nfs/lssc0/flinders/proteomics`, and 70 GB
+  already on HIVE was uploaded (msalemi, 2026-09-24).
