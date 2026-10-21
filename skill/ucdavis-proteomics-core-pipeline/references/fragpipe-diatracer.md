@@ -5,6 +5,17 @@ Everything here was found by running the route end-to-end on nine mouse dia-PASE
 of it is theoretical. **Nothing below is HIVE-specific except where a path is given as
 an example** — a laptop or a generic Linux box hits the same four gates.
 
+<!-- contents: tests/test_skill_structure.py --toc -->
+**Contents** (section: line)
+- 19: The four gates, in the order you hit them
+- 124: Parallelising the conversion
+- 147: Output contract
+- 160: When comparing against the DIA-NN route, say this out loud
+- 167: The verified working invocation
+- 189: 6c. FragPipe / Radiant: the config is generated, not stored (step 6c)
+- 227: 7. Running the FragPipe + diaTracer route (step 7)
+<!-- /contents -->
+
 ## The four gates, in the order you hit them
 
 ### 1. The three engines are licence-gated and cannot be scripted
@@ -174,3 +185,97 @@ segfault masked by a trailing `echo` has reported `COMPLETED` with no output.
 
 **Cite:** K. Li et al., *diaTracer enables spectrum-centric analysis of diaPASEF
 proteomics data*, Nat Commun 16, 95 (2025).
+
+## 6c. FragPipe / Radiant: the config is generated, not stored (step 6c)
+
+These two are driven by a whole config file rather than flags, so
+`resolve_defaults.py` (step 4) already generated one into `./wf/` by calling:
+
+```
+python3 scripts/make_presets.py --engine <fragpipe|radiant> \
+    --instrument "<detected instrument>" --acquisition DIA \
+    [--fasta ./search.fasta] [--threads N] [--cys-alkylation <agent>|none] \
+    --out ./wf/<engine>.<workflow|radiantConfig>
+```
+
+Re-run it directly if the FASTA or thread count changed after step 4, or with
+`--cys-alkylation` when step 3 asked about alkylation: FragPipe's presets fix carbamidomethyl-C
+(MSFragger's C row is set to the agent's mass, or 0 for `none`), and Radiant searches whatever
+fixed C modification its DIA-NN library carries (`run_search.py` builds that library with it, from
+`<out>.provenance.json`).
+
+It starts from the **vendor's own preset for that data type** and patches only what
+is run-specific. That matters: FragPipe's two DIA presets differ in **20 keys**, not
+one — MBR, missed cleavages, precursor charge and tolerance, topN peaks, and the
+var-mod table — so flipping `diatracer.run-diatracer` on the wrong template yields a
+config no vendor ever validated. Never hand-edit a preset to switch routes; pick the
+right template by data type.
+
+- **timsTOF** → `DIA_SpecLib_Quant_diaPASEF.workflow`, diaTracer **on**.
+- **Thermo** → `DIA_SpecLib_Quant.workflow`, diaTracer **off** (MSFragger-DIA
+  searches the spectra directly; there are no pseudo-spectra to trace).
+- **Radiant on Bruker `.d` is refused**, not adapted — the container reads only
+  mzML/Parquet. It also narrows Seer's flat 20/20 ppm default using the instrument,
+  tagged `[DERIVED]` because that inference is ours, not Seer's. A level with no documented
+  DIA-NN value (e.g. a 15k MS2) keeps the vendor 20 ppm, and the provenance says which.
+- Mass tolerances otherwise keep the **vendor's** values: FragPipe already tunes them
+  per data type, and DIA-NN's ppm table describes DIA-NN's matcher. Override only
+  with a value the user gives (`--ms1-ppm/--ms2-ppm`, with `--override-by`/`--override-reason`).
+
+`<out>.provenance.json` records every key changed and why — it feeds the methods text.
+
+## 7. Running the FragPipe + diaTracer route (step 7)
+
+- **FragPipe + diaTracer (timsTOF dia-PASEF, spectrum-centric DIA).** A second DIA route,
+  used when the bundle names it or the user asks for it. diaTracer traces 3-D features and
+  writes pseudo-MS/MS spectra, MSFragger searches those to build a library from the data
+  itself, then **DIA-NN quantifies against it**. Worth reaching for as a cross-check on the
+  DIA-NN route, or when the search needs semi-tryptic / nonspecific / open-modification
+  behaviour that library-free DIA-NN handles poorly.
+  - **⚠ Licensing — get this right, it is easy to state wrongly.** The gate is
+    **MSFragger / IonQuant / diaTracer** (one shared academic licence; commercial users
+    license via fragmatics.com). The DIA-NN that FragPipe bundles is explicitly *"available
+    for both academic and commercial use within FragPipe"*, so DIA-NN is **not** the
+    restriction here. A commercial user is not locked out — they must license the three
+    gated tools. **Never tell them the route is closed to them.**
+  - **⚠ The clause that matters for a core facility:** the academic licence forbids *"any
+    work product, report or deliverable by LICENSEE, for a commercial or for-profit
+    organization"* — which reads on fee-for-service work for an industry client. If asked
+    whether their work qualifies, send them to info@fragmatics.com and their licensing
+    office. Do **not** rule on it yourself. → `references/search-engines.md`.
+  - Output is DIA-NN's own, in `<workdir>/dia-quant-output/`. With FragPipe's bundled
+    DIA-NN 1.8.2 Beta 8 that is **`report.tsv` — there is no `report.parquet`** unless
+    someone configured DIA-NN 2.x. `adapt_fragpipe` handles either.
+  - **Never point FragPipe at shared raw files directly — `run_search.py` stages symlinks
+    for you.** diaTracer writes its mzML *next to the input*, so two people searching the
+    same dataset (a class working from one folder) would race to write the same file, and a
+    read-only share fails outright. `diatracer_stage.py` builds a per-run directory of
+    symlinks; FragPipe normalizes paths without resolving them, so the output lands in
+    **your** directory and the shared raw folder is never written to. This happens
+    automatically for DIA + `.d` inputs; nothing to pass.
+  - **Existing pseudo-spectra are reused, never regenerated.** The stager looks for the
+    mzML in the staging dir *and* beside the real `.d`, and when it finds one emits the
+    reuse form — the mzML as `DDA` plus the `.d` as `DIA-Quant` — so DIA-NN still
+    quantifies against the real chromatograms. That saves ~20 min per file, so a re-search
+    with different parameters is cheap. Report how many were reused.
+  - A manifest data type that isn't one of `DIA`/`GPF-DIA`/`DIA-Quant`/`DIA-Lib`/`DDA+`/
+    `DDA` is **silently treated as DDA**, quietly turning a DIA run into a DDA one.
+  - FragPipe 24.0 bundles **DIA-NN 1.8.2_beta_8**, older than the 2.x the `diann_*`
+    workflows pin. Expect different numbers from that alone; say so rather than
+    attributing every difference to the spectrum-centric approach.
+  - **Four things block this route on a fresh account — read "The four gates" above
+    BEFORE running it.** (1) the three engines are licence-gated and the tools folder must be the
+    one that also contains `speclib/`; (2) MSFragger needs a **target+decoy** FASTA, which DIA-NN
+    does not; (3) headless FragPipe rejects the spectral-library module until
+    `fragpipe-config.bin-python` exists in `~/.config/FragPipe/.../fragpipe-ui.cache` — no CLI flag
+    substitutes, run `scripts/fragpipe_bootstrap.py`; (4) diaTracer's standalone `main()` ignores its
+    own documented defaults and needs all seven numeric options passed.
+  - **On a cluster, parallelise the conversion automatically** with `scripts/diatracer_parallel.py`
+    — one SLURM task per file instead of FragPipe's serial loop. Measured 9 files in ~25 min vs ~3 h.
+    Re-stage afterwards so the manifest takes the reuse form and FragPipe skips conversion.
+  - Budget roughly **20 min per file for the diaTracer conversion alone** (paper: 34 files,
+    32 cores, ~19.4 min each), before MSFragger and DIA-NN. The mzML are **reusable**, so a
+    re-search with different parameters skips it. Needs Java 11+, MSFragger 4.4+,
+    IonQuant 1.11.18+, diaTracer 2.2.1+. The three gated jars are **not** in the FragPipe
+    zip and **cannot be scripted** — a human accepts the licence once and mints a key, then
+    point `FRAGPIPE_TOOLS_FOLDER` at them. → `references/search-engines.md`.
