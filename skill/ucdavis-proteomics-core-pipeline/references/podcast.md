@@ -39,6 +39,22 @@ the tables and the figures, so you write the script. The tool then checks the sc
 against the report -- numbers, symbol-like words, capitalised names -- which catches invented
 ones, not wrong sentences (see "What check cannot catch" below).
 
+<!-- contents: tests/test_skill_structure.py --toc -->
+**Contents** (section: line)
+- 58: When it is made
+- 88: Where it is made
+- 111: Privacy and consent (read before any cloud voice)
+- 185: The hosts
+- 211: Structure
+- 276: Fidelity rules
+- 428: The script file (`<session>/output/podcast/podcast_script.md`)
+- 493: Commands
+- 803: Sending the report with the audio (`share`)
+- 845: What ends up in `output/podcast/`
+- 862: Known limitations
+- 881: 9e. The audio discussion (step 9e)
+<!-- /contents -->
+
 ## When it is made
 
 - **Only after the report is final**: `Analysis_Report.html` is written, and any expert-review
@@ -861,3 +877,100 @@ Listen card points at: the audio, the transcript, the script, `check.txt` and `p
 `make_podcast.py verify --model <model>` (repeatable; `render --verify-model` for the verify a
 render runs) picks the Gemini text model(s) that transcribe the audio (the default is in
 `make_podcast.py`).
+
+## 9e. The audio discussion (step 9e)
+
+A ~20-min two-host episode, "Signal to Noise": Maya, a cell biologist, and Leo, a statistician.
+It is linked from a "Listen" card at the top of `Analysis_Report.html`. It is for the person who
+submitted the samples. It tells them what their data say and how their samples were measured and
+analysed, and it teaches how proteomics works (LC-MS/MS, DIA, FDR, inferred values, empirical
+Bayes) with their own data. **You write the script** from the final report; `make_podcast.py`
+checks it, renders it, verifies the audio and links it in.
+
+- **A CoreOmics submission** (Core staff analysing one): **make it by default** once the report
+  is final, without asking. Tell the staff member in one line; if they say no, skip it. The
+  consent is the Core director's standing approval, which `--core-run` records.
+- **Internal Core work** (no submission: a method test, QC): offer it in one line; on a yes,
+  `--core-run internal` (its `session.json` must say internal work). Both `--core-run` forms
+  need the person running it on the Core staff list.
+- **Anyone else:** offer it in one line when the results go to a collaborator or the lab; make
+  it only on a yes, with their consent recorded: `--cloud-ok "<who agreed, when>"`.
+- **It never holds up the report or the delivery.** No key, Gemini down or out of quota, a
+  failed render or job, a job still running when all else is ready (`scancel` it): one line to
+  the user, then deliver without it; the audio can be added later.
+
+**Make it where the report was built.** Built here (a Mac, `local` mode, or a pulled copy of a
+HIVE session, step 1c.7): make it here. With a session of record on HIVE, it then goes back with
+the finished files, `podcast/` and `Analysis_Report_with_audio.html` included (1c.7's push). For
+a Core run, Gemini voices; with no key here (`make_podcast.py key --core-run`), `--tts say`
+(offline):
+
+```
+P=<session>/output/podcast
+python3 scripts/make_podcast.py check $P/podcast_script.md --source <session>/output/AI_Analysis_Report.md \
+    <session>/output/methods.md <session>/output/AUDIT.md <session>/output/SAMPLE_QUALITY.md --forbid-name "<people>"
+python3 scripts/make_podcast.py meaning $P/podcast_script.md --brief --source <session>/output/AI_Analysis_Report.md
+#   -> a reviewer agent that did not write the script reads every sentence; fix, check again, then:
+python3 scripts/make_podcast.py meaning $P/podcast_script.md --verdict PASS --reviewer "<who>" --findings <file>
+python3 scripts/make_podcast.py render $P/podcast_script.md --tts gemini --core-run   # verify follows
+#   anyone else: --tts gemini --cloud-ok "<who agreed, when>", or --tts say
+python3 scripts/make_podcast.py link <session>/output
+python3 scripts/make_podcast.py share <session>/output
+```
+
+Built **on HIVE** (Windows staff, who cannot run the skill's Python here, or any session whose
+report was made there): in the session of record `$S`. You write the script here and put it
+there. `check` runs through `hive_exec.sh`, then a SLURM job renders the episode in Gemini voices
+(a Core run: the Core's shared key; anyone else: their own key on HIVE), verifies it, links it
+and shares it. Never render on the login node:
+
+```
+bash scripts/hive_exec.sh "mkdir -p $S/output/podcast"
+bash scripts/hive_exec.sh --put <here>/podcast_script.md "$S/output/podcast/"
+bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py check $S/output/podcast/podcast_script.md \
+    --source $S/output/AI_Analysis_Report.md $S/output/methods.md $S/output/AUDIT.md $S/output/SAMPLE_QUALITY.md --forbid-name '<people>'"
+bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py meaning $S/output/podcast/podcast_script.md --brief"
+#   -> the reviewer's findings go to $S/output/podcast/findings.md (--put), then --verdict PASS --reviewer ... --findings ...
+bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py job $S/output/podcast/podcast_script.md --core-run"
+bash scripts/hive_exec.sh '<the "submit" line it printed>'      # at once; then watch its "log"
+```
+
+`job` writes nothing until everything the job needs is there: a passing check, a PASS meaning check, the consent (and
+for `--core-run`, a staff member), google-genai in the pipeline env (`setup.sh` installs it) and
+a key. Each gap is a one-line refusal. The job and its log go in your private
+`~/.proteomics-pipeline/jobs/`, never the group-writable session. After the job, the report on
+HIVE carries the Listen card: never put a local copy over it.
+`share` writes `output/Analysis_Report_with_audio.html`, the report with the audio and transcript
+built in. It is the **one file to send** when someone wants the report with the audio, because
+the card's links are relative. It is checked by decoding the audio back out of the written file
+and by a headless-browser playback. Above ~18 MB (~25 MB as an email attachment, base64) it
+says to use Bioshare. Finalize makes it too
+when a podcast exists, and `deliver` ships it while it is current.
+`verify` has Gemini transcribe the rendered audio and compares it with the script. It reports
+the word match ratio, dropped spans and numbers the voice misread, and names the segments to
+listen to. It runs by itself after a consented `--tts gemini` render, and it sends the audio,
+so it needs the consent too.
+Sources are the delivered files in `output/` only: anything else (a Core note, a draft) is an
+`--extra-source <file> --label "<what>"`, and what comes only from it must be a named Claims
+bullet. The episode never advises tiering by PropObs; it points to README.html, the report and
+the per-group detection columns. `check` matches tokens, not meaning. It fails a number, symbol-like word or capitalised name
+that is not in the sources or listed under "Claims beyond the report", a quantity in words, a
+missing AI disclosure, a host claiming a real specialty, and a forbidden name. It cannot catch
+a true number attached to the wrong protein, a relational word ("higher", "the top hit") or a
+false sentence built from true tokens. So **a reader who did not write the script checks its
+meaning before render** (one `Agent` call with `make_podcast.py meaning <script> --brief`):
+every sentence against the report for (a) the right comparison, group and direction of each
+number and protein, (b) the report's hedges kept, (c) the robust status of every named protein
+(the session's robustness tables), (d) no superlative the report does not make, (e) no claim
+outside the report and the Claims list, (f) no draft history. The writer fixes what it finds and re-runs `check`; the
+reviewer records `make_podcast.py meaning <script> --verdict PASS --reviewer "<who>" --findings
+<file>`, which writes `podcast/meaning_check.md` with the script's sha256. `check` itself fails a
+protein named in the same clause as "robust" / "survives" that the robustness tables call not
+robust, and warns on a superlative the sources do not make. A robustness table you write for an
+analysis goes under `output/tables/` as a CSV with a `Genes` (or `Protein.Names`) column and a
+`robust` column of `yes`/`no` (`TRUE`/`FALSE` also read). Render, link, share and `job` refuse until the check
+passes for the current script and sources AND `meaning_check.md` says PASS for this script. `--tts gemini` sends
+the transcript (never the report) to Google, and nothing without consent: `--core-run` for a Core
+run, `--cloud-ok` for anyone else (`--cloud-ok no` is a refusal). On a free-tier key Google may use
+the text; for anyone else's unpublished data suggest a paid-tier key or `--tts say`. The Core's
+shared key on HIVE is used for a Core run only.
