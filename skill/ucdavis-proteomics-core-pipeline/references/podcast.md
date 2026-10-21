@@ -682,9 +682,9 @@ bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.t
       render says so in the log, waits **5 minutes** and asks those models once more, in the
       same order (at most one more request each; the first that answers is used), so a
       one-minute outage at Google does not count as "every model stalled"; only a second miss
-      does. After the wait the models that missed have a fresh chance for a later
-      hand-over, asked again or not, except one an earlier render saw stall (below): that
-      stays out until it answers. `tts.preflight.waited_s` records the wait, or
+      does. After the wait, a model that missed and was not asked again (another answered
+      first) can still take over mid-episode, unless an earlier render saw it stall (below):
+      that one stays out until it answers, as does one whose test came back empty. `tts.preflight.waited_s` records the wait, or
       `tts.fallback.preflight_waited_s` when the local voice then made the episode.
       `--no-preflight` skips the test; `podcast.json` `tts.preflight` records which.
     - **Mid-episode.** When a chunk's request goes unanswered twice (`--request-timeout`), the

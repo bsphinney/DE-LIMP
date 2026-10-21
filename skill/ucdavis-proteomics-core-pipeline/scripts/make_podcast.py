@@ -424,7 +424,10 @@ def clip_middle(text, n):
     if len(text) <= n:
         return text
     keep = n - len(" [...] ")
-    return text[:keep - keep // 3] + " [...] " + text[-(keep // 3):]
+    if keep < 3:
+        return text[:n]
+    tail = keep // 3
+    return text[:keep - tail] + " [...] " + text[len(text) - tail:]
 
 
 def minutes_label(seconds):

@@ -1043,9 +1043,9 @@ class ShortOutage(Local):
         self.assertEqual(self.container_calls(), [])
 
     def test_a_model_used_after_the_wait_can_still_hand_over(self):
-        """Every model that missed the first test, and that no earlier render saw stall, has a
-        fresh chance after the wait, asked again or not: one that answers then and stops
-        mid-episode hands over to the next."""
+        """A model that missed the first test and was not asked again after the wait (another
+        answered first) can still take over mid-episode, unless an earlier render saw it
+        stall: the model that answered stops on chunk 2 and hands over to it."""
         seen = {"n": 0}
 
         def behaviour(model, contents, config):
@@ -1154,9 +1154,9 @@ class ShortOutage(Local):
         self.assertEqual(self.manifest()["tts"]["backend"], "kokoro")
 
     def test_the_fallback_message_keeps_its_advice(self):
-        """Second review: a long shape (pro models out of free-tier quota with Google's whole
-        answer in the error, as google-genai gives it, the flash models missing twice,
-        remembered stalls) still ends with the advice in podcast.json."""
+        """Second review: a long shape (pro models out of free-tier quota, their errors as
+        google-genai words them, the flash models missing twice, remembered stalls) ends with
+        the advice in podcast.json."""
         self.remember(STALLS, ANSWERS)
 
         def behaviour(model, contents, config):
@@ -1169,7 +1169,6 @@ class ShortOutage(Local):
         rc, out, err, log = self.render(behaviour, preflight=True)
         self.assertEqual(rc, 0, err)
         fb = self.manifest()["tts"]["fallback"]
-        self.assertGreater(len(fb["message"]), 1000)
         self.assertIn("asked again 5 min later", fb["message"])
         self.assertTrue(fb["message"].endswith("--tts say"), fb["message"][-200:])
 
@@ -1181,6 +1180,16 @@ class ShortOutage(Local):
         self.assertTrue(got.endswith(" re-run later, or --tts say"))
         self.assertIn(" [...] ", got)
         self.assertEqual(mp.clip_middle("short", 2000), "short")
+        for n in range(0, 16):                                   # never over n
+            self.assertLessEqual(len(mp.clip_middle(text, n)), n)
+        # and podcast.json's tts.fallback.message goes through it
+        e = mp.GeminiUnusable("no Gemini TTS model answered a two-line test (" + "x" * 3000
+                              + "). The chunks already made are cached: re-run later, or "
+                              "--tts say", "stalled", "preflight")
+        fb = mp.fallback_record(e, None)
+        self.assertEqual(len(fb["message"]), 2000)
+        self.assertIn(" [...] ", fb["message"])
+        self.assertTrue(fb["message"].endswith("re-run later, or --tts say"))
 
     def test_a_resume_whose_cached_model_misses_twice_makes_every_chunk_again(self):
         rc, out, err, log = self.render(None, "--model", STALLS)
@@ -1475,7 +1484,9 @@ class Sizing(unittest.TestCase):
         """Gemini's own waits (the two-line test twice, 5 min apart, then the budgets), then
         each local-voice step with up to 15 min in the queue."""
         # every model missing the test twice; discover() gives each pro model, one flash 3
-        # model and the fallback model: four in this suite's list of Google's (two pro)
+        # model and the fallback model: four in this suite's list of Google's (two pro). This
+        # is a bound on the budgets, not on a real run (the steps take minutes, not their
+        # limits): 178 of 180 min, so up to five models fit
         models = max(len(mp.KNOWN_TTS_MODELS), 4)
         preflight = (2 * models * mp.PREFLIGHT_TIMEOUT + mp.PREFLIGHT_RETRY_WAIT) / 60
         need = (preflight + mp.RATE_WAIT_BUDGET_MIN + mp.REQUEST_TIMEOUT_BUDGET_MIN
