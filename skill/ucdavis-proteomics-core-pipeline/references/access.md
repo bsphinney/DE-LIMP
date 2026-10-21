@@ -695,4 +695,4 @@ it (a `find` over the Flinders NFS mount does not finish). Exit 3 (the laptop's 
 - **Any** drive letter (`R:`, `T:`, …), UNC path (`\\server\share\…`) or SMB mount gets this
   check first — never search `/quobyte` (or anywhere on HIVE) instead: not finding the files
   there does not mean HIVE lacks them. `R:` was `/nfs/lssc0/flinders/proteomics`, and 70 GB
-  already on HIVE was uploaded (msalemi, 2026-09-24).
+  already on HIVE was uploaded (a Core staff member's run, 2026-09-24).

@@ -17,7 +17,7 @@ yourself, so the skill runs them one way only.
 - 419: Known limitations and backlog
 - 440: How to read the results
 - 472: Outputs
-- 486: PROT_0756 v2 (validation, 2026-09-28; after the statistician's review; HIVE job 24182898)
+- 486: PROT_0756 v2 (validation, 2026-09-28; after the statistician's review)
 - 537: 8a. Running them (step 8a)
 <!-- /contents -->
 
@@ -483,7 +483,7 @@ wording cannot be strengthened on the way:
 `make_analysis_html.py` adds a "Protein-set tests" section from the record (a report section of
 the same name replaces it); `make_methods.py` adds the paragraph to `methods.md`.
 
-## PROT_0756 v2 (validation, 2026-09-28; after the statistician's review; HIVE job 24182898)
+## PROT_0756 v2 (validation, 2026-09-28; after the statistician's review)
 
 Read-only on the v2 session (its report, conditions and FASTA sidecar); `run_de.R` re-run to a
 scratch folder with the 12 v2 contrasts plus `Old_IgG-Young_IgG` (random Mouse block, scope

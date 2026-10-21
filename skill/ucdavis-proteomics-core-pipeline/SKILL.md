@@ -262,7 +262,7 @@ Ask where results go (with the raw data, or a `--base`); then `python3 scripts/s
 --name "<short study name>" --raw /path/to/*.d` (Core staff: `--submission`/`--internal`; `--call-id
 <token>` when a subagent ran in the last 6 hours). Then, in this order:
 ```
-python3 scripts/submission_report.py attach --session <session> --record ~/core/PROT_0756   # Core data only
+python3 scripts/submission_report.py attach --session <session> --record ~/core/PROT_0807   # Core data only
 python3 scripts/experiment_type.py set --session <session> --type <type> --source <submission|user> [--bait <gene>]
 python3 scripts/sample_type.py set --session <session> --stated "<their words>"   # or --not-stated / --not-asked
 ```
