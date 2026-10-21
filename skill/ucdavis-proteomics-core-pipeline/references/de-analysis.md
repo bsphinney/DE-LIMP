@@ -4,6 +4,29 @@ The DE step (`run_de.R` + `build_maxlfq.R`) is a faithful port of what DE-LIMP l
 in `R/server_data.R` / `R/helpers.R`. Two pipelines, picked by the bundle's
 `de.method`.
 
+<!-- contents: tests/test_skill_structure.py --toc -->
+**Contents** (section: line)
+- 30: Invocation
+- 96: `--method dpc` (limpa DPC-Quant + limma) — DE-LIMP default, use with DIA-NN
+- 115: `--method maxlfq` (MaxLFQ + limma) — use with Sage/FragPipe (or DIA-NN MaxLFQ)
+- 160: DE-input contract (§8.3)
+- 165: Design matrix
+- 216: Paired / repeated designs — `--block <column>`
+- 335: Method choice — limpa/DPC is the default
+- 371: Normalised or non-normalised quantities: the experiment type and the data check
+- 470: Contaminant filter (both paths, on by default)
+- 559: Coverage filter (maxlfq path)
+- 573: Provenance (self-describing — DE-LIMP architectural rule #1)
+- 586: Top-protein violins (`make_figures.R` → `violin_top_<contrast>.png`)
+- 617: Citations (verified June 2026)
+- 635: Less-used flags
+- 639: Step 8: the normalisation check and the final DE
+- 732: Step 8: blocks and numeric covariates
+- 765: Step 8: keratin samples and contaminants
+- 801: Step 8: the method, what `run_de.R` writes, QuantUMS
+- 869: 8b. Figures, and what counts as significant (step 8b)
+<!-- /contents -->
+
 ## Invocation
 ```
 Rscript scripts/run_de.R --input report.parquet [--format parquet|tsv] \
@@ -612,3 +635,269 @@ no status legend is drawn. Never describe those points as measured.
 ## Less-used flags
 - `make_figures.R --top <n>`: how many proteins the top-protein heatmap shows (default 50).
 - `sample_quality.py --z <x>`: the |z| above which a sample is flagged as elevated (default 1.5).
+
+## Step 8: the normalisation check and the final DE
+
+**Then check the normalisation before the final DE** — for every experiment type. Run the DE
+both ways into scratch folders (one job on HIVE), then the check. **A DE, set-test or figure job
+on HIVE** starts from `python3 ~/proteomics-pipeline/scripts/on_compute.py --header <S>/logs
+--name <short name> --time <minutes> --mem <size>G --cpus <n>`: the queue the skill's rule
+picks, `--time`/`--mem`/`--cpus` explicit, one log per job (`%j`), `set -euo pipefail`. Append
+the commands, `sbatch` it, and when the `ucd-hpc` skill is installed here, lint it first with
+its `lint-jobscript.sh` (`U` = that skill's scripts folder, `~/.claude/skills/ucd-hpc/scripts`):
+`bash scripts/hive_exec.sh 'bash -s -- <job file>' < "$U"/lint-jobscript.sh`
+(it misreads a log path that holds a space as having no `%j`; sbatch reads it right, so that
+one message can be ignored).
+
+```
+Rscript scripts/run_de.R --input ./search_out/report.parquet --metadata conditions.csv \
+    --method <dpc|maxlfq> --fasta-meta ./search.fasta.meta.json [--block Mouse] [--numeric-covariates Covariate1] \
+    --quantities normalised --check-input --outdir <S>/output/norm_check/normalised
+Rscript scripts/run_de.R ... (the same) --quantities raw --check-input --outdir <S>/output/norm_check/raw
+python3 scripts/normalization_check.py run --report ./search_out/report.parquet \
+    --conditions conditions.csv --de-normalised <S>/output/norm_check/normalised \
+    --de-raw <S>/output/norm_check/raw --session <S>
+```
+
+`--quantities normalised` reads DIA-NN's normalised quantities (dpc: `Precursor.Normalised`;
+maxlfq: `PG.MaxLFQ` + quantile normalisation); `raw` reads DIA-NN's non-normalised ones (dpc:
+`Precursor.Quantity`, through limpa's own quantity-column argument; maxlfq: only a report
+searched with `--no-norm` — `diann_parallel.py --no-norm`, or `--no-norm` in a single-shot
+cfg — with no quantile step; a normalised report is refused, since its `PG.MaxLFQ` is
+normalised). **maxlfq on a normal report: its `--quantities raw` DE is refused, so do one of
+these.** (1) Run all three DEs (both check inputs and the final DE) with `--method dpc`, which
+reads both quantities from this report, with no new search. (2) To keep MaxLFQ, search again
+with `--no-norm` (`diann_parallel.py --no-norm` writes `no_norm_report.parquet`), run the raw
+check DE on that report, and pass it to the check as `--report-raw
+<no_norm_report.parquet>`. B1–B4 still read `--report`, and a raw decision holds the final DE
+to the `--report-raw` report. The check reads the normalisation factors (`Precursor.Normalised /
+Precursor.Quantity` = DIA-NN's `Normalisation.Factor`) against the groups, the fold changes
+before normalisation, identifications per group, `Normalisation.Instability`, and each
+contrast's volcano both ways (centre, up:down, % significant, bait rank, p-value shape); for
+proximity labelling also how steady the biotinylated carboxylases are (a reference, never a
+normaliser). `--check-input` marks these two DEs as the check's inputs: in a session that
+records an experiment type, `run_de.R` refuses any DE that has neither it nor
+`--normalization-check`, and prints these exact commands (`normalization_check.py required
+--input <report> --metadata <conditions>` prints them too, and the chain's recovery step in
+`RECOVERY.md` / `checkpoint.py status` is this check, never the final DE alone). **Exit 0:** the
+data agree with the type's default — use it. **Exit 3 (TRIPPED, or no experiment type
+recorded): STOP before the final DE.** With no type recorded nothing is decided for the user:
+ask what the experiment is (step 3) and which quantities to use. Show the Core staff member
+`NORMALIZATION_CHECK.md` (side by side, normalised vs non-normalised, with a recommendation),
+ask which to use, and record their answer. **The decision is the person's, never Claude's.**
+Never choose, and never fill in `--by` yourself. `--by` is their HIVE login, never a full name.
+`decide` checks it against the Core's staff list (`staff.py`: `CORE_STAFF_FILE`, default
+`/quobyte/proteomics-grp/.config/core_staff.txt`, trusted only when a Core admin owns it). With
+the list, a login on it is accepted and any other is refused. With no list, a login that is an
+agent's name (claude, assistant, bot…) is refused, and any other passes with a NOT VERIFIED
+warning. Their name and login go only into the
+staff-only `logs/normalization_check.staff.json`. The Methods, AUDIT.md, `de_provenance.json` and
+the zip say "Core staff chose … because <reason>", so the reason must not name anyone. A
+second `decide` replaces the first: its sentence has no history, and the report, the audit and
+the podcast state only the decision that stands -- never the earlier reason, nor that it was
+"corrected" (the change and why go in `logs/decisions.md`; both decisions stay in the staff-only
+record):
+
+```
+python3 scripts/normalization_check.py decide --check <S>/output/norm_check/normalization_check.json \
+    --quantities <raw|normalised> --by <their HIVE login> --reason '<why, in their words; no quote marks, $ or backticks>'
+```
+
+The recommendation keeps the type's default unless that default's own volcano is clearly the
+worse one; the checks that tripped are the questions to ask. Never switch silently, either way.
+The final DE is held to the decision AND to the data it was made on (it refuses any other
+`--quantities`, and any other report or conditions — their sha256 is in the check) AND to the
+model: all three DEs carry the same design flags (`--numeric-covariates`, `--block`,
+`--block-effect`, `--block-scope`, `--contrasts`). `normalization_check.py run` refuses two check
+DEs fitted with different designs or on other files and records their design (`check_design`);
+the final DE refuses another method, formula, numeric covariate or block (other contrasts: a
+warning; a check from before 2.12 records no design, said as NOT CHECKED — re-run the check to
+check it). It records all of it in `de_provenance.json` `normalization_check` and the Methods.
+A DE without a decided check is a WARN in AUDIT.md, and `core_submission.py deliver` holds the delivery until step 8 is done
+(a delivery meant to go without a DE — a QC report — is `deliver --mode no-de`, step 12b).
+A DE from **before 2.10** has no check record at all. Re-run step 8 on it, or, if Core staff
+decide it stands as it is, they record that with `python3 scripts/normalization_check.py
+ack-legacy --session <S> --by <their HIVE login> --note "<why this DE stands>"`. This is the
+same shape as the QC ack and goes through the same staff-list check. It is accepted only for a
+DE with no check record and is tied to that DE record. It is written to the staff-only
+`logs/normalization_check.staff.json`, and the gate then passes. The final DE:
+
+```
+Rscript scripts/run_de.R --input ./search_out/report.parquet \
+    --metadata conditions.csv --method <dpc|maxlfq> --outdir ./de_results \
+    --fasta-meta ./search.fasta.meta.json [--block Mouse] [--numeric-covariates Covariate1] \
+    --quantities <decided> --normalization-check <S>/output/norm_check/normalization_check.json
+```
+
+## Step 8: blocks and numeric covariates
+
+**Several samples from one animal / patient → `--block <column>`.** IPs cut from the same
+mouse brain, or before/after samples from one subject, are correlated; without `--block`
+they are fitted as independent and the pairing is lost. Give the unit its own
+`conditions.csv` column (`Mouse` — not Batch/Covariate1/2) and pass `--block Mouse`.
+`run_de.R` picks the model (`--block-effect auto`, recorded as `block.effect`):
+
+- **Crossed paired design** (before/after in the same patient; every contrast within one
+  subject): a **fixed** subject effect (`~ 0 + groups + Patient`) — the exact paired
+  analysis (type I 0.050 and power 0.95 at every per-protein correlation, where the
+  random effect drifts 0.078 → 0.010 and loses power to 0.76).
+- **Nested / multi-level** (mice within age, as PROT_0756): a **random** effect via limma
+  `duplicateCorrelation` (limpa's `dpcDE` takes it natively). `--block-scope within` (the
+  default) reports within-mouse contrasts (bait vs IgG) from the blocked fit and
+  between-mouse contrasts that use one sample per mouse (Old vs Young for one bait) from
+  the fit with samples independent — one run, one record (`block.contrast_model`). The
+  single consensus correlation understates between-mouse variance for proteins that vary
+  strongly animal to animal (PROT_0756: SE 0.86× where it should be 1×), so a
+  between-mouse contrast that must use the blocked fit (pooled over baits, or
+  `--block-scope all`) carries a `CAUTION` — define age contrasts per bait instead.
+State n per group in mice, not IPs. run_de.R prints a note when a column looks like a
+block and `--block` is missing — ask the user.
+A `Sample` column whose value repeats (technical replicates from `locate --reinjections all`)
+is blocked by run_de.R itself — random effect, every contrast from that fit — so pass no
+`--block` for it; see "Technical replicates" above.
+**A covariate that is a measurement** (a bait intensity, an age, a run depth) → ask, then pass
+`--numeric-covariates Covariate1` to all three DEs (both check inputs and the final one): it is
+fitted as one slope shared by all groups, not a factor with a level per value. Never decided
+from the values; `Batch` is always a factor. A blank or non-number stops the run; a covariate
+that nearly matches the groups of a comparison is a `CAUTION`, naming it, to raise with the user →
+"Continuous covariates" above.
+
+## Step 8: keratin samples and contaminants
+
+**Keratin sample (step 3):** `run_de.R` reads it from the sidecar or `search_provenance.json`
+and keeps keratin as the analyte — nothing to pass. For a search that records neither (an older
+search, one run outside the skill), pass `--keratin-sample`: precursors that map only to
+keratin-family contaminant entries are then kept (the entries are found with `fetch_fasta.py
+keratin-db`) — another species' keratin (mouse fur, sheep wool in human hair) only when the
+precursor also names a sample protein — trypsin, BSA and every other contaminant entry are still
+removed, and the run prints a `CAUTION` to rebuild the FASTA with `--keratin-sample` and re-search.
+With `--method maxlfq` the kept protein groups stay, but their quantities are DIA-NN's PG.MaxLFQ,
+which already left the shared peptides out, so only a rebuild fixes those numbers. `contam_`
+entries (a database built with FragPipe/Philosopher's `--contam`, not by the skill) count as
+contaminants the same way wherever the tag survives — FragPipe's DDA adapter keeps it. FragPipe's
+DIA route drops it (library.tsv), so `run_search.py` refuses a FragPipe search on such a database:
+build it with `fetch_fasta.py`. When it cannot
+tell whether the samples are keratin, it removes keratin-family entries as for any sample and
+says so in its log and in `de_provenance.json` (`contaminants.keratin_sample`), which
+`methods.txt`, `make_methods.py` and the report read.
+**Contaminants are removed before quantification, on both methods.** Every precursor that
+maps to a `Cont_` entry, or to a `contam_` one (a FragPipe/Philosopher `--contam` database, DDA
+route) (any accession in `Protein.Ids` — the rule of DIA-NN's `--cont-quant-exclude`, applied by
+`run_de.R` to every engine's report), is dropped before limpa/limma sees it. Every adapter writes
+bare accessions as DIA-NN does (`protein_ids.py`): Sage's FASTA IDs (`sp|Cont_P02769|ALBU_BOVIN`)
+used to slip past the rule, so a Sage DE tested its contaminants. DIA-NN's flag alone
+never reached the DE, so contaminants used to be tested and came out as hits (bovine serum
+HBB +10.5 log2 in antibody IPs). The counts land in `de_provenance.json` (`contaminants`),
+`methods.txt` and `contaminants_removed.csv`; `QC_contaminant_share.csv` gives each run's
+contaminant share of the precursor signal — report a high or group-confounded share in the
+Data Quality Notes. `--keep-contaminants` opts out (only when the user asks). Pass
+`--fasta-meta`: a database built before target-identical contaminants were removed holds
+real proteins (ACTB, EEF1A1, keratins) only as `Cont_` entries, and one built by the identity
+rule alone (fetch_fasta.py before 2.8.0) still holds near-identical ones (bovine EEF1A1 and
+YWHAZ for mouse), so the filter removes those proteins too — the run then prints a `CAUTION`
+naming them, AUDIT.md names them from the searched FASTA, and the fix is to rebuild the FASTA
+with fetch_fasta.py from 2.8.0 on and re-search. Tell the collaborator which proteins.
+
+## Step 8: the method, what `run_de.R` writes, QuantUMS
+
+**`dpc` (limpa) is THE DEFAULT — use it unless the user asks otherwise or the data
+cannot support it.** limpa models the detection-probability curve and quantifies from
+precursor intensities directly, so it uses the whole measurement rather than a
+pre-collapsed protein number. Don't switch away from it because a bundle happens to
+say `maxlfq`; switch only for the two reasons below.
+
+Use `maxlfq` when **either**:
+
+1. **The user asks for it** — e.g. they want QuantUMS quality filtering (below), or
+   to match a previous MaxLFQ-based analysis.
+2. **The input cannot support limpa.** `readDIANN()` needs PRECURSOR-level columns
+   (`Precursor.Id`, `Precursor.Normalised`). What matters is *which file you point at*,
+   not which engine ran:
+
+   | engine | file to use for `dpc` | verified |
+   |---|---|---|
+   | DIA-NN | `search_out/report.parquet` (native) | yes |
+   | FragPipe | `dia-quant-output/report.tsv` + `--format tsv` | yes — its DIA route bundles DIA-NN, so this **is** a DIA-NN report, `Lib.Q.Value`/`Lib.PG.Q.Value` included |
+   | Radiant | `radiant_to_delimp.py --out <x>.parquet` | yes |
+
+   What does **not** work is the *adapted* `report.parquet` from `adapt_sage` /
+   `adapt_fragpipe` / `adapt_radiant` — those deliberately collapse to one row per
+   protein × run to feed the maxlfq path. `run_de.R` checks up front and names the
+   precursor-level file to use instead.
+
+Writes `DE_<method>_<contrast>.csv` + `Expression_Matrix.csv` +
+`methods.txt` + `sessionInfo.txt` + `de_provenance.json` (exact R package versions) +
+`QC_contaminant_share.csv` + `contaminants_removed.csv` + `Detection_Matrix.csv` (per protein ×
+sample: precursors observed, 0 = inferred by DPC / missing for MaxLFQ, per
+`de_provenance.json` `detection_matrix`) + **`reproducibility_log.R`** + (DPC runs)
+`DE-LIMP_session.rds`, which loads straight into the DE-LIMP app
+(https://delimp.stan-proteomics.org/) for interactive exploration.
+
+`reproducibility_log.R` is the whole analysis as plain, flat R — every value written
+out literally (report path, FDR cutoff, sample→group map, design, contrasts), runnable
+with `Rscript` using nothing but R and limpa/limma. It is generated from the objects
+that actually ran, so it can't drift from the CSVs next to it. **This is what to show
+a user who asks "what did you do?" or "can I have the R code?"** — not the
+`reproducibility/` bundle, which pins the environment and re-runs the multi-hour
+search. Mention it when you hand over results.
+
+**QuantUMS quality filtering — opt-in, `--method maxlfq`, DIA-NN input only.**
+Only reach for this when the user asks. DIA-NN's
+QuantUMS scores how well MS1 and MS2 agree for each measurement, and filtering on it
+trades depth for quantitative reliability:
+
+| flag | column | default | what it does |
+|---|---|---|---|
+| `--eq-cutoff` | `Empirical.Quality` | 0 (off) | drop precursors whose empirical quality is below this |
+| `--pgq-cutoff` | `PG.MaxLFQ.Quality` | 0 (off) | drop protein groups whose MaxLFQ quality is below this |
+| `--coverage-min` | — | 0.5 | require a protein in ≥ this fraction of samples before testing |
+
+Both QuantUMS cutoffs are **off by default** — they discard real measurements, so
+they are the user's call, not a silent default. Offer them when quantitative
+precision matters more than depth (small fold-changes, few replicates), say roughly
+how many proteins each costs, and record the choice: the counts land in
+`filters_applied` and flow into `methods.txt`. They need DIA-NN input — the columns
+don't exist in Sage/FragPipe/Radiant output, and the filter is skipped if absent.
+
+`--coverage-min` is different: it is **on** at 0.5 because a protein seen in one or
+two samples is an on/off observation, and letting such rows into `eBayes` destabilises
+the variance moderation for *every* protein, not just those rows.
+
+**After DE, log the contrasts** (`log_decision.py`) **and save the conversation**
+(`save_transcript.py <S>`; hive_remote: `--hive "$S"`). See SKILL.md and outputs.md, "Keeping the record of the analysis".
+
+## 8b. Figures, and what counts as significant (step 8b)
+
+```
+Rscript scripts/make_figures.R --de-dir ./de_results --conditions ./conditions.csv \
+    --outdir ./figures
+```
+
+Produces publication-quality volcano (per contrast), PCA (each group circled and named),
+heatmap of top proteins, per-contrast top-protein violins (`violin_top_<contrast>.png`: each
+run's point filled if measured, hollow if inferred; a group never measured makes that fold
+change a detection event), the detected-vs-inferred QC plot, and ONE panel of raw p-value
+distributions (`qc_pvalue_panel.png`, for the appendix), plus `figures.json` (`figures`:
+captions; `failed`: every figure not drawn, with the reason). The per-sample protein-count
+plot is drawn only for a matrix with missing values (MaxLFQ); a DPC matrix is complete, so
+every bar would be identical — it is skipped and the reason logged. The significance cutoff
+comes from the DE run's `de_provenance.json`; `--adjp`/`--logfc` are only a fallback for a
+run with no record, and the captions then say so. These get embedded in the report.
+
+**Significance is `adj.P.Val` alone — there is no fold-change cutoff anywhere in this
+pipeline.** `--logfc` only positions a labelled reference line on the volcano. Never
+re-impose it when you count, rank, or describe significant proteins, and never justify a
+result by "it's ≥2-fold". The moderated t-test tested H0: log2FC = 0, so that is the only
+claim the FDR covers; filtering the list on the observed fold change afterwards would
+report a stronger claim than the error rate supports, because an observed fold change is
+a point estimate with no uncertainty attached. (Testing a fold-change threshold properly
+needs `limma::treat()`'s interval null — McCarthy & Smyth 2009 — not a post-hoc cut.) You
+may report how many significant proteins also exceed the reference line, as a description
+of effect size.
+
+**A protein measured in neither group of a contrast is not tested in it.** With three or more
+groups, a protein seen only in other groups has `Evidence` = `not measured in either group`
+in that contrast's table, no `logFC` or p-value, and is left out of that contrast's BH
+correction (this file). The row stays. Count *tested* proteins as the rows
+with a `P.Value` (`de_provenance.json` `de_tables` → `n_tested`), never as all rows, and never
+describe such a protein as a presence call or a hit.
