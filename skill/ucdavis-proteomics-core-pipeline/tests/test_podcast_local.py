@@ -962,12 +962,15 @@ class ShortOutage(Local):
         self.assertIn(f"Waiting 5 min, then asking {STALLS}, {ANSWERS} once more, in case this "
                       "is a short outage at Google", err)
         self.assertEqual(self.probes(log), [STALLS, ANSWERS, STALLS])
+        self.assertIn(f"asked again 5 min later: {STALLS} answered; using {STALLS}", err)
         man = self.manifest()
         self.assertEqual(man["tts"]["backend"], "gemini")
         self.assertNotIn("fallback", man["tts"])
         self.assertEqual(man["tts"]["models_used"], [STALLS])
         self.assertEqual((man["tts"]["preflight"]["model"], man["tts"]["preflight"]["waited_s"]),
                          (STALLS, 300.0))
+        self.assertEqual(man["tts"]["preflight"]["skipped"][-1],
+                         f"asked again 5 min later: {STALLS} answered")
         self.assertEqual(self.container_calls(), [])
 
     def test_a_second_miss_by_every_model_is_every_model_stalled(self):
@@ -980,6 +983,7 @@ class ShortOutage(Local):
         fb = man["tts"]["fallback"]
         self.assertEqual((man["tts"]["backend"], fb["why"]), ("kokoro", "stalled"))
         self.assertIn("asked again 5 min later", fb["message"])
+        self.assertEqual((fb["preflight_requests"], fb["preflight_waited_s"]), (4, 300.0))
         self.assertLess(err.index("Waiting 5 min"), err.index("making the WHOLE episode"))
 
     def test_the_wait_is_the_constant(self):
@@ -995,17 +999,115 @@ class ShortOutage(Local):
         self.assertEqual(self.container_calls(), [], "--no-fallback still stops")
 
     def test_no_wait_when_no_model_missed_the_test(self):
-        """A 503 or a missing model is not an unanswered test: no wait, as before."""
-        for status, code in (("UNAVAILABLE", 503), ("NOT_FOUND", 404)):
+        """A 503 or a missing model is not an unanswered test: no wait, and the same outcome as
+        before (the resume message; the local voice)."""
+        for status, code, want in (("UNAVAILABLE", 503, 1), ("NOT_FOUND", 404, 0)):
             with self.subTest(status=status):
                 del self.slept[:]
+                shutil.rmtree(os.path.join(self.pod, ".cache"), ignore_errors=True)
 
                 def behaviour(model, contents, config):
                     raise ApiError(code, status, {"error": {"code": code, "status": status,
                                                             "message": "no"}})
                 rc, out, err, log = self.render(behaviour, "--model", ANSWERS, preflight=True)
+                self.assertEqual(rc, want, err)
                 self.assertEqual(self.waits(), [])
                 self.assertNotIn("Waiting 5 min", err)
+                self.assertNotIn("Traceback", err)
+                if want:
+                    self.assertIn("re-run later", err)
+                    self.assertEqual(self.container_calls(), [])
+                else:
+                    self.assertEqual(self.manifest()["tts"]["fallback"]["why"], "quota")
+
+    def test_a_free_tier_key_waits_too(self):
+        """The shape a free-tier key meets: the pro model out of quota, both flash models
+        missing the test. That fell back at once ("none"); now the flash models get the wait."""
+        pro = "gemini-9-pro-tts"
+
+        def behaviour(model, contents, config):
+            if model == pro:
+                raise ApiError(429, "RESOURCE_EXHAUSTED", rpc_error(
+                    "GenerateRequestsPerDayPerProjectPerModel-FreeTier", value="0"))
+            if model == STALLS or not self.waits():
+                self.release.wait(30)
+            return pcm_for(contents)
+        rc, out, err, log = self.render(behaviour, "--model", pro, "--model", STALLS, "--model",
+                                        ANSWERS, preflight=True)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.waits(), [300.0])
+        self.assertIn(f"then asking {STALLS}, {ANSWERS} once more", err)
+        self.assertEqual(self.probes(log), [pro, STALLS, ANSWERS, STALLS, ANSWERS])
+        man = self.manifest()
+        self.assertEqual((man["tts"]["backend"], man["tts"]["models_used"]), ("gemini", [ANSWERS]))
+        self.assertEqual(self.container_calls(), [])
+
+    def test_a_model_used_after_the_wait_can_still_hand_over(self):
+        """The models asked again are no longer counted as stalled: one that answers after the
+        wait and then stops mid-episode hands over to the next, which answers."""
+        seen = {"n": 0}
+
+        def behaviour(model, contents, config):
+            if not self.waits():
+                self.release.wait(30)
+            elif model == STALLS and mp.PREFLIGHT_LINES[0] not in json.dumps(contents):
+                seen["n"] += 1
+                if seen["n"] >= 2:                               # chunk 2 never answers
+                    self.release.wait(30)
+            return pcm_for(contents)
+        rc, out, err, log = self.render(behaviour, "--model", STALLS, "--model", ANSWERS,
+                                        "--request-timeout", "0.3", preflight=True)
+        self.assertEqual(rc, 0, err)
+        man = self.manifest()
+        self.assertEqual((man["tts"]["backend"], man["tts"]["models_used"]), ("gemini", [ANSWERS]))
+        self.assertEqual([(x["from"], x["to"], x["kind"]) for x in man["tts"]["switched"]],
+                         [(STALLS, ANSWERS, "stalled")])
+
+    def test_a_remembered_model_that_answers_after_the_wait_is_forgotten(self):
+        cache = os.path.join(self.pod, ".cache")
+        os.makedirs(cache, exist_ok=True)
+        with open(os.path.join(cache, mp.STALL_FILE), "w") as fh:
+            json.dump({m: {"at": mp.now_iso(), "where": "chunk 2/2 (segment 2)",
+                           "why": "2 requests of 600 s unanswered"} for m in (STALLS, ANSWERS)},
+                      fh)
+
+        def behaviour(model, contents, config):
+            if "pro" in model:
+                raise ApiError(429, "RESOURCE_EXHAUSTED", rpc_error(
+                    "GenerateRequestsPerDayPerProjectPerModel-FreeTier", value="0"))
+            if model != ANSWERS or not self.waits():
+                self.release.wait(30)
+            return pcm_for(contents)
+        rc, out, err, log = self.render(behaviour, preflight=True)     # no --model: remembered
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.waits(), [300.0])
+        self.assertIn(f"preflight: {ANSWERS} stopped answering earlier; it answers now", err)
+        self.assertEqual(err.count(f"preflight: {ANSWERS} stopped answering earlier ("), 1)
+        with open(os.path.join(cache, mp.STALL_FILE)) as fh:
+            self.assertEqual(sorted(json.load(fh)), [STALLS])
+        self.assertEqual(self.manifest()["tts"]["models_used"], [ANSWERS])
+
+    def test_a_resume_whose_cached_model_misses_twice_makes_every_chunk_again(self):
+        rc, out, err, log = self.render(None, "--model", STALLS)
+        self.assertEqual(rc, 0, err)
+        cache = os.path.join(self.pod, ".cache")
+        os.remove(os.path.join(cache, sorted(f for f in os.listdir(cache)
+                                             if f.endswith(".wav"))[0]))
+
+        def behaviour(model, contents, config):
+            if model == STALLS or not self.waits():
+                self.release.wait(30)
+            return pcm_for(contents)
+        rc, out, err, log = self.render(behaviour, "--model", STALLS, "--model", ANSWERS,
+                                        preflight=True)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.waits(), [300.0])
+        man = self.manifest()
+        self.assertEqual(man["tts"]["models_used"], [ANSWERS])
+        self.assertEqual((man["chunks_cached"], man["chunks_synthesized"]), (0, 2))
+        self.assertEqual([(x["from"], x["to"], x["kind"]) for x in man["tts"]["switched"]],
+                         [(STALLS, ANSWERS, "preflight")])
+        self.assertIn("asked again 5 min later", man["tts"]["switched"][0]["why"])
 
 
 class NotAvailable(Local):

@@ -678,10 +678,12 @@ bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.t
       chunk again**, so the voices never mix. Nothing to make, no test. Each test is one request
       against the key's daily quota (a free-tier key's TTS quota is small), and a resume walks
       the models until one answers (up to 60 s each). When none answers and some gave no
-      answer, the render says so in the log, waits **5 minutes** and asks those models once
-      more, so a one-minute outage at Google does not count as "every model stalled"; only a
-      second miss does (`tts.preflight.waited_s` records a wait). `--no-preflight` skips it;
-      `podcast.json` `tts.preflight` records which.
+      answer (the others out of quota or missing, as on a free-tier key, count too), the
+      render says so in the log, waits **5 minutes** and asks those models once more (one more
+      request each), so a one-minute outage at Google does not count as "every model
+      stalled"; only a second miss does. `tts.preflight.waited_s` records the wait, or
+      `tts.fallback.preflight_waited_s` when the local voice then made the episode.
+      `--no-preflight` skips the test; `podcast.json` `tts.preflight` records which.
     - **Mid-episode.** When a chunk's request goes unanswered twice (`--request-timeout`), the
       render moves to the next candidate model and makes **every chunk again** with it, and
       says so in the log; with no other model it stops with the resume message, as before.

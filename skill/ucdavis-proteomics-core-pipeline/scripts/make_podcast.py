@@ -2168,6 +2168,7 @@ class GeminiTTS(object):
         self.produced, self.models_used, self.warnings = 0, [], []
         self.sent_chunks = set()             # chunks whose text was sent (labels)
         self.preflight_sent = 0              # two-line tests sent in this render
+        self.preflight_waited = 0.0          # s waited before asking the models again
         self.sent_before = {}                # SENT_FILE as this render found it
         self.failed_kind = {}                # model -> how it failed in this render
 
@@ -2657,7 +2658,6 @@ class GeminiTTS(object):
                  and m not in self.unusable]
         tried, missed = [], []
         m, secs = self._probe_each(order + later, later, probe, tried, missed)
-        waited = 0
         if m is None and missed:
             wait = PREFLIGHT_RETRY_WAIT
             pause = f"{wait / 60:g} min" if wait >= 60 else f"{wait:g} s"
@@ -2665,12 +2665,12 @@ class GeminiTTS(object):
                 f"({'; '.join(tried)}). Waiting {pause}, then asking {', '.join(missed)} once "
                 "more, in case this is a short outage at Google")
             _sleep(wait)
-            waited = wait
+            self.preflight_waited = wait
             self.stalled = [x for x in self.stalled if x not in missed]
             again = []
             m, secs = self._probe_each(missed, [], probe, again, [])
-            if again:
-                tried.append(f"asked again {pause} later: " + "; ".join(again))
+            tried.append(f"asked again {pause} later: "
+                         + "; ".join(again + ([f"{m} answered"] if m else [])))
         if m is None:
             before = [x for x in self.candidates if x in self.remembered]
             msg = (
@@ -2687,8 +2687,8 @@ class GeminiTTS(object):
                 raise GeminiUnusable(msg, why, "preflight")
             raise RenderError(msg)
         self.preflight_record = {"model": m, "seconds": secs, "skipped": tried}
-        if waited:
-            self.preflight_record["waited_s"] = waited
+        if self.preflight_waited:
+            self.preflight_record["waited_s"] = self.preflight_waited
         if m in later:
             log(f"[render] preflight: {m} stopped answering earlier; it answers now")
             self.forget_stall(m)
@@ -3641,7 +3641,7 @@ def fallback_record(e, gemini, chunks=(), speak=None, cache=None):
                            plain=True)
     return {"from": "gemini", "to": "kokoro", "why": e.why, "reason": cause,
             "google_said": scrub(e.said) if e.said else None, "stopped_at": e.where,
-            "message": cause if e.why == "nokey" else scrub(e)[:600], "at": now_iso(),
+            "message": cause if e.why == "nokey" else scrub(e)[:1000], "at": now_iso(),
             "gemini_models": list(getattr(gemini, "candidates", None) or []),
             "gemini_switched": list(gemini.switch_notes()) if hasattr(gemini, "switch_notes")
             else [],
@@ -3650,6 +3650,7 @@ def fallback_record(e, gemini, chunks=(), speak=None, cache=None):
             "chunks_sent_to_gemini": this, "gemini_chunks_cached": made,
             "preflight_requests": getattr(gemini, "preflight_sent", 0),
             "preflight_requests_before": before.get("requests") or 0,
+            "preflight_waited_s": getattr(gemini, "preflight_waited", 0) or 0,
             "note": f"{cause}; the whole episode was made with Kokoro on HIVE "
                     "instead, so it has one voice throughout"}
 
