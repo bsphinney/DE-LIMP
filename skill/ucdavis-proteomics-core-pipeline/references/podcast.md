@@ -677,7 +677,10 @@ bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.t
       If the model that made the cached chunks does not answer, the next one makes **every
       chunk again**, so the voices never mix. Nothing to make, no test. Each test is one request
       against the key's daily quota (a free-tier key's TTS quota is small), and a resume walks
-      the models until one answers (up to 60 s each). `--no-preflight` skips it;
+      the models until one answers (up to 60 s each). When none answers and some gave no
+      answer, the render says so in the log, waits **5 minutes** and asks those models once
+      more, so a one-minute outage at Google does not count as "every model stalled"; only a
+      second miss does (`tts.preflight.waited_s` records a wait). `--no-preflight` skips it;
       `podcast.json` `tts.preflight` records which.
     - **Mid-episode.** When a chunk's request goes unanswered twice (`--request-timeout`), the
       render moves to the next candidate model and makes **every chunk again** with it, and
@@ -842,7 +845,8 @@ the start.
     part-way through the episode (or the model a resume is pinned to) first hands over to the
     next Gemini model, which makes every chunk again, as for a stall; only when every model is
     out of quota or stalled does the local voice take over;
-  - every candidate model stopped answering (`stalled`) -- also when the time lost to
+  - every candidate model stopped answering (`stalled`; at the two-line test, only when each
+    misses it twice, 5 minutes apart) -- also when the time lost to
     unanswered requests (`--request-timeout-budget`, 30 min) runs out after a model that
     stalled mid-episode has handed over (a hand-over at the two-line test does not count), which
     with the defaults happens on the next model's first timeout -- or a mix

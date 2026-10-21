@@ -128,7 +128,8 @@ class FakeContainers(object):
     def container_calls(self):
         if not os.path.isfile(self.calls):
             return []
-        return [json.loads(ln) for ln in open(self.calls) if ln.strip()]
+        with open(self.calls) as f:
+            return [json.loads(ln) for ln in f if ln.strip()]
 
     def kokoro_calls(self):
         return [c for c in self.container_calls() if any(a.endswith("synth.py") for a in c)]
@@ -924,6 +925,87 @@ class QuotaHandOver(Local):
         self.assertEqual((man["tts"]["backend"], man["tts"]["fallback"]["why"]), ("kokoro", "quota"))
         self.assertIn(f"{STALLS} ran out of its daily quota",
                       " ".join(man["tts"]["fallback"]["gemini_switched"]))
+
+
+class ShortOutage(Local):
+    """Q3 (Brett, 2026-10-20): a one-minute outage must not make a Kokoro episode. When every
+    model misses the two-line test, the render waits PREFLIGHT_RETRY_WAIT (5 min) and asks them
+    once more; only a second miss counts as "every model stalled". The wait is _sleep's, so
+    these tests record it instead of waiting."""
+
+    def setUp(self):
+        super().setUp()
+        self.release = threading.Event()
+        self.addCleanup(self.release.set)                      # the hung worker threads end
+        self.slept = []
+        for name, value in (("HEARTBEAT", 0.05), ("PREFLIGHT_TIMEOUT", 0.3),
+                            ("_sleep", self.slept.append)):
+            p = mock.patch.object(mp, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def probes(self, log):
+        return [m for m, c, _ in log["calls"] if mp.PREFLIGHT_LINES[0] in json.dumps(c)]
+
+    def waits(self):
+        return [x for x in self.slept if x == mp.PREFLIGHT_RETRY_WAIT]
+
+    def test_an_outage_over_within_the_wait_renders_in_gemini(self):
+        def behaviour(model, contents, config):
+            if not self.waits():                               # Google is out until the wait
+                self.release.wait(30)
+            return pcm_for(contents)
+        rc, out, err, log = self.render(behaviour, "--model", STALLS, "--model", ANSWERS,
+                                        preflight=True)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.waits(), [300.0], "one 5-minute wait")
+        self.assertIn(f"Waiting 5 min, then asking {STALLS}, {ANSWERS} once more, in case this "
+                      "is a short outage at Google", err)
+        self.assertEqual(self.probes(log), [STALLS, ANSWERS, STALLS])
+        man = self.manifest()
+        self.assertEqual(man["tts"]["backend"], "gemini")
+        self.assertNotIn("fallback", man["tts"])
+        self.assertEqual(man["tts"]["models_used"], [STALLS])
+        self.assertEqual((man["tts"]["preflight"]["model"], man["tts"]["preflight"]["waited_s"]),
+                         (STALLS, 300.0))
+        self.assertEqual(self.container_calls(), [])
+
+    def test_a_second_miss_by_every_model_is_every_model_stalled(self):
+        rc, out, err, log = self.render(stuck(self.release), "--model", STALLS, "--model",
+                                        ANSWERS, preflight=True)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.waits(), [300.0], "one wait, then no more")
+        self.assertEqual(self.probes(log), [STALLS, ANSWERS, STALLS, ANSWERS])
+        man = self.manifest()
+        fb = man["tts"]["fallback"]
+        self.assertEqual((man["tts"]["backend"], fb["why"]), ("kokoro", "stalled"))
+        self.assertIn("asked again 5 min later", fb["message"])
+        self.assertLess(err.index("Waiting 5 min"), err.index("making the WHOLE episode"))
+
+    def test_the_wait_is_the_constant(self):
+        p = mock.patch.object(mp, "PREFLIGHT_RETRY_WAIT", 7.0)
+        p.start()
+        self.addCleanup(p.stop)
+        rc, out, err, log = self.render(stuck(self.release), "--model", ANSWERS, "--no-fallback",
+                                        preflight=True)
+        self.assertEqual(rc, 1, err)
+        self.assertEqual(self.waits(), [7.0])
+        self.assertIn("Waiting 7 s, then asking", err)
+        self.assertIn("no Gemini TTS model answered a two-line test", err)
+        self.assertEqual(self.container_calls(), [], "--no-fallback still stops")
+
+    def test_no_wait_when_no_model_missed_the_test(self):
+        """A 503 or a missing model is not an unanswered test: no wait, as before."""
+        for status, code in (("UNAVAILABLE", 503), ("NOT_FOUND", 404)):
+            with self.subTest(status=status):
+                del self.slept[:]
+
+                def behaviour(model, contents, config):
+                    raise ApiError(code, status, {"error": {"code": code, "status": status,
+                                                            "message": "no"}})
+                rc, out, err, log = self.render(behaviour, "--model", ANSWERS, preflight=True)
+                self.assertEqual(self.waits(), [])
+                self.assertNotIn("Waiting 5 min", err)
 
 
 class NotAvailable(Local):

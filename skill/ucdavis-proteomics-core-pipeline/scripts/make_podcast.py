@@ -160,6 +160,11 @@ REQUEST_TIMEOUT_BUDGET_MIN = 30.0                   # minutes
 # stalled gemini-3.8-flash-tts while gemini-2.5-flash-preview-tts answered the same test in 2.9 s;
 # the episode's first chunks were cached from the stalled model, so it could never hand over.
 PREFLIGHT_TIMEOUT = 60.0                            # s for the two-line test
+# When no model answers the two-line test and some missed it (no answer in PREFLIGHT_TIMEOUT), the
+# render waits PREFLIGHT_RETRY_WAIT and asks those models once more before it counts them as
+# stalled: a one-minute outage at Google must not make an episode in the local voice (Brett,
+# 2026-10-20).
+PREFLIGHT_RETRY_WAIT = 300.0                        # s
 # A model that stopped answering is remembered in the cache (STALL_FILE) for STALL_MEMORY_H
 # hours: a resume then never pins it again, so it cannot repeat the same timeouts (review of
 # 2.13.2: every resume went back to the stalled model, waited, and stopped).
@@ -2635,9 +2640,11 @@ class GeminiTTS(object):
         """Before the first chunk this render must make: a two-line test to each candidate in
         turn, from the current one, on a PREFLIGHT_TIMEOUT deadline; the first that answers is
         used. A rate limit counts as an answer (the normal loop waits it out); a missing model,
-        no quota, a rejected request, an error or no answer moves on; a key problem stops. A
-        model other than the one the cache was made with (`cached_from`) makes every chunk
-        again. -> the model chosen; RenderError when none answers."""
+        no quota, a rejected request, an error or no answer moves on; a key problem stops. When
+        none answers and some gave no answer, the render waits PREFLIGHT_RETRY_WAIT and asks
+        those once more; only a second miss counts them as stalled. A model other than the one
+        the cache was made with (`cached_from`) makes every chunk again. -> the model chosen;
+        RenderError when none answers."""
         probe = Chunk(0, [Turn(self.hosts[0], PREFLIGHT_LINES[0], 0, 0),
                           Turn(self.hosts[1], PREFLIGHT_LINES[1], 0, 0)])
         start = self.model if self.model in self.candidates else self.candidates[0]
@@ -2648,8 +2655,63 @@ class GeminiTTS(object):
         # the remembered flash models left nothing)
         later = [m for m in self.candidates if m in self.remembered and m not in order
                  and m not in self.unusable]
-        tried = []
-        for m in order + later:
+        tried, missed = [], []
+        m, secs = self._probe_each(order + later, later, probe, tried, missed)
+        waited = 0
+        if m is None and missed:
+            wait = PREFLIGHT_RETRY_WAIT
+            pause = f"{wait / 60:g} min" if wait >= 60 else f"{wait:g} s"
+            log(f"[render] preflight: no Gemini model answered the two-line test "
+                f"({'; '.join(tried)}). Waiting {pause}, then asking {', '.join(missed)} once "
+                "more, in case this is a short outage at Google")
+            _sleep(wait)
+            waited = wait
+            self.stalled = [x for x in self.stalled if x not in missed]
+            again = []
+            m, secs = self._probe_each(missed, [], probe, again, [])
+            if again:
+                tried.append(f"asked again {pause} later: " + "; ".join(again))
+        if m is None:
+            before = [x for x in self.candidates if x in self.remembered]
+            msg = (
+                "no Gemini TTS model answered a two-line test (" + "; ".join(tried) + ")"
+                + (f"; {', '.join(before)} also stopped answering in an earlier render "
+                   f"(podcast/.cache/{STALL_FILE})" if before else "")
+                + ". The chunks already made are cached: re-run later"
+                + (" (this key's project is on the free tier: its quotas are small)"
+                   if self.key_tier == "free" else "")
+                + ", name a model with --model <name> (it is tried whatever happened before), or "
+                "--tts say")
+            why = self.for_good()
+            if why:
+                raise GeminiUnusable(msg, why, "preflight")
+            raise RenderError(msg)
+        self.preflight_record = {"model": m, "seconds": secs, "skipped": tried}
+        if waited:
+            self.preflight_record["waited_s"] = waited
+        if m in later:
+            log(f"[render] preflight: {m} stopped answering earlier; it answers now")
+            self.forget_stall(m)
+        if tried:
+            log(f"[render] preflight: {'; '.join(tried)}; using {m}, which answered the "
+                f"two-line test in {secs:g} s")
+        else:
+            log(f"[render] preflight: {m} answered the two-line test in {secs:g} s")
+        if cached_from and m != cached_from:
+            note = (f"{cached_from} made this episode's cached chunks but did not answer the "
+                    f"preflight; {m} makes every chunk again, so the episode has one model's "
+                    "voices")
+            self.switches.append({"from": cached_from, "to": m, "at": "preflight",
+                                  "why": "; ".join(tried), "note": note, "kind": "preflight"})
+            self.pinned = False                  # none of its chunks are made yet
+            log(f"[render] {note}")
+        return m
+
+    def _probe_each(self, models, later, probe, tried, missed):
+        """The two-line test to each of `models` in turn (preflight): -> (the first that answers,
+        its seconds) or (None, None). Each that does not answer adds a line to `tried`; one that
+        gave no answer in PREFLIGHT_TIMEOUT is also added to `missed`."""
+        for m in models:
             if m in later:
                 self.stalled = [x for x in self.stalled if x != m]
                 log(f"[render] preflight: {m} stopped answering earlier "
@@ -2667,6 +2729,7 @@ class GeminiTTS(object):
                 # of every render for STALL_MEMORY_H (review of 2.13.2, round 2); only a stall
                 # mid-episode is (stall_switch)
                 self.stalled.append(m)
+                missed.append(m)
                 tried.append(f"{m}: no answer in {PREFLIGHT_TIMEOUT:.0f} s")
                 continue
             except EmptyAudio as e:
@@ -2687,39 +2750,8 @@ class GeminiTTS(object):
                     self.failed_kind[m] = err["kind"]
                     tried.append(f"{m}: {err['kind']} ({why_line(err, 120)})")
                     continue
-            secs = round(_now() - t0, 1)
-            self.preflight_record = {"model": m, "seconds": secs, "skipped": tried}
-            if m in later:
-                log(f"[render] preflight: {m} stopped answering earlier; it answers now")
-                self.forget_stall(m)
-            if tried:
-                log(f"[render] preflight: {'; '.join(tried)}; using {m}, which answered the "
-                    f"two-line test in {secs:g} s")
-            else:
-                log(f"[render] preflight: {m} answered the two-line test in {secs:g} s")
-            if cached_from and m != cached_from:
-                note = (f"{cached_from} made this episode's cached chunks but did not answer the "
-                        f"preflight; {m} makes every chunk again, so the episode has one model's "
-                        "voices")
-                self.switches.append({"from": cached_from, "to": m, "at": "preflight",
-                                      "why": "; ".join(tried), "note": note, "kind": "preflight"})
-                self.pinned = False              # none of its chunks are made yet
-                log(f"[render] {note}")
-            return m
-        before = [m for m in self.candidates if m in self.remembered]
-        msg = (
-            "no Gemini TTS model answered a two-line test (" + "; ".join(tried) + ")"
-            + (f"; {', '.join(before)} also stopped answering in an earlier render "
-               f"(podcast/.cache/{STALL_FILE})" if before else "")
-            + ". The chunks already made are cached: re-run later"
-            + (" (this key's project is on the free tier: its quotas are small)"
-               if self.key_tier == "free" else "")
-            + ", name a model with --model <name> (it is tried whatever happened before), or "
-            "--tts say")
-        why = self.for_good()
-        if why:
-            raise GeminiUnusable(msg, why, "preflight")
-        raise RenderError(msg)
+            return m, round(_now() - t0, 1)
+        return None, None
 
     def _advance(self):
         nxt = None if self.produced else self._next_model()
