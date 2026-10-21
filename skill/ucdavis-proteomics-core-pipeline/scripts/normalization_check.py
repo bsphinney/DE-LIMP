@@ -1362,8 +1362,10 @@ def gate(path, quantities, report=None, conditions=None, design=None):
                            "again on this DE's report and conditions -- a decision about one "
                            "report never authorises another."), rec
     # the session as it is now: the one the check sits in (a session moved since the check ran
-    # is the same session), else the one it ran in
-    changed = controls_changed(rec, design, session=folder_session(path))
+    # is the same session), else the one it ran in. A check run without --session read no
+    # session, so none is compared (as before 2.14.1).
+    changed = controls_changed(rec, design,
+                               session=folder_session(path) if rec.get("session") else None)
     if changed:
         return False, changed, rec
     dc = design_check(rec, design)

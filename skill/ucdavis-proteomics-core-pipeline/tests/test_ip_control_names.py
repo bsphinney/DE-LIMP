@@ -336,18 +336,23 @@ class TheGuessIsHeldForTheUser(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn(f"the session this check ran in ({s}) is not there any more", msg)
 
-    def test_a_check_run_without_the_session_says_so(self):
-        """Saved in an IP session's output/norm_check, but run without --session: it never read
-        the type -- said as that, not as a type that changed."""
+    def test_a_check_run_without_the_session_is_not_compared_with_one(self):
+        """Saved in an IP session's output/norm_check, but run without --session: the gate
+        compares no session (as before 2.14.1). Where a session is compared (the delivery), it
+        says the check never read its type -- not that the type changed."""
         report, cond, dn, dr, s = self.inputs("IgG")
         out = os.path.join(s, "output", "norm_check")
         os.makedirs(out)
-        nc.run(report, cond, dn, dr, out=out)
-        ok, msg, _rec = nc.gate(os.path.join(out, nc.RECORD), et.RAW)
-        self.assertFalse(ok)
+        rec = nc.run(report, cond, dn, dr, out=out)[0]
+        self.assertIsNone(rec.get("session"))
+        msg = nc.gate(os.path.join(out, nc.RECORD), et.RAW)[1] or ""
+        self.assertIn("needs a decision", msg)              # the usual path, no comparison
+        for never in ("ran without --session", "changed since this check ran"):
+            self.assertNotIn(never, msg)
+        said = nc.controls_changed(rec, session=s, legacy=False)
         self.assertIn("this check ran without --session, so it did not read the experiment type "
-                      f"recorded in {s} (ip)", msg)
-        self.assertNotIn("changed", msg)
+                      f"recorded in {s} (ip)", said)
+        self.assertNotIn("changed", said)
 
     def test_a_check_from_before_2_14_1_is_compared_too(self):
         """It recorded controls and vs_control but no controls_from: a guess since is refused."""
