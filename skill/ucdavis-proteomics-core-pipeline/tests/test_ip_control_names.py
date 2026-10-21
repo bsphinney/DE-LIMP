@@ -93,7 +93,8 @@ class NotEveryKOIsAnIP(unittest.TestCase):
     def test_a_recorded_whole_proteome_raises_nothing(self):
         for groups, contrasts in self.DESIGNS:
             pd = et.pulldown_design(whole_proteome(), groups, contrasts)
-            self.assertEqual((pd["pulldown"], pd["controls"], pd["note"]), (False, [], None), groups)
+            self.assertEqual((pd["pulldown"], pd["controls"], pd["note"]), (False, [], None),
+                             groups)
             # session_docs' README reads the same rule
             self.assertEqual(et.controls_in(groups, whole_proteome()), [], groups)
 
@@ -136,6 +137,10 @@ class WhichControlsInAnIP(unittest.TestCase):
         note = et.pulldown_design(ip(controls=["IgG"]), ["Bait", "Mock"], ["Bait-Mock"])["note"]
         self.assertIn("the recorded control groups (IgG) are none of this design's groups", note)
         self.assertNotIn("no --controls were recorded", note)
+        # recorded as none: no control, no guess, nothing to raise
+        pd = et.pulldown_design(ip(controls=[]), ["Bait_Ctrl", "Bait_Drug"],
+                                ["Bait_Drug-Bait_Ctrl"])
+        self.assertEqual((pd["controls"], pd["controls_from"], pd["note"]), ([], "recorded", None))
 
     def test_a_control_that_is_no_contrasts_reference_is_said_so(self):
         """KO named, but the contrast is KO-Bait: not "none is named like one"."""
@@ -149,7 +154,7 @@ class TheGuessIsHeldForTheUser(unittest.TestCase):
     """Which contrasts are enrichments decides which volcano anomalies the normalisation check
     expects: controls only guessed from their names are confirmed before anything is decided."""
 
-    def inputs(self, control, controls=None):
+    def inputs(self, control, controls=None, bait="Bait"):
         """A session recorded as an IP, a header-only report (B1-B3 not assessed: no pyarrow
         needed), conditions.csv and the two check DEs -> the `run` arguments."""
         d = tempfile.mkdtemp()
@@ -163,8 +168,8 @@ class TheGuessIsHeldForTheUser(unittest.TestCase):
         with open(cond, "w", newline="") as fh:
             w = csv.writer(fh)
             w.writerow(["File.Name", "Group"])
-            w.writerows([f"{g}_{i}", g] for g in ("Bait", control) for i in (1, 2, 3))
-        c = f"Bait-{control}"
+            w.writerows([f"{g}_{i}", g] for g in (bait, control) for i in (1, 2, 3))
+        c = f"{bait}-{control}"
         return (report, cond, fake_de(os.path.join(d, "n"), c, BALANCED),
                 fake_de(os.path.join(d, "r"), c, BALANCED), s)
 
@@ -186,9 +191,18 @@ class TheGuessIsHeldForTheUser(unittest.TestCase):
     def test_decide_cannot_stand_in_for_the_controls(self):
         """A decision would be reported as the type's default with the data check agreeing."""
         _rec, out = self.check("Parental")
-        with self.assertRaisesRegex(ValueError, "nothing to decide yet.*set --controls"):
+        with self.assertRaisesRegex(ValueError, "nothing to decide yet.*set-controls"):
             nc.decide(os.path.join(out, nc.RECORD), et.NORMALISED, "someone", "a guess")
-        self.assertFalse(nc.gate(os.path.join(out, nc.RECORD), et.RAW)[0])
+        # and nothing the user reads sends them to `decide` for it
+        ok, msg, _rec = nc.gate(os.path.join(out, nc.RECORD), et.RAW)
+        self.assertFalse(ok)
+        self.assertIn("waiting for the control groups", msg)
+        self.assertIn("set-controls", msg)
+        self.assertNotIn("decide", msg)
+        with open(os.path.join(out, nc.SUMMARY)) as fh:
+            summary = fh.read()
+        self.assertIn("**Decision: not needed yet.**", summary)
+        self.assertNotIn("normalization_check.py decide", summary)
 
     def test_the_cli_stops_and_says_why(self):
         report, cond, dn, dr, s = self.inputs("Parental")
@@ -204,11 +218,40 @@ class TheGuessIsHeldForTheUser(unittest.TestCase):
         """The way out: record the confirmed controls, run the check again -- the type's default."""
         report, cond, dn, dr, s = self.inputs("Parental")
         self.assertTrue(nc.run(report, cond, dn, dr, session=s)[0]["needs_decision"])
-        et.record(s, "ip", "user", controls="Parental")
+        p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "experiment_type.py"),
+                            "set-controls", "--session", s, "--controls", "Parental"],
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr)
         rec = nc.run(report, cond, dn, dr, session=s)[0]
         self.assertEqual((rec["needs_decision"], rec["controls_unconfirmed"]), (False, False))
         self.assertEqual(rec["decision"]["source"], "default")
         self.assertEqual(rec["design"]["controls_from"], "recorded")
+
+    def test_a_design_with_no_control_group_says_none(self):
+        """Bait_Drug vs Bait_Ctrl with no IgG: Ctrl is the untreated bait, not a control."""
+        report, cond, dn, dr, s = self.inputs("Bait_Ctrl", bait="Bait_Drug")
+        rec = nc.run(report, cond, dn, dr, session=s)[0]
+        self.assertTrue(rec["controls_unconfirmed"])
+        et.record_controls(s, et.NO_CONTROLS)
+        self.assertEqual(et.load(s)["controls"], [])
+        rec = nc.run(report, cond, dn, dr, session=s)[0]
+        self.assertEqual((rec["needs_decision"], rec["decision"]["source"]), (False, "default"))
+        pd = rec["design"]
+        self.assertEqual((pd["controls"], pd["controls_from"], pd["vs_control"], pd["note"]),
+                         ([], "recorded", [], None))
+
+    def test_set_controls_changes_nothing_else(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        s = session(d, "ip", bait="BAITX", stated="an IP of BAITX")
+        before = et.load(s)
+        et.record_controls(s, "Parental, Mock")
+        after = et.load(s)
+        self.assertEqual(after["controls"], ["Parental", "Mock"])
+        for k in ("type", "source", "stated", "bait", "recorded_at"):
+            self.assertEqual(after[k], before[k], k)
+        with self.assertRaisesRegex(ValueError, "or 'none'"):
+            et.record_controls(s, " ")
 
     def test_igg_or_recorded_controls_are_decided_as_before(self):
         for control, controls in (("IgG", None), ("Parental", "Parental")):

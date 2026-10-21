@@ -63,18 +63,20 @@ class OneMarkedIndex(unittest.TestCase):
     def test_an_r_beside_another_letter_is_a_level(self):
         """Brain_L / Brain_R, Cis_R / Cis_S: left and right, resistant and sensitive."""
         for a, b in (("Brain_L", "Brain_R"), ("Cis_R", "Cis_S")):
-            labels = [f"{g}{n}" for g in (a, b) for n in (1, 2, 3)]
-            rec = cc.collapse_replicates([{"sample": f"S{i}", "group": g, "extras": {}}
-                                          for i, g in enumerate(labels)])[1]
-            self.assertEqual(sorted(rec["conditions"]), [a, b])
-            self.assertEqual(set(sr.sheet_groups(record(labels)).values()), {a, b})
+            for sep in ("", "_", "-", " "):        # Cis_R1, Cis_R_1, Cis_R-1, "Cis_R 1"
+                labels = [f"{g}{sep}{n}" for g in (a, b) for n in (1, 2, 3)]
+                rec = cc.collapse_replicates([{"sample": f"S{i}", "group": g, "extras": {}}
+                                              for i, g in enumerate(labels)])[1]
+                self.assertEqual(sorted(rec["conditions"]), [a, b], labels)
+                self.assertEqual(set(sr.sheet_groups(record(labels)).values()), {a, b}, labels)
         self.assertEqual(cc.split_replicate("ATG5_R2", among=["ATG5_R1", "ATG7_R1"]), ("ATG5", 2))
 
     def test_the_known_condition_list_decides(self):
         self.assertEqual(sr.replicate_base("Mutant-1"), "Mutant")
         self.assertIsNone(sr.replicate_base("Mutant-1", {"mutant-1", "mutant-2"}))
         self.assertEqual(sr.replicate_base("Mutant-1_2", {"mutant-1"}), "Mutant-1")
-        self.assertEqual(sr.known_conditions(["Mutant-1", "Mutant-1", "WT_1", "WT_2"]), {"mutant-1"})
+        self.assertEqual(sr.known_conditions(["Mutant-1", "Mutant-1", "WT_1", "WT_2"]),
+                         {"mutant-1"})
         # a slip in a numbered series is not a condition of its own; a third level is no slip
         self.assertEqual(sr.known_conditions(["WT_1", "WT_2", "WT_2", "WT_3"]), set())
         self.assertEqual(sr.known_conditions(["Mutant-1"] * 3 + ["Mutant-2"] * 3 + ["Mutant-3"]),
@@ -133,8 +135,48 @@ class TheSheetsGroups(unittest.TestCase):
         self.assertIn("sheet_conditions_unique", notes_by_id(rec))
 
     def test_a_slip_in_a_numbered_series_joins_its_condition(self):
-        rec = record(["WT_1", "WT_2", "WT_2", "WT_3", "KO_1", "KO_2", "KO_3"])
-        self.assertEqual(set(sr.sheet_groups(rec).values()), {"WT", "KO"})
+        for names in (["WT_1", "WT_2", "WT_2", "WT_3", "KO_1", "KO_2", "KO_3"],
+                      ["WT1", "WT2", "WT2", "WT3", "KO1", "KO2", "KO3"],
+                      ["WT_1", "WT_2", "WT_2", "WT_3", "KO1", "KO2", "KO3"]):
+            self.assertEqual(set(sr.sheet_groups(record(names)).values()), {"WT", "KO"}, names)
+        # a gene name two samples share, beside two other genes, keeps it (start: ATG 5, 7, 8)
+        self.assertEqual(set(sr.sheet_groups(record(["ATG5", "ATG5", "ATG7", "ATG8"])).values()),
+                         {"ATG5", "ATG7", "ATG8"})
+
+    def test_a_repeated_name_leaves_the_rest_of_the_sheet_as_2_13_2_read_it(self):
+        for names, groups in (
+                (["WT1", "WT2", "WT3", "KO", "KO", "KO"], {"WT", "KO"}),
+                (["Ctrl"] * 3 + ["Treated1", "Treated2", "Treated3"], {"Ctrl", "Treated"}),
+                (["HSP90"] * 3 + ["WT1", "WT2", "WT3"], {"HSP90", "WT"}),
+                (["WT"] * 3 + ["WT4"] + ["KO"] * 3, {"WT", "KO"}),
+                # the series of a numbered condition the sheet repeats stays apart
+                (["Mutant-1"] * 3 + ["Mutant-2"] * 3 + ["Mutant-3", "Mutant-4"],
+                 {"Mutant-1", "Mutant-2", "Mutant-3", "Mutant-4"}),
+                # deliberate (2.13.2 merged them): repeated numbered names are conditions as written
+                (["WT1"] * 2 + ["WT2"] * 2, {"WT1", "WT2"})):
+            self.assertEqual(set(sr.sheet_groups(record(names)).values()), groups, names)
+
+    def test_numbering_that_does_not_start_at_one_is_not_a_series(self):
+        """Kept on purpose (2.13.2 read WT/KO): numbers from 2 read like gene names."""
+        self.assertIn("sheet_conditions_unique",
+                      notes_by_id(record([f"{g}{n}" for g in ("WT", "KO") for n in (2, 3, 4)])))
+
+    def test_results_that_changed_for_the_better(self):
+        """2.13.2 said "no groups" for these sheets, and proposed "WT_R", "WTrep" as conditions."""
+        for names, groups in (([f"{g}_{n}" for g in ("T0", "T24") for n in (1, 2)], {"T0", "T24"}),
+                              ([f"{g} \u2013 {n}" for g in ("WT", "KO") for n in (1, 2)],
+                               {"WT", "KO"})):
+            self.assertEqual(set(sr.sheet_groups(record(names)).values()), groups, names)
+        # never a number after a dot, as 2.13.2: Kv2.1 / Kv2.2 are two channels; WT.1 stays WT.1
+        for names, groups in ((["Kv2.1", "Kv2.2", "WT_1", "WT_2"], {"Kv2.1", "Kv2.2", "WT"}),
+                              (["WT.1", "WT.2", "KO.1", "KO.2"], {"WT.1", "WT.2", "KO.1", "KO.2"})):
+            self.assertEqual(set(sr.sheet_groups(record(names)).values()), groups, names)
+        for fmt in ("{g}_R{n}", "{g}rep{n}", "{g}#{n}", "{g} - Bio {n}"):
+            labels = [fmt.format(g=g, n=n) for g in ("WT", "KO") for n in (1, 2)]
+            rec = cc.collapse_replicates([{"sample": f"S{i}", "group": g, "extras": {}}
+                                          for i, g in enumerate(labels)])[1]
+            self.assertEqual((rec["collapsed"], sorted(rec["conditions"])), (True, ["KO", "WT"]),
+                             fmt)
 
 
 class NoFalseConditionsDiffer(unittest.TestCase):
@@ -171,6 +213,18 @@ class NoFalseConditionsDiffer(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 s = self.session(tmp, names, group=lambda c: cc.split_replicate(
                     c, glued=True, among=names)[0])
+                self.assertNotIn("conditions_differ", notes_by_id(sr.load(s), s), names)
+
+    def test_a_repeated_name_beside_numbered_ones(self):
+        for names, analysed in (
+                (["WT1", "WT2", "WT3", "KO", "KO", "KO"], None),
+                (["WT1", "WT2", "WT2", "WT3", "KO1", "KO2", "KO3"], None),
+                (["WT_1", "WT_2", "WT_2", "WT_3", "KO1", "KO2", "KO3"], None),
+                (["Mutant-1"] * 3 + ["Mutant-2"] * 3 + ["Mutant-3", "Mutant-4"],
+                 lambda c: c.replace("-", "_"))):
+            with tempfile.TemporaryDirectory() as tmp:
+                s = self.session(tmp, names, group=analysed or (
+                    lambda c: (cc.split_replicate(c, glued=True) or (c,))[0].rstrip("_")))
                 self.assertNotIn("conditions_differ", notes_by_id(sr.load(s), s), names)
 
     def test_numbered_conditions_the_sheet_repeats(self):

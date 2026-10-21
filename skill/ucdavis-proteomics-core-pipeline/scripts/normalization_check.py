@@ -986,8 +986,7 @@ def run(report, conditions, de_norm, de_raw, session=None, bait=None, out=None, 
     elif rec["controls_unconfirmed"]:
         rec["needs_decision_why"] = (f"the control group(s) {', '.join(design['controls'])} were "
                                      "read from their names only, and those names can also name an "
-                                     "ordinary condition: confirm them with the user, record them "
-                                     "(experiment_type.py set --controls) and run this check again")
+                                     "ordinary condition: " + CONFIRM_CONTROLS)
     if design.get("note") and not rec["controls_unconfirmed"]:   # else said by needs_decision_why
         rec["design_note"] = design["note"]
     rec["decision"] = None if rec["needs_decision"] else {
@@ -1180,6 +1179,10 @@ def summary_md(rec):
         said = (d.get("statement")
                 or f"{d['quantities']} quantities -- {d.get('by')}: {d.get('reason')}")
         L.append(f"**Decision:** {said}")
+    elif only_controls_unconfirmed(rec):
+        L.append("**Decision: not needed yet.** Confirm the control groups with the Core staff "
+                 "member: " + CONFIRM_CONTROLS + ". The check then applies the type's default if "
+                 "the data agree, or asks.")
     else:
         L.append("**Decision: not made.** Show this to the Core staff member, ask which quantities "
                  "to use -- the decision is theirs, never Claude's -- and record their answer: "
@@ -1217,6 +1220,17 @@ def decision_staff_record(path, rec):
     return os.path.join(here, STAFF_RECORD), STAFF_RECORD
 
 
+# The way out of the one hold that is not a decision: controls only read from their names.
+CONFIRM_CONTROLS = ("confirm them with the user, record them (`experiment_type.py set-controls "
+                    "--session <session> --controls <groups, or none>`) and run this check again")
+
+
+def only_controls_unconfirmed(rec):
+    """True when the check waits only for the control groups (controls_unconfirmed, not
+    tripped): `decide` cannot stand in for them."""
+    return bool(rec.get("controls_unconfirmed")) and not rec.get("tripped")
+
+
 def decide(path, quantities, by, reason):
     """Record a Core staff member's decision -- theirs, never Claude's: --by is their HIVE login
     (staff.require). The check record (and so de_provenance.json, the Methods, the zip) names the
@@ -1226,7 +1240,7 @@ def decide(path, quantities, by, reason):
     if not (reason and reason.strip()):
         raise ValueError("--reason is required: why they chose it, in their words")
     rec = load(path)
-    if rec.get("controls_unconfirmed") and not rec.get("tripped"):
+    if only_controls_unconfirmed(rec):
         raise ValueError(f"nothing to decide yet: {rec.get('needs_decision_why')}. A decision "
                          "here would be reported as the type's default with the data check "
                          "agreeing, and the guess about the controls would stand")
@@ -1270,6 +1284,9 @@ def gate(path, quantities, report=None, conditions=None, design=None):
     if dc["refusal"]:
         return False, dc["refusal"], rec
     d = rec.get("decision")
+    if not d and only_controls_unconfirmed(rec):
+        return False, (f"REFUSED: the normalisation check is waiting for the control groups "
+                       f"({rec.get('needs_decision_why')})."), rec
     if not d:
         why = "; ".join(rec.get("trips") or []) or rec.get("needs_decision_why") or "undecided"
         return False, (f"REFUSED: the normalisation check needs a decision ({why}) and none is "

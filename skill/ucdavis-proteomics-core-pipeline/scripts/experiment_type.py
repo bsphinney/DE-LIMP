@@ -26,6 +26,7 @@ quantile normalisation on top). Now:
   python3 experiment_type.py propose --session <S>      # from the submission; ask the user to confirm
   python3 experiment_type.py set --session <S> --type ip --source submission|user \\
           [--stated "<the user's words>"] [--bait <gene>] [--controls IgG_A,IgG_B]
+  python3 experiment_type.py set-controls --session <S> --controls IgG_A,IgG_B|none
   python3 experiment_type.py show --session <S>
 
 The bait: --bait, else a sequence the user added to the database (fetch_fasta.py --add-fasta,
@@ -51,7 +52,7 @@ SCHEMA = "experiment_type/1"
 FASTA_META = os.path.join("input", "search.fasta.meta.json")
 
 # The group names that read as a pull-down's controls. THE one definition: session_docs.py,
-# analysis_prompt.py and normalization_check.py use them through controls_in / pulldown_design.
+# analysis_prompt.py and normalization_check.py use them through pulldown_design.
 # A name is a whole token of the group name ("Old_IgG1", "Empty-beads"), never letters inside a
 # word ("SKOR1", "Controller"). Read in this order, the first list that names any group giving
 # the controls, because with no experiment type recorded the names alone decide whether the
@@ -76,7 +77,7 @@ CONTROL_NAME_TIERS = ((IP_CONTROL_NAME, "name"), (ENRICHMENT_CONTROL_NAME, "enri
                       (GENERIC_CONTROL_NAME, "enrichment_name"))
 # How the brief and the session README say where the controls came from (pulldown_design's
 # controls_from): a guess is said to be one (rule 2).
-CONTROLS_FROM = {"recorded": "as recorded (`experiment_type.py set --controls`)",
+CONTROLS_FROM = {"recorded": "as recorded (`experiment_type.py set-controls`)",
                  "name": "by group name",
                  "enrichment_name": "read from their names — NOT confirmed; raise it with the "
                                     "user before reading these contrasts as enrichment"}
@@ -247,7 +248,7 @@ def record(session, etype, source, stated=None, bait=None, controls=None, submis
            "default": default_for(etype),
            "reconcile": reconcile(etype, sub.get("normalisation")) if sub else None,
            "bait": bait or None,
-           "controls": [c.strip() for c in (controls or "").split(",") if c.strip()] or None,
+           "controls": _control_list(controls),
            # the user's answer to ask_bait (record_bait) survives a re-recorded type
            **_kept_bait_answer(session, bait),
            "recorded_at": when or datetime.datetime.now(datetime.timezone.utc).strftime(
@@ -420,12 +421,49 @@ def record_bait(session, bait, when=None):
                                "by": "the user, asked ask_bait after the database was built",
                                "at": when or datetime.datetime.now(datetime.timezone.utc).strftime(
                                    "%Y-%m-%dT%H:%M:%SZ")})
+    return _save(session, rec)
+
+
+def _save(session, rec):
     p = path_for(session)
     with open(p + ".tmp", "w", encoding="utf-8") as fh:
         json.dump(rec, fh, indent=2)
         fh.write("\n")
     os.replace(p + ".tmp", p)
     return p
+
+
+# The answer to "which groups are the pull-down's negative controls?" that the design has none
+# (Bait_Ctrl vs Bait_Drug, WT_IP vs KO_IP, no IgG): recorded as controls [].
+NO_CONTROLS = "none"
+
+
+def _control_list(controls):
+    """--controls as recorded: [group, ...], [] for NO_CONTROLS, None when not given."""
+    text = str(controls or "").strip()
+    if not text:
+        return None
+    if text.casefold() == NO_CONTROLS:
+        return []
+    return [c.strip() for c in text.split(",") if c.strip()] or None
+
+
+def record_controls(session, controls, when=None):
+    """The user's answer to which groups are the pull-down's negative controls (or NO_CONTROLS),
+    written into the session's record and nothing else -- `set` rewrites the whole record. Asked
+    when the controls were only read from their names (normalization_check: CONTROLS NOT
+    CONFIRMED). -> path."""
+    rec = load(session)
+    if rec is None:
+        raise ValueError("no experiment type recorded for this session: record it first "
+                         "(experiment_type.py set), then the controls")
+    named = _control_list(controls)
+    if named is None:
+        raise ValueError("--controls needs the control groups, comma-separated, or 'none'")
+    rec.update(controls=named, controls_confirmed={
+        "answer": named or NO_CONTROLS, "by": "the user",
+        "at": when or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")})
+    return _save(session, rec)
 
 
 def bait_for_check(session, bait=None, rec=None):
@@ -456,7 +494,7 @@ def _controls(groups, rec):
     """(the control groups, where they came from: "recorded" (--controls), "name"
     (IP_CONTROL_NAME), "enrichment_name" (a guess to confirm), or None when there are none)."""
     named = (rec or {}).get("controls")
-    if named:
+    if named is not None:                # [] is recorded too: the design has no control group
         return [g for g in groups if g in named], "recorded"
     tiers = CONTROL_NAME_TIERS if (rec or {}).get("type") in ENRICHMENT else CONTROL_NAME_TIERS[:1]
     for pat, source in tiers:
@@ -486,26 +524,27 @@ def pulldown_design(rec, groups, contrasts):
                 "source": "group names only (no experiment type recorded)", "note": None}
     enr = rec["type"] in ENRICHMENT
     note = None
-    if enr and not vs_control and controls:
+    cmd = "experiment_type.py set-controls --controls <groups, or none>"
+    fix = f"record the right ones ({cmd})"
+    if enr and how == "recorded" and not rec["controls"]:
+        pass                             # the user said the design has no control group
+    elif enr and not vs_control and controls:
         note = (f"the experiment type is {rec['label']}, and {', '.join(controls)} "
                 + ("were recorded as" if how == "recorded" else "read as")
                 + " the control group(s), but no contrast has one as its reference (e.g. "
-                f"<bait>-{controls[0]}): check the contrasts' direction, or record the right "
-                "control groups (experiment_type.py set --controls ...)")
+                f"<bait>-{controls[0]}): check the contrasts' direction, or {fix}")
     elif enr and not vs_control and how == "recorded":
         note = (f"the experiment type is {rec['label']}, but the recorded control groups "
-                f"({', '.join(rec['controls'])}) are none of this design's groups: record the "
-                "right ones (experiment_type.py set --controls ...)")
+                f"({', '.join(rec['controls'])}) are none of this design's groups: {fix}")
     elif enr and not vs_control:
         note = (f"the experiment type is {rec['label']}, but no contrast is against a control "
                 "group (none is named like one -- IgG, beads, isotype, parental, untagged, mock, "
-                "empty, KO, ctrl -- and no --controls were recorded): "
-                "record the control groups (experiment_type.py set --controls ...)")
+                f"empty, KO, ctrl -- and no --controls were recorded): record the control groups "
+                f"({cmd})")
     elif enr and how == "enrichment_name":
         note = (f"the control group(s) {', '.join(controls)} were taken from their names, which "
                 "can also name an ordinary condition (untreated, knockout, mock-infected): "
-                "confirm with the user that they are the pull-down's negative controls, or "
-                "record the right ones (experiment_type.py set --controls ...)")
+                f"confirm with the user that they are the pull-down's negative controls, or {fix}")
     elif not enr and vs_control:
         note = (f"the groups {', '.join(controls)} read as a pull-down's controls, but the "
                 f"experiment type is {rec['label']}: confirm the type with the user")
@@ -527,7 +566,12 @@ def main():
     s.add_argument("--bait", help="the bait / fusion protein (gene or accession), when known")
     s.add_argument("--controls", help="comma-separated control groups, when their names do not "
                                       "say so (IgG, beads, isotype; in an enrichment also "
-                                      "parental, untagged, mock, empty, KO, ctrl)")
+                                      "parental, untagged, mock, empty, KO, ctrl), or 'none'")
+    sc = sub.add_parser("set-controls", help="record which groups are the pull-down's controls, "
+                                             "changing nothing else in the record")
+    sc.add_argument("--session", required=True)
+    sc.add_argument("--controls", required=True,
+                    help="comma-separated control groups, or 'none' when the design has none")
     sb = sub.add_parser("set-bait", help="record the user's answer to ask_bait (after step 6)")
     sb.add_argument("--session", required=True)
     sb.add_argument("--bait", required=True,
@@ -572,6 +616,9 @@ def main():
                 "ask_bait": question,
                 "bait_recorded": known,
                 "types": {k: v[0] for k, v in DEFAULTS.items()}}, indent=2))
+        elif a.cmd == "set-controls":
+            path = record_controls(a.session, a.controls)
+            print(json.dumps({"written": path, "record": load(a.session)}, indent=2))
         elif a.cmd == "set-bait":
             path = record_bait(a.session, a.bait)
             print(json.dumps({"written": path, "record": load(a.session)}, indent=2))

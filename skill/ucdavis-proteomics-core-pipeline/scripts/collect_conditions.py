@@ -601,10 +601,21 @@ def intent_from_json(blob):
 # ATG5 as ATG replicate 5 and HSP90 as HSP replicate 90.
 _SEP = r"[\s_.\-–—]"
 _REP_WORD = r"(?:(?:bio(?:logical)?|tech(?:nical)?)" + _SEP + r"*)?(?:replicate|rep)"
-_REP_MARKED = re.compile(r"^(?P<stem>.+?)(?:" + _SEP + r"+(?P<r>r)|" + _SEP + r"+(?:" + _REP_WORD
-                         + r"|bio(?:logical)?|tech(?:nical)?)|" + _SEP + r"*#|[\s_\-–—]+)"
-                         + _SEP + r"*#?\s*(?P<n>\d+)$", re.I)
-_REP_GLUED_WORD = re.compile(r"^(?P<stem>.+?)(?P<word>" + _REP_WORD + r")\s*#?\s*(?P<n>\d+)$", re.I)
+
+
+def _marked(with_r):
+    """The marked forms. The stem ends in a non-separator and each run of separators is read
+    once, so a long label cannot backtrack for seconds. `with_r`: R after a separator counts."""
+    return re.compile(r"^(?P<stem>.*?[^\s_.\-–—])(?:"
+                      + (_SEP + r"+(?P<r>r)|" if with_r else "")
+                      + _SEP + r"+(?:" + _REP_WORD + r"|bio(?:logical)?|tech(?:nical)?)|"
+                      + _SEP + r"*#|(?=[\s_\-–—]))" + _SEP + r"*(?:#\s*)?(?P<n>\d+)$",
+                      re.I)
+
+
+_REP_MARKED, _REP_MARKED_NO_R = _marked(True), _marked(False)
+_REP_GLUED_WORD = re.compile(r"^(?P<stem>.+?)(?P<word>" + _REP_WORD + r")\s*(?:#\s*)?(?P<n>\d+)$",
+                             re.I)
 _REP_GLUED = re.compile(r"^(?P<stem>.*?[A-Za-z])(?P<n>\d+)$|^(?P<dstem>.+?)\.+(?P<dn>\d+)$")
 _SEP_CHARS = " \t_.-–—"
 
@@ -624,29 +635,31 @@ def _r_is_a_level(stem, among):
     return any(other.match(str(x).strip()) for x in among)
 
 
-def split_replicate(label, glued=False, among=()):
+def split_replicate(label, glued=False, among=(), dot=None):
     """(condition, replicate number) for a label ending in a marked replicate index:
     'CtrlA_mix_3' -> ('CtrlA_mix', 3), 'WT_rep2' -> ('WT', 2), 'ATG5_R2' -> ('ATG5', 2),
     'Strep_2' -> ('Strep', 2); 'ATG5' and 'Kv2.1' -> None. `among`: the labels of the set it
-    belongs to (_r_is_a_level). glued=True also reads a number glued to a letter or after a
-    dot: 'Control1' -> ('Control', 1). None when the label has no such index, or nothing would
-    be left of it."""
+    belongs to (_r_is_a_level). glued=True also reads a number glued to a letter --
+    'Control1' -> ('Control', 1) -- and, unless dot=False, one after a dot ('WT.2'). None when
+    the label has no such index, or nothing would be left of it."""
     s = (label or "").strip()
     m = _REP_MARKED.match(s)
     if m and m.group("r") and _r_is_a_level(m.group("stem"), among):
-        m = None
+        m = _REP_MARKED_NO_R.match(s)    # Cis_R_1 beside Cis_S_1: Cis_R, replicate 1
     stem, n = (m.group("stem"), m.group("n")) if m else (None, None)
     w = None if m else _REP_GLUED_WORD.match(s)
     if w and _starts_a_word(w.group("stem"), w.group("word")):
         stem, n = w.group("stem"), w.group("n")
     g = _REP_GLUED.match(s) if glued and stem is None else None
+    if g and g.group("dstem") and dot is False:
+        g = None
     if g:
         stem, n = g.group("stem") or g.group("dstem"), g.group("n") or g.group("dn")
     stem = (stem or "").rstrip(_SEP_CHARS)
     return (stem, int(n)) if stem else None
 
 
-def replicate_reading(labels, glued=False, fold=None):
+def replicate_reading(labels, glued=False, fold=None, dot=None):
     """THE checks that labels, one per sample, read as conditions + replicate numbers (one
     definition: collapse_replicates and submission_report's sheet check) -> {"parsed": {label:
     (condition, n) or None}, "groups": {condition: {n: label}}, "not_numbered": [labels],
@@ -656,9 +669,11 @@ def replicate_reading(labels, glued=False, fold=None):
     samples (one_sample), no two conditions differ only in case or punctuation (case), and each
     condition's numbers run 1..n or 0..n-1 (start: from another number -- ATG 5, 7; gap: a
     number missing). `fold`: what makes two conditions one (the sheet check's _key); exact if
-    None, and the conditions in `groups` and the doubts are folded too."""
+    None, and the conditions in `groups` and the doubts are folded too. glued, dot:
+    split_replicate's."""
     labels = list(labels)
-    parsed = {lab: split_replicate(lab, glued=glued, among=labels) for lab in dict.fromkeys(labels)}
+    parsed = {lab: split_replicate(lab, glued=glued, among=labels, dot=dot)
+              for lab in dict.fromkeys(labels)}
     groups, dup, dup_of = defaultdict(dict), [], set()
     for lab, v in sorted(parsed.items()):
         if v is None:

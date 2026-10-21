@@ -51,10 +51,12 @@ trailing number (after a separator such as `_`, `-`, `.` or a space, or straight
 `tech`), `R` after a separator, or `#` (`WT_rep2`, `WT_BioRep2`, `ATG5_R2`, `WT#2`). A word that
 only ends in "rep" is not a marker (`Strep_2` is Strep, replicate 2), and an `R` is a level, not
 a replicate, when another label has a different letter there (`Brain_L1` beside `Brain_R1`).
-The rule is `collect_conditions.split_replicate` and the checks below are `replicate_reading`;
-the submission report's sheet check uses both, and reads glued numbers (`Control1`) only when
-those checks pass, so `ATG5` and `HSP90` stay as they are. `--map` reads the column that way
-**only when that is unambiguous**:
+The rule is `collect_conditions.split_replicate` and the checks below are `replicate_reading`.
+The submission report's sheet check uses both, per condition: a name several samples share is
+that condition as written, and glued numbers (`Control1`, never a number after a dot) are
+replicates except in a condition the checks find with one sample or numbered from neither 0 nor
+1 — so `ATG5`, `HSP90` and `Kv2.1` stay as they are. `--map` reads the column that way **only
+when that is unambiguous**:
 every label ends in a number, they make ≥ 2 conditions of ≥ 2 samples, no two claim the same
 replicate of a condition, no two conditions differ only in case or punctuation, and each
 condition's numbers run 1..n (or 0..n−1). Then the **proposed** csv has `Group` = the condition,

@@ -471,31 +471,45 @@ def replicate_base(name, known=(), among=()):
 def known_conditions(names):
     """The sheet's condition names that are conditions as written: those more than one sample
     carries ("Mutant-1" x3 beside "Mutant-2" x3), unless it is a slip in a numbered series --
-    carried by exactly two samples, its base shared by at least two names one sample carries
-    each (WT_1, WT_2, WT_2, WT_3) -> {_key(name)}."""
+    carried by exactly two samples, its base (glued numbers read too) shared by at least two
+    names one sample carries each (WT_1, WT_2, WT_2, WT_3; WT1, WT2, WT2, WT3) -> {_key(name)}."""
     names = list(names)
     counts = Counter(_key(c) for c in names)
-    base = {_key(c): _key(replicate_base(c, among=names) or c) for c in names}
+    base = {_key(c): _key((split_replicate(cs._s(c), glued=True, among=names, dot=False)
+                           or (c,))[0])
+            for c in names}
     singles = Counter(base[k] for k, n in counts.items() if n == 1)
     return {k for k, n in counts.items() if n > 1 and not (n == 2 and singles[base[k]] >= 2)}
 
 
 def sheet_bases(names, known=()):
-    """{name: the condition it names} for the sheet's condition names, one per sample: without a
-    marked replicate index (replicate_base). When every name is its own sample's, numbers glued
-    to the names are read as replicate numbers too, as 2.13.2 read them ("WT1".."WT3" beside
-    "KO_1".."KO_3"; a gap is a missing replicate) -- except for a condition that
+    """{name: the condition it names} for the sheet's condition names, one per sample (`known`:
+    known_conditions). A known name is that condition as written, and so is a name in the same
+    numbered series as one (Mutant-3 beside Mutant-1 x3). The rest lose a marked replicate index
+    (replicate_base), and numbers glued to them are read as replicate numbers too, as 2.13.2 read
+    them ("WT1".."WT3" beside "KO_1".."KO_3" or "KO" x3; a gap is a missing replicate; WT4 beside
+    WT x3 joins it; never a number after a dot: Kv2.1) -- except in a condition that
     collect_conditions.replicate_reading finds with one sample or numbered from neither 0 nor 1:
-    gene names (ATG5 and ATG7 are no "ATG" replicates 5 and 7; CD45 alone) keep their names."""
-    names = list(names)
-    marked = {c: replicate_base(c, known, names) or c for c in names}
-    if len({_key(c) for c in names}) < len(names):
-        return marked
-    reading = replicate_reading(names, glued=True, fold=_key)
+    gene names keep theirs (ATG5 and ATG7 are no
+    "ATG" replicates 5 and 7; CD45 alone)."""
+    uniq = list(dict.fromkeys(names))
+    glued = {c: split_replicate(cs._s(c), glued=True, among=uniq, dot=False) for c in uniq}
+    series = {_key(glued[c][0]) for c in uniq if _key(c) in known and glued[c]}
+    reading = replicate_reading([c for c in uniq if _key(c) not in known], glued=True, fold=_key,
+                                dot=False)
     no = {g for kind, _why, conditions in reading["doubts"] if kind in ("one_sample", "start")
           for g in conditions}
-    return {c: v[0] if v and _key(v[0]) not in no else marked[c]
-            for c, v in ((c, reading["parsed"][c]) for c in names)}
+    out = {}
+    for c in uniq:
+        v = reading["parsed"].get(c)
+        b = _key(v[0]) if v else None
+        if _key(c) in known or b in series:
+            out[c] = c
+        elif v and (b not in no or b in known):
+            out[c] = v[0]
+        else:
+            out[c] = replicate_base(c, known, uniq) or c
+    return out
 
 
 def _ranges(nums):

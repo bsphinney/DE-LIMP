@@ -910,7 +910,7 @@ def agents_md(f, for_delivery=False):
         vs = [c for c in f["contrasts"] if any(re.search(rf"(^|-){re.escape(g)}$", c)
                                                for g in f["controls"])]
         if vs:
-            said = experiment_type.CONTROLS_FROM.get(f.get("controls_from"), "by group name")
+            said = experiment_type.CONTROLS_FROM[f["controls_from"]]
             L.append(f"- **Pull-down controls, {said}: {', '.join(f['controls'])}.** "
                      f"{len(vs)} contrast(s) compare against them ({', '.join(vs[:4])}"
                      f"{', …' if len(vs) > 4 else ''}): a positive logFC there is enrichment "

@@ -993,7 +993,9 @@ python3 scripts/fetch_fasta.py resolve --organism "<what they said>"   # or --ta
   subclasses, beads (EmptyBeads), isotype in any study; Parental, Untagged, Mock, Empty, KO —
   then Ctrl/Control — only once the type is an enrichment and no group is named like
   IgG/beads/isotype. Those are a guess (KO vs WT is otherwise a whole-proteome study): the brief
-  and step 8's normalisation check ask you to confirm them, then record them with `--controls`.
+  and step 8's normalisation check ask you to confirm them, then record them with
+  `experiment_type.py set-controls --controls <groups>` (`none` when the design has no control
+  group), which changes nothing else in the record.
   When the submission's "Normalization" answer (how the samples were loaded) contradicts the
   default, `set` prints `ASK:` — ask before going on.
 - **Reduced and alkylated? Ask ONLY for an enrichment experiment** — IP / AP-MS / pull-down or
@@ -2349,8 +2351,9 @@ records an experiment type, `run_de.R` refuses any DE that has neither it nor
 data agree with the type's default — use it. **Exit 3 (TRIPPED, no experiment type
 recorded, or CONTROLS NOT CONFIRMED): STOP before the final DE.** With no type recorded nothing
 is decided for the user: ask what the experiment is (step 3) and which quantities to use. With
-the controls only read from names such as Ctrl or KO, confirm them and record them
-(`experiment_type.py set --controls`), then run the check again (`decide` refuses this one). Show the Core staff member
+the controls only read from names such as Ctrl or KO, confirm them, record them
+(`experiment_type.py set-controls --session <S> --controls <groups, or none>`) and run the check
+again; `decide` refuses this one. Otherwise show the Core staff member
 `NORMALIZATION_CHECK.md` (side by side, normalised vs non-normalised, with a recommendation),
 ask which to use, and record their answer. **The decision is the person's, never Claude's.**
 Never choose, and never fill in `--by` yourself. `--by` is their HIVE login, never a full name.

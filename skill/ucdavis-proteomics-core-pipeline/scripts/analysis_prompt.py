@@ -587,7 +587,7 @@ def main():
         w("## Pull-down design — enrichment over a control")
         if vs_control:
             # where the controls came from, a guess said to be one (etm.CONTROLS_FROM, rule 2)
-            said = etm.CONTROLS_FROM.get(design.get("controls_from"), "by group name")
+            said = etm.CONTROLS_FROM[design["controls_from"]]
             w(f"Control group(s), {said}: {', '.join(controls)}. Contrasts against them "
               f"({', '.join(contrast_label(c) for c in vs_control)}) measure **enrichment over "
               "the control**, not abundance change.")
