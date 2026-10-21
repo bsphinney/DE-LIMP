@@ -990,10 +990,11 @@ python3 scripts/fetch_fasta.py resolve --organism "<what they said>"   # or --ta
   bait (the IP target or the TurboID fusion; asked ONCE — when its sequence will be added with
   `--add-fasta`, ask it after step 6 instead, below) and, for controls whose names do not say
   so, `--controls`. Read from the names (a whole word of the group name): IgG and its
-  subclasses, beads (EmptyBeads), isotype in any study; Parental, Untagged, Mock, Empty, KO —
-  then Ctrl/Control — only once the type is an enrichment and no group is named like
-  IgG/beads/isotype. Those are a guess (KO vs WT is otherwise a whole-proteome study): the brief
-  and step 8's normalisation check ask you to confirm them, then record them with
+  subclasses, beads (EmptyBeads), isotype, no antibody (NoAb) in any study; Parental, Untagged,
+  Mock, Empty/EV, KO/Knockout — then Ctrl/Control/NegCtrl — only once the type is an enrichment
+  and no group is named like IgG/beads/isotype/NoAb. Those are a guess (KO vs WT is otherwise a
+  whole-proteome study): the brief and step 8's normalisation check ask you to confirm them,
+  then record them with
   `experiment_type.py set-controls --session <S> --controls <groups>` (`none` when the design has
   no control group), which changes nothing else in the record.
   When the submission's "Normalization" answer (how the samples were loaded) contradicts the
@@ -1155,7 +1156,11 @@ feedback survey (`core_submission.feedback_url`); a run outside the Core never s
 The record's `notes` are Data Quality Notes for the report: organism vs the FASTA, blank
 UniProt, sheet IDs vs raw files, conditions vs the design analysed, and pairing in the sheet (e.g. every mouse under all five IPs — samples from
 one mouse are not independent). Re-run `submission_report.py notes --session <S>` once the
-FASTA and `conditions.csv` exist.
+FASTA and `conditions.csv` exist. Its `staff_cautions` are for the Core staff member only, never
+the report: a difference that rests on reading names with a number glued to them (ATG5, ATG7)
+as replicates of one condition, which gene names and sample IDs look alike in. Raise each one
+before the DE (it is logged in `logs/decisions.md`), and correct `conditions.csv` if the
+submitter meant otherwise.
 
 **Record the experiment type now** (step 3's confirmed answer):
 ```

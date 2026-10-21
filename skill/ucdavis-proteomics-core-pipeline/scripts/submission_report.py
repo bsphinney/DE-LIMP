@@ -556,8 +556,7 @@ def design(samples):
 def sheet_groups(rec):
     """unique_id -> the group the sheet puts it in: the condition with the blocking unit set
     aside when the names carry one, else without a trailing replicate index when that leaves
-    real groups (never merging two of the sheet's own conditions numbered like genes, not
-    replicates: _own_conditions_apart), else the condition as written."""
+    real groups, else the condition as written."""
     named = {s["unique_id"]: s["condition_name"] for s in rec["samples"] if s["condition_name"]}
     d = design(rec["samples"])
     if d["unit"]:
@@ -565,67 +564,8 @@ def sheet_groups(rec):
         for g in d["unit"]["groups"]:
             out.update({uid: g["name"] for uid in g["samples"]})
         return out
-    bases = _own_conditions_apart(named, {uid: replicate_base(c) or c for uid, c in named.items()})
+    bases = {uid: replicate_base(c) or c for uid, c in named.items()}
     return bases if 1 < len({_key(b) for b in bases.values()}) < len(named) else named
-
-
-def _own_conditions_apart(named, bases):
-    """The sheet's own conditions -- the names more than one sample carries -- are never merged by
-    taking a number glued to the name off them (ATG5 x3 and ATG7 x3 -> "ATG"; HSP70 / HSP90;
-    CD4 / CD8; T0 / T24). A staff report, 2026-10-20: REPLICATE_SUFFIX read ATG5 as ATG replicate
-    5, and the report said the analysed groups split the sheet's "ATG". Only when every number
-    taken off is glued to letters (_glued_number), the numbers are no replicate numbering
-    (_replicate_numbering) and the sheet numbers no other names (WT1, WT2 or LPS_40, LPS_52
-    beside KO3, KO4: then these are sample numbers too) does every name with that base keep its
-    name. Everything else reads as 2.13.2 read it: a number after a separator, an ID letter, rep
-    or # is a sample or replicate number (WT_1 x2 / WT_2 x2, IP_rep1/2/4 x2, Parental_12 x2,
-    Mock_S5 x2; Mutant-1 x3 / Mutant-2 x3, a known limit), and with no name repeated nothing
-    changes (ATG5 and ATG7 alone are "ATG")."""
-    counts = Counter(_key(c) for c in named.values())
-    own, numbers, prefixes, marked = defaultdict(set), defaultdict(set), defaultdict(set), set()
-    trailing = defaultdict(set)              # a name without its trailing number -> the numbers
-    for c in set(named.values()):
-        t = re.search(r"^(.*?)(\d+)$", cs._s(c))
-        if t:
-            trailing[_key(t.group(1))].add(int(t.group(2)))
-    for uid, c in named.items():
-        b = _key(bases[uid])
-        if counts[_key(c)] > 1:
-            own[b].add(_key(c))
-        n = re.search(r"^(.*?)(\d+)$", cs._s(c))
-        if n and _key(c) != b:                 # the number the replicate index took off
-            numbers[b].add(int(n.group(2)))
-            prefixes[b].add(_key(n.group(1)))
-            if not _glued_number(cs._s(c)):
-                marked.add(b)
-    apart = {b for b, names in own.items()
-             if len(names) > 1 and b not in marked and not _replicate_numbering(numbers[b])
-             and not any(len(ns) > 1 for p, ns in trailing.items() if p not in prefixes[b])}
-    return {uid: c if _key(bases[uid]) in apart else bases[uid] for uid, c in named.items()}
-
-
-def _glued_number(name):
-    """True when the name's trailing number is glued to its letters, as in a gene name (ATG5,
-    HSP90, T24) -- not marked as an index by a separator, ')', "#", rep / replicate, or an ID
-    letter after a separator (WT_5, WT-5, WT#5, WTrep5, WT_R5, Mock_S5, WT_M12)."""
-    m = re.search(r"([A-Za-z]*)\d+$", name)
-    word, before = (m.group(1), name[:m.start(1)]) if m else ("", "")
-    return bool(word) and not re.search(r"rep(?:licate)?$", word, re.I) and not (
-        len(word) == 1 and before[-1:] in (" ", "_", ".", "-"))
-
-
-def _replicate_numbering(numbers):
-    """Replicate numbers: starting at 0, 1 or 2 and spread over no more than three times their
-    count (1, 2, 3; 1, 2, 4; 1, 5; 2, 3, 4, 7), or in a row wherever they start (4, 5; 24, 25),
-    also after a shared leading part (11, 12: "Mutant-1" replicates 1, 2) -- not gene-like ones
-    (5, 7; 70, 90; 4, 8) nor time points far apart (0, 24; 1, 7)."""
-    def run(n):
-        return bool(n) and (n[0] <= 2 and n[-1] - n[0] + 1 <= 3 * len(n)
-                            or len(n) >= 2 and n[-1] - n[0] + 1 == len(n))
-    n = sorted(numbers)
-    s = [str(x) for x in n]
-    return run(n) or (all(len(x) > 1 for x in s) and len({x[:-1] for x in s}) == 1
-                      and run(sorted(int(x[-1]) for x in s)))
 
 
 # ------------------------------------------------------------ matching sheet to runs --
@@ -942,6 +882,19 @@ def _sheet_vs_raw(rec, p):
 
 
 def _conditions_vs_analysed(rec, p):
+    """The "conditions differ" note -- its bits that rest only on what the sheet's names say.
+    A bit about a sheet group made by taking a number glued to the names off them (ATG5, ATG7 ->
+    "ATG") is a possibility, not a finding: it goes to staff, never the report (sheet_cautions)."""
+    glued = set(_glued_groups(rec))
+    bits = [b for b, named, _kind in _conditions_bits(rec, p) if not named & glued]
+    if not bits:
+        return []
+    return [("conditions_differ", "Conditions analysed vs the sample sheet: " + "; ".join(bits) + ".")]
+
+
+def _conditions_bits(rec, p):
+    """[(a bit of the comparison of the analysed groups with the sheet's, the sheet groups it
+    names, its kind: "pools" | "split" | "left_out")]."""
     rows = _read_conditions(p)
     d = design(rec["samples"])
     sheet = sheet_groups(rec)
@@ -963,18 +916,77 @@ def _conditions_vs_analysed(rec, p):
     bits = []
     for a, ss in sorted(a2s.items()):
         if len(ss) > 1:
-            bits.append(f"group “{a}” pools the sheet's {_examples(sorted(ss), 4)}")
+            bits.append((f"group “{a}” pools the sheet's {_examples(sorted(ss), 4)}", set(ss),
+                         "pools"))
     for s, aa in sorted(s2a.items()):
         if len(aa) > 1:
-            bits.append(f"the sheet's “{s}” is split across groups {_examples(sorted(aa), 4)}")
+            bits.append((f"the sheet's “{s}” is split across groups {_examples(sorted(aa), 4)}",
+                         {s}, "split"))
     left_out = [u for u in sheet if u not in in_design]
     if left_out and in_design:
         n = len(left_out)
-        bits.append(f"{n} sheet sample{'s are' if n > 1 else ' is'} not in the analysed design "
-                    f"({_examples(left_out)})")
-    if not bits:
+        bits.append((f"{n} sheet sample{'s are' if n > 1 else ' is'} not in the analysed design "
+                     f"({_examples(left_out)})", set(), "left_out"))
+    return bits
+
+
+def _glued_groups(rec):
+    """{a sheet group: the names it was read from} for the groups sheet_groups made by taking a
+    number glued straight to the name's letters off it -- ATG5, ATG7 -> "ATG"; WT3, WT4 -> "WT" --
+    with no separator, ")", "#", rep / replicate or ID letter (WT_R5, Mock_S5) to say it is a
+    replicate number. Gene names look the same (a staff report, 2026-10-20), so what rests on
+    such a group is a possibility (sheet_cautions)."""
+    out, sheet = defaultdict(set), sheet_groups(rec)
+    for s in rec["samples"]:
+        c, g = cs._s(s.get("condition_name")), sheet.get(s["unique_id"])
+        rest = c[len(g):] if g and c.startswith(g) else ""
+        if g and c != g and rest.isdigit() and g[-1:].isalpha():
+            word = re.search(r"[A-Za-z]*$", g).group(0)
+            before = g[:len(g) - len(word)]
+            if not re.search(r"rep(?:licate)?$", word, re.I) and not (
+                    len(word) == 1 and before[-1:] in (" ", "_", ".", "-")):
+                out[g].add(c)
+    return {g: sorted(v) for g, v in out.items()}
+
+
+def sheet_cautions(rec, session=None):
+    """Staff-only cautions -- never in the report: the parts of "Conditions analysed vs the sample
+    sheet" that rest on reading names with a number glued to them as replicates
+    (_glued_groups), worded as a possibility. [{"id", "text"}]."""
+    p = paths_for(os.path.expanduser(session)) if session else None
+    if not p:
         return []
-    return [("conditions_differ", "Conditions analysed vs the sample sheet: " + "; ".join(bits) + ".")]
+    glued = _glued_groups(rec)
+    said = []
+    for bit, named, kind in _conditions_bits(rec, p):
+        for g in sorted(named & set(glued)):
+            then = ("nothing differs, and if they are replicates, correct conditions.csv before "
+                    "the DE" if kind == "split" else "correct conditions.csv before the DE")
+            said.append(f"{bit}: the sheet's {', '.join(glued[g])} were read as replicates of "
+                        f"“{g}”; if they are separate conditions, {then}")
+    if not said:
+        return []
+    return [{"id": "conditions_glued_names",
+             "text": "Conditions analysed vs the sample sheet, read from names with a number "
+                     "glued to them (staff only, a possibility, never in the report): "
+                     + "; ".join(dict.fromkeys(said)) + "."}]
+
+
+def log_cautions(session, cautions):
+    """Each caution into the session's decisions log (logs/decisions.md, Core-internal), once."""
+    if not (session and cautions):
+        return
+    import log_decision
+    path = os.path.join(os.path.abspath(os.path.expanduser(session)), "logs", "decisions.md")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            seen = fh.read()
+    except OSError:
+        seen = ""
+    for c in cautions:
+        if log_decision.one(c["text"]) not in seen:
+            log_decision.append(session, "Sample sheet: a possible difference, for staff",
+                                c["text"], step="3b. submission")
 
 
 def _no_groups(rec, d):
@@ -1282,6 +1294,7 @@ def cmd_attach(a):
     return _emit({"attached": label(rec), "source": rec["source"], "prepared_by": who,
                   "prepared_by_basis": why, "n_samples": len(rec["samples"]),
                   "notes": quality_notes(rec, session),
+                  "staff_cautions": _cautions(rec, session),
                   "warnings": warnings, "outputs": paths})
 
 
@@ -1297,14 +1310,23 @@ def cmd_show(a):
     if a.format == "md":
         print(render_markdown(rec, notes), end="")
         return 0
-    return _emit({"record": rec, "prepared_by": prepared_by(rec)[0], "notes": notes})
+    return _emit({"record": rec, "prepared_by": prepared_by(rec)[0], "notes": notes,
+                  "staff_cautions": sheet_cautions(rec, sess)})
 
 
 def cmd_notes(a):
     rec, sess = resolve(a.submission, a.session)
     if rec is None:
         return _emit({"error": "no submission is attached to this session"}, 2)
-    return _emit({"submission": label(rec), "notes": quality_notes(rec, sess)})
+    return _emit({"submission": label(rec), "notes": quality_notes(rec, sess),
+                  "staff_cautions": _cautions(rec, sess)})
+
+
+def _cautions(rec, session):
+    """sheet_cautions, logged in the decisions log as they are found."""
+    cautions = sheet_cautions(rec, session)
+    log_cautions(session, cautions)
+    return cautions
 
 
 def main(argv=None):

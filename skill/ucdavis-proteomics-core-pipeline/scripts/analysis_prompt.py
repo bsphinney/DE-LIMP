@@ -77,6 +77,17 @@ def submission_brief(w, source):
           "whether paired samples were analysed as independent):")
         for n in notes:
             w(f"  - {n['text']}")
+    # what rests on reading names like ATG5, ATG7 as replicates of "ATG": a possibility, for
+    # staff (submission_report.sheet_cautions), logged in logs/decisions.md as well
+    cautions = sr.sheet_cautions(rec, session)
+    if cautions:
+        sr.log_cautions(session, cautions)
+        w("- **For the Core staff member only -- never in the report, not even in Data Quality "
+          "Notes:** the sheet's names carry a number glued to them, which the sheet check read as "
+          "a replicate number; gene names look the same. Raise this with them before the DE is "
+          "trusted (it is also in logs/decisions.md):")
+        for c in cautions:
+            w(f"  - {c['text']}")
     w("")
     w(sr.render_markdown(rec, (), heading="### The record, as submitted"))
 

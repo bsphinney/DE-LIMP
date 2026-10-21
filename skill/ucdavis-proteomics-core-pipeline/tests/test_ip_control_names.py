@@ -493,9 +493,9 @@ class TheGuessIsSaidWhereItIsRead(unittest.TestCase):
         d, p = self.session()
         said = "read from their names — NOT confirmed"
         self.assertIn(f"Control group(s), {said}", self.brief(d, p))
-        readme = session_docs.agents_md(session_docs.gather(p["session_dir"]))
-        self.assertIn(f"Pull-down controls, {said}", readme)
-        self.assertIn("the name is the only evidence these are controls", readme)
+        agents = session_docs.agents_md(session_docs.gather(p["session_dir"]))
+        self.assertIn(f"Pull-down controls, {said}", agents)
+        self.assertIn("the name is the only evidence these are controls", agents)
         # and the type's label names no particular control
         self.assertNotIn("IgG or bead", et.load(p["session_dir"])["label"])
 
@@ -516,15 +516,17 @@ class TheGuessIsSaidWhereItIsRead(unittest.TestCase):
                       "enriched over the control", "### Specificity"):
             self.assertNotIn(never, brief)
         self.assertIn("### Cross-Comparison Biomarkers", brief)
-        readme = session_docs.agents_md(session_docs.gather(p["session_dir"]))
-        self.assertIn("**No negative control group** (recorded by the user", readme)
+        agents = session_docs.agents_md(session_docs.gather(p["session_dir"]))
+        self.assertIn("**No negative control group** (recorded by the user", agents)
+        readme = session_docs.readme_md(session_docs.gather(p["session_dir"]))
+        self.assertIn("Negative control: none -- the user recorded", readme)
 
     def test_recorded_controls_are_not_called_a_name_guess(self):
         d, p = self.session(controls="Parental")
         self.assertIn("Control group(s), as recorded", self.brief(d, p))
-        readme = session_docs.agents_md(session_docs.gather(p["session_dir"]))
-        self.assertIn("Pull-down controls, as recorded", readme)
-        self.assertNotIn("the name is the only evidence", readme)
+        agents = session_docs.agents_md(session_docs.gather(p["session_dir"]))
+        self.assertIn("Pull-down controls, as recorded", agents)
+        self.assertNotIn("the name is the only evidence", agents)
 
 
 if __name__ == "__main__":

@@ -77,6 +77,9 @@ ENRICHMENT_CONTROL_NAME = re.compile(_CONTROL_TOKEN.format(
 GENERIC_CONTROL_NAME = re.compile(_CONTROL_TOKEN.format(r"(?:neg[ _-]?)?(?:ctrls?|controls?)"))
 CONTROL_NAME_TIERS = ((IP_CONTROL_NAME, "name"), (ENRICHMENT_CONTROL_NAME, "enrichment_name"),
                       (GENERIC_CONTROL_NAME, "enrichment_name"))
+# The tiers in words, for the help and the notes (beside the regexes: one list).
+CONTROL_NAMES_SAID = ("IgG, beads, isotype, no antibody (NoAb); in an enrichment also parental, "
+                      "untagged, mock, empty / EV, KO / knockout, then ctrl / control / NegCtrl")
 # How the brief and the session README say where the controls came from (pulldown_design's
 # controls_from): a guess is said to be one (rule 2).
 CONTROLS_FROM = {"recorded": "as recorded by the user",
@@ -207,8 +210,9 @@ def reconcile(etype, submission_answer):
 # type's default stands, for a reason that names no control (the team lead, 2026-10-20).
 NO_CONTROL = {
     "ip": ("immunoprecipitation / affinity purification / pull-down, with no negative control "
-           "group", "pull-down eluates are not loaded to equal protein, so normalisation would "
-                    "equalise a real difference in how much each pull-down captured"),
+           "group", "the samples are pull-down eluates, not equal-protein loads: normalising them "
+                    "would scale away real differences in how much protein each pull-down "
+                    "recovered"),
     "proximity": ("proximity labelling (TurboID / BioID / APEX), with no negative control group",
                   "the samples are usually loaded by equal protein, so standard normalisation "
                   "holds"),
@@ -624,9 +628,8 @@ def pulldown_design(rec, groups, contrasts):
                 f"({', '.join(rec['controls'])}) are none of this design's groups: {fix}")
     elif enr and not vs_control:
         note = (f"the experiment type is {rec['label']}, but no contrast is against a control "
-                "group (none is named like one -- IgG, beads, isotype, parental, untagged, mock, "
-                f"empty, KO, ctrl -- and no --controls were recorded): record the control groups "
-                f"({cmd})")
+                f"group (none is named like one -- {CONTROL_NAMES_SAID} -- and no --controls were "
+                f"recorded): record the control groups ({cmd})")
     elif enr and how == "enrichment_name":
         note = (f"the control group(s) {', '.join(controls)} were taken from their names, which "
                 "can also name an ordinary condition (untreated, knockout, mock-infected): "
@@ -653,8 +656,7 @@ def main():
     s.add_argument("--stated", help="the user's own words for the experiment")
     s.add_argument("--bait", help="the bait / fusion protein (gene or accession), when known")
     s.add_argument("--controls", help="comma-separated control groups, when their names do not "
-                                      "say so (IgG, beads, isotype; in an enrichment also "
-                                      "parental, untagged, mock, empty, KO, ctrl), or 'none'")
+                                      f"say so ({CONTROL_NAMES_SAID}), or 'none'")
     sc = sub.add_parser("set-controls", help="record which groups are the pull-down's controls, "
                                              "changing nothing else in the record")
     sc.add_argument("--session", required=True)

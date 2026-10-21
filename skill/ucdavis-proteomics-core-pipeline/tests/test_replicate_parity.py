@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
-"""The sample-sheet check reads every sheet as skill 2.13.2 did, but the one case 2.14.1 changed.
+"""The sample-sheet check reads every sheet exactly as skill 2.13.2 did; only who is told changes.
 
 submission_report's sheet check takes a trailing replicate index off the sheet's condition names
 to find its groups, and compares them with the groups the analysis used ("conditions differ").
-2.14.1 added one guard (sheet_groups, _own_conditions_apart): two names that several samples
-carry each are never merged into one base when the numbers taken off them are not replicate
-numbering (ATG5 x3 and ATG7 x3 are not "ATG"). Three reviews of a
-broader rule kept finding sheets that 2.13.2 read right and the new rule read wrong, so this test
-holds today's code to 2.13.2's on a corpus of sheet shapes: the reviews' examples, then stems x
-separators x numbering x levels (L/R, R/S, A/B) x mixed formats x slips x case x duplicated
-names, generated with a fixed seed. The groups the analysis used are each sample's true
-condition, known by construction -- never computed with the code under test.
+Read that way, ATG5 and ATG7 are replicates of "ATG" -- and so are the sample IDs Parental12 and
+Parental51: on names alone the two cannot be told apart. Three reviews found every rule that
+changed the groups reading some sheets worse than 2.13.2 did, so the groups stay 2.13.2's
+exactly. What 2.14.1 changes is the note: a part of it that rests on a group made by taking a
+number glued to the names off them (no separator, ')', '#', rep / replicate or ID letter) is
+withheld from the report and said to staff instead (submission_report.sheet_cautions).
 
-fixtures/replicate_parity_2_13_2.json holds each sheet with 2.13.2's sheet groups, its "every
-sample has its own condition" note and its "conditions differ" note, made by 2.13.2's own code
-(dd932cc), so the test needs no git. The only difference allowed is the guard's
-(expected_groups: a group in which 2.13.2 merged two names that several samples carry each, the
-numbers it took off them glued to letters, no replicate numbering, on a sheet that numbers no
-other names -- ATG 5, 7). Such a group must read as written, every other group exactly as
-2.13.2's, and the "conditions differ" note must follow from those groups -- and a sheet 2.13.2
-grouped as the analysis did must still be grouped that way (the ground truth, not the rule).
+This test holds today's code to 2.13.2's on a corpus of sheet shapes: the reviews' examples,
+then stems x separators x numbering (per condition, on across conditions, sample IDs) x levels
+(L/R, R/S, A/B) x mixed formats x slips x case x duplicated names, generated with a fixed seed.
+The groups the analysis used are each sample's true condition, known by construction -- never
+computed with the code under test. fixtures/replicate_parity_2_13_2.json holds each sheet with
+2.13.2's sheet groups, its "every sample has its own condition" note and its "conditions
+differ" note, made by 2.13.2's own code (dd932cc), so the test needs no git. Groups and the
+"every sample" note must be identical, always. The "conditions differ" note must be 2.13.2's
+less exactly the parts about a glued-number group, and those parts must be in the staff
+caution -- which is there only then.
 
 Regenerate the fixture (new shapes; 2.13.2's code is what must answer):
   git -C <repo> archive dd932cc skill/ucdavis-proteomics-core-pipeline/scripts | tar -x -C <dir>
@@ -156,6 +156,30 @@ REVIEWS = [
     (twice(["WT replicate 5", "WT replicate 7"]) + ["KO"] * 4, ["WT"] * 4 + ["KO"] * 4),
     (twice(["Old - A - R5", "Old - A - R7"]) + ["Old - B"] * 4, ["Old_A"] * 4 + ["Old_B"] * 4),
     (twice(["WT bio rep 5", "WT bio rep 7"]) + ["KO"] * 4, ["WT"] * 4 + ["KO"] * 4),
+    # one condition numbered by glued sample IDs, others not: the twin of ATG5 / ATG7 (r9)
+    (twice(["Parental12", "Parental51"]) + ["Dox(+)"] * 4, ["Parental"] * 4 + ["Dox(+)"] * 4),
+    (twice(["Parental12", "Parental51"]) + ["Dox(+)"] * 4,
+     twice(["Parental12", "Parental51"]) + ["Dox(+)"] * 4),
+    (twice(["WT3", "WT4", "WT6"]) + ["KO"] * 6, ["WT"] * 6 + ["KO"] * 6),
+    (twice(["WT3", "WT4", "WT6"]) + ["KO"] * 6, twice(["WT3", "WT4", "WT6"]) + ["KO"] * 6),
+    (twice(["Bait15", "Bait17"]) + ["Ctrl"] * 6, ["Bait"] * 4 + ["Ctrl"] * 6),
+    (twice(["Tumor12", "Tumor35", "Tumor40"]) + ["Normal"] * 6, ["Tumor"] * 6 + ["Normal"] * 6),
+    (twice(["WT12", "WT40"]) + ["KO"] * 4 + ["Het"] * 4, ["WT"] * 4 + ["KO"] * 4 + ["Het"] * 4),
+    (["WT"] * 2 + twice(["WT5", "WT9"]) + ["KO"] * 6, ["WT"] * 6 + ["KO"] * 6),
+    (twice(["WT05", "WT07"]) + ["KO"] * 4, ["WT"] * 4 + ["KO"] * 4),
+    (twice(["Mock1", "Mock8"]) + ["Infected"] * 4, ["Mock"] * 4 + ["Infected"] * 4),
+    (twice(["DMSO3", "DMSO5"]) + ["Drug"] * 4, ["DMSO"] * 4 + ["Drug"] * 4),
+    (twice(["Sample7", "Sample9"]) + ["Blank"] * 4, ["Sample"] * 4 + ["Blank"] * 4),
+    (twice(["CtrlS12", "CtrlS40"]) + ["LPS"] * 4, ["CtrlS"] * 4 + ["LPS"] * 4),
+    (twice(["IP12", "IP15"]) + ["IgG"] * 4, ["IP"] * 4 + ["IgG"] * 4),
+    (twice(["ATG5", "ATG7"]) + ["WT"] * 4, twice(["ATG5", "ATG7"]) + ["WT"] * 4),
+    (["HSP90"] + twice(["HSP701", "HSP702", "HSP703", "HSP704"]), ["HSP90"] + ["HSP70"] * 8),
+    # r9's boundaries
+    (twice(["WT2", "WT5"]) + ["KO"] * 4, ["WT"] * 4 + ["KO"] * 4),
+    (twice(["WT2", "WT7"]) + ["KO"] * 4, ["WT"] * 4 + ["KO"] * 4),
+    (twice(["WT11", "WT13"]) + ["KO"] * 4, ["WT"] * 4 + ["KO"] * 4),
+    (twice(["WT_replicate5", "WT_replicate7"]) + ["KO"] * 4, ["WT"] * 4 + ["KO"] * 4),
+    (twice(["WT.S5", "WT.S7"]) + ["KO"] * 4, ["WT"] * 4 + ["KO"] * 4),
 ]
 STEMS = ("WT", "KO", "Ctrl", "Control", "Treated", "ATG5", "ATG7", "HSP70", "HSP90", "CD45",
          "IgG1", "Cis", "Brain", "Mutant", "Mutant-1", "Mutant-2", "T0", "T24", "Day", "A549",
@@ -216,7 +240,8 @@ def corpus():
 
 def outcome(sr, names, analysed, tmp):
     """(the sheet's groups in sample order, "every sample has its own condition" note or not,
-    the "conditions differ" note or None) from submission_report module `sr`, end to end: a
+    the "conditions differ" note or None, the staff caution or None) from submission_report
+    module `sr`, end to end: a
     session whose conditions.csv holds `analysed`, each run assigned to its sample."""
     with open(RECORD, encoding="utf-8") as fh:
         r = json.load(fh)
@@ -241,64 +266,46 @@ def outcome(sr, names, analysed, tmp):
         json.dump({"assignments": [{"sample": u, "file": f"{x}.d"} for u, x in runs.items()]}, fh)
     sr.attach(s, rec)
     notes = {n["id"]: n["text"] for n in sr.quality_notes(sr.load(s), s)}
+    cautions = getattr(sr, "sheet_cautions", lambda r, sess: [])(sr.load(s), s)  # not in 2.13.2
     return ([groups[x["unique_id"]] for x in rec["samples"]], "sheet_conditions_unique" in notes,
-            notes.get("conditions_differ"))
+            notes.get("conditions_differ"), " ".join(c["text"] for c in cautions) or None)
 
 
 def _key(s):
     return " ".join(str(s).split()).casefold()
 
 
-def expected_groups(names, base_groups):
-    """2.13.2's groups with the guard applied, from its groups alone (the rule as specified): a
-    group in which it merged two names that several samples carry each reads as written, when
-    every number it took off is glued to letters (not after a separator, ')', '#', rep /
-    replicate or an ID letter), the numbers are no replicate numbering (from 0-2 and spread over
-    at most three times their count, or in a row, also after a shared leading part) and the sheet
-    numbers no other names (two or more numbers after another name's prefix)."""
-    counts = {}
-    for c in names:
-        counts[_key(c)] = counts.get(_key(c), 0) + 1
-    trailing = {}
-    for c in set(names):
-        t = re.search(r"^(.*?)(\d+)$", c.strip())
-        if t:
-            trailing.setdefault(_key(t.group(1)), set()).add(int(t.group(2)))
-    shared, numbers, prefixes, marked = {}, {}, {}, set()
-    for c, g in zip(names, base_groups):
-        if counts[_key(c)] > 1:
-            shared.setdefault(_key(g), set()).add(_key(c))
-        m = re.search(r"^(.*?)([A-Za-z]*)(\d+)$", c.strip())
-        if m and _key(c) != _key(g):
-            numbers.setdefault(_key(g), set()).add(int(m.group(3)))
-            prefixes.setdefault(_key(g), set()).add(_key(m.group(1) + m.group(2)))
-            word, before = m.group(2), m.group(1)
-            if not word or re.search(r"rep(?:licate)?$", word, re.I) or (
+def glued_groups(names, groups):
+    """The sheet groups (as 2.13.2 labels them) made by taking a number glued straight to the
+    name's letters off it: no separator, ')', '#', rep / replicate or single ID letter after a
+    separator before the number (the rule, as specified)."""
+    out = set()
+    for c, g in zip(names, groups):
+        c = c.strip()
+        if c != g and c.startswith(g) and c[len(g):].isdigit() and g[-1:].isalpha():
+            word = re.search(r"[A-Za-z]*$", g).group(0)
+            before = g[:len(g) - len(word)]
+            if not re.search(r"rep(?:licate)?$", word, re.I) and not (
                     len(word) == 1 and before[-1:] in (" ", "_", ".", "-")):
-                marked.add(_key(g))
-
-    def run(ns):
-        return bool(ns) and (ns[0] <= 2 and ns[-1] - ns[0] + 1 <= 3 * len(ns)
-                             or len(ns) >= 2 and ns[-1] - ns[0] + 1 == len(ns))
-
-    def replicates(ns):           # also after a shared leading part: 11, 12 (Mutant-1 rep 1, 2)
-        ns = sorted(ns)
-        last = sorted(int(str(x)[-1]) for x in ns)
-        return run(ns) or (all(x > 9 for x in ns) and len({str(x)[:-1] for x in ns}) == 1
-                           and run(last))
-    apart = {g for g, cs in shared.items()
-             if len(cs) > 1 and g not in marked and not replicates(numbers.get(g, ()))
-             and not any(len(ns) > 1 for p, ns in trailing.items() if p not in prefixes.get(g, ()))}
-    return [c if _key(g) in apart else g for c, g in zip(names, base_groups)]
+                out.add(g)
+    return out
 
 
-def partition(labels, key=str):
-    """The groups of sample positions that `labels` makes (labels compared as written, as the
-    "conditions differ" note compares them; key=_key ignores case)."""
-    by = {}
-    for i, g in enumerate(labels):
-        by.setdefault(key(g), set()).add(i)
-    return sorted(sorted(v) for v in by.values())
+def bits(note):
+    """The parts of a "Conditions analysed vs the sample sheet: a; b; c." note."""
+    if not note:
+        return []
+    return note.split(": ", 1)[1].rstrip(".").split("; ")
+
+
+def names_a_glued_group(bit, glued):
+    """Does this part of the note name a group made from glued numbers?"""
+    if bit.startswith("the sheet's “"):
+        return bit.split("“", 1)[1].split("”", 1)[0] in glued
+    if " pools the sheet's " in bit:
+        listed = re.sub(r" and \d+ more$", "", bit.split(" pools the sheet's ", 1)[1])
+        return any(x in glued for x in listed.split(", "))
+    return False
 
 
 def write_fixture(scripts):
@@ -309,7 +316,7 @@ def write_fixture(scripts):
     rows = []
     for names, analysed in corpus():
         with tempfile.TemporaryDirectory() as tmp:
-            g, unique, differ = outcome(sr, names, analysed, tmp)
+            g, unique, differ, _caution = outcome(sr, names, analysed, tmp)
         rows.append(json.dumps({"names": names, "analysed": analysed, "groups": g,
                                 "unique": unique, "differ": differ}, ensure_ascii=False))
     with open(FIXTURE, "w", encoding="utf-8") as fh:
@@ -330,28 +337,24 @@ class SameAsTwoThirteenTwo(unittest.TestCase):
         self.assertGreater(len(self.base), 400)
         self.assertEqual([(b["names"], b["analysed"]) for b in self.base], corpus())
 
-    def test_every_sheet_reads_as_2_13_2_but_the_guards_case(self):
-        guarded = 0
+    def test_every_sheet_reads_as_2_13_2_and_glued_parts_go_to_staff(self):
+        withheld = 0
         for b in self.base:
             names = b["names"]
             with tempfile.TemporaryDirectory() as tmp:
-                groups, unique, differ = outcome(self.sr, names, b["analysed"], tmp)
-            expected = expected_groups(names, b["groups"])
-            if expected == b["groups"]:
-                self.assertEqual((groups, unique, differ), (b["groups"], b["unique"], b["differ"]),
-                                 names)
-                continue
-            guarded += 1
-            # the guard's case: exactly these groups, and the note follows from them
-            self.assertEqual(groups, expected, names)
-            self.assertEqual(unique, b["unique"], names)
-            self.assertEqual(differ is None, partition(expected) == partition(b["analysed"]),
-                             (names, differ))
-            # and never worse than 2.13.2 against the truth: a sheet it grouped as the analysis
-            # did stays grouped that way
-            if partition(b["groups"], _key) == partition(b["analysed"], _key):
-                self.assertEqual(partition(groups, _key), partition(b["analysed"], _key), names)
-        self.assertGreater(guarded, 0)
+                groups, unique, differ, caution = outcome(self.sr, names, b["analysed"], tmp)
+            self.assertEqual((groups, unique), (b["groups"], b["unique"]), names)
+            glued = glued_groups(names, b["groups"])
+            to_staff = [x for x in bits(b["differ"]) if names_a_glued_group(x, glued)]
+            self.assertEqual(bits(differ), [x for x in bits(b["differ"]) if x not in to_staff],
+                             names)
+            if to_staff:
+                withheld += 1
+                for x in to_staff:
+                    self.assertIn(x, caution or "", names)
+            else:
+                self.assertIsNone(caution, names)
+        self.assertGreater(withheld, 0)
 
 
 if __name__ == "__main__":

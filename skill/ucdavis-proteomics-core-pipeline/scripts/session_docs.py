@@ -572,6 +572,9 @@ def summary_lines(f):
                  "output/tables/de_provenance.json)")
     if f["groups"]:
         L.append("- Groups: " + ", ".join(f"{g} ({n})" for g, n in sorted(f["groups"].items())))
+    if f.get("no_control"):
+        L.append("- Negative control: none -- the user recorded that this pull-down has no control "
+                 "group, so each comparison is between pull-downs, not against a control")
     return L
 
 
