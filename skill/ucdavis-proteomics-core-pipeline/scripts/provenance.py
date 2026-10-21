@@ -31,6 +31,13 @@ Usage (the orchestrator fills these from earlier steps):
     --qc-bracket <session>/logs/qc_bracket.json   # optional: the instrument's QC record
                                       # (qc_bracket.py) -- referenced by path + sha256 only
 
+Inside an analysis session (session.py init), all of that is in the session's own records:
+  python3 provenance.py --session <session dir>
+Every argument not given explicitly is read from where the session keeps it (an explicit one
+always wins); one with no record stays unset, exactly as when it is not given, and is listed
+under `from_session.not_found` in the printed JSON -- never guessed. A --session that is not a
+readable session exits 2.
+
 Outputs under --outdir:
   run_manifest.json          everything, machine-readable
   REPRODUCE.md               human-readable methods + how-to-rerun
@@ -272,6 +279,281 @@ PROT_0756 v2 (a zen4 and a zen2 HIVE node): {CPU_FAMILY_EVIDENCE}. {how} Do not 
 """
 
 
+# ---- --session: every argument not given, from the session's own records --------------------
+# SKILL.md step 10 had the agent hand-type a 12-line command, so a bundle could quietly get the
+# wrong inputs. With --session <S> each argument below that is not given explicitly is read from
+# where the session keeps it (session.paths_for: the one map of that layout). One with no record
+# stays unset -- exactly as when it is not given, so the [SKIPPED] lines are the same -- and is
+# listed (stderr, MANIFEST.txt [NOTE], the printed JSON's `from_session.not_found`): never guessed.
+# The workflow manifest's `de` block is resolve_defaults.py's DEFAULTS, never a record of the DE:
+# the DE's settings come from de_provenance.json alone (architectural rule #2).
+SESSION_FILLED = ("outdir", "workflow_manifest", "tools_json", "params", "conditions", "fasta",
+                  "fasta_info_file", "raw", "report", "de_dir", "engine", "engine_version",
+                  "de_method", "contrasts", "q_cutoff", "logfc", "adjp", "acquisition",
+                  "instrument", "organism_taxid", "commands", "qc_bracket", "timestamp")
+_UNSET = object()
+
+
+def _flag(dest):
+    return "--" + dest.replace("_", "-")
+
+
+def session_or_exit(path):
+    """The session dir --session names (absolute), or exit 2 saying why it is not one: no such
+    folder, not a session (session.is_session_dir: session.json, or init's input/ + output/), or
+    a session.json that cannot be read. init writes session.json only for Core staff (--submission
+    / --internal), so a session without one is still a session."""
+    import session as sm
+    d = os.path.abspath(os.path.expanduser(path))
+
+    def die(why):
+        sys.stderr.write(f"provenance.py --session {path}: {why}\n")
+        sys.exit(2)
+    if not os.path.isdir(d):
+        die("no such folder")
+    if not sm.is_session_dir(d):
+        die("not an analysis session (no session.json, and not the input/ + output/ layout "
+            "`session.py init` makes): give the session folder, or the arguments themselves")
+    sj = sm.paths_for(d)["session_json"]
+    if os.path.exists(sj):
+        try:
+            with open(sj, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError) as e:         # UnicodeDecodeError is a ValueError
+            die(f"{sj} cannot be read ({type(e).__name__}: {e}): look at it before the bundle "
+                "is built from this session")
+        if not isinstance(data, dict):
+            die(f"{sj} is not a JSON object: look at it before the bundle is built from this "
+                "session")
+    return d
+
+
+def _scalar(v):
+    """A de_provenance.json value as the command-line string it was given as, or None. jsonlite
+    may write a scalar as a one-element list, and NA as null or "NA"."""
+    if isinstance(v, list) and len(v) == 1:
+        v = v[0]
+    if isinstance(v, bool) or v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return str(v)
+    return v if isinstance(v, str) and v.strip() and v != "NA" else None
+
+
+def fill_from_session(a, given, sdir):
+    """Fill every SESSION_FILLED argument of `a` not in `given` from session `sdir`'s records.
+    -> the `from_session` record: {session, filled: {flag: {from, value | n_files}}, explicit,
+    not_found: {flag: why}, notes}. Records are read from the FINAL paths (an explicit --de-dir's
+    de_provenance.json, an explicit --fasta's sidecar), so the values agree with the files."""
+    import session as sm
+    p = sm.paths_for(sdir)
+    filled, not_found, notes = {}, {}, []
+
+    def rel(path):
+        path = os.path.abspath(path)
+        return os.path.relpath(path, sdir) if path.startswith(sdir + os.sep) else path
+
+    def put(dest, value, source, shown=None):
+        if dest not in given:
+            setattr(a, dest, value)
+            filled[_flag(dest)] = dict({"from": source}, **(shown or {"value": value}))
+
+    def miss(dest, why):
+        if dest not in given:
+            not_found[_flag(dest)] = why
+
+    def record(path):
+        """(a JSON record as a dict, None) or (None, why there is none)."""
+        if not path or not os.path.isfile(path):
+            return None, f"no {rel(path)}" if path else "no such record"
+        d = load_json(path)
+        return (d, None) if isinstance(d, dict) else (None, f"{rel(path)} is not readable JSON")
+
+    def pick_file(dest, own, ran, ran_from, none_why="the session holds none"):
+        """The session's file (`own`), unless the run's own record names another file (`ran`,
+        absolute): that one is what the run read, so it is used, and the difference said."""
+        if dest in given:
+            return
+        own_ok = bool(own) and os.path.isfile(own)
+        ran_ok = isinstance(ran, str) and os.path.isabs(ran) and os.path.isfile(ran)
+        if ran_ok and not (own_ok and os.path.samefile(own, ran)):
+            put(dest, ran, ran_from)
+            if own_ok:
+                notes.append(f"{_flag(dest)}: the session's {rel(own)} is not the file "
+                             f"{ran_from} names ({ran}); that one is used -- the run read it")
+        elif own_ok:
+            put(dest, own, rel(own))
+        else:
+            why = f"no {rel(own)}" if own else none_why
+            if isinstance(ran, str) and ran:
+                why += (f"; {ran_from} names {ran}, which is not here" if os.path.isabs(ran)
+                        else f"; {ran_from} names it by a relative path ({ran}), which cannot "
+                             "be resolved here")
+            miss(dest, why)
+
+    sp, sp_why = record(p["search_prov"])
+    sp = sp or {}
+    sp_from = rel(p["search_prov"])
+
+    put("outdir", p["repro_dir"], "the session's reproducibility folder (paths.repro_dir)")
+    pick_file("workflow_manifest", p["workflow_manifest"], sp.get("bundle"), f"{sp_from} `bundle`")
+    pick_file("params", sm.params_file(p, resolved=False), sp.get("params_file"),
+              f"{sp_from} `params_file`",
+              f"no search parameters file in {rel(p['workflow_dir'])}/ or {rel(p['input_dir'])}/")
+    pick_file("conditions", p["conditions"], None, None)
+    pick_file("fasta", p["fasta"], sp.get("fasta"), f"{sp_from} `fasta`")
+    # fetch_fasta.py's sidecar of the FASTA this bundle names; --fasta-info (the older form)
+    # given is the sidecar given
+    if "fasta_info_file" not in given and a.fasta_info is None:
+        side = (a.fasta + ".meta.json") if a.fasta else None
+        if side and os.path.isfile(side):
+            put("fasta_info_file", side, rel(side))
+        else:
+            miss("fasta_info_file", f"no {rel(side)} (fetch_fasta.py's sidecar of the FASTA)"
+                 if side else "no FASTA, so no sidecar")
+    # the raw files: those the search ran on (search_provenance.json `files`), else the list
+    # init recorded (input/raw_files.txt)
+    listed = sm.read_raw_list(sdir)
+    searched = [f for f in (sp.get("files") or []) if isinstance(f, str) and f]
+    if searched:
+        put("raw", searched, f"{sp_from} `files` (the files the search ran on)",
+            {"n_files": len(searched)})
+        if listed and set(listed) != set(searched) and "raw" not in given:
+            notes.append(f"--raw: {rel(p['raw_list'])} lists {len(listed)} file(s), the search "
+                         f"ran on {len(searched)}: the searched ones are fingerprinted")
+    elif listed:
+        put("raw", listed, rel(p["raw_list"]), {"n_files": len(listed)})
+        enc = sm.raw_list_encoding_note(sdir)
+        if enc and "raw" not in given:
+            notes.append(f"--raw: {rel(p['raw_list'])} is {enc}")
+    else:
+        miss("raw", f"no {rel(p['raw_list'])} and no `files` in {sp_from}"
+             + (f" ({sp_why})" if sp_why else ""))
+    # the DE: output/tables, when a DE wrote anything there
+    de_dir = p["de_dir"]
+    if os.path.isdir(de_dir) and any(os.path.isfile(os.path.join(de_dir, f))
+                                     for f in os.listdir(de_dir)):
+        put("de_dir", de_dir, rel(de_dir))
+    else:
+        miss("de_dir", f"{rel(de_dir)} holds no DE output (no DE has run in this session)")
+    dp_path = os.path.join(a.de_dir, "de_provenance.json") if a.de_dir else None
+    dp, dp_why = record(dp_path)
+    dp_from = rel(dp_path) if dp_path else "de_provenance.json"
+    # the search report: the session's, unless the DE's record names the one it read
+    ran_report = _scalar((dp or {}).get("input"))
+    if ran_report:
+        ran_report_from = f"{dp_from} `input` (the report the DE read)"
+    else:
+        res = sp.get("result")
+        ran_report = res.get("report") if isinstance(res, dict) else None
+        ran_report_from = f"{sp_from} `result.report`"
+    pick_file("report", os.path.join(p["search_out"], "report.parquet"), ran_report,
+              ran_report_from)
+    # the engine that ran, its build and its tools.json: run_search.py's record
+    if sp.get("engine"):
+        put("engine", sp["engine"], f"{sp_from} `engine`")
+    else:
+        miss("engine", sp_why or f"no `engine` in {sp_from}")
+    if sp.get("version"):
+        put("engine_version", str(sp["version"]), f"{sp_from} `version`")
+    else:
+        miss("engine_version", sp_why or f"{sp_from} records no version ("
+             + str((sp.get("engine_version") or {}).get("source") or "no `engine_version`") + ")")
+    tj = sp.get("tools")
+    if isinstance(tj, str) and os.path.isabs(tj) and os.path.isfile(tj):
+        put("tools_json", tj, f"{sp_from} `tools`")
+    else:
+        miss("tools_json", sp_why or (f"{sp_from} names {tj}, which is not here" if tj else
+                                      f"no `tools` in {sp_from}"))
+    # the DE's settings: run_de.R's record of what it ran (never the workflow's defaults)
+    for dest, key in (("de_method", "method"), ("contrasts", "contrasts"),
+                      ("q_cutoff", "q_cutoff"), ("logfc", "logfc"), ("adjp", "adjp")):
+        v = (dp or {}).get(key)
+        if key == "contrasts" and isinstance(v, list):
+            v = ",".join(str(x).strip() for x in v if str(x).strip()) or None
+        else:
+            v = _scalar(v)
+        if v is not None:
+            put(dest, v, f"{dp_from} `{key}`")
+        else:
+            miss(dest, dp_why or f"no `{key}` in {dp_from}")
+    # what the search's defaults were resolved for (the workflow manifest: the query step 4
+    # confirmed), else step 2's detection (input/acquisition.json)
+    wf = (record(a.workflow_manifest)[0] or {}) if a.workflow_manifest else {}
+    wf_from = rel(a.workflow_manifest) if a.workflow_manifest else "workflow.manifest.json"
+    acq_path = os.path.join(p["input_dir"], "acquisition.json")
+    acq, acq_why = record(acq_path)
+    acq = acq or {}
+    if isinstance(wf.get("acquisition"), str) and wf["acquisition"] in ("DIA", "DDA"):
+        put("acquisition", wf["acquisition"], f"{wf_from} `acquisition`")
+    elif acq.get("overall") in ("DIA", "DDA"):
+        put("acquisition", acq["overall"], f"{rel(acq_path)} `overall`")
+    else:
+        miss("acquisition", f"no `acquisition` in {wf_from}; "
+             + (f"{rel(acq_path)} says `{acq.get('overall')}`" if acq.get("overall")
+                else acq_why or f"no `overall` in {rel(acq_path)}"))
+    instr = next((x for x in (wf.get("instruments") or []) if isinstance(x, str) and x.strip()),
+                 None)
+    if instr:
+        put("instrument", instr, f"{wf_from} `instruments`")
+    elif isinstance(acq.get("instrument"), str) and acq["instrument"].strip():
+        put("instrument", acq["instrument"], f"{rel(acq_path)} `instrument`")
+    else:
+        seen = acq.get("instruments_seen") or []
+        miss("instrument", f"no `instruments` in {wf_from}; " + (
+            f"{rel(acq_path)} saw {len(seen)} instruments ({', '.join(map(str, seen))}), not one"
+            if len(seen) > 1 else acq_why or f"no `instrument` in {rel(acq_path)}"))
+    # the organism the database was built for (fetch_fasta.py's sidecar), else the workflow's
+    side = (record(a.fasta_info_file)[0] or {}) if a.fasta_info_file else {}
+    def taxid(v):                    # 0 is fetch_fasta.py's "not known", never a taxon
+        v = str(v).strip() if isinstance(v, (int, str)) and not isinstance(v, bool) else ""
+        return v if v.isdigit() and int(v) > 0 else None
+    if taxid(side.get("taxid")):
+        put("organism_taxid", taxid(side["taxid"]), f"{rel(a.fasta_info_file)} `taxid`")
+    elif taxid(wf.get("organism_taxid")):
+        put("organism_taxid", taxid(wf["organism_taxid"]), f"{wf_from} `organism_taxid`")
+    else:
+        miss("organism_taxid", "no `taxid` in the FASTA's sidecar and no `organism_taxid` in "
+             f"{wf_from}")
+    pick_file("commands", p["commands_log"], None, None)
+    try:
+        from qc_bracket import RECORD_NAME as QC_RECORD   # the one name of that record
+    except ImportError:
+        QC_RECORD = "qc_bracket.json"
+    qc = os.path.join(p["logs_dir"], QC_RECORD)
+    if os.path.isfile(qc):
+        put("qc_bracket", qc, rel(qc))
+    else:
+        miss("qc_bracket", f"no {rel(qc)}: the instrument's QC around the project (step 8e) "
+             "was not checked in this session")
+    put("timestamp", _utc_now(), "now (UTC): when this bundle was made -- not a session record")
+
+    explicit = sorted(_flag(d) for d in given if d in SESSION_FILLED)
+    return {"session": sdir, "filled": filled, "explicit": explicit, "not_found": not_found,
+            "notes": notes}
+
+
+def say_from_session(rec):
+    """from_session on stderr (for the agent to relay) and as MANIFEST.txt [NOTE] lines."""
+    w = max([len(f) for f in list(rec["filled"]) + list(rec["not_found"])] + [10])
+    lines = [f"[provenance] --session {rec['session']}: arguments read from the session's records:"]
+    lines += [f"  {f:<{w}}  {v['from']}" for f, v in rec["filled"].items()]
+    if rec["explicit"]:
+        lines.append(f"[provenance] given explicitly (these win): {' '.join(rec['explicit'])}")
+    if rec["not_found"]:
+        lines.append("[provenance] NOT FOUND in the session's records -- left unset, as when not "
+                     "given (pass them explicitly if they exist):")
+        lines += [f"  {f:<{w}}  {why}" for f, why in rec["not_found"].items()]
+    lines += [f"[provenance] NOTE {n}" for n in rec["notes"]]
+    sys.stderr.write("\n".join(lines) + "\n")
+    note(f"arguments read from session {rec['session']}: "
+         + "; ".join(f"{f} from {v['from']}" for f, v in rec["filled"].items()))
+    for f, why in rec["not_found"].items():
+        note(f"--session: {f} not found in the session's records ({why}); left unset")
+    for n in rec["notes"]:
+        note(f"--session: {n}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--outdir", default="./reproducibility")
@@ -291,6 +573,9 @@ def main():
     ap.add_argument("--report")
     ap.add_argument("--de-dir")
     ap.add_argument("--engine")
+    ap.add_argument("--engine-version", help="the engine build the search ran (run_search.py's "
+                                             "search_provenance.json `version`); recorded in "
+                                             "run_manifest.json as `engine_version`")
     ap.add_argument("--de-method")
     ap.add_argument("--contrasts", default="")
     ap.add_argument("--q-cutoff"); ap.add_argument("--logfc"); ap.add_argument("--adjp")
@@ -302,7 +587,19 @@ def main():
                                          "only -- the bundle is delivered, the verdict is "
                                          "staff-only")
     ap.add_argument("--timestamp", default="", help="ISO timestamp (script can't call clock)")
-    a = ap.parse_args()
+    ap.add_argument("--session", metavar="DIR",
+                    help="an analysis session (session.py init): every argument not given is read "
+                         "from its records; what has none stays unset and is listed "
+                         "(from_session.not_found in the printed JSON)")
+    # Which arguments were GIVEN (an explicit one always wins over the session's record): each
+    # starts as a sentinel argparse leaves alone unless the flag is on the command line.
+    a = ap.parse_args(namespace=argparse.Namespace(**{d: _UNSET for d in SESSION_FILLED}))
+    given = {d for d in SESSION_FILLED if getattr(a, d) is not _UNSET}
+    for d in SESSION_FILLED:
+        if d not in given:
+            setattr(a, d, ap.get_default(d))
+    # a --session that is not a readable session stops here, before any move to a compute node
+    sdir = session_or_exit(a.session) if a.session is not None else None
     # sha256 of every input raw file (up to 5 GB each) and the report: I/O for a compute node.
     # On a cluster login node this runs itself again there (on_compute.py; HPC@UCD's ucd-hpc rules).
     try:
@@ -312,6 +609,10 @@ def main():
                                        preemptible_ok=True, script=__file__)
     except ImportError:
         pass                              # a partial scripts/ without on_compute.py: as before
+    from_session = None
+    if sdir:
+        from_session = fill_from_session(a, given, sdir)
+        say_from_session(from_session)
     # The database record is checked before anything is written: a bundle whose database replay
     # silently fell back to the workflow defaults would reproduce a different database.
     fasta_info = None
@@ -581,6 +882,8 @@ def main():
         "query": {"acquisition": a.acquisition, "organism_taxid": a.organism_taxid,
                   "instrument": a.instrument},
         "engine": a.engine,
+        # the build that ran (search_provenance.json `version`), only when it is known
+        **({"engine_version": a.engine_version} if a.engine_version else {}),
         "de": {"method": a.de_method, "contrasts": a.contrasts,
                "q_cutoff": a.q_cutoff, "logfc": a.logfc, "adjp": a.adjp},
         "environment": {"os": platform.platform(), "python": py, "rscript": rscript,
@@ -988,10 +1291,12 @@ See `MANIFEST.txt` for exactly what was and wasn't captured.
         "Reproducibility bundle — capture log\n" + "=" * 40 + "\n" + "\n".join(MANIFEST_LINES) + "\n")
 
     n_skip = sum(1 for l in MANIFEST_LINES if l.startswith("[SKIPPED]"))
-    print(json.dumps({"bundle": out, "captured": sum(1 for l in MANIFEST_LINES
-                                                     if l.startswith("[OK]")),
-                      "skipped": n_skip, "manifest": os.path.join(out, "MANIFEST.txt"),
-                      "reproduce": rp}, indent=2))
+    result = {"bundle": out, "captured": sum(1 for l in MANIFEST_LINES if l.startswith("[OK]")),
+              "skipped": n_skip, "manifest": os.path.join(out, "MANIFEST.txt"), "reproduce": rp}
+    if from_session is not None:
+        # which argument came from which record, and which had none (relay those gaps)
+        result["from_session"] = from_session
+    print(json.dumps(result, indent=2))
 
 
 def REGISTRY_LINE(reg):
