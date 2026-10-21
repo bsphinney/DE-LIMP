@@ -475,9 +475,9 @@ now = os.environ.get("CC_STAT") or ""
 fresh = isinstance(st, dict) and f"{st.get('size')}:{st.get('mtime')}" == now
 if isinstance(cc, dict) and cc.get("status") and not now:
     out["contaminant_competition"] = {
-        "status": "unchecked", "reason": "the report's size and modification time could not be "
-                                         "read here, so whether the record describes it is not "
-                                         "known; poll again"}
+        "status": "unchecked", "reason": "the report the record names is not there or could not "
+                                         "be read, so whether the record describes it is not "
+                                         "known (poll again if the connection failed)"}
 elif isinstance(cc, dict) and cc.get("status") and not fresh:
     out["contaminant_competition"] = {
         "status": "stale", "reason": "the record does not describe the report as it is now (its "

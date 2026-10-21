@@ -856,7 +856,7 @@ def single_shot_mass_acc(params, listing, fasta, predicted, out, threads, cmd, l
 
 
 def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", queue=None,
-              raw_files=None):
+              raw_files=None, keratin_sample=None):
     """Single-shot DIA-NN. `queue` is {partition, account, qos} from the command line, handed
     to every emit_sbatch() call -- without it slurm_queue() re-detects a queue and overrides
     the one the user chose. `raw_files`: the inputs as given, when some of `files` are links to
@@ -1104,7 +1104,7 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
     print(f"  [run_diann] {msg}")
     return {"engine": "diann", "report": report, "ran": True, "dda": bool(dda),
             "previous_artefacts_moved_to": moved, **ma_rec,
-            "contaminant_competition": competition_inline(report, fasta, out)}
+            "contaminant_competition": competition_inline(report, fasta, out, keratin_sample)}
 
 
 def search_records(res):
@@ -1123,14 +1123,16 @@ def search_records(res):
     return out
 
 
-def competition_inline(report, fasta, out):
+def competition_inline(report, fasta, out, keratin_sample=None):
     """An inline search's contaminant competition check, as the jobs run it
     (contaminant_competition.job_lines): <out>/contaminant_competition.json, and the record
-    returned for search_provenance.json, which main() writes after the search. Never stops the
-    search: a check that fails is said, and recorded as not run."""
+    returned for search_provenance.json, which main() writes after the search -- so this
+    search's keratin answer is handed in, never read from an earlier search's record there.
+    Never stops the search: a check that fails is said, and recorded as not run."""
     import contaminant_competition as cc
     # check() and write() never raise: a check that could not run is a not_run record
-    rec = cc.check(report, fasta, cc.resolve_inputs(None, report, fasta)[2])
+    rec = cc.check(report, fasta, cc.resolve_inputs(None, report, fasta)[2],
+                   keratin_sample=keratin_sample)
     _written, problems = cc.write(rec, os.path.join(out, cc.RECORD))
     cc.say(rec)
     for p in problems:
@@ -3559,7 +3561,8 @@ def main():
             sbatch_refused["existing_file_moved_to"] = moved and os.path.abspath(moved)
     elif engine == "diann":
         res = run_diann(cmd, a.params, search_files, a.fasta, a.out, a.threads, a.sbatch,
-                        acquisition=bundle.get("acquisition", ""), queue=queue, raw_files=files)
+                        acquisition=bundle.get("acquisition", ""), queue=queue, raw_files=files,
+                        keratin_sample=keratin_rec["value"])
         generated = {os.path.abspath(p) for p in (res.get("submitted"),) if p} \
             if isinstance(res, dict) else set()
         generated |= {os.path.splitext(os.path.abspath(a.sbatch or "x"))[0] + s

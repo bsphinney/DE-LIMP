@@ -110,7 +110,15 @@ LIST_MAX = 12
 # resubmit -- would redo a search that was complete (review of 2.14). Stopped, it records why,
 # and the audit checks the report itself.
 JOB_TIME_LIMIT = 900
-JOB_MARGIN_S = 120
+# What the job still needs after the check: the job-end hook's own limit, and a minute
+JOB_MARGIN_EXTRA_S = 60
+MIN_BUDGET_S = 30
+
+
+class OutOfTime(BaseException):
+    """The job budget ran out. A BaseException, so no `except OSError` / `except Exception` inside
+    the check takes it for an ordinary error and carries on with a degraded "ok" record (review
+    of 2.14: TimeoutError is an OSError)."""
 RULE = ("a precursor is a contaminant's when any accession in its Protein.Ids carries the tag "
         "(DIA-NN's --cont-quant-exclude rule, applied by run_de.R too); a contaminant entry shows "
         f"itself with at least {MIN_UNIQUE_PEPTIDES} non-overlapping peptides that name no sample "
@@ -155,10 +163,13 @@ def _new():
     return {"precursors": set(), "signal": 0.0}
 
 
-def _add(store, key, prec, q):
+def _add(store, key, prec, q, run=None):
     rec = store.setdefault(key, _new())
     rec["precursors"].add(prec)
     rec["signal"] += _num(q) or 0.0
+    if run is not None:                      # a contaminant row's signal per run (the share)
+        by = rec.setdefault("by_run", {})
+        by[run] = by.get(run, 0.0) + (_num(q) or 0.0)
 
 
 # ---- reading the report ------------------------------------------------------------------------
@@ -177,7 +188,7 @@ def _scan_tsv(report, cuts, qcol, ev):
         if _is_cont(ids):
             run[1] += _num(q) or 0.0
             _add(ev["cont"], (ids, (r.get("Stripped.Sequence") or "").upper()),
-                 r.get("Precursor.Id"), q)
+                 r.get("Precursor.Id"), q, str(r.get("Run")))
         elif ids:
             _add(ev["kept"], ids, r.get("Precursor.Id"), q)
 
@@ -194,10 +205,10 @@ def _scan_parquet(report, cuts, qcol, ev):
     tag_rx = "(^|;)(" + "|".join(re.escape(t) for t in CONTAMINANT_TAGS) + ")"
     # cast: a dictionary-encoded column has no regex kernel (DIA-NN writes plain strings)
     cont = pc.match_substring_regex(pads.field("Protein.Ids").cast(pa.string()), tag_rx)
-    cols = ["Precursor.Id", "Protein.Ids", "Stripped.Sequence", qcol]
+    cols = ["Precursor.Id", "Protein.Ids", "Stripped.Sequence", qcol, "Run"]
     for b in d.to_batches(columns=cols, filter=cont if keep is None else keep & cont):
-        for prec, ids, pep, q in zip(*(b.column(c).to_pylist() for c in cols)):
-            _add(ev["cont"], (ids or "", (pep or "").upper()), prec, q)
+        for prec, ids, pep, q, run in zip(*(b.column(c).to_pylist() for c in cols)):
+            _add(ev["cont"], (ids or "", (pep or "").upper()), prec, q, str(run))
     for b in d.to_batches(columns=["Run", "Protein.Ids", "Precursor.Id", qcol], filter=keep):
         if not b.num_rows:
             continue
@@ -294,7 +305,9 @@ def agrees_with_de(rec, de_prov):
     if isinstance(cols, list) and cols and set(cols) != set(rec.get("q_columns") or ()):
         return False
     ex = de_exemption(de_prov)
-    return ex is None or ex["shared"] == set((rec.get("keratin_exempt") or {}).get("shared") or ())
+    mine = rec.get("keratin_exempt") or {}
+    return ex is None or (ex["shared"] == set(mine.get("shared") or ())
+                          and ex["alone"] == set(mine.get("alone") or ()))
 
 
 def de_exemption(de_prov):
@@ -305,6 +318,10 @@ def de_exemption(de_prov):
     k = cont.get("keratin_sample") if isinstance(cont, dict) else None
     if not isinstance(k, dict):
         return None
+    if k.get("under_quantified") is True:
+        # the DE kept those precursors but its quantities are DIA-NN's own, which left them out
+        # (contaminants.R diann_kept_quant): nothing is exempt from what this check reports
+        return {"shared": set(), "alone": set()}
     return {"shared": set(k.get("exempt_accessions") or ()),
             "alone": set(k.get("exempt_alone_accessions") or ())}
 
@@ -361,18 +378,21 @@ def resolve_inputs(search_out=None, report=None, fasta=None, fasta_meta=None):
     return report, fasta, meta, (None if fasta else why)
 
 
-def keratin_exemption(meta, meta_path, report):
+def keratin_exemption(meta, meta_path, report, keratin_sample=None):
     """(exemption or None, where it comes from) for a search not yet analysed: a keratin sample
     (search_provenance.json `keratin_sample`) whose database was not built with fetch_fasta.py
     --keratin-sample keeps the precursors of its keratin-family contaminant entries, which
     contaminants.R reads from fetch_fasta.keratin_database_check -- read here from the same place.
-    A DE says its own (de_provenance.json contaminants.keratin_sample), and the audit uses that."""
-    try:
-        with open(os.path.join(os.path.dirname(os.path.abspath(report)), PROVENANCE)) as fh:
-            sp = json.load(fh)
-    except (OSError, ValueError, TypeError):
-        return None, None
-    if not isinstance(sp, dict) or sp.get("keratin_sample") is not True:
+    A DE says its own (de_provenance.json contaminants.keratin_sample), and the audit uses that.
+    `keratin_sample`: the search's own answer when the caller has it, else its record."""
+    if keratin_sample is None:
+        try:
+            with open(os.path.join(os.path.dirname(os.path.abspath(report)), PROVENANCE)) as fh:
+                sp = json.load(fh)
+        except (OSError, ValueError, TypeError):
+            sp = {}
+        keratin_sample = sp.get("keratin_sample") if isinstance(sp, dict) else None
+    if keratin_sample is not True:
         return None, None
     if keratin_sample_recorded(meta) is True:
         return None, "a keratin sample's database: its keratin entries were removed at build"
@@ -397,18 +417,23 @@ def cont_quant_exclude(report):
 
 # ---- the check ---------------------------------------------------------------------------------
 def check(report, fasta=None, meta=None, q_cutoff=DEFAULT_Q_CUTOFF, q_columns=None,
-          no_fasta_reason=None, exempt=None, meta_path=None):
+          no_fasta_reason=None, exempt=None, meta_path=None, keratin_sample=None):
     """The record (a dict, always): status ok | not_run (with `reason`) | not_applicable. Never
     raises: this check reports, so whatever goes wrong is a not_run record that says what (a
     parquet column of an unexpected type made pyarrow raise ArrowNotImplementedError, review of
     2.14). `no_fasta_reason`: why there is no FASTA, when the caller knows. `exempt`: a keratin
     sample's exemption as the DE recorded it ({"shared", "alone"}; empty: none) -- None reads it
-    from the search's records (keratin_exemption). `meta_path`: the sidecar's path."""
+    from the search's records (keratin_exemption). `meta_path`: the sidecar's path.
+    `keratin_sample`: whether this search is a keratin sample, when the caller knows it (an inline
+    search, whose search_provenance.json is written after this check)."""
     rec = {"check": "contaminant_competition", "report": report, "fasta": fasta,
            "report_stat": report_stat(report)}
     try:
         return _check(rec, report, fasta, meta, q_cutoff, q_columns, no_fasta_reason, exempt,
-                      meta_path)
+                      meta_path, keratin_sample)
+    except OutOfTime as e:
+        rec.update(status="not_run", reason=str(e))
+        return rec
     except Exception as e:
         name = os.path.basename(str(report or ""))
         why = " ".join(str(e).replace(str(report), name).split())
@@ -418,7 +443,8 @@ def check(report, fasta=None, meta=None, q_cutoff=DEFAULT_Q_CUTOFF, q_columns=No
         return rec
 
 
-def _check(rec, report, fasta, meta, q_cutoff, q_columns, no_fasta_reason, exempt, meta_path):
+def _check(rec, report, fasta, meta, q_cutoff, q_columns, no_fasta_reason, exempt, meta_path,
+           keratin_sample):
     rec.update({"organism": (meta or {}).get("organism") or None, "rule": RULE,
                 # which fetch_fasta.py rule built the database (legacy / identity_only / current)
                 "database_state": sidecar_state(meta) if meta else None})
@@ -446,13 +472,16 @@ def _check(rec, report, fasta, meta, q_cutoff, q_columns, no_fasta_reason, exemp
     if exempt is None:
         meta_path = meta_path or (fasta + ".meta.json" if fasta else None)
         exempt, why = keratin_exemption(meta, meta_path if meta_path and os.path.isfile(meta_path)
-                                        else None, report)
+                                        else None, report, keratin_sample)
     if exempt and exempt.get("shared"):
         for key in [k for k in ev["cont"] if exempted(k[0], exempt)]:
             ag = ev["cont"].pop(key)
             kept = ev["kept"].setdefault(key[0], _new())
             kept["precursors"] |= ag["precursors"]
             kept["signal"] += ag["signal"]
+            for run, q in (ag.get("by_run") or {}).items():     # not a contaminant's signal
+                if run in ev["runs"]:
+                    ev["runs"][run][1] -= q
     rec["keratin_exempt"] = ({"shared": sorted(exempt["shared"]),
                               "alone": sorted(exempt.get("alone", ())), "source": why}
                              if exempt and exempt.get("shared") else
@@ -548,8 +577,9 @@ def parsimony(feats):
         mine = of_gene[g] & left
         if not mine:
             continue
-        same = sorted({h for i in mine for h in feats[i]["genes"]
-                       if h != g and of_gene[h] & left == mine}, key=_lead_key)
+        cand = {h for i in mine for h in feats[i]["genes"]} - {g}
+        same = sorted((h for h in cand if count[h] == count[g] and of_gene[h] & left == mine),
+                      key=_lead_key)
         left -= mine
         for i in mine:
             for h in feats[i]["genes"]:
@@ -800,7 +830,7 @@ def notes_text(rec):
     if (rec.get("keratin_exempt") or {}).get("shared"):
         out.append(f"A keratin sample: precursors of its {len(rec['keratin_exempt']['shared'])} "
                    "keratin-family contaminant entries are kept, as the DE keeps them "
-                   f"({rec['keratin_exempt'].get('source')}); the share below counts them.")
+                   f"({rec['keratin_exempt'].get('source')}).")
     if rec.get("fasta_note"):
         out.append(f"({rec['fasta_note']}.)")
     s = rec.get("contaminant_share_pct") or {}
@@ -890,14 +920,24 @@ def audit_findings(rec, de=None):
     if out:
         return out
     # a gene whose signal rests mostly on an entry that shows itself (bovine serum proteins in
-    # cell culture): nothing taken, but its amount is uncertain, so the client is told
-    return [("PASS", staff_message(rec, de), detail, PLAIN_MASKED if rec.get("masked") else None)]
+    # cell culture): nothing attributable was taken, but the client is told what that means here
+    return [("PASS", staff_message(rec, de), detail,
+             plain_masked(rec, de) if rec.get("masked") else None)]
 
 
-PLAIN_MASKED = ("Checked: no protein of the sample lost all or most of its signal to the "
-                "contaminant list. A few proteins share peptides with a contaminant that is "
-                "present in the samples (such as serum proteins from cell culture), so how much "
-                "of their signal is the sample's own is uncertain.")
+def plain_masked(rec, de=None):
+    """The client's words for genes resting mostly on a contaminant that is present (masked), as
+    fate() says what was done with the shared peptides -- never "no protein lost its signal" when
+    a removed one left a protein with nothing (review of 2.14)."""
+    head = ("Some proteins share peptides with a contaminant that is present in the samples "
+            "(such as serum proteins from cell culture), so their signal cannot be told apart "
+            "from it")
+    if fate(rec, de)[1]:
+        return (head + ": those shared peptides are left out of the measurements, so these "
+                "proteins are measured from their remaining peptides only, and one with none "
+                "left is not in the results. No other protein lost its peptides to the "
+                "contaminant list.")
+    return head + ". No other protein lost its peptides to the contaminant list."
 
 
 def say(rec, stream=None):
@@ -951,24 +991,33 @@ def _slurm_seconds(text):
         return None
 
 
+def job_margin():
+    """Seconds the job still needs after the check: the job-end hook's own limit
+    (notify_slack.JOB_END_HOOK_S: FRAN staging, the run log, Slack) and a minute."""
+    from notify_slack import JOB_END_HOOK_S
+    return JOB_END_HOOK_S + JOB_MARGIN_EXTRA_S
+
+
 def job_budget(limit):
     """(seconds this check may take, what bounded it): at most `limit`, and inside a SLURM job
-    never past the job's own time limit less JOB_MARGIN_S (squeue -o %L for SLURM_JOB_ID)."""
+    never into the time the job still needs after it (job_margin; squeue -o %L for
+    SLURM_JOB_ID). Never raises: what could not be read is said."""
     jid = os.environ.get("SLURM_JOB_ID")
     if not jid:
-        return limit, None
-    import shutil
-    from on_compute import SLURM_BIN_DEFAULT
-    squeue = shutil.which("squeue") or os.path.join(SLURM_BIN_DEFAULT, "squeue")
+        return limit, f"the check's own limit of {limit} s"
     try:
+        import shutil
+        from on_compute import _slurm_bin
+        squeue = shutil.which("squeue") or os.path.join(_slurm_bin(os.environ), "squeue")
         got = subprocess.run([squeue, "-h", "-j", jid, "-o", "%L"], capture_output=True,
                              text=True, timeout=30).stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        return limit, "the job's time left could not be read"
+        margin = job_margin()
+    except Exception as e:           # noqa: BLE001 -- the job's time is then not known: said
+        return limit, f"the check's own limit of {limit} s (the job's time left: {e})"
     left = _slurm_seconds(got.splitlines()[0] if got else "")
-    if left is None:
-        return limit, None
-    return min(limit, left - JOB_MARGIN_S), f"{left} s were left in job {jid}"
+    if left is None or left - margin >= limit:
+        return limit, f"the check's own limit of {limit} s"
+    return left - margin, f"{left} s were left in job {jid}, {margin} s of them for its end"
 
 
 def set_aside_record(out):
@@ -997,7 +1046,7 @@ def job_lines(report, fasta, out_dir):
     audit then checks the report itself."""
     report, fasta, out_dir = (os.path.abspath(p) for p in (report, fasta, out_dir))
     # --job-budget stops it in time and records why; `timeout` is only the backstop
-    hard = JOB_TIME_LIMIT + JOB_MARGIN_S
+    hard = JOB_TIME_LIMIT + JOB_MARGIN_EXTRA_S
     return [f'PY={shlex.quote(sys.executable)}; [ -x "$PY" ] || PY=python3; '
             f'T=""; command -v timeout >/dev/null 2>&1 && T="timeout {hard}"; '
             f'$T "$PY" {shlex.quote(os.path.abspath(__file__))} --report {shlex.quote(report)} '
@@ -1041,21 +1090,24 @@ def main(argv=None):
         ap.error("give --report or --search-out")
     report, fasta, meta, why = resolve_inputs(a.search_out, a.report, a.fasta, a.fasta_meta)
     budget, bound = job_budget(a.job_budget) if a.job_budget else (None, None)
-    if budget is not None and budget < 30:
+    if budget is not None and budget < MIN_BUDGET_S:
         rec = {"check": "contaminant_competition", "report": report,
                "report_stat": report_stat(report), "status": "not_run",
                "reason": f"too little of the search job's time was left for it ({bound})"}
     else:
         if budget:
             def stop(_signum, _frame):
-                raise TimeoutError(f"stopped after {budget} s so the search job ends in its "
-                                   f"time ({bound or 'the check limit'})")
+                raise OutOfTime(f"stopped after {budget} s, before the search job's time ran out "
+                                f"({bound}); the audit checks the report itself")
             signal.signal(signal.SIGALRM, stop)
             signal.alarm(budget)
-        rec = check(report, fasta, meta, a.q_cutoff, no_fasta_reason=why,
-                    meta_path=a.fasta_meta)
-        if budget:
-            signal.alarm(0)
+        try:
+            rec = check(report, fasta, meta, a.q_cutoff, no_fasta_reason=why,
+                        meta_path=a.fasta_meta)
+        finally:
+            if budget:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, signal.SIG_DFL)
     out = a.out or (os.path.join(a.search_out, RECORD) if a.search_out else None)
     prov = a.provenance or (os.path.join(a.search_out, PROVENANCE) if a.search_out else None)
     written, problems = write(rec, out, prov)

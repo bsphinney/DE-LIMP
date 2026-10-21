@@ -14,6 +14,7 @@ Stdlib only; the parquet reader's tests are skipped without pyarrow.
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -219,6 +220,59 @@ class TheCheck(Fixture):
             self.meta, keratin_contaminants_in_database=["Cont_Q70009"])))
         self.assertEqual(cc.check(rep, self.fasta, self.meta)["competed_out"], [])
 
+    def test_the_share_leaves_out_what_the_exemption_keeps(self):
+        """Third review of 2.14 (L4): run_de.R's share leaves out exempted keratin."""
+        self.assertEqual(self.run_check(CLEAN + KERATIN)["contaminant_share_pct"]["median"], 48.57)
+        rec = cc.check(os.path.join(self.d, "report.tsv"), self.fasta, self.meta,
+                       exempt={"shared": {"Cont_Q70009"}, "alone": set()})
+        self.assertEqual(rec["contaminant_share_pct"]["median"], 2.86)
+
+    def test_the_de_s_keratin_exemption_is_read_and_compared(self):
+        k = {"value": True, "exempt_accessions": ["Cont_Q70009"], "exempt_alone_accessions": []}
+        de = {"contaminants": dict(DE_REMOVED, keratin_sample=k)}
+        self.assertEqual(cc.de_exemption(de), {"shared": {"Cont_Q70009"}, "alone": set()})
+        self.assertIsNone(cc.de_exemption({"contaminants": DE_REMOVED}))
+        # a MaxLFQ DE: DIA-NN's own quantities left them out -- nothing is exempt
+        uq = {"contaminants": dict(DE_REMOVED, keratin_sample=dict(k, under_quantified=True))}
+        self.assertEqual(cc.de_exemption(uq), {"shared": set(), "alone": set()})
+        rec = self.run_check(CLEAN + KERATIN)
+        self.assertFalse(cc.agrees_with_de(rec, de))             # made without the exemption
+        ex = cc.check(rec["report"], self.fasta, self.meta, exempt=cc.de_exemption(de))
+        self.assertTrue(cc.agrees_with_de(ex, de))
+        alone = dict(k, exempt_alone_accessions=["Cont_Q70009"])
+        self.assertFalse(cc.agrees_with_de(ex, {"contaminants": dict(DE_REMOVED,
+                                                                     keratin_sample=alone)}))
+
+    @unittest.skipUnless(shutil.which("Rscript"), "R is not installed")
+    def test_the_exemption_is_contaminants_r_s_own(self):
+        ids = ["P1;Cont_K2", "Cont_K1", "Cont_K2", "P1;Cont_K2;Cont_X", "P1;Cont_X", "P1"]
+        expr = ('source("{}"); ex <- list(shared=c("Cont_K1","Cont_K2"), alone=c("Cont_K1")); '
+                'cat(as.integer(is_contaminant(c({}), exempt=ex)))').format(
+            os.path.join(SCRIPTS, "contaminants.R"), ", ".join(f'"{i}"' for i in ids))
+        r = subprocess.run(["Rscript", "-e", expr], capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        ex = {"shared": {"Cont_K1", "Cont_K2"}, "alone": {"Cont_K1"}}
+        self.assertEqual([int(x) for x in r.stdout.split()],
+                         [int(cc._is_cont(i) and not cc.exempted(i, ex)) for i in ids])
+
+    def test_running_out_of_time_is_a_check_that_did_not_run(self):
+        """Third review of 2.14 (M1): the stop was a TimeoutError, an OSError, which read_fasta's
+        handler took for an unreadable FASTA -- an "ok" record with accessions for names."""
+        import time
+        rep = write_tsv(os.path.join(self.d, "report.tsv"), CLEAN + COMPETED)
+        out = os.path.join(self.d, "rec.json")
+
+        def slow(_fasta):
+            time.sleep(5)
+        with mock.patch.object(cc, "job_budget", return_value=(1, "a test's 1 s")), \
+                mock.patch.object(cc, "MIN_BUDGET_S", 0), \
+                mock.patch.object(cc, "read_fasta", side_effect=slow), \
+                mock.patch("sys.stdout"), mock.patch("sys.stderr"):
+            cc.main(["--report", rep, "--fasta", self.fasta, "--out", out, "--job-budget", "900"])
+        rec = json.loads(read(out))
+        self.assertEqual(rec["status"], "not_run")
+        self.assertIn("stopped after 1 s", rec["reason"])
+
     def test_the_exemption_mirrors_contaminants_r(self):
         ex = {"shared": {"Cont_K1", "Cont_K2"}, "alone": {"Cont_K1"}}
         for ids, kept in (("P1;Cont_K2", True), ("Cont_K1", True), ("Cont_K2", False),
@@ -247,7 +301,18 @@ class TheCheck(Fixture):
         self.assertEqual([(m["gene"], m["n_kept_precursors"]) for m in rec["masked"]],
                          [("ALB", 1)])
         (f,) = cc.audit_findings(rec)
-        self.assertEqual((f[0], f[3]), ("PASS", cc.PLAIN_MASKED))
+        self.assertEqual((f[0], f[3]), ("PASS", cc.plain_masked(rec)))
+        self.assertIn("cannot be told apart", f[3])
+
+    def test_the_masked_words_follow_what_was_done_with_the_shared_peptides(self):
+        """Third review of 2.14 (M2): with the shared peptides removed, a masked protein with no
+        other peptide is not in the results, and the client read "no protein lost its signal"."""
+        rec = self.run_check(CLEAN + MASKED)
+        (f,) = cc.audit_findings(rec, DE_REMOVED)
+        self.assertIn("one with none left is not in the results", f[3])
+        self.assertNotIn("lost all or most", f[3])
+        (f,) = cc.audit_findings(rec, DE_KEPT)
+        self.assertNotIn("left out of the measurements", f[3])
 
     def test_only_a_true_il_twin_is_listed_as_one(self):
         rec = self.run_check(CLEAN + [("Cont_Q90002", "ASEDLKK", 100)])
@@ -669,13 +734,23 @@ class TheJobsRunIt(unittest.TestCase):
     def test_the_check_stops_before_the_search_job_s_time_runs_out(self):
         """Re-review of 2.14 (M2): 15 minutes appended to a job that had used nearly all its time
         ended a complete search in TIMEOUT, whose fix is a resubmit."""
-        done = subprocess.CompletedProcess([], 0, stdout="05:00\n", stderr="")
+        margin = cc.job_margin()
+        import notify_slack
+        self.assertEqual(margin, notify_slack.JOB_END_HOOK_S + cc.JOB_MARGIN_EXTRA_S)
+        done = subprocess.CompletedProcess([], 0, stdout="20:00\n", stderr="")
         with mock.patch.dict(os.environ, {"SLURM_JOB_ID": "42"}), \
                 mock.patch.object(cc.subprocess, "run", return_value=done):
-            self.assertEqual(cc.job_budget(900),
-                             (300 - cc.JOB_MARGIN_S, "300 s were left in job 42"))
+            self.assertEqual(cc.job_budget(900), (1200 - margin, f"1200 s were left in job 42, "
+                                                                 f"{margin} s of them for its end"))
+        done = subprocess.CompletedProcess([], 0, stdout="2-00:00:00\n", stderr="")
+        with mock.patch.dict(os.environ, {"SLURM_JOB_ID": "42"}), \
+                mock.patch.object(cc.subprocess, "run", return_value=done):
+            self.assertEqual(cc.job_budget(900), (900, "the check's own limit of 900 s"))
+        with mock.patch.dict(os.environ, {"SLURM_JOB_ID": "42"}), \
+                mock.patch.object(cc.subprocess, "run", side_effect=OSError("no squeue")):
+            self.assertEqual(cc.job_budget(900)[0], 900)
         with mock.patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(cc.job_budget(900), (900, None))
+            self.assertEqual(cc.job_budget(900), (900, "the check's own limit of 900 s"))
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "rec.json")
             left = (10, "130 s were left in job 7")
@@ -707,7 +782,7 @@ class TheJobsRunIt(unittest.TestCase):
             self.assertIn(f"--fasta {os.path.join(d, 'db.fasta')}", line)
             self.assertIn(f"--out {rec}", line)
             self.assertIn(f"--provenance {os.path.join(out, 'search_provenance.json')}", line)
-            self.assertIn(f'T="timeout {cc.JOB_TIME_LIMIT + cc.JOB_MARGIN_S}"', line)  # backstop
+            self.assertIn(f'T="timeout {cc.JOB_TIME_LIMIT + cc.JOB_MARGIN_EXTRA_S}"', line)
             self.assertIn(f"--job-budget {cc.JOB_TIME_LIMIT}", line)       # bounded in the job
             self.assertIn('|| echo "WARNING', line)
             self.assertLess(s5.index("pass_comparison.py"), s5.index("contaminant_competition.py"))
