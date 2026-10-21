@@ -585,51 +585,64 @@ def intent_from_json(blob):
 # condition_name is <sample>_mix_1 .. _5 (Core staff, 2026-09-25 and 09-28). Taken
 # literally it is ten singleton groups and no DE at all; the condition is the label without its
 # trailing replicate number. Read that way only when it is unambiguous -- otherwise ASKED.
-_REP_TAIL = re.compile(r"^(?P<stem>.*?)(?P<n>\d+)$")
-_REP_SEP = re.compile(r"[\s_.\-]+$")
-_REP_WORD = re.compile(r"^(?P<stem>.+?)[\s_.\-]+(?:replicate|rep)$", re.I)
+#
+# THE one definition of a trailing replicate index (submission_report's sheet check reads
+# condition names with it too). MARKED as one: digits after a separator ("WT_2", "KO-3",
+# "Ctrl 2", "WT – 2", "CtrlA_mix_3"); a replicate word after a separator -- rep / replicate, with
+# bio / tech before it, or R ("WT_rep2", "Ctrl rep 2", "WT_BioRep2", "ATG5_R2"); or # ("WT#2"). A
+# replicate word glued to the name counts only where a new word visibly starts ("WTrep2",
+# "KORep2"), never at the end of a word ("Strep_2", "SamplePrep_2", "Prep2" keep their names).
+# Digits glued to letters are part of a name -- ATG5, HSP90, CD45, IgG1, CXCR4 -- and so is the
+# number after a dot (Kv2.1): split_replicate(glued=True) reads them as a replicate number, and
+# its callers use that reading only when replicate_reading's checks pass (collapse_replicates,
+# which also asks the user; the sheet check). A staff report, 2026-10-20: the sheet check read
+# ATG5 as ATG replicate 5 and HSP90 as HSP replicate 90.
+_SEP = r"[\s_.\-–—]"
+_REP_WORD = r"(?:(?:bio(?:logical)?|tech(?:nical)?)" + _SEP + r"*)?(?:replicate|rep)"
+_REP_MARKED = re.compile(r"^(?P<stem>.+?)(?:" + _SEP + r"+(?:" + _REP_WORD + r"|r)|" + _SEP
+                         + r"*#|[\s_\-–—]+)" + _SEP + r"*#?\s*(?P<n>\d+)$", re.I)
+_REP_GLUED_WORD = re.compile(r"^(?P<stem>.+?)(?P<word>" + _REP_WORD + r")\s*#?\s*(?P<n>\d+)$", re.I)
+_REP_GLUED = re.compile(r"^(?P<stem>.*?[A-Za-z])(?P<n>\d+)$|^(?P<dstem>.+?)\.+(?P<dn>\d+)$")
+_SEP_CHARS = " \t_.-–—"
 
 
-def split_replicate(label):
-    """(condition, replicate number) for a label ending in a replicate number:
-    'CtrlA_mix_3' -> ('CtrlA_mix', 3), 'Control1' -> ('Control', 1), 'WT_rep2' -> ('WT', 2).
-    The number must follow a separator, or a letter. None when the label has no trailing number,
-    or nothing would be left of it."""
-    m = _REP_TAIL.match((label or "").strip())
-    if not m:
-        return None
-    stem, n = m.group("stem"), int(m.group("n"))
-    sep = _REP_SEP.search(stem)
-    if sep:
-        stem = stem[:sep.start()]
-    elif not stem or not stem[-1].isalpha():
-        return None
-    w = _REP_WORD.match(stem)
-    if w:
-        stem = w.group("stem")
-    return (stem, n) if stem else None
+def _starts_a_word(stem, word):
+    """A replicate word glued to a name starts a new word: capitalised ("KORep2", "CtrlRep2"),
+    or in lower case after a name in capitals ("WTrep2") -- not "Strep2", "SamplePrep2", "Prep2"."""
+    caps = len(stem) - len(stem.rstrip("ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
+    return len(stem) >= 2 and ((word[0].isupper() and word[1:2].islower())
+                               or (word.islower() and caps >= 2))
 
 
-def collapse_replicates(intent, mode="auto"):
-    """Read a per-replicate condition column as conditions + replicate numbers.
+def split_replicate(label, glued=False):
+    """(condition, replicate number) for a label ending in a marked replicate index:
+    'CtrlA_mix_3' -> ('CtrlA_mix', 3), 'WT_rep2' -> ('WT', 2), 'ATG5_R2' -> ('ATG5', 2),
+    'Strep_2' -> ('Strep', 2); 'ATG5' and 'Kv2.1' -> None. glued=True also reads a number glued
+    to a letter or after a dot: 'Control1' -> ('Control', 1). None when the label has no such
+    index, or nothing would be left of it."""
+    s = (label or "").strip()
+    m = _REP_MARKED.match(s)
+    stem, n = (m.group("stem"), m.group("n")) if m else (None, None)
+    w = None if m else _REP_GLUED_WORD.match(s)
+    if w and _starts_a_word(w.group("stem"), w.group("word")):
+        stem, n = w.group("stem"), w.group("n")
+    g = _REP_GLUED.match(s) if glued and stem is None else None
+    if g:
+        stem, n = g.group("stem") or g.group("dstem"), g.group("n") or g.group("dn")
+    stem = (stem or "").rstrip(_SEP_CHARS)
+    return (stem, int(n)) if stem else None
 
-    `auto` collapses, in the PROPOSED csv, only when every sample has its own label (a
-    per-replicate column) and the reading is unambiguous: every label ends in a replicate number,
-    they make >= 2 conditions of >= 2 samples, no two claim the same replicate of a condition, no
-    two conditions differ only in case or punctuation, and each condition's numbers run 1..n (or
-    0..n-1) -- and even then it is the user's to confirm (replicate_labels_to_confirm): numbered
-    labels can be real levels, and Day1..3 beside Ctl1..3 passes every one of those tests as a
-    time course (review of 2.10). Anything doubtful is left as given and returned with the
-    reasons (replicate_labels_ambiguous). `collapse` applies the proposal (the user said yes),
-    `keep` uses the labels as they are. Returns (intent, record or None); a collapsed item keeps
-    its label as `label` and its number as `replicate`."""
-    labels = [it["group"] for it in intent if it.get("group")]
-    counts = Counter(labels)
-    per_sample = len(labels) >= 4 and len(counts) == len(labels)
-    if mode == "keep" or not labels or (mode == "auto" and not per_sample):
-        return intent, ({"detected": per_sample, "mode": mode, "collapsed": False}
-                        if mode == "keep" and per_sample else None)
-    parsed = {lab: split_replicate(lab) for lab in counts}
+
+def replicate_reading(labels, glued=False):
+    """THE checks that labels, one per sample, read as conditions + replicate numbers (one
+    definition: collapse_replicates and submission_report's sheet check) -> {"parsed": {label:
+    (condition, n) or None}, "groups": {condition: {n: label}}, "not_numbered": [labels],
+    "doubts": [(kind, why)]}. No doubts when the reading is unambiguous: every label ends in a
+    replicate number (not_numbered), no two claim the same replicate of a condition (duplicate),
+    they make >= 2 conditions (one_condition) of >= 2 samples (one_sample), no two conditions
+    differ only in case or punctuation (case), and each condition's numbers run 1..n or 0..n-1
+    (numbering)."""
+    parsed = {lab: split_replicate(lab, glued=glued) for lab in dict.fromkeys(labels)}
     groups, dup = defaultdict(dict), []
     for lab, v in sorted(parsed.items()):
         if v is None:
@@ -639,34 +652,62 @@ def collapse_replicates(intent, mode="auto"):
         else:
             groups[v[0]][v[1]] = lab
     unparsed = sorted(lab for lab, v in parsed.items() if v is None)
-    reasons = []
+    doubts = []
     if unparsed:
-        reasons.append(f"{len(unparsed)} label(s) end in no replicate number: "
-                       + ", ".join(unparsed[:8]))
+        doubts.append(("not_numbered", f"{len(unparsed)} label(s) end in no replicate number: "
+                                       + ", ".join(unparsed[:8])))
     if dup:
-        reasons.append("two labels give the same condition and replicate: " + "; ".join(dup[:5]))
+        doubts.append(("duplicate", "two labels give the same condition and replicate: "
+                                    + "; ".join(dup[:5])))
     if len(groups) < 2:
-        reasons.append(f"they make {len(groups)} condition(s) ({', '.join(sorted(groups)) or '-'})"
-                       ": nothing to compare -- the numbers may be the conditions themselves "
-                       "(time points, doses, sample IDs)")
+        doubts.append(("one_condition", f"they make {len(groups)} condition(s) "
+                                        f"({', '.join(sorted(groups)) or '-'}): nothing to compare "
+                                        "-- the numbers may be the conditions themselves (time "
+                                        "points, doses, sample IDs)"))
     small = sorted(g for g, m in groups.items() if len(m) < 2)
     if small:
-        reasons.append("condition(s) with one sample: " + ", ".join(small)
-                       + " -- the number may be part of the condition's name")
+        doubts.append(("one_sample", "condition(s) with one sample: " + ", ".join(small)
+                                     + " -- the number may be part of the condition's name"))
     variants = defaultdict(list)
     for g in groups:
         variants[norm(g)].append(g)
     clash = [sorted(v) for v in variants.values() if len(v) > 1]
     if clash:
-        reasons.append("conditions that differ only in case or punctuation: "
-                       + "; ".join(" / ".join(v) for v in clash))
+        doubts.append(("case", "conditions that differ only in case or punctuation: "
+                               + "; ".join(" / ".join(v) for v in clash)))
     for g, m in sorted(groups.items()):
         nums = sorted(m)
         if len(nums) > 1 and (nums[0] not in (0, 1)
                               or nums != list(range(nums[0], nums[0] + len(nums)))):
-            reasons.append(f"{g}: replicate numbers {', '.join(map(str, nums))} do not run "
-                           f"{nums[0]}..{nums[0] + len(nums) - 1} -- a missing replicate, or not "
-                           "replicate numbers")
+            doubts.append(("numbering", f"{g}: replicate numbers {', '.join(map(str, nums))} do "
+                                        f"not run {nums[0]}..{nums[0] + len(nums) - 1} -- a "
+                                        "missing replicate, or not replicate numbers"))
+    return {"parsed": parsed, "groups": dict(groups), "not_numbered": unparsed, "doubts": doubts}
+
+
+def collapse_replicates(intent, mode="auto"):
+    """Read a per-replicate condition column as conditions + replicate numbers.
+
+    `auto` collapses, in the PROPOSED csv, only when every sample has its own label (a
+    per-replicate column) and the reading is unambiguous (replicate_reading: every label ends in
+    a replicate number, they make >= 2 conditions of >= 2 samples, no two claim the same
+    replicate of a condition, no two conditions differ only in case or punctuation, and each
+    condition's numbers run 1..n (or 0..n-1)) -- and even then it is the user's to confirm
+    (replicate_labels_to_confirm): numbered labels can be real levels, and Day1..3 beside
+    Ctl1..3 passes every one of those tests as a time course (review of 2.10). Anything doubtful
+    is left as given and returned with the reasons (replicate_labels_ambiguous). `collapse`
+    applies the proposal (the user said yes), `keep` uses the labels as they are. Returns
+    (intent, record or None); a collapsed item keeps its label as `label` and its number as
+    `replicate`."""
+    labels = [it["group"] for it in intent if it.get("group")]
+    counts = Counter(labels)
+    per_sample = len(labels) >= 4 and len(counts) == len(labels)
+    if mode == "keep" or not labels or (mode == "auto" and not per_sample):
+        return intent, ({"detected": per_sample, "mode": mode, "collapsed": False}
+                        if mode == "keep" and per_sample else None)
+    reading = replicate_reading(labels, glued=True)
+    parsed, groups, unparsed = reading["parsed"], reading["groups"], reading["not_numbered"]
+    reasons = [why for _kind, why in reading["doubts"]]
     # forced (the user confirmed) or unambiguous -- and only if any label has a number at all
     collapse = (mode == "collapse" or not reasons) and bool(groups)
     rec = {"detected": True, "per_sample_labels": per_sample, "mode": mode,
@@ -674,9 +715,9 @@ def collapse_replicates(intent, mode="auto"):
            "conditions": {g: {str(n): lab for n, lab in sorted(m.items())}
                           for g, m in sorted(groups.items())},
            "not_numbered": unparsed, "reasons": reasons,
-           "rule": "condition = the label without its trailing replicate number (and a "
-                   "separator, or a 'rep' word, before it); conditions.csv keeps the label as "
-                   "given in its Label column"}
+           "rule": "condition = the label without its trailing replicate number (and the "
+                   "separator, rep / replicate, R or # before it); conditions.csv keeps the "
+                   "label as given in its Label column"}
     if collapse:
         if mode == "auto":
             rec["to_confirm"] = ("ASK the user: the proposed csv reads these labels as the "

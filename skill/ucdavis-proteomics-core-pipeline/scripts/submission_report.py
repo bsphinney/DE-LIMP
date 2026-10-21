@@ -52,6 +52,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 import core_submission as cs  # noqa: E402  ids, dates and sample-id matching live there
+# a trailing replicate index, and when numbered names read as replicates: one definition there
+from collect_conditions import replicate_reading, split_replicate  # noqa: E402
 from session import paths_for, read_raw_list  # noqa: E402  the session layout, one place
 
 SCHEMA = "submission_record/1"
@@ -445,7 +447,6 @@ UNIT = re.compile(r"^(?P<noun>mouse|mice|rat|animal|pig|dog|monkey|fish|patient|
                   r"individual|participant|plant|tree)\s*#?\s*(?P<n>\d+)$", re.I)
 REPLICATE_FIELD = re.compile(r"^(?:(?:bio(?:logical)?|tech(?:nical)?)\s*)?(?:rep(?:licate)?|r)?\s*#?\s*\d+$",
                              re.I)
-REPLICATE_SUFFIX = re.compile(r"^(?P<base>.*?[A-Za-z)])[\s_-]*(?:rep(?:licate)?\s*)?#?\d+$", re.I)
 
 
 def _key(s):
@@ -456,14 +457,45 @@ def _fields(name):
     return [f.strip() for f in FIELD_SPLIT.split(name)]
 
 
-def replicate_base(name):
+def replicate_base(name, known=()):
     """The condition without a trailing replicate index ("Old - A - Rep 2" -> "Old - A",
-    "Control 3" -> "Control"), or None when it has none."""
+    "Control 3" -> "Control", "ATG5_R2" -> "ATG5"), or None when it has none. The index is
+    marked (collect_conditions.split_replicate): digits glued to letters are part of the name
+    (ATG5, HSP90, CD45, IgG1). A name in `known` (_key'd: the sheet's own conditions) is that
+    condition whatever its ending ("Mutant-1" beside "Mutant-2")."""
+    if _key(name) in known:
+        return None
     f = _fields(name)
     if len(f) > 1 and REPLICATE_FIELD.match(f[-1]):
         return " - ".join(f[:-1])
-    m = REPLICATE_SUFFIX.match(cs._s(name))
-    return m.group("base").strip() if m else None
+    m = split_replicate(cs._s(name))
+    return m[0].strip() if m else None
+
+
+def known_conditions(names):
+    """The sheet's condition names that are conditions as written: those more than one sample
+    carries ("Mutant-1" x3 beside "Mutant-2" x3), unless it is a slip in a numbered series --
+    WT_1, WT_2, WT_2, WT_3: its base is also a name only one sample carries -> {_key(name)}."""
+    counts = Counter(_key(c) for c in names)
+    base = {_key(c): _key(replicate_base(c) or c) for c in names}
+    once = {base[k] for k, n in counts.items() if n == 1}
+    return {k for k, n in counts.items() if n > 1 and base[k] not in once}
+
+
+def sheet_bases(names, known=()):
+    """{name: the condition it names} for the sheet's condition names, one per sample: without a
+    marked replicate index (replicate_base). When that leaves every sample its own condition,
+    numbers glued to the names are read as replicate numbers ("WT1".."WT3", "KO1".."KO3") -- only
+    when collect_conditions.replicate_reading's checks pass (>= 2 conditions of >= 2 samples, no
+    replicate number twice, numbers running 1..n), so one-sample conditions named after genes
+    (ATG5, ATG7, CD45, HSP90) keep their names; a name with no number keeps it too ("Pool")."""
+    out = {c: replicate_base(c, known) or c for c in names}
+    if len({_key(b) for b in out.values()}) < len(names):
+        return out
+    reading = replicate_reading(names, glued=True)
+    if not reading["groups"] or any(k != "not_numbered" for k, _why in reading["doubts"]):
+        return out
+    return {c: (reading["parsed"][c] or (c,))[0] for c in names}
 
 
 def _ranges(nums):
@@ -556,7 +588,8 @@ def design(samples):
 def sheet_groups(rec):
     """unique_id -> the group the sheet puts it in: the condition with the blocking unit set
     aside when the names carry one, else without a trailing replicate index when that leaves
-    real groups, else the condition as written."""
+    real groups, else the condition as written. A name several samples carry is a condition
+    as written (known_conditions)."""
     named = {s["unique_id"]: s["condition_name"] for s in rec["samples"] if s["condition_name"]}
     d = design(rec["samples"])
     if d["unit"]:
@@ -564,7 +597,8 @@ def sheet_groups(rec):
         for g in d["unit"]["groups"]:
             out.update({uid: g["name"] for uid in g["samples"]})
         return out
-    bases = {uid: replicate_base(c) or c for uid, c in named.items()}
+    base = sheet_bases(list(named.values()), known_conditions(named.values()))
+    bases = {uid: base[c] for uid, c in named.items()}
     return bases if 1 < len({_key(b) for b in bases.values()}) < len(named) else named
 
 
@@ -923,7 +957,7 @@ def _no_groups(rec, d):
     if d["unit"] or d["n_named"] < 2 or d["n_distinct"] < d["n_named"]:
         return False
     names = [s["condition_name"] for s in rec["samples"] if s["condition_name"]]
-    bases = {_key(replicate_base(c) or c) for c in names}
+    bases = {_key(b) for b in sheet_bases(names).values()}
     return len(bases) in (1, len(names))
 
 
