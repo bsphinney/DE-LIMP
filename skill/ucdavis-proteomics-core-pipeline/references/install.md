@@ -4,6 +4,18 @@ Design goal: **a biologist with a fresh laptop runs the skill and it works.**
 `setup.sh` does the installing; this doc explains what it does and the one
 genuine manual fallback.
 
+<!-- contents: tests/test_skill_structure.py --toc -->
+**Contents** (section: line)
+- 19: Installing the SKILL itself — marketplace only
+- 76: What `setup.sh` installs automatically (no admin / no sudo)
+- 159: The search engines
+- 171: The ONE manual step: Docker on macOS (only for DIA-NN / DIA data)
+- 185: macOS + Sage + Bruker/Thermo
+- 197: Windows
+- 228: Assume nothing about the user's computer (golden rule 7)
+- 263: Step 0: the one-time setup, and what `setup.json` says
+<!-- /contents -->
+
 ## Installing the SKILL itself — marketplace only
 
 Install via the plugin marketplace, **added by its HTTPS URL**. In a terminal, one line (then
@@ -212,3 +224,105 @@ R or engines; every script runs on HIVE through `hive_exec.sh`. Git Bash is enou
 
 Public download links for every program are in `references/search-engines.md`
 ("Public program sources"), so a user on any OS can obtain them without HIVE access.
+
+## Assume nothing about the user's computer (golden rule 7)
+
+7. **Assume nothing about the user's environment — this skill runs for anyone.** Most
+   users are **not** UC Davis Core and **not** on HIVE: they're on macOS, Windows
+   (**WSL2** recommended, but **native Windows works too** — the engines ship Windows
+   builds), or generic Linux. HIVE / `/quobyte/proteomics-grp` is a Core **fast-path,
+   never a requirement**. For **every** program you have the user run, give a **public
+   source** anyone can obtain (download URL / `pip`/install command) and a path that
+   works on *their* OS — never hardcode an internal `/quobyte/...` path without its
+   public fallback. → `references/search-engines.md` ("Public program sources") +
+   `references/install.md`.
+
+
+The user may be a biologist on a fresh laptop with no R, no Python packages, no
+Docker. **Do not ask them to install things by hand.** Run `setup.sh` — it
+installs everything that can be installed without admin rights into one
+self-contained conda env. Only one thing ever needs the user's hands (Docker
+Desktop, and only for DIA-NN on macOS), and `setup.sh`/`build_diann_docker.sh`
+print the exact step. Never dump a generic "please install R/limma/..." message;
+the scripts handle it.
+
+
+- Anything in the env (R, limpa, Sage, pyarrow) → re-run `setup.sh`; relay its
+  `notes`. Never tell the biologist to "install R/limma/..." by hand.
+- macOS + DIA data + no Docker → run `build_diann_docker.sh` and relay its exact
+  steps (install Docker Desktop, open once). Don't silently switch to a DDA engine.
+- macOS + DDA + Bruker `.d` → msconvert is Linux-only on bioconda; see
+  `references/install.md` ("macOS + Sage"). Prefer DIA-NN if the data is DIA; else convert
+  to mzML first. Thermo `.raw` is converted with ThermoRawFileParser (bioconda has a macOS
+  build).
+- Unrecognised instrument → parameters fall back to automatic mass calibration;
+  say so plainly. This is never a stop: no organism or instrument is "unsupported".
+- FragPipe license (MSFragger/IonQuant) → surface the `tools.json` note and the fix.
+- Acquisition/instrument unknown → ask the user; never guess into a multi-hour run.
+
+## Step 0: the one-time setup, and what `setup.json` says
+
+`setup.json` also carries **`next_steps`**: for each item that is not ready (`de`, `limpa`,
+`dia`, `dda`, `thermo_raw`, `resolution_reader`) one sentence with the exact fix for this
+platform and when it matters (e.g. `thermo_raw` only for Thermo `.raw` input); `{}` when all is
+ready. setup.sh prints each as a `[setup] next:` line too. Do what the entry says before the step
+it blocks; the bullets below are the reasoning behind each one.
+
+**Then the one-time setup (install everything that's missing):**
+
+```
+bash scripts/setup.sh
+source ~/.proteomics-pipeline/activate.sh        # puts R, python, sage on PATH
+```
+
+`setup.sh` installs micromamba (no admin), then a conda env with R + limpa +
+limma + arrow + Sage + Python/pyarrow, and writes `~/.proteomics-pipeline/setup.json`.
+It also provisions **.NET 8** (`scripts/ensure_dotnet8.sh`, Linux and macOS: one root in
+`~/.proteomics-pipeline/dotnet8` with Microsoft.NETCore.App ≥ 8.0.17 + AspNetCore, which
+DIA-NN's `.raw` reader, the Core's ThermoRawFileParser and the resolution reader all use)
+and installs `thermorawfileparser`, `pythonnet` and `pandas` into the env in their own step,
+so an existing env gets them on a re-run. Neither step is fatal — `setup.json`'s
+`dotnet8.note` and `notes` say what did not happen.
+Sourcing `activate.sh` makes every later step use those interpreters — **source it
+in the same shell before running any later step** (or prefix later commands).
+
+Read `setup.json` and **gate on `ready_for`**:
+
+- `ready_for.de` false → DE can't run: R cannot read `report.parquet` the way this env's limpa
+  does (`de_reader`: arrow for limpa 1.2.x, nanoparquet for limpa ≥ 1.4.0, arrow on both
+  methods); re-run `setup.sh` and report any `notes`. `ready_for.de` is the default method's
+  (`dpc`); `de_reader.maxlfq` true means `--method maxlfq` can still run (arrow + limma, no limpa). (A SILAC ratio analysis, `run_silac.R`,
+  needs only limma, data.table, arrow and jsonlite in that R.)
+- `limpa.ok` false (setup.sh then ends `ERROR: limpa ...` and exits 1) → the env's limpa is
+  older than 1.4.0 (bioconda has only 1.2.5; setup.sh installs 1.4 from Bioconductor 3.23):
+  re-run `setup.sh` (on a cluster it runs on a compute node). run_de.R still reads the report
+  with limpa 1.2.x, through arrow, and records that it did (`references/environment.md`); without
+  nanoparquet its contaminant share is then read from `Precursor.Normalised`. Upgrading an env
+  that other analyses run on changes their limpa mid-analysis: Core staff ask the Core's director first.
+- `ready_for.dia` false → on macOS this means Docker is missing. Run
+  `bash scripts/build_diann_docker.sh` and relay its instructions (install Docker
+  Desktop, open it once), then continue. Don't silently fall back to a DDA engine.
+- `ready_for.dda` false → Sage/R not ready, or (macOS) msconvert is unavailable for
+  `.d`/`.raw` → mzML; tell the user and, if their data is DIA, route to DIA-NN.
+- `ready_for.thermo_raw` false **and the input has Thermo `.raw`** → fix it before step 2:
+  do exactly what `thermo_raw_reader.note` says (usually re-run `setup.sh`, or `bash
+  scripts/ensure_dotnet8.sh`; on a cluster both move to a compute node), then `setup.sh --check` until it is
+  true. `ready_for.dia` does not cover this: without a working parser every `.raw` is
+  `unknown` and a DIA search falls back to 380–980. Irrelevant for `.d`/mzML-only input.
+- `thermo_raw_reader.resolution_reader.ready` false only means step 2 cannot read the
+  Orbitrap resolution and the user will be asked for it; its `note` is the fix.
+
+In `hive_remote` the toolchain lives on HIVE, so run it there instead (the laptop needs none
+of it): `bash scripts/hive_exec.sh 'bash ~/proteomics-pipeline/scripts/setup.sh'`, and read
+`~/.proteomics-pipeline/setup.json` on HIVE the same way. On a cluster login node `setup.sh`
+(and `--check`) runs itself on a compute node (`on_compute.py`: one blocking `srun`, up to 2 h for
+an install, printed first): run that call in the background and wait for it. Never run a conda,
+R or .NET install on the login node by hand; HIVE's compute nodes have internet. Run it before
+the first search: it installs .NET 8, so writing a `.raw` search later does not wait on a
+download job. Exit 3: the compute-node run did not finish (SLURM refused it, a time limit) and
+`setup.json` was not rewritten — its `ready_for` is old; read the srun lines and run it again.
+Exit 2: it could not get there (no python3 there), and says how.
+
+
+This step is idempotent — on a machine that's already set up it just verifies and
+returns in seconds.
