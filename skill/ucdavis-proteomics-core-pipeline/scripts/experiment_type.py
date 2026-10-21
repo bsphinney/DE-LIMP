@@ -105,7 +105,7 @@ DEFAULTS = {
     "whole_proteome": ("whole-proteome (expression) comparison", NORMALISED,
                        "most proteins are expected not to change between the groups, the "
                        "assumption cross-run normalisation rests on"),
-    "ip": ("immunoprecipitation / affinity purification / pull-down with IgG or bead controls",
+    "ip": ("immunoprecipitation / affinity purification / pull-down against negative controls",
            RAW,
            "the controls carry little protein and are not loaded by amount, so normalisation "
            "would scale them up several-fold and hide the enrichment"),
@@ -204,7 +204,6 @@ def reconcile(etype, submission_answer):
 
 # An enrichment the user recorded with no control group (set-controls --controls none): the
 # type's default stands, for a reason that names no control (the team lead, 2026-10-20).
-# The wording of the "ip" reason is Brett's to choose (alternatives sent 2026-10-20).
 NO_CONTROL = {
     "ip": ("immunoprecipitation / affinity purification / pull-down, with no negative control "
            "group", "pull-down eluates are not loaded to equal protein, so normalisation would "
@@ -526,12 +525,16 @@ def record_controls(session, controls, when=None):
     named = _control_list(controls)
     if named is None:
         raise ValueError("--controls needs the control groups, comma-separated, or 'none'")
-    groups = session_groups(session) if named else set()
-    if groups is None:
+    groups = session_groups(session)
+    if named == [] and any(IP_CONTROL_NAME.search(g) for g in groups or ()):
+        print("[experiment_type] recorded: no control group -- although "
+              + ", ".join(sorted(g for g in groups if IP_CONTROL_NAME.search(g)))
+              + " is named like one; record it with set-controls if it is", file=sys.stderr)
+    if groups is None and named:
         raise ValueError("this session has no input/conditions.csv to check the names against: "
                          "write it first, or record the controls at step 3 (experiment_type.py "
                          "set --controls)")
-    unknown = [c for c in named if c not in groups]
+    unknown = [c for c in named if c not in (groups or ())]
     if unknown:
         raise ValueError(f"--controls {', '.join(unknown)}: not a group in this session's "
                          f"conditions.csv ({', '.join(sorted(groups))}); give its exact name")
@@ -539,7 +542,8 @@ def record_controls(session, controls, when=None):
         "answer": named or NO_CONTROLS, "by": "the user",
         "at": when or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")})
     _refresh_default(rec)
-    check = os.path.join(session, "output", "norm_check", "normalization_check.json")
+    from normalization_check import RECORD, check_dir
+    check = os.path.join(check_dir(session), RECORD)
     if os.path.isfile(check):
         print(f"[experiment_type] a normalisation check exists ({check}): it read the earlier "
               "control groups, so run it again (normalization_check.py run)", file=sys.stderr)

@@ -810,6 +810,15 @@ def delivery_gate(session):
     nc = prov.get("normalization_check")
     status = nc.get("status") if isinstance(nc, dict) else None
     if status == "decided" and (nc.get("decision") or {}).get("quantities"):
+        # the session read now as the delivered documents read it (README, brief): a check about
+        # other controls or another type describes another analysis
+        changed = controls_changed(nc, prov.get("design_request")
+                                   if isinstance(prov.get("design_request"), dict) else None,
+                                   session=session, legacy=False)
+        if changed:
+            return {"proceed": False, "status": "stale", "reason": changed,
+                    "hint": "run step 8's normalisation check again, then the final DE with "
+                            "--normalization-check (SKILL.md step 8)"}
         return {"proceed": True, "status": status, "hint": None,
                 "reason": f"{nc['decision']['quantities']} quantities, decided by "
                           f"{nc['decision'].get('by')}"}
@@ -1225,25 +1234,30 @@ def decision_staff_record(path, rec):
     return os.path.join(here, STAFF_RECORD), STAFF_RECORD
 
 
-def controls_changed(rec, design=None):
+def controls_changed(rec, design=None, session=None, legacy=True):
     """A refusal when the check no longer describes the session as the final DE reads it, else
     None: the experiment type or the control groups changed since it ran (set, set-controls), or
     the final DE's contrasts (`design`: run_de.R's design_request) put other contrasts against a
     control than the check's volcanoes did -- the check treated other contrasts as enrichments.
-    A check from before 2.14 records no controls_from and is not compared."""
+    `session`: where the session is now (default: where the check ran). A check from before
+    2.14.1 records no controls_from: its controls and contrasts against a control are compared,
+    and a guess made since (controls read from names it never confirmed) is refused --
+    `legacy=False` leaves such a check alone."""
     d = rec.get("design") if isinstance(rec.get("design"), dict) else {}
-    if not rec.get("session") or "controls_from" not in d:
+    session = session or rec.get("session")
+    old = "controls_from" not in d
+    if not session or not d or (old and not legacy):
         return None
     again = "Run normalization_check.py run again."
     try:
-        now_rec = et.load(rec["session"])
+        now_rec = et.load(session)
     except (OSError, ValueError) as e:
         return (f"REFUSED: the experiment-type record could not be read ({e}), so it is not known "
                 f"whether this check still describes the session. Fix it. {again}")
     was_type = (rec.get("experiment_type") or {}).get("type")
     if now_rec is None and was_type:
         return (f"REFUSED: this check read the experiment type {was_type}, and there is no "
-                f"experiment-type record at {et.path_for(rec['session'])} now. {again}")
+                f"experiment-type record at {et.path_for(session)} now. {again}")
     if (now_rec or {}).get("type") != was_type:
         return (f"REFUSED: the experiment type changed since this check ran ({was_type or 'none'} "
                 f"-> {(now_rec or {}).get('type')}). {again}")
@@ -1252,7 +1266,12 @@ def controls_changed(rec, design=None):
     now = et.pulldown_design(now_rec, list(rec.get("groups") or {}), list(contrasts))
     was = (sorted(d.get("controls") or []), d.get("controls_from"))
     said = lambda c, f: f"{', '.join(c) or 'none'} ({f or 'none named'})"  # noqa: E731
-    if (sorted(now["controls"]), now["controls_from"]) != was:
+    if old and now["controls_from"] == "enrichment_name":
+        return (f"REFUSED: the control groups are now read from their names only "
+                f"({', '.join(now['controls'])}), a guess this check (from before 2.14.1) never "
+                f"saw: confirm them (experiment_type.py set-controls). {again}")
+    if old and sorted(now["controls"]) != was[0] or not old and (
+            sorted(now["controls"]), now["controls_from"]) != was:
         return (f"REFUSED: the control groups changed since this check ran ({said(*was)} -> "
                 f"{said(sorted(now['controls']), now['controls_from'])}): its volcano read the "
                 f"old ones. {again}")

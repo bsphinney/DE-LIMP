@@ -571,15 +571,17 @@ def sheet_groups(rec):
 
 def _own_conditions_apart(named, bases):
     """The sheet's own conditions -- the names more than one sample carries -- are never merged by
-    taking a replicate index off them when the numbers taken off are no replicate run: when two
-    would share a base whose numbers are not consecutive from 0 or 1 (ATG5 x3 and ATG7 x3 ->
-    "ATG" 5, 7; HSP70 / HSP90), every name with that base keeps its name. A staff report,
-    2026-10-20: REPLICATE_SUFFIX read ATG5 as ATG replicate 5, and the report said the analysed
-    groups split the sheet's "ATG". Everything else reads as 2.13.2 read it: a run is replicates
-    (WT1 x2 / WT2 x2 -- every replicate listed twice -- is WT; so, a known limit, is Mutant-1 x3 /
-    Mutant-2 x3), and with no name repeated nothing changes (ATG5 and ATG7 alone are "ATG")."""
+    taking a replicate index off them when the numbers taken off are no replicate numbering: when
+    two would share a base whose numbers are no replicate numbering (_replicate_numbering: ATG5
+    x3 and ATG7 x3 -> "ATG" 5, 7; HSP70 / HSP90) and carry no replicate word or "#", every name
+    with that base keeps its name. A staff report, 2026-10-20: REPLICATE_SUFFIX read ATG5 as ATG
+    replicate 5, and the report said the analysed groups split the sheet's "ATG". Everything else
+    reads as 2.13.2 read it: replicate numbering stays replicates (WT1 x2 / WT2 x2 -- every
+    replicate listed twice, as IP-MS sheets often do -- is WT, and so are WT_rep1/2/4 x2 and
+    WT2-4 x2; so, a known limit, is Mutant-1 x3 / Mutant-2 x3), and with no name repeated nothing
+    changes (ATG5 and ATG7 alone are "ATG")."""
     counts = Counter(_key(c) for c in named.values())
-    own, numbers = defaultdict(set), defaultdict(set)
+    own, numbers, marked = defaultdict(set), defaultdict(set), set()
     for uid, c in named.items():
         b = _key(bases[uid])
         if counts[_key(c)] > 1:
@@ -587,14 +589,27 @@ def _own_conditions_apart(named, bases):
         n = re.search(r"(\d+)$", cs._s(c))
         if n and _key(c) != b:                 # the number the replicate index took off
             numbers[b].add(int(n.group(1)))
-    apart = {b for b, names in own.items() if len(names) > 1 and not _a_run(numbers[b])}
+            if REPLICATE_WORD.search(cs._s(c)):
+                marked.add(b)
+    apart = {b for b, names in own.items()
+             if len(names) > 1 and b not in marked and not _replicate_numbering(numbers[b])}
     return {uid: c if _key(bases[uid]) in apart else bases[uid] for uid, c in named.items()}
 
 
-def _a_run(numbers):
-    """Replicate numbers: consecutive from 0 or 1 (1, 2, 3)."""
+# A replicate index said to be one: rep / replicate or "#" before the number ("WT_rep2", "WT#2").
+REPLICATE_WORD = re.compile(r"(?:rep(?:licate)?|#)\s*#?\s*\d+$", re.I)
+
+
+def _replicate_numbering(numbers):
+    """Replicate numbers: starting at 0, 1 or 2, at most half of those between missing (1, 2, 3;
+    1, 2, 4; 2, 3, 4, 7), also after a shared leading part (11, 12: "Mutant-1" replicates 1, 2)
+    -- not gene-like ones (5, 7; 70, 90; 4, 8) nor time points far apart (0, 24)."""
+    def run(n):
+        return bool(n) and n[0] <= 2 and n[-1] - n[0] + 1 <= 2 * len(n)
     n = sorted(numbers)
-    return bool(n) and n[0] in (0, 1) and n == list(range(n[0], n[0] + len(n)))
+    s = [str(x) for x in n]
+    return run(n) or (all(len(x) > 1 for x in s) and len({x[:-1] for x in s}) == 1
+                      and run(sorted(int(x[-1]) for x in s)))
 
 
 # ------------------------------------------------------------ matching sheet to runs --

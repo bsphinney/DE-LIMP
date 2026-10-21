@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""The sample-sheet check reads every sheet as skill 2.13.2 did, except the one case 2.14 changed.
+"""The sample-sheet check reads every sheet as skill 2.13.2 did, but the one case 2.14.1 changed.
 
 submission_report's sheet check takes a trailing replicate index off the sheet's condition names
 to find its groups, and compares them with the groups the analysis used ("conditions differ").
-2.14 added one guard (sheet_groups, _own_conditions_apart): two names that several samples carry
-each are never merged into one base (ATG5 x3 and ATG7 x3 are not "ATG"). Three reviews of a
+2.14.1 added one guard (sheet_groups, _own_conditions_apart): two names that several samples
+carry each are never merged into one base when the numbers taken off them are not replicate
+numbering (ATG5 x3 and ATG7 x3 are not "ATG"). Three reviews of a
 broader rule kept finding sheets that 2.13.2 read right and the new rule read wrong, so this test
 holds today's code to 2.13.2's on a corpus of sheet shapes: the reviews' examples, then stems x
 separators x numbering x levels (L/R, R/S, A/B) x mixed formats x slips x case x duplicated
@@ -15,9 +16,11 @@ fixtures/replicate_parity_2_13_2.json holds each sheet with 2.13.2's sheet group
 sample has its own condition" note and its "conditions differ" note, made by 2.13.2's own code
 (dd932cc), so the test needs no git. The only difference allowed is the guard's: a group in
 which 2.13.2 merged two names that several samples carry each, the numbers it took off them
-being no replicate run (not consecutive from 0 or 1: ATG 5, 7). Such a group must read as
-written, every other group exactly as 2.13.2's, and the "conditions differ" note must follow
-from those groups.
+being no replicate numbering (not starting at 0-2 with at most half of the span missing:
+ATG 5, 7) and no
+"rep" or "#" before them. Such a group must read as written, every other group exactly as
+2.13.2's, and the "conditions differ" note must follow from those groups -- and a sheet 2.13.2
+grouped as the analysis did must still be grouped that way (the ground truth, not the rule).
 
 Regenerate the fixture (new shapes; 2.13.2's code is what must answer):
   git -C <repo> archive dd932cc skill/ucdavis-proteomics-core-pipeline/scripts | tar -x -C <dir>
@@ -112,6 +115,18 @@ REVIEWS = [
      ["Dox(+)"] * 3 + ["Dox(-)"] * 3),
     (["WT_Rep1", "WT_Rep2", "KO replicate 1", "KO replicate 2"], ["WT"] * 2 + ["KO"] * 2),
     (["WTrep1", "WTrep2", "KORep1", "KORep2"], ["WT"] * 2 + ["KO"] * 2),
+    # every replicate listed twice (IP and input rows), with a dropped replicate or from 2
+    ([x for x in ("WT_rep1", "WT_rep2", "WT_rep4") for _ in (0, 1)]
+     + [x for x in ("KO_rep1", "KO_rep2", "KO_rep3") for _ in (0, 1)], ["WT"] * 6 + ["KO"] * 6),
+    ([x for x in ("IP_rep1", "IP_rep2", "IP_rep4") for _ in (0, 1)] + ["IgG"] * 6,
+     ["IP"] * 6 + ["IgG"] * 6),
+    (["WT1"] * 2 + ["WT3"] * 2 + ["KO1"] * 2 + ["KO2"] * 2, ["WT"] * 4 + ["KO"] * 4),
+    ([x for x in ("WT_2", "WT_3", "WT_4") for _ in (0, 1)]
+     + [x for x in ("KO_2", "KO_3", "KO_4") for _ in (0, 1)], ["WT"] * 6 + ["KO"] * 6),
+    (["CD4"] * 2 + ["CD8"] * 2 + ["WT"] * 2, ["CD4"] * 2 + ["CD8"] * 2 + ["WT"] * 2),
+    # only the replicate word says so: replicates 5 and 7, each listed twice
+    ([x for x in ("WT_rep5", "WT_rep7", "KO_rep5", "KO_rep7") for _ in (0, 1)],
+     ["WT"] * 4 + ["KO"] * 4),
 ]
 STEMS = ("WT", "KO", "Ctrl", "Control", "Treated", "ATG5", "ATG7", "HSP70", "HSP90", "CD45",
          "IgG1", "Cis", "Brain", "Mutant", "Mutant-1", "Mutant-2", "T0", "T24", "Day", "A549",
@@ -205,27 +220,35 @@ def expected_groups(names, base_groups):
     counts = {}
     for c in names:
         counts[_key(c)] = counts.get(_key(c), 0) + 1
-    shared, numbers = {}, {}
+    shared, numbers, marked = {}, {}, set()
     for c, g in zip(names, base_groups):
         if counts[_key(c)] > 1:
             shared.setdefault(_key(g), set()).add(_key(c))
         m = re.search(r"(\d+)$", c.strip())
         if m and _key(c) != _key(g):
             numbers.setdefault(_key(g), set()).add(int(m.group(1)))
+            if re.search(r"(?:rep(?:licate)?|#)\s*#?\s*\d+$", c.strip(), re.I):
+                marked.add(_key(g))
 
     def run(ns):
+        return bool(ns) and ns[0] <= 2 and ns[-1] - ns[0] + 1 <= 2 * len(ns)
+
+    def replicates(ns):           # also after a shared leading part: 11, 12 (Mutant-1 rep 1, 2)
         ns = sorted(ns)
-        return bool(ns) and ns[0] in (0, 1) and ns == list(range(ns[0], ns[0] + len(ns)))
-    apart = {g for g, cs in shared.items() if len(cs) > 1 and not run(numbers.get(g, ()))}
+        last = sorted(int(str(x)[-1]) for x in ns)
+        return run(ns) or (all(x > 9 for x in ns) and len({str(x)[:-1] for x in ns}) == 1
+                           and run(last))
+    apart = {g for g, cs in shared.items()
+             if len(cs) > 1 and g not in marked and not replicates(numbers.get(g, ()))}
     return [c if _key(g) in apart else g for c, g in zip(names, base_groups)]
 
 
-def partition(labels):
+def partition(labels, key=str):
     """The groups of sample positions that `labels` makes (labels compared as written, as the
-    "conditions differ" note compares them)."""
+    "conditions differ" note compares them; key=_key ignores case)."""
     by = {}
     for i, g in enumerate(labels):
-        by.setdefault(g, set()).add(i)
+        by.setdefault(key(g), set()).add(i)
     return sorted(sorted(v) for v in by.values())
 
 
@@ -275,6 +298,10 @@ class SameAsTwoThirteenTwo(unittest.TestCase):
             self.assertEqual(unique, b["unique"], names)
             self.assertEqual(differ is None, partition(expected) == partition(b["analysed"]),
                              (names, differ))
+            # and never worse than 2.13.2 against the truth: a sheet it grouped as the analysis
+            # did stays grouped that way
+            if partition(b["groups"], _key) == partition(b["analysed"], _key):
+                self.assertEqual(partition(groups, _key), partition(b["analysed"], _key), names)
         self.assertGreater(guarded, 0)
 
 

@@ -317,6 +317,60 @@ class TheGuessIsHeldForTheUser(unittest.TestCase):
         os.remove(et.path_for(s))
         self.assertIn("there is no experiment-type record at", nc.gate(path, q)[1])
 
+    def test_a_check_from_before_2_14_1_is_compared_too(self):
+        """It recorded controls and vs_control but no controls_from: a guess since is refused."""
+        report, cond, dn, dr, s = self.inputs("Parental", controls="Parental")
+        rec, out = nc.run(report, cond, dn, dr, session=s)
+        path, q = os.path.join(out, nc.RECORD), rec["decision"]["quantities"]
+        with open(path) as fh:
+            old = json.load(fh)
+        del old["design"]["controls_from"], old["design"]["no_control"]
+        with open(path, "w") as fh:
+            json.dump(old, fh)
+        self.assertTrue(nc.gate(path, q)[0])                   # the same controls: it stands
+        with open(et.path_for(s)) as fh:
+            r = json.load(fh)
+        r.update(controls=None)                                # a 2.13.2 session: none recorded
+        with open(et.path_for(s), "w") as fh:
+            json.dump(r, fh)
+        self.assertIn("a guess this check (from before 2.14.1) never saw", nc.gate(path, q)[1])
+
+    def test_the_delivery_holds_an_analysis_whose_controls_changed(self):
+        report, cond, dn, dr, s = self.inputs("Parental", controls="Parental")
+        rec, _out = nc.run(report, cond, dn, dr, session=s)
+        tables = os.path.join(s, "output", "tables")
+        os.makedirs(tables)
+        with open(os.path.join(tables, "de_provenance.json"), "w") as fh:
+            json.dump({"normalization_check": dict(rec, status="decided",
+                                                   quantities_applied=et.RAW),
+                       "design_request": {"contrasts": ["Bait-Parental"]}}, fh)
+        self.assertTrue(nc.delivery_gate(s)["proceed"])
+        et.record_controls(s, et.NO_CONTROLS)
+        g = nc.delivery_gate(s)
+        self.assertEqual((g["proceed"], g["status"]), (False, "stale"))
+        self.assertIn("the control groups changed since this check ran", g["reason"])
+
+    def test_an_unreadable_record_is_said_at_the_gate(self):
+        report, cond, dn, dr, s = self.inputs("IgG")
+        rec, out = nc.run(report, cond, dn, dr, session=s)
+        with open(et.path_for(s), "w") as fh:
+            fh.write("{not json")
+        self.assertIn("the experiment-type record could not be read",
+                      nc.gate(os.path.join(out, nc.RECORD), rec["decision"]["quantities"])[1])
+
+    def test_a_staff_choice_equal_to_the_default_is_said_too(self):
+        report, cond, dn, dr, s = self.inputs("IgG")
+        no_staff_list(self, os.path.dirname(s))
+        _rec, out = nc.run(report, cond, dn, dr, session=s)
+        rec = nc.decide(os.path.join(out, nc.RECORD), et.RAW, "canalyst", "as the default says")
+        findings = []
+        block = dict(rec, status="decided", quantities_applied=et.RAW)
+        audit_results.audit_normalization_check(findings, {"normalization_check": block})
+        f = [x for x in findings if x["check"] == "normalization_check"]
+        self.assertEqual(f[0]["status"], "PASS")
+        self.assertIn("chose non-normalised (raw) quantities because as the default says",
+                      f[0]["message"])
+
     def test_a_staff_choice_on_an_agreeing_check_is_said_as_theirs(self):
         """Before: the Methods and AUDIT.md said "its default; the data check agreed"."""
         report, cond, dn, dr, s = self.inputs("IgG")
@@ -353,6 +407,24 @@ class TheGuessIsHeldForTheUser(unittest.TestCase):
         # and a re-recorded type keeps the answer, as it keeps the bait's
         et.record(s, "ip", "user", stated="an IP")
         self.assertEqual(et.load(s)["controls"], ["Parental"])
+
+    def test_set_controls_is_for_an_enrichment_and_a_readable_conditions_csv(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        s = session(d, "whole_proteome")
+        with self.assertRaisesRegex(ValueError, "not an enrichment"):
+            et.record_controls(s, "KO")
+        et.record(s, "ip", "user")
+        with open(os.path.join(s, "input", "conditions.csv"), "w", newline="") as fh:
+            csv.writer(fh).writerows([["File.Name", "Condition"], ["r1", "Bait"]])
+        with self.assertRaisesRegex(ValueError, "has no Group column"):
+            et.record_controls(s, "Bait")
+        with open(os.path.join(s, "input", "conditions.csv"), "w", newline="") as fh:
+            csv.writer(fh).writerows([["File.Name", "Group"], ["r1", "Bait"], ["r2", "IgG"]])
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            et.record_controls(s, et.NO_CONTROLS)
+        self.assertIn("IgG is named like one", err.getvalue())      # 'none' beside an IgG group
 
     def test_set_controls_changes_nothing_else(self):
         d = tempfile.mkdtemp()
@@ -409,6 +481,9 @@ class TheGuessIsSaidWhereItIsRead(unittest.TestCase):
         self.assertIn(f"Control group(s), {said}", self.brief(d, p))
         readme = session_docs.agents_md(session_docs.gather(p["session_dir"]))
         self.assertIn(f"Pull-down controls, {said}", readme)
+        self.assertIn("the name is the only evidence these are controls", readme)
+        # and the type's label names no particular control
+        self.assertNotIn("IgG or bead", et.load(p["session_dir"])["label"])
 
     def test_no_control_group_prints_no_empty_control_line(self):
         d, p = self.session(other="Lysate")

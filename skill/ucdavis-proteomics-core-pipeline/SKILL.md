@@ -2354,10 +2354,10 @@ is decided for the user: ask what the experiment is (step 3) and which quantitie
 the controls only read from names such as Ctrl or KO, confirm them, record them
 (`experiment_type.py set-controls --session <S> --controls <groups, or none>`) and run the check
 again; `decide` refuses until then, even when the check also tripped. Otherwise show the Core
-staff member
-`NORMALIZATION_CHECK.md` (side by side, normalised vs non-normalised, with a recommendation),
-ask which to use, and record their answer. **The decision is the person's, never Claude's.**
-Never choose, and never fill in `--by` yourself. `--by` is their HIVE login, never a full name.
+staff member `NORMALIZATION_CHECK.md` (side by side, normalised vs non-normalised, with a
+recommendation), ask which to use, and record their answer. **The decision is the person's,
+never Claude's.** Never choose, and never fill in `--by` yourself. `--by` is their HIVE login,
+never a full name.
 `decide` checks it against the Core's staff list (`staff.py`: `CORE_STAFF_FILE`, default
 `/quobyte/proteomics-grp/.config/core_staff.txt`, trusted only when a Core admin owns it). With
 the list, a login on it is accepted and any other is refused. With no list, a login that is an
