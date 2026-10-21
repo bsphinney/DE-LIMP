@@ -106,6 +106,8 @@ def paths_for(session_dir):
         "search_prov": os.path.join(d, "output", "search", "search_provenance.json"),
         "de_dir": os.path.join(d, "output", "tables"),
         "figures_dir": os.path.join(d, "output", "figures"),
+        # the peak check (skyline_peaks.py, step 8f): pictures, tables, the Skyline document
+        "skyline_dir": os.path.join(d, "output", "skyline"),
         "repro_dir": os.path.join(d, "output", "reproducibility"),
         "analysis_report": os.path.join(d, "output", "AI_Analysis_Report.md"),
         "analysis_prompt": os.path.join(d, "output", "ANALYSIS_PROMPT.md"),
@@ -734,6 +736,23 @@ def report_pdf_step(p, man, print_report=None):
             "Report PDF (output/Analysis_Report.stale.pdf)", removed[1])
 
 
+def peak_check_step(p, man):
+    """The peak check (skyline_peaks.py, step 8f): its outcome as one MANIFEST.txt line -- [OK]
+    with its counts, [SKIPPED] with the record's reason (the user turned it off, the container was
+    not reachable, a job failed) or because no record exists for a session with a DE. Nothing for
+    a session with neither. Never fatal."""
+    name = "Peak check (Skyline, output/skyline)"
+    try:
+        import skyline_peaks
+        got = skyline_peaks.manifest_line(
+            p["output_dir"], os.path.isfile(os.path.join(p["de_dir"], "de_provenance.json")))
+    except Exception as e:                      # recorded, never swallowed
+        man.skip(name, f"{type(e).__name__}: {e}")
+        return
+    if got:
+        {"OK": man.ok, "SKIPPED": man.skip}.get(got[0], man.info)(got[1], got[2])
+
+
 def podcast_share_step(p, man):
     """With a podcast (step 9e): output/Analysis_Report_with_audio.html, the report with the audio
     and transcript built in -- the one file a collaborator can send on (make_podcast.ensure_share:
@@ -846,6 +865,7 @@ def do_finalize(a):
             except Exception as e:
                 man.skip("Deposit package (output/DATA_SUBMISSION)", f"{type(e).__name__}: {e}")
         report_pdf_step(p, man)
+        peak_check_step(p, man)
         podcast_share_step(p, man)             # before the README, which lists it
         conversation_step(p, man, getattr(a, "call_id", None))
     registry, registry_note = _registry_lookup(p["session_dir"])

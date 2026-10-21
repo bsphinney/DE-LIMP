@@ -10,7 +10,7 @@
 #
 # What gets installed (no sudo, into ~/.proteomics-pipeline/):
 #   - micromamba          (single static binary; only if no conda/mamba present)
-#   - a conda env with:   python + pyarrow + pyyaml
+#   - a conda env with:   python + pyarrow + pyyaml + matplotlib-base (the peak check's pictures)
 #                         R (>=4.5) + bioconductor-limma + limpa >= 1.4.0 (from
 #                                   Bioconductor 3.23: bioconda has only 1.2.5)
 #                                   + r-arrow + r-dplyr + r-tidyr + r-nanoparquet
@@ -19,7 +19,8 @@
 #   - thermorawfileparser (bioconda, self-contained: reads Thermo .raw for
 #                         detect_acquisition.py) + pythonnet (conda-forge: lets
 #                         thermo_resolution.py read the Orbitrap resolution) + pandas
-#                         -- one separate, non-fatal install that an existing env gets too
+#                         + matplotlib-base -- one separate, non-fatal install that an
+#                         existing env gets too
 #   - AnnotationDbi + GO.db + org.Hs.eg.db + org.Mm.eg.db: offline GO sets for run_sets.R
 #                         (AnnotationDbi from bioconda; the annotation packages from Bioconductor's
 #                         annotation repository for the env's release; each must load; non-fatal)
@@ -151,7 +152,7 @@ fi
 create_env() {
   # bioconductor-limpa here is bioconda's 1.2.5 (its only build): a floor that run_de.R can
   # still read with (limpa_compat.R). Step 2a upgrades it to >= 1.4.0.
-  local pkgs=(python=3.11 pyarrow pyyaml
+  local pkgs=(python=3.11 pyarrow pyyaml matplotlib-base   # matplotlib: the peak check's pictures
               "r-base>=4.5" bioconductor-limpa bioconductor-limma r-statmod r-data.table
               r-nanoparquet r-arrow r-dplyr r-tidyr sage-proteomics
               r-ggplot2 r-ggrepel r-pheatmap r-jsonlite   # publication-quality figures
@@ -259,6 +260,9 @@ EXTRA_PKGS=""       # a word list, not an array: bash 3.2 + set -u and empty arr
 trfp_in_env           || EXTRA_PKGS="$EXTRA_PKGS thermorawfileparser"
 in_env_meta pythonnet || EXTRA_PKGS="$EXTRA_PKGS pythonnet"
 in_env_meta pandas    || EXTRA_PKGS="$EXTRA_PKGS pandas"
+# matplotlib-base: skyline_peaks.py draws the peak check's pictures with it (step 8f); an env
+# built before 2.14 has none, so it rides along here too
+in_env_meta matplotlib-base || EXTRA_PKGS="$EXTRA_PKGS matplotlib-base"
 if [ -n "$CONDA" ] && env_ready && [ -n "$EXTRA_PKGS" ] && ! $CHECK_ONLY; then
   say "[setup] installing$EXTRA_PKGS into the env..."
   # shellcheck disable=SC2086  # $EXTRA_PKGS is meant to split into package names

@@ -674,6 +674,13 @@ def readme_md(f, for_html=False):
         if path == "output/tables":                  # the files a reader needs by name
             L += [f"| `{f['rel'](files[k])}` | {_esc(what)} |" for k, what in _named_tables(f)
                   if files.get(k)]
+        if path == "output/figures":                 # the peak check (skyline_peaks.py), when run
+            try:
+                import skyline_peaks
+                L += [f"| `{p_}` | {_esc(w_)} |" for p_, w_ in skyline_peaks.readme_rows(
+                    os.path.join(f["p"]["output_dir"], "skyline"), "output/skyline")]
+            except Exception as e:                   # said in the table, never dropped
+                L.append(f"| `output/skyline` | not described: {_esc(type(e).__name__)} |")
     L += ["", "## Reproduce", ""]
     L.append("**The analysis, as code:** `output/tables/reproducibility_log.R` — the whole "
              "differential-expression analysis in plain R with every value written out."
