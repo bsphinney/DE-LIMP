@@ -27,8 +27,8 @@
 # one JSON line: {"mode": "get"|"put", "session": ..., "local": ..., "done": [...],
 # "missing": [...], "failed": [...]}, items relative to the session ("." = the session
 # itself, with an "error"); --dry-run adds "dry_run": true and "would": [...].
-# Exit: 0 every item moved or was absent; 1 a transfer failed, HIVE could not be reached or
-# the session is not there; 2 a usage error.
+# Exit: 0 every item moved or was absent; 1 a transfer failed, HIVE could not be reached, the
+# session is not there, or --put found none of its files under --local; 2 a usage error.
 #
 # Transport: hive_exec.sh beside this file (HIVE_EXEC overrides it, as in report_issue.sh):
 # rsync, or scp where there is none (Git Bash on Windows). Bash 3.2 and Git Bash safe.
@@ -204,7 +204,12 @@ else
       fi
     fi
   done
-  [ "$ANY" = 1 ] || echo "core_sync.sh: none of the report files is under $L/output -- nothing was pushed" >&2
+  if [ "$ANY" != 1 ]; then
+    # nothing to push is a mistake in the step, not a success: deliver copies from $S
+    ERR="none of the report files is under $L/output -- nothing was pushed"
+    echo "core_sync.sh: $ERR" >&2
+    summary; exit 1
+  fi
 fi
 summary
 [ -z "$FAIL_J" ]

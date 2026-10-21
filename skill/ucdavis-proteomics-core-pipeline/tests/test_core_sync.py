@@ -249,6 +249,17 @@ class CoreSync(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.rsess, "output/notes.txt")))
         self.assertFalse(os.path.exists(os.path.join(self.rsess, "output/tables/local_only.tsv")))
 
+    def test_put_with_nothing_to_push_fails(self):
+        """Review of the slim-down (L8): an empty output/ is a step gone wrong (the report was
+        written elsewhere), not a success -- deliver copies from $S."""
+        self.full_session()
+        os.makedirs(os.path.join(self.local, "output"))
+        r = self.run_sync("--put", "--session", self.SESSION, "--local", self.local)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("nothing was pushed", r.stderr)
+        self.assertEqual(self.summary(r)["done"], [])
+        self.assertEqual(self.calls(), [])
+
     def test_put_without_an_output_folder_is_a_usage_error(self):
         os.makedirs(self.local)
         r = self.run_sync("--put", "--session", self.SESSION, "--local", self.local)
