@@ -225,8 +225,8 @@ together inconsistently). Nobody measures anything by hand first:
   and 8 for one, and with 120 files a split is more likely, not less. An omitted `--window` does
   not decline the chain.
 
-Both are described in SKILL.md step 7 and `references/diann_parallel.md` ("Scan window MUST be
-pinned", "Which runs step 1b measures").
+Both are described in `references/diann_parallel.md` ("7. The chain as step 7 runs it", "Scan
+window MUST be pinned", "Which runs step 1b measures").
 
 Watch it with `watch_run.sh --all` (step 7b). A plate-sized array will usually lose a file
 or two to a stalled node; the documented playbook is to retry once, then drop that file and

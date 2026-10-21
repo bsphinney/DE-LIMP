@@ -26,16 +26,16 @@ A **high-throughput plate** is a different route: STAN knows its file list
 - 640: Symlink visibility — measured, and the rules that follow
 - 660: 4. `conditions` — the design from CoreOmics
 - 685: 5. The search and DE — session on HIVE, report written locally
-- 738: 6. `deliver` — real files into the Bioshare folder (HIVE)
-- 869: 7. `bioshare` — register and share (where the key is)
-- 905: 8. `email-draft`
-- 940: Several submissions in one analysis
-- 987: Troubleshooting by exit code
-- 1003: The PROT_0793 lesson
-- 1013: Less-used flags
-- 1023: Step 1 for Core staff: where the CoreOmics steps run, and `identify`
-- 1054: 1c. The service run, step by step (step 1c)
-- 1250: 12b. Deliver to the collaborator (step 12b)
+- 740: 6. `deliver` — real files into the Bioshare folder (HIVE)
+- 871: 7. `bioshare` — register and share (where the key is)
+- 907: 8. `email-draft`
+- 942: Several submissions in one analysis
+- 989: Troubleshooting by exit code
+- 1005: The PROT_0793 lesson
+- 1015: Less-used flags
+- 1025: Step 1 for Core staff: where the CoreOmics steps run, and `identify`
+- 1056: 1c. The service run, step by step (step 1c)
+- 1252: 12b. Deliver to the collaborator (step 12b)
 <!-- /contents -->
 
 ## Why this needs its own script
@@ -687,10 +687,12 @@ labels are the groups).
 **"I only require raw data" submissions get no search and no DE** unless staff explicitly ask:
 go straight to step 6 with `--mode raw-only`.
 
-Otherwise run SKILL.md steps 2–9 with the **session of record on HIVE**, under the work dir:
+Otherwise run SKILL.md steps 2–9 with the **session of record on HIVE**, under the work dir (the
+same run step by step, as SKILL.md step 1c sends you to it: "1c. The service run, step by step"
+below):
 ```
 bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/session.py init \
-    --name PROT_0807 --base <work_dir> --raw $(cat ~/core/PROT_0807/files.txt)'
+    --name PROT_0807 --base <work_dir> --raw $(cat ~/core/PROT_0807/files.txt) --submission PROT_0807'
 S=<the session dir it printed>
 ```
 Search, DE, figures, audit, `sample_quality.py`, `make_methods.py` (it reads raw metadata) and
