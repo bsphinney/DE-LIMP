@@ -146,6 +146,18 @@ class Workspace(unittest.TestCase):
         self.script = os.path.join(self.pod, "podcast_script.md")
         write(self.report, REPORT)
         write(os.path.join(self.out, "Analysis_Report.html"), REPORT_HTML)   # a session output/
+        # No test reads a real Gemini key, on HIVE or anywhere else: a home of its own (the
+        # personal key file is ~/.config/ucdavis-proteomics/gemini_key) and no Core key (on HIVE
+        # the real /quobyte one exists, and find_key named it in two tests' messages). A test that
+        # needs a key sets GEMINI_API_KEY, writes mp.KEY_FILE here, or makes a Core key of its
+        # own (test_make_podcast_hive.CoreKeyFile).
+        home = os.path.join(self.d, "no-real-home")
+        os.makedirs(home)
+        for p in (mock.patch.dict(os.environ, {"HOME": home}),
+                  mock.patch.object(mp, "CORE_KEY_FILE",
+                                    os.path.join(self.d, "no-core-config", "gemini_key"))):
+            p.start()
+            self.addCleanup(p.stop)
         # No test reaches HIVE: a computer with a saved HIVE login would otherwise ask it when a
         # Gemini failure hands over to the local voice. Tests of the local voice give it a
         # runner of their own (test_podcast_local.py).
