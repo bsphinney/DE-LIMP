@@ -28,6 +28,23 @@ Answering "what did the Core search last month, for which submission, with which
 deep did it go?" meant opening each of these, if anyone still knew where they were. Now the
 master log answers it for people, and `record_run.py list` answers it as a table.
 
+<!-- contents: tests/test_skill_structure.py --toc -->
+**Contents** (section: line)
+- 48: Who is recorded, and who must not be
+- 99: When it runs
+- 163: Layout
+- 200: SEARCH_LOG.md
+- 279: CoreOmics submission
+- 295: Locking: `mkdir`, not `flock`
+- 348: The master log: `data_analysis.md`
+- 371: The activity log: `activity_log.csv`
+- 386: What is never copied
+- 406: The session zip
+- 470: The directory README
+- 518: `list`
+- 529: Tests
+<!-- /contents -->
+
 ## Who is recorded, and who must not be
 
 **Proteomics Core runs only.** The gate is **write permission** on the registry, which lives
