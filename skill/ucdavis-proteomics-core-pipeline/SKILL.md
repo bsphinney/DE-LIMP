@@ -137,7 +137,7 @@ background), then `source ~/.proteomics-pipeline/activate.sh`. **Gate on `setup.
 install.md "Step 0: the one-time setup".
 
 **Notes from the Core — check every session**, after the version check and before the resume
-check (0c):
+check (0c); silent without HIVE, and never mentioned to anyone outside the Core:
 ```
 python3 scripts/notes.py check --json          # add --session <dir> once a session exists
 ```
@@ -278,8 +278,9 @@ python3 scripts/resolve_defaults.py --acquisition DIA --instrument "timsTOF HT" 
 once, then run**, in one breath: "timsTOF HT dia-PASEF → DIA-NN 2.7.0, MS1/MS2 15 ppm (DIA-NN
 README), mouse UP000000589 + contaminants, limpa DPC-Quant + limma. Run it?" Do **not** turn this
 into a menu (parameters.md "Golden rule 1"). **`--engine` is honoured, never overridden.**
-Overrides are the user's (`--override-by`, `--override-reason`, no names in the reason); never
-say "read from the data" about numbers the user gave. → parameters.md "4.".
+Overrides are the user's: ask who chose the value and why, never invent a reason, and pass
+`--override-by`/`--override-reason` (no names in the reason); never say "read from the data"
+about numbers the user gave. → parameters.md "4.".
 
 #### 4a. / 4b. DIA routes and the bake-off
 **DIA-NN is the default. Use it unless the user asks otherwise**; name FragPipe and Radiant in a
