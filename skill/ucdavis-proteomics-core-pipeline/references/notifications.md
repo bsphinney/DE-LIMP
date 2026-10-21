@@ -46,6 +46,22 @@ The job hook's `record_run` stays at 60 s.
   `stage` 300 s (or less near the limit) and the whole Slack delivery 25 s, webhook lookup
   included, all inside a `timeout 480` around the hook.
 
+<!-- contents: tests/test_skill_structure.py --toc -->
+**Contents** (section: line)
+- 65: Telling the user, and opting out
+- 90: Setting up the webhook (once, by a Core admin)
+- 112: Where the webhook is looked for (first one set wins)
+- 131: What finalize writes to MANIFEST.txt
+- 156: Which job does what
+- 182: What a message contains
+- 204: Rules the code keeps (from STAN's `stan/notify.py`)
+- 237: Notes from the Core (`note`)
+- 245: Posting from another script (`send_alert`)
+- 257: How the hook is wired into a job (`wrap_job_script`)
+- 277: Running the skill's tests
+- 296: 7. Before submitting: the notes again, and the job-end hook (step 7)
+<!-- /contents -->
+
 ## Telling the user, and opting out
 
 Before submitting a Core search, the agent says in one line that its end will be posted to the
@@ -276,3 +292,24 @@ The job-end hook calls `notify_slack.py` with flags a person never types: `--fro
 outside a SLURM job), `--facts-b64` (the run's facts, encoded by the generated trap),
 `--started` / `--time-limit-min` / `--signal` (timing and how the job ended), `--fail-only` (not
 the route's last job: post only a failure) and `--fran-stage` (stage a finished search for FRAN).
+
+## 7. Before submitting: the notes again, and the job-end hook (step 7)
+
+- **Just before submitting, check the notes from the Core again** (step 0: `notes.py check
+  --json --session <dir>`). A note about this search changes it only if the user agrees.
+- **Every search job ends with the job-end hook**, on the cluster, whether or not anyone is
+  watching. The last job:
+  - logs the run in the Core's run log (`record_run.py`);
+  - if it is a DIA-NN search that succeeded, hands it to FRAN (step 7c);
+  - posts "finished" or "FAILED" to the Core's Slack channel.
+
+  Earlier chain jobs report only a failure. The job's exit status is unchanged and no webhook
+  is ever in it. **Before submitting a Core search, tell the user in one line** that its end
+  will be posted to the Core Slack channel and staged for FRAN. **If they say not to**, pass
+  `--no-notify` (no post) and/or `--no-fran` (not to FRAN) to `run_search.py`. Pass them at
+  generation, never as environment variables, which do not reach a job in `hive_remote`.
+  **Always pass `--fran-name "<the session's descriptive name>"`**: the job-end hook hands the
+  search to FRAN under that name. Also pass **`--qc`** when the user describes the run as QC, or
+  it is an instrument QC standard (e.g. a HeLa QC series), so it is never handed to FRAN. If
+  FRAN's QC rule misfires on a real experiment whose name contains a standalone "QC", pass
+  `--not-qc` instead. This does not replace 7b: still watch the search.
