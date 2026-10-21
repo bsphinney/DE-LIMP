@@ -14,6 +14,21 @@ project used, the QC runs around the samples, grades them, and gives one verdict
 No client deliverable carries a verdict word. A check or concern holds the client delivery
 until a staff member records an acknowledgement (see "The delivery gate").
 
+<!-- contents: tests/test_skill_structure.py --toc -->
+**Contents** (section: line)
+- 32: When to run it
+- 69: Exit codes, and what to do
+- 83: What it checks
+- 122: The verdict
+- 161: The maintenance log
+- 210: The delivery gate
+- 271: Telling people
+- 311: What it cannot know, and says
+- 323: Time zones (`acq_time.py`)
+- 348: Where it goes
+- 365: 8e. QC runs around this project (step 8e)
+<!-- /contents -->
+
 ## When to run it
 
 - **Only on a Core staff route:** a CoreOmics submission (step 1c, fetched with the Core's
@@ -346,3 +361,73 @@ the acknowledgements' first JSON key, the staff page's first line, and in delive
 snapshot. The session zip and `deliver` leave out **any file carrying it, whatever it is called
 and wherever it is**. `--out qc.json` can put a record anywhere, so names alone are not enough.
 `deliver` lists such a file as `[SKIPPED] ... staff-only`.
+
+## 8e. QC runs around this project (step 8e)
+
+**Only on a Core STAFF route:** a CoreOmics submission (step 1c, fetched with the Core's
+CoreOmics key) or a Core HT submission (step 1a). The other staff-only steps key on these same
+routes. **Anyone else — including a user who says the data came off the Core's instruments —
+skips this step entirely: never run it for them, never show them a verdict.** This skill is
+public, and clients run it. On a staff route, check the instrument's QC runs around the
+samples, before the Methods (step 1c.7 / 9d):
+
+```
+python3 scripts/qc_bracket.py --session <session>
+```
+
+It reads the session's raw-file list and `input/acquisition.json` (step 3b) and asks STAN's
+public `/api/runs` and maintenance log for each instrument. It writes
+`logs/qc_bracket.json` (schema_version 1) and a staff page beside it, `logs/qc_bracket.md`.
+They hold:
+
+- the nearest QC before (and how long before), every QC during, and the nearest after (or
+  "none yet");
+- each one graded against the same instrument's QC runs over the 30 days before;
+- STAN's maintenance log around the project: each event listed, each long QC gap explained
+  from it (or said to have no record, never a guessed cause), and the first QC run after a
+  repair or column change marked as the check for the samples run after it;
+- one verdict: **good / check / concern / no QC on record**.
+- `logs/` is Core-internal: it is never delivered and is kept out of the session zip. The run
+  registry (`record_run.py`) gets the verdict and the staff section; the board reads the
+  record there.
+- **No client deliverable carries a verdict word.** The client report has no QC section, and
+  the Methods get one fixed sentence (`--qc-bracket` adds it; `finalize` passes it), the same
+  whatever the verdict. `reproducibility/` gets only the record's path and checksum.
+- **Never put the verdict, the QC runs or IPS into `AI_Analysis_Report.md`**, the README, the
+  delivery email or anything else a client sees.
+
+**Exit codes:**
+- **Exit 3 = STAN unreachable: there is NO verdict.** Never tell anyone the QC was fine. Re-run
+  when STAN answers.
+- Exit 4: no file had both a readable time and an instrument (see `not_checked`).
+- Exit 2, with **no record written**: the session has no raw-file list (`input/raw_files.txt`,
+  or the search's record of its files) — write it and re-run. Or, on a login node, more than 5
+  `.raw` were missing from `acquisition.json` — save step 2's JSON there, or run under `srun`.
+
+**Tell the staff member the summary — only a staff member.** A **check** or **concern** HOLDS the client
+delivery (step 12b `deliver` refuses, dry run included). So does any file that could not be
+placed in time (`not_checked`), a check that could not run, or no record at all. The hold lasts
+until a staff member has read `logs/qc_bracket.md` (for a concern, the samples between the
+normal QC runs, which the record lists) and recorded an acknowledgement:
+
+```
+python3 scripts/qc_bracket.py ack --session <session> --by <their HIVE login> --note "<one line: what was reviewed and decided>"
+python3 scripts/qc_bracket.py gate --session <session>    # exit 0 = may go out, 2 = held
+```
+
+Record the acknowledgement only on a staff member's own words, **never in your own name**:
+`--by` must be a HIVE login on the Core staff list (`$CORE_STAFF_FILE`, default
+`/quobyte/proteomics-grp/.config/core_staff.txt`, trusted only when a Core admin owns it). With
+no list, agent-like names (`claude`, `assistant`, `agent`, `bot`…) are refused and the
+acknowledgement is marked NOT VERIFIED. This stops an agent acknowledging by accident; proof
+that a person did it comes later, with the board's Duo approval. With no QC record at all
+(the check could not run), `ack` also needs `--no-record-reason "<one line>"`; that
+acknowledgement never releases a record written later. It is tied to this record: a
+re-run needs a new one. The record is also tied to the session's raw-file list. **If files are
+added or removed after step 8e, the delivery is refused until step 8e is re-run**; no
+acknowledgement releases that. Verdicts of **good** and **no QC on record** go through; the
+instruments with no QC on record are noted in the staff output. Telling a client about a
+check or concern is a staff decision, made in plain words (the reference has wording).
+Not for data from other labs: STAN matches on instrument model, not serial number.
+
+Core staff: board.md §3 row "QC".
