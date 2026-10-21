@@ -110,8 +110,8 @@ class GluedNumbersAreForStaff(unittest.TestCase):
                 text = cautions[0]["text"]
                 self.assertIn(f"as “{base}”), the sheet's “{base}” is split across groups",
                               text)
-                self.assertIn("read as separate conditions, nothing differs for these samples",
-                              text)
+                self.assertIn("read as separate conditions, nothing is pooled or split for "
+                              "these samples", text)
                 self.assertIn("staff only, a possibility, never in the report", text)
                 # not in the report's Submission section either
                 self.assertNotIn("split across", sr.report_section(session=s)["md"])
@@ -138,12 +138,13 @@ class GluedNumbersAreForStaff(unittest.TestCase):
             self.assertIn("“ATG” is split across", sr.sheet_cautions(rec, s)[0]["text"])
 
     def test_the_caution_says_what_differs_on_the_other_reading(self):
-        """From the data, never from the kind of part: "nothing differs" only when nothing does,
+        """From the data, never from the kind of part: "nothing is pooled or split" only when
+        nothing is,
         and a pool is a pool on either reading."""
         # IP and input rows: WT3 is split across WT_IP and WT_Input on either reading
         said = caution(twice(["WT3", "WT4", "WT6"]) + ["KO"] * 6,
                        ["WT_IP", "WT_Input"] * 3 + ["KO_IP", "KO_Input"] * 3)
-        self.assertNotIn("nothing differs", said)
+        self.assertNotIn("nothing is pooled or split", said)
         self.assertIn("the sheet's “WT3” is split across groups WT_IP, WT_Input", said)
         # one group for all: it pools conditions either way
         said = caution(["ATG5"] * 3 + ["ATG7"] * 3 + ["WT"] * 3, ["All"] * 9)
@@ -159,6 +160,11 @@ class GluedNumbersAreForStaff(unittest.TestCase):
         said = caution(["ATG5"] * 2 + ["ATG7"] * 2 + ["HSP70"] * 2 + ["HSP90"] * 2, ["All"] * 8)
         self.assertEqual(said.count("Read as replicates"), 1, said)
         self.assertIn("(ATG5, ATG7 as “ATG”; HSP70, HSP90 as “HSP”)", said)
+        # many names: the list is cut, and a list already given is not repeated
+        names = [f"ATG{n}" for n in range(1, 11) for _ in (0, 1)] + ["WT"] * 2
+        said = caution(names, [f"G{n % 2}" for n in range(22)])
+        self.assertIn("ATG1, ATG10, ATG2, ATG3, ATG4, ATG5 and 4 more as “ATG”", said)
+        self.assertIn("read as separate conditions, the same as above", said)
 
     def test_the_caution_is_logged_once_and_never_in_the_brief(self):
         names, analysed, _base = GLUED[0]
@@ -205,6 +211,17 @@ class GluedNumbersAreForStaff(unittest.TestCase):
                     self.assertIn("the staff caution was not logged in", p.stderr)
             finally:
                 os.chmod(log, stat.S_IRUSR | stat.S_IWUSR)
+
+    def test_a_log_that_is_not_utf8_is_said_never_a_crash(self):
+        names, analysed, _base = GLUED[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            s = session(tmp, names, analysed)
+            os.makedirs(os.path.join(s, "logs"), exist_ok=True)
+            with open(os.path.join(s, "logs", "decisions.md"), "wb") as fh:
+                fh.write(b"# Decisions log\n\xff\xfe not UTF-8\n")
+            p = run("submission_report.py", "notes", "--session", s)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertTrue(json.loads(p.stdout)["staff_cautions_logged"].startswith("no: "))
 
     def test_no_file_in_the_session_zip_carries_the_caution(self):
         """notes and the brief, then finalize --zip: the caution is in logs/decisions.md and the

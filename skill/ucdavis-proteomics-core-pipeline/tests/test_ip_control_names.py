@@ -336,6 +336,19 @@ class TheGuessIsHeldForTheUser(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn(f"the session this check ran in ({s}) is not there any more", msg)
 
+    def test_a_check_run_without_the_session_says_so(self):
+        """Saved in an IP session's output/norm_check, but run without --session: it never read
+        the type -- said as that, not as a type that changed."""
+        report, cond, dn, dr, s = self.inputs("IgG")
+        out = os.path.join(s, "output", "norm_check")
+        os.makedirs(out)
+        nc.run(report, cond, dn, dr, out=out)
+        ok, msg, _rec = nc.gate(os.path.join(out, nc.RECORD), et.RAW)
+        self.assertFalse(ok)
+        self.assertIn("this check ran without --session, so it did not read the experiment type "
+                      f"recorded in {s} (ip)", msg)
+        self.assertNotIn("changed", msg)
+
     def test_a_check_from_before_2_14_1_is_compared_too(self):
         """It recorded controls and vs_control but no controls_from: a guess since is refused."""
         report, cond, dn, dr, s = self.inputs("Parental", controls="Parental")

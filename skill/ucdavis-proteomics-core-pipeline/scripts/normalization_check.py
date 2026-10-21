@@ -1267,6 +1267,10 @@ def controls_changed(rec, design=None, session=None, legacy=True):
         return (f"REFUSED: the experiment-type record could not be read ({e}), so it is not known "
                 f"whether this check still describes the session. Fix it. {again}")
     was_type = (rec.get("experiment_type") or {}).get("type")
+    if not rec.get("session") and (now_rec or {}).get("type") != was_type:
+        return (f"REFUSED: this check ran without --session, so it did not read the experiment "
+                f"type recorded in {session} ({(now_rec or {}).get('type')}). Run "
+                f"normalization_check.py run again with --session {session}.")
     if now_rec is None and was_type:
         return (f"REFUSED: this check read the experiment type {was_type}, and there is no "
                 f"experiment-type record at {et.path_for(session)} now. {again}")

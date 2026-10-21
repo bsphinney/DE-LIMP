@@ -971,7 +971,7 @@ def sheet_cautions(rec, session=None):
     of "Conditions analysed vs the sample sheet" that rest on reading names with a number glued
     to them as replicates (_glued_groups). Each part is said on both readings, from the data:
     read as separate conditions, what the analysed groups pool or split instead -- or that
-    nothing differs for those samples. [{"id", "text"}]."""
+    nothing is pooled or split for those samples. [{"id", "text"}]."""
     p = paths_for(os.path.expanduser(session)) if session else None
     if not p:
         return []
@@ -984,17 +984,21 @@ def sheet_cautions(rec, session=None):
     names = {s["unique_id"]: cs._s(s.get("condition_name")) for s in rec["samples"]}
     other = {u: (names[u] if g in glued and _glued(names[u], g) else g) for u, g in sheet.items()}
     other_bits = _conditions_bits(rec, p, other)
-    said = []
+    said, listed = [], set()
     for text, named, kind, about in held:
         gs = sorted(named & set(glued))
         written = {other[u] for u, g in sheet.items() if g in gs}
         also = [t for t, n, _k, a in other_bits if n & written or kind == "pools" and a == about]
         either = kind == "pools" and any(k == "pools" and a == about for _t, _n, k, a in other_bits)
-        read = "; ".join(f"{', '.join(glued[g])} as “{g}”" for g in gs)
-        said.append(f"Read as replicates ({read}), {text}; read as separate conditions, "
-                    + ("; ".join(also[:4]) + (f"; and {len(also) - 4} more" if len(also) > 4
-                                              else "")
-                       if also else "nothing differs for these samples")
+        read = "; ".join(f"{_examples(glued[g])} as “{g}”" for g in gs)
+        if not also:
+            then = "nothing is pooled or split for these samples"
+        elif tuple(also) in listed:          # said for an earlier part: once is enough
+            then = "the same as above"
+        else:
+            listed.add(tuple(also))
+            then = "; ".join(also[:4]) + (f"; and {len(also) - 4} more" if len(also) > 4 else "")
+        said.append(f"Read as replicates ({read}), {text}; read as separate conditions, {then}"
                     + (": this pooling holds on either reading." if either else "."))
     return [{"id": "conditions_glued_names",
              "text": CAUTION_LEAD + " " + " ".join(dict.fromkeys(said))}]
@@ -1020,7 +1024,7 @@ def log_cautions(session, cautions):
         for c in new:
             log_decision.append(session, "Sample sheet: a possible difference, for staff",
                                 c["text"], step="3b. submission")
-    except OSError as e:
+    except (OSError, ValueError) as e:          # ValueError: a log that is not UTF-8
         print(f"[submission_report] the staff caution was not logged in {path}: {e}",
               file=sys.stderr)
         return f"no: {e}"

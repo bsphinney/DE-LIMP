@@ -358,16 +358,27 @@ def glued_named(bit, glued, sheet):
     return set()
 
 
+def other_reading(names, groups, drop, glued):
+    """This test's own other reading: {sample index analysed: its condition}, every name with a
+    number glued to it its own condition."""
+    return {i: names[i].strip() if g in glued and is_glued(names[i], g) else g
+            for i, g in enumerate(groups) if i not in drop}
+
+
 def nothing_differs(names, groups, analysed, drop, glued, named):
-    """This test's own reading: with every name with a number glued to it its own condition,
-    do the samples of the `named` sheet groups make no pool or split?"""
-    other = {i: names[i].strip() if g in glued and is_glued(names[i], g) else g
-             for i, g in enumerate(groups) if i not in drop}
+    """On the other reading, do the samples of the `named` sheet groups make no pool or split?"""
+    other = other_reading(names, groups, drop, glued)
     mine = {other[i] for i in other if groups[i] in named}
     split = any(len({analysed[i].strip() for i in other if other[i] == c}) > 1 for c in mine)
     pools = any(len({other[i] for i in other if analysed[i].strip() == a}) > 1
                 for a in {analysed[i].strip() for i in other if other[i] in mine})
     return not (split or pools)
+
+
+def still_pools(names, groups, analysed, drop, glued, a):
+    """On the other reading, does analysed group `a` still pool more than one condition?"""
+    other = other_reading(names, groups, drop, glued)
+    return len({other[i] for i in other if analysed[i].strip() == a}) > 1
 
 
 def sentence(caution, bit):
@@ -428,14 +439,16 @@ class SameAsTwoThirteenTwo(unittest.TestCase):
                 said = sentence(caution or "", x)       # each part in it, said on both readings
                 self.assertTrue(said, (x, caution))
                 named = glued_named(x, glued, sheet)
-                self.assertEqual("nothing differs for these samples" in said,
+                self.assertEqual("nothing is pooled or split for these samples" in said,
                                  nothing_differs(names, groups, analysed, drop, glued, named),
                                  (x, said))
                 pool = " pools the sheet's " in x
-                self.assertEqual("this pooling holds on either reading" in said, pool, said)
+                self.assertEqual("this pooling holds on either reading" in said, pool and
+                                 still_pools(names, groups, analysed, drop, glued, quoted(x)),
+                                 said)
                 seen["a pool with a group not glued"] += pool and any(
                     g not in glued for g, a in sheet if a == quoted(x))
-                seen["something differs"] += "nothing differs" not in said
+                seen["something differs"] += "nothing is pooled or split" not in said
         # the corpus reaches the cases a weaker rule would get wrong
         for what in ("withheld", "kept beside it", "left out beside it",
                      "a pool with a group not glued", "something differs"):
