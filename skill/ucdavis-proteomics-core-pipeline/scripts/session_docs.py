@@ -401,7 +401,7 @@ def gather(session_dir, registry=None, registry_note=None, pending=(), located_a
               "groups taken from their names", file=sys.stderr)
     pulldown = experiment_type.pulldown_design(etype, list(groups), f["contrasts"])
     f["controls"], f["controls_from"] = sorted(pulldown["controls"]), pulldown["controls_from"]
-    f["vs_control"] = pulldown["vs_control"]
+    f["vs_control"], f["no_control"] = pulldown["vs_control"], pulldown["no_control"]
 
     # --- files that exist (links are only ever to these)
     out = p["output_dir"]
@@ -907,6 +907,10 @@ def agents_md(f, for_delivery=False):
                      "submission as recorded (its `source`: the CoreOmics form, or facts the user "
                      "gave). Describe the samples only as it does and add no detail it does not "
                      f"state; {who}.")
+    if f.get("no_control"):
+        L.append("- **No negative control group** (recorded by the user: `experiment_type.py "
+                 "set-controls --controls none`): read each contrast as a comparison between "
+                 "pull-downs; no protein is specific to a bait against a control.")
     vs = f.get("vs_control") or []   # pulldown_design's: the contrasts against a control
     if vs:
         said = experiment_type.CONTROLS_FROM[f["controls_from"]]

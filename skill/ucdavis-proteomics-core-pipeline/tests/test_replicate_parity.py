@@ -14,11 +14,10 @@ condition, known by construction -- never computed with the code under test.
 
 fixtures/replicate_parity_2_13_2.json holds each sheet with 2.13.2's sheet groups, its "every
 sample has its own condition" note and its "conditions differ" note, made by 2.13.2's own code
-(dd932cc), so the test needs no git. The only difference allowed is the guard's: a group in
-which 2.13.2 merged two names that several samples carry each, the numbers it took off them
-being no replicate numbering (not starting at 0-2 with at most half of the span missing:
-ATG 5, 7) and no
-"rep" or "#" before them. Such a group must read as written, every other group exactly as
+(dd932cc), so the test needs no git. The only difference allowed is the guard's
+(expected_groups: a group in which 2.13.2 merged two names that several samples carry each, the
+numbers it took off them glued to letters, no replicate numbering, on a sheet that numbers no
+other names -- ATG 5, 7). Such a group must read as written, every other group exactly as
 2.13.2's, and the "conditions differ" note must follow from those groups -- and a sheet 2.13.2
 grouped as the analysis did must still be grouped that way (the ground truth, not the rule).
 
@@ -42,7 +41,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
 FIXTURE = os.path.join(HERE, "fixtures", "replicate_parity_2_13_2.json")
 RECORD = os.path.join(HERE, "fixtures", "coreomics_prot0756", "submission.json")
-SEED, N_GENERATED = 20261020, 440
+SEED, N_GENERATED = 20261020, 520
+
+def twice(names):
+    """Every name listed twice, in place (an IP-MS sheet's IP and input rows)."""
+    return [x for x in names for _ in (0, 1)]
+
 
 # The reviews' sheets: (condition names, the analysed group of each sample -- by hand).
 REVIEWS = [
@@ -127,6 +131,31 @@ REVIEWS = [
     # only the replicate word says so: replicates 5 and 7, each listed twice
     ([x for x in ("WT_rep5", "WT_rep7", "KO_rep5", "KO_rep7") for _ in (0, 1)],
      ["WT"] * 4 + ["KO"] * 4),
+    # samples numbered on across conditions, or by sample / animal ID, each listed twice
+    (twice(["Ctrl_1", "Ctrl_2", "Ctrl_3", "LPS_4", "LPS_5", "LPS_6"]), ["Ctrl"] * 6 + ["LPS"] * 6),
+    (twice(["Bait_IP 1", "Bait_IP 2", "Bait_IP 3", "IgG 4", "IgG 5", "IgG 6"]),
+     ["Bait_IP"] * 6 + ["IgG"] * 6),
+    (twice(["WT1", "WT2", "WT3", "KO4", "KO5", "KO6"]), ["WT"] * 6 + ["KO"] * 6),
+    (twice([f"{g} {n}" for g, ns in (("WT", (1, 2, 3)), ("KO", (4, 5, 6)), ("DKO", (7, 8, 9)))
+            for n in ns]), ["WT"] * 6 + ["KO"] * 6 + ["DKO"] * 6),
+    (twice(["KO_R1", "KO_R2", "KO_R3", "WT_R4", "WT_R5", "WT_R6"]), ["KO"] * 6 + ["WT"] * 6),
+    (twice(["WT_M12", "WT_M15", "KO_M13", "KO_M14"]), ["WT"] * 4 + ["KO"] * 4),
+    (twice(["WT_1", "WT_2", "KO_3", "KO_4"]), ["WT"] * 4 + ["KO"] * 4),
+    (twice(["WT1", "WT2", "KO3", "KO4"]), ["WT"] * 4 + ["KO"] * 4),
+    (twice(["Parental_12", "Parental_51"]) + ["Dox(+)"] * 4, ["Parental"] * 4 + ["Dox(+)"] * 4),
+    (twice(["FLAG_IP-4", "FLAG_IP-5"]) + ["Ctrl"] * 6, ["FLAG_IP"] * 4 + ["Ctrl"] * 6),
+    (twice(["Sham_R5", "Sham_R6"]) + ["T48"] * 8, ["Sham"] * 4 + ["T48"] * 8),
+    (twice(["Mock_S5", "Mock_S34", "Mock_S59"]) + ["Cis_S"] * 6, ["Mock"] * 6 + ["Cis_S"] * 6),
+    (["siNT"] * 6 + twice(["sg24", "sg25"]), ["siNT"] * 6 + ["sg"] * 4),
+    (twice(["Bait15", "Bait17", "Normal.15", "Normal.18"]), ["Bait"] * 4 + ["Normal"] * 4),
+    # the boundaries of replicate numbering and of the markers, each listed twice
+    (twice(["WT3", "WT4", "WT5"]) + ["KO"] * 6, ["WT"] * 6 + ["KO"] * 6),
+    (twice(["WT1", "WT5"]) + ["KO"] * 4, ["WT"] * 4 + ["KO"] * 4),
+    (twice(["WT#5", "WT#7"]) + ["KO"] * 4, ["WT"] * 4 + ["KO"] * 4),
+    (twice(["WT_REP5", "WT_REP7"]) + ["KO"] * 4, ["WT"] * 4 + ["KO"] * 4),
+    (twice(["WT replicate 5", "WT replicate 7"]) + ["KO"] * 4, ["WT"] * 4 + ["KO"] * 4),
+    (twice(["Old - A - R5", "Old - A - R7"]) + ["Old - B"] * 4, ["Old_A"] * 4 + ["Old_B"] * 4),
+    (twice(["WT bio rep 5", "WT bio rep 7"]) + ["KO"] * 4, ["WT"] * 4 + ["KO"] * 4),
 ]
 STEMS = ("WT", "KO", "Ctrl", "Control", "Treated", "ATG5", "ATG7", "HSP70", "HSP90", "CD45",
          "IgG1", "Cis", "Brain", "Mutant", "Mutant-1", "Mutant-2", "T0", "T24", "Day", "A549",
@@ -134,8 +163,9 @@ STEMS = ("WT", "KO", "Ctrl", "Control", "Treated", "ATG5", "ATG7", "HSP70", "HSP
 LEVELS = (("L", "R"), ("R", "S"), ("A", "B"))
 STYLES = ("{b}", "{b}_{n}", "{b}-{n}", "{b} {n}", "{b}{n}", "{b}_rep{n}", "{b} rep {n}",
           "{b}_R{n}", "{b}#{n}", "{b}.{n}", "{b} - Rep {n}", "{b}-rep{n}", "{b}_Rep{n}",
-          "{b} replicate {n}", "{b}_REP{n}", "{b} \u2013 {n}", "{b}rep{n}", "{b}Rep{n}")
-NUMBERING = ((1, 2, 3), (0, 1, 2), (2, 3, 4), (1, 2, 4), (1, 2))
+          "{b} replicate {n}", "{b}_REP{n}", "{b} \u2013 {n}", "{b}rep{n}", "{b}Rep{n}",
+          "{b}_S{n}", "{b}_M{n}")
+NUMBERING = ((1, 2, 3), (0, 1, 2), (2, 3, 4), (1, 2, 4), (1, 2), (3, 4, 5), (1, 5), (4, 5, 6))
 
 
 def corpus():
@@ -155,9 +185,15 @@ def corpus():
             conds = rnd.sample(STEMS, rnd.choice((2, 2, 3)))
         conds = list(dict.fromkeys(conds))
         mixed, style = rnd.random() < 0.3, rnd.choice(STYLES)
+        # how the samples are numbered: per condition, on across the conditions, or by an ID
+        scheme, last = rnd.random(), 0
         names, analysed = [], []
         for c in conds:
             st, nums = (rnd.choice(STYLES) if mixed else style), rnd.choice(NUMBERING)
+            if scheme < 0.2:
+                nums, last = tuple(range(last + 1, last + 1 + len(nums))), last + len(nums)
+            elif scheme < 0.35:
+                nums = tuple(sorted(rnd.sample(range(1, 60), len(nums))))
             reps = [c] * len(nums) if st == "{b}" else [st.format(b=c, n=n) for n in nums]
             names += reps
             analysed += [c] * len(reps)
@@ -169,7 +205,7 @@ def corpus():
         elif r < 0.3:                                  # one name in another case
             i = rnd.randrange(len(names))
             names[i] = (names[i].lower() if rnd.random() < 0.5 else names[i].upper())
-        elif r < 0.4:                                  # every name twice (technical duplicates)
+        elif r < 0.5:                                  # every name twice (technical duplicates)
             names = [x for x in names for _ in (0, 1)]
             analysed = [x for x in analysed for _ in (0, 1)]
         if tuple(names) not in seen:
@@ -214,24 +250,36 @@ def _key(s):
 
 
 def expected_groups(names, base_groups):
-    """2.13.2's groups with the guard applied, from its groups alone: a group in which it merged
-    two names that several samples carry each, the numbers taken off its names being no run
-    (consecutive from 0 or 1), reads as written."""
+    """2.13.2's groups with the guard applied, from its groups alone (the rule as specified): a
+    group in which it merged two names that several samples carry each reads as written, when
+    every number it took off is glued to letters (not after a separator, ')', '#', rep /
+    replicate or an ID letter), the numbers are no replicate numbering (from 0-2 and spread over
+    at most three times their count, or in a row, also after a shared leading part) and the sheet
+    numbers no other names (two or more numbers after another name's prefix)."""
     counts = {}
     for c in names:
         counts[_key(c)] = counts.get(_key(c), 0) + 1
-    shared, numbers, marked = {}, {}, set()
+    trailing = {}
+    for c in set(names):
+        t = re.search(r"^(.*?)(\d+)$", c.strip())
+        if t:
+            trailing.setdefault(_key(t.group(1)), set()).add(int(t.group(2)))
+    shared, numbers, prefixes, marked = {}, {}, {}, set()
     for c, g in zip(names, base_groups):
         if counts[_key(c)] > 1:
             shared.setdefault(_key(g), set()).add(_key(c))
-        m = re.search(r"(\d+)$", c.strip())
+        m = re.search(r"^(.*?)([A-Za-z]*)(\d+)$", c.strip())
         if m and _key(c) != _key(g):
-            numbers.setdefault(_key(g), set()).add(int(m.group(1)))
-            if re.search(r"(?:rep(?:licate)?|#)\s*#?\s*\d+$", c.strip(), re.I):
+            numbers.setdefault(_key(g), set()).add(int(m.group(3)))
+            prefixes.setdefault(_key(g), set()).add(_key(m.group(1) + m.group(2)))
+            word, before = m.group(2), m.group(1)
+            if not word or re.search(r"rep(?:licate)?$", word, re.I) or (
+                    len(word) == 1 and before[-1:] in (" ", "_", ".", "-")):
                 marked.add(_key(g))
 
     def run(ns):
-        return bool(ns) and ns[0] <= 2 and ns[-1] - ns[0] + 1 <= 2 * len(ns)
+        return bool(ns) and (ns[0] <= 2 and ns[-1] - ns[0] + 1 <= 3 * len(ns)
+                             or len(ns) >= 2 and ns[-1] - ns[0] + 1 == len(ns))
 
     def replicates(ns):           # also after a shared leading part: 11, 12 (Mutant-1 rep 1, 2)
         ns = sorted(ns)
@@ -239,7 +287,8 @@ def expected_groups(names, base_groups):
         return run(ns) or (all(x > 9 for x in ns) and len({str(x)[:-1] for x in ns}) == 1
                            and run(last))
     apart = {g for g, cs in shared.items()
-             if len(cs) > 1 and g not in marked and not replicates(numbers.get(g, ()))}
+             if len(cs) > 1 and g not in marked and not replicates(numbers.get(g, ()))
+             and not any(len(ns) > 1 for p, ns in trailing.items() if p not in prefixes.get(g, ()))}
     return [c if _key(g) in apart else g for c, g in zip(names, base_groups)]
 
 

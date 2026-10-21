@@ -970,7 +970,7 @@ python3 scripts/fetch_fasta.py resolve --organism "<what they said>"   # or --ta
   names.** It decides the DE's quantities (step 8) and the pull-down analysis (8a, the brief).
   With a CoreOmics submission attached (step 3b), `python3 scripts/experiment_type.py propose
   --session <S>` reads its experiment type and proposes one; **confirm it with the user**.
-  Without one, ask: whole proteome / IP · AP-MS · pull-down with IgG or bead controls /
+  Without one, ask: whole proteome / IP · AP-MS · pull-down against negative controls /
   proximity labelling (TurboID · BioID · APEX) / secretome / fractionated for depth (offline
   high-pH, fractions combined per sample) / separation or profiling fractions compared with each
   other (SEC, density or sucrose gradient, BN-PAGE complexome, organelle or subcellular) / other.

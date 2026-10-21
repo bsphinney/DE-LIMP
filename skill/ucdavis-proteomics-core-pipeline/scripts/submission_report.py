@@ -571,41 +571,57 @@ def sheet_groups(rec):
 
 def _own_conditions_apart(named, bases):
     """The sheet's own conditions -- the names more than one sample carries -- are never merged by
-    taking a replicate index off them when the numbers taken off are no replicate numbering: when
-    two would share a base whose numbers are no replicate numbering (_replicate_numbering: ATG5
-    x3 and ATG7 x3 -> "ATG" 5, 7; HSP70 / HSP90) and carry no replicate word or "#", every name
-    with that base keeps its name. A staff report, 2026-10-20: REPLICATE_SUFFIX read ATG5 as ATG
-    replicate 5, and the report said the analysed groups split the sheet's "ATG". Everything else
-    reads as 2.13.2 read it: replicate numbering stays replicates (WT1 x2 / WT2 x2 -- every
-    replicate listed twice, as IP-MS sheets often do -- is WT, and so are WT_rep1/2/4 x2 and
-    WT2-4 x2; so, a known limit, is Mutant-1 x3 / Mutant-2 x3), and with no name repeated nothing
+    taking a number glued to the name off them (ATG5 x3 and ATG7 x3 -> "ATG"; HSP70 / HSP90;
+    CD4 / CD8; T0 / T24). A staff report, 2026-10-20: REPLICATE_SUFFIX read ATG5 as ATG replicate
+    5, and the report said the analysed groups split the sheet's "ATG". Only when every number
+    taken off is glued to letters (_glued_number), the numbers are no replicate numbering
+    (_replicate_numbering) and the sheet numbers no other names (WT1, WT2 or LPS_40, LPS_52
+    beside KO3, KO4: then these are sample numbers too) does every name with that base keep its
+    name. Everything else reads as 2.13.2 read it: a number after a separator, an ID letter, rep
+    or # is a sample or replicate number (WT_1 x2 / WT_2 x2, IP_rep1/2/4 x2, Parental_12 x2,
+    Mock_S5 x2; Mutant-1 x3 / Mutant-2 x3, a known limit), and with no name repeated nothing
     changes (ATG5 and ATG7 alone are "ATG")."""
     counts = Counter(_key(c) for c in named.values())
-    own, numbers, marked = defaultdict(set), defaultdict(set), set()
+    own, numbers, prefixes, marked = defaultdict(set), defaultdict(set), defaultdict(set), set()
+    trailing = defaultdict(set)              # a name without its trailing number -> the numbers
+    for c in set(named.values()):
+        t = re.search(r"^(.*?)(\d+)$", cs._s(c))
+        if t:
+            trailing[_key(t.group(1))].add(int(t.group(2)))
     for uid, c in named.items():
         b = _key(bases[uid])
         if counts[_key(c)] > 1:
             own[b].add(_key(c))
-        n = re.search(r"(\d+)$", cs._s(c))
+        n = re.search(r"^(.*?)(\d+)$", cs._s(c))
         if n and _key(c) != b:                 # the number the replicate index took off
-            numbers[b].add(int(n.group(1)))
-            if REPLICATE_WORD.search(cs._s(c)):
+            numbers[b].add(int(n.group(2)))
+            prefixes[b].add(_key(n.group(1)))
+            if not _glued_number(cs._s(c)):
                 marked.add(b)
     apart = {b for b, names in own.items()
-             if len(names) > 1 and b not in marked and not _replicate_numbering(numbers[b])}
+             if len(names) > 1 and b not in marked and not _replicate_numbering(numbers[b])
+             and not any(len(ns) > 1 for p, ns in trailing.items() if p not in prefixes[b])}
     return {uid: c if _key(bases[uid]) in apart else bases[uid] for uid, c in named.items()}
 
 
-# A replicate index said to be one: rep / replicate or "#" before the number ("WT_rep2", "WT#2").
-REPLICATE_WORD = re.compile(r"(?:rep(?:licate)?|#)\s*#?\s*\d+$", re.I)
+def _glued_number(name):
+    """True when the name's trailing number is glued to its letters, as in a gene name (ATG5,
+    HSP90, T24) -- not marked as an index by a separator, ')', "#", rep / replicate, or an ID
+    letter after a separator (WT_5, WT-5, WT#5, WTrep5, WT_R5, Mock_S5, WT_M12)."""
+    m = re.search(r"([A-Za-z]*)\d+$", name)
+    word, before = (m.group(1), name[:m.start(1)]) if m else ("", "")
+    return bool(word) and not re.search(r"rep(?:licate)?$", word, re.I) and not (
+        len(word) == 1 and before[-1:] in (" ", "_", ".", "-"))
 
 
 def _replicate_numbering(numbers):
-    """Replicate numbers: starting at 0, 1 or 2, at most half of those between missing (1, 2, 3;
-    1, 2, 4; 2, 3, 4, 7), also after a shared leading part (11, 12: "Mutant-1" replicates 1, 2)
-    -- not gene-like ones (5, 7; 70, 90; 4, 8) nor time points far apart (0, 24)."""
+    """Replicate numbers: starting at 0, 1 or 2 and spread over no more than three times their
+    count (1, 2, 3; 1, 2, 4; 1, 5; 2, 3, 4, 7), or in a row wherever they start (4, 5; 24, 25),
+    also after a shared leading part (11, 12: "Mutant-1" replicates 1, 2) -- not gene-like ones
+    (5, 7; 70, 90; 4, 8) nor time points far apart (0, 24; 1, 7)."""
     def run(n):
-        return bool(n) and n[0] <= 2 and n[-1] - n[0] + 1 <= 2 * len(n)
+        return bool(n) and (n[0] <= 2 and n[-1] - n[0] + 1 <= 3 * len(n)
+                            or len(n) >= 2 and n[-1] - n[0] + 1 == len(n))
     n = sorted(numbers)
     s = [str(x) for x in n]
     return run(n) or (all(len(x) > 1 for x in s) and len({x[:-1] for x in s}) == 1

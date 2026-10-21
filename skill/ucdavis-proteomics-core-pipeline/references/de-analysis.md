@@ -348,9 +348,10 @@ engine's adapted output can support, not which method is better.
 ## Normalised or non-normalised quantities: the experiment type and the data check
 
 Global normalisation — DIA-NN's, and the maxlfq path's quantile step — assumes most proteins
-do not change between samples. An IP / pull-down breaks that: its IgG or bead controls carry
-little protein, normalisation scales them up several-fold, and the enrichment is hidden or
-turned into depletion. So the DE's input is a decision, made once and recorded:
+do not change between samples. An IP / pull-down breaks that: its negative controls (IgG,
+beads, a parental or knockout line) carry little protein, normalisation scales them up
+several-fold, and the enrichment is hidden or turned into depletion. So the DE's input is a
+decision, made once and recorded:
 
 1. **The experiment type** (`experiment_type.py`, step 3): proposed from the CoreOmics
    submission's experiment type and confirmed with the user, or asked; never taken from file
@@ -359,7 +360,7 @@ turned into depletion. So the DE's input is a decision, made once and recorded:
    | type | default quantities | why |
    |---|---|---|
    | whole proteome | normalised | most proteins do not change |
-   | IP / AP-MS / pull-down (IgG or bead controls) | **non-normalised** | the controls carry little protein and are not loaded by amount |
+   | IP / AP-MS / pull-down (against negative controls) | **non-normalised** | the controls carry little protein and are not loaded by amount |
    | proximity labelling (TurboID / BioID / APEX) | normalised | the controls carry plenty of signal; samples usually loaded by equal protein |
    | fractionated for depth (offline high-pH, fractions combined per sample) | normalised | every sample is still the whole proteome |
    | separation / profiling fractions COMPARED (SEC, density or sucrose gradient, BN-PAGE complexome, organelle or subcellular) | **non-normalised** | each fraction holds a different part of the proteome. DIA-NN's README (FAQ "What is normalisation and how does it work?"): "If this condition is not satisfied (e.g. when analysing fractions obtained with some separation technique, like SEC, for instance), then normalisation should not be used"; and "Disabling normalisation" lists "any kind of protein fractionation" |

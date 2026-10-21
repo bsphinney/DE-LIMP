@@ -60,7 +60,7 @@ FASTA_META = os.path.join("input", "search.fasta.meta.json")
 # design is a pull-down (pulldown_design):
 #   IP_CONTROL_NAME          a pull-down's control in any study: IgG and its subclasses (IgG1,
 #                            IgG2a ...) or species (mIgG, RbIgG), beads (EmptyBeads, BeadsOnly),
-#                            isotype;
+#                            isotype, no antibody (NoAb);
 #   ENRICHMENT_CONTROL_NAME  a control in an IP but an ordinary group elsewhere -- KO vs WT, Mock
 #                            vs infected, Parental vs engineered, Empty vector (EV) vs
 #                            overexpression are whole-proteome comparisons;
@@ -70,10 +70,11 @@ FASTA_META = os.path.join("input", "search.fasta.meta.json")
 # Bait_Ctrl / Bait_Drug / Parental it is Parental (Core IP-MS guide review, 2026-10-20).
 _CONTROL_TOKEN = r"(?i)(^|[_\-. ])({})($|[_\-. ])"
 IP_CONTROL_NAME = re.compile(_CONTROL_TOKEN.format(
-    r"(?:m|ms|r|rb|h)?igg(?:[1-4][a-d]?)?|(?:empty)?beads?(?:only)?|isotype"))
+    r"(?:m|ms|r|rb|h)?igg(?:[1-4][a-d]?)?|(?:empty)?beads?(?:only)?|isotype|no[ _-]?ab|"
+    r"no[ _-]?antibody"))
 ENRICHMENT_CONTROL_NAME = re.compile(_CONTROL_TOKEN.format(
     r"parental|untagged|mock|empty(?:vector)?|ev|ko|knock[ _.\-]?out"))
-GENERIC_CONTROL_NAME = re.compile(_CONTROL_TOKEN.format(r"ctrls?|controls?"))
+GENERIC_CONTROL_NAME = re.compile(_CONTROL_TOKEN.format(r"(?:neg[ _-]?)?(?:ctrls?|controls?)"))
 CONTROL_NAME_TIERS = ((IP_CONTROL_NAME, "name"), (ENRICHMENT_CONTROL_NAME, "enrichment_name"),
                       (GENERIC_CONTROL_NAME, "enrichment_name"))
 # How the brief and the session README say where the controls came from (pulldown_design's
@@ -317,7 +318,8 @@ def load(session):
         rec = json.load(fh)
     if not isinstance(rec, dict) or rec.get("schema") != SCHEMA or rec.get("type") not in DEFAULTS:
         raise ValueError(f"{p} is not a {SCHEMA} record")
-    return rec
+    _refresh_default(rec)            # today's label and default for its type (a record written
+    return rec                       # before 2.14.1 says "with IgG or bead controls")
 
 
 def session_of(*paths, depth=4):

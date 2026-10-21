@@ -998,7 +998,10 @@ def run(report, conditions, de_norm, de_raw, session=None, bait=None, out=None, 
     elif rec["controls_unconfirmed"]:
         rec["needs_decision_why"] = (f"the control group(s) {', '.join(design['controls'])} were "
                                      "read from their names only, and those names can also name an "
-                                     "ordinary condition: " + CONFIRM_CONTROLS)
+                                     "ordinary condition: " + CONFIRM_CONTROLS
+                                     # e.g. no contrast has them as its reference: say so too
+                                     + (f" (also: {design['note']})" if design.get("note")
+                                        and not design.get("vs_control") else ""))
     if design.get("note") and not rec["controls_unconfirmed"]:   # else said by needs_decision_why
         rec["design_note"] = design["note"]
     rec["decision"] = None if rec["needs_decision"] else {

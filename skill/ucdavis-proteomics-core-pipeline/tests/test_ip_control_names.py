@@ -45,11 +45,12 @@ from test_normalization_check_hold import BALANCED, fake_de  # noqa: E402
 
 ANY_STUDY = ("IgG", "Old_IgG", "IgG1", "IgG2a", "IgG2b", "IgG3", "IgG4", "mIgG", "RbIgG",
              "Beads", "Bead-only", "BeadsOnly", "EmptyBeads", "Empty_beads", "Empty-beads",
-             "Isotype", "Isotype_IgG")
+             "Isotype", "Isotype_IgG", "NoAb", "No_antibody")
 ENRICHMENT_ONLY = ("Parental", "Untagged", "Mock", "Empty", "EmptyVector", "EV", "KO", "Bait_KO",
-                   "Knockout", "Knock-out", "Knock_out", "Ctrl", "Control", "Neg_Ctrl", "Controls")
+                   "Knockout", "Knock-out", "Knock_out", "Ctrl", "Control", "Neg_Ctrl", "Controls",
+                   "NegCtrl")
 NOT_A_CONTROL = ("SKO1", "SKOR1", "MOCS1", "CTRB1", "Controller", "Mockup", "Emptor", "IgGFc",
-                 "Every", "WT", "Bait", "Treated")
+                 "Every", "Nobody", "WT", "Bait", "Treated")
 
 
 def ip(**kw):
@@ -296,6 +297,7 @@ class TheGuessIsHeldForTheUser(unittest.TestCase):
         rec = nc.run(report, cond, dn, dr, session=s)[0]
         self.assertEqual((rec["design"]["vs_control"], rec["controls_unconfirmed"],
                           rec["needs_decision"]), ([], True, True))
+        self.assertIn("no contrast has one as its reference", rec["needs_decision_why"])
 
     def test_the_final_des_contrasts_against_a_control_must_be_the_checks(self):
         report, cond, dn, dr, s = self.inputs("Parental", controls="Parental")
@@ -426,6 +428,18 @@ class TheGuessIsHeldForTheUser(unittest.TestCase):
             et.record_controls(s, et.NO_CONTROLS)
         self.assertIn("IgG is named like one", err.getvalue())      # 'none' beside an IgG group
 
+    def test_a_record_from_before_2_14_1_reads_with_todays_label(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        s = session(d, "ip")
+        with open(et.path_for(s)) as fh:
+            r = json.load(fh)
+        r["label"] = ("immunoprecipitation / affinity purification / pull-down with IgG or bead "
+                      "controls")
+        with open(et.path_for(s), "w") as fh:
+            json.dump(r, fh)
+        self.assertEqual(et.load(s)["label"], et.DEFAULTS["ip"][0])
+
     def test_set_controls_changes_nothing_else(self):
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d, True)
@@ -502,6 +516,8 @@ class TheGuessIsSaidWhereItIsRead(unittest.TestCase):
                       "enriched over the control", "### Specificity"):
             self.assertNotIn(never, brief)
         self.assertIn("### Cross-Comparison Biomarkers", brief)
+        readme = session_docs.agents_md(session_docs.gather(p["session_dir"]))
+        self.assertIn("**No negative control group** (recorded by the user", readme)
 
     def test_recorded_controls_are_not_called_a_name_guess(self):
         d, p = self.session(controls="Parental")
