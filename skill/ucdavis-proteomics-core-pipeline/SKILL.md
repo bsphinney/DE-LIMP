@@ -2787,6 +2787,8 @@ submit what it prints under "submit with". Exit 3 = not run here: its record say
 the report. A user who does not want it: `skyline_peaks.py skip --session <S> --reason '<their
 words>'`. It is a visual check of DIA-NN's peaks, never "confirmed by Skyline". Core staff may ask
 for a PRM/SRM follow-up list from it. → `references/skyline.md`.
+Core staff: board.md §3 row "other job submitted", right after `submit.sh` has run: its three
+jobs as one record, with the `cpu_hours_reserved` that `plan` printed.
 
 ### 9. Analyze the data (you write the report)
 Generate the analysis brief (it lists the figures to embed), then **do the analysis
@@ -3010,7 +3012,9 @@ bash scripts/hive_exec.sh '<the "submit" line it printed>'      # at once; then 
 for `--core-run`, a staff member), google-genai in the pipeline env (`setup.sh` installs it) and
 a key. Each gap is a one-line refusal. The job and its log go in your private
 `~/.proteomics-pipeline/jobs/`, never the group-writable session. After the job, the report on
-HIVE carries the Listen card: never put a local copy over it.
+HIVE carries the Listen card: never put a local copy over it. Core staff: board.md §3 row "other
+job submitted", with the `cpu_hours_reserved` that `job` printed (it includes the local voice's
+steps, which stay under this record).
 `share` writes `output/Analysis_Report_with_audio.html`, the report with the audio and transcript
 built in. It is the **one file to send** when someone wants the report with the audio, because
 the card's links are relative. It is checked by decoding the audio back out of the written file
@@ -3468,8 +3472,8 @@ long steps; `session.py init --submission | --internal` records the answer. **Re
   Claude never approves, gives itself cluster time, or connects itself: its person approves,
   with Duo when the board asks.
 - **A job starts on your person's go-ahead in this conversation** (step 4's one confirmation).
-  Record every cluster job of the analysis (the search, DE, set tests, the podcast, a
-  resubmitted step) right after you submit it, with the CPU-hours a script printed for it
+  Record every cluster job of the analysis (the search, DE, set tests, the peak check, the
+  podcast, a resubmitted step) right after you submit it, with the CPU-hours a script printed for it
   (`cpu_hours_reserved`; `cpu_hours.py` for a job no script sized) and any GPU-hours: `job ...
   --go-ahead chat --cpu-hours N` (board.md §3 rows "search submitted", "other job submitted").
   Never a figure you worked out. The board approves it by itself under 10,000 CPU-hours and

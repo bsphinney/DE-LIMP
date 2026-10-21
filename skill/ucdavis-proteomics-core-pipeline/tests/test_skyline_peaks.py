@@ -626,7 +626,20 @@ class TestNotRun(unittest.TestCase):
             self.assertEqual(sp.load_record(out)["status"], "planned")
             self.assertTrue(os.path.islink(os.path.join(w, "search",
                                                         "report-lib.parquet.skyline.speclib")))
-            self.assertIn("submit with", json.loads(so.getvalue()))
+            got = json.loads(so.getvalue())
+            self.assertIn("submit with", got)
+            # review of 2.14 (LOW-1): the board's job record carries the figure a script printed
+            # -- build + import (one task per raw file) + join, CPUs x time limit, summed
+            import cpu_hours
+            res = cpu_hours.reservation([os.path.join(w, f"sky_{i}.sbatch") for i in
+                                         ("1_build", "2_import", "3_join")])
+            self.assertEqual(got["cpu_hours_reserved"], res["cpu_hours_reserved"])
+            self.assertGreater(got["cpu_hours_reserved"], 0)
+            self.assertEqual(got["gpu_hours_reserved"], 0)
+            with open(os.path.join(w, "submit.sh")) as fh:
+                lines = fh.read().splitlines()
+            self.assertEqual(lines[0], "#!/bin/bash")
+            self.assertEqual(lines[1], cpu_hours.submit_comment(res))
             # a second plan before the first has a result is refused; --replan clears the old
             # run's outputs, caches and status files
             with open(os.path.join(w, "status", "import_1.json"), "w") as fh:

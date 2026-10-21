@@ -5822,6 +5822,15 @@ def cmd_job(a):
     except (RenderError, OSError) as e:
         log(f"[job] refusing: {e}")
         return 2
+    # The board's record of this job (board.md "other job submitted"): the most the podcast can
+    # use, from the job script (cpu_hours.py, the one rule) plus, for a Gemini job, the local
+    # voice's two steps (podcast_local.STEPS). The render asks for them, as SLURM jobs of their
+    # own, only when Gemini fails; they are recorded under this job, never apart.
+    import cpu_hours
+    hours = cpu_hours.reservation([path])
+    steps = {} if local else {k: round(c * m / 60.0, 1) for k, (c, _mem, m) in pl.STEPS.items()}
+    if hours["cpu_hours_reserved"] is not None:
+        hours["cpu_hours_reserved"] = round(hours["cpu_hours_reserved"] + sum(steps.values()), 1)
     print(json.dumps({"job": path, "submit": f"sbatch {shlex.quote(path)}",
                       "log": log_path.replace("%j", "<jobid>"),
                       "python": py, "google_genai": version, "key": src,
@@ -5835,6 +5844,9 @@ def cmd_job(a):
                       "resources": ({"cpus": pl.JOB_CPUS, "mem": pl.JOB_MEM, "hours": JOB_HOURS}
                                     if local else
                                     {"cpus": JOB_CPUS, "mem": JOB_MEM, "hours": JOB_HOURS}),
+                      "cpu_hours_reserved": hours["cpu_hours_reserved"],
+                      "gpu_hours_reserved": hours["gpu_hours_reserved"],
+                      "cpu_hours_local_voice_steps": steps,
                       "steps": (["render --tts local (then the check: Whisper on HIVE)"]
                                 if local else
                                 ["render --tts gemini (then verify; the local voice makes the "

@@ -241,7 +241,7 @@ SKILL.md names each row at the step where it happens ("Core staff: board.md §3 
 | session made | step 1c.7 (a submission) or 3b (internal work), right after `session.py init` | `where THREAD --raw-data <raw folder> --session-folder "$S"` |
 | search submitted | step 7, right after `submit.sh` or `sbatch` has submitted the search | `job THREAD --slurm-id <first job id> --status submitted --step 1/N --go-ahead chat --cpu-hours <cpu_hours_reserved> --body-file - < note.txt` (the note: what was submitted, one line; the hours: below), then `where THREAD --search-output <the search's out dir, its real path> --search-engine diann --fran-handover running` |
 | search finished | step 7b, once its last job has ended | `job THREAD --slurm-id <the same first job id> --status done --step N/N`, or `job THREAD --slurm-id <the same first job id> --status failed --step N/N --body-file - < note.txt` (the note: why, one line) |
-| other job submitted | right after you submit any other cluster job of the analysis: DE, set tests, the podcast, a resubmitted step | `job THREAD --slurm-id <its id> --status submitted --step 1/1 --go-ahead chat --cpu-hours <its cpu_hours_reserved> --body-file - < note.txt`; when it has ended, `job THREAD --slurm-id <its id> --status done --step 1/1` (or `--status failed`) |
+| other job submitted | right after you submit any other cluster job of the analysis: DE, set tests, the peak check (step 8f), the podcast, a resubmitted step | `job THREAD --slurm-id <its id> --status submitted --step 1/1 --go-ahead chat --cpu-hours <its cpu_hours_reserved> --body-file - < note.txt`; when it has ended, `job THREAD --slurm-id <its id> --status done --step 1/1` (or `--status failed`) |
 | FRAN hand-over | step 7c, once per search folder | `where THREAD --search-output <the search's out dir, its real path> --search-engine diann --fran-handover <status>` |
 | QC | step 8e (a submission or an HT plate; internal work has none) | on HIVE, where the record is, with nothing to copy: `bash scripts/hive_exec.sh "bash ~/proteomics-pipeline/scripts/board.sh qc THREAD --from $S/logs/qc_bracket.json"`; with the board on this computer, pull it first: `bash scripts/hive_exec.sh --get "$S/logs/qc_bracket.json" ~/core/PROT_0807/`, then `qc THREAD --from ~/core/PROT_0807/qc_bracket.json` |
 | results ready | step 9, and each time a result is redone | `where THREAD --report <the analysis report's path in "$S"> --extra "DE tables=<its tables folder in "$S">"`, then `post THREAD --kind finding --body-file -` (the protein and DE counts, and anything odd; for internal work, what the test found) |
@@ -264,10 +264,17 @@ work one out, round it or guess it:
   `submit.sh`): CPUs per task × time limit × array tasks, summed over every job the search
   submits, the most it can use. Add `--gpu-hours <gpu_hours_reserved>` when that figure is there
   and above 0; no figure means 0, and `--gpu-hours` is left out.
-- **Any other job** (DE, set tests, the podcast, a resubmitted step, an sbatch script you
-  wrote): the same figure from `python3 scripts/cpu_hours.py <its job script(s)>`, through
-  HIVE `bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/cpu_hours.py <the
-  scripts on HIVE>'`. A resubmitted step is a new job: its own record, its own hours.
+- **The peak check** (step 8f): `cpu_hours_reserved` in the JSON `skyline_peaks.py plan`
+  printed (also the first comment line of its `submit.sh`): its build, import and join jobs as
+  ONE record, with the build job's id (the first line of `skyline_work/jobs.txt`).
+- **The podcast:** `cpu_hours_reserved` in the JSON `make_podcast.py job` printed. For a Gemini
+  job it includes the local voice's two steps (`cpu_hours_local_voice_steps`): the render asks
+  for them, as SLURM jobs of their own, only if Gemini fails, and they stay under the podcast
+  job's record; never record them apart. A `--tts local` job runs both steps itself.
+- **Any other job** (DE, set tests, a resubmitted step, an sbatch script you wrote): the same
+  figure from `python3 scripts/cpu_hours.py <its job script(s)>`, through HIVE `bash
+  scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/cpu_hours.py <the scripts on
+  HIVE>'`. A resubmitted step is a new job: its own record, its own hours.
 - **`cpu_hours_reserved` is null:** a job script has no time limit. Do not submit it as it is:
   give it one, tell your person, and record the problem (`report_issue.sh`).
 

@@ -276,6 +276,7 @@ class TheDocsSayIt(unittest.TestCase):
     def test_each_milestone_step_names_its_board_row(self):
         rows = {"### 1c.": "session made", "### 3b.": "session made", "### 7. ": "search submitted",
                 "### 7b.": "search finished", "### 7c.": "FRAN hand-over", "### 8e.": "QC",
+                "### 8f.": "other job submitted",
                 "### 9. ": "results ready", "### 12. ": "finished", "### 12b.": "delivered"}
         heads = [m.start() for m in __import__("re").finditer(r"^### ", self.skill, __import__("re").M)]
         for head, row in rows.items():

@@ -1733,11 +1733,18 @@ def write_jobs(plan, queue):
     scripts = {"sky_1_build.sbatch": job_script(plan, "build", queue),
                "sky_2_import.sbatch": job_script(plan, "import", queue,
                                                  array=f"1-{n}%{min(n, plan['max_parallel'])}"),
-               "sky_3_join.sbatch": job_script(plan, "join", queue),
-               "submit.sh": submit_script(plan)}
+               "sky_3_join.sbatch": job_script(plan, "join", queue)}
     for fn, text in scripts.items():
         write_text(os.path.join(w, fn), text)
         os.chmod(os.path.join(w, fn), 0o755)
+    # The most the three jobs can use (cpu_hours.py, the one rule), read from the scripts just
+    # written: what the board's job record carries (board.md "other job submitted")
+    import cpu_hours
+    plan["cpu_hours_reservation"] = cpu_hours.reservation([os.path.join(w, fn) for fn in scripts])
+    sub = submit_script(plan).split("\n")
+    sub.insert(1, cpu_hours.submit_comment(plan["cpu_hours_reservation"]))
+    write_text(os.path.join(w, "submit.sh"), "\n".join(sub))
+    os.chmod(os.path.join(w, "submit.sh"), 0o755)
     write_json(os.path.join(w, "plan.json"), plan)
 
 
@@ -1872,6 +1879,8 @@ def cmd_plan(a):
                       "runs": len(plan["raw_files"]), "family": plan["family"],
                       "mass_accuracy": plan["mass_accuracy"], "settings": plan["settings"],
                       "queue": {"partition": queue[0], "account": queue[1], "qos": queue[2]},
+                      "cpu_hours_reserved": plan["cpu_hours_reservation"]["cpu_hours_reserved"],
+                      "gpu_hours_reserved": plan["cpu_hours_reservation"]["gpu_hours_reserved"],
                       "submit with": f"bash {shlex.quote(submit)}"}, indent=2))
     return 0
 

@@ -1721,6 +1721,9 @@ class Job(unittest.TestCase):
         self.assertEqual(got["consent"], "not needed: the local voice sends nothing")
         self.assertIsNone(got["key"])
         self.assertEqual(got["resources"], {"cpus": 16, "mem": "24G", "hours": 4})
+        # the board's record (board.md): the job itself, which runs both steps where it is
+        self.assertEqual((got["cpu_hours_reserved"], got["cpu_hours_local_voice_steps"]),
+                         (64.0, {}))
         text = read(got["job"])
         self.assertIn(f"render {t.script} --tts local || exit $?", text)
         self.assertNotIn("--core-run", text)
@@ -1740,6 +1743,12 @@ class Job(unittest.TestCase):
         self.assertIn("the job's render will make the episode with the local voice", err)
         # a python with google-genai is still preferred: a key may be saved before it runs
         self.assertEqual(json.loads(out)["google_genai"], "2.31.0")
+        # review of 2.14 (LOW-1): the local voice's own allocations are in the job's figure --
+        # 1 CPU x 4 h, plus 16 CPUs x 30 min to speak and 16 CPUs x 45 min to hear it back
+        got = json.loads(out)
+        self.assertEqual(got["cpu_hours_local_voice_steps"], {"speak": 8.0, "hear": 12.0})
+        self.assertEqual(got["cpu_hours_reserved"], 24.0)
+        self.assertEqual(got["gpu_hours_reserved"], 0)
 
 
 class Documented(unittest.TestCase):
