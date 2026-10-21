@@ -75,6 +75,26 @@
 #   installed version from `claude plugin list --json`, or installed_plugins.json beside the
 #   catalogue. SKILL_MARKETPLACE_DIR overrides where the catalogue is. Tests point all four at
 #   stand-ins (a file:// URL, local git repositories, a fake claude); no test uses the network.
+#
+# ONE CALL AT THE START (SKILL.md step 0): --check-update, then --check-hive only with --mode
+# hive_remote (and not while a reload is pending), read into what the agent does next.
+#   bash skill_version.sh --session-start [--mode hive_remote|local]
+#   One JSON object; act on its fields in this order:
+#     up_to_date   true only when --check-update exited 0 and HIVE's release check is not
+#                  behind: the one case in which the skill may be called up to date
+#     relay_first  relay before any other work, or null: older than main or the release ("Your
+#                  copy of the skill is older than the Core's current release ..."), or the
+#                  /reload-plugins line of status reload_needed
+#     ask_update   ask whether to update now; yes -> --update. Not with reload_needed
+#     ask          a question for the user, or null: HIVE has a newer build and the update would
+#                  not bring this computer to it (--check-hive 4), or HIVE's copy is in use by
+#                  the user's jobs (6)
+#     next         run it at once, unasked, then --session-start again (--put-skill: the
+#                  user's own copy, --check-hive 3); after the questions when there are any
+#     say          one line to relay, or null: a check that could not run, HIVE's other notes
+#     update/hive  the two checks' objects, each with its "exit"; hive null when not run
+#   exit 2 the user must answer or act first (ask_update, ask, or the reload); else 3 `next`
+#   is set; else 0.
 # =============================================================================
 
 # The tag for a version that cannot be read -- skill_version.py's UNKNOWN, character for
@@ -750,6 +770,103 @@ SH
     return "$code"
   }
 
+  # ---- one call at the start: --session-start ----------------------------------------------
+
+  # A field of a one-line JSON object printed above (sv_emit, sv_check_update): a string's text,
+  # unescaped (sv_js escapes only \ and "), or a bare true / false / number; nothing for null.
+  # The keys are unique and a string never holds an unescaped quote, so `"<key>": ` matches
+  # only the field itself.
+  sv_json_field() {
+    local v
+    v="$(printf '%s\n' "$2" \
+         | LC_ALL=C sed -nE 's/.*"'"$1"'": ("([^"\\]|\\.)*"|[a-z0-9]+).*/\1/p' | head -n1)"
+    case "$v" in
+      null) ;;
+      \"*) v="${v#\"}"; printf '%s\n' "${v%\"}" | LC_ALL=C sed -E 's/\\(.)/\1/g' ;;
+      *)  printf '%s\n' "$v" ;;
+    esac
+  }
+  # A check's JSON object with its exit code added as "exit"; null when it printed none.
+  sv_with_exit() {
+    case "$1" in
+      "{"*"}") printf '%s, "exit": %s}' "${1%?}" "$2" ;;
+      *) printf 'null' ;;
+    esac
+  }
+  # The non-empty arguments, joined by a space.
+  sv_join() {
+    local out="" x
+    for x in "$@"; do [ -z "$x" ] || out="${out:+$out }$x"; done
+    printf '%s\n' "$out"
+  }
+
+  sv_session_start() {
+    local mode="$1" u urc st loc main h="" hrc="" hst="" hl="" hv="" rel="" hb=null jobs jt
+    local hs="" m base="" setup="" relay="" ask_update=false ask="" next="" say="" up=false
+    local code why
+    u="$(sv_check_update)"; urc=$?
+    st="$(sv_json_field status "$u")"; loc="$(sv_json_field local "$u")"
+    main="$(sv_json_field main "$u")"
+    [ "$urc" != 5 ] || say="$(sv_json_field say "$u")"
+    case "$st" in
+      reload_needed)   # installed already: everything else waits for the reload
+        relay="$(sv_json_field say "$u")" ;;
+      behind)
+        relay="Your copy of the skill is older than the Core's current release (you have $loc, the Core is on $main). Updating takes a minute."
+        ask_update=true ;;
+    esac
+
+    if [ "$mode" = hive_remote ] && [ "$st" != reload_needed ]; then
+      h="$(sv_check_hive hive_remote)"; hrc=$?
+      hst="$(sv_json_field status "$h")"; hl="$(sv_json_field local "$h")"
+      hv="$(sv_json_field hive "$h")"; rel="$(sv_json_field release "$h")"
+      hb="$(sv_json_field behind_release "$h")"; hb="${hb:-null}"
+      jobs="$(sv_json_field jobs "$h")"; jt="$(sv_json_field jobs_total "$h")"
+      # its `say`, in the parts sv_check_hive joins: what it found, HIVE's setup.json note, and
+      # the release sentence -- relay_first and ask_update say that one
+      hs="$(sv_json_field say "$h")"
+      m="This computer has skill $hl, but the Core's current release is $rel:"
+      [ "$hb" != true ] || hs="${hs%%"$m"*}"
+      m="HIVE's setup.json (its ready_for) was written by"
+      case "$hs" in *"$m"*) setup="$m${hs#*"$m"}"; hs="${hs%%"$m"*}" ;; esac
+      base="${hs% }"; setup="${setup% }"
+      if [ "$hb" = true ]; then
+        [ -n "$relay" ] || relay="Your copy of the skill is older than the Core's current release (you have $hl, the Core is on $rel). Updating takes a minute."
+        ask_update=true
+      fi
+      case "$hrc" in
+        3) next="$(sv_json_field next "$h")" ;;       # the user's own copy: put it unasked
+        4) base=""                                    # the update brings this computer to it
+           if [ "$ask_update" = false ]; then
+             why=""
+             [ "$hb" != false ] || [ -z "$rel" ] \
+               || why=", a build not released yet (the Core's current release is $rel)"
+             ask="HIVE has a newer skill ($hv, in $HIVE_COPY) than this computer ($hl)$why. Keep HIVE's $hv, or put this computer's $hl back on HIVE ($PUT_SKILL)?"
+           fi ;;
+        5) [ "$hst" != local_unknown ] || [ "$st" != local_unknown ] || base="" ;;   # said once
+        6) base=""
+           case "$jobs" in
+             ''|*[!0-9]*) why="squeue on HIVE answered with an error, so your SLURM jobs that use it could not be counted"
+                          m="later, once squeue answers and none of them are running" ;;
+             *) why="$jobs of your${jt:+ $jt} SLURM job(s) on HIVE use it, and their end-of-job steps would run the new scripts"
+                m="after those jobs finish" ;;
+           esac
+           ask="HIVE's copy of the skill in $HIVE_COPY (${hv:-incomplete}) should be replaced with this computer's $hl, but $why. Replace it now ($PUT_SKILL), or $m?" ;;
+      esac
+    fi
+
+    say="$(sv_join "$say" "$base" "$setup")"
+    if [ "$urc" = 0 ] && [ "$hb" != true ]; then up=true; fi
+    if [ "$ask_update" = true ] || [ -n "$ask" ] || [ "$st" = reload_needed ]; then code=2
+    elif [ -n "$next" ]; then code=3
+    else code=0; fi
+    printf '{"up_to_date": %s, "relay_first": %s, "ask_update": %s, "ask": %s, "next": %s, ' \
+      "$up" "$(sv_js "$relay")" "$ask_update" "$(sv_js "$ask")" "$(sv_js "$next")"
+    printf '"say": %s, "update": %s, "hive": %s}\n' \
+      "$(sv_js "$say")" "$(sv_with_exit "$u" "$urc")" "$(sv_with_exit "$h" "$hrc")"
+    return "$code"
+  }
+
   case "${1:-}" in
     "")                [ $# -eq 0 ] || sv_die "usage"; skill_version ;;
     --check-hive)      case "$*" in
@@ -761,6 +878,13 @@ SH
                        exit $? ;;
     --check-update)    [ $# -eq 1 ] || sv_die "usage: --check-update"
                        sv_check_update; exit $? ;;
+    --session-start)   case "$*" in
+                         "--session-start")                  sv_session_start "" ;;
+                         "--session-start --mode hive_remote") sv_session_start hive_remote ;;
+                         "--session-start --mode local")     sv_session_start local ;;
+                         *) sv_die "usage: --session-start [--mode hive_remote|local]" ;;
+                       esac
+                       exit $? ;;
     --update)          [ $# -eq 1 ] || sv_die "usage: --update"
                        sv_update; exit $? ;;
     --publish-release) case "${2:-}" in
@@ -768,7 +892,8 @@ SH
                          --allow-older) [ $# -eq 2 ] || sv_die "usage"; sv_publish 1 ;;
                          *) sv_die "unknown argument: $2" ;;
                        esac ;;
-    -h|--help)         sed -n '3,77p' "$0" ;;
+    # the header: line 3 up to the closing rule, however long it grows
+    -h|--help)         sed -n '3,/^# =====/p' "$0" | sed '$d' ;;
     *)                 sv_die "unknown argument: $1 (see --help)" ;;
   esac
 fi
