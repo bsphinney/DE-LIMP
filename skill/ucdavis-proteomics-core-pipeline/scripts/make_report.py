@@ -81,6 +81,12 @@ CATALOG = [
     (r"^lfq\.parquet$|^results\.sage\.parquet$", "Search output", "Sage output (LFQ intensities / PSMs)."),
     (r"^combined_protein\.tsv$", "Search output", "FragPipe/IonQuant protein-level MaxLFQ table."),
     (r"^search_provenance\.json$", "Search output", "Exact search engine, version, and command used (reproducibility)."),
+    (r"^contaminant_competition\.json$", "Search output",
+     "Which of the sample's proteins the contaminant list took away (contaminant_competition.py, "
+     "the search's last job): genes left with no quantity of their own (COMPETED OUT) or with "
+     "most of their signal taken (SIPHONED), the contaminant entries that took them, and the "
+     "re-search that would give them back. AUDIT.md and the report's Audit & caveats say it in "
+     "words."),
     (r"^sage_adapt\.json$", "Search output",
      "Sage only: which lfq.parquet rows became report.parquet -- targets at q_value <= 0.05, "
      "decoys and failing rows dropped -- with the counts per file."),

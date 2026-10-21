@@ -132,6 +132,7 @@ class RealSessionLayout(unittest.TestCase):
              "step3_assembly.parquet", "step3_assembly.log.txt", "step3_assembly.stats.tsv",
              "step1.log.txt", "file_list.txt", "parallel_input_files.txt", "jobs.txt",
              "fran_deposit.json", "window.json", "window.txt", "step1_libpred.sbatch",
+             "contaminant_competition.json",
              "step5_report.sbatch", "submit.sh", "report.parquet", "report.pg_matrix.tsv",
              "report.pr_matrix.tsv", "report.unique_genes_matrix.tsv", "report.manifest.txt",
              "report.protein_description.tsv"]
