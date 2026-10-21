@@ -165,6 +165,13 @@ class GluedNumbersAreForStaff(unittest.TestCase):
         said = caution(names, [f"G{n % 2}" for n in range(22)])
         self.assertIn("ATG1, ATG10, ATG2, ATG3, ATG4, ATG5 and 4 more as “ATG”", said)
         self.assertIn("read as separate conditions, the same as above", said)
+        # "above" is the sentence just before, never one further back
+        said = caution(twice(["AAA1", "AAA2", "ATG5", "ATG7", "WT"]),
+                       twice(["C", "D", "A", "B", "A"]))
+        parts = said.split("Read as replicates (")[1:]
+        self.assertIn("nothing is pooled or split", parts[1])
+        self.assertIn("the sheet's “ATG” is split across groups A, B; read as separate "
+                      "conditions, group “A” pools the sheet's ATG5, WT", parts[2])
 
     def test_the_caution_is_logged_once_and_never_in_the_brief(self):
         names, analysed, _base = GLUED[0]

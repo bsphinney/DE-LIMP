@@ -984,7 +984,7 @@ def sheet_cautions(rec, session=None):
     names = {s["unique_id"]: cs._s(s.get("condition_name")) for s in rec["samples"]}
     other = {u: (names[u] if g in glued and _glued(names[u], g) else g) for u, g in sheet.items()}
     other_bits = _conditions_bits(rec, p, other)
-    said, listed = [], set()
+    said, before = [], None
     for text, named, kind, about in held:
         gs = sorted(named & set(glued))
         written = {other[u] for u, g in sheet.items() if g in gs}
@@ -993,11 +993,11 @@ def sheet_cautions(rec, session=None):
         read = "; ".join(f"{_examples(glued[g])} as “{g}”" for g in gs)
         if not also:
             then = "nothing is pooled or split for these samples"
-        elif tuple(also) in listed:          # said for an earlier part: once is enough
+        elif tuple(also) == before:          # the sentence just before gave this list
             then = "the same as above"
         else:
-            listed.add(tuple(also))
             then = "; ".join(also[:4]) + (f"; and {len(also) - 4} more" if len(also) > 4 else "")
+        before = tuple(also)
         said.append(f"Read as replicates ({read}), {text}; read as separate conditions, {then}"
                     + (": this pooling holds on either reading." if either else "."))
     return [{"id": "conditions_glued_names",
