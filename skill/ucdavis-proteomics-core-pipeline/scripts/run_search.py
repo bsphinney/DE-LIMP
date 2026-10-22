@@ -856,7 +856,7 @@ def single_shot_mass_acc(params, listing, fasta, predicted, out, threads, cmd, l
 
 
 def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", queue=None,
-              raw_files=None):
+              raw_files=None, keratin_sample=None):
     """Single-shot DIA-NN. `queue` is {partition, account, qos} from the command line, handed
     to every emit_sbatch() call -- without it slurm_queue() re-detects a queue and overrides
     the one the user chose. `raw_files`: the inputs as given, when some of `files` are links to
@@ -979,18 +979,25 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
     # were byte-identical afterwards, and both guards passed on them. The stats file goes too:
     # it is check_report_runs.py's fallback evidence when there is no parquet reader.
     import check_report_runs
-    report_files = (report, check_report_runs.stats_path(report))
+    import contaminant_competition
+    # ...and the contaminant record, which must never describe a previous search's report
+    report_files = (report, check_report_runs.stats_path(report),
+                    os.path.join(out, contaminant_competition.RECORD))
     lib_job = "\n".join([dp.clear_stale(predicted), lib_cmd,
                          dp.must_exist(predicted, "the predicted spectral library")])
     guard = report_guard(report, listing)
-    search_job = "\n".join([dp.clear_stale(*report_files), *measure_lines, search_cmd, guard])
-    one_job = "\n".join([dp.clear_stale(*report_files), onecmd, guard])
+    # then which sample proteins the contaminant list took away: a report, never a gate
+    competition = contaminant_competition.job_lines(report, fasta, out)
+    search_job = "\n".join([dp.clear_stale(*report_files), *measure_lines, search_cmd, guard,
+                            *competition])
+    one_job = "\n".join([dp.clear_stale(*report_files), onecmd, guard, *competition])
 
     # Every refusal is behind us (single_shot_mass_acc's is the last): an earlier search's probe
     # outputs must not describe this one -- set aside, never deleted (dda-review N1, R1). Inline,
     # they go with the report files in the loop below, after its own refusal.
     if sbatch:
         dp.set_aside_probe_outputs(out)
+        contaminant_competition.set_aside_record(out)    # and an earlier search's record
     # TWO JOBS + dependency when emitting sbatch: the library is expensive and
     # reusable, so a failed search requeues against it instead of rebuilding.
     if libfree and sbatch:
@@ -1096,7 +1103,42 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
         sys.exit(msg)
     print(f"  [run_diann] {msg}")
     return {"engine": "diann", "report": report, "ran": True, "dda": bool(dda),
-            "previous_artefacts_moved_to": moved, **ma_rec}
+            "previous_artefacts_moved_to": moved, **ma_rec,
+            "contaminant_competition": competition_inline(report, fasta, out, keratin_sample)}
+
+
+def search_records(res):
+    """What a search's result adds to search_provenance.json beside `result`: the records some
+    routes make while the search runs (sage_lfq_check, sage_adapt, probe_fallback, cpu_sizing), and
+    an inline DIA-NN search's contaminant record -- only a record with a status, never the
+    chain's plan of one (diann_parallel's {file, produced: runtime}), so the key has one shape (a
+    job merges its own in here)."""
+    if not isinstance(res, dict):
+        return {}
+    out = {k: res[k] for k in ("sage_lfq_check", "sage_adapt", "probe_fallback", "cpu_sizing")
+           if res.get(k)}
+    cc = res.get("contaminant_competition")
+    if isinstance(cc, dict) and cc.get("status"):
+        out["contaminant_competition"] = cc
+    return out
+
+
+def competition_inline(report, fasta, out, keratin_sample=None):
+    """An inline search's contaminant competition check, as the jobs run it
+    (contaminant_competition.job_lines): <out>/contaminant_competition.json, and the record
+    returned for search_provenance.json, which main() writes after the search -- so this
+    search's keratin answer is handed in, never read from an earlier search's record there.
+    Never stops the search: a check that fails is said, and recorded as not run."""
+    import contaminant_competition as cc
+    # check() and write() never raise: a check that could not run is a not_run record
+    rec = cc.check(report, fasta, cc.resolve_inputs(None, report, fasta)[2],
+                   keratin_sample=keratin_sample)
+    _written, problems = cc.write(rec, os.path.join(out, cc.RECORD))
+    cc.say(rec)
+    for p in problems:
+        sys.stderr.write(f"{cc.TAG} NOTE: could not write {p}; the record is in "
+                         "search_provenance.json only.\n")
+    return rec
 
 
 # ------------------------------------------------- quantity declarations -----
@@ -3519,7 +3561,8 @@ def main():
             sbatch_refused["existing_file_moved_to"] = moved and os.path.abspath(moved)
     elif engine == "diann":
         res = run_diann(cmd, a.params, search_files, a.fasta, a.out, a.threads, a.sbatch,
-                        acquisition=bundle.get("acquisition", ""), queue=queue, raw_files=files)
+                        acquisition=bundle.get("acquisition", ""), queue=queue, raw_files=files,
+                        keratin_sample=keratin_rec["value"])
         generated = {os.path.abspath(p) for p in (res.get("submitted"),) if p} \
             if isinstance(res, dict) else set()
         generated |= {os.path.splitext(os.path.abspath(a.sbatch or "x"))[0] + s
@@ -3641,9 +3684,7 @@ def main():
                        # here itself)
                        # cpu_sizing: the chain's CPUs per array task and how many run at once,
                        # and why (array_task_cpus) -- `threads` above is what was ASKED
-                       **{k: res[k] for k in ("sage_lfq_check", "sage_adapt", "probe_fallback",
-                                              "cpu_sizing")
-                          if isinstance(res, dict) and res.get(k)}},
+                       **search_records(res)},
                       fh, indent=2)
     except Exception as e:
         sys.stderr.write(f"[run_search] could not write search_provenance.json: {e}\n")

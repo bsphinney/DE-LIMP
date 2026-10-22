@@ -45,6 +45,8 @@ import report_style as rs  # noqa: E402  -- the ONE look shared by the skill's H
 import html_to_pdf  # noqa: E402  -- the PDF: the same page printed by a headless browser
 import make_podcast       # noqa: E402  -- an optional audio discussion keeps its Listen card
 from client_text import draft_history, draft_history_loose  # noqa: E402  -- the ONE list (podcast too)
+from client_text import peak_check_overclaims, peak_check_overclaims_loose  # noqa: E402  -- "confirmed by Skyline"
+import skyline_peaks      # noqa: E402  -- the peak check's section (step 8f), from its own record
 import audit_results      # noqa: E402  -- the audit's plain words: the client's Audit & caveats
 from session_docs import IP_CONTROL_NAME  # noqa: E402  -- which groups are pull-down controls
 from fetch_fasta import CONTAMINANT_TAGS  # noqa: E402  -- Cont_ and FragPipe's contam_: one definition
@@ -965,6 +967,13 @@ def build_page(a, prov, tables, figs, md_text, used):
         sections.append({"anchor": anchor("Top proteins per contrast", used),
                          "title": "Top proteins per contrast", "kind": None,
                          "blocks": [("top", top)]})
+    # The peak check (skyline_peaks.py, step 8f): its record's section, whatever the outcome -- a
+    # step that did not run says why (architectural rule 4); the report's own section wins
+    pk = getattr(a, "_peaks", None)
+    if pk and norm_title(skyline_peaks.SECTION_TITLE) not in report_h2:
+        sections.append({"anchor": anchor(skyline_peaks.SECTION_TITLE, used),
+                         "title": skyline_peaks.SECTION_TITLE, "kind": None,
+                         "blocks": [("md", pk["md"])]})
     # The pipeline's own sections (de_provenance.json `report_sections`: {title, markdown}; e.g.
     # run_silac.R's channel mixing and channel-specific proteins) -- the report's own section of
     # the same title wins, as for the set tests
@@ -1756,10 +1765,18 @@ def main():
                         suggested=(prov.get("set_tests") or {}).get("suggested_for") or ())
     if a._sets:
         caps.update(a._sets["captions"])
+    # the peak check's section: its pictures are its own record's (output/skyline/), not
+    # figures.json's
+    out_dir = (os.path.join(a.session, "output") if a.session
+               else os.path.dirname(os.path.abspath(a.tables)) if a.tables else None)
+    a._peaks = skyline_peaks.report_data(out_dir, base) if out_dir else None
+    if a._peaks:
+        caps.update(a._peaks["captions"])
     figs = Figures(base, root, a.figures, caps,
                    summarize=lambda nm: figure_summary(nm, tables, qc, em),
                    suppress=SUPPRESS_WHEN_COMPLETE if complete else (),
-                   current=(a._listed + (a._sets["all_figures"] if a._sets else [])) if have_fj
+                   current=(a._listed + (a._sets["all_figures"] if a._sets else [])
+                            + (a._peaks["figures"] if a._peaks else [])) if have_fj
                    else None, failed=failed)
 
     md_text = md_orig = None
@@ -1778,6 +1795,16 @@ def main():
                   + " -- the client never saw a draft: say what was checked and where the report "
                     "deals with it, in the present tense; the review history goes in "
                     "logs/decisions.md (SKILL.md step 8d)", file=sys.stderr)
+        # The peak check is a visual check of DIA-NN's peaks: never "confirmed by Skyline"
+        over = peak_check_overclaims(md_orig) + peak_check_overclaims_loose(md_orig)
+        if over:
+            print(f"[make_analysis_html] WARNING: {os.path.basename(a.report)} claims more for the "
+                  f"Skyline peak check than it shows ({len(over)} place(s)): "
+                  + " | ".join(f"\"{o}\"" for o in over[:8])
+                  + " -- Skyline reuses DIA-NN's peak edges by default, so a matching peak is not "
+                    "independent confirmation; say it is a visual check of DIA-NN's peaks, and "
+                    "point to where Skyline picked a different peak (references/skyline.md)",
+                  file=sys.stderr)
         # The one source both renderers draw from, so the HTML, .md and PDF all lose it.
         md_text, gone, n_par = drop_suppressed(md_text, figs.suppress)
         figs.suppressed += [g for g in gone if g not in figs.suppressed]

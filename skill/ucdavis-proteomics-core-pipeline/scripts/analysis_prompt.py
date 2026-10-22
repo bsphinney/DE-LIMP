@@ -894,6 +894,20 @@ def main():
     w("Do not write an \"Audit & caveats\" section: the HTML report adds it as a plain-language "
       "table from AUDIT.json, one row per check. Discuss a caution that bears on a finding next "
       "to that finding and in Data Quality Notes.")
+    # the peak check (skyline_peaks.py, step 8f): the page adds its section; the writer's words
+    # about it follow the one rule (references/skyline.md)
+    import skyline_peaks
+    pk = skyline_peaks.load_record(os.path.join(os.path.dirname(os.path.abspath(a.de_dir)),
+                                                "skyline"))
+    if pk:
+        w(f"Do not write a \"{skyline_peaks.SECTION_TITLE}\" section: the HTML report adds it from "
+          "`skyline/skyline_provenance.json`"
+          + (f" (it was not run: {pk.get('reason')})." if pk.get("status") == "skipped" else ".")
+          + " When you mention it, it is a visual check of DIA-NN's peaks: Skyline reuses "
+          "DIA-NN's peak edges by default, so a matching peak is not independent confirmation. "
+          "Never write that Skyline confirmed, validated or verified a result. A checked protein "
+          "where Skyline picked a different peak (`skyline/disagreements.tsv`) is worth naming "
+          "next to its finding, as a peak to look at.")
     w("Write for a reader who sees only this finished report: never narrate drafts, earlier "
       "versions or corrections of it (\"the first draft\", \"was wrong ... corrected\", \"now "
       "says\"). An Expert Review Notes section states, in the present tense, what was checked "

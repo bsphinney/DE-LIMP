@@ -229,7 +229,8 @@ class TheDocsSayIt(unittest.TestCase):
         self.assertIn("bash scripts/board.sh start --internal --title '<the analysis short name>'", step)
         self.assertIn("bash scripts/hive_exec.sh 'bash ~/proteomics-pipeline/scripts/board.sh start "
                       "--internal --title \"<the analysis short name>\"", step)
-        self.assertIn("--hours 336 --with bsphinney@ucdavis.edu", step)
+        self.assertIn("--goal '<what it is, in your words>' --hours 336\n", self.skill)
+        self.assertNotIn("bsphinney@ucdavis.edu", step)
 
     def test_the_core_session_records_its_submission(self):
         step = self.skill[self.skill.index("### 1c."):self.skill.index("### 2. ")]
@@ -275,6 +276,7 @@ class TheDocsSayIt(unittest.TestCase):
     def test_each_milestone_step_names_its_board_row(self):
         rows = {"### 1c.": "session made", "### 3b.": "session made", "### 7. ": "search submitted",
                 "### 7b.": "search finished", "### 7c.": "FRAN hand-over", "### 8e.": "QC",
+                "### 8f.": "other job submitted",
                 "### 9. ": "results ready", "### 12. ": "finished", "### 12b.": "delivered"}
         heads = [m.start() for m in __import__("re").finditer(r"^### ", self.skill, __import__("re").M)]
         for head, row in rows.items():
@@ -283,6 +285,26 @@ class TheDocsSayIt(unittest.TestCase):
                 j = min([h for h in heads if h > i] + [len(self.skill)])
                 self.assertIn(f'board.md §3 row "{row}"', self.skill[i:j])
                 self.assertIn(f"| {row} |", self.board)
+
+    def test_no_thread_names_brett_by_default(self):
+        """Brett, 2026-10-20: "I don't need to approve things like this." A thread a Claude starts
+        for its own person opens at once; the Core admin sees and can act and approve in every
+        thread without being named, so no start command adds him. --with stays for a colleague."""
+        for text, where in ((self.skill, "SKILL.md"), (self.board, "board.md")):
+            with self.subTest(where=where):
+                self.assertNotIn("--with bsphinney", text)
+                self.assertNotIn("Brett approves it", text)
+                self.assertNotIn("Brett will see it", text)
+        ref = _flat(self.board)
+        self.assertIn("No `--with` by default.", ref)
+        self.assertIn("name him only when your person asks for him", ref)
+        self.assertIn('Tell your person: "It is on the Core board."', ref)
+        self.assertIn("A colleague (e.g. the staff member who did the original analysis): add "
+                      "`--with <their UPN>`", ref)
+        self.assertIn("blocked_reason: kickoff_pending", ref)
+        step1c = _flat(self.skill[self.skill.index("### 1c."):self.skill.index("### 2. ")])
+        self.assertIn("scripts/board.sh start --prot PROT_0807 ...` (the whole command", step1c)
+        self.assertIn("never add `--with` for him unless staff ask", step1c)
 
     def test_several_submissions_attach_the_main_record_only(self):
         sec = _flat(self.core[self.core.index("## Several submissions in one analysis"):

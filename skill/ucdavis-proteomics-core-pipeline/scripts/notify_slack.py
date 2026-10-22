@@ -1447,6 +1447,9 @@ def job_end_plan(*, slack=True, fran=True, fran_guarded=False, fran_name=None, q
             "qc": qc}
 
 _HEADER_LINE = re.compile(r"^(#|\s*$)")
+# The most the job-end hook may take inside the job's own time (seconds). Whatever runs before it
+# in the job leaves it this much: contaminant_competition.job_budget reads it.
+JOB_END_HOOK_S = 480
 
 
 def wrap_job_script(script, out, *, final, time_limit_h, stage, slack=True, fran=True,
@@ -1510,7 +1513,7 @@ def wrap_job_script(script, out, *, final, time_limit_h, stage, slack=True, fran
         "_job_end_hook() {",
         f"  local py={q(py)}; [ -x \"$py\" ] || py=python3",
         f"  [ -f {q(notifier)} ] || return 0",
-        '  local to=""; command -v timeout >/dev/null 2>&1 && to="timeout 480"',
+        f'  local to=""; command -v timeout >/dev/null 2>&1 && to="timeout {JOB_END_HOOK_S}"',
         f"  $to \"$py\" {q(notifier)} search-done --from-job --out {q(out)} "
         f"--exit-code \"$1\" --signal \"$2\" --started \"$_JOB_T0\" "
         f"--time-limit-min {mins} --stage {q(stage)}{flags} </dev/null || true",

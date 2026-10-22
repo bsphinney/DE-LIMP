@@ -587,7 +587,8 @@ class SetupReportsThermoRawReadiness(setup_t.SetupCheckHarness):
 # and/or a pythonnet conda-meta record in it, as asked. Both honour only -p: a named env would
 # land wherever a user's .condarc says. google-genai (setup.sh step 2d, the podcast): `install`
 # replaces its record as conda does; `create` writes one too, so these tests see only their own
-# installs -- tests/test_make_podcast_hive.py removes it to test step 2d.
+# installs -- tests/test_make_podcast_hive.py removes it to test step 2d. matplotlib-base (2.14,
+# the peak check's pictures) gets its record from whichever call installs it, as conda's own.
 FAKE_MICROMAMBA = r'''#!/bin/bash
 echo "$*" >> "$FAKE_MM_LOG"
 sub="$1"; shift
@@ -599,7 +600,9 @@ done
 case "$sub" in
   create)  mkdir -p "$prefix/bin" "$prefix/conda-meta"; ln -s "$FAKE_PY" "$prefix/bin/python"
            printf '#!/bin/sh\nexit 0\n' > "$prefix/bin/Rscript"; chmod +x "$prefix/bin/Rscript"
-           echo '{}' > "$prefix/conda-meta/google-genai-2.31.0-pyh0000000_0.json" ;;
+           echo '{}' > "$prefix/conda-meta/google-genai-2.31.0-pyh0000000_0.json"
+           case " $pkgs " in *" matplotlib-base "*)
+             echo '{}' > "$prefix/conda-meta/matplotlib-base-3.10.7-py311h0000000_0.json" ;; esac ;;
   install) [ -n "${FAKE_MM_INSTALL_FAIL:-}" ] && { echo "nothing provides thermorawfileparser" >&2; exit 1; }
            for p in $pkgs; do case "$p" in
              thermorawfileparser)
@@ -607,6 +610,8 @@ case "$sub" in
                chmod +x "$prefix/bin/ThermoRawFileParser" ;;
              pythonnet) echo '{}' > "$prefix/conda-meta/pythonnet-3.1.0-pyhd8ed1ab_0.json" ;;
              pandas) echo '{}' > "$prefix/conda-meta/pandas-2.3.2-py311h0000000_0.json" ;;
+             matplotlib-base)
+               echo '{}' > "$prefix/conda-meta/matplotlib-base-3.10.7-py311h0000000_0.json" ;;
              google-genai*) rm -f "$prefix"/conda-meta/google-genai-[0-9]*.json
                echo '{}' > "$prefix/conda-meta/google-genai-2.31.0-pyh0000000_0.json" ;;
            esac; done ;;
@@ -705,6 +710,21 @@ class SetupInstallsTheParserSeparately(setup_t.SetupCheckHarness):
         installs = [c for c in calls if c.startswith("install")]
         self.assertTrue(installs[-1].endswith("-c conda-forge -c bioconda pandas"), installs)
         self.assertNotIn("pandas", [c for c in calls if c.startswith("create")][0])
+
+    def test_an_env_from_before_2_14_gets_matplotlib_on_a_rerun(self):
+        """The peak check (skyline_peaks.py) draws with matplotlib: a new env has it from
+        create_env, an existing one gets it here, and only once."""
+        _s, calls = self.setup()
+        self.assertIn(" matplotlib-base", [c for c in calls if c.startswith("create")][0])
+        self.assertNotIn("matplotlib-base", [c for c in calls if c.startswith("install")][0])
+        os.remove(os.path.join(self.prefix, "conda-meta",
+                               "matplotlib-base-3.10.7-py311h0000000_0.json"))
+        _s, calls = self.setup()
+        installs = [c for c in calls if c.startswith("install")]
+        self.assertTrue(installs[-1].endswith("-c conda-forge -c bioconda matplotlib-base"),
+                        installs)
+        _s, calls = self.setup()
+        self.assertEqual(len([c for c in calls if c.startswith("install")]), 2, calls)
 
     def test_check_installs_nothing(self):
         _s, calls = self.setup("--check")

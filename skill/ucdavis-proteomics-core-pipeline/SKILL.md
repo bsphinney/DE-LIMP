@@ -490,10 +490,10 @@ Core staff answered step 0a's question 3 (never ask for a number again here):
   `connect` exit 9: show its `link` and `tell_your_person` word for word, and carry on):
   ```
   bash scripts/board.sh connect --owner <their UPN>
-  bash scripts/board.sh start --internal --title '<the analysis short name>' --goal '<what it is, in your words>' --hours 336 --with bsphinney@ucdavis.edu
+  bash scripts/board.sh start --internal --title '<the analysis short name>' --goal '<what it is, in your words>' --hours 336
   # no usable local Python: the same on HIVE (title and goal without $ ` \ " ')
   bash scripts/hive_exec.sh 'bash ~/proteomics-pipeline/scripts/board.sh connect --owner <their UPN>'
-  bash scripts/hive_exec.sh 'bash ~/proteomics-pipeline/scripts/board.sh start --internal --title "<the analysis short name>" --goal "<what it is, in your words>" --hours 336 --with bsphinney@ucdavis.edu'
+  bash scripts/hive_exec.sh 'bash ~/proteomics-pipeline/scripts/board.sh start --internal --title "<the analysis short name>" --goal "<what it is, in your words>" --hours 336'
   ```
   Use the same title at `session.py init --internal`. If the paths name a submission anyway,
   say so in one line; their answer stands.
@@ -677,12 +677,13 @@ submission, the same path locally and on HIVE (`~/core/PROT_0807`).
    login is not always the UPN), then `bash scripts/board.sh connect --owner <their UPN>`
    (exit 9 the first time on
    this computer: show its `link` and `tell_your_person` word for word), then `bash
-   scripts/board.sh start --prot PROT_0807 ... --with bsphinney@ucdavis.edu` (the whole command,
+   scripts/board.sh start --prot PROT_0807 ...` (the whole command,
    with its single-quoted titles and goal: `references/board.md` section 2). No usable local
    Python: each through HIVE, `bash scripts/hive_exec.sh 'bash
    ~/proteomics-pipeline/scripts/board.sh connect --owner <their UPN>'`, and
    `start` the same way, its titles and goal in double quotes without `$` `` ` `` `\` `"` `'`.
-   You create the project and its thread yourself, and Brett approves it on the board. Carry on.
+   You create the project and its thread yourself, and it opens at once: Brett sees every thread
+   without being named, so never add `--with` for him unless staff ask. Carry on.
    Later, one record at each milestone (`references/board.md` section 3); a search starts on
    staff's go-ahead here and is recorded on the board right after it is submitted. **`fetch`
    cannot run yet** (a key problem): `start` anyway, with the PI's surname and project as staff
@@ -2153,6 +2154,11 @@ once against the predicted library, with no match-between-runs, and it has no DD
 If they take it, `make_methods.py` says so in the Methods, from `de_provenance.json`'s `input`
 (never write that by hand), and `audit_results.py` reports the comparison in AUDIT.md either way.
 
+**Every DIA-NN search: the proteins the contaminant list took.** Its last job runs
+`contaminant_competition.py` (a report, never a gate); the watcher's `contaminant_competition`
+names COMPETED OUT genes (no quantity left) and SIPHONED ones. Tell the user; AUDIT.md carries
+it to the report. → `references/audit.md`.
+
 Core staff: board.md §3 row "search finished", once its last job has ended.
 
 ### 7c. Hand the search to FRAN — automatic, Core searches only
@@ -2774,6 +2780,16 @@ Not for data from other labs: STAN matches on instrument model, not serial numbe
 Core staff: board.md §3 row "QC".
 → detail: `references/qc-bracket.md`.
 
+### 8f. Peak check (Skyline) — by default, after the final DE
+Skyline draws DIA-NN's peaks for the top 10 DE proteins (none significant: the most abundant), as
+SLURM jobs in the pinned container: `python3 scripts/skyline_peaks.py plan --session <S>`, then
+submit what it prints under "submit with". Exit 3 = not run here: its record says why, and so does
+the report. A user who does not want it: `skyline_peaks.py skip --session <S> --reason '<their
+words>'`. It is a visual check of DIA-NN's peaks, never "confirmed by Skyline". Core staff may ask
+for a PRM/SRM follow-up list from it. → `references/skyline.md`.
+Core staff: board.md §3 row "other job submitted", right after `submit.sh` has run: its three
+jobs as one record, with the `cpu_hours_reserved` that `plan` printed.
+
 ### 9. Analyze the data (you write the report)
 Generate the analysis brief (it lists the figures to embed), then **do the analysis
 yourself** — you are the consultant the brief addresses:
@@ -2952,9 +2968,13 @@ checks it, renders it, verifies the audio and links it in.
   need the person running it on the Core staff list.
 - **Anyone else:** offer it in one line when the results go to a collaborator or the lab; make
   it only on a yes, with their consent recorded: `--cloud-ok "<who agreed, when>"`.
-- **It never holds up the report or the delivery.** No key, Gemini down or out of quota, a
-  failed render or job, a job still running when all else is ready (`scancel` it): one line to
-  the user, then deliver without it; the audio can be added later.
+- **It never holds up the report or the delivery.** Gemini down, a failed render or job, a job
+  still running when all else is ready (`scancel` it, and the local voice's job its log names):
+  one line to the user, then deliver without it; the audio can be added later. When Gemini
+  cannot be used and waiting would not help (no key, 402 prepay credits, the key refused, no
+  quota or no answer on any model), render makes the whole episode with the local voice (Kokoro
+  on HIVE, nothing sent) and says so; `--tts local` uses it from the start
+  (`references/podcast.md`, "The local voice").
 
 **Make it where the report was built.** Built here (a Mac, `local` mode, or a pulled copy of a
 HIVE session, step 1c.7): make it here. With a session of record on HIVE, it then goes back with
@@ -2992,7 +3012,9 @@ bash scripts/hive_exec.sh '<the "submit" line it printed>'      # at once; then 
 for `--core-run`, a staff member), google-genai in the pipeline env (`setup.sh` installs it) and
 a key. Each gap is a one-line refusal. The job and its log go in your private
 `~/.proteomics-pipeline/jobs/`, never the group-writable session. After the job, the report on
-HIVE carries the Listen card: never put a local copy over it.
+HIVE carries the Listen card: never put a local copy over it. Core staff: board.md §3 row "other
+job submitted", with the `cpu_hours_reserved` that `job` printed (it includes the local voice's
+steps, which stay under this record).
 `share` writes `output/Analysis_Report_with_audio.html`, the report with the audio and transcript
 built in. It is the **one file to send** when someone wants the report with the audio, because
 the card's links are relative. It is checked by decoding the audio back out of the written file
@@ -3450,8 +3472,8 @@ long steps; `session.py init --submission | --internal` records the answer. **Re
   Claude never approves, gives itself cluster time, or connects itself: its person approves,
   with Duo when the board asks.
 - **A job starts on your person's go-ahead in this conversation** (step 4's one confirmation).
-  Record every cluster job of the analysis (the search, DE, set tests, the podcast, a
-  resubmitted step) right after you submit it, with the CPU-hours a script printed for it
+  Record every cluster job of the analysis (the search, DE, set tests, the peak check, the
+  podcast, a resubmitted step) right after you submit it, with the CPU-hours a script printed for it
   (`cpu_hours_reserved`; `cpu_hours.py` for a job no script sized) and any GPU-hours: `job ...
   --go-ahead chat --cpu-hours N` (board.md §3 rows "search submitted", "other job submitted").
   Never a figure you worked out. The board approves it by itself under 10,000 CPU-hours and

@@ -524,12 +524,18 @@ class Job(CoreKeyFile, T.Workspace):
         text = T.read(self.job_path)
         lines = text.splitlines()
         self.assertEqual(lines[0], "#!/bin/bash -l", "a login shell: HIVE's `module` command")
+        # the Gemini job's size as before 2.14: when the local voice takes over, its steps ask
+        # for their own allocations then (podcast_local.Srun), never this job's
         for want in ("#SBATCH --open-mode=append",              # a requeued job keeps its log
-                     "#SBATCH --cpus-per-task=1", "#SBATCH --mem=2G", "#SBATCH --time=2:00:00",
+                     "#SBATCH --ntasks=1", "#SBATCH --cpus-per-task=1", "#SBATCH --mem=2G",
+                     "#SBATCH --time=4:00:00",      # room to wait for a fallback's allocations
                      "#SBATCH --partition=high", "#SBATCH --account=genome-center-grp",
                      "#SBATCH --qos=genome-center-grp-high-qos",
-                     f'#SBATCH --output="{self.log_path}"', "module load ffmpeg/7.0.2"):
+                     f'#SBATCH --output="{self.log_path}"', "module load ffmpeg/7.0.2",
+                     "module load apptainer"):
             self.assertIn(want, text)
+        # ucd-hpc: modules.sh is sourced before the first `module`
+        self.assertLess(text.index(". /etc/profile.d/modules.sh"), text.index("module load"))
         self.assertNotIn("--requeue", text)
         steps = [ln for ln in lines if ln.startswith('"$PY" "$MP"')]
         self.assertEqual([s.split()[2] for s in steps], ["render", "link", "share"])
@@ -686,12 +692,17 @@ class Job(CoreKeyFile, T.Workspace):
         self.assertEqual(rc, 0, err)
         self.assertEqual(json.loads(out)["python"], self.py)
 
-    def test_refuses_without_a_key(self):
+    def test_without_a_key_the_job_is_written_for_the_local_voice(self):
+        """Since 2.14 (Brett, 2026-10-20) a render with no Gemini key makes the episode with the
+        local voice, so the job is written, and says so; it needs no google-genai then."""
         os.remove(self.core_file)
-        rc, out, err = self.job("--core-run")
-        self.assertEqual(rc, 2)
-        self.assertIn("no Gemini API key for the job", err)
-        self.assertFalse(os.path.exists(self.job_path))
+        with mock.patch.dict(os.environ, {"FAKE_GENAI_VERSION": "none"}):
+            rc, out, err = self.job("--core-run")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("no Gemini key was set", err)
+        self.assertIn("will make the episode with the local voice", err)
+        self.assertIn("no Gemini key was set", json.loads(out)["no_key"])
+        self.assertIn("--tts gemini --core-run", T.read(self.job_path))
 
     def test_a_consent_note_is_quoted_for_the_shell(self):
         note = "Dr O'Neil's lab; agreed 2026-10-15 $(id)"

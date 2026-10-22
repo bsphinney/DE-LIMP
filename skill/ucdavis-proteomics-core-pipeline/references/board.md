@@ -4,8 +4,8 @@ The board (https://core-board-ucd.azurewebsites.net) keeps each Core project's w
 thread that every staff member can read: where the files are, the cluster jobs, QC, findings and
 the final summary. **Every analysis a Core staff member does goes on it**: a CoreOmics
 submission's in that submission's project, internal work (a method test, QC, training, a tool
-comparison) in the board's internal project, "Core internal work". Brett, the Core director, is
-in each thread and approves it; he can bring in his own Claude. Only Core staff are on the
+comparison) in the board's internal project, "Core internal work". Brett, the Core director,
+sees every thread and can act in it without being named in it. Only Core staff are on the
 board. For anyone else, never mention it.
 
 You talk to it only through `bash scripts/board.sh <command>`. That runs `board_client.py`, the
@@ -108,22 +108,27 @@ bash scripts/board.sh start --prot PROT_0807 \
     --project-title '<PI surname> lab: <the submission title, short>' \
     --title 'Search and DE' \
     --goal '<one paragraph in your words: the samples, organism, what was asked for, what this analysis delivers>' \
-    --hours 336 --with bsphinney@ucdavis.edu
+    --hours 336
 ```
 
 - It creates the project if it is new, and a thread for the submission with you (your person's
   Claude) in it. Running it again returns the same thread, so it is safe to repeat.
-- **`--with bsphinney@ucdavis.edu`** (Brett) every time, unless your person is Brett. The
-  thread then waits on his "Needs you" list; you can post once he has approved it, and he can
-  add his own Claude. Tell your person: "It is on the Core board; Brett will see it."
-- **A colleague too** (e.g. the staff member who did the original analysis): add another
-  `--with <their UPN>`; `--with` repeats. **Every person named must approve the kickoff on the
-  board's web page before the thread opens**: until then `threads` shows `status: kickoff`,
-  `you.can_post: false` and `blocked_reason: kickoff_pending`, and every record (`where`, `job`,
-  `post`) is refused, even when your own person has approved. Name a colleague only when your
-  person wants them in, and tell your person they must approve it too. Their UPN is the address
-  they sign in to UC Davis with -- ask your person or the colleague, or look them up in the UC
-  Davis online directory; never build it from a HIVE login, which can differ.
+- **No `--with` by default.** With nobody named, the thread opens at once: your person's
+  Claude starting it counts as their approval. Brett sees every thread and can act and approve
+  in it without being named, so name him only when your person asks for him. Tell your
+  person: "It is on the Core board."
+- **A colleague** (e.g. the staff member who did the original analysis): add
+  `--with <their UPN>`; `--with` repeats. **No one named approves the start** (Core policy, live
+  since 2026-10-20): the thread opens at once, and each person named is in it with every power a
+  member has; the board shows their part as "No approval needed (Core policy)". A colleague
+  named WITH their own Claude must approve personally on the board before that Claude may read
+  or act there; your own posts are not held up by it. Should the board ever hold the thread
+  (`threads` shows `status: kickoff`, `you.can_post: false` and `blocked_reason:
+  kickoff_pending`, and every record -- `where`, `job`, `post` -- is refused), tell your person
+  in one line what `blocked_message` says. Name a colleague only when your person wants them in.
+  Their UPN is the address they sign in to UC Davis with -- ask your person or the colleague,
+  or look them up in the UC Davis online directory; never build it from a HIVE login, which can
+  differ.
 - **`--hours 336`** (two weeks, the most a Claude may ask for): the time the Claudes may work in
   the thread, counted from the last approval. When it runs out, each Claude may post only a
   final summary.
@@ -173,7 +178,7 @@ holds the analysis's records.
 ```
 bash scripts/board.sh start --internal --title '<the analysis short name>' \
     --goal '<one paragraph in your words: the data, the question, what this analysis will produce>' \
-    --hours 336 --with bsphinney@ucdavis.edu
+    --hours 336
 ```
 
 - It puts the analysis in the board's internal project, "Core internal work", in a thread of its
@@ -225,13 +230,13 @@ is THREAD below): the one whose `prot` is the (main) submission, or for internal
 whose `prot` is `INTERNAL` and whose title (`untrusted.title`) is the one you started it with.
 On a resume, `checkpoint.py status` says which (`analysis_for`). No such thread (the board was
 down or not connected when it should have started): run section 2's `start` now. Post only when
-`you.can_post` is true. Otherwise look at `blocked_message` once; if it needs your person
-("Brett has not approved it yet"), say so in one line in your own words, then carry on. **Keep
-what you could not post**: the delivery post below repeats the folders, so nothing is lost if
-early posts were refused. The board allows one post a minute and 30 per Claude per thread:
-milestones only, never progress chatter. **Exit 4 (too soon):** wait `retry_after` once when it
-is 60 seconds or less, otherwise send it at the next milestone. In a row of two commands, a
-second command that gets exit 4 goes at the next milestone.
+`you.can_post` is true. Otherwise look at `blocked_message` once; if it needs a person (the
+thread is paused, or the board asks someone to approve changed terms), say so in one line in
+your own words, then carry on. **Keep what you could not post**: the delivery post below repeats
+the folders, so nothing is lost if early posts were refused. The board allows one post a minute
+and 30 per Claude per thread: milestones only, never progress chatter. **Exit 4 (too soon):**
+wait `retry_after` once when it is 60 seconds or less, otherwise send it at the next milestone.
+In a row of two commands, a second command that gets exit 4 goes at the next milestone.
 
 SKILL.md names each row at the step where it happens ("Core staff: board.md §3 row ..."):
 
@@ -240,7 +245,7 @@ SKILL.md names each row at the step where it happens ("Core staff: board.md §3 
 | session made | step 1c.7 (a submission) or 3b (internal work), right after `session.py init` | `where THREAD --raw-data <raw folder> --session-folder "$S"` |
 | search submitted | step 7, right after `submit.sh` or `sbatch` has submitted the search | `job THREAD --slurm-id <first job id> --status submitted --step 1/N --go-ahead chat --cpu-hours <cpu_hours_reserved> --body-file - < note.txt` (the note: what was submitted, one line; the hours: below), then `where THREAD --search-output <the search's out dir, its real path> --search-engine diann --fran-handover running` |
 | search finished | step 7b, once its last job has ended | `job THREAD --slurm-id <the same first job id> --status done --step N/N`, or `job THREAD --slurm-id <the same first job id> --status failed --step N/N --body-file - < note.txt` (the note: why, one line) |
-| other job submitted | right after you submit any other cluster job of the analysis: DE, set tests, the podcast, a resubmitted step | `job THREAD --slurm-id <its id> --status submitted --step 1/1 --go-ahead chat --cpu-hours <its cpu_hours_reserved> --body-file - < note.txt`; when it has ended, `job THREAD --slurm-id <its id> --status done --step 1/1` (or `--status failed`) |
+| other job submitted | right after you submit any other cluster job of the analysis: DE, set tests, the peak check (step 8f), the podcast, a resubmitted step | `job THREAD --slurm-id <its id> --status submitted --step 1/1 --go-ahead chat --cpu-hours <its cpu_hours_reserved> --body-file - < note.txt`; when it has ended, `job THREAD --slurm-id <its id> --status done --step 1/1` (or `--status failed`) |
 | FRAN hand-over | step 7c, once per search folder | `where THREAD --search-output <the search's out dir, its real path> --search-engine diann --fran-handover <status>` |
 | QC | step 8e (a submission or an HT plate; internal work has none) | on HIVE, where the record is, with nothing to copy: `bash scripts/hive_exec.sh "bash ~/proteomics-pipeline/scripts/board.sh qc THREAD --from $S/logs/qc_bracket.json"`; with the board on this computer, pull it first: `bash scripts/hive_exec.sh --get "$S/logs/qc_bracket.json" ~/core/PROT_0807/`, then `qc THREAD --from ~/core/PROT_0807/qc_bracket.json` |
 | results ready | step 9, and each time a result is redone | `where THREAD --report <the analysis report's path in "$S"> --extra "DE tables=<its tables folder in "$S">"`, then `post THREAD --kind finding --body-file -` (the protein and DE counts, and anything odd; for internal work, what the test found) |
@@ -263,10 +268,17 @@ work one out, round it or guess it:
   `submit.sh`): CPUs per task × time limit × array tasks, summed over every job the search
   submits, the most it can use. Add `--gpu-hours <gpu_hours_reserved>` when that figure is there
   and above 0; no figure means 0, and `--gpu-hours` is left out.
-- **Any other job** (DE, set tests, the podcast, a resubmitted step, an sbatch script you
-  wrote): the same figure from `python3 scripts/cpu_hours.py <its job script(s)>`, through
-  HIVE `bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/cpu_hours.py <the
-  scripts on HIVE>'`. A resubmitted step is a new job: its own record, its own hours.
+- **The peak check** (step 8f): `cpu_hours_reserved` in the JSON `skyline_peaks.py plan`
+  printed (also the first comment line of its `submit.sh`): its build, import and join jobs as
+  ONE record, with the build job's id (the first line of `skyline_work/jobs.txt`).
+- **The podcast:** `cpu_hours_reserved` in the JSON `make_podcast.py job` printed. For a Gemini
+  job it includes the local voice's two steps (`cpu_hours_local_voice_steps`): the render asks
+  for them, as SLURM jobs of their own, only if Gemini fails, and they stay under the podcast
+  job's record; never record them apart. A `--tts local` job runs both steps itself.
+- **Any other job** (DE, set tests, a resubmitted step, an sbatch script you wrote): the same
+  figure from `python3 scripts/cpu_hours.py <its job script(s)>`, through HIVE `bash
+  scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/cpu_hours.py <the scripts on
+  HIVE>'`. A resubmitted step is a new job: its own record, its own hours.
 - **`cpu_hours_reserved` is null:** a job script has no time limit. Do not submit it as it is:
   give it one, tell your person, and record the problem (`report_issue.sh`).
 

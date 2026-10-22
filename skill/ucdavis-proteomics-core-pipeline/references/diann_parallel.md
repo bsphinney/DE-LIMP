@@ -139,6 +139,14 @@ empirical-library round-trip.
   0 rows in both reports; with `run_de.R`'s filter (PG.Q.Value at 5%) the first pass kept
   109–160 rows for them against 0–9, all protein groups with a run-specific q between 1% and 5%.
   The job never fails over the comparison (SKILL.md step 7b).
+- **Then step 5 checks what the contaminant list took away.** After the pass comparison it runs
+  `contaminant_competition.py` on its own report (within the job's remaining time): the sample
+  genes left with no precursor of their own (COMPETED OUT) or with most of their signal taken
+  (SIPHONED) by contaminant entries that share their peptides, written to
+  `<out>/contaminant_competition.json` and to `search_provenance.json`
+  (`contaminant_competition`), shown by the watcher once the search has finished and reported
+  in AUDIT.md (`references/audit.md`). Generating a search into a folder sets an earlier
+  search's record aside (`.stale-<time>`). Like the comparison, it never fails the job.
 - **Array tasks have their own `--out`.** Step 2 writes to `<out>/firstpass/t<task>.parquet`,
   step 4 to `<out>/xic/…` with XICs or `<out>/finalpass/…` without. Before, every task wrote
   `report.parquet`, `report.stats.tsv`, `report-lib.parquet` and `report.log.txt` into `<out>`
@@ -947,7 +955,7 @@ DIA-NN 2.7.0 (HIVE, review srun 23512013): a re-run with no .NET logged `ERROR: 
 | 2 | this task's `quant_step2/<run>.quant` | this task's `.quant` was written to `quant_step2/` |
 | 3 | `empirical.parquet` | the empirical spectral library exists |
 | 4 | this task's `quant_step4/<run>.quant` (before the no-step-2-quant skip) | this task's `.quant` was written to `quant_step4/` |
-| 5 | `report.parquet` and `report.stats.tsv` | every `.quant` the runs in `file_list.txt` map to is present and non-empty in `quant_step4/` (before DIA-NN runs), `report.parquet` exists, **and** its `Run` column holds every run in `file_list.txt` (`check_report_runs.py`, the single-shot search's check) |
+| 5 | `report.parquet`, `report.stats.tsv` and `contaminant_competition.json` (the last search's record must never describe this report) | every `.quant` the runs in `file_list.txt` map to is present and non-empty in `quant_step4/` (before DIA-NN runs), `report.parquet` exists, **and** its `Run` column holds every run in `file_list.txt` (`check_report_runs.py`, the single-shot search's check) |
 
 Step 5's count check is the backstop: it is the only place that can notice a sample went
 missing several steps earlier. It counts the `.quant` **files** this chain's inputs map to —

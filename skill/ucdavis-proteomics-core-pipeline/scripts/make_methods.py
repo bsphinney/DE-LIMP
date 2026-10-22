@@ -2215,6 +2215,18 @@ def main():
         w(sets_prov["methods_paragraph"])
         w("")
 
+    # The peak check's paragraph, as skyline_peaks.py wrote it (output/skyline/'s record, beside
+    # the DE tables' folder): only when it ran -- a check that did not run has no method.
+    if a.de_dir:
+        import skyline_peaks
+        pk = skyline_peaks.load_record(os.path.join(os.path.dirname(os.path.abspath(a.de_dir)),
+                                                    "skyline"))
+        if pk and pk.get("status") == "ok" and pk.get("methods_paragraph"):
+            w("## " + skyline_peaks.SECTION_TITLE)
+            w("")
+            w(pk["methods_paragraph"])
+            w("")
+
     # parameter table (value + source)
     w("## Acquisition parameters (extracted from the raw data)" if not from_record else
       "## Acquisition parameters (from the session record — raw files not readable here)")

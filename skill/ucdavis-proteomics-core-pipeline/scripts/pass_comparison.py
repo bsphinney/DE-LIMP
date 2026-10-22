@@ -47,7 +47,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from check_report_runs import _num, stats_path, stats_rows  # noqa: E402  one stats reader
 # run_de.R's identification filter: the ONE definition (DE-LIMP rule 3), never a copy here
-from diann_q_columns import DEFAULT_Q_CUTOFF, cutoff_for, fdr_columns  # noqa: E402
+from diann_q_columns import (DEFAULT_Q_CUTOFF, cutoff_for, fdr_columns,  # noqa: E402
+                             keep_expression)
 
 # A run is flagged when the final pass kept less than this fraction of its first-pass precursors.
 DROP_FLAG = 0.5
@@ -66,6 +67,7 @@ def rows_after_q(report, q_cutoff=DEFAULT_Q_CUTOFF):
     (a missing value is kept)."""
     try:
         import pyarrow.compute as pc
+        import pyarrow.dataset as pads
         import pyarrow.parquet as pq
     except ImportError:
         return None, [], "pyarrow is not installed in this python"
@@ -74,12 +76,9 @@ def rows_after_q(report, q_cutoff=DEFAULT_Q_CUTOFF):
     cols = fdr_columns(pq.read_schema(report).names)
     if not cols:
         return None, [], f"{os.path.basename(report)} has no q-value column run_de.R filters on"
-    t = pq.read_table(report, columns=["Run"] + cols)
-    drop = None
-    for c in cols:
-        over = pc.fill_null(pc.greater(t[c], cutoff_for(c, q_cutoff)), False)
-        drop = over if drop is None else pc.or_(drop, over)
-    vc = pc.value_counts(t.filter(pc.invert(drop))["Run"])
+    t = pads.dataset(report, format="parquet").to_table(
+        columns=["Run"], filter=keep_expression({c: cutoff_for(c, q_cutoff) for c in cols}))
+    vc = pc.value_counts(t["Run"])
     return ({str(v): int(n) for v, n in zip(vc.field("values").to_pylist(),
                                               vc.field("counts").to_pylist())}, cols, None)
 

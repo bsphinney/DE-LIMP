@@ -58,12 +58,17 @@ ones, not wrong sentences (see "What check cannot catch" below).
   the report? It also explains how the measurement and the statistics work, using their data."
   Make it only on a yes. Their data, their consent: cloud voices need it too ("Privacy and
   consent").
-- **It never holds up the report or the delivery.** No key, Gemini unreachable or out of quota,
-  a render or a job that fails: say so in one line ("No podcast this time: Gemini's daily quota
-  is used up.") and deliver without it. On HIVE, submit the job as soon as `job` writes it. If
+- **It never holds up the report or the delivery.** When Gemini cannot be used and waiting would
+  not help (no key, prepay credits used up, the key refused, no quota on any model, every model
+  stalled), the local voice makes the episode instead ("The local voice (Kokoro on HIVE)"). A
+  render or a job that fails anyway, or no local voice where it runs: say so in one line ("No
+  podcast this time: Gemini's prepay credits are used up, and the local voice needs HIVE.") and
+  deliver without it. On HIVE, submit the job as soon as `job` writes it. If
   it has not ended when everything else is ready to deliver, do not wait: cancel it (`scancel
   <jobid>`; the chunks it made are cached), say so in one line, and finalize and deliver
-  without it. A job left running would change the report while `deliver` copies it.
+  without it. If it had handed over to the local voice, also cancel that step's own job: its
+  log names it ("runs as HIVE job N"), and so does `podcast/.cache/local_voice.job` while it
+  runs. A job left running would change the report while `deliver` copies it.
 - **Adding it later.** Make it (submitting the job again resumes from its cache), run
   `finalize` again, then deliver again with a new `--label` (SKILL.md step 12b): the new delivery
   goes beside the first, which is never changed.
@@ -76,11 +81,14 @@ Where the report was finished, so the podcast's checks read the report it links 
 - **On HIVE** when the report was built there: this computer cannot run the skill's Python
   (Windows staff: `check_access.sh` → `local_python3.usable: false`), or any session of record
   on HIVE whose report was made there. You write the script here and put it beside the report
-  in `$S/output/podcast/`. `check` runs there through `hive_exec.sh`, and a small SLURM job
+  in `$S/output/podcast/`. `check` runs there through `hive_exec.sh`, and a SLURM job
   (`make_podcast.py job`) renders it in Gemini voices, verifies it, links it and shares it
-  ("Commands", "On HIVE"). A Core run uses the Core's shared key. Anyone else needs their own
-  key on HIVE, `~/.config/ucdavis-proteomics/gemini_key` with mode 600, saved in their own
-  terminal and never in this chat; `say` does not exist there.
+  ("Commands", "On HIVE"); when Gemini cannot be used, the local voice makes it, from that job,
+  in allocations of its own.
+  A Core run uses the Core's shared key. Anyone else needs their own key on HIVE,
+  `~/.config/ucdavis-proteomics/gemini_key` with mode 600, saved in their own terminal and never
+  in this chat; `say` does not exist there. `job --tts local` makes it in the local voice from
+  the start, with no key and no consent.
 - **Here** when the report was built here: `local` mode, or a copy pulled from a HIVE session of
   record (SKILL.md step 1c.7 on a Mac, or any hive_remote user who built the report here). Make
   the podcast before the finished files go back. Then put `podcast/`, the linked
@@ -89,8 +97,11 @@ Where the report was finished, so the podcast's checks read the report it links 
   "Commands", "Here": for a Core run use **`--tts gemini --core-run`**. The Gemini voices are
   far better than `say`, the consent is standing, and `verify` (the only check of the audio)
   uses Gemini anyway. It needs a key on this computer; `make_podcast.py key --core-run` says
-  whether there is one. With none, use `--tts say`: it is offline and sends nothing, but with
-  no key `verify` cannot run either, so say that someone must listen to it.
+  whether there is one. With none, use `--tts local` when this computer has the skill's HIVE
+  login (each step runs as a HIVE job and the audio comes back; `verify` runs there too), else
+  `--tts say`: it is offline and sends nothing, but with no key `verify` cannot run either, so
+  say that someone must listen to it. A Gemini failure that waiting cannot fix hands over to the
+  local voice the same way, through HIVE.
 
 ## Privacy and consent (read before any cloud voice)
 
@@ -148,7 +159,13 @@ So:
   and sends nothing. A free-tier key is for published or synthetic data only.
 - Without consent the gemini backend sends nothing and exits, explaining why. `--cloud-ok no`
   (or `false`, `0`, `none`, `declined`) is a refusal. `--core-run` and `--cloud-ok` cannot be
-  given together.
+  given together. The refusal is not a Gemini failure, so the local voice never takes over
+  from it; `--tts local` is the way to make an episode without consent.
+- **The local voice sends nothing.** `--tts local`, and the fallback when Gemini fails, run in
+  the Core's containers on HIVE: the text goes no further than campus, so no consent is needed.
+  The episode's own "AI-generated, in synthetic voices" line stays. After a fallback,
+  `cloud_tts_consent` still records the consent under which Gemini was asked before it failed,
+  and `tts.what_was_sent` says how much of the script reached it.
 - **Keys**, the first found: `GEMINI_API_KEY`; `~/.config/ucdavis-proteomics/gemini_key`
   (`chmod 600`), beside the skill's other per-user settings. On HIVE, where every home folder is
   open to every account, a personal key others can read is **refused**, not used
@@ -321,6 +338,14 @@ Claims section):
   effect that we then corrected with ComBat", "we used the previous version, 2.6.1", "the tube
   label was wrong and has been corrected in the sample sheet"). What neither tier catches is the
   meaning check's (f).
+- **The Skyline peak check is not confirmation.** It is a visual check of DIA-NN's peaks
+  (`references/skyline.md`), so no host says a result was "confirmed by Skyline", "validated" or
+  "verified" by the peak check. `check` FAILS on it (`client_text.peak_check_overclaims`, the
+  same words the report builder warns on); a negation in the same clause clears it ("the peak
+  check is not independent confirmation"). When the verb belongs to another check or person in
+  the sentence ("..., and the contaminant check confirmed that ...") or the listener is asked to
+  do it ("open the Skyline file to verify the peaks yourself"), `check` WARNS instead, and the
+  meaning check decides.
 
 ### The meaning check: a separate reader, before render
 
@@ -498,10 +523,14 @@ python3 scripts/make_podcast.py render $P/podcast_script.md --tts gemini --core-
 #    ... anyone else, once they agreed:
 python3 scripts/make_podcast.py render $P/podcast_script.md --tts gemini \
     --cloud-ok "<who agreed>, <date>, <paid|free> key"
+#    ... or the local voice, Kokoro on HIVE (no key or consent; needs the skill's HIVE login):
+python3 scripts/make_podcast.py render $P/podcast_script.md --tts local
 #    ... or offline (macOS; no key needed, nothing sent):
 python3 scripts/make_podcast.py render $P/podcast_script.md --tts say
-# 4. verify: the ASR round trip (automatic after a consented gemini render; by hand after say)
+# 4. verify: the ASR round trip (automatic after a consented gemini render and a local one; by
+#    hand after say). A local-voice episode is always heard back on HIVE, sending nothing.
 python3 scripts/make_podcast.py verify $P/podcast_script.md --core-run   # or --cloud-ok "<who, when>"
+python3 scripts/make_podcast.py verify $P/podcast_script.md --local      # Whisper on HIVE instead
 #    -> $P/verify.txt. Listen to every segment it names; fix, re-render, verify again.
 # 5. link it into the report, README and AGENTS.md (safe to re-run)
 python3 scripts/make_podcast.py link $S/output
@@ -547,6 +576,7 @@ bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py
     $S/output/podcast/podcast_script.md --core-run"
 #    internal Core work they said yes to: --core-run internal
 #    anyone else: --cloud-ok "<who agreed>, <date>, <paid|free> key" (their own key on HIVE)
+#    the local voice from the start (no key, no consent): --tts local
 bash scripts/hive_exec.sh '<the "submit" line it printed>'
 # 4. watch it like any job, with the "log" it printed; when it ends, read verify.txt
 bash scripts/watch_run.sh --hive --slurm <jobid> --log "<the log it printed, with the job id>"
@@ -559,23 +589,37 @@ bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.t
   `--cloud-ok` for anyone else), a python must have
   google-genai >= 2.25.0 (the pipeline env's, from `setup.json`; `bash
   ~/proteomics-pipeline/scripts/setup.sh` installs it, and `setup.sh --check` reports it as
-  `podcast`), and there must be a key (for a Core run, the Core's shared key).
+  `podcast`). With no key (for a Core run, the Core's shared key) it writes the job anyway and
+  says so: its render makes the episode with the local voice, and google-genai is not needed.
 - **The job** is `~/.proteomics-pipeline/jobs/podcast_<PROT or session>_<hash>.sh`, its log
   `..._<jobid>.log` beside it; `job` prints both. That folder is yours alone (mode 700). Core
   session folders are group-writable with no sticky bit, so a script there could be swapped for
   another member's before `sbatch` reads it, and the job would run as you. The script is written
   without following a link, and a link where it goes is refused. The job asks for 1 CPU, 2 GB
-  and 2 hours, on the queue `run_search.slurm_queue` picks for this account (as every job the
-  skill writes; `--requeue` on a preemptible one, with `--open-mode=append` so a requeued job
-  adds to its log). Its `--output` path is in double quotes, so a space in it is fine (single
-  quotes leave no log in a real run). It is a login shell (`#!/bin/bash -l`), so it can
-  `module load ffmpeg/7.0.2` for the AAC; when no ffmpeg can be found, its log says so in a
-  `[WARN]` (the episode then stays a ~58 MB `podcast.wav`, and `share` cannot build). Then `render --tts gemini --core-run` (verify follows by itself), `link` and `share`;
-  a failed step stops it there. Submitting it again resumes: finished chunks are cached. An
-  episode takes minutes; rate limits can stretch that to an hour.
+  and 4 hours: it is network calls. If the local voice takes over, each of its steps asks for an
+  allocation of its own only then ("The local voice", "Where it runs"), so the job never holds
+  Kokoro's CPUs just in case; the time is room for Gemini's own waits (every budget at its
+  limit is about 3 hours) and to wait for those in the queue. It runs on
+  the queue
+  `run_search.slurm_queue` picks for this account (as every job the skill writes; `--requeue`
+  on a preemptible one, with `--open-mode=append` so a requeued job adds to its log). Its
+  `--output` path is in double quotes, so a space in it is fine (single quotes leave no log in a
+  real run). It is a login shell (`#!/bin/bash -l`) that sources `/etc/profile.d/modules.sh`
+  first (HPC@UCD's rule), then `module load ffmpeg/7.0.2` for the AAC and `module load
+  apptainer` for the local voice; when no ffmpeg can be found, its log says so in a `[WARN]`
+  (the episode then stays a ~58 MB `podcast.wav`, and `share` cannot build). Then `render --tts
+  gemini --core-run` (verify follows by itself; the local voice takes over if Gemini fails in
+  a way waiting cannot fix), `link` and `share`; a failed step stops it there. Submitting it
+  again resumes: finished chunks are cached. An episode takes minutes; rate limits can stretch
+  that to an hour. `job --tts local` writes the same job with `render --tts local`, asking for
+  16 CPUs and 24 GB (Kokoro speaks a 24-min episode in about 2 minutes on 16 CPUs; Whisper hears
+  it back in about 6), and needs no consent, key or google-genai.
 - **Never run render, verify or share on the login node**: they are minutes of network calls.
   HIVE's compute nodes reach Google's API (checked 2026-10-15). `check`, the preview, `link`
-  and `key` are light, so they may run through `hive_exec.sh` directly.
+  and `key` are light, so they may run through `hive_exec.sh` directly. `render --tts local`
+  started on a login node moves itself to a compute node (one blocking srun: 16 CPUs, 24 GB,
+  an hour), and on a login node each local-voice step (the speaking, the hearing back) runs
+  in an srun of its own.
 - **After the job, the HIVE report carries the Listen card.** Never put a local copy of
   `Analysis_Report.html` over it. To change the report later, rebuild it
   (`make_analysis_html.py` keeps the card), then `check` and the job again: only changed chunks
@@ -583,8 +627,9 @@ bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.t
 - Then finalize (step 12) and deliver (step 12b), which find `podcast/` and
   `Analysis_Report_with_audio.html` in `$S/output`. **They never wait for it.** A job that
   failed: one line to the staff member, then finalize and deliver without it. A job still
-  running when everything else is ready: `scancel` it, one line, then finalize and deliver
-  without it, and add the audio later ("When it is made").
+  running when everything else is ready: `scancel` it (and the local voice's step job, if its
+  log names one), one line, then finalize and deliver without it, and add the audio later
+  ("When it is made").
 
 - **Sources.** Pass the delivered report text you wrote from, all from the session's `output/`
   folder: `AI_Analysis_Report.md` (or the report's `Analysis_Report.md` twin, or
@@ -625,10 +670,11 @@ bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.t
     request before it has made its first chunk hands over to the next.
   - **One model per episode.** Once a model has made a chunk, the episode stays on it, because
     a second model's voices sound different. A resume (chunks already in the cache) and
-    `--redo` are pinned to the model that made the cache: they never hand over. If that model
-    is out of quota, render stops, names the chunk and keeps the cache. Re-run later to
-    resume, or pass `--model <other>` to re-render every chunk with that model. Only an
-    explicit `--model` render prunes another model's cached chunks.
+    `--redo` are pinned to the model that made the cache. If that model is out of its daily
+    quota, the next model makes every chunk again (since 2.14; with no model left, the local
+    voice does); if it is missing or rejects the request, render stops, names the chunk and
+    keeps the cache: re-run later to resume, or pass `--model <other>` to re-render every chunk
+    with that model. Only an explicit `--model` render prunes another model's cached chunks.
   - **A model that stops answering is left, and every chunk is made again.** A staff render
     (2026-10-16) sat 28 minutes on a stalled `gemini-3.8-flash-tts` while
     `gemini-2.5-flash-preview-tts` answered a two-line test in 2.9 s; its first chunks were
@@ -640,8 +686,16 @@ bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.t
       If the model that made the cached chunks does not answer, the next one makes **every
       chunk again**, so the voices never mix. Nothing to make, no test. Each test is one request
       against the key's daily quota (a free-tier key's TTS quota is small), and a resume walks
-      the models until one answers (up to 60 s each). `--no-preflight` skips it;
-      `podcast.json` `tts.preflight` records which.
+      the models until one answers (up to 60 s each). When none answers and some gave no
+      answer (the others out of quota or missing, as on a free-tier key, count too), the
+      render says so in the log, waits **5 minutes** and asks those models once more, in the
+      same order (at most one more request each; the first that answers is used), so a
+      one-minute outage at Google does not count as "every model stalled"; only a second miss
+      does. After the wait, a model that missed and was not asked again (another answered
+      first) can still take over mid-episode, unless an earlier render saw it stall (below):
+      that one stays out until it answers, as does one whose test came back empty. `tts.preflight.waited_s` records the wait, or
+      `tts.fallback.preflight_waited_s` when the local voice then made the episode.
+      `--no-preflight` skips the test; `podcast.json` `tts.preflight` records which.
     - **Mid-episode.** When a chunk's request goes unanswered twice (`--request-timeout`), the
       render moves to the next candidate model and makes **every chunk again** with it, and
       says so in the log; with no other model it stops with the resume message, as before.
@@ -694,10 +748,12 @@ bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.t
     daily quota (`…PerDay…`).
   - **Prepay credits used up (402).** Not a rate limit, though Google's answer also says
     `RESOURCE_EXHAUSTED`: no wait clears it, and every model draws on the same project. Render
-    (the preflight too) stops at once: "Gemini prepay credits are depleted", Google's own
-    message, add prepay credits to the key's project in AI Studio (its Billing page), re-run
-    the same command; the chunks already made are cached. Before 2.13.2 it was read as a
-    per-minute limit and each chunk waited 10 × 65 s.
+    (the preflight too) stops asking Gemini at once and the local voice makes the whole episode
+    ("The local voice (Kokoro on HIVE)"). Where it cannot, or with `--no-fallback`, render stops
+    with Google's own message: "Gemini prepay credits are depleted", add prepay credits to the
+    key's project in AI Studio (its Billing page), re-run the same command; the chunks already
+    made are cached. Before 2.13.2 it was read as a per-minute limit and each chunk waited
+    10 × 65 s.
   - **Pacing.** Requests to one model are spaced at least 20 s apart (`--min-interval`).
   - **A request that does not answer.** Each request logs `[render] chunk k/N ...: sent to
     <model>` and, while it waits, `still waiting for <model> (Ns)` every minute. With no answer
@@ -784,6 +840,146 @@ bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.t
     as `[SKIPPED]` with the reason. Without `html_to_pdf.py` at all, an `[INFO]` line says how
     to reprint it by hand.
 
+## The local voice (Kokoro on HIVE)
+
+Kokoro-82M (Apache-2.0) speaks the episode, and Whisper (MIT) hears it back, each in the Core's
+pinned container on HIVE (`scripts/podcast_local.py`). The text goes no further than campus, it
+costs nothing and has no daily limit. Brett Phinney (Core director) decided on 2026-10-20 that
+**Gemini stays the default** -- its voices perform the conversation better -- and the local
+voice is its **automatic fallback**. `--tts local` (render, and `job --tts local`) uses it from
+the start.
+
+- **When it takes over.** During `render --tts gemini`, when Gemini cannot be used and waiting
+  would not help (`GeminiUnusable` in `make_podcast.py`):
+  - no Gemini key was set (`nokey`; Brett, 2026-10-20): nothing is sent to Google, and
+    `podcast.json` says "Gemini was not asked: no Gemini key was set";
+  - a 402, "prepay credits are depleted" (`billing`);
+  - the key refused: 401/403, `PERMISSION_DENIED`, "API key not valid" (`auth`);
+  - no quota, or not usable, on every candidate model (`quota`). One model out of its daily quota
+    part-way through the episode (or the model a resume is pinned to) first hands over to the
+    next Gemini model, which makes every chunk again, as for a stall; only when every model is
+    out of quota or stalled does the local voice take over;
+  - every candidate model stopped answering (`stalled`; at the two-line test, only when each
+    misses it twice, 5 minutes apart) -- also when the time lost to
+    unanswered requests (`--request-timeout-budget`, 30 min) runs out after a model that
+    stalled mid-episode has handed over (a hand-over at the two-line test does not count), which
+    with the defaults happens on the next model's first timeout -- or a mix
+    of the last two (`none`).
+  A transient error or an empty answer from any model, at the two-line test or later, means a
+  later run may succeed, so it never hands over.
+  It does **not** take over for what waiting or another Gemini model clears: a per-minute rate
+  limit (waited out), one model that stops answering (the next Gemini model makes every chunk
+  again), one model out of its daily quota (the same), a transient error, the rate-limit budget,
+  the timeout budget with no stalled model, or a resume whose model is missing or rejects the
+  request. Those stop with the resume message, as before. No consent is not a Gemini failure:
+  render refuses as before. `--no-fallback` keeps the old stop for all of them.
+- **One voice per episode.** On a fallback the local voice makes **every chunk again**, those
+  Gemini already made included, so an episode never mixes voices. Gemini's chunks stay in
+  `podcast/.cache` (another model's chunks are never pruned), so a later Gemini render resumes
+  from them.
+- **Said plainly.** The render log says what failed and that the whole episode is being made
+  with Kokoro, and ends: "Gemini failed (its prepay credits are depleted (402)); the whole
+  episode was made with Kokoro on HIVE instead, so it has one voice throughout. Nothing was sent
+  to Google for the audio or its check." The note is the first of `podcast.json`'s warnings.
+- **Voices** (Brett, 2026-10-20, from eight stock pairs): the first host, Maya, is `bf_emma`;
+  the second is `af_heart`. Both are women's voices, so in a local-voice render the second
+  host's name is **spoken as "Lena"**: the whole word "Leo" in the spoken text only ("Leo's"
+  too; never "Leonardo" or "LEO"). The script, the transcript, the speaker labels and
+  `podcast.json`'s hosts keep Leo, and the transcript page's Voices row says "Leo: af_heart
+  (said as Lena)". Gemini renders are unchanged: Kore and Charon, "Leo". A script may name
+  other voices from the image with a header line, `Local voices: Maya=bf_emma, Leo=af_heart`;
+  a man's voice for Leo keeps the name.
+- **Text rules** (`scripts/kokoro_text.py`, after the Pronunciation table; what the voice reads,
+  never the transcript): spelled-out letters in capitals ("c s g a" read "uh" for the lone
+  "a"), ISO dates in words, versions spelled out, PROT numbers digit by digit (the zero was
+  dropped), "+0.61" and "−1.82" as "plus" and "minus", and number ranges ("91–97%", "68-72%") as
+  "91 to 97%". Each fixes a misreading found in Core episodes, and `render --tts local
+  --dry-run` shows the result. A symbol that still comes out wrong gets a Pronunciation row,
+  as for Gemini.
+- **Where it runs** (`podcast_local.find_runner`), each step sized for itself: speaking 16 CPUs,
+  24 GB, 30 min; hearing back 16 CPUs, 12 GB, 45 min.
+  - In a HIVE job with room (8 CPUs and 12 GB or more: `job --tts local`, or `render --tts
+    local` moved off a login node) the containers run in the job itself.
+  - From a job too small for it -- the Gemini podcast job (1 CPU, 2 GB) when it falls back --
+    or from a HIVE login node, each step is a HIVE job of its own, right-sized and asked for
+    only then: one blocking srun with the queue written out (`on_compute.srun_argv`); from
+    inside a job, that job's SLURM variables are left out so srun asks for a new allocation,
+    never a step of the small one. Its files sit in the episode's `podcast/.cache` (never a
+    node's own `/tmp`). As soon as it starts, its job id is said in the log ("runs as HIVE job
+    N … `scancel N` stops it") and kept in `podcast/.cache/local_voice.job` until it ends, so
+    whoever cancels the podcast job can cancel it too. A job HIVE refuses or never starts is
+    said plainly ("HIVE did not give the local voice a job (…)").
+  - On another computer with the skill's HIVE login, each step is a HIVE job (`hive_exec.sh
+    --job`): the lines (or the episode) go to a private folder in your HIVE home
+    (`~/.proteomics-pipeline/podcast-local/`, mode 700), the results come back, and the folder
+    is removed.
+  - The containers run with `--cleanenv --no-mount home,cwd` and see only their own work
+    folder, bound: no environment from the render, no home folder (where a Gemini key file
+    lives) and no working folder. No container call, srun or HIVE job is handed the Gemini key.
+    The work folder never has a `,` or `:` in its path, as given or resolved (apptainer's
+    `--bind` splits on them); the episode is copied into it to be heard back.
+  - Nowhere else: render
+  says so, with the reason -- no HIVE login on this computer, a
+  HIVE account that cannot read the Core's containers (they are for members of
+  proteomics-grp), or the skill not on HIVE or older than 2.13.2, which has the `on_compute.py`
+  the HIVE job needs (`hive_exec.sh --put-skill`) -- and, after a Gemini
+  failure, that there is no episode this time. Staff need nothing installed; their HIVE account
+  must be in proteomics-grp.
+- **Speed and size.** Every line still to make goes to Kokoro in **one** container call
+  (start-up about 20–30 s once). Workers of 2 threads, each holding its own model, about
+  **2.5 GB each**, are sized from the CPUs and memory the step has: 8 workers on **16 CPUs and
+  24 GB**, a 24-minute episode in about 2 minutes. The container's `synth.py` 1.2 ends the call at once (exit 3,
+  with the reason) when a worker dies, for example killed for memory; 1.1 hung there. A free
+  GPU is never waited for: the free tier's GPUs waited over 10 minutes in 12 of 12 tries.
+- **The check.** A local-voice episode is always heard back on HIVE, never by Gemini: Whisper
+  `large-v3-turbo` and, as a second opinion, `small.en` transcribe it at the same time (about 6
+  minutes on 16 CPUs for 24 minutes of audio). Each transcript is scored as `verify` scores
+  Gemini's, against the text the voice was given (Lena included). It WARNs when the word match
+  is below 0.93 or when **both** transcriptions depart from the text at the same spot -- a
+  number not heard as itself, 6+ words not heard, or invented words -- with the time of each;
+  a spot only one transcriber shows is listed as a place to listen, since Whisper too invents
+  and skips words. Numbers are compared by value for decimals (4.10 is 4.1), never for leading
+  zeros (0807 is not 807), and number words do not join across a full stop. `verify` on a
+  local-voice episode does this by itself, with no consent; `verify --local` checks a Gemini
+  episode the same way.
+- **What `podcast.json` says.** `tts.backend` "kokoro", `tts.model` "Kokoro-82M (on HIVE)",
+  `tts.sent_to_cloud` false, `tts.consent` "not needed: made offline on HIVE, nothing was sent
+  to any service" (after a fallback: not needed for this audio, and what Gemini, asked first,
+  was sent). `tts.engine`: the model and its commit, the licence, the image and its
+  sha256, `synth` 1.2, the voices, `spoken_names` ({"Leo": "Lena"}), where it ran, the lines the
+  text rules changed and the container call (workers, threads, memory, timings).
+  `tts.fallback` (null for `--tts local`): `from` "gemini", `to` "kokoro", `why`
+  (billing / auth / quota / stalled / none), `reason`, `google_said` (Google's own words,
+  scrubbed of any key), `stopped_at` (the chunk, or the preflight), `at`, the Gemini models
+  tried and any hand-overs; exactly what Google had of this script: `gemini_chunks_sent` of
+  `chunks` (their text, in this render or an earlier one), `chunks_sent_to_gemini` of them in
+  this render, `gemini_chunks_cached`, `gemini_chunks_not_in_script` (chunks whose text it
+  had that this script no longer holds, after an edit), and the two-line sound checks
+  (`preflight_requests` in this render, `preflight_requests_before`: generic sentences, not the
+  script), `preflight_waited_s` (the 5-minute wait before asking the models again, or 0); and
+  the `note`. These come from `podcast/.cache/gemini_sent.json`, where every
+  request to Gemini for the episode is noted before it is sent (each chunk by a hash of its text,
+  whatever the model) and which is kept with the cache; for renders before 2.14 a chunk counts
+  when its Gemini audio is in the cache. `tts.what_was_sent` and `tts.consent` say the same in
+  words, and the transcript page's Speech row says that Gemini, tried first, failed and what it
+  had been sent ("only a sound check, none of this transcript", or "the text of k of the n parts
+  of this transcript"). `cloud_tts_consent` is the consent it went under. When the check cannot
+  run, `verify.txt` says so plainly and the render log says why (a HIVE folder or account name
+  never goes into the delivered files). The
+  `verify` block names Whisper, the image and its sha256, `audio_sent` "nothing sent:
+  transcribed on HIVE", and the spots both transcriptions agree on.
+- **The images**, each pinned in `podcast_local.py` by its sha256 and checked in the job before
+  it runs (another file at that path is refused, never used):
+  - `/quobyte/proteomics-grp/tts/kokoro/kokoro-1.2.sif`, sha256
+    `9877b44195fbffd81327d85744b68c49807318e19869a459e72cda5d8c16b355`;
+  - `/quobyte/proteomics-grp/tts/whisper/whisper-1.0.sif`, sha256
+    `778806d931e59b6322dd5cee14f0bf14245959a54c57b751d26eb42497aae349`.
+  How they are built, what is in them, and their licences: the `README.md` beside each. A new
+  build is a new versioned file with a new pin; the old ones are kept.
+- **How it sounds.** A calm reader: each line is spoken on its own and joined with a short
+  pause, so the hosts do not react to each other the way Gemini's do. Ask for a listen before
+  it is shared, as for any episode.
+
 ## Sending the report with the audio (`share`)
 
 The Listen card's links are relative (`podcast/podcast.m4a`, `podcast/transcript.html`), so
@@ -831,7 +1027,7 @@ when someone asks for "the report with the audio".
 `podcast.m4a`, `podcast_script.md` (the script with its claims ledger), `transcript.html`
 (disclosure, player, transcript, claims, how it was made -- the pronunciation table is in
 `check.txt`, not here), `podcast.json` (show, title, hosts and voices, TTS backend and exact
-model, consent and, for a Core run, `core_run` (`submission` with its PROT number, or
+model -- for the local voice its engine, and any fallback and why -- consent and, for a Core run, `core_run` (`submission` with its PROT number, or
 `internal`), script sha256, sources as relative paths or labelled file names with their
 sha256, words, duration, `ai_generated: true`, and the `verify` block), `check.txt`, and after
 verify `verify.txt` and `verify_transcript.txt`. For a Core run, who made it (their login) is in
@@ -851,7 +1047,8 @@ Listen card points at: the audio, the transcript, the script, `check.txt` and `p
   over. A Gemini render also warns when a chunk's audio is far shorter or longer than its text
   implies.
 - **Synthetic voices.** There are no real interruptions or laughter. Gemini voices a whole
-  segment at once, so it flows better than one call per turn.
+  segment at once, so it flows better than one call per turn -- or than the local voice, which
+  reads each line on its own.
 - **Figures only through the report**, or through the PNGs you looked at.
 - **The check is mechanical.** It catches invented tokens -- numbers, symbols, capitalised names,
   quantities in words -- plus a missing disclosure, a claimed specialty, forbidden names and

@@ -10,15 +10,18 @@ to a record. session.py (the session zip) and make_report.py (OUTPUT_FILES.md) b
     finalize deletes it once a current PDF exists (session.report_pdf_step);
   * every `*.stale.html` -- the same for the shareable report with the audio built in
     (make_podcast.ensure_share: Analysis_Report_with_audio.stale.html);
-  * podcast.wav when podcast.m4a sits beside it (render --keep-wav): the .m4a is the episode.
+  * podcast.wav when podcast.m4a sits beside it (render --keep-wav): the .m4a is the episode;
+  * every `skyline_work` directory -- the peak check's working folder (skyline_peaks.py): the
+    Skyline document's caches, the per-file imports, the job scripts and logs. What a reader
+    needs from it is in output/skyline/ (the pictures, the tables and the .sky.zip).
 
 They stay on disk where they are. Stdlib only.
 """
 import os
 
-SCRATCH_DIRS = frozenset({".cache"})
-LABEL = ("scratch: .cache folders, *.part files, *.stale.pdf/.html, podcast.wav beside "
-         "podcast.m4a (kept on disk)")
+SCRATCH_DIRS = frozenset({".cache", "skyline_work"})
+LABEL = ("scratch: .cache and skyline_work folders, *.part files, *.stale.pdf/.html, podcast.wav "
+         "beside podcast.m4a (kept on disk)")
 
 
 def is_scratch_dir(name):
