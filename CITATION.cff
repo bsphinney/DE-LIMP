@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "DE-LIMP and the UC Davis Proteomics Core pipeline (Claude Code skill)"
+abstract: "DE-LIMP is an R/Shiny application and Claude Code skill (ucdavis-proteomics-core-pipeline) for reproducible DIA proteomics: database search with DIA-NN or Sage, limpa DPC-Quant and limma differential expression, quality audits, publication Methods, AI-written reports with independent review, and a full reproducibility bundle for every run."
+authors:
+  - family-names: Phinney
+    given-names: "Brett S."
+    affiliation: "UC Davis Genome Center Proteomics Core Facility"
+version: "2.14.0"
+date-released: "2026-10-23"
+license: PolyForm-Noncommercial-1.0.0
+repository-code: "https://github.com/bsphinney/DE-LIMP"
+keywords:
+  - proteomics
+  - DIA
+  - DIA-NN
+  - limpa
+  - limma
+  - differential expression
+  - reproducibility
+  - Claude Code skill
