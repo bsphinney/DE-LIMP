@@ -126,7 +126,7 @@ says which flag was added and why; drop the flag to get the current database ins
 - **`--enzyme <list>`** — always passed: the digestion enzyme(s) recorded as
   `digestion_enzymes_used` (they decide which protease contaminant entries stay `Cont_`
   when they match a target). A sidecar from before the field existed replays the default,
-  `trypsin,lysc`.
+  `trypsin,lysc`; an empty list (a build with no digestion enzyme) replays `--enzyme none`.
 - **`--keep-target-contaminants`** — the database predates the removal of contaminant
   entries identical to a target protein (bovine ACTB = human ACTB …; sidecar state
   `legacy`), or was built with that flag. Without it the rebuild drops entries the original

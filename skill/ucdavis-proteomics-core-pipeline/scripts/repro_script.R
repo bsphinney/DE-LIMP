@@ -85,8 +85,11 @@ write_repro_script <- function(path,
                                # the quantity column the dpc run read (--quantities raw:
                                # Precursor.Quantity); NULL = limpa's default, Precursor.Normalised
                                intensity_column = NULL,
-                               # FALSE when the maxlfq run applied no quantile step (--quantities raw)
-                               quantile_normalise = TRUE,
+                               # the maxlfq run's between-run step, "none" | "quantile" | "median"
+                               # (build_maxlfq.R maxlfq_between_run). NULL = the descriptor's
+                               # between_run; a maxlfq script with neither is refused, never
+                               # guessed.
+                               between_run = NULL,
                                # run_de.R's not_measured record: in each contrast a protein measured
                                # in no run of the compared groups is not tested. NULL = the run
                                # tested every protein (before 2.12.0), so nothing is emitted.
@@ -104,6 +107,15 @@ write_repro_script <- function(path,
 
   is_dpc  <- identical(method, "dpc")
   rpt_abs <- normalizePath(input, mustWork = FALSE)
+  # maxlfq: the between-run step the run applied, as its descriptor recorded it -- never re-decided
+  # and never defaulted (a guess here would be a step the log claims without the run having said
+  # so; the pre-2.14.2 rule for an old record is normalization_check.between_run_of's alone)
+  br_why <- descriptor$between_run$why
+  if (is.null(between_run)) between_run <- descriptor$between_run$method
+  if (!is_dpc && is.null(between_run))
+    stop("write_repro_script: a maxlfq script needs the run's between-run step -- its ",
+         "descriptor's between_run (build_maxlfq.R, 2.14.2 and later) or between_run = ",
+         "\"none\" | \"quantile\" | \"median\"; it is never guessed", call. = FALSE)
   # The contaminant step, emitted from the record so the script removes exactly what the
   # run removed -- a script that kept them would reproduce a different analysis.
   cont_on  <- isTRUE(contaminants$removed)
@@ -317,8 +329,11 @@ write_repro_script <- function(path,
       sprintf("# --- 2. One value per (protein, run) -- %s; pivot wide; log2%s",
               if (!is.null(descriptor$rollup_method)) descriptor$rollup_method
               else "max(PG.MaxLFQ) over the report's rows",
-              if (quantile_normalise) "; quantile-normalise" else
-                "; NOT normalised (--quantities raw: a --no-norm report)"),
+              switch(between_run, quantile = "; quantile-normalise",
+                     median = "; median-centre each run",
+                     if (identical(descriptor$quantities, "raw"))
+                       "; NOT normalised (--quantities raw: a --no-norm report)"
+                     else "; no between-run step here")),
       "pg_run <- rows |>",
       "  dplyr::group_by(Protein.Group, Run) |>",
       "  dplyr::summarise(PG.MaxLFQ = max(PG.MaxLFQ, na.rm = TRUE), .groups = 'drop') |>",
@@ -329,7 +344,11 @@ write_repro_script <- function(path,
       "E[E <= 0 | !is.finite(E)] <- NA_real_",
       "E <- log2(E)",
       "E <- E[, colSums(is.finite(E)) >= 2, drop = FALSE]   # drop runs with <2 proteins",
-      if (quantile_normalise) "E <- limma::normalizeBetweenArrays(E, method = 'quantile')",
+      switch(between_run,
+             quantile = "E <- limma::normalizeBetweenArrays(E, method = 'quantile')",
+             median = c("cm <- apply(E, 2, stats::median, na.rm = TRUE)   # each run's median log2",
+                        "E <- sweep(E, 2, cm - stats::median(cm, na.rm = TRUE))"),
+             if (!is.null(br_why)) sprintf("# no between-run step: %s", br_why)),
       "",
       sprintf("# --- 3. Coverage filter: a protein must be quantified in >= %.0f%% of samples",
               100 * cov_min_frac),

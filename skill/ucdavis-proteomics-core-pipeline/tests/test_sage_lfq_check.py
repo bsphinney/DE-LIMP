@@ -40,12 +40,13 @@ except ImportError:
 
 
 def write_sage_outputs(out, offsets, peaks=None, lfq_q=0.01, lfq_settings=None, n=200,
-                       spread=0.8, log=True):
+                       spread=0.8, log=True, target_q=0.001):
     """Sage 0.14.7-shaped output in `out`: results.sage.parquet (n confident target PSMs per run
     at `offsets[run]` ppm, +/- `spread`, plus decoys at a wild error that must be ignored),
     lfq.parquet (targets and their +11.06 Da decoys, all at q_value `lfq_q`), results.json (the
     parameters as run; lfq_settings only if given, as Sage writes what the config set) and, if
-    `log`, sage.log with Sage's "discovered N target MS1 peaks at 5% FDR"."""
+    `log`, sage.log with Sage's "discovered N target MS1 peaks at 5% FDR". `target_q`: the
+    peptide_q of the n target PSMs (above 0.01: nothing identified at 1%)."""
     import pyarrow as pa
     import pyarrow.parquet as pq
     os.makedirs(out, exist_ok=True)
@@ -67,7 +68,7 @@ def write_sage_outputs(out, offsets, peaks=None, lfq_q=0.01, lfq_settings=None, 
 
     for run, off in offsets.items():
         for i in range(n):
-            psm(run, i, off + spread * ((i % 5) - 2) / 2.0)
+            psm(run, i, off + spread * ((i % 5) - 2) / 2.0, q=target_q)
         for i in range(n // 4):
             psm(run, i, 40.0, decoy=True)                           # never part of the median
             psm(run, i, 30.0, q=0.5)                                # not confident: ignored too
@@ -204,6 +205,29 @@ class LfqWindowCheck(unittest.TestCase):
         rec = slc.check(self.out)
         self.assertEqual(rec["status"], "ok")
         self.assertNotIn("not judged", rec["message"])
+
+    def test_nothing_identified_is_not_checked_and_says_why(self):
+        """H2-3: Sage found 0 peptides at 1% (HIVE, un-combined timsTOF mzML). The record said
+        "warn", that "the runs' median precursor mass errors fit the window" (no run was
+        measured) and that "the identifications are not affected" (there were none)."""
+        write_sage_outputs(self.out, {"a.mzML": 0.5, "b.mzML": 0.5}, peaks=0, target_q=0.5)
+        rec = slc.check(self.out)
+        self.assertEqual(rec["status"], "unchecked", rec.get("message"))
+        self.assertEqual(rec["target_peptides_1pct"], 0)
+        self.assertIn("no target peptide at 1% FDR", rec["reason"])
+        self.assertIn("was not checked", rec["message"])
+        self.assertNotIn("fit the window", rec["message"])
+        self.assertNotIn("not affected", rec["message"])
+        self.assertEqual(rec["target_ms1_peaks_5pct_fdr"], 0)       # still recorded
+
+    def test_runs_too_thin_to_measure_are_not_said_to_fit(self):
+        """H2-3: every run below the PSMs needed to measure it, and 0 MS1 peaks: a warning, but
+        never that the (unmeasured) mass errors fit the window."""
+        write_sage_outputs(self.out, {"a.mzML": 0.5}, peaks=0, n=10)
+        rec = slc.check(self.out)
+        self.assertEqual(rec["status"], "warn")
+        self.assertNotIn("fit the window", rec["message"])
+        self.assertIn("no run's precursor mass error could be measured", rec["message"])
 
     def test_lfq_off_is_not_applicable(self):
         write_sage_outputs(self.out, {"a.mzML": 9.0}, peaks=0)

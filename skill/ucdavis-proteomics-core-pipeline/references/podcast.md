@@ -69,6 +69,15 @@ ones, not wrong sentences (see "What check cannot catch" below).
   without it. If it had handed over to the local voice, also cancel that step's own job: its
   log names it ("runs as HIVE job N"), and so does `podcast/.cache/local_voice.job` while it
   runs. A job left running would change the report while `deliver` copies it.
+- **The finish gate** (SKILL.md golden rule 9; `report_files.FINISH_NEEDS["podcast"]`).
+  `check`, `link`, `share` and `job` refuse, listing each gap with the command that makes it,
+  without the skill's own report (`Analysis_Report.html` with its `report_provenance.json`; a
+  pandoc report once copied over it became an episode) and the Methods (`output/methods.md`).
+  The bundle and the finalize stamp are not needed: 9e runs before steps 10 and 12. `share` and
+  `link` only **warn** when the session is not finalized, or its stamp is stale.
+  `--override-finish "<reason>"` goes ahead and records it in `podcast/podcast.json`
+  `finish_override` (from `check`, before there is one, in `check.txt`, which render carries
+  over).
 - **Adding it later.** Make it (submitting the job again resumes from its cache), run
   `finalize` again, then deliver again with a new `--label` (SKILL.md step 12b): the new delivery
   goes beside the first, which is never changed.
@@ -310,7 +319,7 @@ Claims section):
   the claims, a host's name or the show's name. A capitalised word that starts a sentence
   cannot be told from an ordinary one ("Gapdh went up." / "The gel ran."), so it is not
   failed; `check.txt` lists the ones not in the sources as INFO -- read that line.
-- **Names**: no person's name except the hosts; the lab name ("the Dickson lab") is the most
+- **Names**: no person's name except the hosts; the lab name ("the <PI surname> lab") is the most
   you may use. Pass people's full and first names to `check --forbid-name` (the PI, the
   submitter, lab members, Core staff). They are searched in the transcript, the header lines,
   the claims, the styles and the Pronunciation table.
@@ -554,33 +563,33 @@ runs here.
 
 ```bash
 # 1. write podcast_script.md here, put it beside the report, check it there until it passes
-bash scripts/hive_exec.sh "mkdir -p $S/output/podcast"
+bash scripts/hive_exec.sh "mkdir -p $(printf %q "$S")/output/podcast"
 bash scripts/hive_exec.sh --put <here>/podcast_script.md "$S/output/podcast/"
 bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py check \
-    $S/output/podcast/podcast_script.md --source $S/output/AI_Analysis_Report.md \
-    $S/output/methods.md $S/output/AUDIT.md $S/output/SAMPLE_QUALITY.md \
+    $(printf %q "$S")/output/podcast/podcast_script.md --source $(printf %q "$S")/output/AI_Analysis_Report.md \
+    $(printf %q "$S")/output/methods.md $(printf %q "$S")/output/AUDIT.md $(printf %q "$S")/output/SAMPLE_QUALITY.md \
     --forbid-name '<PI full name>' '<submitter full name>' '<first names>'"
-bash scripts/hive_exec.sh "cat $S/output/podcast/check.txt"   # fix here, --put again, check again
+bash scripts/hive_exec.sh "cat $(printf %q "$S")/output/podcast/check.txt"   # fix here, --put again, check again
 # 1b. the meaning check (a reader who did not write the script; see above), recorded on HIVE
 bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py meaning \
-    $S/output/podcast/podcast_script.md --brief --source $S/output/AI_Analysis_Report.md"
+    $(printf %q "$S")/output/podcast/podcast_script.md --brief --source $(printf %q "$S")/output/AI_Analysis_Report.md"
 bash scripts/hive_exec.sh --put <here>/findings.md "$S/output/podcast/"
 bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py meaning \
-    $S/output/podcast/podcast_script.md --verdict PASS --reviewer '<who>' \
-    --findings $S/output/podcast/findings.md"
+    $(printf %q "$S")/output/podcast/podcast_script.md --verdict PASS --reviewer '<who>' \
+    --findings $(printf %q "$S")/output/podcast/findings.md"
 # 2. preview what will be spoken (sends nothing; light, so no job)
 bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py render \
-    $S/output/podcast/podcast_script.md --tts gemini --dry-run"
+    $(printf %q "$S")/output/podcast/podcast_script.md --tts gemini --dry-run"
 # 3. the job: render in Gemini voices (verify follows), link, share -- submit it at once
 bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py job \
-    $S/output/podcast/podcast_script.md --core-run"
+    $(printf %q "$S")/output/podcast/podcast_script.md --core-run"
 #    internal Core work they said yes to: --core-run internal
 #    anyone else: --cloud-ok "<who agreed>, <date>, <paid|free> key" (their own key on HIVE)
 #    the local voice from the start (no key, no consent): --tts local
 bash scripts/hive_exec.sh '<the "submit" line it printed>'
 # 4. watch it like any job, with the "log" it printed; when it ends, read verify.txt
 bash scripts/watch_run.sh --hive --slurm <jobid> --log "<the log it printed, with the job id>"
-bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.txt"
+bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $(printf %q "$S")/output/podcast/verify.txt"
 ```
 
 - **`job` checks first and writes nothing on a problem**, each a one-line refusal: the script
@@ -648,7 +657,8 @@ bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.t
   into another folder rewrites the relative paths so the check still holds there.
 - **Render refuses** unless `check.txt` says PASS for this exact script and every source is
   unchanged since (each is hashed without any podcast block, so link's own Listen line does
-  not count). `--unchecked` overrides this and is recorded in `podcast.json`; use it only when
+  not count, and without the body of the report's "How this report was made", whose podcast
+  paragraph link fills in and which a rebuild re-reads from the run's records). `--unchecked` overrides this and is recorded in `podcast.json`; use it only when
   the user asks. `link` refuses the same way (the card vouches for the episode), with its own
   `--unchecked`.
 - **Gemini** needs `google-genai`: `setup.sh` installs it into the pipeline env (conda-forge,
@@ -828,6 +838,12 @@ bash scripts/hive_exec.sh "tail -n 30 <that log>; cat $S/output/podcast/verify.t
     the report is made, usually before the podcast. Link rewords it to ask about the podcast
     too (`core_submission.refresh_feedback`, the one wording) in the HTML and the `.md`,
     before the PDF reprint. It never adds one to a report that has none.
+  - The report's "How this report was made" section has a place for the podcast's paragraph
+    (who wrote the script, its checks, which voice and where it ran, from `podcast.json`).
+    Link fills it in, in the HTML and the `.md`, before the PDF reprint, with the words a
+    report made after the podcast would carry (`make_podcast.how_made_block`, the one wording);
+    a re-run replaces it. A report from before the section existed, or one whose own section
+    of that title replaced it, is skipped with `[INFO]`.
   - `make_analysis_html.py` and `session.py finalize` keep the card and the entries on their
     own whenever `podcast/podcast.json` exists. The podcast can never stop the report of
     record: a `podcast.json` that is unreadable or has a wrong field is reported once as a

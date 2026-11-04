@@ -1,0 +1,100 @@
+database_name = /data/search/2026-01-01-decoys-search.fasta.fas			# Path to the protein database file in FASTA format.
+num_threads = 32			# Number of CPU threads to use.
+
+precursor_mass_lower = -20			# Lower bound of the precursor mass window.
+precursor_mass_upper = 20			# Upper bound of the precursor mass window.
+precursor_mass_units = 1			# Precursor mass tolerance units (0 for Da, 1 for ppm).
+data_type = 0			# Data type (0 for DDA, 1 for DIA, 2 for gas-phase fractionation DIA, 3 for DDA+).
+precursor_true_tolerance = 20			# True precursor mass tolerance (window is +/- this value).
+precursor_true_units = 1			# True precursor mass tolerance units (0 for Da, 1 for ppm).
+fragment_mass_tolerance = 25			# Fragment mass tolerance (window is +/- this value).
+fragment_mass_units = 1			# Fragment mass tolerance units (0 for Da, 1 for ppm).
+calibrate_mass = 0			# Perform mass calibration (0 for OFF, 1 for ON, 2 for ON and find optimal parameters, 4 for ON and find the optimal fragment mass tolerance).
+use_all_mods_in_first_search = 0			# Use all variable modifications in first search (0 for No, 1 for Yes).
+decoy_prefix = rev_			# Prefix of the decoy protein entries. Used for parameter optimization only.
+
+deisotope = 1			# Perform deisotoping or not (0=no, 1=yes and assume singleton peaks single charged, 2=yes and assume singleton peaks single or double charged).
+deneutralloss = 1			# Perform deneutrallossing or not (0=no, 1=yes).
+isotope_error = 0/1/2			# Also search for MS/MS events triggered on specified isotopic peaks.
+mass_offsets = 0.0			# Creates multiple precursor tolerance windows with specified mass offsets.
+precursor_mass_mode = selected			# One of isolated/selected/corrected.
+
+write_calibrated_mzml = 0			# Write calibrated MS2 scan to a mzML file (0 for No, 1 for Yes).
+write_uncalibrated_mzml = 1			# Write uncalibrated MS2 scan to a mzML file (0 for No, 1 for Yes). Only for .raw and .d formats.
+write_mzbin_all = 0
+
+fragment_ion_series = b,y			# Ion series used in search, specify any of a,b,c,x,y,z,Y,b-18,y-18 (comma separated).
+ion_series_definitions = 			# User defined ion series. Example: "b* N -17.026548;b0 N -18.010565".
+
+search_enzyme_name_1 = nonspecific			# Name of the first enzyme.
+search_enzyme_cut_1 = @			# First enzyme's cutting amino acid.
+search_enzyme_nocut_1 = 			# First enzyme's protecting amino acid.
+search_enzyme_sense_1 = C			# First enzyme's cutting terminal.
+allowed_missed_cleavage_1 = 2			# First enzyme's allowed number of missed cleavages per peptide. Maximum value is 5.
+
+search_enzyme_name_2 = null			# Name of the second enzyme.
+search_enzyme_cut_2 = @			# Second enzyme's cutting amino acid.
+search_enzyme_nocut_2 = 			# Second enzyme's protecting amino acid.
+search_enzyme_sense_2 = C			# Second enzyme's cutting terminal.
+allowed_missed_cleavage_2 = 2			# Second enzyme's allowed number of missed cleavages per peptide. Maximum value is 5.
+
+num_enzyme_termini = 0			# 0 for non-enzymatic, 1 for semi-enzymatic, and 2 for fully-enzymatic.
+
+clip_nTerm_M = 1			# Specifies the trimming of a protein N-terminal methionine as a variable modification (0 or 1).
+
+# maximum of 16 mods - amino acid codes, * for any amino acid, [ and ] specifies protein termini, n and c specifies peptide termini
+variable_mod_01 = 15.9949 M 2
+variable_mod_02 = 42.0106 [^ 1
+variable_mod_03 = -17.0265 nQ 1
+variable_mod_04 = -18.0106 nE 1
+variable_mod_05 = -0.98402 c^ 1
+# variable_mod_06 = 4.025107 K 1
+# variable_mod_07 = 6.020129 R 1
+
+allow_multiple_variable_mods_on_residue = 0
+max_variable_mods_per_peptide = 3			# Maximum total number of variable modifications per peptide.
+max_variable_mods_combinations = 10000			# Maximum number of modified forms allowed for each peptide (up to 65534).
+
+output_format = pepXML_pin			# File format of output files (tsv, pin, pepxml, tsv_pin, tsv_pepxml, pepxml_pin, or tsv_pepxml_pin).
+output_report_topN = 1			# Reports top N PSMs per input spectrum.
+
+precursor_charge = 1 4			# Assumed range of potential precursor charge states. Only relevant when override_charge is set to 1.
+override_charge = 0			# Ignores precursor charge and uses charge state specified in precursor_charge range (0 or 1).
+
+digest_min_length = 7			# Minimum length of peptides to be generated during in-silico digestion.
+digest_max_length = 65			# Maximum length of peptides to be generated during in-silico digestion.
+digest_mass_range = 500.0 12000.0			# Mass range of peptides to be generated during in-silico digestion in Daltons.
+max_fragment_charge = 2			# Maximum charge state for theoretical fragments to match (1-4).
+
+add_Cterm_peptide = 0.0
+add_Nterm_peptide = 0.0
+add_Cterm_protein = 0.0
+add_Nterm_protein = 0.0
+
+add_G_glycine = 0.0
+add_A_alanine = 0.0
+add_S_serine = 0.0
+add_P_proline = 0.0
+add_V_valine = 0.0
+add_T_threonine = 0.0
+add_C_cysteine = 57.02146
+add_L_leucine = 0.0
+add_I_isoleucine = 0.0
+add_N_asparagine = 0.0
+add_D_aspartic_acid = 0.0
+add_Q_glutamine = 0.0
+add_K_lysine = 0.0
+add_E_glutamic_acid = 0.0
+add_M_methionine = 0.0
+add_H_histidine = 0.0
+add_F_phenylalanine = 0.0
+add_R_arginine = 0.0
+add_Y_tyrosine = 0.0
+add_W_tryptophan = 0.0
+add_B_user_amino_acid = 0.0
+add_J_user_amino_acid = 0.0
+add_O_user_amino_acid = 0.0
+add_U_user_amino_acid = 0.0
+add_X_user_amino_acid = 0.0
+add_Z_user_amino_acid = 0.0
+

@@ -170,7 +170,7 @@ counted, not traversed. There is a per-file cap and a per-record copy budget.
 ```
 
 - **The folder name** is the skill's session name, which already has the DataAnalysis form
-  (`2026-09-24_Silva_LRS_JPH_Kv21_RyR`). With no session it is `<submission date>_<search dir
+  (`2026-09-24_Lab_IP_JPH_Kv21_RyR`). With no session it is `<submission date>_<search dir
   name>`; a generic name such as `search_out` climbs to its parent (`2026-09-23_run1`).
 - **No hash in the name.** The identity is the search out dir's real path. It is stored in
   `run_record.json` and indexed in `.index/`, so a re-record finds its folder whatever it is

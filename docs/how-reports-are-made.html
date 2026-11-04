@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>How the Report Was Made</title>
+<meta name="description" content="How UC Davis Proteomics Core reports are made: which parts established proteomics software does, which parts Claude writes, which AI models are involved, and how your lab can run the same pipeline.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,500..800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<style>
+/* Base: the margin, safe-area padding and image rule of the page as exported */
+:root { padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
+html { scroll-padding-top: env(safe-area-inset-top, 0px); }
+body { margin: 0; }
+img { max-width: 100%; }
+[hidden]:not([hidden=until-found i]) { display: none !important; }
+
+/* Layout: one reading column (max 980px). Short answer first, then the pipeline as a numbered run sheet with a "who does it" tag per step, then models, checks, and how another lab sets it up. */
+:root {
+  --bg: #f4f6f9;
+  --surface: #ffffff;
+  --ink: #131a26;
+  --muted: #586377;
+  --rule: #dce1ea;
+  --accent: #2747a8;
+  --accent-soft: #e7ecf9;
+  --tool: #46536a;
+  --tool-soft: #e6eaf0;
+  --claude: #6a3fb5;
+  --claude-soft: #efe8fb;
+  --gemini: #0d7369;
+  --gemini-soft: #dff2ef;
+  --local: #1b7546;
+  --local-soft: #e2f2e9;
+  --warn: #8f5600;
+  --warn-soft: #faefd9;
+  --f-display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --f-body: "IBM Plex Sans", -apple-system, "Segoe UI", Roboto, sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1219; --surface: #161c26; --ink: #e5e9f0; --muted: #98a2b4; --rule: #2a3240;
+    --accent: #8fa8f2; --accent-soft: #1d2640;
+    --tool: #aab5c6; --tool-soft: #222a36; --claude: #bea6f2; --claude-soft: #271e3b;
+    --gemini: #62cfc2; --gemini-soft: #102f2c; --local: #62c690; --local-soft: #14281e; --warn: #e3a854; --warn-soft: #2a2011;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1219; --surface: #161c26; --ink: #e5e9f0; --muted: #98a2b4; --rule: #2a3240;
+  --accent: #8fa8f2; --accent-soft: #1d2640;
+  --tool: #aab5c6; --tool-soft: #222a36; --claude: #bea6f2; --claude-soft: #271e3b;
+  --gemini: #62cfc2; --gemini-soft: #102f2c; --local: #62c690; --local-soft: #14281e; --warn: #e3a854; --warn-soft: #2a2011;
+  color-scheme: dark;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--f-body);
+  font-size: 16px;
+  line-height: 1.6;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+.wrap { max-width: 980px; margin: 0 auto; padding-block: 44px 72px; display: grid; gap: 60px; }
+section { display: grid; gap: 18px; min-width: 0; }
+h1, h2, h3 { font-family: var(--f-display); text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(2.2rem, 1.5rem + 3vw, 3.5rem); font-weight: 800; font-stretch: 116%; line-height: 1.04; letter-spacing: -0.01em; }
+h2 { font-size: 1.6rem; font-weight: 700; font-stretch: 110%; line-height: 1.15; }
+h3 { font-size: 1.05rem; font-weight: 700; font-stretch: 104%; line-height: 1.3; }
+p { margin: 0; max-width: 68ch; }
+a { color: var(--accent); text-underline-offset: 2px; }
+a:focus-visible, button:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+code { font-family: var(--f-mono); font-size: 0.86em; overflow-wrap: anywhere; }
+.eyebrow { font-family: var(--f-mono); font-size: 0.75rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.muted { color: var(--muted); }
+.small { font-size: 0.9rem; }
+.intro { display: grid; gap: 10px; }
+
+header { display: grid; gap: 18px; }
+.lede { font-size: 1.12rem; max-width: 64ch; }
+
+/* Short answer */
+.answer { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; background: var(--rule); border-block: 1px solid var(--rule); }
+.answer > div { background: var(--bg); padding: 18px 20px 20px; display: grid; gap: 8px; align-content: start; min-width: 0; }
+.answer > div:first-child { padding-left: 0; }
+.answer p { font-size: 0.95rem; }
+@media (max-width: 760px) { .answer { grid-template-columns: 1fr; } .answer > div { padding-left: 0; padding-right: 0; } }
+
+/* Role tags */
+.tag { display: inline-flex; align-items: center; gap: 6px; font-family: var(--f-mono); font-size: 0.7rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; padding: 3px 8px; border-radius: 4px; white-space: nowrap; }
+.tag::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.tag.tool { background: var(--tool-soft); color: var(--tool); }
+.tag.claude { background: var(--claude-soft); color: var(--claude); }
+.tag.gemini { background: var(--gemini-soft); color: var(--gemini); }
+.tag.local { background: var(--local-soft); color: var(--local); }
+.tag.soon { background: var(--warn-soft); color: var(--warn); }
+.tag.soon::before { display: none; }
+.opt-yes { color: var(--local); font-weight: 600; }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; font-size: 0.88rem; color: var(--muted); }
+.legend span.item { display: inline-flex; gap: 8px; align-items: center; }
+
+/* Pipeline */
+.stages { list-style: none; margin: 0; padding: 0; counter-reset: stage; display: grid; }
+.stages li { counter-increment: stage; display: grid; grid-template-columns: 2.4rem minmax(0, 1fr) 9.5rem; gap: 6px 18px; padding-block: 16px; border-top: 1px solid var(--rule); }
+.stages li:last-child { border-bottom: 1px solid var(--rule); }
+.stages li::before { content: counter(stage, decimal-leading-zero); font-family: var(--f-mono); font-size: 0.85rem; color: var(--muted); padding-top: 2px; }
+.stages .body { display: grid; gap: 4px; min-width: 0; }
+.stages .body p { font-size: 0.95rem; }
+.stages .who { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+.stages li.phase-claude { background: linear-gradient(90deg, var(--claude-soft), transparent 70%); }
+@media (max-width: 640px) {
+  .stages li { grid-template-columns: 2rem minmax(0, 1fr); }
+  .stages .who { grid-column: 2; flex-direction: row; flex-wrap: wrap; }
+}
+
+/* Tables */
+.tw { overflow-x: auto; border: 1px solid var(--rule); border-radius: 6px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; min-width: 680px; font-size: 0.9rem; }
+th, td { padding: 11px 12px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--rule); }
+tbody tr:last-child th, tbody tr:last-child td { border-bottom: 0; }
+thead th { font-family: var(--f-mono); font-size: 0.7rem; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted); white-space: nowrap; }
+tbody th { font-weight: 600; }
+tbody th .tag { margin-top: 6px; }
+caption { caption-side: bottom; text-align: left; padding: 10px 12px; font-size: 0.84rem; color: var(--muted); border-top: 1px solid var(--rule); }
+
+/* Checks */
+.checks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.check { background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 16px 18px; display: grid; gap: 6px; align-content: start; min-width: 0; }
+.check p { font-size: 0.93rem; }
+@media (max-width: 700px) { .checks { grid-template-columns: 1fr; } }
+.note { background: var(--warn-soft); border-radius: 6px; padding: 14px 18px; display: grid; gap: 6px; }
+.note h3 { color: var(--warn); }
+.note p { font-size: 0.93rem; }
+
+/* Setup steps */
+.steps { list-style: none; margin: 0; padding: 0; counter-reset: step; display: grid; gap: 14px; }
+.steps > li { counter-increment: step; display: grid; grid-template-columns: 2rem minmax(0, 1fr); gap: 4px 14px; }
+.steps > li::before { content: counter(step); font-family: var(--f-display); font-weight: 800; font-size: 1.1rem; width: 2rem; height: 2rem; border-radius: 50%; background: var(--accent-soft); color: var(--accent); display: grid; place-items: center; }
+.steps .body { display: grid; gap: 6px; min-width: 0; }
+.steps .body p, .steps .body li { font-size: 0.95rem; }
+.cmd { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 8px; background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 10px 10px 10px 14px; }
+.cmd pre { margin: 0; font-family: var(--f-mono); font-size: 0.82rem; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
+.copy { font-family: var(--f-mono); font-size: 0.72rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; border: 1px solid var(--rule); background: var(--bg); color: var(--ink); border-radius: 4px; padding: 5px 9px; cursor: pointer; }
+.copy:hover { border-color: var(--accent); color: var(--accent); }
+ul.plain { margin: 0; padding-left: 1.1em; display: grid; gap: 5px; max-width: 70ch; }
+
+footer { border-top: 1px solid var(--rule); padding-top: 20px; display: grid; gap: 8px; font-size: 0.88rem; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">UC Davis Proteomics Core · for colleagues who received a report</div>
+  <h1>How the Report Was Made</h1>
+  <p class="lede">The analysis report you received, and its audio discussion if it has one, were produced with Claude, Anthropic's AI model, following a set of written instructions and scripts the Proteomics Core maintains. This page explains which parts were done by established proteomics software, which parts an AI wrote, which AI models were involved, and how your lab could run the same pipeline.</p>
+</header>
+
+<section aria-labelledby="h-short">
+  <h2 id="h-short" class="eyebrow" style="font-family:var(--f-mono);font-size:.75rem;font-weight:400;font-stretch:100%">The short answer</h2>
+  <div class="answer">
+    <div>
+      <span class="tag tool">Software</span>
+      <h3>The numbers come from standard tools</h3>
+      <p>DIA-NN (DIA data) or Sage (DDA data) searched the raw files. R packages, usually limpa and limma, did the quantification and statistics; each report names the ones it used. Every number in the report comes from these, and the statistics can be re-run as plain R with no AI involved.</p>
+    </div>
+    <div>
+      <span class="tag claude">Claude</span>
+      <h3>Claude ran the tools and wrote the words</h3>
+      <p>Claude, working in Claude Code, ran each step, read the tables and figures, and wrote the report text and, when there is one, the podcast script. Separate Claude reviewers check the podcast script, and the analysis too when it calls for an expert review.</p>
+    </div>
+    <div>
+      <span class="tag gemini">Gemini</span>
+      <h3>Google's Gemini makes the voices</h3>
+      <p>When a report has a podcast, Gemini's speech model usually reads the script aloud in two synthetic voices. A second Gemini model then transcribes the audio back, so a script can confirm that every number was spoken correctly. If you would rather not use Google, a local voice can make the podcast instead (<a href="#no-gemini">see below</a>). Each report's "How this report was made" section says which voice made its podcast.</p>
+    </div>
+  </div>
+</section>
+
+<section aria-labelledby="h-pipeline">
+  <div class="intro">
+    <h2 id="h-pipeline">Step by step</h2>
+    <p>The pipeline is a Claude Code "skill": a written procedure with dozens of helper scripts, which Claude follows in order.</p>
+    <div class="legend">
+      <span class="item"><span class="tag tool">Software</span> established tools and the skill's scripts</span>
+      <span class="item"><span class="tag claude">Claude</span> written or reviewed by an AI</span>
+      <span class="item"><span class="tag gemini">Gemini</span> Google's cloud models</span>
+      <span class="item"><span class="tag local">Local</span> the voice option that stays on campus</span>
+    </div>
+  </div>
+  <ol class="stages">
+    <li>
+      <div class="body"><h3>Read the raw files</h3><p>Scripts open the instrument files and work out the acquisition (DIA or DDA), the instrument and the m/z range. The search settings are derived from those, then confirmed once with the person running it.</p></div>
+      <div class="who"><span class="tag tool">Software</span></div>
+    </li>
+    <li>
+      <div class="body"><h3>Search the spectra</h3><p><a href="https://github.com/vdemichev/DiaNN">DIA-NN</a> 2.7.0 (DIA data, library-free, 1% FDR, match-between-runs) or <a href="https://github.com/lazear/sage">Sage</a> (DDA data). At the Core this runs as jobs on UC Davis's HIVE computing cluster.</p></div>
+      <div class="who"><span class="tag tool">Software</span></div>
+    </li>
+    <li>
+      <div class="body"><h3>Quantify and test</h3><p><a href="https://bioconductor.org/packages/limpa">limpa</a> estimates each protein's amount and models missing values through a detection-probability curve instead of dropping or imputing them. <a href="https://bioconductor.org/packages/limma">limma</a> tests each comparison with Benjamini–Hochberg FDR. Re-tests on complete data and with per-group variance flag which hits are robust. For a non-model organism, protein names come from DIAMOND searches against Swiss-Prot.</p></div>
+      <div class="who"><span class="tag tool">Software</span></div>
+    </li>
+    <li>
+      <div class="body"><h3>Audit for common mistakes</h3><p>A script checks the results for known pitfalls: too few replicates, a confounded design, mixed instruments, low depth, heavy missingness, contamination, unstable normalisation, implausibly large or empty results. Anything it finds goes into the report's "Audit &amp; caveats" section.</p></div>
+      <div class="who"><span class="tag tool">Software</span></div>
+    </li>
+    <li class="phase-claude">
+      <div class="body"><h3>Write the report</h3><p>Claude reads the tables, figures and audit, then writes the text: the overview, answers to the lab's own questions, findings per comparison, the biological interpretation and the methods. A script assembles it with the figures into one HTML file.</p></div>
+      <div class="who"><span class="tag claude">Claude</span></div>
+    </li>
+    <li class="phase-claude">
+      <div class="body"><h3>Expert review</h3><p>When a statistical claim goes to a collaborator, a result looks extreme (log2FC above 5, p below 10<sup>−10</sup>) or the organism is new, three separate Claude agents review the analysis independently, as a proteomics expert, a biologist and a statistician. Their points become the "Expert Review Notes" section.</p></div>
+      <div class="who"><span class="tag claude">Claude</span></div>
+    </li>
+    <li class="phase-claude">
+      <div class="body"><h3>Write the podcast script</h3><p>Once the report is final, Claude writes a conversation between two fictional hosts, a cell biologist and a statistician. It covers the results, how the samples were measured, and the key terms. Anything said that is not in the report is listed at the end of the transcript.</p></div>
+      <div class="who"><span class="tag claude">Claude</span></div>
+    </li>
+    <li>
+      <div class="body"><h3>Check the script</h3><p>A script compares every number, gene-like symbol and capitalised name in the script with the report, and fails anything it cannot find. A separate Claude agent, not the one that wrote the script, then reads each sentence for overstatement and claims the robustness checks do not support.</p></div>
+      <div class="who"><span class="tag tool">Software</span><span class="tag claude">Claude</span></div>
+    </li>
+    <li>
+      <div class="body"><h3>Make the voices</h3><p>Gemini's speech model reads the checked script in two voices (Kore and Charon). Only the transcript text is sent to Google. The report, tables and figures are not.</p><p class="small muted">Without Gemini, the open-source Kokoro model reads it instead, on the HIVE cluster, and nothing leaves campus.</p></div>
+      <div class="who"><span class="tag gemini">Gemini</span><span class="tag local">or Local</span></div>
+    </li>
+    <li>
+      <div class="body"><h3>Listen back</h3><p>A Gemini text model transcribes the finished audio, and a script compares the transcript with the script. It warns if the word match falls below 0.93 (1 is perfect), if six or more words in a row were not heard, or if a number was not heard as written.</p><p class="small muted">For the local voice, two Whisper speech-recognition models on HIVE do the listening, and a misreading counts only where both hear it.</p></div>
+      <div class="who"><span class="tag gemini">Gemini</span><span class="tag local">or Local</span><span class="tag tool">Software</span></div>
+    </li>
+    <li>
+      <div class="body"><h3>Package it</h3><p>One HTML file with the figures built in, so it opens offline; when there is a podcast, a second copy has the audio and the transcript built in too. Alongside it go a PDF, the tables and a reproducibility bundle: a pinned software environment, the R session details, checksums, a <code>reproduce.sh</code> and the whole statistical analysis as one plain R script.</p></div>
+      <div class="who"><span class="tag tool">Software</span></div>
+    </li>
+  </ol>
+</section>
+
+<section aria-labelledby="h-models">
+  <div class="intro">
+    <h2 id="h-models">The models involved</h2>
+    <p>Three kinds of model are at work, and only two are generative AI. The statistics (limpa, limma) are classical statistical models, not AI.</p>
+  </div>
+  <div class="tw">
+    <table>
+      <thead><tr><th scope="col">Model</th><th scope="col">Made by</th><th scope="col">Its job here</th><th scope="col">Where it runs</th><th scope="col">What it is given</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">Claude Opus 5.5<br><span class="tag claude">Claude</span></th><td>Anthropic</td><td>Runs the steps, writes the report text and the podcast script; separate Claude agents review</td><td>Claude Code on the computer running the analysis (at the Core, a Core computer); the model itself runs in Anthropic's cloud</td><td>Whatever it reads: results tables, figures, logs, the report</td></tr>
+        <tr><th scope="row">DIA-NN 2.7.0 neural networks<br><span class="tag tool">Software</span></th><td>Demichev and colleagues (<em>Nature Methods</em>)</td><td>Predicts each peptide's fragments, retention time and ion mobility, and scores matches against decoys</td><td>The computer or cluster that runs the search (at the Core, HIVE)</td><td>The raw instrument files</td></tr>
+        <tr><th scope="row">A Gemini speech model, such as gemini-2.5-flash-preview-tts<br><span class="tag gemini">Gemini</span></th><td>Google</td><td>The two podcast voices, Kore and Charon</td><td>Google's cloud</td><td>The podcast transcript text only</td></tr>
+        <tr><th scope="row">gemini-2.5-flash<br><span class="tag gemini">Gemini</span></th><td>Google</td><td>Transcribes the audio back for the listen-back check</td><td>Google's cloud</td><td>The finished audio</td></tr>
+        <tr><th scope="row">Kokoro-82M<br><span class="tag local">Local</span> <span class="tag soon">New in 2.14</span></th><td>hexgrad (open source, Apache-2.0)</td><td>The local podcast voices, used instead of Gemini</td><td>The Core's container on HIVE</td><td>The podcast transcript text; nothing leaves campus</td></tr>
+        <tr><th scope="row">Whisper large-v3-turbo and small.en<br><span class="tag local">Local</span> <span class="tag soon">New in 2.14</span></th><td>OpenAI (open source, MIT)</td><td>Hear the local audio back for the check</td><td>The Core's container on HIVE</td><td>The finished audio; nothing leaves campus</td></tr>
+      </tbody>
+      <caption>Each report's own "How this report was made" section, and its podcast transcript, say which software and which voice model made it. Claude Opus 5.5 is the Claude model the Core uses as of this release (skill 2.14.1). The skill can also use newer Gemini speech models, and it falls back to another one if a model stops answering. The Kokoro and Whisper rows are the local option, added in skill 2.14.0.</caption>
+    </table>
+  </div>
+</section>
+
+<section aria-labelledby="no-gemini">
+  <div class="intro">
+    <h2 id="no-gemini">Rather not use Gemini?</h2>
+    <p>The podcast does not have to go through Google. The Core tested three free speech models that run on its own cluster against Gemini, by reading the same passage and checking every protein name and number. Kokoro was the only one that got all 13 numbers and all 11 names right, matching Gemini. The other two, VibeVoice and Qwen3-TTS, changed data numbers and were rejected.</p>
+    <p>Skill 2.14.0, released on 22 October 2026, builds Kokoro in two ways. Ask for it with <code>--tts local</code> and Gemini is never contacted. And when Gemini cannot be used (no key, credits used up, every model out of quota or not answering), the skill switches to Kokoro by itself and re-makes the whole episode, so the voices never mix. The report then says which voice made the audio and why.</p>
+  </div>
+  <div class="tw">
+    <table>
+      <thead><tr><th scope="col">Voice option</th><th scope="col">How it sounds</th><th scope="col">What leaves the cluster or computer</th><th scope="col">Automatic check</th><th scope="col">Cost</th><th scope="col">Who can use it</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">Gemini<br><span class="tag gemini">Default</span></th><td>The most natural; the hosts react to each other</td><td>The transcript and the audio, to Google</td><td class="opt-yes">Yes, Gemini transcribes it back</td><td>About 30 cents per episode on a paid key</td><td>Anyone with a Gemini API key, now</td></tr>
+        <tr><th scope="row">Kokoro, local<br><span class="tag local">Local</span> <span class="tag soon">New in 2.14</span></th><td>A clear, calm reader; each line is read on its own, so less back-and-forth. Voices Emma and Heart</td><td>Nothing; it stays on HIVE</td><td class="opt-yes">Yes, two Whisper models on HIVE</td><td>Free, no daily limit; a 24-minute episode takes about 2 minutes on 16 CPUs</td><td>For now, Proteomics Core members on HIVE. Opening it to other labs is planned</td></tr>
+        <tr><th scope="row">macOS <code>say</code></th><td>Robotic; the Mac's built-in voices</td><td>Nothing</td><td>No; someone has to listen to it</td><td>Free</td><td>Anyone on a Mac, now</td></tr>
+      </tbody>
+      <caption>Both Kokoro voices are female, so in a Kokoro episode the second host is called "Lena" rather than "Leo". For now the Kokoro and Whisper containers sit in the Core's own folder on HIVE. The next version is planned to let any lab use them, on HIVE, another cluster or a Linux workstation.</caption>
+    </table>
+  </div>
+</section>
+
+<section aria-labelledby="h-trust">
+  <div class="intro">
+    <h2 id="h-trust">How the AI-written text is kept honest</h2>
+    <p>An AI can write a fluent sentence that is wrong. The pipeline is built around that risk.</p>
+  </div>
+  <div class="checks">
+    <div class="check"><h3>The AI does not make the numbers</h3><p>Claude runs the tools and reports their output. It does not compute statistics itself. The plain R script in the bundle re-creates every statistical result without Claude.</p></div>
+    <div class="check"><h3>Every hit is re-tested</h3><p>Each significant protein is tested again on complete data only, and again with each group allowed its own variability. The report leads with the hits that survive both.</p></div>
+    <div class="check"><h3>Independent reviewers</h3><p>The expert reviewers and the podcast's meaning check are separate Claude agents, not the one that wrote the text, so they do not share its assumptions.</p></div>
+    <div class="check"><h3>Claude writes the script, a tool checks it</h3><p>An early version let a model write the podcast straight from the report. It passed a number check yet still invented facts, such as calling limpa "our Core's custom extension to limma". Now Claude writes the script from the report it has read, and a script checks every number and name against the report.</p></div>
+  </div>
+  <div class="note">
+    <h3>What the checks cannot catch</h3>
+    <p>The checks find invented numbers and names, not every wrong sentence. That is why the report and the audio both say the written report is the record. The audio is a guide to reading the report, not a replacement for it.</p>
+  </div>
+</section>
+
+<section aria-labelledby="h-yourlab">
+  <div class="intro">
+    <h2 id="h-yourlab">Running it in your lab</h2>
+    <p>The skill is public and free to install. It is maintained by the UC Davis Proteomics Core and written for biologists: it installs its own tools without administrator rights, and confirms the plan with you before the long steps.</p>
+  </div>
+  <ol class="steps">
+    <li><div class="body">
+      <h3>Get Claude Code</h3>
+      <p>Anthropic's <a href="https://claude.com/claude-code">Claude Code</a> runs on your own computer and needs a Claude subscription or an Anthropic API key.</p>
+    </div></li>
+    <li><div class="body">
+      <h3>Install the skill</h3>
+      <p>In a terminal, one line, then start Claude Code:</p>
+      <div class="cmd"><pre id="cmd-install">claude plugin marketplace add https://github.com/bsphinney/DE-LIMP.git &amp;&amp; claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core</pre><button type="button" class="copy" data-copy="cmd-install">Copy</button></div>
+      <p class="small muted">Source and documentation: <a href="https://github.com/bsphinney/DE-LIMP/tree/main/skill/ucdavis-proteomics-core-pipeline">github.com/bsphinney/DE-LIMP</a>, folder <code>skill/ucdavis-proteomics-core-pipeline</code>. Current release 2.14.1.</p>
+    </div></li>
+    <li><div class="body">
+      <h3>Ask in plain words</h3>
+      <p>Point Claude at a folder of raw files, for example:</p>
+      <div class="cmd"><pre id="cmd-ask">Analyze the proteomics data in /data/my_experiment. It's mouse liver, knockout vs wild type, four of each.</pre><button type="button" class="copy" data-copy="cmd-ask">Copy</button></div>
+      <p>Claude checks the files, asks about the organism and design, confirms the search settings once, then runs the search, statistics, figures, audit and report.</p>
+    </div></li>
+    <li><div class="body">
+      <h3>Add the podcast, if you want it</h3>
+      <p>It is optional and offered once the report is done. You choose the voice:</p>
+      <ul class="plain">
+        <li><strong>Gemini:</strong> you need your own Gemini API key. For unpublished data, use a key with billing turned on: under Google's <a href="https://ai.google.dev/gemini-api/terms">Gemini API terms</a>, free-tier content may be used to improve Google's products and read by human reviewers, and paid-tier content is not used that way.</li>
+        <li><strong>Kokoro, the local voice</strong> (skill 2.14.0; for now Core members on HIVE): <code>--tts local</code>. No key, no consent form, nothing sent anywhere (<a href="#no-gemini">details above</a>).</li>
+        <li><strong>macOS <code>say</code>:</strong> <code>--tts say</code> makes the audio offline with the Mac's built-in voices; it sends nothing, but nothing checks it automatically either.</li>
+      </ul>
+      <p class="small muted">Cost: Google charges by length of audio. At the price checked on 16 October 2026, a 22-minute episode with Gemini 3.8 Flash TTS came to about 30 cents.</p>
+    </div></li>
+  </ol>
+
+  <div class="tw">
+    <table>
+      <thead><tr><th scope="col">Where you run it</th><th scope="col">DIA data (DIA-NN)</th><th scope="col">DDA data (Sage) and statistics</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">Linux workstation</th><td>Downloads the free DIA-NN Academia build automatically</td><td>Installed automatically</td></tr>
+        <tr><th scope="row">Mac</th><td>DIA-NN has no Mac build, so install Docker Desktop once; the skill then builds an image from DIA-NN's own official release</td><td>Installed automatically, no Docker needed; DDA files already in mzML need nothing else</td></tr>
+        <tr><th scope="row">Windows, through WSL2<br><span class="tag soon">Untested</span></th><td colspan="2">Should work like a Linux workstation: WSL2 is Linux, and DIA-NN's Linux build has run in it for the Core's DE-LIMP app. Not yet tested with this skill. Copy the raw files into the Linux side (for example <code>~/data</code>) before searching, because files under <code>/mnt/c</code> are read slowly, and give WSL enough memory in Windows' <code>.wslconfig</code> file (it gets half the PC's memory by default).</td></tr>
+        <tr><th scope="row">UC Davis HIVE account</th><td colspan="2">Claude Code stays on your laptop (Mac, Linux, or Windows with Git Bash) and runs the heavy steps on HIVE over SSH, as cluster jobs. This is how the Core runs it. A lab outside the Core gets its own copy of the tools in its HIVE home folder.</td></tr>
+        <tr><th scope="row">Another cluster (Farm, Franklin, other campuses)</th><td colspan="2">Not yet: the cluster mode is built for HIVE. Support for other clusters is planned for the next version. Until then, run it on a Linux workstation.</td></tr>
+      </tbody>
+      <caption>Searching a full experiment is heavy work. A workstation or cluster is a better fit than a laptop for DIA searches of many files.</caption>
+    </table>
+  </div>
+</section>
+
+<section aria-labelledby="h-data">
+  <div class="intro">
+    <h2 id="h-data">Where your data goes</h2>
+  </div>
+  <ul class="plain">
+    <li><strong>Raw files</strong> are searched on your own computer or cluster. The files themselves are not sent to any AI service; Claude sees the scripts' summaries of them.</li>
+    <li><strong>Claude</strong> sees what it reads while working: results tables, figures, logs and the report. Those go to Anthropic under the terms of your Claude plan. Check your institution's guidance for unpublished data.</li>
+    <li><strong>Gemini</strong> receives only the podcast transcript, and then the audio for the listen-back check, and only if you make a podcast with Gemini voices. With the local voice or macOS <code>say</code>, nothing goes to Google.</li>
+    <li><strong>Everything is recorded:</strong> each run keeps a log of the commands, the software versions and which models made the audio, so you can say exactly what was done.</li>
+  </ul>
+</section>
+
+<footer>
+  <p>Questions about the pipeline: Brett Phinney, UC Davis Proteomics Core. The skill's source, including every script and the written procedure Claude follows, is on <a href="https://github.com/bsphinney/DE-LIMP/tree/main/skill/ucdavis-proteomics-core-pipeline">GitHub</a>.</p>
+  <p>Details on this page are taken from the skill's release 2.14.1 and the Core's voice trial of 16–20 October, as of 27 October 2026. What was done for a particular report is in that report's own "How this report was made" section, its methods and its podcast transcript.</p>
+</footer>
+
+</div>
+
+<script>
+document.querySelectorAll('.copy').forEach(function (btn) {
+  btn.addEventListener('click', function () {
+    var el = document.getElementById(btn.dataset.copy);
+    var text = el.textContent;
+    function done(label) { btn.textContent = label; setTimeout(function () { btn.textContent = 'Copy'; }, 1600); }
+    function select() {
+      var r = document.createRange(); r.selectNodeContents(el);
+      var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      done('Selected');
+    }
+    try {
+      navigator.clipboard.writeText(text).then(function () { done('Copied'); }, select);
+    } catch (e) { select(); }
+  });
+});
+</script>
+
+</body>
+</html>

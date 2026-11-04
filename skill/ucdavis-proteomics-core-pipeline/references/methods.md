@@ -44,24 +44,40 @@ part of a full analysis or **standalone** (just `--raw` at the facility data).
      without `--column-log-instrument` falls back to the default, with the reason printed.
      STAN keeps this log in PG Farm, which needs credentials, so the script never connects to
      it; export the rows and pass the file.
-  4. Otherwise the facility's standard column, from STAN's column catalogue (PepSep MAX C18,
-     10 cm × 150 µm, 1.5 µm, part 1893483), **tagged `[facility default — confirm]`**.
-- **Never in a .d, always tagged**:
-  - Column temperature. For a timsTOF, STAN's operator-reported 50 °C is given, tagged
+  4. Otherwise, **for a timsTOF `.d` only**, the facility's standard column, from STAN's column
+     catalogue (PepSep MAX C18, 10 cm × 150 µm, 1.5 µm, part 1893483), **tagged
+     `[facility default — confirm]`**. It is the Core timsTOF HT's column, so any other run (a
+     Thermo `.raw`, an mzML, data from an instrument the Core does not have) gets
+     `an analytical column ____ [not recorded — confirm]`: a Thermo cohort once got the Bruker
+     PepSep column (2.14.2).
+- **Never in a .d, always tagged** (`make_methods.column_record` and `lc_paragraph`, one rule):
+  - Column temperature. **For a timsTOF `.d` only**, STAN's operator-reported 50 °C, tagged
+    `[facility default — confirm]`; otherwise `____ °C [not recorded — confirm]`.
+  - The emitter. **For a timsTOF `.d` only**, the default 20 µm CaptiveSpray emitter, tagged
     `[facility default — confirm]`.
-  - The emitter. The default 20 µm CaptiveSpray emitter is tagged
-    `[facility default — confirm]`.
-  - Mobile phases.
+  - Mobile phases (0.1% formic acid in water / in acetonitrile) and the nanospray source: the
+    facility's, tagged `[facility default — confirm]`, only for a run on a Core instrument (a
+    `.d` or `.raw`); an mzML or data from elsewhere gets `____ [not recorded — confirm]`.
   - Evotip type, loading and peptide amount.
   - The %B gradient of an Evosep method. Its fixed, named method is given instead.
   - A non-Evosep LC's gradient table, which is not parsed. It is tagged
     `[not recorded — confirm]`.
-- **Tags**:
-  - A value no record holds is tagged `[not recorded — confirm]`, never
-    `[facility default — confirm]`.
-  - A `.d` that could not be read is named on stderr and in the note under Mass spectrometry.
-    When it is the only run, its values are tagged `[raw file not readable here — confirm]`.
-  - The ddaPASEF precursor-selection settings are not extracted, and the text says so.
+- **Tags.** Every one is a question for the user or a record, and **is never replaced with a
+  guess** (DE-LIMP rule 2): resolve it from a record or the user's answer, or leave it tagged.
+  - `[facility default — confirm]`: a Core default (above), what is usually fitted, not a record
+    of this run.
+  - `[not recorded — confirm]`: a value no record holds (printed as `____`), never a default.
+  - `[raw file not readable here — confirm]`: a `.d` that could not be read, named on stderr
+    and in the note under Mass spectrometry; when it is the only run, its values carry this tag.
+  - `[vendor — confirm]`: the instrument's name matches neither vendor's words, or both
+    (`make_methods.VENDOR_TAG`): an mzML from an unnamed instrument is not called Thermo.
+  - `[acquired at the UC Davis Proteomics Core? — confirm]`: after the acknowledgment, when the
+    instrument's name is in the Core's registry but the data are not a Core `.d`/`.raw` (an
+    mzML, outside data; `ACK_OUTSIDE_TAG`). Keep the acknowledgment only if the Core acquired it.
+  - `[DDA/DIA — confirm]`: no record gives the acquisition mode (order below).
+  - `[Evotip type, loading protocol and peptide amount — confirm]`, and
+    `[not extracted by this script — take from the MS method; confirm]` for the ddaPASEF
+    precursor-selection settings, which are not extracted.
 
 With `--fasta-meta` (fetch_fasta.py's `<fasta>.meta.json`), it adds the **Sequence database**
 paragraph. Sequences added with `fetch_fasta.py --add-fasta` are named one by one only when there
@@ -86,6 +102,29 @@ cleavages, peptide length, charge and m/z range, fixed/variable modifications, m
 precursor FDR, library mode, MBR), read by `search_record()` — the same reader
 `make_deposit.py` uses for the SDRF. A value in no record prints as
 `____ [not recorded — confirm]`, never as a default.
+
+**Which search, and what its record says (2.14.2):**
+- `--session <S>` (with no `--search-prov`) takes the session's own search record,
+  `session.search_choice`: wherever the search went (`output/search_sage/` …), and with several,
+  the one the DE read. Several records and none chosen: the paragraph is **tagged blanks**, with
+  why, never one search's values; `--search-prov` given more than once does the same. A
+  `--search-prov` file that is not there is refused. Choose a search as SKILL.md step 12b says.
+- The acquisition mode comes from `--acquisition`, then the workflow manifest's `acquisition`,
+  then the session's `input/acquisition.json` (step 2); with none, `[DDA/DIA — confirm]`.
+- DIA-NN's mass accuracy is "optimised automatically per run" only when the record says DIA-NN
+  chose it; measured-and-pinned says so; with no record of the run it is
+  `[not recorded — confirm]` (a search pinned at 10/20 ppm was once called optimised).
+- Sage's settings are read from its `results.json` (the search as it ran), FragPipe's from
+  `fragger.params` and the saved `fragpipe.workflow` (the Philosopher filter as run, the
+  database MSFragger read).
+- An identifications-only search (Sage `--ids-only`, a FragPipe workflow with no
+  quantification) says so, with its FDR rule; a timsTOF `.d` searched by Sage says whether
+  Sage read it directly (identifications only) or it was converted to mzML first (with the
+  msconvert options); a DIA-NN `--dda` search whose second pass crashed says the first-pass
+  report was used and that DIA-NN's protein MaxLFQ quantities are absent.
+- The **Differential expression** paragraph states the between-run normalisation the DE record
+  names (`de_provenance.json` `normalisation`; on the MaxLFQ route, the `--between-run` step,
+  `references/de-analysis.md`).
 
 With `--submission <session>` (a CoreOmics submission attached by `submission_report.py`),
 it adds a **Sample preparation** section from the record, through `prepared_by()`, the one
@@ -139,5 +178,6 @@ an instrument, extend the `ACKS` table in `make_methods.py`.
 
 The agent should **verify the draft against the parameter table and polish the
 prose** (the example in `~/Documents/DataAnalysis/.../timsTOF_Methods` shows the
-target quality), resolve each `[facility default — confirm]`, and keep the
-acknowledgment verbatim.
+target quality), resolve every `[… — confirm]` tag in the list above from a record or the
+user's answer (never with a guess: an unresolved tag stays), and keep the acknowledgment
+verbatim.

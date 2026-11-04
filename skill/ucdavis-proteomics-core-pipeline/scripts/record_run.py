@@ -1147,6 +1147,8 @@ def fasta_facts(meta_path):
             # (that is search.cont_quant_exclude, read from the run itself)
             "cont_quant_exclude_recommended": g("diann_cont_quant_exclude"),
             "digestion_enzymes_used": g("digestion_enzymes_used"),
+            # fetch_fasta's --enzyme in its own words: "none" for a build with no digestion enzyme
+            "enzyme": g("enzyme"),
             "min_unique_peptides": g("min_unique_peptides"),
             **dict(zip(("database_state", "near_identical_measured"), _database_state(merged))),
             "warnings": g("warnings") or []}
@@ -1612,22 +1614,49 @@ def zip_survey(path):
 
 
 def session_search_out(session, explicit):
-    """The search out dir behind a session: --out; else where the session's search_provenance.json
-    says the report was written, when that is somewhere else (a hive_remote session holds a COPY
-    pulled from HIVE); else output/search when the search ran there; else .recovery.json."""
+    """The search out dir behind a session: --out; else where the session's search record
+    (session.search_folder: wherever the search is -- output/search_sage/ as much as
+    output/search/ -- tie-broken by the report the DE read) says the report was written, when
+    that is somewhere else (a hive_remote session holds a COPY pulled from HIVE); else that
+    record's folder; else output/search when a report is there; else .recovery.json. None when
+    the session's records leave the choice open (session_search_note says why)."""
     if explicit:
         return explicit
+    try:
+        import session as sess
+    except ImportError:        # piped alone to a remote python: no sibling, the default folder
+        sess = None
     ss = os.path.join(session, "output", "search")
+    if sess is not None:
+        ss = sess.search_folder(sess.paths_for(session))
+        if ss is None:
+            return None
     prov = load_json(os.path.join(ss, "search_provenance.json")) or {}
     rep = (prov.get("result") or {}).get("report") if isinstance(prov.get("result"), dict) \
         else None
-    if rep and os.path.isabs(rep) and \
-            os.path.realpath(os.path.dirname(rep)) != os.path.realpath(ss):
+    # a report written elsewhere (a hive_remote COPY's record names HIVE's path); one inside the
+    # search folder (FragPipe DIA's <workdir>/dia-quant-output/report.tsv) is this search's
+    if rep and os.path.isabs(rep) and os.path.commonpath(
+            [os.path.realpath(os.path.dirname(rep)), os.path.realpath(ss)]) != \
+            os.path.realpath(ss):
         return os.path.dirname(rep)
     if prov or any(os.path.exists(os.path.join(ss, c)) for c in REPORT_CANDIDATES):
         return ss
     rec = load_json(os.path.join(session, ".recovery.json")) or {}
     return os.path.dirname(rec["report"]) if rec.get("report") else None
+
+
+def session_search_note(session):
+    """Why no search is recorded for a session (session.search_choice: records and none chosen),
+    for the run record's analysis warnings (T44 review F9); None when there is no such reason
+    (one is chosen, or there is none -- or piped alone, with no sibling to ask)."""
+    try:
+        import session as sess
+    except ImportError:
+        return None
+    c = sess.search_choice(sess.paths_for(session))
+    return (f"{c['why']}: no search is recorded with this analysis -- pass --out <the search "
+            "folder>") if sess.search_unchosen(c) else None
 
 
 def section_of(md_path, title):
@@ -1649,7 +1678,7 @@ def plan_analysis(plan, session, a, zip_cap):
     out_d = os.path.join(session, "output")
     de = load_json(os.path.join(out_d, "tables", "de_provenance.json")) or {}
     man_txt = os.path.join(session, "MANIFEST.txt")
-    ok, skipped = 0, []
+    ok, skipped, overridden = 0, [], []
     try:
         with open(man_txt, errors="replace") as fh:
             for ln in fh:
@@ -1657,6 +1686,8 @@ def plan_analysis(plan, session, a, zip_cap):
                     ok += 1
                 elif ln.startswith("[SKIPPED]"):
                     skipped.append(ln.strip()[:300])
+                elif ln.startswith("[OVERRIDE]"):        # --override-finish: without, and why
+                    overridden.append(ln.strip()[:300])
     except OSError:
         man_txt = None
     dep = os.path.join(out_d, "DATA_SUBMISSION")
@@ -1678,7 +1709,8 @@ def plan_analysis(plan, session, a, zip_cap):
           "recorded_at": now_iso(),
           "de": {k: de.get(k) for k in ("method", "contrasts", "significant_per_contrast",
                                          "q_cutoff", "logfc", "adjp")} if de else None,
-          "manifest": {"file": man_txt, "n_ok": ok, "skipped": skipped} if man_txt else None,
+          "manifest": ({"file": man_txt, "n_ok": ok, "skipped": skipped,
+                        "overridden": overridden} if man_txt else None),
           "docx": [{"file": d, "kind": "Methods (Word)" if "method" in os.path.basename(d).lower()
                     else "Report (Word, older copy)"} for d in docx],
           "deliverables": ([{"file": html_report, "kind": "Report of record (HTML)"}]
@@ -1976,6 +2008,13 @@ def data_quality_notes(rec):
         notes.append(dq("WARNING", fell_back,
                         os.path.join(s.get("out_dir") or "", "probe_fallback.json"),
                         source="search_provenance.json scan_window.mode / mass_acc.mode"))
+    # a --dda search whose second pass failed, quantified from its first pass
+    # (dda_first_pass.caution(), as make_methods.search_record() read it); once, as above
+    first_pass = (params.get("record") or {}).get("dda_first_pass")
+    if first_pass and not any(f.get("check") == "dda_first_pass" for f in an.get("audit") or []):
+        notes.append(dq("WARNING", first_pass,
+                        os.path.join(s.get("out_dir") or "", "dda_first_pass.json"),
+                        source="search_provenance.json report_used"))
     oru = det.get("orbitrap_resolution_unknown")
     if oru or (params.get("instrument_class") == "orbitrap_generic"):
         files = (oru or {}).get("files") if isinstance(oru, dict) else None
@@ -2210,13 +2249,20 @@ def render_parameters(s):
             for m in rec["mods"]), None))
     if rec.get("library"):
         L.append(_row("Library", rec["library"]["value"], src(rec["library"])))
-    if rec.get("mbr"):
-        L.append(_row("Match-between-runs", rec["mbr"].get("label") or "on", src(rec["mbr"])))
+    # which report was quantified -- a --dda search's first pass after its second pass failed --
+    # else match-between-runs: make_methods.quantified_report_row, the Methods table's own row
+    from make_methods import quantified_report_row
+    row = quantified_report_row(rec, None)
+    if row:
+        L.append(_row(row[0], row[1], src(rec["mbr"]) if row[0] == "Match-between-runs"
+                      else row[2]))
     if len(L) == 2:
         L.append(_row("(none parsed)", p.get("record_error") or "no parameters file was found",
                       ""))
     for w in rec.get("warnings") or []:
         L.append(f"\n_Note: {w}_")
+    if rec.get("dda_first_pass"):                       # dda_first_pass.caution(), as recorded
+        L.append(f"\n_Note: {rec['dda_first_pass']}_")
     return L
 
 
@@ -2270,7 +2316,10 @@ def render_search(s):
               + cont_quant_exclude_clause(s.get("cont_quant_exclude"))
               + (f"; digestion enzymes kept as contaminants (`fetch_fasta.py --enzyme`): "
                  f"{', '.join(fa['digestion_enzymes_used'])}"
-                 if fa.get("digestion_enzymes_used") else ""),
+                 if fa.get("digestion_enzymes_used") else
+                 "; no digestion enzyme (`fetch_fasta.py --enzyme none`): every protease entry "
+                 "identical to a target was dropped as a target"
+                 if fa.get("enzyme") == "none" else ""),
               f"- **Searched file:** `{fa.get('fasta') or '?'}` -- "
               f"{fmt_n(fa.get('n_sequences'))} sequences, md5 {fa.get('md5') or '?'}"]
     else:
@@ -2432,7 +2481,10 @@ def render_analysis(rec, an):
     m = an.get("manifest") or {}
     if m:
         L.append(f"- **MANIFEST.txt:** {m.get('n_ok', 0)} part(s) OK, "
-                 f"{len(m.get('skipped') or [])} skipped")
+                 f"{len(m.get('skipped') or [])} skipped"
+                 + (f", {len(m['overridden'])} overridden (--override-finish)"
+                    if m.get("overridden") else ""))
+        L += [f"  - {x}" for x in (m.get("overridden") or [])[:10]]
         L += [f"  - {x}" for x in (m.get("skipped") or [])[:10]]
     z, zc = an.get("zip") or {}, rec.get("zip_copy") or {}
     L.append(f"- **Session zip:** `{z.get('path')}`"
@@ -3301,6 +3353,9 @@ def gather(event, a, deadline, r):
         plan_search(plan, out, a, deadline)
     if event == "analysis-done" and sess and os.path.isdir(sess):
         plan_analysis(plan, sess, a, plan["zip_cap"])
+        note = None if out else session_search_note(sess)
+        if note:
+            plan["analysis"]["warnings"].append(note)
     plan["prot"] = find_prot(a.prot, sess if sess and os.path.isdir(str(sess)) else None,
                              out if out and os.path.isdir(str(out)) else None)
     # Over SSH the record is attributed to the HIVE account, never this machine's login name.

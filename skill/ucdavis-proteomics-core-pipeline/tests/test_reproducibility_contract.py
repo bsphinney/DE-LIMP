@@ -100,7 +100,7 @@ def emit(method, q_columns=ALL_SIX, q_cutoffs=MIXED, q_cutoff=0.01,
             eq_cutoff = {eq_cutoff}, pgq_cutoff = {pgq_cutoff}, cov_min_frac = 0.5,
             meta = meta, covariates = character(0),
             formula_parts = "groups", forms = "A-B",
-            adjp_thr = 0.05, logfc_ref = 1))
+            adjp_thr = 0.05, logfc_ref = 1, between_run = "quantile"))
           cat(readLines("{out}"), sep = "\\n")
         '''
         p = subprocess.run(["Rscript", "-e", r], capture_output=True, text=True)

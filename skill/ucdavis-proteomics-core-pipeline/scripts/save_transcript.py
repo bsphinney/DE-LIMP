@@ -1053,6 +1053,31 @@ def _tail(r):
     return (r.stderr or r.stdout or "").strip()[-200:]
 
 
+def verify_hive_saved(rconv, names):
+    """None when every <rconv>/<name> exists on HIVE and is not empty, else the reason. One
+    remote command. A --put can exit 0 and still leave the file somewhere else (a path with a
+    space was split by the remote shell, 2.14.1), so 'saved' is only said after this."""
+    q = shlex.quote(rconv)
+    cmd = "; ".join(
+        f"if test -s {q}/{shlex.quote(n)}; then echo {shlex.quote(n)} $(wc -c < {q}/{shlex.quote(n)}); "
+        f"else echo {shlex.quote(n)} MISSING; fi" for n in names)
+    try:
+        r = _hive(cmd)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return f"could not check {rconv} on HIVE: {type(e).__name__}"
+    got = {}
+    for line in (r.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            got[parts[0]] = parts[1]
+    if r.returncode != 0 and not got:
+        return f"cannot reach HIVE to check {rconv}: {_tail(r)}"
+    bad = [n for n in names if not got.get(n, "MISSING").isdigit() or int(got[n]) == 0]
+    if bad:
+        return f"{', '.join(bad)} not found (or empty) in {rconv} on HIVE after the put"
+    return None
+
+
 def _save_hive(remote, transcript, sid, parts=None, current=None):
     """A HIVE session driven from this computer: redact HERE (the raw transcript never leaves),
     fetch what is saved there -- telling "nothing there yet" from "could not fetch", which aborts
@@ -1080,6 +1105,9 @@ def _save_hive(remote, transcript, sid, parts=None, current=None):
             put = _hive("--put", os.path.join(local, name), rconv + "/")
             if put.returncode != 0:
                 return {"skipped": f"could not put {name} on HIVE: {_tail(put)}"}
+        missing = verify_hive_saved(rconv, names)
+        if missing:
+            return {"skipped": f"not saved: {missing}"}
         _hive(f"chmod 640 {q}/*")
         n = len(glob.glob(os.path.join(local, "*.jsonl")))
     out = {"saved": rconv + "/" + sid + ".jsonl", "session_id": sid, "hive": True,
@@ -1260,6 +1288,26 @@ def render(conv_dir, index):
 
 
 # --------------------------------------------------------------------------------------- CLI
+def check(session_dir=None, hive=None, session_id=None, script=None):
+    """Is this Claude Code session's conversation saved? -> (ok, why). Saves nothing."""
+    sid = session_id or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not sid or not _SAFE_ID.match(sid):
+        return False, "no Claude Code session id (CLAUDE_CODE_SESSION_ID is not set; pass --session-id)"
+    script = script or os.path.abspath(__file__)
+    if hive:
+        rconv = hive.rstrip("/") + "/" + CONV_DIR.replace(os.sep, "/")
+        why = verify_hive_saved(rconv, [sid + ".jsonl"])
+        how = f"python3 {shlex.quote(script)} --hive {shlex.quote(hive)}"
+    else:
+        f = os.path.join(session_dir, CONV_DIR, sid + ".jsonl")
+        ok = os.path.isfile(f) and os.path.getsize(f) > 0
+        why = None if ok else f"{f} is missing or empty"
+        how = f"python3 {shlex.quote(script)} {shlex.quote(session_dir)}"
+    if why is None:
+        return True, ""
+    return False, f"conversation {sid} is not saved: {why}\nSave it with:  {how}"
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1278,6 +1326,9 @@ def main(argv=None):
     ap.add_argument("--from-now", action="store_true",
                     help="this session's part of the conversation starts HERE, not at the "
                          "skill's first load: for a conversation about several clients")
+    ap.add_argument("--check", action="store_true",
+                    help="save nothing: exit 0 if this session's conversation is saved, else "
+                         "exit 3 and print the command that saves it")
     ap.add_argument("--quiet", action="store_true")
     ap.add_argument("--oneline", action="store_true",
                     help="one timestamped line of JSON (the hook's log)")
@@ -1286,6 +1337,11 @@ def main(argv=None):
     ONELINE = a.oneline
     if not (a.session or a.hive):
         ap.error("give the session folder, or --hive <HIVE session folder>")
+    if a.check:
+        ok, why = check(a.session, a.hive, a.session_id)
+        if not ok:
+            print(why, file=sys.stderr)
+        return 0 if ok else 3
     try:
         if a.remember:
             got, warn = remember(a.session, a.hive, a.session_id, a.transcript,

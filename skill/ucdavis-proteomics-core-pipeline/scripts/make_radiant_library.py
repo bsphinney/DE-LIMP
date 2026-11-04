@@ -65,6 +65,9 @@ COLMAP = {
     "Proteotypic":            "Proteotypic",
     "Exclude.From.Quant":     "ExcludeFromAssay",
 }
+# The library's name in --out-dir: the ONE definition (run_search.radiant_library_lines checks a
+# job wrote it, and the parallel route's step 2 reads it).
+LIBRARY_TSV = "radiant_library.tsv"
 # Without these Radiant cannot build a fragment library at all.
 REQUIRED = ["PrecursorMz", "ProductMz", "LibraryIntensity", "ModifiedPeptide",
             "PrecursorCharge", "FragmentType", "FragmentCharge", "FragmentSeriesNumber"]
@@ -123,7 +126,7 @@ def main():
     a = ap.parse_args()
 
     os.makedirs(a.out_dir, exist_ok=True)
-    tsv = os.path.join(a.out_dir, "radiant_library.tsv")
+    tsv = os.path.join(a.out_dir, LIBRARY_TSV)
     # What the library was predicted with, beside it: a library is reused only for the same
     # cysteine choice. One from before 2.12 has no record -- and fixed nothing on C, whatever the
     # prep -- so it is rebuilt.

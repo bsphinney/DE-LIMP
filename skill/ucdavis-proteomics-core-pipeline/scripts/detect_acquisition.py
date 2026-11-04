@@ -287,7 +287,49 @@ def _cap_medium(conf):
     return "medium" if conf == "high" else conf
 
 
-def classify_isolation_windows(widths, targets, los, his):
+# A DIA method's MS2 windows, whatever their width (S2, T41): ONE fixed set that tiles the
+# precursor range, each window acquired again every cycle at exactly the same edges. A DDA run
+# isolates each precursor at its own measured m/z, so its windows do not recur at the same edges
+# (a precursor re-selected after its exclusion ends comes back a few ppm off); a PRM list recurs
+# but does not tile. The width rule alone called 2 m/z DIA (Orbitrap Astral, 300 windows over
+# 380-980) DDA, and 3-4 m/z DIA with more than 80 windows (Astral 4 m/z over 380-980: 150)
+# "unknown". TILED_SHARE: the share of windows that must recur, and of neighbours that must abut
+# (a read cut off mid-cycle leaves the last few once).
+TILED_MIN_WINDOWS, TILED_SHARE = 5, 0.9
+TILED_WHY = "a tiled set of {n} windows, each acquired again every cycle at the same edges"
+
+
+def tiled_window_set(los, his):
+    """The number of windows when the MS2 isolation windows (their ACQUIRED edges, in acquisition
+    order) are one fixed set that tiles the precursor range and repeats every cycle -- the DIA
+    shape, see TILED_WHY -- else None. Edges compared to 0.001 m/z; a window recurs a cycle later
+    (median gap >= half the set); neighbours abut when the next window starts no more than half a
+    median width after one ends (overlapping schemes start before)."""
+    import collections
+    edges = [(round(lo, 3), round(hi, 3)) for lo, hi in zip(los, his) if hi > lo]
+    seen = collections.Counter(edges)
+    k = len(seen)
+    if k < TILED_MIN_WINDOWS or len(edges) < 2 * k:
+        return None
+    if sum(1 for c in seen.values() if c >= 2) < TILED_SHARE * k:
+        return None
+    # ...once per CYCLE: a window comes back after the rest of the set (k scans, 2k for a staggered
+    # scheme), not straight after itself -- a DDA method that fragments each precursor twice (HCD
+    # then EThcD) repeats its edges in the next scan, and its dense windows abut as well
+    last, gaps = {}, []
+    for i, e in enumerate(edges):
+        if e in last:
+            gaps.append(i - last[e])
+        last[e] = i
+    if statistics.median(gaps) < k / 2:
+        return None
+    wins = sorted(seen)
+    half = statistics.median(hi - lo for lo, hi in wins) / 2
+    abut = sum(1 for (_, h0), (l1, _) in zip(wins, wins[1:]) if l1 - h0 <= half)
+    return k if abut >= TILED_SHARE * (k - 1) else None
+
+
+def classify_isolation_windows(widths, targets, los, his, flag_read=False):
     """DIA vs DDA from MS2 isolation windows -> (kind, confidence, reason, range).
 
     The one definition of the width/centre rule, shared by the mzML reader and the Thermo
@@ -303,6 +345,12 @@ def classify_isolation_windows(widths, targets, los, his):
     acquired isolation windows". A wrong number wearing the measured label is worse than the
     FALLBACK tag it replaces, so a partial read never carries `high`, and the reason says how
     much of the method it saw.
+
+    A tiled, repeated window set (tiled_window_set) is DIA past the 80-centre cap, and below
+    3 m/z too, where the width rule would call it DDA. Without the instrument's data-dependent
+    flag -- which this rule never sees; classify_thermo_windows reads it -- narrow (< 3 m/z)
+    and 3-4 m/z sets are "medium", >= 4 m/z "high" as before. `flag_read`: the caller reads that
+    flag and states it in the reason itself, so this rule does not say none was read (review F9).
     """
     if not widths:
         return ("unknown", "low", "no MS2 isolation windows found", None)
@@ -314,11 +362,18 @@ def classify_isolation_windows(widths, targets, los, his):
     partial = len(los) != n
     gap = (f"; isolation window edges for only {len(los)} of {n} windows, so any range read "
            f"from them may be clipped" if partial else "")
-    if med >= 3.0 and distinct <= max(80, n // 50):
+    tiles = tiled_window_set(los, his)
+    shape = f"; {TILED_WHY.format(n=tiles)}" if tiles else ""
+    if med >= 3.0 and (distinct <= max(80, n // 50) or tiles):
         conf = "high" if med >= 4 else "medium"
         return ("DIA", _cap_medium(conf) if partial else conf,
-                f"median isolation width {med:.1f} Da over {distinct} distinct centers{gap}",
-                rng)
+                f"median isolation width {med:.1f} Da over {distinct} distinct centers"
+                f"{shape}{gap}", rng)
+    if tiles:
+        return ("DIA", "medium",
+                f"median isolation width {med:.1f} Da{shape} -- narrow-window DIA by window "
+                f"shape" + ("" if flag_read else
+                            "; no data-dependent flag was read to confirm it") + gap, rng)
     if med <= 2.0:
         conf = "high" if distinct > n // 10 else "medium"
         return ("DDA", _cap_medium(conf) if partial else conf,
@@ -1049,7 +1104,8 @@ def classify_thermo_windows(w):
     data-dependent flag, which outranks window shape whenever the parser reports it.
     """
     kind, conf, why, rng = classify_isolation_windows(w["widths"], w["centres"],
-                                                      w["los"], w["his"])
+                                                      w["los"], w["his"],
+                                                      flag_read=w["n_filter"] > 0)
     # Every MS2 scan the parser answered with, against the ones a window could be read from.
     # A shortfall is the same defect classify_isolation_windows guards against for mzML --
     # a method judged, and a range measured, from part of its windows.
@@ -1069,7 +1125,15 @@ def classify_thermo_windows(w):
                f"{CV_FILTER} or {CV_FILTER_PRE_1_4_5}), so the window widths decided alone")
         return kind, _cap_medium(conf), f"{why}; {dep}", rng
     dep = f"{w['n_dependent']}/{w['n_filter']} MS2 scans flagged data-dependent"
-    if w["n_dependent"] == 0 and kind != "DIA" and w["widths"]:
+    tiles = tiled_window_set(w["los"], w["his"])
+    if w["n_dependent"] == 0 and tiles:
+        # A tiled set repeated every cycle (TILED_WHY) and the instrument says nothing was
+        # data-dependent: DIA, whatever the width or the number of windows (S2, T41) -- the
+        # Astral's 2 m/z x 300 and 4 m/z x 150 read as "medium" and "unknown" by width.
+        kind, conf = "DIA", "high"
+        rng = (min(w["los"]), max(w["his"]))
+        dep += " -- so DIA: the window set tiles and repeats, and nothing is data-dependent"
+    elif w["n_dependent"] == 0 and kind != "DIA" and w["widths"]:
         # Nothing was data-dependent, so this is not DDA whatever the widths look like:
         # narrow-window DIA (2-3 m/z isolation, Astral-style) or targeted PRM. Medium, so
         # the user confirms which.

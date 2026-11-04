@@ -1355,39 +1355,38 @@ class SessionIntegration(unittest.TestCase):
 
     def test_init_records_it_and_finalize_saves_it_but_never_zips_it(self):
         p = self.session()
+        import finish_fixture                               # the skill's report and the bundle
+        finish_fixture.finished(p["output_dir"])
         with mock.patch.dict(os.environ, {"SKILL_CONFIG_DIR": self.env["SKILL_CONFIG_DIR"]}):
             self.assertEqual(st.lookup(SID)[0]["session_dir"], p["session_dir"])
+        # 2.14.2 (I35): Claude Code, and nothing saved, is no longer a [SKIPPED] line finalize
+        # writes past -- it refuses, writes nothing, and says how to save it or waive it
         r = subprocess.run([PY, os.path.join(SCRIPTS, "session.py"), "finalize", "--dir",
                             p["session_dir"], "--zip"], capture_output=True, text=True,
                            env=self.env)
-        self.assertEqual(r.returncode, 0, r.stderr)
-        with open(p["manifest_txt"], encoding="utf-8") as fh:
-            man = fh.read()
-        # Claude Code, and nothing saved: a failure
-        self.assertIn("[SKIPPED] Analysis conversation (logs/conversation)", man)
-        self.assertIn(f"no transcript for Claude Code session {SID}", man)
-        env = dict(self.env)                                   # not Claude Code, and no log:
-        env.pop("CLAUDE_CODE_SESSION_ID")                      # nothing records how it was done
-        subprocess.run([PY, os.path.join(SCRIPTS, "session.py"), "finalize", "--dir",
-                        p["session_dir"]], capture_output=True, text=True, env=env, check=True)
-        with open(p["manifest_txt"], encoding="utf-8") as fh:
-            self.assertIn("no conversation and no decisions log (log_decision.py)", fh.read())
-        import log_decision
-        with mock.patch.dict(os.environ, {"SKILL_CONFIG_DIR": self.env["SKILL_CONFIG_DIR"]}):
-            log_decision.append(p["session_dir"], "Groups: ctrl vs trt", "the user confirmed")
-        r = subprocess.run([PY, os.path.join(SCRIPTS, "session.py"), "finalize", "--dir",
-                            p["session_dir"]], capture_output=True, text=True, env=self.env)
-        with open(p["manifest_txt"], encoding="utf-8") as fh:  # Claude Code, nothing saved:
-            self.assertIn("[SKIPPED] Analysis conversation", fh.read())   # a failure, even so
-        env = dict(self.env)                                   # another agent + its log: INFO
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("no conversation is saved", r.stderr)
+        self.assertIn("save_transcript.py --hive", r.stderr)
+        self.assertFalse(os.path.exists(p["manifest_txt"]))
+        self.assertFalse(os.path.exists(p["session_dir"] + ".zip"))
+        # init's record of this folder names the conversation: without CLAUDE_CODE_SESSION_ID
+        # here (a HIVE shell, another terminal) it is still a Claude Code analysis
+        env = dict(self.env)
         env.pop("CLAUDE_CODE_SESSION_ID")
         r = subprocess.run([PY, os.path.join(SCRIPTS, "session.py"), "finalize", "--dir",
                             p["session_dir"]], capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("the transcript hook's record of this folder", r.stderr)
+        # waived with a reason: [SKIPPED] with that reason
+        r = subprocess.run([PY, os.path.join(SCRIPTS, "session.py"), "finalize", "--dir",
+                            p["session_dir"], "--no-transcript", "the transcript was lost"],
+                           capture_output=True, text=True, env=self.env)
         self.assertEqual(r.returncode, 0, r.stderr)
         with open(p["manifest_txt"], encoding="utf-8") as fh:
-            man = fh.read()
-        self.assertIn("[INFO]    Analysis conversation (logs/conversation)", man)
-        self.assertIn("the decisions log (logs/decisions.md) is the record", man)
+            self.assertIn("-- --no-transcript: the transcript was lost", fh.read())
+        import log_decision
+        with mock.patch.dict(os.environ, {"SKILL_CONFIG_DIR": self.env["SKILL_CONFIG_DIR"]}):
+            log_decision.append(p["session_dir"], "Groups: ctrl vs trt", "the user confirmed")
         write_transcript(self.claude)
         r = subprocess.run([PY, os.path.join(SCRIPTS, "session.py"), "finalize", "--dir",
                             p["session_dir"], "--zip"], capture_output=True, text=True,
@@ -1479,6 +1478,96 @@ class SessionIntegration(unittest.TestCase):
             cat, desc = make_report.describe(name)
             self.assertNotIn("unrecognized", desc, name)
         self.assertIn("CORE-INTERNAL", make_report.describe("conversation.md")[1])
+
+
+class HiveVerifiesTheFiles(Env):
+    """2.14.2 T16: 'saved' only after HIVE is seen to hold the files (I33)."""
+
+    # a --put that exits 0 and writes nothing, as a path split by the remote shell did
+    LOST = Hive.FAKE.replace("--put) cp \"$2\" \"$3\" ;;", "--put) : ;;")
+
+    def _run(self, body):
+        fake = os.path.join(self.d, "hive_exec.sh")
+        with open(fake, "w") as fh:
+            fh.write(body)
+        remote = os.path.join(self.d, "PROT_9756", "hive")
+        os.makedirs(remote)
+        write_transcript(self.claude)
+        with mock.patch.dict(os.environ, {"SKILL_HIVE_EXEC": fake}):
+            rc, out = self.cli("--hive", remote)
+        return remote, out
+
+    def test_put_that_landed_elsewhere_is_reported_skipped(self):
+        self.assertNotEqual(self.LOST, Hive.FAKE)
+        _, out = self._run(self.LOST)
+        self.assertNotIn("saved", out, out)
+        self.assertIn(SID + ".jsonl", out["skipped"])
+
+    def test_verified_put_is_saved(self):
+        remote, out = self._run(Hive.FAKE)
+        self.assertIn("saved", out, out)
+        with mock.patch.dict(os.environ, {"SKILL_HIVE_EXEC": os.path.join(self.d, "hive_exec.sh")}):
+            self.assertIsNone(st.verify_hive_saved(os.path.join(remote, "logs", "conversation"),
+                                                   [SID + ".jsonl"]))
+            self.assertIn("nope.jsonl", st.verify_hive_saved(
+                os.path.join(remote, "logs", "conversation"), ["nope.jsonl"]))
+
+
+class VerifyCannotRaise(Env):
+    def test_a_timeout_or_oserror_is_a_reason_not_a_traceback(self):
+        import subprocess as sp
+        for exc in (sp.TimeoutExpired("x", 600), OSError("gone")):
+            with mock.patch.object(st, "_hive", side_effect=exc):
+                self.assertIn("could not check", st.verify_hive_saved("/r/logs/conversation", ["a.jsonl"]))
+
+
+class CheckFlag(Env):
+    """2.14.2 T17: --check says, from the laptop, whether the conversation is saved."""
+
+    def _check(self, *argv):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            rc = st.main(list(argv) + ["--check"])
+        return rc, err.getvalue()
+
+    def test_check_on_an_unsaved_session_exits_3_with_the_command(self):
+        rc, err = self._check(self.session)
+        self.assertEqual(rc, 3)
+        self.assertIn("save_transcript.py", err)
+        remote = os.path.join(self.d, "PROT_9756", "hive")
+        os.makedirs(remote)
+        fake = os.path.join(self.d, "hive_exec.sh")
+        with open(fake, "w") as fh:
+            fh.write(Hive.FAKE)
+        with mock.patch.dict(os.environ, {"SKILL_HIVE_EXEC": fake}):
+            rc, err = self._check("--hive", remote)
+        self.assertEqual(rc, 3)
+        self.assertIn("save_transcript.py --hive", err)
+
+    def test_check_on_a_saved_session_exits_0(self):
+        write_transcript(self.claude)
+        os.makedirs(self.conv())
+        with open(self.conv(SID + ".jsonl"), "w") as fh:
+            fh.write("{}\n")
+        rc, err = self._check(self.session)
+        self.assertEqual((rc, err), (0, ""))
+        remote = os.path.join(self.d, "PROT_9756", "hive")
+        os.makedirs(os.path.join(remote, "logs", "conversation"))
+        with open(os.path.join(remote, "logs", "conversation", SID + ".jsonl"), "w") as fh:
+            fh.write("{}\n")
+        fake = os.path.join(self.d, "hive_exec.sh")
+        with open(fake, "w") as fh:
+            fh.write(Hive.FAKE)
+        with mock.patch.dict(os.environ, {"SKILL_HIVE_EXEC": fake}):
+            self.assertEqual(self._check("--hive", remote)[0], 0)
+
+    def test_check_writes_nothing(self):
+        write_transcript(self.claude)
+        before = sorted(os.listdir(self.session))
+        self._check(self.session)
+        self.assertEqual(sorted(os.listdir(self.session)), before)
+        self.assertFalse(os.path.exists(self.conv()))
+        self.assertFalse(os.path.exists(self.cfg))
 
 
 if __name__ == "__main__":

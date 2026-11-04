@@ -20,13 +20,16 @@ import sys, os, json, glob, argparse, re
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from report_files import SHARE_NAME  # noqa: E402  defined once; no make_podcast / notify_slack
 try:   # the peak check's rule and pinned Skyline, each defined once (a partial scripts/: generic)
-    from skyline_peaks import APEX_DIFF_S, open_document_text  # noqa: E402
+    from skyline_peaks import (APEX_DIFF_S, SKYLINE_DOCUMENT_SUFFIX,  # noqa: E402
+                               open_document_text)
     _APEX = f"more than {APEX_DIFF_S:g} s from DIA-NN's"
     _OPEN = open_document_text()
+    _SKY_DOC = re.escape(SKYLINE_DOCUMENT_SUFFIX)
 except Exception:                            # recorded in the text: never a guessed number
     _APEX = "too far from DIA-NN's (skyline_provenance.json results.apex_diff_s)"
     _OPEN = ("Open it in the Skyline version its record names (skyline_provenance.json "
              "tool.version) or later.")
+    _SKY_DOC = r"\.sky\.zip"                 # any Skyline document, not a copy of the name
 
 # (regex on basename, category, description). First match wins.
 PEAKS = "Peak check (Skyline)"
@@ -51,7 +54,7 @@ CATALOG = [
      "The precursor-runs where Skyline picked a different peak from DIA-NN's: no peak, its apex "
      f"{_APEX}, or outside DIA-NN's peak edges -- the peaks to look at before trusting their "
      "numbers."),
-    (r".*_top_hits\.sky\.zip$", PEAKS,
+    (r".*" + _SKY_DOC + r"$", PEAKS,
      "The Skyline document of the checked proteins, with the results of every run (it can also "
      f"be uploaded to Panorama). {_OPEN}"),
     (r"^skyline_provenance\.json$", PEAKS,
@@ -91,10 +94,29 @@ CATALOG = [
      "Sage only: which lfq.parquet rows became report.parquet -- targets at q_value <= 0.05, "
      "decoys and failing rows dropped -- with the counts per file."),
     (r"^sage_lfq_check\.json$", "Search output",
-     "Sage only: whether Sage's LFQ window (quant.lfq_settings.ppm_tolerance) fit each run's "
-     "median precursor mass error, and how many target MS1 peaks Sage kept at 5% FDR "
-     "(sage_lfq_check.py). A warning here means the identifications stand but the quantities "
-     "are unreliable."),
+     "The search's quantification check, which the DE asks before it runs (sage_lfq_check.py). "
+     "For a quantifying Sage search: whether Sage's LFQ window (quant.lfq_settings.ppm_tolerance) "
+     "fit each run's median precursor mass error, and how many target MS1 peaks Sage kept at 5% "
+     "FDR; a warning means the identifications stand but the quantities are unreliable. With "
+     "status not_applicable: a search for identifications only (Sage with quant.lfq false, or a "
+     "FragPipe workflow that runs no quantification), so there is no DE; its reason is inside."),
+    (r"^identifications\.tsv$", "Search output",
+     "The identifications of a search for identifications only (Sage with quant.lfq false, or "
+     "a FragPipe workflow that runs no quantification). Sage's has one row per run, modified "
+     "peptide and charge (count peptides, not rows); FragPipe's one row per run and modified "
+     "peptide, its charges listed together. There are no quantities, so no DE; how it was "
+     "filtered is in sage_identifications.json or fragpipe_identifications.json beside it."),
+    (r"^sage_identifications\.json$", "Search output",
+     "How a Sage identifications-only search's identifications.tsv was filtered: the rule "
+     "(rank-1 target PSMs at 1% spectrum- and peptide-level q, over all runs together), and what "
+     "was kept per run. No protein-level FDR filter was applied: `proteins` lists every database "
+     "protein containing the peptide, Sage's picked-protein q-value is in `protein_q`, and the "
+     "totals give how many protein groups have protein_q <= 0.01 (protein_groups_protein_q of "
+     "protein_groups)."),
+    (r"^fragpipe_identifications\.json$", "Search output",
+     "How a FragPipe identifications-only search's identifications.tsv was built: the "
+     "Philosopher filter it ran, the tables it was read from, what was kept per run, and why "
+     "there is no quantification."),
 
     (r"^qc_pvalue_panel\.png$", "Figures",
      "QC panel: the raw p-value distribution of every contrast as small multiples "
@@ -388,10 +410,30 @@ def collect(paths):
     return sorted(seen.values())
 
 
+def search_outs(a):
+    """The search folder(s) to catalog: --search-out; else the session's (session.search_folder,
+    the one answer to "which search"); when its records leave the choice open, every recorded
+    search folder -- a catalog lists files, it does not say which search the results came
+    from."""
+    if a.search_out or not a.session:
+        return [a.search_out]
+    import session as sess
+    p = sess.paths_for(a.session)
+    c = sess.search_choice(p)
+    folder = sess.search_folder(p, c)
+    if folder:
+        return [folder]
+    return [os.path.dirname(x) for x in c["candidates"]]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", default="OUTPUT_FILES.md")
     ap.add_argument("--search-out")
+    ap.add_argument("--session", help="the analysis session: with no --search-out, its search "
+                                      "folder (session.search_folder: wherever the search is, "
+                                      "the one the DE read); records and none chosen: every "
+                                      "search folder, each listed")
     ap.add_argument("--de-dir")
     ap.add_argument("--repro")
     ap.add_argument("--extra", nargs="*", default=[])
@@ -402,7 +444,7 @@ def main():
     # (skyline_peaks.py) in skyline/: each listed when present (its skyline_work/ is scratch)
     here = os.path.dirname(os.path.abspath(a.out))
     podcast, skyline = os.path.join(here, "podcast"), os.path.join(here, "skyline")
-    files = collect([a.search_out, a.de_dir, a.repro, *a.extra,
+    files = collect([*search_outs(a), a.de_dir, a.repro, *a.extra,
                      podcast if os.path.isdir(podcast) else None,
                      skyline if os.path.isdir(skyline) else None])
     root = os.path.abspath(a.root)

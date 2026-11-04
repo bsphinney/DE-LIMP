@@ -10,6 +10,10 @@ search_provenance.json -- run_search.py's 5-step chain never has --no-norm, a si
 has it when its cfg does), and only when that records nothing are the data read; when neither
 can tell, the description claims no DIA-NN normalisation and says NOT RECORDED.
 
+2.14.2 (I20): a normalised DIA-NN report's PG.MaxLFQ gets no second (quantile) step any more
+(build_maxlfq.R maxlfq_between_run; tests/test_maxlfq_between_run.py), so it is described as
+DIA-NN_ONLY; a --no-norm report keeps the quantile step, its only between-run normalisation.
+
 Synthetic reports on a temp dir (tests/test_normalization_check.make_report); the R parts skip
 without R. Hermetic.
 """
@@ -34,8 +38,7 @@ from test_run_de_contaminants import r_has  # noqa: E402
 RUN_DE = os.path.join(SCRIPTS, "run_de.R")
 QUANTILE_ONLY = ("quantile normalisation (limma::normalizeBetweenArrays) only: the DIA-NN search "
                  "ran with --no-norm, so PG.MaxLFQ carries no DIA-NN cross-run normalisation")
-DIANN_THEN_QUANTILE = ("DIA-NN's cross-run normalisation (PG.MaxLFQ), then quantile normalisation "
-                       "(limma::normalizeBetweenArrays)")
+DIANN_ONLY = "DIA-NN's cross-run normalisation (PG.MaxLFQ already carries it); no second step"
 
 
 def provenance(d, **rec):
@@ -124,14 +127,16 @@ class TheDESaysWhatRan(unittest.TestCase):
         self.assertEqual(prov["normalisation"], QUANTILE_ONLY)
         self.assertIn("the report's name", prov["dia_nn_normalisation"]["source"])
 
-    def test_a_normal_report_says_dia_nn_then_quantile_from_its_provenance(self):
+    def test_a_normal_report_says_dia_nn_only_from_its_provenance(self):
         report, cond, contrast = make_report(os.path.join(self.d, "n"), "whole")
         provenance(os.path.dirname(report), search_mode="parallel_5step")
         prov, methods = self.de(report, cond, contrast, "chain")
-        self.assertEqual(prov["normalisation"], DIANN_THEN_QUANTILE)
+        self.assertEqual(prov["normalisation"], DIANN_ONLY)
+        self.assertEqual(prov["between_run"]["method"], "none")
         self.assertFalse(prov["dia_nn_normalisation"]["no_norm"])
         self.assertIn("search_provenance.json", prov["dia_nn_normalisation"]["source"])
-        self.assertIn(DIANN_THEN_QUANTILE, methods)
+        self.assertIn(DIANN_ONLY, methods)
+        self.assertNotIn("quantile", prov["normalisation"])
 
     def test_neither_provenance_nor_data_claims_no_dia_nn_normalisation(self):
         import pyarrow.parquet as pq
@@ -139,7 +144,7 @@ class TheDESaysWhatRan(unittest.TestCase):
         t = pq.read_table(report)
         pq.write_table(t.drop(["Precursor.Quantity", "Precursor.Normalised"]), report)
         prov, methods = self.de(report, cond, contrast, "unknown")
-        self.assertIn("whether DIA-NN also normalised it is NOT RECORDED [confirm]",
+        self.assertIn("no second step; whether DIA-NN normalised it is NOT RECORDED [confirm]",
                       prov["normalisation"])
         self.assertIsNone(prov["dia_nn_normalisation"]["no_norm"])
         self.assertNotIn("DIA-NN's cross-run normalisation (PG.MaxLFQ)", methods)

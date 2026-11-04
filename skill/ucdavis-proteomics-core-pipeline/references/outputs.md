@@ -90,12 +90,17 @@ The orchestrator asks where results should live (SKILL.md step 3b):
 - `session.py init --name "..." --raw <globs> [--base <path>] [--reanalysis-of <prior> [--beside]]`
   makes the folders and prints a `paths` map; **route every step's
   `--out`/`--outdir`/`--dest` into those paths**.
-- `session.py finalize --dir <session> [--zip]` ensures the Methods, writes the deposit package,
+- `session.py finalize --dir <session> [--zip]` ensures the Methods, builds the reproducibility
+  bundle when it is missing or out of date (provenance.py, with step 10's flags read from the
+  session's records), writes the deposit package,
   `README.md` + `README.html` + `AGENTS.md` and `MANIFEST.txt`, prints the report PDF when it is
   missing and a browser is there, moves any loose tables/figures into their subdirs, (for a
   re-analysis) writes `DIFFERENCES.md`, and with `--zip` zips the session, then logs the run and
   posts to the Core's Slack channel (Core runs). `session.py docs --dir <session> [--as <real location>]` writes only
   the three documents (e.g. for a session finalized before they existed, or a copy of one).
+  `session.py docs` after finalize makes the finalize stamp stale (README.md, README.html and
+  AGENTS.md are stamped): `deliver`, the Slack post and `email-draft` then refuse until
+  `session.py finalize` runs again.
 
 ### README.html, README.md and AGENTS.md (`session_docs.py`)
 - **README.html** is what collaborators open: one self-contained page (inline CSS, no external
@@ -164,7 +169,8 @@ The orchestrator asks where results should live (SKILL.md step 3b):
 ### The DE tables (`output/tables/DE_<method>_<contrast>.csv`, `run_de.R`)
 One row per protein, sorted by `adj.P.Val`. limma's columns (`logFC`, `AveExpr`, `t`,
 `P.Value`, `adj.P.Val` — THE significance column —, `B`), the protein annotation
-(`Protein.Group`, `Genes`, `Protein.Names`, and on dpc limpa's `NPeptides` / `PropObs`), then
+(`Protein.Group`, `Genes`, `Protein.Names`, and on dpc limpa's precursor count `NPrec` (limpa ≥ 1.4;
+`NPeptides` before) / `PropObs`), then
 two kinds of detection column, from `Detection_Matrix.csv` (the one definition of
 "measured"; a run measured a protein when that matrix is > 0):
 - **`Detected_<group>`**, one per group the contrast compares (`Detected_Old_JPH3`,

@@ -178,6 +178,7 @@ footer.foot{max-width:78rem;margin:0 auto;padding:0 1rem 2.5rem;color:var(--mute
   .callout,.figmissing,.tile.key,tbody tr:nth-child(even) td{-webkit-print-color-adjust:exact;print-color-adjust:exact}
   a{color:#000;text-decoration:none}
   p.feedback a::after{content:"\A" attr(href);white-space:pre}
+  p.howmade a::after{content:"\A" attr(href);white-space:pre}
   p.star a::after{content:" (" attr(href) ")";white-space:nowrap}
 }
 p.feedback,p.star{margin:2rem 0 0;padding-top:.8rem;border-top:1px solid var(--line)}

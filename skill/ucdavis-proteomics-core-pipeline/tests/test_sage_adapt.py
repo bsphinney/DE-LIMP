@@ -139,18 +139,44 @@ class AdaptSageKeepsOnlyValidMs1Rows(unittest.TestCase):
         self.assertIn("cannot be told from the targets", str(cm.exception))
         self.assertFalse(os.path.exists(os.path.join(self.d, "report.parquet")))
 
+    def adapt_in_a_child(self):
+        return subprocess.run([sys.executable, "-c",
+                               "import sys; sys.path.insert(0, sys.argv[1]); import run_search; "
+                               "run_search.adapt_sage(sys.argv[2])", SCRIPTS, self.d],
+                              capture_output=True, text=True, timeout=60)
+
     def test_nothing_passing_is_said_not_passed_off(self):
         """gabrig's +7 ppm cohort: every target at q 0.128. The old adapter still handed the DE
-        a full matrix of decoy and failing-target intensities."""
+        a full matrix of decoy and failing-target intensities; 2.9-2.14.1 wrote a 0-row report
+        with exit 0 (H2-2: an empty result looked like success). Now: refused, exit 2, no
+        report.parquet -- an earlier one set aside -- and the reason recorded (rule 4)."""
         write_lfq(os.path.join(self.d, "lfq.parquet"),
                   rows=[r for r in ROWS if r[3] == 0.128])
-        r = subprocess.run([sys.executable, "-c",
-                            "import sys; sys.path.insert(0, sys.argv[1]); import run_search; "
-                            "run_search.adapt_sage(sys.argv[2])", SCRIPTS, self.d],
-                           capture_output=True, text=True, timeout=60)
-        self.assertEqual(r.returncode, 0, r.stderr)
+        report = os.path.join(self.d, "report.parquet")
+        with open(report, "w") as fh:
+            fh.write("an earlier adapt's report")
+        r = self.adapt_in_a_child()
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("REFUSED", r.stderr)
         self.assertIn("no Sage MS1 peak passed q_value <= 0.05", r.stderr)
-        self.assertEqual(pq.read_table(os.path.join(self.d, "report.parquet")).num_rows, 0)
+        self.assertFalse(os.path.exists(report))
+        self.assertTrue([f for f in os.listdir(self.d) if f.startswith("report.parquet.stale-")])
+        with open(os.path.join(self.d, "sage_adapt.json")) as fh:
+            rec = json.load(fh)
+        self.assertEqual(rec["status"], "refused")
+        self.assertIsNone(rec["report"])
+        self.assertIn("no Sage MS1 peak passed", rec["refused"])
+
+    def test_no_target_peptide_at_1pct_is_refused(self):
+        """H2-2: Sage identified nothing at 1% (HIVE: an un-combined timsTOF mzML): there is
+        nothing to quantify, whatever lfq.parquet holds."""
+        sys.path.insert(0, HERE)
+        import test_sage_lfq_check as fx
+        fx.write_sage_outputs(self.d, {"a.mzML": 0.5}, peaks=0, target_q=0.5)
+        r = self.adapt_in_a_child()
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("no target peptide at 1% FDR", r.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.d, "report.parquet")))
 
 
 if __name__ == "__main__":

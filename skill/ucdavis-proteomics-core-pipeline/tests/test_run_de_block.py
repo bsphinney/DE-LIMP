@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """run_de.R --block: a random blocking factor (the mouse several IPs came from).
 
-PROT_0756 (Dickson lab, Silva08172026): 30 IPs from 6 mouse brains, one JPH3/JPH4/Kv2.1/
+PROT_9756 (a lab): 30 IPs from 6 mouse brains, one JPH3/JPH4/Kv2.1/
 RyR/IgG IP per mouse, mice 1-3 Old and 4-6 Young. Every bait-vs-IgG contrast compares IPs
 from the same mice, but run_de.R fitted all 30 as independent samples.
 

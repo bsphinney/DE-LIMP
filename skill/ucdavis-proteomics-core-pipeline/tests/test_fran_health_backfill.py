@@ -1589,7 +1589,7 @@ class MetaSelectionTests(unittest.TestCase):
             self.assertEqual(fd.fasta_from_meta(out)[0], fa)
 
     def test_a_staging_path_in_the_sidecar_becomes_the_path_the_search_read(self):
-        """Silva / gabrig on 2026-09-24: the sidecar named ~/proteomics-pipeline/staging/search.fasta
+        """A Core member on 2026-09-24: the sidecar named ~/proteomics-pipeline/staging/search.fasta
         (it EXISTS, and the next session overwrites it); the search read <session>/input/search.fasta."""
         with tempfile.TemporaryDirectory() as d:
             staging = os.path.join(d, "home", "staging")

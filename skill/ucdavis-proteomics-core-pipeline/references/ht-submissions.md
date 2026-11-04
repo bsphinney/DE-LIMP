@@ -66,6 +66,9 @@ bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/ht_manifest.py 
 `--summary` is the submission's CoreOmics record, written by `core_submission.py fetch` and put
 on HIVE (`references/core-submissions.md`). It is what lets `ht_manifest.py` see a sample STAN
 has no run for (gate `sample_list`, below); without it that check is not made, and says so.
+It is also compared with the other submissions' records beside it, `PROT_*/submission_summary.json`
+in the folder above (`~/core/`), for a sample list copied from another plate (gate
+`sample_list_copied`); `--summaries-dir <folder>` names another folder to compare with.
 
 `--include` takes `samples` (**default** — blanks and standards excluded), `rerun` (only
 what STAN flagged for re-injection), `standards`, or `all`. Both `0793` and `793` work.
@@ -116,6 +119,34 @@ covering the wrong files**:
   the list is staged (`locate --files-from … --choose <unique_id>=<file>`). Not checked for
   `--include rerun|standards`. A `--summary` that cannot be read is a FAIL that says to put
   `submission_summary.json` on HIVE and pass its path — nothing to ask the operator.
+* **The plate checks** (2.14.2). On two earlier HT submissions, 94 of 96 runs were named for the wrong well
+  and every gate above passed: they read names, and the names were the error. These three compare
+  other records of the plate (checks only; HyStar queues are still made by hand):
+  * **`run_sizes`** — a blank of the plate (STAN's class, or one of STAN's blank words in its
+    name: `wash`, `blank`, `blnk`, `blk`) larger than half the plate's median sample run is the
+    size of a sample, so what is in it is not what its name says: the plate's run names may be
+    shifted from the plate map (on one of those plates, runs named `Blank_S3-A6` held 1.36 GB). The limit is
+    relative, so real blanks pass at any throughput. With the default `--include samples` STAN
+    leaves its blanks out of the list, so they are also looked for beside the plate's runs: the
+    `.d` folders named for the submission with a blank word, one listing of each runs' folder.
+    Sizes are `analysis.tdf_bin` + `analysis.tdf`, by `stat` only.
+  * **`sample_list_copied`** (with `--summary`) — the CoreOmics record's sample names are the same
+    ordered list (8 names or more) as another submission's record under `--summaries-dir`
+    (default: the folder above `--summary`'s). A list copied from another plate cannot say which
+    sample each run is; the gate names the other submission. A list with an empty name, or of
+    names that are not distinctive (numbers, well labels like `A1`, `Sample <n>`), is not
+    compared (INFO): two unrelated submissions use those by convention.
+  * **`sample_table`** — each run's HyStar sample table, read from `SampleInfo.xml` in its `.d`
+    folder (`<SampleTableHeader SampleTablePath=…>`; the file is UTF-16). **One table per plate**
+    (the tray: STAN's `plate`, or the `_S<n>-` in the name): every Sep/Oct 2026 HT plate on HIVE
+    (four submissions) has 96 runs and exactly one table, and a two-tray submission is
+    usually two. A plate whose runs come from more than one table, or a table whose name carries
+    only **another** `PROT_####`, stops the plate; the way forward is staff choosing the runs
+    (`core_submission.py locate --files-from`). A re-injection (`<date>_<n>_rerun_…`) is checked
+    only for another submission's number, so one queued from its own table passes. A table naming
+    this submission **and** another is a WARN. Staff type these names ("Plate #3 … October 27th"),
+    so most carry no PROT number: that passes, and the output prints `sample table: <name>` (or
+    `sample tables: S3: …; S4: …`) so staff can see they are this plate's.
 
 ### Why STAN's list is checked, not trusted (2026-10-05)
 
@@ -169,6 +200,15 @@ stop on their own:
 * **`one_method` WARN** — a file name declares no method (a re-injection is named
   `<date>_<n>_rerun_…`), so it could not be compared with the rest. Confirm with the operator.
 * **`sample_list` WARN** — not checked, because no `--summary` was given.
+* **`run_sizes` WARN** — a sample run under 20% of the plate's median sample run (a failed
+  injection?), a run that could not be measured (a `.d` without its `analysis.tdf_bin`), or no
+  blank of the plate found at all, so the blank check was not made. Each run is named; ask the
+  operator before searching.
+* **`sample_list_copied` WARN / INFO** — not checked (no `--summary`), not compared (empty or
+  generic names), nothing to compare with (no other record under `--summaries-dir`), or a record
+  there could not be read or holds no list of samples (named; it never stops the fetch).
+* **`sample_table` WARN** — not checked (no `SampleInfo.xml` in the runs), some runs have none
+  or an unreadable one (named), or a table names this submission and another one.
 * **`counts`** — fewer than 12 customer samples. A mistyped submission looks exactly like
   this. A genuinely small submission is legal, so this warns rather than blocks.
 * **`needs_rerun`** — samples STAN flagged for another injection. They **are** included in

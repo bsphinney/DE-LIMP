@@ -72,6 +72,16 @@ class RunDeRecordsCompute(unittest.TestCase):
             si = fh.read()
         return comp, si
 
+    def test_the_skill_version_is_recorded(self):
+        """de_provenance.json names the skill version that ran the DE (plugin.json via
+        skill_version.R): a report rebuilt later by another version names this one."""
+        p, out = self.runs["plain"]
+        self.assertEqual(p.returncode, 0, p.stderr[-1500:])
+        with open(os.path.join(out, "de_provenance.json")) as fh:
+            ran = json.load(fh).get("skill_version")
+        with open(os.path.join(SCRIPTS, "..", ".claude-plugin", "plugin.json"), encoding="utf-8") as fh:
+            self.assertEqual(ran, json.load(fh)["version"])
+
     def test_the_machine_is_recorded(self):
         comp, si = self.record("plain")
         for k in ("cpu_model", "blas", "lapack", "lapack_version", "openblas_coretype", "note"):

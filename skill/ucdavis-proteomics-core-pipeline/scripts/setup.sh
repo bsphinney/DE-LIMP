@@ -636,7 +636,7 @@ $THERMO_READY || NOTES+=("Thermo .raw cannot be read yet (only matters for .raw 
 
 [ -z "$RSCRIPT" ] && NOTES+=("R/Rscript not available — DE cannot run. Re-run setup.sh to install it into the conda env.")
 [ -z "$SAGE" ]    && NOTES+=("Sage not found — DDA search unavailable until the conda env is built.")
-[ "$OS" = "darwin" ] && [ -z "$MSCONVERT" ] && NOTES+=("msconvert is Linux-only on bioconda. On macOS, Sage can only search files ALREADY in mzML; convert Bruker .d / Thermo .raw elsewhere first, or use DIA-NN (which reads .d/.raw natively) for DIA data.")
+[ "$OS" = "darwin" ] && [ -z "$MSCONVERT" ] && NOTES+=("msconvert is Linux-only on bioconda (and has no vendor readers). Sage still searches here: Thermo .raw through ThermoRawFileParser, mzML as it is, and a timsTOF .d read directly for identifications only (estimate_params.py --ids-only). To QUANTIFY a .d with Sage, run the search on HIVE, where the job converts it with the Core's pinned ProteoWizard container, or convert it to mzML elsewhere with a vendor-enabled msconvert (e.g. Windows ProteoWizard) first. DIA-NN reads .d/.raw natively.")
 
 # ---- 4. write activate.sh + setup.json --------------------------------------
 if ! $CHECK_ONLY || [ ! -f "$ACTIVATE" ]; then

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """make_analysis_html.py puts each figure where the report discusses it, and nothing else.
 
-msalemi, 2026-09-24 (Silva08172026): Analysis_Report.html printed all 28 figure references
+mstaff, 2026-09-24 (the mouse-brain IP cohort): Analysis_Report.html printed all 28 figure references
 of AI_Analysis_Report.md as literal Markdown (`![Proteins quantified per sample](figures/
 qc_protein_counts.png)`), dumped every image in figures/ -- a stale pca_original_labels.png
 included -- into galleries at the top, and showed "Overview" and "Audit & caveats" twice.
@@ -184,7 +184,7 @@ class Galleries(unittest.TestCase):
 
 class IdenticalBarsLeftOut(unittest.TestCase):
     """A DPC/limpa matrix is complete by construction, so "proteins quantified per sample" is
-    a row of identical bars (Silva08172026: 30 x 6,112). Brett flagged it twice: an old
+    a row of identical bars (the mouse-brain IP cohort: 30 x 6,112). Brett flagged it twice: an old
     figures/ folder and the narrative written against it kept bringing it back."""
 
     REPORT = ("# T\n\n## QC Assessment\n\n![PCA](figures/pca.png)\n\n**PCA.** Keep this.\n\n"
@@ -332,11 +332,13 @@ class Restyle(unittest.TestCase):
         self.assertNotRegex(p, r"\bsrc=[\"']?(https?:)?//")
         self.assertNotRegex(p, r"<(?!a\b)[a-z]+\b[^>]*\bhref=[\"']?(https?:)?//")
         # the only ways out are links a reader clicks -- navigations, not something the page
-        # loads: the GitHub star line every report has (core_submission.star_line, plugin.json's
-        # address), then this Core run's feedback survey (core_submission.feedback_url)
+        # loads: the public page on how these reports are made (How this report was made, on
+        # every report), the GitHub star line every report has (core_submission.star_line,
+        # plugin.json's address), then this Core run's feedback survey
+        # (core_submission.feedback_url)
         out = re.findall(r'<a\b[^>]*\bhref="((?:https?:)?//[^"]*)"', p)
         import core_submission
-        self.assertEqual(out, [core_submission.repository_url(),
+        self.assertEqual(out, [mah.HOW_MADE_URL, core_submission.repository_url(),
                                core_submission.FEEDBACK_URL + "?prot=PROT_0001&amp;src=report"])
 
     def test_toc_links_resolve(self):

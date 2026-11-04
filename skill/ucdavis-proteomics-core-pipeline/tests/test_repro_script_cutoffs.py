@@ -48,7 +48,7 @@ def emit(q_columns, q_cutoffs, q_cutoff=0.01, method="dpc"):
             q_columns = c({cols}), q_cutoffs = {cuts},
             eq_cutoff = 0, pgq_cutoff = 0, cov_min_frac = 0,
             meta = meta, covariates = character(0), formula_parts = character(0),
-            forms = "A-B", adjp_thr = 0.05, logfc_ref = 1))
+            forms = "A-B", adjp_thr = 0.05, logfc_ref = 1, between_run = "quantile"))
           cat(readLines("{out}"), sep = "\\n")
         '''
         p = subprocess.run(["Rscript", "-e", r], capture_output=True, text=True)

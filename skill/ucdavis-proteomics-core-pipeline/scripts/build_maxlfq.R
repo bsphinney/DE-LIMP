@@ -1,9 +1,12 @@
 #!/usr/bin/env Rscript
 # build_maxlfq.R  --  Port of DE-LIMP's build_maxlfq_pipeline() (R/helpers.R).
 # Reads a DIA-NN report, applies ID-FDR + optional QuantUMS filters, pivots
-# PG.MaxLFQ to a protein x run matrix, log2-transforms, and quantile-normalizes
-# with limma::normalizeBetweenArrays (the DE-LIMP default for the MaxLFQ path) -- except with
-# quantities = "raw" (a --no-norm DIA-NN report), where nothing is normalised.
+# PG.MaxLFQ to a protein x run matrix and log2-transforms it. A between-run step on that matrix
+# is decided by ONE rule, maxlfq_between_run() (run_de.R --between-run, default auto): none for
+# a DIA-NN PG.MaxLFQ DIA-NN already normalised (since 2.14.2: a quantile step on top of it made
+# 61% of the significant calls wrong on the PXD063416 4 m/z benchmark), quantile normalisation
+# (limma::normalizeBetweenArrays) for a --no-norm search's PG.MaxLFQ and for an adapted report's
+# declared quantities, nothing with quantities = "raw"; quantile, median or none on request.
 # An adapted report that declares its own quantity (parquet metadata, declared_quantity()) is
 # described by what it declares -- a Sage report's rows are peptides, not DIA-NN's PG.MaxLFQ.
 #
@@ -162,13 +165,109 @@ report_is_unnormalised <- function(ds, cols) {
   isTRUE(d$worst[1] < 1e-6)
 }
 
+# THE between-run rule of the MaxLFQ route (architectural rule 3): which step, if any, runs on
+# the log2 protein x run matrix, and why. The descriptor's `between_run` and its `normalisation`
+# text (maxlfq_normalisation_text), run_de.R's --between-run and the reproducibility log all read
+# this answer; none of them decides it again.
+#   between_run  "auto" (default) | "none" | "quantile" | "median"   (run_de.R --between-run)
+#   quantities   "normalised" | "raw"                                (run_de.R --quantities)
+#   declared     declared_quantity() of the report; NULL for a DIA-NN report
+#   dia_nn_norm  a DIA-NN report's list(no_norm = TRUE / FALSE / NA, source); NULL otherwise
+# auto: DIA-NN's normalised PG.MaxLFQ gets no second step (2.14.2, I20: a quantile step on top of
+# it gave 61% wrong calls on the PXD063416 4 m/z benchmark); a --no-norm search's PG.MaxLFQ gets
+# quantile, its only between-run normalisation; not recorded gets none, tagged [confirm] (DIA-NN
+# normalises by default); an engine's declared quantities keep 2.14.1's quantile step (median was
+# measured on the benchmark's --no-norm proxy and was worse than quantile, I20; changing the
+# default is Brett's decision, Q1). raw: none, and any
+# step asked for on raw quantities is refused. median = subtract each run's median log2, then add
+# back the median of the run medians.
+# -> list(method = "none" | "quantile" | "median", why, requested = between_run)
+BETWEEN_RUN_CHOICES <- c("auto", "none", "quantile", "median")
+maxlfq_between_run <- function(between_run = "auto", quantities = "normalised", declared = NULL,
+                               dia_nn_norm = NULL) {
+  if (!is.character(between_run) || length(between_run) != 1 ||
+      !between_run %in% BETWEEN_RUN_CHOICES)
+    stop("--between-run must be one of ",
+         paste(paste(head(BETWEEN_RUN_CHOICES, -1), collapse = ", "), "or",
+               tail(BETWEEN_RUN_CHOICES, 1)),
+         " (got ", paste(format(between_run), collapse = " "), ")", call. = FALSE)
+  if (identical(quantities, "raw")) {
+    if (!between_run %in% c("auto", "none"))
+      stop(sprintf(paste(
+        "--between-run %s with --quantities raw: raw quantities are the non-normalised ones, and",
+        "a between-run step would normalise them. Either --quantities normalised --between-run",
+        "%s, or --quantities raw with no --between-run."), between_run, between_run), call. = FALSE)
+    return(list(method = "none", requested = between_run,
+                why = "--quantities raw: a --no-norm search's PG.MaxLFQ, with no between-run step"))
+  }
+  if (!identical(between_run, "auto"))
+    return(list(method = between_run, requested = between_run,
+                why = sprintf("--between-run %s (chosen for this DE)", between_run)))
+  if (!is.null(declared))
+    return(list(method = "quantile", requested = "auto", why = paste(
+      "quantile normalisation (limma::normalizeBetweenArrays) of the engine's quantities")))
+  nn <- dia_nn_norm$no_norm
+  if (isTRUE(nn))
+    return(list(method = "quantile", requested = "auto",
+                why = "the only between-run normalisation: the search ran with --no-norm"))
+  if (isFALSE(nn))
+    return(list(method = "none", requested = "auto", why = paste(
+      "PG.MaxLFQ already carries DIA-NN's cross-run normalisation; no second step (a quantile",
+      "step on top gave 61% wrong calls on the PXD063416 4 m/z benchmark)")))
+  list(method = "none", requested = "auto", why = paste(
+    "DIA-NN normalises by default; whether it did for this report is NOT RECORDED [confirm]"))
+}
+
+# The Methods' words for the between-run normalisation the route applied (descriptor
+# `normalisation`): what the quantities carried before this step, then the step -- built from
+# maxlfq_between_run()'s answer `br`, never decided here.
+maxlfq_normalisation_text <- function(br, quantities, declared = NULL, dia_nn_norm = NULL) {
+  if (identical(quantities, "raw"))
+    return("none: PG.MaxLFQ of a DIA-NN report searched with --no-norm, no quantile step")
+  step <- switch(br$method,
+                 quantile = "quantile normalisation (limma::normalizeBetweenArrays)",
+                 median = paste("median centring (each run's log2 values shifted so that its",
+                                "median is the median of the run medians)"),
+                 none = NULL)
+  nn <- dia_nn_norm$no_norm
+  # what the engine itself did across runs, as its config records it (run_search.py declares
+  # `engine_normalisation` for FragPipe IonQuant and AlphaDIA): said before this DE's step, so
+  # the Methods never leave out the first of two normalisations (C2 statistician M2)
+  eng <- if (!is.null(declared)) declared$engine_normalisation else NULL
+  eng <- if (is.character(eng) && length(eng) == 1 && nzchar(eng)) eng else NULL
+  txt <- if (!is.null(declared) && !is.null(eng)) {
+    if (is.null(step)) paste0(eng, "; no between-run step here")
+    else paste0(eng, ", then ", step, " of the engine's quantities")
+  } else if (!is.null(declared)) {
+    if (is.null(step)) "none: the engine's quantities as it reported them, with no between-run step here"
+    else paste(step, "of the engine's quantities")
+  } else if (isTRUE(nn)) {
+    if (is.null(step)) paste("none: PG.MaxLFQ of a DIA-NN search run with --no-norm and no",
+                             "between-run step here, so no between-run normalisation at all")
+    else paste(step, "only: the DIA-NN search ran with --no-norm, so PG.MaxLFQ carries no",
+               "DIA-NN cross-run normalisation")
+  } else if (isFALSE(nn)) {
+    if (is.null(step)) "DIA-NN's cross-run normalisation (PG.MaxLFQ already carries it); no second step"
+    else paste0("DIA-NN's cross-run normalisation (PG.MaxLFQ), then ", step)
+  } else {
+    if (is.null(step)) paste("PG.MaxLFQ as DIA-NN reported it, no second step; whether DIA-NN",
+                             "normalised it is NOT RECORDED [confirm] (DIA-NN normalises by",
+                             "default)")
+    else paste(step, "of PG.MaxLFQ; whether DIA-NN also normalised it is NOT RECORDED [confirm]")
+  }
+  if (!identical(br$requested, "auto"))
+    txt <- sprintf("%s (--between-run %s, chosen for this DE)", txt, br$requested)
+  txt
+}
+
 # `no_norm`: list(no_norm = TRUE / FALSE / NULL, source) -- whether the search ran with --no-norm,
 # from its provenance (run_de.R asks normalization_check.py searched_no_norm). NULL no_norm: not
 # recorded, and a normalised MaxLFQ then reads it from the data (report_is_unnormalised).
+# `between_run`: run_de.R --between-run, decided by maxlfq_between_run() (above).
 build_maxlfq <- function(report_path, format = "parquet", q_cutoff = 0.01,
                          eq_cutoff = 0, pgq_cutoff = 0, keep_runs = NULL,
                          drop_contaminants = TRUE, contaminant_exempt = NULL,
-                         quantities = "normalised", no_norm = NULL) {
+                         quantities = "normalised", no_norm = NULL, between_run = "auto") {
   stopifnot(requireNamespace("dplyr", quietly = TRUE),
             requireNamespace("tidyr", quietly = TRUE))
 
@@ -182,6 +281,9 @@ build_maxlfq <- function(report_path, format = "parquet", q_cutoff = 0.01,
   }
   declared <- if (identical(format, "parquet")) declared_quantity(ds) else NULL
   per_peptide <- identical(declared$level, "peptide")
+  # The between-run step (maxlfq_between_run, THE rule): a raw request is decided -- or refused --
+  # before the report is read; a normalised one needs what PG.MaxLFQ carries (dia_nn_norm, below).
+  br <- if (identical(quantities, "raw")) maxlfq_between_run(between_run, quantities, declared)
   # --quantities raw: no between-run normalisation anywhere. PG.MaxLFQ is DIA-NN's NORMALISED
   # protein quantity unless the search ran with --no-norm, and an adapted report's engine
   # quantities carry whatever their engine applied -- so only a non-normalised DIA-NN report
@@ -205,7 +307,7 @@ build_maxlfq <- function(report_path, format = "parquet", q_cutoff = 0.01,
            "(SKILL.md step 8).", call. = FALSE)
   }
 
-  # --quantities normalised on a DIA-NN report: what PG.MaxLFQ carries before the quantile step
+  # --quantities normalised on a DIA-NN report: what PG.MaxLFQ carries before any step here
   # -- DIA-NN's cross-run normalisation, or none when the search ran with --no-norm. The search's
   # provenance says which; only when it does not are the data read (a pass over two columns).
   # Said in the descriptor, never assumed (the DE once described a --no-norm report's MaxLFQ as
@@ -224,6 +326,7 @@ build_maxlfq <- function(report_path, format = "parquet", q_cutoff = 0.01,
     }
     dia_nn_norm <- list(no_norm = if (is.null(nn)) NA else nn, source = src)
   }
+  if (is.null(br)) br <- maxlfq_between_run(between_run, quantities, declared, dia_nn_norm)
 
   needed   <- c("Run", "Protein.Group", "PG.MaxLFQ", DIANN_FDR_REQUIRED)
   # DIANN_FDR_OPTIONAL is optional only because older reports lack those columns,
@@ -237,6 +340,18 @@ build_maxlfq <- function(report_path, format = "parquet", q_cutoff = 0.01,
                 CONTAMINANT_SHARE_COLUMNS)
   miss <- setdiff(needed, cols)
   if (length(miss)) stop("MaxLFQ: missing required columns: ", paste(miss, collapse = ", "))
+  # Engine protein quantities (Ruling 53): MaxLFQ reads PG.MaxLFQ, and a report whose PG.MaxLFQ is
+  # 0 or missing in every row -- a DIA-NN --dda first-pass report -- has none. It used to drop
+  # every run and stop with "fewer than 2 usable runs survived the filters", which points at the
+  # filters. Asked of dda_first_pass.py (pg_maxlfq_state: the ONE definition, which the search's
+  # record uses too); its refusal text is that file's MAXLFQ_REFUSAL. Not answered: said, and run.
+  .pq <- python_json("dda_first_pass.py", "pg-maxlfq",
+                     c("--report", shQuote(normalizePath(report_path, mustWork = FALSE))),
+                     "check whether the report has engine protein quantities (PG.MaxLFQ)")
+  if (identical(.pq$res$pg_maxlfq, "absent")) stop(.pq$res$refusal, call. = FALSE)
+  if (is.null(.pq$res$pg_maxlfq))
+    message("[build_maxlfq] note: whether this report has engine protein quantities was not ",
+            "checked (", .pq$why %||% .pq$res$why, ")")
 
   sel <- c(needed, intersect(optional, cols))
   flt <- if (identical(format, "parquet")) dplyr::select(ds, dplyr::all_of(sel)) else ds[, sel]
@@ -289,7 +404,7 @@ build_maxlfq <- function(report_path, format = "parquet", q_cutoff = 0.01,
   if (!nrow(rows)) stop("MaxLFQ: no rows survived the filters. Loosen QuantUMS cutoffs.")
 
   # Contaminants: counted on the rows that passed the filters above, then removed before
-  # the matrix is built -- so they never reach quantile normalisation, lmFit or BH.
+  # the matrix is built -- so they never reach the between-run step, lmFit or BH.
   # `contaminant_exempt`: a keratin sample's keratin-family contaminant accessions, which stay in
   # (contaminants.R keratin_exemption: list(shared, alone)); n_exempt counts what that kept. tag counts which tags
   # (Cont_, FragPipe's contam_) the removed rows carried; flagged_ids are their accession lists,
@@ -375,17 +490,23 @@ build_maxlfq <- function(report_path, format = "parquet", q_cutoff = 0.01,
   }
   if (ncol(E_pre) < 2) stop("MaxLFQ: fewer than 2 usable runs survived the filters.")
 
-  if (identical(quantities, "raw")) {
-    E <- E_pre                        # non-normalised: no between-run step at all
+  # the step maxlfq_between_run() decided, and only that one: never a quiet substitute (a quantile
+  # step without limma used to fall back to median centring while the record said quantile)
+  if (identical(br$method, "quantile")) {
+    if (!requireNamespace("limma", quietly = TRUE))
+      stop("MaxLFQ: the quantile step (", br$why, ") needs limma: BiocManager::install('limma').",
+           call. = FALSE)
+    E <- limma::normalizeBetweenArrays(E_pre, method = "quantile")
+  } else if (identical(br$method, "median")) {
+    cm <- apply(E_pre, 2, stats::median, na.rm = TRUE)
+    E  <- sweep(E_pre, 2, cm - stats::median(cm, na.rm = TRUE))
+  } else {
+    E <- E_pre                        # no between-run step here
+  }
+  if (identical(quantities, "raw"))
     filters_applied <- c(filters_applied, paste(
       "no between-run normalisation (--quantities raw: a --no-norm report's PG.MaxLFQ, no",
       "quantile step)"))
-  } else if (requireNamespace("limma", quietly = TRUE)) {
-    E <- limma::normalizeBetweenArrays(E_pre, method = "quantile")
-  } else {
-    cm <- apply(E_pre, 2, stats::median, na.rm = TRUE)
-    E  <- sweep(E_pre, 2, cm - stats::median(cm, na.rm = TRUE))
-  }
   rownames(E) <- prot_ids
   n_obs <- ifelse(is.na(E), 0L, 1L)
 
@@ -411,19 +532,11 @@ build_maxlfq <- function(report_path, format = "parquet", q_cutoff = 0.01,
     descriptor = c(maxlfq_descriptor(declared,
                                      if (is.null(declared)) diann_cont_quant_exclude(report_path)),
                    list(quantities = quantities,
-                        normalisation = if (identical(quantities, "raw"))
-                          "none: PG.MaxLFQ of a DIA-NN report searched with --no-norm, no quantile step"
-                        else if (!is.null(declared))
-                          "quantile normalisation (limma::normalizeBetweenArrays) of the engine's quantities"
-                        else if (isTRUE(dia_nn_norm$no_norm))
-                          paste("quantile normalisation (limma::normalizeBetweenArrays) only: the",
-                                "DIA-NN search ran with --no-norm, so PG.MaxLFQ carries no DIA-NN",
-                                "cross-run normalisation")
-                        else if (isFALSE(dia_nn_norm$no_norm))
-                          "DIA-NN's cross-run normalisation (PG.MaxLFQ), then quantile normalisation (limma::normalizeBetweenArrays)"
-                        else paste("quantile normalisation (limma::normalizeBetweenArrays) of",
-                                   "PG.MaxLFQ; whether DIA-NN also normalised it is NOT RECORDED",
-                                   "[confirm]"),
+                        # the step this run applied and why (maxlfq_between_run), and the
+                        # Methods' words for it, built from that answer
+                        between_run = br,
+                        normalisation = maxlfq_normalisation_text(br, quantities, declared,
+                                                                  dia_nn_norm),
                         dia_nn_normalisation = dia_nn_norm)),
     # what the report declared about itself, verbatim, for the record
     declared_quantity = declared

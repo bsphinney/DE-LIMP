@@ -64,7 +64,10 @@ The two check DEs and the final DE carry the same design flags (--numeric-covari
 both check DEs were fitted with (run_de.R's design_request) as `check_design`, and refuses DEs
 fitted with different designs or on another report or conditions file; gate() refuses a final DE
 whose method, formula, numeric covariates or block differ (other contrasts: a warning). A check
-from before 2.12 records no design: the final DE's design is then said to be NOT CHECKED.
+from before 2.12 records no design: the final DE's design is then said to be NOT CHECKED. A
+MaxLFQ DE is also held to the between-run step of the check's normalised DE: the step it asked
+for, or, for a check from before 2.14.2 (quantile, the old rule), the step this DE applies --
+run_de.R asks the gate again with it (--between-run-applied) once the report is read.
 
 MaxLFQ has no non-normalised protein quantity in a normal report (PG.MaxLFQ is normalised unless
 the search ran with --no-norm): its raw DE reads a report searched with --no-norm, given to the
@@ -483,8 +486,45 @@ def volcano_version(de, design, bait, raw=False, etype=None):
 RAW_VOLCANO_EXPECTED = ("fractions_separation",)
 
 
-def carboxylase_stability(de_dir):
-    """Per carboxylase found, the SD of its log2 values across samples (Expression_Matrix.csv)."""
+def _matrix_accessions(*de_dirs):
+    """Every accession in the DEs' Expression_Matrix.csv Protein.Group column."""
+    out = set()
+    for d in de_dirs:
+        try:
+            with open(os.path.join(d, "Expression_Matrix.csv"), newline="", encoding="utf-8") as fh:
+                for r in csv.DictReader(fh):
+                    out.update(a.strip() for a in (r.get("Protein.Group") or "").split(";"))
+        except (OSError, TypeError):
+            continue
+    return out - {""}
+
+
+def session_fasta(session):
+    """The search FASTA the session's record names (fetch_fasta.py's input/search.fasta.meta.json
+    `fasta`), or None."""
+    try:
+        with open(os.path.join(session, et.FASTA_META), encoding="utf-8") as fh:
+            f = json.load(fh).get("fasta")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return f if isinstance(f, str) and os.path.isfile(f) else None
+
+
+def fasta_descriptions(fasta, accessions):
+    """{accession: description} from a FASTA's headers, for `accessions` only: fetch_fasta.py's
+    reader, the one that builds the database (imported here, when there is a FASTA: fetch_fasta
+    is a heavy import for the gate's every call). {} when there is no FASTA."""
+    if not fasta:
+        return {}
+    import fetch_fasta
+    return fetch_fasta.fasta_descriptions(fasta, accessions)
+
+
+def carboxylase_stability(de_dir, descriptions=None):
+    """Per reference carboxylase found (experiment_type.carboxylase_of: the gene symbol, else the
+    biotin-enzyme name in `descriptions`, {accession: FASTA description}), the SD of its log2
+    values across samples (Expression_Matrix.csv). Keyed by the symbol, or by the protein's own
+    gene / accession when found by name; `matched_by` says what matched."""
     try:
         with open(os.path.join(de_dir, "Expression_Matrix.csv"), newline="",
                   encoding="utf-8") as fh:
@@ -495,16 +535,24 @@ def carboxylase_stability(de_dir):
         return None
     ids = [c for c in ("Protein.Group", "Genes", "Protein.Names") if c in rows[0]]
     samples = [c for c in rows[0] if c not in ids]
-    found = {}
+    found, matched_by = {}, {}
     for r in rows:
-        genes = _tokens(r.get("Genes"))
-        for g in et.CARBOXYLASES:
-            if g in genes and g not in found:
-                vals = [v for v in (_f(r.get(s)) for s in samples) if v is not None]
-                if len(vals) >= 2:
-                    found[g] = _r(statistics.stdev(vals))
+        accs = [a.strip() for a in (r.get("Protein.Group") or "").split(";") if a.strip()]
+        desc = next(((descriptions or {}).get(a) for a in accs if (descriptions or {}).get(a)),
+                    None)
+        hit = et.carboxylase_of(r.get("Genes"), desc)
+        if not hit:
+            continue
+        key = hit if hit in et.CARBOXYLASES else (
+            (r.get("Genes") or "").split(";")[0].strip() or (accs[0] if accs else hit))
+        if key in found:
+            continue
+        vals = [v for v in (_f(r.get(s)) for s in samples) if v is not None]
+        if len(vals) >= 2:
+            found[key] = _r(statistics.stdev(vals))
+            matched_by[key] = hit
     return {"sd_log2": found, "median_sd_log2": _r(_median(list(found.values()))),
-            "n_found": len(found)} if found else {"n_found": 0}
+            "n_found": len(found), "matched_by": matched_by} if found else {"n_found": 0}
 
 
 def sha256(path):
@@ -571,6 +619,32 @@ def load_design(path):
     return d
 
 
+# The MaxLFQ route's between-run step before 2.14.2, when no record named it: build_maxlfq.R then
+# quantile-normalised every normalised MaxLFQ DE, and raw ones not. THE legacy rule: the gate
+# (a check made before 2.14.2) and provenance.py's replay of an old bundle read it here.
+LEGACY_MAXLFQ_BETWEEN_RUN = "quantile"
+
+
+def between_run_of(rec, key="requested"):
+    """The between-run step a DE asked for (`key` "requested") or applied ("method"), from its
+    record's own `between_run`: de_provenance.json's {method, requested, why} (build_maxlfq.R
+    maxlfq_between_run), or the requested value a design_request / check_design holds. None for a
+    route that records no step of its own (dpc: null). The readers -- the gate, step 8's commands,
+    provenance.py's replay -- go by this, never by the route's name (rule 1). A MaxLFQ record from
+    before 2.14.2 names none: LEGACY_MAXLFQ_BETWEEN_RUN for normalised quantities, "none" for raw
+    ones -- the one place that reads a record's method for it."""
+    if not isinstance(rec, dict):
+        return None
+    br = rec.get("between_run")
+    if isinstance(br, dict) and br.get(key):
+        return br[key]
+    if isinstance(br, str) and br:
+        return br
+    if rec.get("method") != "maxlfq":
+        return None
+    return "none" if rec.get("quantities") == et.RAW else LEGACY_MAXLFQ_BETWEEN_RUN
+
+
 def check_design_of(norm, raw, report_sha, report_raw_sha, conditions_sha):
     """The design the check's DEs were fitted with, and the files they read -> the record's
     `check_design`. Raises ValueError (the check refuses) when the two DEs were fitted with
@@ -614,15 +688,67 @@ def check_design_of(norm, raw, report_sha, report_raw_sha, conditions_sha):
     d = next(iter(reqs.values()))
     rec = {"status": "recorded", **{k: d.get(k) for k in DESIGN_KEYS + ("contrasts", "flags")},
            "files": files}
+    if norm:
+        # the between-run step the NORMALISED DE asked for (the raw one cannot have one): a final
+        # DE reading normalised quantities is held to it (design_check)
+        rec["between_run"] = between_run_of(
+            dict(norm["prov"], method=norm["prov"].get("method") or d.get("method")))
     if unverified:
         rec["files_unverified"] = unverified
     return rec
 
 
-def design_check(rec, design):
+def de_method_of(norm, raw):
+    """The DE route (run_de.R --method) the check's two DEs ran, from their de_provenance.json:
+    "dpc", "maxlfq", "dpc / maxlfq" when they differ (DEs from before 2.12 record no design for
+    check_design_of to refuse that by), or None when neither records it. The decision is about
+    that route's volcanoes: the summary's header says which (2.14.2: a check made on dpc was read
+    as covering a MaxLFQ DE that went wrong)."""
+    ms = sorted({d["prov"].get("method") for d in (norm, raw) if d and d["prov"].get("method")})
+    return " / ".join(ms) if ms else None
+
+
+# The way forward from a check made before 2.14.2 whose step this DE does not have (its words)
+RERUN_CHECK = "run the normalisation check again with this skill"
+# design_check's `match` while a check from before 2.14.2 waits for the step auto gives
+BETWEEN_RUN_PENDING = ("between-run step not compared yet: the check was made before 2.14.2, and "
+                       "what --between-run auto gives is known once the report is read")
+
+
+def legacy_between_run_refusal(bw, bg, applied):
+    """The refusal of a final MaxLFQ DE whose between-run step (`applied`, from --between-run
+    `bg`) is not the step `bw` a check made before 2.14.2 drew its normalised volcano with. The
+    first way forward is the check again, made by this skill: --between-run quantile on DIA-NN's
+    already-normalised PG.MaxLFQ is 2.14.1's quantile step on top of DIA-NN's normalisation
+    (I20), so it is offered only for reproducing a 2.14.1 analysis (C1 review of 2.14.2, F1)."""
+    gives = (f"--between-run {bg} gives {applied} on this report"
+             if bg == "auto" else f"--between-run {bg}")
+    return (f"REFUSED: this normalisation check was made before 2.14.2, when every normalised "
+            f"MaxLFQ DE was quantile-normalised: its normalised volcano, and the decision, were "
+            f"drawn with a {bw} step. This DE's step is another one ({gives}), and the step "
+            f"changes the volcano (2.14.2, I20). Next step: {RERUN_CHECK} -- step 8's commands "
+            f"(both check DEs, then normalization_check.py run; its normalised DE then takes "
+            + ("this skill's default, --between-run auto" if bg == "auto" else
+               f"--between-run {bg}")
+            + ") -- and decide again. Only to reproduce a 2.14.1 analysis: run this DE with "
+            f"--between-run {bw}. On a DIA-NN report whose PG.MaxLFQ DIA-NN already normalised, "
+            f"that repeats 2.14.1's quantile step on top of DIA-NN's normalisation, which made "
+            f"61-77% of the significant calls wrong on the PXD063416 benchmark (I20). The harm "
+            f"is mainly the quantile step itself, on a benchmark where whole species shift, not "
+            f"normalising twice: alone, on quantities DIA-NN had not normalised, it gave 46-72% "
+            f"wrong calls at 4-10 m/z.")
+
+
+def design_check(rec, design, quantities=None, applied=None):
     """A final DE's design (run_de.R's design_request) against the check's `check_design` ->
-    {"match", "warnings", "refusal"}. Another method, formula, numeric covariate or block is
-    refused; other contrasts are a warning; a check that recorded no design is NOT CHECKED, said."""
+    {"match", "warnings", "refusal"[, "between_run_pending"]}. Another method, formula, numeric
+    covariate or block is refused; other contrasts are a warning; a check that recorded no design
+    is NOT CHECKED, said. For a MaxLFQ DE reading normalised `quantities`, the between-run step:
+    a check made by 2.14.2 or later is held to the step its normalised DE asked for; a check from
+    before 2.14.2 drew its volcano with LEGACY_MAXLFQ_BETWEEN_RUN, and is compared with the step
+    this DE APPLIES. That is the requested one, except for auto, whose step build_maxlfq.R
+    maxlfq_between_run decides once run_de.R has read the report: until run_de.R asks again with
+    it (`applied`), the answer holds "between_run_pending", the step it must equal."""
     if design is None:
         return {"match": "not compared (no design given)", "warnings": [], "refusal": None}
     cd = rec.get("check_design")
@@ -643,15 +769,51 @@ def design_check(rec, design):
             f"{design_flags(cd) or 'no design flags'}), or run the check again with this design "
             f"({design_flags(design) or 'no design flags'}: both check DEs, then "
             f"normalization_check.py run) and decide again.")}
+    bw = between_run_of(cd)
+    bg = between_run_of(dict(design, method=design.get("method") or cd.get("method")))
+    pending = None
+    if quantities != et.RAW and bw is not None and bg is not None:
+        if "between_run" not in cd:
+            # a check from before 2.14.2: its step was the old rule's, whatever it asked for
+            step = applied if bg == "auto" else bg
+            if step is None:
+                pending = bw
+            elif step != bw:
+                return {"match": "differs", "warnings": [],
+                        "refusal": legacy_between_run_refusal(bw, bg, step)}
+        elif bw != bg:
+            return {"match": "differs", "warnings": [], "refusal": (
+                f"REFUSED: this DE's between-run step (--between-run {bg}) differs from the one "
+                f"the normalisation check's normalised DE asked for ({bw}). Its volcano, and the "
+                f"decision, were drawn with that step, which changes it (2.14.2, I20). Run this DE "
+                f"with --between-run {bw}, or run the check again with --between-run {bg} on its "
+                f"normalised DE (step 8's commands carry it) and decide again.")}
     want, got = list(cd.get("contrasts") or []), list(design.get("contrasts") or [])
     if want != got:
         extra = [c for c in got if c not in want]
-        return {"match": "matches; contrasts differ", "refusal": None, "warnings": [
+        res = {"match": "matches; contrasts differ", "refusal": None, "warnings": [
             f"this DE's contrasts ({', '.join(got)}) differ from those the check's volcanoes were "
             f"drawn for ({', '.join(want)})"
             + (f": the check did not look at {', '.join(extra)}" if extra else "")
             + ". The decision stands for the same model; say so if it matters."]}
-    return {"match": "matches", "warnings": [], "refusal": None}
+    else:
+        res = {"match": "matches", "warnings": [], "refusal": None}
+    if pending:
+        res.update(match=f"{res['match']}; {BETWEEN_RUN_PENDING}", between_run_pending=pending)
+    return res
+
+
+def _default_contrasts_for(conditions, session):
+    """experiment_type.default_contrasts for these conditions' groups and the session's record,
+    or None. A conditions file or record that cannot be read yet gives none: the printed commands
+    then carry run_de.R's own default, as before, and run_de.R refuses on what is wrong with them
+    (required() reads the same record)."""
+    try:
+        groups = sorted(set(read_conditions(conditions).values()))
+        rec = et.load(session) if session else None
+    except (OSError, KeyError, ValueError):
+        return None
+    return et.default_contrasts(groups, rec)
 
 
 def step8_commands(report, conditions, session, method="dpc", scripts=None, report_raw=None,
@@ -663,26 +825,41 @@ def step8_commands(report, conditions, session, method="dpc", scripts=None, repo
     `report_raw`: MaxLFQ's non-normalised DE reads a report searched with --no-norm (the module
     docstring); the check is told so with --report-raw. `design`: the asking DE's design_request
     -- its design flags (--numeric-covariates, --block ..., --contrasts) are carried by all three
-    DEs, which the check and the gate then hold to one design."""
+    DEs, which the check and the gate then hold to one design. Given no --contrasts, and with
+    control groups recorded for the session, all three get experiment_type.default_contrasts
+    (`<group>-<control>`), not run_de.R's alphabetical default (2.14.2, I18)."""
     import shlex
     q = shlex.quote
     sc = scripts or HERE
     nd = check_dir(session)
     flags = design_flags(design)
+    if "--contrasts" not in ((design or {}).get("flags") or []):
+        dc = _default_contrasts_for(conditions, session)
+        if dc:
+            flags = (flags + " " if flags else "") + "--contrasts " + q(",".join(dc))
+
+    # a between-run step the asking DE opted into (its design_request's own field; dpc's is null):
+    # on the normalised check DE and the final DE only -- the raw DE refuses a step -- so the
+    # gate's comparison (design_check) holds
+    br = (design or {}).get("between_run")
+    br_flag = f" --between-run {q(br)}" if br and br != "auto" else ""
 
     def de(rep):
         return (f"Rscript {q(os.path.join(sc, 'run_de.R'))} --input {q(rep)} --metadata "
                 f"{q(conditions)} --method {method}" + (f" {flags}" if flags else ""))
-    check = [f"{de(report_raw if k == et.RAW and report_raw else report)} --quantities {k} "
+    check = [f"{de(report_raw if k == et.RAW and report_raw else report)} --quantities {k}"
+             f"{br_flag if k == et.NORMALISED else ''} "
              f"--check-input --outdir {q(os.path.join(nd, k))}" for k in (et.NORMALISED, et.RAW)]
     check.append(f"python3 {q(os.path.join(sc, 'normalization_check.py'))} run --report "
                  f"{q(report)} --conditions {q(conditions)} --de-normalised "
                  f"{q(os.path.join(nd, et.NORMALISED))} --de-raw {q(os.path.join(nd, et.RAW))} "
                  f"--session {q(session)}" + (f" --report-raw {q(report_raw)}" if report_raw else ""))
-    final = (f"{de(report)} --quantities <the decided quantities> --normalization-check "
+    raw_note = [f"--input {q(report_raw)}"] if report_raw else []
+    raw_note += ["no --between-run"] if br_flag else []
+    final = (f"{de(report)} --quantities <the decided quantities>{br_flag} --normalization-check "
              f"{q(os.path.join(nd, RECORD))} --outdir "
              f"{q(os.path.join(os.path.abspath(session), 'output', 'tables'))}"
-             + (f"  # raw decided: --input {q(report_raw)}" if report_raw else ""))
+             + (f"  # raw decided: {', '.join(raw_note)}" if raw_note else ""))
     nxt = (" && ".join(check) + "  # exit 3: stop, show NORMALIZATION_CHECK.md, ask (SKILL.md "
            "step 8); then the final DE: " + final)
     return {"check": check, "final": final, "next": nxt}
@@ -718,6 +895,33 @@ def required(report, conditions, method="dpc", design=None):
                         + f"\nthen, once decided:\n  {cmds['final']}\n(The two DEs the check "
                           "compares pass --check-input.)" + (MAXLFQ_RAW_NOTE if method == "maxlfq"
                                                              else ""))}
+
+
+def contrasts_refusal(report, conditions):
+    """THE rule for a DE given no --contrasts (C2 statistician M1): in a session whose control
+    groups are RECORDED (experiment_type.py set --controls), run_de.R's own default -- every group
+    minus the first level alphabetically -- can put a control on the left and flip every fold
+    change (I18 through the other door: a DE typed from a template rather than step 8's printed
+    commands). So it is refused, with the exact --contrasts (experiment_type.default_contrasts,
+    the one definition, which step 8's printed commands already carry). A session with no
+    recorded controls -- or none among these groups -- keeps run_de.R's default, as before.
+    -> {"refused", "session", "contrasts", "message"}."""
+    import shlex
+    session = et.session_of(conditions, report)
+    dc = _default_contrasts_for(conditions, session) if session else None
+    if not dc:
+        return {"refused": False, "session": session, "contrasts": None, "message": None}
+    want = ",".join(dc)
+    controls = sorted({c.split("-", 1)[1] for c in dc})
+    return {"refused": True, "session": session, "contrasts": want,
+            "message": (f"REFUSED: this session records the control group(s) "
+                        f"{', '.join(controls)} (experiment_type.py set --controls), and this DE "
+                        f"was given no --contrasts. run_de.R's own default (every group minus "
+                        f"the first one alphabetically) can put a control on the left, so every "
+                        f"fold change would be control minus bait. Run it again with:\n"
+                        f"  --contrasts {shlex.quote(want)}\n(each group minus its control, as "
+                        f"step 8's printed commands carry it; for another comparison, give it "
+                        f"with --contrasts yourself)")}
 
 
 def searched_no_norm(report, search_dir=None):
@@ -924,6 +1128,10 @@ def run(report, conditions, de_norm, de_raw, session=None, bait=None, out=None, 
             checks[k]["why"] = why_data
         checks[k].setdefault("status", "assessed")
     checks["instability"].setdefault("status", "assessed")
+    # proximity labelling: the reference panel also matches the search FASTA's biotin-enzyme names
+    # (a bacterium's carboxylases have locus tags, not the panel's symbols)
+    cx_fasta = session_fasta(session) if (rec_type or {}).get("type") == "proximity" else None
+    cx_desc = fasta_descriptions(cx_fasta, _matrix_accessions(de_norm, de_raw)) if cx_fasta else {}
     rec = {
         "schema": SCHEMA, "schema_version": SCHEMA_VERSION,
         "checked_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -936,6 +1144,8 @@ def run(report, conditions, de_norm, de_raw, session=None, bait=None, out=None, 
         # the design both check DEs were fitted with (run_de.R design_request): the final DE's
         # must match it (gate, design_check)
         "check_design": check_design,
+        # the route (run_de.R --method) both check DEs ran: the decision covers that route only
+        "de_method": de_method_of(norm, raw),
         # where decide records who decided (STAFF_RECORD in its logs/)
         "session": os.path.abspath(session) if session else None,
         "experiment_type": {"type": (rec_type or {}).get("type"),
@@ -955,9 +1165,11 @@ def run(report, conditions, de_norm, de_raw, session=None, bait=None, out=None, 
                     "raw": volcano_version(raw, design, bait, raw=True,
                                            etype=(rec_type or {}).get("type"))},
         "volcano_not_assessed": {k: w for k, w in (("normalised", why_n), ("raw", why_r)) if w},
-        "carboxylases": ({"normalised": carboxylase_stability(de_norm) if norm else None,
-                          "raw": carboxylase_stability(de_raw) if raw else None,
+        "carboxylases": ({"normalised": carboxylase_stability(de_norm, cx_desc) if norm else None,
+                          "raw": carboxylase_stability(de_raw, cx_desc) if raw else None,
                           "genes": list(et.CARBOXYLASES),
+                          "names": list(et.CARBOXYLASE_NAMES),
+                          "fasta": cx_fasta,
                           "note": "reference only: endogenously biotinylated carboxylases should "
                                   "be roughly constant across samples; never used to normalise"}
                          if (rec_type or {}).get("type") == "proximity" else None),
@@ -1073,6 +1285,21 @@ def write(rec, out):
     return path
 
 
+def _route_line(rec):
+    """The summary header's DE route: the one the check's DEs ran (`de_method`, else a recorded
+    check_design's method), which the final DE must run too."""
+    cd = rec.get("check_design") if isinstance(rec.get("check_design"), dict) else {}
+    m = rec.get("de_method") or (cd.get("method") if cd.get("status") == "recorded" else None)
+    if not m:
+        return ("NOT RECORDED (this check's record names no DE --method): the decision may not "
+                "cover the final DE's route")
+    if " / " in m:
+        return (f"methods {m}: the two check DEs ran different routes, so the decision covers "
+                f"neither cleanly -- run both again with one --method")
+    return (f"method {m} (both check DEs); the decision covers this route only, so the final DE "
+            f"runs --method {m} too")
+
+
 def summary_md(rec):
     """The side-by-side summary the user chooses from (tolerant of a record missing a section:
     what is not there is said to be not recorded)."""
@@ -1088,6 +1315,7 @@ def summary_md(rec):
     L = ["# Normalisation check", "",
          f"- **Experiment type:** {rec['experiment_type']['label']} ({rec['experiment_type']['source']})",
          f"- **Default for it:** {rec['default']['quantities']} quantities -- {rec['default']['why']}",
+         "- **DE route checked:** " + _route_line(rec),
          f"- **Bait:** " + (f"{rec['bait']} ({rec.get('bait_source') or 'source not recorded'})"
                             if rec.get("bait") else
                             f"none ({rec.get('bait_source') or 'not recorded'})"),
@@ -1162,7 +1390,12 @@ def summary_md(rec):
             v = cx.get(k)
             L.append(f"- {k}: " + (("median SD " + str(v["median_sd_log2"]) + " log2 across samples ("
                                     + ", ".join(f"{g} {s}" for g, s in v["sd_log2"].items()) + ")")
-                                   if v and v.get("n_found") else "none found"))
+                                   if v and v.get("n_found") else
+                                   "none found. The panel is the mammalian gene symbols "
+                                   + ", ".join(et.CARBOXYLASES) + " and, in the search FASTA's "
+                                   "descriptions, " + "; ".join(et.CARBOXYLASE_NAMES)
+                                   + (" (no search FASTA was found for the names)"
+                                      if cx.get("fasta") is None and "fasta" in cx else "")))
     L += ["", f"**Recommendation:** {rec['recommendation']}", ""]
     if rec["decision"]:
         d = rec["decision"]
@@ -1231,10 +1464,12 @@ def decide(path, quantities, by, reason):
     return rec
 
 
-def gate(path, quantities, report=None, conditions=None, design=None):
+def gate(path, quantities, report=None, conditions=None, design=None, applied=None):
     """(ok, message, record) for run_de.R: the DE may read only the decided quantities, of the
     report and conditions the decision was made on (their sha256, recorded by run()), fitted with
-    the design the check's DEs used (`design`: run_de.R's design_request; design_check)."""
+    the design the check's DEs used (`design`: run_de.R's design_request; design_check).
+    `applied`: the between-run step the MaxLFQ DE applied (build_maxlfq.R), which run_de.R passes
+    when the first answer said design_check's between_run_pending."""
     rec = load(path)
     # MaxLFQ's non-normalised DE reads its own (--no-norm) report: a raw DE is held to that one
     rkey = "report_raw" if quantities == et.RAW and rec.get("report_raw_sha256") else "report"
@@ -1251,7 +1486,7 @@ def gate(path, quantities, report=None, conditions=None, design=None):
                            + f", not on this DE's {what} {given} (sha256 differs). Run the check "
                            "again on this DE's report and conditions -- a decision about one "
                            "report never authorises another."), rec
-    dc = design_check(rec, design)
+    dc = design_check(rec, design, quantities, applied)
     if dc["refusal"]:
         return False, dc["refusal"], rec
     d = rec.get("decision")
@@ -1304,6 +1539,11 @@ def main():
     g.add_argument("--conditions", help="the DE's --metadata: must be the check's conditions")
     g.add_argument("--design-json", help="the DE's design (run_de.R design_request): must be the "
                                          "design the check's DEs were fitted with")
+    g.add_argument("--between-run-applied",
+                   help="the between-run step the MaxLFQ DE applied (build_maxlfq.R's "
+                        "between_run method), once it has read the report: run_de.R asks again "
+                        "with it when the first answer had between_run_pending (a check made "
+                        "before 2.14.2)")
     nn = sub.add_parser("no-norm", help="did the search behind a report run with --no-norm, by "
                                         "its provenance? (run_de.R's MaxLFQ)")
     nn.add_argument("--report", required=True)
@@ -1314,6 +1554,10 @@ def main():
     rq.add_argument("--method", default="dpc")
     rq.add_argument("--design-json", help="the DE's design (run_de.R design_request): the printed "
                                           "step-8 commands carry its design flags")
+    ct = sub.add_parser("contrasts", help="may a DE of these files run with run_de.R's default "
+                                          "contrasts? (run_de.R, given no --contrasts)")
+    ct.add_argument("--input", required=True)
+    ct.add_argument("--metadata", required=True)
     a = ap.parse_args()
     try:
         if a.cmd == "run":
@@ -1344,12 +1588,16 @@ def main():
             print(json.dumps(searched_no_norm(a.report, a.search_dir)))
         elif a.cmd == "required":
             print(json.dumps(required(a.input, a.metadata, a.method, load_design(a.design_json))))
+        elif a.cmd == "contrasts":
+            print(json.dumps(contrasts_refusal(a.input, a.metadata)))
         else:
             design = load_design(a.design_json)
-            ok, msg, rec = gate(a.check, a.quantities, a.report, a.conditions, design)
-            dc = design_check(rec, design)
+            ok, msg, rec = gate(a.check, a.quantities, a.report, a.conditions, design,
+                                a.between_run_applied)
+            dc = design_check(rec, design, a.quantities, a.between_run_applied)
             print(json.dumps({"ok": ok, "message": msg, "record": rec,
-                              "design_match": dc["match"], "warnings": dc["warnings"]}))
+                              "design_match": dc["match"], "warnings": dc["warnings"],
+                              "between_run_pending": dc.get("between_run_pending")}))
     except (ValueError, OSError) as e:
         sys.exit(f"[normalization_check] {e}")
     return 0

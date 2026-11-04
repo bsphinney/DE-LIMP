@@ -91,9 +91,35 @@ missingness, then mean) in 1.4. On PROT_0756 v2 that moved |logFC| by at most 0.
 
 ## `--method maxlfq` (MaxLFQ + limma) — use with Sage/FragPipe (or DIA-NN MaxLFQ)
 `build_maxlfq.R`: filter `Q/Lib.Q/Lib.PG.Q ≤ q` (+ optional QuantUMS `eQ`/`pgQ`),
-pivot `PG.MaxLFQ` to a protein×run matrix, log2, quantile-normalize
-(`limma::normalizeBetweenArrays`), then `lmFit → contrasts.fit → eBayes →
-topTable(BH)`. NAs are left in place; limma drops them per row.
+pivot `PG.MaxLFQ` to a protein×run matrix, log2, the between-run step below, then
+`lmFit → contrasts.fit → eBayes → topTable(BH)`. NAs are left in place; limma drops them per row.
+
+**The between-run step** (`run_de.R --between-run auto|none|quantile|median`, default `auto`;
+`--method maxlfq` only). One rule decides it, `build_maxlfq.R maxlfq_between_run()`, and the
+descriptor records it (`de_provenance.json` `between_run`: the method, why, what was asked):
+
+| report | `auto` gives | why |
+|---|---|---|
+| DIA-NN, `PG.MaxLFQ` normalised by DIA-NN | **none** | it already carries DIA-NN's cross-run normalisation; a quantile step on top gave 61% wrong calls on the PXD063416 4 m/z benchmark (2.14.1 and earlier did that) |
+| DIA-NN searched with `--no-norm` | quantile (`limma::normalizeBetweenArrays`) | the only between-run normalisation |
+| DIA-NN, whether DIA-NN normalised NOT RECORDED | none | DIA-NN normalises by default; the Methods say NOT RECORDED [confirm] |
+| an engine's declared quantities (Sage, FragPipe, AlphaDIA, Radiant) | quantile | unchanged from 2.14.1; whether to change it is Brett's decision (below) |
+| `--quantities raw` | none | any other `--between-run` is refused |
+
+`quantile`, `median` (each run's median log2 set to the median of the run medians) and `none`
+can be asked for explicitly; the Methods then say "chosen for this DE".
+
+**What the benchmark measured** (PXD063416, 2.14.2's I20 re-score; wrong calls among the
+significant ones at 2 / 4 / 6 / 10 m/z). On DIA-NN's normalised `PG.MaxLFQ`, a quantile step on
+top gave 4.9 / 61 / 76 / 77% (2.14.1), and no step gives 3.3 / 4.5 / 6.4 / 4.4%. On quantities DIA-NN had NOT
+normalised (`--no-norm`, the proxy for an engine that does not normalise, such as Sage), a quantile
+step alone gave 5.5 / 46 / 72 / 69%, median centring 4.8 / 60 / 76 / 74% (measured: worse than
+quantile), and no step 3.4 / 5.5 / 18 / 30%. So the harm is mainly the quantile step itself, not
+normalising twice: a mixed-species (HYE) benchmark, where whole species shift between runs, breaks
+the assumption every between-run step makes, and at 4 m/z quantile was about 8× worse than no
+step. No step was safe at 6 and 10 m/z. A real study whose proteome shifts as a whole is the same
+adversarial case. The engines' declared quantities keep quantile for now; changing that default
+is Brett's decision.
 
 **A Sage report is not MaxLFQ, and is not described as MaxLFQ.** `adapt_sage` writes one row
 per **peptide** × run, and declares that in the report itself (parquet metadata
@@ -347,7 +373,7 @@ engine's adapted output can support, not which method is better.
 
 ## Normalised or non-normalised quantities: the experiment type and the data check
 
-Global normalisation — DIA-NN's, and the maxlfq path's quantile step — assumes most proteins
+Global normalisation — DIA-NN's, and any between-run step on the maxlfq path — assumes most proteins
 do not change between samples. An IP / pull-down breaks that: its IgG or bead controls carry
 little protein, normalisation scales them up several-fold, and the enrichment is hidden or
 turned into depletion. So the DE's input is a decision, made once and recorded:
@@ -375,10 +401,11 @@ turned into depletion. So the DE's input is a decision, made once and recorded:
    quantity-column argument (limpa ≥ 1.4 `intensity.column`, 1.2.x `qty.column`; limpa adds no
    between-run normalisation of its own) — the cleanest route, with no re-search. **maxlfq**
    `raw` needs a `--no-norm` report (checked from the data: `Precursor.Normalised` equals
-   `Precursor.Quantity` on every row) and then applies no quantile step; a normalised report is
+   `Precursor.Quantity` on every row) and then applies no between-run step; a normalised report is
    refused, never relabelled. A pull-down on maxlfq used to be normalised twice. **maxlfq
-   `normalised`** says what its `PG.MaxLFQ` carries before the quantile step — DIA-NN's
-   normalisation, or none for a `--no-norm` search — from the search's provenance
+   `normalised`** says what its `PG.MaxLFQ` carries before any step of its own — DIA-NN's
+   normalisation (then no second step), or none for a `--no-norm` search (then the quantile
+   step) — from the search's provenance
    (`normalization_check.searched_no_norm`: the chain's `no_norm_report.parquet` name, else
    `search_provenance.json`), reading the data only when that records nothing, and NOT RECORDED
    when neither can tell (`de_provenance.json` `dia_nn_normalisation`).
@@ -491,7 +518,7 @@ live in `scripts/contaminants.R` (the tag mirrors `fetch_fasta.py`'s `CONT_TAG`;
 asserts it).
 
 Why it exists: DIA-NN's `--cont-quant-exclude` only shapes DIA-NN's OWN quantities, and
-`run_de.R` re-quantifies from the report. On Silva08172026 (mouse brain IPs, 2026-09-24)
+`run_de.R` re-quantifies from the report. On the mouse-brain IP cohort (2026-09-24)
 all 121 `Cont_` groups — bovine serum proteins from the antibody prep — went into the DE
 and came out as hits, while the Methods said they were excluded. With the filter the same
 report loses 2,196 precursors: the 121 `Cont_` groups, plus the shared peptides of 47

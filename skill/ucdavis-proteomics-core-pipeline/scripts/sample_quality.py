@@ -58,6 +58,10 @@ import sys, os, csv, json, math, argparse, random, re, itertools
 # The list's ONE definition is the FASTA sidecar; the wording for lost proteins lives there too.
 from fetch_fasta import (target_contaminants, seen_only_as_cont, lost_to_contaminants_message,
                          keratin_sample_recorded, CONT_TAG)
+# The contaminant-identical panel's matching rule and each hit's own species: the same functions
+# audit_results.py uses (2.14.2, I21: a yeast TPM2 entry flagged human TPM2 by its symbol).
+from fetch_fasta import (species_code, identical_target_matcher, record_organism,
+                         predates_target_species)
 
 # Curated marker panels, as HUMAN gene symbols (matched case-insensitively against every
 # id column of the matrix). Deliberately specific markers -- avoid ubiquitous glycolytic
@@ -319,6 +323,7 @@ TARGET_PANEL = "CONTAMINANT_IDENTICAL"
 ID_COLUMNS = ("genes", "gene", "protein.names", "protein_names", "protein.group", "protein.ids",
               "protein")
 PROTEIN_ID_COLUMNS = ("protein.group", "protein.ids", "protein")
+ENTRY_NAME_COLUMNS = ("protein.names", "protein_names")
 
 
 def read_matrix(path):
@@ -328,12 +333,14 @@ def read_matrix(path):
     and run_de.R writes Protein.Group, Genes, Protein.Names (R's merge puts the key first) --
     so the gene-symbol panels were compared against UniProt accessions and never matched
     (review 2026-09-24: HBB/HBA1 +5 log2 in one sample -> HEMOLYSIS 0 proteins, no flag).
-    `ids` is the protein-accession column(s) alone."""
+    `ids` is the protein-accession column(s) alone; `species` the species code of the row's
+    UniProt entry names (species_code), None when the matrix has none."""
     with open(path, newline="") as fh:
         rd = csv.reader(fh)
         header = next(rd)
         id_idx = [i for i, h in enumerate(header) if h.strip().lower() in ID_COLUMNS] or [0]
         pid_idx = [i for i in id_idx if header[i].strip().lower() in PROTEIN_ID_COLUMNS]
+        name_idx = [i for i in id_idx if header[i].strip().lower() in ENTRY_NAME_COLUMNS]
         # sample columns = everything that parses as numeric on the first data row
         rows, sample_idx = [], None
         for rec in rd:
@@ -345,8 +352,9 @@ def read_matrix(path):
             genes = set().union(*(_genes(rec[i]) for i in id_idx if i < len(rec)))
             ids = set().union(*(_genes(rec[i]) for i in pid_idx if i < len(rec)))
             vals = {header[i]: _num(rec[i]) for i in sample_idx if i < len(rec)}
+            names = ";".join(rec[i] for i in name_idx if i < len(rec))
             rows.append({"genes": genes, "ids": ids, "vals": vals,
-                         "cont": _cont_accessions(ids)})
+                         "cont": _cont_accessions(ids), "species": species_code(names)})
         samples = [header[i] for i in sample_idx]
     return samples, rows
 
@@ -407,21 +415,25 @@ def _to_log2(rows, samples):
                 r["vals"][s] = math.log2(v) if (v is not None and v > 0) else None
 
 
-def panel_scores(rows, samples, panel_genes, removed=()):
+def panel_scores(rows, samples, panel_genes, removed=(), match=None):
     """-> (per-sample mean, n sample proteins, matched names, contaminant matches). A
     Cont_-tagged row is reported under contaminant matches and never scored: it measures
-    the reagent, not the sample. `removed` = rows run_de.R already filtered out."""
+    the reagent, not the sample. `removed` = rows run_de.R already filtered out. `match`: the
+    contaminant-identical panel's rule (identical_target_matcher), in place of name overlap."""
     pg = set(g.upper() for g in panel_genes)
-    hits = [r for r in rows if r["genes"] & pg and not r.get("cont")]
+
+    def names(r):
+        return set(match(r["genes"], r.get("species"))) if match else (r["genes"] & pg)
+    hits = [r for r in rows if names(r) and not r.get("cont")]
     per = {}
     for s in samples:
         vals = [r["vals"].get(s) for r in hits]
         vals = [v for v in vals if v is not None]
         per[s] = (sum(vals) / len(vals)) if vals else None
-    matched = sorted({g for r in hits for g in (r["genes"] & pg)})
-    cont = sorted({f"{'/'.join(sorted(r['genes'] & pg))} ({';'.join(r['cont'])})"
+    matched = sorted({g for r in hits for g in names(r)})
+    cont = sorted({f"{'/'.join(sorted(names(r)))} ({';'.join(r['cont'])})"
                    + (" -- removed before DE" if r.get("removed") else "")
-                   for r in list(rows) + list(removed) if r.get("cont") and r["genes"] & pg})
+                   for r in list(rows) + list(removed) if r.get("cont") and names(r)})
     return per, len(hits), matched, cont
 
 
@@ -491,7 +503,7 @@ def _stem(x):
 # Why not the old rule (flag when the highest and lowest GROUP MEANS differ by >= --z SD and
 # barely overlap): with k groups it compares the extremes of k noisy means, and their spread
 # grows with k even when nothing differs -- the expected range of 10 means is ~3.1 standard
-# errors against ~1.1 for 2. Silva08172026 (10 groups x 3) flagged all three panels that way
+# errors against ~1.1 for 2. A mouse-brain IP cohort (10 groups x 3) flagged all three panels that way
 # (gaps 1.55-2.74). The test's null distribution comes from the design itself, so k, group
 # sizes and non-normal scores are all accounted for. 1% because three panels are tested.
 CONFOUND_P = 0.01
@@ -826,10 +838,16 @@ def main():
                       f"vertebrate host's proteins: pass --taxid <the host's taxid> to score "
                       f"them)") if scope is False else None
     panels = {name: panel_genes(name, taxid) for name in PANELS}
+    target_rule, target_orgs = None, []
     if tc and (tc["genes"] or tc["accessions"]):
-        # Genes AND accessions: the matrix's id column may be either, and an NCBI database
-        # carries no gene names at all.
+        # Matched by THE rule (identical_target_matcher): accession first, a gene symbol only
+        # within the record's own species; an NCBI database or an old sidecar by accession only.
         panels[TARGET_PANEL] = sorted(tc["genes"] | tc["accessions"])
+        target_rule = identical_target_matcher(tc)
+        # each hit's OWN organism, not the database's primary one (a yeast ADH1 was "Homo sapiens")
+        target_orgs = sorted({record_organism(rec, org) for r in rows if not r.get("cont")
+                              for recs in target_rule(r["genes"], r.get("species")).values()
+                              for rec in recs})
     removed = removed_contaminant_rows(a.matrix)
 
     results, flags = {}, []
@@ -843,7 +861,8 @@ def main():
                              "confound_tests": [], "kept_in_quantification": False,
                              "status": "not_applicable", "status_note": not_applicable}
             continue
-        per, nhit, matched, cont_hits = panel_scores(rows, samples, genes, removed)
+        per, nhit, matched, cont_hits = panel_scores(
+            rows, samples, genes, removed, match=target_rule if name == TARGET_PANEL else None)
         z = zscore(per, samples)
         elevated = sorted(s for s in samples if z.get(s) is not None and z[s] >= a.z)
         blk = block_col or "block"
@@ -870,8 +889,14 @@ def main():
                          "group_detail": detail, "expected_analyte": expected,
                          "confound_tests": ctests,
                          "kept_in_quantification": kept}
-        why = (f" These are {org} proteins that are also common-contaminant sequences: possible "
-               f"contamination, KEPT in quantification and normalisation." if kept else "")
+        if kept:
+            results[name]["organisms"] = target_orgs
+            if predates_target_species(tc):
+                results[name]["matched_by"] = ("accession only: the database's record predates "
+                                               "each entry's species (fetch_fasta.py before 2.5.1)")
+        why = (f" These are {' / '.join(target_orgs) or org} proteins that are also "
+               f"common-contaminant sequences: possible contamination, KEPT in quantification and "
+               f"normalisation." if kept else "")
         if expected:
             pass   # keratin IS the analyte for a keratin-matrix sample: report for QC, never flag
         else:
@@ -1020,11 +1045,14 @@ def main():
                 fh.write("_This is the **analyte** for a keratin-matrix sample (nail/hair/wool/skin/"
                          "feather) — reported for QC, **not** treated as contamination._\n\n")
             if r.get("kept_in_quantification"):
-                fh.write(f"_{org} proteins whose sequence is also a common-contaminant entry "
+                fh.write(f"_{' / '.join(r.get('organisms') or []) or org} proteins whose sequence "
+                         f"is also a common-contaminant entry "
                          f"(from `{fasta_meta}`). fetch_fasta.py removed those contaminant entries "
                          f"so the proteins are quantified under their own accessions: they are "
                          f"**kept in quantification** — possible contamination (skin/hair keratins "
                          f"usually are), reported here, not excluded._\n\n")
+                if r.get("matched_by"):
+                    fh.write(f"_Matched by {r['matched_by']}._\n\n")
             if r.get("contaminant_matches"):
                 fh.write(f"_`{CONT_TAG}`-tagged matches -- {CONTAMINANT_NOT_SAMPLE}:_ "
                          f"{'; '.join(r['contaminant_matches'])}\n\n")

@@ -1051,7 +1051,8 @@ prov <- list(
   checks = checks,
   input = normalizePath(input), input_sha256 = input_sha256, metadata = normalizePath(design_path),
   written = format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC"),
-  written_by = version_label, R_version = as.character(getRversion()),
+  written_by = version_label, skill_version = skill_version(.script_dir),
+  R_version = as.character(getRversion()),
   packages = list(limma = pkg("limma"), data.table = pkg("data.table"), arrow = pkg("arrow"),
                   ggplot2 = pkg("ggplot2"), jsonlite = pkg("jsonlite")),
   runtime = runtime_record("run_silac.R"))

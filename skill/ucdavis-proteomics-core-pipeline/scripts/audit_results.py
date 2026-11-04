@@ -62,6 +62,10 @@ Checks:
                     fallback_default) -- a CAUTION, worded by probe_fallback.caution() (WARN);
                     and a mass accuracy pinned at the SOP floor over probed runs that disagreed
                     (the probe's warnings, probe_fallback.measurement_note) (WARN)
+  dda_first_pass    (DIA-NN --dda) the search's second pass (match-between-runs) crashed and its
+                    complete first-pass report was used instead (search_provenance.json
+                    report_used: first_pass) -- the caveat, worded by dda_first_pass.caution()
+                    (WARN)
   pipeline checks   the DE pipeline's own checks, as de_provenance.json `checks` records them
                     (run_silac.R: silac_channel_balance, silac_replicates,
                     silac_label_incorporation, silac_label_declaration, ...), quoted
@@ -99,7 +103,13 @@ from collections import Counter, defaultdict
 # The list's ONE definition is the FASTA sidecar; the wording for lost proteins lives there too.
 from fetch_fasta import (target_contaminants, seen_only_as_cont, lost_to_contaminants_message,
                          keratin_sample_recorded, CONT_TAG, CONTAMINANT_TAGS,
-                         is_contaminant_accession, contaminant_groups_on_target_peptides)
+                         is_contaminant_accession, contaminant_groups_on_target_peptides,
+                         sidecar_sha256_matches)
+# A contaminant-identical protein's species, and the rule that matches result rows to those
+# proteins (accession first; a gene symbol only within the record's own species): one
+# definition each, read by sample_quality.py too (2.14.2, I21).
+from fetch_fasta import (species_code, identical_target_matcher, record_organism,  # noqa: F401
+                         predates_target_species)
 # What a subject / animal column is called: one definition, shared with --map.
 from collect_conditions import subject_header, subject_assessment
 
@@ -274,6 +284,11 @@ PLAIN = {
         "WARN": "Some search settings that are normally measured from these runs could not be "
                 "measured, so standard values were used instead; the results may be somewhat less "
                 "complete."}),
+    "dda_first_pass": ("DIA-NN's second search pass", {
+        "WARN": "The search's second pass, which matches identifications between runs, failed, "
+                "so these results come from its first pass alone: a peptide is measured only in "
+                "the samples where it was found directly, and more values may be missing than "
+                "usual."}),
     "quantification": ("How protein amounts were calculated", {
         "WARN": "The method used to turn peptide signals into protein amounts has a known "
                 "limitation for this kind of data, so treat small differences with care."}),
@@ -723,17 +738,26 @@ def audit_target_contaminants(findings, meta_path, em_path, de_dir, adjp, kerati
 
     if not tc["dropped"]:
         return
-    genes, accs = tc["genes"], tc["accessions"]
+    rule = identical_target_matcher(tc)
+    # a DE table may lack Protein.Names: its rows take the matrix row's species
+    em_species = {r.get("Protein.Group"): species_code(r.get("Protein.Names")) for r in em_rows}
 
     def match(r):
-        # Gene OR accession: an NCBI database has no GN= in its headers, so its records
-        # carry no gene and only the accession can match.
-        return bool(_tokens(r.get("Genes")) & genes) or bool(_tokens(r.get("Protein.Group")) & accs)
+        # Accession first; a gene symbol only within the record's own species; an NCBI database
+        # (no entry names) or an old sidecar by accession only (identical_target_matcher).
+        sp = species_code(r.get("Protein.Names")) or em_species.get(r.get("Protein.Group"))
+        return rule(_tokens(r.get("Genes")) | _tokens(r.get("Protein.Group")), sp)
 
     def label(r):
         return (r.get("Genes") or r.get("Protein.Group") or "?").split(";")[0]
 
-    hits = sorted({label(r) for r in em_rows if match(r)})
+    hit_org = {}                                       # label -> the hit's OWN organism
+    for r in em_rows:
+        m = match(r)
+        if m:
+            rec = next(iter(m.values()))[0]
+            hit_org.setdefault(label(r), record_organism(rec, org))
+    hits = sorted(hit_org)
     sig = {}
     for f in sorted(glob.glob(os.path.join(de_dir or "", "DE_*.csv"))):
         s = set()
@@ -745,13 +769,27 @@ def audit_target_contaminants(findings, meta_path, em_path, de_dir, adjp, kerati
                 continue
         if s:
             sig[os.path.basename(f)] = sorted(s)
+    old = (" This database's record predates the species of each entry (fetch_fasta.py before "
+           "2.5.1), so these proteins were matched by accession only, not by gene symbol; "
+           "rebuild the FASTA to match by gene within each species." if
+           predates_target_species(tc) else "")
+    orgs = sorted({record_organism(r, org) for r in tc["dropped"]})
     if not hits and not sig:
         add(findings, "target_contaminants", "PASS",
-            f"None of the {len(tc['dropped'])} {org} proteins that are also common-contaminant "
-            f"sequences were quantified.", {"fasta_meta": meta_path})
+            f"None of the {len(tc['dropped'])} {' / '.join(orgs)} proteins that are also "
+            f"common-contaminant sequences were quantified." + old, {"fasta_meta": meta_path})
         return
-    msg = (f"{len(hits)} quantified {org} protein group(s) are also common-contaminant sequences "
-           f"({', '.join(hits[:12])}{', ...' if len(hits) > 12 else ''}): possible contamination, "
+    by_org = {}
+    for h in hits:
+        by_org.setdefault(hit_org[h], []).append(h)
+
+    def names(xs):
+        return f"{', '.join(xs[:12])}{', ...' if len(xs) > 12 else ''}"
+    head = (f"{len(hits)} quantified {next(iter(by_org))} protein group(s) are also "
+            f"common-contaminant sequences ({names(hits)})" if len(by_org) == 1 else
+            f"{len(hits)} quantified protein group(s) are also common-contaminant sequences ("
+            + "; ".join(f"{o}: {names(v)}" for o, v in sorted(by_org.items())) + ")")
+    msg = (head + ": possible contamination, "
            f"KEPT in quantification and normalisation. Skin/hair keratins (KRT1/2/9/10, KRTAPs, "
            f"FLG, HRNR) are usually handling contamination; ACTB/EEF1A1/tubulins -- and the "
            f"simple-epithelial keratins KRT8/18/19/7 in epithelial cells such as HeLa -- are "
@@ -759,8 +797,10 @@ def audit_target_contaminants(findings, meta_path, em_path, de_dir, adjp, kerati
     if sig:
         msg += (" Significant in DE -- check these are not contamination before interpreting "
                 "them: " + "; ".join(f"{k}: {', '.join(v[:10])}" for k, v in sig.items()) + ".")
-    add(findings, "target_contaminants", "WARN", msg,
-        {"fasta_meta": meta_path, "quantified": hits, "significant": sig})
+    add(findings, "target_contaminants", "WARN", msg + old,
+        {"fasta_meta": meta_path, "quantified": hits, "significant": sig,
+         "organism_of": hit_org,
+         "matched_by": "accession only" if old else "accession, then gene within species"})
 
 
 REPORT_PEPTIDE_COLUMNS = ("Run", "Protein.Group", "Protein.Ids", "Stripped.Sequence")
@@ -849,15 +889,9 @@ def searched_fasta(meta, meta_path):
     changed = []
     for p in cands:
         if os.path.isfile(p):
-            if want:
-                import hashlib
-                h = hashlib.sha256()
-                with open(p, "rb") as fh:
-                    for chunk in iter(lambda: fh.read(1 << 20), b""):
-                        h.update(chunk)
-                if h.hexdigest() != want:
-                    changed.append(p)
-                    continue
+            if sidecar_sha256_matches(meta, p) is False:
+                changed.append(p)
+                continue
             return p, None
     names = ", ".join(dict.fromkeys(os.path.basename(p) for p in cands))
     if changed:
@@ -1100,11 +1134,14 @@ def audit_de(findings, de_dir, adjp, logfc, prov=None):
 
 
 def load_search_prov(de_prov, search_prov=None):
-    """(path, search_provenance.json) -- --search-prov, else the one beside de_provenance.json's
-    `input` -- or (path, None) when there is none to read."""
+    """(path, search_provenance.json) -- --search-prov, else the one of the search folder of
+    de_provenance.json's `input` (session.search_folder_of: its folder, or its parent for
+    FragPipe's DIA route) -- or (path, None) when there is none to read."""
     inp = (de_prov or {}).get("input")
-    path = search_prov or (os.path.join(os.path.dirname(inp), "search_provenance.json")
-                           if inp else None)
+    if not search_prov and inp:
+        from session import search_folder_of, SEARCH_RECORD      # the one rule (T44 F1)
+        search_prov = os.path.join(search_folder_of(inp), SEARCH_RECORD)
+    path = search_prov
     try:
         with open(path) as fh:
             return path, json.load(fh)
@@ -1134,6 +1171,25 @@ def audit_search_measurement(findings, de_prov, search_prov=None):
             {"warnings": measurement_warnings(sprov), "search_provenance": path},
             plain="The runs disagreed about the instrument's mass accuracy, and the search used "
                   "the standard setting for it.")
+
+
+def audit_dda_first_pass(findings, de_prov, search_prov=None):
+    """A --dda search whose second pass crashed, so its first-pass report was used
+    (dda_first_pass.py): the caveat, in dda_first_pass.caution()'s one wording -- which says,
+    when the record has pg_maxlfq "absent", that protein quantities come from the precursors."""
+    path, sprov = load_search_prov(de_prov, search_prov)
+    from dda_first_pass import caution
+    msg = caution(sprov)
+    if msg:
+        rec = sprov.get("dda_first_pass") if isinstance(sprov.get("dda_first_pass"), dict) else {}
+        # the shell status is the evidence: here and in dda_first_pass.json, not in the Methods
+        code = rec.get("exit_code")
+        msg += (f" Evidence: DIA-NN exited {code if code is not None else '(status not recorded)'} "
+                f"without writing the final report (search_provenance.json dda_first_pass).")
+        add(findings, "dda_first_pass", "WARN", msg,
+            {"report_used": sprov.get("report_used"), "exit_code": rec.get("exit_code"),
+             "first_pass": rec.get("first_pass"), "pg_maxlfq": rec.get("pg_maxlfq"),
+             "search_provenance": path})
 
 
 def audit_normalisation(findings, de_prov, rows=None, search_prov=None):
@@ -1396,6 +1452,7 @@ def main():
         add(findings, "contaminant_competition", "INFO",
             f"Not run: the check failed ({type(e).__name__}: {e}).", plain=NOT_CHECKED)
     audit_search_measurement(findings, prov, a.search_prov)
+    audit_dda_first_pass(findings, prov, a.search_prov)
     audit_passes(findings, prov, a.search_prov)
     audit_normalization_check(findings, prov)
     audit_normalisation(findings, prov,

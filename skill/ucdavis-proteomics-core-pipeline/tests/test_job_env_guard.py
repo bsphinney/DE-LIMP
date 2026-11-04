@@ -112,6 +112,53 @@ class JobEnvGuard(unittest.TestCase):
         self.assertEqual(env["HIVE_ENV_FILE"], "/nonexistent/hive.env")
         self.assertEqual((env["PATH"], env["EXTRA"]), ("/usr/bin", "1"))
 
+    def test_a_hive_node_is_not_a_login_node_to_a_test(self):
+        """L8R-F2. On a HIVE node SLURM sits at HPC@UCD's fixed path and HPCCF's cluster file
+        exists; job_env drops SLURM_JOB_ID, so on_compute.on_login_node() said True there and
+        run_search refused every test's inline search. job_env points both at nothing."""
+        sys.path.insert(0, os.path.join(os.path.dirname(HERE), "scripts"))
+        import on_compute
+        with tempfile.TemporaryDirectory() as t:
+            slurm = os.path.join(t, "cvmfs_slurm_bin")
+            os.makedirs(slurm)
+            with open(os.path.join(slurm, "sbatch"), "w") as fh:
+                fh.write("#!/bin/sh\n")
+            os.chmod(os.path.join(slurm, "sbatch"), 0o755)
+            conf = os.path.join(t, "cluster_name.conf")
+            open(conf, "w").close()
+            hive = {"SLURM_JOB_ID": "4242424", "HPCCF_SLURM_BIN": slurm,
+                    "UCD_HPC_CLUSTER_CONF": conf, "PATH": "/usr/bin:/bin"}
+            self.assertTrue(on_compute.on_login_node(dict(hive, SLURM_JOB_ID="")))
+            env = job_env(t, base=hive)
+            self.assertFalse(on_compute.on_login_node(env), env)
+            self.assertFalse(os.path.exists(env["HPCCF_SLURM_BIN"]))
+            self.assertFalse(os.path.exists(env["UCD_HPC_CLUSTER_CONF"]))
+            # a test that wants them names them
+            mine = job_env(t, base=hive, HPCCF_SLURM_BIN=slurm)
+            self.assertEqual(mine["HPCCF_SLURM_BIN"], slurm)
+            self.assertTrue(on_compute.on_login_node(mine))
+
+    def test_a_real_sbatch_on_path_does_not_make_a_login_node(self):
+        """2.14.2 C2 (HIVE job 25404434): a HIVE job's login shell has the slurm module on PATH,
+        so with SLURM_JOB_ID dropped every finalize test was a login-node run and on_compute
+        handed it to a REAL srun. job_env drops PATH directories holding sbatch/srun; a fake a
+        test names in `extra` still makes a login node."""
+        sys.path.insert(0, os.path.join(os.path.dirname(HERE), "scripts"))
+        import on_compute
+        with tempfile.TemporaryDirectory() as t:
+            slurm = os.path.join(t, "slurm_module_bin")
+            os.makedirs(slurm)
+            for tool in ("sbatch", "srun"):
+                with open(os.path.join(slurm, tool), "w") as fh:
+                    fh.write("#!/bin/sh\nexit 99\n")
+                os.chmod(os.path.join(slurm, tool), 0o755)
+            base = {"SLURM_JOB_ID": "4242424", "PATH": slurm + os.pathsep + "/usr/bin:/bin"}
+            env = job_env(t, base=base)
+            self.assertEqual(env["PATH"], "/usr/bin:/bin")
+            self.assertFalse(on_compute.on_login_node(env), env)
+            mine = job_env(t, base=base, PATH=slurm + os.pathsep + "/usr/bin:/bin")
+            self.assertTrue(on_compute.on_login_node(mine))
+
 
 if __name__ == "__main__":
     unittest.main()

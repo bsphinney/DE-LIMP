@@ -46,6 +46,12 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from session import paths_for, read_raw_list, params_file, encoding_note  # noqa: E402  one place
+# THE search record of a session (moved to session.py, beside paths_for; re-exported here)
+from session import find_search_provenance, de_input_of  # noqa: E402,F401
+# THE answer to "which search" (session.search_choice) and its one "none chosen" test
+from session import search_choice, search_unchosen, search_folder, search_engine  # noqa: E402
+from session import SEARCH_HOW_TO_CHOOSE  # noqa: E402
+from session import search_result_files  # noqa: E402  what a search wrote: the bundle's prints
 from session import PREDICTED_SPECLIB, is_predicted_speclib   # noqa: E402  out of the zip
 import make_methods as mm                           # noqa: E402  search_record(): one reader
 from skill_version import skill_version, label     # noqa: E402  the one plugin.json reader
@@ -156,6 +162,20 @@ class Manifest:
         why = " ".join(str(why).split())
         self.lines.append(f"[INFO]    {name:<50} -- {why}")
 
+    def note(self, name, why):
+        """A notice the agent relays (as provenance.py's own [NOTE] lines): something done on
+        purpose that the user should know -- e.g. files left out of a folded-in folder because
+        they hold secrets. Not counted as skipped."""
+        why = " ".join(str(why).split())
+        self.lines.append(f"[NOTE]    {name:<50} -- {why}")
+
+    def warn(self, name, why):
+        """A warning the agent relays: nothing failed, but something to put right -- e.g.
+        logs/commands.log missing or behind the session's steps (session.commands_log_warning).
+        Not counted as skipped."""
+        why = " ".join(str(why).split())
+        self.lines.append(f"[WARN]    {name:<50} -- {why}")
+
     def skip(self, name, why):
         why = " ".join(str(why).split())
         if len(why) > 200:
@@ -218,6 +238,22 @@ def read_conditions(path):
     return rows
 
 
+SEARCH_UPLOAD_PART = "Deposit: search output in the upload plan"
+
+
+def _no_search_rows(f):
+    raise Skip("no search output is listed in files_to_upload.tsv: add the files of the search "
+               f"the results come from by hand -- {f['search_choice']['why']}")
+
+
+def search_ambiguous(f):
+    """gather()'s session holds search records and none was chosen (session.search_unchosen:
+    several and the DE's input names none, or the DE read a search no record describes): the
+    Methods carry tagged blanks, the upload list holds no search output, the bundle names no
+    engine, and MANIFEST.txt says why."""
+    return search_unchosen(f["search_choice"])
+
+
 def gather(session_dir):
     """Everything the package and the Methods need, read from the session's own files."""
     p = paths_for(session_dir)
@@ -226,8 +262,11 @@ def gather(session_dir):
     f["wf"] = _load(p["workflow_manifest"]) or {}
     f["wf_path"] = p["workflow_manifest"] if os.path.isfile(p["workflow_manifest"]) else None
     f["run_manifest"] = _load(os.path.join(p["repro_dir"], "run_manifest.json")) or {}
-    f["search_prov_path"] = _first([p["search_prov"]] + sorted(
-        glob.glob(os.path.join(p["search_out"], "*", "search_provenance.json"))))
+    # THE answer to "which search" (session.search_choice, tie-broken by the report the DE
+    # read): the README, the bundle, the deposit list and the Methods all read it (T44)
+    f["search_choice"] = search_choice(p)
+    f["search_prov_path"] = f["search_choice"]["path"]
+    f["search_prov_candidates"] = f["search_choice"]["candidates"]
     f["params"] = params_file(p, resolved=False)     # the file the search was given
     f["fasta_meta_path"] = _first([p["fasta_meta"]] + sorted(
         glob.glob(os.path.join(p["input_dir"], "*.meta.json"))))
@@ -238,7 +277,9 @@ def gather(session_dir):
     f["conditions_note"] = encoding_note(p["conditions"], "row",
                                          "the sample names there are not as written")
     f["methods_params"] = _load(os.path.join(p["output_dir"], "methods_params.json")) or {}
-    f["srec"] = mm.search_record(f["params"], f["search_prov_path"], f["wf_path"])
+    f["srec"] = (mm.ambiguous_search_record(f["search_prov_candidates"], f["search_choice"]["why"],
+                                            f["search_choice"]["how"]) if search_ambiguous(f) else
+                 mm.search_record(f["params"], f["search_prov_path"], f["wf_path"]))
     q = f["run_manifest"].get("query") or {}
     f["acquisition"] = ((f["wf"].get("acquisition") or q.get("acquisition") or "").upper()
                         or None)
@@ -400,9 +441,12 @@ def plan_uploads(f):
             "required", note, "no (raw data is not copied into the session)", size,
             "; ".join(act))
 
-    search = p["search_out"]
+    # the search gather() describes (session.search_folder): output/search_dda/ is listed, not
+    # an output/search/ that Methods and SDRF do not describe (2.14.2 review); none when the
+    # session's records leave the choice open (build says so: SEARCH_UPLOAD_PART)
+    search = search_folder(p, f["search_choice"])
     seen = {}
-    if os.path.isdir(search):
+    if search and os.path.isdir(search):
         for root, dirs, fns in os.walk(search):
             depth = os.path.relpath(root, search).count(os.sep) + (root != search)
             dirs[:] = [d for d in sorted(dirs) if d.lower() not in SKIP_DIRS
@@ -460,6 +504,34 @@ def plan_uploads(f):
             r["before_upload"] = "; ".join(x for x in (
                 r["before_upload"], "name has characters PRIDE rejects -- rename") if x)
     return rows
+
+
+CLIENT_COPY_DIR = "client_copies"     # output/DATA_SUBMISSION/client_copies/
+
+
+def client_copies(rows, out):
+    """A record that names who accepted something by LOGIN (search_provenance.json's
+    sage_lfq_check.accepted.by) goes to the PUBLIC repository only as a redacted copy -- the rule
+    deliveries and the session zip use (staff.client_copy; C2 security M1(b)): written to
+    <out>/client_copies/<upload name>, and the row's source pointed at it, so the hashes and
+    prepare_upload.sbatch's copy are of that. -> how many."""
+    import staff
+    n = 0
+    for r in rows:
+        if r["kind"] != "copy":
+            continue
+        text = staff.client_copy(r["source_path"])
+        if text is None:
+            continue
+        dst = os.path.join(out, CLIENT_COPY_DIR, r["upload_name"])
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        with open(dst, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+        r.update(source_path=dst, size_bytes=os.path.getsize(dst),
+                 notes=(r["notes"] + "; a redacted copy: who accepted is named by role, never "
+                        "by login (staff.client_copy)"))
+        n += 1
+    return n
 
 
 def hash_small(rows):
@@ -1449,7 +1521,8 @@ def required_sections(f):
     need = ["Liquid chromatography", "Mass spectrometry", "Sequence database"]
     if os.path.isfile(f["p"]["submission_record"]):
         need.insert(0, "Sample preparation")    # a methods.md from before the submission was attached
-    if f["srec"].get("engine") or f["params"] or f["search_prov_path"]:
+    if f["srec"].get("engine") or f["params"] or f["search_prov_path"] or \
+            f["srec"].get("ambiguous"):
         need.append("Database search")
     if f["de_prov"]:
         need.append(mm.de_heading(f["de_prov"]))    # make_methods.py's own heading for it
@@ -1473,9 +1546,13 @@ def methods_command(f, out):
     cmd = [sys.executable, os.path.join(HERE, "make_methods.py"), "--raw", *f["raws"],
            "--out", out]
     qc = os.path.join(f["p"]["logs_dir"], "qc_bracket.json")     # qc_bracket.record_paths
+    # records and none chosen (search_ambiguous): --session, and make_methods.py gives the same
+    # answer (session.search_choice): tagged blanks, and why
+    search = ([("--session", f["p"]["session_dir"])] if search_ambiguous(f) else
+              [("--params", f["params"]), ("--search-prov", f["search_prov_path"])])
     for flag, val in (("--fasta-meta", f["fasta_meta_path"]),
                       ("--de-dir", f["p"]["de_dir"] if f["de_prov"] else None),
-                      ("--params", f["params"]), ("--search-prov", f["search_prov_path"]),
+                      *search,
                       ("--workflow-manifest", f["wf_path"]),
                       ("--instrument", next(iter(f["wf"].get("instruments") or []), None)
                        or (f["run_manifest"].get("query") or {}).get("instrument")),
@@ -1489,9 +1566,9 @@ def methods_command(f, out):
     return cmd
 
 
-def _run(cmd, what):
+def _run(cmd, what, timeout=900):
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as e:
         raise Skip(f"{what} could not run: {e}")
     if r.returncode != 0:
@@ -1557,14 +1634,29 @@ def scrub_kept_methods(md, man):
     return note
 
 
-def _has_text(path):
-    """A file with something in it. An empty methods.md (0 bytes or blank: a make_methods.py
-    that died after opening it) is no methods at all -- never a source, never "kept"."""
-    try:
-        with open(path, encoding="utf-8", errors="replace") as fh:
-            return bool(fh.read().strip())
-    except OSError:
-        return False
+# A file with something in it: an empty methods.md (0 bytes or blank: a make_methods.py that died
+# after opening it) is no methods at all -- never a source, never "kept". The one rule, in
+# report_files (the finish gates read it too).
+from report_files import has_text as _has_text  # noqa: E402
+
+
+def search_ambiguity(f, man):
+    """When the session holds search records and none was chosen (search_ambiguous: several
+    and the DE's input names none, or the DE read a search no record describes), and finalize
+    wrote the Methods, the search paragraph is tagged blanks: say so in MANIFEST.txt as a
+    [SKIPPED] line naming every record, and tell the agent how to write it (rule 4: never
+    silent)."""
+    if not search_ambiguous(f):
+        return
+    why = f["search_choice"]["why"]
+    # the key phrase first: a MANIFEST reason is cut at 200 characters
+    man.skip("Search paragraph", f"write Methods at step 9d with make_methods.py --search-prov "
+                                 f"<one> -- {why}")
+    man.for_agent.setdefault("methods_to_fix", []).append(
+        f"{why[:1].upper()}{why[1:]}, so finalize described none of the session's searches: ask "
+        f"the user which search the Methods describe, then re-write output/methods.md with "
+        f"make_methods.py --search-prov <that one> (step 9d). Then, {SEARCH_HOW_TO_CHOOSE}, so "
+        f"the README, the delivery and the deposit list describe it too")
 
 
 def ensure_methods(session_dir, man):
@@ -1596,6 +1688,7 @@ def ensure_methods(session_dir, man):
             except Skip as e:
                 return (f"present, kept as written, but it lacks: {', '.join(missing)}; a "
                         f"complete draft could not be written ({e})" + kept)
+            search_ambiguity(f, man)
             chosen["path"] = draft
             # the agent is told: the Word copy and the deposit protocols now come from an
             # unpolished draft, which only completing methods.md undoes
@@ -1609,6 +1702,7 @@ def ensure_methods(session_dir, man):
                     f"the deposit protocols come from it"
                     + kept + methods_build_warnings(r, man, draft))
         r = _run(methods_command(f, md), "make_methods.py")
+        search_ambiguity(f, man)
         chosen["path"] = md
         with open(md, encoding="utf-8") as fh:
             have = md_sections(fh.read())
@@ -1636,6 +1730,193 @@ def ensure_methods(session_dir, man):
     return chosen.get("path")
 
 
+# ------------------------------------------------------------ the reproducibility bundle --
+# finalize MAKES the bundle when it is missing or stale (2.14.2, L5b review H1, Ruling 59; Brett,
+# 2026-10-31: "an agents.md file and all the reproducibility and methods are always done"): it
+# runs provenance.py with step 10's flags, each read from a record the session holds -- never a
+# value the session did not record (DE-LIMP rule 2). The command line has one definition,
+# bundle_command: finalize runs it, and every refusal that names the bundle (the finish gates,
+# `session.py status`) prints it (report_files._command).
+BUNDLE_PART = "Reproducibility bundle (output/reproducibility)"
+BUNDLE_TIMEOUT_S = 3600            # provenance.py's own compute-node budget (60 minutes)
+
+
+def _chosen_search(f):
+    """(path, record) of THE search record -- gather()'s choice (session.search_choice), as the
+    README and the Methods choose it -- or (None, None): none, or records and none chosen."""
+    path = f["search_prov_path"]
+    rec = _load(path) if path else None
+    return (path, rec) if isinstance(rec, dict) else (None, None)
+
+
+def bundle_raws(f):
+    """The raw files the bundle fingerprints: input/raw_files.txt, else the search's own record of
+    what it read (session_docs.raw_record -- finalize writes it to input/raw_files.txt just before
+    it builds the bundle). [] when the session holds no record of them."""
+    if f["raws"]:
+        return list(f["raws"])
+    import session_docs                          # here, not at the top: it loads the podcast's
+    return list(session_docs.raw_record(f["p"])[0])
+
+
+def _skill_home_file(*parts):
+    """A file in the skill's per-user folder ($PROTEOMICS_PIPELINE_HOME, else
+    ~/.proteomics-pipeline: make_podcast.pipeline_home, the one reader)."""
+    import make_podcast
+    return os.path.join(make_podcast.pipeline_home(), *parts)
+
+
+def bundle_command(f, outdir=None):
+    """provenance.py's command line for this session (gather's facts) -> (cmd, missing,
+    unnamed). Each flag is one SKILL.md step 10 lists, its value read from a record:
+      --workflow-manifest   input/wf/workflow.manifest.json
+      --setup-json          the skill home's setup.json; --tools-json the search record's
+                            `tools`, else the skill home's tools/tools.json
+      --params              the params file the search was given: the search record's
+                            `params_file` when it is here, else the one the session staged
+                            (session.params_file) -- reproduce.sh searches with it, as it ran
+      --search-record       the chosen search's search_provenance.json (what step 5 replays --
+                            a FragPipe search's workflow as it ran -- and REPRODUCE.md describes)
+      --conditions          input/conditions.csv
+      --fasta, --fasta-info-file   input/search.fasta (else the search record's `fasta`) and
+                            fetch_fasta.py's sidecar
+      --raw                 bundle_raws
+      --report              the DE's input (the report it read), else the search record's
+                            `result.report`
+      --search-output       each other result file of the search (session.search_result_files
+                            with engine_tables): an identifications-only search's
+                            identifications.tsv and its record, Sage's own tables
+      --engine              the search record's `engine`, else the workflow manifest's
+      --de-dir, --de-method, --contrasts, --q-cutoff, --logfc, --adjp   the DE's record
+                            (output/tables/de_provenance.json), only for a session with a DE
+      --acquisition, --organism-taxid, --instrument   as the Methods read them (gather)
+      --commands, --qc-bracket, --peak-check   logs/commands.log, logs/qc_bracket.json,
+                            output/skyline/skyline_provenance.json, when there
+    A flag with no record is left out, and provenance.py's own MANIFEST.txt says what it could
+    not capture. `missing`: what finalize cannot build the bundle without -- a record of the raw
+    files, and one of what ran (the workflow manifest or a search record); the command then holds
+    a <placeholder> for the raw files. `unnamed`: what was left out for want of a record, said."""
+    p = f["p"]
+    de = f["de_prov"] if isinstance(f["de_prov"], dict) else None
+    sp_path, sp = _chosen_search(f)
+    sp = sp or {}
+    cands = f["search_prov_candidates"]
+    missing, unnamed = [], []
+
+    def there(x):
+        return str(x) if isinstance(x, str) and x and os.path.exists(x) else None
+
+    raws = bundle_raws(f)
+    if not raws:
+        missing.append("a record of the raw files (input/raw_files.txt, or the search record's "
+                       "`files`)")
+    if not f["wf_path"] and not cands:
+        missing.append("a record of the search (input/wf/workflow.manifest.json, or an "
+                       "output/<search>/search_provenance.json)")
+    result = sp.get("result") if isinstance(sp.get("result"), dict) else {}
+    # every engine's adapter writes the DE-input report as <search out>/report.parquet: the
+    # file beside the record, when the record (a job's, written before it ran) names none
+    report = there((de or {}).get("input")) or there(result.get("report")) or (
+        there(os.path.join(os.path.dirname(sp_path), "report.parquet")) if sp_path else None)
+    # ...and the rest of what the search wrote (session.search_result_files, the one list): a
+    # search for identifications only has no report, and these are its whole result (F3)
+    outputs = [x for x in search_result_files(p, f["search_choice"], engine_tables=True)
+               if not report or os.path.abspath(x) != os.path.abspath(report)]
+    if not report and not outputs:
+        unnamed.append("the search's results (" + (
+            f["search_choice"]["why"] if search_ambiguous(f)
+            else "no report and no identifications here") + "), so the bundle fingerprints none")
+    # the one engine rule (session.search_engine): the chosen record's, the manifest's pin only
+    # when the session has no search record, none when its records leave the choice open
+    engine = search_engine(p, record=sp or None)["engine"]
+    if search_ambiguous(f):
+        unnamed.append(f"the search engine ({f['search_choice']['why']})")
+    contrasts = (de or {}).get("contrasts")
+    if isinstance(contrasts, list):
+        contrasts = ",".join(str(c).strip() for c in contrasts if str(c).strip())
+    flags = [("--outdir", outdir or p["repro_dir"]),
+             ("--workflow-manifest", f["wf_path"]),
+             ("--setup-json", _skill_home_file("setup.json")),
+             ("--tools-json", there(sp.get("tools")) or there(_skill_home_file("tools",
+                                                                               "tools.json"))),
+             # the search's own record of what it was given first: a staged folder can hold
+             # another cfg (sage_config.lfq_ppm<N>.json beside sage_config.json), and the
+             # session's guess would then replay the wrong one (2.14.2 C2, E2E F2)
+             ("--params", there(sp.get("params_file")) or f["params"]),
+             ("--search-record", there(sp_path)),
+             ("--conditions", there(p["conditions"])),
+             ("--fasta", there(p["fasta"]) or there(sp.get("fasta"))),
+             ("--fasta-info-file", f["fasta_meta_path"]),
+             ("--report", report)]
+    flags += [("--search-output", x) for x in outputs]
+    flags += [("--engine", engine)]
+    if de:
+        flags += [("--de-dir", p["de_dir"]), ("--de-method", de.get("method")),
+                  ("--contrasts", contrasts), ("--q-cutoff", de.get("q_cutoff")),
+                  ("--logfc", de.get("logfc")), ("--adjp", de.get("adjp"))]
+    flags += [("--acquisition", f["acquisition"]), ("--organism-taxid", f["taxid"]),
+              ("--instrument", f["instrument"]),
+              ("--commands", there(p["commands_log"])),
+              ("--qc-bracket", there(os.path.join(p["logs_dir"], "qc_bracket.json"))),
+              ("--peak-check", there(os.path.join(p["skyline_dir"], "skyline_provenance.json")))]
+    cmd = [sys.executable, os.path.join(HERE, "provenance.py")]
+    for flag, val in flags:
+        if val is not None and str(val).strip() != "":
+            cmd += [flag, str(val)]
+    return cmd + ["--raw"] + (raws or ["<the raw files>"]), missing, unnamed
+
+
+def bundle_plan(session_dir):
+    """What finalize will do about the bundle, said before anything is written (its gate) ->
+    {"state", "why", "build", "missing", "command"}: "present" -- keep it; otherwise build it
+    ("build" True) unless a record it needs is absent ("missing", with the exact command)."""
+    import report_files as rf
+    p = paths_for(session_dir)
+    state, why = rf.bundle_state(p["output_dir"])
+    plan = {"state": state, "why": why, "build": False, "missing": [], "command": None}
+    if state != "present":
+        f = gather(session_dir)
+        cmd, missing, _unnamed = bundle_command(f)
+        plan.update(build=not missing, missing=missing,
+                    command=rf.shell_line(cmd, p["session_dir"], bundle_raws(f)))
+    return plan
+
+
+def ensure_bundle(session_dir, man):
+    """finalize's reproducibility bundle, one MANIFEST.txt line: kept when current
+    (report_files.bundle_state "present"); else built here -- provenance.py, bundle_command --
+    and checked; [SKIPPED] with the reason when a record it needs is absent or provenance.py
+    fails (finalize then does not stamp, unless --override-finish). -> True when the session has a
+    current bundle afterwards."""
+    import report_files as rf
+    f = gather(session_dir)
+    out = f["p"]["output_dir"]
+    state, why = rf.bundle_state(out)
+
+    def _bundle():
+        if state == "present":
+            made = f["run_manifest"].get("timestamp") or "at an unrecorded time"
+            return f"present and current (made {made}) -- kept"
+        cmd, missing, unnamed = bundle_command(f)
+        if missing:
+            raise Skip(f"{why}; finalize cannot build it without {' and '.join(missing)}")
+        r = _run(cmd, "provenance.py", timeout=BUNDLE_TIMEOUT_S)
+        now, now_why = rf.bundle_state(out)
+        if now != "present":
+            raise Skip(f"provenance.py ran, but the bundle is {now}: {now_why}")
+        try:
+            res = json.loads(r.stdout or "{}")
+            counts = f"{res.get('captured')} part(s) captured, {res.get('skipped')} skipped"
+        except ValueError:
+            counts = "its summary could not be read"
+        return (f"built by finalize (before: {why}) -- provenance.py with step 10's flags read "
+                f"from the session's records: {counts} (output/reproducibility/MANIFEST.txt says "
+                f"which)" + ("; left out for want of a record: " + "; ".join(unnamed)
+                             if unnamed else ""))
+
+    return man.section(BUNDLE_PART, _bundle)
+
+
 # --------------------------------------------------------------------------- build --
 def build(session_dir, man, methods_md=None):
     """Write output/DATA_SUBMISSION/. Each part is its own manifest section: one that fails is
@@ -1647,8 +1928,11 @@ def build(session_dir, man, methods_md=None):
 
     def _plan():
         rows.extend(plan_uploads(f))
+        red = client_copies(rows, out)        # before the hashes: they are of what is uploaded
         n = hash_small(rows)
-        return f"{len(rows)} file(s); {n} small file(s) hashed here"
+        return (f"{len(rows)} file(s); {n} small file(s) hashed here"
+                + (f"; {red} redacted cop{'y' if red == 1 else 'ies'} (who accepted, by role)"
+                   if red else ""))
 
     def _raws():
         raws = [r for r in rows if r["pride_file_type"] == "RAW"]
@@ -1671,6 +1955,8 @@ def build(session_dir, man, methods_md=None):
         return write_prep_script(f, out, rows)
 
     planned = man.section("Deposit: upload plan", _plan)
+    if search_ambiguous(f):              # no search output listed, and why (T44 review F3)
+        man.section(SEARCH_UPLOAD_PART, _no_search_rows, f)
     man.section("Deposit: raw files in the upload plan", _raws)
     man.section("Deposit: sdrf.tsv (SDRF-Proteomics v1.1.0)", write_sdrf, f, out, sdrf)
     man.section("Deposit: protocols.txt", write_protocols, out, methods_md

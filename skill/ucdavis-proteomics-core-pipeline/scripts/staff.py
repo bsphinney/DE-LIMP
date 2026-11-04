@@ -22,7 +22,9 @@ that is an agent's name (claude, assistant, agent, bot, ... as a whole part of i
 VERIFIED.
 
 Names stay with the staff. What reaches a client -- methods, AUDIT.md, tables/,
-reproducibility/, the session zip -- says ROLE ("Core staff"). The name and the login go into
+reproducibility/, the session zip -- says ROLE ("Core staff"); an override (estimate_params.py,
+resolve_defaults.py --override-by) says it only for a login on the list, else USER_ROLE ("the
+user"), through role_for(). The name and the login go into
 staff-only records: files whose names end in STAFF_SUFFIX (".staff.json"), kept in a session's
 logs/ or beside the file they are about. core_submission.py deliver never ships one and session.py
 finalize leaves them out of the zip, wherever they are.
@@ -45,6 +47,8 @@ STAFF_FILE_ENV = "CORE_STAFF_FILE"
 STAFF_FILE_DEFAULT = "/quobyte/proteomics-grp/.config/core_staff.txt"
 #: What a client deliverable calls whoever decided.
 ROLE = "Core staff"
+#: What it calls whoever set a value when they are not known to be Core staff (role_for).
+USER_ROLE = "the user"
 #: A staff-only record's file name ends in this: never delivered, never zipped.
 STAFF_SUFFIX = ".staff.json"
 STAFF_SCHEMA = "staff_record"
@@ -72,6 +76,61 @@ def is_agent_like(name):
 def is_staff_only(name):
     """Is this file a staff-only record (by its name)?"""
     return os.path.basename(name or "").endswith(STAFF_SUFFIX)
+
+
+#: THE rule for files that are Core-internal by NAME, wherever they are (C2 security M1): never
+#: delivered (core_submission.py, every mode) and never zipped (session.py finalize). They are
+#:   * the scheduler's job logs -- node names, paths with the HIVE login, the job-end hook's FRAN,
+#:     Slack and run-log lines. Every one this skill writes is <name>_<jobid>.log, or
+#:     <name>_<arrayjob>_<task>.log for an array (#SBATCH --output ..._%j.log / _%A_%a.log /
+#:     %x_%j.log), plus SLURM's own default slurm-<id>.out/.err;
+#:   * the records of the Core's own steps: fran_deposit.json (fran_deposit.RECEIPT: the login
+#:     that staged the search into the Core's corpus, and its entry) and node_faults.json
+#:     (node_fault.RECORD: the nodes a job failed on). A test ties both names to their writers.
+#: Job SCRIPTS (.sh/.sbatch) are not in it: the zip keeps a session's scripts/ as its record.
+CORE_INTERNAL_FILES = re.compile(r"^(?:slurm-.*\.(?:out|err)|.+_\d+(?:_\d+)?\.log|"
+                                 r"fran_deposit\.json|node_faults\.json)$", re.I)
+CORE_INTERNAL_REASON = ("Core-internal: a scheduler job log or a record of the Core's own steps "
+                        "(nodes, logins, paths), never delivered")
+
+
+def is_core_internal(name):
+    """Is this file Core-internal by its name (CORE_INTERNAL_FILES)?"""
+    return bool(CORE_INTERNAL_FILES.match(os.path.basename(name or "")))
+
+
+#: Client-facing records that can carry the LOGIN of who accepted something (sage_lfq_check.accept
+#: records the login that ran --accept-lfq-window, in sage_lfq_check.json and again in
+#: search_provenance.json `sage_lfq_check`): {file name: the key path to the `accepted` block}.
+#: The session keeps the login (the Core's own record, as commands.log keeps --by); a delivery and
+#: the zip carry client_copy() instead (C2 security M1).
+ACCEPTED_BY_RECORDS = {"sage_lfq_check.json": ("accepted",),
+                       "search_provenance.json": ("sage_lfq_check", "accepted")}
+ACCEPTED_BY_SOURCE = ("the role of whoever accepted (staff.role_for); the login stays in the "
+                      "Core's own copy")
+
+
+def client_copy(path):
+    """The text a client gets of the record at `path` when it names a login as who accepted
+    (ACCEPTED_BY_RECORDS: `by` -> role_for(by)); None when it names none, is not such a record, or
+    is not a JSON object -- then it is copied as it is."""
+    keys = ACCEPTED_BY_RECORDS.get(os.path.basename(path or ""))
+    if not keys:
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            rec = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    block = rec
+    for k in keys:
+        block = block.get(k) if isinstance(block, dict) else None
+    by = block.get("by") if isinstance(block, dict) else None
+    if not by or by in (ROLE, USER_ROLE):
+        return None
+    block["by"] = role_for(by)
+    block["by_source"] = ACCEPTED_BY_SOURCE
+    return json.dumps(rec, indent=2) + "\n"
 
 
 def load_staff(path=None):
@@ -137,6 +196,19 @@ def check_by(by):
     return out
 
 
+def role_for(login):
+    """The role a client document names for `login`: ROLE ("Core staff") only when check_by() finds
+    it on a usable Core staff list; else USER_ROLE ("the user") -- a login not on the list, a name
+    rather than a login, an agent's name, or anyone at all when there is no usable list, since
+    then nothing can be verified. Records nothing and prints nothing: an override is the user's
+    choice whoever typed it (estimate_params.override_source), and only its label depends on this."""
+    if not (login or "").strip():
+        return USER_ROLE
+    c = check_by(login)
+    return ROLE if c["ok"] and str(c.get("checked") or "").startswith(
+        "on the Core staff list") else USER_ROLE
+
+
 def require(by):
     """check_by(), raising ValueError with its error; the warning, if any, goes to stderr."""
     c = check_by(by)
@@ -156,9 +228,18 @@ _NAME_ARG = re.compile(r"(?<![\w-])(" + "|".join(re.escape(f) for f in NAME_FLAG
                        r"""(\s+|=)("(?:[^"\\]|\\.)*"|'[^']*'|[^\s"']+)""")
 
 
+#: What replaces the value after --override-by: no role at all. Anyone may set an override, and a
+#: setter not on the staff list is "the user" in the sidecar, so "<Core staff>" would mislead.
+REDACTED_SETTER = "<redacted>"
+
+
 def redact(text):
-    """`text` (a command log) with the value of every name flag replaced by the role."""
-    return _NAME_ARG.sub(lambda m: f'{m.group(1)}{m.group(2)}"<{ROLE}>"', text)
+    """`text` (a command log) with the value of every name flag replaced: --by (staff-only by
+    construction) by the role, --override-by (anyone may set it) by REDACTED_SETTER."""
+    def sub(m):
+        word = REDACTED_SETTER if m.group(1) == "--override-by" else f"<{ROLE}>"
+        return f'{m.group(1)}{m.group(2)}"{word}"'
+    return _NAME_ARG.sub(sub, text)
 
 
 def login():

@@ -109,7 +109,8 @@ class SingleShotMassAccTests(unittest.TestCase):
         root = os.path.join(d, "dotnet8")
         env.update(PROTEOMICS_DOTNET_DIR=root if os.path.isdir(root) else fx._fake_dotnet_root(d),
                    FAKE_ARGV_LOG=os.path.join(d, "argv.txt"), FAKE_SEARCH_SLEEP="0",
-                   # no sbatch: a machine without SLURM (python3 stays reachable)
+                   # no sbatch: a machine without SLURM (python3 stays reachable); job_env has
+                   # already put none at HPC@UCD's fixed path and no HPCCF cluster file
                    PATH=os.pathsep.join([os.path.dirname(sys.executable), "/usr/bin", "/bin"]))
         return env
 

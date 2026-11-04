@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """sample_quality.py's marker panels see the searched organism's own gene names.
 
-msalemi, 2026-09-24 (Silva08172026, mouse brain IPs, UP000000589): SAMPLE_QUALITY.md said
+mstaff, 2026-09-24 (the mouse-brain IP cohort, mouse brain IPs, UP000000589): SAMPLE_QUALITY.md said
 HEMOLYSIS / SKELETAL_MUSCLE / EPIDERMIS "0 panel proteins detected - not assessable" while
 Hba (P01942) and Hbb-bs (A8DUK4) were quantified at ~15 log2. The panels are human symbols;
 mouse Hbb-bs / Hbb-b1 / Hba-a1 never matched, bovine serum haemoglobin (Cont_P02070) did,
@@ -32,7 +32,7 @@ import sample_quality as sq  # noqa: E402
 SAMPLES = ["S1", "S2", "S3", "S4", "S5", "S6"]
 HEADER = ["Protein.Group", "Genes", "Protein.Names"] + SAMPLES   # run_de.R's column order
 FLAT = [16.0] * 6
-# Verbatim identifiers from Silva08172026's Expression_Matrix.csv (values are synthetic).
+# Verbatim identifiers from the mouse-brain IP cohort's Expression_Matrix.csv (values are synthetic).
 MOUSE_ROWS = [["A8DUK4", "Hbb-bs", "A8DUK4_MOUSE"] + [20, 15, 15, 15, 15, 15],
               ["P01942", "Hba", "HBA_MOUSE"] + [20, 15, 15, 15, 15, 15],
               ["F6UYE3", "Hbq1b", "F6UYE3_MOUSE"] + FLAT,          # theta: not an adult marker
@@ -135,7 +135,7 @@ class ContaminantNotSample(Base):
 
 
     def test_legacy_database_gets_a_caveat(self):
-        # Silva08172026's sidecar: contaminants appended, no contaminant_target_rule, FASTA gone.
+        # the mouse-brain IP cohort's sidecar: contaminants appended, no contaminant_target_rule, FASTA gone.
         meta = os.path.join(self.root, "search.fasta.meta.json")
         with open(meta, "w") as fh:
             json.dump({"organism": "Mus musculus", "taxid": 10090, "contaminant_set": "universal",
@@ -227,7 +227,7 @@ class NotAVertebrate(Base):
 
 
 class ConfoundTest(unittest.TestCase):
-    """Silva08172026 (10 groups x 3) flagged all three panels "CONFOUNDED WITH GROUP": the old
+    """The mouse-brain IP cohort (10 groups x 3) flagged all three panels "CONFOUNDED WITH GROUP": the old
     rule compared the highest and lowest of 10 noisy group means, whose spread grows with the
     number of groups. The permutation F-test asks whether the labels explain the score."""
 

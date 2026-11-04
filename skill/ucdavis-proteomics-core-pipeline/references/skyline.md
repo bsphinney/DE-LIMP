@@ -29,8 +29,10 @@ them, and lists the peaks where Skyline and DIA-NN disagree.
 ## When it runs
 
 - **By default after DE in a Core analysis**, and for anyone else whose HIVE (or other SLURM
-  cluster) can reach the pinned container. Run `plan` right after step 8's final DE; the jobs take
-  minutes, so they are done long before the report (step 9).
+  cluster) can reach the pinned container. Run `plan` right after step 8's final DE. The import
+  jobs can take half an hour or more (32–37 minutes on zen4 nodes), so check `status` before the
+  report (step 9): a report made while they run says the check was not part of it, and the
+  delivery then leaves `skyline/` out until the report is made again.
 - **The user can turn it off:** `skyline_peaks.py skip --session <S> --reason '<their words>'`.
   The report then says it was turned off and why. Jobs still running are cancelled, and an earlier
   run's pictures and document are removed, so none is delivered as current.
@@ -42,7 +44,9 @@ them, and lists the peaks where Skyline and DIA-NN disagree.
   - DDA data (DIA-NN `--dda`): the document extracts DIA;
   - DIA-NN's mass accuracy is not recorded (see below);
   - the search's command does not state a setting the document must copy;
-  - no carbamidomethyl cysteine (`--unimod4`) in the search;
+  - a fixed cysteine modification other than carbamidomethyl (a `--fixed-mod` on C that is not
+    UniMod:4): not yet tested with Skyline. A search with no fixed cysteine modification
+    (unalkylated samples) does run (see "What the document copies");
   - not a Bruker timsTOF `.d` or Thermo `.raw` search;
   - ion-trap MS2;
   - no SLURM;
@@ -157,10 +161,25 @@ run):
   (`K*,R*` is Trypsin/P, `K*,R*,!*P` is Trypsin; table `SKYLINE_ENZYMES`, from Skyline's
   `Settings.cs`);
 - missed cleavages, peptide length, precursor charges, the fragment m/z range;
-- carbamidomethyl C (Skyline's default; the step is not run without `--unimod4`);
-- variable modifications, which Skyline adds from the library (`--import-search-add-mods`).
+- the fixed cysteine modification (`settings.fixed_mods`):
+  - carbamidomethyl C (`--unimod4`, or `--fixed-mod UniMod:4,...,C`) is Skyline's default and
+    stays;
+  - none (unalkylated samples, cysteine searched unmodified, or modified only as a variable
+    modification): Skyline's default is cleared with `--pep-clear-mods` right after `--new` and
+    `--overwrite` (SkylineCmd 26.1.0.266 `--help`: "Clears all peptide modifications from the
+    currently open document"). The record keeps it as `settings.mod_args`, and the Methods say
+    "no fixed modification, as searched: cysteine unmodified, and Skyline's default
+    carbamidomethyl modification cleared" (2.14.2). "Cysteine unmodified" is left out when the
+    search had a variable cysteine modification (`--var-mod ...,C`);
+  - any other fixed C modification: the step is not run (not yet tested with Skyline);
+- variable modifications, which Skyline adds from the library (`--import-search-add-mods`:
+  "Adds all modifications found in peptide search results files to the open document",
+  SkylineCmd 26.1 `--help`). The Methods name the search's own (`settings.var_mods`, in
+  `make_methods.mod_phrase`'s words, with `--var-mods` as "at most N per peptide"), or say it
+  had none (2.14.2).
 
-**Not carried over** (the report says so):
+**Not carried over** (the report and the Methods say so, in one sentence,
+`not_carried_over_sentence`):
 - DIA-NN's N-terminal methionine excision (`--met-excision`): no SkylineCmd option.
 - DIA-NN's precursor m/z range (`--min-pr-mz`/`--max-pr-mz`): SkylineCmd has no precursor m/z
   filter of its own. The checked precursors are DIA-NN's library precursors, all inside it.
@@ -237,6 +256,40 @@ report.
   others' spill files mid-import ("Unable to find the specified file"; the skill's first test on
   HIVE, 2026-10-20). The per-file cache is named after the raw file and its folder only, so the
   task moves it beside the document, where the join finds it.
+- **Each import task copies the build's pristine document**, `<name>_top_hits.built.sky` (and
+  `.built.blib` and the rest, `pristine_doc`), which the build job saves beside the document. The
+  join saves its results into `<name>_top_hits.sky`, so a task run again after a join (by hand,
+  or requeued) would otherwise import into a document that already holds results (2.14.2). A
+  plan built by 2.14.1 has no pristine copy: the task copies the document and its log says
+  `WARNING: no pristine copy`. Each task's status file names the document it copied. **The join
+  restores the pristine copy too** before its batch (`restore_pristine`; the joined cache
+  `<name>_top_hits.skyd` goes with it, the imports' per-file caches stay), so a join run again,
+  requeued on `low` or by hand, never re-imports the replicates into a joined document (2.14.2).
+  Re-running only the failed tasks and joining again is not a subcommand yet (2.15).
+- **The time limit is Slurm's `--time`** (the table above). Slurm does not count the time it
+  keeps a job suspended; the skill's own wall-clock timer did, and on HIVE's `high` it killed
+  imports (rc 124) seconds after they resumed from ~28 min suspended (2.14.2). Only
+  `SkylineCmd --version` has a limit of its own (`VERSION_TIMEOUT_S`, 600 s).
+- **A job Slurm stops says so** (`stop_on_signals`, 2.14.2):
+  - every job asks for an early warning, `#SBATCH --signal=B:USR1@120`. `B:` sends it to the
+    batch shell only, which is `skyline_peaks.py` itself (the job script `exec`s it); without
+    `B:` Slurm signals only job steps, and these jobs have none. It comes once, 120-180 s before
+    the end time, which leaves out suspended time, so the I39 fix holds;
+  - on that warning, or on a SIGTERM (the time limit itself, `scancel`, a preemption; HIVE's
+    KillWait gives 130 s before SIGKILL), the job ends SkylineCmd's process group (SIGTERM, then
+    SIGKILL after 10 s), removes what it half made and writes why: the build and join a
+    "skipped" record (the join first removes its partial pictures, tables and `.sky.zip`), an
+    import its status file (the join names the run, with that reason), a follow-up request a
+    README and `followup_assay.json` saying it was not made (its partial lists removed);
+  - the reason names the job and its time limit, e.g. "the join job ran out of its time limit
+    (Slurm's --time, 90 min) before it finished". The length is the one Slurm applied, read in
+    the job from `scontrol show job -o $SLURM_JOB_ID` (`TimeLimit`, `job_time_limit`, 10 s at
+    most); when it cannot be read, the reason gives no number, never the skill's default (H4: a
+    join resubmitted with `--time=3` had said "90 min"). On `low` it also says a preempted job
+    is requeued and writes its own result;
+  - only a job killed with no signal it can act on (a node failure, an out-of-memory kill of
+    the job's own Python, SIGKILL) still leaves the record "submitted": `status` lists its job
+    ids, and `sacct -j <ids>` says what became of them.
 - **Never `--import-process-count`**: it hung under Wine. `run_skyline()` refuses it.
 - **Each SkylineCmd call costs 8-10 s of Wine start-up**, so the build is one call and the join's
   five steps are one `--batch-commands` file.
@@ -248,7 +301,18 @@ report.
   - parents are bound first. The session usually sits inside the raw-data folder, and a later
     read-only bind of that folder would cover the read-write output folder below it;
   - DIA-NN's library and report are seen through symlinks in `skyline_work/search/`. Skyline finds
-    the report beside the library by name, and nothing is written into the search folder.
+    the report beside the library by a shared leading name, so the library is linked as
+    `<report stem>-lib.parquet.skyline.speclib` (`speclib_link_name`) whatever its own name: a
+    5-step chain search writes `empirical.parquet.skyline.speclib`, which Skyline could not pair
+    with `report.parquet` (2.14.2). Nothing is written into the search folder.
+  - **Which library** is the search's own comes from its record, `search_provenance.json`
+    `search_mode` (`find_speclib`): a chain's (`parallel_5step`) is
+    `empirical.parquet.skyline.speclib` (`diann_parallel.EMPIRICAL_LIBRARY`), a single search's
+    the report-paired one. A folder searched single-shot and then again as a chain still holds the
+    first search's `report-lib.parquet.skyline.speclib`, and the chain's is taken. With no
+    `search_mode` and both there, or the search's own library missing and only the other route's
+    there, the step is not run and the reason names the files (2.14.2). The plan records how the
+    library was chosen (`search.speclib_chosen_by`).
 - **Protein accessions come from the FASTA names** (`sp|P02768|ALBU_HUMAN`): offline, Skyline
   leaves its accession and gene columns empty.
 - **Harmless noise in the logs:** `INFO: Terminating squashfuse_ll after timeout`,
@@ -306,10 +370,19 @@ Plus queue waits. A 12-run timsTOF project should take about 10-15 min of wall t
   - the runs imported and failed;
   - the results, the figures with their captions, and the Methods paragraph.
 
-**What the report says for each state** (`record_state`): "Not run." with the reason (skipped,
-or planned but never submitted); "Not finished when this report was made." (submitted, no result
-yet); "Out of date." (the DE was run again); "Could not be read."; otherwise the section above.
-`MANIFEST.txt` says the same, with what to run.
+**What the report says for each state** (`record_state`): "Not run." with the reason (skipped),
+cut of server paths and naming the engine by its label; for planned, submitted, out of date (the
+DE was run again) or unreadable, "Not part of this report." and one neutral sentence
+(`REPORT_WORDS`: a client reads it, so it never tells staff what to run); otherwise the section
+above. `MANIFEST.txt` gives staff the state, with what to run. The report's record
+(`report_provenance.json` `peak_check_state`) keeps the state it was made with, and the delivery
+never ships a finished `skyline/` beside a report that says the check was not part of it
+(`skyline_peaks.report_disagrees`): make the report again first (2.14.2 C2). The session's README.md and README.html
+(`readme_rows`) describe `output/skyline/` as pictures and a Skyline document only for a finished
+check; in any other state they give it one row, "the peak check (Skyline): " and the state and
+reason (`state_reason`), e.g. "not run: <the reason>" (2.14.2). The delivery ships `skyline/`
+only for a finished check: `skyline_peaks.deliverable`, the one rule, which
+`core_submission.skyline_deliverable` wraps.
 
 **Where it goes:**
 - The report adds a "Peak check (Skyline)" section from the record, after the top-protein tables,

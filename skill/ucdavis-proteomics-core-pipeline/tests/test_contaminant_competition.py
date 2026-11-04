@@ -30,6 +30,7 @@ sys.path.insert(0, SCRIPTS)
 import audit_results as ar  # noqa: E402
 import contaminant_competition as cc  # noqa: E402
 import diann_q_columns as dq  # noqa: E402
+import fetch_fasta as ff  # noqa: E402
 import run_search  # noqa: E402
 
 try:
@@ -153,6 +154,20 @@ class Fixture(unittest.TestCase):
     def run_check(self, rows, failing=(), fasta=True):
         rep = write_tsv(os.path.join(self.d, "report.tsv"), rows, failing)
         return cc.check(rep, self.fasta if fasta else None, self.meta if fasta else None)
+
+    def built(self, dropped=162, in_set=381, **extra):
+        """A fetch_fasta.py sidecar of the searched FASTA (its sha256) recording the build."""
+        import hashlib
+        import fetch_fasta
+        with open(self.fasta, "rb") as fh:
+            sha = hashlib.sha256(fh.read()).hexdigest()
+        self.meta = dict(self.meta, sha256=sha, contaminant_set="universal",
+                         n_contaminants_appended=in_set - dropped, n_contaminants_in_set=in_set,
+                         n_contaminants_dropped_as_target=dropped, min_unique_peptides=2,
+                         contaminant_target_rule=fetch_fasta.contaminant_target_rule(2))
+        self.meta.update(extra)
+        write(self.fasta + ".meta.json", json.dumps(self.meta))
+        return self.meta
 
 
 class TheCheck(Fixture):
@@ -575,6 +590,242 @@ class TheWords(Fixture):
         self.assertEqual(cc.audit_findings({"status": "not_applicable", "reason": "x"}), [])
 
 
+BUILT = "Before the search, "
+
+
+class TheBuildIsSaid(Fixture):
+    """The Core director read "The Core can search again without those contaminant entries" as the
+    skill having failed to correct the problem (2026-10-27). The build had already removed every
+    contaminant entry that is, or cannot be told apart from, a sample protein (162 of the 381
+    universal entries for human); the warning now says so, from the sidecar's numbers."""
+
+    def plains(self, rec, de=DE_REMOVED):
+        return [f[3] or "" for f in cc.audit_findings(rec, de)]
+
+    def test_the_build_s_removals_are_said_once_after_the_warnings(self):
+        self.built()
+        rec = self.run_check(CLEAN + COMPETED + SIPHONED)
+        self.assertEqual(rec["database_build"], {
+            "contaminant_set": "universal", "n_in_set": 381, "n_removed_as_target": 162,
+            "n_removed_matching_added": 0, "n_removed_for_added_sequences": None,
+            "database_state": "current", "kept_matching_target": [],
+            "sidecar": self.fasta + ".meta.json"})
+        fs = cc.audit_findings(rec, DE_REMOVED)
+        self.assertEqual([f[0] for f in fs], ["WARN", "WARN"])
+        self.assertNotIn(BUILT, fs[0][3])
+        self.assertIn(
+            "Before the search, 162 of the contaminant list's 381 entries were already removed "
+            "because each was identical to a Homo sapiens protein or could not be told apart "
+            "from one, so those cannot take a Homo sapiens protein's peptides. The entries "
+            "involved here differ from the Homo sapiens proteins and stay in the list so that "
+            "real contamination is still caught; only the search can show that none, or almost "
+            "none, of their own peptides were found in these samples.", fs[1][3])
+        for t in TheWords.TECHNICAL:
+            self.assertNotIn(t, fs[1][3])
+        row = [ln for ln in ar.client_section_md(
+            [{"check": "contaminant_competition", "status": s, "message": m, "plain": p}
+             for s, m, _d, p in fs]).splitlines() if ln.startswith("| Sample proteins")][0]
+        self.assertEqual(row.count(BUILT), 1)
+        self.assertLess(row.index("ENO1"), row.index(BUILT))      # the lists, then why
+        # staff: one line, once
+        line = ("Database build: 162 of 381 universal contaminant entries removed before the "
+                "search as identical to, or indistinguishable from, Homo sapiens proteins "
+                f"(current rule; {self.fasta}.meta.json).")
+        self.assertEqual(sum(line in f[1] for f in fs), 1)
+        self.assertIn(line, cc.staff_message(rec))
+        self.assertEqual(fs[0][2]["database_build"]["n_removed_as_target"], 162)
+
+    def test_one_entry_and_one_removal_read_in_the_singular(self):
+        self.built(dropped=1)
+        (plain,) = self.plains(self.run_check(CLEAN + COMPETED))
+        self.assertIn("1 of the contaminant list's 381 entries was already removed because it "
+                      "was identical", plain)
+        self.assertIn("so it cannot take", plain)
+        self.assertIn("The entry involved here differs from the Homo sapiens proteins and stays "
+                      "in the list", plain)
+        self.assertIn("none, or almost none, of its own peptides", plain)
+        self.assertTrue(plain.startswith("ACTB is missing"), plain)
+
+    def test_without_a_sidecar_nothing_is_said(self):
+        # the fixture's sidecar records no counts
+        rec = self.run_check(CLEAN + COMPETED + SIPHONED)
+        self.assertIsNone(rec["database_build"])
+        self.assertFalse(any(BUILT in p for p in self.plains(rec)))
+        self.assertNotIn("Database build", cc.staff_message(rec))
+        # no sidecar at all, and none passed
+        os.remove(self.fasta + ".meta.json")
+        rec = cc.check(rec["report"], self.fasta, None)
+        self.assertIsNone(rec["database_build"])
+        self.assertFalse(any(BUILT in p for p in self.plains(rec)))
+        del rec["database_build"]                    # an old record: nothing to fall back to
+        self.assertIsNone(cc.database_build_of(rec))
+
+    def test_a_build_that_removed_none_is_not_said_to_the_client(self):
+        self.built(dropped=0)
+        rec = self.run_check(CLEAN + COMPETED + SIPHONED)
+        self.assertEqual(rec["database_build"]["n_removed_as_target"], 0)
+        self.assertFalse(any(BUILT in p for p in self.plains(rec)))
+
+    def test_an_older_record_reads_the_sidecar_next_to_its_fasta(self):
+        """A record written by skill 2.14.0 has no `database_build`: the sidecar beside its FASTA,
+        read as the check reads it, while it still describes that FASTA."""
+        self.built()
+        rec = self.run_check(CLEAN + COMPETED + SIPHONED)
+        old = {k: v for k, v in rec.items() if k != "database_build"}
+        self.assertEqual(cc.database_build_of(old), rec["database_build"])
+        fs = cc.audit_findings(old, DE_REMOVED)
+        self.assertIn(BUILT + "162 of", fs[-1][3])
+        self.assertEqual(fs[0][2]["database_build"], rec["database_build"])
+        self.assertIn("Database build: 162 of 381", fs[0][1])
+        # a record that says it has none is believed: no fallback
+        self.assertIsNone(cc.database_build_of(dict(rec, database_build=None)))
+
+    def test_a_stale_sidecar_is_not_read(self):
+        """The FASTA changed after the build: its sidecar's counts describe another file."""
+        self.built()
+        rec = self.run_check(CLEAN + COMPETED + SIPHONED)
+        write(self.fasta, FASTA + entry("Q99999", "NEW_HUMAN", "NEW", "MKKKKKKK"))
+        old = {k: v for k, v in rec.items() if k != "database_build"}
+        self.assertIsNone(cc.database_build_of(old))
+        self.assertFalse(any(BUILT in p for p in self.plains(old)))
+        self.assertNotIn("Database build", cc.audit_findings(old, DE_REMOVED)[0][1])
+        fresh = self.run_check(CLEAN + COMPETED + SIPHONED)  # the check itself reads it so too
+        self.assertIsNone(fresh["database_build"])
+        self.assertFalse(any(BUILT in p for p in self.plains(fresh)))
+        # the one comparison (fetch_fasta, shared with _recheck and the auditors' searched_fasta)
+        self.assertIs(ff.sidecar_sha256_matches(self.meta, self.fasta), False)
+        self.assertIsNone(ff.sidecar_sha256_matches(dict(self.meta, sha256=None), self.fasta))
+        self.built()
+        self.assertIs(ff.sidecar_sha256_matches(self.meta, self.fasta), True)
+
+    def test_a_database_built_by_the_identity_rule_alone_is_not_said_to_the_client(self):
+        """Near-identical entries were not removed then, so "could not be told apart" is false
+        and the entries involved may be such entries: the staff note says rebuild."""
+        self.built(min_unique_peptides=0)
+        rec = self.run_check(CLEAN + COMPETED)
+        self.assertEqual(rec["database_build"]["database_state"], "identity_only")
+        self.assertFalse(any(BUILT in p for p in self.plains(rec)))
+        self.assertIn("as identical to, or contained in, Homo sapiens proteins "
+                      "(identity_only rule;", cc.staff_message(rec))
+
+    def test_an_entry_the_build_kept_although_it_matches_is_not_called_different(self):
+        """A digestion enzyme stays a contaminant on purpose even when it is a sample protein
+        (porcine trypsin in a pig sample): "differs from the proteins" would be false."""
+        rows = CLEAN + [("P04406;Cont_P00761", "SSSSSSSSK", 9000)]
+        self.built()
+        (plain,) = self.plains(self.run_check(rows))
+        self.assertIn("The entry involved here differs", plain)
+        self.built(contaminants_kept_despite_target_match=[
+            {"cont_acc": "Cont_P00761", "reason": "digestion enzyme used in this search"}])
+        rec = self.run_check(rows)
+        self.assertEqual(rec["database_build"]["kept_matching_target"], ["Cont_P00761"])
+        (plain,) = self.plains(rec)
+        self.assertNotIn(BUILT, plain)
+
+    def test_an_organism_starting_with_a_vowel_reads_an(self):
+        self.built(organism="Escherichia coli")
+        (plain,) = self.plains(self.run_check(CLEAN + COMPETED))
+        self.assertIn("identical to an Escherichia coli protein", plain)
+
+    # --add-fasta: an added sequence (a bait, a tag) is a target too, so an entry removed as a
+    # target may have matched it rather than the organism's proteome (its record's target_acc)
+    BAIT = [{"file": "bait.fasta", "entries": [{"accession": "1000001"}]}]
+
+    def removed(self, *targets):
+        return [{"cont_acc": f"Cont_Q{i:05d}", "target_acc": t} for i, t in enumerate(targets)]
+
+    def test_entries_removed_for_an_added_sequence_are_not_called_the_organism_s(self):
+        self.built(dropped=2, n_added_sequences=1, added_sequences=self.BAIT,
+                   contaminants_dropped_as_target=self.removed("P60709", "1000001"))
+        rec = self.run_check(CLEAN + COMPETED + SIPHONED)
+        self.assertEqual(rec["database_build"]["n_removed_matching_added"], 1)
+        plain = self.plains(rec)[-1]
+        self.assertIn(
+            "Before the search, 2 of the contaminant list's 381 entries were already removed "
+            "because each was identical to a Homo sapiens protein or to one of the sequences "
+            "added to the database, or could not be told apart from one, "
+            "so those cannot take the peptides of a Homo sapiens protein or an added sequence. "
+            "The entries involved here differ", plain)
+        for t in TheWords.TECHNICAL:
+            self.assertNotIn(t, plain)
+        self.assertIn("as identical to, or indistinguishable from, Homo sapiens proteins or added "
+                      "sequences (1 of them matched an added sequence; current rule;",
+                      cc.staff_message(rec))
+
+    def test_when_every_removed_entry_was_an_added_sequence_the_organism_is_not_named(self):
+        self.built(dropped=1, n_added_sequences=1, added_sequences=self.BAIT,
+                   contaminants_dropped_as_target=self.removed("1000001"))
+        (plain,) = self.plains(self.run_check(CLEAN + COMPETED))
+        self.assertIn("Before the search, 1 of the contaminant list's 381 entries was already "
+                      "removed because it was identical to one of the sequences added to the "
+                      "database, or could not be told apart from one, so "
+                      "it cannot take an added sequence's peptides.", plain)
+        self.assertNotIn("Homo sapiens protein or", plain)
+
+    def test_added_sequences_none_of_the_removed_matched_leave_the_words_as_they_are(self):
+        """The sidecar's separate count -- entries removed because most of each is an added
+        sequence (wild-type GFP beside an EGFP bait) -- is not among those the sentence counts:
+        staff read it, the client's words stay exactly as without --add-fasta."""
+        self.built()
+        before = self.plains(self.run_check(CLEAN + COMPETED + SIPHONED))[-1]
+        self.built(dropped=2, n_added_sequences=1, added_sequences=self.BAIT,
+                   contaminants_dropped_as_target=self.removed("P60709", "P06733"),
+                   n_contaminants_dropped_for_added_sequences=1)
+        rec = self.run_check(CLEAN + COMPETED + SIPHONED)
+        self.assertEqual((rec["database_build"]["n_removed_matching_added"],
+                          rec["database_build"]["n_removed_for_added_sequences"]), (0, 1))
+        after = self.plains(rec)[-1]
+        self.assertEqual(after, before.replace("162 of", "2 of"))
+        self.assertIn("because each was identical to a Homo sapiens protein or could not be told "
+                      "apart from one, so those cannot take a Homo sapiens protein's peptides.",
+                      after)
+        msg = cc.staff_message(rec)
+        self.assertIn("as identical to, or indistinguishable from, Homo sapiens proteins "
+                      "(current rule;", msg)
+        self.assertIn("1 more was removed because most of it is an added sequence "
+                      "(contaminants_dropped_for_added_sequences).", msg)
+
+    def test_records_that_cannot_say_which_matched_read_as_either(self):
+        self.built(dropped=2, n_added_sequences=1, added_sequences=self.BAIT,
+                   contaminants_dropped_as_target=self.removed("P60709"))   # one record of two
+        rec = self.run_check(CLEAN + COMPETED)
+        self.assertIsNone(rec["database_build"]["n_removed_matching_added"])
+        (plain,) = self.plains(rec)
+        self.assertIn("identical to a Homo sapiens protein or to one of the sequences added", plain)
+        self.assertIn("how many of them matched an added sequence is not recorded",
+                      cc.staff_message(rec))
+
+    def test_the_fields_are_read_as_fetch_fasta_writes_them(self):
+        """A real build (offline): a contaminant identical to the human protein and one identical
+        to the added tag both leave as targets; the tag's names the added accession."""
+        tag, actb = "MDYKDDDDKGGSAWSHPQFEK", "MDDDIAALVVDNGSGMCKAGFAGDDAPRAVFPSIVGRPRHQGVMVGMGQK"
+        prot = os.path.join(self.d, "proteome.fasta")
+        write(prot, f">sp|P60709|ACTB_HUMAN Actin OS=Homo sapiens OX=9606 GN=ACTB\n{actb}\n")
+        cont = os.path.join(self.d, "cont.fasta")
+        write(cont, f">sp|Cont_P60712|ACTB_BOVIN Actin OS=Bos taurus OX=9913 GN=ACTB\n{actb}\n"
+                    f">sp|Cont_Q00002|TAG_X Tag OS=x OX=1\n{tag}\n"
+                    f">sp|Cont_P02769|ALBU_BOVIN Albumin OS=Bos taurus OX=9913 GN=ALB\n{BSA}\n")
+        bait = os.path.join(self.d, "bait.fasta")
+        write(bait, f">IN|1000002|TAG synthetic tag\n{tag}\n")
+        out = os.path.join(self.d, "built", "search.fasta")
+        argv = ["fetch_fasta.py", "fetch", "--path", prot, "--organism", "Homo sapiens",
+                "--taxid", "9606", "--contaminants", "universal", "--contaminants-path", cont,
+                "--add-fasta", bait, "--out", out]
+        with mock.patch.object(sys, "argv", argv), mock.patch("sys.stdout"), \
+                mock.patch("sys.stderr"):
+            self.assertIn(ff.main(), (0, None))
+        meta = json.loads(read(out + ".meta.json"))
+        b = cc.database_build(meta, out)
+        self.assertEqual((b["n_in_set"], b["n_removed_as_target"], b["n_removed_matching_added"],
+                          b["n_removed_for_added_sequences"], b["database_state"]),
+                         (3, 2, 1, 0, "current"))
+        rec = {"organism": "Homo sapiens", "drop_contaminant": ["Cont_P02769"],
+               "kept_digestion_enzymes": [], "database_build": b}
+        self.assertIn("2 of the contaminant list's 3 entries were already removed because each "
+                      "was identical to a Homo sapiens protein or to one of the sequences added "
+                      "to the database", cc.plain_build(rec))
+
+
 class TheRecordAndTheAudit(Fixture):
     def search_out(self, rows, prov_extra=None, failing=()):
         out = os.path.join(self.d, "search_out")
@@ -642,6 +893,23 @@ class TheRecordAndTheAudit(Fixture):
         self.assertIn("The DE removed every contaminant precursor", f["message"])
         self.assertNotIn("checked_by", f["detail"])
         self.assertIn("ACTB is missing", ar.client_section_md([f]))
+
+    def test_the_audit_says_the_build_for_a_record_from_before_the_key(self):
+        """A 2.14.0 search's record (no `database_build`): the audit reads the sidecar beside its
+        FASTA and tells the client what the build already removed."""
+        self.built()
+        out, rep = self.search_out(CLEAN + COMPETED)
+        self.cli(out)
+        for path in (os.path.join(out, cc.RECORD), os.path.join(out, "search_provenance.json")):
+            doc = json.loads(read(path))
+            rec = doc.get("contaminant_competition", doc)
+            self.assertEqual(rec.pop("database_build")["n_removed_as_target"], 162)
+            write(path, json.dumps(doc))
+        (f,), _md = self.audit({"input": rep, "contaminants": DE_REMOVED}, out)
+        self.assertNotIn("checked_by", f["detail"])             # the search's own record, quoted
+        self.assertIn("ACTB is missing from the results", f["plain"])
+        self.assertIn(BUILT + "162 of the contaminant list's 381 entries", f["plain"])
+        self.assertEqual(f["detail"]["database_build"]["sidecar"], self.fasta + ".meta.json")
 
     def test_a_search_without_a_record_is_checked_by_the_audit(self):
         out, rep = self.search_out(CLEAN + SIPHONED)

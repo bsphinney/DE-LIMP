@@ -14,7 +14,8 @@ every file at once.
 
 So we split it exactly there:
 
-  step 1  DIA-NN predicts the spectral library                     (1 job)
+  step 1  DIA-NN predicts the spectral library, and               (1 job)
+          make_radiant_library.py makes it the TSV Radiant reads
   step 2  RadiantDIA runs on ONE file per array task               (N tasks)
   step 3  Fulcrum consumes the per-file results and does the       (1 job)
           rescoring / FDR / inference / rollup / output
@@ -105,7 +106,7 @@ def main():
     ap.add_argument("--fasta", required=True)
     ap.add_argument("--config", required=True, help="the .radiantConfig to search with")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--library", help="DIA-NN .tsv library; generated in step 1 if omitted")
+    ap.add_argument("--library", help="a .tsv/.csv/.fragLibFF library; built in step 1 if omitted (a TSV, in <out>/radiant_lib/)")
     ap.add_argument("--diann", help="DIA-NN command (needed only when --library is omitted)")
     ap.add_argument("--cys-alkylation", default="cam",
                     help="the fixed cysteine modification step 1's predicted library carries "
@@ -195,16 +196,33 @@ def main():
     rdir = os.path.join(results, rsub)
     os.makedirs(D, exist_ok=True); os.makedirs(rdir, exist_ok=True)
 
-    # DIA-NN IGNORES the extension given to --out-lib for a PREDICTED library and always
-    # writes <stem>.predicted.speclib (its compact binary format). Radiant reads .speclib
-    # directly (FragLibReader accepts .fragLibFF/.tsv/.csv/.speclib), so no conversion is
-    # needed -- but the filename must match what DIA-NN really produces or step 2 looks
-    # for a file that was never written. The --out-lib has an extension: DIA-NN cuts the name
-    # it derives at the last '.' of the whole path, so a bare stem in a folder with a '.' in its
-    # name put the library one folder up (diann_parallel.diann_output_path).
-    from diann_parallel import predicted_speclib
-    out_lib = os.path.join(D, "diann_predicted_lib.speclib")
-    lib = a.library or predicted_speclib(out_lib)
+    # the fixed C modification (estimate_params.cys_diann_flags, the one map): Radiant's config has
+    # no modifications, it searches what the library carries
+    from estimate_params import CYS_ALKYLATION_CHOICES
+    if a.cys_alkylation not in CYS_ALKYLATION_CHOICES:
+        sys.exit(f"--cys-alkylation {a.cys_alkylation!r}: one of "
+                 f"{', '.join(CYS_ALKYLATION_CHOICES)}")
+    # Step 1 builds Radiant's library exactly as the single-job route does
+    # (run_search.radiant_library_lines, the one builder): make_radiant_library.py turns DIA-NN's
+    # prediction into the TSV Radiant reads, in <out>/radiant_lib/, with the cysteine choice.
+    # Step 1 used to hand step 2 DIA-NN's <stem>.predicted.speclib, read as "Radiant reads
+    # .speclib": it does, but only format v >= -3, and every DIA-NN 2.x speclib is v-10/-11
+    # ("ERROR: version is not supported11"; make_radiant_library.py), so every array task of the
+    # search would have failed (S8).
+    if a.library:
+        lib, lib_lines = a.library, None
+    elif not a.diann:
+        sys.exit("--library not given, so step 1 must build one, but --diann was not provided. "
+                 "Radiant needs a spectral library: step 1 predicts it with DIA-NN and "
+                 "make_radiant_library.py makes the TSV Radiant reads (DIA-NN 2.x's "
+                 ".predicted.speclib is a format Radiant rejects). Pass --diann, or --library "
+                 "with an existing .tsv/.csv/.fragLibFF library.")
+    else:
+        sys.path.insert(0, HERE)
+        import run_search
+        lib, lib_lines = run_search.radiant_library_lines(
+            a.diann, os.path.abspath(a.fasta), run_search.radiant_lib_dir(out), a.libpred_cpus,
+            a.cys_alkylation)
     listing = os.path.join(D, "file_list.txt")
     write_file(listing, "\n".join(os.path.abspath(f) for f in files) + "\n")
 
@@ -257,31 +275,13 @@ def main():
         return write_file(os.path.join(D, name), text + "\n", 0o755)
 
     scripts = {}
-    # the fixed C modification (estimate_params.cys_diann_flags, the one map): Radiant's config has
-    # no modifications, it searches what the library carries
-    from estimate_params import CYS_ALKYLATION_CHOICES, cys_diann_flags
-    if a.cys_alkylation not in CYS_ALKYLATION_CHOICES:
-        sys.exit(f"--cys-alkylation {a.cys_alkylation!r}: one of "
-                 f"{', '.join(CYS_ALKYLATION_CHOICES)}")
-    cys_flags = cys_diann_flags(a.cys_alkylation)
 
-    # ---- step 1: DIA-NN predicted library (skipped when --library is given) -----
-    if not a.library:
-        if not a.diann:
-            sys.exit("--library not given, so step 1 must generate one, but --diann was "
-                     "not provided. Radiant needs a DIA-NN library (it reads DIA-NN's TSV "
-                     "schema natively).")
+    # ---- step 1: the library, as a TSV (skipped when --library is given) -----------------
+    if lib_lines:
         scripts["step1_libpred"] = write("step1_libpred.sbatch", "\n".join([
             header("r1_libpred", a.libpred_cpus, a.libpred_mem, a.libpred_time, **q), "",
-            'echo "Step 1/3 DIA-NN library prediction"; date',
-            f'{a.diann} --fasta {shlex.quote(os.path.abspath(a.fasta))} --fasta-search '
-            f'--predictor --gen-spec-lib --out-lib {shlex.quote(out_lib)} '
-            f'--threads {a.libpred_cpus}' + "".join(f" {shlex.quote(x)}" for x in cys_flags),
-            # Check for what DIA-NN ACTUALLY writes, and say what it did write if absent.
-            f'if [ ! -s {shlex.quote(lib)} ]; then',
-            f'  echo "expected {os.path.basename(lib)}; DIA-NN wrote:"; ls -la {shlex.quote(D)}',
-            f'  exit 1',
-            f'fi']), stage="step 1/3 library prediction", hours=a.libpred_time)
+            'echo "Step 1/3 Radiant library: DIA-NN prediction -> TSV"; date',
+            *lib_lines]), stage="step 1/3 library prediction", hours=a.libpred_time)
 
     # ---- step 2: one RadiantDIA per file (array) --------------------------------
     n = len(files)

@@ -3,7 +3,7 @@
 
 Brett, 2026-09-24: collaborators cannot read a .md, an AI agent handed the folder needs a guide
 to it, and nothing said where the files and the raw data are on HIVE. A real hive_remote session
-(Silva08172026) had a README that named no HIVE path and claimed an input/raw_files.txt that did
+(the mouse-brain IP cohort) had a README that named no HIVE path and claimed an input/raw_files.txt that did
 not exist -- the raw paths were only in output/search/file_list.txt and search_provenance.json.
 
 What these tests pin:
@@ -29,6 +29,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.parse
 import zipfile
 from contextlib import redirect_stderr, redirect_stdout
 from html.parser import HTMLParser
@@ -521,7 +522,9 @@ class Readme(unittest.TestCase):
                       "Methods", "Deposit the data (PRIDE / MassIVE)"):
                 self.assertIn(s, h.h2)
             self.assertIn('href="AGENTS.md"', page)
-            self.assertIn('href="output/tables/"', page)
+            # a folder is linked by its first file, never itself (T33: LinksInBioshare below)
+            self.assertNotIn('href="output/tables/"', page)
+            self.assertIn("(folder tables/)", page)
             self.assertNotIn("Open `README.html`", page.replace("<code>", "`").replace(
                 "</code>", "`"))
             self.assertIn("Open `README.html`", md)
@@ -530,12 +533,15 @@ class Readme(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             p = tdp.dia_session(d)
             write(os.path.join(p["output_dir"], "Analysis_Report.html"), "<html></html>")
-            md = session_docs.readme_md(session_docs.gather(p["session_dir"]))
+            # README.html's source links (README.md names the same files, unlinked: T33)
+            md = session_docs.readme_md(session_docs.gather(p["session_dir"]), for_html=True)
             for target in re.findall(r"\]\(([^)]+)\)", md):
                 self.assertTrue(os.path.exists(os.path.join(p["session_dir"], target)), target)
             self.assertIn("(output/Analysis_Report.html)", md)
+            self.assertIn("Analysis report: `output/Analysis_Report.html`",
+                          session_docs.readme_md(session_docs.gather(p["session_dir"])))
             write(os.path.join(p["output_dir"], "AI_Analysis_Report.docx"), "old")   # older session
-            md = session_docs.readme_md(session_docs.gather(p["session_dir"]))
+            md = session_docs.readme_md(session_docs.gather(p["session_dir"]), for_html=True)
             self.assertNotIn("AI_Analysis_Report.docx", md)          # kept, never pointed at
             first = [ln for ln in md.splitlines() if ln.startswith("- [")][0]
             self.assertIn("Analysis_Report.html", first)             # the report, linked first
@@ -559,8 +565,11 @@ class Readme(unittest.TestCase):
             write(os.path.join(p["output_dir"], "Analysis_Report.md"), "# twin")
             f = session_docs.gather(p["session_dir"])
             md = session_docs.readme_md(f)
-            self.assertIn("[Analysis report (PDF)](output/Analysis_Report.pdf)", md)
-            self.assertIn("[Analysis report (plain text)](output/Analysis_Report.md)", md)
+            self.assertIn("Analysis report (PDF): `output/Analysis_Report.pdf`", md)
+            self.assertIn("Analysis report (plain text): `output/Analysis_Report.md`", md)
+            html_src = session_docs.readme_md(f, for_html=True)
+            self.assertIn("[Analysis report (PDF)](output/Analysis_Report.pdf)", html_src)
+            self.assertIn("[Analysis report (plain text)](output/Analysis_Report.md)", html_src)
             self.assertIn("for NotebookLM or other AI notebooks", md)
             self.assertNotIn("— not made", md)
             agents = session_docs.agents_md(f)
@@ -576,6 +585,8 @@ class Readme(unittest.TestCase):
 
 class Finalize(unittest.TestCase):
     def run_finalize(self, p, hooks=None):
+        import finish_fixture                              # finished as finalize's gate asks
+        finish_fixture.finished(p["output_dir"])
         args = type("A", (), dict(dir=p["session_dir"], zip=True, no_deposit=True,
                                   no_notify=True, reanalysis_of=""))()
         out = io.StringIO()
@@ -609,7 +620,7 @@ class Finalize(unittest.TestCase):
             self.assertEqual(read(p["output_files_md"]).count("written at finalize: BEGIN"),
                              1)
             md = read(p["readme"])
-            self.assertIn("[MANIFEST.txt](MANIFEST.txt)", md)
+            self.assertIn("- `MANIFEST.txt` — what this export contains", md)
 
     def test_registry_path_from_the_hook_is_written_in(self):
         reg = "/quobyte/proteomics-grp/skill_runs/sessions/2026-09-24_demo"
@@ -663,11 +674,14 @@ class Finalize(unittest.TestCase):
             man = read(p["manifest_txt"])
             self.assertRegex(man, r"\[SKIPPED\] README\.html .*RuntimeError: renderer broke")
             self.assertRegex(man, r"\[SKIPPED\] README / AGENTS\.md in the zip")
-            # an older README.html stays whole on disk, and is not zipped as this finalize's
-            write(html, "<html>older</html>")
+            # an older README.html (the skill's: its words, report_files.LEGACY_DOC_SIGNS) stays
+            # whole on disk, and is not zipped as this finalize's
+            older = ("<html><p><em>Written 2026-09-30 by <code>session.py</code> from this "
+                     "session's records.</em></p></html>")
+            write(html, older)
             with broke:
                 res = self.run_finalize(p)
-            self.assertEqual(read(html), "<html>older</html>")
+            self.assertEqual(read(html), older)
             with zipfile.ZipFile(res["zip"]) as z:
                 self.assertNotIn(f"{base}/README.html", z.namelist())
 
@@ -757,6 +771,109 @@ class RegistryLocate(unittest.TestCase):
                 self.assertEqual(json.loads(r.stdout), {"located": folder})
             with mock.patch.dict(os.environ, {"SKILL_RUNS_DIR": runs, "RECORD_RUN": "off"}):
                 self.assertIsNone(record_run.locate(p["session_dir"]))
+
+
+class Hrefs(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.links = []          # (href, text)
+        self._a = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "a":
+            self._a = [dict(attrs).get("href") or "", ""]
+
+    def handle_data(self, data):
+        if self._a is not None:
+            self._a[1] += data
+
+    def handle_endtag(self, tag):
+        if tag == "a" and self._a is not None:
+            self.links.append(tuple(self._a))
+            self._a = None
+
+
+class LinksInBioshare(unittest.TestCase):
+    """I24 (T33): Bioshare shows a folder's README.md inside the folder page and rewrites src=,
+    never href= -- so every relative link in a README.md there opened "Unable to locate the
+    files" (core_submission._item says the same for a delivery's README). A link to a folder
+    opens nothing either, in Bioshare or from a zip. README.md names each file without a link;
+    README.html links files only, a folder by its first file."""
+
+    def session(self, d):
+        p = tdp.dia_session(d)
+        for name, text in (("Analysis_Report.html", "<html></html>"),
+                           ("Analysis_Report.pdf", "%PDF-1.4"), ("methods.md", "# Methods\n")):
+            write(os.path.join(p["output_dir"], name), text)
+        session_docs.write_docs(p["session_dir"])
+        return p
+
+    def test_readme_md_has_no_relative_links(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self.session(d)
+            md = read(p["readme"])
+            self.assertEqual(re.findall(r"\]\((?!https?://)[^)]*\)", md), [], md)
+            self.assertIn("Analysis report: `output/Analysis_Report.html`", md)
+            self.assertIn("Results tables: `output/tables/`", md)
+            self.assertIn("are not links", md)
+
+    def test_readme_html_never_links_a_folder(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self.session(d)
+            h = Hrefs()
+            h.feed(read(os.path.join(p["session_dir"], "README.html")))
+            local = [(u, t) for u, t in h.links if not re.match(r"[a-z]+:", u)]
+            self.assertTrue(local)
+            for u, t in local:
+                self.assertFalse(u.endswith("/"), (u, t))
+                target = os.path.join(p["session_dir"], urllib.parse.unquote(u))
+                self.assertTrue(os.path.isfile(target), (u, t))
+            tables = [(u, t) for u, t in local if "(folder tables/)" in t]
+            self.assertEqual(len(tables), 1, local)
+            first = sorted(n for n in os.listdir(p["de_dir"]) if not n.startswith(".")
+                           and os.path.isfile(os.path.join(p["de_dir"], n)))[0]
+            self.assertEqual(tables[0][0], "output/tables/" + urllib.parse.quote(first))
+
+
+class PrecursorCount(unittest.TestCase):
+    """I40 (T36): limpa 1.4.0 renamed dpcQuant()'s `genes$NPeptides` to `genes$NPrec` (its NEWS.Rd,
+    "Version 1.4.0"). The glossary had no NPrec, so AGENTS.md said "no description recorded" for
+    it on every limpa >= 1.4 table. Both count precursors, never peptides."""
+
+    def test_the_column_the_table_has(self):
+        pc = session_docs.precursor_count_column
+        self.assertEqual(pc(["Protein.Group", "NPrec", "PropObs"]), "NPrec")
+        self.assertEqual(pc(["Protein.Group", "NPeptides", "PropObs"]), "NPeptides")
+        self.assertEqual(pc(["Protein.Group", "NPeptides", "NPrec"]), "NPrec")
+        self.assertIsNone(pc(["Protein.Group", "logFC"]))
+        self.assertIsNone(pc(None))
+
+    def test_nprec_has_a_description(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = tdp.dia_session(d)
+            os.remove(os.path.join(p["de_dir"], "DE_Treated_vs_Control.csv"))
+            write(os.path.join(p["de_dir"], "de_provenance.json"), json.dumps(DPC))
+            write(os.path.join(p["de_dir"], "DE_dpc_Treated.Control.csv"),
+                  '"Protein.Group","Genes","NPrec","PropObs","logFC","adj.P.Val"\n')
+            text = session_docs.agents_md(session_docs.gather(p["session_dir"]))
+        line = next(ln for ln in text.splitlines() if ln.startswith("- `NPrec`"))
+        self.assertNotIn("no description recorded", line)
+        self.assertIn("number of precursors", line)
+        self.assertIn("limpa >= 1.4", line)
+        self.assertNotIn("peptides quantifying", line)
+
+    def test_the_outputs_reference_names_nprec(self):
+        """Review F10: references/outputs.md named only NPeptides for the DE tables."""
+        with open(os.path.join(os.path.dirname(HERE), "references", "outputs.md"),
+                  encoding="utf-8") as fh:
+            text = " ".join(fh.read().split())
+        self.assertIn("`NPrec` (limpa ≥ 1.4; `NPeptides` before)", text)
+        self.assertNotIn("limpa's `NPeptides` / `PropObs`", text)
+
+    def test_npeptides_is_said_to_count_precursors_too(self):
+        d = session_docs.COLUMNS["NPeptides"]
+        self.assertIn("number of precursors", d)
+        self.assertIn("limpa < 1.4", d)
 
 
 if __name__ == "__main__":

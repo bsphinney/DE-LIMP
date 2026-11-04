@@ -575,7 +575,7 @@ exists because the looser version picked a wrong folder with exit 0:
   them must appear whole (`delacruz`) — "de la Cruz" once matched `UC_Santa_Cruz`. Two-letter
   surnames (Li, Wu) match whole.
 - **A folder naming somebody else is not a match.** Other personal-name tokens in the folder
-  that are not the PI's first name make it ambiguous: PI Ying Wang is not `Wang Wei`.
+  that are not the PI's first name make it ambiguous: PI Jane Doe is not `Doe John`.
   (`Doe jane` for Jane Doe is fine.)
 - **on campus:** top-level folders. **off campus:** first- and second-level folders; a
   second-level match must sit under a folder that looks like the PI's institution.
@@ -619,7 +619,7 @@ Folders it creates are `g+rwxs,o+rx` (the tree is shared; umask 077 would lock c
 |---|---|---|---|
 | **relative**, source and target both under the Flinders root (CoreOmics `views/`, e.g. `../../../../../../projects/2019/02/<id>`) | works | **visible and followable** — verified for a relative link to a `.raw` file and to a `.d` folder: both visible and readable | untested for `Data/raw_data` (see step 6) |
 | **absolute** `/nfs/lssc0/...` | works | **invisible** — PROT_0793 `share/raw`: 210 links on HIVE, 0 entries on the Mac mount; an absolute link placed beside the relative ones above was invisible too | — |
-| **into `/quobyte/...`** | works | **invisible** | **works only if Bioshare's file-streaming allows `/quobyte`** — PROT_0793 `share/search`: 59 links → `/quobyte/proteomics-grp/brett/PROT_0793` served nothing because Bioshare streams files through an Apache module whose allowed-folder list had `/quobyte` for http (port 80) but not https (443) — fixed 2026-09-16 (Adam Schaal) |
+| **into `/quobyte/...`** | works | **invisible** | **works only if Bioshare's file-streaming allows `/quobyte`** — the same submission's `share/search`: 59 links → `/quobyte/proteomics-grp/…/PROT_####` served nothing because Bioshare streams files through an Apache module whose allowed-folder list had `/quobyte` for http (port 80) but not https (443) — fixed 2026-09-16 by the Bioshare admins |
 
 Bioshare (`bioshareX/sendfile.py`) also serves a file only if its **realpath** is under the
 server's `DIRECTORY_WHITELIST`, and `check_symlinks_dfs` raises `IllegalPathException` for a
@@ -671,11 +671,18 @@ S=<the session dir it printed>
 ```
 Search, DE, figures, audit, `sample_quality.py`, `make_methods.py` (it reads raw metadata) and
 provenance all run there — heavy steps as SLURM jobs. Writing the report needs the data
-locally, so pull a working copy:
+locally, so pull a working copy. `session.py which-search --paths` lists the search the DE
+read -- its search_provenance.json and report, wherever the search went (output/search_sage/
+...) -- and the workflow manifest: without them the report cannot name the engine or carry the
+scan-window caution. With none chosen it exits 3 with the reason, pulls nothing, and the block
+prints STOP: choose one first (SKILL.md step 12b), then pull again.
 ```
-mkdir -p ~/core/PROT_0807/session/output/search
+mkdir -p ~/core/PROT_0807/session/output
 for d in tables figures; do bash scripts/hive_exec.sh --get "$S/output/$d" ~/core/PROT_0807/session/output/; done
-bash scripts/hive_exec.sh --get "$S/output/search/report.parquet" ~/core/PROT_0807/session/output/search/
+if P=$(bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/session.py which-search --dir $(printf %q "$S") --paths"); then
+  while IFS= read -r f; do [ -n "$f" ] || continue; D=~/core/PROT_0807/session/"$(dirname "$f")"
+    mkdir -p "$D" && bash scripts/hive_exec.sh --get "$S/$f" "$D"/ </dev/null; done <<< "$P"
+else echo "STOP (which-search exit $?): no search is chosen -- choose one (step 12b), then pull again"; fi
 for f in AUDIT.md SAMPLE_QUALITY.md methods.md; do bash scripts/hive_exec.sh --get "$S/output/$f" ~/core/PROT_0807/session/output/; done
 ```
 Attach the submission to `$S` right after `init` (`submission_report.py attach --session "$S"
@@ -684,10 +691,13 @@ Attach the submission to `$S` right after `init` (`submission_report.py attach -
 search.fasta.meta.json}` with the rest. Then locally: write `AI_Analysis_Report.md`;
 `make_analysis_html.py --session ~/core/PROT_0807/session --out
 ~/core/PROT_0807/session/output/Analysis_Report.html` (its Submission section comes from the
-attached record, never an email address); `to_docx.py` for the Methods only (no Word copy of the report). **Push the finished files back before delivering** — `deliver` copies from `$S`:
+attached record, never an email address); `to_docx.py` for the Methods only (no Word copy of the report). **Push the finished files back before delivering** — `deliver` copies from `$S`.
+`report_provenance.json` goes with the report: it is the report's record, written beside it by
+`make_analysis_html.py` (and again by `make_podcast.py link`); without it, finalize, deliver and
+the podcast on HIVE take the report for one made before 2.14.2:
 ```
 L=~/core/PROT_0807/session/output
-for f in AI_Analysis_Report.md Analysis_Report.html Analysis_Report.md Analysis_Report.pdf Analysis_Report_with_audio.html methods.md methods.docx; do
+for f in AI_Analysis_Report.md Analysis_Report.html Analysis_Report.md Analysis_Report.pdf Analysis_Report_with_audio.html methods.md methods.docx report_provenance.json; do
   [ -f "$L/$f" ] && bash scripts/hive_exec.sh --put "$L/$f" "$S/output/"; done
 [ -d "$L/podcast" ] && bash scripts/hive_exec.sh --put "$L/podcast" "$S/output/"   # when it was made here
 ```
@@ -703,14 +713,16 @@ step 11) and `finalize` (step 12: README.html, AGENTS.md, the deposit package, M
 zip and the run log). Without it the delivery goes out with no OUTPUT_FILES.md and the session
 is never recorded:
 ```
-bash scripts/hive_exec.sh "cd $S && python3 ~/proteomics-pipeline/scripts/make_report.py \
-    --out output/OUTPUT_FILES.md --search-out output/search --de-dir output/tables \
+bash scripts/hive_exec.sh "cd $(printf %q "$S") && python3 ~/proteomics-pipeline/scripts/make_report.py \
+    --out output/OUTPUT_FILES.md --session . --de-dir output/tables \
     --repro output/reproducibility --extra input/conditions.csv output/figures \
     output/AUDIT.md output/SAMPLE_QUALITY.md output/Analysis_Report.html \
     output/Analysis_Report.md output/Analysis_Report.pdf output/methods.md"
-bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/session.py finalize --dir $S --zip"
+bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/session.py finalize --dir $(printf %q "$S") --zip"
+bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/session.py status --session $(printf %q "$S")"
 ```
-Then deliver (section 6). `deliver` also takes the podcast's audio and transcript, when there is
+`status` takes `--session` (exit 0 complete, 3 not; a submission stays at 3 until it is
+delivered). Then deliver (section 6). `deliver` also takes the podcast's audio and transcript, when there is
 one, into `podcast/` beside the report, which links it. Its script, checks and consent record
 stay in the session.
 
@@ -726,6 +738,8 @@ python3 ~/proteomics-pipeline/scripts/core_submission.py deliver \
     --summary ~/core/PROT_0807/submission_summary.json --mode raw-only          # "raw data only"
 python3 ~/proteomics-pipeline/scripts/core_submission.py deliver \
     --summary ~/core/PROT_0807/submission_summary.json --session "$S" --mode no-de   # report, no DE
+python3 ~/proteomics-pipeline/scripts/core_submission.py deliver \
+    --summary ~/core/PROT_0807/submission_summary.json --session "$S" --mode interim # raw + search, report to follow
 ```
 
 **The CoreOmics project tree (verified)** is `<flinders>/coreomics/projects/<YYYY>/<MM>/<id>/share/`,
@@ -758,7 +772,7 @@ submissions) have
   login> --note "<one line>"` for that record. The plan's `qc_gate` says why. Good and
   no-QC-on-record go through. A stray `qc_bracket*` file in a delivered folder is never
   shipped. → `references/qc-bracket.md` "The delivery gate". The same gate holds a no-de
-  delivery.
+  or interim delivery.
 - **an analysis delivery's DE holds it** (step 8): it ran without a decided normalisation check
   (`normalization_gate`, `normalization_check.delivery_gate`); a DE from before 2.10 goes once
   staff record `normalization_check.py ack-legacy`.
@@ -771,12 +785,38 @@ submissions) have
   (`de_output` lists them; the names are `report_files.is_de_output`: run_de.R's tables and
   matrices, run_sets.R's protein-set tests, make_figures.R's figures). Deliver it with
   `--mode analysis`.
+- **an interim delivery's session has no search record** (no `output/<folder>/search_provenance.json`):
+  there is nothing to deliver early; raw files alone go with `--mode raw-only`.
+- **an analysis or no-de delivery whose finish steps are not done** (the finish gate, SKILL.md
+  golden rule 9; `report_files.FINISH_NEEDS["deliver"]`, dry run included, nothing copied). It
+  needs:
+  - the skill's own report: `Analysis_Report.html` with its `report_provenance.json` (a report
+    with the skill's footer and no record passes with a warning; a hand-made one is held);
+  - the Methods, `output/methods.md`;
+  - the reproducibility bundle, `output/reproducibility/run_manifest.json`, describing the
+    session as it is now;
+  - the finalize stamp, `output/FINALIZED.json`. It counts only while nothing it stamped has
+    changed: a report made again or a README edited after finalize makes it stale.
+
+  The plan says `held: the skill's finish steps are not done`, and `finish_gaps` lists each gap
+  with the command that makes it (usually `session.py finalize --dir <S> --zip`, which builds the
+  Methods and bundle and writes the stamp). Make them, or re-run with `--override-finish
+  "<reason>"`: the delivery goes ahead, `delivery.json` records `finish_override` and its
+  MANIFEST an `[OVERRIDE]` line. **`--mode raw-only` and `--mode interim` are never gated**
+  (`report_files.UNGATED_DELIVERY_MODES`): neither carries the session's report.
+- **`bioshare send` and `email-draft`** (where the key is) read the same answer from
+  `delivery.json`: they refuse a delivery from a session that was not finalized, unless that
+  delivery was made under `--override-finish` or they are given `--override-finish "<reason>"`
+  themselves; then the email draft opens with `NOT FINALIZED: drafted under --override-finish
+  (<reason>)`. A `delivery.json` from before 2.14.2 passes with a warning. raw-only and interim
+  deliveries are never gated here either.
 
 **Analysis mode** (`--mode analysis`, the default unless CoreOmics says raw data only) fills
 `<share>/<internal_id>_analysis_<YYYY-MM-DD>/` (`--label` replaces the suffix), copied
 **dereferenced**:
 
-- `Analysis_Report.html` — **required**; exit 2 without it
+- `Analysis_Report.html` — **required**; exit 2 without it, or when it is not the skill's own
+  report (the finish gate above)
 - `Analysis_Report.pdf` and `Analysis_Report.md` (the report's PDF and plain-text twin),
   `AI_Analysis_Report.md`, `methods.md/.docx`, `OUTPUT_FILES.md`, `AUDIT.md`,
   `SAMPLE_QUALITY.md`
@@ -802,6 +842,29 @@ in `raw/` are reused.
 and no report: `<share>/<internal_id>_raw_data_<date>/` holds a README that says raw files
 only, the MANIFEST, checksums, and `methods.md` when a `--session` with one is given; the raw
 files are relative links in `<share>/raw/`.
+
+**Several searches and no DE to choose by** (`session.search_choice`: the DE's record names the
+report it read; without one, none is chosen): an analysis or no-de delivery carries no search and
+its MANIFEST says why. Rename each other search folder to `output/superseded_<name>/` (a folder
+whose name holds "superseded" is not a candidate; `session.py which-search --dir "$S"` names the
+one left), or deliver every search folder with `--mode interim`.
+
+**Interim mode** (`--mode interim`, 2.14.2) is the raw files and the search results delivered
+**before the report**, so no agent copies search folders by hand (three earlier HT submissions:
+the hand copy bypassed the QC gate and named the raw files wrongly). It fills
+`<share>/<internal_id>_interim_<YYYY-MM-DD>/` with every search folder of the session
+(`session.find_search_provenance`: `search_dda/`, `search_sage/`, `search/` …, each under its own
+name), by the rules above plus one: job scripts and scheduler logs (`slurm-*.out`, `*.sbatch`,
+`*.sh`) stay behind. The raw files are relative links in `<share>/raw/` under their staged names
+(`--include-raw no` leaves them out). The QC gate holds it like the other modes; the finish gate
+and the finalize stamp do not apply (`report_files.UNGATED_DELIVERY_MODES`). Its README says
+"Still to come, in a later delivery: the analysis report …; the Methods …; the reproducibility
+bundle …", its MANIFEST has a `[SKIPPED] <item> -- not in this interim delivery: it follows in a
+later one (--mode no-de or analysis)` line for each, and `delivery.json` records them as `owed`.
+`session.py status` shows "interim delivered; owed: …" (exit 3) until a later
+`--mode no-de` or `analysis` delivery of the same session, whose `delivery.json` replaces it
+with `owed: []`. Any other delivery in between (a `raw-only` re-send, another interim) carries
+what is owed forward into its own `delivery.json`, so status stays open.
 
 Every delivery also gets:
 
@@ -901,7 +964,8 @@ appear only when they are in its inputs.
 **The wording follows the delivery's `mode`** (from `delivery.json`): analysis, "finished the
 analysis"; no-de, "prepared a report", that the delivery does not include differential
 expression and that a planned comparison will follow separately, then the report and the raw
-folder; raw-only, the raw files only. Without `--delivery` it cannot know, says so in `warnings`,
+folder; interim, "the first part of the results", the search output, and "Still to come, in a
+later delivery: …" from `delivery.json` `owed`; raw-only, the raw files only. Without `--delivery` it cannot know, says so in `warnings`,
 and is worded for an analysis.
 
 **Recipients:** To the submitter, Cc the PI (dropped when the same address). The draft's header
@@ -973,9 +1037,9 @@ EOF
 | 2 | `locate` | `choose_run`, `weak_ids`, `ambiguous_label`, `duplicate_ids`, `duplicate_assignment`, `unmatched_samples` (with `proposed_runs`: runs proposed by name and number), `no_files`; `--max-days` wider than the neighbour window; a `--choose` that names no candidate | show the proposal; `--reinjections latest|all` for re-injections, `--choose <key>=<file>` for collisions and confirmed proposals, `--files-from` a corrected list, `--accept-ambiguous` or `--allow-partial` as staff decide; re-fetch with `--neighbor-days` |
 | 2 | `stage` | several candidate folders, or one naming someone else; project owned by another submission; `--apply` on a hard-failed locate | `--service-dir <folder>`; resolve the locate gates |
 | 2 | `conditions` | blank / case-variant / single / all-unique / singleton conditions | ask exactly the `questions` |
-| 2 | `deliver` | no `Analysis_Report.html`; session not this submission's; folder not empty; symlink in the path or the share; raw requested but no staged project; **held by `qc_gate`** (QC check, step 8e: check/concern, unplaced files, not run, or for another file list); **held by `normalization_gate`** (DE without a decided check); **"this session has no differential expression"** (auto/analysis); **no-de refused**: the session has DE output (`de_output`); any verification failure | finish step 9 and push it; use the right session (or `--force` with staff); `--label`; remove the offending link; `stage --apply`; for `qc_gate`, a staff member reads `logs/qc_bracket.md` and records `qc_bracket.py ack --by <login>` — or re-runs step 8e when it says so; for `normalization_gate`, step 8; no DE: `--mode no-de` if a delivery without it is intended, else step 8; no-de refused: `--mode analysis` |
-| 2 | `email-draft` | a placeholder (no Bioshare link, no submitter address); an address failed its check (`address_problems`) | paste the link; confirm the address with the staff member before sending |
-| 2 | `bioshare send` | no share linked; no or unverified `delivery.json`, or one for another share | `bioshare ensure --apply`; deliver again and `--get` the new `delivery.json` |
+| 2 | `deliver` | no `Analysis_Report.html`; session not this submission's; folder not empty; symlink in the path or the share; raw requested but no staged project; **held by `qc_gate`** (QC check, step 8e: check/concern, unplaced files, not run, or for another file list); **held by `normalization_gate`** (DE without a decided check); **"this session has no differential expression"** (auto/analysis); **no-de refused**: the session has DE output (`de_output`); **held: the skill's finish steps are not done** (analysis/no-de: the skill's report, Methods, bundle, a current finalize stamp; `finish_gaps`); any verification failure | finish step 9 and push it; for the finish gate, each `finish_gaps` command (usually `session.py finalize`), or `--override-finish "<reason>"` (raw-only and interim are never gated); use the right session (or `--force` with staff); `--label`; remove the offending link; `stage --apply`; for `qc_gate`, a staff member reads `logs/qc_bracket.md` and records `qc_bracket.py ack --by <login>` — or re-runs step 8e when it says so; for `normalization_gate`, step 8; no DE: `--mode no-de` if a delivery without it is intended, else step 8; no-de refused: `--mode analysis` |
+| 2 | `email-draft` | a placeholder (no Bioshare link, no submitter address); an address failed its check (`address_problems`); the delivery's session was not finalized (`delivery.json`) | paste the link; confirm the address with the staff member before sending; finalize, deliver again and use the new `delivery.json`, or `--override-finish "<reason>"` (the draft then says NOT FINALIZED) |
+| 2 | `bioshare send` | no share linked; no or unverified `delivery.json`, or one for another share; the delivery's session was not finalized | `bioshare ensure --apply`; deliver again and `--get` the new `delivery.json`; for the finish gate, finalize then deliver again, or `--override-finish "<reason>"` |
 | 3 | `check`, `fetch`, `bioshare` | no usable key, a rejected key, no Proteomics lab access; CoreOmics down; DRF validation error; a redirect or unexpected reply to a write | `core_submission.py check` names the problem and the fix (table above); read the detail |
 | 3 | `locate`, `stage`, `deliver`, `conditions` | not on a machine with the Flinders tree; incomplete scripts directory | run through `hive_exec.sh`; re-put the skill (`hive_exec.sh --put-skill`) |
 | 4 | `locate` | the submission is an HT plate | `ht_manifest.py` (step 1a) |
@@ -986,7 +1050,7 @@ EOF
 PROT_0793 was searched and "shared" by linking: `share/raw` held 210 absolute `/nfs/...` links
 and `share/search` held 59 links into `/quobyte/proteomics-grp/brett/PROT_0793`. On HIVE the
 share looked complete. Over SMB it showed **0** raw entries. The `search/` links served the
-collaborator nothing, because Bioshare streams files through an Apache module whose allowed-folder list had `/quobyte` for http (port 80) but not https (443) — fixed 2026-09-16 (Adam Schaal). Nothing about the share was wrong on
+collaborator nothing, because Bioshare streams files through an Apache module whose allowed-folder list had `/quobyte` for http (port 80) but not https (443) — fixed 2026-09-16 by the Bioshare admins. Nothing about the share was wrong on
 HIVE, and nothing reported an error.
 That is why `deliver` copies real files, makes only relative Flinders-to-Flinders links, and
 refuses to call a delivery done until it has walked the whole share and found no other symlink.

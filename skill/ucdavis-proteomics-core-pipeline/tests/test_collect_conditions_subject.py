@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """collect_conditions.py keeps a subject / animal column under its own name.
 
-PROT_0756 (Dickson lab): five IPs from each of six mice. --map filed any extra sample-sheet
+PROT_9756 (a lab): five IPs from each of six mice. --map filed any extra sample-sheet
 column under Covariate1/2 -- a fixed effect in run_de.R -- so a Mouse column became
 Covariate1; nested in the Old/Young groups that made the design rank-deficient, and the
 pairing could not be passed to run_de.R --block. Now a column named for the unit samples

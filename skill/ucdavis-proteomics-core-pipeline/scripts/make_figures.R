@@ -7,7 +7,8 @@
 #   qc_pvalue_panel.png      raw p-value distributions, every contrast in one small-multiples
 #                            panel (calibration check, for the report's appendix)
 #   pca.png                  sample PCA, coloured by group
-#   heatmap_top.png          top differential proteins, z-scored, group-annotated
+#   heatmap_top.png          top differential proteins (the most variable, said so, when fewer
+#                            than 5 pass), z-scored, group-annotated
 #   qc_protein_counts.png    proteins quantified per sample (loading/QC check) -- only when the
 #                            matrix has missing values; a DPC/limpa matrix is complete, so it is
 #                            skipped and qc_detected_vs_inferred.png is the depth view instead
@@ -474,7 +475,7 @@ if (file.exists(em_path)) {
               if (file.exists(file.path(de_dir, "QC_detected_vs_inferred.csv")))
                 "; qc_detected_vs_inferred.png shows per-sample depth" else "")
       # Not a failure -- nothing to show -- so not listed in "failed". A copy from an earlier
-      # run was already removed by the sweep at the top (Silva08172026's re-rendered report
+      # run was already removed by the sweep at the top (a mouse-brain IP cohort's re-rendered report
       # had shown the identical-bar plot again).
     } else {
       p <- ggplot(cnt, aes(reorder(Sample, n), n, fill = Group)) +
@@ -688,9 +689,15 @@ if (file.exists(em_path)) {
     }
     sig_ids <- names(sort(best_p))              # most significant first
     pick <- intersect(sig_ids, rownames(Mi))    # intersect() preserves sig_ids' order
+    # The basis the proteins were picked on, recorded here and read by the title and the
+    # caption: a fallback heatmap was once titled "top 50 differential proteins" (I10).
     if (length(pick) < 5) {  # fall back to most-variable proteins
+      basis <- "most_variable"
       v <- apply(Mi, 1, var); pick <- names(sort(v, decreasing = TRUE))[seq_len(min(top_n, nrow(Mi)))]
-    } else pick <- head(pick, top_n)
+    } else {
+      basis <- "differential"
+      pick <- head(pick, top_n)
+    }
     H <- Mi[pick, , drop = FALSE]
     hm_inf <- ""
     if (!is.null(D) && !is.null(vocab) && identical(vocab$absent, "Inferred")) {
@@ -711,6 +718,8 @@ if (file.exists(em_path)) {
     fn <- file.path(outdir, "heatmap_top.png")
     colnames(H) <- short_of(colnames(H))
     ann <- if (!is.null(grp)) data.frame(Group = grp, row.names = colnames(H)) else NA
+    hm_title <- if (basis == "differential") sprintf("Top %d differential proteins", nrow(H)) else
+      sprintf("%d most variable proteins", nrow(H))
     if (has_pheat) {
       # pheatmap manages its own device; passing filename= avoids the clipped output
       # produced by wrapping it in png()/dev.off().
@@ -718,16 +727,29 @@ if (file.exists(em_path)) {
                          annotation_colors = if (!is.null(grp)) list(Group = group_colours(levels(grp))) else NA,
                          show_rownames = nrow(H) <= 60, show_colnames = TRUE,
                          fontsize_row = 8, fontsize_col = 9,
-                         main = sprintf("Top %d differential proteins (row z-score)", nrow(H)),
+                         main = paste(hm_title, "(row z-score)"),
                          color = grDevices::colorRampPalette(c("#4393c3", "white", "#d6604d"))(100),
                          width = 11, height = 11, filename = fn)
     } else {  # base-R fallback heatmap
       grDevices::png(fn, width = 1700, height = 2200, res = 200)
       stats::heatmap(t(scale(t(H))), col = grDevices::colorRampPalette(c("#4393c3","white","#d6604d"))(100),
-                     margins = c(8, 8), main = sprintf("Top %d differential proteins", nrow(H)))
+                     margins = c(8, 8), main = hm_title)
       grDevices::dev.off()
     }
-    add_fig(fn, "heatmap", sprintf("Heatmap of the top %d differential proteins (row z-scored log2 abundance), samples annotated by group. Reveals which proteins drive the group separation and whether replicates behave consistently.%s%s%s", nrow(H), hm_inf, LABELS_NOTE, CUT_NOTE))
+    hm_what <- if (basis == "differential")
+      sprintf(paste("Heatmap of the top %d differential proteins (row z-scored log2 abundance), samples annotated",
+                    "by group. Reveals which proteins drive the group separation and whether replicates behave",
+                    "consistently."), nrow(H)) else
+      sprintf(paste("Heatmap of the %d most variable proteins (%s, so the proteins shown were chosen by",
+                    "variance, not by the DE test), as row z-scored log2 abundance, samples annotated by group. It",
+                    "shows the largest differences between samples, whatever their group, and whether replicates",
+                    "behave consistently; it is not evidence of a difference between groups."), nrow(H),
+              # the count that passed, not the count drawable: the heatmap draws complete rows only, so
+              # 8 passing proteins with 4 complete once read "fewer than 5 passed" (2.14.2 review)
+              if (length(sig_ids) < 5) sprintf("only %d passed adj.P < %.2g", length(sig_ids), adjp_thr)
+              else sprintf("%d passed adj.P < %.2g, but fewer than 5 of them %s", length(sig_ids), adjp_thr,
+                           if (mi_imputed) "could be drawn" else "have a value in every sample"))
+    add_fig(fn, "heatmap", paste0(hm_what, hm_inf, LABELS_NOTE, CUT_NOTE))
   }, error = function(e) add_failed("heatmap_top.png", "heatmap", conditionMessage(e)))
 
   # ---- top-protein violins, one figure per contrast ----

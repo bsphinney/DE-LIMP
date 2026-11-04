@@ -38,16 +38,20 @@ THE JOBS (each a thin bash wrapper around one subcommand here)
   1 build   verify the container (the Core's .sif by its pinned sha256; any other .sif by
             SkylineCmd --version), choose the proteins (select_targets: the ONE rule), cut the
             FASTA to them, read DIA-NN's rows for them, then ONE SkylineCmd call builds the
-            document (build_args).
-  2 import  a SLURM array, ONE raw file per task (--import-no-join; import_args): never two
-            readers on one timsTOF .d ("database is locked"), and never --import-process-count,
-            which hangs under Wine.
+            document (build_args), kept as <stem>.built.sky for the imports (keep_pristine).
+  2 import  a SLURM array, ONE raw file per task (--import-no-join; import_args), each in its own
+            copy of the pristine document (pristine_doc): never two readers on one timsTOF .d
+            ("database is locked"), and never --import-process-count, which hangs under Wine.
   3 join    one --batch-commands call joins the per-file caches and exports the precursor and
             transition reports, the targets' chromatograms and the shareable .sky.zip (each
             SkylineCmd call costs 8-10 s of Wine start-up, so they are batched); then the pictures
             are drawn (matplotlib) and the record is written.
   A step that fails writes the record with the reason (status "skipped"), so the report says it;
-  nothing is dropped silently (architectural rule 4).
+  nothing is dropped silently (architectural rule 4). Each job ends at Slurm's --time, which does
+  not count time spent suspended: no SkylineCmd call has a timer of its own but --version's
+  (VERSION_TIMEOUT_S). A job Slurm stops -- its time limit (warned WARN_SECONDS before), a
+  cancel, a preemption -- ends SkylineCmd, removes what it half made and writes that reason too
+  (stop_on_signals).
 
 Stdlib only at import; pyarrow (reading report.parquet) and matplotlib (drawing) are imported
 inside the jobs that need them.
@@ -62,6 +66,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 
@@ -80,6 +85,10 @@ RECORD = "skyline_provenance.json"
 WORK = "skyline_work"               # scratch_files.SCRATCH_DIRS: never zipped or delivered
 SECTION_TITLE = "Peak check (Skyline)"
 FOLLOWUP_DIR = "skyline_followup"   # output/<this>: the staff-only PRM/SRM lists
+# The Skyline document: <name><this> in the output folder, shared and delivered (join_batch's
+# --share-zip), built and joined as <name><this minus .zip> in skyline_work/. The one definition:
+# core_submission and make_report import it (rule 3).
+SKYLINE_DOCUMENT_SUFFIX = "_top_hits.sky.zip"
 
 # ---- the rules, each in one place ----------------------------------------------------------------
 TOP_N_DEFAULT = 10                  # proteins checked (--top)
@@ -104,6 +113,24 @@ PRODUCT_ION_ARGS = ["--tran-product-ion-charges=1,2", "--tran-product-ion-types=
 JOB_CPUS = 4
 JOB_MEM = "16G"
 JOB_MINUTES = {"build": 60, "import": 60, "join": 90, "prm": 30}
+# A job's SkylineCmd calls end at Slurm's --time (JOB_MINUTES), which does not count the time
+# Slurm keeps a job suspended; a wall-clock timer of the skill's own did, and killed imports
+# seconds after they resumed (2.14.2, I39). Only `SkylineCmd --version` has one.
+VERSION_TIMEOUT_S = 600
+# A job Slurm stops writes its record (stop_on_signals). The jobs ask for an early warning,
+# `#SBATCH --signal=B:USR1@120` (sbatch_header): "B:" sends it to the batch shell only, which IS
+# this script -- the job script exec's it (job_script) -- and not to SkylineCmd, which this script
+# ends itself (end_child). Without "B:" Slurm signals only job steps, and these jobs have none
+# (send_job_warn_signal, src/slurmctld/job_mgr.c). Slurm sends it once, up to 60 s earlier than
+# asked (sbatch(1)), against the job's end time, which leaves out time spent suspended
+# (recomputed on resume) and is never sent to a suspended job: I39 stays fixed. USR1, not TERM:
+# only this warning sends it, so the record can say the job ran out of its time limit; a TERM is
+# the limit itself (KillWait before SIGKILL: 130 s on HIVE), a cancel or a preemption.
+WARN_SIGNAL = "USR1"
+WARN_SECONDS = 120
+STOP_SIGNALS = ("SIGTERM", "SIG" + WARN_SIGNAL)
+CHILD_GRACE_S = 10      # end_child: SIGTERM to SkylineCmd's process group, then SIGKILL
+SCONTROL_TIMEOUT_S = 10  # job_time_limit: how long `scontrol show job` may take to answer
 MAX_PARALLEL_DEFAULT = 8
 SHARE_TYPE = "minimal"              # the .sky.zip (join_batch): checked against "complete"
 # The follow-up assay: the 3 best peptides, 6 best fragments and one charge per protein, judged
@@ -182,6 +209,11 @@ SKYR = {"precursor.skyr": _skyr(REPORT_PRECURSORS, "Precursor", _PREC_COLS),
 class Skip(Exception):
     """The step cannot run here. The message is the reason the report, the Methods and
     MANIFEST.txt give, so it is written for a reader, not a log."""
+
+
+class Stopped(Skip):
+    """Slurm stopped the job before it finished (stop_on_signals): raised where the job is, so its
+    own except path removes what it half made and records why, like any Skip."""
 
 
 # ---- small helpers ---------------------------------------------------------------------------------
@@ -379,18 +411,54 @@ def enzyme_for(cut):
     raise Skip(f"the search's cleavage rule --cut {cut} has no Skyline enzyme to match")
 
 
+CAM_FIXED = "Carbamidomethyl (C)"      # Skyline's default fixed modification, DIA-NN's --unimod4
+# SkylineCmd --new starts with CAM_FIXED. A search that fixed nothing on C (unalkylated samples)
+# has it cleared, right after --new (SkylineCmd 26.1.0.266 --help: "--pep-clear-mods  Clears all
+# peptide modifications from the currently open document"); the library's variable modifications
+# are added after (--import-search-add-mods).
+CLEAR_MODS_ARGS = ["--pep-clear-mods"]
+
+
+def on_cysteine(mod):
+    """A DIA-NN --fixed-mod / --var-mod value, <name>,<mass>,<sites>[,label], whose sites include
+    C -- the one test of "a cysteine modification" (fixed_cysteine, methods_paragraph)."""
+    parts = [x.strip() for x in (mod or "").split(",")]
+    return len(parts) >= 3 and "C" in parts[2]
+
+
+def fixed_cysteine(flags):
+    """The search's fixed cysteine modification -> [CAM_FIXED] (--unimod4, or --fixed-mod UniMod:4
+    on C) or [] (none fixed: cysteine searched unmodified, or only as a variable modification).
+    Skip for any other: DIA-NN writes it under another name or id, which the skill has never run
+    Skyline with."""
+    other = []
+    cam = "unimod4" in flags
+    for v in flags.get("fixed-mod", []):
+        parts = [x.strip() for x in (v or "").split(",")]
+        if not on_cysteine(v):
+            continue                          # not on cysteine (a SILAC label, an N-term mod)
+        if parts[0].lower() == "unimod:4":
+            cam = True
+        else:
+            other.append(v.strip())
+    if other:
+        raise Skip(f"the search fixes another cysteine modification (--fixed-mod {other[0]}): a "
+                   f"fixed cysteine modification other than carbamidomethyl is not yet tested "
+                   f"with Skyline (the skill's runs have carbamidomethyl as --unimod4 or "
+                   f"UniMod:4, or no fixed cysteine modification), so the peak check is not run "
+                   f"for this search")
+    return [CAM_FIXED] if cam else []
+
+
 def search_settings(flags):
     """What the Skyline document copies from the DIA-NN command (the trial's way): the enzyme,
-    missed cleavages, peptide lengths, precursor charges and fragment m/z range. A flag the
-    command does not state is not guessed: Skip."""
+    missed cleavages, peptide lengths, precursor charges, fragment m/z range and the fixed
+    cysteine modification. A flag the command does not state is not guessed: Skip."""
     missing = [f"--{f}" for f in SEARCH_FLAGS if not (flags.get(f) or [""])[-1].strip()]
     if missing:
         raise Skip(f"the DIA-NN command in report.log.txt does not state {', '.join(missing)}, "
                    f"which the Skyline document must copy")
-    if "unimod4" not in flags:
-        raise Skip("the search did not fix carbamidomethyl cysteine (--unimod4); the skill's "
-                   "Skyline document assumes it (Skyline's default), so the peak check is not "
-                   "run for this search")
+    fixed = fixed_cysteine(flags)
 
     def num(f, kind=int):
         v = flags[f][-1].strip()
@@ -413,7 +481,9 @@ def search_settings(flags):
                           for m in [re.match(r"\s*UniMod:(\d+)\s*,\s*([-+]?\d+(?:\.\d+)?)", v)]
                           if m},
            "max_var_mods": num("var-mods") if flags.get("var-mods") else None,
-           "fixed_mods": ["Carbamidomethyl (C)"],
+           "fixed_mods": fixed,
+           # what build_args does to Skyline's own modifications, recorded with the settings
+           "mod_args": [] if fixed else list(CLEAR_MODS_ARGS),
            "not_carried_over": []}
     if flags.get("min-pr-mz") or flags.get("max-pr-mz"):
         lo, hi = (flags.get("min-pr-mz") or ["?"])[-1], (flags.get("max-pr-mz") or ["?"])[-1]
@@ -489,10 +559,13 @@ def rt_window(gradient_min):
 def build_args(plan, rt_minutes):
     """ONE SkylineCmd call: new document, settings, DIA-NN's library, the targets' FASTA, save."""
     s, ma = plan["settings"], plan["mass_accuracy"]
-    args = [f"--new={win(plan['doc'])}", "--overwrite",
-            "--full-scan-acquisition-method=DIA",
-            f"--full-scan-isolation-scheme={win(plan['raw_files'][0])}",
-            "--full-scan-precursor-isotopes=Count", "--full-scan-precursor-threshold=3"]
+    args = [f"--new={win(plan['doc'])}", "--overwrite"]
+    # Skyline's default modifications cleared for a search that fixed none, before any other
+    # setting (a plan of 2.14.1 has no mod_args: it ran only on --unimod4 searches)
+    args += list(s.get("mod_args") or [])
+    args += ["--full-scan-acquisition-method=DIA",
+             f"--full-scan-isolation-scheme={win(plan['raw_files'][0])}",
+             "--full-scan-precursor-isotopes=Count", "--full-scan-precursor-threshold=3"]
     args += analyzer_args(plan["family"], ma["ms1_ppm"], ma["ms2_ppm"])
     args += ["--full-scan-rt-filter=ms2_ids", f"--full-scan-rt-filter-tolerance={fmt_num(rt_minutes)}",
              f"--pep-digest-enzyme={s['enzyme']}", f"--pep-max-missed-cleavages={s['missed_cleavages']}",
@@ -506,6 +579,55 @@ def build_args(plan, rt_minutes):
     args += [f"--import-search-file={win(plan['speclib_link'])}", "--import-search-add-mods",
              f"--import-fasta={win(plan['targets_fasta'])}", "--save"]
     return args
+
+
+DOC_EXTS = (".sky", ".blib", ".skyl", ".sky.view")     # the document's files, by its stem
+BUILT_TAG = ".built"     # <stem>.built<ext>: the document as the build saved it, before any join
+
+
+def keep_pristine(plan):
+    """In the build job, once the document is built: a copy of each of its files as
+    <stem>.built<ext>, the document every import task starts from (pristine_doc)."""
+    stem = os.path.splitext(plan["doc"])[0]
+    for ext in DOC_EXTS:
+        if os.path.isfile(stem + ext):
+            shutil.copy2(stem + ext, stem + BUILT_TAG + ext)
+
+
+def pristine_doc(plan):
+    """The document an import task copies: <stem>.built.sky. The join saves its results into
+    plan["doc"] (--save), so a task run again after a join (by hand, or requeued) would import
+    into a document that already holds results (2.14.2, I39). A plan built by 2.14.1 has no
+    pristine copy: plan["doc"], with a warning in the job's log."""
+    built = os.path.splitext(plan["doc"])[0] + BUILT_TAG + ".sky"
+    if os.path.isfile(built):
+        return built
+    print(f"[skyline_peaks] WARNING: no pristine copy; importing from the document the join may "
+          f"have saved over ({plan['doc']})", file=sys.stderr)
+    return plan["doc"]
+
+
+def restore_pristine(plan):
+    """In the join job, before its batch: the document as the build saved it, over whatever a
+    join before this one saved into plan["doc"] (its --save). A join run again -- requeued on
+    `low`, or by hand -- would otherwise re-open a document that already holds the replicates
+    and import them again (2.14.2, L9 review F6). The joined cache (<stem>.skyd) and any document
+    file the build did not write go too; the per-file caches the imports moved beside the
+    document stay. -> True, or False (with a warning in the job's log) for a plan of 2.14.1,
+    which has no pristine copy."""
+    stem = os.path.splitext(plan["doc"])[0]
+    if not os.path.isfile(stem + BUILT_TAG + ".sky"):
+        print(f"[skyline_peaks] WARNING: no pristine copy; joining into the document as it is "
+              f"({plan['doc']})", file=sys.stderr)
+        return False
+    for ext in DOC_EXTS:
+        if os.path.isfile(stem + BUILT_TAG + ext):
+            shutil.copy2(stem + BUILT_TAG + ext, stem + ext)
+        elif os.path.isfile(stem + ext):
+            os.remove(stem + ext)
+    if os.path.isfile(stem + ".skyd"):
+        os.remove(stem + ".skyd")
+    return True
 
 
 def task_doc(plan, i):
@@ -621,6 +743,8 @@ def sbatch_header(name, log_dir, minutes, queue, cpus=JOB_CPUS, mem=JOB_MEM, arr
     h += [f"#SBATCH --time={minutes}", "#SBATCH --ntasks=1", f"#SBATCH --cpus-per-task={cpus}",
           f"#SBATCH --mem={mem}", f'#SBATCH --output="{log}"', f'#SBATCH --error="{log}"']
     h += ["#SBATCH --requeue"] if part == "low" else []
+    # the early warning: the job ends SkylineCmd and writes its record before its time runs out
+    h += [f"#SBATCH --signal=B:{WARN_SIGNAL}@{WARN_SECONDS}"]
     return h
 
 
@@ -1303,17 +1427,36 @@ def open_document_text(path=None):
 
 
 def readme_rows(skyline_dir, shown_as):
-    """README rows (path, what it is) for the peak check's folder and its Skyline document --
-    session_docs (shown_as "output/skyline") and the delivery's README ("skyline")."""
+    """README rows (path, what it is) for the peak check's folder, <output>/skyline, and its
+    Skyline document -- session_docs (shown_as "output/skyline"). They follow deliverable(), the
+    rule the delivery ships the folder by: only a finished, current check is described as
+    pictures and a Skyline document. Any other state -- skipped, failed, not
+    finished, out of date, no record -- is ONE row saying which and why (state_reason; rule 1),
+    so a folder holding a skip record, or an earlier run's pictures, is never described as
+    results."""
     if not os.path.isdir(skyline_dir):
         return []
-    rows = [(shown_as, "the peak check: pictures of the checked proteins' peaks, drawn with "
-                       "Skyline, its tables and the Skyline document")]
-    for f in sorted(os.listdir(skyline_dir)):
-        if f.endswith("_top_hits.sky.zip"):
-            rows.append((f"{shown_as}/{f}", "the Skyline document of the checked proteins. "
-                         + open_document_text()))
-    return rows
+    output_dir = os.path.dirname(os.path.abspath(skyline_dir))
+    ok, state, _why = deliverable(output_dir)          # the rule the delivery ships by
+    if not ok:
+        from make_methods import client_text            # no server path in a README (C2 L3)
+        return [(shown_as, "the peak check (Skyline): "
+                           + client_text(state_reason(state, record_state(output_dir)[1]))[0])]
+    docs = [f for f in sorted(os.listdir(skyline_dir)) if f.endswith(SKYLINE_DOCUMENT_SUFFIX)]
+    return folder_rows(shown_as, [f"{shown_as}/{f}" for f in docs])
+
+
+def folder_rows(folder, documents):
+    """The README rows (path, what it is) of a FINISHED peak check's folder: the folder, then each
+    Skyline document in it, by the paths the README shows (`folder`; `documents`, which may be
+    empty). The one wording (rule 3): the session README (readme_rows) and the delivery README
+    (core_submission.build_readme) both read it; neither decides whether the check finished
+    (deliverable() does)."""
+    return [(folder, "the peak check: pictures of the checked proteins' peaks, drawn with "
+                     "Skyline, " + ("its tables and the Skyline document" if documents
+                                   else "and its tables"))] + \
+        [(d, "the Skyline document of the checked proteins. " + open_document_text())
+         for d in documents]
 
 
 CAVEAT = ("These pictures are a visual check of DIA-NN's peaks. Skyline reuses DIA-NN's peak "
@@ -1321,11 +1464,54 @@ CAVEAT = ("These pictures are a visual check of DIA-NN's peaks. Skyline reuses D
           "real warning signs are the peaks where Skyline picked a different peak.")
 
 
+def not_carried_over_sentence(settings):
+    """The search settings the Skyline document could not copy (search_settings'
+    not_carried_over), as one sentence -- the report's and the Methods' words -- or ""."""
+    items = (settings or {}).get("not_carried_over") or []
+    return ("Not carried over from the search: " + "; ".join(items) + ".") if items else ""
+
+
+def variable_mods_sentence(settings):
+    """The search's variable modifications (search_settings' var_mods, its --var-mod values), in
+    the Methods' words for a modification (make_methods.mod_phrase, which flags a name it cannot
+    verify). SkylineCmd's --import-search-add-mods "adds all modifications found in peptide
+    search results files to the open document" (its 26.1 --help). A record without var_mods
+    says nothing (not guessed); [] says the search had none."""
+    if "var_mods" not in (settings or {}):
+        return ""
+    mods = settings["var_mods"] or []
+    if not mods:
+        return "The search had no variable modifications."
+    try:
+        import make_methods as mm
+        named = [mm.mod_phrase(mm._diann_mod([v], "variable", "search_settings var_mods"))
+                 for v in mods]
+    except ImportError:                  # a partial scripts/: DIA-NN's own words for them
+        named = [f"--var-mod {v}" for v in mods]
+    n = settings.get("max_var_mods")
+    return ("The modifications found in DIA-NN's library were added to the document; the "
+            "search's variable modifications were " + "; ".join(named)
+            + (f", at most {n} per peptide" if n else "") + ".")
+
+
 def methods_paragraph(rec):
     s, ma, t = rec["settings"], rec["mass_accuracy"], rec["tool"]
     res = rec.get("results") or {}
     fam = "TOF analysers, with the library's ion mobility" if rec.get("family") == "timstof" \
         else "centroided spectra"
+    # The fixed modification as the document had it. Every 2.14 record says (2.14.1's
+    # search_settings recorded fixed_mods ["Carbamidomethyl (C)"]: it ran only on --unimod4
+    # searches); a record without the field is not guessed at. "Cysteine unmodified" only when
+    # the search had no variable cysteine modification either.
+    if "fixed_mods" not in s:
+        cys = ""
+    elif s["fixed_mods"]:
+        cys = f", {' and '.join(s['fixed_mods'])} as a fixed modification"
+    else:
+        var_c = any(on_cysteine(v) for v in s.get("var_mods") or [])
+        cys = (", no fixed modification, as searched: "
+               + ("" if var_c else "cysteine unmodified, and ")
+               + "Skyline's default carbamidomethyl modification cleared")
     return (
         f"For selected proteins (how they were chosen follows), chromatograms were "
         f"extracted again from the raw files with Skyline {t['version']} (MacLean et al., "
@@ -1336,9 +1522,10 @@ def methods_paragraph(rec):
         f"missed cleavage{'' if s['missed_cleavages'] == 1 else 's'}, "
         f"{s['min_length']}-{s['max_length']} residues, precursor charges "
         f"{s['charges'][0]}-{s['charges'][-1]}, fragments {fmt_num(s['fragment_mz'][0])}-"
-        f"{fmt_num(s['fragment_mz'][1])} m/z), {fam}, with a tolerance of +-{fmt_num(ma['ms1_ppm'])} "
-        f"ppm (MS1) and +-{fmt_num(ma['ms2_ppm'])} ppm (MS2): {ma['source']}. "
-        f"{selection_sentence(rec)} Skyline integrates within DIA-NN's peak boundaries from the "
+        f"{fmt_num(s['fragment_mz'][1])} m/z{cys}), {fam}, with a tolerance of "
+        f"+-{fmt_num(ma['ms1_ppm'])} ppm (MS1) and +-{fmt_num(ma['ms2_ppm'])} ppm (MS2): {ma['source']}. "
+        + "".join(x + " " for x in (variable_mods_sentence(s), not_carried_over_sentence(s)) if x)
+        + f"{selection_sentence(rec)} Skyline integrates within DIA-NN's peak boundaries from the "
         f"library by default, so this is a visual check of DIA-NN's peaks, not an independent "
         f"identification; precursor-runs where Skyline's apex was more than "
         f"{fmt_num(APEX_DIFF_S)} s from DIA-NN's, or outside DIA-NN's peak boundaries, or where "
@@ -1352,14 +1539,14 @@ def report_section(rec, rel="skyline"):
     peak_check_overclaims() finds nothing in it (tests/test_skyline_peaks.py)."""
     status = rec.get("status")
     if status == "skipped":
-        md = (f"**Not run.** {rec.get('reason') or 'No reason was recorded.'}\n\n"
-              f"Without it, the peaks behind the results were not drawn; the quantities in this "
-              f"report are DIA-NN's, as for any analysis.\n")
+        # the record's reason, as a client reads it; never a claim about whose quantities these
+        # are -- a Sage or FragPipe DE was told "the quantities in this report are DIA-NN's"
+        # (2.14.2 C2 biologist H2)
+        md = (f"**Not run.** {client_reason(rec.get('reason'))}\n\n"
+              f"Without it, the peaks behind the results were not drawn.\n")
         return {"md": md, "figures": [], "captions": {}}
     if status != "ok":
-        md = ("**Not finished when this report was made.** The Skyline jobs had not written "
-              "their results; make the report again once they finish.\n")
-        return {"md": md, "figures": [], "captions": {}}
+        return {"md": REPORT_WORDS["submitted"], "figures": [], "captions": {}}
     t, ma, res = rec["tool"], rec["mass_accuracy"], rec.get("results") or {}
     L = [f"Skyline {t['version']}, a second program, extracted the signal of the checked "
          f"proteins' peptides from the raw files again, using DIA-NN's spectral library and the "
@@ -1420,9 +1607,8 @@ def report_section(rec, rel="skyline"):
         L += ["", "Runs Skyline could not import, left out of the pictures and tables: "
               + "; ".join(f"{os.path.basename(x['file'])} ({x['reason']})" for x in runs["failed"])
               + "."]
-    if (rec.get("settings") or {}).get("not_carried_over"):
-        L += ["", "Not carried over from the search: "
-              + "; ".join(rec["settings"]["not_carried_over"]) + "."]
+    if not_carried_over_sentence(rec.get("settings")):
+        L += ["", not_carried_over_sentence(rec.get("settings"))]
     return {"md": "\n".join(L) + "\n", "figures": figs, "captions": caps}
 
 
@@ -1461,21 +1647,90 @@ STATE_WORDS = {
 }
 
 
+# The report's words for a check that is not current and finished (report_data): a client reads
+# them, so they say what the report holds, never what staff should do next -- "make the report
+# again once they finish" reached clients while the 30-minute jobs ran (2.14.2 C2 biologist M5).
+# STATE_WORDS stay the staff's (the README row, the delivery's reason). A delivery never ships
+# skyline/ beside a report made with one of these (report_peak_state, core_submission).
+REPORT_WORDS = {
+    "unreadable": "**Not part of this report.** The record of a visual check of the peaks with "
+                  "Skyline could not be read.\n",
+    "stale": "**Not part of this report.** A visual check of the peaks with Skyline was made for "
+             "an earlier version of these results, so it is not shown.\n",
+    "planned": "**Not part of this report.** A visual check of the peaks with Skyline was not "
+               "part of this report.\n",
+    "submitted": "**Not part of this report.** A visual check of the peaks with Skyline was not "
+                 "finished when this report was made.\n",
+}
+
+
+def client_reason(text):
+    """A record's skip reason as a client reads it: every server path cut to its file name
+    (make_methods.client_text, the Methods' own rule), a capital first letter and a full stop
+    (C2 biologist H2, L3)."""
+    from make_methods import client_text
+    t = client_text(str(text or "").strip() or "No reason was recorded")[0].rstrip(". ")
+    return t[:1].upper() + t[1:] + "."
+
+
+def state_reason(state, rec, standalone=False):
+    """Why output/skyline/ holds no current, finished check -- any record_state() but "ok" -- in
+    words: THE branch from a state to its words (rule 3), so the README row and the delivery
+    never say two things. standalone=False: words that follow "the peak check (Skyline): "
+    (readme_rows); True: a sentence of its own that names the check (deliverable's `why`). The
+    skip reason is the record's; the other states' words are STATE_WORDS'."""
+    if state == "missing":
+        return (f"output/skyline/ holds no peak-check record ({RECORD})" if standalone else
+                f"no record ({RECORD}), so what this folder holds is not described")
+    if state == "skipped":
+        why = (rec or {}).get("reason") or "no reason recorded"
+        return f"the peak check was skipped: {why}" if standalone else f"not run: {why}"
+    words = STATE_WORDS.get(state, f"its record's state is {state!r}")
+    # "stale" and "unreadable" name the check themselves; "planned" and "submitted" (and a state
+    # with no words of its own) begin "it"/"its"
+    if state in ("stale", "unreadable"):
+        return words
+    return f"the peak check is not finished: {words}" if standalone else f"not finished: {words}"
+
+
+def deliverable(output_dir):
+    """(ok, state, why): THE rule for whether output/skyline/ ships (rule 3). ok only when
+    record_state() is "ok" -- a finished, current check; the Skyline document is not required.
+    `state` is record_state()'s; `why` is None when ok, else state_reason()'s sentence. A missing
+    or unreadable record does not raise."""
+    state, rec = record_state(output_dir)
+    if state == "ok":
+        return True, state, None
+    return False, state, state_reason(state, rec, standalone=True)
+
+
 def report_data(output_dir, base=None):
     """For make_analysis_html: the section of output/skyline/'s record, its pictures referenced
     relative to `base` (the report's folder, default output/), or None without a record."""
     state, rec = record_state(output_dir)
     if state == "missing":
         return None
-    if state in ("unreadable", "stale", "planned", "submitted"):
-        what = {"unreadable": "**Could not be read.** ", "stale": "**Out of date.** ",
-                "planned": "**Not run.** ",
-                "submitted": "**Not finished when this report was made.** "}[state]
-        return {"md": what + STATE_WORDS[state][0].upper() + STATE_WORDS[state][1:] + ".\n",
-                "figures": [], "captions": {}}
+    if state in REPORT_WORDS:
+        return {"md": REPORT_WORDS[state], "figures": [], "captions": {}, "state": state}
     sky = os.path.join(output_dir, "skyline")
     rel = os.path.relpath(sky, base or output_dir).replace(os.sep, "/")
-    return report_section(rec, rel)
+    return dict(report_section(rec, rel), state=state)
+
+
+def report_disagrees(output_dir):
+    """Why a finished check must not ship beside the session's report, or None. The report
+    (Analysis_Report.html) records the peak check's state it was made with (report_provenance.json
+    `peak_check_state`, make_analysis_html): any but "ok" means the report says the check was not
+    part of it, so a delivered skyline/ would contradict it (C2 biologist M5). A record without
+    the state (a report from before it was recorded) claims nothing."""
+    import report_files
+    rec = load_json(os.path.join(output_dir, report_files.SKILL_REPORT_RECORD))
+    st = (rec.get("peak_check_state") if isinstance(rec, dict) and
+          rec.get("report") == "Analysis_Report.html" else None)
+    if not st or st == "ok":
+        return None
+    return (f"Analysis_Report.html was made while the peak check was {st} and says it is not part "
+            f"of the report; make the report again (step 9) to deliver the check with it")
 
 
 def manifest_line(output_dir, has_de):
@@ -1512,13 +1767,27 @@ def _first_existing(*paths):
     return next((p for p in paths if p and os.path.exists(p)), None)
 
 
+def _session_search(session):
+    """(folder, why): the session's search folder (session.search_folder: its search record's,
+    wherever the search is, output/search_sage/ as much as output/search/, tie-broken by the
+    report the DE read; the default output/search/ when it has no record) -- or (None, why) when
+    its records leave the choice open: make_plan then skips with that reason, never "no search
+    folder" (T44 review F7)."""
+    import session as sess
+    p = sess.paths_for(session)
+    c = sess.search_choice(p)
+    folder = sess.search_folder(p, c)
+    return folder, (None if folder else f"{c['why']}: pass --search <the search folder>")
+
+
 def resolve_inputs(a):
     """-> dict of the inputs, from --session and the explicit flags (which win)."""
     p = _session_paths(a.session) if a.session else {}
     if not a.session and not (a.search and a.out):
         raise SystemExit("skyline_peaks.py plan: give --session, or --search and --out")
     out = os.path.abspath(a.out or p["skyline_dir"])
-    search = os.path.abspath(a.search or p["search_out"])
+    search, search_why = (a.search, None) if a.search else _session_search(a.session)
+    search = os.path.abspath(search) if search else None
     de_dir = a.de_dir or (p.get("de_dir") if p else None)
     manifest = a.manifest or _first_existing(p.get("workflow_manifest"),
                                              os.path.join(p.get("input_dir", ""),
@@ -1526,23 +1795,69 @@ def resolve_inputs(a):
     conditions = a.conditions or (p.get("conditions") if p else None)
     name = a.name or (os.path.basename(os.path.abspath(a.session)) if a.session
                       else os.path.basename(os.path.dirname(search)))
-    return {"out": out, "search": search, "de_dir": os.path.abspath(de_dir) if de_dir else None,
+    return {"out": out, "search": search, "search_why": search_why,
+            "de_dir": os.path.abspath(de_dir) if de_dir else None,
             "manifest": manifest, "conditions": conditions, "session": a.session,
             "name": safe_name(name)}
 
 
-def find_speclib(search, report):
-    stem = os.path.splitext(os.path.basename(report))[0]
-    cand = os.path.join(search, f"{stem}-lib.parquet.skyline.speclib")
-    if os.path.isfile(cand):
-        return cand
-    found = sorted(f for f in os.listdir(search) if f.endswith(".skyline.speclib"))
-    if len(found) == 1:
-        return os.path.join(search, found[0])
+SKYLINE_SPECLIB = ".skyline.speclib"     # what DIA-NN 2.x writes for Skyline beside a library
+
+
+def speclib_link_name(report):
+    """The name Skyline pairs with the report: <report stem>-lib.parquet.skyline.speclib. Skyline
+    finds the report beside the library by a shared leading name, so DIA-NN's library is linked
+    under this name whatever its own -- a 5-step chain search writes empirical.parquet.skyline.
+    speclib, which no report pairs with (2.14.2, I38)."""
+    name = os.path.basename(report)
+    stem = name[:-len(".parquet")] if name.endswith(".parquet") else os.path.splitext(name)[0]
+    return f"{stem}-lib.parquet{SKYLINE_SPECLIB}"
+
+
+def find_speclib(search, report, search_mode=None):
+    """DIA-NN's library for Skyline -> (path, how it was chosen). The search's record
+    (search_provenance.json `search_mode`) says which search wrote the folder's report, and so
+    which library is that search's own. A folder searched single-shot and then re-searched as a
+    chain still holds the first search's report-paired library (the chain's clear_stale does not
+    remove it), so the paired name alone could pick an earlier search's (2.14.2, L9 review F11):
+      parallel_5step  the chain's own, diann_parallel.EMPIRICAL_LIBRARY + SKYLINE_SPECLIB;
+      single_shot     the report-paired name (speclib_link_name);
+      not recorded    the report-paired name -- refused when a chain's library is there too.
+    Without its own library: the one other library in the folder, unless it is the other
+    route's own (an earlier search's). Skip, naming the files, whenever the choice is not
+    certain: never a silent pick."""
+    from diann_parallel import EMPIRICAL_LIBRARY
+    paired = speclib_link_name(report)
+    chain = EMPIRICAL_LIBRARY + SKYLINE_SPECLIB
+    found = sorted(f for f in os.listdir(search) if f.endswith(SKYLINE_SPECLIB))
+    route = {"parallel_5step": "5-step chain", "single_shot": "single-shot"}.get(search_mode)
+    rec = f"search_provenance.json search_mode {search_mode}"
+    if route is None and paired in found and chain in found:
+        raise Skip(f"the search folder holds two DIA-NN libraries for Skyline, {paired} (a "
+                   f"single-shot search's) and {chain} (a 5-step chain search's), and its "
+                   f"search_provenance.json does not say which search wrote "
+                   f"{os.path.basename(report)} (no search_mode), so neither is taken")
+    own, other = (chain, paired) if search_mode == "parallel_5step" else \
+        (paired, chain) if search_mode == "single_shot" else (paired, None)
+    if own in found:
+        return os.path.join(search, own), (
+            f"{rec}: the {route} search's own library" if route else
+            f"the library named for {os.path.basename(report)} (no search_mode recorded)")
+    rest = [f for f in found if f != other]
+    if len(rest) == 1:
+        return os.path.join(search, rest[0]), (
+            f"the only DIA-NN library for Skyline in the search folder"
+            + (f" ({rec}; its own, {own}, is not there)" if route else ""))
+    if route and other in found:
+        raise Skip(f"the search was a {route} search ({rec}), whose library for Skyline is "
+                   f"{own}, and that is not in the search folder; {other} there is another "
+                   f"search's (a {'single-shot' if other == paired else '5-step chain'} search "
+                   f"of the same folder), so it is not taken"
+                   + (f"; also there: {', '.join(rest)}" if rest else ""))
     raise Skip("the search folder has no DIA-NN library for Skyline (*-lib.parquet.skyline."
-               "speclib, which DIA-NN 2.x writes beside the report)" if not found else
-               f"the search folder has {len(found)} Skyline libraries and none named for "
-               f"{os.path.basename(report)}")
+               "speclib, which DIA-NN 2.x writes beside the report)" if not rest else
+               f"the search folder has {len(rest)} Skyline libraries ({', '.join(rest)}) and "
+               f"none is this search's own ({own})")
 
 
 def raw_files_of(search_prov, session_paths):
@@ -1594,12 +1909,16 @@ def job_python(arg):
 def make_plan(a, inp):
     """Every check that can be made before a job runs; Skip with the reason when one fails."""
     search = inp["search"]
+    if not search:
+        raise Skip(inp.get("search_why") or "no search folder was named (--search)")
     if not os.path.isdir(search):
         raise Skip(f"there is no search folder at {search}")
     sprov = load_json(os.path.join(search, "search_provenance.json")) or {}
     if sprov.get("engine") and sprov.get("engine") != "diann":
-        raise Skip(f"the search was run with {sprov.get('engine')}; the peak check reads DIA-NN's "
-                   f"spectral library and report")
+        from make_methods import ENGINE_LABEL           # the one engine-name table
+        eng = str(sprov["engine"])
+        raise Skip(f"the search was run with {ENGINE_LABEL.get(eng.lower(), eng)}; the peak "
+                   f"check reads DIA-NN's spectral library and report")
     report = os.path.join(search, "report.parquet")
     log = os.path.join(search, "report.log.txt")
     for f, what in ((report, "DIA-NN's report.parquet"), (log, "DIA-NN's report.log.txt")):
@@ -1616,7 +1935,7 @@ def make_plan(a, inp):
     if "dda" in flags or str((manifest or {}).get("acquisition") or "").upper() == "DDA":
         raise Skip("the search is DDA data (DIA-NN --dda); the skill's Skyline document extracts "
                    "DIA, so every peak would be compared against the wrong extraction")
-    speclib = find_speclib(search, report)
+    speclib, speclib_how = find_speclib(search, report, sprov.get("search_mode"))
     settings = search_settings(flags)
     ma = mass_accuracy(log_text, sprov, a.ppm_ms1, a.ppm_ms2, a.ppm_source)
     sp = _session_paths(inp["session"]) if inp["session"] else None
@@ -1650,7 +1969,7 @@ def make_plan(a, inp):
     de_prov = load_json(os.path.join(de_dir, "de_provenance.json")) if de_dir else {}
     q = _float((de_prov or {}).get("q_cutoff")) or dq.DEFAULT_Q_CUTOFF    # run_de.R's own default
     out, work = inp["out"], os.path.join(inp["out"], WORK)
-    doc = os.path.join(work, f"{inp['name']}_top_hits.sky")
+    doc = os.path.join(work, inp["name"] + SKYLINE_DOCUMENT_SUFFIX[:-len(".zip")])
     group_of = {}
     if inp["conditions"] and os.path.isfile(inp["conditions"]):
         with open(inp["conditions"], newline="", encoding="utf-8") as fh:
@@ -1665,10 +1984,11 @@ def make_plan(a, inp):
         if de_dir else None,
         "session": os.path.abspath(inp["session"]) if inp["session"] else None,
         "name": inp["name"], "out": out, "work": work, "doc": doc,
-        "share_zip": os.path.join(out, f"{inp['name']}_top_hits.sky.zip"),
-        "search": {"dir": search, "report": report, "speclib": speclib, "log": log,
-                   "engine": "diann", "version": ver},
-        "report": report, "speclib_link": os.path.join(work, "search", os.path.basename(speclib)),
+        "share_zip": os.path.join(out, inp["name"] + SKYLINE_DOCUMENT_SUFFIX),
+        "search": {"dir": search, "report": report, "speclib": speclib,
+                   "speclib_chosen_by": speclib_how, "log": log, "engine": "diann",
+                   "version": ver},
+        "report": report, "speclib_link": os.path.join(work, "search", speclib_link_name(report)),
         "fasta": fasta, "targets_fasta": os.path.join(work, "targets.fasta"),
         "de_dir": de_dir, "q_cutoff": q, "raw_files": raw, "group_of": group_of,
         "family": fam, "family_source": fam_src, "settings": settings, "mass_accuracy": ma,
@@ -1693,7 +2013,7 @@ def de_fingerprint(de_record):
 # no picture, table or cache of the last run is taken for this one's (the join would reuse a stale
 # per-file cache, and a stale status file would pass for a finished import).
 OWN_OUTPUTS = re.compile(r"^(?:peaks_.+\.png|areas_.+\.png|skyline_precursors\.tsv|"
-                         r"disagreements\.tsv|.+_top_hits\.sky\.zip)$")
+                         r"disagreements\.tsv|.+" + re.escape(SKYLINE_DOCUMENT_SUFFIX) + r")$")
 
 
 def clear_outputs(out):
@@ -1718,11 +2038,13 @@ def write_jobs(plan, queue):
     os.makedirs(os.path.join(w, "status"), exist_ok=True)
     os.makedirs(os.path.join(w, "search"), exist_ok=True)
     # DIA-NN's library and its report, seen from the document's folder (Skyline finds the
-    # report beside the library by name); the search folder itself stays read-only
-    for src in (plan["search"]["speclib"], plan["report"],
-                os.path.join(plan["search"]["dir"], "report-lib.parquet")):
+    # report beside the library by name: the library under the paired name, speclib_link); the
+    # search folder itself stays read-only
+    lib = os.path.join(plan["search"]["dir"], "report-lib.parquet")
+    for src, link in ((plan["search"]["speclib"], plan["speclib_link"]),
+                      (plan["report"], os.path.join(w, "search", os.path.basename(plan["report"]))),
+                      (lib, os.path.join(w, "search", os.path.basename(lib)))):
         if os.path.isfile(src):
-            link = os.path.join(w, "search", os.path.basename(src))
             if os.path.lexists(link):
                 os.remove(link)
             os.symlink(os.path.realpath(src), link)
@@ -1844,8 +2166,9 @@ def cmd_plan(a):
         if not a.replan:
             raise SystemExit(f"skyline_peaks.py plan: a peak check was planned here at "
                              f"{rec.get('written')} and has not written its result (`status` "
-                             f"says more). Wait for its jobs to end, or pass --replan to cancel "
-                             f"them and plan again")
+                             f"lists its job ids; `sacct -j <ids>` says whether they still run). "
+                             f"Wait for its jobs to end, or pass --replan to cancel them and plan "
+                             f"again")
     # an earlier plan's jobs still in the queue (its join pending after a failed build, say)
     # never run on beside this one: cancelled whatever the record says, or plan refuses
     if os.path.isfile(os.path.join(out, WORK, "jobs.txt")):
@@ -1926,24 +2249,134 @@ def _plan_of(work, plan_id=None):
     return plan
 
 
-def run_skyline(plan, args, log_name, minutes, rw=()):
-    """SkylineCmd in the container -> (exit code, log path). Never --import-process-count."""
+def run_skyline(plan, args, log_name, rw=(), timeout_s=None):
+    """SkylineCmd in the container -> (exit code, log path). Never --import-process-count. No
+    time limit of its own unless `timeout_s` (VERSION_TIMEOUT_S): the job's --time ends it. It
+    runs in a process group of its own (apptainer, Wine, SkylineCmd), which end_child() ends
+    whenever the call does not finish by itself -- a timeout, or Slurm stopping the job
+    (stop_on_signals: the exception passes through here) -- so nothing it started writes on
+    after the job's record is written."""
     assert not any(x.startswith("--import-process-count") for x in args)
     log = os.path.join(plan["work"], "logs", log_name)
     argv = apptainer_argv(plan, rw) + ["wine", "SkylineCmd"] + list(args)
     with open(os.path.join(plan["work"], "logs", log_name.replace(".txt", ".cmd.txt")), "w") as fh:
         fh.write(" ".join(shlex.quote(x) for x in argv) + "\n")
+    proc = None
     try:
         with open(log, "w") as fh:
-            rc = subprocess.run(argv, stdout=fh, stderr=subprocess.STDOUT,
-                                timeout=max(60, (minutes - 5) * 60)).returncode
+            proc = subprocess.Popen(argv, stdout=fh, stderr=subprocess.STDOUT,
+                                    start_new_session=True)
+            rc = proc.wait(timeout=timeout_s)
     except subprocess.TimeoutExpired:
+        end_child(proc)
+        with open(log, "a") as fh:
+            fh.write(f"stopped by skyline_peaks.py after {timeout_s} s\n")
         rc = 124
-    except OSError as e:
+    except BaseException as e:
+        if proc is not None:                 # stopped, or interrupted: its group ends first
+            end_child(proc)
+            with open(log, "a") as fh:
+                fh.write(f"ended by skyline_peaks.py: {type(e).__name__}: {e}\n")
+            raise
+        if not isinstance(e, OSError):
+            raise
         with open(log, "a") as fh:
             fh.write(f"cannot start apptainer: {e}\n")
         rc = 127
     return rc, log
+
+
+def end_child(proc, grace_s=CHILD_GRACE_S):
+    """End a run_skyline() child and everything in its process group: SIGTERM, then -- after
+    grace_s, or as soon as the child itself is gone -- SIGKILL to whatever of the group is left,
+    and the child reaped. A group already gone is not an error."""
+    def to_group(sig):
+        try:
+            os.killpg(proc.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass
+    to_group(signal.SIGTERM)
+    try:
+        proc.wait(timeout=grace_s)
+    except subprocess.TimeoutExpired:
+        pass
+    to_group(signal.SIGKILL)
+    try:
+        proc.wait(timeout=grace_s)
+    except subprocess.TimeoutExpired:
+        print(f"[skyline_peaks] WARNING: SkylineCmd's process {proc.pid} did not end after "
+              f"SIGKILL", file=sys.stderr)
+
+
+# `scontrol show job -o`'s TimeLimit: [D-]HH:MM:SS (Slurm's mins2time_str; on HIVE, inside a job,
+# "TimeLimit=00:15:00", job 25387830). UNLIMITED, Partition_Limit or anything else: not a limit
+# this reads.
+_TIME_LIMIT = re.compile(r"(?:^|\s)TimeLimit=(\S+)")
+_LIMIT_VALUE = re.compile(r"(?:(\d+)-)?(\d+):(\d{2}):(\d{2})")
+
+
+def job_time_limit():
+    """The time limit Slurm applied to THIS job -> (seconds, where it was read), or None when it
+    cannot be read for certain: not in a job (no SLURM_JOB_ID), no scontrol, no answer within
+    SCONTROL_TIMEOUT_S, an error, or a TimeLimit that is not one [D-]HH:MM:SS. Never JOB_MINUTES:
+    a job submitted with another --time has another limit (H4: --time=4 and 3 were recorded as
+    60 and 90 min)."""
+    job, exe = os.environ.get("SLURM_JOB_ID"), shutil.which("scontrol")
+    if not job or not exe:
+        return None
+    try:
+        r = subprocess.run([exe, "show", "job", "-o", job], capture_output=True, text=True,
+                           timeout=SCONTROL_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    shown = set(_TIME_LIMIT.findall(r.stdout or "")) if r.returncode == 0 else set()
+    m = _LIMIT_VALUE.fullmatch(next(iter(shown))) if len(shown) == 1 else None
+    if not m:
+        return None
+    d, h, mi, sec = (int(x or 0) for x in m.groups())
+    return ((d * 24 + h) * 60 + mi) * 60 + sec, f"scontrol show job {job}: TimeLimit={m.group(0)}"
+
+
+def stopped_reason(step, signum):
+    """The record's words for a job Slurm stopped: which job, and its time limit -- with the
+    length Slurm applied (job_time_limit), or, when that cannot be read, no number at all; never
+    a default. On `low` a preemption is said as a possibility: a preempted job there is
+    requeued, and the requeued job writes its own result."""
+    what = {"prm": "follow-up assay"}.get(step, step)
+    got = job_time_limit()
+    if got:
+        mins, secs = divmod(got[0], 60)
+        limit = (f"its time limit (Slurm's --time, {mins} min"
+                 + (f" {secs} s" if secs else "") + ")")
+    else:
+        limit = "its time limit (Slurm's --time)"
+    low = os.environ.get("SLURM_JOB_PARTITION") == "low"
+    if signum == getattr(signal, "SIG" + WARN_SIGNAL):
+        why = (f"the {what} job ran out of {limit} before it finished"
+               + (", or Slurm preempted it" if low else ""))
+    else:
+        why = (f"Slurm stopped the {what} job before it finished: at {limit}, or by a cancel "
+               f"(scancel) or a preemption")
+    return why + ("; on the preemptible low partition a preempted job is requeued and writes its "
+                  "own result" if low else "")
+
+
+def stop_on_signals(step):
+    """In a job (main(), for build, import, join and prm-run): SIGTERM -- Slurm's time limit, a
+    cancel, a preemption -- and the early warning (WARN_SIGNAL) raise Stopped wherever the job
+    is. Its own except path then clears what it half made and writes the record with the reason
+    (rule 4), and run_skyline() ends SkylineCmd's process group on the way. Only the first
+    signal acts: later ones are ignored while the record is written (Slurm's SIGKILL comes its
+    KillWait after its SIGTERM). The reason reads the job's limit from Slurm then
+    (job_time_limit: at most SCONTROL_TIMEOUT_S, well inside the warning's 120 s and HIVE's
+    130 s KillWait). -> {signal: the handler it replaced}."""
+    sigs = [getattr(signal, n) for n in STOP_SIGNALS]
+
+    def handler(signum, _frame):
+        for x in sigs:
+            signal.signal(x, signal.SIG_IGN)
+        raise Stopped(stopped_reason(step, signum))
+    return {x: signal.signal(x, handler) for x in sigs}
 
 
 def log_tail(path, n=3):
@@ -1972,7 +2405,8 @@ def verify_container(plan):
         raise Skip(f"the Skyline container {sif} does not match its pinned sha256 (it is "
                    f"{got[:12]}..., the pin is {SKYLINE_PIN['sif_sha256'][:12]}...): it is not "
                    f"the image the skill was tested with")
-    rc, log = run_skyline(plan, ["--version"], "skyline_version.txt", 10)
+    rc, log = run_skyline(plan, ["--version"], "skyline_version.txt",
+                          timeout_s=VERSION_TIMEOUT_S)
     with open(log, errors="replace") as fh:
         text = fh.read()
     m = re.search(r"Skyline[^\n]*?(\d+\.\d+\.\d+\.\d+)\s*\(([0-9a-f]+)\)", text)
@@ -2046,7 +2480,7 @@ def cmd_build(a):
         rt_min, rt_src = rt_window(last_rt)
         args = build_args(plan, rt_min)
         write_text(os.path.join(w, "build_args.txt"), "\n".join(args) + "\n")
-        rc, log = run_skyline(plan, args, "build.txt", JOB_MINUTES["build"])
+        rc, log = run_skyline(plan, args, "build.txt")
         if rc != 0 or not os.path.isfile(plan["doc"]):
             raise Skip(f"Skyline could not build the document (exit {rc}: {log_tail(log)})")
         with open(plan["doc"], errors="replace") as fh:
@@ -2054,16 +2488,17 @@ def cmd_build(a):
         if not n_pep:
             raise Skip("the Skyline document has no peptides: no DIA-NN library peptide matched "
                        "the chosen proteins' digest")
+        keep_pristine(plan)
+        write_json(st, {"ok": True, "plan_id": plan.get("plan_id"), "tool": tool,
+                        "selection": sel, "diann_rows": nrows,
+                        "rt_window": {"minutes": rt_min, "source": rt_src}, "peptides": n_pep,
+                        "finished": now()})
     except Exception as e:                       # recorded, never swallowed (rule 4)
         why = str(e) if isinstance(e, Skip) else f"the build job failed: {type(e).__name__}: {e}"
         _fail(plan, "build", why)
         write_json(st, {"ok": False, "plan_id": plan.get("plan_id"), "reason": why})
         print(f"[skyline_peaks] build: not run -- {why}", file=sys.stderr)
         return 1
-    write_json(st, {"ok": True, "plan_id": plan.get("plan_id"), "tool": tool, "selection": sel,
-                    "diann_rows": nrows,
-                    "rt_window": {"minutes": rt_min, "source": rt_src}, "peptides": n_pep,
-                    "finished": now()})
     print(f"[skyline_peaks] build: {len(sel['targets'])} protein(s), {n_pep} peptide(s)",
           file=sys.stderr)
     return 0
@@ -2073,58 +2508,70 @@ def cmd_import(a):
     plan = _plan_of(a.work, a.plan_id)
     i = int(a.task)
     raw = plan["raw_files"][i - 1]
-    doc = task_doc(plan, i)
-    tdir = os.path.dirname(doc)
-    shutil.rmtree(tdir, ignore_errors=True)        # a requeued task starts clean
-    os.makedirs(tdir)
-    stem = os.path.splitext(plan["doc"])[0]
-    for ext in (".sky", ".blib", ".skyl", ".sky.view"):
-        if os.path.isfile(stem + ext):
-            shutil.copy2(stem + ext, os.path.join(tdir, os.path.basename(stem + ext)))
-    rc, log = run_skyline(plan, import_args(plan, i), f"import_{i}.txt", JOB_MINUTES["import"])
-    reason = None if rc == 0 else log_tail(log)
-    if rc == 0:
-        made = [f for f in os.listdir(tdir) if f.endswith(".skyd")]
-        if not made:
-            rc, reason = 1, "Skyline wrote no cache for this file"
-        for f in made:
-            os.replace(os.path.join(tdir, f), os.path.join(plan["work"], f))
-    if rc == 0:
-        shutil.rmtree(tdir, ignore_errors=True)
+    src = None
+    try:
+        doc = task_doc(plan, i)
+        tdir = os.path.dirname(doc)
+        shutil.rmtree(tdir, ignore_errors=True)        # a requeued task starts clean
+        os.makedirs(tdir)
+        # the build's pristine copy, under the document's own names (the library by the document's)
+        src = pristine_doc(plan)
+        src_stem, stem = os.path.splitext(src)[0], os.path.splitext(plan["doc"])[0]
+        for ext in DOC_EXTS:
+            if os.path.isfile(src_stem + ext):
+                shutil.copy2(src_stem + ext, os.path.join(tdir, os.path.basename(stem + ext)))
+        rc, log = run_skyline(plan, import_args(plan, i), f"import_{i}.txt")
+        reason = None if rc == 0 else log_tail(log)
+        if rc == 0:
+            made = [f for f in os.listdir(tdir) if f.endswith(".skyd")]
+            if not made:
+                rc, reason = 1, "Skyline wrote no cache for this file"
+            for f in made:
+                os.replace(os.path.join(tdir, f), os.path.join(plan["work"], f))
+        if rc == 0:
+            shutil.rmtree(tdir, ignore_errors=True)
+    except Exception as e:      # recorded in the status file the join reads (rule 4)
+        rc = 1
+        reason = str(e) if isinstance(e, Skip) else \
+            f"the import job failed: {type(e).__name__}: {e}"
+        print(f"[skyline_peaks] import {i}: not imported -- {reason}", file=sys.stderr)
     write_json(os.path.join(plan["work"], "status", f"import_{i}.json"),
                {"file": raw, "rc": rc, "reason": reason, "finished": now(),
-                "plan_id": plan.get("plan_id")})
+                "document": src, "plan_id": plan.get("plan_id")})
     return 0 if rc == 0 else 1
 
 
 def cmd_join(a):
     plan = _plan_of(a.work, a.plan_id)
     w = plan["work"]
+    imported, failed = [], []
+
     def mine(st):            # a status file of this plan, never one an earlier plan's job left
         return st if isinstance(st, dict) and st.get("plan_id") == plan.get("plan_id") else None
-    build = mine(load_json(os.path.join(w, "status", "build.json")))
-    if not build or not build.get("ok"):
-        if not build:                  # the build job died before it could say why
-            _fail(plan, "build", "the build job ended without a result (see "
-                                 f"{os.path.join(w, 'logs')})")
-        return 0                       # the build wrote the record of why
-    imported, failed = [], []
-    for i, f in enumerate(plan["raw_files"], 1):
-        s = mine(load_json(os.path.join(w, "status", f"import_{i}.json")))
-        if s and s.get("rc") == 0:
-            imported.append(f)
-        else:
-            failed.append({"file": f, "reason": (s or {}).get("reason")
-                           or "its import job ended without a result"})
-    if not imported:
-        _fail(plan, "import", f"Skyline could not import any of the {len(failed)} raw files "
-                              f"(first: {os.path.basename(failed[0]['file'])}: {failed[0]['reason']})")
-        return 1
     try:
+        build = mine(load_json(os.path.join(w, "status", "build.json")))
+        if not build or not build.get("ok"):
+            if not build:              # the build job died before it could say why
+                _fail(plan, "build", "the build job ended without a result (see "
+                                     f"{os.path.join(w, 'logs')})")
+            return 0                   # the build wrote the record of why
+        for i, f in enumerate(plan["raw_files"], 1):
+            s = mine(load_json(os.path.join(w, "status", f"import_{i}.json")))
+            if s and s.get("rc") == 0:
+                imported.append(f)
+            else:
+                failed.append({"file": f, "reason": (s or {}).get("reason")
+                               or "its import job ended without a result"})
+        if not imported:
+            _fail(plan, "import", f"Skyline could not import any of the {len(failed)} raw files "
+                                  f"(first: {os.path.basename(failed[0]['file'])}: "
+                                  f"{failed[0]['reason']})")
+            return 1
+        restore_pristine(plan)         # a join run again never re-imports into a joined document
         batch = join_batch(plan, imported)
         write_text(os.path.join(w, "join_batch.txt"), batch)
         rc, log = run_skyline(plan, [f"--batch-commands={win(os.path.join(w, 'join_batch.txt'))}"],
-                              "join.txt", JOB_MINUTES["join"] - 15)
+                              "join.txt")
         need = {"precursor report": os.path.join(plan["out"], "skyline_precursors.tsv"),
                 "transition report": os.path.join(w, "skyline_transitions.tsv"),
                 "chromatograms": os.path.join(w, "skyline_chromatograms.tsv"),
@@ -2133,13 +2580,13 @@ def cmd_join(a):
         if gone:
             raise Skip(f"Skyline did not write the {', '.join(gone)} (exit {rc}: {log_tail(log)})")
         rec = finish(plan, build, imported, failed)
+        if not write_owned(plan, rec):
+            return 1
     except Exception as e:                       # recorded, never swallowed (rule 4)
         why = str(e) if isinstance(e, Skip) else f"the join job failed: {type(e).__name__}: {e}"
         if owns_record(plan):      # no half-made picture or table beside a "Not run"
             clear_outputs(plan["out"])
         _fail(plan, "join", why, {"runs": {"imported": imported, "failed": failed}})
-        return 1
-    if not write_owned(plan, rec):
         return 1
     print(f"[skyline_peaks] done: {rec['results']['flagged']} of {rec['results']['compared']} "
           f"precursor-runs where Skyline picked a different peak", file=sys.stderr)
@@ -2414,41 +2861,73 @@ def followup_readme(spec, rec, counts):
 
 def cmd_prm_run(a):
     plan = _plan_of(a.work, a.plan_id)
-    spec = load_json(os.path.join(plan["work"], "prm", "prm.json"))
-    rec = load_record(plan["out"]) or {}
-    # a second request writes the same documents and lists: Skyline refuses to overwrite an
-    # --out document ("already exists"; the HIVE test), so the last request's own files go first
     prm_dir = os.path.join(plan["work"], "prm")
-    for f in os.listdir(prm_dir):
-        if re.match(r"^(?:refined|prm|srm)\.sky", f):
-            os.remove(os.path.join(prm_dir, f))
-    for f in [t["file"] for t in spec["targets"]] + ["README.md", "followup_assay.json"]:
-        if os.path.isfile(os.path.join(spec["dest"], f)):
-            os.remove(os.path.join(spec["dest"], f))
-    rc, log = run_skyline(plan, [f"--batch-commands={win(os.path.join(prm_dir, 'prm_batch.txt'))}"],
-                          "prm.txt", JOB_MINUTES["prm"], rw=[spec["dest"]])
-    counts, srm_self = {}, 0
-    for t in spec["targets"]:
-        p = os.path.join(spec["dest"], t["file"])
-        if os.path.isfile(p):
-            with open(p, newline="", encoding="utf-8", errors="replace") as fh:
-                rows = list(csv.reader(fh))
-            counts[t["file"]] = max(len(rows) - 1, 0)
-            if t["kind"] == "transition" and rows:
-                h = rows[0]
-                try:
-                    ip, iq = h.index("Precursor (m/z)"), h.index("Product (m/z)")
-                    srm_self = sum(1 for r in rows[1:] if abs(float(r[ip]) - float(r[iq])) < 0.01)
-                except (ValueError, IndexError):
-                    pass
-        else:
-            counts[t["file"]] = "not written"
-    write_text(os.path.join(spec["dest"], "README.md"), followup_readme(spec, rec, counts))
-    write_json(os.path.join(spec["dest"], "followup_assay.json"),
-               {"schema": "skyline_followup/1", "written": now(), "skyline": SKYLINE_PIN["version"],
-                "exit": rc, "log": log, "lists": spec["targets"], "rows": counts,
-                "srm_precursor_as_product_rows": srm_self})
+    spec = load_json(os.path.join(prm_dir, "prm.json"))
+    if not isinstance(spec, dict) or not spec.get("dest") or not spec.get("targets"):
+        raise SystemExit(f"skyline_peaks.py prm-run: no follow-up request in {prm_dir}/prm.json "
+                         f"(skyline_peaks.py prm writes it)")
+    rec = load_record(plan["out"]) or {}
+    lists = [os.path.join(spec["dest"], t["file"]) for t in spec["targets"]]
+    try:
+        # a second request writes the same documents and lists: Skyline refuses to overwrite an
+        # --out document ("already exists"; the HIVE test), so the last request's own files go
+        # first
+        for f in os.listdir(prm_dir):
+            if re.match(r"^(?:refined|prm|srm)\.sky", f):
+                os.remove(os.path.join(prm_dir, f))
+        for f in lists + [os.path.join(spec["dest"], x) for x in ("README.md",
+                                                                  "followup_assay.json")]:
+            if os.path.isfile(f):
+                os.remove(f)
+        rc, log = run_skyline(plan, [f"--batch-commands={win(os.path.join(prm_dir, 'prm_batch.txt'))}"],
+                              "prm.txt", rw=[spec["dest"]])
+        counts, srm_self = {}, 0
+        for t in spec["targets"]:
+            p = os.path.join(spec["dest"], t["file"])
+            if os.path.isfile(p):
+                with open(p, newline="", encoding="utf-8", errors="replace") as fh:
+                    rows = list(csv.reader(fh))
+                counts[t["file"]] = max(len(rows) - 1, 0)
+                if t["kind"] == "transition" and rows:
+                    h = rows[0]
+                    try:
+                        ip, iq = h.index("Precursor (m/z)"), h.index("Product (m/z)")
+                        srm_self = sum(1 for r in rows[1:] if abs(float(r[ip]) - float(r[iq])) < 0.01)
+                    except (ValueError, IndexError):
+                        pass
+            else:
+                counts[t["file"]] = "not written"
+        write_text(os.path.join(spec["dest"], "README.md"), followup_readme(spec, rec, counts))
+        write_json(os.path.join(spec["dest"], "followup_assay.json"),
+                   {"schema": "skyline_followup/1", "written": now(),
+                    "skyline": SKYLINE_PIN["version"], "exit": rc, "log": log,
+                    "lists": spec["targets"], "rows": counts,
+                    "srm_precursor_as_product_rows": srm_self})
+    except Exception as e:      # no partial list without a word of why (rule 4; L9 review F7)
+        why = str(e) if isinstance(e, Skip) else \
+            f"the follow-up assay job failed: {type(e).__name__}: {e}"
+        for f in lists:
+            if os.path.isfile(f):
+                os.remove(f)
+        write_text(os.path.join(spec["dest"], "README.md"), followup_not_made_readme(spec, why))
+        write_json(os.path.join(spec["dest"], "followup_assay.json"),
+                   {"schema": "skyline_followup/1", "written": now(),
+                    "skyline": SKYLINE_PIN["version"], "status": "not made", "reason": why,
+                    "lists": spec["targets"], "rows": {}})
+        print(f"[skyline_peaks] prm-run: not made -- {why}", file=sys.stderr)
+        return 1
     return 0 if rc == 0 and all(isinstance(v, int) and v > 0 for v in counts.values()) else 1
+
+
+def followup_not_made_readme(spec, why):
+    """The follow-up folder's README when its job did not finish: why, and that no list in the
+    folder is a partial one (the lists it had begun are removed)."""
+    return "\n".join([
+        "# Targeted follow-up assay (PRM / SRM) from the peak check", "",
+        f"**Not made.** {why}.", "",
+        "The lists it had begun (" + ", ".join(t["file"] for t in spec["targets"]) + ") were "
+        "removed, so no list here is a partial one. Ask for it again with "
+        "`skyline_peaks.py prm`, then submit the job it writes.", ""])
 
 
 # ---- command line ----------------------------------------------------------------------------------------
@@ -2507,9 +2986,18 @@ def main(argv=None):
         ap.error("give --session (or --out)")
     if a.cmd == "plan" and a.top is not None and a.top < 1:
         ap.error("--top must be at least 1")
-    return {"plan": cmd_plan, "skip": cmd_skip, "status": cmd_status, "prm": cmd_prm,
-            "build": cmd_build, "import": cmd_import, "join": cmd_join,
-            "prm-run": cmd_prm_run}[a.cmd](a)
+    run = {"plan": cmd_plan, "skip": cmd_skip, "status": cmd_status, "prm": cmd_prm,
+           "build": cmd_build, "import": cmd_import, "join": cmd_join,
+           "prm-run": cmd_prm_run}[a.cmd]
+    step = {sub: st for st, sub in JOB_SUBCOMMAND.items()}.get(a.cmd)
+    if step is None:
+        return run(a)
+    before = stop_on_signals(step)          # a job: Slurm stopping it is recorded, never lost
+    try:
+        return run(a)
+    finally:
+        for x, h in before.items():
+            signal.signal(x, h)
 
 
 if __name__ == "__main__":

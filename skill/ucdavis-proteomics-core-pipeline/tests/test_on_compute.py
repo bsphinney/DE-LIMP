@@ -391,6 +391,22 @@ class TwoAccountsOnHigh(Harness):
         (call,) = self.srun_calls()
         self.assertIn("--account=genome-center-grp", call)
 
+    def test_a_script_that_moves_itself_takes_the_account_it_was_given(self):
+        """L8R-F7: run_search.py --account X moves its tdf check with X -- the user already named
+        it, and being told to set PROTEOMICS_SRUN_ACCOUNT instead pointed at the wrong flag."""
+        self.login_node()
+        script = os.path.join(self.d, "mover_account.py")
+        with open(script, "w") as fh:
+            fh.write(MOVER.format(scripts=SCRIPTS).replace(
+                'mem="3G", script=__file__)',
+                'mem="3G", script=__file__, account="labbgrp", partition="high")'))
+        r = subprocess.run([sys.executable, script, self.out], capture_output=True, text=True,
+                           env=self.env(FAKE_ASSOC=self.ASSOC), timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        (call,) = self.srun_calls()
+        self.assertIn("--account=labbgrp", call)
+        self.assertIn("--partition=high", call)
+
     def test_a_script_that_moves_itself_refuses_too(self):
         self.login_node()
         script = os.path.join(self.d, "mover.py")

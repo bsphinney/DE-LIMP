@@ -36,7 +36,9 @@ Usage:
   python3 estimate_params.py --engine diann --acquisition DIA \
       --instrument "Orbitrap Astral" --out diann.cfg
   python3 estimate_params.py --engine sage --acquisition DDA \
-      --instrument "timsTOF Pro" --out sage_config.json [--var-mods ox]
+      --instrument "timsTOF Pro" --out sage_config.json [--var-mods ox] [--ids-only]
+      (--ids-only: identifications only, no differential expression -- the cfg's quant.lfq is
+       false, and run_search.py then hands a timsTOF .d to Sage directly)
   python3 estimate_params.py --engine diann --acquisition DIA \
       --instrument "Orbitrap Fusion Lumos" --ms1-resolution 120000 --ms2-resolution 15000 \
       --resolution-source detected --out diann.cfg
@@ -50,9 +52,10 @@ Writes the engine params file to --out and prints a rationale JSON to stdout
 (one entry per setting: value + source). Pass --overrides '<json>' to force
 specific fields the user chose, with --override-by "<who chose them>" and
 --override-reason "<why, in their words>": each is tagged as a USER OVERRIDE with its
-value, set by Core staff, and why (override_source) -- never as a validated SOP, which the
-skill cannot know it is. Who, by name, goes only to the staff-only <out>.staff.json (staff.py):
-the sidecar travels to the client.
+value, who set it by role, and why (override_source) -- never as a validated SOP, which the
+skill cannot know it is. The role is "Core staff" only when the setter is a login on the Core
+staff list (staff.role_for), else "the user". Who, by name, goes only to the staff-only
+<out>.staff.json (staff.py): the sidecar travels to the client.
 """
 import sys, os, json, math, argparse
 
@@ -203,6 +206,37 @@ def cys_alkylation_record(choice=None):
             "source": source}
 
 
+def cys_record_as_written(cys, found, override_meta=None):
+    """`cys` (cys_alkylation_record) when the cfg as written (`found`: cys_searched()) fixes what it
+    says on C, else the record of what the cfg does fix, with `overridden` naming the choice an
+    --overrides value replaced (review R1). The reagent is then not known -- an override names a
+    modification, not what the lab used -- so it is None, and so is `value` when nothing is fixed
+    (`none` would claim the samples were not alkylated)."""
+    if not found:
+        return cys
+    same = (bool(found["fixed"]) == bool(cys.get("mod")) and
+            (not found["fixed"] or abs(float(found["mass"]) - float(cys["mass"])) < 0.01))
+    if same:
+        return cys
+    om = override_meta or {}
+    reason = om.get("reason")
+    choice = found.get("choice") if found["fixed"] else None
+    r = CYS_REAGENTS.get(choice) if choice else None
+    searched = (f"{found['mod'].lower()} (C), fixed" if found["fixed"] else
+                "cysteine unmodified (no fixed modification)")
+    return {"value": choice, "given": True, "reagent": None,
+            "mod": found.get("mod") if found["fixed"] else None,
+            "unimod": r["unimod"] if r else None,
+            "mass": found.get("mass") if found["fixed"] else None,
+            "searched": searched,
+            "overridden": {"was": cys.get("value"), "was_searched": cys.get("searched")},
+            "source": (f"user override: --overrides replaced what --cys-alkylation "
+                       f"{cys.get('value')} fixes on C ({cys.get('searched')}; a --fixed-mod "
+                       f"override replaces every --fixed-mod line), so the cfg as written "
+                       f"searches {searched}; set by {om.get('role', staff.USER_ROLE)}; reason: "
+                       f"{reason.strip() if reason and reason.strip() else OVERRIDE_REASON_MISSING}")}
+
+
 def _cys_choice(mass):
     """The CYS_REAGENTS key whose mass this is (within 0.01 Da), or None."""
     return next((k for k, r in CYS_REAGENTS.items() if r and abs(r["mass"] - mass) < 0.01), None)
@@ -249,6 +283,83 @@ def cam_searched(params):
     another fixed C modification), None when it cannot be read (cys_searched)."""
     r = cys_searched(params)
     return None if r is None else (r["fixed"] and r["choice"] == "cam")
+
+
+# The variable modifications --var-mods can ask for: THE one table. word -> its label, its UniMod
+# record (id, title, monoisotopic delta mass -- unimod.org: Oxidation 35, Deamidated 7) and
+# sites, and from those DIA-NN's `--var-mod UniMod:<id>,<mass>,<sites>` value (README: "--var-mod
+# [name],[mass],[sites]") and Sage's database.variable_mods entries ({residue: [mass]});
+# make_methods.UNIMOD names them from the same record, as it does CYS_REAGENTS. Any other word is
+# refused (parse_var_mods): it used to be dropped without a word, so a "like-for-like" re-search
+# of a FragPipe study that asked for N/Q deamidation ran without it (I47, 2026-10-29).
+VAR_MODS = {
+    "ox": {"label": "Ox(M)", "unimod": 35, "mod": "Oxidation", "mass": 15.994915, "sites": "M"},
+    "deam": {"label": "Deamidation (NQ)", "unimod": 7, "mod": "Deamidated", "mass": 0.984016,
+             "sites": "NQ"},
+}
+for _vm in VAR_MODS.values():
+    _vm["diann"] = f"UniMod:{_vm['unimod']},{_vm['mass']},{_vm['sites']}"
+    _vm["sage"] = {site: [_vm["mass"]] for site in _vm["sites"]}
+#: --var-mods' explicit off switch: none of the table's modifications, whatever the default.
+VAR_MODS_NONE = "none"
+VAR_MODS_WORDS = ", ".join(list(VAR_MODS) + [VAR_MODS_NONE])     # "ox, deam, none"
+# What is searched when --var-mods is not given, by (engine, acquisition); anything not listed
+# searches none. Met-ox for Sage DDA is the FragPipe/MaxQuant default, and without it those
+# peptides are lost (Brett, 2026-10-30, Q2). DIA-NN keeps none: its README advises against
+# variable mods for quantification.
+VAR_MODS_DEFAULT = {("sage", "DDA"): ["ox"]}
+SRC_VAR_MODS_SAGE_DDA = ("Ox(M) on by default for DDA (the FragPipe/MaxQuant default; Core "
+                         "decision 2026-10-30)")
+SRC_VAR_MODS_DIANN = "DIA-NN README: variable mods do not improve depth for relative quant; left off"
+
+
+def parse_var_mods(text):
+    """--var-mods as given ("ox", "ox,deam", "none") -> the VAR_MODS words, in order, once each;
+    `none` -> []. No word at all ("," or " , ") -> None, the same as not given: the default
+    applies (it is not `none`, which would silently switch off Sage DDA's Met-ox). Raises
+    ValueError naming the known words for any other word, and for `none` beside another word
+    (they contradict)."""
+    words = []
+    for w in (x.strip().lower() for x in str(text or "").split(",")):
+        if w and w not in words:
+            words.append(w)
+    if not words:
+        return None
+    bad = [w for w in words if w not in VAR_MODS and w != VAR_MODS_NONE]
+    if bad:
+        raise ValueError(f"--var-mods {', '.join(bad)}: not a modification this skill can "
+                         f"search. Known words: {VAR_MODS_WORDS} (ox = Ox(M), deam = "
+                         f"Deamidation (NQ), none = no variable modifications). A modification "
+                         f"not in the list goes in --overrides.")
+    if VAR_MODS_NONE in words and len(words) > 1:
+        raise ValueError(f"--var-mods {','.join(words)}: `none` turns variable modifications "
+                         f"off and cannot be combined with another word. Known words: "
+                         f"{VAR_MODS_WORDS}")
+    return [] if words == [VAR_MODS_NONE] else words
+
+
+def var_mods_choice(engine, acquisition, var_mods=None):
+    """(words, source) -- the variable modifications a search gets, and on whose word. `var_mods`
+    is parse_var_mods()'s list (given), a --var-mods string, or None (not given: the default for
+    this engine and acquisition, tagged DEFAULT)."""
+    if isinstance(var_mods, str):
+        var_mods = parse_var_mods(var_mods)
+    if var_mods is not None:
+        words = list(var_mods)
+        if not words:
+            return [], ("none: --var-mods none (variable modifications turned off on request)")
+        return words, (f"user requested (--var-mods {','.join(words)}): "
+                       + ", ".join(f"{VAR_MODS[w]['label']} ({VAR_MODS[w]['diann'].split(',')[0]})"
+                                   for w in words))
+    acq = (acquisition or "").strip().upper()
+    words = list(VAR_MODS_DEFAULT.get((engine, acq), []))
+    if words:
+        return words, (f"DEFAULT, not user-confirmed: {SRC_VAR_MODS_SAGE_DDA}; "
+                       f"--var-mods none turns it off")
+    if engine == "diann":
+        return [], SRC_VAR_MODS_DIANN
+    return [], (f"DEFAULT: Ox(M) off for {acq or 'this acquisition'} (quant default; it is on "
+                f"by default only for DDA); --var-mods ox adds it")
 
 
 # What a precursor m/z range is, by acquisition. detect_acquisition.py reads DIA's from the
@@ -375,9 +486,12 @@ MASS_ACC_LEVEL = {"--mass-acc": "MS2", "--mass-acc-ms1": "MS1"}
 # "user-override (validated SOP)", so a 25 ppm chosen to cover a timsTOF ~20 ppm off calibration
 # went into the provenance, and on to the Methods, as a validated SOP (staff report, 2026-09-25).
 # The ONE wording, with the value, who set it and why; resolve_defaults.py --ms1-ppm/--ms2-ppm
-# uses it too. Who is said by role (staff.ROLE): the sidecar and the manifest reach the client
-# (reproducibility/inputs/, the session zip). The person -- --override-by when given, else the
-# login that ran the command, said so -- is in the staff-only record (record_override_setter).
+# uses it too. Who is said by role: the sidecar and the manifest reach the client
+# (reproducibility/inputs/, the session zip). The role is staff.ROLE ("Core staff") only when the
+# setter -- --override-by when given, else the login that ran the command -- is on a usable Core
+# staff list, else staff.USER_ROLE ("the user"): staff.role_for(), which both main()s call. Every
+# override used to say "set by Core staff", whoever set it (S4). The person is in the staff-only
+# record (record_override_setter).
 OVERRIDE_REASON_MISSING = "reason not given [ask the user -- confirm]"
 
 
@@ -393,20 +507,22 @@ def override_setter(given=None):
         return None, "unknown"
 
 
-def override_source(flag, value, reason=None):
-    """The tag of one overridden setting: a user override, its value, by role, and why."""
+def override_source(flag, value, reason=None, role=staff.USER_ROLE):
+    """The tag of one overridden setting: a user override, its value, by role, and why. `role` is
+    staff.role_for(<the setter>): main() and resolve_defaults.py pass it; a caller that forgets
+    gets the less privileged label, staff.USER_ROLE."""
     shown = value if isinstance(value, (int, float, str)) and not isinstance(value, bool) \
         else json.dumps(value)
-    return (f"user override: {flag} = {shown}, set by {staff.ROLE}; reason: "
+    return (f"user override: {flag} = {shown}, set by {role}; reason: "
             f"{reason.strip() if reason and reason.strip() else OVERRIDE_REASON_MISSING}")
 
 
-def override_record(overrides, reason=None, staff_record=None):
+def override_record(overrides, reason=None, staff_record=None, role=staff.USER_ROLE):
     """{setting: {value, set_by, reason, source, staff_record}} -- the sidecar's `overrides`, by
-    role; `staff_record` names the staff-only file that holds who, by name."""
-    return {k: {"value": v, "set_by": staff.ROLE,
+    role (staff.role_for); `staff_record` names the staff-only file that holds who, by name."""
+    return {k: {"value": v, "set_by": role,
                 "reason": reason.strip() if reason and reason.strip() else None,
-                "source": override_source(k, v, reason), "staff_record": staff_record}
+                "source": override_source(k, v, reason, role), "staff_record": staff_record}
             for k, v in (overrides or {}).items()}
 
 
@@ -415,13 +531,14 @@ def staff_record_name(path):
     return os.path.basename(path) + staff.STAFF_SUFFIX
 
 
-def record_override_setter(path, overrides, by, by_how, reason):
+def record_override_setter(path, overrides, by, by_how, reason, role=None):
     """Who set `overrides`, by name and how that is known ("given": --override-by; "login": the
-    login that ran the command, which is who TYPED it), into the staff-only record beside `path`.
-    -> its file name, for override_record()."""
+    login that ran the command, which is who TYPED it), into the staff-only record beside `path`,
+    with the role the client documents name for them (staff.role_for). -> its file name, for
+    override_record()."""
     staff.append(path + staff.STAFF_SUFFIX, {
         "event": "override", "overrides": overrides, "by": by, "by_how": by_how,
-        "account": staff.login(), "at": staff.now(),
+        "account": staff.login(), "at": staff.now(), "role": role,
         "reason": reason.strip() if reason and reason.strip() else None})
     return staff_record_name(path)
 
@@ -786,6 +903,13 @@ def tagged(value, source):
 
 
 # --- DIA-NN cfg --------------------------------------------------------------
+# DIA-NN flags the cfg carries once per value (one --var-mod line per modification searched,
+# from VAR_MODS): an --overrides value ADDS to those lines (union, deduplicated; a list adds
+# several), never replaces them -- {"--var-mod": "UniMod:21,79.966331,STY"} beside --var-mods
+# ox,deam used to drop Ox(M) and Deamidation without a word (review F3).
+DIANN_ADDED_FLAGS = ("--var-mod",)
+
+
 def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
                 cont_tag=None, mz_range=None, level_src=None, override_meta=None, cys=None,
                 labels=None):
@@ -892,13 +1016,18 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
     else:
         add("--fixed-mod", cys_flags[1], f"fixed {cys['mod']} (C) -- {cys['source']}")
 
-    # variable mods: DIA-NN README says var mods don't help pure quant; default OFF.
-    if var_mods and "ox" in var_mods:
-        add("--var-mods", 1, "user requested Ox(M)")
-        add("--var-mod", "UniMod:35,15.994915,M", "oxidation of methionine (user requested)")
+    # variable mods (VAR_MODS): DIA-NN README says var mods don't help pure quant; default OFF.
+    # --var-mods is DIA-NN's maximum per peptide: one for each kind asked for.
+    vm_words, vm_src = var_mods_choice("diann", acq, var_mods)
+    if vm_words:
+        names = ", ".join(VAR_MODS[w]["label"] for w in vm_words)
+        add("--var-mods", len(vm_words), f"one per variable-modification kind searched "
+                                         f"({names}) -- {vm_src}")
+        r["--var-mod"] = tagged([VAR_MODS[w]["diann"] for w in vm_words], f"{names} -- {vm_src}")
+        lines.extend(f"--var-mod {VAR_MODS[w]['diann']}" for w in vm_words)
+        r["variable_mods"] = tagged(vm_words, vm_src)
     else:
-        r["variable_mods"] = tagged("none",
-            "DIA-NN README: variable mods do not improve depth for relative quant; left off")
+        r["variable_mods"] = tagged("none", vm_src)
 
     # mass accuracy — the data-type-dependent part.
     #
@@ -1011,12 +1140,42 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
             else:
                 add(flag, value, source, render=None if render else False)
 
-    # apply the user's overrides -- re-render the file; each tagged with who set it and why
+    # apply the user's overrides -- re-render the file; each tagged with who set it and why. A
+    # flag replaces its line, except a repeatable one (DIANN_ADDED_FLAGS), which adds.
     om = override_meta or {}
+    added, added_src = [], []
     for k, v in (overrides or {}).items():
-        r[k] = tagged(v, override_source(k, v, om.get("reason")))
+        src_o = override_source(k, v, om.get("reason"), om.get("role", staff.USER_ROLE))
+        if k in DIANN_ADDED_FLAGS:
+            have = [ln[len(k) + 1:] for ln in lines if ln.startswith(k + " ")]
+            new = []
+            for x in (v if isinstance(v, (list, tuple)) else [v]):
+                if str(x) not in have + new:
+                    new.append(str(x))
+            lines.extend(f"{k} {x}" for x in new)
+            prev = r.get(k)
+            r[k] = tagged(have + new, (f"{prev['source']}; + " if prev else "") + src_o)
+            added += new
+            added_src.append(src_o)
+            continue
+        r[k] = tagged(v, src_o)
         lines = [ln for ln in lines if not (ln == k or ln.startswith(k + " "))]
         lines.append(k if v is True else f"{k} {v}")
+    if added:
+        # the modifications searched are now the table's AND the added ones: the rationale and
+        # --var-mods (one per kind, unless the user set it) follow the final lines
+        final = r["--var-mod"]["value"]
+        names = ", ".join([VAR_MODS[w]["label"] for w in vm_words] + added)
+        r["variable_mods"] = tagged(list(vm_words) + added,
+                                    (f"{vm_src}; + " if vm_words else "") + "; ".join(added_src))
+        if "--var-mods" not in (overrides or {}):
+            lines = [ln for ln in lines if not ln.startswith("--var-mods ")]
+            lines.append(f"--var-mods {len(final)}")
+            # with no table mods, vm_src is why there were none ("left off"): not this one's
+            r["--var-mods"] = tagged(len(final), f"one per variable-modification kind searched "
+                                                 f"({names})"
+                                                 + (f" -- {vm_src}; +" if vm_words else ":")
+                                                 + " --var-mod added in --overrides")
     # The DDA levels pinned at the SOP, by flag -- what an export must call a default. A level
     # the caller overrode is theirs, not a default, so it is not listed.
     defaulted = {f: v for f, v in sop_default.items() if f not in given}
@@ -1094,14 +1253,174 @@ SAGE_ENZYME = {"missed_cleavages": 2, "min_len": 7, "max_len": 30,
                "cleave_at": "KR", "restrict": "P"}
 
 
+# --ids-only: a Sage search for identifications only, with no LFQ (no differential expression).
+# The cfg's quant.lfq is false, which is the ONE carrier of the choice: run_search.py reads it
+# (sage_lfq_enabled) to send a timsTOF .d to Sage directly and to skip the LFQ check. A DIA-NN
+# search always quantifies, so the flag is refused for it (a Core submission, 2026-10-29).
+IDS_ONLY_FLAG = "--ids-only"
+SRC_IDS_ONLY = ("identifications only (--ids-only: no differential expression); Sage 0.14.7 reads "
+                "a timsTOF .d directly but has no MS1 quantification on it")
+IDS_ONLY_DIANN = "--ids-only is for Sage; a DIA-NN search always quantifies"
+
+
+# --overrides into a Sage cfg: the ONE merge (H2-4). It took top-level keys only, so an
+# enzyme-only override, {"database": {"enzyme": {...}}}, REPLACED the whole database block and the
+# fixed carbamidomethyl-C, the protein N-term acetyl, the decoys and the FASTA placeholder were
+# gone, with no message. A Sage tolerance is a one-key enum ({"ppm": [lo, hi]} or {"da": [lo, hi]}:
+# crates/sage/src/mass.rs `enum Tolerance { Ppm(f32, f32), Da(f32, f32) }`), so precursor_tol and
+# fragment_tol are replaced whole: merged, {"da": ...} over a ppm window would hold both units.
+SAGE_REPLACED_WHOLE = (("precursor_tol",), ("fragment_tol",))
+
+# Sage 0.14.7's settings, by block: crates/sage-cli/src/input.rs (`Input`, `QuantOptions`,
+# `LfqOptions`, `TmtOptions`) and crates/sage/src/database.rs (`Builder`, `EnzymeBuilder`), read at
+# tag v0.14.7 (2026-11-03). None of them denies unknown fields, so Sage IGNORES a key it does not
+# know, without a word: an override at the wrong level (the rationale names its entries flat --
+# enzyme, static_mods, lfq -- and {"enzyme": ...} at the top level is the easy mistake) was
+# recorded as applied and never searched (review F2). static_mods / variable_mods are maps of
+# residues, so their keys are not checked here.
+SAGE_CFG_KEYS = {
+    (): {"database", "precursor_tol", "fragment_tol", "report_psms", "chimera", "wide_window",
+         "min_peaks", "max_peaks", "max_fragment_charge", "min_matched_peaks", "precursor_charge",
+         "isotope_errors", "deisotope", "quant", "predict_rt", "output_directory", "mzml_paths",
+         "annotate_matches", "write_pin"},
+    ("database",): {"bucket_size", "enzyme", "fragment_min_mz", "fragment_max_mz",
+                    "peptide_min_mass", "peptide_max_mass", "ion_kinds", "min_ion_index",
+                    "static_mods", "variable_mods", "max_variable_mods", "decoy_tag",
+                    "generate_decoys", "fasta"},
+    ("database", "enzyme"): {"missed_cleavages", "min_len", "max_len", "cleave_at", "restrict",
+                             "c_terminal", "semi_enzymatic"},
+    ("quant",): {"tmt", "tmt_settings", "lfq", "lfq_settings"},
+    ("quant", "lfq_settings"): {"peak_scoring", "integration", "spectral_angle", "ppm_tolerance",
+                                "combine_charge_states"},
+    ("quant", "tmt_settings"): {"level", "sn"},
+}
+
+
+class OverrideRefused(ValueError):
+    """An --overrides value the cfg cannot carry as asked: refused (refuse_out: no cfg, no
+    sidecar), so it is never recorded as applied."""
+
+
+class EmptyOverride(OverrideRefused):
+    """An override of {} on a block: merged key by key it changes nothing, so it is refused
+    rather than dropped without a word."""
+
+
+def _dotted(path):
+    return ".".join(str(p) for p in path)
+
+
+def check_sage_overrides(over, _at=()):
+    """Refuse (OverrideRefused) a Sage --overrides key that is not a Sage 0.14.7 setting at its
+    level (SAGE_CFG_KEYS) -- naming where a key of that name belongs -- and a plain value given
+    for a block. Nothing else is judged here: the values go to Sage as given."""
+    known = SAGE_CFG_KEYS.get(_at)
+    if known is None or not isinstance(over, dict):
+        return
+    for k, v in over.items():
+        at = _at + (k,)
+        if at in SAGE_REPLACED_WHOLE and not _one_window(v):
+            # review F5: {} (or two units, or one number) wrote a cfg Sage cannot read, and the
+            # job failed only once it had queued
+            raise OverrideRefused(
+                f"--overrides sets {_dotted(at)} to {json.dumps(v)}: a Sage tolerance is exactly "
+                f'one window, {{"ppm": [lo, hi]}} or {{"da": [lo, hi]}}, with lo <= hi '
+                f"(crates/sage/src/mass.rs `enum Tolerance`).")
+        if k not in known:
+            where = sorted(_dotted(lvl + (k,)) for lvl, keys in SAGE_CFG_KEYS.items()
+                           if k in keys and lvl != _at)
+            raise OverrideRefused(
+                f"--overrides sets {_dotted(at)}, which is not a Sage 0.14.7 setting at that level "
+                + (f"-- it belongs at {' or '.join(where)} (write it nested: "
+                   f"{json.dumps(_nested(where[0].split('.'), v))})" if where else
+                   "(crates/sage-cli/src/input.rs, crates/sage/src/database.rs)")
+                + ". Sage would ignore it without a word, and the search would run without it.")
+        if at in SAGE_CFG_KEYS:
+            if not isinstance(v, dict):
+                raise OverrideRefused(
+                    f"--overrides sets {_dotted(at)} to {json.dumps(v)}, but {_dotted(at)} is a "
+                    f"block of settings ({', '.join(sorted(SAGE_CFG_KEYS[at]))}): give the keys "
+                    f"to change, e.g. {{\"{k}\": {{\"<key>\": <value>}}}}.")
+            check_sage_overrides(v, at)
+
+
+def _one_window(tol):
+    """True for a Sage Tolerance: one key, "ppm" or "da", holding two numbers lo <= hi."""
+    if not (isinstance(tol, dict) and len(tol) == 1 and next(iter(tol)) in ("ppm", "da")):
+        return False
+    w = next(iter(tol.values()))
+    return (isinstance(w, (list, tuple)) and len(w) == 2
+            and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in w)
+            and w[0] <= w[1])
+
+
+def _nested(path, value):
+    for k in reversed(path):
+        value = {k: value}
+    return value
+
+
+def deep_merge(base, over, whole=(), _at=()):
+    """`over` merged into a copy of `base` (neither is changed): a dict that lands on a dict merges
+    into it key by key, at any depth; anything else replaces -- a number, a string, a list (a
+    list is replaced, never appended), a dict that lands on a non-dict or on a path in `whole`.
+    An EMPTY dict that lands on a dict would change nothing: EmptyOverride.
+    -> (merged, [(path, value), ...]): each setting `over` set, at the depth it was merged to."""
+    import copy
+    merged, set_ = copy.deepcopy(base), []
+    for k, v in (over or {}).items():
+        at = _at + (k,)
+        if v == {} and isinstance(merged.get(k), dict) and merged[k] and at not in whole:
+            raise EmptyOverride(
+                f"--overrides sets {'.'.join(str(p) for p in at)} to {{}}: a block merges key by "
+                f"key, so {{}} would change nothing (it holds {json.dumps(merged[k])}). Give the "
+                f"keys to change; to search cysteine unmodified use --cys-alkylation none, and "
+                f"--var-mods for the variable modifications.")
+        if isinstance(v, dict) and isinstance(merged.get(k), dict) and at not in whole:
+            merged[k], below = deep_merge(merged[k], v, whole, at)
+            set_ += below
+        else:
+            merged[k] = copy.deepcopy(v)
+            set_.append((at, copy.deepcopy(v)))
+    return merged, set_
+
+
+# The cfg value each of build_sage's rationale entries describes, so an override that lands on it,
+# or under it, is named in that entry. The tolerance entries hold the NUMBER a window was derived
+# from (10 for {"ppm": [-10, 10]}): an override of the window drops them (SAGE_DERIVED_NUMBERS).
+# The others hold the cfg's value itself, and keep it as merged.
+SAGE_RATIONALE_PATHS = {
+    "precursor_tol_ppm": ("precursor_tol",), "fragment_tol_ppm": ("fragment_tol",),
+    "fragment_tol_da": ("fragment_tol",), "deisotope": ("deisotope",),
+    "bucket_size": ("database", "bucket_size"), "wide_window": ("wide_window",),
+    "chimera": ("chimera",), "static_mods": ("database", "static_mods"),
+    "variable_mods": ("database", "variable_mods"), "enzyme": ("database", "enzyme"),
+    "lfq": ("quant", "lfq"),
+}
+SAGE_DERIVED_NUMBERS = ("precursor_tol_ppm", "fragment_tol_ppm", "fragment_tol_da")
+
+
+def _cfg_at(cfg, path):
+    """The value at `path` in a nested cfg, else None."""
+    for k in path:
+        cfg = cfg.get(k) if isinstance(cfg, dict) else None
+    return cfg
+
+
 def build_sage(acq, instr_class, var_mods, overrides, ms2_analyzer=None, override_meta=None,
-               cys=None):
+               cys=None, ids_only=False):
     prec_ppm, frag_ppm, ppm_src = sage_ppm(instr_class)
     cys = cys or cys_alkylation_record()
     static = cys_sage_static(cys["value"])
     ion_trap = ms2_in_ion_trap(ms2_analyzer)
     UNIV = "universal trypsin/LFQ default"
-    variable = {"M": [15.9949]} if (var_mods and "ox" in var_mods) else {}
+    # VAR_MODS: what was asked for, else this acquisition's default (Ox(M) on for DDA)
+    vm_words, vm_src = var_mods_choice("sage", acq, var_mods)
+    variable = {}
+    for w in vm_words:
+        for site, masses in VAR_MODS[w]["sage"].items():
+            have = variable.setdefault(site, [])
+            have.extend(m for m in masses if m not in have)
     variable["["] = [42.0106]  # protein N-term acetyl is a common, cheap variable mod
     cfg = {
         "database": {
@@ -1126,45 +1445,83 @@ def build_sage(acq, instr_class, var_mods, overrides, ms2_analyzer=None, overrid
         "predict_rt": True,
         "min_peaks": 15, "max_peaks": 150, "min_matched_peaks": 4,
         "max_fragment_charge": 2,
-        "quant": {"lfq": True},
+        "quant": {"lfq": not ids_only},
         "output_directory": "sage_out",
     }
-    # overrides: shallow-merge top-level keys
-    for k, v in (overrides or {}).items():
-        cfg[k] = v
+    # the user's overrides: each a Sage setting at its level (check_sage_overrides), merged at
+    # every depth (deep_merge); `set_` is what each one set
+    check_sage_overrides(overrides)
+    built = cfg                        # before the overrides: what each derived source describes
+    cfg, set_ = deep_merge(cfg, overrides, SAGE_REPLACED_WHOLE)
+    db = cfg.get("database") if isinstance(cfg.get("database"), dict) else {}
 
+    # Every entry that describes a cfg value reads it from the MERGED cfg, never the pre-override
+    # one (H2-4). The enzyme entry is the cfg's own database.enzyme block: it was the text
+    # "trypsin/P, 2 missed cleavages" whatever the cfg held -- and SAGE_ENZYME's restrict "P" is
+    # trypsin, not trypsin/P.
     rationale = {"precursor_tol_ppm": tagged(prec_ppm, ppm_src)}
     if ion_trap:
         it = ("MS2 read partly in the ion trap (mixed ITMS/FTMS)" if ms2_analyzer == "mixed"
               else "MS2 read in the ion trap (ITMS)")
         rationale.update({
             "fragment_tol_da": tagged(SAGE_ITMS_FRAGMENT_DA, f"{it}: {SRC_SAGE_LOWRES}"),
-            "deisotope": tagged(False, f"{it}: {SRC_SAGE_LOWRES}"),
-            "bucket_size": tagged(SAGE_ITMS_BUCKET_SIZE, f"{it}: {SRC_SAGE_LOWRES} ('higher "
-                                                          "values for low-res MS/MS')"),
+            "deisotope": tagged(cfg.get("deisotope"), f"{it}: {SRC_SAGE_LOWRES}"),
+            "bucket_size": tagged(db.get("bucket_size"), f"{it}: {SRC_SAGE_LOWRES} ('higher "
+                                                         "values for low-res MS/MS')"),
         })
     else:
         rationale["fragment_tol_ppm"] = tagged(frag_ppm, ppm_src)
     rationale.update({
-        "wide_window": tagged(cfg["wide_window"], f"{acq.upper()} acquisition"),
-        "chimera": tagged(cfg["chimera"], f"{acq.upper()} acquisition"),
-        "static_mods": tagged(static, (f"fixed {cys['mod'].lower()} (C) -- " if static else
-                                       "none: cysteine searched unmodified -- ") + cys["source"]),
-        "variable_mods": tagged(variable,
-            "Ox(M) " + ("on (user requested)" if var_mods and "ox" in var_mods else "off (quant default)")
-            + " + protein N-term acetyl"),
-        "enzyme": tagged("trypsin/P, 2 missed cleavages", UNIV),
-        "lfq": tagged(True, "label-free quantification"),
+        "wide_window": tagged(cfg.get("wide_window"), f"{acq.upper()} acquisition"),
+        "chimera": tagged(cfg.get("chimera"), f"{acq.upper()} acquisition"),
+        "static_mods": tagged(db.get("static_mods"),
+                              (f"fixed {cys['mod'].lower()} (C) -- " if static else
+                               "none: cysteine searched unmodified -- ") + cys["source"]),
+        "variable_mods": tagged(db.get("variable_mods"),
+                                vm_src + "; + protein N-term acetyl (always)"),
+        "enzyme": tagged(db.get("enzyme"), UNIV),
+        "lfq": tagged(_cfg_at(cfg, ("quant", "lfq")),
+                      SRC_IDS_ONLY if ids_only else "label-free quantification"),
     })
-    # The user's overrides, each tagged with who set it and why. A derived entry the override
-    # replaced (an overridden precursor_tol makes precursor_tol_ppm's derived value untrue) goes:
-    # the rationale says what the config holds. They used to be merged into the config with no
-    # rationale entry at all.
+    # The user's overrides, each tagged with who set it and why, under the path deep_merge set it
+    # at ("precursor_tol", "database.enzyme.cleave_at"). An entry it lands on or under keeps the
+    # merged value with the override's source instead of its derived one; a derived number whose
+    # window it replaced (precursor_tol_ppm under an overridden precursor_tol) goes. They used to
+    # be merged into the config with no rationale entry at all.
+    # An override of PART of an entry (one residue of static_mods, the enzyme's missed cleavages)
+    # keeps the entry's own source, DEFAULT tag included, and adds its own (review F4, rule 2):
+    # the rest of the value is still what that source says. One that replaces the whole value
+    # says only its own.
     om = override_meta or {}
-    for k, v in (overrides or {}).items():
-        for stale in [x for x in rationale if x == k or x.startswith(k + "_")]:
-            del rationale[stale]
-        rationale[k] = tagged(v, override_source(k, v, om.get("reason")))
+    changed = {}                    # entry -> {"orig": its source, "srcs": [...], "whole": bool}
+    for path, v in set_:
+        k = ".".join(str(p) for p in path)
+        src = override_source(k, v, om.get("reason"), om.get("role", staff.USER_ROLE))
+        for x in [x for x in rationale if x in SAGE_RATIONALE_PATHS]:
+            xp = SAGE_RATIONALE_PATHS[x]
+            n = min(len(xp), len(path))
+            if tuple(xp[:n]) != tuple(path[:n]):
+                continue
+            if x in SAGE_DERIVED_NUMBERS:
+                del rationale[x]
+            else:
+                c = changed.setdefault(x, {"orig": rationale[x]["source"], "srcs": [],
+                                           "whole": False, "keys": set()})
+                c["srcs"].append(src)
+                c["whole"] = c["whole"] or len(path) <= len(xp)
+                if len(path) > len(xp):
+                    c["keys"].add(path[len(xp)])
+        rationale[k] = tagged(v, src)
+    for x, c in changed.items():
+        if x in rationale:
+            # every key the derived source described was replaced ({"C": 0} on a static_mods
+            # that held only C): nothing of it is left to that source (review R2)
+            was = _cfg_at(built, SAGE_RATIONALE_PATHS[x])
+            if isinstance(was, dict) and was and set(was) <= c["keys"]:
+                c["whole"] = True
+            said = "; ".join(c["srcs"])
+            rationale[x] = tagged(_cfg_at(cfg, SAGE_RATIONALE_PATHS[x]),
+                                  said if c["whole"] else f"{c['orig']}; + {said}")
     return json.dumps(cfg, indent=2) + "\n", rationale
 
 
@@ -1214,18 +1571,44 @@ SILAC_OVERRIDE_FLAGS = ("--channels", *silac.CHANNEL_NORM.values())
 SILAC_SHARED_FLAGS = ("--lib-fixed-mod", "--original-mods")
 
 
+def refuse_out(out, msg, code=1):
+    """Exit with `msg`, leaving nothing at --out. The message says no cfg was written, and THIS run
+    wrote none -- but an earlier run of the same command may have left the cfg and its sidecar,
+    and the next step reads them by path, not by mtime. A stale cfg beside a refusal on stdout is
+    the worst of both. Every refusal that says "no cfg was written" goes through here.
+
+    The earlier cfg is never DELETED (C2 errors_ux L1: a mistyped --var-mods word deleted the cfg
+    the session's first search ran with, which the Methods and the bundle read): it and its
+    sidecar are set aside (diann_parallel.set_aside, the one definition: renamed .stale-<time>),
+    the message names where, and says so when one could not be moved."""
+    moved, kept = [], []
+    for stale in (out, out + ".rationale.json"):
+        if not os.path.lexists(stale):
+            continue
+        try:
+            import diann_parallel
+            new = diann_parallel.set_aside(stale)
+            if new:
+                moved.append(new)
+        except (ImportError, ValueError, OSError) as e:
+            kept.append(f"{stale} ({e})")
+    if moved:
+        msg += (" The cfg an earlier run left at --out was NOT deleted: set aside as "
+                + " and ".join(moved) + " (rename it back to use it again).")
+    if kept:
+        msg += (" WARNING: could not set aside " + "; ".join(kept) + " -- it is still at --out "
+                "and does NOT have what this command asked for.")
+    print(f"[estimate_params] {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
 def silac_labels(a, overrides):
     """--labels/--label-preset/--channel-norm -> silac.labels_record(), or None. Exits with the
     reason for a request this skill cannot search: not DIA-NN DIA, a preset without --labels, or
     SILAC flags passed as --overrides. Like the other refusals, it leaves no cfg at --out from an
     earlier run to contradict "no cfg was written"."""
     def refuse(msg):
-        for stale in (a.out, a.out + ".rationale.json"):
-            try:
-                os.unlink(stale)
-            except OSError:
-                pass
-        sys.exit(f"[estimate_params] {msg} No cfg was written.")
+        refuse_out(a.out, f"{msg} No cfg was written.")
     label_mod = lambda k: k == "--fixed-mod" and ",label" in str(overrides[k])  # noqa: E731
     silac_request = bool(a.labels) or any(k in SILAC_OVERRIDE_FLAGS or label_mod(k)
                                           for k in overrides or {})
@@ -1256,7 +1639,18 @@ def main():
     ap.add_argument("--engine", required=True, choices=["diann", "sage"])
     ap.add_argument("--acquisition", required=True, choices=["DIA", "DDA", "dia", "dda"])
     ap.add_argument("--instrument", default="")
-    ap.add_argument("--var-mods", default="", help="comma list, e.g. 'ox' to add Ox(M)")
+    ap.add_argument("--var-mods", default=None,
+                    help=f"variable modifications, a comma list of: {VAR_MODS_WORDS}. ox = Ox(M), "
+                         "deam = Deamidation (NQ), none = off. Any other word is refused. Not "
+                         "given: Ox(M) for a Sage DDA search, nothing otherwise (DIA-NN advises "
+                         "against variable mods for quantification) -- recorded as a DEFAULT. "
+                         "Sage always adds protein N-term acetyl. Giving --var-mods replaces the "
+                         "default; to add deamidation and keep Met-ox, give ox,deam")
+    ap.add_argument(IDS_ONLY_FLAG, action="store_true",
+                    help="Sage only: identifications only, no differential expression. The cfg's "
+                         "quant.lfq is false, so run_search.py searches a timsTOF .d directly "
+                         "(Sage 0.14.7 reads it, but has no MS1 quantification on it). Refused "
+                         "with --engine diann (exit 2): a DIA-NN search always quantifies")
     ap.add_argument("--cys-alkylation", choices=CYS_ALKYLATION_CHOICES, default=None,
                     help="what the sample prep did to cysteine. cam (the default): reduced and "
                          "alkylated with iodoacetamide or chloroacetamide -- fixed carbamidomethyl "
@@ -1282,7 +1676,8 @@ def main():
     ap.add_argument("--override-by", default=None,
                     help="who chose the --overrides values (default: the login running this, "
                          "recorded as such) -- in the staff-only <out>.staff.json only; the "
-                         "sidecar says Core staff")
+                         "sidecar says Core staff when that login is on the Core staff list "
+                         "(staff.py), else the user")
     ap.add_argument("--override-reason", default=None,
                     help="why, in the user's words (e.g. 'instrument ~20 ppm off calibration; "
                          "user chose 25 ppm'); without it the record says the reason was not "
@@ -1302,6 +1697,14 @@ def main():
                          "tag so DIA-NN excludes contaminants from quant")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
+    # --var-mods: an unknown word stops here, before anything is written (VAR_MODS). Blank is not
+    # given (so is a list with no word in it, "," ): the default for this engine and acquisition applies.
+    try:
+        var_mods = parse_var_mods(a.var_mods)
+    except ValueError as e:
+        refuse_out(a.out, f"{e} No cfg was written.")
+    if a.ids_only and a.engine != "sage":
+        refuse_out(a.out, f"{IDS_ONLY_DIANN}. No cfg was written.", code=2)
 
     cont_tag = None
     if a.fasta_meta:
@@ -1317,11 +1720,16 @@ def main():
             overrides = json.loads(a.overrides)
         except json.JSONDecodeError as e:
             sys.exit(f"--overrides is not valid JSON: {e}")
+    if a.ids_only and "quant" in overrides:
+        refuse_out(a.out, f"{IDS_ONLY_FLAG} sets the Sage cfg's quant block (lfq false), and "
+                          f"--overrides sets quant too: give one or the other. No cfg was written.")
     if (a.override_by or a.override_reason) and not overrides:
         sys.exit("[estimate_params] --override-by/--override-reason describe --overrides, and "
                  "none were given")
     by, by_how = override_setter(a.override_by) if overrides else (None, "unknown")
-    override_meta = {"reason": a.override_reason}
+    # "Core staff" only for a login on the Core staff list, else "the user" (S4)
+    role = staff.role_for(by) if overrides else staff.USER_ROLE
+    override_meta = {"reason": a.override_reason, "role": role}
     labels = silac_labels(a, overrides)
 
     r1, r2, analyzer = a.ms1_resolution, a.ms2_resolution, a.ms2_analyzer
@@ -1341,7 +1749,6 @@ def main():
     ask = resolution_question(cls, a.engine, r1, r2)
     if ask:
         print(f"[estimate_params] NEEDS CONFIRMATION: {ask}", file=sys.stderr)
-    var_mods = [v.strip().lower() for v in a.var_mods.split(",") if v.strip()]
     level_src = ((ppm_for_resolution(r1)[1], ppm_for_resolution(r2)[1])
                  if cls in ("orbitrap_measured", "orbitrap_untabled") else None)
 
@@ -1353,25 +1760,28 @@ def main():
                                           level_src=level_src, override_meta=override_meta,
                                           cys=cys, labels=labels)
         except (LoneMassAccOverride, NoPrecursorRange) as e:
-            # The message says "no cfg was written", so leave nothing at --out that contradicts
-            # it. build_diann() raises BEFORE the write below, so THIS run wrote neither file --
-            # but an earlier run of the same command may have left both, and the next step reads
-            # them by path, not by mtime. A stale cfg with a stale mass_accuracy_plan beside a
-            # refusal on stdout is the worst of both.
-            for stale in (a.out, a.out + ".rationale.json"):
-                try:
-                    os.unlink(stale)
-                except OSError:
-                    pass
-            sys.exit(f"[estimate_params] {e}")
+            # build_diann() raises BEFORE the write below; a stale cfg with a stale
+            # mass_accuracy_plan must not outlive the refusal (refuse_out)
+            refuse_out(a.out, str(e))
     else:
-        text, rationale = build_sage(a.acquisition, cls, var_mods, overrides, analyzer,
-                                     override_meta=override_meta, cys=cys)
+        try:
+            text, rationale = build_sage(a.acquisition, cls, var_mods, overrides, analyzer,
+                                         override_meta=override_meta, cys=cys,
+                                         ids_only=a.ids_only)
+        except OverrideRefused as e:
+            refuse_out(a.out, f"{e} No cfg was written.")
 
+    # a new session's wf/ may not exist yet: make --out's folder rather than crash on it
+    os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
     with open(a.out, "w") as fh:
         fh.write(text)
+    # The cysteine record says what the WRITTEN cfg searches (review R1): a DIA-NN --fixed-mod
+    # override replaces every --fixed-mod line, the --cys-alkylation one included, and a Sage
+    # static_mods C override replaces its C -- read back by cys_searched(), the one reader
+    if overrides:
+        cys = cys_record_as_written(cys, cys_searched(a.out), override_meta)
     # who set the overrides, by name: staff-only, beside the cfg (never in the sidecar)
-    staff_rec = (record_override_setter(a.out, overrides, by, by_how, a.override_reason)
+    staff_rec = (record_override_setter(a.out, overrides, by, by_how, a.override_reason, role)
                  if overrides else None)
 
     out_payload = {
@@ -1391,7 +1801,7 @@ def main():
         "mass_accuracy_default": (rationale.get("mass_accuracy_default") or {}).get("value"),
         "params_file": os.path.abspath(a.out),
         # each --overrides value: who set it and why ({} when nothing was overridden)
-        "overrides": override_record(overrides, a.override_reason, staff_rec),
+        "overrides": override_record(overrides, a.override_reason, staff_rec, role=role),
         # what was searched for cysteine (fixed carbamidomethyl or unmodified), and whether the
         # user said so or it is the DEFAULT -- read by make_methods.py
         "cys_alkylation": cys,

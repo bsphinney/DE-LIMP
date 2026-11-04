@@ -861,15 +861,20 @@ MIN_CONTAINED_LEN = DIANN_DIGEST["min_pep_len"]
 MIN_UNIQUE_PEPTIDES = 2
 
 
-def contaminant_target_rule(min_unique=MIN_UNIQUE_PEPTIDES, digest=DIANN_DIGEST):
+def contaminant_target_rule(min_unique=MIN_UNIQUE_PEPTIDES, digest=DIANN_DIGEST, stand_in=False):
     """The sidecar's `contaminant_target_rule`: what this build removed. Its PRESENCE marks a
-    sidecar written with the overlap check (provenance.py, record_run.py)."""
+    sidecar written with the overlap check (provenance.py, record_run.py). `stand_in`: a build
+    with no digestion enzyme (--enzyme none) -- the peptides are counted in the tryptic digest
+    all the same, and the rule says that is a stand-in, not the search's (follow-up 3)."""
     rule = (f"identical sequence, or an exact substring (>= {MIN_CONTAINED_LEN} aa) of a target "
             f"entry; I and L compared as distinct residues")
     if min_unique > 0:
         rule += (f". Also: shares a peptide with a target entry and has fewer than {min_unique} "
-                 f"non-overlapping peptides of its own in the search's digest (--cut "
-                 f"{digest['cut']}, {digest['missed_cleavages']} missed cleavage(s), "
+                 f"non-overlapping peptides of its own in "
+                 + ("a tryptic stand-in digest (no digestion enzyme was added: --enzyme none, so "
+                    "the search's own digest is not this one; --cut " if stand_in else
+                    "the search's digest (--cut ")
+                 + f"{digest['cut']}, {digest['missed_cleavages']} missed cleavage(s), "
                  f"{digest['min_pep_len']}-{digest['max_pep_len']} aa"
                  f"{', N-term Met excision' if digest.get('met_excision') else ''}); "
                  f"I and L equal there")
@@ -887,6 +892,61 @@ MEASURED_TARGET_OVERLAP = {9606: 153, 10090: 31, 9913: 145, 9823: 9, 93061: 2}
 _UNIPROT_HEADER = re.compile(r"^>(?:sp|tr)\|([^|\s]+)\|(\S*)")
 _GENE_NAME = re.compile(r"\bGN=(\S+)")
 _TAXID = re.compile(r"\bOX=(\d+)")
+# OS= runs to the next UniProt field (OX= GN= PE= SV= ...) or the end of the header
+_ORGANISM_NAME = re.compile(r"\bOS=(.+?)(?=\s+[A-Z]{2}=|\s*$)")
+# A UniProt entry name: <mnemonic or accession>_<species code of 1-5 letters/digits>
+_ENTRY_SPECIES = re.compile(r"^[A-Za-z0-9]{1,16}_([A-Za-z0-9]{1,5})$")
+
+
+def species_code(text):
+    """THE species code of a UniProt entry name ('ADH1_YEAST' -> 'YEAST'), or of every entry name
+    in a ';'-joined cell (DIA-NN's Protein.Names) when they all agree; None when there is none --
+    an NCBI database, a bare accession, a Cont_ accession -- or they disagree. One reader for the
+    sidecar's target_species (written here) and for the auditors' rows (audit_results.py,
+    sample_quality.py): a yeast ADH1/TPM2 was once called a "Homo sapiens" protein, and human
+    TPM2 flagged by its symbol (2.14.2, I21)."""
+    codes = set()
+    for tok in re.split(r"[;,\s]+", str(text or "")):
+        m = _ENTRY_SPECIES.match(tok.strip())
+        if m:
+            codes.add(m.group(1).upper())
+    return codes.pop() if len(codes) == 1 else None
+
+
+# A header token that is a key=value field (Trinity's len= path=, a gene= tag), not words
+_KEY_VALUE = re.compile(r"^[A-Za-z][\w.-]*=")
+
+
+def fasta_unannotated(text):
+    """(unannotated, n unnamed, n entries, an example unnamed header) for a FASTA's text: an
+    entry is unnamed when its header has no GN=, no UniProt entry name and no description -- a
+    word after the identifier that is not a key=value field (len=300, gene=...). Unannotated
+    when MOST entries are unnamed, so one added bait does not hide it. The coral study's gene
+    models (">adig_s0001.g1.t1", 2026-10-22) were searched that way, and every table, the volcano
+    and the report named proteins by those IDs alone (2.14.2, I07). Empty text: not judged."""
+    n = unnamed = 0
+    example = None
+    for line in str(text or "").splitlines():
+        if not line.startswith(">"):
+            continue
+        n += 1
+        head = line.strip()
+        m = _UNIPROT_HEADER.match(head)
+        words = [t for t in head[1:].split()[1:] if not _KEY_VALUE.match(t)]
+        if _GENE_NAME.search(head) or (m and m.group(2)) or words:
+            continue
+        unnamed += 1
+        example = example or head
+    return n > 0 and unnamed * 2 > n, unnamed, n, example
+
+
+def _target_species_fields(entry, header):
+    """The matched target's own species, for a contaminant-identical record: `target_species`
+    (its entry name's species code) and `target_organism` (OS=); each None when the header has
+    neither (an NCBI database)."""
+    m = _ORGANISM_NAME.search(header or "")
+    return {"target_species": species_code(entry),
+            "target_organism": m.group(1).strip() if m else None}
 
 # The ONE exception to the rule above: the digestion enzyme(s) USED in this search are
 # reagents we added, so their autolysis peptides must stay Cont_ and out of normalisation
@@ -918,6 +978,11 @@ ENZYME_FAMILIES = tuple(sorted(set(DIGESTION_ENZYMES.values())))
 # The Core's usual digest is a trypsin/Lys-C mix, and estimate_params.py searches
 # trypsin/P (--cut K*,R*), so an unchanged command keeps exactly those reagents.
 DEFAULT_ENZYMES = "trypsin,lysc"
+# No digestion enzyme was added (a hydrolysate or peptidome searched non-specifically): then no
+# protease is a reagent, and one identical to a target is dropped as a target like any other
+# entry (L11 N3). Said alone: `--enzyme none`; recorded as digestion_enzymes_used [] and
+# enzyme "none".
+NO_ENZYME = "none"
 
 
 def _nonneg_int(text):
@@ -933,7 +998,9 @@ def _nonneg_int(text):
 def parse_enzymes(text):
     """'trypsin,Lys-C' / 'Trypsin/Lys-C' / 'Trypsin/P' -> ('lysc', 'trypsin'). Unknown names
     are an error, never ignored: a misspelt enzyme would silently drop its own autolysis
-    entries into quantification."""
+    entries into quantification. 'none' (alone) -> (): no digestion enzyme was added."""
+    if (text or "").strip().lower() == NO_ENZYME:
+        return ()
     # A trailing '/P' ('Trypsin/P', 'Lys-C/P', 'Asp-N/P') is the search-engine suffix for
     # "ignore the proline rule", not a second enzyme -- strip it before '/' is read as a
     # separator. The word boundary keeps 'trypsin/pepsin' as two enzymes.
@@ -945,6 +1012,24 @@ def parse_enzymes(text):
             f"unknown enzyme {', '.join(repr(b) for b in bad) or '(none given)'}; choose from "
             f"{', '.join(ENZYME_FAMILIES)} (comma-separated, e.g. trypsin,lysc)")
     return tuple(sorted(set(names)))
+
+
+def enzymes_recorded(meta):
+    """The digestion enzymes a sidecar's build used (digestion_enzymes_used): () for a build with
+    --enzyme none; the default for a sidecar from before --enzyme existed (its build was the
+    default). THE reader of the field -- the overlap re-check, provenance.py's replay and
+    run_search.py's rebuild command use it."""
+    used = (meta or {}).get("digestion_enzymes_used")
+    return tuple(used) if isinstance(used, list) else parse_enzymes(DEFAULT_ENZYMES)
+
+
+def enzyme_arg(meta):
+    """`--enzyme` as a command that rebuilds this sidecar's database would give it: the build's
+    enzymes, `none`, or -- a sidecar from before --enzyme -- the default as the CLI spells it."""
+    used = (meta or {}).get("digestion_enzymes_used")
+    if not isinstance(used, list):
+        return DEFAULT_ENZYMES
+    return ",".join(used) or NO_ENZYME
 
 
 def _digestion_enzyme(acc):
@@ -1142,7 +1227,7 @@ def contaminants_matching_targets(contam_recs, target_recs, min_len=MIN_CONTAINE
     Target entries are only read, never changed. Cont_-tagged records among the targets
     (a database that already carries contaminants) are not targets.
     """
-    seqs, info, t_info = [], [], {}
+    seqs, info, t_info, t_header = [], [], {}, []
     for ti, (header, lines) in enumerate(target_recs):
         if CONT_TAG in header:
             continue
@@ -1150,6 +1235,7 @@ def contaminants_matching_targets(contam_recs, target_recs, min_len=MIN_CONTAINE
         if s:
             seqs.append(s)
             info.append(_header_ids(header))
+            t_header.append(header)
             t_info[ti] = info[-1]
     by_seq = {}
     for i, s in enumerate(seqs):
@@ -1187,8 +1273,9 @@ def contaminants_matching_targets(contam_recs, target_recs, min_len=MIN_CONTAINE
             "cont_acc": c_acc, "cont_entry": c_entry, "cont_gene": c_gene,
             "target_acc": t_acc, "target_entry": t_entry,
             # The TARGET's gene: what the protein group is now called in the results, so it
-            # is the name the auditors match on.
+            # is the name the auditors match on -- within the target's own species only.
             "gene": t_gene,
+            **_target_species_fields(t_entry, t_header[hits[0]]),
             "reason": reason,
             "n_targets": len(hits),
             # Capped: in a full/isoform database one keratin can sit inside many entries.
@@ -1209,6 +1296,7 @@ def contaminants_matching_targets(contam_recs, target_recs, min_len=MIN_CONTAINE
             out.append((ci, {
                 "cont_acc": c_acc, "cont_entry": c_entry, "cont_gene": c_gene,
                 "target_acc": t_acc, "target_entry": t_entry, "gene": t_gene,
+                **_target_species_fields(t_entry, target_recs[p["targets"][0][0]][0]),
                 "reason": "shared_peptides",
                 # Targets sharing at least one peptide, best first (capped, as above).
                 "n_targets": len(p["targets"]),
@@ -1418,9 +1506,9 @@ def drop_contaminants_near_added(text, added_recs, enzymes_used, source, only_ta
 
 
 def _enzyme_advice(used):
-    return (f"--enzyme was {','.join(used)}; if the digest used a different enzyme, re-run "
-            f"fetch with --enzyme <the enzymes actually used> (choices: "
-            f"{', '.join(ENZYME_FAMILIES)})")
+    return (f"--enzyme was {','.join(used) or NO_ENZYME}; if the digest used a different "
+            f"enzyme, re-run fetch with --enzyme <the enzymes actually used> (choices: "
+            f"{', '.join(ENZYME_FAMILIES)}, or {NO_ENZYME})")
 
 
 def _enzyme_note(enzymes, organism, used):
@@ -1496,6 +1584,22 @@ def _protein_name(header):
     if len(parts) < 2:
         return ""
     return re.split(r"\s(?:OS|OX|GN|PE|SV)=", " " + parts[1], maxsplit=1)[0].strip()
+
+
+def fasta_descriptions(fasta, accessions):
+    """{accession: description} from a FASTA file's headers, for `accessions` only: the accession
+    as _header_ids reads it (what DIA-NN reports), the description as _protein_name does. {} when
+    there is no FASTA. The one reader: normalization_check.py's carboxylase panel reads names
+    through it (C1 review of 2.14.2: it had a parser of its own, which read `>Cont_X|ENTRY` as
+    the accession "Cont_X|ENTRY")."""
+    if not fasta:
+        return {}
+    out = {}
+    for header, _ in _fasta_headers(fasta):
+        acc = _header_ids(header.rstrip("\n"))[0]
+        if acc in accessions:
+            out[acc] = _protein_name(header)
+    return out
 
 
 # A keratin sample: the tissue IS keratin, so keratin is the analyte, not handling contamination.
@@ -1753,6 +1857,66 @@ def matched_target_accs(rec):
     return rec.get("target_accs") or [rec.get("target_acc")]
 
 
+def identical_target_matcher(tc):
+    """THE rule for "is this result row one of the contaminant-identical target proteins", for
+    both auditors (audit_results.py, sample_quality.py), from target_contaminants()'s `dropped`:
+      1. by accession (matched_target_accs) first;
+      2. by gene symbol only when the row's species (species_code of its entry names) is the
+         record's own target_species -- a yeast TPM2 entry never flags human TPM2;
+      3. a record with no species (record_species) -- an NCBI database (no entry names), or a
+         sidecar written before 2.5.1 -- by accession only.
+    -> match(tokens, species) -> {matched name: [records]}: `tokens` are the row's id tokens
+    (accessions and gene symbols, any case), `species` its species_code(); empty when it is none
+    of them. A row matched by accession also names the record's gene when the row carries it."""
+    by_acc, by_gene = {}, {}
+    for r in tc.get("dropped") or []:
+        for a in matched_target_accs(r):
+            if a:
+                by_acc.setdefault(a.upper(), []).append(r)
+        g, sp = (r.get("gene") or "").upper(), (record_species(r) or "").upper()
+        if g and sp:
+            by_gene.setdefault((g, sp), []).append(r)
+
+    def match(tokens, species=None):
+        toks = {str(t).upper() for t in tokens if t}
+        out = {t: by_acc[t] for t in toks if t in by_acc}
+        for recs in list(out.values()):
+            for r in recs:
+                g = (r.get("gene") or "").upper()
+                if g in toks:
+                    out.setdefault(g, recs)
+        sp = (species or "").upper()
+        if sp:
+            for t in toks - set(out):
+                if (t, sp) in by_gene:
+                    out[t] = by_gene[(t, sp)]
+        return out
+    return match
+
+
+def record_species(rec):
+    """A contaminant-identical record's target species code: target_species (2.14.2), else the
+    species code of its target_entry, which every sidecar since 2.5.1 records ("ADH1_YEAST") --
+    so PXD063416's sidecar, which raised I21, is read by species too. None for an NCBI entry."""
+    return rec.get("target_species") or species_code(rec.get("target_entry"))
+
+
+def record_organism(rec, default=None):
+    """The organism a contaminant-identical record's target belongs to, as the auditors name it:
+    its own OS=, else its species code (record_species), else `default` (the database's
+    organism -- all a sidecar written before 2.5.1 can say)."""
+    return rec.get("target_organism") or record_species(rec) or default
+
+
+def predates_target_species(tc):
+    """True when a dropped record carries neither target_species nor target_entry: a sidecar
+    written before 2.5.1, whose records the auditors match by accession only
+    (identical_target_matcher). An NCBI record (target_entry "") is accession-only by rule 3,
+    not old."""
+    return any("target_species" not in r and "target_entry" not in r
+               for r in tc.get("dropped") or [])
+
+
 def seen_only_as_cont(kept, groups):
     """Matrix evidence for `kept_as_contaminant`: of [(protein-group accessions, label)], the
     groups made up ONLY of Cont_ accessions that are target proteins -> ['ACTB (Cont_P60712)'].
@@ -1927,16 +2091,145 @@ def near_identical_measured(meta):
         return None
 
 
+def sidecar_sha256_matches(meta, path):
+    """Is the file at `path` the one this sidecar describes? The ONE comparison of a file with the
+    sha256 the sidecar recorded: True when they are equal, False when they differ, None when the
+    sidecar records none. OSError propagates: the caller says which file could not be read.
+    _recheck, audit_results.searched_fasta and contaminant_competition.database_build use it."""
+    want = meta.get("sha256") if isinstance(meta, dict) else None
+    if not want:
+        return None
+    return _sha256(path) == want
+
+
+# Philosopher's target+decoy database, the decoys MSFragger needs added to a FASTA this skill
+# built (`philosopher database --custom <name> --prefix rev_`, as run_search.py's FragPipe
+# refusals print it): <date>-decoys-<name>.fas, written where Philosopher ran. It has no sidecar
+# of its own; <name>'s is the one that describes its targets.
+PHILOSOPHER_DECOY_FAS = re.compile(r"^\d{4}-\d{2}-\d{2}-decoys-(?P<target>.+)\.fas$")
+NO_SIDECAR = "none"                    # --fasta-meta none: the user says the database has none
+
+
+def _sidecar_entries(path):
+    """(n_entries of a fetch_fasta.py sidecar, None) or (None, why it cannot be read)."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            meta = json.load(fh)
+    except FileNotFoundError:
+        return None, "not there"
+    except (OSError, ValueError) as e:
+        return None, f"unreadable ({type(e).__name__})"
+    n = meta.get("n_entries") if isinstance(meta, dict) else None
+    return (n, None) if isinstance(n, int) and not isinstance(n, bool) else \
+        (None, "records no n_entries")
+
+
+def sidecar_for(fasta, given=None, look_in=(), decoy_tag="rev_"):
+    """THE fetch_fasta.py sidecar that describes the database a search is given (2.14.2, H7b-1:
+    a FragPipe search must be given the target+decoy .fas, which has no sidecar, and its record
+    then lost the target FASTA's facts -- keratin_sample_source null -- with nothing said).
+    -> {"path", "target_fasta", "rule", "source", "problem"}, the first rule that finds one:
+      * "given": run_search.py --fasta-meta, that file; NO_SIDECAR: none, the user's word;
+      * "own": <fasta>.meta.json, as always;
+      * for a Philosopher .fas (PHILOSOPHER_DECOY_FAS), whose targets are counted (headers that
+        do not start with `decoy_tag`), a sidecar is taken ONLY when its n_entries equals that
+        count exactly -- evidence, never a guess:
+        - "named": <name>.meta.json beside the .fas, else in a folder of `look_in` (the
+          session's input/);
+        - "count": else the ONE *.meta.json in a `look_in` folder that matches (a .fas built from
+          a renamed copy: references/fragpipe-diatracer.md's `cp search.fasta target.fasta`
+          before 2.14.2). Several matching: none is taken, and `problem` names them.
+    `path` None with `problem` set: a .fas whose target's sidecar was not found, did not match or
+    was ambiguous (where it looked, and why each failed). `path` None with no problem: a database
+    that is not a Philosopher .fas and has no sidecar, as before. OSError reading the .fas
+    propagates."""
+    fasta = os.path.abspath(str(fasta))
+    if given:
+        if given == NO_SIDECAR:
+            return {"path": None, "target_fasta": None, "rule": "given", "problem": None,
+                    "source": "--fasta-meta none: the user says this database has no "
+                              "fetch_fasta.py sidecar"}
+        return {"path": os.path.abspath(given), "target_fasta": None, "rule": "given",
+                "problem": None, "source": "--fasta-meta"}
+    own = fasta + ".meta.json"
+    if os.path.isfile(own):
+        return {"path": own, "target_fasta": fasta, "rule": "own", "problem": None,
+                "source": "<fasta>.meta.json"}
+    m = PHILOSOPHER_DECOY_FAS.match(os.path.basename(fasta))
+    if not m:
+        return {"path": None, "target_fasta": None, "rule": None, "problem": None,
+                "source": f"none: {fasta} has no fetch_fasta.py sidecar"}
+    name = m.group("target")
+    n_targets = sum(1 for ln, _ in _fasta_headers(fasta) if not ln[1:].startswith(decoy_tag))
+    dirs = []
+    for d in [os.path.dirname(fasta)] + [x for x in look_in if x]:
+        if os.path.abspath(d) not in dirs:
+            dirs.append(os.path.abspath(d))
+    folders = [os.path.abspath(x) for x in look_in if x]
+
+    def found(cand, rule, how):
+        return {"path": cand, "target_fasta": (_load_meta_fasta(cand)
+                                               or cand[:-len(".meta.json")]),
+                "rule": rule, "problem": None,
+                "source": (f"the target FASTA's sidecar, by rule '{rule}': "
+                           f"{os.path.basename(fasta)} is Philosopher's target+decoy database of "
+                           f"{name}, and {cand} {how} describes exactly its {n_targets} target "
+                           f"entries")}
+
+    tried = []
+    for d in dirs:
+        cand = os.path.join(d, name + ".meta.json")
+        n, why = _sidecar_entries(cand)
+        if n == n_targets:
+            return found(cand, "named", "(its name)")
+        tried.append((cand, why or f"describes {n} entries, the .fas has {n_targets} targets"))
+    seen = {c for c, _ in tried}
+    matches = []
+    for d in folders:
+        for cand in sorted(glob.glob(os.path.join(d, "*.meta.json"))):
+            if cand in seen:
+                continue
+            seen.add(cand)
+            n, why = _sidecar_entries(cand)
+            if n == n_targets:
+                matches.append(cand)
+            else:
+                tried.append((cand, why or f"describes {n} entries"))
+    if len(matches) == 1:
+        return found(matches[0], "count",
+                     f"(the only sidecar in {os.path.dirname(matches[0])} that does)")
+    if matches:
+        return {"path": None, "target_fasta": None, "rule": None, "source": None,
+                "problem": (f"{fasta} is Philosopher's target+decoy database of {name}, which "
+                            f"has no sidecar of its own, and {len(matches)} sidecars describe "
+                            f"its {n_targets} target entries, so none is taken: "
+                            + ", ".join(matches))}
+    return {"path": None, "target_fasta": None, "rule": None, "source": None,
+            "problem": (f"{fasta} is Philosopher's target+decoy database of {name}, which has no "
+                        f"sidecar of its own, and no sidecar describing its {n_targets} target "
+                        f"entries was found ("
+                        + "; ".join(f"{c}: {why}" for c, why in tried) + ")")}
+
+
+def _load_meta_fasta(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            meta = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return meta.get("fasta") if isinstance(meta, dict) else None
+
+
 def _recheck(meta):
     """(the searched FASTA's records, None) when it is still there AND still the one searched
     (sha256), else (None, why not)."""
-    path, sha = meta.get("fasta"), meta.get("sha256")
+    path = meta.get("fasta")
     if not path or not os.path.isfile(path):
         return None, f"the searched FASTA ({path or 'path not recorded'}) is no longer readable"
     # Caught HERE, and named: left to propagate, an unreadable FASTA reached the auditors'
     # sidecar handler and was reported as "could not read <meta.json>" -- the wrong file.
     try:
-        if sha and _sha256(path) != sha:
+        if sidecar_sha256_matches(meta, path) is False:
             return None, f"{path} has changed since the search (its sha256 no longer matches)"
         return _fasta_records(_read_fasta_text(path)), None
     except OSError as e:
@@ -1946,7 +2239,7 @@ def _recheck(meta):
 def _overlap_now(meta, recs):
     """The contaminant entries of `recs` today's rule drops (both rules; the digestion enzymes
     the search used stay contaminants, as at build time)."""
-    used = meta.get("digestion_enzymes_used") or parse_enzymes(DEFAULT_ENZYMES)
+    used = enzymes_recorded(meta)
     overlap, _enz = _split_enzymes(contaminants_matching_targets(
         [r for r in recs if CONT_TAG in r[0]], recs), used)
     return [rec for _, rec in overlap]
@@ -2302,6 +2595,17 @@ def cmd_fetch(a):
         base_text = _read_fasta_text(a.path)
         source, content_used = f"override:{a.path}", "unknown"
         meta = dict(named_organism, proteome_type="user-supplied FASTA (--path)")
+        # A database that names no protein: said now, recorded for the report (I07)
+        unannotated, n_unnamed, n_entries, example = fasta_unannotated(base_text)
+        meta["unannotated"] = unannotated
+        if unannotated:
+            msg = (f"{n_unnamed} of {n_entries} entries in the supplied FASTA carry no gene "
+                   f"names (GN=) and no protein descriptions (e.g. '{example}'): the results "
+                   f"tables, the volcano and the report will name those proteins by these IDs "
+                   f"only. This skill does not annotate them yet (e.g. a DIAMOND search against "
+                   f"Swiss-Prot); tell the user before the search")
+            _warn(msg)
+            warnings.append(msg)
 
     # 2. HIVE pre-staged
     if base_text is None and a.hive and a.proteome:
@@ -2489,7 +2793,9 @@ def cmd_fetch(a):
     # target-identical ones found there stay -- and those real proteins will be reported
     # only as Cont_ groups and kept out of quant. Find them and say so, loudly.
     # The enzymes this search used: only these stay Cont_ despite matching a target.
-    enzymes_used = getattr(a, "enzyme", None) or parse_enzymes(DEFAULT_ENZYMES)
+    # () is --enzyme none, not "unset": only None falls back to the default
+    enzymes_used = (a.enzyme if getattr(a, "enzyme", None) is not None
+                    else parse_enzymes(DEFAULT_ENZYMES))
     # The peptide rule's threshold (MIN_UNIQUE_PEPTIDES; 0 = identity rule only).
     min_unique = getattr(a, "min_unique_peptides", MIN_UNIQUE_PEPTIDES)
 
@@ -2744,6 +3050,18 @@ def cmd_fetch(a):
         build_taxid = int(meta.get("taxid") or 0)
     except (TypeError, ValueError):
         build_taxid = 0
+    # --enzyme none: the own-peptide rule still counted peptides in DIANN_DIGEST (tryptic), a
+    # stand-in for a search that has no enzyme -- said, never called "the search's digest"
+    # (follow-up 3, H7 bug 5)
+    digest_note = None
+    if not enzymes_used and min_unique > 0 and not keep_all:
+        digest_note = (f"no digestion enzyme (--enzyme none): the contaminants' own-peptide rule "
+                       f"(fewer than {min_unique} peptides of their own) counted peptides in a "
+                       f"tryptic stand-in digest (--cut {DIANN_DIGEST['cut']}, "
+                       f"{DIANN_DIGEST['missed_cleavages']} missed cleavage(s)), not the search's; "
+                       f"--min-unique-peptides 0 keeps only the identity rule")
+        _warn(digest_note)
+        warnings.append(digest_note)
     result = {
         "fasta": os.path.abspath(a.out),
         "sha256": _sha256(a.out),
@@ -2762,6 +3080,9 @@ def cmd_fetch(a):
         # Where organism/taxid came from, so an offline fill is never mistaken for
         # UniProt's answer: uniprot_api:<UP>, filename_taxid+curated_table, ... or none.
         "organism_source": meta.get("organism_source", "none"),
+        # --path only: True when no header names its protein (fasta_unannotated); None when not
+        # checked (a UniProt or NCBI download names every entry)
+        "unannotated": meta.get("unannotated"),
         # UniProt's superkingdom when the proteome came from it ("" otherwise): sample_quality.py
         # scores its vertebrate blood/muscle/skin panels only where they can apply
         "superkingdom": meta.get("superkingdom") or "",
@@ -2824,10 +3145,14 @@ def cmd_fetch(a):
         "contaminants_kept_despite_target_match": enzymes_kept,
         # What --enzyme said (default trypsin,lysc): decides which protease entries stay Cont_.
         "digestion_enzymes_used": list(enzymes_used),
+        # ...in the CLI's words: the enzymes, or "none" (--enzyme none: no digestion enzyme)
+        "enzyme": ",".join(enzymes_used) or NO_ENZYME,
         # Its PRESENCE marks a sidecar written with the overlap check; provenance.py replays a
         # sidecar without it (or with the rule disabled) using --keep-target-contaminants.
         "contaminant_target_rule": (KEEP_TARGET_CONTAMINANTS_RULE if keep_all
-                                    else contaminant_target_rule(min_unique)),
+                                    else contaminant_target_rule(
+                                        min_unique, stand_in=not enzymes_used)),
+        **({"contaminant_digest_note": digest_note} if digest_note else {}),
         # The peptide rule's threshold and the digest it counted peptides in (the search's,
         # estimate_params.DIANN_DIGEST). A sidecar with the rule but WITHOUT this key was built
         # with the identity rule alone; provenance.py replays it with --min-unique-peptides 0.
@@ -2948,7 +3273,10 @@ def main():
                    help="digestion enzyme(s) used on these samples, comma-separated, from: "
                         + ", ".join(ENZYME_FAMILIES) + f". Default {DEFAULT_ENZYMES} (the Core's "
                         "trypsin/Lys-C mix). Only these enzymes' contaminant entries stay Cont_ "
-                        "when they match a target protein; any other protease is dropped then.")
+                        "when they match a target protein; any other protease is dropped then. "
+                        f"'{NO_ENZYME}' (alone): no digestion enzyme was added (a hydrolysate or "
+                        "peptidome searched non-specifically), so every protease entry identical "
+                        "to a target is dropped as a target; recorded as enzyme: none.")
     f.add_argument("--min-unique-peptides", type=_nonneg_int, default=MIN_UNIQUE_PEPTIDES,
                    help="a contaminant entry that shares a peptide with a target protein is "
                         "dropped when it has fewer than this many non-overlapping peptides of "

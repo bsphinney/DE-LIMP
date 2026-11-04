@@ -115,6 +115,8 @@ class Beside(unittest.TestCase):
     def test_finalize_writes_differences_in_the_new_session_only(self):
         new = self.init("--reanalysis-of", self.prior, "--beside")["created"]
         before = snapshot(self.prior)
+        import finish_fixture                              # finished as finalize's gate asks
+        finish_fixture.finished(os.path.join(new, "output"), methods=True)
         args = type("A", (), dict(dir=new, zip=False, no_deposit=True, no_notify=True,
                                   reanalysis_of=""))()
         out = io.StringIO()

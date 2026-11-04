@@ -18,7 +18,9 @@ hung 16 min expanding a raw-data glob that the login node listed instantly; resu
                             NODE_FAULT_EXIT -- before DIA-NN, so nothing is blamed on it.
   classify(...)             a FAILED job's log tail, sacct state and exit codes -> a node fault,
                             or None. The signatures are I/O errors from the storage, never
-                            anything DIA-NN reports about the data. watch_run.sh asks this.
+                            anything DIA-NN reports about the data -- and a job killed by signal
+                            53 before it wrote any log (a "black-hole" node that cannot start
+                            jobs). watch_run.sh asks this.
   retry                     resubmit the failed step -- and every step waiting on it, which
                             afterok has left DependencyNeverSatisfied -- with --exclude=<node>,
                             at most MAX_NODE_RETRIES times per step. Recorded in
@@ -31,7 +33,8 @@ and a cancel keep their own classes (watch_run.sh); a retry of those on another 
 the same way.
 
 Usage:
-  node_fault.py classify [--state FAILED] [--exit-codes 75:0,1:0] [--nodes n1,n2] < log_tail
+  node_fault.py classify [--state FAILED] [--exit-codes 75:0,1:0] [--nodes n1,n2]
+                         [--elapsed 00:00:02,...] < log_tail
   node_fault.py retry --out <search out dir> [--job <failed job id>] [--node <name>] [--dry-run]
 """
 import argparse
@@ -73,6 +76,12 @@ SIGNATURES = (
 # A job SLURM ended for a reason of its own: not retried as a node fault.
 NOT_NODE_STATES = ("OUT_OF_MEMORY", "TIMEOUT", "CANCELLED", "PREEMPTED", "DEADLINE")
 FAILED_STATES = ("FAILED", "NODE_FAIL", "BOOT_FAIL")
+# A black-hole node (I08): it kills every job SLURM sends it before the script runs -- sacct
+# FAILED, ExitCode 0:53, an Elapsed of seconds, and no log at all. The signal is the evidence
+# only with nothing in the log: a job that wrote one ran, and its log decides.
+BLACK_HOLE_SIGNAL = "53"
+BLACK_HOLE_MEANING = ("the job died as it started (signal 53) and wrote no log: a node that "
+                      "cannot start jobs")
 # a line step 1b's probe wrote or relayed (probe_window.py: "[probe_window] ...", "[probe 2] ...";
 # diann_parallel.probe_attempts: "[probe] ...")
 PROBE_LINE_RE = re.compile(r"\s*\[probe(?:_window| \d+)?\] ")
@@ -89,11 +98,13 @@ def _ended_badly(r):
             or r["exit"].split(":")[0] == str(NODE_FAULT_EXIT))
 
 
-def classify(text, state=None, exit_codes=(), nodes=()):
+def classify(text, state=None, exit_codes=(), nodes=(), elapsed=()):
     """A node fault in a failed job, or None. `text` is its log tail, `state` its sacct state,
-    `exit_codes` sacct's ExitCode values ("75:0"), `nodes` where it ran. The log's own line is
-    the evidence when there is one; NODE_FAULT_EXIT (the node check) and NODE_FAIL (SLURM's own
-    verdict) need no log -- a node that lost its mount may not have been able to write one."""
+    `exit_codes` sacct's ExitCode values ("75:0"), `nodes` where it ran, `elapsed` sacct's
+    Elapsed values. The log's own line is the evidence when there is one; NODE_FAULT_EXIT (the
+    node check) and NODE_FAIL (SLURM's own verdict) need no log -- a node that lost its mount may
+    not have been able to write one -- and a FAILED job killed by signal 53 is one only when it
+    wrote no log (BLACK_HOLE_SIGNAL)."""
     state = state.split()[0].rstrip("+") if state and state.split() else ""
     nodes = sorted({n for n in nodes if n and n not in ("None", "None assigned")})
     if state in NOT_NODE_STATES:
@@ -118,6 +129,13 @@ def classify(text, state=None, exit_codes=(), nodes=()):
         elif state in ("NODE_FAIL", "BOOT_FAIL"):
             rec = {"signature": "slurm_node_fail", "evidence": f"sacct state {state}",
                    "meaning": "SLURM itself marked the node as failed"}
+        elif state == "FAILED" and not text.strip() and any(
+                str(c).partition(":")[2] == BLACK_HOLE_SIGNAL for c in exit_codes):
+            code = next(str(c) for c in exit_codes
+                        if str(c).partition(":")[2] == BLACK_HOLE_SIGNAL)
+            took = next((e for e in elapsed if e), None) or "not recorded"
+            rec = {"signature": "slurm_signal53", "meaning": BLACK_HOLE_MEANING,
+                   "evidence": f"sacct ExitCode {code}, Elapsed {took}, no log"}
         else:
             return None
     rec["nodes"] = nodes
@@ -314,10 +332,14 @@ def _run(argv, cwd=None):
         return None, "", f"{type(e).__name__}: {e}"
 
 
+# sacct's fields for a job's rows; watch_run.sh asks for the same (NF_FORMAT)
+SACCT_FORMAT = "JobID,State,ExitCode,NodeList,Elapsed"
+
+
 def sacct_rows(job):
-    """[{id, task, state, exit, node}] for a job (every array task), from sacct."""
-    rc, out, err = _run(["sacct", "-j", str(job), "-X", "-n", "-P",
-                         "-o", "JobID,State,ExitCode,NodeList"])
+    """[{id, task, state, exit, node, elapsed}] for a job (every array task), from sacct. A row
+    of four fields (no Elapsed) still parses, with elapsed None."""
+    rc, out, err = _run(["sacct", "-j", str(job), "-X", "-n", "-P", "-o", SACCT_FORMAT])
     if rc != 0:
         raise RuntimeError(f"sacct -j {job} failed: {(err or out).strip()[:200]}")
     rows = []
@@ -327,7 +349,7 @@ def sacct_rows(job):
             continue
         jid, _, task = f[0].partition("_")
         rows.append({"id": jid, "task": task or None, "state": f[1].split()[0] if f[1] else "",
-                     "exit": f[2], "node": f[3]})
+                     "exit": f[2], "node": f[3], "elapsed": (f[4] or None) if len(f) > 4 else None})
     return rows
 
 
@@ -367,19 +389,21 @@ def _write_json(path, data):
 
 def _log_tail(out, job, task=None, n=12000):
     """The tail of a failed job's log in the search folder (`<name>_<job>.log`, an array task's
-    `<name>_<job>_<task>.log`), or ""."""
+    `<name>_<job>_<task>.log`); "" when the folder holds none (the job wrote no log); None when
+    the folder or its log could not be read -- which is never "no log" (a signal-53 job is a
+    node fault only when it wrote none, L8R-F5)."""
     want = f"_{job}_{task}.log" if task else f"_{job}.log"
     try:
         names = [f for f in os.listdir(out) if f.endswith(want)]
     except OSError:
-        return ""
+        return None
     for f in names:
         try:
             with open(os.path.join(out, f), errors="replace") as fh:
                 return fh.read()[-n:]
         except OSError:
             continue
-    return ""
+    return None if names else ""
 
 
 def _refuse(msg, **extra):
@@ -497,8 +521,11 @@ def _retry(out, job, node, dry_run, force):
     # own error had its node excluded and blamed.
     verdict = {}
     for r in bad:
-        verdict[r["task"]] = classify(_log_tail(out, id_of[failed_var], r["task"]), r["state"],
-                                      [r["exit"]], [r["node"]])
+        tail = _log_tail(out, id_of[failed_var], r["task"])
+        if tail is None:                                # not read: never a black hole
+            tail = f"(the job's log could not be read in {out})"
+        verdict[r["task"]] = classify(tail, r["state"], [r["exit"]], [r["node"]],
+                                      [r.get("elapsed")])
     faulty = [r for r in bad if verdict[r["task"]]]
     other = [r for r in bad if not verdict[r["task"]]]
     label = (lambda r: f"task {r['task']}" if r["task"] else f"job {r['id']}")
@@ -704,6 +731,7 @@ def main(argv=None):
     c.add_argument("--state", default="")
     c.add_argument("--exit-codes", default="", help="sacct ExitCode values, comma-separated")
     c.add_argument("--nodes", default="", help="sacct NodeList values, comma-separated")
+    c.add_argument("--elapsed", default="", help="sacct Elapsed values, comma-separated")
     r = sub.add_parser("retry", help="resubmit the failed step and its dependants elsewhere")
     r.add_argument("--out", required=True, help="the search folder (submit.sh + jobs.txt)")
     r.add_argument("--job", help="the failed job id (default: the first failed one)")
@@ -714,7 +742,8 @@ def main(argv=None):
     a = ap.parse_args(argv)
     if a.cmd == "classify":
         split = lambda s: [x for x in s.split(",") if x]  # noqa: E731
-        rec = classify(sys.stdin.read(), a.state, split(a.exit_codes), split(a.nodes))
+        rec = classify(sys.stdin.read(), a.state, split(a.exit_codes), split(a.nodes),
+                       split(a.elapsed))
         print(json.dumps({"node_fault": bool(rec), **(rec or {})}, indent=2))
         return 0
     return retry(a.out, a.job, a.node, a.dry_run, a.force)

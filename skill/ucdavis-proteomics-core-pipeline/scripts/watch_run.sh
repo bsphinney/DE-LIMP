@@ -63,22 +63,57 @@ if [ "$(python3 -c 'print("ok")' 2>/dev/null | tr -d '\r')" != ok ]; then     # 
   exit 3
 fi
 
-# sacct's JobID|State|ExitCode|NodeList rows for a job (every array task); the one query.
-NF_FORMAT="JobID,State,ExitCode,NodeList"
+# sacct's JobID|State|ExitCode|NodeList|Elapsed rows for a job (every array task); the one
+# query (node_fault.SACCT_FORMAT). Elapsed: a black-hole node's job dies in seconds (signal 53).
+NF_FORMAT="JobID,State,ExitCode,NodeList,Elapsed"
 # node_fault.py classify, from those rows of a failed job and its FAILED tasks' log tails (the
 # one definition of a node fault). Prints its JSON; empty when python3 cannot run it.
 node_fault_json() {
-  local rows="$1" tail="$2" st codes nodes
+  local rows="$1" tail="$2" st codes nodes took
   st="$(printf '%s\n' "$rows" | awk -F'|' 'NF>=4 && $2 !~ /COMPLETED|RUNNING|PENDING/{print $2; exit}')"
   codes="$(printf '%s\n' "$rows" | awk -F'|' 'NF>=4 && $2 !~ /COMPLETED|RUNNING|PENDING/{print $3}' | paste -sd, -)"
   nodes="$(printf '%s\n' "$rows" | awk -F'|' 'NF>=4 && $2 !~ /COMPLETED|RUNNING|PENDING/{print $4}' | sort -u | paste -sd, -)"
-  printf '%s' "$tail" | python3 "$HERE/node_fault.py" classify --state "$st" --exit-codes "$codes" --nodes "$nodes" 2>/dev/null | tr '\n' ' '
+  took="$(printf '%s\n' "$rows" | awk -F'|' 'NF>=5 && $2 !~ /COMPLETED|RUNNING|PENDING/{print $5}' | paste -sd, -)"
+  printf '%s' "$tail" | python3 "$HERE/node_fault.py" classify --state "$st" --exit-codes "$codes" --nodes "$nodes" --elapsed "$took" 2>/dev/null | tr '\n' ' '
+}
+# A failed job's log tails for node_fault.py, as `run` reads them. A log NOT READ is never a log
+# not written: a signal-53 job is a node fault only when it wrote none (L8R-F5). Each sets
+# nf_logs (the tails) and nf_unread (why they could not be read, or empty). A folder that
+# exists and holds no matching log is a job that wrote none.
+read_job_logs() {   # <folder> <glob in it>
+  local got
+  got="$(run "d=$(printf %q "$1"); if [ -d \"\$d\" ] && [ -x \"\$d\" ]; then echo __LOGDIR_READ__; for f in \"\$d\"/$2; do [ -e \"\$f\" ] || continue; if [ -r \"\$f\" ]; then tail -n 100 \"\$f\"; else echo __LOG_UNREADABLE__; fi; done; fi" 2>/dev/null)"
+  nf_logs=""; nf_unread=""
+  if ! printf '%s\n' "$got" | LC_ALL=C grep -aq '^__LOGDIR_READ__$'; then nf_unread="$1 could not be read"
+  elif printf '%s\n' "$got" | LC_ALL=C grep -aq '^__LOG_UNREADABLE__$'; then nf_unread="a log in $1 could not be read"
+  else nf_logs="$(printf '%s\n' "$got" | LC_ALL=C sed '/^__LOGDIR_READ__$/d')"; fi
+}
+read_log_file() {   # <file>
+  local got
+  got="$(run "f=$(printf %q "$1"); if [ -r \"\$f\" ]; then echo __LOG_READ__; tail -n 100 \"\$f\"; fi" 2>/dev/null)"
+  nf_logs=""; nf_unread=""
+  if printf '%s\n' "$got" | LC_ALL=C grep -aq '^__LOG_READ__$'; then
+    nf_logs="$(printf '%s\n' "$got" | LC_ALL=C sed '/^__LOG_READ__$/d')"
+  else nf_unread="--log $1 could not be read"; fi
 }
 # What to run for one: on HIVE itself, or from a laptop through hive_exec.sh. The folder is
 # shell-quoted: service folders hold spaces.
 node_fault_fix() {
   local o; o="$(printf %q "$1")"
   echo "Retry it on another node: python3 $HERE/node_fault.py retry --out $o --job $2 (from a laptop: bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/node_fault.py retry --out $o --job $2'). It resubmits that step and the steps waiting on it with --exclude=<node>, at most twice per step (node_faults.json), and refuses when any failed task is not a node fault. Tell the user it was a node problem, not DIA-NN and not their data."
+}
+
+# A --dda search whose second pass crashed and fell back to its first-pass report
+# (dda_first_pass.py): the caveat, worded by dda_first_pass.caution() HERE, from the search's
+# provenance as `run` reads it (with --hive the skill's scripts are not at this path on HIVE).
+# Empty for every other search, and for a provenance from before 2.14.2 (no report_used).
+dda_caution() {
+  local f py
+  f="$(mktemp 2>/dev/null || echo "${TMPDIR:-/tmp}/watch_run_dfp.$$")"
+  run "cat $(printf %q "$1/search_provenance.json") 2>/dev/null" > "$f" 2>/dev/null
+  py="$f"; command -v cygpath >/dev/null 2>&1 && py="$(cygpath -m "$f")"
+  [ -s "$f" ] && python3 "$HERE/dda_first_pass.py" caution --provenance "$py" 2>/dev/null | tr -d '\r'
+  rm -f "$f"
 }
 
 # mtime of a file, in the syntax of whichever kernel `run` will actually execute on.
@@ -110,6 +145,10 @@ if [ -n "$OUTDIR" ]; then
     if   has "$OUTDIR/report.parquet";     then stage="step5"; n_done="$n_total"
     elif has "$OUTDIR/empirical.parquet";  then stage="step4"; n_done="$q4"
     elif [ "$q2" -ge "$n_total" ];         then stage="step3"; n_done="$n_total"
+    # step 1b (a chain that has one) writes params.resolved.cfg as its last act: until then it
+    # is measuring on representative runs, and no file is being searched yet (S6)
+    elif has "$OUTDIR/step1.predicted.speclib" && has "$OUTDIR/step1b_window.sbatch" \
+         && ! has "$OUTDIR/params.resolved.cfg"; then stage="step1b"; n_done=0
     elif has "$OUTDIR/step1.predicted.speclib"; then stage="step2"; n_done="$q2"
     else stage="step1"; n_done=0
     fi
@@ -163,12 +202,17 @@ if [ "$MODE" = "chain" ]; then
     nf_rows="$(run "sacct -j $worst -X --noheader -P -o $NF_FORMAT 2>/dev/null" 2>/dev/null)"
     # the logs of the tasks that FAILED (an array's first task may have succeeded), at most 3
     nf_tasks="$(printf '%s\n' "$nf_rows" | awk -F'|' 'NF>=4 && $2 !~ /COMPLETED|RUNNING|PENDING/{n=split($1,a,"_"); print (n>1 ? a[2] : "-")}' | head -3 | tr '\n' ' ')"
-    nf_tail=""
+    nf_tail=""; nf_unread_all=""
     for t in $nf_tasks; do
       if [ "$t" = "-" ]; then pat="*_${worst}.log"; else pat="*_${worst}_${t}.log"; fi
+      read_job_logs "$CHAINDIR" "$pat"
+      [ -n "$nf_unread" ] && nf_unread_all="$nf_unread"
       nf_tail="$nf_tail
-$(run "for f in $QD/$pat; do [ -f \"\$f\" ] && tail -n 100 \"\$f\"; done" 2>/dev/null)"
+$nf_logs"
     done
+    # not read is not "no log": classify() then calls no signal-53 job a black hole
+    [ -n "$nf_unread_all" ] && nf_tail="$nf_tail
+(the job's log could not be read: $nf_unread_all)"
     nf_json="$(node_fault_json "$nf_rows" "$nf_tail")"
     if printf '%s' "$nf_json" | grep -q '"node_fault": true'; then
       nf_say="$(printf '%s' "$nf_json" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("say",""))' 2>/dev/null | tr -d '"\\')"
@@ -189,10 +233,26 @@ print(json.dumps(o))'
 
       exit 0
     fi
-    echo "{\"mode\":\"chain\",\"dir\":\"$CHAINDIR\",\"failed\":true,\"done\":true,\"first_failed_job\":\"$worst\",\"chain\":\"${summary# }\"$fb,\"fix\":\"A step FAILED. Inspect it: watch_run.sh --slurm $worst --hive. Downstream steps will sit PENDING with DependencyNeverSatisfied forever until you fix and resubmit them.\"}"
+    lu=""; [ -n "$nf_unread_all" ] && lu=",\"log_unread\":$(json_str "the failed job's log could not be read ($nf_unread_all), so whether a node fault ended it is not known: read it before resubmitting")"
+    echo "{\"mode\":\"chain\",\"dir\":\"$CHAINDIR\",\"failed\":true,\"done\":true,\"first_failed_job\":\"$worst\",\"chain\":\"${summary# }\"$fb$lu,\"fix\":\"A step FAILED. Inspect it: watch_run.sh --slurm $worst --hive. Downstream steps will sit PENDING with DependencyNeverSatisfied forever until you fix and resubmit them.\"}"
     exit 0
   fi
   if $allterm; then
+    # the two-job route's search is watched here: done, with the caveat when it fell back
+    dfp="$(dda_caution "$CHAINDIR")"
+    if [ -n "$dfp" ]; then
+      DFP="$dfp" CDIR="$CHAINDIR" CHAIN="${summary# }" FB="$fb" python3 -c '
+import json, os
+o = {"mode": "chain", "dir": os.environ["CDIR"], "failed": False, "done": True,
+     "chain": os.environ["CHAIN"]}
+fb = os.environ.get("FB") or ""
+if fb:
+    o.update(json.loads("{" + fb.lstrip(",") + "}"))
+o["dda_first_pass"] = True
+o["caution"] = " ".join(x for x in (o.get("caution"), os.environ["DFP"]) if x)
+print(json.dumps(o))'
+      exit 0
+    fi
     echo "{\"mode\":\"chain\",\"dir\":\"$CHAINDIR\",\"failed\":false,\"done\":true,\"chain\":\"${summary# }\"$fb}"
     exit 0
   fi
@@ -216,6 +276,8 @@ print(json.dumps(o))'
   CDIR="$CHAINDIR" CHAIN="${summary# }" FB="$fb" STAGE="$stage" NDONE="${n_done:-0}" \
   NTOTAL="${n_total:-0}" RID="$rid" RLOG="$rlog" RFILE="$rfile" NOTES="$notes" python3 - <<'PY'
 import json, os, re
+STEP1B = ("step 1b/5 measuring the scan window (and any planned mass accuracy) on representative "
+          "runs; no file is searched until it is done")
 o = {"mode": "chain", "dir": os.environ["CDIR"], "failed": False, "done": False,
      "chain": os.environ["CHAIN"]}
 fb = os.environ.get("FB") or ""
@@ -227,7 +289,9 @@ step = stage[4:] if stage.startswith("step") else None
 where = f"step {step}/5" if step else "search"
 p = {"stage": stage, "files_done": n_done, "files_total": n_total}
 m = re.match(r"File #(\d+)/(\d+)", os.environ.get("RFILE") or "")
-if n_total and step:
+if stage == "step1b":
+    p["summary"] = STEP1B
+elif n_total and step:
     p["percent"] = round(100.0 * n_done / n_total, 1)
     p["summary"] = f"{where}: {n_done}/{n_total} files done ({p['percent']:.0f}%)"
 elif m:
@@ -313,7 +377,20 @@ tail_txt=""
 # over OOM / TIMEOUT / CANCELLED, which classify() leaves to their own classes below.
 nf_json=""
 if $failed && [ "$MODE" = "slurm" ] && [ -n "$JOB" ] && ! $q_failed; then
-  nf_json="$(node_fault_json "$(run "sacct -j $JOB -X --noheader -P -o $NF_FORMAT 2>/dev/null" 2>/dev/null)" "$tail_txt")"
+  # The log is evidence either way -- a signal-53 job is a node fault only when it wrote none --
+  # so: --log; else (or when --log cannot be read) the job's own log in --out; with neither, or
+  # when neither can be read, it is said not to be read (read_job_logs), never "no log".
+  nf_tail=""; nf_unread_all=""
+  if [ -n "$LOG" ]; then read_log_file "$LOG"; nf_tail="$nf_logs"; nf_unread_all="$nf_unread"; fi
+  if [ -z "$LOG" ] || [ -n "$nf_unread_all" ]; then
+    if [ -n "$OUTDIR" ]; then
+      read_job_logs "$OUTDIR" "*_${JOB}.log"; nf_tail="$nf_logs"
+      if [ -n "$nf_unread" ]; then nf_unread_all="${nf_unread_all:+$nf_unread_all; }$nf_unread"
+      else nf_unread_all=""; fi
+    elif [ -z "$LOG" ]; then nf_unread_all="no --log and no --out"; fi
+  fi
+  [ -n "$nf_unread_all" ] && nf_tail="(the job's log could not be read: $nf_unread_all)"
+  nf_json="$(node_fault_json "$(run "sacct -j $JOB -X --noheader -P -o $NF_FORMAT 2>/dev/null" 2>/dev/null)" "$nf_tail")"
 fi
 
 # error signatures -> (class, fix). First match wins.
@@ -331,12 +408,16 @@ elif m "Number of IDs at 0.01 FDR: 0";                                          
 elif m "java.lang.OutOfMemoryError|Java heap space|Answer from Java side is empty";  then err_class="spark_heap";      fix="A JVM heap OOM inside Fulcrum/Spark. RAISING --mem DOES NOT HELP: Spark sizes its driver heap independently of the SLURM allocation. Pass spark_config = {\"spark.driver.memory\" = \"32g\"} in the workflow TOML (Fulcrum forwards it to SparkSession.builder.config).";
 elif m "0 proteins|No fragment ions|No precursors|no spectra|empty";                then err_class="empty_results"; fix="Check the FASTA matches the organism, the mass-accuracy setting, and that the raw files are the expected acquisition type.";
 elif m "CUDA|no kernel image|cuDNN|device-side|GPU.*not";                           then err_class="gpu";           fix="AlphaDIA needs a GPU. Submit to a GPU node (sbatch --gres=gpu:1) or reduce batch size.";
-elif m "msconvert.*not found|requires mzML|no mzML";                                then err_class="sage_no_mzml";  fix="Sage/Radiant read mzML and the conversion in the job failed (run_search.py converts .raw with ThermoRawFileParser, .d with msconvert, before the search). Read the converter's own error above the FAILED line: for ThermoRawFileParser usually .NET (bash scripts/ensure_dotnet8.sh), for .raw via msconvert a Linux build without vendor readers. Fix, then regenerate the job with run_search.py --sbatch and resubmit.";
+elif m "msconvert.*not found|requires mzML|no mzML|does not match its pinned sha256"; then err_class="sage_no_mzml";  fix="Sage/Radiant read mzML and the conversion in the job failed (run_search.py converts .raw with ThermoRawFileParser and, to quantify, a timsTOF .d with msconvert in the Core's pinned ProteoWizard container -- apptainer + wine, its sha256 checked first -- before the search). Read the converter's own error above the FAILED line: for ThermoRawFileParser usually .NET (bash scripts/ensure_dotnet8.sh); for a .d, a container that does not match its pinned sha256 is not the image the skill was tested with (re-copy it, or pass another with --pwiz-sif), otherwise msconvert's own message; for .raw via msconvert a Linux build without vendor readers. A .d searched for identifications only needs no conversion (estimate_params.py --ids-only). Fix, then regenerate the job with run_search.py --sbatch and resubmit.";
 elif m "Disk quota exceeded|No space left";                                         then err_class="disk";          fix="Out of disk/quota. Free space or point --out elsewhere and resubmit.";
 elif m "No such file|cannot open|does not exist|not found.*(fasta|\\.d|\\.raw)";     then err_class="missing_input"; fix="An input path is wrong (fasta/raw). Re-check paths (Windows→WSL/HIVE translation) and resubmit.";
 elif [ "${dep_failed:-false}" = true ];                                              then err_class="dependency_failed"; fix="An UPSTREAM job in the chain failed, so this one is stuck PENDING with DependencyNeverSatisfied (it will NEVER run and never leave the queue). Find the failed step (sacct -j <arrayjob>), apply that step's fix, and resubmit the downstream steps reusing already-computed outputs (.quant, step1.predicted.speclib) — don't restart the whole chain.";
 elif [ "${held:-false}" = true ];                                                   then err_class="held"; fix="The job is HELD (${reason}) and will never start by itself -- do NOT resubmit it (that makes a duplicate). JobHeldUser: release it with scontrol release <jobid> once whatever it was held for is resolved. JobHeldAdmin: ask the HIVE admins why.";
 elif $failed;                                                                        then err_class="unknown_failure"; fix="Read the full log; diagnose via references/watcher.md; fix and resubmit.";
+fi
+# ...and when the log the node-fault check needed could not be read, say so (read_job_logs)
+if [ "$err_class" = unknown_failure ] && [ -n "${nf_unread_all:-}" ]; then
+  fix="$fix The job's log could not be read here (${nf_unread_all}), so whether a node fault ended it is not known: read it before resubmitting."
 fi
 
 # STALL detection: job RUNNING but its log has not advanced in STALL_MIN minutes.
@@ -379,6 +460,12 @@ if [ -n "$OUTDIR" ] && [ "$done" = true ] && [ "$failed" = false ]; then
   [ -n "$cc_rep" ] && cc_stat="$(run "$STAT_SIZE_MTIME $(printf %q "$cc_rep") 2>/dev/null" \
                                  2>/dev/null | tr -dc '0-9:')"
 fi
+# ---- DIA-NN --dda: a crashed second pass fell back to the first-pass report (dda_caution). Done,
+# not failed: the report is complete, but the user must hear the caveat.
+dfp=""
+if [ -n "$OUTDIR" ] && [ "$done" = true ] && [ "$failed" = false ]; then
+  dfp="$(dda_caution "$OUTDIR")"
+fi
 
 # ---- narration: what this stage is doing, plus something to read while waiting
 if $q_failed; then err_class="watcher_query_failed"; fix="$fix_qf"; fi
@@ -389,7 +476,7 @@ STATE="$state" DONE="$done" FAILED="$failed" STALLED="$stalled" JOB="$JOB" MODE=
 ECLASS="$err_class" FIX="$fix" TAIL="$tail_txt" ATASKS="${array_summary:-}" \
 STAGE="$stage" NDONE="${n_done:-0}" NTOTAL="${n_total:-0}" NOTES="$notes" \
 REASON="${reason:-}" ATERM="${a_term:-0}" LFQ_REC="$lfq_rec" NF_JSON="$nf_json" CC_FILE="$cc_py" \
-CC_STAT="$cc_stat" \
+CC_STAT="$cc_stat" DFP="$dfp" \
 python3 - <<'PY'
 import os, json, re
 n_done, n_total = int(os.environ.get("NDONE") or 0), int(os.environ.get("NTOTAL") or 0)
@@ -412,6 +499,9 @@ where = f"step {step_no}/5" if step_no else "search"
 progress["summary"] = (f"{where}: {n_done}/{n_total} files done"
                        + (f" ({progress['percent']:.0f}%)" if n_total else "")) \
     if n_total else f"{where} running"
+if stage == "step1b":
+    progress["summary"] = ("step 1b/5 measuring the scan window (and any planned mass accuracy) "
+                           "on representative runs; no file is searched until it is done")
 # A job that has not started is not searching anything. A held search (JobHeldUser) was
 # reported as "search running" / "Searching your files" (HIVE e2e test 2026-09-23). But PENDING
 # alone does not mean nothing ran: the chain's step-5 job sits PENDING (Dependency) while
@@ -491,6 +581,10 @@ elif isinstance(cc, dict) and cc.get("status"):
     if (cc.get("competed_out") or cc.get("siphoned") or cc["status"] == "not_run") \
             and cc.get("message"):
         out.setdefault("warnings", []).append(cc["message"])
+if os.environ.get("DFP"):
+    out["dda_first_pass"] = True
+    out["caution"] = os.environ["DFP"]
+    out.setdefault("warnings", []).append(os.environ["DFP"])
 out["log_tail"] = tail[-1500:]
 print(json.dumps(out, indent=2))
 PY

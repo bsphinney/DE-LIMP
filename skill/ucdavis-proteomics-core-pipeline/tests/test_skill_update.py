@@ -469,6 +469,86 @@ class UpdateOverHttps(Harness):
         self.assertFalse(self.market.startswith(os.path.join(self.d, "home")))
 
 
+@unittest.skipUnless(shutil.which("git") and shutil.which("curl"), "needs git and curl")
+class WindowsDesktopClaude(Harness):
+    """I01: on Windows the desktop app's Claude Code has no `claude` on Git Bash's PATH; its
+    claude.exe is under %APPDATA%\\Claude\\claude-code\\<version>\\ (or the CLI installer's
+    %USERPROFILE%\\.local\\bin\\claude.exe), so --update said "not on PATH" and stopped.
+    sv_find_claude: SKILL_CLAUDE when it is found, else (MINGW/MSYS only) .local\\bin, else the
+    newest desktop-app version by version order. `uname` is a stand-in; SKILL_CLAUDE names a
+    command that does not exist, as `claude` is not on the laptop's PATH."""
+
+    def windows(self, system="MINGW64_NT-10.0-19045"):
+        sh_exe(os.path.join(self.bin, "uname"), f'echo "{system}"\n')
+        self.appdata = os.path.join(self.d, "AppData", "Roaming")
+        self.profile = os.path.join(self.d, "Users", "staff")
+        os.makedirs(self.profile)
+        return dict(SKILL_CLAUDE=os.path.join(self.d, "no_such_claude"), APPDATA=self.appdata,
+                    USERPROFILE=self.profile)
+
+    def exe(self, path):
+        """A claude.exe stand-in that logs which one ran, then behaves as the fake claude."""
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        return sh_exe(path, FAKE_CLAUDE.replace(
+            "#!/usr/bin/env bash\n", '#!/usr/bin/env bash\necho "$0" >> "$FAKE_CLAUDE_LOG.which"\n',
+            1))
+
+    def ran(self):
+        p = self.claude_log + ".which"
+        if not os.path.exists(p):
+            return set()
+        with open(p) as fh:
+            return set(fh.read().splitlines())
+
+    def desktop(self, version):
+        return self.exe(os.path.join(self.appdata, "Claude", "claude-code", version, "claude.exe"))
+
+    def test_windows_desktop_claude_is_found_under_appdata(self):
+        self.laptop()
+        env = self.windows()
+        self.desktop("2.1.95")
+        newest = self.desktop("2.1.300")      # newer by version, older by spelling
+        r = self.run_sv("--update", **env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        j = json.loads(r.stdout)
+        self.assertEqual((j["status"], j["installed"]), ("updated", "2.11.2"))
+        self.assertEqual(self.ran(), {newest})
+        self.assertIn("using " + newest, r.stderr)
+        self.assertEqual(self.updates(), [f"plugin update {ID} PREFER_HTTPS=1"])
+
+    def test_local_bin_wins_over_appdata(self):
+        self.laptop()
+        env = self.windows(system="MSYS_NT-10.0-19045")
+        self.desktop("2.1.300")
+        local = self.exe(os.path.join(self.profile, ".local", "bin", "claude.exe"))
+        r = self.run_sv("--update", **env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(json.loads(r.stdout)["status"], "updated")
+        self.assertEqual(self.ran(), {local})
+        self.assertIn("using " + local, r.stderr)
+
+    def test_unix_unchanged(self):
+        """(pin) on Linux or macOS only SKILL_CLAUDE is looked for: a claude.exe under APPDATA
+        is never run, and the message is the one it was."""
+        self.laptop()
+        env = self.windows(system="Linux")
+        self.desktop("2.1.300")
+        j = self.sv(1, "--update", **env)
+        self.assertEqual((j["status"], j["claude_exit"]), ("not_updated", None))
+        self.assertIn("The claude command is not on PATH here, so claude plugin update could "
+                      "not run", j["say"])
+        self.assertEqual(self.ran(), set())
+
+    def test_windows_with_no_claude_anywhere_says_where_it_looked(self):
+        self.laptop()
+        env = self.windows()
+        j = self.sv(1, "--update", **env)
+        self.assertEqual((j["status"], j["claude_exit"]), ("not_updated", None))
+        self.assertIn("not on PATH", j["say"])
+        self.assertIn("claude-code", j["say"])
+        self.assertIn("Update now", j["say"])
+
+
 class InstalledVersionReader(unittest.TestCase):
     """skill_installed_version: the version `claude plugin list --json` or installed_plugins.json
     gives this plugin -- the lowest of several installs, so one still behind is never current."""

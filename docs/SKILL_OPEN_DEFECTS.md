@@ -538,7 +538,7 @@ searches; or DIA-NN `--dda` for timsTOF DDA.
   Every Sage DE made before 2.9 should be re-run. A search the same day found no other adapted
   Sage report (an `lfq.parquet` with a `report.parquet` beside it). It covered every
   `lfq.parquet` under Flinders `Data/lab/service`, `/quobyte/proteomics-grp` and gabrig's and
-  msalemi's homes (srun, depth 11). The other eight are `brett/zach_hair_gvp` identification
+  msalemi's homes (srun, depth 11). The other eight are `brett/<a client lab>_hair_gvp` identification
   runs that were never adapted. Not searched: other users' homes, and runs made off HIVE.
 
 All verified present in `c29f269`:

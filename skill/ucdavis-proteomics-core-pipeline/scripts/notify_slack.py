@@ -437,11 +437,10 @@ def _engine_label(engine):
 
 
 def _session_of(out):
-    """The session directory a search output belongs to (<session>/output/search), or None."""
-    parent = os.path.dirname(out)
-    if os.path.basename(out) == "search" and os.path.basename(parent) == "output":
-        return os.path.dirname(parent)
-    return None
+    """The session directory a search output belongs to, or None: session.session_of_search, the
+    one rule (<session>/output/search_sage/ as much as <session>/output/search/)."""
+    import session as sess                          # one definition of the session layout
+    return sess.session_of_search(out)
 
 
 def _mtime_date(path):
@@ -546,6 +545,9 @@ def search_facts(out, exit_code=None, status=None, signal=None, started=None,
         "stats": _run_stats(report) if st == "ok" and final else None,
         # a DIA-NN search that fell back instead of measuring (probe_fallback.caution_for)
         "caution": _fallback_caution(out),
+        # a --dda search quantified from its first pass, its second pass failed
+        # (dda_first_pass.caution_for)
+        "dda_first_pass": _dda_first_pass_caution(out),
         "location": out,
         "log": _find_log(out),
         "job": {k: os.environ.get(v) for k, v in (("id", "SLURM_JOB_ID"),
@@ -569,6 +571,17 @@ def _fallback_caution(out):
                 "probe_fallback.json in the search folder")
 
 
+def _dda_first_pass_caution(out):
+    """dda_first_pass.caution_for(out): the caveat for a --dda search whose second pass failed and
+    whose first-pass report was used, or None. A failure to check is said, not dropped."""
+    try:
+        import dda_first_pass
+        return dda_first_pass.caution_for(out)
+    except Exception as e:                              # noqa: BLE001
+        return (f"could not check whether the search used its first-pass report "
+                f"({type(e).__name__}: {e}); look for report_used in search_provenance.json")
+
+
 def _find_log(out):
     """This job's SLURM log, when it can be named without guessing."""
     jid, aid, task = (os.environ.get(k) for k in ("SLURM_JOB_ID", "SLURM_ARRAY_JOB_ID",
@@ -584,17 +597,21 @@ def _find_log(out):
 def analysis_facts(session_dir, zip_path=None):
     import session as sess                          # one definition of the session layout
     p = sess.paths_for(session_dir)
-    sprov = _load(p["search_prov"]) or {}
+    # the search the DE read, wherever it is (output/search_sage/ ...), and its engine and
+    # version by the one rule (session.search_engine: T44, review F4/F5)
+    se = sess.search_engine(p)
+    sprov = _load(se["choice"]["path"]) or {}
     wf = _load(p["workflow_manifest"]) or {}
     de = _load(os.path.join(p["de_dir"], "de_provenance.json")) or {}
     raws = sess.read_raw_list(p["session_dir"])
-    skipped = 0
+    skipped = overridden = 0
     try:
         with open(p["manifest_txt"]) as fh:
-            skipped = sum(1 for ln in fh if ln.startswith("[SKIPPED]"))
+            for ln in fh:
+                skipped += ln.startswith("[SKIPPED]")
+                overridden += ln.startswith("[OVERRIDE]")     # went ahead without, and why
     except OSError:
         pass
-    engine = sprov.get("engine") or (wf.get("engine") or {}).get("name")
     howto = os.path.join(p["deposit_dir"], "HOW_TO_SUBMIT.md")
     sig = de.get("significant_per_contrast")
     return {
@@ -606,8 +623,11 @@ def analysis_facts(session_dir, zip_path=None):
         "instrument": (wf.get("instruments") or [None])[0] or wf.get("instrument_label"),
         "runs": len(raws) or sprov.get("n_files"),
         "samples": de.get("n_samples"),
-        "engine": _engine_label(engine) if engine else None,
-        "engine_version": sprov.get("version") or (wf.get("engine") or {}).get("version"),
+        "engine": _engine_label(se["engine"]) if se["engine"] else None,
+        "engine_version": se["version"],
+        # what the engine line cannot claim: records and none chosen, or the manifest's pin
+        "engine_note": (se["choice"].get("short") if se["note"] else "workflow manifest pin"
+                        if se["source"] == sess.ENGINE_PIN_SOURCE else None),
         "de_method": de.get("display_label") or de.get("method"),
         # run_de.R's own words for what "significant" meant (CLAUDE.md rule 1): counted there,
         # never re-derived here from the tables.
@@ -620,6 +640,7 @@ def analysis_facts(session_dir, zip_path=None):
         "zip": zip_path if zip_path and os.path.isfile(zip_path) else None,
         "deposit": howto if os.path.isfile(howto) else None,
         "export_skipped": skipped,
+        "export_overridden": overridden,
         "skill_version": _skill_version(),
     }
 
@@ -749,7 +770,9 @@ def render(f):
     else:
         head = "Analysis complete"
     icon = _ICON.get(f["status"], ":information_source:")
-    bits = [x for x in (eng, f"{runs} runs" if runs else None) if x]
+    # an engine line with a note (none chosen, or the manifest's pin) is said in its field only
+    bits = [x for x in (None if f.get("engine_note") else eng,
+                        f"{runs} runs" if runs else None) if x]
     st = f.get("stats")
     if st:
         bits.append(f"median {st['median_precursors']:,} precursors/run")
@@ -759,6 +782,10 @@ def render(f):
         bits.append(f["why"])
     if f.get("caution"):
         bits.append("CAUTION: fell back, not measured")
+    if f.get("dda_first_pass"):
+        bits.append("CAUTION: first-pass report, the second pass failed")
+    if f.get("finish_override"):
+        bits.append("NOT FINALIZED")
     # Escaped like the blocks: `<!channel>` or `<url|x>` in a session name must not ping or link.
     text = _cut(f"{icon} {head}: {_esc(name)}" + (f" ({_esc(', '.join(str(b) for b in bits))})"
                                                    if bits else "")
@@ -773,6 +800,7 @@ def render(f):
     else:
         fields.append(_field("Runs", runs or "not recorded"))
     fields.append(_field("Engine", _esc(eng or "not recorded")
+                         + (f" ({_esc(f['engine_note'])})" if f.get("engine_note") else "")
                          + (f" ({_esc(_MODE_LABEL.get(f['mode'], f['mode']))})"
                             if f.get("mode") else "")))
     if f["kind"] == "search":
@@ -797,9 +825,14 @@ def render(f):
     blocks = [{"type": "section",
                "text": {"type": "mrkdwn", "text": _cut(f"{icon} *{head}* — `{_esc(name)}`", 2900)}},
               {"type": "section", "fields": fields[:10]}]
-    if f.get("caution"):
+    for k in ("caution", "dda_first_pass"):
+        if f.get(k):
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": _cut(
+                f":warning: {_esc(f[k])}", 2900)}})
+    if f.get("finish_override"):
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": _cut(
-            f":warning: {_esc(f['caution'])}", 2900)}})
+            ":warning: The session is not finalized as the skill asks: finalized or posted under "
+            f"--override-finish ({_esc(f['finish_override'])})", 2900)}})
 
     if f["kind"] == "analysis":
         sig = f.get("significant")
@@ -831,6 +864,9 @@ def render(f):
         where.append(f"*Deposit (PRIDE/MassIVE):* `{_esc(f['deposit'])}`")
     if f.get("export_skipped"):
         where.append(f":warning: {f['export_skipped']} export part(s) skipped -- see MANIFEST.txt")
+    if f.get("export_overridden"):
+        where.append(f":warning: {f['export_overridden']} finish step(s) overridden "
+                     "(--override-finish) -- see MANIFEST.txt")
     if f.get("log") and f["status"] != "ok":
         where.append(f"*Log:* `{_esc(f['log'])}`")
     steps = []
@@ -1339,12 +1375,37 @@ def search_done(out, exit_code=None, status=None, signal=None, started=None,
         return False, clean_text(f"job-end hook failed: {type(e).__name__}: {e}")
 
 
-def analysis_done(session_dir, zip_path=None, dry_run=False, run_log=None):
+def announce_gate(session_dir, override=None):
+    """The `analysis-done` command announces results, so it needs the finalize stamp
+    (report_files.FINISH_NEEDS["announce"], 2.14.2). -> (refusal or None, override reason or
+    None). session.py finalize calls analysis_done() itself, before its stamp is written, and
+    holds the post there when it will not stamp."""
+    import report_files as rf
+    import session as sess
+    out = sess.paths_for(session_dir)["output_dir"]
+    reason = " ".join(str(override or "").split())
+    if override is not None and not reason:
+        return f"not sent: {rf.OVERRIDE_FLAG} needs a reason", None
+    gaps = rf.finish_gaps(out, rf.FINISH_NEEDS["announce"])
+    if gaps and not reason:
+        return "not sent: " + rf.refusal("notify_slack.py analysis-done", gaps), None
+    if gaps:
+        return None, reason
+    # a stamp written under --override-finish: announced with its reason, never as complete
+    rec = rf.finalized_record(out)[0] or {}
+    fo = rec.get("finish_override") if isinstance(rec.get("finish_override"), dict) else None
+    return None, ((fo.get("reason") or "no reason recorded") if fo else None)
+
+
+def analysis_done(session_dir, zip_path=None, dry_run=False, run_log=None, finish_override=None):
     """Post that an analysis was finalized. (sent?, status line); never raises. `run_log` is
-    what record_run.py said (session.py finalize runs it first), shown in the post."""
+    what record_run.py said (session.py finalize runs it first), shown in the post.
+    `finish_override`: the reason it is posted for a session that is not finalized (shown)."""
     try:
         f = analysis_facts(session_dir, zip_path)
         f["run_log"] = run_log
+        if finish_override:
+            f["finish_override"] = finish_override
         return deliver(f, relay_ok=True, dry_run=dry_run)
     except Exception as e:  # noqa: BLE001
         return False, _scrub(f"not sent: {type(e).__name__}: {e}")
@@ -1445,6 +1506,27 @@ def job_end_plan(*, slack=True, fran=True, fran_guarded=False, fran_name=None, q
                      "stage" if fran_guarded else "left_to_agent"),
             "fran_name": fran_name or None,
             "qc": qc}
+
+def job_end_flags(*, slack=True, fran=True, fran_name=None, qc=None):
+    """The job-end choices as run_search.py / chain-generator flags -- THE mapping, read by
+    run_search.py's generators and by the re-run commands built from a recorded plan
+    (job_end_argv; follow-up 3, H7 bug 4)."""
+    argv = (["--no-notify"] if not slack else []) + (["--no-fran"] if not fran else [])
+    if fran_name:
+        argv += ["--fran-name", fran_name]
+    return argv + {True: ["--qc"], False: ["--not-qc"], None: []}[qc]
+
+
+def job_end_argv(plan):
+    """job_end_flags() for a recorded job_end_plan() (search_provenance.json job_end_hook), so a
+    re-run keeps its search's choices; [] when there is no plan."""
+    if not isinstance(plan, dict):
+        return []
+    qc = plan.get("qc") if plan.get("qc") in (True, False) else None
+    return job_end_flags(slack=plan.get("slack") != "off",
+                         fran=plan.get("fran") != "off" or qc is True,
+                         fran_name=plan.get("fran_name"), qc=qc)
+
 
 _HEADER_LINE = re.compile(r"^(#|\s*$)")
 # The most the job-end hook may take inside the job's own time (seconds). Whatever runs before it
@@ -1582,6 +1664,9 @@ def main(argv=None):
                              "finalize runs record_run.py itself, first)")
     an.add_argument("--session", required=True)
     an.add_argument("--zip")
+    an.add_argument("--override-finish", metavar="REASON", default=None,
+                    help="post although the session is not finalized (no output/FINALIZED.json); "
+                         "the reason is shown in the post")
     nt = sub.add_parser("note", parents=[common],
                         help="a note from the Core was left, or answered (notes.py posts these "
                              "itself; this is for trying one out)")
@@ -1608,7 +1693,11 @@ def main(argv=None):
                               fran_name=a.fran_name,
                               qc=(True if a.qc else False if a.not_qc else None))
     elif a.cmd == "analysis-done":
-        ok, msg = analysis_done(a.session, a.zip, dry_run=a.dry_run)
+        refuse, reason = announce_gate(a.session, a.override_finish)
+        if refuse:
+            say(refuse)
+            return 2
+        ok, msg = analysis_done(a.session, a.zip, dry_run=a.dry_run, finish_override=reason)
     elif a.cmd == "note":
         ok, msg = send_note(a.event, sender=a.sender, to=a.to, subject=a.subject, reply=a.reply,
                             replier=a.replier, relay_ok=True, dry_run=a.dry_run)

@@ -541,6 +541,7 @@ class OfflineRecord(unittest.TestCase):
             script = os.path.join(pod, "podcast_script.md")
             write(os.path.join(out, "AI_Analysis_Report.md"), __import__("test_make_podcast").REPORT)
             write(os.path.join(out, "Analysis_Report.html"), "<html></html>")
+            write(os.path.join(out, "methods.md"), "# Methods\n")      # 9d, before the podcast
             write(script, script_text())
             self.assertEqual(run("check", script, "--source",
                                  os.path.join(out, "AI_Analysis_Report.md"))[0], 0)
