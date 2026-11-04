@@ -190,6 +190,78 @@ scp_get() {
   fi
 }
 
+# A remote path with a space, a quote or a glob character cannot go through rsync or scp: the
+# remote shell re-splits it (rsync) or an old scp does, so "UC Davis Lab/logs" became the
+# stray file "UC" (2.14.1, I16/I33). Such a path is streamed as tar over the same ssh, with
+# the remote side quoted once by printf %q -- as the generic branch below does. A "plain"
+# path keeps the rsync/scp commands above unchanged. Such a path is taken LITERALLY: a glob or
+# $VAR in it is not expanded (rsync's remote shell used to); nothing in the skill relies on that.
+PLAIN_RE='^[A-Za-z0-9._/~+=:@%,-]+$'
+is_plain_path() { [[ "$1" =~ $PLAIN_RE ]]; }
+# a remote path as one shell word, with a leading ~ left to expand
+rq() {
+  case "$1" in
+    "~") printf '%s' '"$HOME"' ;;
+    "~/"*) printf '"$HOME"/%s' "$(printf '%q' "${1#\~/}")" ;;
+    *) printf '%q' "$1" ;;
+  esac
+}
+# run a command on HIVE and keep its stdin/stdout for the caller. NOT a login shell (no -l):
+# the stream is binary, and a profile that prints to stdout would corrupt it. $HOME is set anyway.
+rssh() { MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "${SSH[@]}" "bash -c $(printf '%q' "$1")"; }
+# split <path> into dir and name for tar -C (a trailing slash was removed by the caller)
+split_path() { case "$1" in */*) sp_dir="${1%/*}"; [ -n "$sp_dir" ] || sp_dir=/ ;; *) sp_dir=. ;; esac; sp_name="${1##*/}"; }
+HX_STAGE=""
+hx_cleanup() { [ -z "$HX_STAGE" ] || rm -rf "$HX_STAGE"; }
+# --get by tar. A destination that does not exist yet receives the stream directly; otherwise
+# it is staged NEXT TO the destination (same disk, so the result is a rename, not a second copy)
+# and a failed get leaves the destination as it was.
+tar_get() {
+  local src="$1" dst="$2" rc b dir par new=0
+  [ -e "$dst" ] || new=1
+  par="$(dirname "${dst%/}")"; [ -d "$par" ] || par="${TMPDIR:-/tmp}"
+  if [ "${src%/}" != "$src" ] && [ "$src" != "/" ]; then
+    # trailing slash: the CONTENTS
+    if [ $new -eq 1 ]; then
+      mkdir -p -- "$dst" || return
+      rssh "cd -- $(rq "${src%/}") && tar -cf - ." | tar -C "$dst" -xf -; rc=$?
+      [ $rc -eq 0 ] || rm -rf "$dst"
+      return $rc
+    fi
+    HX_STAGE="$(mktemp -d "$par/.hive_get.XXXXXX")" || return; trap hx_cleanup EXIT; trap 'exit 130' INT TERM
+    rssh "cd -- $(rq "${src%/}") && tar -cf - ." | tar -C "$HX_STAGE" -xf -; rc=$?
+    [ $rc -eq 0 ] && tar -C "$HX_STAGE" -cf - . | tar -C "$dst" -xf -; return $?
+  fi
+  HX_STAGE="$(mktemp -d "$par/.hive_get.XXXXXX")" || return; trap hx_cleanup EXIT; trap 'exit 130' INT TERM
+  split_path "$src"; dir="$sp_dir"; b="$sp_name"
+  rssh "cd -- $(rq "$dir") && tar -cf - -- $(printf '%q' "$b")" | tar -C "$HX_STAGE" -xf -; rc=$?
+  [ $rc -eq 0 ] || return $rc
+  if [ -d "$HX_STAGE/$b" ]; then
+    mkdir -p -- "$dst" || return
+    if [ -e "${dst%/}/$b" ]; then   # merge into what is there, keeping mtimes
+      mkdir -p -- "${dst%/}/$b" && tar -C "$HX_STAGE/$b" -cf - . | tar -C "${dst%/}/$b" -xf -
+    else mv -- "$HX_STAGE/$b" "${dst%/}/$b"; fi
+  elif [ -e "$HX_STAGE/$b" ]; then
+    if [ -d "$dst" ] || [ "${dst%/}" != "$dst" ]; then mkdir -p -- "$dst" && mv -f -- "$HX_STAGE/$b" "${dst%/}/$b"
+    else mv -f -- "$HX_STAGE/$b" "$dst"; fi           # an existing file is overwritten, a missing dest becomes the file
+  else return 1; fi
+}
+tar_put() {
+  local src="$1" dst="$2" parent name chm=""
+  if [ -d "$src" ]; then
+    if [ "${src%/}" != "$src" ]; then parent="$src"; name=.; else split_path "$src"; parent="$sp_dir"; name="$sp_name"; fi
+    tar -C "$parent" -cf - -- "$name" | rssh "mkdir -p -- $(rq "${dst%/}") && tar -C $(rq "${dst%/}") -xf -"
+  elif [ "${dst%/}" != "$dst" ]; then
+    split_path "$src"
+    tar -C "$sp_dir" -cf - -- "$sp_name" | rssh "mkdir -p -- $(rq "${dst%/}") && tar -C $(rq "${dst%/}") -xf -"
+  else
+    # a file to a name: into it when <dst> is a folder on HIVE, else it BECOMES <dst>
+    split_path "$src"
+    [ -x "$src" ] && chm=" && chmod +x"
+    rssh "if [ -d $(rq "$dst") ]; then cat > $(rq "$dst")/$(printf '%q' "$sp_name")${chm:+ && chmod +x $(rq "$dst")/$(printf '%q' "$sp_name")}; else cat > $(rq "$dst")${chm:+ && chmod +x $(rq "$dst")}; fi" < "$src"
+  fi
+}
+
 case "${1:-}" in
   # The skill's scripts/ and .claude-plugin/ (the version) side by side, as in the skill itself.
   --put-skill) [ $# -eq 1 ] || usage
@@ -202,14 +274,16 @@ case "${1:-}" in
          done
          echo "put $root/scripts and $root/.claude-plugin into ~/proteomics-pipeline/ on HIVE" ;;
   --put) [ $# -eq 3 ] || usage; shift; put_guard "$1"; src="$(winpath "$1")"
-         if command -v rsync >/dev/null 2>&1; then rsync -e "$RSYNC_E" -a "$src" "$HU@$HOST:$2"
+         if ! is_plain_path "$2"; then tar_put "$src" "$2"
+         elif command -v rsync >/dev/null 2>&1; then rsync -e "$RSYNC_E" -a "$src" "$HU@$HOST:$2"
          else scp_put "$src" "$2"; fi ;;
   # --get is -rlt, not -a: HIVE's shared dirs are setgid 2775, and -a's permission/group copy
   # makes macOS fail with "fchmodat ... Operation not permitted" (exit 23) AFTER the files
   # arrive -- measured 2026-09-16 -- so a good copy read as a failed one.
   --get) [ $# -eq 3 ] || usage; shift
          dst="$(winpath "$2")"
-         if command -v rsync >/dev/null 2>&1; then rsync -e "$RSYNC_E" -rlt "$HU@$HOST:$1" "$dst"
+         if ! is_plain_path "$1"; then tar_get "$1" "$dst"
+         elif command -v rsync >/dev/null 2>&1; then rsync -e "$RSYNC_E" -rlt "$HU@$HOST:$1" "$dst"
          else scp_get "$1" "$dst"; fi ;;
   # A command for a COMPUTE node -- HPC@UCD's ucd-hpc rules: on a login node nothing "past a
   # few seconds of CPU or much I/O" (a walk of a share, an install, a zip, hashing raw files).

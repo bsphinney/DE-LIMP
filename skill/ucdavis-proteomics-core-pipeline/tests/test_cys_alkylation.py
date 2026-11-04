@@ -127,7 +127,78 @@ class Methods(unittest.TestCase):
             self.assertNotIn("Carbamidomethyl (", text)
             self.assertIn("No fixed modifications were set.", text)
             self.assertIn("Cysteine was searched unmodified (no carbamidomethylation), as the "
-                          "samples were not reduced and alkylated.", text)
+                          "samples were not alkylated.", text)
+
+
+TMT_K = "UniMod:737,229.162932,K"
+
+
+class AFixedModOverrideIsRecordedAsItRan(unittest.TestCase):
+    """Review R1 (Ruling 74a): a DIA-NN --fixed-mod override replaces every --fixed-mod line --
+    that is how a user changes the alkylation -- so with --cys-alkylation nem and
+    {"--fixed-mod": "UniMod:737,229.162932,K"} the NEM line on C is gone. The sidecar still said
+    "nethylmaleimide (C), fixed". The record now reads the cfg as written (cys_searched), and the
+    Methods name only what ran."""
+
+    def methods(self, d, path):
+        prov = os.path.join(d, "search_provenance.json")
+        with open(prov, "w") as fh:
+            json.dump({"engine": "diann", "version": "2.7.0", "params_file": path,
+                       "result": {}}, fh)
+        return mm.search_paragraph(mm.search_record(path, prov))
+
+    def test_an_override_that_drops_the_nem_line(self):
+        with tempfile.TemporaryDirectory() as d:
+            path, cfg, side = estimate(d, "diann", "--cys-alkylation", "nem",
+                                       "--overrides", json.dumps({"--fixed-mod": TMT_K}))
+            text = self.methods(d, path)
+        self.assertNotIn("UniMod:108", cfg)
+        cys = side["cys_alkylation"]
+        self.assertEqual(cys["searched"], "cysteine unmodified (no fixed modification)")
+        self.assertIsNone(cys["value"])
+        self.assertIsNone(cys["reagent"])
+        self.assertEqual(cys["overridden"]["was"], "nem")
+        self.assertIn("--fixed-mod", cys["source"])
+        self.assertIn("user override", cys["source"])
+        for word in ("ethylmaleimide", "NEM", "alkylated with"):
+            self.assertNotIn(word, text)
+        self.assertIn("Fixed modifications: UniMod:737", text)      # from the cfg's own lines
+        self.assertIn("(K)", text)
+
+    def test_an_override_that_fixes_another_mod_on_c(self):
+        with tempfile.TemporaryDirectory() as d:
+            path, cfg, side = estimate(d, "diann", "--cys-alkylation", "nem", "--overrides",
+                                       json.dumps({"--fixed-mod": "UniMod:4,57.021464,C"}))
+            text = self.methods(d, path)
+        cys = side["cys_alkylation"]
+        self.assertEqual((cys["value"], cys["searched"]), ("cam", "carbamidomethyl (C), fixed"))
+        self.assertIsNone(cys["reagent"], "the override names a modification, not a reagent")
+        self.assertNotIn("ethylmaleimide", text)
+
+    def test_a_sage_static_c_override_is_recorded_too(self):
+        with tempfile.TemporaryDirectory() as d:
+            _, _, side = estimate(d, "sage", "--overrides",
+                                  json.dumps({"database": {"static_mods": {"C": 0}}}))
+        cys = side["cys_alkylation"]
+        self.assertEqual(cys["searched"], "cysteine unmodified (no fixed modification)")
+        self.assertEqual(cys["overridden"]["was"], "cam")
+        self.assertNotIn("DEFAULT", cys["source"])
+
+    def test_without_an_override_the_record_is_as_given(self):
+        """(pin)"""
+        with tempfile.TemporaryDirectory() as d:
+            path, _, side = estimate(d, "diann", "--cys-alkylation", "nem")
+            text = self.methods(d, path)
+        self.assertEqual(side["cys_alkylation"]["value"], "nem")
+        self.assertNotIn("overridden", side["cys_alkylation"])
+        self.assertIn("Cysteines were alkylated with N-ethylmaleimide (NEM).", text)
+
+    def test_parameters_md_says_fixed_replaces_and_var_adds(self):
+        with open(os.path.join(os.path.dirname(HERE), "references", "parameters.md"),
+                  encoding="utf-8") as fh:
+            text = " ".join(fh.read().split())
+        self.assertIn("a `--fixed-mod` override REPLACES every `--fixed-mod` line", text)
+        self.assertIn("a `--var-mod` override ADDS", text)
 
 
 def write_report(path, seqs):
@@ -369,7 +440,8 @@ class OtherRoutes(unittest.TestCase):
             lib, lines = run_search.radiant_library_job({"diann": "/opt/diann"}, "/x/db.fasta",
                                                         os.path.join(d, "out"), 4, cfg)
             self.assertIn("--cys-alkylation nem", " ".join(lines))
-            # the array chain's step 1 predicts with the flags
+            # the array chain's step 1 builds its library with the same helper and choice (S8:
+            # make_radiant_library.py, which turns cam into --unimod4 -- cys_diann_flags)
             runs = [os.path.join(d, f"r{i}.mzML") for i in range(2)]
             for r in runs:
                 open(r, "w").close()
@@ -388,7 +460,9 @@ class OtherRoutes(unittest.TestCase):
                                capture_output=True, text=True)
             self.assertEqual(p.returncode, 0, p.stderr)
             with open(os.path.join(out, "radiant_parallel", "step1_libpred.sbatch")) as fh:
-                self.assertIn("--threads 16 --unimod4", fh.read())
+                step1 = fh.read()
+            self.assertIn("make_radiant_library.py", step1)
+            self.assertIn("--threads 16 --cys-alkylation cam", step1)
 
     def test_a_radiant_library_is_reused_only_for_the_same_choice(self):
         with tempfile.TemporaryDirectory() as d:

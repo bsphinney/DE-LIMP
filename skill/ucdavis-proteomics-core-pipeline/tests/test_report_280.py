@@ -67,10 +67,11 @@ def evidence(d):
 
 def session(root, prov=None, detmat=True, det_cols=False, figures_json=None, report=True,
             removed=None, evidence_col=False, extra_figs=(), omit=(), report_extra="",
-            rows=None, prov_bytes=None):
+            rows=None, prov_bytes=None, count_col=None):
     """rows: (protein, gene, logFC, adj.P, detection b1..b3 c1..c3[, raw P[, Protein.Names]]) --
     ROWS by default, raw P = adj.P / 2 unless given. prov_bytes: de_provenance.json exactly as
-    these bytes."""
+    these bytes. count_col: limpa's precursor-count column in the DE table -- "NPeptides" (limpa
+    < 1.4), "NPrec" (>= 1.4) or None (neither)."""
     rows = rows or ROWS
     out = os.path.join(root, "output")
     tables, figs = os.path.join(out, "tables"), os.path.join(out, "figures")
@@ -80,6 +81,7 @@ def session(root, prov=None, detmat=True, det_cols=False, figures_json=None, rep
     with open(os.path.join(tables, "de_provenance.json"), "wb") as fh:
         fh.write(prov_bytes if prov_bytes is not None else json.dumps(prov).encode())
     head = ["Protein.Group", "Genes", "logFC", "P.Value", "adj.P.Val", "PropObs", "Protein.Names"]
+    head += [count_col] if count_col else []
     if det_cols:
         head += ["Detected_Bait", "Detected_IgG"] + (["Evidence"] if evidence_col else [])
     with open(os.path.join(tables, "DE_dpc_Bait.IgG.csv"), "w", newline="") as fh:
@@ -88,6 +90,7 @@ def session(root, prov=None, detmat=True, det_cols=False, figures_json=None, rep
         for p, g, lfc, adj, d, *more in rows:
             row = [p, g, lfc, more[0] if more and more[0] != "" else (adj / 2 if not more else ""),
                    adj, 0.5, more[1] if len(more) > 1 else ""]
+            row += [3] if count_col else []
             if det_cols:
                 row += [f"{sum(x > 0 for x in d[:3])}/3", f"{sum(x > 0 for x in d[3:])}/3"]
                 row += [evidence(d)] if evidence_col else []
@@ -171,12 +174,30 @@ class Brief(unittest.TestCase):
 
     def test_propobs_is_study_wide_and_never_a_tier(self):
         b = brief(self.root)
-        self.assertIn("rowMeans(n.observations) / NPeptides over **all runs of the study**", b)
+        # each fixture shape names its own precursor-count column (T36): none in this table
+        self.assertIn("rowMeans(n.observations) / the protein's number of precursors over **all "
+                      "runs of the study**", b)
+        self.assertNotIn("NPeptides", b)
         self.assertIn("**Never tier hits by PropObs", b)
         self.assertIn("from Detection_Matrix.csv + conditions.csv (count each group's runs", b)
         b2 = brief(tempfile.mkdtemp(dir=self.root), det_cols=True)
         self.assertIn("the DE tables' `Detected_<group>` columns (k/n samples measured)", b2)
         self.assertIn("`Detected_Bait`, `Detected_IgG`", b2)
+
+    def test_brief_names_nprec_when_the_table_has_it(self):
+        b = brief(self.root, count_col="NPrec")
+        self.assertIn("rowMeans(n.observations) / NPrec (precursors) over **all runs of the "
+                      "study**", b)
+        self.assertIn(", PropObs/NPrec (limpa)", b)
+        self.assertNotIn("NPeptides", b)
+
+    def test_brief_names_npeptides_for_old_limpa(self):
+        """The column a limpa < 1.4 table has, now said to count precursors."""
+        b = brief(self.root, count_col="NPeptides")
+        self.assertIn("rowMeans(n.observations) / NPeptides (precursors) over **all runs of the "
+                      "study**", b)
+        self.assertIn(", PropObs/NPeptides (limpa)", b)
+        self.assertNotIn("NPrec", b)
 
     def test_pulldown_specificity_never_in_control_and_next_steps(self):
         b = brief(self.root)

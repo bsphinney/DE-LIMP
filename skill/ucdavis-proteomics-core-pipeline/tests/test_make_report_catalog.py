@@ -32,6 +32,8 @@ SKILL_FILES = [
     "AUDIT.md", "AUDIT.json", "SAMPLE_QUALITY.md", "SAMPLE_QUALITY.json",
     # sage_lfq_check.py (via run_search.py)
     "sage_lfq_check.json", "sage_adapt.json",
+    # an identifications-only search (Sage quant.lfq false; a FragPipe workflow with no quant)
+    "identifications.tsv", "sage_identifications.json", "fragpipe_identifications.json",
     # submission_report.py
     "submission.json", "samples.tsv", "session.json",
     # make_deposit.py
@@ -84,6 +86,13 @@ class Catalog(unittest.TestCase):
                 cat, desc = make_report.describe(name)
                 self.assertNotIn("unrecognized", desc)
                 self.assertNotEqual(cat, "Other")
+
+    def test_the_quantification_record_is_described_for_every_engine(self):
+        """L11 review F5: a FragPipe identifications-only search writes sage_lfq_check.json too"""
+        desc = make_report.describe("sage_lfq_check.json")[1]
+        self.assertNotIn("Sage only", desc)
+        for words in ("not_applicable", "FragPipe", "identifications only"):
+            self.assertIn(words, desc)
 
     def test_the_specific_figure_wins_over_the_generic_png(self):
         self.assertIn("p-value", make_report.describe("qc_pvalue_panel.png")[1])

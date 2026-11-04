@@ -208,6 +208,16 @@ def cmd_status(a):
                          "look for probe_fallback.json beside the report")
         if fell_back:
             out.setdefault("warnings", []).append(fell_back)
+        # A --dda search quantified from its first pass, its second pass failed (dda_first_pass)
+        try:
+            import dda_first_pass
+            first_pass = dda_first_pass.caution_for(os.path.dirname(os.path.abspath(rep)))
+        except Exception as e:                          # noqa: BLE001 -- said, never dropped
+            first_pass = (f"could not check whether the search used its first-pass report "
+                          f"({type(e).__name__}: {e}); look for report_used in "
+                          "search_provenance.json beside the report")
+        if first_pass:
+            out.setdefault("warnings", []).append(first_pass)
     # Core staff: the submission(s) or internal work the analysis is for (session.py init), so a
     # resume finds its Core Project Board thread without asking again (SKILL.md step 0c). Never
     # a reason to fail a status query -- but a session.json that exists and cannot be read is

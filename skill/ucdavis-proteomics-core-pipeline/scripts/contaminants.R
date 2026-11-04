@@ -1,7 +1,7 @@
 # =============================================================================
 # contaminants.R -- the contaminant filter run_de.R applies before quantification.
 #
-# Why (msalemi, 2026-09-24, Silva08172026): run_de.R re-quantifies from the DIA-NN
+# Why (a Core member, 2026-09-24, a mouse-brain IP cohort): run_de.R re-quantifies from the DIA-NN
 # report with limpa and had no contaminant filter. DIA-NN's --cont-quant-exclude
 # Cont_ only shapes DIA-NN's OWN quantities, so all 121 Cont_ protein groups (bovine
 # serum proteins from the antibody prep) entered the DE model and BH, and came out as
@@ -230,7 +230,7 @@ contaminant_census <- function(group, is_cont, feature = NULL, genes = NULL, exe
 
 # The intensity the per-run share is computed on, most meaningful first. Precursor.Quantity
 # is the measured signal; Precursor.Normalised has DIA-NN's RT-dependent normalisation on
-# it, which does not preserve a run's signal fractions -- on Silva08172026 the contaminant
+# it, which does not preserve a run's signal fractions -- on a mouse-brain IP cohort the contaminant
 # share was median 12.7% of Precursor.Quantity but 28.3% of Precursor.Normalised.
 CONTAMINANT_SHARE_COLUMNS <- c("Precursor.Quantity", "Precursor.Normalised")
 

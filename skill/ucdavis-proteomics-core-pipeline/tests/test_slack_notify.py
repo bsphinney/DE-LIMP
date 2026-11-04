@@ -926,8 +926,11 @@ class Finalize(unittest.TestCase):
         root = os.path.dirname(sd)
         scripts = scripts_copy(os.path.join(root, "copy"), record_run=record_run)
         env = dict(env, FAKE_ORDER_LOG=os.path.join(root, "order.log"))
+        import finish_fixture                              # finished as finalize's gate asks
+        finish_fixture.finished(os.path.join(sd, "output"))
         return subprocess.run([PY, os.path.join(scripts, "session.py"), "finalize", "--dir", sd,
-                               *extra], capture_output=True, text=True, env=env, timeout=240)
+                               *extra],
+                              capture_output=True, text=True, env=env, timeout=240)
 
     def test_the_run_is_logged_before_the_post(self):
         import test_deposit_package as tdp
@@ -1104,8 +1107,10 @@ exec bash -c "$1"
 class RelayThroughHive(unittest.TestCase):
     def test_a_laptop_without_a_webhook_posts_through_hive(self):
         import test_deposit_package as tdp
+        import finish_fixture
         with tempfile.TemporaryDirectory() as d:
             p = tdp.dia_session(d)
+            finish_fixture.stamp(p["output_dir"])        # analysis-done: a finalized session
             hx = os.path.join(d, "fake_hive_exec.sh")
             write(hx, FAKE_HIVE_EXEC)
             os.chmod(hx, 0o755)
@@ -1552,6 +1557,8 @@ class ZipManifestFallback(unittest.TestCase):
                 if calls["n"] <= fail_writes:
                     raise OSError(28, "No space left on device")
             return real(zself, arcname, data, *a, **k)
+        import finish_fixture                              # finished as finalize's gate asks
+        finish_fixture.finished(p["output_dir"])
         args = type("A", (), dict(dir=p["session_dir"], zip=True, no_deposit=True,
                                   no_notify=False, reanalysis_of=""))()
         out = io.StringIO()

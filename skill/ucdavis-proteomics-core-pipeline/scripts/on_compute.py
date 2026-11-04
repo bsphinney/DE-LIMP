@@ -224,11 +224,14 @@ def _exec(argv, srun=False):
 
 
 def ensure_compute_node(why, minutes=DEFAULT_MINUTES, mem=DEFAULT_MEM, cpus=1,
-                        preemptible_ok=False, argv=None, script=None):
+                        preemptible_ok=False, argv=None, script=None, partition=None,
+                        account=None, qos=None):
     """First thing in a script whose work does not belong on a login node: there, replace this
     process with the same command under srun (never returns). Anywhere else, return. `script`
     (the caller's __file__): only when that script IS this process's program -- a test or
-    another script calling its main() in-process is left alone, never re-run under srun."""
+    another script calling its main() in-process is left alone, never re-run under srun.
+    `partition` / `account` / `qos`: the queue the script was given on its own command line
+    (run_search.py --account ...), used as given, as on_compute.py's own flags are."""
     if not on_login_node():
         return
     if script and (not sys.argv or os.path.realpath(sys.argv[0]) != os.path.realpath(script)):
@@ -237,7 +240,8 @@ def ensure_compute_node(why, minutes=DEFAULT_MINUTES, mem=DEFAULT_MEM, cpus=1,
     cmd = [sys.executable or "python3", os.path.abspath(argv[0])] + argv[1:]
     try:
         line = srun_argv(cmd, minutes, mem, cpus, preemptible_ok=preemptible_ok,
-                         name="pp_" + os.path.splitext(os.path.basename(argv[0]))[0])
+                         name="pp_" + os.path.splitext(os.path.basename(argv[0]))[0],
+                         partition=partition, account=account, qos=qos)
     except QueueChoice as e:
         sys.stderr.write(f"[on_compute] {why}, which is work for a compute node, but {e}\n")
         sys.exit(2)

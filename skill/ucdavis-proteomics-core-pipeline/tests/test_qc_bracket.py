@@ -981,6 +981,8 @@ class DeliveryGate(Base):
         qb.write_gate_snapshot(sdir, gate)
         with open(os.path.join(sdir, "delivery.json"), "w") as fh:     # an old full delivery.json
             json.dump({"applied": True, "qc_gate": gate}, fh)
+        import finish_fixture                              # finished as finalize's gate asks
+        finish_fixture.finished(os.path.join(sdir, "output"), methods=True)
         r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "session.py"), "finalize",
                             "--dir", sdir, "--zip", "--no-deposit", "--no-notify"],
                            capture_output=True, text=True, env=env)

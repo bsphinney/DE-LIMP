@@ -54,16 +54,19 @@ in one call took 27–33 s. A busy mount stretches it: two reads took 11.1 and 1
   a window off each end.
 - **DDA vs DIA.** A standalone `d` token in the filter string (`FTMS + c NSI d Full ms2
   …`) is the instrument saying "data-dependent". All flagged + narrow windows → DDA
-  `high`; none flagged → never DDA (narrow-window DIA or PRM → DIA `medium`, confirm);
-  a mix → never `high`. **Every release v1.3.0–v1.4.4 writes the filter string under a
+  `high`; none flagged → never DDA: a tiled window set repeated every cycle at the same
+  edges (`tiled_window_set`: any width, any number of windows, e.g. Astral 2 m/z × 300) →
+  DIA `high`, anything else (PRM?) → DIA `medium`, confirm; a mix → never `high`. **Every release v1.3.0–v1.4.4 writes the filter string under a
   misspelled accession, `MS:10000512`** (one zero too many; `Query/ProxiSpectrumReader.cs`
   at each tag, corrected in v1.4.5), and bioconda still serves 1.3.2–1.4.4, so both
   spellings are read. Read only the correct one and those builds lose the flag: a 300 ×
   2 m/z DIA method then comes back DDA/`high`, no range, no confirmation. If no filter
   string is found at all, the width rule decides alone: the `reason` says so, a `warnings`
   entry says so, and the confidence is capped at `medium` — "none flagged → never DDA"
-  cannot be applied when nothing was flagged either way, and on widths alone that same
-  300 × 2 m/z DIA method is indistinguishable from DDA.
+  cannot be applied when nothing was flagged either way. On widths alone that same
+  300 × 2 m/z DIA method looks like DDA; its tiled, repeated windows make it DIA `medium`
+  (the mzML reader, which reads no flag, says the same), and a 3–4 m/z set with more than
+  80 windows is DIA too.
 - **A partial read is never `high`.** A width needs only the two offsets; a window *edge*
   needs the isolation target as well, so a file that reports one without the other yields a
   range built from part of the method — 350.0–793.0 for the Exploris method that acquired
@@ -564,14 +567,66 @@ Apache-2.0 — the open-source alternative to DIA-NN for non-academic users. Lib
    `detect_acquisition.py` finds it (above). msconvert is used only if no parser is usable,
    and on Linux with a warning: bioconda's `proteowizard` is built from ProteoWizard's source
    **without vendor readers** (its recipe downloads `pwiz-src-without-v`), so it cannot open a
-   `.raw`. `.d` goes to msconvert as before. With `--sbatch` the conversion runs **in the
-   job**, first, never at generation (gabrig 2026-09-29: msconvert had run on the HIVE login
-   node). A converter that leaves no complete file (an indexed mzML must end in
-   `</indexedmzML>`) stops the job before Sage. With no converter at all, `run_search.py`
-   refuses before anything is written.
+   `.raw`. With `--sbatch` the conversion runs **in the job**, first, never at generation
+   (a Core member, 2026-09-29: msconvert had run on the HIVE login node). A converter that leaves no
+   complete file (an indexed mzML must end in `</indexedmzML>`) stops the job before Sage.
+   With no converter at all, `run_search.py` refuses before anything is written.
+   - **A timsTOF `.d`** goes in one of two ways, decided by the cfg's `quant.lfq` alone
+     (`run_search.sage_lfq_enabled`). With a `.d` among the inputs, a cfg whose `quant.lfq` is
+     not `true` or `false` (or that cannot be read) is refused before anything is written
+     (Sage's own default is no LFQ, so the route would be a guess), and so is a quantifying
+     search of a **diaPASEF** `.d` (the conversion settings below are DDA-PASEF's; use
+     DIA-NN) -- `run_search.refuse_sage_dotd_route`:
+     - **Identifications only** (`quant.lfq` false, written by `estimate_params.py
+       --ids-only`): Sage 0.14.7 reads the `.d` itself. On a Core submission's two timsTOF HT
+       DDA-PASEF runs (HIVE, 2026-10-30) that gave 896 peptides at 1% in 22 s, against 753
+       from an 11.6 GB Windows msconvert mzML (`sage015_test/RESULTS.md`, arm B). A `.raw`
+       beside it is still converted, and an mzML goes in as it is.
+     - **Quantification** (a cfg written without `--ids-only`; which one a study gets is the
+       rule in `references/no-de-route.md`, step 1): 0.14.7 has no MS1 quantification on a `.d`, so the
+       job converts each `.d` to mzML first, with the Core's pinned vendor-enabled
+       ProteoWizard container (`resolve_defaults.SKYLINE_PIN["sif"]`, the image Skyline runs
+       from; another with `--pwiz-sif`). The step (`run_search.pwiz_step`):
+       `apptainer exec --cleanenv --env WINEDEBUG=-all --bind <.d folder>:<.d folder>:ro
+       --bind <out>/mzml/.partial:<same> <sif> wine msconvert <.d> --mzML --zlib
+       --combineIonMobilitySpectra --filter "peakPicking vendor msLevel=1-" --filter
+       "scanSumming precursorTol=0.05 scanTimeTol=10 ionMobilityTol=0.1 sumMs1=0" -o
+       <out>/mzml/.partial`, with plain Linux paths (as ProteoWizard's container README runs
+       it; confirmed under Wine on HIVE), every path shell-quoted. The msconvert options are
+       `run_search.PWIZ_TIMS_MSCONVERT`, the Core's Windows msconvert 3.0.26058 settings as
+       its mzML's `<dataProcessing>` records them; vendor `peakPicking` must stay the first
+       filter. On `sumMs1=0`: the pinned ProteoWizard 3.0.26266 does not take sumMs1 and
+       records sumMS1=true in its mzML; MS1 spectrum counts equal the Windows 3.0.26058 output,
+       so MS1 is not summed in effect (HIVE check, 2026-11-01). The record says so
+       (`containers[].msconvert_options_note`). Without the combine and the summing, msconvert writes one spectrum per
+       mobility scan (HIVE: 11.1 million spectra and more than 9.9 GB for one run, against
+       82,905). The record (`containers[].msconvert_options`, `sage_input.why`) quotes the same
+       constant. The job first checks
+       the pinned image's sha256 (`sha256sum -c`; an inline search checks it in Python) and
+       stops on a mismatch; a sif with another name is used as given, and its version is
+       recorded as unknown. `search_provenance.json` `result.mzml_conversion.containers`
+       names the sif, image, version and sha256. `run_search.py` refuses before anything is
+       written when the sif is not there (off HIVE, usually), naming the two ways out: an mzML
+       from a vendor-enabled msconvert (e.g. Windows ProteoWizard), or `--ids-only`; and when
+       a folder to bind holds `:` or `,`. A Sage 0.15 beta that quantifies `.d` is not adopted
+       (it crashes on `.d` on disk, lazear/sage#228; see RESULTS.md).
+   - `search_provenance.json` records `sage_input` (`dotd`: `direct`, `converted` or null
+     when no input is a `.d`, with `why`) and `quantified` (true/false). `sage_input` and
+     `sage_identifications` each carry a `methods_sentence` (the route and the conversion with
+     its options; the identification FDR rule), which `make_methods.py` quotes as written.
 2. `<cmd> <bundle sage_config.json> -f <fasta> -o <out> --parquet
-   --disable-telemetry-i-dont-want-to-improve-sage <mzml...>`, its output teed to
-   `<out>/sage.log`.
+   --disable-telemetry-i-dont-want-to-improve-sage <mzML, and .d for identifications only...>`,
+   its output teed to `<out>/sage.log`.
+   - **Identifications only:** there is no step 3 (`sage_lfq_check` is `not_applicable`) and
+     no step 4. `--adapt-only` writes `<out>/identifications.tsv` instead (`adapt_sage_ids`):
+     a run's identification is a target PSM of rank 1 with Sage's `spectrum_q` **and**
+     `peptide_q` ≤ 0.01 (`run_search.SAGE_IDS_RULE`; `peptide_q` alone is one value per peptide
+     over all the runs, so it would list a peptide in a run where its only spectrum is poor),
+     one row per (run, modified peptide, charge) at its best `spectrum_q`, columns `run, peptide, proteins, charge, spectrum_q, peptide_q,
+     protein_q`. What was kept per run goes to `sage_identifications.json` and
+     `search_provenance.json` `sage_identifications`. It writes no `report.parquet`, sets
+     aside one an earlier search left in the folder, and refuses an output whose
+     `results.json` says Sage ran with LFQ.
 3. **LFQ mass-window check** (`sage_lfq_check.py`, in the job and again at `--adapt-only`).
    Sage integrates MS1 only within ±`quant.lfq_settings.ppm_tolerance` of the theoretical
    mass (default 5 ppm, `lfq.rs`). The search itself uses `precursor_tol` (±10 ppm). So a
@@ -610,6 +665,12 @@ Apache-2.0 — the open-source alternative to DIA-NN for non-academic users. Lib
      subset** of Sage's own count: 16,649 kept against Sage's logged 17,288 there. Both
      numbers are recorded (`target_precursors_kept`, `sage_logged_target_ms1_peaks_5pct`).
    - It refuses an `lfq.parquet` without those columns.
+   - **An empty result is refused, never written as one** (H2-2): when Sage identified no
+     target peptide at 1% (`results.sage.parquet`), or no `lfq.parquet` row passes, it exits
+     2, writes no `report.parquet` (an earlier one is set aside), and records why in
+     `sage_adapt.json` (`status: refused`). The same for an identifications-only search with
+     no identification: no `identifications.tsv`. `sage_lfq_check` then says `unchecked`: no
+     run's mass error could be measured (H2-3).
    - The kept and dropped rows per file go to `sage_adapt.json` and `search_provenance.json`
      `sage_adapt`. The contract's q-columns are then 0.0, and the report declares them
      placeholders (`q_columns: placeholder`), so the DE applies no second threshold and
@@ -807,10 +868,61 @@ Say so rather than crediting it all to the method.
   *"Could not find Batmass-IO Thermo binary"* + `Scans = 0` → either install mono
   (conda-forge `mono`, then `export PATH=<monoenv>/bin:$PATH` in the job) or pre-centroid
   to mzML. (On HIVE, mono 6.12 is installed at `/quobyte/proteomics-grp/conda_envs/mono`.)
+  `run_search.py` puts it on the job's PATH itself (`$FRAGPIPE_MONO_BIN`, else PATH, else that
+  copy; HIVE has no mono module) and refuses `.raw` before writing anything when there is none.
+- **DDA inputs are staged, never written beside:** MSFragger writes `<run>_uncalibrated.mzML`,
+  `_uncalibrated.mzBIN` and `.mzBIN` (~1 GB a run) next to each input, so `run_search.py`
+  stages them in `<out>/raw_stage/` — a `.raw` copied in the job (MSFragger cannot read one
+  through a link: "Instrument index not available for requested device"), a `.d`/mzML linked —
+  and the manifest names the staged paths — one experiment per run (the run name) only when the
+  workflow quantifies; an identifications-only workflow keeps one pooled experiment (an empty
+  experiment column), as FragPipe's own manifest does (`fragpipe_dda_stage`, `experiment_rule`
+  in `fragpipe_stage`). The job
+  removes the copies and MSFragger's files once FragPipe prints `ALL JOBS DONE`; after a search
+  that did not finish they stay for a re-run. `raw_stage/` is scratch: never zipped, catalogued
+  or delivered. FragPipe turns `-` into `_` in an experiment name; the adapter maps its names
+  back to the run names (`fragpipe-files.fp-manifest`). Before anything is written the route
+  checks there is room for the copies plus ~1.2 GB a run of MSFragger's files, refuses an input
+  given from inside `raw_stage/`, and the job checks the room again; a failed copy removes its
+  partial file and says what is kept. After a finished search every regular file in the stage
+  goes (links stay).
+- **FragPipe DIA on `.raw`/mzML is refused (2.14.2):** its DIA route stages only `.d`
+  (`diatracer_stage.py`); on other inputs MSFragger would write beside them. Use DIA-NN, or stage
+  the inputs in a folder of your own (the refusal prints the commands). Staged properly in 2.15.
+- **A workflow that runs no quantification is an identifications-only search** — the shipped
+  Nonspecific-peptidome (and Nonspecific-HLA) have `quantitation.run-label-free-quant=false` and
+  no TMT-Integrator or DIA-NN step (`fragpipe_params.workflow_quantification`, the one reading;
+  `ionquant.run-ionquant=true` alone switches nothing on). It writes `psm.tsv`/`peptide.tsv`/
+  `protein.tsv` (one set, all runs filtered together, in the one pooled experiment the route
+  gives it). It is NOT true that it never writes `combined_protein.tsv`: given several
+  experiments, Philosopher's abacus writes one with spectral counts and every intensity 0 (H7, a
+  two-run hydrolysate search). So the workflow's quantification keys decide first, and a
+  `combined_protein.tsv` with no intensity above 0 is not a quantified search either
+  (`fragpipe_run_quantification`). The job counts it finished without one; it is recorded as
+  identifications only (`quantified: false`, a `not_applicable` quantification record);
+  `--adapt-only` writes `identifications.tsv` +
+  `fragpipe_identifications.json` and no `report.parquet`; the DE refuses, naming a workflow with
+  `quantitation.run-label-free-quant=true` (LFQ-MBR) or Sage with `quant.lfq`; the Methods say
+  identifications only. Vendor workflows are not patched to switch LFQ on.
+- **The filter quoted is the filter as run:** FragPipe adds options to the workflow's
+  `phi-report.filter` when it runs Philosopher (`--razor`, `--tag`; with LFQ on it can change
+  `--prot`), so the Methods' FDR sentence and `fragpipe_identifications.json` both read the
+  `philosopher filter` line from FragPipe's `log_*.txt` (`fragpipe_params.filter_as_recorded`,
+  the one reading) and fall back to the workflow's line only tagged. With one experiment per run,
+  each experiment's filter reads the one combined protein inference (`combined.prot.xml`): the
+  PSM, peptide-ion and peptide rates hold per run, a protein FDR over all runs together.
+- **The database searched is `--fasta` (2.14.2):** the shipped workflows name no
+  `database.db-path`, and headless FragPipe then takes the one cached in the account's
+  `fragpipe-ui.cache` — the LAST search's database. `run_search.py` writes
+  `<out>/fragpipe_input.workflow`, the given workflow with `database.db-path` set to `--fasta`,
+  runs that, refuses a workflow naming a different database, and records the FASTA's path,
+  sha256, entries and decoys (`fragpipe_database` in `search_provenance.json`); the Methods name
+  it from `fragger.params` `database_name`.
 - **Other DDA gotchas:** IonQuant MBR needs experiment groups in the manifest — set
   `ionquant.mbr=0` if you only want peptide/protein IDs; **profile-mode mzML** fail
   `CheckCentroid` (centroid during conversion, or read `.raw` so MSFragger vendor-centroids);
-  the LFQ-MBR template ships **without** a `database.db-path` line (add one); and the
+  the LFQ-MBR template ships **without** a `database.db-path` line (`run_search.py` sets it
+  from `--fasta`; a hand-run FragPipe needs one added); and the
   headless run's exit code can read 0 even on a crash — **verify the output file exists**.
 - **Which output file to verify (don't false-alarm):** the file depends on the run
   type. A **single-experiment / peptide-ID run** (`ionquant.mbr=0`, one experiment)

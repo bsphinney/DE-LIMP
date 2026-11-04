@@ -1,7 +1,7 @@
 """make_figures.R: short sample names on the heatmap / PCA / QC plots.
 
 Raw run names ("08132026__60SPD_DIA-LRS-124_S3-F4_1_23659") took ~40% of the heatmap and
-buried the PCA (Silva08172026). short_sample_names() is the one definition: a Label/Sample
+buried the PCA (the mouse-brain IP cohort). short_sample_names() is the one definition: a Label/Sample
 column in conditions.csv wins; otherwise the tokens every run shares are dropped and the
 shortest distinguishing stretch is kept; any empty or colliding label falls back to the full
 run name. The mapping is written to sample_labels.csv so no label is ambiguous.

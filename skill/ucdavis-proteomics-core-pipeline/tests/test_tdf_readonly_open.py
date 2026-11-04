@@ -990,7 +990,9 @@ class TestRunSearchChecksTheTdfItself(unittest.TestCase):
     searched there with nothing said."""
 
     def _args(self, tmp, *files, extra=()):
-        for name, text in (("tools.json", "{}"), ("bundle.json", "{}"),
+        # a DIA-NN cfg gets a DIA bundle: run_search resolves the engine from "acquisition"
+        # (DIA -> diann, else sage), and the engine-specific refusals run before check_tdf
+        for name, text in (("tools.json", "{}"), ("bundle.json", '{"acquisition": "DIA"}'),
                            ("p.cfg", "--qvalue 0.01\n"), ("db.fasta", ">sp|P1|X\nPEPTIDER\n")):
             with open(os.path.join(tmp, name), "w") as fh:
                 fh.write(text)

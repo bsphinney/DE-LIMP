@@ -177,7 +177,7 @@ class RunSearchSage(_Harness):
         twice = os.path.join(self.d, "sage_twice.sh")
         p = self.run_search("--sbatch", twice, files=[self.raws[0], self.raws[1], self.raws[0]])
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        self.assertNotIn("share an mzML name", p.stderr)
+        self.assertNotIn("share a Sage run name", p.stderr)
         self.assertIn(f"FLAG: 1 input file(s) were listed more than once; each is searched once: "
                       f"{self.raws[0]} (listed 2 times)", p.stderr)
         with open(once) as a, open(twice) as b:

@@ -3003,7 +3003,7 @@ STALE_SNAPSHOT = "/quobyte/proteomics-grp/coreomics/.submissions_db"
 
 
 def ids_in(text: str, typed: bool = False) -> list:
-    """[("internal_id", "PROT_0756") | ("id", "0022066cd85f"), ...] written in a path or name,
+    """[("internal_id", "PROT_0807") | ("id", "a1b2c3d4e5f6"), ...] written in a path or name,
     or -- typed=True -- in what the user wrote. A 12-hex token counts only with a letter AND a
     digit in it: a 12-digit timestamp is not a CoreOmics id."""
     s, hits = _s(text), []
@@ -3241,9 +3241,12 @@ def name_tokens(s, min_len: int = 3) -> list:
 
 
 def institution_tokens(s) -> set:
+    """An institution's distinctive words, its aliases folded to one form. An alias matches with
+    or without the spaces between its words (2.14.2, I14: staff named a folder "UC SantaCruz",
+    and "University of California Santa Cruz" did not find it)."""
     text = " ".join(re.findall(r"[a-z0-9]+", _fold(s).lower()))
     for long, short in INSTITUTION_ALIASES:
-        text = re.sub(r"\b" + re.escape(long) + r"\b", short, text)
+        text = re.sub(r"\b" + r" ?".join(map(re.escape, long.split())) + r"\b", short, text)
     return {t for t in text.split() if len(t) >= 3 and t not in INSTITUTION_STOPWORDS}
 
 
@@ -3841,7 +3844,46 @@ DELIVERY_MODES = {
               "what": "an analysis report delivered without differential expression: a QC report, "
                       "an identification list, or results delivered before the statistics"},
     "raw-only": {"suffix": "raw_data", "de": False, "what": "the raw instrument files only"},
+    # 2.14.2 (Amendment 3 to T13; three earlier HT submissions hand-copied the search folders and
+    # so bypassed the QC gate): the raw files and the search results before the report. What it
+    # leaves owed is delivery.json `owed`, which keeps `session.py status` open until a later
+    # no-de or analysis delivery. Not gated by the finish steps (report_files.UNGATED_DELIVERY_MODES).
+    "interim": {"suffix": "interim", "de": False,
+                "what": "the raw files and the search results, delivered before the report: the "
+                        "report, the Methods and the reproducibility bundle follow in a later "
+                        "delivery",
+                "owed": ("the analysis report (Analysis_Report.html)",
+                         "the Methods for a manuscript (methods.md)",
+                         "the reproducibility bundle (reproducibility/)")},
 }
+# The modes that deliver what an interim delivery owes (the report, Methods, the bundle): only
+# these clear delivery.json `owed` (references/core-submissions.md, SKILL.md 12b).
+OWED_CLEARED_BY = ("analysis", "no-de")
+
+
+def owed_after(mode: str, record_dir) -> list:
+    """delivery.json `owed` for a delivery in `mode`: what the mode itself leaves owed (interim),
+    and -- unless it is a no-de or analysis delivery, which deliver them -- what the last delivery
+    from this session left owed (its delivery.json in `record_dir`), each once, in order. A
+    raw-only re-send after an interim delivery must not close it (L5b review M2: status said
+    "delivered" although the report never went)."""
+    owed = list(DELIVERY_MODES[mode].get("owed") or ())
+    if mode in OWED_CLEARED_BY or not record_dir:
+        return owed
+    try:
+        with open(os.path.join(record_dir, "delivery.json")) as fh:
+            prior = json.load(fh)
+    except FileNotFoundError:
+        return owed                          # the first delivery from this session
+    except (OSError, ValueError) as e:
+        # said in the record itself: what was owed before cannot be read, so it is not dropped
+        return owed + [f"whatever the earlier delivery left owed (its delivery.json cannot be "
+                       f"read: {type(e).__name__}) -- deliver the report with --mode no-de or "
+                       f"analysis"]
+    earlier = prior.get("owed") if isinstance(prior, dict) else None
+    return [x for x in (earlier if isinstance(earlier, list) else []) if x not in owed] + owed
+
+
 # No AI_Analysis_Report.docx: Analysis_Report.html is the report of record, and an older
 # session's Word copy (Word mangled its figures) is kept there but never handed out.
 DELIVER_FILES = (("Analysis_Report.html", True), ("Analysis_Report.pdf", False),
@@ -3851,8 +3893,39 @@ DELIVER_DIRS = ("tables", "figures", "reproducibility")
 # Delivered when the session has them, and not listed when it does not: the peak check
 # (skyline_peaks.py, step 8f) -- its pictures, tables and the Skyline document. Its working folder
 # (skyline_work/) is scratch and stays behind (EXCLUDED_DIRS). Whether it ran, or why not, is the
-# session MANIFEST's and the report's to say.
+# session MANIFEST's and the report's to say. skyline/ goes only for a FINISHED check
+# (skyline_deliverable): a skipped one leaves its record there, which alone is no deliverable
+# (2.14.2, I31: a delivery held skyline/ with only the skip record in it, marked [OK]).
 OPTIONAL_DELIVER_DIRS = ("skyline",)
+# The peak check's Skyline document, as skyline_peaks.py names it (<name> + this suffix).
+try:                        # its one definition (rule 3); a partial copy of scripts/: never read,
+    from skyline_peaks import SKYLINE_DOCUMENT_SUFFIX   # as skyline_deliverable stops first
+except ImportError:
+    SKYLINE_DOCUMENT_SUFFIX = None
+
+
+def skyline_deliverable(output_dir: str) -> tuple:
+    """(True, None) when output/skyline/ holds a finished peak check (skyline_peaks.record_state
+    "ok"), else (False, why): the record's skip reason, or skyline_peaks' words for its state.
+    A thin wrapper: skyline_peaks.deliverable() owns the rule (so the README row and, through
+    delivery.json `skyline`, the client email follow it)."""
+    sp = sibling("skyline_peaks")
+    ok, _state, why = sp.deliverable(output_dir)
+    if ok:
+        # ...and never beside a report made before it finished, which says it is not part of the
+        # report (skyline_peaks.report_disagrees; C2 biologist M5)
+        why = sp.report_disagrees(output_dir)
+        ok = why is None
+    return ok, why
+
+
+def skyline_document(names) -> str:
+    """The peak check's Skyline document among delivered names (skyline/<name> +
+    SKYLINE_DOCUMENT_SUFFIX), or None."""
+    return next((x for x in sorted(names) if x.startswith("skyline/")
+                 and x.endswith(SKYLINE_DOCUMENT_SUFFIX)), None)
+
+
 # The optional audio discussion (make_podcast.py): the audio and its transcript only. Its
 # chunk cache, script, check/verify logs and podcast.json (consent notes) stay in the session.
 # The report's "Listen" card links podcast/<file> relative to Analysis_Report.html. Beside the
@@ -3861,7 +3934,12 @@ OPTIONAL_DELIVER_DIRS = ("skyline",)
 PODCAST_FILES = ("podcast.m4a", "podcast.wav", "transcript.html")
 SEARCH_FILES = ("report.parquet", "report.pg_matrix.tsv", "report.pr_matrix.tsv", "report.gg_matrix.tsv",
                 "report.unique_genes_matrix.tsv", "report.stats.tsv", "report.log.txt",
-                "search_provenance.json")
+                "search_provenance.json",
+                # a Sage search for identifications only (run_search.py adapt_sage_ids): its one
+                # product and what it kept; optional, SKIPPED when absent (L7R-F4)
+                "identifications.tsv", "sage_identifications.json",
+                # ...and a FragPipe search whose workflow ran no quantification (Ruling 73a)
+                "fragpipe_identifications.json")
 EXCLUDED_DIRS = {"xic", "report_xic", "temp", "tmp", ".tmp", "__pycache__", "raw_data",
                  "skyline_work"}
 # The analysis conversation (save_transcript.py -> logs/conversation/) and the decisions log are
@@ -3877,6 +3955,21 @@ INTERNAL_FILES = re.compile(r"^(?:conversation\.(?:md|html)|decisions\.md|"
 INTERNAL_REASON = "Core-internal: the analysis conversation is never delivered"
 STAFF_ONLY_REASON = "Core-internal: staff-only, never delivered"     # the QC record
 EXCLUDED_SUFFIXES = (".quant", ".speclib")
+# Working folders of a search, which an interim delivery's walk of the whole search folder would
+# otherwise ship (L5b review L1): Sage's mzML conversion of the raw files -- a second copy of the
+# raw data, often tens of GB -- the scan-window probe and the library Radiant searched.
+SEARCH_WORK_DIRS = {
+    "mzml": "excluded: the search's mzML conversion of the raw files, a second copy of the raw "
+            "data (the raw files are in raw/)",
+    "window_probe": "excluded: the search's scan-window probe, a working folder",
+    "radiant_lib": "excluded: the library Radiant searched, rebuilt from the FASTA and params"}
+SCRATCH_REASON = "excluded: scratch, a half-written or out-of-date file"  # scratch_files' rule
+# An interim delivery copies whole search folders: their job scripts (account, node and path
+# names) stay behind, as no analysis delivery ever carried them (SEARCH_FILES). The scheduler's
+# job logs and the Core's own records are Core-internal in EVERY walk, by staff.is_core_internal
+# (the one rule, shared with the session zip; C2 security M1).
+JOB_FILES = re.compile(r"^.*\.(?:sbatch|slurm|sh)$", re.I)
+JOB_REASON = "Core-internal: a job script, never delivered"
 
 
 def _excluded_dir(name: str) -> bool:
@@ -3896,6 +3989,10 @@ def _plan_file(src: str, name: str, required: bool = False) -> dict:
         return dict(item, status="SKIPPED", reason="not a regular file")
     if not os.access(src, os.R_OK):
         return dict(item, status="SKIPPED", reason="unreadable (permission denied)")
+    if sibling("staff").client_copy(src) is not None:
+        # it names who accepted by login: the client gets the role (C2 security M1)
+        return dict(item, status="OK", bytes=st.st_size,
+                    redacted=sibling("staff").ACCEPTED_BY_SOURCE)
     return dict(item, status="OK", bytes=st.st_size)
 
 
@@ -3916,59 +4013,96 @@ def _plan_share(output_dir: str) -> dict:
             "reason": f"{why}; `make_podcast.py share output/` builds it (finalize does)"}
 
 
-def plan_delivery(output_dir: str) -> list:
+def _plan_tree(output_dir: str, d: str, job_files: bool = False) -> list:
+    """The plan items of output/<d>/, walked by the delivery's rules: the conversation and every
+    staff-only record, chromatograms and temp folders, engine intermediates stay out, each a
+    [SKIPPED] item with its reason, and so do the scheduler's job logs and the Core's own records
+    (staff.is_core_internal). `job_files`: job scripts too (JOB_FILES; an interim delivery's
+    search folders)."""
     staff_only = sibling("staff").is_staff_only
+    items = []
+    root = os.path.join(output_dir, d)
+
+    def unreadable(e, _items=items):
+        # os.walk skips a directory it cannot list unless told; that must not vanish silently.
+        rel = os.path.relpath(e.filename, output_dir) if e.filename else "?"
+        _items.append({"name": rel.rstrip("/") + "/", "status": "SKIPPED",
+                       "reason": f"unreadable directory ({e.strerror})", "required": False})
+
+    seen = set()
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=True, onerror=unreadable):
+        real = os.path.realpath(dirpath)
+        if real in seen:                           # a symlink loop
+            dirnames[:] = []
+            continue
+        seen.add(real)
+        rel_dir = os.path.relpath(dirpath, output_dir)
+        keep = []
+        for n in sorted(dirnames):
+            if n.lower() in INTERNAL_DIRS:
+                items.append({"name": os.path.join(rel_dir, n) + "/", "status": "SKIPPED",
+                              "reason": INTERNAL_REASON, "required": False})
+            elif n.lower() in SEARCH_WORK_DIRS:
+                items.append({"name": os.path.join(rel_dir, n) + "/", "status": "SKIPPED",
+                              "reason": SEARCH_WORK_DIRS[n.lower()], "required": False})
+            elif sibling("scratch_files").is_scratch_dir(n):
+                items.append({"name": os.path.join(rel_dir, n) + "/", "status": "SKIPPED",
+                              "reason": sibling("scratch_files").dir_reason(n, SCRATCH_REASON),
+                              "required": False})
+            elif _excluded_dir(n):
+                items.append({"name": os.path.join(rel_dir, n) + "/", "status": "SKIPPED",
+                              "reason": "excluded: chromatograms/temp data are not a deliverable",
+                              "required": False})
+            else:
+                keep.append(n)
+        dirnames[:] = keep
+        for fn in sorted(filenames):
+            rel = os.path.join(rel_dir, fn)
+            if sibling("scratch_files").is_scratch_file(fn, filenames):  # *.part, *.partial ...
+                items.append({"name": rel, "status": "SKIPPED", "reason": SCRATCH_REASON,
+                              "required": False})
+                continue
+            # staff-only: a QC record by its marker, whatever it is called (--out), and
+            # staff.py's records of who decided (*.staff.json) -- both predicates
+            qc_only = sibling("qc_bracket").is_staff_only_file(os.path.join(dirpath, fn))
+            if sibling("staff").is_core_internal(fn):   # job logs, fran_deposit.json (M1)
+                items.append({"name": rel, "status": "SKIPPED",
+                              "reason": sibling("staff").CORE_INTERNAL_REASON, "required": False})
+                continue
+            if INTERNAL_FILES.match(fn) or staff_only(fn) or qc_only:
+                items.append({"name": rel, "status": "SKIPPED",
+                              "reason": STAFF_ONLY_REASON if (qc_only or staff_only(fn))
+                              else INTERNAL_REASON,
+                              "required": False})
+                continue
+            if fn.lower().endswith(EXCLUDED_SUFFIXES):
+                items.append({"name": rel, "status": "SKIPPED",
+                              "reason": "excluded: engine intermediate", "required": False})
+                continue
+            if job_files and JOB_FILES.match(fn):
+                items.append({"name": rel, "status": "SKIPPED", "reason": JOB_REASON,
+                              "required": False})
+                continue
+            items.append(_plan_file(os.path.join(dirpath, fn), rel))
+    return items
+
+
+def plan_delivery(output_dir: str) -> list:
     items = [_plan_file(os.path.join(output_dir, n), n, req) for n, req in DELIVER_FILES]
-    for d in DELIVER_DIRS + tuple(x for x in OPTIONAL_DELIVER_DIRS
-                                  if os.path.isdir(os.path.join(output_dir, x))):
+    optional = tuple(x for x in OPTIONAL_DELIVER_DIRS if os.path.isdir(os.path.join(output_dir, x)))
+    if "skyline" in optional:
+        ok, why = skyline_deliverable(output_dir)
+        if not ok:
+            optional = tuple(x for x in optional if x != "skyline")
+            items.append({"name": "skyline/", "status": "SKIPPED", "required": False,
+                          "reason": why})
+    for d in DELIVER_DIRS + optional:
         root = os.path.join(output_dir, d)
         if not os.path.isdir(root):
             items.append({"name": d + "/", "status": "SKIPPED", "reason": "not found in the session",
                           "required": False})
             continue
-
-        def unreadable(e, _items=items):
-            # os.walk skips a directory it cannot list unless told; that must not vanish silently.
-            rel = os.path.relpath(e.filename, output_dir) if e.filename else "?"
-            _items.append({"name": rel.rstrip("/") + "/", "status": "SKIPPED",
-                           "reason": f"unreadable directory ({e.strerror})", "required": False})
-
-        seen = set()
-        for dirpath, dirnames, filenames in os.walk(root, followlinks=True, onerror=unreadable):
-            real = os.path.realpath(dirpath)
-            if real in seen:                           # a symlink loop
-                dirnames[:] = []
-                continue
-            seen.add(real)
-            rel_dir = os.path.relpath(dirpath, output_dir)
-            keep = []
-            for n in sorted(dirnames):
-                if n.lower() in INTERNAL_DIRS:
-                    items.append({"name": os.path.join(rel_dir, n) + "/", "status": "SKIPPED",
-                                  "reason": INTERNAL_REASON, "required": False})
-                elif _excluded_dir(n):
-                    items.append({"name": os.path.join(rel_dir, n) + "/", "status": "SKIPPED",
-                                  "reason": "excluded: chromatograms/temp data are not a deliverable",
-                                  "required": False})
-                else:
-                    keep.append(n)
-            dirnames[:] = keep
-            for fn in sorted(filenames):
-                rel = os.path.join(rel_dir, fn)
-                # staff-only: a QC record by its marker, whatever it is called (--out), and
-                # staff.py's records of who decided (*.staff.json) -- both predicates
-                qc_only = sibling("qc_bracket").is_staff_only_file(os.path.join(dirpath, fn))
-                if INTERNAL_FILES.match(fn) or staff_only(fn) or qc_only:
-                    items.append({"name": rel, "status": "SKIPPED",
-                                  "reason": STAFF_ONLY_REASON if (qc_only or staff_only(fn))
-                                  else INTERNAL_REASON,
-                                  "required": False})
-                    continue
-                if fn.lower().endswith(EXCLUDED_SUFFIXES):
-                    items.append({"name": rel, "status": "SKIPPED",
-                                  "reason": "excluded: engine intermediate", "required": False})
-                    continue
-                items.append(_plan_file(os.path.join(dirpath, fn), rel))
+        items += _plan_tree(output_dir, d)
     pdir = os.path.join(output_dir, "podcast")
     if not os.path.isdir(pdir):
         items.append({"name": "podcast/", "status": "SKIPPED", "required": False,
@@ -3981,9 +4115,52 @@ def plan_delivery(output_dir: str) -> list:
         items += [_plan_file(os.path.join(pdir, fn), "podcast/" + fn) for fn in audio]
         if any(fn != "transcript.html" for fn in audio):
             items.append(_plan_share(output_dir))
-    for fn in SEARCH_FILES:
-        items.append(_plan_file(os.path.join(output_dir, "search", fn), "search/" + fn))
+    folder, why = delivery_search(output_dir)
+    if folder is None:
+        items.append({"name": "search/", "status": "SKIPPED", "required": False, "reason": why})
+    else:
+        for fn in SEARCH_FILES:
+            items.append(_plan_file(os.path.join(output_dir, *folder.split("/"), fn),
+                                    f"{folder}/{fn}"))
     return items
+
+
+def delivery_search(output_dir: str) -> tuple:
+    """(folder, None) or (None, why): THE search an analysis delivery carries -- the session's
+    search folder (session.search_folder: search_choice's, wherever the search is,
+    output/search_sage/ as much as output/search/, tie-broken by the report the DE read) -- as its
+    folder under output/, which is its folder in the delivery ("search", "search_sage";
+    AGENTS_DELIVERY_NOTE: output/<x> is <x>). "search", the default folder, for a session with no
+    search record (as before 2.14.2). Records and none chosen (session.search_unchosen): which
+    one the results come from is not recorded, so none is delivered, and `why` says so (T44)."""
+    sess = sibling("session")
+    p = sess.paths_for(os.path.dirname(os.path.abspath(output_dir)))
+    c = sess.search_choice(p)
+    folder = sess.search_folder(p, c)
+    if folder:
+        return os.path.relpath(folder, p["output_dir"]).replace(os.sep, "/"), None
+    return None, (f"which search the results come from is not recorded, so none is delivered "
+                  f"-- {sess.SEARCH_HOW_TO_CHOOSE} ({c['why']})")
+
+
+def plan_interim(output_dir: str) -> tuple:
+    """An interim delivery's items (--mode interim): every search folder of the session
+    (session.find_search_provenance's records, wherever they are: output/search_dda/ ...), walked
+    by the delivery's rules plus JOB_FILES, each under its own folder name. -> (items, the folder
+    names). A session with no search record has nothing to deliver early: Stop."""
+    _, records = sibling("session").find_search_provenance(output_dir)
+    if not records:
+        raise Stop(EXIT_DECIDE, {"error": "--mode interim delivers the session's search results, "
+                                          "but it has no search record (no output/<folder>/"
+                                          "search_provenance.json)",
+                                 "hint": "run the search (step 7) first; raw files alone go with "
+                                         "--mode raw-only"})
+    folders = sorted({os.path.relpath(os.path.dirname(r), output_dir).replace(os.sep, "/")
+                      for r in records})
+    items = []
+    for d in folders:
+        items += _plan_tree(output_dir, d, job_files=True)
+    return items, folders
 
 
 def find_service_record(summary: dict, session_dir, explicit) -> tuple:
@@ -4030,6 +4207,27 @@ def find_service_record(summary: dict, session_dir, explicit) -> tuple:
     if len(hits) > 1:
         return None, "several staged service projects: " + ", ".join(hits) + " (pass --service-project)", foreign
     return None, "no staged service project found (run `stage --apply` first, or pass --service-project)", foreign
+
+
+def raw_names(record: dict) -> list:
+    """[(name, target)] of a staged service project's raw files, for the share's raw/ links: each
+    `links` item's staged name -- the name stage linked it under in raw/, which may be a corrected
+    one (a link `S07.d` staff made to the instrument's mis-named `wrong_sample.d`) -- and its
+    `target`, the real file (2.14.2, I43: deliver named the share's links after the target).
+    Only the name's base name is used, so a hand-edited `../x.d` cannot put a link outside raw/;
+    a name that is no file name (empty, `.`, `..`) is None -- never the target's basename, the
+    wrong name I43 fixes -- and the item is not linked. A missing target is None too.
+    A stage record from before `links` falls back to `files`, each named by its own basename."""
+    links = record.get("links")
+    if isinstance(links, list) and links:
+        out = []
+        for p in links:
+            p = p if isinstance(p, dict) else {}
+            name = os.path.basename(_s(p.get("name")).rstrip("/"))
+            out.append((name if name not in ("", ".", "..") else None,
+                        _s(p.get("target")) or None))
+        return out
+    return [(os.path.basename(f.rstrip("/")), f) for f in record.get("files") or []]
 
 
 def session_ownership(session_dir: str, record: dict) -> tuple:
@@ -4165,9 +4363,53 @@ README_MD_OPENER = ("**Open `README.html`** (double-click it, or click it in Bio
                     "links: in Bioshare, open each file from the file list.")
 
 
+# What a delivered search did, in the client's words, by searches_quantified() -- the one
+# predicate, sage_lfq_check.search_quantified, which the DE gate shares: a search for
+# identifications only (Sage --ids-only, a FragPipe workflow that runs no quantification) is never
+# said to have quantified anything (2.14.2 C2 B1: the README and the email said it had).
+SEARCH_DID = {True: "identified and quantified the proteins",
+              False: "identified the peptides and proteins (identifications only: no quantities)"}
+SEARCH_FOLDER_HOLDS = {
+    True: "its report and matrices, its log, and search_provenance.json (what ran, and with "
+          "which settings)",
+    False: "its identifications (identifications.tsv, per run), how they were filtered "
+           "(*_identifications.json), its log, and search_provenance.json (what ran, and with "
+           "which settings); identifications only, so there are no quantities"}
+
+
+def searches_quantified(output_dir, folders) -> dict:
+    """{folder: True | False} for search folders under output/ (each its name in a delivery):
+    False for a search for identifications only (sage_lfq_check.search_quantified, the one
+    predicate). {} with no output dir."""
+    if not output_dir:
+        return {}
+    slc = sibling("sage_lfq_check")
+    return {f: slc.search_quantified(os.path.join(output_dir, *f.split("/")))
+            for f in folders if f}
+
+
+def delivered_search_folders(delivered, mode, search_dir=None) -> list:
+    """The search folders a delivery carries, as their names under output/: an interim
+    delivery's every folder with a delivered search_provenance.json (plan_interim), an analysis
+    or no-de delivery's one (delivery_search, `search_dir`); none for raw-only."""
+    if mode == "interim":
+        return sorted({x.rsplit("/", 1)[0] for x in delivered
+                       if x.endswith("/search_provenance.json")})
+    return [search_dir.strip("/")] if search_dir and mode in ("analysis", "no-de") else []
+
+
+def _folder_quantified(quantified, folder):
+    """searches_quantified's answer for a delivered top-level `folder` (a search may sit one
+    level down): False only when every search under it is identifications only; True otherwise,
+    and when nothing was recorded (an older caller)."""
+    got = [v for k, v in (quantified or {}).items()
+           if k.strip("/") == folder.strip("/") or k.startswith(folder.strip("/") + "/")]
+    return not got or any(got)
+
+
 def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "analysis",
                  html_twin: bool = False, for_html: bool = False, hive_md=None,
-                 podcast: bool = False) -> str:
+                 podcast: bool = False, search_dir: str = "search", quantified=None) -> str:
     """Collaborator-facing. Every claim comes from the submission record or from a file that
     was actually delivered -- no email addresses, no numbers that are not in the inputs, and no
     "we compared your groups" without a comparison table beside it. The only paths are the
@@ -4176,7 +4418,11 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
     README.md is this text; README.html (`html_twin`) is the same text rendered, without the
     line pointing a Markdown reader at the .html (`for_html`). Only README.html links its files
     (_item): Bioshare breaks every relative link in a README.md. `podcast`: the delivery carries
-    the run's podcast (delivered_podcast), so the survey line asks about it too."""
+    the run's podcast (delivered_podcast), so the survey line asks about it too. `search_dir`:
+    the folder an analysis delivery's search went to (delivery_search: search_sage, ...).
+    `quantified`: searches_quantified() of the delivered search folders, so an
+    identifications-only search is described as one (SEARCH_DID, SEARCH_FOLDER_HOLDS)."""
+    sd = (search_dir or "search").strip("/") + "/"
     label = submission_label(summary)
     pi_name = (summary.get("pi") or {}).get("name")
     fixed = ("MANIFEST.txt", "checksums.sha256") + (("README.html",) if html_twin else ())
@@ -4211,6 +4457,48 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
                 L.append("- `.d` entries are Bruker timsTOF data **folders** — download each one as a whole folder.")
             if ".raw" in exts:
                 L.append("- `.raw` files are Thermo instrument files.")
+    elif mode == "interim":
+        # the raw files and the search results, before the report: say what is still to come
+        # it names only what it holds: no raw files with --include-raw no (L5b review L3)
+        L = [f"# {label} — {'raw data and search results' if raw_names else 'search results'} "
+             "from the UC Davis Proteomics Core (interim)", ""]
+        if pi_name:
+            L += [f"Prepared for {pi_name}.", ""]
+        L += opener
+        folders = sorted({x.split("/", 1)[0] for x in delivered if "/" in x})
+        did = {d: _folder_quantified(quantified, d) for d in folders}
+        if all(did.values()):
+            what = SEARCH_DID[True]
+        elif not any(did.values()):
+            what = SEARCH_DID[False]
+        else:                                # each folder's row says which
+            what = ("identified the proteins (each folder's row below says whether that search "
+                    "also quantified them)")
+        L += [f"This folder holds the first part of what the UC Davis Proteomics Core is preparing "
+              f"for CoreOmics submission {label}{_submission_details(summary)}: the output of the "
+              f"database search that {what}"
+              + (", with the raw instrument files in the `raw` folder next to this one"
+                 if raw_names else "") + ".", "",
+              "**Still to come, in a later delivery:** "
+              + "; ".join(DELIVERY_MODES["interim"]["owed"]) + ". There is no report"
+              + (" or statistical comparison" if any(did.values()) else "")
+              + " in this folder yet.", "",
+              "## What is in this folder", "", "| item | what it is |", "|---|---|"]
+        for d in folders:
+            L.append(f"| {item(d + '/')} | the search engine's output: "
+                     f"{SEARCH_FOLDER_HOLDS[did[d]]} |")
+        for name, text in (("README.html", "this README as a web page, with working links"),
+                           ("AGENTS.md", "a guide to this folder for an AI assistant: give it "
+                                         "this file with the folder"),
+                           ("MANIFEST.txt", "what was included in this folder and, for anything "
+                                            "not included, why"),
+                           ("checksums.sha256", "SHA-256 checksums to verify the download "
+                                                "(`shasum -a 256 -c checksums.sha256`)")):
+            if name in delivered or name in fixed:
+                L.append(f"| {item(name)} | {text} |")
+        if raw_names:
+            L.append(f"| {item('../raw/')} | your raw instrument files, in the `raw` folder next "
+                     "to this one |")
     else:
         de = DELIVERY_MODES[mode]["de"]
         L = [f"# {label} — {'results' if de else 'report'} from the UC Davis Proteomics Core", ""]
@@ -4218,9 +4506,16 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
             L += [f"Prepared for {pi_name}.", ""]
         L += opener
         claims = []
-        if any(x.startswith("search/") for x in delivered):
+        sd_quantified = _folder_quantified(quantified, sd)
+        if any(x.startswith(sd) for x in delivered) and sd_quantified:
             claims.append("The mass-spectrometry data were searched to identify and quantify proteins; "
-                          "the search output is in `search/`.")
+                          f"the search output is in `{sd}`.")
+        elif any(x.startswith(sd) for x in delivered):
+            ids = f"{sd}identifications.tsv"
+            claims.append("The mass-spectrometry data were searched to identify peptides and "
+                          "proteins (identifications only: no quantities); "
+                          + (f"the identifications are in `{ids}`." if ids in delivered else
+                             f"the search output is in `{sd}`."))
         if any(x.startswith("tables/DE_") for x in delivered):
             claims.append("Protein abundances were compared between sample groups; there is one "
                           "table per comparison in `tables/`.")
@@ -4235,8 +4530,11 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
             L += ["## Start here", "",
                   "**Open `Analysis_Report.html` first.** It is the whole report in one file — every figure "
                   "is embedded, so it opens by double-clicking in any web browser, with no internet "
-                  "connection and nothing to install. The quality-control panels come before the results "
-                  "on purpose: they show how much weight the results can carry.", ""]
+                  "connection and nothing to install."
+                  # a report without figures (the no-DE route skips them) has no QC panels
+                  + (" The quality-control panels come before the results on purpose: they show "
+                     "how much weight the results can carry."
+                     if any(x.startswith("figures/") for x in delivered) else ""), ""]
             if SHARE_FILE and SHARE_FILE in delivered:
                 L += [f"**To send the report on with its audio discussion, send `{SHARE_FILE}`** — the "
                       "same report with the audio and its transcript built in, so this one file works "
@@ -4260,7 +4558,11 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
                          "send this one file to pass on both"),
             ("reproducibility/", "the pinned record of the run: software versions, parameters, checksums, "
                                  "and reproduce.sh"),
-            ("search/", "the search engine's own output (report.parquet and the matrices delivered)"),
+            (sd, "the search engine's own output (report.parquet and the matrices delivered)"
+                 if sd_quantified else
+                 "the search engine's own output: identifications.tsv (the identifications, per "
+                 "run), what was kept (*_identifications.json) and search_provenance.json; "
+                 "identifications only, so there are no quantities"),
             ("AUDIT.md", "automated checks of the experimental design and results, with caveats"),
             ("SAMPLE_QUALITY.md", "sample-quality checks (e.g. contamination that can mimic biology)"),
             ("OUTPUT_FILES.md", "a catalogue of every file and what it is"),
@@ -4273,15 +4575,13 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
             if present:
                 L.append(f"| {item(name)} | {text} |")
             if name == "figures/" and any(x.startswith("skyline/") for x in delivered):
-                # the peak check (skyline_peaks.py): its folder, and how to open its document
-                sp = sibling("skyline_peaks")
-                L.append(f"| {item('skyline/')} | the peak check: pictures of the checked "
-                         "proteins' peaks, drawn with Skyline, its tables and the Skyline "
-                         "document |")
-                for x in sorted(delivered):
-                    if x.startswith("skyline/") and x.endswith("_top_hits.sky.zip"):
-                        L.append(f"| {item(x)} | the Skyline document of the checked proteins. "
-                                 f"{sp.open_document_text()} |")
+                # the peak check (skyline_peaks.py): its folder, and how to open its document.
+                # skyline/ is delivered only for a finished check (skyline_deliverable), and the
+                # row names a Skyline document only when one was delivered.
+                doc = skyline_document(delivered)
+                for path, text in sibling("skyline_peaks").folder_rows(
+                        "skyline/", [doc] if doc else []):
+                    L.append(f"| {item(path)} | {text} |")
         if raw_names:
             L.append(f"| {item('../raw/')} | your raw instrument files, in the `raw` folder next to this one |")
         methods = []
@@ -4331,6 +4631,19 @@ def delivered_podcast(session_dir, delivered) -> bool:
                 and make_podcast.has_podcast(os.path.join(session_dir, "output")))
 
 
+def delivered_skyline(items: list, delivered) -> dict:
+    """delivery.json `skyline`: whether the peak check's folder went (plan_delivery, by
+    skyline_deliverable), its delivered Skyline document, and why not -- or None when the session
+    has no skyline/ folder. email-draft runs on a laptop from delivery.json alone, so this is what
+    lets it name Skyline only for a delivered document (2.14.2, I29)."""
+    skipped = next((i for i in items if i["name"] == "skyline/" and i["status"] != "OK"), None)
+    went = any(x.startswith("skyline/") for x in delivered)
+    if not went and not skipped:
+        return None
+    return {"delivered": went, "reason": skipped.get("reason") if skipped else None,
+            "document": skyline_document(delivered)}
+
+
 def delivery_docs(summary: dict, session_dir, delivery: str, delivered: set, raw_names: list,
                   mode: str, froot: str, warnings: list) -> list:
     """AGENTS.md, README.html and README.md for a delivery -- what every collaborator
@@ -4369,11 +4682,20 @@ def delivery_docs(summary: dict, session_dir, delivery: str, delivered: set, raw
             hive = docs.locations_table(f)
         except Exception as e:
             warnings.append(f"README: the HIVE locations table could not be built: {type(e).__name__}: {e}")
+    # the folder an analysis delivery's search went to (plan_delivery's delivery_search)
+    sdir = (delivery_search(sibling("session").paths_for(session_dir)["output_dir"])[0]
+            if session_dir and mode in ("analysis", "no-de") else None)
+    # whether each delivered search quantified (the one predicate): the README never says an
+    # identifications-only search quantified the proteins (C2 B1)
+    quantified = searches_quantified(
+        sibling("session").paths_for(session_dir)["output_dir"] if session_dir else None,
+        delivered_search_folders(delivered, mode, sdir))
     html_ok = False
     if docs:
         try:
             src = build_readme(summary, delivered, raw_names, mode, html_twin=True, for_html=True,
-                               hive_md=hive, podcast=delivered_podcast(session_dir, delivered))
+                               hive_md=hive, podcast=delivered_podcast(session_dir, delivered),
+                               search_dir=sdir, quantified=quantified)
             write_text_nofollow(os.path.join(delivery, "README.html"),
                                 docs._render_html(src, src.splitlines()[0].lstrip("# ").strip()),
                                 froot, warnings)
@@ -4386,7 +4708,8 @@ def delivery_docs(summary: dict, session_dir, delivery: str, delivered: set, raw
         lines.append(("README.html", why or "session_docs.py could not be loaded"))
     write_text_nofollow(os.path.join(delivery, "README.md"),
                         build_readme(summary, delivered, raw_names, mode, html_twin=html_ok,
-                                     hive_md=hive, podcast=delivered_podcast(session_dir, delivered)),
+                                     hive_md=hive, podcast=delivered_podcast(session_dir, delivered),
+                                     search_dir=sdir, quantified=quantified),
                         froot, warnings)
     delivered.add("README.md")
     lines.append(("README.md", None))
@@ -4486,6 +4809,8 @@ def write_deliver_job(a, session_dir, where_dir: str, label: str, total: int, wa
         argv += ["--service-project", os.path.abspath(a.service_project)]
     if a.force:
         argv += ["--force"]
+    if getattr(a, "override_finish", None):
+        argv += ["--override-finish", a.override_finish]
     log = os.path.join(logs if os.path.isdir(logs) else where_dir, "deliver_%j.log")
     if re.search(r'["\n]', log):
         raise Stop(EXIT_DECIDE, {"error": f"the delivery job's log path holds a quote or a line "
@@ -4524,8 +4849,9 @@ def cmd_deliver(a) -> int:
     mode = a.mode if a.mode != "auto" else ("raw-only" if s.get("raw_data_only") is True else "analysis")
     session_dir = os.path.abspath(a.session) if a.session else None
     if mode != "raw-only" and not session_dir:
-        raise Stop(EXIT_DECIDE, {"error": f"--session is required for {'an analysis' if mode == 'analysis' else 'a no-de'} "
-                                          f"delivery: it delivers the session's report",
+        raise Stop(EXIT_DECIDE, {"error": f"--session is required for {'an analysis' if mode == 'analysis' else 'a ' + mode} "
+                                          f"delivery: it delivers the session's "
+                                          f"{'search results' if mode == 'interim' else 'report'}",
                                  "hint": "a raw-data-only submission uses --mode raw-only"})
     if session_dir and not os.path.isdir(session_dir):
         raise Stop(EXIT_DECIDE, {"error": f"session dir not found: {session_dir}"})
@@ -4554,9 +4880,20 @@ def cmd_deliver(a) -> int:
         else:
             ownership = "NOT CHECKED (--force)"
             warnings.append("--force: no stage record, so the session was not checked against the submission")
-    want_raw = mode == "raw-only" or a.include_raw == "yes" or (a.include_raw == "auto" and s.get("raw_data_only") is True)
+    # an interim delivery carries the raw files unless --include-raw no (an HT submission: raw + search)
+    want_raw = (mode == "raw-only" or a.include_raw == "yes" or (mode == "interim" and a.include_raw != "no")
+                or (a.include_raw == "auto" and s.get("raw_data_only") is True))
     if want_raw and not record:
-        raise Stop(EXIT_DECIDE, {"error": f"raw data was requested but the staged service project cannot be found: {where}"})
+        # say WHY raw data is wanted: an interim delivery links the raw files by default, which
+        # nobody asked for out loud (L5b review N3)
+        by_default = mode == "interim" and a.include_raw == "auto"
+        raise Stop(EXIT_DECIDE, {
+            "error": ("an interim delivery links the raw files unless --include-raw no, and "
+                      if by_default else "raw data was requested, but ")
+                     + f"the staged service project cannot be found: {where}",
+            "hint": ("pass --include-raw no to deliver the search results alone, or stage the "
+                     "files first (`stage --apply`)" if mode != "raw-only" else
+                     "stage the files first (`stage --apply`), or pass --service-project")})
 
     today = dt.date.today().isoformat()
     suffix = safe_component(a.label) if a.label else f"{DELIVERY_MODES[mode]['suffix']}_{today}"
@@ -4587,6 +4924,8 @@ def cmd_deliver(a) -> int:
                  if output_dir else [{"name": "methods.md", "status": "SKIPPED", "required": False,
                                       "reason": "no --session given (run make_methods.py on the raw files "
                                                 "and pass its session to include it)"}])
+    elif mode == "interim":
+        items, interim_folders = plan_interim(output_dir)
     else:
         items = plan_delivery(output_dir)
     ok = [i for i in items if i["status"] == "OK"]
@@ -4595,8 +4934,16 @@ def cmd_deliver(a) -> int:
 
     raw_plan = []
     if want_raw:
-        for f in record.get("files") or []:
-            name = os.path.basename(f.rstrip("/"))
+        for name, f in raw_names(record):
+            if not name or not f:
+                # shown by what the stage record has; never linked under a guessed name
+                raw_plan.append({"name": name or (os.path.basename(f.rstrip("/")) if f else "?"),
+                                 "status": "SKIPPED",
+                                 "reason": ("the stage record gives this link no usable name (a "
+                                            "file name inside raw/): stage the files again"
+                                            if not name else
+                                            "the stage record names no file for this link")})
+                continue
             target = os.path.realpath(f)
             if not os.path.exists(target):
                 raw_plan.append({"name": name, "status": "SKIPPED", "reason": "staged raw file no longer exists"})
@@ -4617,12 +4964,18 @@ def cmd_deliver(a) -> int:
             "items": [{k: v for k, v in i.items() if k != "src"} for i in items],
             "raw": {"wanted": want_raw, "include_raw": a.include_raw, "links": raw_plan,
                     "service_project": where if record else None},
+            # what this delivery leaves to a later one (interim): delivery.json `owed`, with what
+            # an earlier delivery left owed when this one does not deliver it (owed_after)
+            "owed": owed_after(mode, session_dir or (record or {}).get("work_dir")),
             "warnings": warnings}
+    if mode == "interim":
+        plan["search_folders"] = interim_folders
     # Whether the session has a DE decides between the two report modes, and never silently: an
     # analysis delivery carries one (behind the normalisation gate below), and a no-de delivery
     # carries none -- not the DE record (run_de.R's), and no file the DE wrote
-    # (report_files.is_de_output, the one definition), delivered or not.
-    if mode != "raw-only":
+    # (report_files.is_de_output, the one definition), delivered or not. An interim delivery
+    # carries the search folders only, so neither applies.
+    if mode in ("analysis", "no-de"):
         is_de_output = sibling("report_files").is_de_output
         de_record = sibling("normalization_check").de_provenance_path(session_dir)
         has_record = os.path.lexists(de_record)          # even one that does not resolve
@@ -4642,15 +4995,54 @@ def cmd_deliver(a) -> int:
                             "step 8 (the DE and its normalisation check) and deliver again")
             emit(plan)
             return EXIT_DECIDE
+    # The finish gate (2.14.2, a Core submission, 2026-10-29): a delivery of the session's report needs the skill's
+    # own report, the Methods, the reproducibility bundle and the finalize stamp
+    # (report_files.FINISH_NEEDS["deliver"], the one definition) -- dry run included, nothing
+    # copied -- unless --override-finish "<reason>", recorded in delivery.json and its MANIFEST.
+    # raw-only and interim are never gated (report_files.UNGATED_DELIVERY_MODES): neither carries
+    # the report. delivery.json says whether the session was finalized, for the outward steps
+    # after it (bioshare send, email-draft), which run where the key is.
+    rf = sibling("report_files")
+    plan["finalized"], plan["finish_override"] = None, None
+    # `finalized` only for a CURRENT stamp (finish_check: a stale one is not finalized), with the
+    # stamp's own --override-finish carried, so every step after this one says NOT FINALIZED
+    # (report_files.delivery_finish_override; C2 errors_ux M1)
+    if output_dir and all(e["ok"] for e in rf.finish_check(output_dir, ("finalized",))):
+        stamp, _why = rf.finalized_record(output_dir)
+        if stamp:
+            plan["finalized"] = {"finalized_at": stamp.get("finalized_at"),
+                                 "skill_version": stamp.get("skill_version"),
+                                 "sha256": sha256_of(os.path.join(output_dir,
+                                                                  rf.FINALIZED_RECORD)),
+                                 "finish_override": stamp.get("finish_override")
+                                 if isinstance(stamp.get("finish_override"), dict) else None}
+    if mode not in rf.UNGATED_DELIVERY_MODES:
+        need = rf.FINISH_NEEDS["deliver"]
+        warnings.extend(rf.finish_warnings(output_dir, need))
+        gaps = rf.finish_gaps(output_dir, need)
+        reason = " ".join(str(getattr(a, "override_finish", None) or "").split())
+        if gaps and not reason:
+            plan["finish_gaps"] = gaps
+            plan["error"] = ("held: the skill's finish steps are not done: "
+                             + "; ".join(g.split(":", 1)[0] for g in gaps))
+            plan["hint"] = (f"make each one with the command in finish_gaps, or re-run with "
+                            f"{rf.OVERRIDE_FLAG} \"<reason>\"")
+            emit(plan)
+            note(rf.refusal("core_submission.py deliver", gaps))
+            return EXIT_DECIDE
+        if gaps:
+            plan["finish_override"] = rf.override_record("core_submission.py deliver", gaps, reason)
+            warnings.append(f"delivering under {rf.OVERRIDE_FLAG} ({reason}) without: "
+                            + "; ".join(g.split(":", 1)[0] for g in gaps))
     if missing_required:
         plan["error"] = "required deliverable missing: " + ", ".join(missing_required)
         plan["hint"] = "run step 9 (make_analysis_html.py) before delivering"
         emit(plan)
         return EXIT_DECIDE
     # The instrument's QC around the project (qc_bracket.py, staff-only): a check or concern
-    # verdict -- or a check that never ran -- holds a delivery of the session's report (analysis
-    # or no-de), dry run included, until a staff member records an acknowledgement for this
-    # record. The rule is qc_bracket's.
+    # verdict -- or a check that never ran -- holds a delivery of the session's results
+    # (analysis, no-de or interim), dry run included, until a staff member records an
+    # acknowledgement for this record. The rule is qc_bracket's.
     if mode != "raw-only" and session_dir:
         qb = sibling("qc_bracket")
         gate = qb.delivery_gate(session_dir)
@@ -4706,7 +5098,11 @@ def cmd_deliver(a) -> int:
                                         "started": now_utc()}, indent=2), froot, warnings)
         for i in ok:
             try:
-                copy_nofollow(i["src"], os.path.join(delivery, i["name"]), froot, warnings)
+                text = sibling("staff").client_copy(i["src"])   # the role, not the login (M1)
+                if text is not None:
+                    write_text_nofollow(os.path.join(delivery, i["name"]), text, froot, warnings)
+                else:
+                    copy_nofollow(i["src"], os.path.join(delivery, i["name"]), froot, warnings)
                 expected.add(i["name"])
             except (OSError, UnsafePath) as e:
                 i.update(status="SKIPPED", reason=f"copy failed: {getattr(e, 'strerror', None) or e}")
@@ -4764,16 +5160,25 @@ def cmd_deliver(a) -> int:
         note("delivery stopped by an error:\n" + traceback.format_exc())
 
     manifest_lines = [f"# MANIFEST -- {label} delivery ({now_utc()})",
-                      "# [OK] = included.  [SKIPPED] <name> -- <reason> = not included, and why."]
+                      "# [OK] = included.  [SKIPPED] <name> -- <reason> = not included, and why."
+                      + ("  [OVERRIDE] = delivered although a finish step was not done, and why."
+                         if plan.get("finish_override") else "")]
     for i in items:
         manifest_lines.append(f"[OK] {i['name']}" if i["status"] == "OK" and i["name"] in expected else
                               f"[SKIPPED] {i['name']} -- {i.get('reason') or 'not copied (delivery stopped early)'}")
     for r in raw_plan:
         manifest_lines.append(f"[OK] ../raw/{r['name']} -- linked to the raw instrument file"
                               if r["status"] == "OK" else f"[SKIPPED] ../raw/{r['name']} -- {r['reason']}")
+    if plan.get("finish_override"):
+        fo = plan["finish_override"]
+        manifest_lines.append(f"[OVERRIDE] the skill's finish steps -- {fo['reason']}; delivered "
+                              "without: " + "; ".join(g.split(":", 1)[0] for g in fo["missing"]))
     if mode == "no-de":
         manifest_lines.append("[SKIPPED] differential expression -- not part of this delivery "
                               "(--mode no-de: a report without the statistics)")
+    for owed in plan["owed"]:
+        manifest_lines.append(f"[SKIPPED] {owed} -- not in this {mode} delivery: it follows in a "
+                              "later one (--mode no-de or analysis)")
     if not want_raw:
         manifest_lines.append(f"[SKIPPED] ../raw/ -- not requested (--include-raw {a.include_raw}"
                               + (", CoreOmics says the Core does the analysis)" if a.include_raw == "auto" else ")"))
@@ -4839,6 +5244,16 @@ def cmd_deliver(a) -> int:
                          + ([f"results link -- {results_link['reason']}"] if results_link and results_link.get("state") == "SKIPPED" else []),
               "raw_links": raw_result, "raw_whitelist_unverified": bool(raw_plan), "results_link": results_link,
               "podcast": delivered_podcast(session_dir, expected),
+              "skyline": delivered_skyline(items, expected),
+              # the search folder an analysis / no-de delivery carried (delivery_search): its own
+              # name ("search_sage"), or null with the reason none went; email-draft reads it
+              **({"search_folder": dict(zip(("folder", "why"), delivery_search(output_dir)))}
+                 if output_dir and mode in ("analysis", "no-de") else {}),
+              # whether each delivered search quantified (searches_quantified, the one
+              # predicate): email-draft never says an identifications-only search quantified
+              "search_quantified": searches_quantified(output_dir, delivered_search_folders(
+                  expected, mode, delivery_search(output_dir)[0]
+                  if output_dir and mode in ("analysis", "no-de") else None)),
               "verified": verified, "violations": violations, "failed_required": failed_required,
               # whether the QC gate let it through, under which record and when acknowledged --
               # never the verdict, the reason, who or their note: delivery.json sits in the
@@ -4850,6 +5265,12 @@ def cmd_deliver(a) -> int:
               "normalization_gate": ({k: plan["normalization_gate"].get(k)
                                       for k in ("proceed", "status")}
                                      if plan.get("normalization_gate") else None),
+              # the finalize stamp this delivery was made from, or the override it went under:
+              # bioshare send and email-draft read them (report_files.delivery_finish_state)
+              "finalized": plan.get("finalized"), "finish_override": plan.get("finish_override"),
+              # what is still to come (an interim delivery; [] otherwise): `session.py status`
+              # stays open while it is not empty, and email-draft names it
+              "owed": plan["owed"],
               "error": fatal, "errors": errors, "warnings": warnings}
     djson = os.path.join(record_dir, "delivery.json") if record_dir else None
     try:
@@ -4927,6 +5348,30 @@ def delivery_gate(summary: dict, delivery_path, share: str) -> dict:
     return d
 
 
+def finish_problem(d: dict, a, tool: str):
+    """The outward steps after deliver (bioshare send, email-draft) run where the key is, with the
+    delivery.json deliver wrote: it says whether the session was finalized (2.14.2). -> (stop:
+    dict or None, warning or None, override record or None). A raw-only delivery is never gated;
+    a delivery.json from before 2.14.2 passes with a warning; --override-finish goes ahead."""
+    rf = sibling("report_files")
+    ok, why = rf.delivery_finish_state(d)
+    carried = rf.delivery_finish_override(d) if ok else None
+    if carried:
+        # delivered under an override (deliver's, or the stamp's): never silent (C2 errors_ux M1)
+        return None, why, dict(carried, carried_from="delivery.json")
+    if ok:
+        return None, None, None
+    if ok is None:
+        return None, f"{why}; check that the session was finalized (session.py status)", None
+    reason = " ".join(str(getattr(a, "override_finish", None) or "").split())
+    if reason:
+        return None, f"going ahead under {rf.OVERRIDE_FLAG} ({reason}): {why}", \
+            rf.override_record(tool, [why], reason)
+    return ({"error": f"refusing: {why}",
+             "hint": f"run session.py finalize, deliver again, and use the new delivery.json; or "
+                     f"re-run with {rf.OVERRIDE_FLAG} \"<reason>\""}, None, None)
+
+
 def cmd_bioshare(a) -> int:
     s, summary_path = full_summary(a.summary)
     sid = _s(s.get("id"))
@@ -4983,16 +5428,28 @@ def cmd_bioshare(a) -> int:
                 out["delivery_gate"] = "PASS"
                 if d.get("raw_whitelist_unverified"):
                     out["check_first"] = RAW_WHITELIST_WARNING
+                stop, warn, fo = finish_problem(d, a, "core_submission.py bioshare send")
+                out["finish_gate"] = stop or "PASS"
+                if warn:
+                    out["finish_warning"] = warn
+                if fo:
+                    out["finish_override"] = fo
             except Stop as e:
                 out["delivery_gate"] = e.payload
         emit(out)
         return EXIT_OK
-    delivery_gate(s, a.delivery, share)
+    d = delivery_gate(s, a.delivery, share)
+    stop, warn, fo = finish_problem(d, a, "core_submission.py bioshare send")
+    if stop:
+        raise Stop(EXIT_DECIDE, dict(stop, delivery=a.delivery))
+    if warn:
+        note(warn)
     resp = api_call("POST", url, payload=payload)
     if not isinstance(resp, dict) or "results" in resp:
         raise ApiError(None, f"unexpected response to the share request: {json.dumps(resp)[:300]}", api_url(url))
     emit({"applied": True, "recipients": recipients, "notification_email": payload["email"],
-          "response": resp, "url": linked.get("url")})
+          "response": resp, "url": linked.get("url"),
+          **({"finish_warning": warn} if warn else {}), **({"finish_override": fo} if fo else {})})
     return EXIT_OK
 
 
@@ -5084,16 +5541,49 @@ def cmd_email_draft(a) -> int:
     if not url:
         placeholders.append("Bioshare link")
     contents = set(delivery.get("contents") or [])
+    # the folder the search went to (delivery.json `search_folder`, deliver's delivery_search):
+    # its own name, e.g. search_sage; "search" for a delivery.json from before it was recorded
+    sf = delivery.get("search_folder") if isinstance(delivery.get("search_folder"), dict) else {}
+    sfolder = str(sf.get("folder") or "search").split("/")[0]
     raw = delivery.get("raw_links") or {}
     n_raw = (raw.get("created") or 0) + (raw.get("existing") or 0) + (raw.get("replaced") or 0)
     # the wording follows what deliver delivered (its delivery.json `mode`), never a guess
     mode = delivery.get("mode")
-    raw_only, no_de = mode == "raw-only", mode == "no-de"
+    raw_only, no_de, interim = mode == "raw-only", mode == "no-de", mode == "interim"
     if not a.delivery:
         warnings.append("no --delivery: the draft cannot say what was delivered and is worded for an "
                         "analysis with its report; pass the delivery.json deliver wrote")
-    L = ["<!-- DRAFT -- not sent. Review it, then send it from your own mail client.",
-         "Recipients, and where each address came from:"]
+        fo = None
+    else:
+        # it may only promise what was delivered: a delivery from a session that was not finalized
+        # (no AGENTS.md / README / Methods / bundle) is refused, unless --override-finish
+        stop, warn, fo = finish_problem(delivery, a, "core_submission.py email-draft")
+        if stop:
+            raise Stop(EXIT_DECIDE, dict(stop, delivery=a.delivery))
+        if warn:
+            warnings.append(warn)
+    # Skyline is named only for a delivered Skyline document: deliver's record of it (delivery.json
+    # `skyline`, from skyline_deliverable), never the bare folder name (2.14.2, I29: the email
+    # promised peak pictures for a check that was skipped).
+    sky = delivery.get("skyline")
+    names_skyline = bool(isinstance(sky, dict) and sky.get("delivered") and sky.get("document"))
+    if "skyline" in contents and "skyline" not in delivery:
+        warnings.append("delivery.json is from before skill 2.14.2: it does not say whether the peak "
+                        "check's Skyline document was delivered, so the draft does not name Skyline; "
+                        "look in the delivery's skyline/ folder for a "
+                        + (f"*{SKYLINE_DOCUMENT_SUFFIX}" if SKYLINE_DOCUMENT_SUFFIX
+                           else "Skyline document (.sky.zip)")
+                        + " and add the line by hand if there is one")
+    L = ["<!-- DRAFT -- not sent. Review it, then send it from your own mail client."]
+    if fo and fo.get("carried_from"):           # the delivery was made under an override (M1)
+        L.append("NOT FINALIZED: DELIVERED UNDER --override-finish (" + str(fo.get("reason"))
+                 + ") without: " + ("; ".join(str(g).split(":", 1)[0] for g in fo.get("missing")
+                                              or []) or "(not recorded)"))
+    elif fo:
+        L.append(f"NOT FINALIZED: drafted under --override-finish ({fo['reason']}): {fo['missing'][0]}")
+    if not a.delivery:                 # nothing says what was delivered, or whether it was finalized
+        L.append("NOT CHECKED: no delivery.json, finalize state unknown")
+    L += ["Recipients, and where each address came from:"]
     for r in recipients:
         who = ", ".join(x for x in (_s(r["name"]), f"the {r['who']}") if x)
         L.append(f"  {r['field']}: {r['email'] or '(none)'} -- {who}, "
@@ -5106,9 +5596,38 @@ def cmd_email_draft(a) -> int:
         L.append(f"{r['field']}: {addr}" + (f"  [CHECK THIS ADDRESS: {r['problem']}]" if r["problem"] else ""))
     samples = f" ({s['n_samples']} samples)" if s.get("n_samples") else ""
     if raw_only:
+        # after an interim delivery, what it left owed is carried forward (core_submission.
+        # owed_after): the draft says it follows -- never "no search was run"
+        still = [str(x) for x in (delivery.get("owed") or [])]
         L += [f"Subject: Raw data for {label} is ready", "", f"Hi {sub.get('first') or 'there'},", "",
               f"The raw instrument files for your submission {label}{samples} are ready on Bioshare:", "",
-              link, "", "They are in the raw folder of the share. As requested, no search or analysis was run."]
+              link, "", "They are in the raw folder of the share."
+              + (" Still to come, in a later delivery: " + "; ".join(still) + ". We will email "
+                 "you when they are ready." if still else
+                 " As requested, no search or analysis was run.")]
+    elif interim:
+        # the first part only: say what is to follow (delivery.json `owed`, deliver's own words)
+        owed = [str(x) for x in (delivery.get("owed") or DELIVERY_MODES["interim"]["owed"])]
+        # what the search did, from deliver's record (delivery.json `search_quantified`, the one
+        # predicate): an identifications-only search never "quantified" (C2 B1); a delivery.json
+        # from before it says nothing, and keeps the old words
+        sq = delivery.get("search_quantified")
+        sq = [v for v in sq.values() if isinstance(v, bool)] if isinstance(sq, dict) else []
+        did = (SEARCH_DID[True] + " in each sample" if not sq or all(sq) else
+               SEARCH_DID[False].replace(" (", " in each sample (", 1) if not any(sq) else
+               "identified the proteins in each sample; the README in the share says which "
+               "search also quantified them")
+        # the subject promises raw files only when some were linked (L5b review L3)
+        L += [f"Subject: {'Raw data and search results' if n_raw else 'Search results'} for "
+              f"{label}", "",
+              f"Hi {sub.get('first') or 'there'},", "",
+              f"The UC Davis Proteomics Core has put the first part of the results for your "
+              f"submission {label}{samples} on Bioshare:", "", link, "",
+              f"It holds the output of the database search that {did}.", "",
+              "Still to come, in a later delivery: " + "; ".join(owed) + ". We will email you "
+              "when they are ready."]
+        if n_raw:
+            L += ["", "Your raw instrument files are in the raw folder of the same share."]
     else:
         if no_de:
             L += [f"Subject: Proteomics report for {label} is ready", "", f"Hi {sub.get('first') or 'there'},", "",
@@ -5136,8 +5655,9 @@ def cmd_email_draft(a) -> int:
                                             "audio, send this one file"),
                                ("methods.md", "a Methods section you can adapt for a manuscript"),
                                ("reproducibility", "a full record of the software and settings used"),
-                               ("search", "the search engine output")):
-                if name in contents:
+                               (sfolder, "the search engine output" + (
+                                   f" (in {sfolder}/)" if sfolder != "search" else ""))):
+                if name in contents and (name != "skyline" or names_skyline):
                     L.append(f"  - {text}")
         if n_raw:
             L += ["", "Your raw instrument files are in the raw folder of the same share."]
@@ -5158,7 +5678,7 @@ def cmd_email_draft(a) -> int:
     emit({"wrote": os.path.abspath(a.out), "mode": mode, "recipients": recipients,
           "to": recipients[0]["email"], "cc": recipients[1]["email"] if len(recipients) > 1 else None,
           "share_url": url or None, "placeholders": placeholders, "address_problems": problems,
-          "warnings": warnings, "sent": False})
+          "warnings": warnings, "sent": False, **({"finish_override": fo} if fo else {})})
     for p in problems:
         note(f"CHECK THIS ADDRESS before sending -- {p}")
     return EXIT_DECIDE if placeholders or problems else EXIT_OK
@@ -5272,7 +5792,8 @@ def main(argv=None) -> int:
     de.add_argument("--session", default=None, help="the analysis session directory (optional for raw-only)")
     de.add_argument("--mode", choices=["auto", *DELIVERY_MODES], default="auto",
                     help="auto = raw-only when CoreOmics says 'I only require raw data', else analysis "
-                         f"(held when the session has no DE). no-de = {DELIVERY_MODES['no-de']['what']}")
+                         f"(held when the session has no DE). no-de = {DELIVERY_MODES['no-de']['what']}. "
+                         f"interim = {DELIVERY_MODES['interim']['what']}")
     de.add_argument("--label", default=None,
                     help="folder suffix instead of " + " / ".join(f"{m['suffix']}_<date>"
                                                                   for m in DELIVERY_MODES.values()))
@@ -5285,6 +5806,7 @@ def main(argv=None) -> int:
     de.add_argument("--max-gb", type=float, default=5.0,
                     help="above this, write deliver_job.sh and exit 5 instead of copying (default 5)")
     de.add_argument("--no-size-guard", action="store_true", help="used by deliver_job.sh itself")
+    de.add_argument("--override-finish", metavar="REASON", default=None, help="go ahead although the skill's finish steps are not done (the skill's own report, Methods, the reproducibility bundle, the finalize stamp); the reason is recorded")
     de.set_defaults(func=cmd_deliver)
 
     bs = sub.add_parser("bioshare", help="WHERE THE KEY IS: status | ensure | send (ensure/send are dry runs)")
@@ -5297,6 +5819,7 @@ def main(argv=None) -> int:
     g.add_argument("--email", dest="email", action="store_true",
                    help="send: have Bioshare email the recipients")
     g.add_argument("--no-email", dest="email", action="store_false", help="send: grant access silently (default)")
+    bs.add_argument("--override-finish", metavar="REASON", default=None, help="go ahead although the skill's finish steps are not done (the skill's own report, Methods, the reproducibility bundle, the finalize stamp); the reason is recorded")
     bs.set_defaults(func=cmd_bioshare, email=False)
 
     em = sub.add_parser("email-draft", help="WHERE THE KEY IS: draft the results email (never sends)")
@@ -5304,6 +5827,7 @@ def main(argv=None) -> int:
     em.add_argument("--delivery", default=None, help="delivery.json from deliver")
     em.add_argument("--share-url", default=None)
     em.add_argument("--out", required=True)
+    em.add_argument("--override-finish", metavar="REASON", default=None, help="go ahead although the skill's finish steps are not done (the skill's own report, Methods, the reproducibility bundle, the finalize stamp); the reason is recorded")
     em.set_defaults(func=cmd_email_draft)
 
     a = ap.parse_args(argv)

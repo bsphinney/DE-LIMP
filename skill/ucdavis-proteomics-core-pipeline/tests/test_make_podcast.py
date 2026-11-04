@@ -40,6 +40,7 @@ sys.path.insert(0, SCRIPTS)
 sys.path.insert(0, HERE)
 
 import make_podcast as mp  # noqa: E402
+import report_files  # noqa: E402  (the finish gate's record of the skill's own report)
 
 VERIFY_AUDIO = mp._verify_audio          # the real ones; Verify patches the module attributes
 ENCODE_AAC = mp.encode_aac
@@ -95,6 +96,11 @@ def write(path, text):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(text)
+    if os.path.basename(path) == "Analysis_Report.html":
+        # a report these tests write stands for make_analysis_html.py's, which records it
+        # (2.14.2: check, link, share and job take only the skill's own report; the gate's own
+        # tests are tests/test_finish_gates.py)
+        report_files.mark_skill_report(path, "make_analysis_html.py")
 
 
 def read(path):
@@ -120,6 +126,8 @@ def checked_podcast(out, source, **manifest):
     podcast.json naming it -- what link needs before it vouches for an episode."""
     pod = os.path.join(out, "podcast")
     script = os.path.join(pod, "podcast_script.md")
+    if not os.path.isfile(os.path.join(out, "methods.md")):    # 9d comes before the podcast
+        write(os.path.join(out, "methods.md"), "# Methods\n")
     write(script, script_text())
     rc, o, e = run("check", script, "--source", source)
     assert rc == 0, read(os.path.join(pod, "check.txt"))
@@ -146,6 +154,7 @@ class Workspace(unittest.TestCase):
         self.script = os.path.join(self.pod, "podcast_script.md")
         write(self.report, REPORT)
         write(os.path.join(self.out, "Analysis_Report.html"), REPORT_HTML)   # a session output/
+        write(os.path.join(self.out, "methods.md"), "# Methods\n")       # 9d, before the podcast
         # No test reads a real Gemini key, on HIVE or anywhere else: a home of its own (the
         # personal key file is ~/.config/ucdavis-proteomics/gemini_key) and no Core key (on HIVE
         # the real /quobyte one exists, and find_key named it in two tests' messages). A test that
@@ -386,10 +395,10 @@ class Check(Workspace):
         self.assertIn("no AI disclosure in the first 3 turns", txt)
 
     def test_a_forbidden_name_fails(self):
-        text = script_text().replace("We are just two voices", "The Dickson lab asked us, two voices")
-        rc, txt = self.check(text, "--forbid-name", "Dickson", "Silva")
+        text = script_text().replace("We are just two voices", "The Quillon lab asked us, two voices")
+        rc, txt = self.check(text, "--forbid-name", "Quillon", "Varnley")
         self.assertEqual(rc, 1)
-        self.assertIn("forbidden name 'Dickson' appears in: turn 2", txt)
+        self.assertIn("forbidden name 'Quillon' appears in: turn 2", txt)
         self.assertIn("forbidden names: 2 given (not listed here)", txt)
 
     def test_spelled_out_numbers_fail(self):
@@ -1226,15 +1235,18 @@ class Link(Workspace):
         super().setUp()
         checked_podcast(self.out, self.report)
         write(os.path.join(self.out, "Analysis_Report.html"), REPORT_HTML)
+        # the skill's own README / AGENTS.md (finalize's: they carry its marker), which link edits;
+        # one written by hand it leaves alone (tests/test_finalize_hand_docs.py)
+        mark = report_files.SKILL_DOC_MARKER
         write(os.path.join(self.d, "README.html"),
               '<main class="doc"><nav><h2>Start here</h2><ul><li><a href="output/Analysis_Report'
               '.html">Analysis report</a> — figures</li><li><a href="output/methods.md">M</a></li>'
-              '</ul></nav></main>')
+              '</ul></nav></main>' + mark)
         write(os.path.join(self.d, "README.md"),
               "# S\n\n## Start here\n\n- [Analysis report](output/Analysis_Report.html) — x\n"
-              "- [M](output/methods.md)\n")
+              "- [M](output/methods.md)\n\n" + mark + "\n")
         write(os.path.join(self.d, "AGENTS.md"), "# AGENTS\n\n## Where this lives on HIVE\n\nt\n\n"
-                                                 "## Do not\n\n- x\n")
+                                                 "## Do not\n\n- x\n\n" + mark + "\n")
 
     def files(self):
         return {p: read(p) for p in (os.path.join(self.out, "Analysis_Report.html"), self.report,
@@ -1267,8 +1279,10 @@ class Link(Workspace):
         self.assertRegex(readme, r"Analysis report</a> — figures</li>" + re.escape(mp.START)
                          + r'<li><a href="output/podcast/podcast.m4a">')
         rmd = first[os.path.join(self.d, "README.md")]
-        self.assertIn("— x\n" + mp.START + "\n- [Audio discussion of these results]"
-                      "(output/podcast/podcast.m4a)", rmd)
+        # README.md names the files without links (Bioshare opens no relative link in it: T33)
+        self.assertIn("— x\n" + mp.START + "\n- Audio discussion of these results: "
+                      "`output/podcast/podcast.m4a`", rmd)
+        self.assertNotIn("](output/podcast/", rmd)
         agents = first[os.path.join(self.d, "AGENTS.md")]
         self.assertLess(agents.index(mp.START), agents.index("## Do not"))
         self.assertIn("NOT authoritative", agents)
@@ -2067,7 +2081,9 @@ class Release280(Workspace):
         self.assertEqual(rc, 0, read(os.path.join(self.pod, "check.txt")))
         os.remove(os.path.join(self.out, "Analysis_Report.html"))      # a DE record also marks it
         write(os.path.join(self.out, "tables", "de_provenance.json"), "{}")
-        self.assertEqual(run("check", self.script, "--source", self.report)[0], 0)
+        # (no report now: the finish gate, test_finish_gates.py, is passed with a reason)
+        self.assertEqual(run("check", self.script, "--source", self.report, "--override-finish",
+                             "a test of the output folder, not of the report")[0], 0)
         # a script in some other podcast/ folder: the folder above it is not an output folder
         stray = os.path.join(self.d, "podcast", "podcast_script.md")
         write(stray, script_text())
@@ -2420,10 +2436,14 @@ class SessionFiles(unittest.TestCase):
                 write(os.path.join(pod, ".cache", f"{i:064x}.wav"), "w" * 100)
             session_docs.write_docs(p["session_dir"])
             readme = read(p["readme"])
-            self.assertEqual(readme.count("(output/podcast/podcast.m4a)"), 1)
-            starts = [ln for ln in readme.splitlines() if ln.startswith("- [")]
+            # README.md: plain names (T33); README.html: the links
+            self.assertEqual(readme.count("`output/podcast/podcast.m4a`"), 1)
+            self.assertNotIn("](output/podcast/", readme)
+            starts = [ln for ln in readme.splitlines() if ln.startswith("- ")]
             self.assertIn("Analysis_Report.html", starts[0])
             self.assertIn("Audio discussion of these results", starts[1])   # right after it
+            page = read(os.path.join(p["session_dir"], "README.html"))
+            self.assertEqual(page.count('href="output/podcast/podcast.m4a"'), 1)
             agents = read(os.path.join(p["session_dir"], "AGENTS.md"))
             self.assertIn("a derivative, not a record", agents)
             self.assertLess(agents.index("Audio discussion (podcast)"), agents.index("## Do not"))
@@ -2443,7 +2463,8 @@ class SessionFiles(unittest.TestCase):
             import scratch_files
             self.assertEqual(res["zip_excluded"][scratch_files.LABEL], 5)   # 3 + .part + .wav
             readme = read(p["readme"])                                   # finalize rewrote it
-            self.assertEqual(readme.count("(output/podcast/podcast.m4a)"), 1)
+            self.assertEqual(readme.count("`output/podcast/podcast.m4a`"), 1)
+            self.assertNotIn("](output/podcast/", readme)
 
     @unittest.skipUnless(HAS_AAC, "needs afconvert or ffmpeg to make the AAC")
     def test_finalize_builds_the_report_with_the_audio_built_in(self):
@@ -2472,11 +2493,13 @@ class SessionFiles(unittest.TestCase):
             names = zipfile.ZipFile(res["zip"]).namelist()
             self.assertTrue(any(n.endswith("output/" + mp.SHARE_NAME) for n in names), names)
             readme = read(p["readme"])
-            self.assertIn("(output/Analysis_Report_with_audio.html) — **to send the report with its "
-                          "audio, send this one file**", readme)
-            starts = [ln for ln in readme.splitlines() if ln.startswith("- [")]
+            self.assertIn("`output/Analysis_Report_with_audio.html` — **to send the report with its "
+                          "audio, send this one file**", readme)          # no link in README.md: T33
+            starts = [ln for ln in readme.splitlines() if ln.startswith("- ")]
             self.assertIn("Audio discussion of these results", starts[1])
             self.assertIn(mp.SHARE_NAME, starts[2])                   # right after the podcast
+            self.assertIn('href="output/Analysis_Report_with_audio.html"',
+                          read(os.path.join(p["session_dir"], "README.html")))
             self.assertIn(f"`output/{mp.SHARE_NAME}` is the same report",
                           read(os.path.join(p["session_dir"], "AGENTS.md")))
             again = tdp.finalize(p["session_dir"])                    # current: left alone

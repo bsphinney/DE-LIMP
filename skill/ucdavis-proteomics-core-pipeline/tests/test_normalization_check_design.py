@@ -139,6 +139,158 @@ class TheGateHoldsTheFinalDeToIt(unittest.TestCase):
             self.assertIn("design matches", msg)
 
 
+class TheCheckCoversTheMaxlfqRoute(unittest.TestCase):
+    """2.14.2 (I20; Brett's Q1): the check also covers the MaxLFQ route. On the PXD063416
+    benchmark its record said "method dpc" while the MaxLFQ DE that went wrong was never checked:
+    the check's DEs, the final DE and the summary must all be about one route."""
+    REPORT, COND, S = "/s/output/search/report.parquet", "/s/input/conditions.csv", "/s"
+
+    def test_step8_commands_maxlfq_runs_all_three_des_with_maxlfq(self):
+        """(pin) step8_commands already carried --method into every DE it prints."""
+        cmds = nc.step8_commands(self.REPORT, self.COND, self.S, method="maxlfq")
+        for c in cmds["check"][:2] + [cmds["final"]]:
+            self.assertIn("--method maxlfq", c)
+        self.assertNotIn("--method dpc", cmds["next"])
+
+    def test_maxlfq_final_de_is_refused_against_a_dpc_check(self):
+        """(pin) design_check already refused another --method than the check's DEs ran."""
+        rec = {"check_design": dict(DESIGN, status="recorded", method="dpc")}
+        dc = nc.design_check(rec, dict(DESIGN, method="maxlfq"))
+        self.assertIsNotNone(dc["refusal"])
+        self.assertIn("'dpc'", dc["refusal"])
+        self.assertIn("'maxlfq'", dc["refusal"])
+
+    def test_check_summary_names_the_route(self):
+        """The summary's header names the route the check's DEs ran, even when their design was
+        not recorded (DEs from before 2.12)."""
+        rec = {"default": {"quantities": et.NORMALISED}, "de_method": "maxlfq"}
+        head = nc.summary_md(rec).split("## Checks")[0]
+        self.assertIn("method maxlfq", head)
+        self.assertIn("--method maxlfq", head)
+        self.assertIn("DE route checked:** NOT RECORDED",
+                      nc.summary_md({"default": {"quantities": et.NORMALISED}}))
+
+    @unittest.skipUnless(HAVE_ARROW, "needs pyarrow")
+    def test_the_record_names_the_des_method(self):
+        with tempfile.TemporaryDirectory() as d:
+            report, cond, _ = make_report(os.path.join(d, "w"), "whole")
+            s = session(os.path.join(d, "w"), "whole_proteome")
+            dirs = {}
+            for q in (et.NORMALISED, et.RAW):
+                dirs[q] = os.path.join(d, "nc", q)
+                os.makedirs(dirs[q])
+                with open(os.path.join(dirs[q], "de_provenance.json"), "w") as fh:
+                    json.dump({"method": "maxlfq", "contrasts": ["B-A"], "de_tables": {},
+                               "input_sha256": nc.sha256(report),
+                               "metadata_sha256": nc.sha256(cond),
+                               "design_request": dict(DESIGN, method="maxlfq")}, fh)
+            rec, out = nc.run(report, cond, dirs[et.NORMALISED], dirs[et.RAW], session=s,
+                              out=os.path.join(d, "nc"))
+            self.assertEqual(rec["de_method"], "maxlfq")
+            with open(os.path.join(out, nc.SUMMARY)) as fh:
+                self.assertIn("method maxlfq", fh.read().split("## Checks")[0])
+
+
+class TheGateSeesTheBetweenRunStep(unittest.TestCase):
+    """2.14.2 review: run_de.R --between-run was outside the gate, so a final MaxLFQ DE with
+    another between-run step than the check's normalised DE passed as "design matches" -- and its
+    Methods said the data check (volcano shape) agreed about a volcano drawn without that step.
+    The step changes the volcano (I20), so it is held like the method: the check records its
+    normalised DE's requested step (check_design `between_run`); a check from before 2.14.2
+    counts as quantile (normalization_check.LEGACY_MAXLFQ_BETWEEN_RUN); a final DE reading
+    normalised quantities with another step is refused. A raw final DE has no step to compare."""
+    MAXLFQ = dict(DESIGN, method="maxlfq")
+
+    def check(self, **cd):
+        return {"check_design": dict(self.MAXLFQ, status="recorded", **cd)}
+
+    def test_check_design_records_the_normalised_des_step(self):
+        norm, raw = de(dict(self.MAXLFQ, between_run="quantile")), de(dict(self.MAXLFQ,
+                                                                            between_run="auto"))
+        norm["prov"].update(method="maxlfq", quantities=et.NORMALISED,
+                            between_run={"method": "quantile", "requested": "quantile", "why": "x"})
+        raw["prov"].update(method="maxlfq", quantities=et.RAW,
+                           between_run={"method": "none", "requested": "auto", "why": "x"})
+        cd = nc.check_design_of(norm, raw, "r" * 64, None, "c" * 64)   # not refused: raw has none
+        self.assertEqual(cd["between_run"], "quantile")
+        old = de(self.MAXLFQ)                                 # a 2.14.1 maxlfq DE: no between_run
+        old["prov"].update(method="maxlfq", quantities=et.NORMALISED)
+        self.assertEqual(nc.check_design_of(old, de(self.MAXLFQ), "r" * 64, None,
+                                            "c" * 64)["between_run"], "quantile")
+
+    def test_scenario_a_auto_check_then_a_quantile_final_is_refused(self):
+        dc = nc.design_check(self.check(between_run="auto"),
+                             dict(self.MAXLFQ, between_run="quantile"), et.NORMALISED)
+        self.assertEqual(dc["match"], "differs")
+        self.assertIn("--between-run quantile", dc["refusal"])
+        self.assertIn("auto", dc["refusal"])
+
+    def test_scenario_b_a_2_14_1_check_then_an_auto_final_is_refused(self):
+        # what auto gives is known once the report is read: the step that runs is compared (C1
+        # review F1, tests/test_check_before_2142.py); on a DIA-NN report it is none
+        dc = nc.design_check(self.check(), dict(self.MAXLFQ, between_run="auto"), et.NORMALISED)
+        self.assertEqual(dc["between_run_pending"], "quantile")
+        dc = nc.design_check(self.check(), dict(self.MAXLFQ, between_run="auto"), et.NORMALISED,
+                             applied="none")
+        self.assertIsNotNone(dc["refusal"])
+        self.assertIn("before 2.14.2", dc["refusal"])
+        self.assertIn("--between-run quantile", dc["refusal"])
+        # ... and with the step that check's DEs had, it matches
+        self.assertEqual(nc.design_check(self.check(), dict(self.MAXLFQ, between_run="quantile"),
+                                         et.NORMALISED)["match"], "matches")
+
+    def test_the_same_step_matches_and_raw_or_dpc_compare_none(self):
+        self.assertEqual(nc.design_check(self.check(between_run="auto"),
+                                         dict(self.MAXLFQ, between_run="auto"),
+                                         et.NORMALISED)["refusal"], None)
+        # a raw final DE has no between-run step: the normalised DE's is not its to match
+        self.assertIsNone(nc.design_check(self.check(between_run="quantile"),
+                                          dict(self.MAXLFQ, between_run="auto"), et.RAW)["refusal"])
+        self.assertEqual(nc.design_check({"check_design": dict(DESIGN, status="recorded")},
+                                         DESIGN, et.NORMALISED)["match"], "matches")
+
+    def test_gate_refuses_scenario_a(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, nc.RECORD)
+            with open(path, "w") as fh:
+                json.dump(dict(self.check(between_run="auto"), schema=nc.SCHEMA, tripped=False,
+                               trips=[], decision={"quantities": et.NORMALISED, "by": "x",
+                                                   "reason": "r"}), fh)
+            ok, msg, _ = nc.gate(path, et.NORMALISED,
+                                 design=dict(self.MAXLFQ, between_run="quantile"))
+            self.assertFalse(ok)
+            self.assertIn("--between-run", msg)
+            ok, msg, _ = nc.gate(path, et.NORMALISED, design=dict(self.MAXLFQ, between_run="auto"))
+            self.assertTrue(ok, msg)
+
+    def test_step8_commands_carry_the_opt_in_to_the_normalised_and_final_des_only(self):
+        cmds = nc.step8_commands("/s/output/search/report.parquet", "/s/input/conditions.csv", "/s",
+                                 method="maxlfq", design=dict(self.MAXLFQ, between_run="median"))
+        norm, raw, _ = cmds["check"]
+        self.assertIn("--quantities normalised", norm)
+        self.assertIn("--between-run median", norm)
+        self.assertNotIn("--between-run", raw)                # the raw arm refuses a step
+        self.assertIn("--between-run median", cmds["final"])
+        auto = nc.step8_commands("/s/output/search/report.parquet", "/s/input/conditions.csv", "/s",
+                                 method="maxlfq", design=dict(self.MAXLFQ, between_run="auto"))
+        self.assertNotIn("--between-run", auto["next"])
+        with tempfile.TemporaryDirectory() as d:              # ... and required() prints them
+            s = session(d, "ip")
+            r = nc.required(os.path.join(s, "output", "search", "report.parquet"),
+                            os.path.join(s, "input", "conditions.csv"), method="maxlfq",
+                            design=dict(self.MAXLFQ, between_run="quantile"))
+        self.assertEqual(r["message"].count("--between-run quantile"), 2)
+
+    def test_the_legacy_rule_is_one_definition(self):
+        self.assertEqual(nc.LEGACY_MAXLFQ_BETWEEN_RUN, "quantile")
+        self.assertEqual(nc.between_run_of({"method": "maxlfq", "quantities": et.NORMALISED}),
+                         "quantile")
+        self.assertEqual(nc.between_run_of({"method": "maxlfq", "quantities": et.RAW}), "none")
+        self.assertIsNone(nc.between_run_of({"method": "dpc"}))
+        self.assertEqual(nc.between_run_of({"method": "maxlfq", "between_run": {
+            "method": "none", "requested": "auto"}}, "method"), "none")
+
+
 class TheCommandsCarryTheDesign(unittest.TestCase):
     def test_step8_commands_carry_the_flags_to_all_three_des(self):
         cmds = nc.step8_commands("/s/output/search/report.parquet", "/s/input/conditions.csv", "/s",

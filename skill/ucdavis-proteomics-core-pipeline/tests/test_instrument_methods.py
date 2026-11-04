@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The LC-MS paragraphs of the Methods must come from the run, in the published order.
 
-PROT_0756 (Dickson lab, timsTOF HT + Evosep One, 2026-08-13) got a Methods section that left
+PROT_9756 (a lab, timsTOF HT + Evosep One, 2026-08-13) got a Methods section that left
 "[LC system / gradient — confirm]" although every .d names the Evosep One and its "60 samples
 per day" method; reported m/z 99.993933-1700; said the collision energy was "ramped from ≈26.3
 to ≈49.4 eV" when the method ramps 20 eV at 1/K0 0.6 to 65 eV at 1/K0 1.6 (26.3-49.4 are the

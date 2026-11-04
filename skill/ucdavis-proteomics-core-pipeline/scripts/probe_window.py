@@ -653,7 +653,7 @@ def _size_scale(m):
 
     All directories share one scale, TDF or not: a FAILED Bruker acquisition is a .d with neither
     analysis.tdf nor analysis.tdf_bin in it, and it is exactly the size floor against the real .d
-    beside it that has to drop it (HIVE, garg cohort) -- put it in a partition of its own and it
+    beside it that has to drop it (HIVE, a timsTOF cohort) -- put it in a partition of its own and it
     survives, has no acquisition time, and drags the whole cohort back to size ranking."""
     return "directory" if m["format"] in ("bruker_tdf", "directory") else m["format"]
 
@@ -777,7 +777,7 @@ def select_representative(paths, max_probes=3, min_fraction=MIN_FRACTION, min_pr
     # The size floor first, over every usable run: it is what removes a failed acquisition with
     # no data at all -- a .d with neither analysis.tdf nor tdf_bin has no acquisition time, and
     # deciding the ranking before it was gone made a whole timsTOF cohort rank by bytes (HIVE,
-    # garg cohort). Then, when every run left has a frame index, the time floor and time ranking.
+    # a timsTOF cohort). Then, when every run left has a frame index, the time floor and time ranking.
     #
     # Per KIND (see _size_scale): a .d's size_bytes and a .raw's are not the same quantity, and
     # one floor over both threw out every .raw of a two-instrument cohort as a blank.

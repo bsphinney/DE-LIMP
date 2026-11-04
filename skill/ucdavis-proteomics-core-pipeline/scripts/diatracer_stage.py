@@ -85,6 +85,25 @@ def check_stage_path(stage):
                  "path rewrite would mangle the output. Choose a path without '.d' in it.")
 
 
+def link_into(stage, real):
+    """<stage>/<basename of real> as a symlink to `real` (made, or re-pointed when it points
+    elsewhere); refuses to overwrite anything that is not a link. -> the link's path. FragPipe
+    normalises a path but does not resolve a link, so what diaTracer or MSFragger writes beside
+    its input lands in `stage`, never in the raw folder. run_search.py's FragPipe DDA stage links
+    a .d and an mzML with it too (and COPIES a Thermo .raw: MSFragger cannot read one through a
+    link -- "Instrument index not available for requested device")."""
+    link = os.path.join(stage, os.path.basename(real.rstrip("/")))
+    if os.path.islink(link):
+        if os.path.realpath(link) != os.path.realpath(real):
+            os.unlink(link)
+            os.symlink(real, link)
+    elif os.path.exists(link):
+        sys.exit(f"{link} exists and is not a symlink — refusing to overwrite it.")
+    else:
+        os.symlink(real, link)
+    return link
+
+
 def load_groups(path):
     """Optional conditions.csv -> {run_basename: group} for the manifest's experiment column."""
     if not path or not os.path.exists(path):
@@ -126,16 +145,9 @@ def main():
             sys.exit(f"{name} is not a .d directory — diaTracer only runs on Bruker .d "
                      "(FragPipe hard-errors if a DIA input is not .d).")
         base = name[:-2]                                  # strip the trailing '.d'
-        link = os.path.join(a.stage, name)                # symlink KEEPS the .d suffix,
-        # otherwise FragPipe skips it (CmdDiaTracer requires endsWith(".d")).
-        if os.path.islink(link):
-            if os.path.realpath(link) != os.path.realpath(real):
-                os.unlink(link)
-                os.symlink(real, link)
-        elif os.path.exists(link):
-            sys.exit(f"{link} exists and is not a symlink — refusing to overwrite it.")
-        else:
-            os.symlink(real, link)
+        # the symlink KEEPS the .d suffix, otherwise FragPipe skips it (CmdDiaTracer requires
+        # endsWith(".d"))
+        link = link_into(a.stage, real)
 
         grp = groups.get(base, "")
         mz = find_existing_mzml(a.stage, os.path.dirname(real), base)

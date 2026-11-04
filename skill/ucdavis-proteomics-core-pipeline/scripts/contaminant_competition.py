@@ -21,7 +21,9 @@ contaminant list or the search, and never fails a job or an audit (the Core dire
 WHAT IT READS. DIA-NN's report (report.parquet, or a .tsv report), rows kept as run_de.R keeps
 them (diann_q_columns: the q-columns present, cutoff_for() each, keep_expression / row_passes),
 and the searched FASTA (gene names; I/L twins), with its fetch_fasta.py sidecar when there is one
-(organism, the digest the build used, which rule built the database). What took the shared
+(organism, the digest the build used, which rule built the database, and how many contaminant
+entries the build already removed as target proteins -- `database_build`, recorded only while the
+sidecar's sha256 is the FASTA's, and said to the client with a warning). What took the shared
 precursors is said from the records, never assumed (DE-LIMP rule 1): the DE's own contaminant
 record when an audit has one, else DIA-NN's --cont-quant-exclude as make_methods.py reads it.
 
@@ -88,7 +90,8 @@ from fetch_fasta import (CONTAMINANT_TAGS, MIN_UNIQUE_PEPTIDES, REBUILD_ADVICE, 
                          _contaminant_ids, _digestion_enzyme, _fasta_records, _header_ids,
                          _independent_count, fasta_accessions_and_targets,
                          is_contaminant_accession, keratin_database_check,
-                         keratin_sample_recorded, sidecar_state, target_peptide_hits)
+                         keratin_sample_recorded, sidecar_sha256_matches, sidecar_state,
+                         target_peptide_hits)
 from diann_q_columns import (DEFAULT_Q_CUTOFF, cutoff_for, fdr_columns,  # noqa: E402
                              keep_expression, row_passes)
 
@@ -362,6 +365,11 @@ def resolve_inputs(search_out=None, report=None, fasta=None, fasta_meta=None):
         res = prov.get("result") if isinstance(prov.get("result"), dict) else {}
         cands = [report, res.get("report"), os.path.join(search_out, "report.parquet")]
         report = next((p for p in cands if p and os.path.isfile(p)), report or cands[-1])
+        if not fasta:
+            # the sidecar the search found for its FASTA (run_search `fasta_meta`: a FragPipe .fas
+            # has none of its own -- its target FASTA's; H7b-1), before <fasta>.meta.json
+            fm = prov.get("fasta_meta") if isinstance(prov.get("fasta_meta"), dict) else {}
+            fasta_meta = fasta_meta or fm.get("path")
         fasta = fasta or prov.get("fasta")
         if not fasta and not why:
             why = f"{PROVENANCE} in {search_out} names no FASTA"
@@ -376,6 +384,76 @@ def resolve_inputs(search_out=None, report=None, fasta=None, fasta_meta=None):
     meta = meta if isinstance(meta, dict) else None
     fasta = fasta or (meta or {}).get("fasta")
     return report, fasta, meta, (None if fasta else why)
+
+
+def _count(x):
+    return x if isinstance(x, int) and not isinstance(x, bool) and x >= 0 else None
+
+
+def _matching_added(meta, d):
+    """How many of the `d` entries removed as targets matched a sequence added with --add-fasta
+    rather than the proteome: fetch_fasta.py matches an added sequence as a target, and records
+    for each removed entry its target (contaminants_dropped_as_target `target_acc`, under the
+    accession added_sequences records). 0 when no sequence was added; None when the records
+    cannot say."""
+    added = {e["accession"] for f in meta.get("added_sequences") or () if isinstance(f, dict)
+             for e in f.get("entries") or () if isinstance(e, dict) and e.get("accession")}
+    if not added and not meta.get("n_added_sequences"):
+        return 0
+    recs = meta.get("contaminants_dropped_as_target")
+    if not added or not isinstance(recs, list) or len(recs) != d:
+        return None
+    return sum(1 for r in recs if isinstance(r, dict) and r.get("target_acc") in added)
+
+
+def database_build(meta, fasta, meta_path=None):
+    """What the build did to the contaminant list before the search, as fetch_fasta.py's sidecar
+    records it: {"contaminant_set", "n_in_set" (the set as fetched), "n_removed_as_target"
+    (identical to, or indistinguishable from, a target: a proteome protein or an added
+    sequence), "n_removed_matching_added" (how many of those an added sequence;
+    _matching_added), "n_removed_for_added_sequences" (the sidecar's own count of entries removed
+    because most of each is an added sequence -- not among n_removed_as_target),
+    "database_state" (sidecar_state), "kept_matching_target" (entries it found to match a target
+    and kept: a digestion enzyme, a supplied database's own), "sidecar"} -- or None when the
+    sidecar does not record the counts or does not describe `fasta`
+    (fetch_fasta.sidecar_sha256_matches). Never a default (DE-LIMP rule 2)."""
+    if not isinstance(meta, dict) or not fasta:
+        return None
+    n = _count(meta.get("n_contaminants_in_set"))
+    d = _count(meta.get("n_contaminants_dropped_as_target"))
+    if n is None or d is None:
+        return None
+    try:
+        if sidecar_sha256_matches(meta, fasta) is not True:
+            return None
+    except OSError:                  # not readable here: it cannot be said to be that FASTA
+        return None
+    kept = {r["cont_acc"] for k in ("contaminants_kept_despite_target_match",
+                                    "contaminants_identical_to_target_kept")
+            for r in meta.get(k) or ()
+            if isinstance(r, dict) and isinstance(r.get("cont_acc"), str)}
+    return {"contaminant_set": meta.get("contaminant_set"), "n_in_set": n,
+            "n_removed_as_target": d, "n_removed_matching_added": _matching_added(meta, d),
+            "n_removed_for_added_sequences":
+                _count(meta.get("n_contaminants_dropped_for_added_sequences")),
+            "database_state": sidecar_state(meta), "kept_matching_target": sorted(kept),
+            "sidecar": os.path.abspath(meta_path or fasta + ".meta.json")}
+
+
+def database_build_of(rec):
+    """The build's numbers for a record: its own `database_build`; for a record written before
+    that key (skill 2.14.0), the sidecar next to its FASTA, read as the check reads it
+    (resolve_inputs) and only while it still describes that FASTA; else None."""
+    if not isinstance(rec, dict):
+        return None
+    if "database_build" in rec:
+        b = rec["database_build"]
+        return b if isinstance(b, dict) else None
+    fasta = rec.get("fasta")
+    if not fasta:
+        return None
+    _report, _fasta, meta, _why = resolve_inputs(fasta=fasta)
+    return database_build(meta, fasta)
 
 
 def keratin_exemption(meta, meta_path, report, keratin_sample=None):
@@ -447,7 +525,9 @@ def _check(rec, report, fasta, meta, q_cutoff, q_columns, no_fasta_reason, exemp
            keratin_sample):
     rec.update({"organism": (meta or {}).get("organism") or None, "rule": RULE,
                 # which fetch_fasta.py rule built the database (legacy / identity_only / current)
-                "database_state": sidecar_state(meta) if meta else None})
+                "database_state": sidecar_state(meta) if meta else None,
+                # what that build already removed from the contaminant list (None: not recorded)
+                "database_build": database_build(meta, fasta, meta_path)})
     from estimate_params import DIANN_DIGEST
     dig = (meta or {}).get("contaminant_digest")
     digest = dig if isinstance(dig, dict) and {"cut", "missed_cleavages", "min_pep_len",
@@ -819,8 +899,30 @@ def fix_text(rec):
                "enzyme)." if rec.get("kept_digestion_enzymes") else ""))
 
 
+def build_text(rec):
+    """For staff: what the build removed from the contaminant list before the search
+    (database_build_of), or "" when that is not recorded."""
+    b = database_build_of(rec)
+    if not b or not b.get("n_in_set"):
+        return ""
+    how = ("identical to, or indistinguishable from," if b.get("database_state") == "current"
+           else "identical to, or contained in,")          # the identity rule alone
+    cset = f"{b['contaminant_set']} " if b.get("contaminant_set") else ""
+    k, more = b.get("n_removed_matching_added"), b.get("n_removed_for_added_sequences")
+    added = ("" if k == 0 else
+             "how many of them matched an added sequence is not recorded; " if k is None else
+             f"{k} of them matched an added sequence; ")
+    return (f"Database build: {b['n_removed_as_target']} of {b['n_in_set']} {cset}contaminant "
+            f"entries removed before the search as {how} {rec.get('organism') or 'target'} "
+            f"proteins{'' if k == 0 else ' or added sequences'} ({added}"
+            f"{b.get('database_state')} rule; {b.get('sidecar')})."
+            + (f" {_n(more, 'more was', 'more were')} removed because most of "
+               f"{'it' if more == 1 else 'each'} is an added sequence "
+               "(contaminants_dropped_for_added_sequences)." if more else ""))
+
+
 def notes_text(rec):
-    ma, out = rec.get("masked") or [], []
+    ma, out = rec.get("masked") or [], [x for x in (build_text(rec),) if x]
     if rec.get("n_genes_lost_minority"):
         out.append(f"{_n(rec['n_genes_lost_minority'], 'gene', 'genes')} lost a minority of "
                    "their signal to shared precursors (in the record).")
@@ -893,6 +995,51 @@ def plain_siphoned(rec, de=None):
             "contaminant. The Core can search again without those contaminant entries.")
 
 
+def _a(word):
+    return ("an " if word[:1].lower() in "aeiou" else "a ") + word
+
+
+def plain_build(rec):
+    """The client's words, once with a COMPETED OUT / SIPHONED warning: the build already removed
+    the contaminant entries that are, or cannot be told apart from, the organism's proteins (or a
+    sequence added to the database, when the sidecar says some were), and the ones involved here
+    are not such entries. "" when the record's numbers cannot say so
+    (database_build_of; never a default): none removed, a database built by an older rule (which
+    removed fewer -- fix_text says rebuild), or an entry involved here that the build found to
+    match a target protein and kept (a digestion enzyme, a supplied database's own)."""
+    b = database_build_of(rec)
+    if not b or b.get("database_state") != "current":
+        return ""
+    d, n = b.get("n_removed_as_target"), b.get("n_in_set")
+    if not (isinstance(d, int) and isinstance(n, int) and 0 < d <= n):
+        return ""
+    involved = {str(a).upper() for a in (rec.get("drop_contaminant") or [])
+                + (rec.get("kept_digestion_enzymes") or [])}
+    if not involved or involved & {str(a).upper() for a in b.get("kept_matching_target") or ()}:
+        return ""
+    org, one, solo = rec.get("organism") or "sample", d == 1, len(involved) == 1
+    # --add-fasta: an added sequence (a bait, a tag) is a target too, so a removed entry may have
+    # matched one rather than the organism's proteome -- worded from how many did (None: some may)
+    # (no example in the words: what was added may be one bait or a whole second proteome)
+    k, bait = b.get("n_removed_matching_added"), "one of the sequences added to the database"
+    if k == 0:
+        what = f"{_a(org)} protein or could not be told apart from one"
+        whose = f"{_a(org)} protein's peptides"
+    elif k == d:
+        what, whose = f"{bait}, or could not be told apart from one", "an added sequence's peptides"
+    else:
+        what = f"{_a(org)} protein or to {bait}, or could not be told apart from one"
+        whose = f"the peptides of {_a(org)} protein or an added sequence"
+    return (f"Before the search, {d} of the contaminant list's {n} entries "
+            f"{'was' if one else 'were'} already removed because {'it' if one else 'each'} was "
+            f"identical to {what}, so {'it' if one else 'those'} cannot take {whose}. "
+            f"The {'entry' if solo else 'entries'} involved here "
+            f"{'differs' if solo else 'differ'} from the {org} proteins and "
+            f"{'stays' if solo else 'stay'} in the list so that real contamination is still "
+            "caught; only the search can show that none, or almost none, of "
+            f"{'its' if solo else 'their'} own peptides were found in these samples.")
+
+
 def audit_findings(rec, de=None):
     """[(status, message, detail, plain)] for audit_results.py; [] for a record that does not
     apply (another engine's report). `de`: the DE's contaminant record, which says what was done
@@ -904,9 +1051,11 @@ def audit_findings(rec, de=None):
     if rec.get("status") != "ok":
         return [("INFO", staff_message(rec), {"reason": rec.get("reason"),
                                               "report": rec.get("report")}, None)]
+    if "database_build" not in rec:      # a record from before the key: its sidecar, read once
+        rec = dict(rec, database_build=database_build_of(rec))
     keys = ("report", "fasta", "organism", "contaminant_share_pct", "drop_contaminant",
             "contaminants_not_showing_themselves", "q_columns", "cutoffs", "record_file",
-            "checked_by")
+            "checked_by", "database_build")
     detail = {k: rec.get(k) for k in keys if rec.get(k) is not None}
     detail.update({k: [x["gene"] for x in rec.get(k) or []]
                    for k in ("competed_out", "siphoned", "masked")})
@@ -919,6 +1068,12 @@ def audit_findings(rec, de=None):
         # the fix and the notes once, in the first of the two
         out.append(("WARN", f"{siphoned_text(rec)} {said}" + ("" if out else f" {tail}"), detail,
                     plain_siphoned(rec, de)))
+    built = plain_build(rec) if out else ""
+    if built:
+        # once, after the last warning's words: the client's row (audit_results.client_section_md
+        # joins them in order) names what is missing, then why those entries stay in the list
+        status, msg, det, plain = out[-1]
+        out[-1] = (status, msg, det, f"{plain} {built}")
     if out:
         return out
     # a gene whose signal rests mostly on an entry that shows itself (bovine serum proteins in

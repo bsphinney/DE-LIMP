@@ -1,5 +1,447 @@
 # Changelog
 
+## [Skill 2.14.2] — 2026-11-04
+
+A Core analysis of two timsTOF DDA-PASEF runs went off the skill's standard path. Sage refused the `.d` files, and DIA-NN's `--dda` second pass crashed. The analysis was then delivered as a plain hand-made report, with no reproducibility bundle, no Methods and no AGENTS.md. Two more sessions ended the same way: a re-analysis with no DE, and three HT-plate submissions that stopped at search QC.
+
+2.14.2 makes that path work:
+- Sage reads a `.d` for identifications, and converts it for quantification.
+- A crashed DIA-NN second pass falls back to the complete first pass.
+- finalize now ALWAYS makes the Methods, the bundle, AGENTS.md and the README, for every analysis, with or without a DE.
+- The podcast refuses to go ahead without the skill's own report and Methods, and the delivery and the announcements refuse without finalize's stamp.
+- Every reader finds the search the DE read, wherever it is.
+
+The release also carries the fixes from the staff reports of 20 October to 2 November. Each area was reviewed and verified separately. After every lane had merged, two more things drove a last round of fixes:
+- six independent reviews: biology, proteomics, statistics, errors and UX, documentation, security;
+- a run of the two-run DDA case, end to end on the 2.14.2 build, by a fresh agent session.
+
+The DDA, non-specific, MaxLFQ and peak-check changes were checked on real data on HIVE.
+
+2.14.1 (below) was never released on its own. Its two additions ship with this release, and its entry stays as written.
+
+### What the client sees
+- **Fewer wrong calls on the MaxLFQ route.** Before, `run_de.R --method maxlfq` put a quantile step on top of DIA-NN's `PG.MaxLFQ`, which DIA-NN had already normalised across runs. On the public PXD063416 benchmark that gave 60.9, 76.1 and 76.9% wrong calls at 4, 6 and 10 m/z windows.
+  - **The cause:** mainly the quantile step itself, not normalising twice. On this benchmark whole species shift between runs. Even on quantities DIA-NN had not normalised, the quantile step alone gave 46–72% wrong calls at 4–10 m/z.
+  - **Now:** the default (`--between-run auto`) adds no step to a `PG.MaxLFQ` that DIA-NN normalised. The wrong calls are 4.5, 6.4 and 4.4% (at 2 m/z, 3.3% instead of 4.9%).
+  - **Still quantile:** a `--no-norm` search's `PG.MaxLFQ`, and another engine's declared quantities (Sage, FragPipe). For FragPipe and AlphaDIA, the Methods name the engine's own normalisation first (IonQuant's, AlphaDIA's directLFQ, or "not recorded — confirm"), then the DE's step.
+  - **Unchanged:** `--between-run quantile|median|none` still chooses a step explicitly, and the Methods say which step ran and why. limpa DPC-Quant, the default DE, is not affected.
+- **Fold changes point the right way when the controls are recorded.** Before, a session with its control groups recorded (`experiment_type.py set --controls`) still compared groups alphabetically. A TurboID study got IgG minus bait, with every sign flipped, and the normalisation check said "no --controls were recorded". Now:
+  - every printed step-8 command carries `<group>-<control>` contrasts, and contrasts given by hand still win;
+  - `run_de.R` run by hand with no `--contrasts` in such a session is refused, naming the `--contrasts` to use;
+  - the check's note tells a reversed contrast apart from a missing one;
+  - `reproduce.sh` replays the contrasts the DE actually ran, read from its record. A different `provenance.py --contrasts` value is named in a MANIFEST NOTE.
+- **The Methods name the right maker, LC and mode, and tag what they cannot know.** Before, several statements were wrong or untagged:
+  - an mzML from a Bruker impact II was called "Thermo Fisher Scientific";
+  - another lab's data got the Core's PepSep column and CaptiveSpray emitter;
+  - a Thermo `.raw` got the Bruker column and "not recorded in the .d";
+  - the session's recorded DIA/DDA mode was still marked "confirm";
+  - outside data read "performed at the UC Davis Proteomics Core", untagged.
+
+  Now the maker comes from the instrument name, and an unknown one reads "[vendor — confirm]". The Core's LC defaults apply only to a Core timsTOF `.d`. The mode comes from `--acquisition`, then the workflow manifest, then `input/acquisition.json`. Outside data's Core acknowledgment is tagged "confirm". `references/methods.md` and step 9d list every tag, and an unresolved tag is never replaced with a guess.
+- **The Methods describe the search that ran, wherever it is.** Before, finalize looked for the search only in `output/search/`, so a search in `output/search_dda/` got no search paragraph. The Methods also said DIA-NN "optimised it automatically" for a mass accuracy pinned at a fixed ppm. Now the Methods take the search the DE read (see "Searches find their record"), and with none chosen they give tagged blanks and say why. "Optimised automatically" is written only when the run's record says so; otherwise the Methods say "measured before the search and pinned", or "not recorded".
+- **Non-specific and FragPipe searches are described as they ran.** Before, the Methods of a FragPipe search said "No fixed modifications were set. No variable modifications were searched" when five were searched, and left the tolerances and FDR blank. A non-specific Sage search got a proline rule it never had, and "[enzyme name not mapped]". Now:
+  - **Sage:** the digestion, the modifications and the tolerances come from Sage's own `results.json`. The digestion reads "no enzyme specificity (non-specific search)", semi-specific, or no digestion. Sage's LFQ route gets its own FDR sentence.
+  - **FragPipe settings:** they come from `fragger.params`: fixed and variable mods (a mod on several sites is read site by site), tolerances, Met clipping, mass offsets and labile settings. The Methods also name the database MSFragger searched, with its entries, decoys and sha256.
+  - **FragPipe's Philosopher filter:** it is stated as FragPipe's log shows it ran, because FragPipe can run a different filter from the one its workflow states. With label-free quantification on, FragPipe 24 ran `--prot 0.01` where the workflow says `--prot 1`. The scope is given per level: PSM, ion and peptide within each experiment, and protein over all runs when one protein inference was read. A FragPipe DE's Methods state the same filter. A FragPipe DIA DE's Methods do not print it beside DIA-NN's q-values.
+  - **Any engine:** a setting no record holds reads "not recorded — confirm", never "none".
+  - **Enzyme names:** the Methods and the SDRF name the common enzymes (chymotrypsin, Lys-C, Arg-C, Asp-N, Lys-N, semi- and non-specific) instead of "[enzyme name not mapped]".
+- **Identifications-only results are labelled as such, and never called quantified.** Before, the client README and email said an identifications-only search had "identified and quantified" the proteins. Now:
+  - one reading of the search record decides, for the README, the email, the folder rows and the DE gate;
+  - the report page itself says "identifications only: no quantities, no differential expression", with the identifications per run;
+  - the README and AGENTS.md name `identifications.tsv` and how it was filtered;
+  - the Methods say how a timsTOF `.d` went into Sage (read directly, or converted with the pinned ProteoWizard and its options). They give the identification rule (rank 1, spectrum and peptide q ≤ 0.01) instead of "Identification FDR: not recorded".
+  - for Sage, the Methods also say that no protein-level FDR filter was applied to the list. They give how many of the listed protein groups pass Sage's protein q ≤ 0.01, and each row carries its `protein_q`.
+- **A DIA-NN `--dda` first-pass result is labelled as one.** When the skill falls back to DIA-NN's first pass (see the DDA section), the results are said to be the first-pass report, identified without match-between-runs. That is said:
+  - on the report page itself;
+  - in the Methods and AUDIT.md (a WARN);
+  - in the run registry, the job-end Slack post and `checkpoint status`.
+
+  The parameter table says "Report quantified: DIA-NN's first-pass report" instead of "Match-between-runs: on". When that report has no engine protein quantities, the search paragraph says so. The sentence that limpa DPC-Quant estimated the protein quantities from the precursors appears only when a DPC DE ran. A Methods with no DE never claims it.
+- **Contaminant-identical proteins carry their own species.** Before, a yeast ADH1 in a human + yeast search was called a "Homo sapiens" protein, and a yeast TPM2 entry flagged human TPM2 by its gene symbol. Now each hit is named by its own organism, in AUDIT.md and in the sample-quality panel. It is matched by accession first, and by gene symbol only within its own species (NCBI databases match by accession only). Databases built before 2.14.2 take the species from their entry names.
+- **The heatmap says when it is not differential.** Before, with fewer than 5 proteins passing, the heatmap showed the most variable proteins under the title "top 50 differential proteins". Now the title and caption say "most variable" and how many proteins passed. They also say the proteins were chosen by variance, not by the DE test.
+- **No raw tool output in the report.** Before, the tool's raw sample-quality or audit block (z-scores, run file names, developer notes) was left beside the report's own section whenever that section was numbered ("## 9. Data Quality Notes", "## 10. Audit & caveats"). At least one delivered report carried both. Now a numbered heading replaces the raw block, as an un-numbered one already did.
+- **A report with no DE reads as one.** Before, a search-only analysis was briefed and documented as a differential-expression analysis: the brief sent the writer to DE files that did not exist, and never to the identifications.
+  - **The analysis brief** is now titled "identification and QC (no differential expression)" and is built from the search's own files: `identifications.tsv` and its record, or the search report. It has no significance rule, contrasts, volcano or DE tables. Its sections are identification depth per run, QC, notable proteins (presence only) and how the analysis works. With two or more conditions it says that differences between them are not tested: with one run per condition they cannot be told from run-to-run variation, and in DDA a missing protein is not shown to be absent.
+  - **The README and AGENTS.md** fold the DE rows into "Differential expression: none in this analysis", and the review checklist asks whether no DE was wanted.
+- **The peak check runs on more searches, and ships only when it is finished.** Before, two kinds of search never got a peak check: one without fixed carbamidomethyl-C (unalkylated or client-prepared samples) was skipped, and every 5-step-chain search failed to build one. A skipped check still shipped a `skyline/` folder holding only its record, the README described pictures that were not there, and the email promised them. A skipped check on a Sage or FragPipe search also told the client that "the quantities in this report are DIA-NN's". Now:
+  - an unalkylated search clears Skyline's default modification, and a chain search links its own library;
+  - `skyline/` ships, and the README, the Methods and the email name the Skyline document, only for a finished and current check;
+  - a check that is not part of the report reads "Not part of this report." with one neutral sentence: the right engine, no paths and no task for staff. A delivery then leaves `skyline/` out. MANIFEST.txt says why;
+  - the Methods name the search's variable modifications and what Skyline did not carry over (N-terminal Met excision), and say "cysteine unmodified" only when it was.
+- **No Core-internal files in a delivery.** Before, an interim delivery copied whole search folders, scheduler logs included: node names, paths with the HIVE login, the job-end hook's lines. It also copied `fran_deposit.json` (the login that staged the search) and the LFQ record naming, by login, who accepted an LFQ window. Now:
+  - scheduler logs (`<job>_<id>.log`, `slurm-*`), `fran_deposit.json` and `node_faults.json` never leave the Core, in any delivery mode or in the session zip;
+  - a record naming who accepted something is delivered with the role, in deliveries, the zip and the PRIDE deposit's copy;
+  - a DIA-NN search's `input_links/` (links to whole `.d` runs) is scratch, not a second copy of the raw data.
+- **README links that work in Bioshare.** Before, README.md used relative links, and README.html linked folders; both break inside Bioshare. Now README.md lists plain file names, the podcast item included. README.html links files only, and a folder is linked through its first file.
+- **Raw files under their corrected names.** Before, a raw-only delivery named each share link after the instrument's original (wrong) file name, not the name staff had corrected when staging. Now the staged name is used. A link with no usable name is SKIPPED, with the reason.
+- **No internal logs in the session zip.** Before, `finalize --zip` packed most of `logs/`: expert reviews, job logs, and a QC output carrying the staff-only verdict. Now the zip leaves `logs/` out, except `logs/commands.log`. In that log, staff names are replaced by the role (`<Core staff>`), and `--override-by` is replaced by `<redacted>`.
+- **limpa 1.4's `NPrec` column is explained.** Before, the column glossary said "NPrec — no description recorded". Now it says the column counts the precursors that quantify the protein (`NPeptides` before limpa 1.4), and the analysis brief quotes the column the table really has.
+
+### For staff: finishing a session
+- **Golden rule 9: stay on the standard path, and finish.** SKILL.md has a new golden rule. Leave the standard path only when it is clearly better. When you do, record why with `log_decision.py` at that moment, and still run the finish steps: the report (9), Methods (9d), the bundle (10), finalize (12) and, for a Core submission, deliver (12b). Before telling the user an analysis is finished, run `session.py status --session <session>` and show its result. The rule gives the form for a HIVE session run from a laptop.
+- **The finish steps refuse a report the skill did not write.** Before, a hand-made pandoc report copied into `output/` went through the podcast, the delivery and finalize. Now `make_analysis_html.py` records each report it writes in `report_provenance.json`, with its sha256. Each step then checks what it needs:
+  - `make_podcast.py` (`check`, `link`, `share`, `job`): that report and the Methods;
+  - `deliver` (analysis and no-de modes): the report, the Methods, the bundle and the finalize stamp;
+  - `bioshare send`, `email-draft` and `notify_slack.py analysis-done`: the finalize stamp;
+  - `board.sh`: warns only.
+
+  A report from before 2.14.2 (it has the old footer) passes with a warning, and a raw-only delivery is never gated. On the laptop route, `report_provenance.json` goes back to HIVE with the report; without it, the steps there would take the report for one made before 2.14.2. Each refusal lists every missing item with the command that makes it. `--override-finish "<reason>"` goes ahead and records the reason in delivery.json and its MANIFEST, in MANIFEST.txt and the stamp, or in podcast.json. `references/core-submissions.md`, `podcast.md` and `notifications.md` describe the gates.
+- **finalize stamps what it made.** finalize's last act is `output/FINALIZED.json`. It holds the skill version and the time, and the sha256 of each of these (or `[SKIPPED] <reason>`): AGENTS.md, the README, the Methods, the bundle's manifest, the report and MANIFEST.txt. finalize refuses to stamp when any of these was not made, and ends with one hint per missing document: the exact `provenance.py` command, or for `--methods` the `cp` into `output/methods.md`.
+  - A stamp counts only while nothing it stamped has changed. `session.py docs` run after finalize makes it stale.
+  - An override or a stale stamp is never reported downstream as finalized. deliver records `finalized` only for a current stamp. The email draft says NOT FINALIZED and `bioshare send` warns. A finalize that does not stamp is not logged as finished in the run registry.
+  - A refused finalize removes the earlier stamp, unless the refusal was a mistake in its own command.
+  - An empty methods.md or a broken run_manifest.json no longer passes.
+- **finalize makes the bundle.** Before, a session that skipped step 10 stayed without a bundle. Now finalize builds the bundle when it is missing or out of date (the DE, the search report or the conditions changed). It reads step 10's flags from the session's records, with the contrasts from the DE record, and leaves out any flag that has no record; MANIFEST.txt says what was left out. It refuses only when there is no raw-file list or no record of what ran, and then names the exact `provenance.py` command.
+- **`reproduce.sh` replays what ran.** Before, the bundle's step 5 re-derived the search settings, so a Sage search was replayed with `--params ./wf/` (a folder), losing its overrides, `--ids-only` and its enzyme. Step 6 ran a DE that never happened, with a literal `<method>`. Now:
+  - step 5 searches with the cfg the search ran with, copied into `inputs/`; for FragPipe, its workflow without the database line;
+  - with no DE there is no step 6, and REPRODUCE.md describes the analysis as it was;
+  - finalize takes `--params` from the search's record;
+  - the bundle also fingerprints the search's outputs and record, so a changed output makes the bundle stale;
+  - finalize warns when `logs/commands.log` is missing or older than the analysis.
+- **finalize for every analysis, with or without a DE.** Before, finalize was read as a DE step, and sessions with no DE ended with no AGENTS.md, README, Methods or bundle. Now a session with no `de_provenance.json` gets the same documents, built from its search records, and MANIFEST.txt lists each DE-only part as `[SKIPPED]`.
+- **`session.py status`, the finish checklist.** `session.py status --session <S>` (or `--dir <S>`) lists each finish item as done, or as "missing" with the command that makes it:
+  - the skill report, the Methods and the bundle;
+  - AGENTS.md and the README;
+  - the saved conversation and the finalize stamp;
+  - for a CoreOmics submission, the delivery.
+
+  It exits 0 when everything is done and 3 when something is not. A submission stays at 3 until step 12b delivers it. With anything overridden or waived, it says "Complete, with N overridden/waived: …", never that every item is done. A delivery made under an override reads "overridden"; one of an earlier finalize reads "stale". SKILL.md gives the runnable command at golden rule 9, steps 12 and 12b, and the laptop finish list.
+- **The conversation is saved before finalize.** Before, finalize never warned when a Claude Code analysis had no saved transcript. Now finalize tries once to save the conversation, and refuses if it is still not saved. `--no-transcript "<why>"` waives this and writes the reason to MANIFEST.txt. On HIVE:
+  - a session whose transcript the laptop already saved passes;
+  - a session with only its decisions log, and no record of a Claude Code session, passes with an INFO line.
+
+  `save_transcript.py <S> --check` (or `--hive <S> --check`) tells you, from the laptop, whether the conversation is saved. When it is not, it prints the save command and exits 3.
+- **Hand-written documents are kept.** Before, `session.py docs` and finalize overwrote a README.md or AGENTS.md written by hand, so at least one session avoided both. Now such a file is never changed. The same goes for one the skill wrote and someone then edited, init's starter included: the skill records what it wrote in `logs/skill_docs.json`. The skill writes its own `README.skill.md` / `AGENTS.skill.md` beside the kept file, and MANIFEST.txt says so.
+- **Work done outside the session goes in with it, and nothing secret goes with it.** These finalize flags copy outside work into `output/custom/<kind>/<name>/`, checksummed and listed in the README and AGENTS.md:
+  - `--code-dir <dir>` and `--extra-dir <dir>` (each repeatable);
+  - `--methods <md>`;
+  - `--report <html>`. A report the skill did not write also needs `--override-finish`, and the README calls it custom.
+
+  These are left out, whatever the case of their names, and named in a `[NOTE]` line that step 12 relays:
+  - key and credential files: the skill's own token files, `*token*`, `*.key`, `id_*`, `.netrc`, `.pgpass`, shell histories;
+  - folders: `.ssh`, `.aws`, `.config`, `.gnupg`, `.kube`, `.docker`, `.claude`, `.venv`, `node_modules`, `.git`;
+  - any file in which a secret is found.
+
+  These are refused: a folder that is a home folder or holds one; a folder or file inside a session's `logs/`, `input/` or `output/`; a `--report` or `--methods` file holding a secret. A file too big to read for secrets is named as unread. Copies are made whole first, so a failed copy leaves no partial one in the zip. A project's own reproducibility package is in addition to the bundle, never instead of it.
+- **An interim delivery before the report.** Before, staff copied the raw files and search folders to the share by hand, which skipped the QC check. Now `core_submission.py deliver --mode interim` does it, behind the same QC check, and needs no report, Methods or stamp:
+  - it links the raw files under their staged names, and copies every search folder, wherever its record is;
+  - it leaves out a search's mzML conversions, scan-window probe, Radiant library, input links and half-written files, and every Core-internal file;
+  - its README, MANIFEST and email draft say what is still owed, and promise quantities only for a search that quantified;
+  - `delivery.json` `owed` keeps `session.py status` open until a later no-de or analysis delivery. A raw-only re-send carries the owed items forward.
+- **The podcast warns when the session is not finalized.** `make_podcast.py share` and `link` warn, without refusing, when there is no finalize stamp. An email draft made without `--delivery` is marked as unchecked.
+- **The no-DE route is signposted.** SKILL.md steps 3 and 4, and the top of step 8, now say that an analysis with no DE is not done after the search. That covers a detection question, an ID list, a QC run, one sample per condition, and a re-analysis or benchmark.
+  - **The steps:** the route skips 8–8d and 8f (Core runs still do 8e), then runs 9 → 9d → 9e → 11 → 12 (finalize) → 12b (`deliver --mode no-de`).
+  - **One rule for its search:** a Sage DDA search is identifications only (`--ids-only`) unless amounts are wanted (abundance between runs, an intensity table, a DE later). Ask once if the request does not say, log the choice, and confirm it at step 4.
+  - **The detail** is in the new `references/no-de-route.md`.
+
+### For staff: DDA searches
+- **Sage reads a timsTOF `.d` for identifications.** Before, the Sage route could not take a `.d`: the bioconda msconvert has no Bruker reader. Now `estimate_params.py --ids-only` writes a Sage cfg with `quant.lfq` false, and Sage 0.14.7 searches the `.d` directly, with no conversion. `.raw` still goes through ThermoRawFileParser, and mzML goes straight in.
+  - `--adapt-only` writes `identifications.tsv` and `sage_identifications.json`, and no `report.parquet`. The table has one row per run and peptide, for target PSMs of rank 1 with spectrum and peptide q ≤ 0.01, each with its `protein_q`.
+  - The DE refuses an identifications-only search with the reason, and deliveries take the identifications.
+  - On HIVE, on the two-run DDA submission, this found 896 peptides, and 143 proteins at Sage's 1% protein FDR. The identifications table lists 198 protein groups, each with its `protein_q`. That matches a hand-run Sage search of the same `.d`.
+- **Sage quantification of a `.d` converts in the job, with the Core's pinned ProteoWizard.** A cfg written without `--ids-only` (a DE study, or a no-DE one whose user wants amounts) quantifies. Its job converts each `.d` on the compute node with msconvert 3.0.26266 from the pinned Skyline container, and checks the container's sha256 before the first conversion. The conversion combines ion-mobility spectra and sums scans, as the Core's Windows msconvert does.
+  - **Without those two options** (found on HIVE before release), the conversion gave 11 million spectra a run, 86 GB for the two runs, and Sage found nothing.
+  - **With them, on the same runs:** the two runs convert in about 20–25 minutes. Sage identifies 753 peptides, with LFQ intensities identical (r = 1.000) to Sage's on the Core's Windows-converted mzML. But the quantified report keeps only 65 precursors in 34 protein groups: Sage 0.14.7's MS1 quantification on this data covers a small share of what it identifies (see the LFQ check below).
+  - **Refusals:** a missing container is refused, naming the two ways out: convert first with a vendor msconvert, or search with `--ids-only`. A path that apptainer cannot bind (one holding `:` or `,`) is refused.
+  - **Re-runs:** `--pwiz-sif` is recorded, and re-runs and `reproduce.sh` replay it.
+- **The Sage `.d` route is guarded.**
+  - The cfg decides the route, so an unset or unreadable `quant.lfq` with a `.d` is refused.
+  - Quantifying a diaPASEF `.d` with DDA settings is refused, with DIA-NN named as the way.
+  - An empty result is refused (exit 2), never written as a 0-row report.
+  - One run-name rule serves the duplicate check and both adapters.
+  - Generating a search sets the other route's outputs aside.
+  - A refusal leaves no empty folder.
+- **The Sage LFQ check.**
+  - It warns, with the numbers, when the quantified report keeps fewer target precursors than 10% of the target peptides identified at 1% (a warning, not a gate). AUDIT.md says what that means for the results, in the client's words, and names the protein groups; the staff's next step is said to staff only.
+  - It says when nothing was identified or measured.
+  - It runs with the pipeline env's Python. Before, the job's Python had no pyarrow, so the check could not run.
+  - Its printed re-run command keeps the search's `--mem`, `--time` and `--pwiz-sif`, and its job-end choices (`--no-notify`, `--no-fran`, `--not-qc`).
+  - The re-run's config carries the parameters' record, so its Methods keep the cysteine sentence.
+- **A DIA-NN `--dda` second-pass crash falls back to the first pass.** Before, when DIA-NN 2.7.0's `--dda` second pass (match-between-runs) crashed, the search failed with no report, although DIA-NN had written a complete first-pass report. Now, for `--dda` only, the job:
+  - copies the first pass, with its stats and precursor matrix, to the report's names;
+  - records `report_used: first_pass` and its sha256 in `dda_first_pass.json` and `search_provenance.json`;
+  - goes on, and the watcher reports the search done, with a caution.
+
+  A final report is never replaced, and a crash with no first pass still fails. A resubmitted search starts from its own record, so a second pass that then succeeds is not called a fallback. A DIA search's job script is unchanged. On HIVE the two-run submission's second pass crashed again (exit 132), and the fallback ran end to end. Such a search is still handed to FRAN, with `report_used` in its manifest.
+- **`--method maxlfq` refuses a report with no protein quantities.** DIA-NN's `--dda` first-pass report has `PG.MaxLFQ` = 0 in every row. On it, `--method maxlfq` stopped with a misleading "fewer than 2 usable runs survived the filters". Now the fallback records `pg_maxlfq: absent`, and maxlfq refuses by name and points to `--method dpc`. DPC reads the precursors and is expected to be unaffected.
+- **FragPipe DDA never writes into the raw folder.** Before, four things went wrong:
+  - MSFragger wrote about 1 GB a run of `_uncalibrated.mzML`/`.mzBIN` into the input raw folder;
+  - the manifest had no experiment column, so IonQuant made no `combined_protein.tsv`;
+  - a `.raw` search had no mono on its PATH;
+  - `finalize --zip` would have packed the hand-made copies (about 50 GB).
+
+  Now:
+  - **Staging.** The inputs are staged in `<out>/raw_stage/` after a free-space check: a `.raw` is copied in the job, a `.d` or mzML is linked. `raw_stage` must be a real folder inside `--out`, and the clean-up never follows a link. So a stage made by hand as a link to the raw folder can never delete the raw files. An input path holding a tab or a line break is refused.
+  - **Experiments.** A workflow that quantifies gets one experiment per run, named as in conditions.csv, and FragPipe's `-`→`_` renaming is mapped back. An identifications-only workflow keeps FragPipe's one pooled experiment, so its FDR holds over all runs, as before.
+  - **mono.** It is found from `$FRAGPIPE_MONO_BIN`, then PATH, then the Core's shared copy. Without one, a `.raw` search is refused before anything is written, naming conda-forge mono or mzML as the way out.
+  - **Success.** It means exit 0, "ALL JOBS DONE" and the expected tables. The stage is then emptied; after a failure it is kept for a re-run.
+  - **Scratch.** The stage is never zipped, catalogued or delivered.
+  - **Sizing.** Every FragPipe SLURM job now passes `--ram` (the job's memory less a margin) and `--threads` (the CPUs SLURM gave it), tryptic searches included. Before, FragPipe sized its Java heap from the node.
+- **FragPipe searches the database the skill names.** Before, FragPipe 24.0's shipped workflows name no database. Headless FragPipe then filled it from the account's cache, so it searched whatever database that account had used last, and the record never said which. Now:
+  - run_search writes its own copy of the workflow (`fragpipe_input.workflow`) with `database.db-path` = `--fasta`, the target+decoy `.fas`;
+  - a workflow naming a different database is refused, with nothing written;
+  - `search_provenance.json` records the database searched: path, sha256, entries and decoys;
+  - a `.fas` takes its target FASTA's sidecar, or the search is refused. A renamed copy finds it by an exact entry count.
+
+  On HIVE the shipped workflow, with no database line, searched `--fasta` (12,596 entries, 6,298 of them decoys; the sha256 matched).
+- **A FragPipe workflow that runs no quantification is identifications only.** FragPipe 24.0's shipped Nonspecific-peptidome workflow runs no label-free quantification. The job was marked failed for lack of a `combined_protein.tsv`, after FragPipe had finished. Now the workflow's own switches decide, with the outputs actually present as the fallback:
+  - the job counts the search as finished. Its table check now uses `find -print -quit`, so it never calls a finished search unfinished;
+  - a `combined_protein.tsv` whose intensities are all zero (spectral counts only) is not a quantified search;
+  - `--adapt-only` writes `identifications.tsv` and `fragpipe_identifications.json`. The table is per run, from `psm.tsv`, with peptides kept by Philosopher's peptide filter wherever a `peptide.tsv` exists. The record quotes the filter as FragPipe's log shows it ran, the same reading as the Methods;
+  - the DE refuses, and says how to quantify;
+  - the Methods say identifications only.
+- **FragPipe DIA on `.raw` or mzML is refused.** It writes beside its inputs the same way. It is now refused before anything is written, naming DIA-NN or a command to stage the inputs yourself. FragPipe DIA on `.d` is unchanged.
+- **Non-specific and semi-specific searches.**
+  - **`fetch_fasta.py --enzyme none`** builds the database for a sample to which no enzyme was added. A trypsin entry identical to a target is then dropped as a target, not kept as a reagent. The sidecar records the enzyme, `reproduce.sh` replays it, and the run record says "no digestion enzyme". The build says that its contaminant rule used a tryptic stand-in. SKILL.md step 6 ties `--enzyme` to the search's enzyme.
+  - **The digest warning.** A non-specific Sage search is warned when the contaminant check's digest is tryptic.
+  - **Default sizes.** A non-specific or semi-specific single Sage or FragPipe job defaults to 192G (Sage) or 200G (FragPipe) and 24 h, recorded as defaults. These were measured on a 38-run hydrolysate peptidomics study. The NOTE warns when the database is bigger than the 6,300 sequences they were measured on.
+  - **The memory cap.** A job over its queue's per-job memory cap is refused, with the options.
+  - **Checked on HIVE**, on two runs of the hydrolysate study, and passed:
+    - FragPipe's shipped workflow, identifications only;
+    - the same workflow with label-free quantification;
+    - Sage non-specific;
+    - an mzML input.
+
+    The raw folder's listing was byte-for-byte the same before and after.
+
+### For staff: search parameters
+- **`--var-mods` refuses unknown words, adds deamidation, and turns Met-ox on for Sage DDA.** Before, `--var-mods` acted on `ox` only and silently dropped any other word. A like-for-like re-search that asked for N/Q deamidation ran without it. Now the words come from one table (`ox`, `deam`, `none`), and any other word is refused before anything is written.
+  - A Sage DDA search with no `--var-mods` searches Oxidation (M), tagged as a default (the Core's decision of 2026-10-30). New Sage DDA searches therefore find more peptides, from a larger search space.
+  - DIA-NN, and Sage on DIA, still search no variable mods by default.
+  - Giving `--var-mods` replaces the default: `ox,deam` keeps both. `,` alone counts as not given.
+  - The Methods name the mods from the same table. Step 6b's template shows both flags.
+- **`--overrides` merges at every depth.** Before, a Sage override such as `{"database": {"enzyme": …}}` replaced the whole `database` block, silently dropping carbamidomethyl-C, N-terminal acetyl and the decoys, and the rationale still said "trypsin/P". Now nested blocks merge key by key; lists and tolerance windows are replaced whole. The rationale is read from the merged cfg: each overridden entry names the override, and the untouched part of an entry keeps its DEFAULT tag. These are refused, and nothing refused is recorded as applied:
+  - a key at the wrong level, with where it belongs (checked against Sage 0.14.7's own settings);
+  - `{}` on a block;
+  - a malformed tolerance window.
+- **Modification overrides are recorded as run.** A DIA-NN `--var-mod` override adds to the searched modifications. A `--fixed-mod` override replaces them, and the cysteine record, the rationale and the Methods read the final cfg, so a replaced reagent is never named. A cysteine modification the user set is not tagged DEFAULT.
+- **"Set by Core staff" only for Core staff.** Before, every override was labelled "set by Core staff", whoever set it, and the label reached the client's bundle. Now it says Core staff only for a login on the Core staff list, and "the user" otherwise, or when there is no list. Re-bundling a session from before 2.14.2 re-checks its labels and says so in a MANIFEST NOTE.
+- **Smaller fixes.**
+  - `--ids-only` is refused for DIA-NN ("a DIA-NN search always quantifies"), and beside an override that sets `quant`.
+  - `estimate_params.py` creates `--out`'s folder instead of crashing.
+  - A refused run sets the earlier cfg aside (`.stale-<time>`, named in the message) instead of deleting it.
+
+### For staff: the peak check
+- **Chain searches get the right library.** Before, every 5-step-chain search failed: its library was linked under a name Skyline does not pair with `report.parquet`. Now the library is linked as `<report>-lib.parquet.skyline.speclib`, chosen by the route in the search record. A stale library is never taken. A folder holding both routes' libraries and no record is refused, naming both.
+- **Unalkylated searches.** A search with no fixed cysteine modification gets `--pep-clear-mods` right after `--new` and `--overwrite`, and the record says so. A fixed cysteine modification other than carbamidomethyl is still skipped, with the reason.
+- **Imports end at Slurm's time limit, and start from a pristine document.** Before, the skill's own timer killed imports that Slurm had suspended, just after they resumed, and a by-hand retry imported into the already-joined document. Now only `--time` ends an import. The build saves a pristine copy (`<stem>.built.sky`), and every import and every re-run join starts from it. A plan from 2.14.1 warns and joins as before.
+- **A job that Slurm stops says why.** Each Skyline job (build, import, join, PRM run) gets an early warning (`--signal=B:USR1@120`) and a handler. When Slurm stops the job, SkylineCmd is ended, the partial outputs are cleared, and the record names the job and the time limit Slurm applied (read from Slurm; with no number when it cannot be read). The join's record names a stopped import. A stopped PRM run leaves "Not made", and no partial list.
+- **One delivery rule.** `skyline_peaks.deliverable()` decides whether the check ships, for deliver, the README rows and the Methods. One sentence describes the folder, and core_submission no longer spells out the document's name. The report records the check's state it showed, and a delivery whose report says the check was not part of it leaves `skyline/` out.
+- **Checked on HIVE.** The check ran on an earlier unalkylated chain search:
+  - the build, 6 of 6 imports and the join completed;
+  - 1,204 precursor-runs were compared and 60 flagged;
+  - there was no carbamidomethyl in the built, joined or zipped document;
+  - an import stopped at a 4-minute limit was recorded, and the join went on with 5 of 6 runs.
+
+### For staff: search jobs and HIVE
+- **sbatch off PATH.** Before, in a shell without sbatch on its PATH, run_search wrote a single-shot search for many files, and its login-node refusal of an inline search did not fire. Now it finds sbatch at HPC@UCD's fixed path, with one warning that gives the submit line, and it refuses an inline search on any login node.
+- **No `.d` reads on the login node.** Before, run_search read every `.d`'s `analysis.tdf` on the login node: 13 minutes for 224 runs. Now it reuses step 2's check of a file that has not changed since (sizes, times, inode and side files). When more than 5 `.d` still need reading on a login node, it moves itself to a compute node, with its own `--account`, `--partition` and `--qos`.
+- **`--mem` and `--time` for every single-job search.** `run_search.py --mem GB --time HOURS` sets the memory and time of every single-job search: Sage, DIA-NN single-shot, FragPipe, AlphaDIA and single Radiant jobs. They are recorded as `job_mem` and `job_time`, "64G (default)" when not given. On a chain they change nothing, and a NOTE names the chain's own sizing flags. `references/watcher.md` re-generates a job with them instead of editing its script by hand.
+- **Black-hole nodes.** A job that FAILED with signal 53 and wrote no log is now a node fault, which `node_fault.py retry --exclude` acts on. A log that the watcher could not read is never counted as "no log".
+- **Radiant.** The parallel route builds a TSV library with `make_radiant_library.py`, because Radiant cannot read DIA-NN 2.x's `.predicted.speclib`. On a login node, a multi-file Radiant search with no `--sbatch` goes to its per-file chain instead of being refused.
+- **Astral narrow-window DIA is recognised.** Before, Astral 2 m/z DIA read as DIA "medium", and more than 80 windows of 3–4 m/z read as unknown. Now a tiled window set that repeats every cycle, with no data-dependent scan, is DIA "high" when read from a `.raw`. Read from an mzML, which carries no data-dependent flag, a set of windows narrower than 4 m/z reads "medium".
+- **The watcher.** It shows "step 1b/5 measuring" until step 1b's resolved cfg exists; before, it showed "step 2/5". It also reports the `--dda` first-pass caution.
+- **FragPipe's `contam_` refusal** names the target+decoy `.fas` that MSFragger searches.
+- **Paths with spaces to and from HIVE.** Before, `hive_exec.sh --get`/`--put` split a remote path at a space. A conversation pushed to a service folder with a space in its name landed in a stray file, and `save_transcript.py` still said "saved". Now:
+  - a remote path with a space or another special character goes as a tar stream over the same ssh; plain paths are unchanged;
+  - names starting with `-` and the exec bit survive, and `--get` copies once;
+  - `save_transcript.py --hive` checks that the files arrived before it says saved;
+  - every remote command in SKILL.md, `references/core-submissions.md` and `references/podcast.md` quotes the session folder (`$(printf %q "$S")`). Before, `which-search`, the pull, `finalize`, `attach` and the podcast commands broke on a lab folder with a space.
+- **Updating from the Windows desktop app.** `skill_version.sh --update` finds the desktop app's `claude.exe`: `%USERPROFILE%\.local\bin` first, then the newest under `%APPDATA%\Claude\claude-code\`.
+
+### For staff: everything else
+- **The normalisation check holds the MaxLFQ step.**
+  - The gate compares the final MaxLFQ DE's between-run step with the check's. A check made before 2.14.2 counts as quantile, and is compared with the step the final DE actually applies.
+  - A different step is refused, with "run the check again" as the first way forward. The refusal also says that `--between-run quantile` on DIA-NN-normalised data repeats 2.14.1's quantile step on top of DIA-NN's normalisation, and that the step itself is the harm.
+  - NORMALIZATION_CHECK.md names the route it checked.
+  - `reproduce.sh` always replays the step that ran, and notes a `--no-norm` report's normalised DE.
+  - A quantile step without limma is an error, not a silent median.
+- **A proteome bait survives "none".** In a TurboID study whose bait is a protein of the proteome and whose only added sequence is the enzyme, answering "none" for the added sequences used to erase the bait. Now the bait is kept, the question is not asked again, and `set --bait` keeps the answer.
+- **The carboxylase panel finds bacterial biotin enzymes.** The proximity-labelling check matched only mammalian gene symbols, so a bacterial study found none. It now also matches proteins by name from the search FASTA: biotin carboxyl carrier protein, biotin carboxylase, and oxaloacetate decarboxylase alpha. Non-biotinylated beta chains are left out, so mammalian results are unchanged.
+- **Unannotated FASTAs are flagged.** `fetch_fasta.py --path` warns when most entries have no GN=, no entry name and no description, and records `unannotated: true`. Annotating them is planned for 2.15.
+- **HT plates are checked against their own records.** Before, on two HT plates 94 of 96 runs were named for the wrong well and every gate passed, because the gates read only names. Now `ht_manifest.py fetch` also stops (exit 2) on any of these:
+  - a blank larger than half the plate's median sample run. The blanks are found beside the runs, since STAN leaves them out;
+  - a sample list identical to another submission's (8 or more distinctive names);
+  - a plate whose runs come from more than one HyStar sample table, or a sample table that names another submission.
+
+  A sample run under 20% of the median warns. Each failure names the way forward.
+- **Service folders.** `stage` matches a campus name written with its words run together, or joined by underscores, to the campus's alias.
+
+### For staff: searches find their record wherever they are
+- **One answer to "which search".** Before, many readers looked only in `output/search/`:
+  - the report's engine line and "How this report was made";
+  - the README and AGENTS.md;
+  - the Methods and the Slack posts;
+  - the delivery's search files, the bundle and the deposit plan;
+  - the resolved parameters, the run log and the raw-file list;
+  - the peak check's default search;
+  - a re-analysis link.
+
+  A session with searches in `output/search_dda/` and `output/search_sage/`, and a DE on the Sage one, therefore had a report naming DIA-NN and a delivery with no search files. Now one choice, `session.search_choice`, serves every reader:
+  - **It picks:** the record in the folder of the report the DE read, or else the only record.
+  - **It picks none:** when there are several records and no DE to choose by, or when the DE read a report that no record describes. It never falls back to `output/search/`.
+  - **FragPipe DIA:** a `dia-quant-output/report.tsv` belongs to its own search.
+- **With none chosen, nothing is guessed.**
+  - The report says "Search: not recorded (2 search records, none chosen)", and so does "How this report was made".
+  - The Methods give tagged blanks.
+  - A delivery carries no search and says why, with how to choose: rename each other search folder to `output/superseded_<name>/` (a folder whose name holds "superseded" is never a candidate), or deliver every search folder with `--mode interim`.
+- **`session.py which-search --dir <S> [--paths]`.** It prints the choice as JSON. With `--paths` it prints the files a working copy needs: the record, the report the DE read, and the workflow manifest. It exits 3 when none is chosen. `--paths` also lists an identifications-only search's `identifications.tsv` and its record. The laptop route's pull takes that list and stops with STOP when none is chosen; before, it pulled only `output/search/report.parquet`.
+- **One engine-and-version rule.** A search record gives its engine and its own version; a version the record does not hold stays unrecorded and never borrows the pin. With no record at all, the workflow manifest's pin is used, tagged "(workflow manifest pin)".
+- **The delivery and the commands follow.**
+  - `delivery.json` records the search folder, and the email draft names it.
+  - An analysis delivery carries the DE's search under its own folder name.
+  - `make_report.py --session` and `make_methods.py --session` take the session's choice.
+  - A `--search-prov` file that is not there is refused, not read as "no record".
+
+### Public text
+- **Client names and newly added Core identifiers are removed.**
+  - 88 lines naming a client, a client's lab or an outside person are rewritten in the skill's text, tests and comments.
+  - So are 80 lines of submission numbers, staff names and logins that 2.14.1 and 2.14.2 added.
+  - The identifiers already public on main (917 hits on 826 lines, and 3 file names) go with the 2.15 rewrite.
+- **A guard keeps new ones out.** `tests/test_no_new_identifiers.py` fails on any staff or submission identifier beyond a frozen list of those already on main. With the Core's private client-name list, it also fails on any client name.
+  - The list is kept outside the repo: `$SKILL_PRIVATE_NAMES`, by default `~/.config/ucdavis-proteomics/client_names.txt`. No name, and no digest of one, is in the repo.
+  - Without the list, only the client-name part skips, with a message; an unusable list is an error.
+- **The FragPipe licence notes name the tools' commercial licensor and its contact again.** The scrub had taken them for a client. They are allowed through the guard as public licence text.
+- **No submission number in a search record.** The Sage `.d` conversion's record names the Core's msconvert settings without naming the submission they came from.
+
+**Tests:** 1,065 more test functions than 2.14.1 (4,111 → 5,176), with 76 new test files: 1,069 added, 4 renamed or removed. By lane (tests added in each lane's merge):
+
+| lane | new tests |
+|---|---|
+| finishing a session (records) | 131 |
+| non-specific searches (with follow-ups 2 and 3) | 120 |
+| small fixes | 89 |
+| search jobs | 77 |
+| Sage `.d` | 73 |
+| C2 fixer B: safety, state and gates | 73 |
+| report text | 69 |
+| C2 fixer A: client text, Methods and the brief | 61 |
+| normalisation | 60 |
+| search records (T44, with its follow-up) | 57 |
+| peak check (with the HIVE follow-up) | 50 |
+| core service | 49 |
+| C1 review fixes | 38 |
+| C2 fixer C: docs and the guard | 33 |
+| parameters | 28 |
+| transport | 19 |
+| identifier scrub | 9 |
+| HIVE job guard | 1 |
+| C2 fixer D: reproducibility (with its follow-up) | 34 |
+
+The lane counts add up to 1,071, two more than the tests added, because two tests renamed by the identifier scrub count in two lanes.
+
+Every fix's test was seen failing before the fix, and a test that pins existing behaviour says so.
+
+The full suite on HIVE ran 5,189 tests on the final build and found no failure that 2.14.1 (4,126 tests) did not also have. So did two earlier runs on the merged release (4,979 and 4,991 tests). The failures left are tests that fail only in HIVE's environment, on both. The two commits after that run change only the identifier guard's list and the daily stats; the guard passed with the private client list.
+
+The real-data checks on HIVE:
+- the two-run DDA submission through both Sage routes and the DIA-NN `--dda` fallback;
+- the MaxLFQ re-score on the PXD063416 benchmark;
+- the peak check on an unalkylated chain search;
+- the non-specific searches on the hydrolysate study.
+
+A fresh agent session also ran the two-run DDA case end to end on the 2.14.2 build, and stayed on the skill's path:
+- the search: Sage read the `.d`, identifications only;
+- the report, the Methods, and finalize, which built the bundle;
+- `deliver --mode no-de` as a dry run, which the staff QC check held, as designed.
+
+No hand-made report and no override. Its findings were fixed in fixers A, C and D.
+
+A re-check on a build with every fixer's changes confirmed those fixes on a copy of the session:
+- finalize, run four ways, warned exactly when `logs/commands.log` was missing or older than the newest step record, and stayed quiet otherwise;
+- the Methods name the enzyme, and reproduce.sh searches with the configuration that ran and has no DE step;
+- the search in reproduce.sh, run for real, reproduced the original exactly: 5,756 PSMs, 1,041 peptides and 147 proteins at 1% FDR, and an `identifications.tsv` with the same checksum as the bundle's.
+
+### Known limits carried to 2.15
+- **Normalisation.**
+  - The between-run default for the engines' declared quantities is still quantile. That covers Sage and FragPipe, and IonQuant's and directLFQ's quantities, where the quantile step now comes after the engine's own normalisation, and the Methods name both.
+  - On the benchmark's proxy for an engine that does not normalise, the quantile step gave 46, 72 and 69% wrong calls at 4, 6 and 10 m/z; median centring gave 60, 76 and 74% (worse); no step gave 5.5, 18 and 30%. No step was safe at 6 and 10 m/z.
+  - A mixed-species benchmark, where whole species shift between runs, is the adversarial case. Changing the default is the Core director's decision.
+- **FragPipe for DDA-PASEF.** In 2.15, FragPipe becomes the default engine for timsTOF DDA-PASEF (identifications and quantification). Sage is the fallback when FragPipe cannot be installed. With fewer than 3 experiments, MaxLFQ or directLFQ is computed by the skill. On the two-run submission FragPipe found 1,215 peptides, against Sage's 753 and DIA-NN's first pass's 936; two unreplicated runs cannot judge accuracy.
+- **Sage.** Sage 0.15 is not adopted for quantification on `.d`: the beta's release binary panics on a local `.d`. Re-test when 0.15 is released, and re-check the override key list against its settings. The low-coverage LFQ warning may become a gate.
+- **DIA-NN `--dda`.** The second-pass crash (exit 132, an illegal instruction) may depend on the CPU family: check zen4 against zen2 before reporting it upstream. DPC on a first-pass report is expected to be unaffected, but it is not yet tested with 3 or more runs.
+- **Enzymes.**
+  - `estimate_params.py` has no `--enzyme`, so a non-trypsin Sage search needs an `--overrides` block.
+  - `fetch_fasta.py --enzyme chymotrypsin` still judges the contaminants on a tryptic digest.
+- **SKILL.md.** The 2.15 slim-down rewrites SKILL.md; golden rule 9 becomes rule 16 there. A Stop hook will run `session.py status` before a turn ends.
+- **FragPipe.**
+  - Staging for FragPipe DIA on `.raw` or mzML (refused for now).
+  - An engine-neutral name for `sage_lfq_check.json`, which FragPipe now shares.
+  - SKILL.md repeats the broad-digest sizes that run_search holds.
+  - The `rev_` decoy-tag fallback is not tagged.
+  - A quantifying workflow without the label-free key is pooled (FragPipe then refuses loudly).
+  - One reading of "identifications only" across the record and the bundle.
+- **Peak check.**
+  - Imports on zen4 nodes took 32–37 minutes, against 3–5 elsewhere; SkylineCmd 26.1 has no thread setting to bind.
+  - A stopped import's scratch folder is left behind.
+  - The `--version` timer counts suspended time.
+  - wineserver may sit outside the process group that is stopped.
+  - A preempted build leaves a transient "skipped" record.
+  - Not yet checked on real data: a no-CAM search with Met-ox.
+  - A `retry` subcommand and node constraints.
+- **finalize, status and the fold-in.**
+  - The stale check compares the report by size only, and a rebuilt bundle keeps old `inputs/` files.
+  - `status` calls a delivery "stale" after any later finalize, even one that changed nothing.
+  - A folder holding key names is left out, not refused.
+  - Big files are not scanned in chunks.
+  - Conversation copies outside a session are not caught by name.
+  - The fold-in can walk its folders on the login node.
+  - The `id_*`/`credentials*`/`env` exclusions can catch innocent names; the NOTE names each one.
+  - The session zip still carries a Sage search's `mzml/` folder.
+  - `board.sh` never warns for a HIVE-remote session.
+  - OUTPUT_FILES.md does not list `--code-dir`/`--extra-dir` work, and a delivery does not carry `output/custom/`.
+  - README, AGENTS.md and run_manifest.json can carry absolute paths, and `node_faults.json` node names.
+- **Search records.**
+  - The DE-input tie-break compares real paths, so a laptop copy of a HIVE session gets none.
+  - A no-DE delivery of a multi-search session delivers no search.
+  - A no-DE benchmark of two searches gets Methods that describe neither.
+  - A re-analysis whose DE read the prior's report can name the prior's engine on the page.
+  - A choice's reason can carry an absolute path.
+- **Reproducing a search.**
+  - reproduce.sh's closing step compares every search output with the bundle's checksums, but two of them change in a faithful re-run: Sage's internal `psm_id` in `results.sage.parquet`, and the adapter's record when the skill version differs. `identifications.tsv` matches. REPRODUCE.md should say which files to compare.
+  - The database step replays `fetch_fasta.py` without `--hive`, so on HIVE the contaminants come from GitHub rather than the staged copy the search used (the same sequences in the re-check; one header differed).
+  - Sequences added with `--add-fasta` are named by their HIVE path and not copied into the bundle, so someone without that path cannot rebuild the database.
+- **Contrasts.** A reversed contrast given by hand still only warns at the design check.
+- **No-DE sessions.**
+  - The report page has no identification counts of its own.
+  - Conditions with one run per sample fail `--validate`.
+  - The sample-ID match misses Core digest suffixes.
+  - The step-4 confirmation quotes DIA-NN's 15 ppm for a Sage search.
+  - `experiment_type.py` asks about normalisation with no DE.
+- **Staff reports not yet fixed.**
+  - `to_docx.py` stops when pandoc is present but cannot run.
+  - `qc_bracket` grades a QC `.d` that never finished recording as a failed QC.
+  - `deliver --mode no-de` refuses a no-DE session that has `figures/figures.json`.
+  - The Core's shared Gemini key is free tier, and `--core-run` is not stopped on it. Paying for the key, or changing the policy, is the Core director's decision.
+- **Identifiers.**
+  - The pre-existing staff and submission identifiers on main go with the slim-down, whose guard will read the private client list.
+  - Client names already on main outside the core skill (the dev skill and one docs page) are removed, and the guard is extended to `docs/` and the dev skill.
+- **Still planned.** From the 2.14.2 triage:
+  - DIA-NN with match-between-runs off;
+  - the contaminant rule on the search's own digest;
+  - annotating unannotated FASTAs;
+  - a bait carry-over check;
+  - the review record in deliveries;
+  - internal Bioshare shares;
+  - the bait and every significant protein in the Skyline document;
+  - HyStar queue generation;
+  - step 6b reading another search's settings for a like-for-like re-search;
+  - the mzML reader reading Thermo's data-dependent flag.
+
+## [Skill 2.14.1] — 2026-10-27
+
+Two additions to the report: every report now says how it was made, with a link to a public page explaining the pipeline, and the contaminant warning says what the skill already did about the contaminant list before the search.
+
+### What the client sees
+- **Every report says how it was made.** Before, a report never said that an AI ran the pipeline and wrote its text. Now each report ends, before the figure appendix, with a short "How this report was made" section: which software searched the raw files and ran the statistics (and that `tables/reproducibility_log.R` re-runs them with no AI involved), that Claude ran each step following the Core's pipeline and wrote the analysis text, and, when there is a podcast, who wrote and checked its script and which voice made it and where. Every sentence comes from the run's own records; a fact no record holds is left out. The section links to a public page, [How the Report Was Made](https://bsphinney.github.io/DE-LIMP/how-reports-are-made.html), which explains each step, the models involved, where the data go, and how another lab can run the same pipeline. The PDF prints the page's address.
+- **The contaminant warning says what was already done.** Before, the warning named the proteins the contaminant list took, and read as if the skill had done nothing about contaminant entries that copy the sample's proteins. Now it ends by saying how many of the list's entries the database build removed before the search because each was identical to a protein of the organism (or to a sequence added to the database) or could not be told apart from one, and that the entries involved differ from the sample's proteins and stay in the list so real contamination is still caught. The sentence appears only when the database's own record says so.
+
+### For staff
+- **The podcast paragraph follows the podcast.** The podcast is usually made after the report, so `make_podcast.py link` fills in the section's podcast paragraph (and `share` does the same in the copy with audio); a report rebuilt after the podcast reads the same. The podcast check ignores the section, so neither makes a check stale. The AI report's own section of that title wins, and the writer's prompt asks it not to write one.
+- **One check that a database is the one its record describes.** `fetch_fasta.sidecar_sha256_matches` is now the one comparison of a FASTA with its sidecar's sha256, used by `fetch_fasta`, `audit_results.py` and the contaminant check. The contaminant record gains `database_build`, read from the sidecar while it still describes the searched FASTA (for an older record, the sidecar beside its FASTA).
+- **The DE record names the skill version that ran it.** `run_de.R` and `run_silac.R` write `skill_version` in `de_provenance.json`. The section names that version, and a report rebuilt later by another version adds "This report was built with skill X" (before, no JSON record of the run held the version).
+- **Tests:** 44 new (15 for the contaminant wording, 28 for the report section, 1 for the recorded version).
+
 ## [Skill 2.14.0] — 2026-10-21
 
 Four additions: a Skyline peak check of the top hits after the DE (and, for staff, a PRM/SRM follow-up list made from it), a local voice that takes over the podcast when Gemini cannot be used, an automatic check for sample proteins that the contaminant list takes away, and Core board threads that no longer name Brett by default.

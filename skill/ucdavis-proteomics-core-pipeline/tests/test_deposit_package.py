@@ -143,13 +143,18 @@ def dia_session(root, conditions=True, de=True, fasta=True, raw_reachable=True):
     return p
 
 
-def finalize(sd, *extra):
+def finalize(sd, *extra, report=True, gap=None):
     # job_env: finalize logs the run (record_run.py) and posts "analysis complete" to the Core's
     # Slack channel, and a test must never do either (or ssh to HIVE to relay the post).
-    # test_slack_notify.py covers both, against fakes.
+    # test_slack_notify.py covers both, against fakes. Each session is finished first as
+    # finalize's gate asks (the skill's report -- unless report=False -- and the bundle:
+    # finish_fixture.finished), so the gate itself is under test here too. `gap`: the reason,
+    # for a test whose point is a missing finish item (finalize goes ahead under it).
+    import finish_fixture
+    finish_fixture.finished(os.path.join(sd, "output"), report=report)
     return subprocess.run([PY, os.path.join(SCRIPTS, "session.py"), "finalize", "--dir", sd,
-                           *extra], capture_output=True, text=True,
-                          env=job_env(os.path.dirname(sd)))
+                           *(("--override-finish", gap) if gap else ()), *extra],
+                          capture_output=True, text=True, env=job_env(os.path.dirname(sd)))
 
 
 def read_sdrf(path):
@@ -337,7 +342,10 @@ class FullSession(unittest.TestCase):
         # the agent logs its decisions (log_decision.py); without them, or a saved conversation,
         # finalize says [SKIPPED] "nothing records how this analysis was done"
         import log_decision
-        with mock.patch.dict(os.environ, {"SKILL_CONFIG_DIR": os.path.join(cls.tmp, "cfg")}):
+        # (job_env: run inside Claude Code, the entry would name THIS conversation, and finalize
+        # would then owe its transcript)
+        with mock.patch.dict(os.environ, job_env(cls.tmp, SKILL_CONFIG_DIR=os.path.join(
+                cls.tmp, "cfg")), clear=True):
             log_decision.append(cls.p["session_dir"], "Groups: Control vs Treated",
                                 "the user confirmed the design table")
         # ... and a session with a DE has its peak check (skyline_peaks.py, step 8f); without a
@@ -367,12 +375,6 @@ class FullSession(unittest.TestCase):
                      "files_to_upload.tsv", "prepare_upload.sbatch", "HOW_TO_SUBMIT.md",
                      "HOW_TO_SUBMIT.html"):
             self.assertTrue(any(part in ln for ln in lines), part)
-
-    def test_report_pdf_is_recorded_as_info_without_a_report(self):
-        # no output/Analysis_Report.html in this session: not a failure, and it says why
-        lines = manifest_lines(self.p)
-        self.assertTrue(any(ln.startswith("[INFO]    Report PDF") and "has not run" in ln
-                            for ln in lines), lines)
 
     def test_package_files_exist(self):
         for n in ("HOW_TO_SUBMIT.md", "HOW_TO_SUBMIT.html", "sdrf.tsv", "protocols.txt",
@@ -570,6 +572,19 @@ class RunningThePrepScript(unittest.TestCase):
             self.assertFalse(any("upload_staging" in n for n in names))
 
 
+class NoReport(unittest.TestCase):
+    def test_report_pdf_is_recorded_as_info_without_a_report(self):
+        # no output/Analysis_Report.html in this session: not a failure, and it says why
+        with tempfile.TemporaryDirectory() as tmp:
+            p = dia_session(tmp)
+            r = finalize(p["session_dir"], "--no-deposit", report=False,
+                         gap="a session with no report is the point of this test")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            lines = manifest_lines(p)
+            self.assertTrue(any(ln.startswith("[INFO]    Report PDF") and "has not run" in ln
+                                for ln in lines), lines)
+
+
 class MissingInputs(unittest.TestCase):
     """Parts that cannot be made are [SKIPPED] with a reason, or TO-FILL -- never a crash."""
 
@@ -577,7 +592,8 @@ class MissingInputs(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             p = init_session(tmp, os.path.join(tmp, "nothing", "*.d"))
             os.remove(p["raw_list"]) if os.path.exists(p["raw_list"]) else None
-            r = finalize(p["session_dir"], "--zip")
+            r = finalize(p["session_dir"], "--zip",
+                         gap="the missing inputs (so no Methods) are the point of this test")
             self.assertEqual(r.returncode, 0, r.stderr)
             lines = manifest_lines(p)
             text = "\n".join(lines)
@@ -762,7 +778,8 @@ class SageDDA(unittest.TestCase):
 
 
 class FragPipe(unittest.TestCase):
-    """An engine whose parameter file is not parsed: named and versioned, the rest TO-FILL."""
+    """A FragPipe search whose fragger.params is not in the search folder: named and versioned,
+    the rest TO-FILL -- never "No fixed modifications were set" (L11 N4)."""
 
     def test_fragpipe_session(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -784,7 +801,11 @@ class FragPipe(unittest.TestCase):
             with open(p["methods_md"], encoding="utf-8") as fh:
                 search = md.md_sections(fh.read())["Database search"]
             self.assertIn("FragPipe 24.0 [pinned version — confirm it is what ran]", search)
-            self.assertIn("not parsed here", search)
+            self.assertIn("fragger.params, the MSFragger parameters FragPipe writes into the "
+                          "search folder, was not found here", search)
+            self.assertIn("Fixed and variable modifications: ____ [not recorded — confirm]",
+                          search)
+            self.assertNotIn("No fixed modifications were set", search)
             header, rows = read_sdrf(os.path.join(p["deposit_dir"], "sdrf.tsv"))
             for c in ("comment[cleavage agent details]", "comment[label]"):
                 self.assertEqual(set(col(header, rows, c)), {md.TO_FILL}, c)

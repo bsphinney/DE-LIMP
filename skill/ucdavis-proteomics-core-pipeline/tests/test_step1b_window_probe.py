@@ -442,9 +442,9 @@ class RepresentativeSelectionTests(unittest.TestCase):
     def test_a_wash_beside_a_few_dia_runs_is_not_probed(self):
         """Real sizes, HIVE raw_data/Lumos1/noi25: three 90-min DIA runs and a 60-min wash."""
         with tempfile.TemporaryDirectory() as d:
-            paths = [_raw(d, "FL011125_DWang-Dia_90m_440.raw", 1753040624),
-                     _raw(d, "FL011125_DWang-Dia_90m_441.raw", 1954554235),
-                     _raw(d, "FL011125_DWang-Dia_90m_442.raw", 1852751309),
+            paths = [_raw(d, "FL011125_LabR-Dia_90m_440.raw", 1753040624),
+                     _raw(d, "FL011125_LabR-Dia_90m_441.raw", 1954554235),
+                     _raw(d, "FL011125_LabR-Dia_90m_442.raw", 1852751309),
                      _raw(d, "FL24noi25_wa60m-cleanAPInewAnlypreC.raw", 550651027)]
             sel = probe_window.select_representative(paths)
             self.assertNotIn("FL24noi25_wa60m-cleanAPInewAnlypreC.raw",
@@ -492,14 +492,14 @@ class RepresentativeSelectionTests(unittest.TestCase):
     def test_the_pilots_truncated_run_is_never_probed_though_its_tdf_bin_is_largest(self):
         with tempfile.TemporaryDirectory() as d:
             paths = [_bruker(d, f"ok{i}.d", minutes=21, gb=2.3 + i / 100) for i in range(4)]
-            trunc = _bruker(d, "8aug25_Koganti_trunc.d", minutes=21, gb=2.5, nframes=140,
+            trunc = _bruker(d, "8aug25_LabQ_trunc.d", minutes=21, gb=2.5, nframes=140,
                             indexed_frames=1)
             sel = probe_window.select_representative([trunc] + paths)
-            self.assertNotIn("8aug25_Koganti_trunc.d",
+            self.assertNotIn("8aug25_LabQ_trunc.d",
                              _names(sel["chosen"]) + _names(sel["reserves"]))
             damaged = {os.path.basename(x["file"]): x for x in sel["excluded_damaged"]}
-            self.assertIn("8aug25_Koganti_trunc.d", damaged)
-            self.assertTrue(damaged["8aug25_Koganti_trunc.d"]["problems"])
+            self.assertIn("8aug25_LabQ_trunc.d", damaged)
+            self.assertTrue(damaged["8aug25_LabQ_trunc.d"]["problems"])
             self.assertEqual(len(sel["chosen"]), 3)
 
     def test_wal_mode_and_stale_wal_runs_are_never_probed(self):
@@ -535,7 +535,7 @@ class RepresentativeSelectionTests(unittest.TestCase):
             self.assertRegex(small["blank.d"]["why"], r"size")
 
     def test_an_empty_failed_acquisition_does_not_switch_a_timstof_cohort_to_size(self):
-        """HIVE, garg cohort (srun job 23537237): the folder's failed acquisition is a .d with
+        """HIVE, a timsTOF cohort (a test run): the folder's failed acquisition is a .d with
         neither analysis.tdf nor tdf_bin. It has no acquisition time, and deciding the ranking
         before the size floor dropped it made all eight real runs rank by bytes."""
         with tempfile.TemporaryDirectory() as d:
@@ -588,7 +588,7 @@ class RepresentativeSelectionTests(unittest.TestCase):
         """A failed Bruker acquisition is a .d with neither analysis.tdf nor tdf_bin in it. It
         has to share the size floor with the real .d -- give it a partition of its own and it
         survives, has no acquisition time, and drags the cohort back to size ranking (the HIVE
-        garg case, in the other direction)."""
+        the same cohort, in the other direction)."""
         with tempfile.TemporaryDirectory() as d:
             failed = os.path.join(d, "260822_He200ng_failed.d")
             os.makedirs(failed)
@@ -1239,16 +1239,16 @@ class Step1bChainTests(unittest.TestCase):
         """The pilot: the truncated run had the largest tdf_bin, so a bytes rule chose it."""
         with tempfile.TemporaryDirectory() as d:
             runs = [_bruker(d, f"A{i}_w7.d", minutes=21, gb=0.02 + i / 1000) for i in range(4)]
-            trunc = _bruker(d, "Koganti_trunc_w3.d", minutes=21, gb=0.03, nframes=140,
+            trunc = _bruker(d, "LabQ_trunc_w3.d", minutes=21, gb=0.03, nframes=140,
                             indexed_frames=1)
             out, env, _ = self._chain(d, [trunc] + runs)
             p = self._run_step1b(out, env)
             self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
             w = json.load(open(os.path.join(out, "window.json")))
-            self.assertNotIn("Koganti_trunc_w3.d", _names(w["probes"]))
-            self.assertEqual(_names(w["selection"]["excluded_damaged"]), ["Koganti_trunc_w3.d"])
+            self.assertNotIn("LabQ_trunc_w3.d", _names(w["probes"]))
+            self.assertEqual(_names(w["selection"]["excluded_damaged"]), ["LabQ_trunc_w3.d"])
             self.assertEqual(_read(os.path.join(out, "window.txt")).strip(), "7")
-            self.assertRegex(p.stderr, r"WARNING.*Koganti_trunc_w3\.d")
+            self.assertRegex(p.stderr, r"WARNING.*LabQ_trunc_w3\.d")
 
     def test_step1b_timeout_is_per_probe_and_the_budget_fits_the_job(self):
         with tempfile.TemporaryDirectory() as d:

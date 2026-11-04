@@ -1721,5 +1721,36 @@ class RunBoundedOnWindows(unittest.TestCase):
             record_run.run_bounded(["bash", "-c", "sleep 30 & sleep 30"], 1)
         self.assertLess(time.monotonic() - t0, 15)
 
+class EnzymeNone(unittest.TestCase):
+    """L11 review F19: a database built with fetch_fasta --enzyme none (digestion_enzymes_used [],
+    enzyme "none") showed no enzyme at all in the run record."""
+
+    def test_the_record_says_no_digestion_enzyme(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            meta = os.path.join(d, "search.fasta.meta.json")
+            with open(meta, "w") as fh:
+                json.dump({"fasta": os.path.join(d, "search.fasta"), "n_sequences": 10,
+                           "contaminant_set": "universal", "digestion_enzymes_used": [],
+                           "enzyme": "none"}, fh)
+            fa = record_run.fasta_facts(meta)
+            self.assertEqual(fa["enzyme"], "none")
+            text = "\n".join(record_run.render_search({"fasta": fa}))
+        self.assertIn("no digestion enzyme (`fetch_fasta.py --enzyme none`)", text)
+
+    def test_a_build_with_enzymes_is_unchanged(self):
+        """(pin)"""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            meta = os.path.join(d, "search.fasta.meta.json")
+            with open(meta, "w") as fh:
+                json.dump({"fasta": os.path.join(d, "search.fasta"), "n_sequences": 10,
+                           "contaminant_set": "universal",
+                           "digestion_enzymes_used": ["lysc", "trypsin"]}, fh)
+            text = "\n".join(record_run.render_search({"fasta": record_run.fasta_facts(meta)}))
+        self.assertIn("digestion enzymes kept as contaminants (`fetch_fasta.py --enzyme`): "
+                      "lysc, trypsin", text)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -166,6 +166,10 @@ class EveryGeneratedDiannOutputHasAnExtension(unittest.TestCase):
             self.assertTrue({"--out", "--out-lib"} <= {f for _, f, _ in seen}, seen)
 
     def test_the_radiant_chain_predicts_its_library_inside_the_folder(self):
+        """Step 1 builds the library with make_radiant_library.py (S8: it handed Radiant DIA-NN
+        2.x's .predicted.speclib, which Radiant rejects), whose two DIA-NN runs name their
+        outputs with an extension (RadiantLibraryInADotFolder, below). Here: its --out-dir is
+        inside the dot folder, and so is everything DIA-NN wrote; none of it one level up."""
         with tempfile.TemporaryDirectory() as d:
             diann = _exe(os.path.join(d, "fake-diann"), FAKE)
             mzml = [os.path.join(d, f"r{i}.mzML") for i in range(2)]
@@ -186,13 +190,18 @@ class EveryGeneratedDiannOutputHasAnExtension(unittest.TestCase):
                                capture_output=True, text=True, env=job_env(d), timeout=120)
             self.assertEqual(g.returncode, 0, g.stderr)
             step1 = os.path.join(out, "radiant_parallel", "step1_libpred.sbatch")
-            self._check([step1], diann)
+            libdir = os.path.join(out, "radiant_lib")
+            self.assertIn("--out-dir " + shlex.quote(libdir), open(step1).read())
             p = subprocess.run(["bash", step1], capture_output=True, text=True,
                                env=job_env(d), cwd=d, timeout=120)
-            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+            # the helper's step 3 reads the (fake) parquet and fails on it; its two DIA-NN steps,
+            # and where they wrote, are what is tested
+            self.assertIn("[3/3]", p.stdout, p.stdout + p.stderr)
             self.assertEqual(json.loads(g.stdout)["library"],
-                             os.path.join(out, "radiant_parallel",
-                                          "diann_predicted_lib.predicted.speclib"))
+                             os.path.join(libdir, "radiant_library.tsv"))
+            names = os.listdir(libdir)
+            self.assertIn("diann_predicted_lib.predicted.speclib", names)
+            self.assertIn("radiant_library_src.parquet", names)
             self.assertEqual(_strays(d, "P2_X.01dup2"), [])
 
 

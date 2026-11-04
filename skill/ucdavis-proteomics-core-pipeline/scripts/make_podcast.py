@@ -52,8 +52,9 @@ CHECKS the script, RENDERS it to audio and LINKS the audio into the outputs.
             the card sits between <!-- podcast:start --> and <!-- podcast:end --> and is replaced
             on a re-run. A file that is not there is skipped with [INFO]. Refuses while the
             check does not hold (--unchecked overrides); rewords a Core run's "How did we do?"
-            survey line to ask about the podcast too (never adds one); reprints an older
-            Analysis_Report.pdf.
+            survey line to ask about the podcast too (never adds one); fills in the podcast's
+            paragraph of the report's "How this report was made" (HTML and .md, in place);
+            reprints an older Analysis_Report.pdf.
             The hooks the report calls never raise: a bad podcast.json is one [WARN].
   share  OUTDIR [--kbps 48] [--unchecked] [--no-browser]
          -> OUTDIR/Analysis_Report_with_audio.html: the report with the audio (AAC, 32-64 kbps
@@ -222,6 +223,11 @@ GAP_SEGMENT, GAP_CHUNK, GAP_TURN = 0.7, 0.3, 0.25   # seconds of silence
 
 START, END = "<!-- podcast:start -->", "<!-- podcast:end -->"
 T_START, T_END = "<!-- TRANSCRIPT START -->", "<!-- TRANSCRIPT END -->"
+# The report's "How this report was made" (make_analysis_html.how_made): its body sits between
+# HOWMADE_START and HOWMADE_END, which a check's sources leave out (source_text); in it the
+# podcast's paragraph sits between MADE_START and MADE_END, which link fills in (add_how_made)
+HOWMADE_START, HOWMADE_END = "<!-- howmade:start -->", "<!-- howmade:end -->"
+MADE_START, MADE_END = "<!-- podcast:made:start -->", "<!-- podcast:made:end -->"
 DISCLOSURE = ("AI-generated, in synthetic voices. It discusses this report and methods; items "
               "beyond them are listed in the transcript. The report is the record — check "
               "anything important against it.")
@@ -485,6 +491,14 @@ def strip_block(text):
     breaks around it), so a report that carries a Listen line reads as it did before."""
     return re.sub(r"\n?[ \t]*" + re.escape(START) + r".*?" + re.escape(END) + r"[ \t]*\n?", "\n",
                   text or "", flags=re.S)
+
+
+def strip_how_made(text):
+    """The text without the body of the report's "How this report was made" (HOWMADE_START ...
+    HOWMADE_END; its heading stays): link fills in its podcast paragraph, and a report made
+    again re-reads the run's records into it, so neither may count as a change to the report."""
+    return re.sub(re.escape(HOWMADE_START) + r".*?" + re.escape(HOWMADE_END), " ", text or "",
+                  flags=re.S)
 
 
 def parse_script(path):
@@ -888,10 +902,12 @@ def pronunciation_problems(written, spoken):
 # ----------------------------------------------------------------------------- sources
 def source_text(path):
     """A source as check hashes it: its text without any podcast block, so `link` adding its
-    Listen line to the report does not make the check stale -- and without the Core's survey
-    line, which link rewords to ask about the podcast (core_submission.without_feedback)."""
+    Listen line to the report does not make the check stale; without the body of "How this
+    report was made" (strip_how_made), whose podcast paragraph link fills in; and without the
+    Core's survey line, which link rewords to ask about the podcast
+    (core_submission.without_feedback)."""
     with open(path, "rb") as fh:
-        text = strip_block(fh.read().decode("utf-8", errors="replace"))
+        text = strip_how_made(strip_block(fh.read().decode("utf-8", errors="replace")))
     try:
         import core_submission
     except ImportError:
@@ -1705,6 +1721,84 @@ def output_dir_problem(d):
             "Analysis_Report.html nor tables/de_provenance.json")
 
 
+# ------------------------------------------------------------------------- the finish gate
+# 2.14.2 (a Core submission, 2026-10-29): an episode is made only from the skill's own report and its Methods
+# (report_files.FINISH_NEEDS["podcast"], the one definition). That submission's agent copied a pandoc
+# report over Analysis_Report.html and this script took it. check, link, share and job refuse,
+# listing each gap with its command, unless --override-finish "<reason>", which goes into
+# podcast/podcast.json `finish_override` (check, before there is one: into check.txt, which
+# render carries over).
+FINISH_OVERRIDE_LINE = "finish_override: "
+
+
+def finish_gate(out, tool, override=None):
+    """-> (refusal or None, override record or None) for the session output folder `out`."""
+    import report_files as rf
+    need = rf.FINISH_NEEDS["podcast"]
+    for w in rf.finish_warnings(out, need):
+        log(f"[{tool}] {w}")
+    reason = " ".join(str(override or "").split())
+    if override is not None and not reason:
+        return f"[{tool}] {rf.OVERRIDE_FLAG} needs a reason: {rf.OVERRIDE_FLAG} \"<why>\"", None
+    gaps = rf.finish_gaps(out, need)
+    if gaps and not reason:
+        return rf.refusal(f"make_podcast.py {tool}", gaps), None
+    if gaps:
+        log(f"[{tool}] going ahead under {rf.OVERRIDE_FLAG} ({reason}) without: "
+            + "; ".join(gaps))
+    return None, (rf.override_record(f"make_podcast.py {tool}", gaps, reason) if gaps else None)
+
+
+def record_finish_override(out, rec):
+    """podcast/podcast.json `finish_override` <- `rec` (when both exist). -> written?"""
+    path = os.path.join(out, "podcast", "podcast.json")
+    if not rec or not os.path.isfile(path):
+        return False
+    with open(path, encoding="utf-8") as fh:
+        man = json.load(fh)
+    man["finish_override"] = rec
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(man, fh, indent=2, ensure_ascii=False)
+        fh.write("\n")
+    return True
+
+
+def check_finish_override(s):
+    """The finish override check.txt recorded for this script (check --override-finish), or
+    None -- render carries it into podcast.json. A line that cannot be read is still an
+    override: kept, with its text as the reason and why it could not be read (rule 4), and said."""
+    try:
+        with open(os.path.join(os.path.dirname(s.path), "check.txt"), encoding="utf-8",
+                  errors="replace") as fh:
+            lines = [ln for ln in fh if ln.startswith(FINISH_OVERRIDE_LINE)]
+    except OSError:
+        return None                       # no check.txt: nothing recorded
+    if not lines:
+        return None
+    text = lines[0][len(FINISH_OVERRIDE_LINE):].strip()
+    try:
+        rec = json.loads(text)
+        why = None if isinstance(rec, dict) else "it is not a JSON object"
+    except ValueError as e:
+        rec, why = None, f"it is not JSON ({e})"
+    if why is None:
+        return rec
+    log(f"WARNING: check.txt's finish_override line cannot be read: {why}; it is kept as the "
+        "override's reason")
+    return {"tool": "make_podcast.py check", "missing": [], "reason": text, "at": None,
+            "unreadable": f"check.txt's finish_override line cannot be read: {why}"}
+
+
+def warn_not_finalized(out, tool):
+    """Amendment 2 (the beer session, 2026-10-31): share and link are often the LAST step an
+    off-path session runs, so they say so -- a warning, never a refusal (9e runs before 12)."""
+    import report_files as rf
+    st = rf.finish_check(out, ("finalized",))[0]   # no stamp, or one gone stale (stamp_drift)
+    if not st["ok"]:
+        log(f"[{tool}] WARNING: this session is not finalized: run session.py finalize before "
+            f"sending (AGENTS.md, README, Methods and the bundle come from it) -- {st['why']}")
+
+
 def cmd_check(a):
     s = parse_script(a.script)
     sdir = os.path.dirname(s.path)
@@ -1719,6 +1813,12 @@ def cmd_check(a):
                         + output_dir_problem(out) + ". Point it at <session>/output, the folder the "
                         "lab receives; nothing is counted as delivered until then")
         out = None
+    finish = None
+    if out:
+        refuse, finish = finish_gate(out, "check", getattr(a, "override_finish", None))
+        if refuse:
+            log(refuse)
+            return 2
     for p in a.source:
         if not out:
             continue                              # the one problem above says why
@@ -1757,6 +1857,10 @@ def cmd_check(a):
     path = os.path.join(sdir, "check.txt")
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(check_report(s, res, sources, a.forbid_name or []))
+        if finish:                        # render carries it into podcast.json
+            fh.write(FINISH_OVERRIDE_LINE + json.dumps(finish) + "\n")
+    if finish:
+        record_finish_override(out, finish)
     print(json.dumps({"status": res["status"], "fails": len(res["fails"]),
                       "warnings": len(res["warns"]), "check": path, **res["stats"]}, indent=2))
     for f in res["fails"][:40]:
@@ -3685,23 +3789,24 @@ def fallback_record(e, gemini, chunks=(), speak=None, cache=None):
                     "instead, so it has one voice throughout"}
 
 
-def gemini_had(fallback, page=False):
+def gemini_had(fallback, page=False, whose="this transcript"):
     """What Google had before a fallback, in words, from tts.fallback (fallback_record): the
-    chunks of this script whose text reached it, and the two-line tests. `page`: for the
-    transcript page, which the lab reads."""
+    chunks of this script whose text reached it, and the two-line tests. `page`: for a page the
+    lab reads -- the transcript page, or the report's "How this report was made" (how_made_md),
+    which names the script it speaks of as `whose`."""
     k, total = fallback.get("gemini_chunks_sent") or 0, fallback.get("chunks") or 0
     other = fallback.get("gemini_chunks_not_in_script") or 0
     tests = (fallback.get("preflight_requests") or 0) + (fallback.get("preflight_requests_before")
                                                          or 0)
     if page:
         if tests and not (k or other):
-            return "only a sound check, none of this transcript"
-        had = ([f"the text of {k} of the {total} parts of this transcript"] if k else [])
-        had += [f"the text of {other} part(s) not in this transcript"] if other else []
+            return f"only a sound check, none of {whose}"
+        had = ([f"the text of {k} of the {total} parts of {whose}"] if k else [])
+        had += [f"the text of {other} part(s) not in {whose}"] if other else []
         had += ["a sound check"] if tests else []
         said = ", ".join(had[:-1]) + " and " + had[-1] if len(had) > 1 else "".join(had)
-        return (said or "none of this transcript") + (
-            ", none of this transcript" if said and not k else "")
+        return (said or f"none of {whose}") + (
+            f", none of {whose}" if said and not k else "")
     parts = []
     if k:
         parts.append(f"the text of {k} of this script's {total} chunk(s), after pronunciation "
@@ -3916,6 +4021,9 @@ def cmd_render(a):
         "warnings": warnings,
         "made_by": "make_podcast.py (UC Davis Proteomics Core pipeline skill)",
     }
+    fo = check_finish_override(s)
+    if fo:                                        # check --override-finish (the finish gate)
+        man["finish_override"] = fo
     for name in VERIFY_FILES:                     # the last render's: never this audio's check
         if os.path.exists(os.path.join(out, name)):
             os.remove(os.path.join(out, name))
@@ -4763,27 +4871,36 @@ def listen_md(outdir, base_dir=None):
                       END])
 
 
+def _md_item(text, path, link):
+    """A README file name: a link, or (`link` False: README.md, session_docs.README_MD_NOT_LINKS)
+    the name alone -- Bioshare opens no relative link in a README.md (T33)."""
+    return f"[{text}]({href(path)})" if link else f"{text}: `{path}`"
+
+
 @_never_raise("")
-def readme_item_md(outdir, base_dir):
+def readme_item_md(outdir, base_dir, link=True):
     """The README "Start here" bullet, paths relative to `base_dir`. '' without a podcast.
-    session_docs.py and `link` both use this, so the wording lives here only."""
+    session_docs.py and `link` both use this, so the wording lives here only. `link` False:
+    the file names without links (session_docs' README.md)."""
     man = load_manifest(outdir)
     if not man:
         return ""
     audio, tr = _paths(outdir, base_dir, man)
-    return (f"- [Audio discussion of these results]({href(audio)}) — AI-generated, two synthetic "
-            f"voices, {minutes_label(man.get('duration_s'))}; the report is the record "
-            f"([transcript]({href(tr)}))")
+    return (f"- {_md_item('Audio discussion of these results', audio, link)} — AI-generated, two "
+            f"synthetic voices, {minutes_label(man.get('duration_s'))}; the report is the record "
+            f"({_md_item('transcript', tr, link)})")
 
 
 @_never_raise("")
-def share_item_md(outdir, base_dir):
+def share_item_md(outdir, base_dir, link=True):
     """The README "Start here" bullet for the shareable report (share), after the podcast's.
-    '' when it is not there."""
+    '' when it is not there. `link` as readme_item_md's."""
     path = os.path.join(outdir, SHARE_NAME)
     if not (load_manifest(outdir) and _share_current(outdir)):
         return ""
-    return (f"- [{SHARE_NAME}]({href(rel(path, base_dir))}) — **to send the report with its "
+    item = (f"[{SHARE_NAME}]({href(rel(path, base_dir))})" if link else
+            f"`{rel(path, base_dir)}`")
+    return (f"- {item} — **to send the report with its "
             f"audio, send this one file**: the same report with the audio discussion and its "
             f"transcript built in ({_mb(os.path.getsize(path))})")
 
@@ -4809,6 +4926,126 @@ def agents_md_lines(outdir, base_dir):
             "built in, one file for a person to send on; it is mostly the audio as base64. Read "
             f"`{rel(os.path.join(outdir, 'Analysis_Report.html'), base_dir)}` instead, and never "
             "treat the copy as a second source."] if _share_current(outdir) else [])
+
+
+# The meaning check's reviewer as `meaning --reviewer` recorded it: Claude when it names Claude or
+# an agent (references/podcast.md: the reviewer is spawned with one Agent call). A person, or a
+# name that says neither, is "a separate reviewer".
+_CLAUDE_REVIEWER = re.compile(r"\b(?:claude|agent|subagent)\b", re.I)
+
+
+def _meaning_reviewer(outdir, man):
+    """The reviewer the meaning_check.md beside podcast.json records for THIS episode's script
+    (podcast.json script_sha256), or None: no file, another script's, or no reviewer line."""
+    mc = man.get("meaning_check") if isinstance(man.get("meaning_check"), dict) else {}
+    name = mc.get("file") or MEANING_FILE
+    if not (isinstance(name, str) and re.match(r"^[A-Za-z0-9_.\-]+\.md$", name)):
+        return None
+    try:
+        with open(os.path.join(outdir, "podcast", name), encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return None
+    sha = re.search(r"(?m)^script_sha256: (\w+)", text)
+    if not sha or sha.group(1) != man.get("script_sha256"):
+        return None
+    who = re.search(r"(?m)^reviewer: (.+)$", text)
+    return who.group(1).strip() if who else None
+
+
+@_never_raise("")
+def how_made_md(outdir):
+    """The podcast's paragraph in the report's "How this report was made" section
+    (make_analysis_html.how_made), in plain words. Each sentence only when this episode's own
+    records hold it: podcast.json (an AI wrote the script; the check and the meaning check passed
+    and were not overridden; the voices: backend, model, what was sent where) and the meaning
+    check's reviewer. '' when `outdir` has no podcast. The podcast usually comes after the
+    report: link puts the paragraph in then (how_made_block, add_how_made)."""
+    man = load_manifest(outdir)
+    if not man:
+        return ""
+    L = []
+    if man.get("ai_generated") is True:
+        L.append("Claude also wrote the podcast script.")
+    chk = man.get("check") if isinstance(man.get("check"), dict) else {}
+    mc = man.get("meaning_check") if isinstance(man.get("meaning_check"), dict) else {}
+    if chk.get("status") == "PASS" and not chk.get("overridden"):
+        L.append("A program checked the script's numbers and names against the report.")
+    if mc.get("status") == "PASS" and not mc.get("overridden"):
+        who = _meaning_reviewer(outdir, man)
+        L.append(("A separate Claude reviewer" if who and _CLAUDE_REVIEWER.search(who)
+                  else "A separate reviewer")
+                 + ", not the script's writer, read every sentence against the report for the "
+                   "right comparisons and for any claim stronger than the report makes.")
+    tts = man.get("tts") if isinstance(man.get("tts"), dict) else {}
+    backend = tts.get("backend")
+    engine = tts.get("engine") if isinstance(tts.get("engine"), dict) else {}
+    models = [m for m in (tts.get("models_used") if isinstance(tts.get("models_used"), list)
+                          else [tts.get("model")]) if isinstance(m, str) and m]
+    v = man.get("verify") if isinstance(man.get("verify"), dict) else {}
+    fb = tts.get("fallback") if isinstance(tts.get("fallback"), dict) else None
+    tried = bool(fb) and fb.get("why") != "nokey"          # gemini_tried(): Gemini was asked
+    sent = []
+    if backend == "gemini":
+        L.append("The voices were made by Google's Gemini"
+                 + (f" ({', '.join(models)})" if models else "") + ", in Google's cloud.")
+        sent.append("the script's text")
+    elif backend == "kokoro":
+        L.append(f"The voices were made by {engine.get('name') or (models or ['Kokoro'])[0]} on "
+                 "UC Davis's HIVE computing cluster.")
+    elif backend == "say":
+        L.append("The voices were made by macOS's built-in speech (say), on the Mac that made "
+                 "the podcast.")
+    if v.get("cloud_consent") and v.get("status") not in (None, "NOT RUN"):
+        sent.append("the finished audio, to check that it was spoken as written")
+    if tried:
+        L.append("Google's Gemini, tried first, failed; it had been sent "
+                 f"{gemini_had(fb, page=True, whose='the script')}.")
+    if sent:
+        L.append("Google received " + " and ".join(sent) + ", never the report.")
+    # scoped to the voices: the paragraph also says Claude wrote and reviewed the script, which
+    # sends the report's text to Anthropic -- "nothing was sent" alone would read as covering that
+    elif backend == "kokoro" and not tried:
+        L.append("Nothing was sent off campus to make the voices.")
+    elif backend == "say":
+        L.append("Nothing was sent anywhere to make the voices.")
+    return " ".join(L)
+
+
+def _made_empty(outdir, fmt="md"):
+    return MADE_START + ("" if fmt == "html" else "\n") + MADE_END
+
+
+@_never_raise(_made_empty)
+def how_made_block(outdir, fmt="md"):
+    """how_made_md's paragraph between MADE_START and MADE_END, for the HTML report (fmt="html")
+    or its Markdown twin: the markers alone when `outdir` has no podcast, so link has a place
+    for it later. The report (make_analysis_html) and link (add_how_made) both write it here, so
+    a report made after the podcast and one linked after it say the same words."""
+    text = how_made_md(outdir)
+    if not text:
+        return _made_empty(outdir, fmt)
+    return MADE_START + (f"<p>{esc(text)}</p>" if fmt == "html" else f"\n{text}\n") + MADE_END
+
+
+def _replace_made(text, block):
+    """-> (text with `block` in place of its MADE_START ... MADE_END, how) -- how is None when
+    the text has no such place: a report made before the section existed, or one whose own
+    section of that title replaced it."""
+    i = text.find(MADE_START)
+    j = text.find(MADE_END, i + 1) if i >= 0 else -1
+    if i < 0 or j < 0:
+        return text, None
+    new = text[:i] + block + text[j + len(MADE_END):]
+    return new, ("replaced" if new != text else "already current")
+
+
+@_never_raise(lambda text, *rest: text)
+def add_how_made(text, outdir, fmt="html"):
+    """`text` (the HTML report, or with fmt="md" its Markdown twin) with the podcast's paragraph
+    of "How this report was made" as the podcast's records say now; unchanged when it has no
+    place for it."""
+    return _replace_made(text, how_made_block(outdir, fmt))[0]
 
 
 def _md_inline_html(t):
@@ -4952,6 +5189,16 @@ def cmd_link(a):
         return 2
     if warn:
         log(f"[WARN] linking an episode whose check does not hold: {warn}")
+    stop, finish = finish_gate(out, "link", getattr(a, "override_finish", None))
+    if stop:
+        log(stop)
+        return 2
+    warn_not_finalized(out, "link")
+    import report_files as rf
+    report_html = os.path.join(out, "Analysis_Report.html")
+    # Re-marked after the edits below ONLY when it was the skill's report before them: link must
+    # never bless a hand copy (or a legacy report, which keeps its footer) by editing it.
+    was_skill = rf.skill_report_state(report_html)[0] == "skill"
     done = []
 
     def edit(path, fn, what):
@@ -4974,10 +5221,18 @@ def cmd_link(a):
     for name in ("Analysis_Report.md", "AI_Analysis_Report.md"):
         edit(os.path.join(out, name), lambda t: _upsert(t, listen_md(out), _md_slot, "\n\n"),
              "Listen line")                   # add_listen_md, with the added/replaced verdict
+    # the podcast's paragraph of "How this report was made", as a report made now would say it
+    for name, fmt in (("Analysis_Report.html", "html"), ("Analysis_Report.md", "md")):
+        edit(os.path.join(out, name),
+             lambda t, fmt=fmt: _replace_made(t, how_made_block(out, fmt)),
+             "podcast paragraph of How this report was made")
     # README / AGENTS.md sit at the session root: the folder above output/
     roots = [os.path.dirname(out) if os.path.basename(out) == "output" else out]
     for root in roots:
         item = readme_item_md(out, root)
+        # README.md names the files without links, as session_docs writes it (T33: Bioshare opens
+        # no relative link in a README.md); README.html links them
+        item_md = readme_item_md(out, root, link=False)
 
         def readme_html(t, item=item):
             if _mentions(t):
@@ -4985,7 +5240,7 @@ def cmd_link(a):
             block = f"{START}<li>{_md_inline_html(item[2:])}</li>{END}"
             return _upsert(t, block, _readme_html_slot)
 
-        def readme_md(t, item=item):
+        def readme_md(t, item=item_md):
             if _mentions(t):
                 return t, "already listed (session_docs.py)"
             return _upsert(t, f"{START}\n{item}\n{END}", _readme_md_slot, "\n")
@@ -4995,10 +5250,30 @@ def cmd_link(a):
                 return t, "already described (session_docs.py)"
             block = START + "\n" + "\n".join(agents_md_lines(out, root)) + "\n" + END
             return _upsert(t, block, _agents_slot, "\n\n")
-        edit(os.path.join(root, "README.html"), readme_html, "file-list entry")
-        edit(os.path.join(root, "README.md"), readme_md, "file-list entry")
-        edit(os.path.join(root, "AGENTS.md"), agents, "podcast section")
+        # the skill's documents: beside one written by hand, its README.skill.md / ... copy --
+        # a hand-written file is never edited (report_files.skill_doc_targets)
+        docs = rf.skill_doc_targets(root)
+        n_done = len(done)
+        edit(docs["README.html"], readme_html, "file-list entry")
+        edit(docs["README.md"], readme_md, "file-list entry")
+        edit(docs["AGENTS.md"], agents, "podcast section")
+        # link's edits are the skill's: recorded, so the next finalize writes these again rather
+        # than keep them as edited by hand (report_files.is_skill_doc, L5b review M1)
+        for level, path, _note in done[n_done:]:
+            if level == "OK":
+                rf.record_skill_doc(path, "make_podcast.py link")
     done += refresh_feedback(out)                     # before the PDF is reprinted
+    if was_skill:                                    # link's own edits, recorded as the skill's
+        prior = rf._read_json(os.path.join(out, rf.SKILL_REPORT_RECORD))[0] or {}
+        writer = prior.get("writer") or "make_analysis_html.py"
+        rf.mark_skill_report(report_html, writer if "make_podcast.py link" in writer
+                             else f"{writer}, then make_podcast.py link",
+                             prior.get("skill_version"))
+        done.append(("OK", os.path.join(out, rf.SKILL_REPORT_RECORD),
+                     "the report's record updated after link's edits"))
+    if finish and record_finish_override(out, finish):
+        done.append(("OK", os.path.join(out, "podcast", "podcast.json"),
+                     "finish_override recorded"))
     done.append(refresh_pdf(os.path.join(out, "Analysis_Report.html")))
     for level, path, note in done:
         print(f"[{level}] {rel(path, os.path.dirname(out))}: {note}")
@@ -5414,7 +5689,7 @@ def share_state(outdir):
     return True, "current: built from this report and episode"
 
 
-def build_share(outdir, kbps=SHARE_KBPS, unchecked=False, play=True):
+def build_share(outdir, kbps=SHARE_KBPS, unchecked=False, play=True, override=None):
     """Write OUTDIR/Analysis_Report_with_audio.html: Analysis_Report.html with the Listen card
     (listen_card_html, share mode) holding the audio as a data: URI and the transcript as an
     iframe srcdoc. Kept only once the file as written holds up: the audio taken back out of it
@@ -5438,6 +5713,11 @@ def build_share(outdir, kbps=SHARE_KBPS, unchecked=False, play=True):
     for f in (report, audio):
         if not os.path.isfile(f):
             raise ShareError(f"no {rel(f, os.path.dirname(out))}: nothing to build it from", 2)
+    stop, finish = finish_gate(out, "share", override)
+    if stop:
+        raise ShareError(stop, 2)
+    if finish:
+        record_finish_override(out, finish)
     s, refuse, warn = vouch(out, man, unchecked)
     if refuse:
         raise ShareError(refuse, 2)
@@ -5465,6 +5745,7 @@ def build_share(outdir, kbps=SHARE_KBPS, unchecked=False, play=True):
                                                    "transcript": page, "mark": mark})
             if mark not in doc:
                 raise ShareError("the Listen card could not be built (the [WARN] above says why)")
+            doc = add_how_made(doc, out)               # as link would have put it
             doc = _share_feedback(doc, out)            # the survey link says src=share
             with open(part, "w", encoding="utf-8") as fh:
                 fh.write(doc)
@@ -5584,10 +5865,12 @@ def ensure_share(outdir):
 
 
 def cmd_share(a):
+    warn_not_finalized(os.path.abspath(a.outdir), "share")
     try:
-        res = build_share(a.outdir, kbps=a.kbps, unchecked=a.unchecked, play=not a.no_browser)
+        res = build_share(a.outdir, kbps=a.kbps, unchecked=a.unchecked, play=not a.no_browser,
+                          override=getattr(a, "override_finish", None))
     except ShareError as e:
-        log(f"[share] {e}")
+        log(str(e) if str(e).startswith("[") else f"[share] {e}")
         return e.code
     for level, text in res["lines"]:
         print(f"[{level}] {text}")
@@ -5677,7 +5960,8 @@ def job_python(given=None, genai=True):
                         "or name a python with --python")
 
 
-def write_job(path, py, script, out, consent_args, models, queue, log_path, name, tts="gemini"):
+def write_job(path, py, script, out, consent_args, models, queue, log_path, name, tts="gemini",
+              override=None):
     """The job script: render --tts gemini (verify follows; the local voice takes over when
     Gemini fails in a way waiting cannot fix) or --tts local, link, share -> its text, written
     mode 700 into the private jobs folder (private_dir). The log path is DOUBLE-quoted: sbatch
@@ -5721,8 +6005,11 @@ def write_job(path, py, script, out, consent_args, models, queue, log_path, name
           f"PY={q(py)}", f"MP={q(os.path.abspath(__file__))}",
           " ".join(['"$PY" "$MP" render', q(script), "--tts", tts]
                    + [q(x) for x in consent_args + models]) + " || exit $?",
-          f'"$PY" "$MP" link {q(out)} || exit $?',
-          f'"$PY" "$MP" share {q(out)}', ""]
+          # the finish override job was written under, for link and share (podcast.json)
+          f'"$PY" "$MP" link {q(out)}'
+          + (f" --override-finish {q(override)}" if override else "") + " || exit $?",
+          f'"$PY" "$MP" share {q(out)}'
+          + (f" --override-finish {q(override)}" if override else ""), ""]
     text = "\n".join(L)
     if os.path.islink(path):
         raise RenderError(f"{path} is a link: not writing through it. Remove it and run job again.")
@@ -5758,6 +6045,10 @@ def cmd_job(a):
     if why:
         log(f"[job] refusing: {why}. Run `make_podcast.py check {a.script} --source <the report "
             "files>` and fix every flagged line first.")
+        return 2
+    stop, finish = finish_gate(out, "job", getattr(a, "override_finish", None))
+    if stop:
+        log(stop)
         return 2
     m_why = read_meaning(s)[1]
     m_override = " ".join((getattr(a, "no_meaning_check", None) or "").split())
@@ -5822,7 +6113,8 @@ def cmd_job(a):
         models += ["--no-meaning-check", m_override]
     try:
         write_job(path, py, os.path.abspath(a.script), out, consent_args, models,
-                  (part, acct, qos, requeue), log_path, name, tts="local" if local else "gemini")
+                  (part, acct, qos, requeue), log_path, name, tts="local" if local else "gemini",
+                  override=finish["reason"] if finish else None)
     except (RenderError, OSError) as e:
         log(f"[job] refusing: {e}")
         return 2
@@ -5888,6 +6180,7 @@ def main(argv=None):
     c.add_argument("--label", action="append", help="what the matching --extra-source is")
     c.add_argument("--forbid-name", nargs="+", default=[], action="extend",
                    help="names that must not appear (the PI, staff, collaborators)")
+    c.add_argument("--override-finish", metavar="REASON", help="go ahead although the skill's own report (make_analysis_html.py) or the Methods (methods.md) is missing; the reason is recorded in podcast/podcast.json")
     def consent_args(p, cloud_help):
         g = p.add_mutually_exclusive_group()
         g.add_argument("--cloud-ok", nargs="?", const=True, default=False, help=cloud_help)
@@ -5970,6 +6263,7 @@ def main(argv=None):
     k.add_argument("--unchecked", action="store_true",
                    help="link although the script's check no longer holds (the report or the "
                         "script changed since)")
+    k.add_argument("--override-finish", metavar="REASON", help="go ahead although the skill's own report (make_analysis_html.py) or the Methods (methods.md) is missing; the reason is recorded in podcast/podcast.json")
     h = sub.add_parser("share", help="write Analysis_Report_with_audio.html: the report with the "
                                      "audio and transcript built in, one file to send")
     h.add_argument("outdir", help="the folder with Analysis_Report.html and podcast/")
@@ -5980,6 +6274,7 @@ def main(argv=None):
                    help="build it although the script's check no longer holds")
     h.add_argument("--no-browser", action="store_true",
                    help="skip the headless-browser playback test")
+    h.add_argument("--override-finish", metavar="REASON", help="go ahead although the skill's own report (make_analysis_html.py) or the Methods (methods.md) is missing; the reason is recorded in podcast/podcast.json")
     j = sub.add_parser("job", help="write the SLURM job (HIVE) that renders the checked script in "
                                    "Gemini voices (or the local voice), verifies, links and "
                                    "shares it")
@@ -5993,6 +6288,7 @@ def main(argv=None):
     j.add_argument("--no-meaning-check", metavar="WHY",
                    help="render although no PASS meaning check is recorded for this script; the "
                         "reason goes into podcast.json")
+    j.add_argument("--override-finish", metavar="REASON", help="go ahead although the skill's own report (make_analysis_html.py) or the Methods (methods.md) is missing; the reason is recorded in podcast/podcast.json")
     j.add_argument("--python", help="the python the job runs (default: the pipeline env's, from "
                                     "setup.json, else this one; it needs google-genai >= "
                                     + GENAI_MIN + ")")

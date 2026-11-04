@@ -261,15 +261,20 @@ class ConversionRefusals(_Harness):
         if sys.platform.startswith("linux"):
             self.assertIn("no vendor", p.stderr)
 
-    def test_bruker_d_keeps_msconvert_in_the_job(self):
+    def test_bruker_d_converts_in_the_job_with_the_container(self):
+        """A quantifying search's .d: msconvert in the ProteoWizard container, in the job
+        (tests/test_sage_dotd_pwiz_conversion.py), never bioconda's msconvert from PATH."""
         d_dir = os.path.join(self.d, "raw", "S1.d")
         os.makedirs(d_dir)
+        sif = os.path.join(self.d, "pwiz.sif")
+        open(sif, "w").close()
         job = os.path.join(self.d, "sage_job.sh")
-        p = self.run_search("--sbatch", job, files=[d_dir])
+        p = self.run_search("--sbatch", job, "--pwiz-sif", sif, files=[d_dir])
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertEqual(self.calls(), [])
         text = open(job).read()
-        self.assertIn(os.path.join(self.bin, "msconvert"), text)
+        self.assertNotIn(os.path.join(self.bin, "msconvert"), text)
+        self.assertIn("wine msconvert", text)
         self.assertIn(os.path.join(self.out, "mzml", "S1.mzML"), text)
 
     def test_two_inputs_with_one_name_are_refused(self):
@@ -281,7 +286,7 @@ class ConversionRefusals(_Harness):
         p = self.run_search("--sbatch", job, files=[self.raws[0], twin])
         self.assertNotEqual(p.returncode, 0)
         # flagged and stopped by run_search's one rule (check_report_runs.names_stop) before the
-        # conversion's own "share an mzML name" backstop is reached
+        # conversion's own "share a Sage run name" backstop is reached
         self.assertIn("STOPPED before searching: different input files share a run name", p.stderr)
         self.assertFalse(os.path.exists(job))
 

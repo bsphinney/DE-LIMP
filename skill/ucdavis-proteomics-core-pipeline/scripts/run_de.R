@@ -14,9 +14,12 @@
 #                 Li M, Smyth GK (2023) Bioinformatics 39(5):btad200.
 #
 #   maxlfq  MaxLFQ + limma. DE-LIMP alternative path.
-#           DIA-NN PG.MaxLFQ -> log2 -> quantile normalize
-#           (limma::normalizeBetweenArrays) -> lmFit -> contrasts.fit -> eBayes.
-#           (--quantities raw: a --no-norm report's PG.MaxLFQ, and no quantile step.)
+#           DIA-NN PG.MaxLFQ -> log2 -> [between-run step] -> lmFit -> contrasts.fit -> eBayes.
+#           The between-run step is --between-run's (build_maxlfq.R maxlfq_between_run, the one
+#           rule). Default auto: none on DIA-NN's already-normalised PG.MaxLFQ (since 2.14.2);
+#           quantile normalisation (limma::normalizeBetweenArrays) on a --no-norm search's
+#           PG.MaxLFQ and on an adapted engine's declared quantities (Sage, FragPipe ...).
+#           (--quantities raw: a --no-norm report's PG.MaxLFQ, and no between-run step.)
 #           NAs are left in place; limma drops them per row at fit time.
 #           Proteins entirely missing in one condition are reported separately
 #           as qualitative on/off calls.
@@ -48,9 +51,16 @@
 #   all: every contrast from the blocked fit. blocking.R says why.
 # --quantities normalised|raw (default normalised): which of DIA-NN's quantities the DE reads.
 #   normalised  dpc: Precursor.Normalised (DIA-NN's cross-run normalisation); maxlfq: PG.MaxLFQ,
-#               then quantile normalisation.
+#               with the --between-run step (below).
 #   raw         dpc: Precursor.Quantity (DIA-NN's non-normalised quantity); maxlfq: PG.MaxLFQ of a
-#               report searched with --no-norm (refused otherwise), with NO quantile step.
+#               report searched with --no-norm (refused otherwise), with NO between-run step.
+# --between-run auto|none|quantile|median (default auto; --method maxlfq only, refused with dpc):
+#   the step on the log2 MaxLFQ matrix. auto: none for a DIA-NN report DIA-NN normalised (a
+#   quantile step on top gave 61% wrong calls on the PXD063416 4 m/z benchmark), quantile for a
+#   --no-norm search's PG.MaxLFQ and for an engine's declared quantities, none tagged [confirm]
+#   when whether DIA-NN normalised is not recorded. quantile / median / none: as given, recorded
+#   as chosen for this DE (median: each run's median log2 set to the median of the run medians).
+#   With --quantities raw only auto or none. build_maxlfq.R maxlfq_between_run() is the rule.
 #   The choice is normalization_check.py's (the experiment type's default, checked against the
 #   data); --normalization-check <its json> holds the DE to it -- and to the report and conditions
 #   the check was made on -- and records it. In a session that records an experiment type a DE
@@ -105,6 +115,15 @@ keep_contaminants <- isTRUE(getarg("--keep-contaminants", FALSE))
 # Decided by normalization_check.py, which --normalization-check names; recorded either way.
 quantities <- getarg("--quantities", "normalised")
 if (!quantities %in% c("normalised", "raw")) stop("--quantities must be 'normalised' or 'raw'")
+# The between-run step of the MaxLFQ route (see the header): decided in build_maxlfq.R by
+# maxlfq_between_run(), which also checks the value and refuses a step on raw quantities. Only
+# that it means nothing to limpa's route is checked here.
+between_run <- getarg("--between-run", NULL)
+if (!is.null(between_run) && !identical(method, "maxlfq"))
+  stop("--between-run applies to --method maxlfq only: limpa (--method ", method, ") applies ",
+       "no between-run normalisation of its own; --quantities chooses DIA-NN's normalised or ",
+       "non-normalised precursor quantities", call. = FALSE)
+if (is.null(between_run)) between_run <- "auto"
 norm_check_path <- getarg("--normalization-check", NULL)
 if (isTRUE(norm_check_path)) stop("--normalization-check needs the check's json path")
 if (!is.null(norm_check_path) && !file.exists(norm_check_path))
@@ -487,6 +506,10 @@ design_request <- local({
        block_effect = if (is.null(block_col)) NULL else block_effect_req,
        block_scope = if (is.null(block_col)) NULL else block_scope,
        contrasts = as.list(contrast_forms(factor(meta$Group))),
+       # maxlfq: the between-run step asked for (--between-run, default auto). Not a design flag
+       # carried to all three step-8 DEs -- the raw one refuses a step -- but held by the gate:
+       # another step draws another volcano than the check's (normalization_check.design_check)
+       between_run = if (identical(method, "maxlfq")) between_run else NULL,
        flags = as.list(c(.flag("--numeric-covariates"), .flag("--block"), .flag("--block-effect"),
                          .flag("--block-scope"), .flag("--contrasts"))))
 })
@@ -530,6 +553,26 @@ if (is.null(norm_check_path) && !check_input) {
          "): run it with --normalization-check, or fix that first", call. = FALSE)
   if (isTRUE(.rq$res$required)) stop(.rq$res$message, call. = FALSE)
 }
+# No --contrasts in a session whose control groups are RECORDED: refused, with the exact
+# --contrasts (each group minus its control) -- never the alphabetical default below, which can
+# put the control on the left and flip every sign (C2 statistician M1; the rule is
+# normalization_check.contrasts_refusal(), asked here). Every DE, the check's two included: step
+# 8's printed commands carry the --contrasts. Asked after required(), whose refusal prints
+# all of step 8 with them.
+if (is.null(contrasts)) {
+  .ct <- python_json("normalization_check.py", "contrasts",
+                     c("--input", shQuote(normalizePath(input, mustWork = FALSE)),
+                       "--metadata", shQuote(normalizePath(meta_path, mustWork = FALSE))),
+                     "ask whether this session records control groups")
+  if (is.null(.ct$res))
+    stop("could not ask whether this DE's session records control groups (", .ct$why,
+         "): pass --contrasts (each group minus its control), or fix that first", call. = FALSE)
+  if (isTRUE(.ct$res$refused)) stop(.ct$res$message, call. = FALSE)
+}
+# A check made before 2.14.2 and a MaxLFQ DE's --between-run auto: the gate compares the step
+# that runs, known only once the report is read -- its first answer says the step it must be
+# (between_run_pending), and it is asked again then (below, after build_maxlfq)
+norm_check_pending <- NULL
 norm_check_rec <- if (is.null(norm_check_path)) {
   list(schema = "normalization_check", schema_version = 1L,
        status = if (check_input) "check_input" else "not_run",
@@ -540,17 +583,18 @@ norm_check_rec <- if (is.null(norm_check_path)) {
        else paste("no normalisation check was run for this DE (normalization_check.py):",
                   "whether these quantities suit the experiment was NOT CHECKED"))
 } else {
-  .ng <- python_json("normalization_check.py", "gate",
-                     c("--check", shQuote(normalizePath(norm_check_path)), "--quantities", quantities,
-                       "--report", shQuote(normalizePath(input, mustWork = FALSE)),
-                       "--conditions", shQuote(normalizePath(meta_path, mustWork = FALSE)),
-                       "--design-json", shQuote(design_request_file)),
+  norm_check_gate_args <- c("--check", shQuote(normalizePath(norm_check_path)), "--quantities", quantities,
+                            "--report", shQuote(normalizePath(input, mustWork = FALSE)),
+                            "--conditions", shQuote(normalizePath(meta_path, mustWork = FALSE)),
+                            "--design-json", shQuote(design_request_file))
+  .ng <- python_json("normalization_check.py", "gate", norm_check_gate_args,
                      "read the normalisation decision")
   if (is.null(.ng$res))
     stop("the normalisation check ", norm_check_path, " could not be evaluated: ", .ng$why,
          call. = FALSE)
   if (!isTRUE(.ng$res$ok)) stop(.ng$res$message, call. = FALSE)
   message("[run_de] normalisation: ", .ng$res$message)
+  norm_check_pending <- .ng$res$between_run_pending
   # this DE's design against the one the check's DEs used (normalization_check.design_check):
   # a contrast difference is a warning; a check that recorded no design is NOT CHECKED, said
   for (.w in .ng$res$warnings) warning("normalisation check: ", .w, call. = FALSE)
@@ -919,12 +963,28 @@ if (method == "dpc") {
                      eq_cutoff = eq_cutoff, pgq_cutoff = pgq_cutoff,
                      keep_runs = keep_runs, drop_contaminants = !keep_contaminants,
                      contaminant_exempt = cont_exempt, quantities = quantities,
-                     no_norm = no_norm)
+                     no_norm = no_norm, between_run = between_run)
   E         <- ml$E
   run_names <- colnames(E)
   genes     <- ml$genes
   descriptor <- ml$descriptor
   q_use     <- ml$q_columns
+  # the gate asked again, with the between-run step that ran (norm_check_pending, above): a check
+  # made before 2.14.2 drew its volcano with another step than this one is refused here
+  if (!is.null(norm_check_pending)) {
+    .ng <- python_json("normalization_check.py", "gate",
+                       c(norm_check_gate_args, "--between-run-applied",
+                         shQuote(descriptor$between_run$method %||% "not recorded")),
+                       "compare the between-run step with the normalisation check's")
+    if (is.null(.ng$res))
+      stop("the normalisation check ", norm_check_path, " could not be evaluated: ", .ng$why,
+           call. = FALSE)
+    if (!isTRUE(.ng$res$ok)) stop(.ng$res$message, call. = FALSE)
+    message("[run_de] normalisation: ", .ng$res$message)
+    norm_check_rec$design_match <- .ng$res$design_match %||%
+      "not compared (normalization_check.py gave no answer)"
+    norm_check_rec$design_warnings <- as.list(.ng$res$warnings)
+  }
   cont_census    <- ml$contaminants$census
   cont_tag       <- ml$contaminants$tag
   keratin <- keratin_unchecked(keratin, ml$contaminants$flagged_ids,
@@ -1516,7 +1576,6 @@ if (is.null(.rs)) {
       contaminants = cont_rec, block = block_rec, contrast_model = contrast_model,
       dpc_annotation_columns = if (exists("dpc_ann")) dpc_ann else NULL,
       intensity_column = if (exists("dpc_intensity")) dpc_intensity else NULL,
-      quantile_normalise = !identical(quantities, "raw"),
       not_measured = not_measured_rec)
     message(sprintf("[run_de] reproducibility_log.R: the analysis as %d lines of plain R (Rscript-runnable)",
                     length(repro_lines)))
@@ -1766,6 +1825,9 @@ if (file.exists(.prev) && requireNamespace("jsonlite", quietly = TRUE)) {
 }
 prov <- list(
   pipeline_id = descriptor$pipeline_id, display_label = descriptor$display_label,
+  # the skill version that ran this DE (skill_version.R; its UNKNOWN tag when plugin.json is not
+  # found): a report rebuilt later with another version names this one (make_analysis_html how_made)
+  skill_version = skill_version(.script_dir),
   rollup_method = descriptor$rollup_method, de_engine = descriptor$de_engine,
   missing_policy = descriptor$missing_policy, citation = descriptor$citation,
   # set only by a pipeline that has them (build_maxlfq.R maxlfq_descriptor): its own
@@ -1835,6 +1897,9 @@ prov <- list(
   # which quantities the DE read, the normalisation they carry, and the check that decided it
   # (normalization_check.py; schema_version'd so it can be aggregated across projects)
   quantities = quantities, normalisation = descriptor$normalisation,
+  # maxlfq: the between-run step it applied, why, and what --between-run asked for
+  # (build_maxlfq.R maxlfq_between_run); dpc has none of its own
+  between_run = descriptor$between_run,
   # maxlfq: whether the search ran with --no-norm, and how that is known (build_maxlfq.R)
   dia_nn_normalisation = descriptor$dia_nn_normalisation,
   normalization_check = norm_check_rec,

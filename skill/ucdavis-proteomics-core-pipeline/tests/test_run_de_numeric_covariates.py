@@ -350,7 +350,7 @@ class ReproEmitter(unittest.TestCase):
                 eq_cutoff = 0, pgq_cutoff = 0, cov_min_frac = 0.5, meta = meta,
                 covariates = c("Batch", "Covariate1"), numeric_covariates = "Covariate1",
                 formula_parts = c("groups", "Batch", "Covariate1"), forms = "B-A",
-                adjp_thr = 0.05, logfc_ref = 1))
+                adjp_thr = 0.05, logfc_ref = 1, between_run = "quantile"))
               e <- new.env(); invisible(parse("{out}"))
               L <- readLines("{out}"); i <- grep("^covariate1_map", L)
               eval(parse(text = paste(L[i:(i + 5)], collapse = "\\n")), e)

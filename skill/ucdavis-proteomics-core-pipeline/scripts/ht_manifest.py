@@ -37,6 +37,24 @@ submission (`named_for_submission`), the runs must declare one acquisition metho
 (`one_method`), and with the CoreOmics record (`--summary`) every sample must have a run and
 every run a sample (`sample_list`). Each FAILS closed, naming every file or sample it is about.
 
+Names are not enough (2.14.2, I41): on two earlier HT submissions, 94 of 96 runs were named for the wrong
+well and every gate passed. Three plate checks compare other records of the plate, each a hard
+stop on FAIL (checks only -- HyStar queues are still made by hand, Brett's Q7):
+  * `run_sizes` -- a blank of the plate (STAN class, or STAN's blank words in its name; STAN
+    leaves those out of its list, so they are also looked for beside the plate's runs, one folder
+    listing each) larger than BLANK_FRACTION (half) of the plate's median sample run
+    (analysis.tdf_bin + analysis.tdf, stat only) is the size of a sample: FAIL. No blank to check,
+    or a sample run under SMALL_RUN_FRACTION (20%) of the median (a failed injection?): WARN.
+  * `sample_list_copied` -- with --summary, the CoreOmics sample names are the same ordered list
+    (COPIED_LIST_MIN, 8, or more) as another submission's PROT_*/submission_summary.json under
+    --summaries-dir (default: the folder above --summary's, ~/core/): FAIL naming it. A list
+    with an empty name, or of generic names (numbers, well labels, "Sample <n>"), is not compared.
+  * `sample_table` -- each run's HyStar sample table (SampleInfo.xml SampleTablePath, UTF-16),
+    one per plate: a plate's runs from more than one table, or a table naming only ANOTHER PROT
+    number (a re-injection is checked for that alone): FAIL; a table naming this submission and
+    another: WARN. A table name with no PROT number (staff type them) is fine and is printed, so
+    staff can see which table it was.
+
     bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/ht_manifest.py fetch <n> \\
         --summary ~/core/PROT_<n>/submission_summary.json --out ~/ht<n>'
 
@@ -56,12 +74,15 @@ EXIT CODES -- the orchestrator must honour these:
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import re
+import statistics
 import subprocess
 import sys
 import urllib.parse
+import xml.etree.ElementTree as ET
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from check_report_runs import (distinct_inputs, repeated_names, repeats_note,  # noqa: E402
@@ -553,6 +574,382 @@ def sample_list_gate(a, own: list, entries: dict) -> dict:
     return dict(g, status="PASS")
 
 
+# --- The plate checks (I41, skill 2.14.2): what a plate's NAMES cannot show. On two earlier HT submissions,
+# 94 of 96 runs were named for the wrong well and every gate above passed: they read names, and
+# the names were the error. So three other records of the plate are compared: the runs' sizes (the
+# verify half of Brett's make_ht_queue.py), the CoreOmics sample list against other submissions',
+# and the HyStar sample table each run came from. Checks only (Brett, Q7): no queue is built here.
+# A blank is a fraction of a sample run's size at any throughput, so the limits are relative to the
+# plate's own median sample run (a fixed size would fail real blanks at a lower throughput).
+BLANK_FRACTION = 0.5               # a blank larger than this share of the median is a sample's size
+SMALL_RUN_FRACTION = 0.2           # a sample run under this share of the median: failed injection?
+COPIED_LIST_MIN = 8                # an identical ORDERED list this long is no coincidence
+SAMPLE_INFO = "SampleInfo.xml"     # HyStar's copy of the run's sample-table row (UTF-16 LE)
+SAMPLE_INFO_MAX_BYTES = 1 << 20    # a real one is about 5 KB
+# STAN's blank words (a run whose name holds one is a blank, and --include samples leaves it out
+# of the manifest's files and entries), without its DELETE: that marks a run to drop, not a blank.
+BLANK_NAME = re.compile(r"wash|blank|blnk|blk", re.I)
+
+
+def _size(n) -> str:
+    return (f"{n / 1e9:.2f} GB" if n >= 1e9 else f"{n / 1e6:.0f} MB" if n >= 1e6
+            else f"{int(n):,} bytes")
+
+
+def run_bytes(path):
+    """A run's size, by stat alone: a timsTOF .d folder's analysis.tdf_bin + analysis.tdf, any
+    other run its own file's size. None when there is nothing to measure (a .d folder without its
+    analysis.tdf_bin, or a path that cannot be read)."""
+    try:
+        if os.path.isdir(path):
+            n = os.stat(os.path.join(path, "analysis.tdf_bin")).st_size
+            try:
+                n += os.stat(os.path.join(path, "analysis.tdf")).st_size
+            except OSError:
+                pass                    # the binary alone still says how big the run is
+            return n
+        return os.stat(path).st_size
+    except OSError:
+        return None
+
+
+def run_kind(path, entries: dict) -> str:
+    """"blank" (STAN's class, or one of STAN's blank words in the run name), "sample" (STAN's
+    class, or none given) or STAN's other class (a standard), for the size check."""
+    cls = str((entries.get(os.path.realpath(path)) or {}).get("class") or "").lower()
+    if cls == "blank" or BLANK_NAME.search(_base(path)):
+        return "blank"
+    return cls or "sample"
+
+
+def blanks_beside(own: list, plate) -> tuple:
+    """([blank run], [unlistable folder]): the plate's blanks that STAN left out of its list --
+    the `.d` folders named for the submission (`plate`, core_submission.ht_pattern) with one of
+    STAN's blank words, in the folders the plate's runs are in. One listing per folder (a
+    one-level os.scandir), nothing opened; runs already in `own` are not listed again."""
+    if plate is None:
+        return [], []
+    mine = {os.path.realpath(f) for f in own}
+    found, unlisted = [], []
+    for d in sorted({os.path.dirname(os.path.abspath(f)) for f in own}):
+        try:
+            with os.scandir(d) as it:
+                for ent in it:
+                    if (ent.name.lower().endswith(".d") and plate.match(ent.name)
+                            and BLANK_NAME.search(ent.name) and ent.is_dir()
+                            and os.path.realpath(ent.path) not in mine):
+                        found.append(ent.path)
+        except OSError as e:
+            unlisted.append(f"{d} ({e.strerror or type(e).__name__})")
+    return sorted(found), unlisted
+
+
+def run_size_gate(own: list, entries: dict, plate=None) -> dict:
+    """`run_sizes`: a blank of the plate (STAN class, or STAN's blank words in its name: in the
+    list, or beside its runs on disk, blanks_beside) larger than BLANK_FRACTION of the plate's
+    median sample run is a FAIL -- what is in the run is not what its name says (one of those plates: runs
+    named Blank_S3-A6 held 1.36 GB). No blank to check is a WARN, as is a sample run under
+    SMALL_RUN_FRACTION of the median (a failed injection?). Sizes by stat only (run_bytes)."""
+    beside, unlisted = blanks_beside(own, plate)
+    sized, unmeasured = [], []
+    for f in own:
+        n = run_bytes(f)
+        if n is None:
+            unmeasured.append(f)
+        else:
+            sized.append((f, n, run_kind(f, entries)))
+    for f in beside:
+        n = run_bytes(f)
+        if n is None:
+            unmeasured.append(f)
+        else:
+            sized.append((f, n, "blank"))
+    blanks = [(f, n) for f, n, k in sized if k == "blank"]
+    sample_sizes = [n for _f, n, k in sized if k == "sample"]
+    median = statistics.median(sample_sizes) if sample_sizes else 0
+    big = [(f, n) for f, n in blanks if median > 0 and n > BLANK_FRACTION * median]
+    small = [(f, n) for f, n, k in sized
+             if k == "sample" and median > 0 and n < SMALL_RUN_FRACTION * median]
+    g = {"gate": "run_sizes", "n": len(own), "n_blanks": len(blanks),
+         "blanks_beside_the_runs": beside, "median_sample_bytes": median,
+         "oversized_blanks": [{"file": f, "bytes": n} for f, n in big],
+         "small": [{"file": f, "bytes": n} for f, n in small], "unmeasured": unmeasured,
+         "unlisted_folders": unlisted,
+         "listed": ([f"blank the size of a sample: {f}  ({_size(n)}, {n / median:.0%} of the "
+                     f"median)" for f, n in big]
+                    + [f"small run: {f}  ({_size(n)}, {n / median:.0%} of the median)"
+                       for f, n in small]
+                    + [f"not measured (no analysis.tdf_bin): {f}" for f in unmeasured]
+                    + [f"folder not listed: {d}" for d in unlisted])}
+    said = []
+    if big:
+        said.append(f"{len(big)} blank run(s) of this plate (STAN's class, or STAN's blank words "
+                    f"in the name) are larger than {BLANK_FRACTION:.0%} of the plate's median "
+                    f"sample run ({_size(median)}): the size of a sample, not of a blank. What is "
+                    f"in them is not what their names say, so the plate's run names may be "
+                    f"shifted from the plate map. Check the HyStar queue against the plate map "
+                    f"with the operator")
+    if small:
+        said.append(f"{len(small)} sample run(s) are under {SMALL_RUN_FRACTION:.0%} of the "
+                    f"plate's median sample run ({_size(median)}): a failed injection? Check them "
+                    f"with the operator before searching")
+    if unmeasured:
+        said.append(f"{len(unmeasured)} run(s) could not be measured (a .d folder without its "
+                    f"analysis.tdf_bin, or unreadable)")
+    if not median:
+        said.append("no sample run could be measured, so no blank was compared with one")
+    elif not blanks:
+        said.append("no blank of this plate was found, in STAN's list or beside its runs, so no "
+                    "blank size was checked: the check that catches run names shifted from the "
+                    "plate map was not made")
+    if unlisted:
+        said.append(f"{len(unlisted)} folder(s) of the plate's runs could not be listed for its "
+                    f"blanks")
+    if said:
+        return dict(g, status="FAIL" if big else "WARN", detail="; ".join(said))
+    return dict(g, status="PASS",
+                detail=f"{len(sized)} run(s) measured, median sample run {_size(median)}; "
+                       f"{len(blanks)} blank(s) ({len(beside)} beside the runs, not in STAN's "
+                       f"list), none over {BLANK_FRACTION:.0%} of it")
+
+
+# Names two unrelated submissions use by convention -- a number, a well label, "Sample <n>" -- so
+# the same ordered list of them is no evidence of a copy.
+GENERIC_SAMPLE_NAME = re.compile(r"^(?:\d+|[A-H](?:0?[1-9]|1[0-2])|sample[\s_-]*\d+)$", re.I)
+
+
+def _sample_names(record: dict) -> list:
+    """The record's sample names, in order. TypeError when `samples` is not a list."""
+    samples = record.get("samples") or []
+    if not isinstance(samples, list):
+        raise TypeError(f"`samples` is a {type(samples).__name__}, not a list")
+    return [str(x.get("sample_name") or "").strip() for x in samples if isinstance(x, dict)]
+
+
+def copied_list_gate(a) -> dict:
+    """`sample_list_copied`: this submission's CoreOmics sample names (--summary) against every
+    other submission's record, PROT_*/submission_summary.json under --summaries-dir (default: the
+    folder above --summary's, ~/core/ on HIVE). The same ORDERED list of COPIED_LIST_MIN or more
+    names as another submission's is a FAIL naming it: a sample list copied from another plate."""
+    g = {"gate": "sample_list_copied"}
+    if not a.summary:
+        return dict(g, status="WARN",
+                    detail="not checked: no CoreOmics record given (--summary), so its sample list "
+                           "could not be compared with other submissions'")
+    if _cs is None:
+        return dict(g, status="FAIL", detail=f"{CORE_UNAVAILABLE}, so the sample list could not "
+                                             f"be compared with other submissions'")
+    path = os.path.abspath(os.path.expanduser(a.summary))
+    try:
+        ours = _cs.load_json_file(path, "--summary")
+        mine = _cs.normalize_submission(ours.get("internal_id"))[1]
+        names = _sample_names(ours)
+    except (_cs.Stop, ValueError, TypeError):
+        return dict(g, status="WARN", detail="not checked: the CoreOmics record could not be read, "
+                                             "names no submission, or has no list of samples (see "
+                                             "sample_list)")
+    where = (os.path.abspath(os.path.expanduser(a.summaries_dir)) if a.summaries_dir
+             else os.path.dirname(os.path.dirname(path)))
+    g.update(summaries_dir=where, n_samples=len(names))
+    if len(names) < COPIED_LIST_MIN:
+        return dict(g, status="PASS", n_compared=0,
+                    detail=f"not compared: {len(names)} sample(s), fewer than {COPIED_LIST_MIN}; "
+                           f"a list that short can match another by chance")
+    empty = sum(not x for x in names)
+    if empty:
+        return dict(g, status="INFO", n_compared=0,
+                    detail=f"not compared: {empty} sample(s) have no name, so the list cannot be "
+                           f"told apart from another submission's")
+    if all(GENERIC_SAMPLE_NAME.match(x) for x in names):
+        return dict(g, status="INFO", n_compared=0,
+                    detail="not compared: the names are not distinctive (numbers, well labels or "
+                           "\"Sample <n>\"), so another submission can have the same list without "
+                           "copying it")
+    copied, unreadable, n = [], [], 0
+    for p in sorted(glob.glob(os.path.join(glob.escape(where), "PROT_*", "submission_summary.json"))):
+        if os.path.realpath(p) == os.path.realpath(path):
+            continue
+        try:
+            with open(p, encoding="utf-8") as fh:
+                rec = json.load(fh)
+            theirs = _cs.normalize_submission(rec.get("internal_id"))[1]
+            same = _sample_names(rec) == names
+        except (OSError, ValueError, AttributeError, TypeError) as e:
+            unreadable.append(f"{p} ({type(e).__name__})")
+            continue
+        if theirs == mine:                       # another copy of this submission's own record
+            continue
+        n += 1
+        if same:
+            copied.append((theirs, p))
+    g.update(n_compared=n, unreadable=unreadable)
+    if copied:
+        ids = sorted({t for t, _p in copied})
+        return dict(g, status="FAIL", copied_from=ids,
+                    listed=[f"the same list as {t}: {p}" for t, p in copied],
+                    detail=f"the CoreOmics record of {mine} lists the same {len(names)} sample "
+                           f"names, in the same order, as the record of {', '.join(ids)}: a sample "
+                           f"list copied from another submission, so which sample each run is "
+                           f"cannot be read from it. Ask staff, and through them the submitter, "
+                           f"which list is this plate's, and have it corrected in CoreOmics")
+    if unreadable:
+        return dict(g, status="INFO", listed=unreadable,
+                    detail=f"compared with {n} other submission record(s) under {where}: none "
+                           f"has the same list; {len(unreadable)} record(s) there could not be "
+                           f"read and were not compared")
+    if not n:
+        return dict(g, status="INFO",
+                    detail=f"no other submission's record (PROT_*/submission_summary.json) under "
+                           f"{where} to compare with; --summaries-dir <folder> names another")
+    return dict(g, status="PASS", detail=f"compared with {n} other submission record(s) under "
+                                         f"{where}: none has the same list")
+
+
+def sample_table_path(run: str):
+    """The HyStar sample table a timsTOF run was queued from, as staff named it: SampleInfo.xml's
+    <SampleTableHeader SampleTablePath=...>. The file is UTF-16 little-endian with a BOM, so it
+    is parsed from its bytes (expat reads the BOM). None when the run has no SampleInfo.xml;
+    ValueError when it is not one."""
+    p = os.path.join(run, SAMPLE_INFO)
+    if not os.path.isfile(p):
+        return None
+    with open(p, "rb") as fh:
+        raw = fh.read(SAMPLE_INFO_MAX_BYTES + 1)
+    if len(raw) > SAMPLE_INFO_MAX_BYTES:
+        raise ValueError(f"larger than {SAMPLE_INFO_MAX_BYTES} bytes, so not a SampleInfo.xml")
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError as e:
+        raise ValueError(f"not readable as XML ({e})")
+    for el in root.iter():
+        if el.tag.rsplit("}", 1)[-1] == "SampleTableHeader" and (el.get("SampleTablePath") or "").strip():
+            return el.get("SampleTablePath").strip()
+    raise ValueError("it has no <SampleTableHeader SampleTablePath=...> naming a table")
+
+
+def run_plate(path, entries: dict):
+    """The plate (tray) a run was on: STAN's entry `plate`, else the plate position in its name
+    (core_submission.HT_TAIL, `..._S<n>-<well>_<n>_<acq#>.d`), else None."""
+    p = (entries.get(os.path.realpath(path)) or {}).get("plate")
+    if p:
+        return str(p)
+    m = _cs.HT_TAIL.search(_base(path)) if _cs is not None else None
+    return m.group(0)[1:].split("-", 1)[0].upper() if m else None
+
+
+def is_reinjection(path, plate) -> bool:
+    """A re-injection: a run named for the submission that declares no method after its plate
+    token (`<date>_<n>_rerun_<sample>_...`, declared_method -- method_gate's rule); without that
+    rule, a `rerun` in the name."""
+    name = _base(path)
+    if plate is None or RUN_METHOD_RE is None or not plate.match(name):
+        return "rerun" in name.lower()
+    return declared_method(name, plate) is None
+
+
+def sample_table_gate(own: list, submission, entries=None, plate=None) -> dict:
+    """`sample_table`: the HyStar sample table each run came from (sample_table_path), ONE PER
+    PLATE (controller ruling 34b, 2026-10-31: HIVE's Sep/Oct 2026 HT plates, four
+    submissions, each have 96 runs and exactly one SampleTablePath; a two-tray submission is most
+    likely two tables). A plate (run_plate) whose runs come from more than one table, or a table
+    naming only ANOTHER submission number (PROT_####, the one definition: core_submission
+    .PROT_TOKEN via ids_in), is a FAIL. A re-injection (is_reinjection), or a run whose plate is
+    unknown, is checked only for another submission's number. A table naming this submission AND
+    another is a WARN. Real table names are typed by staff and carry no PROT number: such a name
+    is fine, and is named (ruling 34). No SampleInfo.xml anywhere: WARN, not checked."""
+    entries = entries or {}
+    g = {"gate": "sample_table"}
+    read, missing, unreadable = {}, [], []
+    for f in own:
+        try:
+            t = sample_table_path(f) if os.path.isdir(f) else None
+        except (OSError, ValueError) as e:
+            unreadable.append(f"{f}: {getattr(e, 'strerror', None) or e}")
+            continue
+        if t is None:
+            missing.append(f)
+        else:
+            read[f] = t
+    tables = {}
+    for f, t in read.items():
+        tables.setdefault(t, []).append(f)
+    g.update(n=len(tables), tables={t: len(v) for t, v in tables.items()},
+             no_sample_info=missing, unreadable=unreadable)
+    if not tables:
+        return dict(g, status="WARN", listed=unreadable,
+                    detail=f"not checked: none of the {len(own)} run(s) has a readable "
+                           f"{SAMPLE_INFO} (HyStar writes one into each timsTOF .d folder), so the "
+                           f"sample table the runs came from is unknown")
+    if _cs is None:
+        return dict(g, status="FAIL", detail=f"{CORE_UNAVAILABLE}, so the sample tables' names "
+                                             f"could not be checked for a submission number")
+    try:
+        kind, mine = _cs.normalize_submission(submission)
+    except ValueError:
+        kind, mine = None, None
+    ours = mine if kind == "internal_id" else None
+
+    def named(t):
+        return {x for k, x in _cs.ids_in(t) if k == "internal_id"}
+
+    foreign = {t: sorted(named(t) - {ours}) for t in tables
+               if named(t) - {ours} and ours not in named(t)}
+    mixed = {t: sorted(named(t) - {ours}) for t in tables if named(t) - {ours} and ours in named(t)}
+    by_plate, loose = {}, []
+    for f, t in read.items():
+        pl = run_plate(f, entries)
+        if pl is None or is_reinjection(f, plate):
+            loose.append(f)
+        else:
+            by_plate.setdefault(pl, {}).setdefault(t, []).append(f)
+    split = {pl: ts for pl, ts in sorted(by_plate.items()) if len(ts) > 1}
+    g.update(plate_tables={pl: sorted(ts) for pl, ts in sorted(by_plate.items())},
+             loose_runs=loose, foreign=foreign, mixed=mixed)
+    if len(tables) == 1:
+        g["table"] = next(iter(tables))
+
+    def runs_of(ts):
+        return "; ".join(f"'{t}' ({len(v)} run(s), e.g. {_base(v[0])})"
+                         for t, v in sorted(ts.items(), key=lambda kv: (-len(kv[1]), kv[0])))
+
+    if split or foreign:
+        why = [f"plate {pl}'s runs come from {len(ts)} HyStar sample tables: {runs_of(ts)}"
+               for pl, ts in split.items()]
+        if split:
+            why[-1] += (". A plate is queued from one table, so some of its runs may be another "
+                        "plate's, or named from another plate's list")
+        why += [f"The sample table '{t}' names {', '.join(v)}, not this submission "
+                f"({ours or submission})" for t, v in foreign.items()]
+        listed = ([f"plate {pl}, table '{t}': {f}" for pl, ts in split.items()
+                   for t, v in sorted(ts.items()) for f in v]
+                  + [f"table '{t}' (names {', '.join(v)}): {len(tables[t])} run(s), e.g. "
+                     f"{tables[t][0]}" for t, v in foreign.items()])
+        return dict(g, status="FAIL", listed=listed,
+                    detail=". ".join(why) + ". Ask the operator which table each plate was queued "
+                                            "from; once staff have said which runs are this "
+                                            "submission's, stage that list with "
+                                            "core_submission.py locate --files-from <list> "
+                                            "(never search this list as given)")
+    no_number = [t for t in tables if not named(t)]
+    note = (f". {len(no_number)} of the {len(tables)} table name(s) carry no submission "
+            f"number: staff type these names, so check they are this plate's" if no_number else "")
+    where = "; ".join([f"plate {pl}: '{next(iter(ts))}' ({len(next(iter(ts.values())))} run(s))"
+                       for pl, ts in sorted(by_plate.items())]
+                      + ([f"{len(loose)} re-injection(s) or run(s) with no plate: "
+                          + ", ".join(f"'{t}'" for t in sorted({read[f] for f in loose}))]
+                         if loose else []))
+    warn = [f"the sample table '{t}' names this submission ({ours}) and also {', '.join(v)}: "
+            f"check with the operator whose table it is" for t, v in mixed.items()]
+    if missing or unreadable:
+        warn.append(f"{len(missing) + len(unreadable)} run(s) have no readable {SAMPLE_INFO} and "
+                    f"were not checked")
+    if warn:
+        return dict(g, status="WARN",
+                    listed=unreadable + [f"no {SAMPLE_INFO}: {f}" for f in missing],
+                    detail=f"one sample table per plate: {where}{note}. " + "; ".join(warn))
+    return dict(g, status="PASS", detail=f"one sample table per plate: {where}{note}")
+
+
 def fetch(a) -> int:
     use_http = bool(a.http or os.environ.get("STAN_HT_URL"))
     m = _manifest_over_http(a) if use_http else _manifest_over_cli(a)
@@ -704,6 +1101,14 @@ def fetch(a) -> int:
     gates.append(samples_gate)
     hard_fail = hard_fail or samples_gate["status"] == "FAIL"
 
+    # --- HARD: the plate checks (2.14.2, I41) -- the runs' sizes, the CoreOmics list against
+    # other submissions', and the HyStar sample table the runs came from. Names alone let 94 of
+    # 96 mis-named runs through (two earlier HT submissions).
+    table_gate = sample_table_gate(own, a.submission, stan_entries, plate)
+    for g in (run_size_gate(own, stan_entries, plate), copied_list_gate(a), table_gate):
+        gates.append(g)
+        hard_fail = hard_fail or g["status"] == "FAIL"
+
     n_rerun = m.get("n_needs_rerun") or 0
     if n_rerun:
         gates.append({"gate": "needs_rerun", "status": "INFO", "n": n_rerun,
@@ -730,6 +1135,12 @@ def fetch(a) -> int:
     _say(f"  files      : {len(own)}" + (f" ({listed} listed by STAN; {'; '.join(why)})"
                                          if why else ""))
     _say(f"  plates     : {', '.join(map(str, plates)) or '(none reported)'}")
+    # staff type the HyStar tables' names (ruling 34): shown so they can see they are this plate's
+    if table_gate.get("table") is not None:
+        _say(f"  sample table: {table_gate['table']}")
+    elif table_gate.get("plate_tables"):
+        _say("  sample tables: " + "; ".join(f"{pl}: {', '.join(ts)}" for pl, ts in
+                                            table_gate["plate_tables"].items()))
     _say(f"  counts     : {counts}")
     _say(f"  files.txt  : {fl}")
     _say(f"  manifest   : {mf}")
@@ -841,6 +1252,10 @@ def main() -> int:
                    help="the submission's CoreOmics record (core_submission.py fetch's "
                         "submission_summary.json): every sample on it must have a run, and every "
                         "run a sample (gate sample_list). Without it that check is not made")
+    f.add_argument("--summaries-dir", default=None, metavar="DIR",
+                   help="where other submissions' records are (PROT_*/submission_summary.json), "
+                        "to find a sample list copied from another submission (gate "
+                        "sample_list_copied). Default: the folder above --summary's (~/core/)")
     f.add_argument("--http", default=None, metavar="BASE_URL",
                    help="ask the hosted dashboard instead of the local DB, e.g. "
                         "https://ucd.stan-proteomics.org (or set STAN_HT_URL). Use this when "

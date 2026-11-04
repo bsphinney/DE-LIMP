@@ -22,7 +22,7 @@ FIGURES SIT WHERE THE TEXT DISCUSSES THEM
 Each `![alt](figures/x.png)` in AI_Analysis_Report.md becomes an embedded, numbered
 figure AT THAT POSITION -- the alt text is its title, figures.json's caption (when
 there is one) its caption. The report used to print those references as literal
-Markdown (28 of them on Silva08172026, 2026-09-24) while dumping every image in
+Markdown (28 of them on a mouse-brain IP cohort, 2026-09-24) while dumping every image in
 figures/ into galleries at the top, a stale pca_original_labels.png included.
   * an image the report does not reference is NOT embedded; one warning line names it;
   * a referenced image that is missing becomes a visible "figure missing: <file>" note
@@ -464,8 +464,16 @@ ENGINE_LABEL = {"diann": "DIA-NN", "sage": "Sage", "fragpipe": "FragPipe", "radi
                 "alphadia": "AlphaDIA"}
 
 
+# A leading section number ("9.", "10.2", "9)", "IV.") -- a report's "## 9. Data Quality Notes"
+# covers the tool's Sample-quality block exactly as "## Data Quality Notes" does (I12: the
+# number kept the raw z-score table and run file names on a client's page). A Roman
+# numeral needs its "." or ")": "CV analysis" and "LC MS" keep their first word.
+_SECTION_NUMBER = re.compile(r"^\s*(?:\d+(?:\.\d+)*[.)]?|[ivxlc]+[.)])\s+", re.I)
+
+
 def norm_title(t):
-    return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", t or "")).strip().lower())
+    t = re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", t or ""))).strip()
+    return _SECTION_NUMBER.sub("", t).lower()
 
 
 # Records that exist but could not be read, {path: why}: said on stderr when it happens and on
@@ -536,17 +544,63 @@ def session_facts(a, prov, submission=None):
     s = os.path.abspath(a.session) if a.session else None
     man = load_record(os.path.join(s, "input", "wf", "workflow.manifest.json")) if s else {}
     fmeta = load_record(os.path.join(s, "input", "search.fasta.meta.json")) if s else {}
-    sprov = load_record(os.path.join(s, "output", "search", "search_provenance.json")) if s else {}
     org = fmeta.get("organism") or man.get("organism")
     tax = fmeta.get("taxid") or man.get("organism_taxid")
-    eng = (sprov.get("engine") or (man.get("engine") or {}).get("name") or "").lower()
-    ver = sprov.get("version") or (man.get("engine") or {}).get("version")
+    eng, ver = search_engine(a.session, prov)
+    unchosen = search_not_recorded_text(a.session, prov)
+    pinned = search_engine_pinned(a.session, prov)
     return [("Submission", submission),
             ("Organism", f"{org} (taxid {tax})" if org and tax else org),
             ("Instrument", ", ".join(man.get("instruments") or []) or None),
-            ("Search", " ".join(x for x in (ENGINE_LABEL.get(eng, eng), str(ver) if ver else "") if x) or None),
+            ("Search", (" ".join(x for x in (eng, ver) if x)
+                        + (" (workflow manifest pin)" if eng and pinned else ""))
+             or (f"not recorded ({unchosen})" if unchosen else None)),
             ("DE", prov.get("display_label")),
             ("Report generated", datetime.date.today().isoformat())]
+
+
+def _engine_facts(session, prov=None):
+    """session.search_engine for the page's session (the one engine/version rule), with the
+    record beside the DE's input as the chosen record when there is one (search_record's first
+    step) -> its dict, or {} without a session."""
+    if not session:
+        return {}
+    import session as sess                      # one definition of which search, and its engine
+    s = os.path.abspath(session)
+    beside = _beside_record((prov or {}).get("input"))
+    return sess.search_engine(sess.paths_for(s), (prov or {}).get("input"),
+                              record=load_record(beside) if beside else None)
+
+
+def search_engine(session, prov=None):
+    """(engine, version) of the search the DE read, as the run recorded it (session.search_engine:
+    its search_provenance.json, wherever the search is; the workflow manifest's pin only when the
+    session has no search record at all) -- each None when no record names it: ("DIA-NN",
+    "2.7.0"). A record's null version stays None. The header's Search fact and "How this report
+    was made" both read it here."""
+    e = _engine_facts(session, prov)
+    eng = e.get("engine") or ""
+    return ENGINE_LABEL.get(eng, eng) or None, e.get("version")
+
+
+def search_engine_pinned(session, prov=None):
+    """True when the engine the page names is the workflow manifest's pin, not a search record's
+    (the session holds no search record): the header and "How this report was made" tag it, as
+    the README, Slack and the Methods do (rule 2; Ruling 80 N2). session.search_engine decides."""
+    import session as sess
+    return _engine_facts(session, prov).get("source") == sess.ENGINE_PIN_SOURCE
+
+
+def search_not_recorded_text(session, prov=None):
+    """A few words when the page has a session and no engine to name: its records leave the
+    choice open ("2 search records, none chosen": T44 review F5), or it holds no search record
+    and no workflow manifest -- a working copy pulled without them (Ruling 80 N4). The header
+    and "How this report was made" say so: "not recorded (...)", never a missing line. None when
+    an engine is named, or there is no session."""
+    e = _engine_facts(session, prov)
+    if not e or e.get("engine"):
+        return None
+    return (e.get("choice") or {}).get("short") or "the search record names no engine"
 
 
 def contrast_label(c):
@@ -648,7 +702,7 @@ def fmt_p(p):
 
 
 # Figures that say nothing when the expression matrix is complete by construction: every
-# bar of "proteins quantified per sample" is the same number (Silva08172026: 30 bars of
+# bar of "proteins quantified per sample" is the same number (a mouse-brain IP cohort: 30 bars of
 # 6,112). make_figures.R no longer draws it then, but an older figures/ folder -- and the
 # narrative written against it -- still can; Brett flagged it twice (2026-09-25).
 SUPPRESS_WHEN_COMPLETE = ("qc_protein_counts",)
@@ -909,12 +963,85 @@ def audit_plain(path):
     return audit_results.client_section_md(found) or None
 
 
+# Every report's section on how it was made (before the appendix), and the public page that
+# explains it
+HOW_MADE_TITLE = "How this report was made"
+HOW_MADE_URL = "https://bsphinney.github.io/DE-LIMP/how-reports-are-made.html"
+HOW_MADE_LINK = ("How these reports are made, step by step, and how your lab can run the same "
+                 "pipeline")
+
+
+def _skill_version():
+    """skill_version.py's reading of plugin.json, or None when it cannot say (its unknown tag, or
+    a partial copy of scripts/ without it): the section then names no version."""
+    try:
+        import skill_version as sv
+    except ImportError:
+        return None
+    v = sv.skill_version()
+    return None if v == sv.UNKNOWN else v
+
+
+def how_made(a, prov, md_text, report_secs):
+    """"How this report was made", in plain words for the lab: the software that made the
+    numbers, Claude running the pipeline (and writing the text, when there is an AI-written
+    report), the podcast, the expert review. Each sentence only when a record of the run holds
+    it -- a fact no record holds is left out, never filled in (rule 2); the DE is named by its
+    own label (rule 1). -> the section's blocks (build_page). The body sits between
+    make_podcast's HOWMADE markers, which a podcast check's sources leave out; the podcast's
+    paragraph is make_podcast.how_made_block's, between its own markers, so `link` can fill it
+    in when the podcast comes after the report."""
+    eng, ver = search_engine(a.session, prov)
+    unchosen = search_not_recorded_text(a.session, prov)
+    pinned = search_engine_pinned(a.session, prov)
+    did = []
+    if eng:
+        did.append(f"{eng}{' ' + ver if ver else ''}"
+                   # client words, not staff's (C2 biologist nit)
+                   + (" (the version planned for this workflow; the search's own record was "
+                      "not available)" if pinned else "") + " searched the raw instrument files")
+    if prov.get("display_label"):
+        did.append(f"{prov['display_label']} estimated the protein amounts and ran the statistics")
+    p1 = ("The numbers in this report come from established scientific software: "
+          + ", and ".join(did) + ".") if did else ""
+    if unchosen:
+        p1 += (" " if p1 else "") + (f"Which search these numbers come from was not recorded "
+                                     f"({unchosen}).")
+    repro = os.path.join(a.tables, "reproducibility_log.R") if a.tables else None
+    if repro and os.path.isfile(repro):
+        r = os.path.relpath(repro, os.path.dirname(os.path.abspath(a.out)))
+        r = os.path.basename(repro) if r.startswith("..") else r.replace(os.sep, "/")
+        p1 += f" `{r}` re-runs the statistics as plain R code, with no AI involved."
+    v = _skill_version()                  # the version building this page
+    ran = prov.get("skill_version")       # the version that ran the DE (run_de.R records it)
+    ran = ran if isinstance(ran, str) and ran.strip() and not ran.startswith("(unknown") else None
+    p2 = ("Claude, Anthropic's AI model, ran each step, following the UC Davis Proteomics Core's "
+          "pipeline" + (f" (skill {ran})" if ran else "")
+          + (", and wrote this report's analysis text" if md_text is not None else "") + "."
+          # a page built by another version than the DE's, or a DE from before the record named one
+          + (f" This report was built with skill {v}." if v and v != ran else ""))
+    outdir = os.path.dirname(os.path.abspath(a.out))
+    exp = next((t for t, _ in report_secs if "expert review" in norm_title(t)), None)
+    p4 = (f"Separate Claude reviewers — a proteomics expert, a biologist and a statistician — "
+          f"checked the analysis; their notes are in the {exp} section." if exp else "")
+    mp = make_podcast
+    return ([("raw", mp.HOWMADE_START, mp.HOWMADE_START),
+             ("md", "\n\n".join(p.strip() for p in (p1, p2) if p.strip())),
+             ("raw", mp.how_made_block(outdir, "html"), mp.how_made_block(outdir, "md"))]
+            + ([("md", p4)] if p4 else [])
+            + [("raw", f'<p class="howmade"><a href="{html.escape(HOW_MADE_URL)}">'
+                       f"{html.escape(HOW_MADE_LINK)}</a></p>",
+                f"[{HOW_MADE_LINK}]({HOW_MADE_URL})"),
+               ("raw", mp.HOWMADE_END, mp.HOWMADE_END)])
+
+
 def build_page(a, prov, tables, figs, md_text, used):
     """Assemble the page ONCE, as data. render_html() and render_md() draw this same list,
     so the HTML report and its Markdown twin cannot say different things (rule 3).
     -> (title, subtitle_md, sections); section = {anchor, title, kind, blocks}, block =
     ("md", text) | ("glance", data) | ("gallery", section, [names]) | ("top", data) |
-    ("submission", html, markdown) -- the CoreOmics record, main() puts it first."""
+    ("submission", html, markdown) -- the CoreOmics record, main() puts it first |
+    ("raw", html, markdown) -- one thing written for each renderer (a link, a marker)."""
     sections, h1, pre = [], None, ""
     report_secs = []
     if md_text is not None:
@@ -934,6 +1061,7 @@ def build_page(a, prov, tables, figs, md_text, used):
         body = audit_plain(path) if key == "audit" else None
         extras.append((title, body or strip_h1(read_text(path))))
     top = top_data(tables, a, prov)
+    how = how_made(a, prov, md_text, report_secs)
     g = glance_data(prov, tables, a.tables, a.session)
     for n in (not_drawn_note(figs.failed, referenced), unreadable_note()):
         if n:
@@ -982,6 +1110,10 @@ def build_page(a, prov, tables, figs, md_text, used):
                 and norm_title(sec["title"]) not in report_h2):
             sections.append({"anchor": anchor(sec["title"], used), "title": sec["title"],
                              "kind": None, "blocks": [("md", sec["markdown"])]})
+    # How this report was made: last before the appendix, on every page; the report's own wins
+    if norm_title(HOW_MADE_TITLE) not in report_h2:
+        sections.append({"anchor": anchor(HOW_MADE_TITLE, used), "title": HOW_MADE_TITLE,
+                         "kind": None, "blocks": how})
     if md_text is not None:
         app = [fn for fn in a._listed if fn.startswith(APPENDIX_FIGURES) and fn not in referenced]
         if app:
@@ -1037,7 +1169,9 @@ def glance_data(prov, tables, tables_dir, session=None):
     if rows:
         tiles.append((len(rows), "contrasts"))
         tiles.append((max(r["tested"] for r in rows), "proteins tested"))
-    notes = [n for n in (search_measurement_note(prov, session), search_inputs_note(prov, session),
+    notes = [n for n in (search_measurement_note(prov, session), first_pass_note(prov, session),
+                         identifications_only_note(prov, session),
+                         search_inputs_note(prov, session),
                          runs_left_out_note(prov),
                          added_sequences_note(session), inferred_note(prov, tables_dir),
                          not_measured_note(prov),
@@ -1165,14 +1299,76 @@ def database_note(prov, tables_dir, session=None):
 
 
 def search_record(prov, session=None):
-    """The search's search_provenance.json: the one beside de_provenance.json's `input` (as
-    audit_results.py reads it), else the session's output/search/. {} when there is none."""
+    """The search's search_provenance.json: the one of the search folder of de_provenance.json's
+    `input` (session.search_folder_of: the report's folder, or its parent for FragPipe's DIA
+    route -- as audit_results.py reads it), else the session's search record wherever it is
+    (session.search_record: output/search_dda/ as much as output/search/, tie-broken by that
+    input; none when the session's records leave the choice open). {} when there is none."""
+    return load_record(search_record_path(prov, session))
+
+
+def search_record_path(prov, session=None):
+    """search_record()'s file, or None: its folder is the search's (the page's notes ask
+    sage_lfq_check.search_quantified of it)."""
     inp = prov.get("input")
-    path = next((c for c in (
-        os.path.join(os.path.dirname(str(inp)), "search_provenance.json") if inp else None,
-        os.path.join(session, "output", "search", "search_provenance.json") if session else None)
-        if c and os.path.exists(c)), None)
-    return load_record(path)
+    beside = _beside_record(inp)
+    if beside:
+        return beside
+    if not session:
+        return None
+    import session as sess                      # one definition of where the search record is
+    return sess.search_record(sess.paths_for(session), inp)[0]
+
+
+def first_pass_note(prov, session=None):
+    """The fixed CAUTION for a DIA-NN --dda search whose second pass failed, so its results are
+    the first-pass report (dda_first_pass.caution decides; the words are AUDIT.md's plain-language
+    row, audit_results.PLAIN). Shown by the page itself: on the no-DE route the audit, which
+    carried it to the page, does not run (C2 biologist M1). None otherwise."""
+    import dda_first_pass
+    if not dda_first_pass.caution(search_record(prov, session)):
+        return None
+    from audit_results import PLAIN
+    return {"kind": "warning", "title": "These results come from the search's first pass",
+            "text": PLAIN["dda_first_pass"][1]["WARN"]}
+
+
+def identifications_only_note(prov, session=None):
+    """The fixed callout for a search for identifications only (sage_lfq_check.search_quantified,
+    the predicate the DE gate shares): no quantities and no differential expression, with the
+    identifications per run from its record (*_identifications.json `per_run`). Shown by the
+    page itself, never left to the writer (C2 biologist M1). None for a quantifying search."""
+    path = search_record_path(prov, session)
+    if not path:
+        return None
+    import sage_lfq_check
+    folder = os.path.dirname(path)
+    if sage_lfq_check.search_quantified(folder):
+        return None
+    per = []
+    for name, unit in (("sage_identifications.json", "precursors"),
+                       ("fragpipe_identifications.json", "peptides")):
+        rec = load_record(os.path.join(folder, name))
+        for run, n in sorted((rec.get("per_run") or {}).items()):
+            n = n.get("precursors") if isinstance(n, dict) else n
+            if isinstance(n, int) and not isinstance(n, bool):
+                per.append(f"{run}: {n:,} {unit}")
+    return {"kind": "info", "title": "Identifications only: no quantities",
+            "text": "This search was for identifications only: it measured no protein or "
+                    "peptide amounts, so this report has no differential expression and compares "
+                    "no amounts between samples. The identifications are in the search folder's "
+                    "identifications.tsv"
+                    + (" (identified per run: " + "; ".join(per) + ")." if per else ".")}
+
+
+def _beside_record(report):
+    """The search_provenance.json of the search folder of `report` (session.search_folder_of: its
+    folder, or its parent for FragPipe's DIA route), when there is one; else None."""
+    if not report:
+        return None
+    import session as sess
+    path = os.path.join(sess.search_folder_of(report), sess.SEARCH_RECORD)
+    return path if os.path.exists(path) else None
 
 
 def added_sequences_note(session=None):
@@ -1215,8 +1411,9 @@ def search_measurement_note(prov, session=None):
     accuracy (search_provenance.json scan_window.mode / mass_acc.mode), worded by
     probe_fallback.caution() -- the one wording, shared with AUDIT.md and the run record. Shown by
     the page itself, like database_note: it must never depend on the report writer remembering
-    it. The search record is the one beside de_provenance.json's `input` (as audit_results.py
-    reads it), else the session's output/search/. None when nothing fell back."""
+    it. The search record is search_record's: the one beside de_provenance.json's `input` (as
+    audit_results.py reads it), else the session's, wherever its search is. None when nothing
+    fell back."""
     sprov = search_record(prov, session)
     if not sprov:
         return None
@@ -1496,7 +1693,7 @@ def render_html(title, subtitle, sections, figs, facts, used, feedback=None, sta
                 parts += [figs.html("", fn, emitted) for fn in b[2]]
             elif b[0] == "top":
                 parts.append(top_html(b[1]))
-            elif b[0] == "submission":
+            elif b[0] in ("submission", "raw"):
                 parts.append(b[1])
         body.append(rs.section(sec["anchor"], md_inline(sec["title"]), "".join(parts), sec["kind"]))
     if star:                                     # the GitHub star line, before the survey
@@ -1644,7 +1841,7 @@ def render_md(title, subtitle, sections, figs, facts, md_dir, feedback=None, sta
                 parts += [figs.md("", fn, emitted, md_dir) for fn in b[2]]
             elif b[0] == "top":
                 parts.append(top_md(b[1]))
-            elif b[0] == "submission":
+            elif b[0] in ("submission", "raw"):
                 parts.append(b[2])
         body = "\n\n".join(p for p in parts if p.strip())
         if sec["kind"]:
@@ -1770,6 +1967,10 @@ def main():
     out_dir = (os.path.join(a.session, "output") if a.session
                else os.path.dirname(os.path.abspath(a.tables)) if a.tables else None)
     a._peaks = skyline_peaks.report_data(out_dir, base) if out_dir else None
+    # the peak check's state this report is made with, for its record (report_files.
+    # mark_skill_report facts): a delivery never ships skyline/ beside a report that says the
+    # check was not part of it (skyline_peaks.report_disagrees)
+    a._peak_state = ((a._peaks or {}).get("state") or "missing") if out_dir else None
     if a._peaks:
         caps.update(a._peaks["captions"])
     figs = Figures(base, root, a.figures, caps,
@@ -1822,7 +2023,9 @@ def main():
     used = set()
     sub_anchor = anchor("Submission", used) if sub else None
     h1, subtitle, sections = build_page(a, prov, tables, figs, md_text, used)
-    if not sections and not subtitle and md_text is None:
+    # How this report was made is on every page: by itself it is no report
+    if (not [s for s in sections if s["title"] != HOW_MADE_TITLE] and not subtitle
+            and md_text is None):
         sys.exit("[make_analysis_html] nothing to render — check --session/--report/--figures")
     title = a.title or (re.sub(r"[*`]", "", h1) if h1 else "Proteomics Analysis Report")
     if sub:
@@ -1891,6 +2094,22 @@ def main():
         os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(text)
+    # The skill's record of its own report (report_files.mark_skill_report, 2.14.2): make_podcast,
+    # deliver and finalize go ahead only for a report this script wrote, as it is now -- a Core submission's
+    # pandoc copy over Analysis_Report.html passed for one. Never silent when it cannot be written.
+    import report_files
+    try:
+        skill_record = os.path.join(os.path.dirname(os.path.abspath(a.out)),
+                                    report_files.SKILL_REPORT_RECORD)
+        report_files.mark_skill_report(
+            a.out, "make_analysis_html.py", _skill_version(),
+            facts={"peak_check_state": a._peak_state}
+            if getattr(a, "_peak_state", None) else None)
+    except OSError as e:
+        skill_record = None
+        print(f"[make_analysis_html] WARNING: {report_files.SKILL_REPORT_RECORD} could not be "
+              f"written ({e.strerror or e}): make_podcast.py, deliver and finalize will not take "
+              f"this report as the skill's until it is", file=sys.stderr)
     # The PDF: the same HTML through its print stylesheet, so it carries the figures -- for
     # NotebookLM (which reads a PDF's images too) and for printing. Never fatal: without a
     # browser (HIVE) it says so, and finalize retries on the laptop.
@@ -1911,7 +2130,7 @@ def main():
                       "figures_not_embedded": left_out, "figures_missing": figs.missing,
                       "figures_rejected": figs.rejected, "figures_suppressed": figs.suppressed,
                       "figures_stale": figs.stale, "pdf_status": pdf_status,
-                      "records_unreadable": dict(_UNREADABLE),
+                      "records_unreadable": dict(_UNREADABLE), "skill_record": skill_record,
                       "contrasts": len(tables.contrasts), "self_contained": True}, indent=2))
 
 

@@ -46,6 +46,7 @@ from estimate_params import (classify_instrument, MEASURE_CLASSES,  # noqa: E402
                              resolution_record, resolution_question, SAGE_ITMS_FRAGMENT_DA,
                              override_setter, override_source, override_record,
                              staff_record_name, record_override_setter)
+import staff  # noqa: E402  who may be called Core staff (role_for)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MANIFEST = "workflow.manifest.json"
@@ -82,6 +83,12 @@ SKYLINE_PIN = {
     "sif": "/quobyte/proteomics-grp/apptainers/"
            "pwiz-skyline-i-agree-to-the-vendor-licenses_skyline_26.1.0.266-578b175.sif",
     "sif_sha256": "b5f135587e9b589dd2d4686ff520573ea237b84f53b1343d5b76213c16f302bf",
+    # ProteoWizard msconvert's own version inside this image (run_search.py converts a timsTOF .d
+    # with it): read on HIVE 2026-11-01 (job 25387830) from the sif above -- `wine msconvert
+    # --help` prints "ProteoWizard release: 3.0.26266 (578b175)" near its end (lines 613-614, so
+    # `head` does not find it), and the mzML it writes records pwiz_Reader_Bruker 3.0.26266. Not
+    # Skyline's 26.1.0.266, and not 3.0.26058 (the Windows build whose settings it runs with).
+    "msconvert_version": "3.0.26266",
 }
 
 # Which engines are sensible for a data type, best first. Instrument class comes
@@ -167,7 +174,8 @@ def main():
     ap.add_argument("--override-by", default=None,
                     help="who chose --ms1-ppm/--ms2-ppm (default: the login running this, "
                          "recorded as such) -- in the staff-only workflow.manifest.json.staff.json "
-                         "only; the manifest says Core staff")
+                         "only; the manifest says Core staff when that login is on the Core staff "
+                         "list (staff.py), else the user")
     ap.add_argument("--override-reason", default=None,
                     help="why, in the user's words; without it the record says it was not given")
     ap.add_argument("--fasta", default=None)
@@ -251,7 +259,9 @@ def main():
         sys.exit("resolve_defaults: --override-by/--override-reason describe --ms1-ppm/--ms2-ppm, "
                  "and neither was given")
     by, by_how = override_setter(args.override_by) if given else (None, "unknown")
-    sop = [f"{f[2:5].upper()}: {override_source(f, f'{v:g}', args.override_reason)}"
+    # "Core staff" only for a login on the Core staff list, else "the user" (S4)
+    role = staff.role_for(by) if given else staff.USER_ROLE
+    sop = [f"{f[2:5].upper()}: {override_source(f, f'{v:g}', args.override_reason, role)}"
            for f, v in given.items()]
     # What the manifest will actually carry: the user's number where they gave one, the table's
     # otherwise. UNDOCUMENTED_LEVEL applies to a level that is STILL without a value -- an
@@ -302,7 +312,7 @@ def main():
             # name, is in the staff-only record beside the manifest
             "overrides": override_record(given, args.override_reason,
                                          staff_record_name(os.path.join(dest, MANIFEST))
-                                         if given else None),
+                                         if given else None, role=role),
             "preset_provenance": preset_prov,
         },
         "validated": {
@@ -322,7 +332,7 @@ def main():
     with open(mpath, "w") as fh:
         json.dump(manifest, fh, indent=2)
     if given:
-        record_override_setter(mpath, given, by, by_how, args.override_reason)
+        record_override_setter(mpath, given, by, by_how, args.override_reason, role)
 
     print(json.dumps({
         "id": manifest["id"], "dir": dest, "manifest": mpath,

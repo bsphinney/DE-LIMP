@@ -1,0 +1,29 @@
+{
+  "database": {
+    "bucket_size": 8192,
+    "enzyme": {
+      "missed_cleavages": 0,
+      "min_len": 7,
+      "max_len": 30,
+      "cleave_at": ""
+    },
+    "fragment_min_mz": 200.0,
+    "fragment_max_mz": 1800.0,
+    "static_mods": {},
+    "variable_mods": {"[": [42.0106], "M": [15.9949]},
+    "max_variable_mods": 2,
+    "decoy_tag": "rev_",
+    "generate_decoys": true
+  },
+  "quant": {"lfq": true, "lfq_settings": {"ppm_tolerance": 7.0}},
+  "precursor_tol": {"ppm": [-10.0, 10.0]},
+  "fragment_tol": {"ppm": [-10.0, 10.0]},
+  "precursor_charge": [2, 4],
+  "isotope_errors": [0, 1],
+  "deisotope": true,
+  "chimera": true,
+  "min_peaks": 15,
+  "max_peaks": 150,
+  "report_psms": 1,
+  "predict_rt": true
+}

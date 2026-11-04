@@ -225,8 +225,14 @@ class FinalizeKeepsThePdf(unittest.TestCase):
             stale = os.path.join(p["output_dir"], "Analysis_Report.stale.pdf")
             with open(stale, "wb") as fh:
                 fh.write(b"%PDF-1.4\nOLD\n%%EOF\n")
-            r = tdp.finalize(p["session_dir"], "--zip")
+            # no HTML, so nothing supersedes it: the report is the missing finish item, recorded
+            # under the fixture's override (a report would be printed where a browser is, and
+            # the current PDF would then rightly replace the stale one: StalePdfNeverShips)
+            import finish_fixture
+            r = tdp.finalize(p["session_dir"], "--zip", report=False,
+                             gap=finish_fixture.FIXTURE_OVERRIDE)
             self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertFalse(os.path.exists(os.path.join(p["output_dir"], "Analysis_Report.html")))
             self.assertTrue(os.path.isfile(stale))              # no HTML: nothing supersedes it
             self.assertFalse(os.path.exists(os.path.join(p["figures_dir"],
                                                          "Analysis_Report.stale.pdf")))

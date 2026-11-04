@@ -1,7 +1,7 @@
 """make_figures.R: the "Proteins quantified per sample" plot only when it can say something.
 
 A DPC/limpa expression matrix is complete by construction -- every protein gets a value in every
-run -- so the old plot drew one identical bar per sample (Silva08172026, 2026-09-24: 30 bars of
+run -- so the old plot drew one identical bar per sample (the mouse-brain IP cohort, 2026-09-24: 30 bars of
 6,112) and the report had to explain it away. It is skipped for a complete matrix, where
 qc_detected_vs_inferred.png is the per-sample depth view, and kept for a matrix with missing
 values (MaxLFQ), where the counts differ and mean something.

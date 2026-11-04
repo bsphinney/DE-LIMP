@@ -114,11 +114,57 @@ Orbitrap/Astral → ±10 ppm fragment; timsTOF → ±20 ppm; SCIEX → ±40 ppm;
 ±20 ppm safe high-res default) and tags them `derived from DIA-NN per-instrument
 recommendation (Sage docs give none)`. `wide_window`/`chimera` follow acquisition.
 
+## Sage for identifications only (`--ids-only`)
+`estimate_params.py --engine sage --ids-only` writes `"quant": {"lfq": false}`, tagged in the
+rationale's `lfq`: `identifications only (--ids-only: no differential expression); Sage 0.14.7
+reads a timsTOF .d directly but has no MS1 quantification on it`. That cfg key is the one carrier
+of the choice: `run_search.py` reads it to send a timsTOF `.d` to Sage directly and to skip the
+LFQ check. Without the flag `lfq` stays `true`. With `--engine diann` it is refused (exit 2: a
+DIA-NN search always quantifies), and so is an `--overrides` that sets `quant` beside it; either
+refusal leaves nothing at `--out`.
+
 ## Defaults that are NOT data-dependent (universal)
 Trypsin/P, 1–2 missed cleavages, peptide length 7–30, charge 2–4, fixed
-carbamidomethyl (C). Variable mods are **off by default** — the DIA-NN README
-notes variable mods don't improve depth for relative quant; pass `var_mods: "ox"`
-in the workflow (or `--var-mods ox`) to add Ox(M).
+carbamidomethyl (C).
+
+## Variable modifications (`--var-mods`)
+`--var-mods` takes a comma list of the words in `estimate_params.VAR_MODS` (the one table;
+masses are UniMod's), or `none`. **Any other word is refused** before a file is written, with the
+known words in the message: it used to be dropped without a word, so a "like-for-like" re-search
+of a FragPipe study that asked for N/Q deamidation ran without it (2026-10-29). A modification
+not in the table goes in `--overrides`, and it ADDS to the table's: DIA-NN
+`{"--var-mod": "UniMod:21,79.966331,STY"}` (a list for several) joins the `--var-mod` lines, and
+`--var-mods` (one per kind) counts it unless you set `--var-mods` too; Sage
+`{"database": {"variable_mods": {"S": [79.966331]}}}` merges into the block. Giving `--var-mods`
+replaces the default; to add deamidation and keep Met-ox, give `ox,deam`. On DIA-NN, a `--var-mod`
+override ADDS, but a `--fixed-mod` override REPLACES every `--fixed-mod` line, the
+`--cys-alkylation` one included: that is how a user changes the alkylation, and the sidecar's
+`cys_alkylation` then records what the cfg as written fixes on C (`overridden` names the choice
+replaced; the reagent is not known).
+
+| word | modification | DIA-NN cfg | Sage `variable_mods` |
+|---|---|---|---|
+| `ox` | Oxidation (M), UniMod 35, +15.994915 | `--var-mod UniMod:35,15.994915,M` | `{"M": [15.994915]}` |
+| `deam` | Deamidation (N, Q), UniMod 7, +0.984016 | `--var-mod UniMod:7,0.984016,NQ` | `{"N": [0.984016], "Q": [0.984016]}` |
+| `none` | none of these (the explicit off switch) | (nothing) | (nothing) |
+
+DIA-NN's `--var-mods` (the most per peptide) is the number of kinds asked for: `ox,deam` gives
+`--var-mods 2`. Sage always adds protein N-terminal acetyl (`"["`), whatever `--var-mods` says.
+
+**When `--var-mods` is not given** (`estimate_params.VAR_MODS_DEFAULT`), the choice is tagged in
+the rationale's `variable_mods`:
+- **Sage, DDA: Ox(M) is on**, tagged `DEFAULT, not user-confirmed: Ox(M) on by default for DDA
+  (the FragPipe/MaxQuant default; Core decision 2026-10-30)`. Without it, oxidised-methionine
+  peptides are lost. `--var-mods none` turns it off. A Sage DDA search made with 2.14.1 or
+  earlier searched no Ox(M), so the same command now finds more peptides, from a larger search
+  space.
+- **DIA-NN (DIA or DDA): none.** The DIA-NN README notes variable mods don't improve depth for
+  relative quant. `--var-mods ox` adds Ox(M).
+- **Sage, DIA: none** (the quant default). `--var-mods ox` adds it.
+
+The Methods read the modifications from the parameters file (`make_methods.search_record`), so
+they name Oxidation (M) for a default Sage DDA search and say none were searched for a default
+DIA-NN one.
 
 ## SILAC labels (`--labels silac2|silac3 --label-preset ... [--channel-norm spec|run]`)
 
@@ -188,13 +234,16 @@ Every emitted value is tagged in the `rationale`:
   at the top of the sidecar) are what `diann_parallel.mass_acc_measure_plan()` reads, for the
   chain and the single-shot search alike
 - `universal trypsin/LFQ default`
-- `user override: <setting> = <value>, set by Core staff; reason: <why>` — forced with
+- `user override: <setting> = <value>, set by <Core staff|the user>; reason: <why>` — forced with
   `--overrides` (or the workflow's `param_overrides`), with `--override-by` and
   `--override-reason` (`estimate_params.override_source`, the one wording; the sidecar's
   `overrides` holds the same as fields). Never "validated SOP": an override may be a one-off
   workaround (a cohort searched at 25 ppm to cover a ~20 ppm calibration error was once
   recorded as an SOP), and the skill cannot tell. The sidecar travels to the client
-  (`reproducibility/inputs/`, the session zip), so it names the role. Who set it, by name
+  (`reproducibility/inputs/`, the session zip), so it names the role: "Core staff" only when
+  the setter is a login on the Core staff list (`staff.role_for`; `--override-by`, else the
+  login that ran the command), and "the user" otherwise -- a login not on the list, a name, or
+  anyone when there is no usable list to check against. Who set it, by name
   (`--override-by`, or the login that ran it, said to be that), is in the staff-only
   `<params>.staff.json` (`staff.py`; never delivered, never zipped), which `overrides.*.staff_record`
   names. No reason: "reason not given [ask the user -- confirm]"
@@ -207,8 +256,16 @@ is never mistaken for a confirmed setting.
 Two ways, both honored:
 - `param_overrides` in the workflow.yaml, or `--overrides` (e.g. `{"--mass-acc": 8}` or
   `{"fragment_tol": {"ppm": [-15, 15]}}`) — merged on top of the estimate, tagged as a user
-  override with who set it and why (above). A Sage override replaces the derived rationale
-  entry it changes (`precursor_tol` drops `precursor_tol_ppm`). An override of one mass-accuracy flag is a value for that level, so
+  override with who set it and why (above). A Sage override merges at every depth
+  (`estimate_params.deep_merge`): `{"database": {"enzyme": {"missed_cleavages": 1}}}` changes
+  that one value and keeps the rest of the block (fixed C, N-term acetyl, decoys); a list or a
+  tolerance window is replaced whole, and `{}` on a block is refused (it would change
+  nothing: `--cys-alkylation none`, `--var-mods`). Refused too: a key that is not a Sage
+  0.14.7 setting at its level (`{"enzyme": …}` belongs at `database.enzyme`; Sage would
+  ignore it), and a window that is not exactly one `{"ppm": [lo, hi]}` or
+  `{"da": [lo, hi]}`. The rationale entry it lands on shows the merged value and
+  names the override; a derived number it replaces goes (`precursor_tol` drops
+  `precursor_tol_ppm`). An override of one mass-accuracy flag is a value for that level, so
   nothing is measured: the other level is written from DIA-NN's table (`{"--mass-acc": 8}` at
   120k/15k gives `--mass-acc-ms1 7 --mass-acc 8`, plan `pinned`). When the table has no value
   for the other level (outside 30k–240k, resolution unknown, instrument not identified), the

@@ -39,6 +39,15 @@ The 300 s budget is there because, over SSH, a laptop may upload up to ~300 MB o
 to the registry. The subprocess cap is 310 s, so `record_run.py` can report its own timeout.
 The job hook's `record_run` stays at 60 s.
 
+**"Analysis complete" needs the finalize stamp** (SKILL.md golden rule 9;
+`report_files.FINISH_NEEDS["announce"]`). finalize posts just before it writes the stamp, and
+holds the post when it will not stamp. `notify_slack.py analysis-done --session <S>` run by hand
+refuses ("not sent: …", each gap with its command) without a current stamp: no stamp, or one gone
+stale because something it stamped (the report, the Methods, the README …) changed after
+finalize. With `--override-finish "<reason>"` it posts, marked **NOT FINALIZED** with the
+reason, as it does for a stamp finalize wrote under `--override-finish`. The search-done and
+search-failed posts are not gated.
+
 **Every step is non-fatal.**
 - Nothing in the hook changes the job's exit status or what the report guard decided.
 - A missing helper is skipped cleanly.

@@ -33,17 +33,26 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 from session import (paths_for, read_raw_list, raw_list_encoding_note,  # noqa: E402  one place
-                     params_file, NOT_RECORDED, reanalysis_of)
+                     params_file, NOT_RECORDED, reanalysis_of, has_de,
+                     search_engine, search_choice, search_folder, NO_DE_REASON)
 import share_map                                    # noqa: E402
 import make_podcast                                 # noqa: E402  the optional audio discussion
+
+# The client's words for session.NO_DE_REASON, the MANIFEST's reason for each part only a DE
+# makes: that one ends with a task for staff ("If one was wanted, run step 8, then finalize
+# again"), which the delivered AGENTS.md quoted in "Missing parts" (C2 biologist L5). The
+# MANIFEST and the session's own AGENTS.md keep the staff's words.
+NO_DE_CLIENT = "no differential expression was part of this analysis"
 from fetch_fasta import CONT_TAG                    # noqa: E402  the contaminant tag, one place
 
 RAW_HEADER = "# Raw MS files used in this analysis (not copied — too large)."
 
 # DE_*.csv / Expression_Matrix.csv columns. Sources: limma's topTable() (logFC ... B), limpa's
-# dpcQuant() documentation (NPeptides, PropObs; limpa 1.5.0 man/dpcQuant.Rd) and dpcQuant.R (an
-# annotation column survives to the protein row only when all its precursors agree), DIA-NN's
-# README "Main output reference" (Protein.Group, Protein.Names, Genes, Proteotypic).
+# dpcQuant() documentation (PropObs, and the precursor count: NPeptides, which limpa 1.4.0 renamed
+# NPrec -- its NEWS.Rd, "Version 1.4.0": "the output column `genes$NPeptides` from dpcQuant() has
+# been renamed to `genes$NPrec`") and dpcQuant.R (an annotation column survives to the protein row
+# only when all its precursors agree), DIA-NN's README "Main output reference" (Protein.Group,
+# Protein.Names, Genes, Proteotypic).
 COLUMNS = {
     "Protein.Group": "the protein group DIA-NN inferred (UniProt accession(s)); the row key in "
                      "every table",
@@ -51,7 +60,10 @@ COLUMNS = {
     "Genes": "gene names of the proteins in the group (DIA-NN)",
     "Proteotypic": "DIA-NN's proteotypic flag (0/1). limpa keeps it on the protein row only when "
                    "all of that protein's precursors share the value",
-    "NPeptides": "number of precursors quantifying the protein (limpa)",
+    "NPrec": "number of precursors quantifying the protein (limpa >= 1.4; NPeptides in older "
+             "limpa)",
+    "NPeptides": "number of precursors quantifying the protein (limpa < 1.4; NPrec from limpa "
+                 "1.4)",
     "PropObs": "fraction of the protein's precursor intensities that were OBSERVED rather than "
                "missing, over all its precursors and samples (limpa) -- low = mostly inferred",
     "logFC": "log2 fold change for the contrast: first group minus second (contrast `A-B`; the "
@@ -64,6 +76,15 @@ COLUMNS = {
                  "the proteins tested in this contrast (NA = not tested)",
     "B": "log-odds that the protein is differentially expressed (limma)",
 }
+
+
+def precursor_count_column(columns):
+    """limpa's per-protein precursor count among a DE table's `columns`: "NPrec" (limpa >= 1.4),
+    else "NPeptides" (older limpa), else None. Either counts precursors, never peptides (I40)."""
+    have = set(columns or ())
+    return "NPrec" if "NPrec" in have else "NPeptides" if "NPeptides" in have else None
+
+
 QC_COLUMNS = {
     "Sample": "the run (conditions.csv File.Name)", "Group": "its group",
     "Detected": "proteins with at least one precursor actually observed in this run",
@@ -75,6 +96,8 @@ QC_COLUMNS = {
 # Only ever used to POINT at contrasts against them; the user's design says what they are.
 from experiment_type import IP_CONTROL_NAME  # noqa: E402,F401  one definition, re-exported
 import experiment_type  # noqa: E402  the control groups (controls_in)
+import custom_work  # noqa: E402  work folded in at finalize (output/custom)
+import report_files  # noqa: E402  where the skill's README / AGENTS.md go (skill_doc_targets)
 
 
 # ---------------------------------------------------------------------------- reading
@@ -140,18 +163,28 @@ def design_file(de):
 
 def raw_record(p):
     """(raw paths, where the list came from): input/raw_files.txt, else the search's own record
-    of what it read -- search_provenance.json `files`, output/search/file_list.txt -- else the
+    of what it read -- search_provenance.json `files`, file_list.txt beside it, wherever the
+    search is (session.search_record: with several, the one the DE read) -- else the
     reproducibility bundle's run_manifest.json."""
     raws = read_raw_list(p["session_dir"])
     if raws:
         return raws, "input/raw_files.txt"
-    sp = _load(p["search_prov"]) or {}
+    folder = search_folder(p)              # none when the session's records leave it open
+    if not folder:
+        return _raws_from_bundle(p)
+    sp_path = os.path.join(folder, "search_provenance.json")
+    rel = lambda x: os.path.relpath(x, p["session_dir"]).replace(os.sep, "/")  # noqa: E731
+    sp = _load(sp_path) or {}
     if isinstance(sp.get("files"), list) and sp["files"]:
-        return [str(x) for x in sp["files"]], "output/search/search_provenance.json"
-    fl = os.path.join(p["search_out"], "file_list.txt")
+        return [str(x) for x in sp["files"]], rel(sp_path)
+    fl = os.path.join(os.path.dirname(sp_path), "file_list.txt")
     lines = [ln.strip() for ln in _text(fl).splitlines() if ln.strip() and not ln.startswith("#")]
     if lines:
-        return lines, "output/search/file_list.txt"
+        return lines, rel(fl)
+    return _raws_from_bundle(p)
+
+
+def _raws_from_bundle(p):
     rm = _load(os.path.join(p["repro_dir"], "run_manifest.json")) or {}
     raw = (rm.get("inputs") or {}).get("raw")
     if isinstance(raw, list) and raw:
@@ -169,7 +202,7 @@ def ensure_raw_list(p):
     raws, src = raw_record(p)
     if not raws:
         return "SKIPPED", ("no record of the raw files: no search_provenance.json `files`, "
-                           "output/search/file_list.txt or run_manifest.json")
+                           "file_list.txt in the search folder, or run_manifest.json")
     os.makedirs(os.path.dirname(p["raw_list"]), exist_ok=True)
     with open(p["raw_list"], "w", encoding="utf-8") as fh:
         fh.write(f"{RAW_HEADER}\n# Written by session.py from {src}: the paths are where the "
@@ -334,6 +367,38 @@ def _de_block(de):
     return de_block_sentence(de)
 
 
+# An identifications-only search's record of how identifications.tsv was filtered, per engine
+# (run_search.py SAGE_IDS_RECORD / FRAGPIPE_IDS_RECORD)
+IDS_RECORDS = ("sage_identifications.json", "fragpipe_identifications.json")
+
+
+def _search_quantified(search_dir):
+    """sage_lfq_check.search_quantified of the session's search folder; True without one."""
+    if not search_dir:
+        return True
+    import sage_lfq_check
+    return sage_lfq_check.search_quantified(search_dir)
+
+
+def no_de_condition_caveat(groups, acq=None):
+    """THE caveat for an analysis with no DE whose study has conditions (C2 statistician M3): the
+    differences between them were not tested. `groups`: {group: number of runs}. None with fewer
+    than two groups. The analysis brief, the README and AGENTS.md all say it in these words."""
+    if len(groups or {}) < 2:
+        return None
+    single = all(v == 1 for v in groups.values())
+    s = ("Each condition has one run, so differences between conditions in what was identified "
+         "or in intensity are not tested and cannot be separated from run-to-run variation"
+         if single else
+         "No differential expression was run, so differences between conditions in what was "
+         "identified or in intensity are not tested")
+    s += "; do not present them as differences between conditions"
+    if str(acq or "").upper() == "DDA":
+        s += (" (in DDA, which precursors are fragmented varies from run to run, so a protein "
+              "missing from one run is not shown to be absent from that sample)")
+    return s + "."
+
+
 def gather(session_dir, registry=None, registry_note=None, pending=(), located_at=None):
     """Every fact the three documents state, read from the session. `registry`: the Core
     run-registry folder of this session, when known (record_run.locate() or its result).
@@ -343,12 +408,30 @@ def gather(session_dir, registry=None, registry_note=None, pending=(), located_a
     p = paths_for(session_dir)
     sd = p["session_dir"]
     de = _load(os.path.join(p["de_dir"], "de_provenance.json")) or {}
-    sp = _load(p["search_prov"]) or {}
+    # the search wherever it is (output/search_dda/ ...): session.search_choice, the one answer;
+    # records and none chosen -> no search folder (search_folder None), and the documents say why
+    choice = search_choice(p, de.get("input"))
+    sp_path = choice["path"]
+    sp = (_load(sp_path) or {}) if sp_path else {}
+    search_dir = search_folder(p, choice)
     wf = _load(p["workflow_manifest"]) or {}
     rm = _load(os.path.join(p["repro_dir"], "run_manifest.json")) or {}
     fm = _load(p["fasta_meta"]) or {}
     q = rm.get("query") or {}
-    f = {"p": p, "name": os.path.basename(sd), "de": de, "sp": sp, "wf": wf, "fm": fm}
+    f = {"p": p, "name": os.path.basename(sd), "de": de, "sp": sp, "wf": wf, "fm": fm,
+         "search_dir": search_dir, "search_choice": choice,
+         # the session has a DE (session.has_de: run_de.R's record): what the documents say about
+         # the tables, the Methods and the review checklist follows it (L5b review L2, rule 1)
+         "has_de": has_de(p),
+         # whether the search quantified (sage_lfq_check.search_quantified, the predicate the DE
+         # gate shares): an identifications-only search's one table is identifications.tsv,
+         # which the README and AGENTS.md name (C2 biologist M2)
+         "search_quantified": _search_quantified(search_dir)}
+    # the skill's README / AGENTS.md go beside a hand-written one, never over it
+    targets = report_files.skill_doc_targets(sd)
+    f["doc_paths"] = {n: targets[n] for n in report_files.SKILL_DOCS}
+    f["doc_names"] = {n: os.path.basename(targets[n]) for n in report_files.SKILL_DOCS}
+    f["kept_docs"] = targets["kept"]
     rel = lambda path: os.path.relpath(path, sd).replace(os.sep, "/")
     # a 0-byte file (a write that died) is not linked as if it held the thing it is named for
     has = lambda path: os.path.isdir(path) or (os.path.isfile(path) and
@@ -363,17 +446,17 @@ def gather(session_dir, registry=None, registry_note=None, pending=(), located_a
     f["taxid"] = fm.get("taxid") or wf.get("organism_taxid") or q.get("organism_taxid")
     f["instrument"] = q.get("instrument") or next(iter(wf.get("instruments") or []), None)
     f["acquisition"] = (wf.get("acquisition") or q.get("acquisition") or None)
-    eng = sp.get("engine") or (wf.get("engine") or {}).get("name")
+    # the engine and version by the one rule (session.search_engine: a record's null version is
+    # never the manifest's pin; records and none chosen name no engine -- T44 review F4/F5)
+    se = search_engine(p, de.get("input"))
     try:
         from make_methods import ENGINE_LABEL          # the one engine-name table
     except Exception:
         ENGINE_LABEL = {}
-    f["engine"] = ENGINE_LABEL.get(str(eng).lower(), eng) if eng else None
-    f["engine_version"] = sp.get("version")
-    f["engine_version_src"] = "search_provenance.json" if sp.get("version") else None
-    if not f["engine_version"] and (wf.get("engine") or {}).get("version"):
-        f["engine_version"] = wf["engine"]["version"]
-        f["engine_version_src"] = "workflow manifest pin -- the search's own record is not here"
+    f["engine"] = ENGINE_LABEL.get(se["engine"], se["engine"]) if se["engine"] else None
+    f["engine_version"] = se["version"]
+    f["engine_version_src"] = se["source"] if se["version"] else None
+    f["engine_note"] = se["choice"].get("short") if se["note"] else None
     raws, raw_src = raw_record(p)
     f["raws"], f["raw_src"] = raws, raw_src
     conds = []
@@ -431,12 +514,16 @@ def gather(session_dir, registry=None, registry_note=None, pending=(), located_a
         "reproduce_md": os.path.join(p["repro_dir"], "REPRODUCE.md"),
         "output_files": p["output_files_md"], "manifest": p["manifest_txt"],
         "conditions": p["conditions"], "raw_list": p["raw_list"], "fasta_meta": p["fasta_meta"],
-        "search_prov": p["search_prov"], "report": os.path.join(p["search_out"], "report.parquet"),
+        "search_prov": sp_path or (p["search_prov"] if search_dir else None),
+        "report": os.path.join(search_dir, "report.parquet") if search_dir else None,
+        "identifications": os.path.join(search_dir, "identifications.tsv") if search_dir else None,
+        "ids_record": next((x for x in (os.path.join(search_dir, n) for n in IDS_RECORDS)
+                            if os.path.isfile(x)), None) if search_dir else None,
         "params": params_file(p),
         "figures_json": os.path.join(p["figures_dir"], "figures.json"),
         "audit": os.path.join(out, "AUDIT.md"),
         "quality": os.path.join(out, "SAMPLE_QUALITY.md"),
-        "agents": os.path.join(sd, "AGENTS.md"),
+        "agents": targets["AGENTS.md"],
         "podcast": os.path.join(out, "podcast", "podcast.json"),
         "conversation": os.path.join(sd, "logs", "conversation", "conversation.md"),
         "decisions": os.path.join(sd, "logs", "decisions.md"),
@@ -449,7 +536,8 @@ def gather(session_dir, registry=None, registry_note=None, pending=(), located_a
     f["audit_overall"], f["audit_notes"] = _audit_notes(p)
     f["quality_notes"] = _quality_notes(p)
     f["manifest_lines"] = _manifest(p)
-    fran = _load(os.path.join(p["search_out"], "fran_deposit.json")) or {}
+    f["custom"] = custom_work.load(out)          # finalize --report/--methods/--code-dir/...
+    fran = (_load(os.path.join(search_dir, "fran_deposit.json")) or {}) if search_dir else {}
     f["fran"] = fran
 
     # --- where it all lives on HIVE
@@ -481,11 +569,15 @@ def gather(session_dir, registry=None, registry_note=None, pending=(), located_a
                   "how": f"{NOT_RECORDED}: no raw-file list in this session"})
     res = sp.get("result") if isinstance(sp.get("result"), dict) else {}
     s_out = res.get("out") or (os.path.dirname(res["report"]) if res.get("report") else None)
-    if not s_out and sp:                        # the search ran in this session's output/search
-        s_out = p["search_out"]
-    L.append(dict(loc(s_out), what="Search output (report.parquet, logs)") if s_out else
+    if not s_out and sp:                        # the search ran in this session, where it is
+        s_out = search_dir
+    unchosen = (f.get("search_choice") or {}).get("short") if not f.get("search_dir") else None
+    L.append(dict(loc(s_out), what="Search output ("
+                  + ("report.parquet" if f.get("search_quantified", True) else
+                     "identifications.tsv: identifications only") + ", logs)") if s_out else
              {"what": "Search output", "path": None, "hive": None, "windows": None, "mac": None,
-              "how": f"{NOT_RECORDED}: search_provenance.json names no output folder"})
+              "how": f"{NOT_RECORDED}: " + (unchosen or "search_provenance.json names no "
+                                                       "output folder")})
     fasta = sp.get("fasta") or fm.get("fasta")
     L.append(dict(loc(fasta), what="The FASTA the search read") if fasta else
              {"what": "The FASTA the search read", "path": None, "hive": None, "windows": None,
@@ -503,11 +595,33 @@ def gather(session_dir, registry=None, registry_note=None, pending=(), located_a
 
 
 # ---------------------------------------------------------------------------- rendering
-def _link(f, key, text):
+# README.md's words for its file names (T33, I24): Bioshare shows a folder's README.md inside the
+# folder page and rewrites src=, never href=, so every relative link there opened "Unable to
+# locate the files" -- the rule core_submission._item(link=False) applies to a delivery's README.
+README_MD_NOT_LINKS = ("The file names below are not links: in Bioshare, or wherever this file "
+                       "is shown inside its folder's page, open each one from the file list.")
+
+
+def _link(f, key, text, for_html=False):
+    """A file the README points at, or None when the session has none. README.md (`for_html`
+    False): "<text>: `<relative name>`" -- no link (README_MD_NOT_LINKS). README.html: a link to
+    the file; a folder is linked by its first file (sorted, not hidden), "<text> (folder
+    <name>/)", never the folder itself, which opens nothing in Bioshare or from a zip; an empty
+    folder is named, not linked."""
     path = f["files"].get(key)
     if not path:
         return None
-    rel = f["rel"](path) + ("/" if os.path.isdir(path) else "")
+    folder = os.path.isdir(path)
+    rel = f["rel"](path) + ("/" if folder else "")
+    if not for_html:
+        return f"`{rel}`" if rel == text else f"{text}: `{rel}`"
+    if folder:
+        first = next((n for n in sorted(os.listdir(path)) if not n.startswith(".")
+                      and os.path.isfile(os.path.join(path, n))), None)
+        name = os.path.basename(path.rstrip(os.sep))
+        if first is None:
+            return f"{text}: `{rel}` (empty)"
+        rel, text = f["rel"](os.path.join(path, first)), f"{text} (folder {name}/)"
     return f"[{text}]({urllib.parse.quote(rel, safe='/')})"
 
 
@@ -550,7 +664,8 @@ def summary_lines(f):
     de = f["de"]
     org = (f"{f['organism']} (taxid {f['taxid']})" if f["organism"] else
            f"taxid {f['taxid']}" if f["taxid"] else NOT_RECORDED)
-    eng = f"{f['engine']} {f['engine_version'] or ''}".strip() if f["engine"] else NOT_RECORDED
+    eng = (f"{f['engine']} {f['engine_version'] or ''}".strip() if f["engine"] else
+           f"{NOT_RECORDED} ({f['engine_note']})" if f.get("engine_note") else NOT_RECORDED)
     ro = f.get("reanalysis_of") or {}
     L = ([f"- {f['submission']}"] if f.get("submission") else []) + (
         [f"- Re-analysis of `{ro['session']}`"
@@ -567,10 +682,14 @@ def summary_lines(f):
         L.append(f"- Differential expression: {de.get('display_label') or NOT_RECORDED}")
         L.append(f"- Significance: {significance_text(de)}")
     else:
-        L.append("- Differential expression: not run in this session (no "
-                 "output/tables/de_provenance.json)")
+        L.append("- Differential expression: none in this analysis")
+    if not f.get("search_quantified", True):
+        L.append("- Search: identifications only (no quantities)")
     if f["groups"]:
         L.append("- Groups: " + ", ".join(f"{g} ({n})" for g, n in sorted(f["groups"].items())))
+    caveat = no_de_condition_caveat(f["groups"], f.get("acquisition")) if not de else None
+    if caveat:
+        L.append(f"- **Conditions:** {caveat}")
     return L
 
 
@@ -592,6 +711,21 @@ def _named_tables(f):
             ("quality", "sample quality and contamination flags" + both("quality")))
 
 
+def _tables_row(f):
+    """The README's line for output/tables: the DE's tables when the session has a DE; else the
+    files the folder holds (init makes it empty), or None -- no line -- when it holds none."""
+    if f.get("has_de"):
+        return ((_tables_summary(f) or "DE results (DE_*.csv), Expression_Matrix.csv, methods.txt")
+                + ", de_provenance.json, reproducibility_log.R (the analysis as R)")
+    d = f["p"]["de_dir"]
+    held = sorted(n for n in (os.listdir(d) if os.path.isdir(d) else ())
+                  if not n.startswith("."))
+    if not held:
+        return None
+    return ("tables from this session (no differential expression was run): "
+            + ", ".join(held[:8]) + (f" and {len(held) - 8} more" if len(held) > 8 else ""))
+
+
 def _tables_summary(f):
     """The DE pipeline's own one-line description of its tables (de_provenance.json
     `tables_summary`), or None -- then run_de.R's tables are described."""
@@ -603,11 +737,15 @@ def readme_md(f, for_html=False):
     """THE README source. README.md is this text; README.html is this text rendered (for_html
     drops only the line pointing the Markdown reader at the .html)."""
     de, files = f["de"], f["files"]
+    names = f.get("doc_names") or {}
+    agents_name = names.get("AGENTS.md", "AGENTS.md")
     L = [f"# {f['name']}", "",
          "Proteomics results from the UC Davis Proteomics Core pipeline "
          "(the `ucdavis-proteomics-core-pipeline` skill)."]
     if not for_html:
-        L += ["", "**Open `README.html`** (double-click it) — the same page, with working links."]
+        L += ["", f"**Open `{names.get('README.html', 'README.html')}`** (double-click it) — the "
+                  f"same page, with working links. {README_MD_NOT_LINKS}"]
+    L += kept_note(f, "README.md")
     start = []
     for key, text, what in (
             ("report_html", "Analysis report", " — figures, QC and the interpretation in one page"),
@@ -627,12 +765,18 @@ def readme_md(f, for_html=False):
                                          + (", protein-set tests `Sets_*.csv`"
                                             if f.get("sets_files") else "")),
             ("howto_html", "How to deposit the data in PRIDE / MassIVE", ""),
-            ("agents", "AGENTS.md", " — for an AI assistant: give it this file with the folder"),
+            ("agents", agents_name, " — for an AI assistant: give it this file with the folder"),
             ("manifest", "MANIFEST.txt", " — what this export contains, and anything that could "
                                          "not be made (with the reason)")):
-        link = _link(f, key, text)
+        link = _link(f, key, text, for_html)
         if link:
             start.append(f"- {link}{what}")
+    ids = _link(f, "identifications", "Identifications", for_html)
+    if ids and not f.get("search_quantified", True):
+        # an identifications-only search's one result table (C2 biologist M2)
+        start.append(f"- {ids} — the identifications, per run (identifications only: "
+                     "no quantities)" + (f"; how they were filtered: `{f['rel'](files['ids_record'])}`"
+                                         if files.get("ids_record") else ""))
     if files.get("report_html") and not files.get("report_pdf"):
         # why is MANIFEST.txt's "Report PDF" line (finalize, html_to_pdf.py) -- not assumed here
         start.append("- `output/Analysis_Report.pdf` — not made"
@@ -640,9 +784,11 @@ def readme_md(f, for_html=False):
                         if files.get("manifest") else "")
                      + ": open `Analysis_Report.html`, Print, Save as PDF")
     if not files.get("agents"):
-        start.append("- `AGENTS.md` — for an AI assistant: give it this file with the folder")
-    items = ([make_podcast.readme_item_md(f["p"]["output_dir"], f["p"]["session_dir"]),
-              make_podcast.share_item_md(f["p"]["output_dir"], f["p"]["session_dir"])]
+        start.append(f"- `{agents_name}` — for an AI assistant: give it this file with the folder")
+    items = ([make_podcast.readme_item_md(f["p"]["output_dir"], f["p"]["session_dir"],
+                                          link=for_html),
+              make_podcast.share_item_md(f["p"]["output_dir"], f["p"]["session_dir"],
+                                         link=for_html)]
              if files.get("podcast") else [])
     at = 1 if files.get("report_html") else 0    # after the report it discusses
     start[at:at] = [x for x in items if x]
@@ -660,16 +806,22 @@ def readme_md(f, for_html=False):
                       "the search parameters"
                       + (", raw_files.txt (where the raw data are)" if files.get("raw_list")
                          else "")),
-            ("output/search", "the search output (report, engine logs, search_provenance.json)"),
-            ("output/tables", (_tables_summary(f) or "DE results (DE_*.csv), "
-                               "Expression_Matrix.csv, methods.txt")
-                              + ", de_provenance.json, reproducibility_log.R (the analysis as R)"),
+            *([(f["rel"](f["search_dir"]),
+                "the search output (report, engine logs, search_provenance.json)"
+                if f.get("search_quantified", True) else
+                "the search output (identifications.tsv and how it was filtered, engine logs, "
+                "search_provenance.json): identifications only, no quantities")]
+              if f.get("search_dir") else
+              [(f["rel"](os.path.dirname(c)), "a search output -- "
+                + f["search_choice"]["short"] + " (MANIFEST.txt says why)")
+               for c in f["search_choice"]["candidates"]]),
+            ("output/tables", _tables_row(f)),
             ("output/figures", "plots; captions in figures.json"),
             ("output/reproducibility", "the pinned bundle for re-running the search too"),
             ("output/DATA_SUBMISSION", "everything to deposit the data in PRIDE / MassIVE"),
             ("output/OUTPUT_FILES.md", "a catalog of every file"),
             ("scripts", "the skill scripts that ran"), ("logs", "commands.log + engine logs")):
-        if os.path.exists(os.path.join(f["p"]["session_dir"], path)):
+        if what and os.path.exists(os.path.join(f["p"]["session_dir"], path)):
             L.append(f"| `{path}` | {what} |")
         if path == "output/tables":                  # the files a reader needs by name
             L += [f"| `{f['rel'](files[k])}` | {_esc(what)} |" for k, what in _named_tables(f)
@@ -681,19 +833,23 @@ def readme_md(f, for_html=False):
                     os.path.join(f["p"]["output_dir"], "skyline"), "output/skyline")]
             except Exception as e:                   # said in the table, never dropped
                 L.append(f"| `output/skyline` | not described: {_esc(type(e).__name__)} |")
+    L += custom_lines(f)
     L += ["", "## Reproduce", ""]
-    L.append("**The analysis, as code:** `output/tables/reproducibility_log.R` — the whole "
-             "differential-expression analysis in plain R with every value written out."
-             if files.get("repro_R") else
-             "**The analysis, as code:** not in this folder (no reproducibility_log.R).")
-    L += ["", ("**The whole run, pinned** (search included, takes hours, needs the raw data on "
+    if files.get("repro_R") or f.get("has_de"):
+        L.append("**The analysis, as code:** `output/tables/reproducibility_log.R` — the whole "
+                 "differential-expression analysis in plain R with every value written out."
+                 if files.get("repro_R") else
+                 "**The analysis, as code:** not in this folder (no reproducibility_log.R).")
+        L.append("")
+    L += [("**The whole run, pinned** (search included, takes hours, needs the raw data on "
                "HIVE): `output/reproducibility/REPRODUCE.md`." if files.get("reproduce_md") else
                "**The whole run, pinned:** not in this folder (no REPRODUCE.md).")]
     L += ["", "## Methods", ""]
     L.append((f"**For the paper:** `{f['rel'](files['methods_md'])}` (Word: the `.docx` beside it)"
-              " — LC-MS acquisition, the search, the database, the DE and the UC Davis "
-              "instrument-grant acknowledgment. Resolve every `[... — confirm]` tag before "
-              "publishing.") if files.get("methods_md") else
+              " — LC-MS acquisition, the search, the database"
+              + (", the DE and" if f.get("has_de") else " and")
+              + " the UC Davis instrument-grant acknowledgment. Resolve every `[... — confirm]` "
+              "tag before publishing.") if files.get("methods_md") else
              "**For the paper:** no publication Methods in this folder — `MANIFEST.txt` says why.")
     if files.get("methods_txt"):
         L += ["", "The DE step's own record is `output/tables/methods.txt`."]
@@ -708,7 +864,7 @@ def readme_md(f, for_html=False):
           ("`MANIFEST.txt` lists every part of the Methods and deposit package as [OK], or "
            "[SKIPPED] with the reason." if files.get("manifest") else
            "This session has no `MANIFEST.txt` (it was finalized before the skill wrote one).")
-          + " `AGENTS.md` is a guide to this folder for an AI agent.", ""]
+          + f" `{agents_name}` is a guide to this folder for an AI agent.", ""]
     if f.get("feedback"):                        # a Core run: the Core's survey
         import core_submission
         L += [core_submission.feedback_line(
@@ -716,6 +872,11 @@ def readme_md(f, for_html=False):
     L += [f"*Written {datetime.date.today().isoformat()} by `session.py` from this session's "
           "records.*", ""]
     return "\n".join(L)
+
+
+# AGENTS.md rows only a DE fills (None: the DE tables): one "none in this analysis" line instead
+AGENTS_DE_ONLY = ("de_prov", "methods_txt", None, "sets", "expr", "det_matrix", "qc_di",
+                  "cont_removed", "cont_share", "repro_R")
 
 
 def agents_md(f, for_delivery=False):
@@ -728,6 +889,8 @@ def agents_md(f, for_delivery=False):
          "Generated by `session.py` from this session's own records. Every fact here is read "
          "from a file in this folder; where a file below is named authoritative, it wins over "
          "this summary and over `AI_Analysis_Report.md` (an interpretation, not a record).", ""]
+    note = [] if for_delivery else kept_note(f, "AGENTS.md")   # a delivery has no hand copy
+    L += note[1:] + [""] * bool(note)
     L += ["## The study", "", *summary_lines(f)]
     if f["contrasts"]:
         adjp = de.get("adjp")
@@ -766,11 +929,15 @@ def agents_md(f, for_delivery=False):
                    ("Search engine, the version that ran, exact command", "search_prov"),
                    ("Search parameters as run", "params"),
                    ("Precursor-level search results", "report"),
+                   ("Identifications, per run (identifications only: no quantities)",
+                    "identifications"),
+                   ("How the identifications were filtered", "ids_record"),
                    ("The database: organism, UniProt release, contaminants", "fasta_meta"),
                    ("Where the raw data are", "raw_list"),
                    ("Figure captions", "figures_json"),
                    ("Pitfall audit", "audit"), ("Sample quality / contamination", "quality"),
-                   ("Publication Methods (LC-MS + search + DE + acknowledgment)", "methods_md"),
+                   ("Publication Methods (LC-MS + search + "
+                    + ("DE + " if f.get("has_de") else "") + "acknowledgment)", "methods_md"),
                    ("The report of record (QC, figures, interpretation)", "report_html"),
                    ("The same report as plain text: sections, figure captions and the numbers "
                     "each figure shows, top proteins per contrast", "report_twin"),
@@ -778,6 +945,17 @@ def agents_md(f, for_delivery=False):
                    ("What this export contains, and what is missing", "manifest"),
                    ("The DE as runnable R", "repro_R"),
                    ("Re-running everything", "reproduce_md")):
+        # an identifications-only search has no precursor report, and a session with no DE has
+        # no DE files: their rows fold into one line each, never a column of "not in this
+        # folder" (C2 biologist M2)
+        if key in ("identifications", "ids_record") and f.get("search_quantified", True):
+            continue
+        if key == "report" and not f.get("search_quantified", True):
+            continue
+        if key in AGENTS_DE_ONLY and not f.get("has_de") and not files.get(key):
+            if key == "de_prov":
+                L.append("| Differential expression | none in this analysis |")
+            continue
         if key is None:
             n = len(f["de_files"])
             v = (f"`output/tables/DE_<pipeline>_<contrast>.csv` ({n} file{'s' if n != 1 else ''})"
@@ -929,6 +1107,8 @@ def agents_md(f, for_delivery=False):
                  "(`sets_provenance.json` `reading`):")
         L += [f"  - {r}" for r in f["sets"]["reading"]]
     skipped = [ln for ln in f["manifest_lines"] if ln.startswith("[SKIPPED]")]
+    if for_delivery:                    # the client's copy: never a task for staff
+        skipped = [ln.replace(NO_DE_REASON, NO_DE_CLIENT) for ln in skipped]
     if skipped:
         L.append("- **Missing parts** (MANIFEST.txt): a [SKIPPED] part is absent, not empty — "
                  + "; ".join(re.sub(r"\s+", " ", s[len("[SKIPPED]"):]).strip() for s in skipped))
@@ -947,10 +1127,13 @@ def agents_md(f, for_delivery=False):
     if not (f["audit_overall"] or f["audit_notes"] or f["quality_notes"] or sub_notes):
         L.append("- No AUDIT or SAMPLE_QUALITY record in this folder.")
 
+    if not for_delivery:                         # not delivered: the session's own
+        L += custom_lines(f, for_agents=True)
     L += ["", "## Reproduce", ""]
-    L.append(f"- The DE: `{rel(files['repro_R'])}` (plain R, every value literal; it reads "
-             f"`{os.path.basename(str(de.get('input') or 'the search report'))}`)."
-             if files.get("repro_R") else "- The DE as R: not in this folder.")
+    if files.get("repro_R") or f.get("has_de"):       # no DE: nothing to reproduce as R (C2 L5)
+        L.append(f"- The DE: `{rel(files['repro_R'])}` (plain R, every value literal; it reads "
+                 f"`{os.path.basename(str(de.get('input') or 'the search report'))}`)."
+                 if files.get("repro_R") else "- The DE as R: not in this folder.")
     L.append(f"- Search + DE: `{rel(files['reproduce_md'])}` — needs the raw data, which are on "
              "HIVE (below), not here." if files.get("reproduce_md") else
              "- The full run: no REPRODUCE.md in this folder.")
@@ -979,6 +1162,48 @@ def agents_md(f, for_delivery=False):
     return "\n".join(L)
 
 
+def kept_note(f, doc):
+    """The lines at the top of the skill's README ("README.md") or AGENTS.md ("AGENTS.md") when
+    the folder holds one written by hand (report_files.skill_doc_targets): it is kept as it is,
+    and this is the skill's copy beside it, linking the skill's other document. [] otherwise."""
+    names, kept = f.get("doc_names") or {}, f.get("kept_docs") or []
+    hand = [n for n in (("README.md", "README.html") if doc == "README.md" else ("AGENTS.md",))
+            if n in kept]
+    if not hand:
+        return []
+    which = " and ".join(f"`{n}`" for n in hand)
+    one = len(hand) == 1
+    if doc == "README.md":
+        return ["", f"> **{which} in this folder {'was' if one else 'were'} written by hand**, and "
+                    f"{'is' if one else 'are'} kept as {'it is' if one else 'they are'}: read "
+                    f"{'it' if one else 'them'} first. This is the skill's README, written from "
+                    f"the session's records; the skill's guide for an AI agent is "
+                    f"`{names.get('AGENTS.md', 'AGENTS.md')}`."]
+    return ["", f"> **{which} in this folder was written by hand**, and is kept as it is: read it "
+                f"too. This guide is the skill's, written from the session's records; the skill's "
+                f"README is `{names.get('README.md', 'README.md')}`."]
+
+
+def custom_lines(f, for_agents=False):
+    """README / AGENTS.md lines for the work folded in at finalize (custom_work.py: --report,
+    --methods, --code-dir, --extra-dir), from output/custom/custom.json; [] when there is none."""
+    items = f.get("custom") or []
+    if not items:
+        return []
+    rec = f"output/{custom_work.CUSTOM_DIR}/{custom_work.RECORD}"
+    L = ["", "## Work done outside the skill's steps (output/custom)", "",
+         "Folded in at finalize (`session.py finalize --report / --methods / --code-dir / "
+         f"--extra-dir`) from where it was made; `{rec}` gives each file's sha256 and its "
+         "source. The skill did not write or check it."
+         + (" Treat it as its author's own work: the records above are authoritative for what "
+            "the skill did, and a number from this code is only as good as the code -- read it "
+            "first." if for_agents else ""), ""]
+    for i in items:
+        dest = str(i.get("dest") or "")
+        L.append(f"- `{dest}{'/' if i.get('dir') else ''}` — {_esc(custom_work.describe(i))}")
+    return L
+
+
 def reviewing_lines(f):
     """AGENTS.md's checklist for an AI reviewing the analysis (reproducibility, not the biology),
     naming the records this session has: the decisions log, the saved conversation
@@ -998,9 +1223,13 @@ def reviewing_lines(f):
                                      "`MANIFEST.txt` and the provenance files (no decisions log, "
                                      "conversation or commands.log is in this folder)")
             + ", then check:", "",
-            "- **Groups and contrasts:** were the groups and contrasts analysed the ones the user "
-            f"confirmed? Compare `input/{design_file(f.get('de'))}` and the contrasts in "
-            "`output/tables/de_provenance.json` with what the user agreed to.",
+            ("- **Groups and contrasts:** were the groups and contrasts analysed the ones the "
+             f"user confirmed? Compare `input/{design_file(f.get('de'))}` and the contrasts in "
+             "`output/tables/de_provenance.json` with what the user agreed to."
+             if f.get("has_de") else
+             "- **No differential expression:** this session has no differential expression "
+             "(no `output/tables/de_provenance.json`). Was none wanted? Check what the user asked "
+             "for; `MANIFEST.txt`'s [SKIPPED] lines say what a DE would have made."),
             "- **Every number traces to a command:** does each count, threshold and result in "
             "the report trace to a logged command (`logs/commands.log`) and a table in "
             "`output/tables/`?",
@@ -1036,8 +1265,11 @@ def _write_whole(path, text):
 
 def write_docs(session_dir, man=None, registry=None, registry_note=None, pending=(),
                located_at=None):
-    """README.md, README.html and AGENTS.md at the session root. Each is its own [OK]/[SKIPPED]
-    line when `man` (make_deposit.Manifest) is given -- one that fails never stops the others.
+    """README.md, README.html and AGENTS.md at the session root -- or, beside one written by hand
+    (report_files.skill_doc_targets, which is never changed), README.skill.md / .skill.html /
+    AGENTS.skill.md, with an [INFO] line saying so. Each is its own [OK]/[SKIPPED] line when
+    `man` (make_deposit.Manifest) is given -- one that fails never stops the others. Each ends with
+    report_files.SKILL_DOC_MARKER, so the next finalize knows it for the skill's own.
     Returns {"readme", "readme_html", "agents"} with the paths written (None if not)."""
     written = {"readme": None, "readme_html": None, "agents": None}
 
@@ -1048,24 +1280,39 @@ def write_docs(session_dir, man=None, registry=None, registry_note=None, pending
         return True
 
     f = gather(session_dir, registry, registry_note, pending, located_at)
-    sd = f["p"]["session_dir"]
+    to = f["doc_paths"]
+    for name, what in (("README.md", "README"), ("README.html", "README page"),
+                       ("AGENTS.md", "guide")):
+        if name in f["kept_docs"] and man is not None and hasattr(man, "info"):
+            man.info(f"{name} (written by hand)", f"kept as written: it has no skill marker; the "
+                                                  f"skill's {what} is {f['doc_names'][name]}")
+
+    def marked(text):
+        return text.rstrip("\n") + "\n\n" + report_files.SKILL_DOC_MARKER + "\n"
 
     # Each document is rendered to a string first, then written to <name>.part and renamed over
     # the old one: a render that fails leaves the previous file whole (or none) -- never the
     # 0-byte README.html that an open-then-render left, and zipped, before.
+    # each one recorded as written (report_files.record_skill_doc): edited later, it is kept
     def _md():
-        _write_whole(f["p"]["readme"], readme_md(f))
-        written["readme"] = f["p"]["readme"]
+        _write_whole(to["README.md"], marked(readme_md(f)))
+        report_files.record_skill_doc(to["README.md"], "session_docs.py")
+        written["readme"] = to["README.md"]
 
     def _html():
-        path = os.path.join(sd, "README.html")
-        _write_whole(path, _render_html(readme_md(f, for_html=True), f["name"]))
-        written["readme_html"] = path
+        page = _render_html(readme_md(f, for_html=True), f["name"])
+        head, sep, rest = page.partition("\n")      # after <!DOCTYPE html>: invisible, first
+        page = (head + sep + report_files.SKILL_DOC_MARKER + "\n" + rest
+                if head.lower().startswith("<!doctype") else report_files.SKILL_DOC_MARKER
+                + "\n" + page)
+        _write_whole(to["README.html"], page)
+        report_files.record_skill_doc(to["README.html"], "session_docs.py")
+        written["readme_html"] = to["README.html"]
 
     def _agents():
-        path = os.path.join(sd, "AGENTS.md")
-        _write_whole(path, agents_md(f))
-        written["agents"] = path
+        _write_whole(to["AGENTS.md"], marked(agents_md(f)))
+        report_files.record_skill_doc(to["AGENTS.md"], "session_docs.py")
+        written["agents"] = to["AGENTS.md"]
 
     # AGENTS.md first, so the README's link to it is to a file that exists
     section("AGENTS.md (guide for an AI agent)", _agents)

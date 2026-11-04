@@ -37,10 +37,10 @@ workflow expects (`database.decoy-tag=rev_` in the diaPASEF preset):
 ```bash
 PH=<fragpipe>/tools/Philosopher/philosopher-v5.1.3-RC9
 cd <somewhere writable>
-cp search.fasta target.fasta
+cp search.fasta search.fasta.meta.json .   # keep the name: run_search.py finds the sidecar beside the .fas
 "$PH" workspace --init
-"$PH" database --custom ./target.fasta --prefix rev_
-# -> <date>-decoys-target.fasta.fas   (targets + decoys)
+"$PH" database --custom ./search.fasta --prefix rev_
+# -> <date>-decoys-search.fasta.fas   (targets + decoys)
 ```
 
 Point `database.db-path` at the `.fas`, not the original FASTA. A 55,245-sequence

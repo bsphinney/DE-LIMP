@@ -401,7 +401,7 @@ def _meta_candidates(out, explicit_meta=None):
     near = glob.glob(os.path.join(out, "*.meta.json")) \
         + glob.glob(os.path.join(parent, "*.fasta.meta.json")) \
         + glob.glob(os.path.join(parent, "input", "*.fasta.meta.json"))
-    if os.path.basename(parent) == "output":     # a session: <session>/output/search
+    if os.path.basename(parent) == "output":     # a session: <session>/output/<search folder>
         near += glob.glob(os.path.join(os.path.dirname(parent), "input", "*.fasta.meta.json"))
     near = sorted(dict.fromkeys(os.path.realpath(p) for p in near))
     if used:
@@ -482,7 +482,7 @@ def fasta_from_meta(out, explicit_meta=None):
         # The PATH is the file the search READ, when the search says so; the sidecar describes the
         # content (md5, count) but records wherever fetch_fasta.py first wrote it. Two ways that
         # differs, both seen in the drop dir on 2026-09-24: hive_remote writes the sidecar on the
-        # laptop (Dupanloup: a /Users/... path), and a session's sidecar can name the user's
+        # laptop (one Core search: a /Users/... path), and a session's sidecar can name the user's
         # staging copy (~/proteomics-pipeline/staging/search.fasta, overwritten by the next
         # session) while the search read <session>/input/search.fasta. Same md5 in all three.
         sib = os.path.realpath(c[:-len(".meta.json")]) if c.endswith(".meta.json") else None
@@ -832,8 +832,9 @@ SESSION_QC_FILES = ("session.json", os.path.join("input", "session.json"),
 
 
 def session_for(out):
-    """The session directory a search out dir belongs to, or None: `<session>/output/search`
-    (session.py's layout), or a job dir holding the search next to its `input/` (hive_remote)."""
+    """The session directory a search out dir belongs to, or None: `<session>/output/<folder>`
+    (session.py's layout: output/search/ by default, output/search_dda/ or output/search_sage/
+    as well), or a job dir holding the search next to its `input/` (hive_remote)."""
     out = os.path.abspath(out)
     parent = os.path.dirname(out)
     cands = [os.path.dirname(parent)] if os.path.basename(parent) == "output" else []
@@ -2108,7 +2109,7 @@ def incoming_health(runs, now=None, drop=None):
     else. Never a modification time: rewriting a manifest (a repair, a QC withdrawal) bumps the
     directory's. On 2026-09-25 the repaired search_mouse_mousecont entry, staged 2026-09-08, showed
     as 0 days old, and "oldest never reached" dropped from 16 d to 4 d -- enough to hide a starved
-    entry under STARVED_AFTER_H; on 2026-09-28 the Gallegos pair, which have no staged_at, read as
+    entry under STARVED_AFTER_H; on 2026-09-28 a client lab's pair, which have no staged_at, read as
     3 d old. An entry without a readable staged_at has age None ("age unknown: no staged_at"),
     is never called starved on a guess, and is counted and named in the detail instead."""
     now = now or time.time()
@@ -2699,7 +2700,7 @@ SEARCH_HINTS = {"search_provenance.json", RECEIPT, "report.parquet", "report.tsv
                 "step5_report.sbatch", "step3_fulcrum.sbatch", "dia-quant-output",
                 "radiant_results", "fulcrum-results"}
 # What proves THIS skill ran a search, from file names alone. search_provenance.json is not enough
-# by itself: in hive_remote mode run_search.py writes it on the laptop, and the Dupanloup search on
+# by itself: in hive_remote mode run_search.py writes it on the laptop, and one Core search on
 # HIVE has none. The DE-LIMP app writes the same step*_*.sbatch names, but its jobs are called
 # diann_<name>_<step>, while diann_parallel.py's are s1_libpred / s1b_window / s5_report -- so the
 # SLURM logs tell the two apart without opening a file.

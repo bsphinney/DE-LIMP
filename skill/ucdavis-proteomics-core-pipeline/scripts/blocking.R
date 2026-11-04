@@ -3,7 +3,7 @@
 #
 # Samples that share a source -- the IPs cut from one mouse brain, the biopsies from one
 # patient -- are correlated. Modelling them as independent throws that pairing away.
-# Why (PROT_0756, Dickson lab, 2026-09): 30 IPs from 6 mouse brains, one JPH3/JPH4/
+# Why (a mouse-brain IP cohort, 2026-09): 30 IPs from 6 mouse brains, one JPH3/JPH4/
 # Kv2.1/RyR/IgG IP per mouse. Every bait-vs-IgG contrast compares IPs from the SAME
 # mice, yet run_de.R fitted all 30 as independent samples.
 #

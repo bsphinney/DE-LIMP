@@ -37,7 +37,8 @@ and the quantities went on into the DE):
   * run_search.py --adapt-only (and an inline search) will not build report.parquet, and
     run_de.R will not read one beside this record, until either that re-run is used or the
     user accepts these quantities as they are: run_search.py --adapt-only --accept-lfq-window
-    "<who, and why>" (accept(), recorded as `accepted`).
+    "<why>" (accept(), recorded as `accepted`; who is the login that ran it, named to clients by
+    role -- never typed into the reason, which reaches AUDIT.md and commands.log verbatim).
 Nothing is re-run automatically: a wider window also admits more co-eluting interference, so
 the re-run's target/decoy separation has to be compared, and a changed search setting is a new
 search to confirm. A low peak count with a fitting window stays a warning: its cause is unknown,
@@ -94,6 +95,21 @@ PSM_Q = 0.01            # the peptide_q Sage's LFQ feature map takes (lfq.rs bui
 LFQ_Q_MAX = 0.05
 
 
+def methods_sentence(q_value_max=LFQ_Q_MAX):
+    """A quantifying Sage search's identification FDR in a Methods section's words: the rule
+    run_search.adapt_sage keeps report rows with (PSM_Q, the line Sage's feature map takes -- lfq.rs
+    build_feature_map, `peptide_q <= 0.01 && label == 1` at v0.14.7 -- and the MS1-peak q it kept,
+    `q_value_max`, LFQ_Q_MAX unless a record says otherwise). adapt_sage writes it into
+    sage_adapt.json `methods_sentence`; make_methods.py quotes it, or builds it with this from an
+    older record's own q_value_max. The identifications-only route has its own
+    (run_search.SAGE_IDS_METHODS)."""
+    return (f"Peptides were quantified from Sage's label-free MS1 quantification: Sage traced "
+            f"the MS1 signal of the peptides it identified at {PSM_Q * 100:g}% FDR (peptide-level "
+            f"q-value <= {PSM_Q:g}, computed over all runs together), and an MS1 peak was kept "
+            f"when it was a target peak with Sage's MS1-integration q-value <= {q_value_max:g}; "
+            f"no protein-level FDR filter was applied.")
+
+
 def q_passes(q):
     """A pyarrow boolean array: q_value <= LFQ_Q_MAX, compared in float32 as Sage compares it
     (fdr.rs: `q_min <= 0.05` on an f32; lfq.parquet stores q_value as float). In float64 a q of
@@ -103,6 +119,10 @@ def q_passes(q):
     return pc.fill_null(pc.less_equal(pc.cast(q, pa.float32()),
                                       pa.scalar(LFQ_Q_MAX, pa.float32())), False)
 RECORD = "sage_lfq_check.json"
+# What a Sage search for identifications only (quant.lfq false) writes instead of report.parquet
+# (run_search.py adapt_sage_ids; run_search.SAGE_IDS is this name).
+IDENTIFICATIONS = "identifications.tsv"
+NOT_APPLICABLE_WHY = "identifications only (quant.lfq is false)"
 PROVENANCE = "search_provenance.json"
 # The config with the corrected window, beside the search, and the folder its re-run goes to.
 CORRECTED_CONFIG = "sage_config.lfq_ppm{ppm}.json"
@@ -233,8 +253,7 @@ def check(out, params=None, log=None):
     lfq_on, tol, tol_src = lfq_settings(out, params)
     rec.update({"lfq_enabled": lfq_on, "ppm_tolerance": tol, "ppm_tolerance_source": tol_src})
     if lfq_on is False:
-        rec.update(status="not_applicable", message="Sage ran without LFQ (quant.lfq false).")
-        return rec
+        return not_applicable(rec)
     results = _find(out, "results.sage.parquet")
     rec["sage_results"] = results
     try:
@@ -266,6 +285,17 @@ def check(out, params=None, log=None):
             src = "neither Sage's log nor lfq.parquet was found"
     rec["target_ms1_peaks_5pct_fdr"] = peaks
     rec["target_ms1_peaks_source"] = src
+    # Nothing identified: there is no run whose mass error could be measured, and no quantity to
+    # judge -- said as such, never as a window that "fits" or identifications "not affected"
+    # (H2-3: an un-combined timsTOF mzML gave 0 peptides, and the record said both).
+    if not peptides:
+        return _unchecked(rec, f"Sage identified no target peptide at {PSM_Q * 100:g}% FDR "
+                               f"(peptide_q <= {PSM_Q}) in any run, so no run's precursor mass "
+                               f"error could be measured and the LFQ window was not checked; "
+                               f"with no identifications there is nothing to quantify either")
+    if not runs:
+        return _unchecked(rec, f"no run has a rank-1 target PSM at peptide_q <= {PSM_Q}, so no "
+                               f"run's precursor mass error could be measured")
 
     flagged = sorted(f for f, r in runs.items()
                      if r["psms"] >= MIN_PSMS and r["median_abs_ppm"] is not None
@@ -334,6 +364,18 @@ def corrected_config(out, params, ppm):
         json.dump(cfg, fh, indent=2)
         fh.write("\n")
     os.replace(path + ".tmp", path)
+    # ...and the params side record (estimate_params.py's <params>.rationale.json: cysteine
+    # alkylation, SILAC labels, defaults) beside it, so the re-run's Methods keep what it says
+    # (follow-up 3, H7 bug 3: "Cysteine was searched unmodified" was lost). Only one that exists
+    # is carried, with what changed; none is invented.
+    side = _load_json(f"{src}.rationale.json")
+    if isinstance(side, dict):
+        side = dict(side, derived_from={"params": src, "changed": {
+            "quant.lfq_settings.ppm_tolerance": float(ppm)}})
+        with open(path + ".rationale.json.tmp", "w") as fh:
+            json.dump(side, fh, indent=2)
+            fh.write("\n")
+        os.replace(path + ".rationale.json.tmp", path + ".rationale.json")
     return path, None
 
 
@@ -370,12 +412,39 @@ def rerun_plan(out, corrected, ppm):
     # the nodes the search was kept off (run_search.py --exclude): the re-run stays off them too
     if (prov.get("queue") or {}).get("exclude"):
         argv += ["--exclude", ",".join(prov["queue"]["exclude"])]
+    # the memory it asked for (run_search.py --mem <GB>, recorded as queue.mem "<GB>G"; nothing is
+    # recorded for the default, and nothing is passed then)
+    mem = str((prov.get("queue") or {}).get("mem") or "")
+    if mem:
+        argv += ["--mem", mem[:-1] if mem.upper().endswith("G") else mem]
+    # ...and the wall time (run_search.py --time HOURS, queue.time); a digest-sized default is not
+    # in `queue`, so the re-run recomputes it from its own config
+    hours = (prov.get("queue") or {}).get("time")
+    if hours:
+        argv += ["--time", str(hours)]
+    # a .d converted in a container other than the pin's: the re-run converts with it again
+    # (run_search.py records the flag and its value, pwiz_rerun_args)
+    argv += [str(x) for x in (prov.get("pwiz_sif_arg") or [])]
+    # ...and its job-end choices (Slack, FRAN, QC), as recorded, through the one mapping
+    # (notify_slack.job_end_argv; follow-up 3, H7 bug 4)
+    je_note = None
+    try:
+        import notify_slack
+        argv += notify_slack.job_end_argv(prov.get("job_end_hook"))
+    except ImportError:
+        # a partial copy of the skill: the command is still printed, and says what it lacks
+        je_note = ("notify_slack.py is not beside sage_lfq_check.py, so the search's job-end "
+                   "choices (search_provenance.json job_end_hook) are not in this command: add "
+                   "--no-notify / --no-fran / --qc or --not-qc as the search had them")
     job = prov.get("submitted_sbatch")
     if job:
         stem, ext = os.path.splitext(job)
         argv += ["--sbatch", stem + RERUN_SUFFIX.format(ppm=ppm) + (ext or ".sh")]
     argv += ["--files", *need["files"]]
-    return {"out": new_out, "command": " ".join(shlex.quote(str(x)) for x in argv)}
+    plan = {"out": new_out, "command": " ".join(shlex.quote(str(x)) for x in argv)}
+    if je_note:
+        plan["note"] = je_note
+    return plan
 
 
 def gated(rec):
@@ -409,7 +478,9 @@ def refusal(out, rec):
         + f". Re-run the search with it:{how}. Before using the re-run, compare its target MS1 "
         "peaks and target/decoy separation with this one: a wider window also admits more "
         "interference. Or, if the user accepts these quantities as they are, run this "
-        "--adapt-only again with --accept-lfq-window \"<who accepted, and why>\" (recorded).")
+        "--adapt-only again with --accept-lfq-window \"<why, in the user's words>\" (recorded; "
+        "who accepted is the login that runs it, named to clients by role -- put no name in "
+        "the reason).")
     try:
         record(out, rec)
     except OSError as e:
@@ -481,10 +552,16 @@ def warn_message(rec, runs, flagged, peaks, peptides, tol, tol_src):
                  + (" -- LFQ collapsed" if rec.get("low_ms1_peaks") else ""))
     s = rec.get("suggested_ppm_tolerance")
     if not flagged:
-        # the mass error fits, so a wider window is not the known fix -- say so, not guess
-        fix = ("the runs' median precursor mass errors fit the window, so this check cannot "
-               "name the cause; inspect the MS1 data (centroided MS1 present in the mzML?) and "
-               "Sage's RT alignment before trusting the quantities")
+        # the mass error fits, so a wider window is not the known fix -- say so, not guess; and
+        # when no run could be measured, say THAT, not that it fits (H2-3)
+        measured = [f for f in runs if f not in (rec.get("runs_too_few_psms") or [])]
+        fix = (("the runs' median precursor mass errors fit the window, so this check cannot "
+                "name the cause" if measured else
+                f"no run's precursor mass error could be measured (each has fewer than "
+                f"{MIN_PSMS} confident target PSMs), so this check cannot tell whether the "
+                f"window fits, nor name the cause")
+               + "; inspect the MS1 data (centroided MS1 present in the mzML?) and Sage's RT "
+                 "alignment before trusting the quantities")
     else:
         fix = ("re-run Sage with a wider window: add \"lfq_settings\": {\"ppm_tolerance\": "
                f"{s}}} to the \"quant\" block of the Sage config" if s else
@@ -502,11 +579,142 @@ def warn_message(rec, runs, flagged, peaks, peptides, tol, tol_src):
             + " Nothing was re-run automatically.")
 
 
+def not_applicable(rec=None, engine=None, why=None, ran=None, de_refusal=None):
+    """The record of a search without quantification: identifications only, so there are no
+    quantities to check, and no DE (gate_main refuses one). The ONE definition, for every engine:
+    check() and run_search.py's Sage identifications-only route write it as Sage's (the defaults,
+    unchanged); run_search.py's FragPipe route writes it for a workflow that runs no
+    quantification (L11, Ruling 73a) with its own `engine`, `why`, `ran` and the DE refusal
+    (`de_refusal`, which gate_main says). Its file keeps the name RECORD: run_de.R asks the gate
+    about that file."""
+    rec = dict(rec or {})
+    why = why or NOT_APPLICABLE_WHY
+    rec.update(status="not_applicable", why=why,
+               message=(f"{ran or 'Sage ran without LFQ (quant.lfq false)'}: {why}, so there "
+                        f"are no MS1 quantities to check and no DE. Its identifications are in "
+                        f"{IDENTIFICATIONS}."))
+    if engine:
+        rec["engine"] = engine
+    if de_refusal:
+        rec["de_refusal"] = de_refusal
+    return rec
+
+
+def identifications_only(rec):
+    """THE predicate "this search did not quantify", on a search's quantification record (the
+    not_applicable() shape, any engine): the DE gate (gate_main) refuses on it, and every client
+    text that says whether the proteins were quantified asks it through search_quantified()."""
+    return isinstance(rec, dict) and rec.get("status") == "not_applicable"
+
+
+def search_quantified(out, record=None):
+    """True when the search in folder `out` quantified, False when it was for identifications
+    only: identifications_only() of its record -- <out>/RECORD, the file the DE gate reads, else
+    the copies search_provenance.json carries (write_record: `sage_lfq_check` for Sage,
+    `quantification` for FragPipe, and Sage's `quantified: false`), as a delivered or laptop
+    copy of the folder holds only search_provenance.json. A folder with neither (a DIA-NN
+    search, which always quantifies) is True. The delivery README and email, the session
+    README/AGENTS.md, the report page, the analysis brief and the reproducibility bundle
+    (provenance.identified_only) all ask this one question (C2 B1). `record`: the search record
+    the caller has already read (provenance.py --search-record), asked in place of
+    <out>/search_provenance.json; None reads that file."""
+    if identifications_only(load(out)):
+        return False
+    prov = record if isinstance(record, dict) else _load_json(os.path.join(out, PROVENANCE))
+    if isinstance(prov, dict) and (prov.get("quantified") is False or any(
+            identifications_only(prov.get(k)) for k in ("sage_lfq_check", "quantification"))):
+        return False
+    return True
+
+
 def _unchecked(rec, why):
     rec.update(status="unchecked", reason=why,
                message=f"The Sage LFQ mass-window check could not run: {why}. Look for "
                        f"'target MS1 peaks at 5% FDR' in Sage's log by hand; 0 there means the "
                        f"search has no usable quantities.")
+    return rec
+
+
+def quantified_coverage(adapt):
+    """How much of what Sage identified the adapter's report.parquet quantifies (C2 proteomics
+    M2), from sage_adapt.json -- the one place both counts are made (run_search.adapt_sage):
+    `target_precursors_kept` (the precursors in report.parquet) against `target_peptides_1pct`
+    (the target peptides Sage identified at 1% FDR). Precursors against peptides is generous to
+    the search (one peptide can be several precursors). -> {"target_precursors_quantified",
+    "target_peptides_identified_1pct", "protein_groups_quantified", "fraction", "low",
+    "low_below"}, or None when either count is not recorded. `protein_groups_quantified`: the
+    adapter's `protein_groups_kept` (the groups report.parquet has amounts for), None in an older
+    sage_adapt.json. `low`: under LOW_PEAK_FRACTION, the check's own "LFQ collapsed" line."""
+    adapt = adapt if isinstance(adapt, dict) else {}
+    kept, ids = adapt.get("target_precursors_kept"), adapt.get("target_peptides_1pct")
+    if not isinstance(kept, int) or not isinstance(ids, int) or ids <= 0:
+        return None
+    groups = adapt.get("protein_groups_kept")
+    frac = kept / ids
+    return {"target_precursors_quantified": kept, "target_peptides_identified_1pct": ids,
+            "protein_groups_quantified": groups if isinstance(groups, int) else None,
+            "fraction": round(frac, 4), "low": frac < LOW_PEAK_FRACTION,
+            "low_below": LOW_PEAK_FRACTION,
+            "source": "sage_adapt.json: target_precursors_kept / target_peptides_1pct "
+                      "(protein_groups_kept: the groups with amounts)"}
+
+
+def coverage_note(cov):
+    """The sentence AUDIT.md and the record read for a low coverage: the numbers, no verdict on
+    the cause, and no task -- AUDIT.md goes into the client's bundle (COVERAGE_STAFF_TASK is said
+    to staff only, by add_coverage)."""
+    g = cov.get("protein_groups_quantified")
+    return (f"Only {cov['target_precursors_quantified']:,} target precursors"
+            + (f" in {g:,} protein groups" if isinstance(g, int) else "")
+            + f" were quantified (report.parquet) for the "
+            f"{cov['target_peptides_identified_1pct']:,} target peptides Sage identified at 1% FDR "
+            f"({cov['fraction'] * 100:.1f}%, under {cov['low_below'] * 100:g}%): a differential "
+            f"expression on this report sees a small part of what was identified. This is a "
+            f"warning, not a refusal.")
+
+
+def coverage_plain(cov):
+    """What a low coverage means for the results, in the client's words (the audit table): most
+    identified proteins get no amount at all, and those that do rest on few peptides."""
+    g = cov.get("protein_groups_quantified")
+    k, m = cov.get("target_precursors_quantified"), cov.get("target_peptides_identified_1pct")
+    if isinstance(g, int):
+        return (f"The quantification settings fit these runs, but only a small share of what was "
+                f"identified could be quantified: the comparison has amounts for {g} protein "
+                f"groups, from {k} quantified peptide signals for the {m} peptides identified. "
+                f"Many identified proteins therefore have no amount in the comparison, and the "
+                f"{g} that do rest on few peptides; the identifications are not affected.")
+    return (f"The quantification settings fit these runs, but only a small share of the "
+            f"identified peptides could be quantified ({k} quantified peptide signals for {m} "
+            f"identified peptides), so many identified proteins have no amount in the "
+            f"comparison, and those that do rest on few peptides; the identifications are not "
+            f"affected.")
+
+
+# The staff's next step for a low coverage: said where staff read it (add_coverage's stderr, the
+# --adapt-only print), never in AUDIT.md or the client's table.
+COVERAGE_STAFF_TASK = ("before relying on this report, compare its protein count with another "
+                       "engine's search of the same runs (DIA-NN --dda, FragPipe)")
+
+
+def add_coverage(out, adapt):
+    """After the adapter wrote sage_adapt.json: put quantified_coverage() into this search's
+    LFQ check record (and search_provenance.json), and WARN -- status warn, said -- when it is
+    low. Never a gate: gated() still asks only about runs outside the window. -> the record, or
+    None when there is no checked record or no counts to compare."""
+    rec = load(out)
+    cov = quantified_coverage(adapt)
+    if not rec or cov is None or rec.get("status") not in ("ok", "warn"):
+        return None
+    rec["quantified_coverage"] = cov
+    if cov["low"] and not rec.get("coverage_warning"):
+        rec["coverage_warning"] = coverage_note(cov)
+        rec["message"] = ((rec.get("message") or "") + " " + rec["coverage_warning"]).strip()
+        rec["status"] = "warn"
+    record(out, rec)
+    if cov["low"]:
+        say(rec)
+        print(f"{TAG} STAFF: {COVERAGE_STAFF_TASK}.", file=sys.stderr, flush=True)
     return rec
 
 
@@ -521,21 +729,37 @@ def load(out):
 
 
 def audit_finding(rec):
-    """(status, message, detail) for audit_results.py, or None. ONE mapping: warn -> WARN,
-    ok -> PASS, unchecked -> INFO (a check that could not run never changes the verdict)."""
+    """(status, message, detail, plain) for audit_results.py (its add(): `plain` is the client's
+    words when they differ from the check's usual ones, else None), or None. ONE mapping: warn ->
+    WARN, ok -> PASS, unchecked -> INFO (a check that could not run never changes the verdict).
+    A warning ONLY for a low quantified coverage (C2 proteomics M2) carries its own plain words:
+    the usual ones say the settings did not fit the mass error, which is then not so."""
     if not rec or rec.get("status") not in ("warn", "ok", "unchecked"):
         return None
     status = {"warn": "WARN", "ok": "PASS", "unchecked": "INFO"}[rec["status"]]
     detail = {k: rec.get(k) for k in ("ppm_tolerance", "ppm_tolerance_source",
                                       "target_ms1_peaks_5pct_fdr", "target_peptides_1pct",
                                       "runs_outside_lfq_window", "suggested_ppm_tolerance",
-                                      "corrected_params", "rerun", "accepted")
+                                      "corrected_params", "rerun", "accepted",
+                                      "quantified_coverage")
               if rec.get(k) is not None}
-    acc = rec.get("accepted") or {}
+    acc = dict(rec.get("accepted") or {})
+    if acc.get("by"):
+        # AUDIT.md is delivered: the role, never the login (C2 security M1/L5; staff.py's rule)
+        import staff
+        if acc["by"] not in (staff.ROLE, staff.USER_ROLE):
+            acc["by"] = staff.role_for(acc["by"])
+            acc["by_source"] = staff.ACCEPTED_BY_SOURCE
+        detail["accepted"] = acc
     who = acc.get("by") or "who: not recorded"
+    cov = rec.get("quantified_coverage") if isinstance(rec.get("quantified_coverage"), dict) else {}
+    plain = None
+    if (rec.get("status") == "warn" and rec.get("coverage_warning")
+            and not rec.get("runs_outside_lfq_window") and not rec.get("low_ms1_peaks")):
+        plain = coverage_plain(cov)
     return status, (rec.get("message") or "") + (
         f" The user accepted these quantities as they are ({who}, {acc.get('at')}): "
-        f"{acc.get('reason')}." if acc else ""), detail
+        f"{acc.get('reason')}." if acc else ""), detail, plain
 
 
 def say(rec, stream=None):
@@ -607,6 +831,14 @@ def gate_main(argv):
     a = ap.parse_args(argv)
     rec = load(a.out)
     msg = (rec.get("refusal") or refusal(a.out, rec)) if gated(rec) else None
+    if identifications_only(rec):
+        # identifications only: there is nothing to run a DE on (run_de.R stops with this) --
+        # the engine's own words when its record carries them (a FragPipe workflow without
+        # quantification), else Sage's
+        msg = rec.get("de_refusal") or (
+            f"REFUSED: this Sage search was for {rec.get('why') or NOT_APPLICABLE_WHY}: there "
+            f"are no quantities, so no DE. Its identifications are in {IDENTIFICATIONS} "
+            f"(run_search.py --adapt-only, with the cfg the search ran with, writes it).")
     print(json.dumps({"checked": rec is not None, "refused": bool(msg), "message": msg}))
     return 0
 

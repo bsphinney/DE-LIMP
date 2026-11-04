@@ -1,0 +1,89 @@
+{
+  "version": "0.14.6",
+  "database": {
+    "bucket_size": 8192,
+    "enzyme": {
+      "missed_cleavages": 0,
+      "min_len": 7,
+      "max_len": 30,
+      "cleave_at": "",
+      "restrict": null,
+      "c_terminal": null,
+      "semi_enzymatic": null
+    },
+    "fragment_min_mz": 200.0,
+    "fragment_max_mz": 1800.0,
+    "peptide_min_mass": 500.0,
+    "peptide_max_mass": 5000.0,
+    "ion_kinds": [
+      "b",
+      "y"
+    ],
+    "min_ion_index": 2,
+    "static_mods": {},
+    "variable_mods": {
+      "[": [
+        42.0106
+      ],
+      "M": [
+        15.9949
+      ]
+    },
+    "max_variable_mods": 2,
+    "decoy_tag": "rev_",
+    "generate_decoys": true,
+    "fasta": "/data/search/search.fasta"
+  },
+  "quant": {
+    "tmt": null,
+    "tmt_settings": {
+      "level": 3,
+      "sn": false
+    },
+    "lfq": true,
+    "lfq_settings": {
+      "peak_scoring": "Hybrid",
+      "integration": "Sum",
+      "spectral_angle": 0.7,
+      "ppm_tolerance": 7.0,
+      "combine_charge_states": true
+    }
+  },
+  "precursor_tol": {
+    "ppm": [
+      -10.0,
+      10.0
+    ]
+  },
+  "fragment_tol": {
+    "ppm": [
+      -10.0,
+      10.0
+    ]
+  },
+  "precursor_charge": [
+    2,
+    4
+  ],
+  "isotope_errors": [
+    0,
+    1
+  ],
+  "deisotope": true,
+  "chimera": true,
+  "wide_window": false,
+  "min_peaks": 15,
+  "max_peaks": 150,
+  "max_fragment_charge": 2,
+  "min_matched_peaks": 4,
+  "report_psms": 1,
+  "predict_rt": true,
+  "mzml_paths": [
+    "/data/search/mzml/run01.mzML",
+    "/data/search/mzml/run02.mzML"
+  ],
+  "output_paths": [
+    "/data/search/results.sage.parquet",
+    "/data/search/lfq.parquet"
+  ]
+}

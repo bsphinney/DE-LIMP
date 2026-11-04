@@ -127,6 +127,21 @@ the spine.
    have, the user correcting how you used the skill: record it **then**, not at the end —
    sessions end without warning, and an unrecorded problem is one nobody fixes. Tell the user
    in one line when you do. → "Recording skill problems" below.
+9. **Stay on the standard path; leave it only when it is clearly better.** When you must (a step
+   fails, the data need something no script does), record why with `log_decision.py` at that
+   moment, and still run the finish steps: the report (step 9, `make_analysis_html.py`), Methods
+   (9d), the reproducibility bundle (10), finalize (12) and, for a Core submission,
+   `core_submission.py deliver` (12b). Each refuses without what it needs: `make_podcast.py`
+   the skill's own report and Methods; `finalize` the report (it makes the Methods and the
+   bundle itself from the session's records); `deliver` the
+   report, Methods, the bundle and the finalize stamp, which `bioshare send`, `email-draft` and
+   the Slack post (`notify_slack.py analysis-done`) need too. A stamp counts only while nothing
+   it stamped has changed. `--override-finish "<reason>"` goes ahead and records the reason.
+   Before you tell the user an analysis is finished, run
+   `python3 scripts/session.py status --session <session>` and show its result: exit 0 is
+   complete, exit 3 lists each missing item with the command that makes it. Finish every missing
+   item first. A HIVE session from a laptop:
+   `bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/session.py status --session $(printf %q "$S")"`
 
 ## Audience: assume nothing is installed
 
@@ -742,7 +757,7 @@ submission, the same path locally and on HIVE (`~/core/PROT_0807`).
        --name PROT_0807 --base <work_dir> --raw $(cat ~/core/PROT_0807/files.txt) --submission PROT_0807'
    S=<the session dir it printed>
    bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/submission_report.py attach \
-       --session $S --record ~/core/PROT_0807"
+       --session $(printf %q "$S") --record ~/core/PROT_0807"
    ```
    Core staff: board.md §3 row "session made".
    - **Conditions (local):** `core_submission.py conditions --summary
@@ -751,18 +766,25 @@ submission, the same path locally and on HIVE (`~/core/PROT_0807`).
      exactly its `questions` (a condition per replicate is answered by re-running with
      `--replicate-labels collapse|keep`). Put the final CSV back: `--put
      ~/core/PROT_0807/conditions.csv "$S/input/"`. No usable local Python: the same on HIVE
-     through `hive_exec.sh`, with `--out "$S/input/conditions.csv"` and nothing to put back.
+     through `hive_exec.sh`, with `--out $(printf %q "$S")/input/conditions.csv` (in a remote
+     command `$S` is always quoted so: a lab folder can hold a space) and nothing to put back.
    - **Organism:** `organism_as_submitted` is the submitter's free text. Put it to the staff
      member as the proposed answer and get it confirmed — golden rule #4 still applies.
    - **On HIVE in `$S`:** search, DE, figures, audit, `sample_quality.py`, the QC check
      (step 8e, staff-only: `qc_bracket.py --session "$S"`), `make_methods.py --submission "$S"
      --qc-bracket "$S/logs/qc_bracket.json"` (it reads the raw metadata; the flag adds the one
      fixed Instrument performance sentence) and provenance — heavy steps as SLURM jobs.
-   - **Pull what the report needs:**
+   - **Pull what the report needs** (`which-search --paths` lists the search the DE read --
+     its record and report, wherever the search went -- and the workflow manifest; with none
+     chosen it exits 3 with the reason, pulls nothing, and the block prints STOP: choose one
+     first, step 12b, then pull again -- a report written without them cannot name the engine):
      ```
-     mkdir -p ~/core/PROT_0807/session/output/search
+     mkdir -p ~/core/PROT_0807/session/output
      for d in tables figures; do bash scripts/hive_exec.sh --get "$S/output/$d" ~/core/PROT_0807/session/output/; done
-     bash scripts/hive_exec.sh --get "$S/output/search/report.parquet" ~/core/PROT_0807/session/output/search/
+     if P=$(bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/session.py which-search --dir $(printf %q "$S") --paths"); then
+       while IFS= read -r f; do [ -n "$f" ] || continue; D=~/core/PROT_0807/session/"$(dirname "$f")"
+         mkdir -p "$D" && bash scripts/hive_exec.sh --get "$S/$f" "$D"/ </dev/null; done <<< "$P"
+     else echo "STOP (which-search exit $?): no search is chosen -- choose one (step 12b), then pull again"; fi
      for f in AUDIT.md SAMPLE_QUALITY.md methods.md; do bash scripts/hive_exec.sh --get "$S/output/$f" ~/core/PROT_0807/session/output/; done
      mkdir -p ~/core/PROT_0807/session/input
      bash scripts/hive_exec.sh --get "$S/session.json" ~/core/PROT_0807/session/
@@ -775,7 +797,7 @@ submission, the same path locally and on HIVE (`~/core/PROT_0807`).
      (step 9: no Word copy of the report). **No usable local Python** (step 0a,
      `local_python3.usable: false`, Windows staff): keep the pull above (`--get` falls back to
      scp; it is what you read to write the report). Run `analysis_prompt.py` (step 9) on HIVE
-     through `hive_exec.sh` with `--out "$S/output/ANALYSIS_PROMPT.md"` and `--get` the brief;
+     through `hive_exec.sh` with `--out $(printf %q "$S")/output/ANALYSIS_PROMPT.md` and `--get` the brief;
      write `AI_Analysis_Report.md` here, `--put` it into `"$S/output/"`, then build on HIVE:
      `make_analysis_html.py --session "$S" --out "$S/output/Analysis_Report.html"` and
      `to_docx.py --in "$S/output/methods.md" --out "$S/output/methods.docx"`. Nothing then needs
@@ -785,23 +807,29 @@ submission, the same path locally and on HIVE (`~/core/PROT_0807`).
      a submission) goes back with them when it was made here; made on HIVE (Windows staff), it
      is in `$S` already, its job submitted as soon as `job` wrote it. Never wait for it: if the
      job has not ended when the delivery is otherwise ready, `scancel` it, say so in one line,
-     finalize and deliver without it, and add the audio later (`references/podcast.md`):
+     finalize and deliver without it, and add the audio later (`references/podcast.md`).
+     `report_provenance.json` goes back with the report: it is the report's record, written
+     beside it by `make_analysis_html.py` (and again by `make_podcast.py link`). Without it,
+     finalize, deliver and the podcast on HIVE take the report for one made before 2.14.2:
      ```
      L=~/core/PROT_0807/session/output
-     for f in AI_Analysis_Report.md Analysis_Report.html Analysis_Report.md Analysis_Report.pdf Analysis_Report_with_audio.html methods.md methods.docx; do
+     for f in AI_Analysis_Report.md Analysis_Report.html Analysis_Report.md Analysis_Report.pdf Analysis_Report_with_audio.html methods.md methods.docx report_provenance.json; do
        [ -f "$L/$f" ] && bash scripts/hive_exec.sh --put "$L/$f" "$S/output/"; done
      [ -d "$L/podcast" ] && bash scripts/hive_exec.sh --put "$L/podcast" "$S/output/"
      ```
    - **Then on HIVE, finish the session:** the output-files report (step 11), then `finalize`
      (step 12: README.html, AGENTS.md, the deposit package, MANIFEST.txt, the zip, the run log):
      ```
-     bash scripts/hive_exec.sh "cd $S && python3 ~/proteomics-pipeline/scripts/make_report.py \
-         --out output/OUTPUT_FILES.md --search-out output/search --de-dir output/tables \
+     bash scripts/hive_exec.sh "cd $(printf %q "$S") && python3 ~/proteomics-pipeline/scripts/make_report.py \
+         --out output/OUTPUT_FILES.md --session . --de-dir output/tables \
          --repro output/reproducibility --extra input/conditions.csv output/figures \
          output/AUDIT.md output/SAMPLE_QUALITY.md output/Analysis_Report.html \
          output/Analysis_Report.md output/Analysis_Report.pdf output/methods.md"
-     bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/session.py finalize --dir $S --zip"
+     bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/session.py finalize --dir $(printf %q "$S") --zip"
+     bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/session.py status --session $(printf %q "$S")"
      ```
+     `status` (exit 0 complete, 3 not) is what you show before saying the analysis is finished;
+     a submission's stays at exit 3 ("The delivery of …: not delivered yet") until step 12b.
 8. **Deliver, share, draft the email** — step 12b.
 
 | exit | meaning | what to do |
@@ -1108,6 +1136,18 @@ checked against the search's own run names in step 8, once `report.parquet` exis
 (Fallback: if the user has nothing yet, `--emit-template` writes a blank
 File.Name,Group sheet for them to fill.) → detail: `references/conditions.md`.
 
+**No differential expression?** (a detection question, an ID list, a QC run, one sample per
+condition, a re-analysis or benchmark): say so now. You are NOT done after the search: skip
+8–8d and 8f (Core runs still do 8e), then 9 → 9d → 9e (Core) → 11 (`OUTPUT_FILES.md`; 11a for a
+benchmark of two searches) → 12 `finalize` (it makes AGENTS.md, the README, Methods and the bundle
+for every analysis) → 12b `deliver --mode no-de` (Core; `--mode interim` for raw + search before
+the report). The search: a Sage DDA search is identifications only
+(`estimate_params.py --ids-only`) unless the user (for a Core submission, the client) wants
+amounts -- abundance between runs, an intensity table, a DE later -- and then it quantifies; ask
+once if the request does not say, and log the choice. Outside code: `finalize --code-dir`;
+a project's own reproducibility package is in addition to the bundle, never instead.
+→ `references/no-de-route.md`.
+
 ### 3b. Create the analysis session (organize all files)
 **Ask the user where the results should go** — two choices:
 - **In the folder with their raw data** (default, recommended — keeps results next
@@ -1240,7 +1280,8 @@ version, mass accuracy + where it came from, FASTA, DE method — and get a yes:
 > before the search, human UP000005640 + contaminants, limpa DPC-Quant + limma. Run it?
 
 Do **not** turn this into a menu. There is exactly one confirmation before compute,
-and it is this one.
+and it is this one. If step 3 chose the no-DE route, confirm it with the defaults, and with it
+the search: identifications only (`--ids-only`), or quantified because amounts are wanted.
 
 - **`--engine` is honoured, never overridden.** If the user names an engine that
   isn't the default for their data type, it runs anyway and `notes` says so. Never
@@ -1377,6 +1418,7 @@ gluc`, `--enzyme trypsin,pepsin`). Only those enzymes' contaminant entries stay 
 they match a protein of the searched organism (their autolysis peptides stay out of quant);
 any other protease is treated as sample protein — which matters for organisms that make the
 enzyme themselves (S. aureus's own SspA is the Glu-C entry, quantified on a trypsin digest).
+The search's enzyme answer (the digest step 6b searches with) also sets `--enzyme` here: `--enzyme none` for a sample no enzyme was added to (a hydrolysate or peptidome searched non-specifically), so a trypsin entry identical to a target is dropped as a target, not kept as a reagent.
 Defaults are `--content one_per_gene` (the canonical set, from UniProt's
 reference-proteome FTP tree) and `--contaminants universal`. **Do not pass
 `--content full` casually** — for human that is 147,506 sequences instead of
@@ -1500,13 +1542,22 @@ python3 scripts/estimate_params.py --engine <diann|sage> \
     --acquisition <DIA|DDA> --instrument "<detected instrument>" \
     --precursor-mz-range <LO> <HI> \
     [--ms1-resolution <MS1> (--ms2-resolution <MS2> | --ms2-analyzer <ITMS|mixed>) [--resolution-source detected]] \
-    [--var-mods ox] [--cys-alkylation <agent>|none] \
+    [--var-mods ox|deam|ox,deam|none] [--ids-only] [--cys-alkylation <agent>|none] \
     [--labels silac2|silac3 --label-preset <K4R6,K8R10|K8R10|...> [--channel-norm spec|run]] \
     [--overrides '<the user's values as JSON>' \
      --override-by "<who chose them>" --override-reason "<why, in their words>"] \
     --fasta-meta ./search.fasta.meta.json \
     --out ./wf/params.<cfg|json>
 ```
+**`--var-mods`** (a comma list of `ox`, `deam`, or `none`): Sage DDA searches Ox(M) by default
+(the FragPipe/MaxQuant default, tagged DEFAULT, so a new Sage DDA search differs from one made
+before 2.14.2); DIA-NN and Sage DIA search none. Giving `--var-mods` replaces the default: `deam`
+alone drops Ox(M), `ox,deam` keeps both, `none` turns it off; any other word is refused.
+**`--ids-only`** (Sage only; refused with DIA-NN): identifications, no quantification and no DE;
+Sage then searches a timsTOF `.d` directly. It is the no-DE route's search **unless amounts are
+wanted** (abundance between runs, an intensity table, a DE later): then leave it off and the
+search quantifies (`references/no-de-route.md`, step 1). → `references/parameters.md` "Sage for
+identifications only (`--ids-only`)", and "Variable modifications" for `--var-mods`.
 **`--labels` for a SILAC sample** (step 3): writes DIA-NN's plexDIA declaration into the cfg
 (`--fixed-mod SILAC,0.0,KR,label`, `--channels`, `--original-mods`, the channel-normalisation
 flag) and the sidecar's `labels` record, the normalisation tagged DEFAULT unless given. Never
@@ -1994,11 +2045,19 @@ python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \
     `report.parquet`. → `references/diann_parallel.md`.
 - **On `hpc`:** add `--sbatch job.sh`, then submit **what `run_search.py` prints under
   "submit with:"** (over `hive_exec.sh` for a remote HIVE run). Re-run with `--adapt-only`
-  afterward for Sage/FragPipe/AlphaDIA to build `report.parquet`.
+  afterward for Sage/FragPipe/AlphaDIA to build `report.parquet`. A FragPipe workflow that runs no quantification (the shipped Nonspecific-peptidome) is identifications only: `--adapt-only` writes `identifications.tsv`, with no `report.parquet` and no DE (the run_search output's `note` says so).
   - **Sage (and single-job Radiant) with `.raw`/`.d` input:** nothing is converted on the
-    login node. The job converts each file to mzML on the compute node first: `.raw` with
-    ThermoRawFileParser (`-f=2`, found the way step 2 finds it), `.d` with msconvert. A
-    file the converter leaves incomplete stops the job before the search
+    login node. The job converts `.raw` to mzML on the compute node first, with
+    ThermoRawFileParser (`-f=2`, found the way step 2 finds it). A timsTOF `.d` goes to Sage
+    one of two ways, decided by the cfg alone:
+    - **identifications only** (`estimate_params.py --ids-only`, cfg `quant.lfq` false): Sage
+      reads the `.d` itself, with no conversion. `--adapt-only` then writes
+      `identifications.tsv`, and no `report.parquet`, so there is no DE.
+    - **quantification** (a cfg written without `--ids-only`: a DE study, or a no-DE one whose
+      user wants amounts -- the one rule is in `references/no-de-route.md`, step 1): Sage 0.14.7
+      has no MS1 quantification on a `.d`, so the job first converts it to mzML with the Core's
+      pinned ProteoWizard container.
+    A file the converter leaves incomplete stops the job before the search
     (`FAILED: no mzML from …`; watcher class `sage_no_mzml`).
   - **Sage LFQ check.** After Sage (in the job, and again at `--adapt-only`),
     `sage_lfq_check.py` compares each run's median precursor mass error with Sage's LFQ
@@ -2120,7 +2179,7 @@ flight does not. Common auto-fixes (→ `references/watcher.md` playbook):
   job can land there, and `search_provenance.json` records it. Do not `export SBATCH_EXCLUDE`:
   sbatch ignores it. A later `node_fault.py retry` keeps these nodes excluded as well
   (→ `references/watcher.md`).
-- OOM → raise `--mem`; timeout → raise `--time`; missing temp dir → `mkdir -p` first.
+- OOM → raise `--mem`; timeout → raise `--time`; missing temp dir → `mkdir -p` first. A single-job search takes both from `run_search.py --mem GB --time HOURS` (recorded as `job_mem`/`job_time`); a non-specific or semi-specific Sage or FragPipe search already defaults to 192G (Sage) / 200G (FragPipe) and 24 h, recorded as that default — raise `--mem` for a database bigger than the 6,300 sequences it was measured on.
 - **A failed search is recorded in the Core run registry. When the chain dies before its last
   job, record it yourself.** A job that SLURM kills (OOM, TIMEOUT, node failure, `scancel`)
   never runs its own job-end hook. The jobs queued after it never start at all. So whenever the
@@ -2263,6 +2322,10 @@ python3 scripts/fran_deposit.py health     # is FRAN's cron taking anything at a
 Core staff: board.md §3 row "FRAN hand-over", once per search folder.
 
 ### 8. Differential expression
+**No DE wanted? You are NOT done:** skip 8–8d and 8f; 8e (Core runs) → 9 → 9d → 9e (Core) → 11
+(`OUTPUT_FILES.md`; 11a for a benchmark) → 12 `finalize` → 12b `deliver --mode no-de`.
+→ `references/no-de-route.md`.
+
 **A SILAC session (`--labels` in step 6b) does not use `run_de.R` or the normalisation check.**
 Its comparison is a ratio inside each run:
 ```
@@ -2328,10 +2391,12 @@ python3 scripts/normalization_check.py run --report ./search_out/report.parquet 
     --de-raw <S>/output/norm_check/raw --session <S>
 ```
 `--quantities normalised` reads DIA-NN's normalised quantities (dpc: `Precursor.Normalised`;
-maxlfq: `PG.MaxLFQ` + quantile normalisation); `raw` reads DIA-NN's non-normalised ones (dpc:
+maxlfq: `PG.MaxLFQ` as DIA-NN normalised it, with no second step — `--between-run auto`, the
+default; a quantile step stays only for a `--no-norm` report or an engine's declared quantities,
+or as an explicit `--between-run quantile|median`); `raw` reads DIA-NN's non-normalised ones (dpc:
 `Precursor.Quantity`, through limpa's own quantity-column argument; maxlfq: only a report
 searched with `--no-norm` — `diann_parallel.py --no-norm`, or `--no-norm` in a single-shot
-cfg — with no quantile step; a normalised report is refused, since its `PG.MaxLFQ` is
+cfg — with no between-run step; a normalised report is refused, since its `PG.MaxLFQ` is
 normalised). **maxlfq on a normal report: its `--quantities raw` DE is refused, so do one of
 these.** (1) Run all three DEs (both check inputs and the final DE) with `--method dpc`, which
 reads both quantities from this report, with no new search. (2) To keep MaxLFQ, search again
@@ -2736,9 +2801,9 @@ They hold:
 - one verdict: **good / check / concern / no QC on record**.
 
 **The verdict is staff-only** (Brett, 2026-10-01):
-- `logs/` is Core-internal: it is never delivered and is kept out of the session zip. The run
-  registry (`record_run.py`) gets the verdict and the staff section; the board reads the
-  record there.
+- `logs/` is Core-internal: it is never delivered, and the session zip leaves it out except
+  `logs/commands.log`, whose staff names are replaced by the role. The run registry
+  (`record_run.py`) gets the verdict and the staff section; the board reads the record there.
 - **No client deliverable carries a verdict word.** The client report has no QC section, and
   the Methods get one fixed sentence (`--qc-bracket` adds it; `finalize` passes it), the same
   whatever the verdict. `reproducibility/` gets only the record's path and checksum.
@@ -2898,7 +2963,7 @@ records, with the correct UC Davis Proteomics Core instrument-grant acknowledgme
 python3 scripts/make_methods.py --raw /path/to/*.d \
     --fasta-meta <session>/input/search.fasta.meta.json \
     --params <session>/input/wf/<params_file> \
-    --search-prov <session>/output/search/search_provenance.json \
+    --session <session> \
     --workflow-manifest <session>/input/wf/workflow.manifest.json \
     --out <session>/output/methods.md --de-dir <session>/output/tables \
     [--submission <session>] \
@@ -2906,6 +2971,9 @@ python3 scripts/make_methods.py --raw /path/to/*.d \
 python3 scripts/to_docx.py --in <session>/output/methods.md \
     --out <session>/output/methods.docx
 ```
+(`--session` takes the session's own search record, wherever its search is -- with several, the
+one the DE read; with none chosen, tagged blanks and why. `--search-prov <file>` names one by
+hand, and a file that is not there is refused.)
 (Step 12's `finalize` runs this for you when `output/methods.md` does not exist yet, passing
 `--submission` itself when one is attached, and `--qc-bracket <session>/logs/qc_bracket.json`
 when step 8e ran: an **Instrument performance** paragraph of ONE fixed sentence, the same
@@ -2921,12 +2989,22 @@ What it extracts, and what it only defaults:
   collision-energy ramp. It writes them in the order published timsTOF Methods use.
 - The analytical column comes from `--lc-column`, else from HyStar's ColumnInfo, else from
   `--column-log`. That flag takes an export of STAN's column-change log, and the column in place
-  at the first acquisition is used. With none of these, the facility's standard column (PepSep
-  MAX C18, 10 cm × 150 µm, 1.5 µm) is printed **tagged `[facility default — confirm]`**.
+  at the first acquisition is used. With none of these, **for a timsTOF `.d` only**, the
+  facility's standard column (PepSep MAX C18, 10 cm × 150 µm, 1.5 µm) is printed **tagged
+  `[facility default — confirm]`**; any other run (a Thermo `.raw`, an mzML, outside data) gets
+  `____ [not recorded — confirm]`.
   STAN keeps that log in PG Farm, which needs credentials, so the script never connects to it.
 - It tags what no file records: column temperature, emitter, mobile phases, Evotip loading and
-  peptide amount. STAN's 50 °C and the 20 µm emitter are given as facility defaults, tagged;
+  peptide amount. STAN's 50 °C and the 20 µm emitter are given as facility defaults, tagged,
+  **for a timsTOF `.d` only**; the facility's mobile phases only for a Core `.d` or `.raw`;
   anything else unknown is tagged `[not recorded — confirm]`.
+- **The tags you will meet**, each resolved from a record or the user's answer and **never
+  replaced with a guess** (an unresolved tag stays): `[facility default — confirm]`,
+  `[not recorded — confirm]`, `[raw file not readable here — confirm]`, `[DDA/DIA — confirm]`,
+  `[vendor — confirm]` (the instrument name names no one vendor: an mzML is not called Thermo),
+  and `[acquired at the UC Davis Proteomics Core? — confirm]` after the acknowledgment (a Core
+  instrument's name on data that are not a Core `.d`/`.raw`; keep the acknowledgment only if the
+  Core acquired it). → the full list: `references/methods.md`.
 - It builds parameter tables showing the source of each value.
 - It appends the instrument's grant acknowledgment (Fusion Lumos → S10OD021801; Exploris 480 →
   S10OD026918-01A1; timsTOF → Dr. Neil Hunter / HHMI).
@@ -2999,13 +3077,13 @@ there. `check` runs through `hive_exec.sh`, then a SLURM job renders the episode
 (a Core run: the Core's shared key; anyone else: their own key on HIVE), verifies it, links it
 and shares it. Never render on the login node:
 ```
-bash scripts/hive_exec.sh "mkdir -p $S/output/podcast"
+bash scripts/hive_exec.sh "mkdir -p $(printf %q "$S")/output/podcast"
 bash scripts/hive_exec.sh --put <here>/podcast_script.md "$S/output/podcast/"
-bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py check $S/output/podcast/podcast_script.md \
-    --source $S/output/AI_Analysis_Report.md $S/output/methods.md $S/output/AUDIT.md $S/output/SAMPLE_QUALITY.md --forbid-name '<people>'"
-bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py meaning $S/output/podcast/podcast_script.md --brief"
+bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py check $(printf %q "$S")/output/podcast/podcast_script.md \
+    --source $(printf %q "$S")/output/AI_Analysis_Report.md $(printf %q "$S")/output/methods.md $(printf %q "$S")/output/AUDIT.md $(printf %q "$S")/output/SAMPLE_QUALITY.md --forbid-name '<people>'"
+bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py meaning $(printf %q "$S")/output/podcast/podcast_script.md --brief"
 #   -> the reviewer's findings go to $S/output/podcast/findings.md (--put), then --verdict PASS --reviewer ... --findings ...
-bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py job $S/output/podcast/podcast_script.md --core-run"
+bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/make_podcast.py job $(printf %q "$S")/output/podcast/podcast_script.md --core-run"
 bash scripts/hive_exec.sh '<the "submit" line it printed>'      # at once; then watch its "log"
 ```
 `job` writes nothing until everything the job needs is there: a passing check, a PASS meaning check, the consent (and
@@ -3173,7 +3251,23 @@ the numbers.
 First check the notes from the Core again (step 0: `notes.py check --json --session <dir>`).
 ```
 python3 scripts/session.py finalize --dir <session> --zip
+python3 scripts/session.py status --session <session>     # exit 0: complete; 3: what is missing
 ```
+finalize refuses when the report is missing, or when a Claude Code analysis has no
+saved conversation: save it (`save_transcript.py`; from a laptop for a HIVE session:
+`save_transcript.py --hive <S>`), or pass `--no-transcript "<why>"`.
+When the bundle (step 10) is missing or out of date, finalize builds it, with step 10's flags read
+from the session's records; it refuses, naming the exact `provenance.py` command, only when a
+record it needs is absent (no raw-file list).
+finalize is the last step of **every** analysis, with or without a DE: a session with none gets
+the same documents, and `MANIFEST.txt` lists each DE-only part as `[SKIPPED]` (say once that the
+analysis has no DE). Work done outside the session goes in with it: `--code-dir <dir>` and
+`--extra-dir <dir>` (each repeatable), `--methods <md>`, `--report <html>` (a report the skill
+did not write only with `--override-finish "<why>"`). Each is copied to
+`output/custom/<kind>/<name>/`, checksummed, and listed in the README and AGENTS.md. A
+`README.md` or `AGENTS.md` written by hand, or one the skill wrote and someone then edited (init's
+starter README included), is never overwritten: the skill writes
+`README.skill.md` / `AGENTS.skill.md` beside it.
 (On HIVE's login node it moves itself to a compute node: run it in the background.) This tidies `output/` (tables→`tables/`, figures→`figures/`) and makes sure the session carries
 **publication Methods**: `output/methods.md` + `.docx`, covering LC-MS acquisition, the search
 (engine, pinned version, parameters, FDR), the sequence database and contaminants, the DE, and the
@@ -3198,7 +3292,10 @@ version, significant proteins per contrast, and where the folder, the zip and
 `HOW_TO_SUBMIT.md` are. Neither step can fail finalize, and `--no-notify` skips only the post.
 Their outcomes are the last two lines of `MANIFEST.txt`. → `references/notifications.md`.
 
-**Read `MANIFEST.txt` and relay every `[SKIPPED]` line with its reason** (e.g. "the Word copy of
+**Run `session.py status --session <session>` and show its result** (golden rule 9): exit 0 is
+complete; exit 3 names each missing item with the command that makes it -- make them, then run it
+again. A Core submission stays at exit 3 ("The delivery of …") until step 12b delivers it.
+**Read `MANIFEST.txt` and relay every `[SKIPPED]` and `[NOTE]` line with its reason** (e.g. "the Word copy of
 the Methods was skipped: pandoc/python-docx not installed"). `[INFO]` lines are notices, not
 missing parts, so do not relay them. Examples are the run log and Slack lines such as "Core
 notification -- not configured for this user". Then summarize: data type (instrument
@@ -3268,6 +3365,9 @@ python3 ~/proteomics-pipeline/scripts/core_submission.py deliver \
 # delivered before the statistics (the DE waits on the study design, or there will be none)
 python3 ~/proteomics-pipeline/scripts/core_submission.py deliver \
     --summary ~/core/PROT_0807/submission_summary.json --session "$S" --mode no-de   # then --apply
+# The raw files and the search results BEFORE the report (never copy search folders by hand)
+python3 ~/proteomics-pipeline/scripts/core_submission.py deliver \
+    --summary ~/core/PROT_0807/submission_summary.json --session "$S" --mode interim   # then --apply
 ```
 **Then where the CoreOmics key is** (`coreomics_runs_on`, step 1c.1). Shown for this computer;
 with `hive`, run the same `core_submission.py` lines on HIVE through `hive_exec.sh`
@@ -3294,6 +3394,16 @@ python3 scripts/core_submission.py email-draft --summary ~/core/PROT_0807/submis
   says so plainly: ask the staff member whether a delivery without the DE is intended. If it is
   (a QC report, an identification list, results before the statistics), deliver with
   `--mode no-de`; if not, run step 8 first. `deliver` never switches modes by itself.
+- **Several searches, and no DE to choose by:** an analysis or no-de delivery carries none of
+  them and says why. Choose one: rename each other search folder to `output/superseded_<name>/`
+  (a folder whose name holds "superseded" is not a candidate; `session.py which-search --dir
+  "$S"` then names the one left), or deliver every search folder with `--mode interim`.
+- **`--mode interim`** links the raw files (under their staged names) and copies every search
+  folder (wherever its `search_provenance.json` is: `output/search_dda/` ...) into
+  `<share>/PROT_0807_interim_<date>/`, behind the same QC check; it needs no report, Methods,
+  bundle or finalize. Its README, MANIFEST and email draft say what is still owed (the report,
+  Methods, the bundle), and `delivery.json` `owed` keeps `session.py status` open: the work is
+  not finished until a later `--mode no-de` or `analysis` delivery.
 - **`--mode no-de`** delivers the session's report without differential expression into
   `<share>/PROT_0807_report_<date>/`, with the same files and rules as an analysis delivery
   (`Analysis_Report.html` required, raw links as asked). The QC check holds it exactly as it
@@ -3338,6 +3448,11 @@ python3 scripts/core_submission.py email-draft --summary ~/core/PROT_0807/submis
   `@`, a space, a comma, no domain ending) or looks like a typo of `ucdavis.edu` is marked
   `[CHECK THIS ADDRESS: …]` and the draft exits 2 (`address_problems`): show the staff member
   the address and the reason, and have them confirm the right one before sending.
+- **Then check the session is finished**, on HIVE:
+  `python3 ~/proteomics-pipeline/scripts/session.py status --session "$S"` (from a laptop
+  through `hive_exec.sh`, as in step 1c). It stays at exit 3 while anything is missing, and after
+  an interim delivery until the no-de or analysis delivery (`owed`); show its result before
+  telling the staff member the submission is done.
 → detail: `references/core-submissions.md`.
 
 ## Keeping the record of the analysis: the decisions log and the conversation

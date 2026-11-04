@@ -599,6 +599,7 @@ class Job(CoreKeyFile, T.Workspace):
         out = os.path.join(sd, "output")
         T.write(os.path.join(out, "AI_Analysis_Report.md"), T.REPORT)
         T.write(os.path.join(out, "Analysis_Report.html"), T.REPORT_HTML)
+        T.write(os.path.join(out, "methods.md"), "# Methods\n")      # 9d, before the podcast
         script = os.path.join(out, "podcast", "podcast_script.md")
         T.write(script, T.script_text())
         rc, o, e = T.run("check", script, "--source", os.path.join(out, "AI_Analysis_Report.md"))

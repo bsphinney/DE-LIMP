@@ -107,6 +107,36 @@ ENRICHMENT = ("ip", "proximity")
 # with keyword KW-0092 (Biotin) are exactly these carboxylases (plus the transporter SLC5A6) in
 # human (P11498, P05165, Q96RQ3, Q13085, O00763) and in mouse (Pc, Pcca, Mccc1, Acaca, Acacb).
 CARBOXYLASES = ("PC", "PCCA", "MCCC1", "ACACA", "ACACB")
+# ... and, for organisms whose genes are not these symbols (a bacterium's locus tags: a Core submission,
+# V. cholerae, 2.14.2 I26), the biotin enzymes' names in the search FASTA's descriptions,
+# lower case, each matched from the start of a word. Specific names only (that report's
+# list): a bare "carboxylase" would also take decarboxylases, RuBisCO and phosphoenolpyruvate
+# carboxylase, none of them biotinylated, and "acetyl-CoA carboxylase" a bacterium's
+# carboxyltransferase subunits (AccA/AccD), which carry no biotin. Biotin carboxylase (AccC)
+# carries none itself either, but sits on the carrier protein, so streptavidin brings it down.
+CARBOXYLASE_NAMES = ("biotin carboxyl carrier protein", "biotin carboxylase",
+                     "oxaloacetate decarboxylase alpha", "oxaloacetate decarboxylase subunit alpha",
+                     "pyruvate carboxylase", "propionyl-coa carboxylase",
+                     "methylcrotonoyl-coa carboxylase", "methylcrotonyl-coa carboxylase")
+# ... and never a description naming a beta chain / subunit or a carboxyltransferase: those
+# subunits of the same enzymes (PCCB, MCCC2, a bacterium's AccA/AccD, PccB) carry no biotin --
+# the panel's KW-0092 definition above -- and a human session's panel stays 2.14.1's five
+CARBOXYLASE_NOT_NAMES = re.compile(r"\bbeta\b|carboxyl[- ]?transferase", re.I)
+
+
+def carboxylase_of(genes, description=None):
+    """THE panel's rule: which reference carboxylase a protein is -> the CARBOXYLASES symbol its
+    Genes cell names, else the CARBOXYLASE_NAMES entry its description contains (never one that
+    CARBOXYLASE_NOT_NAMES matches), else None."""
+    toks = {t.strip().upper() for t in re.split(r"[;,]", genes or "") if t.strip()}
+    for g in CARBOXYLASES:
+        if g in toks:
+            return g
+    d = (description or "").casefold()
+    if CARBOXYLASE_NOT_NAMES.search(d):
+        return None
+    return next((n for n in CARBOXYLASE_NAMES
+                 if re.search(r"(?<![a-z0-9])" + re.escape(n), d)), None)
 
 # The CoreOmics form's proteomics_type answers -> a type to PROPOSE (first match wins: a record
 # naming both "Affinity Purification" and "BioID" is proximity labelling). Unmatched -> ask.
@@ -184,13 +214,28 @@ def default_for(etype):
 
 
 def _kept_bait_answer(session, bait):
-    """{"bait", "bait_confirmed"} from an earlier record_bait answer, when this `set` names no
-    --bait; {} otherwise."""
-    if bait or not os.path.isfile(path_for(session)):
+    """{"bait", "bait_confirmed"} from an earlier record_bait answer: when this `set` names no
+    --bait, the earlier bait and answer; when it names one, the answer still holds for it (2.14.2,
+    I15: re-recording the type with the same proteome bait asked the bait question again) -- an
+    answer that an added sequence is the bait, when --bait names that sequence; "none of the
+    added sequences is the bait", when --bait names none of them. {} otherwise: the answer was
+    about another bait, and the question is asked again."""
+    if not os.path.isfile(path_for(session)):
         return {}
     prior = load(session) or {}
     ans = prior.get("bait_confirmed")
-    return {"bait": prior.get("bait"), "bait_confirmed": ans} if ans else {}
+    if not ans:
+        return {}
+    if not bait:
+        return {"bait": prior.get("bait"), "bait_confirmed": ans}
+    hits = {c["accession"] for c in matching_candidates(bait, bait_candidates(session))}
+    if ans.get("answer") == NO_BAIT:
+        # "none" given before any bait was recorded, then a --bait naming none of the added
+        # sequences: that answer is now about this proteome bait, and says so (bait_question
+        # then returns the bait, not "none")
+        return {} if hits else {"bait_confirmed": dict(ans, added_sequences_are_not_the_bait=True)}
+    return {"bait_confirmed": ans} if bait == ans.get("answer") or hits == {ans.get("answer")} \
+        else {}
 
 
 def record(session, etype, source, stated=None, bait=None, controls=None, submission=None,
@@ -332,9 +377,16 @@ def bait_question(rec, cands):
     if not cands:
         return None, None
     conf = (rec or {}).get("bait_confirmed")
-    if isinstance(conf, dict) and conf.get("answer"):
-        return None, {"bait": conf["answer"], "source": "set-bait (asked after step 6)"}
     told = (rec or {}).get("bait")
+    if isinstance(conf, dict) and conf.get("answer"):
+        # "none" for the added sequences, with a bait from the searched proteome recorded: that
+        # bait stands (record_bait or set kept it), and nothing is asked again. Read from the
+        # record, not only from the flag, so an answer recorded without it is never read as "no
+        # bait" beside a recorded one
+        if conf["answer"] == NO_BAIT and told and not matching_candidates(told, cands):
+            return None, {"bait": told, "source": "set --bait (a proteome protein); the added "
+                                                  "sequences are not the bait"}
+        return None, {"bait": conf["answer"], "source": "set-bait (asked after step 6)"}
     if told:
         hits = matching_candidates(told, cands)
         if len(hits) == 1:
@@ -343,7 +395,11 @@ def bait_question(rec, cands):
                                     "sequences"}
         return (f"The bait was recorded at step 3 as {told}, which names "
                 + ("several" if hits else "none") + " of the sequences the user added. "
-                + ask_bait(cands)), None
+                + ask_bait(cands)
+                + ("" if hits else
+                   f" If none of them is (the bait is a protein of the searched proteome and the "
+                   f"added sequence a tag or the labelling enzyme), --bait none keeps {told} as "
+                   f"the bait.")), None
     return ask_bait(cands), None
 
 
@@ -387,9 +443,15 @@ def record_bait(session, bait, when=None):
     cands = bait_candidates(session)
     none = answer.casefold() == NO_BAIT
     acc = answer if none or not cands else resolve_bait(answer, cands)
-    rec.update(bait=None if none else acc,
+    # "none" while the recorded bait names none of the added sequences: the bait is a protein of
+    # the searched proteome and the added sequences are something else (a tag, the TurboID enzyme)
+    # -- it is kept, and the answer says what it was about (2.14.2, I15: "none" erased it)
+    keep = (none and bool(cands) and bool(rec.get("bait"))
+            and not matching_candidates(rec["bait"], cands))
+    rec.update(bait=rec["bait"] if keep else None if none else acc,
                bait_confirmed={"answer": NO_BAIT if none else acc,
                                **({"given_as": answer} if not none and acc != answer else {}),
+                               **({"added_sequences_are_not_the_bait": True} if keep else {}),
                                "by": "the user, asked ask_bait after the database was built",
                                "at": when or datetime.datetime.now(datetime.timezone.utc).strftime(
                                    "%Y-%m-%dT%H:%M:%SZ")})
@@ -432,6 +494,21 @@ def controls_in(groups, rec=None):
         [g for g in groups if IP_CONTROL_NAME.search(g)]
 
 
+def default_contrasts(groups, rec=None):
+    """With control groups RECORDED (experiment_type.py set --controls), the contrasts a DE should
+    default to: every other group minus each control, `<group>-<control>`, so each fold change is
+    the bait (or treatment) over its control. run_de.R's own default -- every group against the
+    first level alphabetically -- put IgG-Bait, control minus bait, on a TurboID study whose
+    controls were recorded (2.14.2, I18). None when no controls were recorded, or none of them is
+    a group here: a group merely NAMED like IgG / beads stays advisory (pulldown_design's note),
+    never a contrast chosen for the user."""
+    if not (rec or {}).get("controls"):
+        return None
+    controls = controls_in(groups, rec)
+    out = [f"{g}-{c}" for c in controls for g in groups if g not in controls]
+    return out or None
+
+
 def pulldown_design(rec, groups, contrasts):
     """THE pull-down decision the analysis uses: {"pulldown", "source", "controls", "vs_control",
     "note"}. From the experiment type when recorded -- an enrichment type is a pull-down design --
@@ -443,7 +520,24 @@ def pulldown_design(rec, groups, contrasts):
                 "source": "group names only (no experiment type recorded)", "note": None}
     enr = rec["type"] in ENRICHMENT
     note = None
-    if enr and not vs_control:
+    # a contrast with a control on the LEFT (IgG-Bait): its fold changes are control minus bait
+    reversed_ = [c for c in contrasts if "-" in c and c.split("-", 1)[0].strip() in controls]
+    found = "recorded" if rec.get("controls") else "named like IgG/beads"
+    if enr and not vs_control and reversed_:
+        swapped = ",".join("-".join(x.strip() for x in reversed(c.split("-", 1)))
+                           for c in reversed_)
+        note = (f"the control groups were {found} ({', '.join(controls)}), but "
+                + ("every contrast has" if len(reversed_) == len(contrasts) else
+                   "each contrast against one has")
+                + f" a control on the left ({', '.join(reversed_)}), so "
+                + ("its" if len(reversed_) == 1 else "their")
+                + f" fold changes are control minus bait: use --contrasts {swapped}")
+    elif enr and not vs_control and controls:
+        note = (f"the control groups were {found} ({', '.join(controls)}), but no contrast is "
+                f"against one ({', '.join(contrasts) or 'none given'})"
+                + (f": use --contrasts {','.join(default_contrasts(groups, rec))}"
+                   if default_contrasts(groups, rec) else ""))
+    elif enr and not vs_control:
         note = (f"the experiment type is {rec['label']}, but no contrast is against a control "
                 "group (none is named like IgG/beads, and no --controls were recorded): "
                 "record the control groups (experiment_type.py set --controls ...)")
@@ -451,7 +545,8 @@ def pulldown_design(rec, groups, contrasts):
         note = (f"the groups {', '.join(controls)} read as a pull-down's controls, but the "
                 f"experiment type is {rec['label']}: confirm the type with the user")
     return {"pulldown": enr, "controls": controls, "vs_control": vs_control,
-            "source": f"experiment type ({rec['source']})", "note": note}
+            "source": f"experiment type ({rec.get('source') or 'source not recorded'})",
+            "note": note}
 
 
 def main():

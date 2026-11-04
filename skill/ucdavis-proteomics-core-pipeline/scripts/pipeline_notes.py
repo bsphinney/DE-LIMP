@@ -23,6 +23,10 @@ STAGES = {
               "A deep-learning model predicts the retention time, ion mobility and fragment "
               "pattern of every peptide your proteins could produce. One job, no raw data "
               "read yet -- this is why nothing looks like it is touching your files."),
+    "step1b": ("Measuring the search settings on a few representative runs",
+               "Before any file is searched, DIA-NN is run on a few representative files to "
+               "measure the scan window (and, where planned, the mass accuracy), so that every "
+               "file is then searched with the same settings instead of each choosing its own."),
     "step2": ("First pass: searching each file against the predicted library",
               "Each raw file is searched independently as its own cluster task, which is "
               "where the parallel chain earns its time back. Each finished file leaves a "
@@ -129,7 +133,7 @@ def pick(stage, index, prefer_stage=True):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--stage", default="single", help="step1..step5 | single | de")
+    ap.add_argument("--stage", default="single", help="step1, step1b, step2..step5 | single | de")
     ap.add_argument("--index", type=int, default=0, help="poll counter; rotates the note")
     ap.add_argument("--no-fact", action="store_true")
     a = ap.parse_args()

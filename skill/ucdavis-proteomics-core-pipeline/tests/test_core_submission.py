@@ -157,7 +157,16 @@ def write(root, rel, text):
     os.makedirs(os.path.dirname(p), exist_ok=True)
     with open(p, "w") as fh:
         fh.write(text)
+    if os.path.basename(p) == "Analysis_Report.html":
+        # a report these tests write stands for make_analysis_html.py's, which records it
+        # (2.14.2: deliver takes only the skill's own report; tests/test_finish_gates.py)
+        sibling_report_files().mark_skill_report(p, "make_analysis_html.py")
     return p
+
+
+def sibling_report_files():
+    import report_files
+    return report_files
 
 
 class FakeCoreOmics:
@@ -1365,16 +1374,16 @@ class TestStage(unittest.TestCase):
         self.assertEqual(rc, 0)
 
     def test_a_same_surname_folder_naming_someone_else_is_ambiguous(self):
-        """Defect 8: PI Ying Wang was filed under `Wang Wei` with exit 0."""
-        self.folder("on_campus", "Wang Wei")
-        summary, _ = write_summary(self.tmp, record(pi_last="Wang", pi_first="Ying"))
+        """Defect 8: PI Jane Doe was filed under `Doe John` with exit 0."""
+        self.folder("on_campus", "Doe John")
+        summary, _ = write_summary(self.tmp, record(pi_last="Doe", pi_first="Jane"))
         rc, out, _ = self.stage(summary)
         self.assertEqual(rc, 2)
-        self.assertIn("wei", out["group_resolution"]["reason"])
+        self.assertIn("john", out["group_resolution"]["reason"])
 
     def test_a_same_surname_folder_naming_the_pi_is_reused(self):
-        group = self.folder("on_campus", "Wang Ying")
-        summary, _ = write_summary(self.tmp, record(pi_last="Wang", pi_first="Ying"))
+        group = self.folder("on_campus", "Doe Jane")
+        summary, _ = write_summary(self.tmp, record(pi_last="Doe", pi_first="Jane"))
         rc, out, _ = self.stage(summary)
         self.assertEqual((rc, out["group_dir"]), (0, group))
 
@@ -1415,6 +1424,22 @@ class TestStage(unittest.TestCase):
         rc, out, _ = self.stage(summary)
         self.assertEqual(rc, 0)
         self.assertEqual(out["group_dir"], os.path.join(self.sroot, "off_campus", "UCSF", "Placeholder"))
+
+    def test_a_campus_name_run_together_is_still_its_alias(self):
+        """I14 (2.14.2): stage asked about the folder "UC SantaCruz" for "University of California
+        Santa Cruz" (tokens {santacruz} vs {ucsc}). Aliases are compared with spaces removed."""
+        for folder in ("UC SantaCruz", "UCSantaCruz", "UC_Santa_Cruz"):
+            self.assertEqual(cs.institution_tokens(folder), {"ucsc"}, folder)
+        self.assertEqual(cs.institution_tokens("University of California Santa Cruz"), {"ucsc"})
+        group = self.folder("off_campus", "UC SantaCruz", "Placeholder lab")
+        summary, _ = write_summary(self.tmp, record(institution="University of California Santa Cruz"))
+        rc, out, p = self.stage(summary)
+        self.assertEqual(rc, 0, p.stdout + p.stderr)
+        self.assertEqual(out["group_dir"], group)
+
+    def test_a_run_together_alias_needs_its_word_boundaries(self):
+        """(pin) "Ducsantacruzx" is no campus: the alias still ends at a word boundary."""
+        self.assertNotIn("ucsc", cs.institution_tokens("Ducsantacruzx"))
 
     def test_apply_refuses_files_whose_locate_hard_failed(self):
         """Defect 15: files.txt is written even on a FAIL; nothing else stopped it being staged."""
@@ -1683,6 +1708,10 @@ class DeliverBase(unittest.TestCase):
               json.dumps(qc_record("good", session=self.session)))
         write(o, "Analysis_Report.html", "<html>report</html>")
         write(o, "AUDIT.md", "# audit")
+        # the finish steps deliver needs (2.14.2): Methods (9d), the bundle (10) and the finalize
+        # stamp (12); tests/test_finish_gates.py takes each away
+        write(o, "methods.md", "# Methods\n")
+        write(o, "reproducibility/run_manifest.json", '{"files": []}')
         # The DE table is a symlink to a file elsewhere: the delivery must hold the BYTES.
         elsewhere = write(self.tmp, "elsewhere/DE_dpc_ctrl.vs.treat.csv", "Protein,logFC\nP1,1\n")
         os.symlink(elsewhere, os.path.join(o, "tables", "DE_dpc_ctrl.vs.treat.csv"))
@@ -1696,6 +1725,10 @@ class DeliverBase(unittest.TestCase):
         write(o, "search/report.parquet", "parquet")
         write(o, "search/xic/t1_xic.parquet", "xic")
         self.output = o
+        # finalize's stamp, last, with the real checksums of what is there (finish_fixture.stamp):
+        # it goes stale like a real one when a stamped file changes (L5b review N2)
+        import finish_fixture
+        finish_fixture.stamp(o)
         self.share = local_share(self.tmp)
         self.delivery = os.path.join(self.share, "PROT_0807_t1")
 
@@ -1906,6 +1939,8 @@ class TestDeliver(DeliverBase):
                       "-- to pass the report on with the audio, send this one file", read(out_md))
 
         write(self.output, "Analysis_Report.html", "<html>report, regenerated</html>")
+        import finish_fixture
+        finish_fixture.stamp(self.output)     # finalized again: the report is stamped (N2)
         rc, out, p = self.deliver("--apply", "--label", "t3")
         self.assertEqual(rc, 0, p.stderr + p.stdout)
         d3 = os.path.join(self.share, "PROT_0807_t3")
@@ -2223,6 +2258,80 @@ class TestRawOnlyDelivery(DeliverBase):
         run(["email-draft", "--summary", self.summary, "--delivery",
              os.path.join(self.work, "delivery.json"), "--out", out_md], self.env)
         self.assertNotIn(SURVEY, read(out_md))
+
+
+class RawOnlyNames(DeliverBase):
+    """I43 (2.14.2): stage links each raw file into raw/ under the name it was LISTED by -- a link
+    staff made to correct a mis-named run (S07.d -> the instrument's wrong_sample.d) keeps the
+    corrected name -- and records that name in `links`, the real file in `files`. deliver named
+    the share's raw links after `files`, so the collaborator got the run under its wrong name."""
+    rec_kwargs = {"raw_only": True}
+
+    def deliver_raw(self):
+        rc, out, p = run(["deliver", "--summary", self.summary, "--label", "raw", "--apply"], self.env)
+        self.assertEqual(rc, 0, p.stdout + p.stderr)
+        return os.path.join(self.share, "raw"), read(os.path.join(self.share, "PROT_0807_raw",
+                                                                  "MANIFEST.txt"))
+
+    def test_raw_names_reads_the_staged_links(self):
+        rec = {"files": ["/x/wrong_sample.d"],
+               "links": [{"name": "S07.d", "target": "/x/wrong_sample.d",
+                          "link": "../../x/wrong_sample.d", "relative": True, "action": "create"}]}
+        self.assertEqual(cs.raw_names(rec), [("S07.d", "/x/wrong_sample.d")])
+
+    def test_a_staged_name_never_leaves_raw(self):
+        """Review of 51e5ba21: a hand-edited name `../x.d` put the link outside raw/. Only its
+        base name is used, and a name that is no file name (`..`, `.`, empty) is none; a link with
+        no usable name is never named after its target, the wrong name I43 fixes."""
+        t = "/x/wrong_sample.d"
+        for name, want in (("../x.d", "x.d"), ("sub/S07.d", "S07.d"), ("..", None), (".", None),
+                           ("", None), (None, None), ("../", None)):
+            with self.subTest(name=name):
+                rec = {"links": [{"name": name, "target": t}]}
+                self.assertEqual(cs.raw_names(rec), [(want, t)])
+
+    def test_a_link_with_no_usable_name_is_skipped(self):
+        marker = os.path.join(self.service_project, cs.MARKER)
+        for m in (marker, os.path.join(self.work, cs.MARKER)):
+            rec = load(m)
+            rec["links"][1]["name"] = ".."
+            with open(m, "w") as fh:
+                json.dump(rec, fh)
+        share_raw, manifest = self.deliver_raw()
+        second = os.path.basename(self.raw_files[1])
+        self.assertFalse(os.path.lexists(os.path.join(share_raw, second)))
+        self.assertEqual(sorted(os.listdir(share_raw)), [os.path.basename(self.raw_files[0])])
+        line = [x for x in manifest.splitlines() if x.startswith(f"[SKIPPED] ../raw/{second} -- ")]
+        self.assertEqual(len(line), 1, manifest)
+        self.assertIn("no usable name", line[0])
+        self.assertTrue(os.path.islink(os.path.join(share_raw, os.path.basename(self.raw_files[0]))))
+
+    def test_raw_only_uses_the_staged_name(self):
+        wrong = raw(self.tmp, "tTOF_HT", "mar25", "wrong_sample.d")
+        fixed = os.path.join(self.tmp, "corrected", "S07.d")
+        os.makedirs(os.path.dirname(fixed))
+        os.symlink(wrong, fixed)
+        flist = write(self.tmp, "files_corrected.txt", "\n".join(self.raw_files + [fixed]) + "\n")
+        rc, st, p = run(["stage", "--summary", self.summary, "--files", flist, "--apply"], self.env)
+        self.assertEqual(rc, 0, p.stdout + p.stderr)
+        share_raw, manifest = self.deliver_raw()
+        self.assertTrue(os.path.islink(os.path.join(share_raw, "S07.d")))
+        self.assertEqual(os.path.realpath(os.path.join(share_raw, "S07.d")), os.path.realpath(wrong))
+        self.assertFalse(os.path.lexists(os.path.join(share_raw, "wrong_sample.d")))
+        self.assertIn("[OK] ../raw/S07.d", manifest)
+        self.assertNotIn("wrong_sample", manifest)
+
+    def test_old_record_without_links_falls_back_to_files(self):
+        """(pin) A stage record from before `links`: the files' own names, as before."""
+        for m in (os.path.join(self.service_project, cs.MARKER), os.path.join(self.work, cs.MARKER)):
+            rec = load(m)
+            rec.pop("links")
+            with open(m, "w") as fh:
+                json.dump(rec, fh)
+        share_raw, manifest = self.deliver_raw()
+        for f in self.raw_files:
+            self.assertTrue(os.path.islink(os.path.join(share_raw, os.path.basename(f))))
+            self.assertIn(f"[OK] ../raw/{os.path.basename(f)}", manifest)
 
 
 class TestNoDeDelivery(DeliverBase):
@@ -2858,7 +2967,7 @@ class TestEmailDraft(unittest.TestCase):
 
 # ---------------------------------------------------------------------- identify --
 LRS_RUNS = [f"/data/JUL26/08132026__60SPD_DIA-LRS-{n}_S3-A1_1_{23600 + n}.d" for n in range(96, 126)]
-HEX_0756 = "0022066cd85f"
+HEX_0756 = "9a7e5c3b1d0f"
 
 
 def rec_0756(**kw):

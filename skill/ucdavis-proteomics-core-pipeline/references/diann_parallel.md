@@ -555,7 +555,7 @@ Why these rules, measured on HIVE:
   frame index stops early while `analysis.tdf_bin` is complete (a stale mid-acquisition
   `-wal` was checkpointed into the finished tdf by a read-write open); every one has a WAL
   header, intact ones are 1,1. The FRAN pilot's size rule picked one:
-  `8aug25_KogantiLys7uL_60spd_6_S4-B6_1_15704.d`, `tdf_bin` 2.40 GB, index 1,451 frames /
+  `8aug25_LabQLys7uL_60spd_6_S4-B6_1_15704.d`, `tdf_bin` 2.40 GB, index 1,451 frames /
   134 s covering **0.74%** of it (read with the immutable URI), where its 11 siblings index
   13,736–13,743 frames / 21.0 min covering 99.9999–100%. DIA-NN read 121 cycles and 80
   precursors. On that cohort (srun jobs 23536639 and 23536675) the rule excludes run 6 by its WAL header,

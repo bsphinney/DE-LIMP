@@ -142,7 +142,11 @@ class WhoMaySign(StaffEnv):
         self.assertNotIn("jdoe", out)
         self.assertNotIn("Jane Doe", out)
         self.assertNotIn("quoted", out)
-        self.assertEqual(out.count('"<Core staff>"'), 4)
+        # --by is staff-only by construction; --override-by may be set by anyone, so it gets a
+        # role-neutral word (the sidecar says "the user" for a setter not on the list)
+        self.assertEqual(out.count('"<Core staff>"'), 3)
+        self.assertEqual(out.count('"<redacted>"'), 1)
+        self.assertIn('--override-by="<redacted>"', out)
         self.assertIn('--reason "low IgG"', out)
         self.assertIn("--block Mouse --input r.parquet", out)
 
@@ -383,6 +387,8 @@ class NamesStayWithStaff(StaffEnv):
         with open(os.path.join(sdir, "logs", "commands.log"), "a") as fh:
             fh.write("python3 normalization_check.py decide --check c.json --quantities raw "
                      "--by jdoe --reason \"low IgG\"\n")
+        import finish_fixture                              # finished as finalize's gate asks
+        finish_fixture.finished(os.path.join(sdir, "output"), methods=True)
         r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "session.py"), "finalize",
                             "--dir", sdir, "--zip", "--no-deposit", "--no-notify"],
                            capture_output=True, text=True, env=env)
@@ -417,8 +423,10 @@ class NamesStayWithStaff(StaffEnv):
         said = json.loads(side)
         self.assertNotIn(ME, json.dumps([said["overrides"], said["rationale"]]))
         o = said["overrides"]["--mass-acc"]
-        self.assertEqual((o["set_by"], o["staff_record"]), ("Core staff", "params.cfg.staff.json"))
-        self.assertIn("set by Core staff; reason: off calibration", o["source"])
+        # "Jane Doe" is a name, not a login on a Core staff list (there is none here): the user
+        # (S4; tests/test_overrides_are_the_users.py WhoSetIt has the staff-list cases)
+        self.assertEqual((o["set_by"], o["staff_record"]), ("the user", "params.cfg.staff.json"))
+        self.assertIn("set by the user; reason: off calibration", o["source"])
         e = staff.read(cfg + staff.STAFF_SUFFIX)
         self.assertEqual([(x["by"], x["by_how"], x["account"]) for x in e],
                          [("Jane Doe", "given", ME)])

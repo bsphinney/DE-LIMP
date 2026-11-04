@@ -408,10 +408,12 @@ class DataDependentFlagOutranksWindowShape(unittest.TestCase):
         return w
 
     def test_narrow_windows_that_are_not_data_dependent_are_not_called_dda(self):
-        # Astral-style 2 m/z DIA: the width rule alone would call this DDA.
+        # Astral-style 2 m/z DIA: the width rule alone would call this DDA. A tiled set
+        # repeated every cycle with nothing data-dependent is DIA "high" since T41 (S2; it was
+        # "medium" -- tests/test_tiled_dia_windows.py).
         centres = [381.0 + 2.0 * i for i in range(300)]
         kind, conf, why, rng = da.classify_thermo_windows(self.windows(2.0, centres, 3, False))
-        self.assertEqual((kind, conf), ("DIA", "medium"), why)
+        self.assertEqual((kind, conf), ("DIA", "high"), why)
         self.assertEqual(rng, (380.0, 980.0))
 
     def test_wide_windows_that_are_all_data_dependent_are_not_called_dia(self):
@@ -486,13 +488,14 @@ class DataDependentFlagOutranksWindowShape(unittest.TestCase):
         """End to end from query JSON: 300 x 2 m/z windows, nothing data-dependent, the
         filter string under v1.3.0-v1.4.4's "MS:10000512". Reading only the correct
         accession returned DDA/high with no range and no confirmation -- DIA data routed to
-        Sage without asking."""
+        Sage without asking. (DIA "high" since T41: a tiled set repeated every cycle, nothing
+        data-dependent.)"""
         centres = [381.0 + 2.0 * i for i in range(300)]
         for acc in ("MS:1000512", "MS:10000512"):
             w = da.thermo_isolation_windows(self.proxi(2.0, centres, 3, acc))
             self.assertEqual((w["n_filter"], w["n_dependent"]), (900, 0), acc)
             kind, conf, why, rng = da.classify_thermo_windows(w)
-            self.assertEqual((kind, conf), ("DIA", "medium"), f"{acc}: {why}")
+            self.assertEqual((kind, conf), ("DIA", "high"), f"{acc}: {why}")
             self.assertEqual(rng, (380.0, 980.0), acc)
 
 

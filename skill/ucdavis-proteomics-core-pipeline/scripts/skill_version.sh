@@ -71,7 +71,8 @@
 #   main's version is read over HTTPS (curl, which Git Bash has; SKILL_MAIN_URL), never SSH, and
 #   no Python is needed. --update refreshes a catalogue behind main with
 #   `git pull --ff-only` over HTTPS (an SSH remote is pulled from SKILL_REPO_URL instead), runs
-#   `claude plugin update` (SKILL_CLAUDE) with CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1, and reads the
+#   `claude plugin update` (SKILL_CLAUDE; on Windows, when it is not on PATH, the claude.exe of
+#   the CLI installer or the desktop app: sv_find_claude) with CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1, and reads the
 #   installed version from `claude plugin list --json`, or installed_plugins.json beside the
 #   catalogue. SKILL_MARKETPLACE_DIR overrides where the catalogue is. Tests point all four at
 #   stand-ins (a file:// URL, local git repositories, a fake claude); no test uses the network.
@@ -592,12 +593,55 @@ SH
     [ -n "$MAIN" ]
   }
 
+  # Which claude to run (I01). SKILL_CLAUDE when the shell finds it. On Windows (Git Bash: uname
+  # -s MINGW*/MSYS*) Claude Code is often not on PATH at all: the CLI installer puts claude.exe in
+  # %USERPROFILE%\.local\bin, and the desktop app runs its own from
+  # %APPDATA%\Claude\claude-code\<version>\ -- so those are tried next, .local\bin first, then the
+  # newest desktop version by version order (skill_version_cmp: 2.1.300 is newer than 2.1.95).
+  # Echoes the command, with "using <path>" on stderr for a Windows one; nothing (status 1) when
+  # there is none. Linux and macOS: SKILL_CLAUDE only, as before.
+  SV_WIN_CLAUDE_PLACES='%USERPROFILE%\.local\bin\claude.exe, or the desktop app'"'"'s %APPDATA%\Claude\claude-code\<version>\claude.exe'
+  sv_on_windows() { case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*) return 0 ;; esac; return 1; }
+  sv_posix_path() {      # a Windows path (C:\Users\...) as Git Bash's /c/Users/..., when it can say
+    if [ -n "$1" ] && command -v cygpath >/dev/null 2>&1; then cygpath -u "$1"; else printf '%s\n' "$1"; fi
+  }
+  sv_find_claude() {
+    local p d v best="" bv=""
+    if command -v "$SKILL_CLAUDE" >/dev/null 2>&1; then printf '%s\n' "$SKILL_CLAUDE"; return 0; fi
+    sv_on_windows || return 1
+    if [ -n "${USERPROFILE:-}" ]; then
+      p="$(sv_posix_path "$USERPROFILE")/.local/bin/claude.exe"
+      if [ -f "$p" ] && [ -x "$p" ]; then
+        echo "skill_version.sh: using $p (claude is not on PATH)" >&2; printf '%s\n' "$p"; return 0
+      fi
+    fi
+    if [ -n "${APPDATA:-}" ]; then
+      for p in "$(sv_posix_path "$APPDATA")"/Claude/claude-code/*/claude.exe; do
+        [ -f "$p" ] && [ -x "$p" ] || continue
+        d="${p%/claude.exe}"; v="$(skill_version_core "${d##*/}")"
+        # a version-named folder beats one that is not; among versions the newest wins
+        if [ -z "$best" ] || { sv_is_version "$v" && { ! sv_is_version "$bv" \
+             || [ "$(skill_version_cmp "$v" "$bv")" = 1 ]; }; }; then
+          best="$p"; bv="$v"
+        fi
+      done
+    fi
+    [ -n "$best" ] || return 1
+    echo "skill_version.sh: using $best (claude is not on PATH)" >&2; printf '%s\n' "$best"
+  }
+  # sv_find_claude once per run (its stderr line once), before anything asks in a subshell
+  CLAUDE_CMD=""; CLAUDE_FOUND=""
+  sv_resolve_claude() {
+    [ -n "$CLAUDE_FOUND" ] && return 0
+    CLAUDE_CMD="$(sv_find_claude)"; CLAUDE_FOUND=1
+  }
+
   # The installed plugin's version: `claude plugin list --json`, else installed_plugins.json
   # beside the catalogue (as Claude Code 2.1.295 writes it). "" when neither says.
   sv_installed() {
     local v="" f
-    if command -v "$SKILL_CLAUDE" >/dev/null 2>&1; then
-      v="$("$SKILL_CLAUDE" plugin list --json </dev/null 2>/dev/null | skill_installed_version)"
+    if [ -n "$CLAUDE_CMD" ]; then
+      v="$("$CLAUDE_CMD" plugin list --json </dev/null 2>/dev/null | skill_installed_version)"
     fi
     f="$(dirname "$(dirname "$1")")/installed_plugins.json"
     if [ -z "$v" ] && [ -f "$f" ]; then v="$(skill_installed_version <"$f")"; fi
@@ -630,12 +674,14 @@ SH
 
   # `claude plugin update`, with Claude Code's documented switch for a machine without a GitHub
   # SSH key (CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1: an owner/repo marketplace is cloned over HTTPS,
-  # no SSH probe). CLAUDE_RC is "" when claude is not on PATH; CLAUDE_SAID its output, on one line.
+  # no SSH probe). CLAUDE_RC is "" when no claude was found (sv_find_claude); CLAUDE_SAID its
+  # output, on one line.
   sv_claude_update() {
     local out
     CLAUDE_RC=""; CLAUDE_SAID=""
-    command -v "$SKILL_CLAUDE" >/dev/null 2>&1 || return 1
-    out="$(CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1 "$SKILL_CLAUDE" plugin update "$SKILL_PLUGIN_ID" \
+    sv_resolve_claude
+    [ -n "$CLAUDE_CMD" ] || return 1
+    out="$(CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1 "$CLAUDE_CMD" plugin update "$SKILL_PLUGIN_ID" \
            </dev/null 2>&1)"
     CLAUDE_RC=$?
     CLAUDE_SAID="$(printf '%s\n' "$out" | LC_ALL=C tr -d '\r' | LC_ALL=C tr -d '\200-\377' \
@@ -656,6 +702,7 @@ SH
     else
       state="$(skill_update_state "$here" "$MAIN")"
       if [ "$state" = behind ]; then
+        sv_resolve_claude
         inst="$(sv_installed "$mp")"
         state="$(skill_update_state "$here" "$MAIN" "$inst")"
       fi
@@ -688,6 +735,7 @@ SH
     # the installed version only when this copy is not already main's (claude takes seconds)
     if [ -n "$MAIN" ] && [ -n "$here" ]; then state="$(skill_update_state "$here" "$MAIN")"; fi
     if [ "$state" != current ]; then
+      sv_resolve_claude
       inst0="$(sv_installed "$mp")"
       [ -z "$MAIN" ] || state="$(skill_update_state "${here:-$inst0}" "$MAIN" "$inst0")"
     fi
@@ -712,7 +760,9 @@ SH
         # repeated here (it is in claude_said): it compared against a stale catalogue.
         lc="$(printf '%s' "$CLAUDE_SAID" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
         cat1="$(sv_catalogue_version "$mp")"
-        if [ -z "$CLAUDE_RC" ]; then
+        if [ -z "$CLAUDE_RC" ] && sv_on_windows; then
+          why="The claude command is not on PATH here, nor at $SV_WIN_CLAUDE_PLACES, so claude plugin update could not run (in Claude Code: /plugin -> Installed -> ucdavis-proteomics-core-pipeline -> Update now)."
+        elif [ -z "$CLAUDE_RC" ]; then
           why="The claude command is not on PATH here, so claude plugin update could not run (in Claude Code: /plugin -> Installed -> ucdavis-proteomics-core-pipeline -> Update now)."
         elif [ "$CLAUDE_RC" != 0 ]; then
           why="claude plugin update failed (exit $CLAUDE_RC)."
@@ -768,7 +818,7 @@ SH
                          --allow-older) [ $# -eq 2 ] || sv_die "usage"; sv_publish 1 ;;
                          *) sv_die "unknown argument: $2" ;;
                        esac ;;
-    -h|--help)         sed -n '3,77p' "$0" ;;
+    -h|--help)         sed -n '3,78p' "$0" ;;
     *)                 sv_die "unknown argument: $1 (see --help)" ;;
   esac
 fi

@@ -65,6 +65,72 @@ class TheCheckComputesTheFix(unittest.TestCase):
         self.assertEqual(cfg["precursor_tol"], {"ppm": [-10.0, 10.0]}, "nothing else changes")
         self.assertTrue(slc.gated(rec))
 
+    def test_the_corrected_config_carries_the_params_side_record(self):
+        """Follow-up 3 (H7 bug 3): the re-run's Methods lost "Cysteine was searched unmodified"
+        because sage_config.lfq_ppm<N>.json had no .rationale.json beside it"""
+        side = {"cys_alkylation": {"value": "none", "source": "user"},
+                "labels": {"channels": []}}
+        with open(self.cfg + ".rationale.json", "w") as fh:
+            json.dump(side, fh)
+        fx.write_sage_outputs(self.out, OFF, peaks=0)
+        rec = slc.check(self.out, self.cfg)
+        with open(rec["corrected_params"] + ".rationale.json") as fh:
+            got = json.load(fh)
+        self.assertEqual(got["cys_alkylation"], side["cys_alkylation"])
+        self.assertEqual(got["labels"], side["labels"])
+        self.assertEqual(got["derived_from"]["params"], self.cfg)
+        with open(rec["corrected_params"]) as fh:
+            ppm = json.load(fh)["quant"]["lfq_settings"]["ppm_tolerance"]
+        # the full path of the one setting changed (nothing reads a short name)
+        self.assertEqual(got["derived_from"]["changed"], {"quant.lfq_settings.ppm_tolerance": ppm})
+        import make_methods as mm
+        self.assertEqual(mm._cys_alkylation([rec["corrected_params"]])["value"], "none")
+
+    def test_without_a_side_record_none_is_invented(self):
+        """(pin) no sidecar to carry: none is written"""
+        fx.write_sage_outputs(self.out, OFF, peaks=0)
+        rec = slc.check(self.out, self.cfg)
+        self.assertFalse(os.path.exists(rec["corrected_params"] + ".rationale.json"))
+
+    def _prov(self, **extra):
+        with open(os.path.join(self.out, "search_provenance.json"), "w") as fh:
+            json.dump({"tools": "/t.json", "bundle": "/b.json", "fasta": "/f.fasta",
+                       "files": ["/r1.mzML"], "queue": {}, **extra}, fh)
+
+    def test_the_rerun_keeps_the_job_end_choices(self):
+        """Follow-up 3 (H7 bug 4): a re-run of an opted-out search posted to Slack and staged to
+        FRAN, because the printed command dropped --no-notify / --no-fran / --not-qc"""
+        os.makedirs(self.out, exist_ok=True)
+        self._prov(job_end_hook={"run_log": "on", "slack": "off", "fran": "off",
+                                 "fran_name": "a study", "qc": False})
+        cmd = slc.rerun_plan(self.out, "/c.json", 7.0)["command"]
+        for flag in ("--no-notify", "--no-fran", "--not-qc", "--fran-name 'a study'"):
+            self.assertIn(flag, cmd)
+
+    def test_a_search_that_kept_the_defaults_reruns_with_them(self):
+        """(pin)"""
+        os.makedirs(self.out, exist_ok=True)
+        self._prov(job_end_hook={"run_log": "on", "slack": "on", "fran": "left_to_agent",
+                                 "fran_name": None, "qc": None})
+        cmd = slc.rerun_plan(self.out, "/c.json", 7.0)["command"]
+        for flag in ("--no-notify", "--no-fran", "--qc", "--not-qc", "--fran-name"):
+            self.assertNotIn(flag, cmd)
+
+    def test_one_definition_of_the_flags(self):
+        import argparse
+        import notify_slack
+        import run_search
+        a = argparse.Namespace(no_notify=True, no_fran=False, fran_name="n", qc=True,
+                               not_qc=False)
+        self.assertEqual(run_search._job_end_argv(a),
+                         notify_slack.job_end_flags(slack=False, fran=True, fran_name="n",
+                                                    qc=True))
+        plan = {"run_log": "on", "slack": "off", "fran": "left_to_agent", "fran_name": "n",
+                "qc": False}                     # as job_end_plan() records it
+        self.assertEqual(notify_slack.job_end_argv(plan),
+                         notify_slack.job_end_flags(slack=False, fran=True, fran_name="n",
+                                                    qc=False))
+
     def test_without_a_config_it_says_why(self):
         fx.write_sage_outputs(self.out, OFF, peaks=0)
         rec = slc.check(self.out)
@@ -137,9 +203,13 @@ class TheCheckComputesTheFix(unittest.TestCase):
         fx.write_sage_outputs(self.out, OFF, peaks=0, lfq_settings={"ppm_tolerance": 7.0})
         changed = slc.carry_acceptance(slc.load(self.out), slc.check(self.out, self.cfg))
         self.assertNotIn("accepted", changed)
-        status, msg, detail = slc.audit_finding(again)
+        status, msg, detail, _plain = slc.audit_finding(again)
         self.assertEqual(status, "WARN")
-        self.assertIn(f"The user accepted these quantities as they are (analyst1, ", msg)
+        # AUDIT.md is delivered: the role, never the login (C2 security M1/L5)
+        self.assertRegex(msg, r"The user accepted these quantities as they are "
+                              r"\((Core staff|the user), ")
+        self.assertNotIn("analyst1", msg + json.dumps(detail))
+        self.assertEqual(again["accepted"]["by"], "analyst1")      # the record keeps the login
         self.assertIn(REASON, msg)
         with self.assertRaises(ValueError):
             slc.accept(self.out, rec, "  ")
@@ -156,6 +226,21 @@ class TheCheckComputesTheFix(unittest.TestCase):
         slc.accept(self.out, rec, REASON)
         j = json.loads(subprocess.run(gate, capture_output=True, text=True, timeout=60).stdout)
         self.assertEqual((j["checked"], j["refused"], j["message"]), (True, False, None))
+
+    def test_the_gate_refuses_a_de_of_an_identifications_only_search(self):
+        """L7R-F5: a Sage search with quant.lfq false has no quantities. Before, the gate opened
+        and run_de.R failed on a missing report.parquet with a raw arrow error."""
+        os.makedirs(self.out, exist_ok=True)
+        with open(os.path.join(self.out, slc.RECORD), "w") as fh:
+            json.dump({"status": "not_applicable",
+                       "why": "identifications only (quant.lfq is false)"}, fh)
+        gate = [sys.executable, os.path.join(SCRIPTS, "sage_lfq_check.py"), "gate", "--out",
+                self.out]
+        j = json.loads(subprocess.run(gate, capture_output=True, text=True, timeout=60).stdout)
+        self.assertEqual((j["checked"], j["refused"]), (True, True))
+        self.assertIn("identifications only", j["message"])
+        self.assertIn("no DE", j["message"])
+        self.assertIn("identifications.tsv", j["message"])
 
 
 @unittest.skipUnless(fx.HAVE_ARROW, "pyarrow is needed to write the Sage fixtures")

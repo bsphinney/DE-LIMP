@@ -15,15 +15,19 @@ Per engine:
            a cfg whose --dda disagrees with the bundle's acquisition is refused on both
            routes (diann_parallel.dda_mismatch). If inputs are Thermo .raw,
            auto-provisions a .NET 8 runtime (ensure_dotnet8.sh) so 2.6 can read them
-  sage     convert .raw -> mzML (ThermoRawFileParser) / .d -> mzML (msconvert) if needed --
-           inside the job with --sbatch, never before submission -- then
+  sage     convert .raw -> mzML (ThermoRawFileParser) / .d -> mzML (msconvert under Wine in the
+           Core's pinned ProteoWizard container, --pwiz-sif) if needed -- inside the job with
+           --sbatch, never before submission; a cfg with quant.lfq false (identifications
+           only) hands a timsTOF .d to Sage as it is -- then
            <cmd> <bundle sage_config.json> -f <fasta> -o <out> --parquet
            --disable-telemetry-i-dont-want-to-improve-sage
            then sage_lfq_check.py (LFQ window vs the runs' MS1 mass error: warns; runs outside
            the window are a gate -- --adapt-only refuses report.parquet until the recorded
            corrected-window re-run is used or --accept-lfq-window; never re-runs by itself)
            then adapt lfq.parquet -> DIA-NN-shaped report for --method maxlfq, keeping only
-           Sage's valid MS1 quantities (not decoy, q_value <= 0.05; counts in sage_adapt.json)
+           Sage's valid MS1 quantities (not decoy, q_value <= 0.05; counts in sage_adapt.json).
+           Identifications only: no LFQ check, and results.sage.parquet -> identifications.tsv
+           (targets at peptide_q <= 0.01), no report.parquet
   fragpipe <cmd> --headless --workflow <.workflow> --manifest <m> --workdir <out>
            then adapt combined_protein.tsv -> DIA-NN-shaped report
 
@@ -43,7 +47,7 @@ searches it anyway). detect_acquisition.py checks the same thing in step 2, but 
 who already has the paths -- "re-run this search", "the paths are already known" -- comes
 straight here.
 """
-import sys, os, json, glob, re, shlex, argparse, subprocess, shutil, stat, time
+import sys, os, json, glob, re, shlex, argparse, subprocess, shutil, stat, time, math
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # ONE definition of the q-value columns -- see diann_q_columns.py.
@@ -51,9 +55,12 @@ from diann_q_columns import FDR_REQUIRED, PROTEIN_Q_PREFERENCE
 # the one reading of a protein identifier
 from protein_ids import fragpipe_group, group_accessions, group_entry_names
 # No Bruker .d is searched before its analysis.tdf has been checked -- see bruker_tdf.py.
-from bruker_tdf import STATUSES, integrity_warning, tdf_integrity
+from bruker_tdf import (STATUSES, INTEGRITY_RULES, fingerprint, integrity_warning,
+                        tdf_integrity)
 # Every file a job runs or reads is written without following a planted link: see safe_write.py.
 from safe_write import open_text, write_file
+# An identifications-only Sage search's output file: named where its LFQ record says so.
+from sage_lfq_check import IDENTIFICATIONS as SAGE_IDS
 
 ALLOW_DAMAGED_TDF = "--allow-damaged-tdf"
 
@@ -68,8 +75,113 @@ def sh(cmd, **kw):
     return subprocess.run(cmd, shell=True, check=True, **kw)
 
 
-def tdf_problems(files):
-    """Every Bruker .d in `files` whose analysis.tdf is not `ok`, worst first.
+# More .d than this still to read (no matching record from step 2) on a login node, and the
+# whole command moves to a compute node (on_compute.ensure_compute_node) -- HPC@UCD's rules: no
+# I/O-heavy work on a login node. Five is a few seconds of reads.
+TDF_LOGIN_MAX = 5
+# Set in the environment of the run_search.py that ensure_compute_node() re-runs under srun for
+# the tdf check: that srun is a short, small allocation, so a search never runs inline in it.
+TDF_REEXEC_ENV = "RUN_SEARCH_MOVED_FOR_TDF_CHECK"
+
+
+def tdf_files(files):
+    """The inputs that are a Bruker .d with an analysis.tdf: the ones the gate reads."""
+    return [f for f in files
+            if f.rstrip("/").lower().endswith(".d")
+            and os.path.isfile(os.path.join(f.rstrip("/"), "analysis.tdf"))]
+
+
+def find_acquisition_json(out, given=None):
+    """step 2's detect_acquisition.py output: `given` (--acquisition-json), else the first
+    input/acquisition.json walking up from --out, at most 3 folders (a session's
+    output/search -> <session>/input/acquisition.json). None when there is none."""
+    if given:
+        return given
+    d = os.path.abspath(out)
+    for _ in range(4):
+        cand = os.path.join(d, "input", "acquisition.json")
+        if os.path.isfile(cand):
+            return cand
+        up = os.path.dirname(d)
+        if up == d:
+            break
+        d = up
+    return None
+
+
+def recorded_integrity(files, acq_json):
+    """{path: tdf_integrity} for each input .d whose record in `acq_json` (step 2) still
+    describes it: made under today's rules (bruker_tdf.INTEGRITY_RULES), its fingerprint
+    (bruker_tdf.fingerprint: sizes, mtimes, ctimes, inodes) equals the files' now, and so do the
+    sizes of any -wal/-journal beside the tdf -- a side file that appeared since is exactly what
+    the check is for. A record without a fingerprint or rules (before 2.14.2, or other rules), an
+    unreadable or missing acquisition.json: not recorded, so that .d is read again (never a
+    crash)."""
+    if not acq_json:
+        return {}
+    try:
+        with open(acq_json) as fh:
+            doc = json.load(fh)
+        recs = doc.get("files") or []
+    except (OSError, ValueError, AttributeError) as e:
+        sys.stderr.write(f"[run_search] NOTE: {acq_json} could not be read ({type(e).__name__}: "
+                         f"{e}); every .d's analysis.tdf is checked here instead.\n")
+        return {}
+    by_path = {}
+    for r in recs if isinstance(recs, list) else []:
+        if isinstance(r, dict) and isinstance(r.get("file"), str) \
+                and isinstance(r.get("tdf_integrity"), dict):
+            by_path[os.path.realpath(r["file"].rstrip("/"))] = r["tdf_integrity"]
+    out = {}
+    for f in tdf_files(files):
+        p = f.rstrip("/")
+        integ = by_path.get(os.path.realpath(p))
+        if (not integ or integ.get("rules") != INTEGRITY_RULES or not integ.get("fingerprint")
+                or integ["fingerprint"] != fingerprint(p)):
+            continue
+        tdf = os.path.join(p, "analysis.tdf")
+        side = {"wal_bytes": tdf + "-wal", "journal_bytes": tdf + "-journal"}
+        if any((os.path.getsize(v) if os.path.isfile(v) else 0) != (integ.get(k) or 0)
+               for k, v in side.items()):
+            continue
+        out[f] = integ
+    return out
+
+
+def tdf_check_minutes(n):
+    """The srun's time for reading n analysis.tdf: about 4 s each, plus 5 minutes, at least 10."""
+    return max(10, 5 + math.ceil(n * 4 / 60))
+
+
+def check_tdf(files, out, acquisition_json, allow, queue=None):
+    """The tdf gate of main(): step 2's records reused where they still describe the file, the
+    rest read here -- or, more than TDF_LOGIN_MAX of them on a login node, this whole command
+    re-run on a compute node first (never returns then), on the --partition / --account / --qos
+    it was given (`queue`), else on_compute's choice; the check only reads, so a preemptible
+    queue may take it. Refuses as refuse_damaged_tdf()."""
+    acq = find_acquisition_json(out, acquisition_json)
+    recorded = recorded_integrity(files, acq)
+    unchecked = [f for f in tdf_files(files) if f not in recorded]
+    if recorded:
+        print(f"[run_search] analysis.tdf: {len(recorded)} .d checked by step 2 and unchanged "
+              f"since ({acq}); {len(unchecked)} read here", flush=True)
+    import on_compute
+    if len(unchecked) > TDF_LOGIN_MAX and on_compute.on_login_node():
+        os.environ[TDF_REEXEC_ENV] = "1"
+        q = queue or {}
+        on_compute.ensure_compute_node(
+            f"run_search.py reads the analysis.tdf of {len(unchecked)} .d",
+            minutes=tdf_check_minutes(len(unchecked)), mem="2G", script=__file__,
+            preemptible_ok=True, partition=q.get("partition"), account=q.get("account"),
+            qos=q.get("qos"))
+        os.environ.pop(TDF_REEXEC_ENV, None)    # not moved (main() called in-process): read here
+    return refuse_damaged_tdf(files, allow, recorded)
+
+
+def tdf_problems(files, recorded=None):
+    """Every Bruker .d in `files` whose analysis.tdf is not `ok`, worst first. A .d in
+    `recorded` (recorded_integrity: step 2's check, still describing the file) is not read
+    again; its recorded status counts exactly as a fresh one.
 
     detect_acquisition.py runs the same check, but step 2 is exactly what the entry points
     SKILL.md advertises for a bare search skip: "re-run this search", "re-search with
@@ -81,20 +193,20 @@ def tdf_problems(files):
 
     Per file this is a 100-byte header read, one indexed query and a 4-byte read -- nothing
     that needs a compute node, and nothing next to a multi-hour search."""
+    recorded = recorded or {}
     out = []
-    for f in files:
+    for f in tdf_files(files):
         p = f.rstrip("/")
-        if p.lower().endswith(".d") and os.path.isfile(os.path.join(p, "analysis.tdf")):
-            r = tdf_integrity(p)
-            if r["status"] != "ok":
-                out.append((p, r))
+        r = recorded.get(f) or tdf_integrity(p)
+        if r["status"] != "ok":
+            out.append((p, r))
     out.sort(key=lambda t: (STATUSES.index(t[1]["status"]), t[0]))
     return out
 
 
-def refuse_damaged_tdf(files, allow):
+def refuse_damaged_tdf(files, allow, recorded=None):
     """Stop before the search when any input .d is not `ok`. Prints and returns the list."""
-    bad = tdf_problems(files)
+    bad = tdf_problems(files, recorded)
     if not bad:
         return bad
     lines = [f"  {p}\n      {integrity_warning(r)}" for p, r in bad]
@@ -369,8 +481,37 @@ HIVE_USER_CPU_CAP = int(os.environ.get('HIVE_USER_CPU_CAP', '64'))
 ARRAY_TASK_MIN_CPUS = 8
 
 
+_SBATCH_OFF_PATH_WARNED = False
+
+
+def sbatch_path():
+    """sbatch, or None when there is no SLURM here: on PATH, else at HPC@UCD's fixed path
+    (on_compute: HPCCF_SLURM_BIN, or SLURM_BIN_DEFAULT) when it is executable there. A
+    non-login shell on HIVE -- an agent's `ssh hive 'cmd'`, or a shell after `module purge` --
+    has no sbatch on PATH, and `which` alone then routed a 6-file cohort to one single-shot
+    search and let an inline search start on the login node (I13, I44). Said once, on stderr,
+    when only the fixed path has it: submit.sh calls `sbatch` by name."""
+    global _SBATCH_OFF_PATH_WARNED
+    found = shutil.which("sbatch")
+    if found:
+        return found
+    import on_compute
+    d = on_compute._slurm_bin(os.environ)
+    p = os.path.join(d, "sbatch")
+    if not os.access(p, os.X_OK):
+        return None
+    if not _SBATCH_OFF_PATH_WARNED:
+        _SBATCH_OFF_PATH_WARNED = True
+        out = getattr(a_globals, "out", None)
+        submit = shlex.quote(os.path.join(out, "submit.sh")) if out else "<out>/submit.sh"
+        sys.stderr.write(f"[run_search] WARNING: sbatch is not on PATH in this shell (a non-login "
+                         f"shell); found {p}. Submit with: PATH={shlex.quote(d)}:$PATH bash "
+                         f"{submit}\n")
+    return p
+
+
 def slurm_available():
-    return shutil.which("sbatch") is not None
+    return sbatch_path() is not None
 
 
 def cpu_hours_mod():
@@ -414,8 +555,10 @@ def parallel_decision(engine, files, params, a):
     if n <= a.parallel_threshold:
         return False, f"{n} file(s), at or below the threshold of {a.parallel_threshold}"
     if not slurm_available():
-        return False, (f"{n} files, but no SLURM here (sbatch not on PATH) -- the 5-step "
-                       "chain runs as job arrays, so a single search is the only option")
+        import on_compute
+        return False, (f"{n} files, but no SLURM here (no sbatch on PATH or in "
+                       f"{on_compute._slurm_bin(os.environ)}) -- the 5-step chain runs as job "
+                       "arrays, so a single search is the only option")
     # THE routing rule lives in diann_parallel.parallel_safe(), which the generator consumes
     # too, so the router can no longer decline a cfg the chain would happily run. That drift
     # is the whole bug: an unpinned --window -- which estimate_params.py omits BY DESIGN,
@@ -980,17 +1123,32 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
     # it is check_report_runs.py's fallback evidence when there is no parquet reader.
     import check_report_runs
     import contaminant_competition
+    import dda_first_pass
     # ...and the contaminant record, which must never describe a previous search's report
     report_files = (report, check_report_runs.stats_path(report),
                     os.path.join(out, contaminant_competition.RECORD))
+    if dda:
+        # A --dda search whose second pass crashes falls back to the first-pass report DIA-NN
+        # wrote (dda_first_pass.py), so an earlier search's first pass and record must not
+        # survive into this one: with them, a crash before this first pass would use THAT one.
+        report_files += tuple(dda_first_pass.stale_files(report))
+    provenance = os.path.join(out, "search_provenance.json")
+
+    def searched(command):
+        """The DIA-NN search line; for --dda, wrapped in the first-pass fallback (a DIA search's
+        job is unchanged)."""
+        return dda_first_pass.job_lines(command, report, provenance) if dda else [command]
     lib_job = "\n".join([dp.clear_stale(predicted), lib_cmd,
                          dp.must_exist(predicted, "the predicted spectral library")])
     guard = report_guard(report, listing)
     # then which sample proteins the contaminant list took away: a report, never a gate
     competition = contaminant_competition.job_lines(report, fasta, out)
-    search_job = "\n".join([dp.clear_stale(*report_files), *measure_lines, search_cmd, guard,
-                            *competition])
-    one_job = "\n".join([dp.clear_stale(*report_files), onecmd, guard, *competition])
+    # ...and, for --dda, an earlier run's fallback leaves the record (dda_first_pass.forget):
+    # a resubmitted job whose second pass succeeds must not read as a first pass (L8R-F1)
+    cleared = [dp.clear_stale(*report_files)] + (dda_first_pass.forget_lines(provenance)
+                                                 if dda else [])
+    search_job = "\n".join([*cleared, *measure_lines, *searched(search_cmd), guard, *competition])
+    one_job = "\n".join([*cleared, *searched(onecmd), guard, *competition])
 
     # Every refusal is behind us (single_shot_mass_acc's is the last): an earlier search's probe
     # outputs must not describe this one -- set aside, never deleted (dda-review N1, R1). Inline,
@@ -1089,9 +1247,12 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
                 ma_rec["mass_acc"] = dict(rec["mass_acc"], value_file=mass_acc["value_file"],
                                           evidence_file=mass_acc["evidence_file"])
                 ma_rec["probe_fallback"] = rec
-        sh(pre + search_cmd)
+    command = pre + (search_cmd if libfree else onecmd)
+    fell_back = {}
+    if dda:
+        fell_back = dda_search_inline(command, report)
     else:
-        sh(pre + onecmd)
+        sh(command)
     # `-s`, not `-e`: the sbatch route's must_exist() tests `[ -s ]`, and a 0-byte report is
     # exactly what DIA-NN leaves when it creates the file and then dies -- which reached
     # verify() as an unhandled parquet-reader traceback instead of this sentence.
@@ -1103,8 +1264,36 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
         sys.exit(msg)
     print(f"  [run_diann] {msg}")
     return {"engine": "diann", "report": report, "ran": True, "dda": bool(dda),
-            "previous_artefacts_moved_to": moved, **ma_rec,
+            "previous_artefacts_moved_to": moved, **ma_rec, **fell_back,
             "contaminant_competition": competition_inline(report, fasta, out, keratin_sample)}
+
+
+def dda_search_inline(command, report):
+    """An inline --dda search, as the job runs it (dda_first_pass.job_lines): a missing or empty
+    report beside a first pass makes the first pass the report, recorded in the result, which
+    main() writes into search_provenance.json (`report_used`, `dda_first_pass`). Otherwise
+    DIA-NN's non-zero status stops the search. -> {} or {report_used, dda_first_pass}."""
+    import dda_first_pass
+    print(f"  $ {command}", flush=True)
+    rc = subprocess.run(command, shell=True).returncode
+    fp = dda_first_pass.first_pass_path(report)
+    nonempty = dda_first_pass.nonempty
+    if nonempty(report) or not nonempty(fp):
+        if rc != 0:
+            sys.exit(f"DIA-NN search failed (exit {rc}) -- check its output above for ERROR:"
+                     + ("" if nonempty(report) else f"; there is no first-pass report ({fp}) "
+                                                    "to fall back to"))
+        return {}
+    try:
+        rec = dda_first_pass.record(report, fp, None, rc)
+    except (OSError, ValueError) as e:
+        sys.exit(f"DIA-NN exited {rc} without {report}, and its first-pass report could not be "
+                 f"used: {e}")
+    rec.pop("provenance_updated", None)
+    print(f"  [run_diann] {dda_first_pass.MARKER}: DIA-NN exited {rc} without {report}; its "
+          f"first-pass report {fp} (no match-between-runs) is used instead.\n"
+          f"  [run_diann] CAUTION: {rec['caveat']}", flush=True)
+    return {"report_used": rec["report_used"], "dda_first_pass": rec}
 
 
 def search_records(res):
@@ -1115,8 +1304,21 @@ def search_records(res):
     job merges its own in here)."""
     if not isinstance(res, dict):
         return {}
-    out = {k: res[k] for k in ("sage_lfq_check", "sage_adapt", "probe_fallback", "cpu_sizing")
+    out = {k: res[k] for k in ("sage_lfq_check", "sage_adapt", "probe_fallback", "cpu_sizing",
+                               "sage_input", "sage_identifications", "pwiz_sif_arg",
+                               # FragPipe's Java heap in its job (fragpipe_ram_gb), its DDA
+                               # stage in the search folder and the mono its job reads .raw with
+                               "fragpipe_ram_gb", "fragpipe_stage", "fragpipe_mono",
+                               # the database it searched and the workflow it ran (FU3)
+                               "fragpipe_database", "fragpipe_workflow",
+                               # what its workflow quantifies (Ruling 73a)
+                               "quantification", "identifications",
+                               # an inline --dda search that fell back to its first pass (a
+                               # job's dda_first_pass.py writes these here itself)
+                               "report_used", "dda_first_pass")
            if res.get(k)}
+    if isinstance(res.get("quantified"), bool):     # a Sage search: false = identifications only
+        out["quantified"] = res["quantified"]
     cc = res.get("contaminant_competition")
     if isinstance(cc, dict) and cc.get("status"):
         out["contaminant_competition"] = cc
@@ -1201,33 +1403,44 @@ def fragpipe_quantity_declaration(out, maxlfq_columns):
     """combined_protein.tsv's quantity, read from the fragpipe.workflow FragPipe saves beside it:
     its '# FragPipe version' / '# IonQuant version' header, the Philosopher filter it ran, and
     whether IonQuant matched between runs (ionquant.mbr)."""
-    vers, filt, mbr = {}, None, None
-    wf = _find(out, ["fragpipe.workflow"])
+    import fragpipe_params                  # the one reader of a FragPipe workflow (make_methods too)
+    wf = _find(out, [fragpipe_params.SAVED_WORKFLOW])
     try:
-        with open(wf or "") as fh:
-            for ln in fh:
-                m = re.match(r"#\s*(FragPipe|IonQuant|MSFragger) version (\S.*)$", ln.strip())
-                if m:
-                    vers[m.group(1)] = m.group(2).strip()
-                elif ln.startswith("phi-report.filter="):
-                    filt = ln.split("=", 1)[1].strip()
-                elif ln.startswith("ionquant.mbr="):
-                    mbr = ln.split("=", 1)[1].strip()
+        props, vers = fragpipe_params.read_workflow(wf) if wf else ({}, {})
     except OSError:
-        pass
+        props, vers = {}, {}                # said below: "not recorded"
+    filt = props.get(fragpipe_params.PHILOSOPHER_FILTER_KEY)
+    # the filter AS RUN, from FragPipe's log, with over which runs its rates hold -- the one
+    # statement the Methods' search paragraph makes too (fragpipe_params.fdr_statement; C2
+    # proteomics M1: this quoted the workflow's line, which FragPipe changes when it runs it)
+    st = fragpipe_params.fdr_statement(out, filt)
+    # IonQuant's own cross-run normalisation (ionquant.normalization, 1 in FragPipe's shipped
+    # workflows), for the Methods' words before any between-run step of the DE (C2 stat M2)
+    norm = props.get("ionquant.normalization")
+    eng_norm = ("IonQuant's cross-run normalisation (ionquant.normalization=1 in "
+                "fragpipe.workflow)" if norm == "1" else
+                "no cross-run normalisation by IonQuant (ionquant.normalization=0 in "
+                "fragpipe.workflow)" if norm == "0" else
+                "whether IonQuant normalised across runs is NOT RECORDED ("
+                + ("no ionquant.normalization in fragpipe.workflow" if wf else
+                   "no fragpipe.workflow") + ") [confirm]")
+    mbr = props.get("ionquant.mbr")
     what = "MaxLFQ intensity" if maxlfq_columns else "protein intensity (not MaxLFQ)"
     cols = "'<sample> MaxLFQ Intensity'" if maxlfq_columns else "'<sample> Intensity'"
     mbr_txt = ("match-between-runs on" if mbr == "1" else "match-between-runs off" if mbr == "0"
                else "match-between-runs not recorded" + ("" if wf else " (no fragpipe.workflow)"))
     return {
         "level": "protein",
+        "engine_normalisation": eng_norm,
         "label": "FragPipe IonQuant" + (" MaxLFQ" if maxlfq_columns else ""),
         "value": f"{_vtag('FragPipe', vers.get('FragPipe'))} / "
                  f"{_vtag('IonQuant', vers.get('IonQuant'))} {what}, {mbr_txt} "
                  f"(combined_protein.tsv {cols})",
-        "identification": (f"FragPipe's own FDR: Philosopher filter {filt} (fragpipe.workflow)"
-                           if filt else "FragPipe's own FDR (its Philosopher filter is not "
-                           "recorded: no fragpipe.workflow in the output)") + f". {PLACEHOLDER_Q}",
+        "identification": (f"FragPipe's own FDR: Philosopher filter {st['filter']} ("
+                           + ("FragPipe's log, the filter as run" if st["from_log"] else
+                              "fragpipe.workflow") + "). " + st["sentence"] + " "
+                           if st else "FragPipe's own FDR (its Philosopher filter is not "
+                           "recorded: no fragpipe.workflow in the output). ") + PLACEHOLDER_Q,
         "q_columns": "placeholder",
         "citation": "; ".join([CITE["msfragger"], CITE["ionquant"]]
                               + ([CITE["maxlfq"]] if maxlfq_columns else [])),
@@ -1248,7 +1461,7 @@ def _frozen_config(out):
     number shaped like a release (\\d+.\\d+) is taken as AlphaDIA's version. `schema_v1` records
     that the file was the old shape."""
     rec = {"found": False, "version": None, "normalization_method": None, "fdr": None,
-           "schema_v1": False}
+           "normalize_directlfq": None, "schema_v1": False}
     p = _find(out, ["frozen_config.yaml"])
     if not p:
         return rec
@@ -1262,14 +1475,20 @@ def _frozen_config(out):
         import yaml
         cfg = yaml.safe_load(text) or {}
         raw = (cfg.get("version"), (cfg.get("search_output") or {}).get("normalization_method"),
-               (cfg.get("fdr") or {}).get("fdr"))
+               (cfg.get("fdr") or {}).get("fdr"),
+               (cfg.get("search_output") or {}).get("normalize_directlfq"))
     except Exception:
-        # no PyYAML: the three keys are plain scalars (alphadia/constants/default.yaml)
+        # no PyYAML: the keys are plain scalars (alphadia/constants/default.yaml)
         def key(k, indented):
             m = re.search(rf"^{'[ ]+' if indented else ''}{k}:\s*['\"]?([^'\"#\n]+)", text, re.M)
             return m.group(1).strip() if m else None
-        raw = (key("version", False), key("normalization_method", True), key("fdr", True))
-    ver, rec["normalization_method"], rec["fdr"] = raw
+        raw = (key("version", False), key("normalization_method", True), key("fdr", True),
+               key("normalize_directlfq", True))
+    ver, rec["normalization_method"], rec["fdr"], nd = raw
+    # AlphaDIA 2.1's search_output.normalize_directlfq (a real 2.1.2 run records `true`)
+    rec["normalize_directlfq"] = (nd if isinstance(nd, bool) else
+                                  {"true": True, "false": False}.get(str(nd).strip().lower())
+                                  if nd is not None else None)
     if _version_tuple(ver) and "." in str(ver):
         rec["version"] = str(ver)
     elif str(ver).strip() == "1":
@@ -1293,8 +1512,19 @@ def alphadia_quantity_declaration(out, source):
         algo = "its protein LFQ (method not recorded: no frozen_config.yaml)"
     fdr = fc["fdr"]
     no_fdr = ("no fdr.fdr in frozen_config.yaml" if fc["found"] else "no frozen_config.yaml")
+    # the engine's own cross-run normalisation, as its config records it, for the Methods' words
+    # before any between-run step of the DE (C2 statistician M2) -- never assumed
+    nd = fc["normalize_directlfq"]
+    eng_norm = ("directLFQ's between-run normalisation (search_output.normalize_directlfq: true "
+                "in frozen_config.yaml)" if m == "directlfq" and nd is True else
+                "no directLFQ normalisation (search_output.normalize_directlfq: false in "
+                "frozen_config.yaml)" if m == "directlfq" and nd is False else
+                "whether AlphaDIA normalised its protein quantities across runs is NOT RECORDED "
+                + ("(no search_output.normalize_directlfq in frozen_config.yaml)" if fc["found"]
+                   else "(no frozen_config.yaml)") + " [confirm]")
     return {
         "level": "protein",
+        "engine_normalisation": eng_norm,
         "label": "AlphaDIA" + (f" {algo}" if m in ("directlfq", "quantselect") else ""),
         "value": f"{_vtag('AlphaDIA', ver)} protein-group LFQ intensity ({algo}; {source})",
         "identification": (f"AlphaDIA's own FDR: precursors and protein groups at {fdr} "
@@ -1494,7 +1724,7 @@ def radiant_library(tools, fasta, out, threads, params=None):
     in make_radiant_library.py, which also decides whether a library already there can be reused
     (only one built with the same cysteine modification).
     """
-    libdir = os.path.join(out, "radiant_lib")
+    libdir = radiant_lib_dir(out)
     dn = tools.get("diann")
     if not dn:
         sys.exit("Radiant needs a spectral library, but tools.json has no DIA-NN command. "
@@ -1505,11 +1735,8 @@ def radiant_library(tools, fasta, out, threads, params=None):
     # .predicted.speclib v-10/-11, Radiant's reader supports v>=-3 ("ERROR: version is
     # not supported11"), and DIA-NN cannot emit TSV. make_radiant_library.py does the
     # required predict -> parquet -> renamed TSV hop. See its docstring for the evidence.
-    helper = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                          "make_radiant_library.py")
-    res = subprocess.run([sys.executable, helper, "--diann", dn, "--fasta", fasta,
-                          "--out-dir", libdir, "--threads", str(threads),
-                          "--cys-alkylation", radiant_cys(params)],
+    res = subprocess.run([sys.executable, *radiant_library_argv(dn, fasta, libdir, threads,
+                                                                radiant_cys(params))],
                          capture_output=True, text=True)
     sys.stderr.write(res.stderr)
     if res.returncode != 0:
@@ -1529,15 +1756,37 @@ def radiant_library_job(tools, fasta, out, threads, params=None):
         sys.exit("Radiant needs a spectral library, but tools.json has no DIA-NN command. "
                  "Acquire DIA-NN first (it is the library generator for this route), or "
                  "pass --library with an existing .tsv/.csv/.fragLibFF library.")
-    q = shlex.quote
-    libdir = os.path.join(out, "radiant_lib")
-    tsv = os.path.join(libdir, "radiant_library.tsv")
+    return radiant_library_lines(dn, fasta, radiant_lib_dir(out), threads, radiant_cys(params))
+
+
+def radiant_lib_dir(out):
+    """Where a search's Radiant library is built: <out>/radiant_lib, on every route."""
+    return os.path.join(out, "radiant_lib")
+
+
+def radiant_library_argv(diann, fasta, libdir, threads, cys):
+    """make_radiant_library.py and its arguments: THE argv that builds a Radiant library (DIA-NN's
+    predictor -> parquet -> the TSV Radiant reads) into `libdir`, for the inline route
+    (radiant_library) and the job lines (radiant_library_lines)."""
     helper = os.path.join(os.path.dirname(os.path.abspath(__file__)), "make_radiant_library.py")
+    return [helper, "--diann", diann, "--fasta", fasta, "--out-dir", libdir,
+            "--threads", str(threads), "--cys-alkylation", cys]
+
+
+def radiant_library_lines(diann, fasta, libdir, threads, cys):
+    """The job lines that build a Radiant library on a compute node: radiant_library_argv() run
+    with the job's python, then a guard that it wrote the TSV. -> (the TSV, the lines). The
+    single-job route (radiant_library_job) and the parallel route's step 1 (radiant_parallel.py)
+    both use it: that step handed Radiant DIA-NN 2.x's .predicted.speclib, a format Radiant
+    rejects (S8)."""
+    from make_radiant_library import LIBRARY_TSV
+    q = shlex.quote
+    tsv = os.path.join(libdir, LIBRARY_TSV)
     return tsv, [
         'echo "building the Radiant spectral library (DIA-NN predictor) on this compute node"',
         _job_python(),
-        f'"$_py" {q(helper)} --diann {q(dn)} --fasta {q(fasta)} --out-dir {q(libdir)} '
-        f"--threads {threads} --cys-alkylation {q(radiant_cys(params))}",
+        '"$_py" ' + " ".join(q(w) for w in radiant_library_argv(diann, fasta, libdir, threads,
+                                                                  cys)),
         f"[ -s {q(tsv)} ] || {{ echo {q(f'FAILED: make_radiant_library.py wrote no {tsv}')} "
         ">&2; exit 1; }"]
 
@@ -1782,7 +2031,11 @@ def adapt_radiant(out):
 # found the same way (detect_acquisition.locate_trfp: $THERMORAWFILEPARSER, PATH, the pipeline
 # env, the Core's shared copy) and given the same checked DOTNET_ROOT (trfp_launch -- directory
 # checks only, nothing is started here). msconvert only when there is no usable parser.
-# .d (and anything else not mzML) -> msconvert, as before.
+# .d -> searched as it is for a Sage search for identifications only (dotd="direct": Sage 0.14.7
+# reads a timsTOF .d itself, but has no MS1 quantification on one); otherwise msconvert in the
+# Core's pinned vendor-enabled ProteoWizard container (pwiz_step), never msconvert from PATH:
+# bioconda's has no Bruker reader (I45).
+# Anything else not mzML -> msconvert.
 MZML_SUFFIXES = (".mzml", ".mzml.gz")
 TRFP_UNSET_ENV = ("DOTNET_ROOT_X64", "DOTNET_ROOT_ARM64", "DOTNET_ROOT_X86")  # see _child_env
 
@@ -1800,21 +2053,201 @@ def _trfp_converter():
     return launch["cmd"], env, f"ThermoRawFileParser ({where})"
 
 
-def mzml_plan(files, out):
-    """(the mzML each input is searched as, in order; the conversion steps). Nothing is run or
+# The container that converts a timsTOF .d for a quantifying Sage search: by default the Core's
+# pinned vendor-enabled ProteoWizard image, the one skyline_peaks.py runs SkylineCmd from
+# (resolve_defaults.SKYLINE_PIN, read here, never changed). msconvert is in it under Wine.
+PWIZ_SIF_FLAG = "--pwiz-sif"
+
+# msconvert's options for a timsTOF .d: the Core's Windows msconvert settings (ProteoWizard
+# 3.0.26058), as recorded in the <dataProcessing> of the mzML it made for a Core submission (arm C), and
+# written as MSConvertGUI writes them (sumMs1=0 is "false"). Without the combine and the summing,
+# msconvert writes one spectrum per mobility scan: on HIVE one run gave 11,139,896 spectra ("frame=1
+# scan=1") and passed 9.9 GB, against 82,905 combined ones ("merged=0 frame=1 scanStart=1
+# scanEnd=811") -- H2-F1, 2026-11-01. --combineIonMobilitySpectra is an option, not a filter;
+# vendor peakPicking must be the FIRST filter (MSConvertGUI: "it only works on raw, untransformed
+# data"). The step's argv and every record of it read this one tuple.
+PWIZ_TIMS_MSCONVERT = ("--mzML", "--zlib", "--combineIonMobilitySpectra",
+                       "--filter", "peakPicking vendor msLevel=1-",
+                       "--filter", "scanSumming precursorTol=0.05 scanTimeTol=10 "
+                                   "ionMobilityTol=0.1 sumMs1=0")
+# sumMs1=0 is kept because it is the settings' source and the HIVE acceptance ran with it -- but
+# the pinned 3.0.26266's scanSumming usage (msconvert --help, lines 410-416) has no sumMs1, and
+# its mzML records sumMS1 value="true" (Windows 3.0.26058: "false"). MS1 is not summed in effect:
+# spectrum counts, IDs, MS1 peaks and LFQ all equal the Windows output (H2-7, 2026-11-01). The
+# records say so beside the options (PWIZ_SUMMS1_NOTE); the Methods sentence does not need it.
+PWIZ_SUMMS1_NOTE = ("the pinned ProteoWizard 3.0.26266 does not take sumMs1 and records "
+                    "sumMS1=true in its mzML; MS1 spectrum counts equal the Windows 3.0.26058 "
+                    "output, so MS1 is not summed in effect (HIVE check, 2026-11-01)")
+# (in records, which are delivered: no submission number -- L7R-F10)
+PWIZ_TIMS_MSCONVERT_SOURCE = ("the Core's Windows msconvert settings (ProteoWizard 3.0.26058) for "
+                              "timsTOF HT DDA-PASEF, as recorded in the <dataProcessing> of an "
+                              "mzML it made (2026-10)")
+
+
+def pwiz_msconvert_options(windows=False):
+    """PWIZ_TIMS_MSCONVERT as one string: shell-quoted for the records, or with double quotes for
+    a command a person types into a Windows prompt (the refusal's way out)."""
+    if windows:
+        return " ".join(f'"{x}"' if " " in x else x for x in PWIZ_TIMS_MSCONVERT)
+    return " ".join(shlex.quote(x) for x in PWIZ_TIMS_MSCONVERT)
+
+
+def pwiz_rerun_args(sif):
+    """What a re-run of this search must add to get the same container: nothing for the pin's
+    own path (the default), else --pwiz-sif <sif> (search_provenance.json `pwiz_sif_arg`, read
+    by sage_lfq_check.rerun_plan and provenance.py's reproduce.sh)."""
+    if os.path.abspath(sif) == os.path.abspath(_skyline_pin()["sif"]):
+        return []
+    return [PWIZ_SIF_FLAG, sif]
+
+
+def _skyline_pin():
+    from resolve_defaults import SKYLINE_PIN
+    return SKYLINE_PIN
+
+
+def _pwiz_pinned(sif):
+    """The Core's pinned image (by its file name, as skyline_peaks.verify_container decides)."""
+    return os.path.basename(sif) == os.path.basename(_skyline_pin()["sif"])
+
+
+def _pwiz_sha_failed(sif):
+    """The one message for a pinned-name container whose bytes are not the pin's."""
+    return f"FAILED: the ProteoWizard container {sif} does not match its pinned sha256"
+
+
+def _pwiz_sif_or_refuse(sif):
+    """The container's absolute path; refused, before anything is written, when it is not there.
+    Off HIVE it usually is not: the refusal names the two ways out."""
+    sif = os.path.abspath(sif or _skyline_pin()["sif"])
+    if not os.path.isfile(sif):
+        which = (f"the Core's pinned image on HIVE; another can be given with {PWIZ_SIF_FLAG}"
+                 if sif == _skyline_pin()["sif"] else
+                 f"{PWIZ_SIF_FLAG}; the Core's on HIVE is {_skyline_pin()['sif']}")
+        sys.exit(
+            f"[run_search] REFUSED -- Nothing was converted, written or submitted. Sage 0.14.7 has "
+            f"no MS1 quantification on a timsTOF .d, so a quantifying search converts each .d to "
+            f"mzML in the job with a vendor-enabled ProteoWizard container, and there is none at "
+            f"{sif} ({which}). Two ways out:\n  1. convert each .d to mzML first with a "
+            f"vendor-enabled msconvert (e.g. ProteoWizard on Windows: msconvert <run>.d "
+            f"{pwiz_msconvert_options(windows=True)}) and search the mzML; or\n"
+            f"  2. search for identifications "
+            f"only: estimate_params.py --engine sage --ids-only writes a cfg (quant.lfq false) "
+            f"with which Sage reads the .d itself -- no quantities, so no DE.")
+    return sif
+
+
+def pwiz_step(d_path, partial, final, sif):
+    """The conversion step for one timsTOF .d in the ProteoWizard container (see mzml_plan for
+    the step's keys; `sif` added). apptainer as skyline_peaks.apptainer_argv runs it: the .d's
+    folder read-only (as given and as its real path, for a .d reached through a link), the
+    partial mzML folder read-write, parents bound first. msconvert is given plain Linux paths, as
+    ProteoWizard's own container README runs it (`wine msconvert /data/file.raw`)."""
+    d = os.path.abspath(d_path.rstrip("/"))
+    partial_dir = os.path.dirname(partial)
+    binds = [(p, ":ro") for p in dict.fromkeys([os.path.dirname(d),
+                                                 os.path.dirname(os.path.realpath(d))])]
+    binds.append((partial_dir, ""))
+    for b, _mode in binds:
+        if ":" in b or "," in b:
+            sys.exit(f"[run_search] REFUSED -- Nothing was converted, written or submitted. The "
+                     f"folder {b} holds ':' or ',', which an apptainer --bind cannot carry, so "
+                     f"{d} cannot be converted in the ProteoWizard container. Search it from a "
+                     f"folder whose path has neither (a link to it is enough), or with "
+                     f"estimate_params.py --ids-only, where Sage reads the .d itself.")
+    binds.sort(key=lambda b: (b[0].rstrip("/").count("/"), b[0], b[1]))
+    # 2.15: build this with skyline_peaks.apptainer_argv, the one definition (L7R-F12); kept as is
+    # in 2.14.2 because the HIVE acceptance run used this argv.
+    argv = ["apptainer", "exec", "--cleanenv", "--env", "WINEDEBUG=-all"]
+    for b, mode in binds:
+        argv += ["--bind", f"{b}:{b}{mode}"]
+    tool = (f"ProteoWizard msconvert (pinned Skyline container {_skyline_pin()['version']})"
+            if _pwiz_pinned(sif) else
+            f"ProteoWizard msconvert (container {os.path.basename(sif)}, not the Core's pinned "
+            f"image)")
+    # centroided MS1 and MS2 (Sage wants peaks, not profile), mobility scans combined
+    return {"tool": tool, "sif": sif,
+            "argv": argv + [sif, "wine", "msconvert", d, *PWIZ_TIMS_MSCONVERT,
+                            "-o", partial_dir],
+            "env": {}, "complete": "</indexedmzML>", "input": d_path, "mzml": final,
+            "partial": partial}
+
+
+def pwiz_sif_lines(sif):
+    """The job's check of the container, before any conversion: the Core's pinned image by its
+    sha256; any other sif is used as given (skyline_peaks.verify_container's rule)."""
+    if not _pwiz_pinned(sif):
+        return []
+    q = shlex.quote
+    return [f"echo {q(_skyline_pin()['sif_sha256'] + '  ' + sif)} | sha256sum -c --quiet - "
+            f"|| {{ echo {q(_pwiz_sha_failed(sif))} >&2; exit 1; }}"]
+
+
+def pwiz_container_record(sif):
+    """What search_provenance.json says of the container. Only the pinned image's version is
+    known; another sif's is not checked, and none is written for it."""
+    pin = _skyline_pin()
+    how = {"msconvert_options": pwiz_msconvert_options(),
+           "msconvert_options_source": PWIZ_TIMS_MSCONVERT_SOURCE}
+    if _pwiz_pinned(sif):
+        how["msconvert_options_note"] = PWIZ_SUMMS1_NOTE
+    if _pwiz_pinned(sif):
+        ver = pin.get("msconvert_version")
+        return {"sif": sif, "image": pin["image"], "tag": pin["tag"], "version": pin["version"],
+                "sif_sha256": pin["sif_sha256"], "docker_digest": pin["docker_digest"],
+                "msconvert_version": ver,
+                "msconvert_version_source": (
+                    "resolve_defaults.SKYLINE_PIN msconvert_version, read from the pinned image "
+                    "(`wine msconvert --help`, its ProteoWizard release line)" if ver
+                    else "not recorded [DEFAULT -- the pinned image's own msconvert version has "
+                         "not been read from it yet]"),
+                # written at generation: what will be checked, not that it was (L7R-F14)
+                "verified": ("sha256 checked by the job before the first conversion (it stops on "
+                             "a mismatch); an inline search checks it before converting"), **how}
+    return {"sif": sif, "version": None, "sif_sha256": None, "msconvert_version": None,
+            "msconvert_version_source": "not recorded: not the Core's pinned image",
+            "verified": "not checked: not the Core's pinned image, so its ProteoWizard version "
+                        "and sha256 are not known", **how}
+
+
+def sage_run_name(path):
+    """The run an input is named by in Sage's output, as the adapters write it: its file name
+    without the folder and the last extension (S1.d, S1.raw -> S1.mzML, S1.mzML -> S1). The ONE
+    rule for mzml_plan's duplicate check, adapt_sage and adapt_sage_ids (L7R-F8)."""
+    return os.path.splitext(os.path.basename(str(path).rstrip("/\\")))[0]
+
+
+def mzml_plan(files, out, dotd="convert", pwiz_sif=None):
+    """(what each input is searched as, in order; the conversion steps). Nothing is run or
     created. A step is {"input", "mzml", "partial", "tool", "argv", "env", "complete"}: `argv`
     (with `env` added) writes `partial`, which is moved to `mzml` only once `complete` -- the
-    closing tag an indexed mzML ends with, or None for "non-empty" -- is found in its tail."""
+    closing tag an indexed mzML ends with, or None for "non-empty" -- is found in its tail.
+
+    `dotd`: "convert" (every .d becomes an mzML, in the ProteoWizard container `pwiz_sif`,
+    default the Core's pinned one -- refused when it is not there) or "direct" (a .d is searched
+    as given, with no step: run_sage() for a search with quant.lfq false). .raw and mzML are the
+    same either way."""
+    if dotd not in ("convert", "direct"):
+        raise ValueError(f"mzml_plan: dotd must be 'convert' or 'direct', not {dotd!r}")
     mzdir = os.path.join(out, "mzml")
     partial_dir = os.path.join(mzdir, ".partial")
-    mzml, steps, trfp, msconvert = [], [], None, None
+    mzml, steps, trfp, msconvert, sif = [], [], None, None, None
     for f in files:
         if f.lower().endswith(MZML_SUFFIXES):
             mzml.append(f)
             continue
-        base = os.path.splitext(os.path.basename(f.rstrip("/")))[0]
+        if dotd == "direct" and _is_dotd(f):
+            mzml.append(f)
+            continue
+        base = sage_run_name(f)
         final, partial = os.path.join(mzdir, base + ".mzML"), os.path.join(partial_dir,
                                                                             base + ".mzML")
+        if _is_dotd(f):
+            if sif is None:
+                sif = _pwiz_sif_or_refuse(pwiz_sif)
+            steps.append(pwiz_step(f, partial, final, sif))
+            mzml.append(final)
+            continue
         tool = None
         if f.lower().endswith(".raw"):
             if trfp is None:
@@ -1831,7 +2264,7 @@ def mzml_plan(files, out):
                 why = (f"ThermoRawFileParser: {trfp[2]}\n  " if trfp and not trfp[0] else "")
                 sys.exit("[run_search] Sage/Radiant read mzML, and this input is not mzML: "
                          f"{f}\n  Nothing was converted, written or submitted.\n  {why}"
-                         "msconvert: not on PATH (.d/other formats need it).\n  Convert to mzML "
+                         "msconvert: not on PATH (other formats need it).\n  Convert to mzML "
                          "first, or install ThermoRawFileParser for .raw (bash scripts/setup.sh "
                          "puts bioconda's in the pipeline env).")
             if sys.platform.startswith("linux"):
@@ -1841,8 +2274,10 @@ def mzml_plan(files, out):
                     f"[run_search] WARNING: converting {os.path.basename(f.rstrip('/'))} with "
                     f"msconvert ({msconvert}){why}. bioconda's Linux msconvert has no vendor "
                     "readers and cannot open .raw or .d; this works only with a vendor-enabled "
-                    "build. (Sage 0.14 reads .d itself, but without its MS1 scans, so with no "
-                    "LFQ.)\n")
+                    "build. (A .raw normally goes through ThermoRawFileParser. A timsTOF .d never "
+                    "comes here: Sage reads it itself for identifications only -- "
+                    "estimate_params.py --ids-only -- and to quantify, the job converts it in the "
+                    "Core's pinned ProteoWizard container.)\n")
             # centroided MS1 and MS2 (Sage and Radiant want peaks, not profile), and the same
             # completeness check as the parser: an indexed mzML ends with its closing tag
             tool = {"tool": f"msconvert ({msconvert})",
@@ -1851,15 +2286,16 @@ def mzml_plan(files, out):
                     "env": {}, "complete": "</indexedmzML>"}
         steps.append(dict(tool, input=f, mzml=final, partial=partial))
         mzml.append(final)
-    # One mzML per name: two inputs called s1 (from two folders) would overwrite each other's
-    # conversion, and Sage names a run by its file name alone.
+    # One input per run name: two inputs called s1 (from two folders) would overwrite each
+    # other's conversion, and a run1.d searched as it is beside a run1.raw converted to run1.mzML
+    # would be one run, run1, in the adapters' output (sage_run_name).
     seen = {}
     for m in mzml:
-        seen.setdefault(os.path.basename(m), []).append(m)
+        seen.setdefault(sage_run_name(m), []).append(m)
     dupes = {k: v for k, v in seen.items() if len(v) > 1}
     if dupes:
-        sys.exit("[run_search] inputs share an mzML name, so they would overwrite each other or "
-                 "merge into one run: " + "; ".join(f"{k}: {v}" for k, v in dupes.items())
+        sys.exit("[run_search] inputs share a Sage run name, so they would overwrite each other "
+                 "or merge into one run: " + "; ".join(f"{k}: {v}" for k, v in dupes.items())
                  + ". Rename them, or search them separately. Nothing was converted, written or "
                    "submitted.")
     return mzml, steps
@@ -1881,9 +2317,12 @@ def conversion_lines(steps):
         return []
     q = shlex.quote
     tools = sorted({s["tool"] for s in steps})
-    lines = [f'echo "converting {len(steps)} input file(s) to mzML on this compute node: '
-             f'{"; ".join(tools)}"',
-             f"mkdir -p {q(os.path.dirname(steps[0]['partial']))}"]
+    # the ProteoWizard container first: a pinned image that is not the pin stops the job here
+    lines = [ln for sif in dict.fromkeys(s["sif"] for s in steps if s.get("sif"))
+             for ln in pwiz_sif_lines(sif)]
+    lines += [f'echo "converting {len(steps)} input file(s) to mzML on this compute node: '
+              f'{"; ".join(tools)}"',
+              f"mkdir -p {q(os.path.dirname(steps[0]['partial']))}"]
     for s in steps:
         # quoted as one word: an input path is data, never shell. `|| { ... }` on the converter
         # itself: under set -e a converter that exits non-zero would end the job before any
@@ -1910,6 +2349,11 @@ def _no_mzml(step):
 
 def convert_inline(steps):
     """Run the conversions here (an inline search: never on a login node -- main() refuses)."""
+    for sif in dict.fromkeys(s["sif"] for s in steps if s.get("sif")):
+        if _pwiz_pinned(sif):               # pwiz_sif_lines' check, in Python
+            import skyline_peaks
+            if skyline_peaks.sha256_file(sif) != _skyline_pin()["sif_sha256"]:
+                sys.exit(_pwiz_sha_failed(sif))
     for s in steps:
         os.makedirs(os.path.dirname(s["partial"]), exist_ok=True)
         for p in (s["mzml"], s["partial"]):
@@ -1931,10 +2375,16 @@ def convert_inline(steps):
 
 def conversion_record(steps, where):
     """What converted what, for search_provenance.json."""
-    return {"where": where, "tools": sorted({s["tool"] for s in steps}),
-            "files": [{"input": s["input"], "mzml": s["mzml"],
-                       "command": " ".join(shlex.quote(x) for x in _step_argv(s))}
-                      for s in steps]} if steps else None
+    if not steps:
+        return None
+    rec = {"where": where, "tools": sorted({s["tool"] for s in steps}),
+           "files": [{"input": s["input"], "mzml": s["mzml"],
+                      "command": " ".join(shlex.quote(x) for x in _step_argv(s))}
+                     for s in steps]}
+    sifs = list(dict.fromkeys(s["sif"] for s in steps if s.get("sif")))
+    if sifs:
+        rec["containers"] = [pwiz_container_record(sif) for sif in sifs]
+    return rec
 
 
 # ------------------------------------------------------------------- Sage -----
@@ -1987,13 +2437,17 @@ def sage_digest(enz):
     got = {k2: enz[k1] for k1, k2 in (("missed_cleavages", "missed_cleavages"),
                                        ("min_len", "min_pep_len"),
                                        ("max_len", "max_pep_len")) if k1 in enz}
-    if enz.get("cleave_at"):
+    if enz.get("cleave_at") == "":
+        got["cut"] = "(none: a non-specific digest)"   # compared, never dropped (FU3, H7 bug 5)
+    elif enz.get("cleave_at") == "$":
+        got["cut"] = "(none: no digestion)"
+    elif enz.get("cleave_at"):
         got["cut"] = ",".join(f"{c}*" for c in enz["cleave_at"]) + (
             f",!*{enz['restrict']}" if enz.get("restrict") else "")
     return got
 
 
-def warn_contaminant_digest(engine, params, fasta):
+def warn_contaminant_digest(engine, params, fasta, sidecar=None):
     """Warn when this search digests differently from the digest fetch_fasta.py judged the
     contaminants on (the sidecar's contaminant_digest, estimate_params.DIANN_DIGEST): its peptide
     rule dropped the contaminant entries with fewer than min_unique_peptides peptides of their
@@ -2001,8 +2455,8 @@ def warn_contaminant_digest(engine, params, fasta):
     cleavages and proline rule -- an entry near that cut may be judged differently. Sage's known
     default difference is one INFO line; anything else is a WARNING. Never a stop: the database
     is still correct for the identity rule, and the list is on record. Returns the message (or
-    None)."""
-    sidecar = fasta + ".meta.json"
+    None). `sidecar`: fasta_sidecar_or_refuse's (default <fasta>.meta.json)."""
+    sidecar = sidecar or fasta + ".meta.json"
     try:
         with open(sidecar) as fh:
             meta = json.load(fh)
@@ -2043,7 +2497,43 @@ def warn_contaminant_digest(engine, params, fasta):
     return msg
 
 
-def keratin_sample_check(fasta, flag, engine="diann"):
+def fasta_sidecar_or_refuse(a, engine):
+    """The sidecar describing --fasta (fetch_fasta.sidecar_for, the one reading), looked for also
+    in the session's input/ -- or REFUSED, before anything is converted, written or submitted,
+    when --fasta is a Philosopher target+decoy .fas whose target FASTA's sidecar is not found
+    (H7b-1: the record then said keratin_sample_source null, and nothing that reads the sidecar
+    from the record's `fasta` found one). Never null facts recorded silently. -> the record
+    (search_provenance.json `fasta_meta`)."""
+    import fetch_fasta as ff
+    look_in = []
+    try:
+        import session as session_mod
+        sess = session_mod.session_of_search(a.out)
+        if sess:
+            look_in.append(os.path.join(sess, "input"))
+    except ImportError:
+        pass                                 # a partial scripts/: the .fas's own folder only
+    tag = (_workflow_value(a.params, "database.decoy-tag") if engine == "fragpipe" and a.params
+           else None) or "rev_"
+    try:
+        rec = ff.sidecar_for(a.fasta, getattr(a, "fasta_meta", None), look_in, tag)
+    except OSError as e:
+        sys.exit(f"[run_search] REFUSED -- nothing was converted, written or submitted. --fasta "
+                 f"{a.fasta} could not be read to find its sidecar ({e}).")
+    if rec["problem"]:
+        sys.exit(f"[run_search] REFUSED -- nothing was converted, written or submitted. "
+                 f"{rec['problem']}. Its facts (keratin sample, contaminant set, organism) would "
+                 f"be recorded as unknown. Give the target FASTA's sidecar: --fasta-meta "
+                 f"<target FASTA>.meta.json (fetch_fasta.py wrote it beside the FASTA the .fas "
+                 f"was built from), or --fasta-meta {ff.NO_SIDECAR} if the database was not "
+                 f"built by fetch_fasta.py.")
+    if rec["path"] and not os.path.isfile(rec["path"]):
+        sys.exit(f"[run_search] REFUSED -- nothing was converted, written or submitted. "
+                 f"--fasta-meta {rec['path']}: no such file.")
+    return rec
+
+
+def keratin_sample_check(fasta, flag, engine="diann", sidecar=None):
     """A keratin sample (hair, wool, feather, skin, nail ...) is never searched against a database
     that still holds keratin-family Cont_ entries. Keratin is the analyte there, and those entries
     take its peptides away: DIA-NN's --cont-quant-exclude Cont_ keeps every peptide they share with
@@ -2054,9 +2544,10 @@ def keratin_sample_check(fasta, flag, engine="diann"):
     The sample is a keratin sample when --keratin-sample says so OR the FASTA's sidecar was built
     with fetch --keratin-sample (fetch_fasta.keratin_sample_recorded). The FASTA's own headers are
     checked with fetch_fasta's one keratin rule, sidecar or not. -> the record search_provenance.json
-    keeps; exits (REFUSED) before anything is converted, written or submitted."""
+    keeps; exits (REFUSED) before anything is converted, written or submitted. `sidecar`: the one
+    fasta_sidecar_or_refuse found (a Philosopher .fas: its target FASTA's), else <fasta>.meta.json."""
     import fetch_fasta as ff
-    sidecar = fasta + ".meta.json"
+    sidecar = sidecar or fasta + ".meta.json"
     try:
         with open(sidecar) as fh:
             meta = json.load(fh)
@@ -2098,7 +2589,7 @@ def keratin_sample_check(fasta, flag, engine="diann"):
             base += f" --taxid {int(m['taxid'])}" if m.get("taxid") else ""
         cont = m.get("contaminant_set")
         cont = cont if cont and cont not in ("none", "already_in_supplied_database") else "universal"
-        enz = ",".join(m.get("digestion_enzymes_used") or ["trypsin", "lysc"])
+        enz = ff.enzyme_arg(m)          # the build's --enzyme, "none" too (fetch_fasta's reader)
         content = m.get("content_requested") or "one_per_gene"
         new = os.path.splitext(fasta)[0] + "_keratin.fasta"
         sys.exit(
@@ -2125,19 +2616,98 @@ def keratin_sample_check(fasta, flag, engine="diann"):
     return rec
 
 
-def fragpipe_databases(params, fasta):
-    """The database(s) a FragPipe search reads: its workflow's database.db-path (make_presets.py
-    writes --fasta there) and --fasta, existing files only, each once."""
-    paths = [fasta]
+def _workflow_value(params, key):
+    """A FragPipe workflow's value for `key` as FragPipe reads it (Java .properties: a backslash
+    escapes the next character), or None when it is absent or empty."""
     try:
         with open(params, encoding="utf-8", errors="replace") as fh:
             for ln in fh:
-                if ln.startswith("database.db-path="):
-                    # a Java .properties value: a backslash escapes the next character
-                    paths.append(re.sub(r"\\(.)", r"\1", ln.split("=", 1)[1].strip()))
+                if ln.startswith(key + "="):
+                    v = re.sub(r"\\(.)", r"\1", ln.split("=", 1)[1].strip())
+                    return v or None
     except OSError:
         pass
+    return None
+
+
+def fragpipe_databases(params, fasta):
+    """The database(s) a FragPipe search reads: its workflow's database.db-path (make_presets.py
+    writes --fasta there) and --fasta, existing files only, each once."""
+    paths = [fasta, _workflow_value(params, "database.db-path")]
     return [p for p in dict.fromkeys(os.path.abspath(p) for p in paths if p) if os.path.isfile(p)]
+
+
+# The workflow a FragPipe search RUNS: the one given, with database.db-path set to --fasta
+# (fragpipe_workflow_for_run), in the search folder. Not FragPipe's own "fragpipe.workflow",
+# which it saves there itself.
+FRAGPIPE_RUN_WORKFLOW = "fragpipe_input.workflow"
+
+
+def refuse_fragpipe_database(params, fasta):
+    """Before anything is written (H7 bug 1): FragPipe's shipped workflows name no
+    database.db-path, and headless FragPipe then takes the one cached in the account's
+    ~/.config/FragPipe/.../fragpipe-ui.cache -- the LAST search's database (H5 finding 11). So
+    the route sets it to --fasta itself (fragpipe_workflow_for_run) and refuses a workflow that
+    names a DIFFERENT database. -> the record of the database searched (search_provenance.json
+    fragpipe_database): path, sha256, entries, decoys under the workflow's decoy tag, and the
+    db-path the workflow gave. A FASTA without decoys is said (MSFragger refuses one)."""
+    import hashlib
+    import fetch_fasta as ff
+    fas = os.path.abspath(fasta)
+    given = _workflow_value(params, "database.db-path")
+    if given and os.path.realpath(os.path.abspath(given)) != os.path.realpath(fas):
+        sys.exit(f"[run_search] REFUSED -- nothing was written or submitted. The workflow "
+                 f"{params} names database.db-path={given}, but --fasta is {fas}: FragPipe "
+                 f"would search the workflow's database, not the one recorded for this search. "
+                 f"Give --fasta {given}, or a workflow without database.db-path (run_search.py "
+                 f"sets it from --fasta).")
+    tag = _workflow_value(params, "database.decoy-tag") or "rev_"
+    try:
+        heads = ff._fasta_headers(fas)
+        h = hashlib.sha256()
+        with open(fas, "rb") as fh:
+            for block in iter(lambda: fh.read(1 << 20), b""):
+                h.update(block)
+        sha = h.hexdigest()
+    except OSError as e:
+        sys.exit(f"[run_search] REFUSED -- nothing was written or submitted. --fasta {fas} could "
+                 f"not be read ({e}).")
+    n_dec = sum(1 for ln, _ in heads if ln[1:].startswith(tag))
+    if not n_dec:
+        sys.stderr.write(f"[run_search] NOTE: {fas} has no decoys (no entry starts with {tag}, "
+                         f"the workflow's database.decoy-tag): MSFragger refuses a target-only "
+                         f"FASTA (\"No decoys found in the FASTA file\"). Add them with FragPipe's "
+                         f"Philosopher, without --contam: philosopher database --custom {fas} "
+                         f"--prefix {tag}, then give --fasta the .fas it writes.\n")
+    return {"path": fas, "sha256": sha, "n_entries": len(heads), "n_decoys": n_dec,
+            "decoy_tag": tag, "workflow_db_path": given,
+            "source": "--fasta, written as the workflow's database.db-path by run_search.py"}
+
+
+def fragpipe_workflow_for_run(params, db, out):
+    """<out>/FRAGPIPE_RUN_WORKFLOW: the workflow given, line for line, with database.db-path set
+    to the database recorded (refuse_fragpipe_database) -- so FragPipe never fills it from its
+    cache. -> its path."""
+    with open(params, encoding="utf-8", errors="replace", newline="") as fh:
+        lines = fh.read().splitlines(keepends=True)
+    nl = "\r\n" if lines and lines[0].endswith("\r\n") else "\n"
+    value = db["path"].replace("\\", "\\\\").replace(":", "\\:").replace("=", "\\=")
+    new = f"database.db-path={value}{nl}"
+    out_lines, done = [], False
+    for ln in lines:
+        if ln.startswith("database.db-path="):
+            if not done:
+                out_lines.append(new)
+                done = True
+            continue
+        out_lines.append(ln)
+    if not done:
+        if out_lines and not out_lines[-1].endswith(("\n", "\r")):
+            out_lines[-1] += nl
+        out_lines.append(new)
+    path = os.path.join(out, FRAGPIPE_RUN_WORKFLOW)
+    write_file(path, "".join(out_lines))
+    return path
 
 
 def fragpipe_contam_entries(databases):
@@ -2175,10 +2745,20 @@ def refuse_fragpipe_contam_database(params, fasta):
                 f"tag when it builds its library, so those contaminants reach report.tsv as plain "
                 f"accessions that neither DIA-NN nor run_de.R's contaminant filter can recognise, and "
                 f"they would be tested as sample proteins. Build the database with the skill's "
-                f"contaminant set (tagged {ff.CONT_TAG}) instead and point the workflow at it:\n"
+                f"contaminant set (tagged {ff.CONT_TAG}) instead:\n"
                 f"  python3 scripts/fetch_fasta.py fetch --proteome <UPID> --contaminants universal "
                 f"--out ./search.fasta [--keratin-sample | --no-keratin-sample]\n"
-                f"  python3 scripts/make_presets.py --engine fragpipe ... --fasta ./search.fasta")
+                # S9: that FASTA is targets only, and MSFragger refuses one (references/
+                # fragpipe-diatracer.md); the decoys come from FragPipe's own Philosopher
+                f"then add the decoys MSFragger needs (it refuses a target-only FASTA: \"No decoys "
+                f"found in the FASTA file\") with FragPipe's Philosopher, without --contam, which "
+                f"would add the {ff.FRAGPIPE_CONT_TAG} entries back:\n"
+                f"  <fragpipe>/tools/Philosopher/philosopher-<v> workspace --init\n"
+                f"  <fragpipe>/tools/Philosopher/philosopher-<v> database --custom ./search.fasta "
+                f"--prefix rev_    # -> <date>-decoys-search.fasta.fas (targets + decoys)\n"
+                f"and point the workflow's database.db-path at that target+decoy .fas:\n"
+                f"  python3 scripts/make_presets.py --engine fragpipe ... --fasta "
+                f"./<date>-decoys-search.fasta.fas")
 
 
 # The FragPipe workflow key that runs DIA-NN as its quantification step (FragPipe 24.0's shipped
@@ -2242,11 +2822,179 @@ def refuse_fragpipe_dashed(params, files, fasta, out, acquisition):
 # sage_lfq_check.py reads its "discovered N target MS1 peaks at 5% FDR" from it.
 SAGE_LOG = "sage.log"
 
+# A Sage search for IDENTIFICATIONS ONLY: its cfg says "quant": {"lfq": false} (written by
+# estimate_params.py --ids-only). Sage 0.14.7 reads a timsTOF .d itself for identifications but has
+# no MS1 quantification on one, so this is the route that searches a .d without converting it:
+# A Core submission on HIVE, 2026-10-30, 896 peptides at 1% from the two .d in 22 s against 753 from an
+# 11.6 GB Windows mzML conversion (sage015_test/RESULTS.md, arm B). Decided by the cfg key alone.
+# The search gives identifications.tsv (SAGE_IDS, imported from sage_lfq_check; adapt_sage_ids)
+# and no report.parquet, so no DE.
+SAGE_IDS_RECORD = "sage_identifications.json"
+# A run's identification (L7R-F2): a target PSM of rank 1 at Sage's spectrum_q AND peptide_q at 1%.
+# peptide_q alone is one value per peptide over all the runs, so a peptide confidently seen in
+# one run would be listed as identified in another where its only spectrum is poor; and a rank-2
+# (chimeric) PSM is not the spectrum's identification. This is how sage015_test/RESULTS.md counts.
+SAGE_IDS_Q = 0.01
+SAGE_IDS_RULE = (f"a target PSM (is_decoy false) of rank 1 with Sage's spectrum_q <= "
+                 f"{SAGE_IDS_Q:g} and peptide_q <= {SAGE_IDS_Q:g}")
+# ...and the same rule in the words of a Methods section (sage_identifications.methods_sentence,
+# which make_methods.py quotes)
+# (the q-values are global: a run's subset of a globally filtered list carries no 1% FDR of its
+# own, so the sentence says "over all runs together, listed per run" -- C2 statistician nit)
+SAGE_IDS_METHODS = (f"Identifications were Sage's own at {SAGE_IDS_Q * 100:g}% FDR over all runs "
+                    f"together, listed per run where a peptide-spectrum match passed: a target "
+                    f"peptide-spectrum match of rank 1 with spectrum- and peptide-level q-values "
+                    f"<= {SAGE_IDS_Q:g}.")
+SAGE_IDS_COLUMNS = ("run", "peptide", "proteins", "charge", "spectrum_q", "peptide_q",
+                    "protein_q")
+# No protein-level filter is applied to the table (C2 statistician H1 + proteomics L1: on the
+# two-run DDA test the kept PSMs map to 198 protein groups, of which 143 pass Sage's own 1%
+# picked-protein FDR), so the Methods say so, with that count from the table itself
+# (sage_ids_protein_groups; the record's totals protein_groups / protein_groups_protein_q).
+SAGE_IDS_PROTEIN_METHODS = (
+    "No protein-level FDR filter was applied to the identification list: each peptide is listed "
+    "with every database protein that contains it, and with Sage's picked-protein q-value; "
+    "{passing} of the {groups} protein groups listed have a protein-level q-value <= {q:g}.")
+
+
+def sage_ids_protein_groups(rows):
+    """(protein groups listed, of them with a Sage protein_q <= SAGE_IDS_Q) over
+    identifications.tsv rows (SAGE_IDS_COLUMNS order): a group is Sage's `proteins` string, at
+    its best protein_q."""
+    best = {}
+    for r in rows:
+        q = r[6]
+        if r[2] not in best or (q is not None and (best[r[2]] is None or q < best[r[2]])):
+            best[r[2]] = q
+    return len(best), sum(1 for q in best.values() if q is not None and q <= SAGE_IDS_Q)
+
+
+def sage_ids_methods_sentence(groups, passing):
+    """The Methods' sentences for a Sage identifications-only search: the PSM/peptide rule
+    (SAGE_IDS_METHODS) and that no protein-level filter was applied, with the count."""
+    return (SAGE_IDS_METHODS + " " + SAGE_IDS_PROTEIN_METHODS.format(
+        passing=passing, groups=groups, q=SAGE_IDS_Q))
+
+
+def _is_dotd(path):
+    """A Bruker timsTOF .d (a folder named <run>.d)."""
+    return str(path).rstrip("/").lower().endswith(".d")
+
+
+def _sage_cfg_lfq(params):
+    """(the cfg's quant.lfq when it is a bool, else None; what the cfg says, in words)."""
+    try:
+        with open(params) as fh:
+            cfg = json.load(fh)
+    except (OSError, ValueError, TypeError) as e:
+        return None, f"the cfg {params} could not be read ({type(e).__name__})"
+    quant = cfg.get("quant") if isinstance(cfg, dict) else None
+    lfq = quant.get("lfq") if isinstance(quant, dict) else None
+    if isinstance(lfq, bool):
+        return lfq, f"quant.lfq is {'true' if lfq else 'false'} in the cfg"
+    return None, "quant.lfq is not set (true or false) in the cfg"
+
+
+def sage_lfq_setting(params):
+    """(whether this Sage search quantifies, how that was decided). Only a cfg whose quant.lfq is
+    false is identifications only. Not set, or a cfg that cannot be read, counts as quantifying
+    -- the DEFAULT, said so -- for a search with no .d; with a .d, refuse_sage_dotd_route stops
+    it first (L7R-F6: Sage's own default is no LFQ, so the route would be guessed)."""
+    lfq, said = _sage_cfg_lfq(params)
+    if lfq is None:
+        return True, f"DEFAULT -- {said}, so the search is treated as quantifying"
+    return lfq, said
+
+
+def refuse_sage_dotd_route(bundle, params, files):
+    """Stop, before anything is converted, written or submitted, a Sage search of a timsTOF .d
+    whose route is not decided, or does not fit the data:
+      * the cfg's quant.lfq is not true or false (L7R-F6): it decides whether each .d is
+        converted to mzML (hours, tens of GB) or read as it is, and Sage's own default (no LFQ)
+        is not what the skill would otherwise assume;
+      * a quantifying search of a diaPASEF .d (L7R-F7): the conversion's settings
+        (PWIZ_TIMS_MSCONVERT) are DDA-PASEF's -- its scan summing would add up each isolation
+        window's MS2 over about ten cycles, which DIA scoring cannot use."""
+    dots = [f for f in files if _is_dotd(f)]
+    if not dots:
+        return
+    lfq, said = _sage_cfg_lfq(params)
+    if lfq is None:
+        sys.exit(f"[run_search] REFUSED -- Nothing was converted, written or submitted. {said}, "
+                 f"and it decides how a timsTOF .d goes into Sage ({len(dots)} input(s) are .d). "
+                 f"Set quant.lfq true (each .d converted to mzML and quantified) or false "
+                 f"(identifications only: Sage reads the .d itself, no DE -- estimate_params.py "
+                 f"--engine sage --ids-only writes it) in {params}.")
+    acq = str(bundle.get("acquisition") or "").upper()
+    if lfq and acq == "DIA":
+        sys.exit(f"[run_search] REFUSED -- Nothing was converted, written or submitted. This is a "
+                 f"quantifying Sage search of timsTOF .d whose acquisition is DIA (the workflow "
+                 f"manifest). The .d conversion's settings are DDA-PASEF's (msconvert "
+                 f"{pwiz_msconvert_options()}): their scan summing would add up each diaPASEF "
+                 f"window's MS2 across cycles. Search diaPASEF with DIA-NN (--engine diann).")
+
+
+def sage_lfq_enabled(params):
+    """The cfg's quant.lfq, default True (an unreadable cfg too): see sage_lfq_setting."""
+    return sage_lfq_setting(params)[0]
+
+
+def pwiz_methods_sentence(sif):
+    """The Methods sentence for a .d converted in this container, from PWIZ_TIMS_MSCONVERT and the
+    container record -- a version that is not recorded is said to be so (L7R-F3)."""
+    c = pwiz_container_record(sif)
+    ver = c.get("msconvert_version")
+    prog = (f"ProteoWizard msconvert {ver}" if ver else
+            "ProteoWizard msconvert (version not recorded -- confirm)")
+    where = (f"the ProteoWizard container {c['image']}:{c['tag']}" if c.get("tag") else
+             f"the container {os.path.basename(sif)} (not the Core's pinned image)")
+    return (f"Each timsTOF .d file was converted to mzML with {prog} in {where}, under Wine, with "
+            f"vendor peak picking at MS1 and MS2, ion-mobility spectra combined, and MS2 spectra "
+            f"of similar precursor m/z, retention time and ion mobility summed (msconvert options: "
+            f"{pwiz_msconvert_options()}).")
+
+
+def sage_input_record(files, params, steps):
+    """search_provenance.json `sage_input`: how each timsTOF .d went into Sage, and why. `dotd` is
+    "direct" (searched as it is), "converted" (to mzML first) or null when no input is a .d.
+    `methods_sentence` says the route in a Methods section's words (make_methods.py quotes it;
+    None when there is nothing to add)."""
+    dots = [f for f in files if _is_dotd(f)]
+    quantified, how = sage_lfq_setting(params)
+    ids_only = "for identifications only, with no MS1 quantification"
+    if not dots:
+        return {"dotd": None, "files": [], "why": "no timsTOF .d among the inputs",
+                "methods_sentence": None if quantified else f"The search was {ids_only}."}
+    if not quantified:
+        return {"dotd": "direct", "files": dots,
+                "why": (f"identifications only ({how}): Sage 0.14.7 reads a timsTOF .d itself "
+                        f"for identifications, so each .d was searched as it is, with no mzML "
+                        f"conversion"),
+                "methods_sentence": (f"Sage read each timsTOF .d file directly, without "
+                                     f"conversion to mzML; the search was {ids_only}.")}
+    tools = sorted({s["tool"] for s in steps if s["input"] in dots})
+    sifs = list(dict.fromkeys(s["sif"] for s in steps if s.get("sif")))
+    return {"dotd": "converted", "files": dots, "tools": tools,
+            "why": (f"quantification ({how}): Sage 0.14.7 has no MS1 quantification on a .d, "
+                    f"so each .d was converted to mzML first, with {'; '.join(tools)}: "
+                    f"msconvert {pwiz_msconvert_options()} ({PWIZ_TIMS_MSCONVERT_SOURCE})"),
+            "methods_sentence": " ".join(pwiz_methods_sentence(sif) for sif in sifs) or None}
+
+
+# The pipeline env's interpreter, as acquire_tools.sh finds it -- left for the JOB's shell to
+# expand (the cluster's $HOME, not the generator's). ${HOME:-}: a job without $HOME under set -u
+# falls through to the next choice instead of ending.
+PIPELINE_ENV_PYTHON = ("${PROTEOMICS_PIPELINE_HOME:-${HOME:-}/.proteomics-pipeline}"
+                       "/micromamba/envs/proteomics-pipeline/bin/python")
+
 
 def _job_python():
-    """A job's interpreter for the skill's own scripts: this one (the pipeline env, which has
-    pyarrow), else python3 -- the job-end hook's rule (notify_slack.wrap_job_script)."""
-    return f'_py={shlex.quote(sys.executable or "python3")}; [ -x "$_py" ] || _py=python3'
+    """A job's interpreter for the skill's own scripts (the LFQ check, the Radiant library): the
+    first executable of the pipeline env's python (which has pyarrow), this generator's, then
+    python3. Not this one alone: a search generated under /usr/bin/python3 gave the job no
+    pyarrow, and its Sage LFQ check could only say "unchecked" (a Core submission, 2026-10-29)."""
+    return (f'_py="{PIPELINE_ENV_PYTHON}"; [ -x "$_py" ] || '
+            f'_py={shlex.quote(sys.executable or "python3")}; [ -x "$_py" ] || _py=python3')
 
 
 def sage_check_line(out, params):
@@ -2292,42 +3040,115 @@ def sage_lfq(out, params, log=None, accept=None):
     return rec
 
 
-def run_sage(cmd, params, files, fasta, out, threads, sbatch, queue=None):
+def sage_ids_lfq_record(out):
+    """An identifications-only search's LFQ check: not applicable, written where a quantifying
+    search's record would be (sage_lfq_check.json + search_provenance.json), so the watcher and
+    the audit never read an earlier search's record as this one's. Called only once
+    adapt_sage_ids has accepted the output as identifications only."""
+    rec = sage_lfq_check_mod().not_applicable()
+    try:
+        rec["written_to"] = sage_lfq_check_mod().record(out, rec)
+    except OSError as e:
+        sys.stderr.write(f"{sage_lfq_check_mod().TAG} NOTE: could not write "
+                         f"{sage_lfq_check_mod().RECORD} in {out}: {e}\n")
+    return rec
+
+
+def sage_set_aside_other_kind(out, quantified):
+    """Set aside (renamed .stale-<time>, never deleted) what an earlier Sage search of the OTHER
+    kind left in `out`, when this one is generated -- as run_diann's previous_artefacts_moved_to
+    (L7R-F9). Until --adapt-only they described the folder: the watcher showed an earlier LFQ
+    record, and run_de.R could gate on it and run a DE on an earlier report.parquet beside a
+    provenance saying quantified: false. Identifications only: the quantities and their records
+    go, and the LFQ record is written now (sage_ids_lfq_record). Quantifying: identifications.tsv
+    and its record go, and a not-applicable LFQ record; a quantifying search's own LFQ record
+    stays (the job's check carries an earlier acceptance over). Called only once every refusal
+    has passed. -> the new paths."""
+    slc = sage_lfq_check_mod()
+    if quantified:
+        names = [SAGE_IDS, SAGE_IDS_RECORD]
+        if (slc.load(out) or {}).get("status") == "not_applicable":
+            names.append(slc.RECORD)
+    else:
+        names = ["report.parquet", "lfq.parquet", SAGE_ADAPT, slc.RECORD]
+    moved = []
+    for name in names:
+        try:
+            new = set_aside(os.path.join(out, name))
+        except ValueError as e:
+            sys.exit(f"[run_sage] {e}. Move it yourself, or search into a different --out. "
+                     f"Nothing was submitted.")
+        if new:
+            moved.append(new)
+    if moved:
+        print(f"  [run_sage] an earlier search's outputs set aside: {', '.join(moved)}")
+    return moved
+
+
+def _load_sage_record(out, name):
+    try:
+        with open(os.path.join(out, name)) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None                     # the step that writes it said why it could not
+
+
+def run_sage(cmd, params, files, fasta, out, threads, sbatch, queue=None, pwiz_sif=None):
+    quantified = sage_lfq_enabled(params)
+    # mzml_plan creates nothing and its refusals say "Nothing was converted, written or
+    # submitted": the folder is made only once it has passed, so a refusal leaves no empty
+    # search folder behind (H2c N1)
+    mzml, steps = mzml_plan(files, out, dotd="convert" if quantified else "direct",
+                            pwiz_sif=pwiz_sif)
     os.makedirs(out, exist_ok=True)
-    mzml, steps = mzml_plan(files, out)
     files_args = " ".join(shlex.quote(m) for m in mzml)
     full = (f"{cmd} {shlex.quote(params)} -f {shlex.quote(fasta)} -o {shlex.quote(out)} "
             f"--parquet --disable-telemetry-i-dont-want-to-improve-sage {files_args}")
     log = os.path.join(out, SAGE_LOG)
+    said = {"quantified": quantified, "sage_input": sage_input_record(files, params, steps),
+            "previous_artefacts_moved_to": sage_set_aside_other_kind(out, quantified)}
+    if not quantified:
+        said["sage_lfq_check"] = sage_ids_lfq_record(out)      # this search's, from now on
+    sifs = [s["sif"] for s in steps if s.get("sif")]
+    if sifs and pwiz_rerun_args(sifs[0]):
+        said["pwiz_sif_arg"] = pwiz_rerun_args(sifs[0])      # a re-run keeps this container
     if sbatch:
         # Conversion, search and LFQ check all run in the job, on the compute node: nothing
         # heavy happens before submission (golden rule 3). pipefail keeps Sage's exit status.
+        # Identifications only: no LFQ, so no LFQ check.
         job = "\n".join(conversion_lines(steps)
-                        + [f"{full} 2>&1 | tee {shlex.quote(log)}",
-                           _job_python(), sage_check_line(out, params)])
+                        + [f"{full} 2>&1 | tee {shlex.quote(log)}"]
+                        + ([_job_python(), sage_check_line(out, params)] if quantified else []))
         emit_sbatch(sbatch, job, out, threads, job="sage_search", **(queue or {}))
-        return {"engine": "sage", "out": out, "submitted": sbatch, "ran": False,
-                "mzml_conversion": conversion_record(steps, "in the job, before Sage"),
-                "note": "After the job runs, re-run with --adapt-only to build report.parquet "
-                        "(it also re-runs the LFQ mass-window check, sage_lfq_check.json)."}
+        res = {"engine": "sage", "out": out, "submitted": sbatch, "ran": False,
+               "mzml_conversion": conversion_record(steps, "in the job, before Sage"), **said}
+        if quantified:
+            res["note"] = ("After the job runs, re-run with --adapt-only to build report.parquet "
+                           "(it also re-runs the LFQ mass-window check, sage_lfq_check.json).")
+        else:
+            res["note"] = (f"Identifications only (quant.lfq is false): after the job runs, "
+                           f"re-run with --adapt-only to write {SAGE_IDS}. There is no "
+                           f"report.parquet, so no differential expression.")
+        return res
     convert_inline(steps)
     sh_logged(full, log)
+    if not quantified:
+        ids = adapt_sage_ids(out)
+        return {"engine": "sage", "report": None, "identifications": ids, "ran": True,
+                "mzml_conversion": conversion_record(steps, "inline, before Sage"), **said,
+                "sage_identifications": _load_sage_record(out, SAGE_IDS_RECORD)}
     rec = sage_lfq(out, params, log, accept=getattr(a_globals, "accept_lfq_window", None))
     if sage_lfq_check_mod().gated(rec):
         # the gate (sage_lfq_check.refusal): no report.parquet from quantities known to be wrong;
         # main() records the search, then says how to re-run it and exits non-zero
         return {"engine": "sage", "report": None, "ran": True, "lfq_window_refused": True,
-                "mzml_conversion": conversion_record(steps, "inline, before Sage"),
+                "mzml_conversion": conversion_record(steps, "inline, before Sage"), **said,
                 "sage_lfq_check": rec}
     report = adapt_sage(out)
-    try:
-        with open(os.path.join(out, SAGE_ADAPT)) as fh:
-            adapted = json.load(fh)
-    except (OSError, ValueError):
-        adapted = None                  # adapt_sage said why it could not write it
+    rec = sage_lfq_check_mod().load(out) or rec          # with the quantified coverage (M2)
     return {"engine": "sage", "report": report, "ran": True,
-            "mzml_conversion": conversion_record(steps, "inline, before Sage"),
-            "sage_lfq_check": rec, "sage_adapt": adapted}
+            "mzml_conversion": conversion_record(steps, "inline, before Sage"), **said,
+            "sage_lfq_check": rec, "sage_adapt": _load_sage_record(out, SAGE_ADAPT)}
 
 
 SAGE_ADAPT = "sage_adapt.json"
@@ -2372,6 +3193,34 @@ def sage_quantity_declaration(out, qmax):
     }
 
 
+# An empty Sage result is refused, never written as one (H2-2, rule 4): on HIVE an un-combined
+# timsTOF mzML gave Sage 0 peptides at 1%, and --adapt-only exited 0 with a 0-row report.parquet
+# and no warning. Exit 2, so `... --adapt-only && run_de.R ...` stops there.
+SAGE_EMPTY_EXIT = 2
+
+
+def _sage_refuse_empty(out, product, record, key, rec, reason):
+    """Refuse an empty adapter result: no <product> is written, and one already in `out` is set
+    aside (it is not this search's, and a DE or a delivery would read it as one); the reason is
+    recorded in <record> + search_provenance.json `key` (status "refused"), said, and the
+    process exits SAGE_EMPTY_EXIT."""
+    path = os.path.join(out, product)
+    try:
+        moved = set_aside(path)
+    except ValueError as e:
+        moved = None
+        reason += f" ({path} is not a regular file, so it was left where it is: {e})"
+    rec.update(status="refused", refused=reason, earlier_output_moved_to=moved)
+    try:
+        rec["written_to"] = sage_lfq_check_mod().write_record(out, record, key, rec)
+    except OSError as e:
+        sys.stderr.write(f"[adapt] NOTE: could not write {record} in {out}: {e}\n")
+    sys.stderr.write(f"[adapt] REFUSED: {reason}. No {product} was written"
+                     + (f"; the earlier one was moved to {moved}" if moved else "")
+                     + f" (recorded in {record}).\n")
+    sys.exit(SAGE_EMPTY_EXIT)
+
+
 def adapt_sage(out):
     """Sage lfq.parquet -> the DE-input report.parquet, one row per (peptide, file) that Sage
     counts as a valid MS1 quantity. Sage quantifies PEPTIDES; build_maxlfq.R makes the protein x
@@ -2400,6 +3249,11 @@ def adapt_sage(out):
 
     lfq = _find(out, ["lfq.parquet"])
     if not lfq:
+        if sage_ran_lfq(out) is False:
+            sys.exit(f"No lfq.parquet under {out}: this Sage search was for identifications only "
+                     f"(its results.json says quant.lfq false), so there is nothing to build "
+                     f"report.parquet from. Its identifications go to {SAGE_IDS}: run_search.py "
+                     f"--adapt-only with the cfg the search ran with (quant.lfq false) writes it.")
         sys.exit(f"No lfq.parquet under {out}; was Sage run with quant.lfq=true?")
     t = pq.read_table(lfq)
     cols = {c.lower(): c for c in t.column_names}
@@ -2423,6 +3277,27 @@ def adapt_sage(out):
                  "peaks cannot be told from the targets. Nothing was adapted. Re-run the search "
                  "with Sage >= 0.14.")
 
+    # Nothing identified at 1% (sage_lfq_check's one count): nothing to quantify, whatever
+    # lfq.parquet holds -- refused, not adapted (H2-2)
+    res = _find(out, ["results.sage.parquet"])
+    peptides, why_not = None, (f"no results.sage.parquet under {out}" if not res else None)
+    if res:
+        try:
+            peptides = sage_lfq_check.per_run_mass_error(res)[1]
+        except Exception as e:      # noqa: BLE001 -- said in the record, never dropped
+            why_not = f"{res} unreadable ({type(e).__name__}: {e})"
+        if peptides == 0:
+            _sage_refuse_empty(out, "report.parquet", SAGE_ADAPT, "sage_adapt",
+                               {"source": lfq, "report": None, "sage_results": res,
+                                "target_peptides_1pct": 0},
+                               f"Sage identified no target peptide at "
+                               f"{sage_lfq_check.PSM_Q * 100:g}% FDR (peptide_q <= "
+                               f"{sage_lfq_check.PSM_Q}) in {res}, so this search has nothing to "
+                               f"quantify")
+        if peptides is None:
+            sys.stderr.write(f"[adapt] NOTE: the target peptides at 1% could not be counted: "
+                             f"{why_not}\n")
+
     qmax = sage_lfq_check.LFQ_Q_MAX
     per_file, runs, prots, ints, names, feats = {}, [], [], [], [], []
     # the precursors kept, to set beside Sage's own logged count (one q per precursor, not per row)
@@ -2434,7 +3309,7 @@ def adapt_sage(out):
             t.column(c_prot).to_pylist(), t.column(c_run).to_pylist(),
             t.column(c_int).to_pylist(), t.column(c_dec).to_pylist(),
             sage_lfq_check.q_passes(t.column(c_q)).to_pylist(), peps, chgs):
-        rn = os.path.splitext(os.path.basename(str(r)))[0]
+        rn = sage_run_name(r)
         n = per_file.setdefault(rn, {"rows": 0, "decoy_dropped": 0, "q_value_dropped": 0,
                                      "kept": 0})
         n["rows"] += 1
@@ -2477,9 +3352,17 @@ def adapt_sage(out):
     declared = sage_quantity_declaration(out, qmax)
     out_tbl = declare_quantity(out_tbl, declared)
     report = os.path.join(out, "report.parquet")
-    pq.write_table(out_tbl, report)
     totals = {key: sum(f[key] for f in per_file.values())
               for key in ("rows", "decoy_dropped", "q_value_dropped", "kept")}
+    if not k:
+        _sage_refuse_empty(out, "report.parquet", SAGE_ADAPT, "sage_adapt",
+                           {"source": lfq, "report": None, "q_value_max": qmax,
+                            "per_file": per_file, "totals": totals},
+                           f"no Sage MS1 peak passed q_value <= {qmax:g} ({totals['rows']} "
+                           f"lfq.parquet rows: {totals['decoy_dropped']} decoy, "
+                           f"{totals['q_value_dropped']} above it), so this search has nothing "
+                           f"to quantify -- see sage_lfq_check.json")
+    pq.write_table(out_tbl, report)
     logp = sage_lfq_check.find_log(out)
     rec = {"source": lfq, "report": report,
            "kept_rule": (f"is_decoy false and stored q_value <= {qmax:g} (the stored q is shared "
@@ -2494,35 +3377,795 @@ def adapt_sage(out):
                               "target and its decoy (the lower-scoring member's), so filtering "
                               "it keeps a conservative subset of that count"),
            "target_precursors_kept": len(kept_precursors),
+           # the protein groups report.parquet has amounts for (sage_lfq_check's coverage)
+           "protein_groups_kept": len(set(prots)),
            "sage_logged_target_ms1_peaks_5pct": (sage_lfq_check.ms1_peaks_from_log(logp)
                                                  if logp else None),
+           "target_peptides_1pct": peptides,
+           "target_peptides_1pct_not_counted": why_not,
            "sage_log": logp,
            "row_unit": "one row per (peptide, file); protein rollup downstream",
+           # the rule above in a Methods section's words (make_methods.py quotes it)
+           "methods_sentence": sage_lfq_check.methods_sentence(qmax),
            "declared_quantity": declared,
            "per_file": per_file, "totals": totals}
     try:
         rec["written_to"] = sage_lfq_check.write_record(out, SAGE_ADAPT, "sage_adapt", rec)
     except OSError as e:
         sys.stderr.write(f"[adapt] NOTE: could not write {SAGE_ADAPT} in {out}: {e}\n")
+    # how much of what Sage identified this report quantifies: into the LFQ check's record, a
+    # WARNING when low (C2 proteomics M2; a warning, never a gate)
+    try:
+        sage_lfq_check.add_coverage(out, rec)
+    except OSError as e:
+        sys.stderr.write(f"[adapt] NOTE: could not record the quantified coverage in "
+                         f"{sage_lfq_check.RECORD}: {e}\n")
+    cov = sage_lfq_check.quantified_coverage(rec)
     logged = rec["sage_logged_target_ms1_peaks_5pct"]
     print(f"  [adapt] Sage -> {report}  ({k} peptide x run rows kept of {totals['rows']}: "
           f"{totals['decoy_dropped']} decoy, {totals['q_value_dropped']} above stored q_value "
           f"{qmax:g} dropped; {len(kept_precursors)} target precursors kept"
           + (f" of the {logged} Sage logged at 5% FDR" if logged is not None else "")
+          + (f", for {cov['target_peptides_identified_1pct']} target peptides identified at 1% "
+             f"FDR ({cov['fraction'] * 100:.1f}%)" if cov else "")
           + f"; per file in {SAGE_ADAPT})")
-    if totals["rows"] and not k:
-        sys.stderr.write(f"[adapt] WARNING: no Sage MS1 peak passed q_value <= {qmax:g} -- "
-                         f"{report} has no rows, so there is nothing to quantify. See "
-                         f"sage_lfq_check.json.\n")
     return report
 
 
+def sage_ran_lfq(out):
+    """quant.lfq as Sage ran this search (its results.json holds every parameter as run), or
+    None when there is no readable results.json."""
+    try:
+        with open(_find(out, ["results.json"]) or "") as fh:
+            quant = json.load(fh).get("quant")
+    except (OSError, ValueError, AttributeError):
+        return None
+    lfq = quant.get("lfq") if isinstance(quant, dict) else None
+    return lfq if isinstance(lfq, bool) else None
+
+
+def adapt_sage_ids(out):
+    """Sage results.sage.parquet -> <out>/identifications.tsv, for a search for identifications
+    only (quant.lfq false). No report.parquet: there are no quantities, so there is no DE.
+
+    Kept: SAGE_IDS_RULE -- a target PSM of rank 1 at spectrum_q and peptide_q <= SAGE_IDS_Q (Sage
+    computes its q-values over all the runs together). Written: one row per (run, modified
+    peptide, charge), at the best spectrum_q of its PSMs -- `run` is the file name without its
+    extension, as adapt_sage names it; `proteins` is Sage's own ';' list of FASTA IDs. What was
+    kept and dropped, per run, goes to <out>/sage_identifications.json and search_provenance.json
+    `sage_identifications`. A report.parquet already in <out> is from an earlier search (this one
+    wrote none), so it is set aside: the DE would read it as this search's."""
+    try:
+        import pyarrow.parquet as pq
+    except ImportError:
+        sys.exit("pyarrow required to read Sage's results.sage.parquet. pip install pyarrow.")
+    import csv
+    import sage_lfq_check
+
+    if sage_ran_lfq(out) is True:
+        sys.exit(f"[adapt] {out} holds a QUANTIFIED Sage search (its results.json says quant.lfq "
+                 f"true), but the cfg given says identifications only (quant.lfq false). Nothing "
+                 f"was written or moved. Re-run --adapt-only with the cfg the search ran with.")
+    res = _find(out, ["results.sage.parquet"])
+    if not res:
+        sys.exit(f"No results.sage.parquet under {out}; did the Sage search finish?")
+    need = ("filename", "peptide", "proteins", "charge", "rank", "is_decoy", "spectrum_q",
+            "peptide_q", "protein_q")
+    have = pq.read_schema(res).names
+    missing = [c for c in need if c not in have]
+    if missing:
+        sys.exit(f"{res} has no {', '.join(missing)} column ({have}); it is not Sage 0.14 output. "
+                 f"Nothing was written.")
+    cols = list(need) + (["stripped_peptide"] if "stripped_peptide" in have else [])
+    t = pq.read_table(res, columns=cols).to_pydict()
+    stripped = t.get("stripped_peptide") or t["peptide"]
+    qmax = SAGE_IDS_Q
+    best, per_run, peptides = {}, {}, set()
+
+    def passes(v):
+        return v is not None and v <= qmax
+
+    for i, fn in enumerate(t["filename"]):
+        run = sage_run_name(fn)
+        n = per_run.setdefault(run, {"psms": 0, "decoy_dropped": 0, "rank_dropped": 0,
+                                     "spectrum_q_dropped": 0, "peptide_q_dropped": 0,
+                                     "psms_kept": 0, "precursors": 0})
+        n["psms"] += 1
+        # each PSM is counted under the first rule it fails, in SAGE_IDS_RULE's order
+        if t["is_decoy"][i]:
+            n["decoy_dropped"] += 1
+            continue
+        if t["rank"][i] != 1:
+            n["rank_dropped"] += 1
+            continue
+        if not passes(t["spectrum_q"][i]):
+            n["spectrum_q_dropped"] += 1
+            continue
+        q = t["peptide_q"][i]
+        if not passes(q):
+            n["peptide_q_dropped"] += 1
+            continue
+        n["psms_kept"] += 1
+        peptides.add(stripped[i])
+        key = (run, t["peptide"][i], t["charge"][i])
+        row = (run, t["peptide"][i], t["proteins"][i], t["charge"][i], t["spectrum_q"][i], q,
+               t["protein_q"][i])
+        if key not in best:
+            n["precursors"] += 1
+        if key not in best or row[4] < best[key][4]:
+            best[key] = row
+
+    if not best:
+        _sage_refuse_empty(out, SAGE_IDS, SAGE_IDS_RECORD, "sage_identifications",
+                           {"source": res, "identifications": None, "kept_rule": SAGE_IDS_RULE,
+                            "per_run": per_run, "quantified": False},
+                           f"no Sage PSM in {res} is {SAGE_IDS_RULE} (of "
+                           f"{sum(r['psms'] for r in per_run.values())} PSMs read), so this "
+                           f"search has no identifications to list")
+    report = os.path.join(out, "report.parquet")
+    moved = None
+    if os.path.lexists(report):
+        try:
+            moved = set_aside(report)
+        except ValueError as e:
+            sys.exit(f"[adapt] {report} is from an earlier search (this one wrote none) and "
+                     f"could not be set aside: {e}. Move it away, then re-run --adapt-only.")
+        sys.stderr.write(f"[adapt] NOTE: {report} was left by an earlier search -- this one is "
+                         f"for identifications only and writes none -- so it was moved to "
+                         f"{moved}, where no DE reads it.\n")
+
+    def cell(v):
+        return "" if v is None else (f"{v:.6g}" if isinstance(v, float) else str(v))
+
+    path = os.path.join(out, SAGE_IDS)
+    with open_text(path) as fh:                     # written whole, or not at all
+        w = csv.writer(fh, delimiter="\t", lineterminator="\n")
+        w.writerow(SAGE_IDS_COLUMNS)
+        for key in sorted(best, key=lambda k: (k[0], str(k[1]), k[2] or 0)):
+            w.writerow([cell(v) for v in best[key]])
+    totals = {k: sum(r[k] for r in per_run.values())
+              for k in ("psms", "decoy_dropped", "rank_dropped", "spectrum_q_dropped",
+                        "peptide_q_dropped", "psms_kept")}
+    totals.update(rows=len(best), precursors=len({k[1:] for k in best}), peptides=len(peptides))
+    groups, passing = sage_ids_protein_groups(best.values())
+    totals.update(protein_groups=groups, protein_groups_protein_q=passing)
+    rec = {"source": res, "identifications": path, "columns": list(SAGE_IDS_COLUMNS),
+           "kept_rule": SAGE_IDS_RULE,
+           "methods_sentence": sage_ids_methods_sentence(groups, passing),
+           "protein_filter": (f"none: `proteins` lists every database protein containing the "
+                              f"peptide; Sage's picked-protein q-value is in `protein_q` "
+                              f"({passing} of {groups} protein groups have protein_q <= "
+                              f"{SAGE_IDS_Q:g})"),
+           "q_value_scope": "Sage's own q-values, computed over all the runs together",
+           "row_unit": "one row per (run, modified peptide, charge)",
+           "quantified": False, "per_run": per_run, "totals": totals,
+           "stale_report_moved_to": moved}
+    try:
+        rec["written_to"] = sage_lfq_check.write_record(out, SAGE_IDS_RECORD,
+                                                        "sage_identifications", rec)
+    except OSError as e:
+        sys.stderr.write(f"[adapt] NOTE: could not write {SAGE_IDS_RECORD} in {out}: {e}\n")
+    print(f"  [adapt] Sage identifications only -> {path}  ({totals['rows']} precursor x run rows "
+          f"from {totals['psms_kept']} PSMs kept as {SAGE_IDS_RULE}: {totals['precursors']} "
+          f"precursors, {totals['peptides']} peptides, {len(per_run)} runs; {groups} protein "
+          f"groups, {passing} at protein_q <= {SAGE_IDS_Q:g}, none filtered on it; no "
+          f"report.parquet)")
+    return path
+
+
 # --------------------------------------------------------------- FragPipe -----
-def run_fragpipe(cmd, bundle, params, files, fasta, out, threads, sbatch, queue=None):
+# FragPipe reads a Thermo .raw through tools/ext/thermo/BatmassIoThermoServer.exe, a .NET
+# Framework program: on Linux it needs mono (references/search-engines.md "Reading Thermo .raw";
+# the .NET 8 runtime does not run it). HIVE has no mono module (`module avail mono` and
+# `module search mono` find nothing, 2026-11-03); the Core keeps one at FRAGPIPE_MONO_SHARED
+# (conda-forge mono 6.12.0.199), which the 38-run hydrolysate FragPipe search ran with.
+FRAGPIPE_MONO_ENV = "FRAGPIPE_MONO_BIN"           # a folder holding `mono`; set = used or refused
+FRAGPIPE_MONO_SHARED = "/quobyte/proteomics-grp/conda_envs/mono/bin"
+
+
+def fragpipe_mono():
+    """(the folder holding mono, where it was found) or (None, why there is none): $FRAGPIPE_MONO_BIN
+    when set (it is then the only answer), else PATH, else the Core's shared copy."""
+    env = os.environ.get(FRAGPIPE_MONO_ENV)
+    if env is not None and env.strip():
+        d = os.path.abspath(env.strip())
+        if _is_exe(os.path.join(d, "mono")):
+            return d, f"${FRAGPIPE_MONO_ENV}"
+        return None, f"${FRAGPIPE_MONO_ENV}={d} holds no executable mono"
+    hit = shutil.which("mono")
+    if hit:
+        return os.path.dirname(os.path.abspath(hit)), "PATH"
+    if _is_exe(os.path.join(FRAGPIPE_MONO_SHARED, "mono")):
+        return FRAGPIPE_MONO_SHARED, "the Core's shared mono (FRAGPIPE_MONO_SHARED)"
+    return None, (f"no mono on PATH, ${FRAGPIPE_MONO_ENV} not set, and none at "
+                  f"{FRAGPIPE_MONO_SHARED}")
+
+
+def _is_exe(path):
+    return os.path.isfile(path) and os.access(path, os.X_OK)
+
+
+def refuse_fragpipe_raw_without_mono(bundle, files, sbatch):
+    """Before anything is written: a FragPipe DDA search of Thermo .raw that will run on Linux (a
+    SLURM job, or here on Linux) needs mono; -> {"bin", "source"} for the job's PATH, None when no
+    input needs it, or exit (REFUSED) with the way out -- never a job that fails mid-search."""
+    raws = [f for f in files if str(f).lower().endswith(".raw")]
+    if not raws or str(bundle.get("acquisition", "DDA")).upper() == "DIA":
+        return None
+    if not sbatch and not sys.platform.startswith("linux"):
+        return None                       # Windows / macOS FragPipe reads .raw itself
+    where, why = fragpipe_mono()
+    if where:
+        return {"bin": where, "source": why}
+    sys.exit(f"[run_search] REFUSED -- nothing was written or submitted. FragPipe reads Thermo "
+             f".raw through tools/ext/thermo/BatmassIoThermoServer.exe, a .NET Framework program "
+             f"that needs mono on Linux, and none was found ({why}); {len(raws)} input(s) are "
+             f".raw. Either set {FRAGPIPE_MONO_ENV} to a folder holding mono (on HIVE, for the "
+             f"Core group: {FRAGPIPE_MONO_SHARED}; outside the Core group, or on another "
+             f"cluster: install conda-forge's mono, e.g. `micromamba create -n mono -c "
+             f"conda-forge mono`, and set {FRAGPIPE_MONO_ENV}=<that env>/bin), or convert each "
+             f".raw to mzML first and search those -- ThermoRawFileParser, as run_search.py's "
+             f"Sage route converts them: ThermoRawFileParser -i=<run>.raw -b=<folder>/<run>.mzML "
+             f"-f=2  -- then run_search.py --engine fragpipe ... --files <folder>/*.mzML.")
+
+
+def refuse_fragpipe_dia_unstaged(bundle, files, out):
+    """Before anything is written (review F18): FragPipe's DIA route stages only a timsTOF .d
+    (diatracer_stage.py). On .raw or mzML it would hand MSFragger the raw paths, and MSFragger
+    writes its uncalibrated mzML/mzBIN beside them -- the harm the DDA stage removes (N1) -- with
+    no mono check either. Refused, with the ways out; staged properly in 2.15."""
+    if str(bundle.get("acquisition", "")).upper() != "DIA":
+        return
+    other = [f for f in files if not str(f).rstrip("/").lower().endswith(".d")]
+    if not other:
+        return
+    q = shlex.quote
+    stage = os.path.abspath(out).rstrip(os.sep) + "_inputs"
+    sys.exit(f"[run_search] REFUSED -- nothing was written or submitted. FragPipe's DIA route "
+             f"stages only timsTOF .d (diatracer_stage.py); {len(other)} input(s) are .raw or "
+             f"mzML, and MSFragger would write its uncalibrated mzML/mzBIN (~1 GB a run) beside "
+             f"them, in the raw folder. Either search them with DIA-NN (--engine diann; it never "
+             f"writes beside its inputs), or stage them yourself in a folder of your own and give "
+             f"FragPipe those:\n  mkdir -p {q(stage)} && cp -p <each .raw> {q(stage)}/ && "
+             f"ln -s <each .mzML> {q(stage)}/\n  run_search.py ... --engine fragpipe --files "
+             f"{q(stage)}/*\n(a .raw needs mono on Linux: {FRAGPIPE_MONO_ENV}).")
+
+
+# What MSFragger writes beside each staged input (<run>_uncalibrated.mzML / .mzBIN, <run>.mzBIN):
+# ~1.1 GB a run, measured (a 38-run Orbitrap hydrolysate search's raw folder gained ~1.1 GB a run;
+# H5: 2.2 GB for two timsTOF .d). The free-space check counts 1.2 GB a run on top of the copies.
+STAGE_SIDE_FILES_BYTES_PER_RUN = int(1.2 * 1024 ** 3)
+
+
+def _gb(n):
+    return f"{n / 1024 ** 3:.1f} GB"
+
+
+def _existing_parent(path):
+    path = os.path.abspath(path)
+    while not os.path.exists(path):
+        up = os.path.dirname(path)
+        if up == path:
+            break
+        path = up
+    return path
+
+
+def fragpipe_stage_problem(stage, out):
+    """Why `stage` is not a safe FragPipe staging folder, or None (C2 security H2). The stage is
+    emptied after a finished search, so it must be a REAL directory -- lstat, never a link -- at
+    <realpath(--out)>/raw_stage, or not exist yet. A raw_stage linked to the raw folder (`ln -s`)
+    would have every regular file in that folder deleted. The one test, used before anything is
+    written, before the copies and again before the clean-up (stage_dir_is_safe_sh: the job's)."""
+    import scratch_files
+    want = os.path.join(os.path.realpath(out), scratch_files.FRAGPIPE_STAGE_DIR)
+    try:
+        st = os.lstat(stage)
+    except FileNotFoundError:
+        st = None
+    except OSError as e:
+        return f"{stage} could not be checked ({e})"
+    if st is not None and stat.S_ISLNK(st.st_mode):
+        return (f"{stage} is a link (to {os.path.realpath(stage)}), not a folder of its own: the "
+                f"search empties its stage after it finishes, and through a link that would "
+                f"delete the files the link points at")
+    if st is not None and not stat.S_ISDIR(st.st_mode):
+        return f"{stage} exists and is not a folder"
+    if os.path.realpath(stage) != want:
+        return (f"{stage} resolves to {os.path.realpath(stage)}, not to {want} inside the search "
+                f"folder")
+    return None
+
+
+def refuse_fragpipe_stage_link(stage, out, now="nothing was written or submitted"):
+    """sys.exit with fragpipe_stage_problem()'s reason and the way out, when there is one."""
+    why = fragpipe_stage_problem(stage, out)
+    if why:
+        sys.exit(f"[run_search] REFUSED -- {now}. {why}. Move it out of the way (a link: `rm` "
+                 f"on the link itself, never `rm -r` through it) and re-run: the search makes its "
+                 f"own raw_stage folder and copies the .raw into it.")
+
+
+def stage_dir_is_safe_sh(d):
+    """The job's form of fragpipe_stage_problem() for the shell-quoted stage `d`: true when it is
+    a real folder or does not exist yet, never a link (`[ -L ]` does not follow one)."""
+    return f"{{ ! [ -L {d} ] && {{ ! [ -e {d} ] || [ -d {d} ]; }}; }}"
+
+
+def refuse_fragpipe_stage(bundle, files, out):
+    """Before anything is written, for a FragPipe DDA search (review F2, F10): refuse a raw_stage
+    that is a link or not a folder of its own (fragpipe_stage_problem, C2 security H2); refuse an
+    input given from inside <out>/raw_stage -- compared by path and by realpath, so an alias of
+    the stage is caught -- the job empties that folder after a finished search; and refuse when
+    the folder the stage goes in has not the room for the .raw copies plus MSFragger's files
+    (STAGE_SIDE_FILES_BYTES_PER_RUN a run), with the numbers and the ways out.
+    -> {"to_copy_bytes", "need_bytes", "free_bytes", "where"}, or None for a DIA search."""
+    import scratch_files
+    # FragPipe's manifest is one tab-separated line a run (both routes): a tab or a line break in
+    # an input's path would split its row into a wrong one (C2 security n3)
+    split = [repr(str(f)) for f in files if any(c in str(f) for c in "\t\n\r")]
+    if split:
+        sys.exit(f"[run_search] REFUSED -- nothing was written or submitted. {len(split)} input "
+                 f"path(s) hold a tab or a line break, which would split FragPipe's manifest row "
+                 f"(one tab-separated line a run): {', '.join(split[:3])}"
+                 f"{' ...' if len(split) > 3 else ''}. Rename them, or link them under plain "
+                 f"names, and give those.")
+    if str(bundle.get("acquisition", "DDA")).upper() == "DIA":
+        return None
+    stage = os.path.join(os.path.abspath(out), scratch_files.FRAGPIPE_STAGE_DIR)
+    refuse_fragpipe_stage_link(stage, out)
+    real_stage = os.path.realpath(stage).rstrip(os.sep) + os.sep
+    inside = [f for f in files
+              if os.path.abspath(str(f)).startswith(stage.rstrip(os.sep) + os.sep)
+              or os.path.realpath(str(f)).startswith(real_stage)]
+    if inside:
+        sys.exit(f"[run_search] REFUSED -- nothing was written or submitted. {len(inside)} input(s) "
+                 f"lie inside {stage}, the search's own staging folder, which the job empties "
+                 f"after a finished search: {', '.join(inside[:3])}{' ...' if len(inside) > 3 else ''}. "
+                 f"Give the original raw files (the job copies them in itself).")
+    to_copy = 0
+    for f in files:
+        src = os.path.abspath(str(f).rstrip("/"))
+        if not src.lower().endswith(".raw"):
+            continue
+        dest = os.path.join(stage, os.path.basename(src))
+        try:
+            st = os.stat(src)
+            d = os.lstat(dest)
+            if not os.path.islink(dest) and d.st_size == st.st_size and d.st_mtime >= st.st_mtime:
+                continue                               # already staged: the job reuses it
+        except OSError:
+            pass
+        try:
+            to_copy += os.path.getsize(src)
+        except OSError:
+            pass
+    need = to_copy + len(files) * STAGE_SIDE_FILES_BYTES_PER_RUN
+    where = _existing_parent(stage)
+    free = shutil.disk_usage(where)[2]
+    rec = {"to_copy_bytes": to_copy, "need_bytes": need, "free_bytes": free, "where": where}
+    if free < need:
+        sys.exit(f"[run_search] REFUSED -- nothing was written or submitted. The FragPipe stage in "
+                 f"{stage} needs {_gb(need)} ({_gb(to_copy)} of .raw copies and ~1.2 GB a run of "
+                 f"MSFragger's files for {len(files)} run(s)); {where} has {_gb(free)} free. Free "
+                 f"space there, search into another --out on a filesystem with room, or convert "
+                 f"the .raw to mzML first (an mzML is linked into the stage, not copied).")
+    return rec
+
+
+def fragpipe_dda_stage(files, out, manifest, per_run=True):
+    """Stage a FragPipe DDA search's inputs inside the search folder (<out>/raw_stage,
+    scratch_files.FRAGPIPE_STAGE_DIR) and write the manifest for the staged paths, one
+    experiment per run (L11 N1, N4). MSFragger writes <run>_uncalibrated.mzML/.mzBIN and
+    <run>.mzBIN beside each input (~1 GB a run), so the raw folder is never handed to it:
+      * a Thermo .raw is COPIED -- in the job (golden rule 3: no heavy I/O here) -- because
+        MSFragger cannot read a .raw through a link ("Instrument index not available for
+        requested device");
+      * a .d or an mzML is LINKED, as diatracer_stage.py links a .d (its link_into).
+    `per_run` (the workflow quantifies): one experiment per run, named as the adapters and
+    conditions.csv name it (sage_run_name) -- with the column empty, FragPipe refuses IonQuant
+    MBR and writes no combined_protein.tsv (H5 gap 1). Otherwise (an identifications-only
+    workflow) the column stays empty: ONE pooled experiment, so Philosopher filters all runs
+    together, as FragPipe did before 2.14.2, and identifications.tsv takes each run from the
+    PSMs' Spectrum (follow-up 3). -> the record (search_provenance.json `fragpipe_stage`)."""
+    import diatracer_stage
+    import scratch_files
+    stage = os.path.join(os.path.abspath(out), scratch_files.FRAGPIPE_STAGE_DIR)
+    # never a link: the inline route reaches here without refuse_fragpipe_stage (C2 security H2)
+    refuse_fragpipe_stage_link(stage, out, now="nothing was staged or searched")
+    os.makedirs(stage, exist_ok=True)
+    refuse_fragpipe_stage_link(stage, out, now="nothing was staged or searched")
+    rows, copied, linked, scratch = [], [], [], []
+    for f in files:
+        src = os.path.abspath(str(f).rstrip("/"))
+        if src.lower().endswith(".raw"):
+            dest = os.path.join(stage, os.path.basename(src))
+            copied.append({"src": src, "dest": dest})
+            scratch.append(dest)
+        else:
+            dest = diatracer_stage.link_into(stage, src)
+            linked.append({"src": src, "link": dest})
+        stem = os.path.splitext(dest)[0]
+        scratch += [stem + "_uncalibrated.mzML", stem + "_uncalibrated.mzBIN", stem + ".mzBIN"]
+        rows.append((dest, sage_run_name(src) if per_run else ""))
+    write_file(manifest, "".join(f"{d}\t{e}\t\tDDA\n" for d, e in rows))
+    return {"dir": stage, "copied": copied, "linked": linked,
+            "experiments": ({sage_run_name(c["src"]): c["dest"] for c in copied + [
+                {"src": x["src"], "dest": x["link"]} for x in linked]} if per_run else {}),
+            "experiment_rule": ("one experiment per run: the workflow quantifies (IonQuant needs "
+                                "experiments)" if per_run else
+                                "none: one pooled experiment, because the workflow runs no "
+                                "quantification (FragPipe's filter then pools all runs, as before "
+                                "2.14.2; the run of each identification comes from its PSMs)"),
+            # every regular file in the stage goes after a finished search (review F17): the
+            # copies, MSFragger's and IonQuant's side files, the console log; links stay
+            "removed_after_a_finished_search": ("every regular file in the stage (the .raw "
+                                                "copies, MSFragger's and IonQuant's side files, "
+                                                "the console log); links stay"),
+            "msfragger_side_files": scratch,
+            "why": ("MSFragger writes <run>_uncalibrated.mzML/.mzBIN beside each input, so the "
+                    "inputs are staged here and the raw folder is never written to; a .raw is "
+                    "copied (MSFragger cannot read one through a link), a .d / mzML linked. The "
+                    "job removes the copies and MSFragger's files once FragPipe reports ALL JOBS "
+                    "DONE; after a search that did not finish they are kept for a re-run. Scratch: "
+                    "never zipped, catalogued or delivered (scratch_files.py)")}
+
+
+FRAGPIPE_IDS_RECORD = "fragpipe_identifications.json"
+
+
+def fragpipe_quantification(params):
+    """What the workflow this FragPipe search runs quantifies (fragpipe_params.
+    workflow_file_quantification, the one reading) -- {"quantified": True/False/None, ...}."""
+    import fragpipe_params
+    return fragpipe_params.workflow_file_quantification(params)
+
+
+def fragpipe_not_quantified_record(quant):
+    """The quantification record of a FragPipe search whose workflow runs none: identifications
+    only, in sage_lfq_check.not_applicable()'s one shape -- the file run_de.R asks the gate about,
+    so a DE is refused with this record's own words (Ruling 73a)."""
+    import fragpipe_params
+    return sage_lfq_check_mod().not_applicable(
+        engine="fragpipe", why=quant["why"], ran="FragPipe ran no quantification",
+        de_refusal=(f"REFUSED: this FragPipe search ran no quantification ({quant['why']}), so "
+                    f"there is no report.parquet and no DE. Its identifications are in {SAGE_IDS} "
+                    f"(run_search.py --adapt-only writes it). To quantify, search with a workflow "
+                    f"that has {fragpipe_params.LFQ_KEY}=true (FragPipe's LFQ-MBR), or with Sage "
+                    f"and quant.lfq true."))
+
+
+def fragpipe_record_quantification(out, quant):
+    """At generation: an identifications-only search writes its record now (the gate's, and
+    search_provenance.json `quantification`), and an earlier quantifying search's report.parquet
+    in `out` is set aside; a quantifying one sets aside an earlier identifications-only search's
+    record and tables -- renamed .stale-<time>, never deleted (as sage_set_aside_other_kind).
+    -> (the record or None, the paths set aside)."""
+    slc = sage_lfq_check_mod()
+    if quant.get("quantified") is False:
+        names, rec = ["report.parquet"], fragpipe_not_quantified_record(quant)
+    elif quant.get("quantified"):
+        names = [SAGE_IDS, FRAGPIPE_IDS_RECORD]
+        rec = {"status": "quantified", "why": quant["why"], "switches": quant.get("switches")}
+        if (slc.load(out) or {}).get("status") == "not_applicable":
+            names.append(slc.RECORD)
+    else:
+        return None, []
+    moved = []
+    for name in names:
+        try:
+            new = set_aside(os.path.join(out, name))
+        except ValueError as e:
+            sys.exit(f"[run_fragpipe] {e}. Move it yourself, or search into a different --out. "
+                     f"Nothing was submitted.")
+        if new:
+            moved.append(new)
+    if rec and rec["status"] == "not_applicable":
+        try:
+            rec["written_to"] = slc.write_record(out, slc.RECORD, "quantification", rec)
+        except OSError as e:
+            sys.stderr.write(f"[run_fragpipe] NOTE: could not write {slc.RECORD} in {out}: {e}\n")
+    elif rec:
+        _provenance_set(out, "quantification", rec)     # the gate's file is for IDs-only only
+    if moved:
+        print(f"  [run_fragpipe] an earlier search's outputs set aside: {', '.join(moved)}")
+    return rec, moved
+
+
+def _provenance_set(out, key, rec):
+    """search_provenance.json[key] = rec in `out`, when that file exists (merged, never
+    replaced); a write that fails is said."""
+    prov = os.path.join(out, "search_provenance.json")
+    try:
+        with open(prov) as fh:
+            p = json.load(fh)
+    except (OSError, ValueError):
+        return
+    if isinstance(p, dict):
+        p[key] = rec
+        try:
+            with open(prov + ".tmp", "w") as fh:
+                json.dump(p, fh, indent=2)
+            os.replace(prov + ".tmp", prov)
+        except OSError as e:
+            sys.stderr.write(f"[run_fragpipe] NOTE: could not record {key} in {prov}: {e}\n")
+
+
+def fragpipe_run_quantification(out, params=None):
+    """What a FragPipe output's search quantified: the workflow FragPipe saved in it
+    (fragpipe.workflow), else `params`, as fragpipe_params reads it -- and when that does not
+    say (no label-free switch; review F7), what the search wrote: combined_protein.tsv is
+    quantified, identification tables without one are identifications only. None when neither
+    tells."""
+    import fragpipe_params
+    wf = fragpipe_params.find(out, fragpipe_params.SAVED_WORKFLOW) or (
+        params if params and str(params).endswith(".workflow") else None)
+    quant = (fragpipe_params.workflow_file_quantification(wf) if wf else
+             {"quantified": None, "label_free": False, "runs": [], "switches": {},
+              "reports": {}, "why": "no workflow was found for this output"})
+    if quant.get("quantified") is not None:
+        return quant
+    has_table = _written(out, [fragpipe_params.LFQ_TABLE]) == []
+    intensities = _combined_protein_intensities(out) if has_table else None
+    if has_table and intensities:
+        return dict(quant, quantified=True, label_free=True,
+                    why=f"the search wrote combined_protein.tsv ({quant['why']})")
+    if _written(out, ["psm.tsv", "peptide.tsv"]) == []:
+        return dict(quant, quantified=False,
+                    why=("the search wrote identification tables and "
+                         + ("a combined_protein.tsv with no intensities (spectral counts only)"
+                            if has_table else "no combined_protein.tsv")
+                         + f" ({quant['why']})"))
+    return None
+
+
+def _combined_protein_intensities(out):
+    """Whether the combined_protein.tsv at the top of `out` holds any intensity > 0 in a
+    '<sample> Intensity' / '<sample> MaxLFQ Intensity' column. With several experiments,
+    Philosopher's abacus writes one for an identifications-only search too, with spectral counts
+    and every intensity 0 (H7 A) -- not quantities (follow-up 3). False when unreadable."""
+    import csv
+    try:
+        with open(os.path.join(out, "combined_protein.tsv"), newline="", errors="replace") as fh:
+            for r in csv.DictReader(fh, delimiter="\t"):
+                for k, v in r.items():
+                    if k and k.endswith("Intensity") and k != "Intensity":
+                        try:
+                            if float(v) > 0:
+                                return True
+                        except (TypeError, ValueError):
+                            continue
+    except OSError:
+        return False
+    return False
+
+
+def adapt_fragpipe_ids(out, quant):
+    """A FragPipe search whose workflow ran no quantification -> <out>/identifications.tsv (the
+    name the Sage identifications-only route writes, SAGE_IDS) and <out>/fragpipe_identifications
+    .json, and NO report.parquet: there are no quantities, so no DE (the gate refuses one).
+    identifications.tsv is every experiment's peptide.tsv as Philosopher filtered it, one row per
+    (run, peptide): `run` the run name (FragPipe's experiment name mapped back,
+    fragpipe_experiment_names), `peptide`, `modifications` (Assigned Modifications), `charges`,
+    `probability`, `proteins` (Protein ID, then Mapped Proteins). -> its path."""
+    import csv
+    import fragpipe_params
+    back = fragpipe_experiment_names(out)
+    tables = []                                           # each folder's psm.tsv
+    for dp, dns, fns in os.walk(out):
+        depth = os.path.relpath(dp, out).count(os.sep) + (dp != out)
+        dns[:] = [d for d in dns if depth < 1 and not os.path.islink(os.path.join(dp, d))]
+        if "psm.tsv" in fns:
+            tables.append(os.path.join(dp, "psm.tsv"))
+    if not tables:
+        sys.exit(f"No psm.tsv under {out}: this FragPipe search ran no quantification "
+                 f"({quant['why']}), and its identification tables are not there either. Check "
+                 f"the FragPipe log -- a headless run can exit 0 on a crash.")
+    # One row per (run, peptide, modifications): the run from each PSM's Spectrum (<run>.<scan>.
+    # <scan>.<charge>, the input file's name), so it holds whether Philosopher filtered each
+    # experiment or all runs together (the tables then at the workdir root, one set for all
+    # runs); a peptide only when it is in the same folder's peptide.tsv (Philosopher's
+    # peptide-level filter).
+    best, psm_only = {}, []
+    for t in sorted(tables):
+        folder = os.path.dirname(t)
+        exp = os.path.basename(folder) if folder != out else ""
+        ok = None
+        try:
+            with open(os.path.join(folder, "peptide.tsv"), newline="", errors="replace") as fh:
+                ok = {r.get("Peptide", "") for r in csv.DictReader(fh, delimiter="\t")}
+        except OSError:
+            ok = None                                     # said in the record: PSM level only
+            psm_only.append(os.path.relpath(folder, out) if folder != out else ".")
+        with open(t, newline="", errors="replace") as fh:
+            for r in csv.DictReader(fh, delimiter="\t"):
+                pep = r.get("Peptide", "")
+                if ok is not None and pep not in ok:
+                    continue
+                spec = r.get("Spectrum") or ""
+                run = (spec.rsplit(".", 3)[0] if spec.count(".") >= 3 else back.get(exp, exp))
+                key = (run, pep, r.get("Assigned Modifications", ""))
+                mapped = (r.get("Mapped Proteins") or "").strip()
+                row = best.setdefault(key, {
+                    "run": run, "peptide": pep, "modifications": key[2], "charges": set(),
+                    "probability": 0.0,
+                    "proteins": ";".join(x for x in [r.get("Protein ID", "")] +
+                                         [m.strip() for m in mapped.split(",")] if x)})
+                row["charges"].add(r.get("Charge", ""))
+                try:
+                    row["probability"] = max(row["probability"], float(r.get("Probability")))
+                except (TypeError, ValueError):
+                    pass
+    rows = sorted(({**v, "charges": ",".join(sorted(c for c in v["charges"] if c))}
+                   for v in best.values()), key=lambda x: (x["run"], x["peptide"]))
+    per_run = {}
+    for x in rows:
+        per_run[x["run"]] = per_run.get(x["run"], 0) + 1
+    path = os.path.join(out, SAGE_IDS)
+    cols = ["run", "peptide", "modifications", "charges", "probability", "proteins"]
+    with open(path + ".part", "w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=cols, delimiter="\t")
+        w.writeheader()
+        w.writerows(rows)
+    os.replace(path + ".part", path)
+    wf = fragpipe_params.find(out, fragpipe_params.SAVED_WORKFLOW)
+    wf_filt = None
+    if wf:
+        try:
+            wf_filt = fragpipe_params.read_workflow(wf)[0].get(
+                fragpipe_params.PHILOSOPHER_FILTER_KEY)
+        except OSError:
+            wf_filt = None
+    # the filter AS RUN, from FragPipe's log, else the workflow's line, said which: the one
+    # reading the Methods use (fragpipe_params.filter_as_recorded; follow-up 3, H7)
+    fr = fragpipe_params.filter_as_recorded(out, wf_filt)
+    filt = fr["filter"]
+    if not filt:
+        filt_src = None
+    elif fr["from_log"]:
+        filt_src = "FragPipe's log, the filter as run"
+    else:
+        filt_src = ("the workflow's phi-report.filter line; FragPipe may add options when it "
+                    "runs it, and its log line for it "
+                    + (f"could not be read ({fr['log_error']})" if fr["log_error"]
+                       else "was not found"))
+    rec = {"source": sorted(tables), "identifications": path, "columns": cols,
+           # what the inputs had, never more (follow-up 2, verify R2): the peptide-level filter
+           # only where a folder had a peptide.tsv
+           "kept_rule": ("the PSMs of psm.tsv, as FragPipe's Philosopher filter wrote it"
+                         + (f" (filter {filt}, from {filt_src})" if filt
+                            else " (its filter is not recorded here)")
+                         + (", whose peptide is in the same folder's peptide.tsv"
+                            if not psm_only else
+                            f"; PSM level only for {', '.join(psm_only)} (no peptide.tsv there, "
+                            f"so no peptide-level filter)"
+                            if len(psm_only) == len(tables) else
+                            f", whose peptide is in the same folder's peptide.tsv -- PSM level "
+                            f"only for {', '.join(psm_only)} (no peptide.tsv there)")
+                         + "; one row per run (from each PSM's Spectrum) and peptide, at its "
+                           "best probability"),
+           "peptide_filter_applied": (True if not psm_only else
+                                      False if len(psm_only) == len(tables) else "partial"),
+           "psm_level_only": psm_only,
+           "quantification": quant, "per_run": per_run, "rows": len(rows),
+           "filter": filt, "filter_source": filt_src,
+           "methods_sentence": (fragpipe_params.philosopher_methods_sentence(filt) if filt
+                                else None)}
+    try:
+        rec["written_to"] = sage_lfq_check_mod().write_record(out, FRAGPIPE_IDS_RECORD,
+                                                              "fragpipe_identifications", rec)
+    except OSError as e:
+        sys.stderr.write(f"[adapt] NOTE: could not write {FRAGPIPE_IDS_RECORD} in {out}: {e}\n")
+    fragpipe_record_quantification(out, quant)
+    print(f"  [adapt] FragPipe identifications only -> {path} ({len(rows)} peptide rows, "
+          f"{len(per_run)} run(s)); no report.parquet: {quant['why']}")
+    return path
+
+
+def fragpipe_stage_job(stage, command, log, expect=None, out=None):
+    """The job's lines around FragPipe for a staged DDA search: copy each .raw in (into .part,
+    then renamed; a copy already there of the same size and no older is reused), run FragPipe
+    with its output also in `log`, then -- only when FragPipe exited 0, printed ALL JOBS DONE
+    (headless FragPipe can exit 0 after a crash) AND wrote what its workflow makes (`expect`,
+    fragpipe_params.expected_outputs: the identification tables, plus combined_protein.tsv when it
+    ran label-free quantification -- an identifications-only workflow is a finished search
+    without one, Ruling 73a) -- remove the staged copies and MSFragger's files; otherwise keep
+    them, say so, and fail the job."""
+    q = shlex.quote
+    lines = ["# [raw_stage] the inputs are staged in the search folder, never written beside "
+             "the raw files: a .raw is copied (MSFragger cannot read one through a link)",
+             "_stage_copy() {",
+             # a link left in the stage (a hand attempt) is not a copy: MSFragger cannot read a
+             # .raw through one (review F10)
+             '  if [ -L "$2" ]; then rm -f -- "$2"; fi',
+             '  if [ -f "$2" ] && [ "$(wc -c < "$1")" -eq "$(wc -c < "$2")" ] && ! [ "$1" -nt "$2" ]; then',
+             '    echo "[raw_stage] $2 already staged"; return 0',
+             "  fi",
+             '  cp -p -- "$1" "$2.part" && mv -f -- "$2.part" "$2"',
+             "}",
+             # a copy that fails (a full share): its partial file goes, and the job says what is
+             # kept and how to free it (review F2)
+             "_stage_fail() {",
+             '  rm -f -- "$2.part"',
+             f'  echo "[raw_stage] $1 could not be copied (cp exit $3): its partial copy was '
+             f'removed; the copies already staged are KEPT for a re-run in" {q(stage["dir"])} '
+             '"-- delete them to free the space" >&2',
+             "  exit 1",
+             "}"]
+    d = q(stage["dir"])
+    # a raw_stage made a link since generation would have the copies "found" in the raw folder,
+    # MSFragger's files written there and every file in it removed after the search (C2
+    # security H2): refused before anything is copied, and checked again before the clean-up
+    lines += [f"if ! {stage_dir_is_safe_sh(d)}; then",
+              f'  echo "[raw_stage] REFUSED: the stage" {d} "is a link or not a folder of its '
+              f'own -- nothing was copied or searched. Remove the link itself (rm, never rm -r '
+              f'through it) and resubmit." >&2',
+              "  exit 1",
+              "fi",
+              f"mkdir -p {d}"]
+    if stage["copied"]:
+        # the room checked at generation, again here: time has passed (review F2)
+        need_kb = (stage.get("space") or {}).get("need_bytes", 0) // 1024
+        lines += [f"_free_kb=$(df -Pk {d} | awk 'NR==2 {{print $4}}')",
+                  f'if [ -n "$_free_kb" ] && [ "$_free_kb" -lt {need_kb} ]; then',
+                  f'  echo "[raw_stage] REFUSED: the stage needs {need_kb} KB, $_free_kb KB are '
+                  f'free in" {d} "-- nothing was copied" >&2',
+                  "  exit 1",
+                  "fi"]
+    lines += [f"_stage_copy {q(c['src'])} {q(c['dest'])} || _stage_fail {q(c['src'])} "
+              f"{q(c['dest'])} $?" for c in stage["copied"]]
+    if stage["copied"]:
+        lines.append(f'echo "[raw_stage] {len(stage["copied"])} .raw staged in" {d}')
+    lines += ["set +e", f"{command} 2>&1 | tee {q(log)}", "_fp_rc=${PIPESTATUS[0]}", "set -e",
+              # what this workflow must have written (fragpipe_params.expected_outputs): an
+              # identifications-only workflow is a finished search without combined_protein.tsv
+              '_fp_missing=""']
+    # `-print -quit` in a test, never `find | grep -q .`: under pipefail, grep -q closing the
+    # pipe early gives find SIGPIPE (exit 141) once it prints more than a pipe block -- ~30 runs'
+    # tables -- and a finished search was called unfinished (C2 errors_ux M3; as the mzML check)
+    for t in (expect or ()):
+        lines.append(f'[ -n "$(find {q(out)} -maxdepth 2 -name {q(t)} -size +0 -print -quit '
+                     f'2>/dev/null)" ] || _fp_missing="$_fp_missing {t}"')
+    lines += [f'if [ "$_fp_rc" -eq 0 ] && grep -q "ALL JOBS DONE" {q(log)} && '
+              f'[ -z "$_fp_missing" ]; then',
+              # every regular file in the stage -- copies, MSFragger's and IonQuant's side
+              # files, the console copy (the job log has it all); links stay (review F17).
+              # Only in a real folder: find -P never follows the stage or a link in it (C2 H2)
+              f"  if {stage_dir_is_safe_sh(d)} && [ -d {d} ]; then",
+              f"    find -P {d} -maxdepth 1 -type f -exec rm -f -- {{}} +",
+              f'    echo "[raw_stage] the search finished: removed the staged copies and '
+              f'MSFragger\'s uncalibrated mzML/mzBIN from" {d}',
+              "  else",
+              f'    echo "[raw_stage] WARNING: the search finished, but the stage" {d} "is no '
+              f'longer a folder of its own (a link?): NOTHING in it was removed -- check it by '
+              f'hand" >&2',
+              "  fi",
+              "else",
+              '  _why="FragPipe exit $_fp_rc"',
+              f'  grep -q "ALL JOBS DONE" {q(log)} || _why="$_why, no ALL JOBS DONE"',
+              '  [ -z "$_fp_missing" ] || _why="$_why, not written:$_fp_missing"',
+              f'  echo "[raw_stage] the search did not finish ($_why): the staged copies are KEPT '
+              f'for a re-run in" {d} >&2',
+              '  [ "$_fp_rc" -ne 0 ] || _fp_rc=1',
+              '  exit "$_fp_rc"',
+              "fi"]
+    return "\n".join(lines)
+
+
+def run_fragpipe(cmd, bundle, params, files, fasta, out, threads, sbatch, queue=None, mono=None,
+                 space=None, database=None):
+    """`mono`: refuse_fragpipe_raw_without_mono()'s {"bin", "source"} -- put on the job's PATH for
+    a Thermo .raw input."""
     os.makedirs(out, exist_ok=True)
     acq = bundle.get("acquisition", "DDA").upper()
     manifest = os.path.join(out, "fragpipe.fp-manifest")
     dtype = "DIA" if acq == "DIA" else "DDA"
+    dda_stage = None
+    # What the workflow quantifies decides what a finished search has written and whether it is
+    # identifications only (recorded now: the gate's record, search_provenance quantification)
+    import fragpipe_params
+    quant = fragpipe_quantification(params)
+    quant_rec, _ = fragpipe_record_quantification(out, quant) if dtype == "DDA" else (None, [])
 
     if acq == "DIA" and any(f.rstrip("/").endswith(".d") for f in files):
         # diaTracer writes its pseudo-MS/MS mzML NEXT TO THE INPUT, so pointing it at the
@@ -2544,18 +4187,152 @@ def run_fragpipe(cmd, bundle, params, files, fasta, out, threads, sbatch, queue=
               f"{info['n_to_convert']} to convert, {info['n_reused']} reused -> {stage}")
         for n in info.get("notes", []):
             print(f"  [diatracer] {n}")
+    elif dtype == "DDA":
+        # never into the raw folder: the inputs go into <out>/raw_stage (fragpipe_dda_stage)
+        # one experiment per run only when the workflow quantifies (follow-up 3)
+        dda_stage = fragpipe_dda_stage(files, out, manifest,
+                                       per_run=quant.get("quantified") is True)
+        dda_stage["space"] = space                     # refuse_fragpipe_stage's numbers
+        print(f"  [raw_stage] {len(dda_stage['copied'])} .raw to copy in the job, "
+              f"{len(dda_stage['linked'])} linked -> {dda_stage['dir']}")
     else:
         write_file(manifest, "".join(f"{os.path.abspath(f)}\t\t\t{dtype}\n" for f in files))
     tools = os.environ.get("FRAGPIPE_TOOLS_FOLDER", "")
     tools_arg = f"--config-tools-folder {shlex.quote(tools)}" if tools else ""
-    full = (f"{cmd} --headless --workflow {shlex.quote(params)} "
-            f"--manifest {shlex.quote(manifest)} --workdir {shlex.quote(out)} {tools_arg}")
+    # The job's size reaches FragPipe: its Java heap (--ram, GB) inside the job's memory -- with
+    # no --ram FragPipe sizes the heap from the NODE, not the job's cgroup (H5 gap 4) -- and its
+    # threads from the CPUs SLURM gave the job (L11 N1)
+    ram = (fragpipe_ram_gb(int(str((queue or {}).get("mem") or JOB_MEM_DEFAULT).rstrip("Gg")))
+           if sbatch else None)
+    size = (f' --ram {ram} --threads "${{SLURM_CPUS_PER_TASK:-{int(threads)}}}"' if sbatch
+            else f" --threads {int(threads)}")
+    # the workflow it RUNS: the given one with database.db-path = --fasta (H7 bug 1)
+    database = database or refuse_fragpipe_database(params, fasta)
+    run_wf = fragpipe_workflow_for_run(params, database, out)
+    full = (f"{cmd} --headless --workflow {shlex.quote(run_wf)} "
+            f"--manifest {shlex.quote(manifest)} --workdir {shlex.quote(out)} {tools_arg}{size}")
+    stage = dda_stage
+    said = {"fragpipe_stage": stage, "fragpipe_mono": mono, "fragpipe_database": database,
+            "fragpipe_workflow": {"given": os.path.abspath(params), "run": run_wf}}
+    if dtype == "DDA" and isinstance(quant.get("quantified"), bool):
+        said["quantified"] = quant["quantified"]          # false = identifications only
+        said["quantification"] = quant_rec or {"status": "quantified", "why": quant["why"],
+                                               "switches": quant["switches"]}
+    expect = fragpipe_params.expected_outputs(quant)
+    # mono on PATH for a .raw (refuse_fragpipe_raw_without_mono found it), as DIA-NN's job gets
+    # its .NET 8 (dotnet_env_for)
+    pre = (f'export PATH={shlex.quote(mono["bin"])}:"$PATH"; '
+           f'echo "[fragpipe] mono: $(command -v mono)"' if mono else "")
+    log = os.path.join(stage["dir"], "fragpipe_console.log") if stage else None
     if sbatch:
-        emit_sbatch(sbatch, full, out, threads, job="fragpipe_search", **(queue or {}))
-        return {"engine": "fragpipe", "out": out, "submitted": sbatch, "ran": False}
-    sh(full)
+        job = fragpipe_stage_job(stage, full, log, expect, out) if stage else full
+        emit_sbatch(sbatch, job, out, threads, job="fragpipe_search", preamble=pre,
+                    **(queue or {}))
+        res = {"engine": "fragpipe", "out": out, "submitted": sbatch, "ran": False,
+               "fragpipe_ram_gb": ram, **said}
+        if quant.get("quantified") is False and dtype == "DDA":
+            res["note"] = (f"Identifications only ({quant['why']}): after the job runs, re-run "
+                           f"with --adapt-only to write {SAGE_IDS}. There is no report.parquet, "
+                           f"so no differential expression.")
+        return res
+    if stage:
+        # `pre` ends in an echo: joined with a space it would print the command instead of
+        # running it (review F1), so it is its own command
+        fragpipe_stage_inline(stage, f"{pre}; {full}" if pre else full, log, expect, out)
+    else:
+        sh(full)
+    if quant.get("quantified") is False and dtype == "DDA":
+        ids = adapt_fragpipe_ids(out, quant)
+        return {"engine": "fragpipe", "report": None, "identifications": ids, "ran": True,
+                **said}
     report = adapt_fragpipe(out)
-    return {"engine": "fragpipe", "report": report, "ran": True}
+    return {"engine": "fragpipe", "report": report, "ran": True, **said}
+
+
+def _written(out, names):
+    """The names in `names` that no non-empty file of that name holds at depth <= 2 of `out`."""
+    found = set()
+    for dp, dns, fns in os.walk(out):
+        depth = os.path.relpath(dp, out).count(os.sep) + (dp != out)
+        dns[:] = [d for d in dns if depth < 1]
+        found |= {f for f in fns if f in names and os.path.getsize(os.path.join(dp, f)) > 0}
+    return [n for n in names if n not in found]
+
+
+def empty_fragpipe_stage(stage_dir, out):
+    """Remove every regular file directly in the stage, never through a link (C2 security H2):
+    the stage must pass fragpipe_stage_problem(), is then opened O_NOFOLLOW (a stage swapped for a
+    link since the check fails to open), and each entry is unlinked relative to that open folder
+    only when it is a regular file and not a link. -> the names removed, or a str: why NOTHING
+    was removed."""
+    why = fragpipe_stage_problem(stage_dir, out)
+    if why:
+        return why
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(stage_dir, flags)
+    except OSError as e:
+        return f"{stage_dir} could not be opened as a folder of its own ({e})"
+    removed = []
+    try:
+        for e in os.scandir(fd):
+            if e.is_file(follow_symlinks=False) and not e.is_symlink():
+                os.unlink(e.name, dir_fd=fd)
+                removed.append(e.name)
+    finally:
+        os.close(fd)
+    return removed
+
+
+def fragpipe_stage_inline(stage, command, log, expect=(), out=None):
+    """fragpipe_stage_job() for a search run here (inside an allocation): the same copy, run,
+    and remove-only-after-a-finished-search (ALL JOBS DONE, and `expect` written). A stage that is
+    a link or not a folder of its own is refused before anything is copied, and never emptied
+    (C2 security H2)."""
+    stage_out = out or os.path.dirname(os.path.abspath(stage["dir"]))
+    refuse_fragpipe_stage_link(stage["dir"], stage_out, now="nothing was copied or searched")
+    for c in stage["copied"]:
+        if os.path.islink(c["dest"]):
+            os.remove(c["dest"])                       # a link is not a copy (review F10)
+        st_src = os.stat(c["src"])
+        try:
+            st = os.stat(c["dest"])
+            if st.st_size == st_src.st_size and st.st_mtime >= st_src.st_mtime:
+                print(f"  [raw_stage] {c['dest']} already staged")
+                continue
+        except OSError:
+            pass
+        try:
+            shutil.copy2(c["src"], c["dest"] + ".part")
+        except OSError as e:
+            try:
+                os.remove(c["dest"] + ".part")
+            except OSError:
+                pass
+            sys.exit(f"[raw_stage] {c['src']} could not be copied ({e}): its partial copy was "
+                     f"removed; the copies already staged are KEPT for a re-run in "
+                     f"{stage['dir']} -- delete them to free the space")
+        os.replace(c["dest"] + ".part", c["dest"])
+    try:
+        sh_logged(command, log)
+        with open(log, errors="replace") as fh:
+            done = "ALL JOBS DONE" in fh.read()
+    except subprocess.CalledProcessError:
+        done = False
+    missing = _written(out, list(expect)) if done and out else []
+    if not done or missing:
+        sys.exit(f"[raw_stage] the search did not finish"
+                 + (f" (not written: {', '.join(missing)})" if missing else "")
+                 + f": the staged copies in {stage['dir']} are KEPT for a re-run (FragPipe's "
+                 f"output: {log})")
+    # every regular file; links stay (F17); never through a link (C2 security H2)
+    removed = empty_fragpipe_stage(stage["dir"], stage_out)
+    if isinstance(removed, str):
+        print(f"  [raw_stage] WARNING: the search finished, but NOTHING was removed from the "
+              f"stage: {removed} -- check it by hand", file=sys.stderr)
+        return
+    print(f"  [raw_stage] the search finished: removed the staged copies and MSFragger's "
+          f"uncalibrated mzML/mzBIN from {stage['dir']} ({len(removed)} file(s))")
 
 
 def warn_fragpipe_dia_contam(out):
@@ -2696,6 +4473,28 @@ def adapt_fragpipe(out):
     return adapt_fragpipe_dda(out)
 
 
+def _fp_manifest(path):
+    """An .fp-manifest -> {file path: experiment}, {} when it cannot be read."""
+    try:
+        with open(path, errors="replace") as fh:
+            rows = [ln.rstrip("\r\n").split("\t") for ln in fh if ln.strip()]
+    except OSError:
+        return {}
+    return {r[0]: r[1] for r in rows if len(r) >= 2}
+
+
+def fragpipe_experiment_names(out):
+    """{experiment as FragPipe named it -> the run name our manifest gave that file}. FragPipe
+    turns '-' into '_' in an experiment name (its own copy of the manifest, fragpipe-files.
+    fp-manifest, in the workdir: an experiment named S-1 became S_1; H5 gap 8), so
+    combined_protein.tsv's sample columns are not the run names conditions.csv uses. Matched by
+    file path; {} when either manifest is missing (an output from before 2.14.2 or from outside
+    the skill keeps FragPipe's names)."""
+    ours = _fp_manifest(os.path.join(out, "fragpipe.fp-manifest"))
+    theirs = _fp_manifest(os.path.join(out, "fragpipe-files.fp-manifest"))
+    return {e: ours[p] for p, e in theirs.items() if e and ours.get(p) and ours[p] != e}
+
+
 def adapt_fragpipe_dda(out):
     """combined_protein.tsv (IonQuant MaxLFQ) -> DIA-NN-shaped report.parquet."""
     try:
@@ -2728,6 +4527,7 @@ def adapt_fragpipe_dda(out):
     # Protein.Names stay the leading protein's (FragPipe gives no per-member gene).
     names = {"Genes": "Gene", "Protein.Names": "Entry Name"}
     names = {k: v for k, v in names.items() if v in rows[0]}
+    back_to_runs = fragpipe_experiment_names(os.path.dirname(os.path.abspath(cp)))
     runs, prots, ints = [], [], []
     ann = {k: [] for k in names}
     for r in rows:
@@ -2737,6 +4537,7 @@ def adapt_fragpipe_dda(out):
             continue
         for c in lfq_cols:
             sample = c.replace(" MaxLFQ Intensity", "").replace(" Intensity", "")
+            sample = back_to_runs.get(sample, sample)        # FragPipe's name -> the run's
             val = r.get(c, "")
             try:
                 v = float(val)
@@ -3152,13 +4953,12 @@ def _exclude_arg(a):
 
 
 def _job_end_argv(a):
-    """The job-end choices as flags for the chain generators (diann/radiant_parallel.py)."""
-    argv = (["--no-notify"] if getattr(a, "no_notify", False) else []) + \
-           (["--no-fran"] if getattr(a, "no_fran", False) else [])
-    if getattr(a, "fran_name", None):
-        argv += ["--fran-name", a.fran_name]
-    qc = _qc_choice(a)
-    return argv + ({True: ["--qc"], False: ["--not-qc"], None: []}[qc])
+    """The job-end choices as flags for the chain generators (diann/radiant_parallel.py), through
+    notify_slack.job_end_flags -- the one mapping the re-run commands use too."""
+    import notify_slack
+    return notify_slack.job_end_flags(slack=not getattr(a, "no_notify", False),
+                                      fran=not getattr(a, "no_fran", False),
+                                      fran_name=getattr(a, "fran_name", None), qc=_qc_choice(a))
 
 
 def _job_end_plan(a, engine):
@@ -3174,10 +4974,169 @@ def _job_end_plan(a, engine):
         return {"error": f"{type(e).__name__}: {e}"}
 
 
+# Memory of a single-job search's job(s) when --mem is not given; recorded "64G (default)".
+JOB_MEM_DEFAULT = "64G"
+
+# The job of a Sage or FragPipe search with a BROAD digest (non-specific, or semi-specific), when
+# --mem / --time are not given (L11 N1/N2). MEASURED on HIVE (sacct, 2026-10-30 and 11-02), a
+# 38-run Orbitrap DDA hydrolysate peptidomics search against a 6,300-sequence database, 32 CPUs:
+#   * Sage 0.14.7, cleave_at "" (7-30 residues: 165 M peptides, 3.87 G fragments), .raw converted
+#     in the job: 0:45:11 and 1:01:52 elapsed, MaxRSS 126.2 and 121.9 GiB (132,333,884 and
+#     127,832,764 KiB) at --mem 192G. 192G is 1.5x the larger.
+#   * FragPipe 24.0 Nonspecific-peptidome (7-65 residues): 1:55:15 elapsed (FragPipe: ALL JOBS
+#     DONE IN 112.6 MINUTES, MSFragger 97.4 of them), MaxRSS 200.0 GiB at --mem 200G --ram 190:
+#     the Java heap grows to what it is given, so this is the request, not a need below it; 200G
+#     is what that search finished with.
+#   * Time: both are far under 12 h; it scales with the runs (FragPipe 2.96 min a run here), so
+#     24 h keeps >= 10x headroom at 38 runs and covers ~480 runs of FragPipe at that rate.
+# A semi-specific digest gets the same (smaller than non-specific; not measured on its own).
+# Memory follows the DATABASE (peptides x fragments), not the runs: a bigger database needs more
+# -- the generation NOTE says what this was measured on.
+BROAD_DIGEST_SAGE_MEM_GB = 192
+BROAD_DIGEST_FRAGPIPE_MEM_GB = 200
+BROAD_DIGEST_HOURS = 24
+BROAD_DIGEST_MEASURED = ("measured on a 38-run hydrolysate search against a 6,300-sequence "
+                         "database: Sage non-specific 7-30 residues peaked at 126.2 GiB (two "
+                         "runs of it took 0:45 and 1:02 on 32 CPUs), FragPipe "
+                         "Nonspecific-peptidome finished in 1:55 at 200G")
+BROAD_DIGEST_SEQUENCES = 6300
+
+
+def broad_digest_source(digest):
+    """The words a digest-sized default is recorded with (rule 2: a default, said so)."""
+    if digest == "non-specific":
+        return "default for a non-specific digest (measured on a 38-run hydrolysate search)"
+    return (f"default for a {digest} digest (the non-specific one's, measured on a 38-run "
+            f"hydrolysate search)")
+
+
+def digest_breadth(engine, params):
+    """(how broad this Sage / FragPipe search's digest is -- "non-specific", "semi-specific" or
+    None for an enzyme rule -- and where that was read), from its parameters file as
+    cleavage_rules reads it. A file that cannot be read is None, said."""
+    import cleavage_rules
+    try:
+        if engine == "sage":
+            with open(params) as fh:
+                enz = ((json.load(fh) or {}).get("database") or {}).get("enzyme")
+            if not isinstance(enz, dict) or not enz:      # no block: Sage's trypsin default
+                return None, f"{os.path.basename(params)} (no enzyme block: Sage's trypsin)"
+            spec = cleavage_rules.sage_cleavage(enz, params)["specificity"]
+        elif engine == "fragpipe":
+            import fragpipe_params as fpp
+            if os.path.basename(params) == fpp.FRAGGER_PARAMS:
+                kv = fpp.read_fragger_params(params)
+            else:
+                props, _ = fpp.read_workflow(params)
+                kv = {k[len("msfragger."):]: v for k, v in props.items()
+                      if k.startswith("msfragger.")}
+            spec = fpp.digest(kv)["specificity"]
+        else:
+            return None, None
+    except (OSError, ValueError, AttributeError) as e:
+        return None, f"{params} could not be read ({type(e).__name__}: {e})"
+    return cleavage_rules.BROAD.get(spec), os.path.basename(params)
+
+
+def single_job_sizing(engine, params, mem_gb=None, hours=None):
+    """The memory and wall time of a single-job search's job(s), and where each came from: the
+    user's --mem / --time, else a broad digest's default (Sage, FragPipe), else the route's own
+    default (64G; 12 h -- the DIA-NN single shot adds its probe's hours, search_job_hours).
+    -> {"digest", "digest_source", "mem" ("<GB>G" or None), "mem_source", "hours" (int or
+    None), "hours_source"}. None = the route's own default."""
+    digest, where = (digest_breadth(engine, params) if engine in ("sage", "fragpipe")
+                     else (None, None))
+    broad = broad_digest_source(digest) if digest else None
+    default_mem = (BROAD_DIGEST_SAGE_MEM_GB if engine == "sage" else BROAD_DIGEST_FRAGPIPE_MEM_GB)
+    mem = (f"{mem_gb}G", "user (--mem)") if mem_gb else \
+        (f"{default_mem}G", broad) if broad else (None, "default")
+    hrs = (int(hours), "user (--time)") if hours else \
+        (BROAD_DIGEST_HOURS, broad) if broad else (None, "default")
+    return {"digest": digest, "digest_source": where, "mem": mem[0], "mem_source": mem[1],
+            "hours": hrs[0], "hours_source": hrs[1]}
+
+
+def sizing_note(sizing):
+    """The generation NOTE for a digest that could not be read (review F15): the default then
+    applies without anyone being told why. "" when there is nothing to say."""
+    src = (sizing or {}).get("digest_source") or ""
+    if (sizing or {}).get("digest") is None and "could not be read" in src:
+        return (f"[run_search] NOTE: the digest could not be read for the job's size ({src}); "
+                f"the job gets the route's default memory and time -- a non-specific or "
+                f"semi-specific search needs more (--mem GB / --time HOURS).")
+    return ""
+
+
+def refuse_job_over_queue_cap(mem, limits, mem_source):
+    """Before anything is written (review F11): a single job asking for more memory than its
+    QOS lets one job have (user_limits per_job_mem_gb: publicgrp-high-qos MaxTRESPerJob
+    mem=128G on HIVE) would never start -- refused, with the options. A cap that is not known
+    checks nothing. -> None when it fits."""
+    cap = (limits or {}).get("per_job_mem_gb")
+    try:
+        gb = int(str(mem).rstrip("Gg"))
+    except (TypeError, ValueError):
+        return None
+    if not cap or gb <= cap:
+        return None
+    sys.exit(f"[run_search] REFUSED -- nothing was written or submitted. The job would ask for "
+             f"{gb}G ({mem_source}), but {limits.get('qos') or 'this queue'} lets one job have at "
+             f"most {cap}G ({limits.get('source')}), so it would never start. Either search on "
+             f"a queue without that cap (--partition/--account/--qos: genome-center-grp high for "
+             f"the Core; publicgrp low has no per-job memory cap but is preemptible), or pass "
+             f"--mem {cap} and accept that the search may run out of memory (a non-specific "
+             f"search was {BROAD_DIGEST_MEASURED}).")
+
+
+def job_size_record(sizing, emitted):
+    """search_provenance.json job_mem / job_time (the last job script's header: the search job),
+    each with its source: "128G" / "36h" for the user's flag, "64G (default)" / "12h (default)",
+    "192G (default for a non-specific digest)". All None without a single-job script."""
+    if not sizing or not emitted:
+        return {"job_mem": None, "job_mem_source": None, "job_time": None,
+                "job_time_source": None, "job_digest": None, "job_digest_source": None}
+    last = emitted[-1]
+
+    def tag(source):
+        return ("" if source.startswith("user") else " (default)" if source == "default"
+                else f" (default for a {sizing['digest']} digest)")
+    return {"job_mem": f"{last['mem']}{tag(sizing['mem_source'])}",
+            "job_mem_source": sizing["mem_source"],
+            "job_time": f"{last['hours']}h{tag(sizing['hours_source'])}",
+            "job_time_source": sizing["hours_source"],
+            # what the size was decided from: the digest read, and where (review F15)
+            "job_digest": sizing.get("digest"), "job_digest_source": sizing.get("digest_source")}
+
+
+def _fasta_sequences(fasta):
+    """The database's sequence count as fetch_fasta.py's sidecar records it (n_sequences), or None
+    -- the FASTA itself is not read here (a login node)."""
+    try:
+        with open(str(fasta) + ".meta.json") as fh:
+            n = json.load(fh).get("n_sequences")
+        return int(n) if isinstance(n, int) and not isinstance(n, bool) else None
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def fragpipe_ram_gb(mem_gb):
+    """FragPipe's --ram (its Java heap, GB) for a job of `mem_gb`: what is left after a margin for
+    the rest of the job (Python helpers, Percolator, the JVM's own memory) -- 10 GB or 5%, the
+    margin the 200G / --ram 190 hydrolysate search finished with -- never under half the job."""
+    margin = max(10, -(-mem_gb * 5 // 100))
+    return max(mem_gb - margin, mem_gb // 2, 1)
+
+
+# What emit_sbatch() wrote in this run: [{"path", "mem", "hours"}] -- search_provenance.json
+# job_mem / job_time are read from it, so the record says what the job scripts say.
+EMITTED_JOBS = []
+
+
 def emit_sbatch(path, command, out, threads, job, preamble="",
-                partition=None, account=None, qos=None, mem="64G", hours=SEARCH_WALL_HOURS,
+                partition=None, account=None, qos=None, mem=JOB_MEM_DEFAULT,
+                hours=SEARCH_WALL_HOURS,
                 submit_hint=True, notify="final", stage="search", fran_guarded=False,
-                preflight=None, exclude=None):
+                preflight=None, exclude=None, time=None):
     """Emit a minimal SLURM script (login-node-safe). Orchestrator submits it.
     The queue is DETECTED from the submitting user's own SLURM associations — see
     slurm_queue() — unless the caller passes one, which then wins. Every caller must forward
@@ -3195,7 +5154,11 @@ def emit_sbatch(path, command, out, threads, job, preamble="",
     FRAN_DEPOSIT=off at generation, the FRAN hand-over. `fran_guarded`: this job ends with a
     completeness guard (report_guard), so a finished search may be staged for FRAN from the job;
     without one it is left to step 7c. `preflight`: node_fault.preflight_lines(), run first in the
-    job (through the hook)."""
+    job (through the hook). `time`: run_search.py --time HOURS (carried in the queue dict, as
+    --mem is), which wins over the route's `hours`."""
+    if time:
+        hours = int(time)
+    EMITTED_JOBS.append({"path": path, "mem": mem, "hours": hours})
     part, acct, q = slurm_queue(partition, account, qos)
     pre = (preamble + "\n") if preamble else ""
     lines = [
@@ -3298,6 +5261,21 @@ def main():
                          "every job script (both single-shot jobs, every step of the chain) and "
                          "recorded in search_provenance.json (queue.exclude). sbatch reads no "
                          "SBATCH_EXCLUDE variable, so exporting one does nothing")
+    ap.add_argument("--mem", type=_positive_int, metavar="GB",
+                    help="memory in GB for the job(s) of a single-job search -- Sage, DIA-NN "
+                         "single shot (both of its jobs), FragPipe, AlphaDIA, Radiant -- written "
+                         f"as #SBATCH --mem=<GB>G (default: {JOB_MEM_DEFAULT}); recorded as "
+                         "search_provenance.json job_mem. The 5-step chain sizes its own jobs: "
+                         "--mem-per-file, --assembly-mem. A non-specific or semi-specific Sage "
+                         f"or FragPipe search defaults to {BROAD_DIGEST_SAGE_MEM_GB}G (Sage) / "
+                         f"{BROAD_DIGEST_FRAGPIPE_MEM_GB}G (FragPipe), recorded as that default")
+    ap.add_argument("--time", type=_positive_int, metavar="HOURS",
+                    help="wall-clock hours for the job(s) of a single-job search -- the same "
+                         "routes as --mem -- written as #SBATCH --time=<HOURS>:00:00 (default: "
+                         f"{SEARCH_WALL_HOURS}; the DIA-NN single shot adds its mass-accuracy "
+                         f"probe's hours; a non-specific or semi-specific Sage or FragPipe search "
+                         f"{BROAD_DIGEST_HOURS}); recorded as search_provenance.json job_time. The "
+                         "5-step chain sizes its own jobs: --time-per-file")
     ap.add_argument("--max-simultaneous", type=int,
                     help="cap concurrent array tasks in the parallel chain")
     ap.add_argument("--threads-per-file", type=_positive_int,
@@ -3329,11 +5307,24 @@ def main():
                          "library")
     ap.add_argument("--adapt-only", action="store_true",
                     help="skip the search; just build report.parquet from an existing engine output dir")
+    ap.add_argument(PWIZ_SIF_FLAG, metavar="SIF",
+                    help="Sage, quantifying a timsTOF .d: the vendor-enabled ProteoWizard "
+                         "container the job converts it to mzML with (default: the Core's "
+                         "pinned Skyline image on HIVE, resolve_defaults.SKYLINE_PIN, whose "
+                         "sha256 the job checks first). Not used for identifications only "
+                         "(quant.lfq false), where Sage reads the .d itself")
     ap.add_argument("--accept-lfq-window", metavar="REASON",
                     help="Sage: build report.parquet although the LFQ window did not fit the "
                          "runs' MS1 mass error (sage_lfq_check.py's gate), because the user "
-                         "accepts those quantities as they are -- give who and why; recorded in "
+                         "accepts those quantities as they are -- give WHY (no name: who is the "
+                         "login that runs this, named to clients by role); recorded in "
                          "sage_lfq_check.json and search_provenance.json, and AUDIT.md says so")
+    ap.add_argument("--fasta-meta", metavar="SIDECAR",
+                    help="fetch_fasta.py's sidecar describing --fasta's targets, when --fasta has "
+                         "none of its own (a FragPipe search's Philosopher target+decoy .fas: its "
+                         "target FASTA's <name>.meta.json is found beside it or in the session's "
+                         "input/ when it matches; else give it here). 'none': the database has "
+                         "no sidecar (not built by fetch_fasta.py), recorded so")
     ap.add_argument("--keratin-sample", action="store_true",
                     help="the samples ARE keratin (hair, wool, feather, skin, nail ...): refuse a "
                          "--fasta that still holds keratin-family Cont_ entries (build it with "
@@ -3344,6 +5335,11 @@ def main():
                          "named with each run of dashes made one, so its run is renamed (DIA-NN "
                          "cannot be given a path with '--'); without it such an input is refused. "
                          "A '--' in a folder only is linked under the same file name either way")
+    ap.add_argument("--acquisition-json", metavar="JSON",
+                    help="step 2's detect_acquisition.py output (input/acquisition.json): a .d "
+                         "whose analysis.tdf check it records is not read again while its files "
+                         "are unchanged. Default: the first input/acquisition.json up to 3 "
+                         "folders above --out")
     ap.add_argument(ALLOW_DAMAGED_TDF, action="store_true",
                     help="search a Bruker .d whose analysis.tdf is not `ok` (truncated, "
                          "stale -wal/-journal beside it, WAL-mode header, unreadable) "
@@ -3365,6 +5361,15 @@ def main():
     # The queue the user asked for, handed to every emit_sbatch() -- see emit_sbatch() -- and
     # recorded as search_provenance.json `queue`; `exclude` is in every job script's header.
     queue = {"partition": a.partition, "account": a.account, "qos": a.qos, "exclude": exclude}
+    # --mem: every single-job route's emit_sbatch() takes it from here; without it, its default
+    if a.mem:
+        queue["mem"] = f"{a.mem}G"
+    # --time, the same way (emit_sbatch's `time`); the queue holds only what the user asked for --
+    # a digest-sized default goes to the route alone (route_queue, below), so a re-run built from
+    # the record (sage_lfq_check.rerun_plan) recomputes it instead of replaying it as a choice
+    if a.time:
+        queue["time"] = a.time
+    del EMITTED_JOBS[:]
     tools = json.load(open(a.tools))
     bundle = json.load(open(a.bundle))
     engine = pick_engine(a, bundle)
@@ -3406,6 +5411,25 @@ def main():
         sys.exit(check_report_runs.names_stop(repeated_names, "run_search"))
 
     if a.adapt_only:
+        if engine == "sage" and not sage_lfq_enabled(a.params):
+            # identifications only (quant.lfq false): no LFQ check and no report.parquet. The
+            # record only after adapt_sage_ids: it refuses a quantified output, whose LFQ record
+            # (a gate run_de.R reads) must then stay as it is.
+            ids = adapt_sage_ids(a.out)
+            sage_ids_lfq_record(a.out)
+            print(json.dumps({"engine": "sage", "report": None, "identifications": ids,
+                              "quantified": False, "ran": False, "adapt_only": True}, indent=2))
+            return
+        fq = fragpipe_run_quantification(a.out, a.params) if engine == "fragpipe" else None
+        if fq and fq.get("quantified") is False:
+            # a workflow that ran no quantification: its identifications, no report.parquet
+            ids = adapt_fragpipe_ids(a.out, fq)
+            print(json.dumps({"engine": "fragpipe", "report": None, "identifications": ids,
+                              "quantified": False, "ran": False, "adapt_only": True}, indent=2))
+            return
+        if fq and fq.get("quantified"):
+            # the record follows what ran: an IDs-only record from generation is set aside
+            fragpipe_record_quantification(a.out, fq)
         # After a Sage job: the LFQ mass-window check again, here, where the orchestrator sees
         # it (the job ran it too, into its log) -- and its record into search_provenance.json.
         lfq = sage_lfq(a.out, a.params, accept=a.accept_lfq_window) if engine == "sage" else None
@@ -3415,15 +5439,25 @@ def main():
         report = {"sage": adapt_sage, "fragpipe": adapt_fragpipe,
                   "alphadia": adapt_alphadia,
                   "radiant": adapt_radiant}.get(engine, lambda o: None)(a.out)
+        if lfq:
+            lfq = sage_lfq_check_mod().load(a.out) or lfq    # with the quantified coverage (M2)
         print(json.dumps({"engine": engine, "report": report, "ran": False, "adapt_only": True,
                           **({"sage_lfq_check": lfq} if lfq else {})}, indent=2))
         return
 
     if engine == "sage":
         refuse_sage_fragment_mismatch(bundle, a.params)
+        refuse_sage_dotd_route(bundle, a.params, files)
     if engine == "fragpipe":
         refuse_fragpipe_contam_database(a.params, a.fasta)
         refuse_fragpipe_dashed(a.params, files, a.fasta, a.out, bundle.get("acquisition", ""))
+        # Thermo .raw needs mono where the search runs (Linux): found now, or refused now
+        refuse_fragpipe_dia_unstaged(bundle, files, a.out)
+        # the database it searches: --fasta, never one FragPipe cached from an earlier search
+        a.fragpipe_database = refuse_fragpipe_database(a.params, a.fasta)
+        a.fragpipe_mono = refuse_fragpipe_raw_without_mono(bundle, files, a.sbatch)
+        # the stage: no input from inside it, and room for it -- before anything is written
+        a.fragpipe_stage_space = refuse_fragpipe_stage(bundle, files, a.out)
     # DIA-NN cuts its command line at every '--', quoted or not (diann_parallel.DIANN_OPTION_MARK):
     # an output, database or cfg path holding one is refused here, and an input run is searched
     # through a link in <out>/input_links/ -- made just before the search is generated, once
@@ -3444,11 +5478,14 @@ def main():
 
     # Before anything is provisioned, submitted or run: no damaged .d gets searched here.
     # --adapt-only is above this on purpose -- it reads an engine's finished output and
-    # never touches a raw file.
-    refuse_damaged_tdf(files, a.allow_damaged_tdf)
+    # never touches a raw file. Step 2's check is reused where it still describes the file;
+    # many .d left to read on a login node move this command to a compute node (check_tdf).
+    check_tdf(files, a.out, a.acquisition_json, a.allow_damaged_tdf, queue=queue)
     # Same place, same reason: a keratin sample is never searched on a database whose keratin-
     # family Cont_ entries would take its analyte out of quantification.
-    keratin_rec = keratin_sample_check(a.fasta, a.keratin_sample, engine)
+    fasta_meta_rec = fasta_sidecar_or_refuse(a, engine)
+    keratin_rec = keratin_sample_check(a.fasta, a.keratin_sample, engine,
+                                       sidecar=fasta_meta_rec["path"])
 
     cmd = tools.get(engine)
     if not cmd:
@@ -3472,7 +5509,7 @@ def main():
         a.params = ensure_xic(a.params, a.out)
         ensure_temp_dirs(a.params, a.out)
     if engine in ("diann", "sage"):
-        warn_contaminant_digest(engine, a.params, a.fasta)
+        warn_contaminant_digest(engine, a.params, a.fasta, sidecar=fasta_meta_rec["path"])
     use_parallel, why = parallel_decision(engine, files, a.params, a)
     if engine == "diann":
         print(f"[run_search] parallel routing: {'YES' if use_parallel else 'no'} -- {why}")
@@ -3483,12 +5520,25 @@ def main():
     # DIA-NN run whose mass accuracy was unpinned fell out of the parallel chain into
     # the single-shot path and, with no --sbatch, launched diann-linux on the HIVE
     # login node at 16 threads (twice, because an earlier invocation was still alive).
-    # sbatch present + no SLURM_JOB_ID == we are on a submit host, not a compute node.
-    if not use_parallel and not a.sbatch and slurm_available() \
-            and not os.environ.get("SLURM_JOB_ID") and not a.allow_inline:
+    # A login node is on_compute.on_login_node(), THE definition: no SLURM job here, and SLURM
+    # (on PATH or at the fixed path) or HPCCF's cluster file is -- "sbatch on PATH" alone missed
+    # a non-login shell, which has none (I44).
+    import on_compute
+    # Radiant on SLURM with >1 file: a per-file array + one Fulcrum job (radiant_parallel.py).
+    # Decided HERE: like the DIA-NN chain it only writes job scripts, so the refusal below must
+    # know it -- decided after it, a multi-file Radiant search was refused inline (L8R-F10).
+    radiant_chain = (engine == "radiant" and len(files) > 1 and slurm_available()
+                     and not a.no_parallel)
+    # ...nor in the short, small srun check_tdf() moved this command to for the tdf check
+    moved = bool(os.environ.get(TDF_REEXEC_ENV))
+    if not (use_parallel or radiant_chain) and not a.sbatch \
+            and (on_compute.on_login_node() or moved) and not a.allow_inline:
+        where = ("this command was moved to a compute node only to read the .d files' "
+                 "analysis.tdf, in a short, small allocation (check_tdf)" if moved else
+                 "this is a cluster login/submit node (on_compute.on_login_node: no SLURM job "
+                 "here, and SLURM or HPCCF's cluster file is)")
         sys.exit(
-            "REFUSING to run the search inline: this looks like a cluster login/submit "
-            "node (sbatch is on PATH and SLURM_JOB_ID is unset).\n"
+            f"REFUSING to run the search inline: {where}.\n"
             f"  engine={engine}  files={len(files)}  threads={a.threads}\n"
             f"  parallel routing declined because: {why}\n"
             "  Re-run with --sbatch <script>, then submit what it prints under "
@@ -3510,12 +5560,60 @@ def main():
         sys.stderr.write(f"[run_search] NOTE: {', '.join(chain_only)} size the 5-step chain "
                          f"only; this search is single-shot ({why}), so they are ignored. "
                          f"Its job(s) request --threads {a.threads} CPUs.\n")
-    # Radiant on SLURM with >1 file: a per-file array + one Fulcrum job (radiant_parallel.py)
-    radiant_chain = (engine == "radiant" and len(files) > 1 and slurm_available()
-                     and not a.no_parallel)
     if exclude and not (use_parallel or radiant_chain or a.sbatch):
         sys.stderr.write(f"[run_search] NOTE: --exclude keeps SLURM jobs off nodes; this search "
                          f"runs here, inline, with no job script, so it changes nothing.\n")
+    # --mem sizes the job of a single-job search; said when it changes nothing
+    if a.mem and (use_parallel or radiant_chain):
+        sizing = ("the 5-step chain's are --mem-per-file (steps 1b, 2, 4) and --assembly-mem "
+                  "(steps 3, 5)" if use_parallel else
+                  "Radiant's per-file array is sized by radiant_parallel.py itself (--mem-per-file "
+                  "per file, --fulcrum-mem for Fulcrum, --libpred-mem for the library), which "
+                  "run_search does not pass on: run radiant_parallel.py with them to change it")
+        sys.stderr.write("[run_search] NOTE: --mem sets the memory of a single-job search; this "
+                         "search is a chain whose generator sizes its own jobs, so it is "
+                         f"ignored -- {sizing}.\n")
+    elif a.mem and not a.sbatch:
+        sys.stderr.write("[run_search] NOTE: --mem sets the memory of a SLURM job; this search "
+                         "runs here, inline, with no job script, so it changes nothing.\n")
+    # --time likewise
+    if a.time and (use_parallel or radiant_chain):
+        sys.stderr.write("[run_search] NOTE: --time sets the wall time of a single-job search; "
+                         "this search is a chain whose generator sizes its own jobs, so it is "
+                         "ignored -- " + ("the 5-step chain's array tasks take --time-per-file"
+                                          if use_parallel else
+                                          "run radiant_parallel.py with its own options") + ".\n")
+    elif a.time and not a.sbatch:
+        sys.stderr.write("[run_search] NOTE: --time sets the wall time of a SLURM job; this search "
+                         "runs here, inline, with no job script, so it changes nothing.\n")
+    # The job size of a single-job search, and where it came from (single_job_sizing). A broad
+    # digest's default reaches the route's job script through route_queue, never `queue`.
+    sizing = (single_job_sizing(engine, a.params, a.mem, a.time)
+              if a.sbatch and not (use_parallel or radiant_chain) else None)
+    route_queue = dict(queue)
+    if sizing_note(sizing):
+        print(sizing_note(sizing), file=sys.stderr, flush=True)
+    if sizing:
+        # the job's memory against the queue's per-job cap, where SLURM says it (review F11)
+        _p, _a, _q = slurm_queue(a.partition, a.account, a.qos)
+        _mem = (a.mem and f"{a.mem}G") or sizing["mem"] or JOB_MEM_DEFAULT
+        refuse_job_over_queue_cap(_mem, user_limits(_p, _a, _q),
+                                  sizing["mem_source"] if (a.mem or sizing["mem"]) else "default")
+    if sizing and sizing["digest"]:
+        if not a.mem:
+            route_queue["mem"] = sizing["mem"]
+        if not a.time:
+            route_queue["time"] = sizing["hours"]
+        n_seq = _fasta_sequences(a.fasta)
+        bigger = (f" This database has {n_seq:,} sequences, {n_seq / BROAD_DIGEST_SEQUENCES:.1f}x "
+                  f"that one: memory follows the database, so raise --mem with it."
+                  if n_seq and n_seq > BROAD_DIGEST_SEQUENCES else "")
+        print(f"[run_search] a {sizing['digest']} digest ({sizing['digest_source']}): the job "
+              f"asks for {route_queue['mem']} ({'your --mem' if a.mem else 'the default'}) and "
+              f"{route_queue['time']} h ({'your --time' if a.time else 'the default'})"
+              + ("" if a.mem and a.time else
+                 f"; the default for one is {BROAD_DIGEST_MEASURED}") + "."
+              + bigger + " --mem GB / --time HOURS set your own.", flush=True)
     print(f"[run_search] engine={engine}  files={len(files)}  threads={a.threads}  "
           f"{'(5-step chain)' if use_parallel else '(emit sbatch)' if a.sbatch else '(inline)'}")
     sbatch_refused = None
@@ -3589,10 +5687,13 @@ def main():
         res = run_alphadia(cmd, a.params, files, a.fasta, a.out, a.threads, a.sbatch,
                            queue=queue)
     elif engine == "sage":
-        res = run_sage(cmd, a.params, files, a.fasta, a.out, a.threads, a.sbatch, queue=queue)
+        res = run_sage(cmd, a.params, files, a.fasta, a.out, a.threads, a.sbatch,
+                       queue=route_queue, pwiz_sif=a.pwiz_sif)
     elif engine == "fragpipe":
         res = run_fragpipe(cmd, bundle, a.params, files, a.fasta, a.out, a.threads, a.sbatch,
-                           queue=queue)
+                           queue=route_queue, mono=getattr(a, "fragpipe_mono", None),
+                           space=getattr(a, "fragpipe_stage_space", None),
+                           database=getattr(a, "fragpipe_database", None))
     elif engine == "radiant":
         # Takes the whole tools dict: it needs the container runtime + image to build
         # bind mounts, and DIA-NN to generate the spectral library.
@@ -3638,6 +5739,12 @@ def main():
                        # with the queue, what a re-run of this search needs (sage_lfq_check's
                        # corrected-window command)
                        "tools": os.path.abspath(a.tools), "queue": queue,
+                       # the memory and wall time of the single-job search's job(s), as the
+                       # job scripts say (EMITTED_JOBS), and where each came from
+                       # (single_job_sizing: the user's flag, a broad digest's default -- rule
+                       # 2, said so -- or the route's default); null for a chain (its generator
+                       # sizes its jobs) and for an inline search (no job)
+                       **job_size_record(sizing, EMITTED_JOBS),
                        # what the jobs' end hook will do, as baked into them at generation
                        # (only DIA-NN routes have a completeness guard to stage from)
                        "job_end_hook": _job_end_plan(a, engine),
@@ -3652,6 +5759,9 @@ def main():
                        # --pg-level / --no-prot-inf as the cfg set them, or DIA-NN's default
                        "protein_inference": protein_inference_provenance(engine, a.params),
                        "fasta": a.fasta, "threads": a.threads,
+                       # the sidecar describing it (fetch_fasta.sidecar_for: a Philosopher .fas
+                       # has none of its own; its target FASTA's) -- what to read for its facts
+                       "fasta_meta": fasta_meta_rec,
                        # read by run_de.R (contaminants.R): keratin kept as the analyte
                        "keratin_sample": keratin_rec["value"],
                        "keratin_sample_source": keratin_rec["sample_source"],

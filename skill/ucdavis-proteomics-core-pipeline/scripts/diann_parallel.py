@@ -82,6 +82,10 @@ STRIP = ("--fasta-search", "--predictor", "--gen-spec-lib", "--matrices", "--rea
 # library), which step 5 compares its own report with (pass_comparison.py). The one name of it:
 # the comparison, the Methods (make_methods.py, when it is the deliverable) and SKILL.md use it.
 FIRST_PASS_REPORT = "step3_assembly.parquet"
+# Step 3's empirical library (--out-lib), which steps 4 and 5 search. DIA-NN also writes it for
+# Skyline as <this>.skyline.speclib, the library the peak check reads for a chain search
+# (skyline_peaks.find_speclib). The one name of it.
+EMPIRICAL_LIBRARY = "empirical.parquet"
 # Step 5's report under --no-norm: DIA-NN's quantities with no cross-run normalisation. Its name
 # is the record of that (normalization_check.searched_no_norm reads it, so run_de.R's MaxLFQ
 # says what ran without re-reading the report).
@@ -1799,7 +1803,7 @@ def main():
     seed = refuse_unsafe_path(os.path.abspath(a.seed_lib), "--seed-lib") if a.seed_lib else None
     step1_lib = f"{D}/step1.speclib"
     predicted = seed if seed else predicted_speclib(step1_lib)
-    empirical = f"{D}/empirical.parquet"
+    empirical = f"{D}/{EMPIRICAL_LIBRARY}"
     first_pass = f"{D}/{FIRST_PASS_REPORT}"
     pass_cmp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pass_comparison.py")
     run_check = os.path.join(os.path.dirname(os.path.abspath(__file__)), "check_report_runs.py")

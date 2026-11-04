@@ -3,8 +3,8 @@ The CoreOmics submission in every report (submission_report.py).
 
 The report goes to the collaborator and gets forwarded, so the record is ALLOWLISTED: no email,
 phone, billing or internal field may reach it, however CoreOmics or the submitter spells it.
-The fixture is PROT_0756's real record with every contact field stripped and fake people's
-names (tests/fixtures/coreomics_prot0756); the canaries below are planted at test time.
+The fixture is PROT_9756's real record with every contact field stripped and fake people's
+names (tests/fixtures/coreomics_prot9756); the canaries below are planted at test time.
 
 Stdlib only, no network.
 """
@@ -28,7 +28,7 @@ import record_run  # noqa: E402
 import session as session_mod  # noqa: E402
 import session_docs  # noqa: E402
 
-FIXTURE = os.path.join(HERE, "fixtures", "coreomics_prot0756")
+FIXTURE = os.path.join(HERE, "fixtures", "coreomics_prot9756")
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 RUNS = {f"LRS{n}": f"08132026__60SPD_DIA-LRS-{n}_S3-A1_1_{23600 + n}" for n in range(96, 126)}
 
@@ -62,7 +62,7 @@ def planted():
 
 
 def make_session(tmp, raws=None, conditions=None, fasta=None, extra_col="Batch", prov=None):
-    s = os.path.join(tmp, "2026-09-24_PROT_0756")
+    s = os.path.join(tmp, "2026-09-24_PROT_9756")
     os.makedirs(os.path.join(s, "input"))
     os.makedirs(os.path.join(s, "output"))
     if raws is not None:
@@ -137,18 +137,18 @@ class TestAllowlist(unittest.TestCase):
             with open(out) as fh:
                 page = fh.read()
             self.assertClean(page, "Analysis_Report.html")
-            self.assertIn("PROT_0756", page)
+            self.assertIn("PROT_9756", page)
 
     def test_the_summary_and_facts_given_by_the_user_are_allowlisted_too(self):
-        summary = {"schema": "core_submission/1", "internal_id": "PROT_0756", "id": "0022066cd85f",
+        summary = {"schema": "core_submission/1", "internal_id": "PROT_9756", "id": "9a7e5c3b1d0f",
                    "submitter": {"name": "Sam Sampleton", "email": "canary.submitter@example.org"},
                    "pi": {"name": "Alex Example", "email": "canary.pi@example.org"},
                    "contacts": [{"email": "canary.contact@example.org"}], "samples": []}
         self.assertClean(json.dumps(sr.sanitize(summary)), "a record from the summary")
-        given = sr.sanitize({"internal_id": "756", "pi": {"name": "A", "email": "canary.pi@example.org"},
+        given = sr.sanitize({"internal_id": "807", "pi": {"name": "A", "email": "canary.pi@example.org"},
                              "phone": "530-555-0142"})
         self.assertClean(json.dumps(given), "facts given by the user")
-        self.assertEqual((given["internal_id"], given["source"]), ("PROT_0756", sr.SOURCE_USER))
+        self.assertEqual((given["internal_id"], given["source"]), ("PROT_0807", sr.SOURCE_USER))
 
     def test_every_phone_form_is_removed(self):
         for phone in ("(530)555-0100", "+15305550100", "5305550100", "530-5550100", "530.555.0100",
@@ -164,7 +164,7 @@ class TestAllowlist(unittest.TestCase):
 
     def test_links_are_only_coreomics_and_uniprot_pages(self):
         for url in ("https://x.example/?e=a@b.co", "https://ucdavis.coreomics.com/submissions/x)",
-                    "javascript:alert(1)", "http://ucdavis.coreomics.com/submissions/0022066cd85f"):
+                    "javascript:alert(1)", "http://ucdavis.coreomics.com/submissions/9a7e5c3b1d0f"):
             self.assertIsNone(sr._url(url), url)
         r = fixture()
         r["submission_data"]["uniprot"] = "https://evil.example/UP000000589"
@@ -189,7 +189,7 @@ class TestAllowlist(unittest.TestCase):
         self.assertNotIn("uniprot_blank", notes_by_id(rec))
 
     def test_a_record_from_the_summary_says_what_the_summary_lacks(self):
-        summary = {"schema": "core_submission/1", "internal_id": "PROT_0756", "id": "0022066cd85f",
+        summary = {"schema": "core_submission/1", "internal_id": "PROT_9756", "id": "9a7e5c3b1d0f",
                    "samples": []}
         page = sr.render_html(sr.sanitize(summary))
         self.assertIn("not in submission_summary.json", page)
@@ -212,7 +212,7 @@ class TestSection(unittest.TestCase):
     def test_renders_everything_the_lab_told_the_core(self):
         rec = sr.sanitize(fixture())
         page = sr.render_html(rec, sr.quality_notes(rec))
-        for expect in ("href='https://ucdavis.coreomics.com/submissions/0022066cd85f'>PROT_0756</a>",
+        for expect in ("href='https://ucdavis.coreomics.com/submissions/9a7e5c3b1d0f'>PROT_9756</a>",
                        "Alex Example, SOM: Example Department, UC Davis", "Sam Sampleton",
                        "2026-07-15", "Mouse", "left blank on the form",
                        "DIA (Quantitative); Affinity Purification (magnetic Beads)",
@@ -233,11 +233,11 @@ class TestSection(unittest.TestCase):
     def test_markdown_section(self):
         md = sr.render_markdown(sr.sanitize(fixture()))
         self.assertTrue(md.startswith("## Submission\n"))
-        self.assertIn("| Submission | [PROT_0756](https://ucdavis.coreomics.com/submissions/0022066cd85f) |", md)
+        self.assertIn("| Submission | [PROT_9756](https://ucdavis.coreomics.com/submissions/9a7e5c3b1d0f) |", md)
         self.assertIn("| LRS125 | Young - IgG - Mouse 6 |", md)
 
     def test_facts_given_by_the_user_are_labelled_so(self):
-        rec = sr.sanitize({"internal_id": "PROT_0756", "organism": "mouse", "sample_prep": "lab"})
+        rec = sr.sanitize({"internal_id": "PROT_9756", "organism": "mouse", "sample_prep": "lab"})
         self.assertIn("not read from CoreOmics", sr.render_html(rec))
         self.assertIn("source_user", notes_by_id(rec))
         self.assertIn("not in the record", sr.render_html(rec), "missing facts say so")
@@ -261,7 +261,7 @@ class TestSection(unittest.TestCase):
             # first in the contents, first section, and the header's Submission fact
             self.assertIn('<ol><li><a href="#submission">Submission</a></li>', page)
             self.assertLess(page.index('id="submission"'), page.index('id="overview"'))
-            self.assertIn("<b>Submission</b>PROT_0756", page)
+            self.assertIn("<b>Submission</b>PROT_9756", page)
             # styled by report_style.py (the one design system), not by a style of its own
             import report_style
             self.assertIn(".subm dl{", report_style.CSS)
@@ -275,7 +275,7 @@ class TestSection(unittest.TestCase):
             with open(os.path.join(s, "output", "AI_Analysis_Report.md"), "w") as fh:
                 fh.write("# Analysis\n\n## Overview\n\nmore\n")
             out = os.path.join(tmp, "a.html")
-            p = run("make_analysis_html.py", "--session", s, "--submission", "PROT_0001",
+            p = run("make_analysis_html.py", "--session", s, "--submission", "PROT_9101",
                     "--out", out)
             self.assertEqual(p.returncode, 0, p.stderr)
             with open(out) as fh:
@@ -293,7 +293,7 @@ class TestSection(unittest.TestCase):
             p = run("make_analysis_html.py", "--report", rep, "--submission", FIXTURE, "--out", out)
             self.assertEqual(p.returncode, 0, p.stderr)
             with open(out) as fh:
-                self.assertIn("PROT_0756", fh.read())
+                self.assertIn("PROT_9756", fh.read())
 
     def test_an_unreadable_record_is_shown_not_dropped(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -315,7 +315,7 @@ class TestAttach(unittest.TestCase):
             with open(os.path.join(s, "session.json")) as fh:
                 sj = json.load(fh)
             self.assertFalse(sj["qc"], "other session metadata is kept")
-            self.assertEqual(sj["coreomics"]["internal_id"], "PROT_0756")
+            self.assertEqual(sj["coreomics"]["internal_id"], "PROT_9756")
             self.assertEqual(sj["coreomics"]["record"], "input/submission.json")
             self.assertEqual(sr.load(s)["samples"][0]["unique_id"], "LRS96")
             with open(os.path.join(s, "input", "samples.tsv")) as fh:
@@ -327,15 +327,15 @@ class TestAttach(unittest.TestCase):
             attach_fixture(s)
             attach_fixture(s)                                   # the same one again: fine
             with self.assertRaises(sr.RecordError):
-                sr.attach(s, sr.sanitize({"internal_id": "PROT_0757"}))
-            sr.attach(s, sr.sanitize({"internal_id": "PROT_0757"}), replace=True)
-            self.assertEqual(sr.load(s)["internal_id"], "PROT_0757")
+                sr.attach(s, sr.sanitize({"internal_id": "PROT_9757"}))
+            sr.attach(s, sr.sanitize({"internal_id": "PROT_9757"}), replace=True)
+            self.assertEqual(sr.load(s)["internal_id"], "PROT_9757")
 
     def test_given_facts_warn_about_what_was_not_recorded(self):
         with tempfile.TemporaryDirectory() as tmp:
             s = make_session(tmp)
             p = run("submission_report.py", "attach", "--session", s, "--given",
-                    json.dumps({"internal_id": "PROT_0756", "sample_prep": "lab", "email": "x@example.org"}))
+                    json.dumps({"internal_id": "PROT_9756", "sample_prep": "lab", "email": "x@example.org"}))
             self.assertEqual(p.returncode, 0, p.stderr)
             out = json.loads(p.stdout)
             self.assertEqual((out["source"], out["prepared_by"]), (sr.SOURCE_USER, "lab"))
@@ -346,7 +346,7 @@ class TestAttach(unittest.TestCase):
             s = make_session(tmp)
             attach_fixture(s)
             got = record_run.find_prot(None, s, None)
-            self.assertEqual((got["prot"], got["id"]), ("PROT_0756", "0022066cd85f"))
+            self.assertEqual((got["prot"], got["id"]), ("PROT_9756", "9a7e5c3b1d0f"))
             self.assertTrue(got["source"].endswith("session.json"))
 
     def test_the_session_readme_names_it(self):
@@ -355,8 +355,8 @@ class TestAttach(unittest.TestCase):
             p = session_mod.paths_for(s)
             self.assertIsNone(session_docs.submission_line(p))
             attach_fixture(s)
-            line = ("CoreOmics submission: [PROT_0756](https://ucdavis.coreomics.com/submissions/"
-                    "0022066cd85f) (source: CoreOmics)")
+            line = ("CoreOmics submission: [PROT_9756](https://ucdavis.coreomics.com/submissions/"
+                    "9a7e5c3b1d0f) (source: CoreOmics)")
             self.assertEqual(session_docs.submission_line(p), line)
             # the README (and AGENTS.md's study summary) that finalize writes carry it
             written = session_docs.write_docs(s)
@@ -408,7 +408,7 @@ class TestFeedbackSurvey(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             p = self.finished(tmp, core=True)
             o, s = p["output_dir"], p["session_dir"]
-            url = SURVEY + "?prot=PROT_0756&src=report"
+            url = SURVEY + "?prot=PROT_9756&src=report"
             page = self.read(o, "Analysis_Report.html")
             self.assertIn('<p class="feedback"><strong>How did we do?</strong> Tell us what you '
                           f'thought of this report: <a href="{html_mod.escape(url)}">a 5-minute '
@@ -422,7 +422,7 @@ class TestFeedbackSurvey(unittest.TestCase):
             text = self.pdf_text(os.path.join(o, "Analysis_Report.pdf"))
             if text is not None:
                 self.assertIn(url.replace("https://", ""), text)
-            readme = SURVEY + "?prot=PROT_0756&src=readme"
+            readme = SURVEY + "?prot=PROT_9756&src=readme"
             self.assertIn("\n**How did we do?** Tell us what you thought of the report: [a 5-minute "
                           f"survey]({readme}).\n", self.read(s, "README.md"))
             self.assertIn(f'<a href="{html_mod.escape(readme)}">a 5-minute survey</a>',
@@ -466,11 +466,11 @@ class TestFeedbackSurvey(unittest.TestCase):
             p = session_mod.paths_for(s)
             self.assertIsNone(sr.core_run(s))
             attach_fixture(s)
-            self.assertEqual(sr.core_run(s), {"prot": "PROT_0756"})
+            self.assertEqual(sr.core_run(s), {"prot": "PROT_9756"})
             with open(p["submission_record"]) as fh:
                 record = fh.read()
             os.remove(p["submission_record"])                # announced, record missing: Core
-            self.assertEqual(sr.core_run(s), {"prot": "PROT_0756"})
+            self.assertEqual(sr.core_run(s), {"prot": "PROT_9756"})
             with open(p["submission_record"], "w") as fh:     # there but unreadable: NOT Core
                 fh.write("{")
             self.assertIsNone(sr.core_run(s))
@@ -494,7 +494,7 @@ class TestFeedbackSurvey(unittest.TestCase):
             self.assertEqual(sr.core_run(record={"internal_id": "PROT_0807"}), {"prot": "PROT_0807"})
             self.assertEqual(sr.core_run(record={"id": "99922f5337f8"}), {"prot": None})
             self.assertIsNone(sr.core_run(record={"internal_id": "not a number"}))
-            for i, digits in enumerate(("٧٥٦", "１２３")):      # not ASCII: not a PROT number
+            for i, digits in enumerate(("٩٧٥٦", "１２３")):      # not ASCII: not a PROT number
                 self.assertIsNone(sr.core_run(record={"internal_id": digits}), digits)
                 given = make_session(os.path.join(tmp, f"given{i}"))
                 r = run("submission_report.py", "attach", "--session", given, "--given",
@@ -620,7 +620,7 @@ class TestFeedbackSurvey(unittest.TestCase):
             out = os.path.join(s, "output", "Analysis_Report.html")
             # --submission feeds the Submission section only; the survey asks the session
             # (option a), so even a real record there, unattached, gives none -- as README
-            for extra in (["--submission", "PROT_1234"],
+            for extra in (["--submission", "PROT_9234"],
                           ["--submission", os.path.join(tmp, "nonexistent", "record.json")],
                           ["--submission", FIXTURE]):
                 r = run("make_analysis_html.py", "--session", s, "--out", out, "--no-pdf", *extra)
@@ -678,7 +678,7 @@ class TestMethods(unittest.TestCase):
             attach_fixture(s)
             sec = self.methods(s)
             self.assertIn("prepared by the submitting laboratory", sec)
-            self.assertIn("as peptides ready for LC-MS/MS (CoreOmics submission PROT_0756)", sec)
+            self.assertIn("as peptides ready for LC-MS/MS (CoreOmics submission PROT_9756)", sec)
             self.assertNotIn("confirm]", sec, "no Core-side placeholder the Core could never fill")
             self.assertNotIn("chemically", sec)
             self.assertIn("“The samples are in 50 mM Ammonium Bicarbonate", sec)
@@ -686,7 +686,7 @@ class TestMethods(unittest.TestCase):
     def test_peptides_only_when_the_form_says_peptides(self):
         with tempfile.TemporaryDirectory() as tmp:
             s = make_session(tmp)
-            sr.attach(s, {"internal_id": "PROT_0756", "sample_prep": "lab"})
+            sr.attach(s, {"internal_id": "PROT_9756", "sample_prep": "lab"})
             sec = self.methods(s)
             self.assertIn("prepared by the submitting laboratory", sec)
             self.assertNotIn("peptides", sec)
@@ -758,7 +758,7 @@ class TestMethods(unittest.TestCase):
             self.assertEqual(p.returncode, 0, p.stderr)
             with open(out) as fh:
                 brief = fh.read()
-            self.assertIn("## The submission (PROT_0756) — quote it, add nothing", brief)
+            self.assertIn("## The submission (PROT_9756) — quote it, add nothing", brief)
             self.assertIn("already lists these notes, so do not copy them", brief)
             self.assertIn("The submitting lab prepared the samples and sent peptides", brief)
             self.assertIn("Pairing in the sample sheet", brief)
@@ -774,7 +774,7 @@ class TestNotes(unittest.TestCase):
         attach_fixture(s)
         return s
 
-    def test_prot0756_pairing_is_surfaced(self):
+    def test_prot9756_pairing_is_surfaced(self):
         with tempfile.TemporaryDirectory() as tmp:
             s = self.session(tmp)
             n = notes_by_id(sr.load(s), s)

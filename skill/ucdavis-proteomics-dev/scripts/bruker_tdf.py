@@ -100,6 +100,32 @@ def _size(path):
         return 0
 
 
+# The version of tdf_integrity()'s rules, recorded with every verdict. run_search.py reuses a
+# recorded verdict only under the same rules, so a skill whose check is stricter re-reads a .d
+# instead of trusting an older verdict. Raise it whenever tdf_integrity() would judge a file
+# differently.
+INTEGRITY_RULES = 1
+
+
+def fingerprint(d_path):
+    """What a later reader compares to know a .d's analysis.tdf and analysis.tdf_bin are the
+    files this check read, from os.stat only (None for a file that is not there): sizes and
+    modification times, and the change time and inode, which no copy tool can set -- a .d
+    replaced at the same path by `rsync -a` / `cp -p` keeps the first two (L8R-F6); a chmod also
+    changes ctime, which costs only a re-read. run_search.py reuses step 2's tdf_integrity() of a
+    .d whose fingerprint is unchanged instead of reading every analysis.tdf again (I05)."""
+    out = {}
+    for name, key in (("analysis.tdf", "tdf"), ("analysis.tdf_bin", "tdf_bin")):
+        try:
+            st = os.stat(os.path.join(d_path, name))
+            vals = (st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino)
+        except OSError:
+            vals = (None, None, None, None)
+        for field, v in zip(("bytes", "mtime_ns", "ctime_ns", "ino"), vals):
+            out[f"{key}_{field}"] = v
+    return out
+
+
 def tdf_integrity(d_path):
     """Does this .d's analysis.tdf still index its whole analysis.tdf_bin, and is it exposed
     to a read-write open? Reads only; writes nothing. Returns
@@ -115,6 +141,8 @@ def tdf_integrity(d_path):
       tdf_bin_bytes      size of analysis.tdf_bin (None when absent)
       index_end_bytes    the last frame's TimsId + its block size (None when not read)
       index_coverage     index_end_bytes / tdf_bin_bytes (None when not read)
+      fingerprint        fingerprint(): the files this check read, as os.stat saw them
+      rules              INTEGRITY_RULES: the rules this verdict was made under
 
     `status` is the worst finding: truncated (the index ends more than allowed_slack() short
     of the end of tdf_bin, so a search reads only part of the run) > bin_incomplete (tdf_bin
@@ -131,6 +159,8 @@ def tdf_integrity(d_path):
     distinct status is kept in `statuses`, and integrity_warning() gives a remedy for each."""
     tdf = os.path.join(d_path, "analysis.tdf")
     tdf_bin = os.path.join(d_path, "analysis.tdf_bin")
+    # before anything is read: a file that changes during the check then fails the comparison
+    fp = fingerprint(d_path)
     r = {"status": "ok", "statuses": [], "problems": [], "sqlite_header_wal": None,
          "wal_bytes": _size(tdf + "-wal"), "journal_bytes": _size(tdf + "-journal"),
          "tdf_bin_bytes": os.path.getsize(tdf_bin) if os.path.isfile(tdf_bin) else None,
@@ -225,6 +255,8 @@ def tdf_integrity(d_path):
     r["problems"] = [text for _, text in findings]
     r["statuses"] = sorted({s for s, _ in findings}, key=STATUSES.index)
     r["status"] = r["statuses"][0] if r["statuses"] else "ok"
+    r["fingerprint"] = fp
+    r["rules"] = INTEGRITY_RULES
     return r
 
 
