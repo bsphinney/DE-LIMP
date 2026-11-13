@@ -123,14 +123,14 @@ def load_diann_report(report_path, q_threshold=0.01):
 def read_ms1_from_tdf(d_path):
     """Read MS1 frames directly from analysis.tdf SQLite with tof-to-mz calibration.
 
-    Returns list of (rt_minutes, mz_array, intensity_array) tuples.
+    Returns list of (rt_seconds, mz_array, intensity_array) tuples (timsrust RT is seconds).
     """
     tdf_path = os.path.join(d_path, "analysis.tdf")
     if not os.path.exists(tdf_path):
         logger.warning("No analysis.tdf in %s", d_path)
         return []
 
-    conn = sqlite3.connect(tdf_path)
+    conn = sqlite3.connect(f"file:{tdf_path}?mode=ro&immutable=1", uri=True)  # never touch the raw
 
     # Get calibration parameters for tof-to-mz conversion
     # TimsTOF uses: mz = c0 + c1/t + c2/t^2 ... or similar
@@ -183,7 +183,7 @@ def read_ms1_from_tdf(d_path):
     # Use the GlobalMetadata calibration coefficients
 
     # Read calibration from TDF
-    conn = sqlite3.connect(tdf_path)
+    conn = sqlite3.connect(f"file:{tdf_path}?mode=ro&immutable=1", uri=True)  # never touch the raw
     try:
         # Try to get tof-to-mz conversion via property definitions
         # Bruker stores calibration as: mz = (C1 / (10000 * sqrt(tof/C2) - C3))^2
@@ -224,7 +224,7 @@ def read_ms1_from_tdf(d_path):
 
     ms1_list = []
     for frame in ms1_frames:
-        rt_min = frame.rt  # already in minutes
+        rt_sec = frame.rt  # timsrust Frame.rt is Bruker Frames.Time, in SECONDS
         tof_idx = np.array(frame.tof_indices, dtype=np.float64)
         ints = np.array(frame.intensities, dtype=np.float64)
 
@@ -239,7 +239,7 @@ def read_ms1_from_tdf(d_path):
         tof_slope = (np.sqrt(mz_upper) - tof_intercept) / n_tof
         mz_values = (tof_intercept + tof_slope * tof_idx) ** 2
 
-        ms1_list.append((rt_min, mz_values, ints))
+        ms1_list.append((rt_sec, mz_values, ints))
 
     logger.info("Processed %d MS1 frames with m/z calibration", len(ms1_list))
     return ms1_list
@@ -283,18 +283,18 @@ def create_labeled_asf(df, file_col, raw_dir, output_path, max_charge=4):
         ms1_list = read_ms1_from_tdf(d_path)
         logger.info("  Read %d MS1 frames", len(ms1_list))
 
-        # Build MS1 lookup by RT (in minutes)
+        # Build MS1 lookup by RT (in seconds)
         ms1_by_rt_bin = {}
-        for rt_min, mzs, ints in ms1_list:
-            rt_bin = int(rt_min * 6)  # 10-second bins in minutes
-            ms1_by_rt_bin.setdefault(rt_bin, []).append((rt_min, mzs, ints))
+        for rt_sec, mzs, ints in ms1_list:
+            rt_bin = int(rt_sec / 10)  # 10-second bins
+            ms1_by_rt_bin.setdefault(rt_bin, []).append((rt_sec, mzs, ints))
 
         # Index MS2 spectra by RT and m/z for matching
         ms2_by_rt_mz = {}
         for spec in spectra:
             if spec.precursor.mz is None or float(spec.precursor.mz) == 0.0:
                 continue
-            rt_min = float(spec.precursor.rt)  # timsrust gives minutes
+            rt_sec = float(spec.precursor.rt)  # timsrust: SECONDS
             prec_mz = float(spec.precursor.mz)
             mz_arr = np.array(spec.mz_values, dtype=np.float64)
             int_arr = np.array(spec.intensities, dtype=np.float64)
@@ -311,9 +311,9 @@ def create_labeled_asf(df, file_col, raw_dir, output_path, max_charge=4):
                 if np.max(int_arr) > 0:
                     int_arr = int_arr / np.max(int_arr)
 
-            key = (int(prec_mz / 10), int(rt_min * 6))  # 10-sec bins
+            key = (int(prec_mz / 10), int(rt_sec / 10))  # 10-sec bins
             ms2_by_rt_mz.setdefault(key, []).append({
-                'mz': prec_mz, 'rt': rt_min,
+                'mz': prec_mz, 'rt': rt_sec,
                 'fragments': list(zip(mz_arr.tolist(), int_arr.tolist()))
             })
 
@@ -338,9 +338,10 @@ def create_labeled_asf(df, file_col, raw_dir, output_path, max_charge=4):
             prec_mz = row['Precursor.Mz']
             rt_val = row['RT']
             rt_min = rt_val if rt_val < 200 else rt_val / 60.0
+            rt_sec = rt_min * 60.0  # DIA-NN RT is minutes; spectra are seconds
 
             # Search neighboring m/z bins (±3 bins = ±30 Da covers any DIA window)
-            rt_bin = int(rt_min * 6)
+            rt_bin = int(rt_sec / 10)
             mz_bin = int(prec_mz / 10)
             best_spec = None
             best_dist = float('inf')
@@ -352,7 +353,7 @@ def create_labeled_asf(df, file_col, raw_dir, output_path, max_charge=4):
                         # Check if peptide m/z falls within this DIA window
                         if abs(cand['mz'] - prec_mz) > iso_half + 1.0:
                             continue
-                        dist = abs(cand['rt'] - rt_min) + abs(cand['mz'] - prec_mz) * 0.1
+                        dist = abs(cand['rt'] - rt_sec) / 60.0 + abs(cand['mz'] - prec_mz) * 0.1
                         if dist < best_dist:
                             best_dist = dist
                             best_spec = cand
@@ -380,11 +381,11 @@ def create_labeled_asf(df, file_col, raw_dir, output_path, max_charge=4):
             prec_to_spec[prec_key]['rts'].append(0.0)
 
             # Find MS1 context near this RT
-            rt_bin = int(best_spec['rt'] * 6)
+            rt_bin = int(best_spec['rt'] / 10)
             ms1_found = False
             for rt_search in range(rt_bin - 1, rt_bin + 2):
                 for ms1_rt, ms1_mz, ms1_int in ms1_by_rt_bin.get(rt_search, []):
-                    if abs(ms1_rt - best_spec['rt']) < 0.2:  # within 12 seconds
+                    if abs(ms1_rt - best_spec['rt']) < 12.0:  # within 12 seconds
                         # Apply same normalization as augment.py MS1: sqrt(sqrt) + normalize
                         top_n = 150
                         if len(ms1_int) > top_n:

@@ -45,7 +45,7 @@ def _read_mz_calibration(d_folder):
         return 100.0, 1700.0, 631025
 
     try:
-        conn = sqlite3.connect(f"file:{tdf_path}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"file:{tdf_path}?mode=ro&immutable=1", uri=True)
         meta = dict(conn.execute("SELECT Key, Value FROM GlobalMetadata").fetchall())
         conn.close()
         mz_lower = float(meta.get("MzAcqRangeLower", 100.0))
@@ -258,7 +258,7 @@ class MobilityFilteredExtractor:
         {
             'mz': np.ndarray,
             'intensity': np.ndarray,
-            'rt': float (minutes),
+            'rt': float (SECONDS; timsrust Frame.rt = Bruker Frames.Time),
             'precursor_mz': float,
             'isolation_width': float,
             'im': float (1/K0),
@@ -288,7 +288,7 @@ class MobilityFilteredExtractor:
             scan_offsets = np.array(frame.scan_offsets)
             tof_indices = np.array(frame.tof_indices)
             intensities = np.array(frame.intensities, dtype=np.float64)
-            rt_min = frame.rt  # timsrust gives minutes
+            rt_sec = frame.rt  # timsrust Frame.rt is Bruker Frames.Time, in SECONDS (not minutes)
 
             n_windows = len(qs.isolation_mz)
             for win_idx in range(n_windows):
@@ -324,7 +324,7 @@ class MobilityFilteredExtractor:
                         spectra.append({
                             "mz": mz,
                             "intensity": intensity,
-                            "rt": rt_min,
+                            "rt": rt_sec,
                             "precursor_mz": iso_mz,
                             "isolation_width": iso_width,
                             "im": im_val,
@@ -360,7 +360,7 @@ class MobilityFilteredExtractor:
                     spectra.append({
                         "mz": mz,
                         "intensity": intensity,
-                        "rt": rt_min,
+                        "rt": rt_sec,
                         "precursor_mz": iso_mz,
                         "isolation_width": iso_width,
                         "im": im_val,
@@ -379,7 +379,7 @@ class MobilityFilteredExtractor:
     def extract_ms1_frames(self, top_n=150):
         """Read MS1 frames with tof-to-mz conversion.
 
-        Returns list of (rt_min, mz_array, intensity_array) tuples
+        Returns list of (rt_sec, mz_array, intensity_array) tuples
         with sqrt(sqrt) normalization matching Cascadia's augment.py MS1 path.
         """
         import timsrust_pyo3 as timsrust
@@ -427,7 +427,7 @@ def write_asf_5col(output_path, spectra, ms1_list, top_n_ms2=150, scan_width=1):
         PEPMASS=<precursor_mz>
         CHARGE=<charge>
         SCAN=<scan_idx>
-        RT=<rt_minutes>
+        RT=<rt_seconds>
         <m/z>\t<intensity>\t<rt_offset>\t<ms_level>\t<1/K0>
         ...
         END IONS
@@ -437,9 +437,9 @@ def write_asf_5col(output_path, spectra, ms1_list, top_n_ms2=150, scan_width=1):
     """
     # Build MS1 lookup by RT
     ms1_by_rt_bin = {}
-    for rt_min, mzs, ints in ms1_list:
-        rt_bin = int(rt_min * 6)  # 10-second bins
-        ms1_by_rt_bin.setdefault(rt_bin, []).append((rt_min, mzs, ints))
+    for rt_sec, mzs, ints in ms1_list:
+        rt_bin = int(rt_sec / 10)  # 10-second bins (RT is in seconds)
+        ms1_by_rt_bin.setdefault(rt_bin, []).append((rt_sec, mzs, ints))
 
     n_written = 0
     with open(output_path, "w") as out:
@@ -466,7 +466,7 @@ def write_asf_5col(output_path, spectra, ms1_list, top_n_ms2=150, scan_width=1):
                 int_norm = int_norm / np.max(int_norm)
 
             # Find closest MS1 frame
-            rt_bin = int(rt * 6)
+            rt_bin = int(rt / 10)  # 10-second bins (RT is in seconds)
             best_ms1 = None
             best_dt = float("inf")
             for search_bin in range(rt_bin - 1, rt_bin + 2):

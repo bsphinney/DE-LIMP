@@ -27,7 +27,7 @@ def _read_mz_calibration(d_folder):
         return 100.0, 1700.0, 631025  # defaults
 
     try:
-        conn = sqlite3.connect(f"file:{tdf_path}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"file:{tdf_path}?mode=ro&immutable=1", uri=True)
         meta = dict(conn.execute("SELECT Key, Value FROM GlobalMetadata").fetchall())
         conn.close()
         mz_lower = float(meta.get('MzAcqRangeLower', 100.0))
@@ -54,7 +54,7 @@ def _tof_to_mz(tof_indices, mz_lower, mz_upper, dns):
 
 
 def _read_ms1_frames(d_folder, mz_lower, mz_upper, dns, top_n=150):
-    """Read MS1 frames and convert to (rt_min, mz_array, intensity_array) list.
+    """Read MS1 frames and convert to (rt_sec, mz_array, intensity_array) list (timsrust RT is seconds).
 
     Applies the same normalization as augment.py MS1: sqrt(sqrt) + normalize.
     """
@@ -87,7 +87,7 @@ def _read_ms1_frames(d_folder, mz_lower, mz_upper, dns, top_n=150):
         if len(ints) > 0 and np.max(ints) > 0:
             ints = ints / np.max(ints)
 
-        ms1_list.append((frame.rt, mzs, ints))  # rt is in minutes
+        ms1_list.append((frame.rt, mzs, ints))  # timsrust Frame.rt is SECONDS
 
     return ms1_list
 
@@ -123,7 +123,7 @@ def get_centers_bruker_im(d_folder, im_span=0.05, im_step=0.02):
     prev_rt = None
     count_for_cycle = 0
     for spec in reader:
-        rt_sec = float(spec.precursor.rt) * 60.0
+        rt_sec = float(spec.precursor.rt)  # timsrust: already seconds
         if prev_rt is not None and abs(rt_sec - prev_rt) > 0.01:
             cycle_time = rt_sec - prev_rt
             break
@@ -139,7 +139,7 @@ def get_centers_bruker_im(d_folder, im_span=0.05, im_step=0.02):
         if spec.precursor.mz is None or float(spec.precursor.mz) == 0.0:
             continue
 
-        rt_sec = float(spec.precursor.rt) * 60.0
+        rt_sec = float(spec.precursor.rt)  # timsrust: already seconds
         window_center = float(spec.precursor.mz)
         im_value = float(spec.precursor.im) if hasattr(spec.precursor, 'im') and spec.precursor.im is not None else 0.0
 
@@ -191,8 +191,7 @@ def extract_spectra_bruker_im(d_folder, f_to_mzrt_to_pep, part, top_n, time_widt
 
     # Index MS1 by RT bin (10-second bins in seconds)
     ms1_by_rt = {}
-    for rt_min, mzs, ints in ms1_list:
-        rt_sec = rt_min * 60.0
+    for rt_sec, mzs, ints in ms1_list:  # already seconds
         rt_bin = int(rt_sec / 10)
         # MS1 peaks: IM = 0.0 (no IM filtering for MS1 frames)
         mz_int_im = [(m, i, 0.0) for m, i in zip(mzs.tolist(), ints.tolist())]
@@ -208,7 +207,7 @@ def extract_spectra_bruker_im(d_folder, f_to_mzrt_to_pep, part, top_n, time_widt
         if spec.precursor.mz is None or float(spec.precursor.mz) == 0.0:
             continue
 
-        rt_sec = float(spec.precursor.rt) * 60.0
+        rt_sec = float(spec.precursor.rt)  # timsrust: already seconds
         window_center = float(spec.precursor.mz)
         im_value = float(spec.precursor.im) if hasattr(spec.precursor, 'im') and spec.precursor.im is not None else 0.0
 

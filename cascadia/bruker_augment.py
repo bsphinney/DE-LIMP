@@ -115,8 +115,9 @@ def _read_bruker_spectra(d_folder: str) -> tuple:
     n_empty = 0
 
     for i, spec in enumerate(all_spectra):
-        # timsrust reports RT in minutes; Cascadia expects seconds
-        rt_sec = spec.precursor.rt * 60.0
+        # timsrust reports RT in SECONDS (Bruker Frames.Time), which is what Cascadia expects.
+        # (Was `* 60.0` on the belief it was minutes: RT= headers were 60x too large.)
+        rt_sec = float(spec.precursor.rt)
 
         mz_arr = np.array(spec.mz_values, dtype=np.float32)
         int_arr = np.array(spec.intensities, dtype=np.float32)

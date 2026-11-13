@@ -150,7 +150,7 @@ def match_peptides_to_spectra(file_df, spectra, im_tol=0.05, rt_tol_min=0.3):
     spec_index = {}
     for spec in spectra:
         mz_bin = int(spec["precursor_mz"] / 10)
-        rt_bin = int(spec["rt"] * 6)  # 10-sec bins
+        rt_bin = int(spec["rt"] / 10)  # 10-sec bins; spectrum RT is in SECONDS
         for mb in range(mz_bin - 3, mz_bin + 4):
             for rb in range(rt_bin - 2, rt_bin + 3):
                 spec_index.setdefault((mb, rb), []).append(spec)
@@ -164,11 +164,12 @@ def match_peptides_to_spectra(file_df, spectra, im_tol=0.05, rt_tol_min=0.3):
         prec_mz = row["Precursor.Mz"]
         rt_val = row["RT"]
         rt_min = rt_val if rt_val < 200 else rt_val / 60.0
+        rt_sec = rt_min * 60.0  # DIA-NN RT is minutes; spectra are seconds
         charge = int(row["Precursor.Charge"]) if "Precursor.Charge" in row.index else 0
         pep_im = float(row["IM"]) if has_im and not np.isnan(row.get("IM", np.nan)) else None
 
         mz_bin = int(prec_mz / 10)
-        rt_bin = int(rt_min * 6)
+        rt_bin = int(rt_sec / 10)
         key = (mz_bin, rt_bin)
 
         # Find best matching spectrum
@@ -182,7 +183,7 @@ def match_peptides_to_spectra(file_df, spectra, im_tol=0.05, rt_tol_min=0.3):
                 continue
 
             # Check RT
-            dt = abs(cand["rt"] - rt_min)
+            dt = abs(cand["rt"] - rt_sec) / 60.0  # minutes, to compare with rt_tol_min
             if dt > rt_tol_min:
                 continue
 
@@ -219,7 +220,7 @@ def write_labeled_asf_5col(outfile, matched_list, ms1_list, max_pep_length=30, m
     Args:
         outfile: Output file path (appended to)
         matched_list: List of (spectrum_dict, peptide, charge) tuples
-        ms1_list: List of (rt_min, mz_array, int_array) from MS1 extraction
+        ms1_list: List of (rt_sec, mz_array, int_array) from MS1 extraction
         max_pep_length: Maximum peptide length to include
         max_charge: Max charge to enumerate per peptide
 
@@ -228,9 +229,9 @@ def write_labeled_asf_5col(outfile, matched_list, ms1_list, max_pep_length=30, m
     """
     # Build MS1 lookup by RT
     ms1_by_rt_bin = {}
-    for rt_min, mzs, ints in ms1_list:
-        rt_bin = int(rt_min * 6)
-        ms1_by_rt_bin.setdefault(rt_bin, []).append((rt_min, mzs, ints))
+    for rt_sec, mzs, ints in ms1_list:
+        rt_bin = int(rt_sec / 10)  # 10-second bins (RT is in seconds)
+        ms1_by_rt_bin.setdefault(rt_bin, []).append((rt_sec, mzs, ints))
 
     count = 0
     top_n_ms2 = 150
@@ -261,7 +262,7 @@ def write_labeled_asf_5col(outfile, matched_list, ms1_list, max_pep_length=30, m
                 intensity = intensity / np.max(intensity)
 
             # Find closest MS1 frame
-            rt_bin = int(rt * 6)
+            rt_bin = int(rt / 10)  # 10-second bins (RT is in seconds)
             best_ms1 = None
             best_dt = float("inf")
             for search_bin in range(rt_bin - 1, rt_bin + 2):

@@ -120,7 +120,7 @@ def _read_mz_calibration(d_path):
         return 100.0, 1700.0, 631025
 
     try:
-        conn = sqlite3.connect(f"file:{tdf_path}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"file:{tdf_path}?mode=ro&immutable=1", uri=True)
         meta = dict(conn.execute("SELECT Key, Value FROM GlobalMetadata").fetchall())
         conn.close()
         mz_lower = float(meta.get('MzAcqRangeLower', 100.0))
@@ -141,7 +141,7 @@ def _tof_to_mz(tof_indices, mz_lower, mz_upper, dns):
 
 
 def _read_ms1_frames(d_path, mz_lower, mz_upper, dns, top_n=150):
-    """Read MS1 frames with tof-to-mz calibration. Returns (rt_min, mz, int) list."""
+    """Read MS1 frames with tof-to-mz calibration. Returns (rt_sec, mz, int) list (timsrust RT is seconds)."""
     import timsrust_pyo3 as timsrust
 
     reader = timsrust.FrameReader(str(d_path))
@@ -230,16 +230,16 @@ def create_labeled_asf_im(df, file_col, raw_dir, output_path, has_im=True,
 
         # Build MS1 lookup by RT
         ms1_by_rt_bin = {}
-        for rt_min, mzs, ints in ms1_list:
-            rt_bin = int(rt_min * 6)
-            ms1_by_rt_bin.setdefault(rt_bin, []).append((rt_min, mzs, ints))
+        for rt_sec, mzs, ints in ms1_list:
+            rt_bin = int(rt_sec / 10)  # 10-second bins (RT is in seconds)
+            ms1_by_rt_bin.setdefault(rt_bin, []).append((rt_sec, mzs, ints))
 
         # Index IM-sliced MS2 spectra by RT, m/z, and IM
         ms2_by_rt_mz = {}
         for spec in reader:
             if spec.precursor.mz is None or float(spec.precursor.mz) == 0.0:
                 continue
-            rt_min = float(spec.precursor.rt)
+            rt_sec = float(spec.precursor.rt)  # timsrust: SECONDS
             prec_mz = float(spec.precursor.mz)
             im_value = float(spec.precursor.im) if hasattr(spec.precursor, 'im') and spec.precursor.im is not None else 0.0
             mz_arr = np.array(spec.mz_values, dtype=np.float64)
@@ -256,11 +256,11 @@ def create_labeled_asf_im(df, file_col, raw_dir, output_path, has_im=True,
                 if np.max(int_arr) > 0:
                     int_arr = int_arr / np.max(int_arr)
 
-            key = (int(prec_mz / 10), int(rt_min * 6))
+            key = (int(prec_mz / 10), int(rt_sec / 10))
             # Store as 3-tuple peaks: (mz, intensity, im)
             fragments = [(m, i, im_value) for m, i in zip(mz_arr.tolist(), int_arr.tolist())]
             ms2_by_rt_mz.setdefault(key, []).append({
-                'mz': prec_mz, 'rt': rt_min, 'im': im_value,
+                'mz': prec_mz, 'rt': rt_sec, 'im': im_value,
                 'fragments': fragments
             })
 
@@ -280,9 +280,10 @@ def create_labeled_asf_im(df, file_col, raw_dir, output_path, has_im=True,
             prec_mz = row['Precursor.Mz']
             rt_val = row['RT']
             rt_min = rt_val if rt_val < 200 else rt_val / 60.0
+            rt_sec = rt_min * 60.0  # DIA-NN RT is minutes; spectra are seconds
             pep_im = float(row['IM']) if (has_im and 'IM' in row.index) else None
 
-            rt_bin = int(rt_min * 6)
+            rt_bin = int(rt_sec / 10)
             mz_bin = int(prec_mz / 10)
             best_spec = None
             best_dist = float('inf')
@@ -295,7 +296,7 @@ def create_labeled_asf_im(df, file_col, raw_dir, output_path, has_im=True,
                             continue
 
                         # Compute distance: RT + m/z + IM (if available)
-                        dist = abs(cand['rt'] - rt_min) + abs(cand['mz'] - prec_mz) * 0.1
+                        dist = abs(cand['rt'] - rt_sec) / 60.0 + abs(cand['mz'] - prec_mz) * 0.1
                         if pep_im is not None:
                             im_dist = abs(cand['im'] - pep_im)
                             if im_dist > im_tolerance * 3:
@@ -332,11 +333,11 @@ def create_labeled_asf_im(df, file_col, raw_dir, output_path, has_im=True,
             prec_to_spec[prec_key]['rts'].append(0.0)
 
             # Find MS1 context near this RT
-            rt_bin_ms1 = int(best_spec['rt'] * 6)
+            rt_bin_ms1 = int(best_spec['rt'] / 10)
             ms1_found = False
             for rt_search in range(rt_bin_ms1 - 1, rt_bin_ms1 + 2):
                 for ms1_rt, ms1_mz, ms1_int in ms1_by_rt_bin.get(rt_search, []):
-                    if abs(ms1_rt - best_spec['rt']) < 0.2:
+                    if abs(ms1_rt - best_spec['rt']) < 12.0:  # 0.2 min, in seconds
                         top_n = 150
                         if len(ms1_int) > top_n:
                             top_idx = np.argsort(ms1_int)[-top_n:]
