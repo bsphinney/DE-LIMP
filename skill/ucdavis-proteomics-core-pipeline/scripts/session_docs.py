@@ -369,7 +369,8 @@ def _de_block(de):
 
 # An identifications-only search's record of how identifications.tsv was filtered, per engine
 # (run_search.py SAGE_IDS_RECORD / FRAGPIPE_IDS_RECORD)
-IDS_RECORDS = ("sage_identifications.json", "fragpipe_identifications.json")
+IDS_RECORDS = ("sage_identifications.json", "fragpipe_identifications.json",
+               "metamorpheus_identifications.json")
 
 
 def _search_quantified(search_dir):

@@ -24,7 +24,7 @@
 #   (Measured 2026-09-16: both HIVE tools.json files in use said "sage": "latest";
 #   the cached tarball was sage-v0.14.7.)
 #   There is a key for every engine tools.json can name a command for -- diann, sage,
-#   radiant, fragpipe, alphadia. A MISSING key is not "no version this time": it makes
+#   radiant, fragpipe, alphadia, metamorpheus. A MISSING key is not "no version this time": it makes
 #   every search that engine ever runs record `version: null`, because run_search.py has
 #   nothing to read. run_search.py accepts only a value SHAPED like a version, so a word
 #   written here ("latest", "env", "nightly") is refused there rather than deposited.
@@ -36,6 +36,9 @@
 #            (or its older .sif) under $DIANN_HIVE_DIR.
 #   FragPipe Java app; MSFragger + IonQuant are LICENSE-GATED and cannot be
 #            silently downloaded.
+#   MetaMorpheus  MIT; the Core's Apptainer image on HIVE only (built from
+#            docker://smithchemwisc/metamorpheus:<ver>). tools.json `metamorpheus` is the
+#            image's path; run_search.py --engine metamorpheus builds the command around it.
 # =============================================================================
 set -uo pipefail
 
@@ -88,6 +91,7 @@ asset_url_tag() { # owner/repo  tag  pattern
 }
 
 DIANN_CMD="null"; SAGE_CMD="null"; FRAGPIPE_CMD="null"; ALPHADIA_CMD="null"; NOTES=()
+METAMORPHEUS_CMD="null"; METAMORPHEUS_VER=""
 RADIANT_CMD="null"; RADIANT_RUNTIME=""; RADIANT_IMAGE=""; RADIANT_VER=""
 # Empty until a command is resolved; see "versions" in the header. There is one per engine
 # tools.json can name a command for: an engine with no `versions` key records
@@ -426,6 +430,30 @@ acquire_fragpipe() {
   fi
 }
 
+# --------------------------------------------------------- MetaMorpheus -------
+# MIT. The Core's image on HIVE (resolve_defaults.METAMORPHEUS_PIN: its sha256, which the search
+# job checks before every run). Not pulled anywhere else: run_search.py --engine metamorpheus is a
+# HIVE route. Found by its fixed path, never by a search of the group share (login-node rules).
+# $METAMORPHEUS_SIF points at another image (tests; another site); a PIN_VERSION that its name
+# does not carry is refused rather than substituted.
+METAMORPHEUS_HIVE_SIF="${METAMORPHEUS_SIF:-/quobyte/proteomics-grp/apptainers/metamorpheus_1.1.12.sif}"
+acquire_metamorpheus() {
+  local sif="$METAMORPHEUS_HIVE_SIF" ver
+  if [ ! -f "$sif" ]; then
+    [ "$CLASS" = "hpc" ] || [ -n "${METAMORPHEUS_SIF:-}" ] && \
+      NOTES+=("MetaMorpheus: no image at $sif, so tools.json has no metamorpheus command (\$METAMORPHEUS_SIF names another).")
+    return
+  fi
+  ver="$(basename "$sif" | sed -nE 's#.*[Mm]eta[Mm]orpheus[-_]v?([0-9]+(\.[0-9]+)+)\.sif$#\1#p')"
+  if pin_for metamorpheus && [ "$ver" != "$PIN_VERSION" ]; then
+    NOTES+=("MetaMorpheus $PIN_VERSION requested, but the image found is $sif (${ver:-no version in its name}) -- NOT substituting it; tools.json has no metamorpheus command.")
+    return
+  fi
+  METAMORPHEUS_CMD="$sif"; METAMORPHEUS_VER="$ver"
+  NOTES+=("MetaMorpheus ${ver:-(version not in the image name)}: the Core's image $sif (MIT). run_search.py --engine metamorpheus checks its sha256 and runs it with apptainer.")
+  [ -z "$ver" ] && NOTES+=("MetaMorpheus: $sif names no release, so tools.json records no MetaMorpheus version.")
+}
+
 # ------------------------------------------------------------- AlphaDIA -------
 # Apache-2.0 (commercial use OK) — the open-source DIA alternative to DIA-NN,
 # whose free "Academia" build is academic/non-profit only. pip-installed into the
@@ -473,6 +501,7 @@ echo "[acquire] platform=$CLASS  os=$OS arch=$ARCH  root=$ROOT  pin=${PIN_ENGINE
 acquire_sage
 acquire_diann
 acquire_fragpipe
+acquire_metamorpheus
 # AlphaDIA: discover the HIVE container automatically; otherwise only acquire when
 # pinned/requested or already present (it's a large GPU pip package — don't auto-install).
 if [ "${PIN_ENGINE:-}" = "alphadia" ] || have alphadia \
@@ -491,7 +520,7 @@ esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
   printf '  "platform_class": "%s",\n' "$CLASS"
   printf '  "tools_root": "%s",\n' "$(esc "$ROOT")"
   printf '  "pinned": {"engine": "%s", "version": "%s"},\n' "${PIN_ENGINE:-}" "${PIN_VERSION:-}"
-  printf '  "versions": {"diann": "%s", "sage": "%s", "radiant": "%s", "fragpipe": "%s", "alphadia": "%s"},\n' "$(esc "$DIANN_VER")" "$(esc "$SAGE_VER")" "$(esc "${RADIANT_VER:-}")" "$(esc "${FRAGPIPE_VER:-}")" "$(esc "${ALPHADIA_VER:-}")"
+  printf '  "versions": {"diann": "%s", "sage": "%s", "radiant": "%s", "fragpipe": "%s", "alphadia": "%s", "metamorpheus": "%s"},\n' "$(esc "$DIANN_VER")" "$(esc "$SAGE_VER")" "$(esc "${RADIANT_VER:-}")" "$(esc "${FRAGPIPE_VER:-}")" "$(esc "${ALPHADIA_VER:-}")" "$(esc "${METAMORPHEUS_VER:-}")"
   printf '  "radiant":  %s,\n'  "$( [ "${RADIANT_CMD:-null}" = null ]  && echo null || printf '"%s"' "$(esc "${RADIANT_CMD}")" )"
   printf '  "radiant_runtime": %s,\n' "$( [ -z "${RADIANT_RUNTIME:-}" ] && echo null || printf '"%s"' "$(esc "${RADIANT_RUNTIME}")" )"
   printf '  "radiant_image":   %s,\n' "$( [ -z "${RADIANT_IMAGE:-}" ]   && echo null || printf '"%s"' "$(esc "${RADIANT_IMAGE}")" )"
@@ -499,6 +528,7 @@ esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
   printf '  "sage":     %s,\n'  "$( [ "$SAGE_CMD" = null ]     && echo null || printf '"%s"' "$(esc "$SAGE_CMD")" )"
   printf '  "fragpipe": %s,\n'  "$( [ "$FRAGPIPE_CMD" = null ] && echo null || printf '"%s"' "$(esc "$FRAGPIPE_CMD")" )"
   printf '  "alphadia": %s,\n'  "$( [ "$ALPHADIA_CMD" = null ] && echo null || printf '"%s"' "$(esc "$ALPHADIA_CMD")" )"
+  printf '  "metamorpheus": %s,\n'  "$( [ "$METAMORPHEUS_CMD" = null ] && echo null || printf '"%s"' "$(esc "$METAMORPHEUS_CMD")" )"
   printf '  "notes": [\n'
   for i in "${!NOTES[@]}"; do
     printf '    "%s"%s\n' "$(esc "${NOTES[$i]}")" "$( [ "$i" -lt $((${#NOTES[@]}-1)) ] && echo , )"

@@ -128,7 +128,7 @@ DDA_TAG = "[not extracted by this script — take from the MS method; confirm]"
 UNREADABLE_TAG = "[raw file not readable here — confirm]"
 
 ENGINE_LABEL = {"diann": "DIA-NN", "sage": "Sage", "fragpipe": "FragPipe",
-                "radiant": "Radiant", "alphadia": "AlphaDIA"}
+                "radiant": "Radiant", "alphadia": "AlphaDIA", "metamorpheus": "MetaMorpheus"}
 # In-silico cleavage rule -> PSI-MS cleavage agent (name, accession). Accessions from OLS4,
 # 2026-09-24. DIA-NN: `--cut K*,R*,!*P` is "canonical tryptic specificity" (DIA-NN README), so
 # K*,R* without the !*P exception also cleaves before proline: Trypsin/P.
@@ -767,6 +767,50 @@ def _fragpipe_record(rec, prov, pf, search_prov):
                                         else "(the workflow given to the search)"))
 
 
+def _metamorpheus_record(rec, prov, pf):
+    """A MetaMorpheus search (run_search.py --engine metamorpheus), from the task TOML it was
+    given (metamorpheus_params, the one reading) and its identifications record. The task's
+    modifications are MetaMorpheus' own names, not UNIMOD entries: they are listed as written in
+    a warning for the writer, never mapped (mods_read stays False, so no "no fixed modifications"
+    claim is made)."""
+    import metamorpheus_params as mmp
+    try:
+        st = mmp.summary(mmp.read_task(pf))
+    except OSError as e:
+        rec["warnings"].append(f"{pf} could not be read ({e.strerror or e})")
+        return
+    w = os.path.basename(pf)
+    stype = (st.get("search_type") or "").lower()
+    if stype == "nonspecific":
+        rec["cleavage"] = {"rule": "SearchType NonSpecific", "name": NONSPECIFIC[0],
+                           "ac": NONSPECIFIC[1], "specificity": "none", "source": w}
+    elif st.get("protease"):
+        rec["warnings"].append(f"{w}: protease {st['protease']} ({st.get('search_type')} search) "
+                               "is not mapped to a cleavage rule here; take it from that file")
+    lo, hi = (_num(st.get(k)) for k in ("min_peptide_length", "max_peptide_length"))
+    if lo is not None or hi is not None:
+        rec["pep_len"] = {"value": (int(lo) if lo is not None else None,
+                                    int(hi) if hi is not None else None), "source": w}
+    mv = _num(st.get("max_mods_per_peptide"))
+    if mv is not None:
+        rec["max_var_mods"] = {"value": int(mv), "source": w}
+    for key, tol in (("ms1_tol", "precursor_tolerance"), ("ms2_tol", "product_tolerance")):
+        ppm = mmp.tolerance_ppm(st.get(tol))
+        if ppm is not None:
+            rec[key] = {"value": ppm, "unit": "ppm", "source": w}
+    if st.get("variable_mods") or st.get("fixed_mods"):
+        rec["warnings"].append(
+            f"{w} sets these MetaMorpheus modifications (its own names; not mapped to UNIMOD "
+            f"here): variable {'; '.join(st['variable_mods']) or 'none'}; fixed "
+            f"{'; '.join(st['fixed_mods']) or 'none'}")
+    ids = prov.get("metamorpheus_identifications")
+    if isinstance(ids, dict) and ids.get("methods_sentence"):
+        rec["fdr_sentence"] = ids["methods_sentence"]
+        rec["fdr_source"] = "metamorpheus_identifications (search_provenance.json)"
+    rec["route_sentence"] = ("The search was for peptide identifications only, with no "
+                             "quantification.")
+
+
 # DIA-NN echoes its argv, joined with single spaces and unquoted, near the top of its log; an
 # option's value runs to the next "--" (fran_deposit._FASTA_ARG has the why: FragPipe's DIA-NN
 # 1.8.1 logs even `--cfg <workdir>/filelist_diann.txt-- `). The command line is the first line of
@@ -1250,6 +1294,8 @@ def search_record(params=None, search_prov=None, manifest=None):
         rec["fdr_sentence"] = _sage_lfq_fdr(sa)
     elif engine == "fragpipe" or pf.endswith((".workflow", ".params")):
         _fragpipe_record(rec, prov, pf, search_prov)
+    elif engine == "metamorpheus" or pf.endswith(".toml"):
+        _metamorpheus_record(rec, prov, pf)
     else:
         rec["warnings"].append(f"the {rec['engine_label'] or 'search'} parameter file "
                                f"{os.path.basename(pf)} is not parsed here; its settings are "

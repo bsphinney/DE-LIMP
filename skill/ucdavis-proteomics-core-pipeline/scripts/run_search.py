@@ -30,6 +30,18 @@ Per engine:
            (targets at peptide_q <= 0.01), no report.parquet
   fragpipe <cmd> --headless --workflow <.workflow> --manifest <m> --workdir <out>
            then adapt combined_protein.tsv -> DIA-NN-shaped report
+  metamorpheus  DDA, identifications only, never by default (--engine metamorpheus, or a bundle
+           from resolve_defaults.py --engine metamorpheus). tools.json `metamorpheus` is the
+           Core's image (metamorpheus_1.1.12.sif); --params a MetaMorpheus search-task .toml
+           (the validated one: resolve_defaults.py writes wf/metamorpheus.toml). The job checks
+           the image's sha256, copies its app to node-local $TMPDIR (MetaMorpheus writes into its
+           own folder) and the database (it writes DatabaseIndex/ beside it), installs
+           presets/metamorpheus/Mods/*.txt, then
+           apptainer exec --cleanenv --bind ... <sif> dotnet $MM_APP/CMD.dll --acceptThermoLicence
+             -t <out>/metamorpheus_task.toml -d $TMPDIR/<fasta copy> -s <files> -o <out>/run
+           (the task copy's MaxThreadsToUsePerFile = --threads), and writes identifications.tsv
+           from AllPSMs/AllPeptides.psmtsv (target PSM q <= 0.01 whose peptide passes q <= 0.01).
+           No report.parquet, no DE, never staged for FRAN.
 
 On HIVE the diann/sage command from tools.json is already Apptainer-wrapped.
 Pass --sbatch to EMIT an sbatch script instead of running inline (so heavy
@@ -39,7 +51,7 @@ Usage:
   python3 run_search.py --tools tools.json --bundle wf/workflow.manifest.json \
       --params wf/diann.cfg --fasta search.fasta --out search_out \
       --files /data/*.raw --threads 16 [--sbatch job.sh]
-      [--engine diann|alphadia|sage|fragpipe|radiant]
+      [--engine diann|alphadia|sage|fragpipe|radiant|metamorpheus]
 
 Every input Bruker .d is checked with bruker_tdf.tdf_integrity() before anything is
 provisioned or submitted, and a .d that is not `ok` is REFUSED (--allow-damaged-tdf
@@ -1313,6 +1325,9 @@ def search_records(res):
                                "fragpipe_database", "fragpipe_workflow",
                                # what its workflow quantifies (Ruling 73a)
                                "quantification", "identifications",
+                               # a MetaMorpheus search: its container, task TOML and mod files,
+                               # and (inline) how identifications.tsv was kept
+                               "metamorpheus", "metamorpheus_identifications",
                                # an inline --dda search that fell back to its first pass (a
                                # job's dda_first_pass.py writes these here itself)
                                "report_used", "dda_first_pass")
@@ -1369,6 +1384,8 @@ CITE = {
     "directlfq": "directLFQ (Ammar et al. 2023, Mol Cell Proteomics 22:100581) "
                  "[10.1016/j.mcpro.2023.100581]",
     "radiant": "Radiant DIA (Just et al. 2026, bioRxiv) [10.64898/2026.04.29.721743]",
+    "metamorpheus": "MetaMorpheus (Solntsev et al. 2018, J Proteome Res 17:1844-1851) "
+                    "[10.1021/acs.jproteome.7b00873]",
 }
 PLACEHOLDER_Q = ("The report's q-value columns are 0.0 placeholders, so the DE's q-value filter "
                  "keeps every row")
@@ -4249,6 +4266,458 @@ def run_fragpipe(cmd, bundle, params, files, fasta, out, threads, sbatch, queue=
     return {"engine": "fragpipe", "report": report, "ran": True, **said}
 
 
+# ----------------------------------------------------------- MetaMorpheus -----
+# MetaMorpheus (Solntsev et al. 2018), DDA, identifications only: the Core's container on HIVE
+# (resolve_defaults.METAMORPHEUS_PIN) and a search-task TOML (the validated one ships in
+# presets/metamorpheus/; resolve_defaults.py --engine metamorpheus copies it). No quantities, so
+# no report.parquet and no DE: the search's quantification record is sage_lfq_check's
+# not_applicable() (the file run_de.R asks the gate about), as for FragPipe without LFQ. Never
+# staged for FRAN (METAMORPHEUS_FRAN).
+METAMORPHEUS_TASK_RUN = "metamorpheus_task.toml"      # the copy the job runs (threads set)
+METAMORPHEUS_MODS_DIR = "metamorpheus_mods"           # the custom mod files the job installs
+METAMORPHEUS_LOG = "metamorpheus.log"
+METAMORPHEUS_RUN_DIR = "run"                          # MetaMorpheus -o: run/Task1SearchTask/...
+METAMORPHEUS_IDS_RECORD = "metamorpheus_identifications.json"
+METAMORPHEUS_TABLES = ("AllPSMs.psmtsv", "AllPeptides.psmtsv")
+METAMORPHEUS_FRAN = ("never staged for FRAN: FRAN's corpus is a DIA, quantified corpus and has no "
+                     "MetaMorpheus adapter (fran_deposit.py UNSUPPORTED), so this route sets "
+                     "--no-fran itself")
+METAMORPHEUS_APP_WHY = (
+    "MetaMorpheus writes into its own folder every time it starts (Data/CustomCrosslinkers.tsv; "
+    "settings.toml, where --acceptThermoLicence records the agreement), and an Apptainer image is "
+    "read-only: run from the image it aborts with 'Read-only file system' (HIVE job 25758490). "
+    "It also writes a DatabaseIndex/ folder beside the database it is given (job 25758650 failed "
+    "on a read-only database folder). The job copies the image's own app folder and the database "
+    "to node-local $TMPDIR, adds the custom modification files, runs that copy inside the same "
+    "image, and deletes both at the end: nothing is written beside the user's database.")
+METAMORPHEUS_LICENCE = (
+    "--acceptThermoLicence is passed: MetaMorpheus needs the Thermo RawFileReader licence agreed "
+    "to read Thermo .raw files, and this flag agrees to it non-interactively for the run (it is "
+    "printed in the search log)")
+METAMORPHEUS_IDS_Q = 0.01
+# MetaMorpheus' own "target PSMs / peptides with q-value <= 0.01" (results.txt) count rows with
+# BOTH QValue and QValue Notch (its q-value within the precursor mass-difference notch, here 0 or
+# +1.0029 Da) at or below 0.01: on HIVE 2026-11-16 (job 25758676) that rule gives exactly its
+# 1,711 PSMs and 438 peptides, QValue alone 1,811 and 464. So the table uses both.
+METAMORPHEUS_Q_COLUMNS = ("QValue", "QValue Notch")
+METAMORPHEUS_IDS_RULE = (
+    f"a target PSM (Decoy/Contaminant/Target without D) with MetaMorpheus' QValue and QValue Notch "
+    f"<= {METAMORPHEUS_IDS_Q:g} (its own 1% rule, results.txt), whose peptide (Full Sequence) "
+    f"passes the same rule in AllPeptides.psmtsv")
+METAMORPHEUS_IDS_METHODS = (
+    f"Identifications were MetaMorpheus's own at {METAMORPHEUS_IDS_Q * 100:g}% FDR over all runs "
+    f"together (target-decoy, reversed decoys; q-values overall and within each precursor "
+    f"mass-difference notch), listed per run: a target peptide-spectrum match with q-value <= "
+    f"{METAMORPHEUS_IDS_Q:g} whose modified peptide also passed MetaMorpheus' peptide-level "
+    f"q-value <= {METAMORPHEUS_IDS_Q:g}. No protein-level filter was applied.")
+METAMORPHEUS_IDS_COLUMNS = ("run", "peptide", "base_sequence", "charge", "proteins",
+                            "psm_q", "peptide_q", "pep_q", "target_type")
+
+
+def _mm_defaults():
+    import resolve_defaults
+    return resolve_defaults
+
+
+def metamorpheus_mod_files():
+    """Every custom modification file the skill ships (presets/metamorpheus/Mods/*.txt): all of
+    them are installed into the run's copy of the app, as the validated search had them."""
+    d = os.path.join(_mm_defaults().METAMORPHEUS_PRESET_DIR, "Mods")
+    return sorted(glob.glob(os.path.join(d, "*.txt")))
+
+
+def metamorpheus_sif(cmd):
+    """tools.json `metamorpheus` is the image (acquire_tools.sh acquire_metamorpheus): its path."""
+    return os.path.abspath(cmd.split()[-1]) if isinstance(cmd, str) and cmd.strip() else None
+
+
+def _mm_pinned(sif):
+    return os.path.basename(sif or "") == os.path.basename(_mm_defaults().METAMORPHEUS_PIN["sif"])
+
+
+def metamorpheus_container_record(sif):
+    pin = _mm_defaults().METAMORPHEUS_PIN
+    if _mm_pinned(sif):
+        return {"sif": sif, "image": pin["image"], "tag": pin["tag"], "version": pin["version"],
+                "docker_base_digest": pin["docker_base_digest"], "sif_sha256": pin["sif_sha256"],
+                "app_dir": pin["app_dir"], "build": pin["build"], "runtime": pin["runtime"],
+                "license": pin["license"],
+                "source_commit": pin["source_commit"], "source_tag": pin["source_tag"],
+                "version_note": ("1.1.12 is the Docker Hub tag the image was built from; the "
+                                 f"binary reports '{pin['build']}' (results.txt says only "
+                                 "'Not a release version'), and that commit is the one the "
+                                 "GitHub tag 1.1.12 names"),
+                "verified": "sha256 checked by the job before the search (it stops on a mismatch)"}
+    return {"sif": sif, "version": None, "sif_sha256": None,
+            "verified": "not checked: not the Core's pinned image, so its version is not known"}
+
+
+def refuse_metamorpheus(bundle, params, files, fasta, out, cmd):
+    """Everything that stops a MetaMorpheus search, before anything is written -> the plan
+    (the task's settings, the custom mod files, the image)."""
+    import metamorpheus_params as mmp
+    stop = "[run_search] REFUSED -- nothing was written or submitted."
+    acq = (bundle.get("acquisition") or "").upper()
+    if acq != "DDA":
+        sys.exit(f"{stop} MetaMorpheus is wired for DDA identifications only, and the bundle says "
+                 f"{acq or 'no acquisition'}. Search DIA with diann (or fragpipe / radiant).")
+    sif = metamorpheus_sif(cmd)
+    if not sif or not sif.endswith(".sif") or not os.path.isfile(sif):
+        sys.exit(f"{stop} tools.json's metamorpheus entry ({cmd!r}) is not an Apptainer image on "
+                 f"disk. On HIVE the Core's is {_mm_defaults().METAMORPHEUS_PIN['sif']}: re-run "
+                 f"acquire_tools.sh hpc to write it into tools.json.")
+    if not params or not params.lower().endswith(mmp.TASK_SUFFIX) or not os.path.isfile(params):
+        sys.exit(f"{stop} --params must be a MetaMorpheus search-task .toml (resolve_defaults.py "
+                 f"--engine metamorpheus writes the validated one as wf/metamorpheus.toml); got "
+                 f"{params}.")
+    try:
+        task = mmp.read_task(params)
+    except OSError as e:
+        sys.exit(f"{stop} {params} could not be read ({e}).")
+    mods = metamorpheus_mod_files()
+    bad = mmp.problems(task, mods)
+    if bad:
+        sys.exit(f"{stop} {params}: " + "; ".join(bad) + ".")
+    wrong = [f for f in files if not f.rstrip("/").lower().endswith(mmp.SPECTRA_SUFFIXES)]
+    if wrong:
+        dotd = [f for f in wrong if f.rstrip("/").lower().endswith(".d")]
+        sys.exit(f"{stop} MetaMorpheus 1.1.12 reads .raw, .mzML, .mgf and ms2.msalign spectra "
+                 f"(its --help); not {', '.join(wrong[:5])}{' ...' if len(wrong) > 5 else ''}."
+                 + (" A Bruker .d must be converted to mzML first, or searched with sage." if dotd
+                    else ""))
+    for p in [os.path.dirname(f) for f in files] + [out]:
+        if ":" in p or "," in p:
+            sys.exit(f"{stop} the folder {p} holds ':' or ',', which an apptainer --bind cannot "
+                     f"carry. Search from a folder whose path has neither (a link is enough).")
+    if os.path.lexists(os.path.join(out, METAMORPHEUS_RUN_DIR)):
+        sys.exit(f"{stop} {os.path.join(out, METAMORPHEUS_RUN_DIR)} is there already, from an "
+                 f"earlier MetaMorpheus search; MetaMorpheus would write its tables beside that "
+                 f"one's. Move it away, or search into a different --out.")
+    st = mmp.summary(task)
+    notes = []
+    if str(st.get("label_free_quantification")).lower() == "true":
+        notes.append("the task TOML turns on MetaMorpheus' label-free quantification "
+                     "(DoLabelFreeQuantification = true): its FlashLFQ tables are written but "
+                     "not read -- this route records identifications only, and no DE runs")
+    return {"sif": sif, "task": task, "settings": st, "mods": mods, "notes": notes}
+
+
+def metamorpheus_validated(params):
+    """Which shipped preset the given task TOML is, by md5, or None."""
+    import metamorpheus_params as mmp
+    got = mmp.md5(params)
+    for name, pre in _mm_defaults().METAMORPHEUS_PRESETS.items():
+        if pre["md5"] == got:
+            return name, got
+    return None, got
+
+
+def metamorpheus_binds(files, fasta, out):
+    """(dir, mode) apptainer binds: each input's folder and its real folder read-only; the search
+    folder read-write. Parents first, a folder bound once (rw wins). The database is not bound:
+    the job searches a node-local copy of it (MetaMorpheus writes DatabaseIndex/ beside it)."""
+    want = {}
+    for f in list(files):
+        for d in (os.path.dirname(os.path.abspath(f)), os.path.dirname(os.path.realpath(f))):
+            want.setdefault(d, ":ro")
+    want[os.path.abspath(out)] = ""
+    return sorted(want.items(), key=lambda b: (b[0].rstrip("/").count("/"), b[0]))
+
+
+def metamorpheus_job_lines(sif, files, fasta, out, task_run, mods_dir):
+    """The job's lines: apptainer, the image's sha256, the app copy, the search, the check that it
+    wrote its tables, the identifications table. `set -euo pipefail` is emit_sbatch's."""
+    q = shlex.quote
+    pin = _mm_defaults().METAMORPHEUS_PIN
+    run_dir = os.path.join(out, METAMORPHEUS_RUN_DIR)
+    binds = metamorpheus_binds(files, fasta, out)
+    bind_args = " ".join(f"--bind {q(d + ':' + d + m)}" for d, m in binds)
+    # modules.sh reads unset variables (MANPATH ...), so -u is off around it
+    lines = ["command -v apptainer >/dev/null 2>&1 || "
+             "{ set +u; source /etc/profile.d/modules.sh; module load apptainer; set -u; }"]
+    if _mm_pinned(sif):
+        fail = f"FAILED: the MetaMorpheus container {sif} does not match its pinned sha256"
+        lines.append(f"echo {q(pin['sif_sha256'] + '  ' + sif)} | sha256sum -c --quiet - "
+                     f"|| {{ echo {q(fail)} >&2; exit 1; }}")
+    app_src = pin["app_dir"]
+    skip = pin["app_skip"]
+    copy = (f'shopt -s dotglob; for f in {app_src}/*; do [ "${{f##*/}}" = {skip} ] || '
+            f'cp -r "$f" "$1"/; done')
+    db_name = os.path.basename(fasta)
+    if not re.fullmatch(r"[A-Za-z0-9._+-]+", db_name):
+        db_name = "search.fasta" if not db_name.lower().endswith(".gz") else "search.fasta.gz"
+    adapt = ("import sys; sys.path.insert(0, sys.argv[1]); import run_search; "
+             "run_search.adapt_metamorpheus_ids(sys.argv[2])")
+    lines += [
+        "# MetaMorpheus writes into its own folder and beside its database (DatabaseIndex/):",
+        "# a node-local copy of the image's app and of the database, deleted at the end",
+        'MM_TMP="$(mktemp -d "${TMPDIR:-/tmp}/metamorpheus.XXXXXX")"',
+        "trap 'rm -rf \"$MM_TMP\"' EXIT",
+        'MM_APP="$MM_TMP/app"; mkdir -p "$MM_APP" "$MM_TMP/db"',
+        f'cp {q(fasta)} "$MM_TMP/db/{db_name}"',
+        f'apptainer exec --bind "$MM_TMP" {q(sif)} bash -c {q(copy)} _ "$MM_APP"',
+        f'test -f "$MM_APP/CMD.dll" || {{ echo "FAILED: no CMD.dll in the copy of {app_src}" >&2; '
+        f'exit 1; }}',
+        f'for m in {q(mods_dir)}/*.txt; do [ ! -e "$MM_APP/Mods/${{m##*/}}" ] || '
+        f'{{ echo "FAILED: the image already has Mods/${{m##*/}}" >&2; exit 1; }}; '
+        f'cp "$m" "$MM_APP/Mods/"; done',
+        f"apptainer exec --cleanenv {bind_args} --bind \"$MM_TMP\" {q(sif)} "
+        f"dotnet \"$MM_APP/CMD.dll\" --acceptThermoLicence -t {q(task_run)} "
+        f"-d \"$MM_TMP/db/{db_name}\" "
+        f"-s {' '.join(q(f) for f in files)} -o {q(run_dir)} -v normal "
+        f"2>&1 | tee {q(os.path.join(out, METAMORPHEUS_LOG))}",
+        f'_psms="$(ls -1 {q(run_dir)}/*/AllPSMs.psmtsv 2>/dev/null | head -n1)"',
+        f'[ -s "$_psms" ] || {{ echo "FAILED: MetaMorpheus wrote no AllPSMs.psmtsv under '
+        f'{run_dir}" >&2; exit 1; }}',
+        _job_python(),
+        f'"$_py" -c {q(adapt)} {q(os.path.dirname(os.path.abspath(__file__)))} {q(out)}',
+    ]
+    return lines
+
+
+def metamorpheus_quantification_record():
+    return sage_lfq_check_mod().not_applicable(
+        engine="metamorpheus",
+        why="MetaMorpheus is run for identifications only (no label-free quantification is read)",
+        ran="MetaMorpheus ran for identifications only",
+        de_refusal=(f"REFUSED: this MetaMorpheus search is identifications only, so there is no "
+                    f"report.parquet and no DE. Its identifications are in {SAGE_IDS}. To "
+                    f"quantify, search with sage (quant.lfq true) or DIA-NN."))
+
+
+def run_metamorpheus(cmd, params, files, fasta, out, threads, sbatch, queue=None, plan=None):
+    import metamorpheus_params as mmp
+    plan = plan or {}
+    sif = plan.get("sif") or metamorpheus_sif(cmd)
+    os.makedirs(out, exist_ok=True)
+    # the copy the job runs: the given TOML with MaxThreadsToUsePerFile = the job's CPUs
+    with open(params, encoding="utf-8", newline="") as fh:
+        text, old = mmp.run_copy_text(fh.read(), threads)
+    task_run = os.path.join(out, METAMORPHEUS_TASK_RUN)
+    write_file(task_run, text, 0o644)
+    mods_dir = os.path.join(out, METAMORPHEUS_MODS_DIR)
+    os.makedirs(mods_dir, exist_ok=True)
+    mods = []
+    for m in plan.get("mods") or metamorpheus_mod_files():
+        dst = os.path.join(mods_dir, os.path.basename(m))
+        shutil.copyfile(m, dst)
+        mods.append({"file": m, "md5": mmp.md5(m), "installed_as": f"Mods/{os.path.basename(m)}",
+                     "defines": sorted(mmp.custom_mods_defined(m))})
+    # an earlier search's products in this folder are not this one's: renamed, never deleted
+    moved = []
+    for name in ("report.parquet", SAGE_IDS, METAMORPHEUS_IDS_RECORD):
+        try:
+            new = set_aside(os.path.join(out, name))
+        except ValueError as e:
+            sys.exit(f"[run_metamorpheus] {e}. Move it yourself, or search into a different "
+                     f"--out. Nothing was submitted.")
+        if new:
+            moved.append(new)
+    quant = metamorpheus_quantification_record()
+    try:
+        quant["written_to"] = sage_lfq_check_mod().record(out, quant)
+    except OSError as e:
+        sys.stderr.write(f"[run_metamorpheus] NOTE: could not write the quantification record "
+                         f"in {out}: {e}\n")
+    preset, given_md5 = metamorpheus_validated(params)
+    lines = metamorpheus_job_lines(sif, files, fasta, out, task_run, mods_dir)
+    said = {
+        "quantified": False, "quantification": quant,
+        "previous_artefacts_moved_to": moved or None,
+        "metamorpheus": {
+            "container": metamorpheus_container_record(sif),
+            "app": METAMORPHEUS_APP_WHY,
+            "thermo_licence": METAMORPHEUS_LICENCE,
+            "task_given": {"path": params, "md5": given_md5,
+                           "validated_preset": preset,
+                           "validated": (_mm_defaults().METAMORPHEUS_PRESETS[preset]["validated"]
+                                         if preset else None),
+                           "note": (None if preset else
+                                    "not one of the skill's validated task TOMLs (its md5 matches "
+                                    "none): the settings below are the user's")},
+            "task_run": {"path": task_run, "md5": mmp.md5(task_run),
+                         "changed": {mmp.THREADS_KEY: {"given": old, "run": str(int(threads)),
+                                                       "why": "the job's CPUs (--threads)"}}},
+            "settings": mmp.summary(mmp.read_task(task_run)),
+            "custom_mods": mods,
+            "database": {"given": fasta, "md5": mmp.md5(fasta),
+                         "searched_as": ("a node-local copy made by the job ($TMPDIR), so "
+                                         "MetaMorpheus' DatabaseIndex/ is not written beside it")},
+            "binds": [d + m for d, m in metamorpheus_binds(files, fasta, out)],
+            "output_dir": os.path.join(out, METAMORPHEUS_RUN_DIR),
+            "tables": list(METAMORPHEUS_TABLES),
+            "fran": METAMORPHEUS_FRAN,
+            "notes": plan.get("notes") or [],
+        },
+    }
+    if sbatch:
+        emit_sbatch(sbatch, "\n".join(lines), out, threads, job="metamorpheus_search",
+                    **(queue or {}))
+        return {"engine": "metamorpheus", "out": out, "submitted": sbatch, "ran": False, **said,
+                "note": (f"Identifications only: the job searches, checks that MetaMorpheus wrote "
+                         f"its tables under {METAMORPHEUS_RUN_DIR}/, and writes {SAGE_IDS} and "
+                         f"{METAMORPHEUS_IDS_RECORD} (run_search.py --adapt-only --engine "
+                         f"metamorpheus re-writes them). No report.parquet, so no DE.")}
+    script = os.path.join(out, "metamorpheus_inline.sh")
+    write_file(script, "set -euo pipefail\n" + "\n".join(lines) + "\n", 0o755)
+    sh(f"bash {shlex.quote(script)}")
+    return {"engine": "metamorpheus", "report": None, "ran": True, **said,
+            "identifications": os.path.join(out, SAGE_IDS),
+            "metamorpheus_identifications": _load_sage_record(out, METAMORPHEUS_IDS_RECORD)}
+
+
+def _mm_float(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def metamorpheus_tables(out):
+    """{name: path} of the one search task's AllPSMs / AllPeptides under <out>/run/*/."""
+    found = {}
+    for name in METAMORPHEUS_TABLES:
+        hits = sorted(glob.glob(os.path.join(out, METAMORPHEUS_RUN_DIR, "*", name)))
+        if len(hits) > 1:
+            sys.exit(f"[adapt] {len(hits)} {name} under {out}/{METAMORPHEUS_RUN_DIR}/ "
+                     f"({', '.join(hits)}): one search task per --out. Nothing was written.")
+        if hits:
+            found[name] = hits[0]
+    return found
+
+
+def metamorpheus_reported(out):
+    """MetaMorpheus' own totals from <out>/run/allResults.txt ('All target PSMs with q-value <=
+    0.01: N', per file too), for the record beside ours. {} when it is not there."""
+    path = os.path.join(out, METAMORPHEUS_RUN_DIR, "allResults.txt")
+    rep = {}
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                m = re.match(r"^(All|.+?) - Target (PSMs|peptides) with q-value <= ([0-9.]+): (\d+)",
+                             line.strip()) or re.match(
+                    r"^(All) target (PSMs|peptides) with q-value <= ([0-9.]+): (\d+)", line.strip())
+                if m:
+                    rep.setdefault(m.group(1), {})[m.group(2).lower()] = int(m.group(4))
+                m = re.match(r"^MetaMorpheus: version (.+)$", line.strip())
+                if m:
+                    rep["version_line"] = m.group(1)
+    except OSError:
+        return {}
+    return rep
+
+
+def adapt_metamorpheus_ids(out):
+    """MetaMorpheus AllPSMs.psmtsv + AllPeptides.psmtsv -> <out>/identifications.tsv and
+    <out>/metamorpheus_identifications.json (search_provenance.json `metamorpheus_identifications`).
+    Kept: METAMORPHEUS_IDS_RULE. One row per (run, Full Sequence, charge) at its best PSM q-value;
+    `run` is MetaMorpheus' File Name (the input's name without its extension), `proteins` its
+    Accession. No report.parquet: identifications only. -> the table's path."""
+    import csv
+    csv.field_size_limit(1 << 30)
+    tables = metamorpheus_tables(out)
+    if "AllPSMs.psmtsv" not in tables:
+        sys.exit(f"No AllPSMs.psmtsv under {os.path.join(out, METAMORPHEUS_RUN_DIR)}/*/; did the "
+                 f"MetaMorpheus search finish? (its log: {os.path.join(out, METAMORPHEUS_LOG)})")
+    if "AllPeptides.psmtsv" not in tables:
+        sys.exit(f"No AllPeptides.psmtsv beside {tables['AllPSMs.psmtsv']}: the peptide-level "
+                 f"filter cannot be applied. Nothing was written.")
+    need = ("File Name", "Full Sequence", "Base Sequence", "Precursor Charge", "Accession",
+            "PEP_QValue", "Decoy/Contaminant/Target") + METAMORPHEUS_Q_COLUMNS
+
+    def rows(path):
+        with open(path, newline="", encoding="utf-8", errors="replace") as fh:
+            r = csv.DictReader(fh, delimiter="\t")
+            missing = [c for c in need if c not in (r.fieldnames or [])]
+            if missing:
+                sys.exit(f"{path} has no {', '.join(missing)} column: not MetaMorpheus 1.1 "
+                         f"output. Nothing was written.")
+            yield from r
+
+    def q_of(r):
+        """the row's q for the rule: the larger of QValue and QValue Notch (None if unreadable)"""
+        qs = [_mm_float(r[c]) for c in METAMORPHEUS_Q_COLUMNS]
+        return None if None in qs else max(qs)
+
+    def is_decoy(dct):
+        return "D" in (dct or "").split("|")
+
+    qmax = METAMORPHEUS_IDS_Q
+    pep_q = {}
+    for r in rows(tables["AllPeptides.psmtsv"]):
+        q = q_of(r)
+        if not is_decoy(r["Decoy/Contaminant/Target"]) and q is not None and q <= qmax:
+            fs = r["Full Sequence"]
+            pep_q[fs] = min(q, pep_q.get(fs, q))
+    best, per_run, peptides = {}, {}, set()
+    for r in rows(tables["AllPSMs.psmtsv"]):
+        run = r["File Name"]
+        n = per_run.setdefault(run, {"psms": 0, "decoy_dropped": 0, "psm_q_dropped": 0,
+                                     "peptide_q_dropped": 0, "psms_kept": 0, "precursors": 0})
+        n["psms"] += 1
+        dct = r["Decoy/Contaminant/Target"]
+        if is_decoy(dct):
+            n["decoy_dropped"] += 1
+            continue
+        q = q_of(r)
+        if q is None or q > qmax:
+            n["psm_q_dropped"] += 1
+            continue
+        fs = r["Full Sequence"]
+        if fs not in pep_q:
+            n["peptide_q_dropped"] += 1
+            continue
+        n["psms_kept"] += 1
+        peptides.add(r["Base Sequence"])
+        key = (run, fs, r["Precursor Charge"])
+        row = (run, fs, r["Base Sequence"], r["Precursor Charge"], r["Accession"], q, pep_q[fs],
+               _mm_float(r["PEP_QValue"]), dct)
+        if key not in best:
+            n["precursors"] += 1
+        if key not in best or q < best[key][5]:
+            best[key] = row
+    rec = {"source": tables, "identifications": os.path.join(out, SAGE_IDS),
+           "columns": list(METAMORPHEUS_IDS_COLUMNS), "kept_rule": METAMORPHEUS_IDS_RULE,
+           "row_unit": "one row per run, modified peptide (Full Sequence) and charge",
+           "q_columns": list(METAMORPHEUS_Q_COLUMNS),
+           "psm_q_is": ("the larger of MetaMorpheus' QValue and QValue Notch (both must pass); "
+                        "q-values are over all runs together -- MetaMorpheus' per-file counts in "
+                        "results.txt come from its own per-file re-analysis and differ"),
+           "per_run": per_run, "quantified": False,
+           "methods_sentence": METAMORPHEUS_IDS_METHODS,
+           "metamorpheus_reported": metamorpheus_reported(out)}
+    if not best:
+        _sage_refuse_empty(out, SAGE_IDS, METAMORPHEUS_IDS_RECORD, "metamorpheus_identifications",
+                           dict(rec, identifications=None),
+                           f"no MetaMorpheus PSM is {METAMORPHEUS_IDS_RULE} (of "
+                           f"{sum(r['psms'] for r in per_run.values())} PSMs read), so this "
+                           f"search has no identifications to list")
+
+    def cell(v):
+        return "" if v is None else (f"{v:.6g}" if isinstance(v, float) else str(v))
+
+    path = os.path.join(out, SAGE_IDS)
+    with open_text(path) as fh:
+        w = csv.writer(fh, delimiter="\t", lineterminator="\n")
+        w.writerow(METAMORPHEUS_IDS_COLUMNS)
+        for key in sorted(best, key=lambda k: (k[0], k[1], k[2])):
+            w.writerow([cell(v) for v in best[key]])
+    rec["totals"] = {k: sum(r[k] for r in per_run.values())
+                     for k in ("psms", "decoy_dropped", "psm_q_dropped", "peptide_q_dropped",
+                               "psms_kept")}
+    rec["totals"].update(rows=len(best), precursors=len({k[1:] for k in best}),
+                         modified_peptides=len({k[1] for k in best}),
+                         peptides=len(peptides), peptides_peptide_q=len(pep_q))
+    try:
+        rec["written_to"] = sage_lfq_check_mod().write_record(
+            out, METAMORPHEUS_IDS_RECORD, "metamorpheus_identifications", rec)
+    except OSError as e:
+        sys.stderr.write(f"[adapt] NOTE: could not write {METAMORPHEUS_IDS_RECORD} in {out}: {e}\n")
+    print(f"  [adapt] MetaMorpheus identifications only -> {path} ({len(best)} rows, "
+          f"{len(peptides)} peptides, {len(per_run)} run(s)); no report.parquet")
+    return path
+
+
 def _written(out, names):
     """The names in `names` that no non-empty file of that name holds at depth <= 2 of `out`."""
     found = set()
@@ -5214,7 +5683,8 @@ def main():
     ap.add_argument("--threads", type=int, default=8,
                     help="CPUs for the search job(s); on the 5-step chain, the MOST an array task "
                          "gets -- each is sized to the queue's per-user cap (--threads-per-file)")
-    ap.add_argument("--engine", choices=["diann", "alphadia", "sage", "fragpipe", "radiant"])
+    ap.add_argument("--engine", choices=["diann", "alphadia", "sage", "fragpipe", "radiant",
+                                         "metamorpheus"])
     ap.add_argument("--library", help="Radiant: an existing DIA-NN .tsv spectral library. "
                                       "Omit and one is generated with DIA-NN's predictor.")
     ap.add_argument("--one-step", action="store_true",
@@ -5411,6 +5881,12 @@ def main():
         sys.exit(check_report_runs.names_stop(repeated_names, "run_search"))
 
     if a.adapt_only:
+        if engine == "metamorpheus":
+            # identifications only, always: the tables MetaMorpheus wrote under <out>/run/
+            ids = adapt_metamorpheus_ids(a.out)
+            print(json.dumps({"engine": "metamorpheus", "report": None, "identifications": ids,
+                              "quantified": False, "ran": False, "adapt_only": True}, indent=2))
+            return
         if engine == "sage" and not sage_lfq_enabled(a.params):
             # identifications only (quant.lfq false): no LFQ check and no report.parquet. The
             # record only after adapt_sage_ids: it refuses a quantified output, whose LFQ record
@@ -5448,6 +5924,14 @@ def main():
     if engine == "sage":
         refuse_sage_fragment_mismatch(bundle, a.params)
         refuse_sage_dotd_route(bundle, a.params, files)
+    if engine == "metamorpheus":
+        a.metamorpheus_plan = refuse_metamorpheus(bundle, a.params, files, a.fasta, a.out,
+                                                  tools.get("metamorpheus"))
+        # FRAN has no MetaMorpheus adapter: the jobs never stage it (METAMORPHEUS_FRAN)
+        if not a.no_fran:
+            sys.stderr.write(f"[run_search] NOTE: MetaMorpheus searches are {METAMORPHEUS_FRAN}."
+                             f"\n")
+        a.no_fran = True
     if engine == "fragpipe":
         refuse_fragpipe_contam_database(a.params, a.fasta)
         refuse_fragpipe_dashed(a.params, files, a.fasta, a.out, bundle.get("acquisition", ""))
@@ -5694,6 +6178,9 @@ def main():
                            queue=route_queue, mono=getattr(a, "fragpipe_mono", None),
                            space=getattr(a, "fragpipe_stage_space", None),
                            database=getattr(a, "fragpipe_database", None))
+    elif engine == "metamorpheus":
+        res = run_metamorpheus(cmd, a.params, files, a.fasta, a.out, a.threads, a.sbatch,
+                               queue=route_queue, plan=getattr(a, "metamorpheus_plan", None))
     elif engine == "radiant":
         # Takes the whole tools dict: it needs the container runtime + image to build
         # bind mounts, and DIA-NN to generate the spectral library.

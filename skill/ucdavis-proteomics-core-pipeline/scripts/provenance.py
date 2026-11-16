@@ -533,7 +533,8 @@ def analysis_section(sp, engine, de_ran, ids_only=False):
     route = _record_key(sp, "sage_input")
     if isinstance(route, dict) and route.get("methods_sentence"):
         lines.append(f"- How the raw files went in: {route['methods_sentence']}")
-    ids = next((x for x in (sp.get("sage_identifications"), sp.get("fragpipe_identifications"))
+    ids = next((x for x in (sp.get("sage_identifications"), sp.get("fragpipe_identifications"),
+                            sp.get("metamorpheus_identifications"))
                 if isinstance(x, dict)), None)
     if ids_only:
         lines.append("- Identifications only: the search did not quantify, so there is no "

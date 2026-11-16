@@ -193,7 +193,10 @@ ENGINE_REPORTS = {
 # Engines FRAN's corpus schema does not model. Skipping them is the honest outcome; inventing a
 # DIA row for a DDA search would put a wrong acquisition label on real data.
 UNSUPPORTED = {"sage": "Sage is DDA; the FRAN corpus is a DIA corpus",
-               "alphadia": "AlphaDIA output is not one of corpus_ingest.py's supported schemas"}
+               "alphadia": "AlphaDIA output is not one of corpus_ingest.py's supported schemas",
+               "metamorpheus": ("MetaMorpheus is run for DDA identifications only (run_search.py "
+                                "--engine metamorpheus); the FRAN corpus is a DIA, quantified "
+                                "corpus")}
 
 # Markers that IDENTIFY an engine, in order — distinct from ENGINE_REPORTS, which says where that
 # engine's report lives. The two cannot be the same list: FragPipe's report is also called

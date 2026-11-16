@@ -105,7 +105,9 @@ CATALOG = [
      "a FragPipe workflow that runs no quantification). Sage's has one row per run, modified "
      "peptide and charge (count peptides, not rows); FragPipe's one row per run and modified "
      "peptide, its charges listed together. There are no quantities, so no DE; how it was "
-     "filtered is in sage_identifications.json or fragpipe_identifications.json beside it."),
+     "filtered is in sage_identifications.json, fragpipe_identifications.json or "
+     "metamorpheus_identifications.json beside it (MetaMorpheus': one row per run, modified "
+     "peptide and charge)."),
     (r"^sage_identifications\.json$", "Search output",
      "How a Sage identifications-only search's identifications.tsv was filtered: the rule "
      "(rank-1 target PSMs at 1% spectrum- and peptide-level q, over all runs together), and what "
@@ -117,6 +119,11 @@ CATALOG = [
      "How a FragPipe identifications-only search's identifications.tsv was built: the "
      "Philosopher filter it ran, the tables it was read from, what was kept per run, and why "
      "there is no quantification."),
+    (r"^metamorpheus_identifications\.json$", "Search output",
+     "How a MetaMorpheus search's identifications.tsv was filtered: target PSMs passing "
+     "MetaMorpheus' own 1% rule (QValue and QValue Notch <= 0.01, over all runs together) whose "
+     "peptide passes it too, what was kept per run, and MetaMorpheus' own totals from "
+     "allResults.txt. MetaMorpheus is run for identifications only: no quantities, no DE."),
 
     (r"^qc_pvalue_panel\.png$", "Figures",
      "QC panel: the raw p-value distribution of every contrast as small multiples "

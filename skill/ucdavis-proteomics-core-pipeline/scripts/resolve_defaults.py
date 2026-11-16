@@ -65,7 +65,68 @@ ENGINE_VERSIONS = {
     "sage": "0.14.7",
     "fragpipe": "24.0",
     "radiant": "2.3.3",   # container release, NOT the Radiant DIA version inside
+    # The Docker Hub tag of the Core's image (METAMORPHEUS_PIN). The binary inside it does not
+    # call itself 1.1.12: `dotnet CMD.dll --version` prints "CMD 1.0.0+2591d745..." and its
+    # results.txt says "MetaMorpheus: version Not a release version" (HIVE, 2026-11-16).
+    "metamorpheus": "1.1.12",
 }
+
+# The Core's MetaMorpheus container (run_search.py --engine metamorpheus). Built on HIVE
+# 2026-11-04 from docker://smithchemwisc/metamorpheus:1.1.12 (MIT); its labels and sha256 were read
+# on HIVE 2026-11-16 (job 25758472). The app is /MetaMorpheus/CMD.dll on the image's .NET 10.0.12.
+# MetaMorpheus WRITES INTO ITS OWN FOLDER on every start (Data/CustomCrosslinkers.tsv,
+# settings.toml where --acceptThermoLicence records the agreement), so run read-only from the
+# image it aborts ("Read-only file system: /MetaMorpheus/Data/CustomCrosslinkers.tsv.tmp", job
+# 25758490): the job copies /MetaMorpheus (not its duplicate publish/ folder) to node-local
+# $TMPDIR and runs that copy, inside the same image. The sif's sha256 is checked by the job first.
+METAMORPHEUS_PIN = {
+    "version": "1.1.12",
+    "image": "smithchemwisc/metamorpheus",
+    "tag": "1.1.12",
+    "docker_base_digest": "sha256:33ac82b46374d6b5616fcd218f3fd4f0c5f1a574e28a04533d51a5431e5ab92d",
+    "sif": "/quobyte/proteomics-grp/apptainers/metamorpheus_1.1.12.sif",
+    "sif_sha256": "221d0d78237860c2422ff099317c476c48cfe7086bd9cd868a2cd64730a8327c",
+    "app_dir": "/MetaMorpheus",
+    "app_skip": "publish",
+    # what `dotnet CMD.dll --version` prints; results.txt says only "Not a release version".
+    # The commit IS the GitHub tag 1.1.12 (git/ref/tags/1.1.12 -> 2591d745..., checked
+    # 2026-11-16), so the version rests on the source, not only on the Docker tag.
+    "build": "CMD 1.0.0+2591d74550a78618dbb7198b46591e45fc86e8cc",
+    "source_commit": "2591d74550a78618dbb7198b46591e45fc86e8cc",
+    "source_tag": "https://github.com/smith-chem-wisc/MetaMorpheus/releases/tag/1.1.12",
+    "runtime": ".NET 10.0.12 (in the image)",
+    "license": "MIT",
+}
+
+# MetaMorpheus is configured by a whole search-task TOML, shipped in presets/metamorpheus/ (not
+# generated: the one there is the file a comparison validated). Each preset names the custom
+# modification files its TOML needs: MetaMorpheus 1.1.12's own Mods/ has no peptide-N-terminal
+# pyroGlu, so the validated search defined it (Unimod 28 / 27) in its own copy of the app; the job
+# installs these into the run's copy of the app (run_search.py metamorpheus_job_lines).
+METAMORPHEUS_PRESET_DIR = os.path.join(os.path.dirname(HERE), "presets", "metamorpheus")
+METAMORPHEUS_PRESETS = {
+    "nonspecific_peptidomics": {
+        "file": "NonSpecific_Peptidomics_HCD.toml",
+        "md5": "7f5d2d874b0cb577afe5c8d4f901b284",
+        "mods": ["Mods/CustomPyroGluPeptideNterm.txt"],
+        "description": ("non-specific digest (peptidomics), 7-25 residues, precursor +/-10 ppm, "
+                        "product +/-20 ppm (HCD, Orbitrap MS2), variable Oxidation (M), "
+                        "N-terminal acetylation (any residue), peptide-N-terminal pyroGlu from Q "
+                        "and E; reverse decoys; PSM q-value 0.01; no LFQ, no MBR, no parsimony"),
+        "validated": {
+            "date": "2026-11-04",
+            "by": "UC Davis Proteomics Core",
+            "dataset": ("a Core submission's 4-engine comparison: Orbitrap Exploris 480 HCD "
+                        "DDA, non-specific milk peptidomics, harmonised with the FragPipe and "
+                        "Sage settings of the same comparison"),
+            "notes": ("Run as MM_SearchTask_common.toml in that 2026-11-04 four-engine session "
+                      "(md5 7f5d2d874b0cb577afe5c8d4f901b284, the same bytes as this file). "
+                      "Validated for that data type only: Orbitrap HCD MS2 read in the Orbitrap, "
+                      "non-specific digest."),
+        },
+    },
+}
+METAMORPHEUS_DEFAULT_PRESET = "nonspecific_peptidomics"
 
 # Pinned Skyline, for the peak check after DE (skyline_peaks.py; references/skyline.md). Not a
 # search engine: SkylineCmd runs headless under Wine in ProteoWizard's vendor-reader container.
@@ -103,7 +164,10 @@ ROUTES = {
     ("DDA", "other"): ["sage"],
 }
 
-DE_METHOD = {"diann": "dpc", "fragpipe": "dpc", "radiant": "dpc", "sage": "maxlfq"}
+DE_METHOD = {"diann": "dpc", "fragpipe": "dpc", "radiant": "dpc", "sage": "maxlfq",
+             # identifications only: no quantities, so no DE method (run_de.R is refused by the
+             # search's not_applicable record, sage_lfq_check.not_applicable)
+             "metamorpheus": None}
 
 # What each engine does with an Orbitrap mass-accuracy level that has no documented DIA-NN value
 # (ms1_ppm/ms2_ppm None: resolution unknown, or outside the README's 30k-240k table). Appended to
@@ -118,6 +182,7 @@ UNDOCUMENTED_LEVEL = {
     "fragpipe": "FragPipe: its vendor preset tolerances are used (the DIA-NN table is not "
                 "applied to MSFragger)",
     "sage": "Sage: its own derived tolerances are used (estimate_params.py --engine sage)",
+    "metamorpheus": "MetaMorpheus: the tolerances of its validated task TOML are used",
 }
 
 # The same, for an MS2 read in the ion trap (class orbitrap_iontrap): there is no Orbitrap MS2
@@ -131,6 +196,7 @@ ION_TRAP_MS2_ROUTE = {
     "fragpipe": "FragPipe: its vendor Thermo preset tolerances are used",
     "sage": f"Sage: fragment tolerance +/-{SAGE_ITMS_FRAGMENT_DA} Da, Sage's documented low-res "
             "MS/MS setting (estimate_params.py --engine sage --ms2-analyzer ITMS)",
+    "metamorpheus": "MetaMorpheus: refused -- its validated task TOML is for Orbitrap MS2",
 }
 
 # Engines configured by a whole config file rather than by flags. These are
@@ -144,6 +210,54 @@ def family(cls):
     if cls.startswith("orbitrap"):
         return "orbitrap"
     return "other"
+
+
+def metamorpheus_refusal(engine, acq, cls, label, args):
+    """Why a MetaMorpheus search of this data type is not run with the shipped TOML, or None.
+    MetaMorpheus is DDA here; the validated TOML reads an Orbitrap MS2 (+/-20 ppm product); its
+    tolerances are the validated file's, so --ms1-ppm/--ms2-ppm are not applied to it."""
+    if acq != "DDA":
+        return ("MetaMorpheus is wired for DDA only (identifications); this is "
+                f"{acq}. Search DIA with diann (or fragpipe / radiant).")
+    if cls == "orbitrap_iontrap":
+        return ("the validated MetaMorpheus task TOML matches fragments at +/-20 ppm, an "
+                "Orbitrap MS2; this data's MS2 was read in the ion trap. Search it with sage "
+                "(estimate_params.py --engine sage --ms2-analyzer ITMS), or give run_search.py a "
+                "task TOML of your own with ProductMassTolerance in Da (--params).")
+    if args.ms1_ppm is not None or args.ms2_ppm is not None:
+        return ("--ms1-ppm/--ms2-ppm are not applied to a MetaMorpheus task TOML: its tolerances "
+                "are the validated file's. Copy "
+                f"{os.path.join(METAMORPHEUS_PRESET_DIR, METAMORPHEUS_PRESETS[args.metamorpheus_preset]['file'])}"
+                ", edit PrecursorMassTolerance / ProductMassTolerance, and give run_search.py "
+                "that copy as --params (it is then recorded as not the validated file).")
+    return None
+
+
+def install_metamorpheus_preset(name, dest):
+    """Copy the shipped, validated task TOML into `dest` as metamorpheus.toml -- refused if its
+    bytes are not the validated md5 -- and return (its path, the manifest record)."""
+    import shutil
+    import metamorpheus_params as mmp
+    pre = METAMORPHEUS_PRESETS[name]
+    src = os.path.join(METAMORPHEUS_PRESET_DIR, pre["file"])
+    got = mmp.md5(src)
+    if got != pre["md5"]:
+        sys.exit(f"resolve_defaults: REFUSED -- {src} is not the validated MetaMorpheus task "
+                 f"TOML (md5 {got}, validated {pre['md5']}). The skill's copy was changed; "
+                 f"restore it from the skill's git history.")
+    path = os.path.join(dest, "metamorpheus.toml")
+    shutil.copyfile(src, path)
+    task = mmp.read_task(path)
+    st = mmp.summary(task)
+    return path, {
+        "preset": name, "shipped_file": src, "md5": got, "description": pre["description"],
+        "settings": st,
+        "ms1_ppm": mmp.tolerance_ppm(st["precursor_tolerance"]),
+        "ms2_ppm": mmp.tolerance_ppm(st["product_tolerance"]),
+        "custom_mods": [os.path.join(METAMORPHEUS_PRESET_DIR, m) for m in pre["mods"]],
+        "validated": pre["validated"],
+        "container": METAMORPHEUS_PIN,
+    }
 
 
 def load_env(path):
@@ -183,6 +297,11 @@ def main():
     ap.add_argument("--env", default=None, help="detect_env.sh JSON, to flag engines that "
                                                 "cannot run on this machine")
     ap.add_argument("--dest", default="./wf")
+    ap.add_argument("--metamorpheus-preset", default=METAMORPHEUS_DEFAULT_PRESET,
+                    choices=sorted(METAMORPHEUS_PRESETS),
+                    help="--engine metamorpheus: which shipped, validated task TOML to search with "
+                         f"(default {METAMORPHEUS_DEFAULT_PRESET}: "
+                         f"{METAMORPHEUS_PRESETS[METAMORPHEUS_DEFAULT_PRESET]['description']})")
     args = ap.parse_args()
 
     acq = args.acquisition.upper()
@@ -224,6 +343,11 @@ def main():
         if info.get("note"):
             notes.append(f"{engine}: {info['note']}")
 
+    # MetaMorpheus: refused here, before anything is written, for what its validated TOML is not
+    mm = metamorpheus_refusal(engine, acq, cls, label, args) if engine == "metamorpheus" else None
+    if mm:
+        sys.exit(f"resolve_defaults: REFUSED -- nothing was written. {mm}")
+
     dest = os.path.abspath(args.dest)
     os.makedirs(dest, exist_ok=True)
 
@@ -245,6 +369,18 @@ def main():
         if r.returncode != 0:
             sys.exit(f"resolve_defaults: preset generation failed:\n{r.stderr.strip()}")
         preset_prov = json.loads(r.stdout)
+
+    mm_preset = None
+    if engine == "metamorpheus":
+        params_file, mm_preset = install_metamorpheus_preset(args.metamorpheus_preset, dest)
+        ms1 = mm_preset["ms1_ppm"]
+        ms2 = mm_preset["ms2_ppm"]
+        src = (f"the validated MetaMorpheus task TOML ({mm_preset['preset']}): precursor "
+               f"{mm_preset['settings']['precursor_tolerance']}, product "
+               f"{mm_preset['settings']['product_tolerance']}")
+        notes.append(f"metamorpheus: identifications only (no quantification, no DE); the task "
+                     f"TOML {mm_preset['preset']} was validated on "
+                     f"{mm_preset['validated']['dataset']}")
 
     # A user's --ms1-ppm/--ms2-ppm REPLACES that level in the manifest below, so ppm_source has
     # to account for BOTH flags. Gated on --ms1-ppm alone, an override that sets only --ms2-ppm
@@ -303,7 +439,7 @@ def main():
                   "add_contaminants": True},
         "de": {"method": DE_METHOD[engine], "q_cutoff": 0.01, "logfc": 1.0, "adjp": 0.05},
         "search": {
-            "estimate_params": engine not in PRESET_ENGINES,
+            "estimate_params": engine not in PRESET_ENGINES and engine != "metamorpheus",
             "params_file": params_file,
             "ms1_ppm": eff_ms1,
             "ms2_ppm": eff_ms2,
@@ -314,13 +450,16 @@ def main():
                                          staff_record_name(os.path.join(dest, MANIFEST))
                                          if given else None, role=role),
             "preset_provenance": preset_prov,
+            # --engine metamorpheus: the shipped task TOML copied, its md5, settings and the
+            # custom modification files the job installs (install_metamorpheus_preset)
+            "metamorpheus_preset": mm_preset,
         },
-        "validated": {
+        "validated": (dict(mm_preset["validated"]) if mm_preset else {
             "date": None, "by": None, "dataset": None,
             "notes": ("Parameters are this skill's data-type defaults "
                       f"(resolve_defaults.py {DEFAULTS_VERSION}), not a site validation run. "
                       "They are reproducible from the skill version alone."),
-        },
+        }),
         "registry": {"source": "local skill defaults",
                      "defaults_version": DEFAULTS_VERSION,
                      "note": "no remote registry; parameters ship with the skill"},

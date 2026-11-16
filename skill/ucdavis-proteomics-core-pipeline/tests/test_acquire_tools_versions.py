@@ -135,7 +135,10 @@ class AcquireHarness(unittest.TestCase):
         env = {"PATH": f"{self.bin}:{self.sys}", "HOME": self.d, "FIXTURES": self.fix,
                "DIANN_HIVE_DIR": self.hive, "PIN_ENGINE": pin_engine,
                "PIN_VERSION": pin_version,
-               "RADIANT_HIVE_DIRS": f"{self.radiant_dirs[0]}:{self.radiant_dirs[1]}"}
+               "RADIANT_HIVE_DIRS": f"{self.radiant_dirs[0]}:{self.radiant_dirs[1]}",
+               # the HIVE MetaMorpheus image, mocked the same way (absent unless a test makes it)
+               "METAMORPHEUS_SIF": os.path.join(self.radiant_dirs[0],
+                                                "metamorpheus_1.1.12.sif")}
         env.update(extra_env or {})
         r = subprocess.run([self.bash, ACQUIRE, platform_class, self.root],
                            capture_output=True, text=True, env=env, timeout=120)
@@ -584,6 +587,42 @@ class HiveRadiantSifTests(AcquireHarness):
         t = self.acquire("hpc", extra_env={"ACQUIRE_RADIANT": "1", "RADIANT_HIVE_DIRS": dirs})
         self.assertEqual(t["radiant_image"], p)
         self.assertEqual(t["versions"]["radiant"], "2.3.3")
+
+
+class MetaMorpheusTests(AcquireHarness):
+    """The Core's MetaMorpheus image on HIVE: tools.json `metamorpheus` is its path, and the
+    version is what its file name carries (metamorpheus_1.1.12.sif), never a request."""
+
+    def sif(self):
+        p = os.path.join(self.radiant_dirs[0], "metamorpheus_1.1.12.sif")
+        with open(p, "w") as fh:
+            fh.write("not really an image\n")
+        return p
+
+    def test_the_image_is_recorded_with_the_version_its_name_carries(self):
+        p = self.sif()
+        t = self.acquire("hpc")
+        self.assertEqual(t["metamorpheus"], p)
+        self.assertEqual(t["versions"]["metamorpheus"], "1.1.12")
+
+    def test_no_image_records_an_empty_version_not_a_missing_key(self):
+        t = self.acquire("hpc")
+        self.assertIsNone(t["metamorpheus"])
+        self.assertEqual(t["versions"]["metamorpheus"], "")
+        self.assertTrue(any("MetaMorpheus: no image" in n for n in t["notes"]), t["notes"])
+
+    def test_a_pin_the_image_does_not_carry_is_not_substituted(self):
+        self.sif()
+        t = self.acquire("hpc", pin_engine="metamorpheus", pin_version="1.1.13")
+        self.assertIsNone(t["metamorpheus"])
+        self.assertEqual(t["versions"]["metamorpheus"], "")
+        self.assertTrue(any("NOT substituting" in n for n in t["notes"]), t["notes"])
+
+    def test_the_matching_pin_is_recorded(self):
+        p = self.sif()
+        t = self.acquire("hpc", pin_engine="metamorpheus", pin_version="1.1.12")
+        self.assertEqual(t["metamorpheus"], p)
+        self.assertEqual(t["versions"]["metamorpheus"], "1.1.12")
 
 
 if __name__ == "__main__":

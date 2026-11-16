@@ -1787,6 +1787,11 @@ python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \
   without the flag. `search_provenance.json` records `keratin_sample`, which `run_de.R` reads.
 - DIA → whichever of the three routes the user chose in step 4a (**default DIA-NN**);
   DDA → Sage; FragPipe/Radiant when the bundle names them or the user asks.
+- **MetaMorpheus (DDA, identifications only, HIVE).** `--engine metamorpheus` with the
+  `wf/metamorpheus.toml` that `resolve_defaults.py --engine metamorpheus` ships (the
+  validated non-specific peptidomics TOML). Opt-in only — a second DDA engine for
+  identifications (e.g. a known-variant check), never a quantifying route: no DE, no FRAN.
+  No `.d`; Orbitrap HCD only. Details: `references/search-engines.md` "MetaMorpheus".
 - **Radiant + Fulcrum (Thermo Orbitrap DIA).** Add `--engine radiant`:
   ```
   python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \

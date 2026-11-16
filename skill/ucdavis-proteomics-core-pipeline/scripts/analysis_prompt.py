@@ -250,7 +250,8 @@ def no_de_body(L, a, session, engine, eng_ver, eng_note, acq, embed, failed, fig
     import dda_first_pass
     first_pass = dda_first_pass.caution(sp, methods=True)
     ids_rec = None
-    for name in ("sage_identifications.json", "fragpipe_identifications.json"):
+    for name in ("sage_identifications.json", "fragpipe_identifications.json",
+                 "metamorpheus_identifications.json"):
         if folder and os.path.isfile(os.path.join(folder, name)):
             ids_rec = (name, load_record(os.path.join(folder, name)))
             break
@@ -320,6 +321,9 @@ def no_de_body(L, a, session, engine, eng_ver, eng_note, acq, embed, failed, fig
                  "what was kept and dropped per run, and the totals"),
                 ("fragpipe_identifications.json", "how the identifications were built: the "
                  "Philosopher filter, the tables read, what was kept per run"),
+                ("metamorpheus_identifications.json", "how a MetaMorpheus search's "
+                 "identifications were filtered: its own 1% q-value rule, what was kept per run, "
+                 "and MetaMorpheus' own totals (results.txt) beside them"),
                 ("report.parquet", "the search's precursor report: one row per precursor and run "
                  "(Run, Protein.Group, Q.Value, PG.Q.Value, and the precursor quantities)"),
                 ("report.stats.tsv", "the engine's per-run statistics"),

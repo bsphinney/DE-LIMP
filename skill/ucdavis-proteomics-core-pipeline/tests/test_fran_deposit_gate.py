@@ -152,6 +152,18 @@ class GateTests(unittest.TestCase):
                 json.dump({"engine": "sage", "version": "0.14.7"}, fh)
             self.assertEqual(fd.check(Args(out))["reason"], "engine_unsupported")
 
+    def test_metamorpheus_is_skipped_not_mislabelled(self):
+        """run_search.py --engine metamorpheus never stages (it sets --no-fran); a stage run by
+        hand on its folder is refused with the reason, not treated as an unknown engine."""
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "s")
+            os.makedirs(out)
+            with open(os.path.join(out, "search_provenance.json"), "w") as fh:
+                json.dump({"engine": "metamorpheus", "version": "1.1.12"}, fh)
+            r = fd.check(Args(out))
+            self.assertEqual(r["reason"], "engine_unsupported")
+            self.assertIn("identifications only", r["detail"])
+
 
 class EngineDetectionTests(unittest.TestCase):
     """All three DIA routes must be recognised, and told apart from each other."""

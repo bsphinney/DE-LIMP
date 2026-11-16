@@ -461,7 +461,7 @@ def rule_text(adjp, src):
 
 
 ENGINE_LABEL = {"diann": "DIA-NN", "sage": "Sage", "fragpipe": "FragPipe", "radiant": "Radiant",
-                "alphadia": "AlphaDIA"}
+                "alphadia": "AlphaDIA", "metamorpheus": "MetaMorpheus"}
 
 
 # A leading section number ("9.", "10.2", "9)", "IV.") -- a report's "## 9. Data Quality Notes"
@@ -1347,7 +1347,8 @@ def identifications_only_note(prov, session=None):
         return None
     per = []
     for name, unit in (("sage_identifications.json", "precursors"),
-                       ("fragpipe_identifications.json", "peptides")):
+                       ("fragpipe_identifications.json", "peptides"),
+                       ("metamorpheus_identifications.json", "precursors")):
         rec = load_record(os.path.join(folder, name))
         for run, n in sorted((rec.get("per_run") or {}).items()):
             n = n.get("precursors") if isinstance(n, dict) else n

@@ -3939,7 +3939,9 @@ SEARCH_FILES = ("report.parquet", "report.pg_matrix.tsv", "report.pr_matrix.tsv"
                 # product and what it kept; optional, SKIPPED when absent (L7R-F4)
                 "identifications.tsv", "sage_identifications.json",
                 # ...and a FragPipe search whose workflow ran no quantification (Ruling 73a)
-                "fragpipe_identifications.json")
+                "fragpipe_identifications.json",
+                # ...and a MetaMorpheus search (identifications only, always)
+                "metamorpheus_identifications.json")
 EXCLUDED_DIRS = {"xic", "report_xic", "temp", "tmp", ".tmp", "__pycache__", "raw_data",
                  "skyline_work"}
 # The analysis conversation (save_transcript.py -> logs/conversation/) and the decisions log are

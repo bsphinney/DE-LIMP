@@ -2068,7 +2068,8 @@ def search_result_files(p, choice=None, engine_tables=False):
       * the report the DE read when it lies in the search folder, else <folder>/report.parquet:
         what a search that quantified writes;
       * identifications.tsv and the record of how its rows were kept (sage_identifications.json,
-        fragpipe_identifications.json): what a search for identifications only writes instead
+        fragpipe_identifications.json, metamorpheus_identifications.json): what a search for
+        identifications only writes instead
         (run_search.py adapt_sage_ids / adapt_fragpipe_ids -- a search of the other kind into the
         same folder sets them aside, so a folder holds one kind);
       * with `engine_tables`, the engine's own tables those were made from, as the record's
@@ -2090,7 +2091,8 @@ def search_result_files(p, choice=None, engine_tables=False):
     inp = de_input_of(p)
     files = [inp if _inside(inp) else os.path.join(folder, "report.parquet")]
     files += [os.path.join(folder, n) for n in (run_search.SAGE_IDS, run_search.SAGE_IDS_RECORD,
-                                                run_search.FRAGPIPE_IDS_RECORD)]
+                                                run_search.FRAGPIPE_IDS_RECORD,
+                                                run_search.METAMORPHEUS_IDS_RECORD)]
     if engine_tables:
         rec = _load(c["path"]) if c["path"] else None
         for key in ("sage_identifications", "sage_adapt"):

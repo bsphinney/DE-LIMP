@@ -1,0 +1,14 @@
+ID   Gln to PyroGlu peptide N-term
+TG   Q
+PP   Peptide N-terminal.
+MT   Custom
+CF   H-3 N-1
+DR   Unimod; 28.
+//
+ID   Glu to PyroGlu peptide N-term
+TG   E
+PP   Peptide N-terminal.
+MT   Custom
+CF   H-2 O-1
+DR   Unimod; 27.
+//

@@ -184,6 +184,8 @@ Search parameters are derived from the data type (instrument + acquisition) by
 Default by acquisition: **DIA → DIA-NN, DDA → Sage.** `--engine` overrides. The
 bundle's `engine.name` is authoritative when present. FragPipe is opt-in only (the
 bundle names it or the user asks) because MSFragger/IonQuant are license-gated.
+MetaMorpheus is opt-in only too (`--engine metamorpheus`): DDA identifications, no
+quantities, on HIVE — see its section below.
 
 ## Licensing — pick a commercial-OK engine for non-academic users
 | Engine | License | Commercial use | Notes |
@@ -192,6 +194,7 @@ bundle names it or the user asks) because MSFragger/IonQuant are license-gated.
 | **AlphaDIA** | Apache-2.0 | ✅ yes | open-source DIA alternative; deep-learning, **GPU recommended** |
 | **Sage** | MIT | ✅ yes | fast, CPU; DDA + wide-window DIA |
 | **FragPipe** (MSFragger/IonQuant) | license-gated | depends | requires the user's own license |
+| **MetaMorpheus** | MIT | ✅ yes | reading Thermo `.raw` agrees to Thermo's RawFileReader licence (`--acceptThermoLicence`) |
 
 **For commercial / non-academic DIA users, route to AlphaDIA** (`--engine alphadia`)
 instead of DIA-NN — same job, no license problem. Ask "academic or commercial?" before
@@ -211,6 +214,7 @@ Windows, or Linux). `setup.sh`/`acquire_tools.sh` fetch the free ones automatica
 | **AlphaDIA** | https://github.com/MannLabs/alphadia | Win, macOS, Linux | Apache-2.0 (commercial-OK); `pip install alphadia`, GPU recommended. |
 | **Radiant DIA + Fulcrum** (Seer) | https://github.com/seerbio/radiant-fulcrum-container · image `seerbio/radiant-fulcrum` | container only (multi-arch amd64+arm64) | **Thermo Orbitrap only** here (mzML/Parquet input). Needs a DIA-NN-generated library. **Apache-2.0 + Commons Clause + grant-back** — restricts selling a derived service. |
 | **FragPipe** (MSFragger/IonQuant) | https://github.com/Nesvilab/FragPipe/releases | Win, macOS, Linux | Java GUI; MSFragger/IonQuant need the user's own (free-academic) license. |
+| **MetaMorpheus** | https://github.com/smith-chem-wisc/MetaMorpheus/releases · image `smithchemwisc/metamorpheus` | Win (GUI); Linux/macOS via the .NET CLI or the image | MIT. The skill runs only the Core's HIVE image (`$METAMORPHEUS_SIF` names another). |
 | **ThermoRawFileParser** | https://github.com/compomics/ThermoRawFileParser/releases | Win, macOS, Linux | Reads `.raw` for `detect_acquisition.py`, and `.raw`→mzML. v2.0.0-dev: self-contained Linux/macOS/Windows zips, or the `-net8` zip run as `dotnet ThermoRawFileParser.dll` (.NET 8 runtime); `conda install -c bioconda thermorawfileparser` (Linux/macOS; that build is self-contained — no .NET — and `setup.sh` installs it). 1.4.x needs Mono off Windows. Not a single executable on PATH → `export THERMORAWFILEPARSER="dotnet /path/ThermoRawFileParser.dll"`. Its mzML carries **no resolving power** (see `parameters.md`). |
 | **ProteoWizard / msconvert** | https://proteowizard.sourceforge.io/ | Windows (native); Linux/macOS via Docker | vendor→mzML; Linux via the `chambm/pwiz-...` Docker image. |
 | **.NET 8 runtime** | https://dotnet.microsoft.com/download/dotnet/8.0 · installer script https://dot.net/v1/dotnet-install.sh | Win, macOS, Linux | needed by the **Linux** DIA-NN binary to read `.raw` (Microsoft.NETCore.App ≥ 8.0.17) and by a framework-dependent ThermoRawFileParser (the Core's shared copy, the `-net8` zip), which also needs Microsoft.AspNetCore.App 8; `ensure_dotnet8.sh` installs both. **Native Windows DIA-NN doesn't need it.** |
@@ -932,6 +936,46 @@ Say so rather than crediting it all to the method.
   "no output" on a perfectly good ID run. Success check = `peptide.tsv` (and `psm.tsv`)
   present and non-empty; use `combined_protein.tsv` only when the manifest defines ≥2
   experiment groups and you asked for the cross-run LFQ matrix.
+
+### MetaMorpheus (DDA identifications only; HIVE)
+
+`--engine metamorpheus` runs MetaMorpheus 1.1.12 (Solntsev et al. 2018, JPR 17:1844,
+doi:10.1021/acs.jproteome.7b00873) for **identifications only**: there are no quantities, so
+no DE, no FRAN deposit (the search sets `--no-fran` itself and `fran_deposit.py` refuses the
+engine), and `sage_lfq_check.json` is the `not_applicable` record. Use it as a second DDA
+engine — e.g. a known-variant or known-site check next to Sage — not as a quantifying route.
+
+- **Parameters: the validated task TOML, never generated.** `resolve_defaults.py
+  --acquisition DDA --engine metamorpheus --dest ./wf` copies
+  `presets/metamorpheus/NonSpecific_Peptidomics_HCD.toml` (md5-checked) to
+  `wf/metamorpheus.toml`. It is the file a Core submission's 4-engine comparison validated
+  (2026-11-04): non-specific, 7–25 aa, ±10 ppm precursor, ±20 ppm product, HCD, variable
+  Oxidation (M), Acetylation (X), pyroGlu from Q and E (custom mods, file
+  `presets/metamorpheus/Mods/CustomPyroGluPeptideNterm.txt`), reversed decoys, q ≤ 0.01, no
+  LFQ/MBR/parsimony. Validated only for **Orbitrap HCD** peptidomics: DIA, an ion-trap MS2
+  and `--ms1-ppm/--ms2-ppm` are refused. A TOML of your own runs, recorded as not validated.
+- **Container.** Only the Core's image runs: `/quobyte/proteomics-grp/apptainers/
+  metamorpheus_1.1.12.sif` (sha256 checked by the job; `acquire_tools.sh` records it as
+  `tools.json` `metamorpheus`). The binary reports commit `2591d745`, which is the GitHub tag
+  1.1.12. Input: `.raw`, `.mzML`, `.mgf` — **no Bruker `.d`** (convert to mzML first).
+- **Why the job copies things to `$TMPDIR`.** MetaMorpheus writes into its own folder at
+  start-up (`Data/CustomCrosslinkers.tsv`; `settings.toml`, where `--acceptThermoLicence`
+  is recorded) and a `DatabaseIndex/` beside its database. A read-only image or database
+  folder aborts the run (HIVE jobs 25758490, 25758650). The job copies the image's app and
+  the FASTA to node-local `$TMPDIR`, installs the custom mods, runs that copy inside the
+  same image, and deletes it. Nothing is written beside the user's database.
+- **Threads.** The run's copy of the TOML (`<out>/metamorpheus_task.toml`) sets
+  `MaxThreadsToUsePerFile` to `--threads`; the given file is not changed.
+- **Output.** `<out>/run/Task1SearchTask/AllPSMs.psmtsv`, `AllPeptides.psmtsv`,
+  `<out>/run/allResults.txt`; the adapter writes `identifications.tsv` (one row per run,
+  Full Sequence and charge) and `metamorpheus_identifications.json`. The kept rule is
+  MetaMorpheus' own 1% rule: **`QValue` and `QValue Notch` both ≤ 0.01** (q within the
+  precursor mass-difference notch), for the PSM and for its peptide in `AllPeptides`. On a real
+  two-file search (HIVE job 25758676) that rule reproduces `allResults.txt` exactly (1,711 PSMs,
+  438 peptides); `QValue` alone gives 1,811 and 464. q-values are over all runs together;
+  the per-file counts in `results.txt` come from MetaMorpheus' own per-file re-analysis and
+  differ from the per-run rows of the table.
+- **Runtime.** Two 60-min Exploris DDA files, 465-entry database, 8 CPUs: 68 s, 5.7 GB RSS.
 
 ## The adapters are the test surface
 
