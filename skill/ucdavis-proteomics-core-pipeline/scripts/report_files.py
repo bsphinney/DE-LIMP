@@ -98,6 +98,8 @@ _ITEM_LABEL = {"report": "the skill's report (output/Analysis_Report.html)",
                "finalized": "the finalize stamp (output/FINALIZED.json)"}
 
 
+# Own copy on purpose (not safe_write.sha256_file): this file is loaded from a partial copy of
+# scripts/ (test_make_report_catalog), so it imports no sibling.
 def _sha256(path):
     h = hashlib.sha256()
     with open(path, "rb") as fh:
@@ -607,7 +609,7 @@ def finish_warnings(output_dir, need):
 
 def refusal(tool, gaps):
     """The refusal every gate prints: each gap with its command, then the way past it."""
-    return (f"[{tool}] refusing: the skill's finish steps are not done (SKILL.md golden rule 9):\n"
+    return (f"[{tool}] refusing: the skill's finish steps are not done (SKILL.md golden rule 16):\n"
             + "".join(f"  - {g}\n" for g in gaps)
             + f"or re-run with {OVERRIDE_FLAG} \"<reason>\"")
 

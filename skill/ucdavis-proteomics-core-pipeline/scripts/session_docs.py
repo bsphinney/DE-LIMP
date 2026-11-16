@@ -33,7 +33,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 from session import (paths_for, read_raw_list, raw_list_encoding_note,  # noqa: E402  one place
-                     params_file, NOT_RECORDED, reanalysis_of, has_de,
+                     database_organisms, params_file, NOT_RECORDED, reanalysis_of, has_de,
                      search_engine, search_choice, search_folder, NO_DE_REASON)
 import share_map                                    # noqa: E402
 import make_podcast                                 # noqa: E402  the optional audio discussion
@@ -399,6 +399,21 @@ def no_de_condition_caveat(groups, acq=None):
     return s + "."
 
 
+def _params_as_run(p, sp, search_dir):
+    """The search parameters as run, for AGENTS.md: a FragPipe search's own run workflow (the
+    record's fragpipe_workflow.run, fragpipe_input.workflow in its folder: what FragPipe ran and a
+    replay uses) when it is there, else session.params_file (the resolved cfg, else the staged
+    one). A session's input/wf can hold several FragPipe workflows; only the record says which
+    ran."""
+    fw = sp.get("fragpipe_workflow") if isinstance(sp, dict) else None
+    run = fw.get("run") if isinstance(fw, dict) else None
+    if run and search_dir:
+        here = os.path.join(search_dir, os.path.basename(str(run)))
+        if os.path.isfile(here):
+            return here
+    return params_file(p)
+
+
 def gather(session_dir, registry=None, registry_note=None, pending=(), located_at=None):
     """Every fact the three documents state, read from the session. `registry`: the Core
     run-registry folder of this session, when known (record_run.locate() or its result).
@@ -519,7 +534,9 @@ def gather(session_dir, registry=None, registry_note=None, pending=(), located_a
         "identifications": os.path.join(search_dir, "identifications.tsv") if search_dir else None,
         "ids_record": next((x for x in (os.path.join(search_dir, n) for n in IDS_RECORDS)
                             if os.path.isfile(x)), None) if search_dir else None,
-        "params": params_file(p),
+        "params": _params_as_run(p, sp, search_dir),
+        # what a FragPipe DDA report's protein quantity is, and why (fragpipe_quant.py's record)
+        "fp_quantity": os.path.join(search_dir, "fragpipe_quantity.json") if search_dir else None,
         "figures_json": os.path.join(p["figures_dir"], "figures.json"),
         "audit": os.path.join(out, "AUDIT.md"),
         "quality": os.path.join(out, "SAMPLE_QUALITY.md"),
@@ -662,8 +679,7 @@ def locations_table(f):
 
 def summary_lines(f):
     de = f["de"]
-    org = (f"{f['organism']} (taxid {f['taxid']})" if f["organism"] else
-           f"taxid {f['taxid']}" if f["taxid"] else NOT_RECORDED)
+    org = database_organisms(f["fm"], f["organism"], f["taxid"]) or NOT_RECORDED
     eng = (f"{f['engine']} {f['engine_version'] or ''}".strip() if f["engine"] else
            f"{NOT_RECORDED} ({f['engine_note']})" if f.get("engine_note") else NOT_RECORDED)
     ro = f.get("reanalysis_of") or {}
@@ -929,6 +945,8 @@ def agents_md(f, for_delivery=False):
                    ("Search engine, the version that ran, exact command", "search_prov"),
                    ("Search parameters as run", "params"),
                    ("Precursor-level search results", "report"),
+                   ("What the report's protein quantity is, and why (FragPipe: IonQuant MaxLFQ, "
+                    "or directLFQ with IonQuant's Intensity beside it)", "fp_quantity"),
                    ("Identifications, per run (identifications only: no quantities)",
                     "identifications"),
                    ("How the identifications were filtered", "ids_record"),
@@ -952,6 +970,11 @@ def agents_md(f, for_delivery=False):
             continue
         if key == "report" and not f.get("search_quantified", True):
             continue
+        if key == "fp_quantity" and not files.get(key):
+            continue                          # a FragPipe DDA search's record; no row otherwise
+        if key == "report" and files.get("fp_quantity"):
+            # a FragPipe DDA report holds one protein quantity per run, not precursors
+            q = "Protein-level search results (one quantity per protein and run)"
         if key in AGENTS_DE_ONLY and not f.get("has_de") and not files.get(key):
             if key == "de_prov":
                 L.append("| Differential expression | none in this analysis |")
@@ -1134,7 +1157,9 @@ def agents_md(f, for_delivery=False):
         L.append(f"- The DE: `{rel(files['repro_R'])}` (plain R, every value literal; it reads "
                  f"`{os.path.basename(str(de.get('input') or 'the search report'))}`)."
                  if files.get("repro_R") else "- The DE as R: not in this folder.")
-    L.append(f"- Search + DE: `{rel(files['reproduce_md'])}` — needs the raw data, which are on "
+    # a session with no DE has a search to reproduce and no DE (X8 F14)
+    L.append(f"- {'Search + DE' if f.get('has_de') else 'The search'}: "
+             f"`{rel(files['reproduce_md'])}` — needs the raw data, which are on "
              "HIVE (below), not here." if files.get("reproduce_md") else
              "- The full run: no REPRODUCE.md in this folder.")
 
@@ -1153,8 +1178,11 @@ def agents_md(f, for_delivery=False):
     L += ["", "## Do not", "",
           "- Invent a value, protein, count or threshold that is not in these files.",
           "- Treat an inferred value as a measured one, or a missing/[SKIPPED] part as empty.",
-          "- Claim a threshold that was not applied (see Significance above) or describe the "
-          "pipeline differently from `de_provenance.json` / `methods.txt`.",
+          ("- Claim a threshold that was not applied (see Significance above) or describe the "
+           "pipeline differently from `de_provenance.json` / `methods.txt`." if f.get("has_de")
+           else "- Describe the search differently from `search_provenance.json` and the "
+                "Methods (`output/methods.md`), or claim a differential expression or a "
+                "quantity this session does not have."),
           "- Re-run the search from this folder: the raw data are not in it (see the HIVE "
           "table), and a re-run needs HIVE and the pinned engine (`REPRODUCE.md`).",
           "- Edit the records (`*_provenance.json`, `methods.txt`, `MANIFEST.txt`); write new "
@@ -1232,10 +1260,12 @@ def reviewing_lines(f):
              "for; `MANIFEST.txt`'s [SKIPPED] lines say what a DE would have made."),
             "- **Every number traces to a command:** does each count, threshold and result in "
             "the report trace to a logged command (`logs/commands.log`) and a table in "
-            "`output/tables/`?",
+            + ("`output/tables/`?" if f.get("has_de") else
+               "the search folder (`output/search*/`)?"),
             "- **Nothing unrecorded:** was any step skipped, changed or re-run without being "
             "recorded -- a command in the conversation that is not in `commands.log`, a "
-            "parameter that differs from `search_provenance.json` / `de_provenance.json`, a "
+            "parameter that differs from `search_provenance.json`"
+            + (" / `de_provenance.json`" if f.get("has_de") else "") + ", a "
             "re-run with no note?",
             "- **No warning ignored:** were any warnings ignored -- `[WARN]`/`WARNING` lines in "
             "the conversation and logs, `[SKIPPED]` lines in `MANIFEST.txt`, AUDIT.md findings "

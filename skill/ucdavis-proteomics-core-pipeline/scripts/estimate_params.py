@@ -57,11 +57,12 @@ skill cannot know it is. The role is "Core staff" only when the setter is a logi
 staff list (staff.role_for), else "the user". Who, by name, goes only to the staff-only
 <out>.staff.json (staff.py): the sidecar travels to the client.
 """
-import sys, os, json, math, argparse
+import sys, os, re, json, math, argparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import staff  # noqa: E402  the role client documents name, and the staff-only record
 import silac  # noqa: E402  SILAC labels (--labels): the one definition of the plexDIA declaration
+import cleavage_rules  # noqa: E402  --enzyme: the word -> rule map (fetch_fasta.py's words)
 
 # --- known-good mass accuracy by instrument class (DIA-NN README) ------------
 ORBITRAP_RES_PPM = {240000: 4, 120000: 7, 60000: 10, 30000: 15}
@@ -113,7 +114,7 @@ DIANN_DIGEST = {"cut": "K*,R*", "missed_cleavages": 1, "min_pep_len": 7, "max_pe
 # cfg that does not match the bundle's acquisition, probe_window.py's refusal to measure).
 # It used to live nowhere: run_search.py appended it to the single-shot command only, so every
 # DDA cohort of more than 5 files went to the 5-step chain WITHOUT it and DIA-NN searched DDA
-# spectra as DIA, with no error (msalemi, SET28 / PROT_0000, 28 Exploris .raw, 2026-09-25).
+# spectra as DIA, with no error (a Core member, SET28 / PROT_0000, 28 Exploris .raw, 2026-09-25).
 DIANN_DDA_FLAG = "--dda"
 SRC_DDA = ("DDA acquisition: DIA-NN README, '--dda process data as DDA -- must be used with DDA "
            "data, must not be used with DIA data' (beta DDA support since DIA-NN 2.3)")
@@ -206,7 +207,8 @@ def cys_alkylation_record(choice=None):
             "source": source}
 
 
-def cys_record_as_written(cys, found, override_meta=None):
+def cys_record_as_written(cys, found, override_meta=None,
+                          how="a --fixed-mod override replaces every --fixed-mod line"):
     """`cys` (cys_alkylation_record) when the cfg as written (`found`: cys_searched()) fixes what it
     says on C, else the record of what the cfg does fix, with `overridden` naming the choice an
     --overrides value replaced (review R1). The reagent is then not known -- an override names a
@@ -231,8 +233,8 @@ def cys_record_as_written(cys, found, override_meta=None):
             "searched": searched,
             "overridden": {"was": cys.get("value"), "was_searched": cys.get("searched")},
             "source": (f"user override: --overrides replaced what --cys-alkylation "
-                       f"{cys.get('value')} fixes on C ({cys.get('searched')}; a --fixed-mod "
-                       f"override replaces every --fixed-mod line), so the cfg as written "
+                       f"{cys.get('value')} fixes on C ({cys.get('searched')}; {how}), so the "
+                       f"cfg as written "
                        f"searches {searched}; set by {om.get('role', staff.USER_ROLE)}; reason: "
                        f"{reason.strip() if reason and reason.strip() else OVERRIDE_REASON_MISSING}")}
 
@@ -242,18 +244,41 @@ def _cys_choice(mass):
     return next((k for k, r in CYS_REAGENTS.items() if r and abs(r["mass"] - mass) < 0.01), None)
 
 
+def cys_fixed(mass, name=None):
+    """cys_searched()'s record of a fixed modification of `mass` on C."""
+    choice = _cys_choice(mass)
+    r = CYS_REAGENTS.get(choice) if choice else None
+    return {"fixed": True, "choice": choice, "mass": mass,
+            "mod": r["mod"] if r else (name or f"+{mass:g} on C")}
+
+
+# MSFragger's fixed-modification table row for cysteine (msfragger.table.fix-mods): mass, then
+# whether the row is on -- FragPipe 24.0's Nonspecific-HLA ships it off ("57.02146,C (cysteine),
+# false,-1"), so the mass alone does not say what is searched
+FRAGPIPE_C_ROW = re.compile(r"(?<![0-9.\-])(-?[0-9.]+),C \(cysteine\),(true|false),")
+
+
 def cys_searched(params):
     """What the params file fixes on C: {"fixed": False} (unmodified), {"fixed": True, "choice":
     a CYS_REAGENTS key or None for an unlisted one, "mod", "mass"}, or None when the file cannot
-    be read. A DIA-NN cfg: --unimod4, or a --fixed-mod on C; a Sage config: database.static_mods C."""
+    be read. A DIA-NN cfg: --unimod4, or a --fixed-mod on C; a Sage config: database.static_mods C;
+    a FragPipe workflow: its fixed-mod table's C row when on (FRAGPIPE_C_ROW); fragger.params:
+    add_C_cysteine (2.15: a workflow used to be read as a DIA-NN cfg, which it is not)."""
     from diann_parallel import cfg_groups, cfg_tokens, CfgError   # here: it imports this module
-
-    def fixed(mass, name=None):
-        choice = _cys_choice(mass)
-        r = CYS_REAGENTS.get(choice) if choice else None
-        return {"fixed": True, "choice": choice, "mass": mass,
-                "mod": r["mod"] if r else (name or f"+{mass:g} on C")}
+    fixed = cys_fixed
     try:
+        p = str(params)
+        if p.endswith(".workflow") or p.endswith("fragger.params"):
+            import fragpipe_params as fpp
+            if p.endswith("fragger.params"):
+                mass = float(fpp.read_fragger_params(p).get("add_C_cysteine") or 0)
+            else:
+                props, _ = fpp.read_workflow(p)
+                m = FRAGPIPE_C_ROW.search(props.get("msfragger.table.fix-mods") or "")
+                if not m:
+                    return None
+                mass = float(m.group(1)) if m.group(2) == "true" else 0.0
+            return fixed(mass) if mass else {"fixed": False}
         if str(params).lower().endswith(".json"):
             with open(params) as fh:
                 mods = (json.load(fh).get("database") or {}).get("static_mods") or {}
@@ -305,9 +330,17 @@ VAR_MODS_NONE = "none"
 VAR_MODS_WORDS = ", ".join(list(VAR_MODS) + [VAR_MODS_NONE])     # "ox, deam, none"
 # What is searched when --var-mods is not given, by (engine, acquisition); anything not listed
 # searches none. Met-ox for Sage DDA is the FragPipe/MaxQuant default, and without it those
-# peptides are lost (Brett, 2026-10-30, Q2). DIA-NN keeps none: its README advises against
-# variable mods for quantification.
-VAR_MODS_DEFAULT = {("sage", "DDA"): ["ox"]}
+# peptides are lost (Brett, 2026-10-30, Q2); the FragPipe DDA preset (make_presets.py, 2.15) has
+# the same default, and its vendor workflows already search it. DIA-NN keeps none: its README
+# advises against variable mods for quantification.
+VAR_MODS_DEFAULT = {("sage", "DDA"): ["ox"], ("fragpipe", "DDA"): ["ox"]}
+# The DDA searches' other shared variable-modification settings, one definition for Sage
+# (build_sage) and the FragPipe DDA preset (make_presets.py): at most DDA_MAX_VAR_MODS variable
+# modifications per peptide (Sage's max_variable_mods; MSFragger's max_variable_mods_per_peptide,
+# whose vendor value 3 H5 set to 2 for a like-for-like search), and protein N-terminal acetylation
+# always searched (Sage's "[" variable mod; MSFragger's vendor row 42.0106,[^ on).
+DDA_MAX_VAR_MODS = 2
+PROTEIN_NTERM_ACETYL = 42.0106
 SRC_VAR_MODS_SAGE_DDA = ("Ox(M) on by default for DDA (the FragPipe/MaxQuant default; Core "
                          "decision 2026-10-30)")
 SRC_VAR_MODS_DIANN = "DIA-NN README: variable mods do not improve depth for relative quant; left off"
@@ -471,8 +504,8 @@ SRC_MEASURE = ("measured with DIA-NN before the search: one DIA-NN per represent
 # A lone --mass-acc or --mass-acc-ms1 FIXES BOTH levels in DIA-NN 2.7.0: "WARNING: note the mass
 # accuracy settings used by DIA-NN, automatic optimisation will not be performed as at least one
 # of MS1/MS2 mass accuracies is user-provided", and the other level falls to 20 ppm -- `--window 7
-# --mass-acc-ms1 7` logged "Mass accuracy will be fixed to 2e-05 (MS2) and 7e-06 (MS1)" (HIVE srun
-# job 23528991, 2026-09-16). So a documented level is never written into the cfg on its own.
+# --mass-acc-ms1 7` logged "Mass accuracy will be fixed to 2e-05 (MS2) and 7e-06 (MS1)" (measured on
+# HIVE, 2026-09-16). So a documented level is never written into the cfg on its own.
 LONE_FLAG_NOTE = ("not written into the cfg on its own: DIA-NN 2.7.0 fixes BOTH levels when either "
                   "flag is given, the other at 20 ppm; it is pinned together with the measured "
                   "level")
@@ -623,7 +656,7 @@ def ppm_for_resolution(res):
 
 # Where an Orbitrap's MS1/MS2 resolution came from. The phrase goes into the class label, and
 # from there into workflow.manifest.json, <cfg>.rationale.json and every mass-accuracy rationale
-# line. gabrig 2026-09-23 (Fusion Lumos, skill 2.5.0): resolutions the user TYPED IN came out as
+# line. A Core member, 2026-09-23 (Fusion Lumos, skill 2.5.0): resolutions the user TYPED IN came out as
 # "MS1 60,000 / MS2 15,000 resolution read from the data" -- a value presented as something it
 # is not (DE-LIMP rule #2). The caller says where the numbers came from; a number given on the
 # command line is "user" unless the caller says otherwise.
@@ -663,7 +696,7 @@ def ms2_in_ion_trap(analyzer):
 
 def add_resolution_args(ap):
     """The resolution flags, defined once for estimate_params.py, resolve_defaults.py and
-    make_presets.py. gabrig 2026-09-23: resolve_defaults.py took --ms1-res/--ms2-res and this
+    make_presets.py. A Core member, 2026-09-23: resolve_defaults.py took --ms1-res/--ms2-res and this
     script --ms1-resolution/--ms2-resolution, so one of the two commands failed whichever
     spelling was used. Both spellings are accepted everywhere; --ms1-resolution is canonical."""
     for lvl in ("ms1", "ms2"):
@@ -721,7 +754,7 @@ RESOLUTION_ENGINES = ("diann", "radiant")
 
 def resolution_question(instr_class, engine, ms1_res=None, ms2_res=None):
     """What to ask the user when an Orbitrap's resolution is unknown and the engine uses it,
-    else None. gabrig 2026-09-23: a Fusion Lumos with no resolution got a manifest saying
+    else None. A Core member, 2026-09-23: a Fusion Lumos with no resolution got a manifest saying
     "resolution unknown", exit 0, and no prompt -- so nobody asked. The class test is
     classify_instrument()'s own: orbitrap_generic IS "an Orbitrap with no usable resolution"
     (the Astral is its own class and assumes 240k).
@@ -747,6 +780,20 @@ def resolution_question(instr_class, engine, ms1_res=None, ms2_res=None):
             f".raw scan trailer. Then re-run with {flags}{keep} (add --resolution-source "
             "detected when the values came from detect_acquisition.py). Without it DIA-NN's "
             "documented Orbitrap mass-accuracy table cannot be applied.")
+
+
+# A unit-resolution instrument, MS1 and MS2 alike: the Thermo Stellar (FragPipe 24.0's Stellar-DDA
+# workflow: "Workflow for Stellar data (unit resolution in MS1 and MS2)"). Read from the name, as
+# classify_instrument() reads the others; it is not one of its classes, because only the FragPipe
+# DDA preset acts on it (make_presets.UNIT_RESOLUTION_KEYS: Stellar-DDA's own mass and spectrum
+# settings). DIA-NN and Sage see it as an unrecognised instrument, as before.
+UNIT_RESOLUTION_NAMES = ("stellar",)
+
+
+def unit_resolution(instrument):
+    """True when the instrument reads MS1 and MS2 at unit resolution (a Thermo Stellar)."""
+    n = (instrument or "").strip().lower()
+    return any(k in n for k in UNIT_RESOLUTION_NAMES)
 
 
 def classify_instrument(name, ms1_res=None, ms2_res=None, res_source=None, ms2_analyzer=None):
@@ -1246,11 +1293,17 @@ SAGE_ITMS_BUCKET_SIZE = 32768
 SRC_SAGE_LOWRES = "Sage docs' low-res MS/MS setting (sage-docs.vercel.app/docs/configuration)"
 
 
-# Sage's in-silico digest (its database.enzyme block): trypsin with the proline rule, 2 missed
-# cleavages. The ONE definition: build_sage writes it, and run_search.py recognises it as Sage's
-# KNOWN difference from DIANN_DIGEST (which fetch_fasta.py judges contaminants on).
-SAGE_ENZYME = {"missed_cleavages": 2, "min_len": 7, "max_len": 30,
-               "cleave_at": "KR", "restrict": "P"}
+# The skill's DDA digest, in Sage's database.enzyme form: trypsin with the proline rule (cut after
+# K/R, not before P), 2 missed cleavages, peptides of 7-30. ONE digest for the DDA engines (Ruling
+# 57.1: "The FragPipe digest is the skill's trypsin (no cut before P), one digest shared with the
+# Sage fallback"): build_sage writes it as Sage's enzyme block, make_presets.py as the FragPipe DDA
+# preset's rule, missed cleavages and lengths (2.15), and run_search.py recognises it as the KNOWN
+# difference of both from DIANN_DIGEST (which fetch_fasta.py judges contaminants on). --enzyme
+# changes its rule only (cleavage_rules.enzyme_rule); a non-specific FragPipe template keeps its
+# own lengths. SAGE_ENZYME is the same object, under the name it has always had.
+DDA_DIGEST = {"missed_cleavages": 2, "min_len": 7, "max_len": 30,
+              "cleave_at": "KR", "restrict": "P"}
+SAGE_ENZYME = DDA_DIGEST
 
 
 # --ids-only: a Sage search for identifications only, with no LFQ (no differential expression).
@@ -1258,9 +1311,37 @@ SAGE_ENZYME = {"missed_cleavages": 2, "min_len": 7, "max_len": 30,
 # (sage_lfq_enabled) to send a timsTOF .d to Sage directly and to skip the LFQ check. A DIA-NN
 # search always quantifies, so the flag is refused for it (a Core submission, 2026-10-29).
 IDS_ONLY_FLAG = "--ids-only"
+# FragPipe's protein quantity from 3 or more experiments is IonQuant's MaxLFQ; --directlfq asks for
+# directLFQ instead (make_presets.py writes ionquant.maxlfq=0; fragpipe_quant.REQUESTED_WORDS is
+# how the record, Methods and report say why). Sage and DIA-NN have no such choice.
+DIRECTLFQ_FLAG = "--directlfq"
+DIRECTLFQ_NOT_FRAGPIPE = (f"{DIRECTLFQ_FLAG} is for a FragPipe DDA search (make_presets.py "
+                          f"--engine fragpipe --acquisition DDA): IonQuant's MaxLFQ or directLFQ")
 SRC_IDS_ONLY = ("identifications only (--ids-only: no differential expression); Sage 0.14.7 reads "
                 "a timsTOF .d directly but has no MS1 quantification on it")
 IDS_ONLY_DIANN = "--ids-only is for Sage; a DIA-NN search always quantifies"
+
+# Ruling 105.2 / 107.3: a unit-resolution instrument (unit_resolution(): a Thermo Stellar) reads
+# MS1 at unit resolution, which cannot support label-free MS1 quantities -- a fact about the DATA,
+# not the engine, so a DDA search of one is for identifications only on EVERY engine (FragPipe and
+# Sage). THE rule, applied before the engine is chosen (resolve_defaults.py, step 4) and again
+# wherever a DDA cfg or preset is built (dda_args: estimate_params.py --engine sage,
+# make_presets.py --engine fragpipe). The words are Ruling 105's, unchanged.
+UNIT_RESOLUTION_NO_QUANT = (
+    "{instrument} reads MS1 at unit resolution, which cannot support label-free MS1 quantities, "
+    "and FragPipe's own Stellar-DDA workflow runs no quantification: search it for "
+    "identifications only ({ids_only}); for amounts, targeted quantification (PRM, with "
+    "Skyline) is the route").replace("{ids_only}", IDS_ONLY_FLAG)
+
+
+def unit_resolution_amounts_refused(instrument, acquisition, ids_only):
+    """Why a search that would report amounts cannot, or None: a DDA search of a unit-resolution
+    instrument without --ids-only (UNIT_RESOLUTION_NO_QUANT). DIA is not covered: DIA-NN
+    quantifies from fragment ions, not from MS1."""
+    if (str(acquisition or "").upper() == "DDA" and not ids_only
+            and unit_resolution(instrument)):
+        return UNIT_RESOLUTION_NO_QUANT.format(instrument=instrument)
+    return None
 
 
 # --overrides into a Sage cfg: the ONE merge (H2-4). It took top-level keys only, so an
@@ -1408,7 +1489,7 @@ def _cfg_at(cfg, path):
 
 
 def build_sage(acq, instr_class, var_mods, overrides, ms2_analyzer=None, override_meta=None,
-               cys=None, ids_only=False):
+               cys=None, ids_only=False, enzyme=None):
     prec_ppm, frag_ppm, ppm_src = sage_ppm(instr_class)
     cys = cys or cys_alkylation_record()
     static = cys_sage_static(cys["value"])
@@ -1421,17 +1502,18 @@ def build_sage(acq, instr_class, var_mods, overrides, ms2_analyzer=None, overrid
         for site, masses in VAR_MODS[w]["sage"].items():
             have = variable.setdefault(site, [])
             have.extend(m for m in masses if m not in have)
-    variable["["] = [42.0106]  # protein N-term acetyl is a common, cheap variable mod
+    variable["["] = [PROTEIN_NTERM_ACETYL]  # protein N-term acetyl: a common, cheap variable mod
     cfg = {
         "database": {
             "bucket_size": SAGE_ITMS_BUCKET_SIZE if ion_trap else 8192,
-            "enzyme": dict(SAGE_ENZYME),
+            "enzyme": (cleavage_rules.sage_enzyme_block(enzyme, SAGE_ENZYME) if enzyme
+                       else dict(SAGE_ENZYME)),
             "fragment_min_mz": 200.0, "fragment_max_mz": 1800.0,
             "peptide_min_mass": 500.0, "peptide_max_mass": 5000.0,
             "ion_kinds": ["b", "y"], "min_ion_index": 2,
             "static_mods": static,
             "variable_mods": variable,
-            "max_variable_mods": 2,
+            "max_variable_mods": DDA_MAX_VAR_MODS,
             "decoy_tag": "rev_", "generate_decoys": True,
             "fasta": "REPLACED_AT_RUNTIME.fasta",
         },
@@ -1479,7 +1561,7 @@ def build_sage(acq, instr_class, var_mods, overrides, ms2_analyzer=None, overrid
                                "none: cysteine searched unmodified -- ") + cys["source"]),
         "variable_mods": tagged(db.get("variable_mods"),
                                 vm_src + "; + protein N-term acetyl (always)"),
-        "enzyme": tagged(db.get("enzyme"), UNIV),
+        "enzyme": tagged(db.get("enzyme"), enzyme_source(enzyme) if enzyme else UNIV),
         "lfq": tagged(_cfg_at(cfg, ("quant", "lfq")),
                       SRC_IDS_ONLY if ids_only else "label-free quantification"),
     })
@@ -1533,7 +1615,7 @@ def sage_fragment_mismatch(ms2_analyzer, sage_cfg):
     (this script -> the Sage cfg); only the second changes the search. Given in step 4 and
     forgotten in 6b, the manifest said ITMS while sage_config.json kept a +/-10 ppm fragment
     window -- which on an ion-trap spectrum matches nothing (a +0.25 Da synthetic spectrum: 0 PSMs
-    at 10 ppm, the target at 0.4 Da; Sage 0.14.7, HIVE job 23990274)."""
+    at 10 ppm, the target at 0.4 Da; Sage 0.14.7, a test job on HIVE)."""
     tol = (sage_cfg or {}).get("fragment_tol") or {}
     unit = "da" if "da" in tol else "ppm" if "ppm" in tol else None
     rerun = ("re-run estimate_params.py --engine sage with the same --ms2-analyzer that "
@@ -1571,18 +1653,187 @@ SILAC_OVERRIDE_FLAGS = ("--channels", *silac.CHANNEL_NORM.values())
 SILAC_SHARED_FLAGS = ("--lib-fixed-mod", "--original-mods")
 
 
-def refuse_out(out, msg, code=1):
+# ------------------------------------------------------------------ the DDA flags (2.15) -----
+# ONE definition of the flags that describe a DDA search's chemistry and scope, for
+# estimate_params.py (Sage; DIA-NN takes the ones that apply to it) and make_presets.py (the
+# FragPipe DDA preset): add_dda_args() defines them, dda_args() reads them, with the same words and
+# the same refusals in both (review REVIEW_part3 F1).
+ENZYME_FLAG = "--enzyme"
+SEMI_FLAG = "--semi-specific"
+ENZYME_DIANN = (f"{ENZYME_FLAG} sets a Sage or FragPipe search's digest; DIA-NN's digest is "
+                f"--cut {DIANN_DIGEST['cut']} (estimate_params.DIANN_DIGEST, which fetch_fasta.py "
+                f"judges contaminants on): change it with --overrides")
+
+
+def enzyme_source(rule):
+    """The rationale/record tag of a digest written from --enzyme (cleavage_rules.enzyme_rule)."""
+    return f"user requested: {rule['why']}"
+
+
+class DdaArgsError(Exception):
+    """A DDA flag the caller refuses: `msg`, the exit `code`, and `refuse` -- True when the caller
+    sets aside an earlier output at --out (refuse_out), False for a plain exit with `msg` (the form
+    estimate_params.py has always used for an unreadable --overrides)."""
+
+    def __init__(self, msg, code=1, refuse=True):
+        super().__init__(msg)
+        self.msg, self.code, self.refuse = msg, code, refuse
+
+
+def add_dda_args(ap):
+    """--var-mods, --ids-only, --cys-alkylation, --enzyme, --overrides, --override-by,
+    --override-reason: defined once, for estimate_params.py and make_presets.py."""
+    ap.add_argument("--var-mods", default=None,
+                    help=f"variable modifications, a comma list of: {VAR_MODS_WORDS}. ox = Ox(M), "
+                         "deam = Deamidation (NQ), none = off. Any other word is refused. Not "
+                         "given: Ox(M) for a Sage or FragPipe DDA search, nothing otherwise "
+                         "(DIA-NN advises against variable mods for quantification) -- recorded "
+                         "as a DEFAULT. Sage and FragPipe DDA always add protein N-term acetyl. "
+                         "Giving --var-mods replaces the default; to add deamidation and keep "
+                         "Met-ox, give ox,deam")
+    ap.add_argument(IDS_ONLY_FLAG, action="store_true",
+                    help="identifications only, no differential expression. Sage: the cfg's "
+                         "quant.lfq is false, so run_search.py searches a timsTOF .d directly "
+                         "(Sage 0.14.7 reads it, but has no MS1 quantification on it). FragPipe "
+                         "(make_presets.py): the vendor Basic-Search workflow, or a non-specific "
+                         "one without label-free quantification. Refused with --engine diann "
+                         "(exit 2): a DIA-NN search always quantifies")
+    ap.add_argument(DIRECTLFQ_FLAG, action="store_true",
+                    help="FragPipe DDA (make_presets.py): protein quantities by directLFQ from "
+                         "IonQuant's ion intensities instead of IonQuant's MaxLFQ (which a search "
+                         "of 3 or more experiments gets by default; 2 experiments always get "
+                         "directLFQ). Writes ionquant.maxlfq=0 into the workflow; the Methods, "
+                         "report and record say directLFQ was requested. Refused with "
+                         "--ids-only and for Sage / DIA-NN (exit 2)")
+    ap.add_argument("--cys-alkylation", choices=CYS_ALKYLATION_CHOICES, default=None,
+                    help="what the sample prep did to cysteine. cam (the default): reduced and "
+                         "alkylated with iodoacetamide or chloroacetamide -- fixed carbamidomethyl "
+                         "C (DIA-NN --unimod4, Sage static_mods C, MSFragger's fixed C row). "
+                         "none: not alkylated (often so for on-bead, IP and pull-down digests) -- "
+                         "cysteine searched unmodified. nem / carboxymethyl / propionamide / "
+                         "mmts / pyridylethyl: alkylated with N-ethylmaleimide / iodoacetic acid "
+                         "/ acrylamide / MMTS / 4-vinylpyridine -- that fixed modification on C "
+                         "(UniMod). Not given, cam is used and recorded as a DEFAULT")
+    ap.add_argument(ENZYME_FLAG, default=None,
+                    help="the digestion enzyme(s) added to the samples, in fetch_fasta.py's words "
+                         f"({', '.join(sorted(cleavage_rules.ENZYME_RULES))}; "
+                         "comma-separated; Trypsin/P = no proline rule), or none (no enzyme was "
+                         "added: a peptidome or hydrolysate, searched non-specifically; pepsin "
+                         "too). Sage and FragPipe DDA: the search's rule comes from FragPipe "
+                         "24.0's enzyme list (cleavage_rules.ENZYME_RULES). Not given: the "
+                         "engine's own default digest, recorded as one. Refused with --engine "
+                         "diann (exit 2)")
+    ap.add_argument(SEMI_FLAG, action="store_true",
+                    help="search the digest semi-specifically: one end of each peptide must "
+                         f"follow the enzyme's rule ({ENZYME_FLAG}, else the skill's trypsin), the "
+                         "other may be anywhere (N-terminomics, endogenous cleavage, hair and "
+                         "other degraded or processed samples). Sage: database.enzyme."
+                         "semi_enzymatic true. FragPipe DDA: msfragger.num_enzyme_termini 1. "
+                         "Much larger search space (the job's memory is sized for it). Refused "
+                         f"with --engine diann, and with `{ENZYME_FLAG} none` (already "
+                         "non-specific). The Methods name it")
+    ap.add_argument("--overrides", default="",
+                    help="JSON of fields to force, as the user chose them (Sage: its cfg keys, "
+                         "nested; FragPipe: workflow keys, e.g. {\"msfragger.allowed_missed_"
+                         "cleavage_1\": 1}); each is recorded as a user override with its value, "
+                         "who set it and why -- never as an SOP")
+    ap.add_argument("--override-by", default=None,
+                    help="who chose the --overrides values (default: the login running this, "
+                         "recorded as such) -- in the staff-only <out>.staff.json only; the "
+                         "sidecar says Core staff when that login is on the Core staff list "
+                         "(staff.py), else the user")
+    ap.add_argument("--override-reason", default=None,
+                    help="why, in the user's words (e.g. 'instrument ~20 ppm off calibration; "
+                         "user chose 25 ppm'); without it the record says the reason was not "
+                         "given")
+
+
+def dda_args(a, engine, who="estimate_params"):
+    """The DDA flags of `a` (add_dda_args), read and checked once -> {"var_mods": parse_var_mods'
+    list or None, "overrides": dict, "override_meta": {"reason", "role"}, "by", "by_how", "role",
+    "cys": cys_alkylation_record(), "ids_only", "enzyme": cleavage_rules.enzyme_rule() or None}.
+    Raises DdaArgsError for what `engine` cannot honour, with the words and exit codes
+    estimate_params.py has always used."""
+    try:
+        var_mods = parse_var_mods(a.var_mods)
+    except ValueError as e:
+        raise DdaArgsError(f"{e} No cfg was written.")
+    if getattr(a, "directlfq", False) and engine != "fragpipe":
+        raise DdaArgsError(f"{DIRECTLFQ_NOT_FRAGPIPE}. No cfg was written.", code=2)
+    if getattr(a, "directlfq", False) and a.ids_only:
+        raise DdaArgsError(f"{IDS_ONLY_FLAG} searches without quantification, and "
+                           f"{DIRECTLFQ_FLAG} chooses how it is made: give one or the other. "
+                           f"Nothing was written.")
+    if a.ids_only and engine == "diann":
+        raise DdaArgsError(f"{IDS_ONLY_DIANN}. No cfg was written.", code=2)
+    # a unit-resolution DDA search reports no amounts, whichever engine (Ruling 107.3)
+    no_amounts = unit_resolution_amounts_refused(getattr(a, "instrument", ""),
+                                                 getattr(a, "acquisition", ""), a.ids_only)
+    if no_amounts:
+        raise DdaArgsError(f"{no_amounts}. No cfg was written.")
+    enzyme = None
+    if a.enzyme is not None:
+        if engine == "diann":
+            raise DdaArgsError(f"{ENZYME_DIANN}. No cfg was written.", code=2)
+        try:
+            enzyme = cleavage_rules.enzyme_rule(a.enzyme)
+        except cleavage_rules.EnzymeError as e:
+            raise DdaArgsError(f"{e}. No cfg was written.")
+    overrides = {}
+    if a.overrides:
+        try:
+            overrides = json.loads(a.overrides)
+        except json.JSONDecodeError as e:
+            raise DdaArgsError(f"--overrides is not valid JSON: {e}", refuse=False)
+    if getattr(a, "semi_specific", False):
+        if engine == "diann":
+            raise DdaArgsError(f"{SEMI_FLAG} sets a Sage or FragPipe search's digest; DIA-NN has "
+                               f"no semi-specific digest. No cfg was written.", code=2)
+        try:
+            base = enzyme or cleavage_rules.enzyme_rule("trypsin")
+            if not enzyme:
+                base = dict(base, why="the skill's default digest (trypsin, not before P)")
+            enzyme = cleavage_rules.semi_specific(base)
+        except cleavage_rules.EnzymeError as e:
+            raise DdaArgsError(f"{e}. No cfg was written.")
+        set_by_hand = (("database" in overrides and isinstance(overrides["database"], dict)
+                        and isinstance(overrides["database"].get("enzyme"), dict)
+                        and "semi_enzymatic" in overrides["database"]["enzyme"])
+                       or "msfragger.num_enzyme_termini" in overrides)
+        if set_by_hand:
+            raise DdaArgsError(f"{SEMI_FLAG} sets the enzymatic termini, and --overrides sets them "
+                               f"too (semi_enzymatic / num_enzyme_termini): give one or the "
+                               f"other. No cfg was written.")
+    if a.ids_only and engine == "sage" and "quant" in overrides:
+        raise DdaArgsError(f"{IDS_ONLY_FLAG} sets the Sage cfg's quant block (lfq false), and "
+                           f"--overrides sets quant too: give one or the other. No cfg was "
+                           f"written.")
+    if (a.override_by or a.override_reason) and not overrides:
+        raise DdaArgsError(f"[{who}] --override-by/--override-reason describe --overrides, and "
+                           "none were given", refuse=False)
+    by, by_how = override_setter(a.override_by) if overrides else (None, "unknown")
+    # "Core staff" only for a login on the Core staff list, else "the user" (S4)
+    role = staff.role_for(by) if overrides else staff.USER_ROLE
+    return {"var_mods": var_mods, "overrides": overrides,
+            "override_meta": {"reason": a.override_reason, "role": role},
+            "by": by, "by_how": by_how, "role": role,
+            "cys": cys_alkylation_record(a.cys_alkylation), "ids_only": bool(a.ids_only),
+            "directlfq": bool(getattr(a, "directlfq", False)), "enzyme": enzyme}
+
+
+def refuse_out(out, msg, code=1, sidecars=(".rationale.json",), who="estimate_params"):
     """Exit with `msg`, leaving nothing at --out. The message says no cfg was written, and THIS run
     wrote none -- but an earlier run of the same command may have left the cfg and its sidecar,
     and the next step reads them by path, not by mtime. A stale cfg beside a refusal on stdout is
-    the worst of both. Every refusal that says "no cfg was written" goes through here.
+    the worst of both. Every refusal that says "no cfg was written" goes through here, and
+    make_presets.py's (`sidecars`: its record's suffixes; `who`: the script named).
 
     The earlier cfg is never DELETED (C2 errors_ux L1: a mistyped --var-mods word deleted the cfg
     the session's first search ran with, which the Methods and the bundle read): it and its
     sidecar are set aside (diann_parallel.set_aside, the one definition: renamed .stale-<time>),
     the message names where, and says so when one could not be moved."""
     moved, kept = [], []
-    for stale in (out, out + ".rationale.json"):
+    for stale in (out, *(out + s for s in sidecars)):
         if not os.path.lexists(stale):
             continue
         try:
@@ -1598,7 +1849,7 @@ def refuse_out(out, msg, code=1):
     if kept:
         msg += (" WARNING: could not set aside " + "; ".join(kept) + " -- it is still at --out "
                 "and does NOT have what this command asked for.")
-    print(f"[estimate_params] {msg}", file=sys.stderr)
+    print(f"[{who}] {msg}", file=sys.stderr)
     sys.exit(code)
 
 
@@ -1639,27 +1890,7 @@ def main():
     ap.add_argument("--engine", required=True, choices=["diann", "sage"])
     ap.add_argument("--acquisition", required=True, choices=["DIA", "DDA", "dia", "dda"])
     ap.add_argument("--instrument", default="")
-    ap.add_argument("--var-mods", default=None,
-                    help=f"variable modifications, a comma list of: {VAR_MODS_WORDS}. ox = Ox(M), "
-                         "deam = Deamidation (NQ), none = off. Any other word is refused. Not "
-                         "given: Ox(M) for a Sage DDA search, nothing otherwise (DIA-NN advises "
-                         "against variable mods for quantification) -- recorded as a DEFAULT. "
-                         "Sage always adds protein N-term acetyl. Giving --var-mods replaces the "
-                         "default; to add deamidation and keep Met-ox, give ox,deam")
-    ap.add_argument(IDS_ONLY_FLAG, action="store_true",
-                    help="Sage only: identifications only, no differential expression. The cfg's "
-                         "quant.lfq is false, so run_search.py searches a timsTOF .d directly "
-                         "(Sage 0.14.7 reads it, but has no MS1 quantification on it). Refused "
-                         "with --engine diann (exit 2): a DIA-NN search always quantifies")
-    ap.add_argument("--cys-alkylation", choices=CYS_ALKYLATION_CHOICES, default=None,
-                    help="what the sample prep did to cysteine. cam (the default): reduced and "
-                         "alkylated with iodoacetamide or chloroacetamide -- fixed carbamidomethyl "
-                         "C (DIA-NN --unimod4, Sage static_mods C). none: not alkylated (often so "
-                         "for on-bead, IP and pull-down digests) -- cysteine searched unmodified. "
-                         "nem / carboxymethyl / propionamide / mmts / pyridylethyl: alkylated with "
-                         "N-ethylmaleimide / iodoacetic acid / acrylamide / MMTS / 4-vinylpyridine "
-                         "-- that fixed modification on C (UniMod). Not given, cam is used and "
-                         "recorded as a DEFAULT")
+    add_dda_args(ap)        # --var-mods --ids-only --cys-alkylation --enzyme --overrides ...
     ap.add_argument("--labels", choices=sorted(silac.SCHEMES), default=None,
                     help="SILAC multiplexing (DIA-NN plexDIA, DIA only): silac2 = L/H, silac3 = "
                          "L/M/H on Lys and Arg. Needs --label-preset; references/silac.md")
@@ -1670,18 +1901,6 @@ def main():
                     help="with --labels: spec = independent samples in each channel (the "
                          "default, recorded as one); run = old and new protein of one culture "
                          "(pulsed SILAC / turnover)")
-    ap.add_argument("--overrides", default="",
-                    help="JSON of fields to force, as the user chose them; each is recorded as a "
-                         "user override with its value, who set it and why -- never as an SOP")
-    ap.add_argument("--override-by", default=None,
-                    help="who chose the --overrides values (default: the login running this, "
-                         "recorded as such) -- in the staff-only <out>.staff.json only; the "
-                         "sidecar says Core staff when that login is on the Core staff list "
-                         "(staff.py), else the user")
-    ap.add_argument("--override-reason", default=None,
-                    help="why, in the user's words (e.g. 'instrument ~20 ppm off calibration; "
-                         "user chose 25 ppm'); without it the record says the reason was not "
-                         "given")
     add_resolution_args(ap)
     ap.add_argument("--from-mzml", default="",
                     help="read both resolutions straight out of this mzML")
@@ -1697,14 +1916,17 @@ def main():
                          "tag so DIA-NN excludes contaminants from quant")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
-    # --var-mods: an unknown word stops here, before anything is written (VAR_MODS). Blank is not
-    # given (so is a list with no word in it, "," ): the default for this engine and acquisition applies.
+    # --var-mods (an unknown word stops here, before anything is written: VAR_MODS; blank, or a
+    # list with no word in it, is not given), --ids-only, --enzyme, --overrides and who set them:
+    # read once, with make_presets.py (dda_args)
     try:
-        var_mods = parse_var_mods(a.var_mods)
-    except ValueError as e:
-        refuse_out(a.out, f"{e} No cfg was written.")
-    if a.ids_only and a.engine != "sage":
-        refuse_out(a.out, f"{IDS_ONLY_DIANN}. No cfg was written.", code=2)
+        dda = dda_args(a, a.engine)
+    except DdaArgsError as e:
+        if e.refuse:
+            refuse_out(a.out, e.msg, code=e.code)
+        sys.exit(e.msg)
+    var_mods, overrides, override_meta = dda["var_mods"], dda["overrides"], dda["override_meta"]
+    by, by_how, role = dda["by"], dda["by_how"], dda["role"]
 
     cont_tag = None
     if a.fasta_meta:
@@ -1714,22 +1936,6 @@ def main():
         except (OSError, json.JSONDecodeError) as e:
             sys.exit(f"--fasta-meta could not be read: {e}")
 
-    overrides = {}
-    if a.overrides:
-        try:
-            overrides = json.loads(a.overrides)
-        except json.JSONDecodeError as e:
-            sys.exit(f"--overrides is not valid JSON: {e}")
-    if a.ids_only and "quant" in overrides:
-        refuse_out(a.out, f"{IDS_ONLY_FLAG} sets the Sage cfg's quant block (lfq false), and "
-                          f"--overrides sets quant too: give one or the other. No cfg was written.")
-    if (a.override_by or a.override_reason) and not overrides:
-        sys.exit("[estimate_params] --override-by/--override-reason describe --overrides, and "
-                 "none were given")
-    by, by_how = override_setter(a.override_by) if overrides else (None, "unknown")
-    # "Core staff" only for a login on the Core staff list, else "the user" (S4)
-    role = staff.role_for(by) if overrides else staff.USER_ROLE
-    override_meta = {"reason": a.override_reason, "role": role}
     labels = silac_labels(a, overrides)
 
     r1, r2, analyzer = a.ms1_resolution, a.ms2_resolution, a.ms2_analyzer
@@ -1752,7 +1958,7 @@ def main():
     level_src = ((ppm_for_resolution(r1)[1], ppm_for_resolution(r2)[1])
                  if cls in ("orbitrap_measured", "orbitrap_untabled") else None)
 
-    cys = cys_alkylation_record(a.cys_alkylation)
+    cys = dda["cys"]
     if a.engine == "diann":
         try:
             text, rationale = build_diann(a.acquisition, cls, ms1, ms2, label, src, var_mods,
@@ -1767,9 +1973,9 @@ def main():
         try:
             text, rationale = build_sage(a.acquisition, cls, var_mods, overrides, analyzer,
                                          override_meta=override_meta, cys=cys,
-                                         ids_only=a.ids_only)
-        except OverrideRefused as e:
-            refuse_out(a.out, f"{e} No cfg was written.")
+                                         ids_only=a.ids_only, enzyme=dda["enzyme"])
+        except (OverrideRefused, cleavage_rules.EnzymeError) as e:
+            refuse_out(a.out, f"{str(e).rstrip('.')}. No cfg was written.")
 
     # a new session's wf/ may not exist yet: make --out's folder rather than crash on it
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
@@ -1808,6 +2014,8 @@ def main():
         # SILAC channels, their masses and the channel-normalisation answer (silac.labels_record);
         # absent for a label-free search -- read by make_methods.py, run_silac.R and the audit
         **({"labels": labels} if labels else {}),
+        # the digest --enzyme asked for (cleavage_rules.enzyme_rule); absent when not given
+        **({"enzyme": dda["enzyme"]} if dda["enzyme"] else {}),
         "rationale": rationale,
         "note": "Every value is tagged with its provenance. Mass tolerances are the "
                 "data-type-dependent settings; the rest are standard trypsin/LFQ defaults.",

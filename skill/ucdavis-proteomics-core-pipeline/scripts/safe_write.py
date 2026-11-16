@@ -17,9 +17,31 @@ on make_podcast.py). write_file() never writes through a link at `path`:
 Text is written with "\\n" line ends on every platform: these are bash scripts and lists bash
 reads. Stdlib only.
 """
+import hashlib
 import io
 import os
 import secrets
+
+
+def load_json(path):
+    """THE read-or-None: the parsed JSON at `path`, or None when the file is missing, unreadable or
+    not JSON. (A reader that must tell those apart, or insist on an object, has its own.)"""
+    import json
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def sha256_file(path, chunk=1 << 20):
+    """THE chunked sha256 of a file (a report or a database can be GBs). Raises OSError if the file
+    cannot be read; a caller that wants None catches it."""
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(chunk), b""):
+            h.update(block)
+    return h.hexdigest()
 
 
 def write_file(path, text, mode=0o644):

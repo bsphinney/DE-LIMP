@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The machine the DE ran on is on the record.
 
-DPC-Quant's numbers are exact only on the same CPU family (PROT_0756 v2, zen4 vs zen2 HIVE
+DPC-Quant's numbers are exact only on the same CPU family (PROT_9756 v2, zen4 vs zen2 HIVE
 nodes: |dlogFC| <= 0.0022, |dt| <= 0.0064, no call changed). So:
   * run_de.R records `compute` in de_provenance.json -- CPU model, BLAS/LAPACK libraries,
     OPENBLAS_CORETYPE as found (never set) and, on a SLURM node, the node and its CPU-family

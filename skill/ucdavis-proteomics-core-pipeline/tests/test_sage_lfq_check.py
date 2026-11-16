@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Sage's LFQ integrates MS1 only within +/- quant.lfq_settings.ppm_tolerance (default 5 ppm) of the
-theoretical mass. gabrig 2026-09-29 (HeLa, Fusion Lumos, Sage 0.14.7): runs whose MS1 sat +7.1 /
+theoretical mass. gstaff 2026-09-29 (HeLa, Fusion Lumos, Sage 0.14.7): runs whose MS1 sat +7.1 /
 +7.7 ppm off searched normally (29,846 PSMs) but LFQ logged "discovered 0 target MS1 peaks at 5%
 FDR", and nothing warned. sage_lfq_check.py now reads each run's median precursor mass error and
 Sage's MS1-peak count after every Sage search and WARNS; the record reaches search_provenance.json,
@@ -123,7 +123,7 @@ class LfqWindowCheck(unittest.TestCase):
         self.out = os.path.join(self.d, "search")
 
     def test_plus_seven_ppm_warns_and_names_the_fix(self):
-        """gabrig's cohort: +7.1/+7.7 ppm against Sage's default 5 ppm window, 0 peaks kept."""
+        """gstaff's cohort: +7.1/+7.7 ppm against Sage's default 5 ppm window, 0 peaks kept."""
         write_sage_outputs(self.out, {"HeLa_1.mzML": 7.1, "HeLa_2.mzML": 7.7}, peaks=0,
                            lfq_q=0.128)
         rec = slc.check(self.out)
@@ -247,7 +247,7 @@ class LfqWindowCheck(unittest.TestCase):
             prov = json.load(fh)
         self.assertEqual(prov["engine"], "sage")                # merged, not replaced
         self.assertEqual(prov["sage_lfq_check"]["status"], "warn")
-        with open(os.path.join(self.out, "sage_lfq_check.json")) as fh:
+        with open(os.path.join(self.out, slc.RECORD)) as fh:
             self.assertEqual(json.load(fh)["status"], "warn")
 
 
@@ -333,7 +333,7 @@ class WarningReachesEveryReader(unittest.TestCase):
         """After a Sage job, `run_search.py --adapt-only` is the step the orchestrator runs: the
         warning is on its screen, and in search_provenance.json, before any DE."""
         self._record({"a.mzML": 7.3}, 0)
-        os.remove(os.path.join(self.out, "sage_lfq_check.json"))
+        os.remove(os.path.join(self.out, slc.RECORD))
         with open(os.path.join(self.out, "search_provenance.json"), "w") as fh:
             json.dump({"engine": "sage"}, fh)
         tools, bundle, cfg, fasta = (os.path.join(self.d, n) for n in

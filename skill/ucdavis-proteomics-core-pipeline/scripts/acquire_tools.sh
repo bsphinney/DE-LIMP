@@ -35,7 +35,11 @@
 #            on mac, run via Docker. On HIVE, reuse the Core's native builds
 #            (or its older .sif) under $DIANN_HIVE_DIR.
 #   FragPipe Java app; MSFragger + IonQuant are LICENSE-GATED and cannot be
-#            silently downloaded.
+#            silently downloaded. Where this account can run the Core's licensed
+#            install (engine_choice.CORE_FRAGPIPE_INSTALL, HIVE), `fragpipe` IS its
+#            bin/fragpipe. tools.json `fragpipe_tools` (engine_choice.fragpipe_tools:
+#            the tools folder, its jars, Philosopher + bundled DIA-NN of the install
+#            that runs, the Java, `licensed`, `why`) is what the search reads.
 # =============================================================================
 set -uo pipefail
 
@@ -104,6 +108,8 @@ DIANN_HIVE_DIR="${DIANN_HIVE_DIR:-/quobyte/proteomics-grp/dia-nn}"
 # has no shared folder", and used to fall back to the real /quobyte paths instead -- so a test
 # (or a site) that set it empty silently searched HIVE's own folders.
 RADIANT_HIVE_DIRS="${RADIANT_HIVE_DIRS-/quobyte/proteomics-grp/apptainers:/quobyte/proteomics-grp/radiant}"
+# The Core's AlphaDIA container; overridable like the folders above (tests point it at nothing).
+ALPHADIA_HIVE_SIF="${ALPHADIA_HIVE_SIF-/quobyte/proteomics-grp/apptainers/alphadia.sif}"
 
 # Only honor PIN_VERSION for the engine it names.
 pin_for() { [ -n "$PIN_ENGINE" ] && [ "$PIN_ENGINE" = "$1" ] && [ -n "$PIN_VERSION" ]; }
@@ -391,12 +397,25 @@ acquire_fragpipe() {
   local ver tag; ver="latest"; tag=""
   if pin_for fragpipe; then ver="$PIN_VERSION"; tag="$PIN_VERSION"; fi
   local dir="$ROOT/fragpipe/$ver"
-  local fp asset=""; fp="$(find "$dir" -name 'fragpipe' -type f 2>/dev/null | head -n1)"
+  local fp="" asset="" core=""
+  # The Core's licensed install, when this account can run it and it is the pinned release
+  # (engine_choice.py core-binary: the one definition of where it is). Its own tools/ holds the
+  # jars, and FragPipe takes Philosopher from the install that runs -- so on HIVE the home copy
+  # (no jars) is never what runs. No python3 = not looked for.
+  if have python3; then
+    core="$(python3 "$SCRIPT_DIR/engine_choice.py" core-binary ${tag:+--pin "$tag"} 2>/dev/null || true)"
+  fi
+  if [ -n "$core" ]; then
+    fp="$core"
+    NOTES+=("FragPipe: using the Core's install $core.")
+  else
+    fp="$(find "$dir" -name 'fragpipe' -type f 2>/dev/null | head -n1)"
+  fi
   if [ -z "$fp" ]; then
     mkdir -p "$dir"
     local url; url="$(asset_url_tag Nesvilab/FragPipe "$tag" 'FragPipe-[0-9].*zip' | grep -v jre)"
-    if [ -z "$url" ]; then NOTES+=("FragPipe: could not resolve release zip for version '$ver'; see https://github.com/Nesvilab/FragPipe/releases"); return; fi
-    download_here FragPipe || return
+    if [ -z "$url" ]; then NOTES+=("FragPipe: could not resolve release zip for version '$ver'; see https://github.com/Nesvilab/FragPipe/releases"); fragpipe_tools_record ""; return; fi
+    download_here FragPipe || { fragpipe_tools_record ""; return; }
     echo "  FragPipe: downloading $url"
     # The asset names the release (FragPipe-24.0.zip). Keep it: the file is saved as
     # fragpipe.zip, so after this line the name is the only place the release survives if
@@ -415,15 +434,38 @@ acquire_fragpipe() {
     [ -z "$FRAGPIPE_VER" ] && [ -n "$asset" ] && FRAGPIPE_VER="$(fragpipe_version_of "$asset")"
     [ -z "$FRAGPIPE_VER" ] && NOTES+=("FragPipe ($fp): cannot tell which release this is (neither the install path nor the downloaded asset names one), so tools.json records no FragPipe version.")
   fi
-  if ! have java; then NOTES+=("FragPipe: requires Java 9+ on PATH. Install a JDK first."); fi
-  local tools="${FRAGPIPE_TOOLS_FOLDER:-$dir/tools}"
-  if [ -n "$fp" ] && ls "$tools"/MSFragger*.jar >/dev/null 2>&1; then
-    FRAGPIPE_CMD="$fp"
-    NOTES+=("FragPipe $ver: ready (tools folder $tools). run_search.py adds --config-tools-folder via FRAGPIPE_TOOLS_FOLDER.")
-  elif [ -n "$fp" ]; then
-    FRAGPIPE_CMD="$fp"
-    NOTES+=("FragPipe $ver: downloaded, but MSFragger/IonQuant are license-gated and absent. Run the GUI once to accept the academic license, OR set FRAGPIPE_TOOLS_FOLDER. Headless search disabled until then.")
+  if ! have java; then NOTES+=("FragPipe: requires Java 11+ on PATH (FragPipe 24.0). Install a JDK first."); fi
+  fragpipe_tools_record "$fp" "$tag"
+  [ -z "$fp" ] && return
+  FRAGPIPE_CMD="$fp"
+  case "$FRAGPIPE_LICENSED" in
+    true)
+      NOTES+=("FragPipe $ver: ready (tools folder $FRAGPIPE_FOLDER, tools.json fragpipe_tools.folder; the search passes it to FragPipe as --config-tools-folder).") ;;
+    false)
+      NOTES+=("FragPipe $ver: downloaded, but MSFragger/IonQuant are license-gated and absent. Run the GUI once to accept the academic license, OR set FRAGPIPE_TOOLS_FOLDER. Headless search disabled until then.") ;;
+    *)
+      NOTES+=("FragPipe $ver: whether MSFragger/IonQuant are here was not checked (no python3 to run engine_choice.py), so tools.json fragpipe_tools.licensed is null. Re-run acquire_tools.sh where python3 is on PATH.") ;;
+  esac
+}
+
+# fragpipe_tools_record <bin/fragpipe or ""> [pin]: tools.json `fragpipe_tools`, from
+# engine_choice.fragpipe_tools() -- the one place the tools folder, the jars (two levels down,
+# any case), Philosopher, the bundled DIA-NN, the Java and `licensed` are worked out. It reads
+# $FRAGPIPE_TOOLS_FOLDER itself; the search reads only what is written here (review M4).
+FRAGPIPE_TOOLS_JSON=""; FRAGPIPE_LICENSED=""; FRAGPIPE_FOLDER=""
+fragpipe_tools_record() {
+  local out=""
+  if have python3; then
+    out="$(python3 "$SCRIPT_DIR/engine_choice.py" fragpipe-tools ${1:+--binary "$1"} ${2:+--pin "$2"} 2>/dev/null || true)"
   fi
+  if [ -z "$out" ]; then
+    FRAGPIPE_TOOLS_JSON='{"binary": null, "folder": null, "source": null, "jars": null, "philosopher": null, "diann": null, "java": null, "licensed": null, "ready": null, "why": "not checked: python3 is not on PATH where acquire_tools.sh ran", "skipped": []}'
+    FRAGPIPE_LICENSED=""; FRAGPIPE_FOLDER=""
+    return
+  fi
+  FRAGPIPE_TOOLS_JSON="$out"
+  FRAGPIPE_LICENSED="$(printf '%s\n' "$out" | sed -nE 's/^  "licensed": (true|false|null),?$/\1/p' | head -n1)"
+  FRAGPIPE_FOLDER="$(printf '%s\n' "$out" | sed -nE 's/^  "folder": "(.*)",?$/\1/p' | head -n1)"
 }
 
 # ------------------------------------------------------------- AlphaDIA -------
@@ -433,8 +475,8 @@ acquire_fragpipe() {
 acquire_alphadia() {
   # On HIVE the Proteomics Core keeps an AlphaDIA container.
   if [ "$CLASS" = "hpc" ]; then
-    local asif=/quobyte/proteomics-grp/apptainers/alphadia.sif
-    if [ -f "$asif" ] && have apptainer; then
+    local asif="$ALPHADIA_HIVE_SIF"
+    if [ -n "$asif" ] && [ -f "$asif" ] && have apptainer; then
       ALPHADIA_CMD="apptainer exec --bind /quobyte:/quobyte $asif alphadia"
       # Whatever the .sif's NAME carries (alphadia-1.10.0.sif). Not `pip show`: that answers
       # for the login environment's alphadia, not the one inside the image.
@@ -476,7 +518,7 @@ acquire_fragpipe
 # AlphaDIA: discover the HIVE container automatically; otherwise only acquire when
 # pinned/requested or already present (it's a large GPU pip package — don't auto-install).
 if [ "${PIN_ENGINE:-}" = "alphadia" ] || have alphadia \
-   || { [ "$CLASS" = "hpc" ] && [ -f /quobyte/proteomics-grp/apptainers/alphadia.sif ]; }; then
+   || { [ "$CLASS" = "hpc" ] && [ -n "$ALPHADIA_HIVE_SIF" ] && [ -f "$ALPHADIA_HIVE_SIF" ]; }; then
   acquire_alphadia
 fi
 # Radiant: a ~3 GB image pull, so only when pinned/requested or already available.
@@ -498,6 +540,7 @@ esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
   printf '  "diann":    %s,\n'  "$( [ "$DIANN_CMD" = null ]    && echo null || printf '"%s"' "$(esc "$DIANN_CMD")" )"
   printf '  "sage":     %s,\n'  "$( [ "$SAGE_CMD" = null ]     && echo null || printf '"%s"' "$(esc "$SAGE_CMD")" )"
   printf '  "fragpipe": %s,\n'  "$( [ "$FRAGPIPE_CMD" = null ] && echo null || printf '"%s"' "$(esc "$FRAGPIPE_CMD")" )"
+  printf '  "fragpipe_tools": %s,\n' "$(printf '%s' "${FRAGPIPE_TOOLS_JSON:-null}" | sed '2,$s/^/  /')"
   printf '  "alphadia": %s,\n'  "$( [ "$ALPHADIA_CMD" = null ] && echo null || printf '"%s"' "$(esc "$ALPHADIA_CMD")" )"
   printf '  "notes": [\n'
   for i in "${!NOTES[@]}"; do

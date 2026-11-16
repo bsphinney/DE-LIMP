@@ -59,6 +59,8 @@ class NoLocalPython(unittest.TestCase):
         self.local = os.path.join(self.tmp, "laptop_scripts")
         os.makedirs(self.local)
         shutil.copy(WATCH, self.local)
+        # ...and the one Slurm state list it reads (slurm_states.py, 2.15)
+        shutil.copy(os.path.join(SCRIPTS, "slurm_states.py"), self.local)
         _exe(os.path.join(self.local, "hive_exec.sh"), FAKE_HIVE_EXEC)
         # SLURM on "HIVE"
         self.slurm = os.path.join(self.tmp, "slurm_bin")

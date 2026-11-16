@@ -8,7 +8,7 @@ build_feature_map: Tolerance::Ppm(-ppm_tolerance, ppm_tolerance) around `calcmas
 LfqSettings::default). The search itself uses precursor_tol (+/-10 ppm here), so a run whose MS1
 sits a few ppm off identifies normally and quantifies badly -- and nothing says so.
 
-gabrig 2026-09-29 (HeLa, Fusion Lumos, Sage 0.14.7, skill 2.6.0): runs with a systematic MS1
+A Core member, 2026-09-29 (HeLa, Fusion Lumos, Sage 0.14.7, skill 2.6.0): runs with a systematic MS1
 offset of +7.1/+7.7 ppm searched fine (29,846 PSMs) but LFQ logged "discovered 0 target MS1 peaks
 at 5% FDR" -- target and decoy MS1 intensities were the same (1.85e5 vs 1.89e5). Runs at +1.8 to
 +5.8 ppm quantified, but with run-dependent loss: protein CV 50% against MSFragger's 14% on the
@@ -22,7 +22,8 @@ log, else lfq.parquet), and WARNS when
   * Sage kept 0 target MS1 peaks, or fewer than LOW_PEAK_FRACTION of the target peptides it
     identified at 1% FDR (the peptides LFQ tries to quantify).
 
-It never changes or re-runs the search. The record goes to <out>/sage_lfq_check.json and into
+It never changes or re-runs the search. The record goes to <out>/RECORD (record_path(): its
+engine-neutral name quantification_check.json, or 2.14.x's sage_lfq_check.json) and into
 <out>/search_provenance.json (`sage_lfq_check`); watch_run.sh --out, checkpoint.py status and
 audit_results.py --search-out (-> AUDIT.md -> the report's "Audit & caveats") read it from there.
 
@@ -47,7 +48,8 @@ so there is no corrected run to point to.
 Columns, from Sage 0.14.7 crates/sage-cloudpath/src/parquet.rs:
   results.sage.parquet: filename, is_decoy, rank, peptide, peptide_q, precursor_ppm (ABSOLUTE:
     scoring.rs takes .abs()), expmass, calcmass, isotope_error (Da). The signed offset is
-    (expmass - isotope_error - calcmass) / calcmass * 1e6 and is reported for direction only.
+    (expmass - isotope_error - calcmass) / calcmass * 1e6 (observed minus calculated); Sage's
+    precursor_tol window has the opposite sign (sage_window_ppm, the one conversion).
   lfq.parquet: peptide, charge, is_decoy, q_value, filename, intensity.
   The log line is sage-cli/src/main.rs: "discovered {} target MS1 peaks at 5% FDR".
 
@@ -68,7 +70,7 @@ import sys
 # Sage's results.json nor the config states one, and then tagged as the default in the record.
 SAGE_DEFAULT_LFQ_PPM = 5.0
 # How much room the median needs inside the window: the envelope is spread around the median,
-# so a median right at the edge leaves about half of it outside. 2 ppm is the margin gabrig's
+# so a median right at the edge leaves about half of it outside. 2 ppm is the margin a Core member's
 # diagnosis used (runs at +1.8..+5.8 ppm already quantified worse than MSFragger against 5 ppm).
 MARGIN_PPM = 2.0
 # Heuristic, not measured: a healthy search quantifies most of what it identified, so under 10%
@@ -89,7 +91,7 @@ PSM_Q = 0.01            # the peptide_q Sage's LFQ feature map takes (lfq.rs bui
 # The q_value Sage STORES is not the one it counted with: picked_precursor keys its q map by
 # PrecursorId alone, so a target and its decoy end with ONE shared q -- the lower-scoring member's
 # (the map is filled in score order, and a later insert wins). Stored q >= the target's own q, so
-# filtering the stored q keeps a conservative SUBSET of Sage's logged count: gabrig's HeL50 UnvPe
+# filtering the stored q keeps a conservative SUBSET of Sage's logged count: a Core member's HeL50 UnvPe
 # (2026-09-29) had 1,489 of 1,489 target/decoy pairs with identical q, and 16,649 targets kept
 # against Sage's logged 17,288. No FDR harm; Sage's count is recorded beside what was kept.
 LFQ_Q_MAX = 0.05
@@ -118,7 +120,15 @@ def q_passes(q):
     import pyarrow.compute as pc
     return pc.fill_null(pc.less_equal(pc.cast(q, pa.float32()),
                                       pa.scalar(LFQ_Q_MAX, pa.float32())), False)
-RECORD = "sage_lfq_check.json"
+# The search's quantification record -- the file run_de.R asks the gate about. Its engine-neutral
+# name (any engine writes it: Sage's LFQ check, a FragPipe search for identifications only) and the
+# name 2.14.x wrote: every reader takes either (record_path(), the newer first; run_de.R and
+# staff.ACCEPTED_BY_RECORDS read these names), so a search folder from before keeps its gate.
+RECORD_NAMES = ("quantification_check.json", "sage_lfq_check.json")
+LEGACY_RECORD = RECORD_NAMES[1]
+# The name the writers use (run_search.py's set-aside lists take RECORD_NAMES, so a 2.14.x record
+# is set aside, never left to be read in place of this one).
+RECORD = RECORD_NAMES[0]
 # What a Sage search for identifications only (quant.lfq false) writes instead of report.parquet
 # (run_search.py adapt_sage_ids; run_search.SAGE_IDS is this name).
 IDENTIFICATIONS = "identifications.tsv"
@@ -179,11 +189,12 @@ def _median(xs):
     return xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2.0
 
 
-def per_run_mass_error(results):
-    """({run: {"psms", "median_abs_ppm", "median_offset_ppm"}}, target peptides at 1%).
-
-    Confident target PSMs only: not decoy, peptide_q <= PSM_Q (what LFQ quantifies), rank 1 for
-    the mass error (a chimeric second match has its own precursor)."""
+def confident_mass_errors(results):
+    """([(file name, |precursor_ppm| or None, signed offset ppm or None)], target peptides at 1%)
+    -- THE confident PSMs whose precursor mass error is read (per_run_mass_error, the LFQ window;
+    precursor_window_check, the search window): not decoy, peptide_q <= PSM_Q (what LFQ
+    quantifies), rank 1 (a chimeric second match has its own precursor). The signed offset is
+    (expmass - isotope_error - calcmass) / calcmass * 1e6."""
     import pyarrow.parquet as pq
     import pyarrow.compute as pc
     cols = ["filename", "is_decoy", "rank", "peptide", "peptide_q", "precursor_ppm",
@@ -192,15 +203,28 @@ def per_run_mass_error(results):
     t = t.filter(pc.and_(pc.invert(t["is_decoy"]), pc.less_equal(t["peptide_q"], PSM_Q)))
     peptides = len(set(t["peptide"].to_pylist()))
     t = t.filter(pc.equal(t["rank"], 1))
-    runs = {}
+    psms = []
     for f, ppm, em, cm, iso in zip(t["filename"].to_pylist(), t["precursor_ppm"].to_pylist(),
                                    t["expmass"].to_pylist(), t["calcmass"].to_pylist(),
                                    t["isotope_error"].to_pylist()):
-        r = runs.setdefault(os.path.basename(str(f)), ([], []))
-        if ppm is not None:
-            r[0].append(abs(float(ppm)))
-        if em is not None and cm:
-            r[1].append((float(em) - float(iso or 0.0) - float(cm)) / float(cm) * 1e6)
+        psms.append((os.path.basename(str(f)),
+                     None if ppm is None else abs(float(ppm)),
+                     (float(em) - float(iso or 0.0) - float(cm)) / float(cm) * 1e6
+                     if em is not None and cm else None))
+    return psms, peptides
+
+
+def per_run_mass_error(results):
+    """({run: {"psms", "median_abs_ppm", "median_offset_ppm"}}, target peptides at 1%), from the
+    confident PSMs (confident_mass_errors)."""
+    psms, peptides = confident_mass_errors(results)
+    runs = {}
+    for f, a_ppm, signed in psms:
+        r = runs.setdefault(f, ([], []))
+        if a_ppm is not None:
+            r[0].append(a_ppm)
+        if signed is not None:
+            r[1].append(signed)
     return {f: {"psms": len(a),
                 "median_abs_ppm": _round(_median(a)),
                 "median_offset_ppm": _round(_median(s))}
@@ -379,14 +403,15 @@ def corrected_config(out, params, ppm):
     return path, None
 
 
-def rerun_plan(out, corrected, ppm):
+def rerun_plan(out, corrected, ppm, suffix=None):
     """The run_search.py command that repeats this search with the corrected window, into a new
-    folder beside it, from what search_provenance.json recorded. -> {"out", "command"}, with
-    command None and `why` when the record lacks what the command needs (a search from before
-    2.10 records no tools.json)."""
+    folder beside it (<out><suffix>; default RERUN_SUFFIX, the LFQ window's), from what
+    search_provenance.json recorded. -> {"out", "command"}, with command None and `why` when the
+    record lacks what the command needs (a search from before 2.10 records no tools.json)."""
     import shlex
     out = os.path.abspath(out)
-    new_out = out.rstrip(os.sep) + RERUN_SUFFIX.format(ppm=ppm)
+    suffix = suffix if suffix is not None else RERUN_SUFFIX.format(ppm=ppm)
+    new_out = out.rstrip(os.sep) + suffix
     prov = _load_json(os.path.join(out, PROVENANCE)) or {}
     need = {"tools": prov.get("tools"), "bundle": prov.get("bundle"),
             "fasta": prov.get("fasta"), "files": prov.get("files")}
@@ -439,7 +464,7 @@ def rerun_plan(out, corrected, ppm):
     job = prov.get("submitted_sbatch")
     if job:
         stem, ext = os.path.splitext(job)
-        argv += ["--sbatch", stem + RERUN_SUFFIX.format(ppm=ppm) + (ext or ".sh")]
+        argv += ["--sbatch", stem + suffix + (ext or ".sh")]
     argv += ["--files", *need["files"]]
     plan = {"out": new_out, "command": " ".join(shlex.quote(str(x)) for x in argv)}
     if je_note:
@@ -718,10 +743,24 @@ def add_coverage(out, adapt):
     return rec
 
 
+def record_path(out):
+    """<out>/<the search's quantification record>: the first of RECORD_NAMES present (the
+    engine-neutral name first, then 2.14.x's), or None."""
+    for name in RECORD_NAMES:
+        path = os.path.join(out or "", name)
+        if os.path.isfile(path):
+            return path
+    return None
+
+
 def load(out):
-    """The record written for this Sage output dir, or None (no Sage search, or not checked)."""
+    """The record written for this search output dir (record_path(): either name), or None (no
+    such record: not checked, or a DIA-NN search)."""
+    path = record_path(out)
+    if not path:
+        return None
     try:
-        with open(os.path.join(out, RECORD)) as fh:
+        with open(path) as fh:
             rec = json.load(fh)
     except (OSError, ValueError):
         return None
@@ -762,6 +801,195 @@ def audit_finding(rec):
         f"{acc.get('reason')}." if acc else ""), detail, plain
 
 
+# ---------------------------------------------------------------- the search's precursor window
+# Ruling 120 condition 4: Sage does no mass calibration, so an uncalibrated Orbitrap's MS1 offset
+# goes straight against its precursor window. A 30-run Q Exactive peptidome (non-specific, Sage
+# 0.14.7, +/-10 ppm): the confident matches sat at a median +8.5 ppm (5th-95th percentile 5.0 to
+# 9.9), the window cut off everything past +10 ppm, and Sage found 179 peptides where FragPipe
+# found 16,203. FragPipe's Nonspecific-peptidome workflow does NOT calibrate (calibrate_mass=0):
+# it searches +/-20 ppm and rescores with MSBooster and Percolator (C2 proteomics H2). Sage with
+# its window centred on the offset recovered 4,034 PSMs at 1% against 882 (8 runs, PM check b);
+# how much of FragPipe's peptide lead that closes was not counted. This reads the confident matches' signed offset after any Sage
+# search and, when their median sits in the outer part of the window, warns with the number,
+# writes the config with the window CENTRED on the measured offset in Sage's own sign
+# (sage_window_ppm: Sage's window is calculated minus observed) (same width: a wider window
+# multiplies a non-specific search space) and the command that repeats the search with it. It
+# never re-runs or gates: the shifted search is a new search to compare.
+WINDOW_RECORD = "precursor_window_check.json"
+WINDOW_PROVENANCE_KEY = "precursor_window_check"
+# Heuristic, not measured: a median further than this fraction of the half-width from the
+# window's centre leaves the far tail of the error distribution outside (the peptidome's +8.5 in
+# +/-10 = 0.85; a well-calibrated run's median is within 1-2 ppm of 0).
+WINDOW_EDGE_FRACTION = 0.5
+WINDOW_MIN_PSMS = MIN_PSMS
+WINDOW_CONFIG = "sage_config.precursor_{lo:g}_{hi:g}ppm.json"
+WINDOW_RERUN_SUFFIX = "_precursor_{lo:g}_{hi:g}ppm"
+WINDOW_TAG = "[sage_precursor_window]"
+
+
+def sage_window_ppm(offset_ppm):
+    """THE sign convention between the offset this module measures and Sage's precursor_tol.
+    The measured offset is observed minus calculated, (expmass - isotope_error - calcmass) /
+    calcmass * 1e6 (confident_mass_errors). Sage applies precursor_tol around the OBSERVED
+    precursor mass and keeps the peptides whose calculated mass falls inside, so its window bounds
+    calculated minus observed: the opposite sign. A measured +8.4 ppm therefore sits at -8.4 ppm in
+    Sage's window, and the centred window is [-19, +2], not [-2, +19]. Verified on real data (C2
+    PM check b, a 8-run Orbitrap peptidome searched +/-10 ppm, median +8.44 ppm): [-2, 19] gave 0
+    PSMs at q <= 0.01 (the original window 882), the mirrored [-19, 2] gave 4,034. Every window
+    position and suggested window is computed through this function, never from the raw offset."""
+    return -offset_ppm
+
+
+def _percentile(xs, q):
+    xs = sorted(xs)
+    if not xs:
+        return None
+    k = (len(xs) - 1) * q
+    lo, hi = int(math.floor(k)), int(math.ceil(k))
+    return xs[lo] + (xs[hi] - xs[lo]) * (k - lo)
+
+
+def search_window(cfg):
+    """A Sage config's precursor_tol -> ([lo, hi] in ppm, None), or (None, why) for a window in
+    Da or none stated (Sage 0.14.7: {"ppm": [lo, hi]} or {"da": [lo, hi]})."""
+    tol = (cfg or {}).get("precursor_tol") if isinstance(cfg, dict) else None
+    if not isinstance(tol, dict):
+        return None, "the config states no precursor_tol"
+    if "ppm" not in tol:
+        return None, f"the precursor window is not in ppm ({json.dumps(tol)})"
+    try:
+        lo, hi = (float(x) for x in tol["ppm"])
+    except (TypeError, ValueError):
+        return None, f"the precursor window could not be read ({json.dumps(tol)})"
+    return [lo, hi], None
+
+
+def precursor_window_check(out, params=None):
+    """The search-window record (see WINDOW_RECORD above): status ok | warn | unchecked, the
+    window, the confident matches' median signed offset and 5th/95th percentiles, and for a
+    warning the centred window, the config written with it (`corrected_params`) and the re-run
+    (`rerun`, rerun_plan). Never raises for a missing input: "unchecked", with the reason."""
+    rec = {"check": "sage_precursor_window", "out": os.path.abspath(out),
+           "checked_at": datetime.datetime.now().isoformat(timespec="seconds"),
+           "edge_fraction": WINDOW_EDGE_FRACTION, "min_psms": WINDOW_MIN_PSMS,
+           "psm_rule": f"rank-1 target PSMs at peptide_q <= {PSM_Q:g}"}
+
+    def unchecked(why):
+        rec.update(status="unchecked", reason=why,
+                   message=f"The Sage precursor-window check could not run: {why}.")
+        return rec
+    src = params or (_load_json(os.path.join(out, PROVENANCE)) or {}).get("params_file")
+    cfg = _load_json(src) if src else None
+    if cfg is None:
+        return unchecked(f"the Sage config the search ran with ({src}) could not be read" if src
+                         else "the Sage config the search ran with is not known")
+    window, why = search_window(cfg)
+    if window is None:
+        return unchecked(why)
+    rec["window_ppm"], rec["params"] = window, src
+    results = _find(out, "results.sage.parquet")
+    if not results:
+        return unchecked(f"no results.sage.parquet under {out}")
+    try:
+        psms, _peptides = confident_mass_errors(results)
+    except ImportError:
+        return unchecked("pyarrow is not installed in this Python")
+    except Exception as e:          # an unreadable parquet is reported, never a crash
+        return unchecked(f"could not read {results} ({type(e).__name__}: {e})")
+    offsets = [x[2] for x in psms if x[2] is not None]
+    rec["psms"] = len(offsets)
+    if len(offsets) < WINDOW_MIN_PSMS:
+        return unchecked(f"only {len(offsets)} confident target PSMs ({rec['psm_rule']}), fewer "
+                         f"than {WINDOW_MIN_PSMS}, to measure the precursor offset from")
+    med = round(_median(offsets), 2)
+    p5, p95 = round(_percentile(offsets, 0.05), 2), round(_percentile(offsets, 0.95), 2)
+    lo, hi = window
+    centre, half = (lo + hi) / 2.0, (hi - lo) / 2.0
+    # where the matches sit in Sage's own window: its sign, not the measured one (sage_window_ppm)
+    at = sage_window_ppm(med)
+    position = (at - centre) / half if half else 0.0
+    rec.update(median_offset_ppm=med, p5_offset_ppm=p5, p95_offset_ppm=p95,
+               offset_sign="observed minus calculated (Sage's window is the opposite sign)",
+               median_in_window_ppm=round(at, 2), position_in_window=round(position, 3))
+    span = f"5th-95th percentile {p5:+.1f} to {p95:+.1f} ppm; {len(offsets):,} {rec['psm_rule']}"
+    if abs(position) <= WINDOW_EDGE_FRACTION:
+        rec.update(status="ok", message=(
+            f"Sage's precursor window ({_window_text(window)}) fits the data: the confident "
+            f"matches sit at a median {med:+.1f} ppm, observed minus calculated ({span}), which "
+            f"is {at:+.1f} ppm in Sage's window."))
+        return rec
+    # centred on the matches in Sage's sign: [-ceil(med + half), -floor(med - half)]
+    new = [float(math.floor(at - half)), float(math.ceil(at + half))]
+    rec["status"] = "warn"
+    rec["suggested_window_ppm"] = new
+    corrected, cwhy = _window_config(out, src, cfg, new)
+    if corrected:
+        rec["corrected_params"] = corrected
+    else:
+        rec["corrected_params_why"] = cwhy
+    rec["rerun"] = rerun_plan(out, corrected, None,
+                              suffix=WINDOW_RERUN_SUFFIX.format(lo=new[0], hi=new[1]))
+    how = (rec["rerun"].get("command") or rec["rerun"].get("why") or "")
+    rec["message"] = (
+        f"Sage's precursor window is {_window_text(window)}, but the confident matches sit at a "
+        f"median {med:+.1f} ppm, observed minus calculated ({span}). Sage's window runs the "
+        f"other way (calculated minus observed), so they sit at {at:+.1f} ppm in it: the window "
+        f"cuts off the matches beyond its {'upper' if position > 0 else 'lower'} edge, so true "
+        f"matches were lost -- and the "
+        f"median read here is itself pulled toward the window, so the real offset may be larger. "
+        f"Sage does no mass calibration. Repeat the search with the window centred on the "
+        f"measured offset, [{new[0]:g}, {new[1]:g}] ppm (the same width"
+        + (f", in {corrected}" if corrected else f"; {cwhy}") + f"): {how} -- and compare the two "
+        f"searches before using either; or search with FragPipe, whose non-specific workflow "
+        f"searches a wider +/-20 ppm window (it does no mass calibration either).")
+    return rec
+
+
+def _window_text(window):
+    lo, hi = window
+    return f"+/-{hi:g} ppm" if lo == -hi else f"[{lo:g}, {hi:g}] ppm"
+
+
+def _window_config(out, src, cfg, window):
+    """<out>/WINDOW_CONFIG: the config the search ran with, precursor_tol = {"ppm": window}, and
+    nothing else changed (its .rationale.json side record carried beside it, as
+    corrected_config does) -> (path, None) | (None, why)."""
+    new = dict(cfg, precursor_tol={"ppm": list(window)})
+    path = os.path.join(out, WINDOW_CONFIG.format(lo=window[0], hi=window[1]))
+    try:
+        with open(path + ".tmp", "w") as fh:
+            json.dump(new, fh, indent=2)
+            fh.write("\n")
+        os.replace(path + ".tmp", path)
+        side = _load_json(f"{src}.rationale.json")
+        if isinstance(side, dict):
+            side = dict(side, derived_from={"params": src, "changed": {
+                "precursor_tol": {"ppm": list(window)}}})
+            with open(path + ".rationale.json.tmp", "w") as fh:
+                json.dump(side, fh, indent=2)
+                fh.write("\n")
+            os.replace(path + ".rationale.json.tmp", path + ".rationale.json")
+    except OSError as e:
+        return None, f"the corrected config could not be written in {out} ({e})"
+    return path, None
+
+
+def check_precursor_window(out, params=None, stream=None):
+    """precursor_window_check, recorded (<out>/WINDOW_RECORD and search_provenance.json
+    `precursor_window_check`) and said (WARNING / NOTE / INFO). What run_search.py's Sage
+    adapters call; a record that cannot be written is said, never raised."""
+    rec = precursor_window_check(out, params)
+    try:
+        write_record(out, WINDOW_RECORD, WINDOW_PROVENANCE_KEY, rec)
+    except OSError as e:
+        print(f"{WINDOW_TAG} NOTE: could not record the check in {out}: {e}",
+              file=stream or sys.stderr)
+    level = {"warn": "WARNING", "unchecked": "NOTE", "ok": "INFO"}.get(rec.get("status"))
+    if level and rec.get("message"):
+        print(f"{WINDOW_TAG} {level}: {rec['message']}", file=stream or sys.stderr, flush=True)
+    return rec
+
+
 def say(rec, stream=None):
     """The one line (or two) a person sees: WARNING for warn, NOTE for unchecked, INFO for ok."""
     stream = stream or sys.stderr
@@ -797,7 +1025,7 @@ def write_record(out, name, key, rec):
 
 
 def record(out, rec):
-    """<out>/sage_lfq_check.json + search_provenance.json `sage_lfq_check`."""
+    """<out>/RECORD + search_provenance.json `sage_lfq_check`."""
     return write_record(out, RECORD, "sage_lfq_check", rec)
 
 

@@ -4,7 +4,7 @@
 # private key. Claude Code runs LOCALLY; this is how the HIVE steps execute.
 #
 #   Set once per session:
-#     export HIVE_USER=brettsp
+#     export HIVE_USER=<your HIVE user>
 #     export HIVE_KEY=~/.ssh/id_ed25519     # the path the user gave you
 #
 #   Run a command on HIVE:
@@ -18,6 +18,9 @@
 #   Run a command on a HIVE COMPUTE node (one blocking srun, the queue spelled out) -- for
 #   anything heavier than seconds of light work (HPC@UCD's ucd-hpc rules):
 #     bash hive_exec.sh --job --time 30 --mem 4G 'python3 ~/proteomics-pipeline/scripts/...'
+#   --preemptible: the command can be run again, so it runs on the preemptible queue (publicgrp/low).
+#   --session DIR: the session folder it serves; the job starts there and carries
+#   --comment=session:<name> (otherwise it runs in your home and cannot be traced to its session).
 #
 #   Put the skill on HIVE -- once, and again after every skill update:
 #     bash hive_exec.sh --put-skill
@@ -43,7 +46,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 CFG="${HIVE_ENV_FILE:-$HOME/.config/ucdavis-proteomics/hive.env}"
 if [ -z "${HIVE_USER:-}" ] && [ -f "$CFG" ]; then . "$CFG"; fi
 HU="${HIVE_USER:?set HIVE_USER, or save it once: mkdir -p ~/.config/ucdavis-proteomics && printf \'HIVE_USER=<user>\\nHIVE_KEY=~/.ssh/id_ed25519\\n\' > ~/.config/ucdavis-proteomics/hive.env}"
-# gabrig 2026-09-23, Windows 11: ssh's default user there is the AD login `AD3+gabrig`, and
+# A Core member, 2026-09-23, Windows 11: ssh's default user there is the AD login `AD3+<user>`, and
 # every call that relied on it got "Permission denied". The same name in HIVE_USER fails the
 # same way, after spending one of HIVE's throttled connection attempts -- so stop here.
 case "$HU" in
@@ -81,7 +84,7 @@ if [ "${HIVE_SSH_MUX:-1}" != "0" ]; then
   MUX=(-o ControlMaster=auto -o "ControlPath=$HOME/.ssh/cm-%C" -o ControlPersist=10m)
   MUX_E=" -o ControlMaster=auto -o 'ControlPath=$HOME/.ssh/cm-%C' -o ControlPersist=10m"
 fi
-# StrictHostKeyChecking=accept-new: gabrig 2026-09-23, the first call from a new laptop died
+# StrictHostKeyChecking=accept-new: a Core member, 2026-09-23, the first call from a new laptop died
 # "Host key verification failed" -- HIVE was not in known_hosts yet and there is no prompt
 # to answer in a non-interactive call. accept-new records an UNKNOWN key and still refuses
 # a CHANGED one. check_access.sh prints the fingerprint for the user to compare.
@@ -121,9 +124,9 @@ winpath() {
   printf '%s\n' "$1"
 }
 
-usage() { echo "usage: hive_exec.sh '<command>' | --job [--time MIN] [--mem SIZE] [--cpus N] [--preemptible] '<command>' | --put <local> <remote> | --get <remote> <local> | --put-skill" >&2; exit 2; }
+usage() { echo "usage: hive_exec.sh '<command>' | --job [--time MIN] [--mem SIZE] [--cpus N] [--preemptible] [--session DIR] '<command>' | --put <local> <remote> | --get <remote> <local> | --put-skill" >&2; exit 2; }
 
-# gabrig 2026-09-23: T:\Data\lab\service\... went up by scp (7.1 GB, ~20 min) although T: is
+# A Core member, 2026-09-23: T:\Data\lab\service\... went up by scp (7.1 GB, ~20 min) although T: is
 # the Flinders share HIVE mounts at /nfs/lssc0/flinders/proteomics. hive_path.sh makes no
 # ssh call for an ordinary local path, so this costs nothing unless the source is on a share.
 put_guard() {
@@ -146,7 +149,7 @@ put_guard() {
 # remote path is relative to home under both protocols, so drop it.
 rpath() { local r="$1"; case "$r" in "~") r=. ;; "~/"*) r="${r#\~/}"; [ -n "$r" ] || r=. ;; esac; echo "$r"; }
 
-# rsync, which the rest of the skill assumes, is not in Git Bash on Windows (gabrig
+# rsync, which the rest of the skill assumes, is not in Git Bash on Windows (a Core member,
 # 2026-09-23: "rsync: command not found", then scp commands hand-built by the agent). These
 # keep rsync's meaning, which scp -r does not have on its own:
 #   - a directory lands INSIDE <dest>, and <dest> is created if missing. scp -r to a
@@ -246,14 +249,31 @@ tar_get() {
     else mv -f -- "$HX_STAGE/$b" "$dst"; fi           # an existing file is overwritten, a missing dest becomes the file
   else return 1; fi
 }
+# The stream tar_put sends. A Mac's bsdtar writes each file's extended attributes -- nearly every
+# file carries com.apple.provenance -- as an AppleDouble "._<name>" member and as
+# LIBARCHIVE.xattr headers; HIVE's GNU tar unpacks the first as real files beside the data
+# (._Analysis_Report.html ... in a session of record: review M6, the real HIVE test T5b) and
+# warns about the second for every file. COPYFILE_DISABLE=1 drops the ._ members; on macOS
+# --no-mac-metadata --no-xattrs (checked once: this tar must take them) drops the headers too.
+PUT_TAR_OPTS=() PUT_TAR_CHECKED=0
+put_tar() {
+  if [ "$PUT_TAR_CHECKED" = 0 ]; then
+    PUT_TAR_CHECKED=1
+    case "$(uname -s 2>/dev/null)" in
+      Darwin) COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs -cf - -T /dev/null \
+                >/dev/null 2>&1 && PUT_TAR_OPTS=(--no-mac-metadata --no-xattrs) ;;
+    esac
+  fi
+  COPYFILE_DISABLE=1 tar ${PUT_TAR_OPTS[@]+"${PUT_TAR_OPTS[@]}"} "$@"
+}
 tar_put() {
   local src="$1" dst="$2" parent name chm=""
   if [ -d "$src" ]; then
     if [ "${src%/}" != "$src" ]; then parent="$src"; name=.; else split_path "$src"; parent="$sp_dir"; name="$sp_name"; fi
-    tar -C "$parent" -cf - -- "$name" | rssh "mkdir -p -- $(rq "${dst%/}") && tar -C $(rq "${dst%/}") -xf -"
+    put_tar -C "$parent" -cf - -- "$name" | rssh "mkdir -p -- $(rq "${dst%/}") && tar -C $(rq "${dst%/}") -xf -"
   elif [ "${dst%/}" != "$dst" ]; then
     split_path "$src"
-    tar -C "$sp_dir" -cf - -- "$sp_name" | rssh "mkdir -p -- $(rq "${dst%/}") && tar -C $(rq "${dst%/}") -xf -"
+    put_tar -C "$sp_dir" -cf - -- "$sp_name" | rssh "mkdir -p -- $(rq "${dst%/}") && tar -C $(rq "${dst%/}") -xf -"
   else
     # a file to a name: into it when <dst> is a folder on HIVE, else it BECOMES <dst>
     split_path "$src"
@@ -305,6 +325,11 @@ case "${1:-}" in
              # a restartable, read-only command: at the user's own CPU cap on high it may run
              # on low (preemptible) instead of waiting behind their searches (on_compute.py)
              --preemptible) jopts="$jopts $1"; shift ;;
+             # the session this serves: the job starts in it (--chdir) and carries
+             # --comment=session:<name>, so it can be traced (it runs in the user's home otherwise)
+             --session)
+               [ $# -ge 2 ] || { echo "hive_exec.sh --job: --session takes a folder" >&2; exit 2; }
+               jopts="$jopts $1 $(printf '%q' "$2")"; shift 2 ;;
              *) break ;;
            esac
          done

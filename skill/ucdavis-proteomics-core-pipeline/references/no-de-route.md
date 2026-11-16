@@ -1,6 +1,14 @@
 # The no-DE route: an analysis with no differential expression
 
-SKILL.md points here from step 3 (the design questions), step 4 and the top of step 8.
+SKILL.md points here from its route list, step 3 (the design questions), step 4 and the top of
+step 8.
+
+<!-- contents: tests/test_skill_structure.py --toc -->
+**Contents** (section: line)
+- 13: When it applies
+- 26: The route, in order
+- 118: Work done outside the skill
+<!-- /contents -->
 
 ## When it applies
 The session has no study design to test, or the question is not a comparison of groups:
@@ -9,18 +17,30 @@ The session has no study design to test, or the question is not a comparison of 
 - a **re-analysis** of a published or earlier dataset, a **benchmark**, or a comparison
   against a published result that asks its own question (not a volcano of two groups).
 
-Say so in step 3, confirm it with the defaults in step 4, and record it
-(`log_decision.py`). Do not file the steps after step 8 as "after the DE / later": they are
-the finish of THIS analysis. Three sessions that did ended with a hand-made report, a hand-made
-reproducibility zip and no AGENTS.md, README, bundle or finalize, and one delivered raw files
-and search results with its own copy script, past the QC check.
+Say so in step 3, confirm it with the defaults in step 4, and record it (`log_decision.py`).
+**You are NOT done after the search.** Do not file the steps after step 8 as "after the DE /
+later": they are the finish of THIS analysis. Three sessions that did ended with a hand-made
+report, a hand-made reproducibility zip and no AGENTS.md, README, bundle or finalize, and one
+delivered raw files and search results with its own copy script, past the QC check.
 
 ## The route, in order
-1. **The search (step 7). One rule: a no-DE DDA search with Sage is identifications only
-   (`estimate_params.py --ids-only`, step 6b) unless the user -- for a Core submission, the
-   client -- wants amounts.** Sage then writes `identifications.tsv` and no `report.parquet`. On
-   a timsTOF `.d` it reads the `.d` itself, which identified more than the mzML conversion a
-   quantifying search needs (896 peptides against 753 on two timsTOF HT DDA-PASEF runs,
+Every step up to the search runs as in any analysis; none is skipped for a "quick" one: 0a, 0,
+0b and 0c (a search of these files may already be running), step 1 (`hive_path.sh` before any
+upload), 1b, 2, **all of step 3** (organism, database type, contaminants, sample type, keratin,
+and item 1's question), 3b, 4 (the one confirmation carries item 1's choice), 5, 6, 6b, the
+search with item 1's rule, 7b, and 7c (a Core search goes to FRAN). Core staff: 1c or 1a as
+usual. Then:
+
+1. **The search (step 7). One rule, both DDA engines: a no-DE DDA search is identifications
+   only unless the user -- for a Core submission, the client -- wants amounts.** Pass
+   `--ids-only` at step 4 (`resolve_defaults.py`); the engine does not change
+   (search-engines.md "4c."). FragPipe (the timsTOF DDA-PASEF route): step 4's preset is then
+   FragPipe's Basic-Search workflow, all runs in one pooled experiment with one FDR; Sage: pass
+   `estimate_params.py --ids-only` at step 6b too. Either writes `identifications.tsv` and its
+   record (`fragpipe_identifications.json` / `sage_identifications.json`) and no
+   `report.parquet`; the Methods read the protein FDR and isotope errors from the run. Sage on a
+   timsTOF `.d` reads the `.d` itself, which identified more than the mzML conversion a
+   quantifying Sage search needs (896 peptides against 753 on two timsTOF HT DDA-PASEF runs,
    `references/search-engines.md`).
    - **Quantify instead** (no `--ids-only`) when the question needs amounts: abundance compared
      between runs or samples, an intensity table in the delivery, or a DE that may follow
@@ -29,16 +49,19 @@ and search results with its own copy script, past the QC check.
      list or a species check is identifications only.
    - When the request does not say, ask once. Record the choice and why with
      `log_decision.py`.
-   - A DIA search (DIA-NN) always quantifies (`--ids-only` is refused with DIA-NN). That is
-     fine: there is just no step 8.
-2. **Skip steps 8–8d and 8f** (the DE, set tests, DE figures, audit, expert review, peak check).
+   - A DIA search (DIA-NN, Radiant, or FragPipe's DIA route) always quantifies: `--ids-only` is
+     for DDA searches only (Sage or FragPipe), and step 4 refuses it otherwise -- leave it out;
+     the search's own report is the result. That is fine: there is just no step 8.
+2. **Skip steps 8–8d and 8f** (the DE, set tests, DE figures, audit, expert review, peak check),
+   and 8g (the protein screen reads a limpa DE).
    **Core runs still do step 8e** (`qc_bracket.py --session <S>`): `deliver` holds a no-DE
    delivery on the QC check exactly as it holds an analysis delivery.
 3. **The report (step 9):** `make_analysis_html.py` works without DE tables. With no DE record
    and no DE table, `analysis_prompt.py` writes the **no-DE brief**, titled "identification and
    QC (no differential expression)". Its body is written for that session, not only its title.
    Pass `--session <S>`, as step 9 says: it finds the session's search (`session.search_folder`;
-   else `--report`'s folder).
+   else `--report`'s folder). `--de-dir` is not needed here (it defaults to
+   `<S>/output/tables`, which a no-DE session does not have).
    - **It names the search's own files to read.** For an identifications-only search:
      `identifications.tsv` and its record, `sage_identifications.json` or
      `fragpipe_identifications.json` (the rule, the protein-level statement, the row unit). For a
@@ -86,15 +109,17 @@ and search results with its own copy script, past the QC check.
      carries **no** search folder and says why, and the Methods' Database-search paragraph is
      tagged blanks (`make_methods.py --session`: none chosen). Deliver **`--mode interim`
      first** (every search folder, each under its own name), **then `--mode no-de`** (the
-     report, Methods and bundle), which closes `owed`. To deliver one search only, rename each
-     other folder to `output/superseded_<name>/` before finalize (SKILL.md 12b, "Several
-     searches").
+     report, Methods and bundle), which closes `owed`. To deliver one search only, run
+     `session.py choose-search --dir "$S" --folder <its folder>` (or rename a replaced one to
+     `output/superseded_<name>/`) before finalize (core-submissions.md "12b.",
+     "Several searches").
    - "I only require raw data": `--mode raw-only`.
 
 ## Work done outside the skill
 - Analysis code you write outside the session (a species-composition script, a notebook) goes
   in with `session.py finalize --code-dir <dir>` (repeatable; `--extra-dir <dir>` for other
-  files). It is copied to `output/custom/`, checksummed, and listed in the README and AGENTS.md.
+  files). It is copied to `output/custom/`, checksummed, and listed in the README, AGENTS.md and
+  OUTPUT_FILES.md.
 - A project's own reproducibility package (for example a CLAUDE.md "collaborator package") is
   IN ADDITION to the skill's bundle, never instead of it.
 - A README.md or AGENTS.md written by hand is never overwritten: finalize writes

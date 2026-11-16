@@ -4,7 +4,7 @@
 contaminants.R's rule is DIA-NN's: an accession in the group STARTS with Cont_ (or FragPipe's
 contam_). DIA-NN writes bare accessions (Cont_P02769). adapt_sage wrote Sage's `proteins` as
 Sage gives it -- full FASTA IDs (sp|Cont_P02769|ALBU_BOVIN) -- so no Sage DE ever had a
-contaminant removed: on gabrig's HeL50 UnvPe (2026-09-29) the Sage DE limma-tested 171 Cont_
+contaminant removed: on gstaff's HeL50 UnvPe (2026-09-29) the Sage DE limma-tested 171 Cont_
 groups (BSA, gelsolin, mouse keratins) while methods.txt said "Contaminants : none", and a
 keratin sample's exemption could never apply. adapt_sage now writes bare accessions through
 protein_ids.group_accessions (the one reading of an identifier). FragPipe's DDA adapter reads
@@ -52,7 +52,7 @@ OWN_KRTAP = "sp|Cont_Q9BYR0|KRA47_HUMAN"            # the sample species' own ke
 WOOL = "sp|Cont_P02438|KRB2A_SHEEP"                 # another species', naming no sample protein
 SHARED_KRT = "sp|P31000|K1H1_HUMAN;sp|Cont_Q61765|K1H1_MOUSE"
 # a sample protein (P00001, which has 3 peptides of its own) sharing one peptide with BSA: a
-# MIXED Cont_ group. On gabrig's HeL50 Sage run 101 of the 171 Cont_ groups were mixed and 36 human
+# MIXED Cont_ group. On gstaff's HeL50 Sage run 101 of the 171 Cont_ groups were mixed and 36 human
 # proteins lost peptides to them, while methods.txt said "0 lost some" (sage-review B1).
 MIXED_BSA = f"sp|P00001|PROT1_HUMAN;{BSA}"
 
@@ -106,7 +106,7 @@ def write_sage_output(out, seed=9):
 
 def write_fragpipe_output(out, seed=13):
     """combined_protein.tsv as FragPipe 23.1 writes it (Protein, Protein ID, Entry Name, Gene,
-    '<sample> MaxLFQ Intensity'); Protein ID of a skill contaminant is Cont_... (gabrig's HeL50
+    '<sample> MaxLFQ Intensity'); Protein ID of a skill contaminant is Cont_... (gstaff's HeL50
     UnvPe MSFragger output, 2026-09-29), of a Philosopher --contam one the bare accession."""
     rnd = random.Random(seed)
     rows = [(p, p.split("|")[1], base, up) for p, base, up in sample_proteins()]
@@ -499,7 +499,7 @@ class DiannContQuantExcludeIsRead(unittest.TestCase):
                      "Compiled on Sep 15 2026 15:30:01\nLogical CPU cores: 64\n" + line + "\n\n")
 
     def test_a_cfg_on_the_command_line_is_read(self):
-        """sage-review, ca9aff2: DIA-NN logs `--cfg <file>` UNEXPANDED (2.7.0 PROT_0002, 2.6.1
+        """sage-review, ca9aff2: DIA-NN logs `--cfg <file>` UNEXPANDED (2.7.0 PROT_9102, 2.6.1
         taha_dog), so a --one-step search (`diann --cfg params.cfg ...`) read "not set" although
         params.cfg had the flag -- in the DE, the Methods and the run record."""
         import make_methods

@@ -254,10 +254,23 @@ def search_ambiguous(f):
     return search_unchosen(f["search_choice"])
 
 
-def gather(session_dir):
-    """Everything the package and the Methods need, read from the session's own files."""
+def _first_of(*pairs):
+    """(value, source) of the first pair whose value is set (not None, "" or 0), else (None, None)."""
+    return next(((v, s) for v, s in pairs if v), (None, None))
+
+
+def gather(session_dir, fasta=None, de_dir=None):
+    """Everything the package and the Methods need, read from the session's own files.
+    `fasta` / `de_dir`: a FASTA or DE folder given in place of the session's own (provenance.py
+    --session with an explicit --fasta / --de-dir): its sidecar and its de_provenance.json are
+    then the records read, so every value agrees with the file the bundle names."""
     p = paths_for(session_dir)
-    f = {"p": p, "session": os.path.basename(p["session_dir"])}
+    if fasta:
+        fasta = os.path.abspath(fasta)
+        p = dict(p, fasta=fasta, fasta_meta=fasta + ".meta.json")
+    if de_dir:
+        p = dict(p, de_dir=os.path.abspath(de_dir))
+    f = {"p": p, "session": os.path.basename(p["session_dir"]), "fasta_given": bool(fasta)}
     f["raws"] = read_raw_list(session_dir)
     f["wf"] = _load(p["workflow_manifest"]) or {}
     f["wf_path"] = p["workflow_manifest"] if os.path.isfile(p["workflow_manifest"]) else None
@@ -268,8 +281,9 @@ def gather(session_dir):
     f["search_prov_path"] = f["search_choice"]["path"]
     f["search_prov_candidates"] = f["search_choice"]["candidates"]
     f["params"] = params_file(p, resolved=False)     # the file the search was given
-    f["fasta_meta_path"] = _first([p["fasta_meta"]] + sorted(
-        glob.glob(os.path.join(p["input_dir"], "*.meta.json"))))
+    # (a FASTA given in place of the session's: its own sidecar or none -- never another's)
+    f["fasta_meta_path"] = _first([p["fasta_meta"]] + ([] if fasta else sorted(
+        glob.glob(os.path.join(p["input_dir"], "*.meta.json")))))
     f["fasta_meta"] = _load(f["fasta_meta_path"]) if f["fasta_meta_path"] else None
     f["de_prov_path"] = _first([os.path.join(p["de_dir"], "de_provenance.json")])
     f["de_prov"] = _load(f["de_prov_path"]) if f["de_prov_path"] else None
@@ -281,20 +295,29 @@ def gather(session_dir):
                                             f["search_choice"]["how"]) if search_ambiguous(f) else
                  mm.search_record(f["params"], f["search_prov_path"], f["wf_path"]))
     q = f["run_manifest"].get("query") or {}
-    f["acquisition"] = ((f["wf"].get("acquisition") or q.get("acquisition") or "").upper()
-                        or None)
+    # each value with the record it came from (`sources`: provenance.py --session says where)
+    wf_rel, rm_rel = "input/wf/workflow.manifest.json", "output/reproducibility/run_manifest.json"
+    acq, acq_from = _first_of((f["wf"].get("acquisition"), f"{wf_rel} `acquisition`"),
+                              (q.get("acquisition"), f"{rm_rel} `query.acquisition`"))
+    f["acquisition"] = (acq or "").upper() or None
     rep = f["methods_params"].get("representative") or {}
     f["mode"] = rep.get("mode") if not f["methods_params"].get("from_session_record") else None
-    f["instrument"] = (f["methods_params"].get("instrument")
-                       or next(iter(f["wf"].get("instruments") or []), None)
-                       or q.get("instrument") or None)
+    f["instrument"], instr_from = _first_of(
+        (f["methods_params"].get("instrument"), "output/methods_params.json `instrument`"),
+        (next(iter(f["wf"].get("instruments") or []), None), f"{wf_rel} `instruments`"),
+        (q.get("instrument"), f"{rm_rel} `query.instrument`"))
     f["instrument_source"] = ("methods_params.json (read from the raw files)"
                               if f["methods_params"].get("instrument")
                               and not f["methods_params"].get("from_session_record")
                               else "the session record (workflow manifest)")
     fm = f["fasta_meta"] or {}
-    f["taxid"] = fm.get("taxid") or f["wf"].get("organism_taxid") or q.get("organism_taxid")
+    side_rel = (os.path.relpath(f["fasta_meta_path"], p["session_dir"]).replace(os.sep, "/")
+                if f["fasta_meta_path"] else "the FASTA's sidecar")
+    f["taxid"], taxid_from = _first_of((fm.get("taxid"), f"{side_rel} `taxid`"),
+                                       (f["wf"].get("organism_taxid"), f"{wf_rel} `organism_taxid`"),
+                                       (q.get("organism_taxid"), f"{rm_rel} `query.organism_taxid`"))
     f["organism"] = fm.get("organism") or None
+    f["sources"] = {"acquisition": acq_from, "instrument": instr_from, "taxid": taxid_from}
     return f
 
 
@@ -1749,14 +1772,21 @@ def _chosen_search(f):
     return (path, rec) if isinstance(rec, dict) else (None, None)
 
 
-def bundle_raws(f):
-    """The raw files the bundle fingerprints: input/raw_files.txt, else the search's own record of
-    what it read (session_docs.raw_record -- finalize writes it to input/raw_files.txt just before
-    it builds the bundle). [] when the session holds no record of them."""
+def bundle_raws_from(f):
+    """(the raw files the bundle fingerprints, where that list came from): input/raw_files.txt,
+    else the search's own record of what it read (session_docs.raw_record -- finalize writes it to
+    input/raw_files.txt just before it builds the bundle). ([], None) when the session holds no
+    record of them."""
     if f["raws"]:
-        return list(f["raws"])
+        return list(f["raws"]), "input/raw_files.txt"
     import session_docs                          # here, not at the top: it loads the podcast's
-    return list(session_docs.raw_record(f["p"])[0])
+    raws, src = session_docs.raw_record(f["p"])
+    return list(raws), src
+
+
+def bundle_raws(f):
+    """The raw files the bundle fingerprints (bundle_raws_from)."""
+    return bundle_raws_from(f)[0]
 
 
 def _skill_home_file(*parts):
@@ -1766,9 +1796,31 @@ def _skill_home_file(*parts):
     return os.path.join(make_podcast.pipeline_home(), *parts)
 
 
-def bundle_command(f, outdir=None):
-    """provenance.py's command line for this session (gather's facts) -> (cmd, missing,
-    unnamed). Each flag is one SKILL.md step 10 lists, its value read from a record:
+def de_scalar(v):
+    """A de_provenance.json value as the command-line string it was given as, or None. jsonlite
+    may write a scalar as a one-element list, and NA as null or "NA"."""
+    if isinstance(v, list) and len(v) == 1:
+        v = v[0]
+    if isinstance(v, bool) or v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return str(v)
+    return v if isinstance(v, str) and v.strip() and v != "NA" else None
+
+
+# Flags whose absence is ordinary, not a missing record: no peak check ran (step 8f), and a
+# search that quantified has no result file besides its report. provenance.py --session lists a
+# flag with no value under from_session.not_found unless it is one of these.
+BUNDLE_OPTIONAL = ("--peak-check", "--search-output")
+
+
+def bundle_flags(f, outdir=None):
+    """THE flags of provenance.py for this session (gather's facts): finalize's command
+    (bundle_command) and provenance.py --session (step 10) both take them from here, so the
+    bundle step 10 builds is the bundle finalize would build (2.15 review H1).
+    -> {"flags": [{"flag", "value", "from"} | {"flag", "value": None, "why"}], "raws",
+    "raws_from", "missing", "unnamed", "notes"}. Each flag is one SKILL.md step 10 lists, its
+    value read from a record (`from` says which; `why` says why there is none):
       --workflow-manifest   input/wf/workflow.manifest.json
       --setup-json          the skill home's setup.json; --tools-json the search record's
                             `tools`, else the skill home's tools/tools.json
@@ -1778,46 +1830,89 @@ def bundle_command(f, outdir=None):
       --search-record       the chosen search's search_provenance.json (what step 5 replays --
                             a FragPipe search's workflow as it ran -- and REPRODUCE.md describes)
       --conditions          input/conditions.csv
-      --fasta, --fasta-info-file   input/search.fasta (else the search record's `fasta`) and
-                            fetch_fasta.py's sidecar
-      --raw                 bundle_raws
+      --fasta, --fasta-info-file   the FASTA the search ran on (the search record's `fasta`,
+                            when it is here), else input/search.fasta, and that file's own
+                            fetch_fasta.py sidecar; --organism-taxid follows it (Ruling 96)
+      --raw                 bundle_raws ("raws", "raws_from")
       --report              the DE's input (the report it read), else the search record's
                             `result.report`
       --search-output       each other result file of the search (session.search_result_files
                             with engine_tables): an identifications-only search's
                             identifications.tsv and its record, Sage's own tables
-      --engine              the search record's `engine`, else the workflow manifest's
+      --engine, --engine-version   the search record's `engine` (else the workflow manifest's)
+                            and `version`
       --de-dir, --de-method, --contrasts, --q-cutoff, --logfc, --adjp   the DE's record
-                            (output/tables/de_provenance.json), only for a session with a DE
+                            (output/tables/de_provenance.json); --de-dir alone for DE tables
+                            with no record (provenance.de_ran_of: a DE ran, its record is gone)
       --acquisition, --organism-taxid, --instrument   as the Methods read them (gather)
       --commands, --qc-bracket, --peak-check   logs/commands.log, logs/qc_bracket.json,
                             output/skyline/skyline_provenance.json, when there
-    A flag with no record is left out, and provenance.py's own MANIFEST.txt says what it could
-    not capture. `missing`: what finalize cannot build the bundle without -- a record of the raw
-    files, and one of what ran (the workflow manifest or a search record); the command then holds
-    a <placeholder> for the raw files. `unnamed`: what was left out for want of a record, said."""
+    A flag with no record is left out of the command, and provenance.py's own MANIFEST.txt says
+    what it could not capture. `missing`: what finalize cannot build the bundle without -- a
+    record of the raw files, and one of what ran (the workflow manifest or a search record); the
+    command then holds a <placeholder> for the raw files. `unnamed`: what was left out for want of
+    a record, said. `notes`: where the session's own file and its search record name different
+    files, which one is used -- bundle_command passes each as --note, and REPRODUCE.md says it."""
     p = f["p"]
+    sdir = os.path.abspath(p["session_dir"])
     de = f["de_prov"] if isinstance(f["de_prov"], dict) else None
     sp_path, sp = _chosen_search(f)
     sp = sp or {}
     cands = f["search_prov_candidates"]
-    missing, unnamed = [], []
+    missing, unnamed, notes, flags = [], [], [], []
+
+    def rel(x):
+        a = os.path.abspath(x)
+        return (os.path.relpath(a, sdir).replace(os.sep, "/") if a.startswith(sdir + os.sep)
+                else a)
 
     def there(x):
         return str(x) if isinstance(x, str) and x and os.path.exists(x) else None
 
-    raws = bundle_raws(f)
+    def same(x, y):
+        try:
+            return os.path.samefile(x, y)
+        except OSError:
+            return False
+
+    def put(flag, value, source, why=None):
+        if value is not None and str(value).strip() != "":
+            flags.append({"flag": flag, "value": value, "from": source})
+        else:
+            flags.append({"flag": flag, "value": None, "why": why or "no record"})
+
+    if sp_path and sp:
+        sp_from, sp_why = rel(sp_path), None
+    elif search_ambiguous(f):
+        sp_from = "the session's search record"
+        sp_why = f"no search is chosen ({f['search_choice']['why']})"
+    elif f["search_prov_path"]:
+        sp_from = rel(f["search_prov_path"])
+        sp_why = f"{sp_from} is not readable JSON"
+    else:
+        sp_from, sp_why = "the session's search record", "the session holds no search record"
+    de_path = os.path.join(p["de_dir"], "de_provenance.json")
+    de_from = rel(de_path)
+
+    raws, raws_from = bundle_raws_from(f)
     if not raws:
         missing.append("a record of the raw files (input/raw_files.txt, or the search record's "
                        "`files`)")
+    searched = [x for x in (sp.get("files") or []) if isinstance(x, str) and x]
+    if raws and searched and set(searched) != set(raws):
+        notes.append(f"Raw files: {raws_from} lists {len(raws)} file(s); {sp_from} `files` names "
+                     f"{len(searched)}, not the same: the listed ones are fingerprinted")
     if not f["wf_path"] and not cands:
         missing.append("a record of the search (input/wf/workflow.manifest.json, or an "
                        "output/<search>/search_provenance.json)")
     result = sp.get("result") if isinstance(sp.get("result"), dict) else {}
     # every engine's adapter writes the DE-input report as <search out>/report.parquet: the
     # file beside the record, when the record (a job's, written before it ran) names none
-    report = there((de or {}).get("input")) or there(result.get("report")) or (
-        there(os.path.join(os.path.dirname(sp_path), "report.parquet")) if sp_path else None)
+    report, report_from = _first_of(
+        (there((de or {}).get("input")), f"{de_from} `input` (the report the DE read)"),
+        (there(result.get("report")), f"{sp_from} `result.report`"),
+        (there(os.path.join(os.path.dirname(sp_path), "report.parquet")) if sp_path else None,
+         f"beside {sp_from}"))
     # ...and the rest of what the search wrote (session.search_result_files, the one list): a
     # search for identifications only has no report, and these are its whole result (F3)
     outputs = [x for x in search_result_files(p, f["search_choice"], engine_tables=True)
@@ -1828,42 +1923,131 @@ def bundle_command(f, outdir=None):
             else "no report and no identifications here") + "), so the bundle fingerprints none")
     # the one engine rule (session.search_engine): the chosen record's, the manifest's pin only
     # when the session has no search record, none when its records leave the choice open
-    engine = search_engine(p, record=sp or None)["engine"]
+    eng = search_engine(p, record=sp or None)
     if search_ambiguous(f):
         unnamed.append(f"the search engine ({f['search_choice']['why']})")
     contrasts = (de or {}).get("contrasts")
     if isinstance(contrasts, list):
         contrasts = ",".join(str(c).strip() for c in contrasts if str(c).strip())
-    flags = [("--outdir", outdir or p["repro_dir"]),
-             ("--workflow-manifest", f["wf_path"]),
-             ("--setup-json", _skill_home_file("setup.json")),
-             ("--tools-json", there(sp.get("tools")) or there(_skill_home_file("tools",
-                                                                               "tools.json"))),
-             # the search's own record of what it was given first: a staged folder can hold
-             # another cfg (sage_config.lfq_ppm<N>.json beside sage_config.json), and the
-             # session's guess would then replay the wrong one (2.14.2 C2, E2E F2)
-             ("--params", there(sp.get("params_file")) or f["params"]),
-             ("--search-record", there(sp_path)),
-             ("--conditions", there(p["conditions"])),
-             ("--fasta", there(p["fasta"]) or there(sp.get("fasta"))),
-             ("--fasta-info-file", f["fasta_meta_path"]),
-             ("--report", report)]
-    flags += [("--search-output", x) for x in outputs]
-    flags += [("--engine", engine)]
-    if de:
-        flags += [("--de-dir", p["de_dir"]), ("--de-method", de.get("method")),
-                  ("--contrasts", contrasts), ("--q-cutoff", de.get("q_cutoff")),
-                  ("--logfc", de.get("logfc")), ("--adjp", de.get("adjp"))]
-    flags += [("--acquisition", f["acquisition"]), ("--organism-taxid", f["taxid"]),
-              ("--instrument", f["instrument"]),
-              ("--commands", there(p["commands_log"])),
-              ("--qc-bracket", there(os.path.join(p["logs_dir"], "qc_bracket.json"))),
-              ("--peak-check", there(os.path.join(p["skyline_dir"], "skyline_provenance.json")))]
+
+    put("--outdir", outdir or p["repro_dir"],
+        "the session's reproducibility folder (paths.repro_dir)")
+    put("--workflow-manifest", f["wf_path"], rel(f["wf_path"]) if f["wf_path"] else None,
+        "no input/wf/workflow.manifest.json")
+    put("--setup-json", _skill_home_file("setup.json"), "the skill home's setup.json")
+    tools_named = sp.get("tools")
+    tools, tools_from = _first_of(
+        (there(tools_named), f"{sp_from} `tools`"),
+        (there(_skill_home_file("tools", "tools.json")), "the skill home's tools/tools.json ("
+         + (f"{sp_from} names {tools_named}, which is not here" if tools_named else
+            sp_why or f"no `tools` in {sp_from}") + ")"))
+    put("--tools-json", tools, tools_from, sp_why or (
+        f"{sp_from} names {tools_named}, which is not here" if tools_named
+        else f"no `tools` in {sp_from}") + ", and the skill home has no tools/tools.json")
+    # the search's own record of what it was given first: a staged folder can hold another cfg
+    # (sage_config.lfq_ppm<N>.json beside sage_config.json), and the session's guess would then
+    # replay the wrong one (2.14.2 C2, E2E F2)
+    ran_params = there(sp.get("params_file"))
+    if ran_params:
+        own = f["params"]
+        put("--params", ran_params, rel(own) if own and same(own, ran_params)
+            else f"{sp_from} `params_file`")
+        if own and not same(own, ran_params):
+            notes.append(f"Parameters: the search was given {ran_params} ({sp_from} "
+                         f"`params_file`); the session's {rel(own)} is another file and is not "
+                         "used -- the bundle replays what ran")
+    else:
+        put("--params", f["params"], rel(f["params"]) if f["params"] else None,
+            "no search parameters file in input/wf/ or input/")
+    put("--search-record", there(sp_path), rel(sp_path) if sp_path else None, sp_why)
+    put("--conditions", there(p["conditions"]), rel(p["conditions"]),
+        f"no {rel(p['conditions'])}")
+    # the FASTA the search ran on first, as --params (Ruling 96: the bundle replays what RAN),
+    # with its own sidecar and taxon (gather of that file); an explicit --fasta always wins
+    own_fasta = there(p["fasta"])
+    ran_fasta = None if f.get("fasta_given") else there(sp.get("fasta"))
+    db = f
+    if ran_fasta and not (own_fasta and same(own_fasta, ran_fasta)):
+        db = gather(sdir, fasta=ran_fasta)
+        fasta, fasta_from = ran_fasta, f"{sp_from} `fasta`"
+        if own_fasta:
+            notes.append(f"Database (FASTA): the search ran on {ran_fasta} ({sp_from} `fasta`); "
+                         f"the session's {rel(own_fasta)} is another file and is not used -- the "
+                         "bundle replays what ran")
+    else:
+        fasta = own_fasta or ran_fasta
+        fasta_from = rel(fasta) if fasta else None
+    put("--fasta", fasta, fasta_from,
+        f"no {rel(p['fasta'])}" + (f", and {sp_from} names {sp['fasta']}, which is not here"
+                                   if sp.get("fasta") else ""))
+    put("--fasta-info-file", db["fasta_meta_path"],
+        rel(db["fasta_meta_path"]) if db["fasta_meta_path"] else None,
+        f"no {rel(db['p']['fasta_meta'])} (fetch_fasta.py's sidecar of the FASTA)")
+    put("--report", report, rel(report) if report and rel(report) != os.path.abspath(report)
+        else report_from, "the session holds no report" + (
+            f" ({sp_why})" if sp_why else ""))
+    for x in outputs:
+        put("--search-output", x, "the chosen search's result files (session.search_result_files)")
+    if not outputs:
+        put("--search-output", None, None, "no result file besides the report")
+    put("--engine", eng["engine"], f"{sp_from} `engine`" if sp.get("engine")
+        else "the workflow manifest's engine (the session has no search record)",
+        eng.get("note") or sp_why or f"no `engine` in {sp_from}")
+    put("--engine-version", str(sp["version"]) if sp.get("version") else None,
+        f"{sp_from} `version`", sp_why or f"{sp_from} records no version ("
+        + str((sp.get("engine_version") or {}).get("source") or "no `engine_version`") + ")")
+    de_tables = bool(glob.glob(os.path.join(p["de_dir"], "DE_*.csv")))
+    if de or de_tables:
+        put("--de-dir", p["de_dir"], rel(p["de_dir"]) + ("" if de else
+                                                         " (DE tables; no de_provenance.json)"))
+    else:
+        put("--de-dir", None, None, f"{rel(p['de_dir'])} holds no DE output (no DE has run in "
+                                    "this session)")
+    no_de = f"no {de_from}" + ("" if de_tables else " (no DE has run in this session)")
+    for flag, key, value in (("--de-method", "method", (de or {}).get("method")),
+                             ("--contrasts", "contrasts", contrasts),
+                             ("--q-cutoff", "q_cutoff", (de or {}).get("q_cutoff")),
+                             ("--logfc", "logfc", (de or {}).get("logfc")),
+                             ("--adjp", "adjp", (de or {}).get("adjp"))):
+        put(flag, de_scalar(value) if de else None, f"{de_from} `{key}`",
+            f"no `{key}` in {de_from}" if de else no_de)
+    src = f.get("sources") or {}
+    put("--acquisition", f["acquisition"], src.get("acquisition"),
+        "no `acquisition` in input/wf/workflow.manifest.json")
+    put("--organism-taxid", db["taxid"], (db.get("sources") or {}).get("taxid"),
+        "no `taxid` in the FASTA's sidecar and no `organism_taxid` in "
+        "input/wf/workflow.manifest.json")
+    put("--instrument", f["instrument"], src.get("instrument"),
+        "no `instrument` in output/methods_params.json and no `instruments` in "
+        "input/wf/workflow.manifest.json")
+    put("--commands", there(p["commands_log"]), rel(p["commands_log"]),
+        f"no {rel(p['commands_log'])}")
+    qc = os.path.join(p["logs_dir"], "qc_bracket.json")
+    put("--qc-bracket", there(qc), rel(qc), f"no {rel(qc)}: the instrument's QC around the "
+                                            "project (step 8e) was not checked in this session")
+    pk = os.path.join(p["skyline_dir"], "skyline_provenance.json")
+    put("--peak-check", there(pk), rel(pk), f"no {rel(pk)}: no peak check ran (step 8f)")
+    return {"flags": flags, "raws": raws, "raws_from": raws_from, "missing": missing,
+            "unnamed": unnamed, "notes": notes}
+
+
+def bundle_command(f, outdir=None):
+    """provenance.py's command line for this session (gather's facts) -> (cmd, missing,
+    unnamed): every flag of bundle_flags that has a value, in its order, a --note for each of its
+    notes, then --raw (the raw files, or a <placeholder> when the session holds no record of
+    them)."""
+    b = bundle_flags(f, outdir)
     cmd = [sys.executable, os.path.join(HERE, "provenance.py")]
-    for flag, val in flags:
-        if val is not None and str(val).strip() != "":
-            cmd += [flag, str(val)]
-    return cmd + ["--raw"] + (raws or ["<the raw files>"]), missing, unnamed
+    for x in b["flags"]:
+        if x["value"] is not None:
+            cmd += [x["flag"], str(x["value"])]
+    for n in b["notes"]:                 # REPRODUCE.md says where the session's files differ
+        cmd += ["--note", n]
+    # --session, as SKILL.md step 10 says: the command printed (status, the finish gates) is run
+    # by hand, and without it the bundle was built from the flags alone and claimed that no DE
+    # ran (2.15 acceptance). Every flag above still wins; --session fills what none names.
+    cmd += ["--session", os.path.abspath(f["p"]["session_dir"])]
+    return cmd + ["--raw"] + (b["raws"] or ["<the raw files>"]), b["missing"], b["unnamed"]
 
 
 def bundle_plan(session_dir):

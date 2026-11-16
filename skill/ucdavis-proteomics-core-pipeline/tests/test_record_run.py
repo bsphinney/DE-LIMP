@@ -139,8 +139,8 @@ def make_search(root, name="search_out", report=True, runs=RUNS, secrets=False, 
           "[1:45] Optimised mass accuracy: 24 ppm\n"
           "[0:57] Recommended MS1 mass accuracy setting: 8 ppm\n"
           "[4:20] Recommended MS1 mass accuracy setting: 7 ppm\n" + log_extra)
-    write(os.path.join(out, "diann_libpred_23978018.log"), "library predicted\n")
-    write(os.path.join(out, "diann_search_23978112.log"), "searching\n" + log_extra)
+    write(os.path.join(out, "diann_libpred_9900001.log"), "library predicted\n")
+    write(os.path.join(out, "diann_search_9900002.log"), "searching\n" + log_extra)
     write(os.path.join(out, "job_input_files.txt"), "\n".join(files) + "\n")
     for r in runs:
         write(os.path.join(out, "quant", f"{r}.quant"), "Q" * 2048)
@@ -277,7 +277,7 @@ exec bash -c "$cmd"
             e["SKILL_RUNS_DIR"] = FAKE_ROOT + "/skill_runs"
             e["SKILL_ISSUES_DIR"] = FAKE_ROOT + "/skill_issues"
         if route == "ssh":
-            e.update(HIVE_USER="gabrig", HIVE_KEY=self.key, HIVE_EXEC=self.fake_exec)
+            e.update(HIVE_USER="gstaff", HIVE_KEY=self.key, HIVE_EXEC=self.fake_exec)
         e.update({k: str(v) for k, v in extra.items()})
         return e
 
@@ -354,7 +354,7 @@ class Layout(Base):
                      "input/workflow.manifest.json", "input/search.fasta.meta.json",
                      "input/raw_files.txt", "output/search/search_provenance.json",
                      "output/search/report.stats.tsv", "output/search/report.log.txt",
-                     "output/search/fran_deposit.json", "output/search/diann_search_23978112.log",
+                     "output/search/fran_deposit.json", "output/search/diann_search_9900002.log",
                      "SEARCH_LOG.md", "run_record.json"):
             self.assertIn(want, files)
         with open(os.path.join(folder, "input", "raw_files.txt")) as fh:
@@ -432,16 +432,16 @@ class Layout(Base):
     def test_intermediate_failure_then_success_is_one_record(self):
         out = make_search(self.d, report=False,
                           log_extra="ERROR: DIA-NN tried but failed to load the following files\n")
-        write(os.path.join(out, "s2_firstpass_23977910_4.log"), "ERROR: task 4 died\n")
+        write(os.path.join(out, "s2_firstpass_9900003_4.log"), "ERROR: task 4 died\n")
         res = self.run_it("search-done", "--out", out, "--status", "failed", "--exit-code", "1",
-                          SLURM_JOB_ID="23977911", SLURM_JOB_NAME="s3_assembly")
+                          SLURM_JOB_ID="9900004", SLURM_JOB_NAME="s3_assembly")
         self.assertTrue(res["recorded"], res)
         folder = self.only_folder()
         log = self.read(folder)
         self.assertIn("**FAILED** (exit 1) at step `s3_assembly`", log)
-        self.assertIn("job 23977911 `s3_assembly`", log)
+        self.assertIn("job 9900004 `s3_assembly`", log)
         self.assertIn("failed to load the following files", log)
-        self.assertIn("output/search/s2_firstpass_23977910_4.log", self.all_files(folder))
+        self.assertIn("output/search/s2_firstpass_9900003_4.log", self.all_files(folder))
         # the fixed search completes: same folder, a dated update line, a new activity row
         write(os.path.join(out, "report.parquet"), "P" * 4096)
         write(os.path.join(out, "report.stats.tsv"), STATS)
@@ -696,14 +696,14 @@ class CoreOmics(Base):
         import core_submission
         self.assertIs(record_run.normalize_submission, core_submission.normalize_submission)
         self.assertFalse(hasattr(record_run, "PROT_RE"))
-        for s in ("٧٥٦", "PROT_٠٧٥٦", "１２３",
-                  "prot-８０７", "#٧٥٦"):
+        for s in ("٩٧٥٦", "PROT_٩٩٧٥٦", "１２３",
+                  "prot-８０７", "#٩٧٥٦"):
             self.assertIsNone(record_run.parse_prot([s]), s)
             self.assertIsNone(record_run.prot_from_obj({"prot": s, "internal_id": s}), s)
-        self.assertEqual(record_run.parse_prot(["٧٥٦ 807"]),
+        self.assertEqual(record_run.parse_prot(["٩٧٥٦ 807"]),
                          {"prot": "PROT_0807", "id": None})
         out = make_search(self.d)
-        self.run_it("search-done", "--out", out, "--prot", "٧٥٦")
+        self.run_it("search-done", "--out", out, "--prot", "٩٧٥٦")
         folder = self.only_folder()
         self.assertIn("**CoreOmics submission:** not recorded", self.read(folder))
         self.assertIsNone(self.read(folder, "run_record.json")["prot"])
@@ -721,10 +721,10 @@ class CoreOmics(Base):
     def test_prot_from_session_metadata_and_core_submission_receipt(self):
         sess, _ = make_session(self.d, quant_in_zip=False)
         write(os.path.join(sess, "input", "submission.json"),
-              json.dumps({"coreomics": {"prot": "PROT_0744", "id": "3cba9a067ee4"}}))
+              json.dumps({"coreomics": {"prot": "PROT_9744", "id": "3cba9a067ee4"}}))
         out = make_search(self.d)
         self.run_it("analysis-done", "--session", sess, "--out", out)
-        self.assertIn("PROT_0744 / `3cba9a067ee4`", self.read(self.only_folder()))
+        self.assertIn("PROT_9744 / `3cba9a067ee4`", self.read(self.only_folder()))
 
         other = os.path.join(self.d, "work")
         sess2, _ = make_session(other, quant_in_zip=False, name="2026-09-24_Other_Study")
@@ -1018,7 +1018,7 @@ class Gate(Base):
 
     def test_where(self):
         self.assertTrue(self.run_raw("--where").stdout.startswith("direct:"))
-        self.assertTrue(self.run_raw("--where", route="ssh").stdout.startswith("ssh: gabrig@hive"))
+        self.assertTrue(self.run_raw("--where", route="ssh").stdout.startswith("ssh: gstaff@hive"))
         self.assertTrue(self.run_raw("--where", route="none").stdout.startswith("not recorded"))
 
 
@@ -1032,9 +1032,9 @@ class Sacct(Base):
     def test_times_and_state_come_from_sacct(self):
         out = make_search(self.d, report=False)
         exe = self.fake_sacct([
-            "23978018|diann_libpred|COMPLETED|0:0|2026-09-23T17:22:43|2026-09-23T17:22:45|"
+            "9900001|diann_libpred|COMPLETED|0:0|2026-09-23T17:22:43|2026-09-23T17:22:45|"
             "2026-09-23T17:28:38|00:05:53|hive-as-11-3-71|high|genome-center-grp|u",
-            "23978112|diann_search|OUT_OF_MEMORY|0:125|2026-09-23T17:31:34|2026-09-23T17:31:35|"
+            "9900002|diann_search|OUT_OF_MEMORY|0:125|2026-09-23T17:31:34|2026-09-23T17:31:35|"
             "2026-09-23T17:42:01|00:10:26|hive-dc-7-4-18|high|genome-center-grp|u"])
         self.run_it("search-done", "--out", out, RECORD_RUN_SACCT=exe)
         folder = self.only_folder()
@@ -1076,7 +1076,7 @@ class ListRuns(Base):
         self.assertIn("(3 run(s)", self.run_raw("list").stdout)
 
     def test_list_over_ssh(self):
-        self.put(os.path.join(self.remote, "skill_runs"), "gabrig", "2026-09-23", "completed",
+        self.put(os.path.join(self.remote, "skill_runs"), "gstaff", "2026-09-23", "completed",
                  "2026-09-23_remote")
         rows = json.loads(self.run_raw("list", "--json", route="ssh").stdout)
         self.assertEqual([r["session"] for r in rows], ["2026-09-23_remote"])
@@ -1096,7 +1096,7 @@ class SshRoute(Base):
         res = self.run_it("search-done", "--out", out.replace(self.remote, FAKE_ROOT),
                           route="ssh")
         self.assertTrue(res["recorded"], res)
-        self.assertTrue(res["path"].startswith("gabrig@hive:"))
+        self.assertTrue(res["path"].startswith("gstaff@hive:"))
         folder = self.only_folder(self.rruns)
         rec = self.read(folder, "run_record.json")
         self.assertEqual(rec["search"]["engine_version"], "2.7.0")
@@ -1109,7 +1109,7 @@ class SshRoute(Base):
     def test_login_from_hive_env_file_only(self):
         out = make_search(os.path.join(self.remote, "searches"))
         envfile = write(os.path.join(self.d, "hive.env"),
-                        f"HIVE_USER=gabrig\nHIVE_KEY={self.key}\n")
+                        f"HIVE_USER=gstaff\nHIVE_KEY={self.key}\n")
         e = self.env("ssh")
         e.pop("HIVE_USER")
         e.pop("HIVE_KEY")
@@ -1689,7 +1689,7 @@ class FindingPartsAreDeclared(unittest.TestCase):
 
 
 class RunBoundedOnWindows(unittest.TestCase):
-    """gabrig's laptop is Windows: no os.killpg, no signal.SIGKILL. A timed-out call must still be
+    """gstaff's laptop is Windows: no os.killpg, no signal.SIGKILL. A timed-out call must still be
     killed (tree and all) and still raise TimeoutExpired -- not AttributeError, which the SSH
     route reported as "error" while the upload kept running."""
 

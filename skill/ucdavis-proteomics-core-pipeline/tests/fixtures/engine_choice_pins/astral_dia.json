@@ -1,0 +1,56 @@
+{
+  "acquisition": "DIA",
+  "alternatives": [
+    "fragpipe",
+    "radiant"
+  ],
+  "ask_user": null,
+  "de": {
+    "adjp": 0.05,
+    "logfc": 1.0,
+    "method": "dpc",
+    "q_cutoff": 0.01
+  },
+  "engine": {
+    "name": "diann",
+    "version": "2.7.0"
+  },
+  "fasta": {
+    "add_contaminants": true,
+    "path": null
+  },
+  "id": "diann_orbitrap_dia",
+  "instrument_class": "orbitrap_astral",
+  "instrument_label": "Orbitrap Astral (assumes 240k MS1)",
+  "instruments": [
+    "Orbitrap Astral"
+  ],
+  "name": "diann \u2014 Orbitrap Astral (assumes 240k MS1) (DIA)",
+  "needs_confirmation": false,
+  "notes": [],
+  "organism": null,
+  "organism_taxid": null,
+  "path": null,
+  "platform": null,
+  "registry": {
+    "defaults_version": "2026-09-23",
+    "note": "no remote registry; parameters ship with the skill",
+    "source": "local skill defaults"
+  },
+  "resolution": null,
+  "search": {
+    "estimate_params": true,
+    "ms1_ppm": 4,
+    "ms2_ppm": 10,
+    "overrides": {},
+    "params_file": null,
+    "ppm_source": "DIA-NN README recommended settings (verified 2026-06)",
+    "preset_provenance": null
+  },
+  "validated": {
+    "by": null,
+    "dataset": null,
+    "date": null,
+    "notes": "Parameters are this skill's data-type defaults (resolve_defaults.py 2026-09-23), not a site validation run. They are reproducible from the skill version alone."
+  }
+}

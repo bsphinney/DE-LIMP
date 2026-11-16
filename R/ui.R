@@ -285,6 +285,16 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
       tags$a(href="https://github.com/bsphinney/DE-LIMP", target="_blank", class="btn btn-secondary w-50", icon("github"), "Code", style="color:white; font-weight:bold;")
     ),
 
+    # --- Legacy notice (v4.1.2): the Core's pipeline moved to its own repository ---
+    tags$div(class = "alert alert-info py-1 px-2 mb-2", role = "note",
+      style = "font-size: 0.82em;",
+      icon("circle-info"),
+      " The UC Davis Proteomics Core pipeline now lives at ",
+      tags$a(href = "https://github.com/bsphinney/UCD-Proteomics-AI-Skill", target = "_blank",
+             rel = "noopener", .noWS = "outside", "github.com/bsphinney/UCD-Proteomics-AI-Skill"),
+      ". This app is the previous version: it is kept as it is and no longer developed."
+    ),
+
     # --- Acquisition Mode Switcher (DIA / DDA / XL-MS) ---
     # Gated by config.yml feature flags + HPC availability
     {

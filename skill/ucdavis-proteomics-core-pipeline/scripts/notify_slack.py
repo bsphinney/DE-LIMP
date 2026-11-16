@@ -495,6 +495,10 @@ def classify(exit_code, signal=None, job_seconds=None, time_limit_min=None):
         return "ok", None
     if exit_code == 137:
         return "failed", "killed (exit 137, SIGKILL) -- most often out of memory"
+    if exit_code == 134:
+        return "failed", ("exit 134: the program aborted -- for Sage, 'fatal runtime error: "
+                          "stack overflow' (intermittent; sage_failure.json beside the results "
+                          "says which); re-run the same job script")
     if exit_code == NODE_FAULT_EXIT:
         return "failed", (f"exit {exit_code}: the compute node could not reach the storage -- a "
                           "node problem, not the search; resubmit on another node "
@@ -1034,6 +1038,51 @@ def _helper(name):
     return p if os.path.isfile(p) else None
 
 
+def no_record_reason(*paths, flag=False, check_env=True):
+    """Why this run is to be left out of the shared run records, or None: record_run's own
+    no_record_reason() (THE definition: --no-record, RECORD_RUN=off, a /skill_test/ path). An
+    install without record_run.py has nothing to keep a run out of, but --no-record still says
+    so."""
+    mod = sys.modules.get("record_run")
+    if mod is None:
+        rr = _helper("record_run.py")
+        try:                                  # only a record_run.py that HAS the definition
+            with open(rr, encoding="utf-8") as fh:
+                has = "def no_record_reason" in fh.read()
+        except (OSError, TypeError):
+            has = False
+        if rr and has:
+            try:
+                import importlib.util
+                spec = importlib.util.spec_from_file_location("record_run", rr)
+                mod = importlib.util.module_from_spec(spec)
+                sys.modules["record_run"] = mod
+                spec.loader.exec_module(mod)
+            except Exception:                         # noqa: BLE001 -- never fatal
+                sys.modules.pop("record_run", None)
+                mod = None
+    if mod is not None and hasattr(mod, "no_record_reason"):
+        return mod.no_record_reason(*paths, flag=flag, check_env=check_env)
+    if flag:
+        return "--no-record was given"
+    if check_env and (os.environ.get("RECORD_RUN") or "").strip().lower() in ("off", "0", "no", "false"):
+        return "RECORD_RUN=off"            # as before: a record_run.py without the definition
+    return None
+
+
+def no_record_words(why):
+    """no_record_reason()'s answer in words with no path in them (MANIFEST.txt travels to
+    collaborators; a /skill_test/ reason names the folder)."""
+    w = str(why or "")
+    if w.startswith("--no-record"):
+        return "a test run: --no-record was given"
+    if "RECORD_RUN" in w or "SKILL_RUNS_DIR" in w:
+        return "RECORD_RUN=off"
+    if "/skill_test/" in w:
+        return "a test run: under a /skill_test/ folder"
+    return "a test run"
+
+
 def _run_helper(argv, timeout):
     """(exit code, stdout, stderr) -- exit code None when it hung or could not start. Never raises."""
     try:
@@ -1067,7 +1116,7 @@ def _last_line(*texts):
     return ""
 
 
-def record_run(kind, *, out=None, session=None, status=None, exit_code=None):
+def record_run(kind, *, out=None, session=None, status=None, exit_code=None, no_record=False):
     """Log this run in the Core's central run log with record_run.py. None when this install
     has no record_run.py; otherwise {"logged": True|False|None, "reason", "detail", "path",
     "error", "off"}. Never raises.
@@ -1082,8 +1131,9 @@ def record_run(kind, *, out=None, session=None, status=None, exit_code=None):
     rr = _helper("record_run.py")
     if not rr:
         return None
-    if (os.environ.get("RECORD_RUN") or "").strip().lower() in ("off", "0", "no", "false"):
-        return {"logged": False, "off": True, "detail": "RECORD_RUN=off"}
+    why = no_record_reason(out, session, flag=no_record)
+    if why:
+        return {"logged": False, "off": True, "detail": why}
     argv = [sys.executable or "python3", rr, kind]
     if kind == "search-done":
         argv += ["--out", out, "--status", status, "--exit-code", str(exit_code),
@@ -1194,6 +1244,8 @@ def _fran_text(fr):
                 if fr.get("health_warning") else "yes")
     if fr.get("reason") == "error":
         return f"error: {fr.get('detail')}"
+    if fr.get("test_run"):
+        return f"skipped: {fr['test_run']}"
     words = {"opted_out": "off for this search",
              "left_to_agent": "left to the agent (no completeness guard on this route)",
              "near_time_limit": "left to the agent (too close to the job's time limit)",
@@ -1211,6 +1263,8 @@ def slack_manifest(sent, detail):
     if d.startswith("--no-notify"):
         return "INFO", "Slack notification (Core channel)", "off (--no-notify)"
     if d.startswith("not posted again"):       # session._finish_hooks: an unchanged re-finalize
+        return "INFO", "Slack notification (Core channel)", one_line(d)
+    if d.startswith("off: a test run"):        # --no-record / a /skill_test/ folder (path-free)
         return "INFO", "Slack notification (Core channel)", one_line(d)
     m = re.search(r"off: (SKILL_SLACK=\S+)", d)
     if m:
@@ -1244,7 +1298,7 @@ def run_log_manifest(run_log):
     if run_log is None:
         return "INFO", part, "not configured for this user"
     if run_log.get("off"):
-        return "INFO", part, f"off ({run_log.get('detail')})"
+        return "INFO", part, f"off ({no_record_words(run_log.get('detail'))})"
     if run_log.get("logged") is True:
         return "OK", part, "logged"
     if run_log.get("error"):                  # attempted and failed: say what kind, no paths
@@ -1328,7 +1382,7 @@ def _fran_step(out, session, mode, fran_name=None, qc=None):
 
 def search_done(out, exit_code=None, status=None, signal=None, started=None,
                 time_limit_min=None, stage=None, final=True, from_job=False, dry_run=False,
-                slack=True, fran="left_to_agent", fran_name=None, qc=None):
+                slack=True, fran="left_to_agent", fran_name=None, qc=None, record=True):
     """THE JOB-END HOOK: what a search job does when it ends, in this order --
       1. fran_deposit.py stage        (the route's LAST job, on SUCCESS only)
       2. record_run.py search-done   (the run log; on success and on failure -- after stage,
@@ -1354,19 +1408,41 @@ def search_done(out, exit_code=None, status=None, signal=None, started=None,
             return False, "nothing to do: this job succeeded; the search's last job reports"
         if f["status"] == "failed" and not dry_run and not _array_first_failure(f["location"]):
             return False, "nothing done: another task of this array already reported the failure"
+        # A test run (--no-record baked in, or a /skill_test/ folder) stays out of FRAN and the
+        # Core channel too, whatever the job script was generated with: the ONE reason, read
+        # again here (an older job script, a folder moved under skill_test/). C2 ux H2.
+        test_why = no_record_reason(f["location"], _session_of(f["location"]),
+                                    flag=not record, check_env=False)
+        if test_why:
+            fran, slack = "off", False
+            f["slack_off_because"] = no_record_words(test_why)
         if not dry_run:
             session = _session_of(f["location"])
             # FRAN first on success: record_run.py reads the stage receipt (fran_deposit.json),
             # so the central record shows the real FRAN outcome, not "not staged (yet)".
             if f["status"] == "ok" and final:
                 f["fran"] = _fran_step(f["location"], session, fran, fran_name, qc)
+                if test_why and isinstance(f["fran"], dict) and not f["fran"].get("staged"):
+                    f["fran"]["test_run"] = no_record_words(test_why)
                 if f["fran"] is not None and f["fran"].get("reason") != "left_to_agent":
                     say("fran_deposit stage: " + json.dumps(f["fran"], separators=(",", ":")))
+            # where the jobs actually ran (a pending job can be moved after generation), beside
+            # the requested queue in search_provenance.json; a failure here is said, never fatal
+            try:
+                import queue_actual
+                queue_actual.record(os.path.join(f["location"], "search_provenance.json"),
+                                    os.path.join(f["location"], "jobs.txt"),
+                                    [os.environ.get("SLURM_JOB_ID")])
+            except Exception as e:  # noqa: BLE001
+                say(f"queue_actual: not recorded ({type(e).__name__}: {e})")
             f["run_log"] = record_run("search-done", out=f["location"], session=session,
                                       status="completed" if f["status"] == "ok" else "failed",
-                                      exit_code=143 if signal else (exit_code or 0))
+                                      exit_code=143 if signal else (exit_code or 0),
+                                      no_record=not record)
         if slack:
             sent, msg = deliver(f, relay_ok=False, dry_run=dry_run)
+        elif f.get("slack_off_because"):
+            sent, msg = False, f"Slack: off for this job ({f['slack_off_because']})"
         else:
             sent, msg = False, "Slack: off for this job (--no-notify when it was generated)"
         steps = _steps_summary(f)
@@ -1483,7 +1559,8 @@ def fran_opted_out():
         else None
 
 
-def job_end_plan(*, slack=True, fran=True, fran_guarded=False, fran_name=None, qc=None):
+def job_end_plan(*, slack=True, fran=True, fran_guarded=False, fran_name=None, qc=None,
+                 record=True, out=None):
     """What a generated job's end hook will do, decided NOW, at generation.
 
     In hive_remote every hive_exec.sh call is a fresh shell, so an opt-out in the generating
@@ -1500,18 +1577,31 @@ def job_end_plan(*, slack=True, fran=True, fran_guarded=False, fran_name=None, q
       name; the agent decides later), False (--not-qc, passed on to stage), None (stage decides
       from the names it has). Decided here, not later: a QC session whose name has no "QC" token
       would otherwise be staged by the hook before the agent's own `stage --name "... QC"`."""
-    return {"run_log": "on",
-            "slack": "on" if slack and not opted_out() else "off",
-            "fran": ("off" if not fran or qc is True or fran_opted_out() else
+    why = no_record_reason(out, flag=not record, check_env=False)
+    plan = {"run_log": "off" if why else "on",
+            "slack": "on" if slack and not opted_out() and not why else "off",
+            "fran": ("off" if not fran or qc is True or fran_opted_out() or why else
                      "stage" if fran_guarded else "left_to_agent"),
             "fran_name": fran_name or None,
             "qc": qc}
+    if why:                    # --no-record or a /skill_test/ folder, at generation
+        # ONE reason keeps a test run out of all three Core records (C2 ux H2): the run log, the
+        # FRAN corpus (the hook's stage --skip leaves the receipt opted_out, so a later backfill
+        # honours it) and the Core's Slack channel. Each says why, here and in the provenance.
+        plan["run_log_off_because"] = why
+        if slack and not opted_out():
+            plan["slack_off_because"] = why
+        if fran and qc is not True and not fran_opted_out():
+            plan["fran_off_because"] = why
+    return plan
 
-def job_end_flags(*, slack=True, fran=True, fran_name=None, qc=None):
+
+def job_end_flags(*, slack=True, fran=True, fran_name=None, qc=None, record=True):
     """The job-end choices as run_search.py / chain-generator flags -- THE mapping, read by
     run_search.py's generators and by the re-run commands built from a recorded plan
     (job_end_argv; follow-up 3, H7 bug 4)."""
     argv = (["--no-notify"] if not slack else []) + (["--no-fran"] if not fran else [])
+    argv += [] if record else ["--no-record"]
     if fran_name:
         argv += ["--fran-name", fran_name]
     return argv + {True: ["--qc"], False: ["--not-qc"], None: []}[qc]
@@ -1525,7 +1615,8 @@ def job_end_argv(plan):
     qc = plan.get("qc") if plan.get("qc") in (True, False) else None
     return job_end_flags(slack=plan.get("slack") != "off",
                          fran=plan.get("fran") != "off" or qc is True,
-                         fran_name=plan.get("fran_name"), qc=qc)
+                         fran_name=plan.get("fran_name"), qc=qc,
+                         record=plan.get("run_log") != "off")
 
 
 _HEADER_LINE = re.compile(r"^(#|\s*$)")
@@ -1536,7 +1627,7 @@ JOB_END_HOOK_S = 480
 
 def wrap_job_script(script, out, *, final, time_limit_h, stage, slack=True, fran=True,
                     fran_guarded=False, fran_name=None, qc=None, py=None, scripts_dir=None,
-                    preflight=None):
+                    preflight=None, record=True):
     """A SLURM job script that runs the job-end hook (search_done: FRAN stage on success ->
     run log -> Slack) however it ends.
 
@@ -1546,7 +1637,7 @@ def wrap_job_script(script, out, *, final, time_limit_h, stage, slack=True, fran
 
     * The time limit. SLURM ends a job with SIGTERM to the BATCH SHELL ONLY, and bash runs a
       trap only after the foreground command returns -- so with the work in the foreground
-      (DIA-NN, for hours) the trap never ran: measured on HIVE 2026-09-24 (job 23990731, a
+      (DIA-NN, for hours) the trap never ran: measured on HIVE 2026-09-24 (a test job, a
       1-minute limit), TERM at 1:15, no trap, SIGKILL 130 s later (KillWait). `wait` IS
       interrupted by a trapped signal, so the TERM handler runs at once, reports, and re-raises
       TERM so the job still dies by the signal. (Without a TERM trap, bash's EXIT trap sees
@@ -1579,8 +1670,9 @@ def wrap_job_script(script, out, *, final, time_limit_h, stage, slack=True, fran
     py = py or sys.executable or "python3"
     mins = int(round(float(time_limit_h) * 60)) if time_limit_h else 0
     plan = job_end_plan(slack=slack, fran=fran, fran_guarded=fran_guarded,
-                        fran_name=fran_name, qc=qc)
+                        fran_name=fran_name, qc=qc, record=record, out=out)
     flags = (("" if final else " --fail-only")
+             + ("" if plan["run_log"] == "on" else " --no-record")
              + ("" if plan["slack"] == "on" else " --no-slack")
              + {"stage": " --fran-stage", "left_to_agent": "", "off": " --no-fran"}[plan["fran"]]
              + {True: " --qc", False: " --not-qc", None: ""}[plan["qc"]]
@@ -1649,6 +1741,9 @@ def main(argv=None):
                    help="refuse outside a SLURM job (what the generated trap passes)")
     s.add_argument("--no-slack", action="store_true",
                    help="log the run and stage for FRAN, but post nothing to Slack")
+    s.add_argument("--no-record", action="store_true",
+                   help="leave the run out of the Core's run records (a test run; "
+                        "--no-record at generation)")
     fr = s.add_mutually_exclusive_group()
     fr.add_argument("--fran-stage", action="store_true",
                     help="this route has a completeness guard: stage a finished search for FRAN")
@@ -1691,7 +1786,8 @@ def main(argv=None):
                               fran=("off" if a.no_fran else
                                     "stage" if a.fran_stage else "left_to_agent"),
                               fran_name=a.fran_name,
-                              qc=(True if a.qc else False if a.not_qc else None))
+                              qc=(True if a.qc else False if a.not_qc else None),
+                              record=not a.no_record)
     elif a.cmd == "analysis-done":
         refuse, reason = announce_gate(a.session, a.override_finish)
         if refuse:

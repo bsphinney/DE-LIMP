@@ -50,7 +50,7 @@ SOURCE_CODES = ("0:No Source;1:ESI;2:APCI;3:Nano ESI Offline;4:Nano ESI Online;5
 
 
 def scheme_windows():
-    """The PROT_0756 dia-PASEF scheme: 11 ramps, 36 windows of 26 Th at 25 Th spacing over
+    """The PROT_9756 dia-PASEF scheme: 11 ramps, 36 windows of 26 Th at 25 Th spacing over
     m/z 299.5-1200.5 -- (group, centre)."""
     out = []
     for g in range(1, 12):
@@ -74,7 +74,7 @@ def blob(*xs):
 def make_timstof_d(path, method="DIA_11x3-k07t13Ra85.m", ce_hi=65.0, ramp_hi=65.0,
                    acquired="2026-08-14T01:30:04.726-07:00", column_info="",
                    source_codes=SOURCE_CODES, side_files=True):
-    """A synthetic timsTOF HT + Evosep One dia-PASEF .d carrying the metadata PROT_0756's
+    """A synthetic timsTOF HT + Evosep One dia-PASEF .d carrying the metadata PROT_9756's
     runs carry. `ce_hi` sets the window energies' ramp end, `ramp_hi` the method's."""
     os.makedirs(path)
     tdf = os.path.join(path, "analysis.tdf")

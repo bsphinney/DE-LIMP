@@ -1,0 +1,62 @@
+{
+  "acquisition": "DIA",
+  "alternatives": [
+    "fragpipe",
+    "radiant"
+  ],
+  "ask_user": null,
+  "de": {
+    "adjp": 0.05,
+    "logfc": 1.0,
+    "method": "dpc",
+    "q_cutoff": 0.01
+  },
+  "engine": {
+    "name": "diann",
+    "version": "2.7.0"
+  },
+  "fasta": {
+    "add_contaminants": true,
+    "path": null
+  },
+  "id": "diann_orbitrap_dia",
+  "instrument_class": "orbitrap_measured",
+  "instrument_label": "Orbitrap, MS1 120,000 / MS2 30,000 resolution read from the raw file (scan trailer)",
+  "instruments": [
+    "Orbitrap Exploris 480"
+  ],
+  "name": "diann \u2014 Orbitrap, MS1 120,000 / MS2 30,000 resolution read from the raw file (scan trailer) (DIA)",
+  "needs_confirmation": false,
+  "notes": [],
+  "organism": null,
+  "organism_taxid": null,
+  "path": null,
+  "platform": null,
+  "registry": {
+    "defaults_version": "2026-09-23",
+    "note": "no remote registry; parameters ship with the skill",
+    "source": "local skill defaults"
+  },
+  "resolution": {
+    "ms1": 120000,
+    "ms2": 30000,
+    "ms2_analyzer": null,
+    "source": "detected",
+    "source_label": "read from the raw file (scan trailer)"
+  },
+  "search": {
+    "estimate_params": true,
+    "ms1_ppm": 7,
+    "ms2_ppm": 15,
+    "overrides": {},
+    "params_file": null,
+    "ppm_source": "DIA-NN README, Orbitrap resolution->accuracy table",
+    "preset_provenance": null
+  },
+  "validated": {
+    "by": null,
+    "dataset": null,
+    "date": null,
+    "notes": "Parameters are this skill's data-type defaults (resolve_defaults.py 2026-09-23), not a site validation run. They are reproducible from the skill version alone."
+  }
+}

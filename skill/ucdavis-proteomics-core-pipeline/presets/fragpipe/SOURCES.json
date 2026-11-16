@@ -1,0 +1,80 @@
+{
+  "about": "Where each FragPipe preset in this folder comes from. Every file is FragPipe 24.0's own shipped workflow, byte for byte as it is in the FragPipe git repository at tag 24.0 (github.com/Nesvilab/FragPipe, ref tags/24.0 -> 70e5b6989a1a96701809711cf2be7cc3d9b2a87d, path workflows/<name>). The FragPipe 24.0 install ships the same files with CRLF line ends; nothing else differs (C0, 2026-11-04: the Core install /quobyte/proteomics-grp/fragpipe24/fragpipe-24.0/workflows). make_presets.py copies a template through and patches only the lines it names in its record; tests/test_fragpipe_dda_preset.py pins each sha256 below.",
+  "vendor": "FragPipe 24.0",
+  "fragpipe_version": "24.0",
+  "read": "2026-11-04",
+  "presets": {
+    "DIA_SpecLib_Quant.workflow": {
+      "vendor_workflow": "DIA_SpecLib_Quant",
+      "source": "workflows/DIA_SpecLib_Quant.workflow @ tags/24.0",
+      "sha256": "09e11fd2192ccf0b98ac514af096863dfcdc41df5d420726c320967233470793",
+      "install_sha256_crlf": "d2ee1630cc2c15f0a1019e8957806da7fa7fe7decb64dd210f7e307d8fdf3712",
+      "used_for": "Thermo Orbitrap DIA (MSFragger-DIA, diaTracer off)"
+    },
+    "DIA_SpecLib_Quant_diaPASEF.workflow": {
+      "vendor_workflow": "DIA_SpecLib_Quant_diaPASEF",
+      "source": "workflows/DIA_SpecLib_Quant_diaPASEF.workflow @ tags/24.0",
+      "sha256": "cf67a668b01dce364f677b8b936a0575f4eec2036df17fa4b0fced96c49b4c1b",
+      "install_sha256_crlf": "b6311420e533c375714f71d99814deb9aa27b61b1ae5369133919171c8486aa7",
+      "used_for": "Bruker diaPASEF (diaTracer on)"
+    },
+    "LFQ-MBR.workflow": {
+      "vendor_workflow": "LFQ-MBR",
+      "source": "workflows/LFQ-MBR.workflow @ tags/24.0",
+      "sha256": "b045c59f7f89239a6c3c6597dcc122d8118e9ea68dc50a6cea08d5ec8074bc17",
+      "install_sha256_crlf": "434607187710b1c414440df5073f7d76927362840bf47834a0af80cb38c7cce0",
+      "used_for": "DDA with an enzyme rule, amounts wanted (label-free quantification with IonQuant, match-between-runs)"
+    },
+    "Basic-Search.workflow": {
+      "vendor_workflow": "Basic-Search",
+      "source": "workflows/Basic-Search.workflow @ tags/24.0",
+      "sha256": "d7ff02bc2e080235a9ed9a6e3e184342541ef0cc632d17bec5de60c15b87ce87",
+      "install_sha256_crlf": "9450bf02e33b93becee44e1d3fc11be15d9578dba70c803d2e05dece4db2805f",
+      "used_for": "DDA with an enzyme rule, identifications only (--ids-only; quantitation.run-label-free-quant=false)"
+    },
+    "Nonspecific-peptidome.workflow": {
+      "vendor_workflow": "Nonspecific-peptidome",
+      "source": "workflows/Nonspecific-peptidome.workflow @ tags/24.0",
+      "sha256": "b90b15a26b9287e51d5c0e079314d18e7d4785a00449edcaf53926b6099bdd26",
+      "install_sha256_crlf": "9ddb1b34012faf9d9a5e1fffea54386b868c67b219bacf9c05ebe680cdc579b7",
+      "used_for": "DDA with no digestion enzyme (--enzyme none): a peptidome or hydrolysate, searched non-specifically (the default non-specific workflow)"
+    },
+    "Nonspecific-HLA.workflow": {
+      "vendor_workflow": "Nonspecific-HLA",
+      "source": "workflows/Nonspecific-HLA.workflow @ tags/24.0",
+      "sha256": "0aa84252265dd0c621d9e61c69e724cf49a182bc5718843f3181e5829175eaff",
+      "install_sha256_crlf": "df5bef4e562a79435bd0d95cee4471a3936aa28bb35fb35969f665a8baa1f962",
+      "used_for": "DDA with no digestion enzyme, HLA immunopeptides (--enzyme none --nonspecific-workflow hla)"
+    }
+  },
+  "values_adapted_from": {
+    "TMT10-MS3.workflow": {
+      "source": "workflows/TMT10-MS3.workflow @ tags/24.0 (not shipped here)",
+      "sha256": "67b9aee1360675614b47cb18b2e1534a8d13ded3e6b18d31026fa9ebf2810911",
+      "description": "'identification from low mass accuracy MS2'",
+      "values": "ion-trap MS2: msfragger.fragment_mass_tolerance=0.6, fragment_mass_units=0 (Da), isotope_error=0/1/2/3; precursor -20/+20 ppm (the only search keys it changes from TMT10.workflow)"
+    },
+    "TMT16-MS3.workflow": {
+      "source": "workflows/TMT16-MS3.workflow @ tags/24.0 (not shipped here)",
+      "sha256": "20c4b2cace69bd54ed52682c0b6501aec8ae9132589c4545e36e768e51ed454e",
+      "description": "'identification form low mass accuracy MS2 (ion trap)'",
+      "values": "the same ion-trap MS2 values as TMT10-MS3"
+    },
+    "Stellar-DDA.workflow": {
+      "source": "workflows/Stellar-DDA.workflow @ tags/24.0 (not shipped here)",
+      "sha256": "301a9dcc35ef4667f583da92a4a4ee33de44caf66b5813756e2e455045a98065",
+      "description": "'Workflow for Stellar data (unit resolution in MS1 and MS2) acquired in DDA mode'",
+      "values": "unit resolution: the msfragger spectrum and mass keys it changes from LFQ-MBR (fragment 0.3 Da, precursor -1.5/+1.5 Da, ...); make_presets.UNIT_RESOLUTION_KEYS lists them"
+    },
+    "citrullination.workflow": {
+      "source": "workflows/citrullination.workflow @ tags/24.0 (not shipped here)",
+      "sha256": "33fb429bf0f19f09144a428f7b3df9e5e92f742bc0844d19c9edb2d3f86aea7b",
+      "values": "its N/Q deamidation row 0.984016,NQ,true,2 -- the row --var-mods deam adds"
+    },
+    "enzyme-defs-supported.txt": {
+      "source": "FragPipe-GUI/src/main/java/org/nesvilab/fragpipe/tools/fragger/enzyme-defs-supported.txt @ tags/24.0 (not shipped here)",
+      "sha256": "c1c58a79e437d53d979a2f7c2f8cb49ed596b1943742da12e95c95aa344187e9",
+      "values": "FragPipe's enzyme list: cleavage_rules.ENZYME_RULES takes each --enzyme family's rule from it"
+    }
+  }
+}

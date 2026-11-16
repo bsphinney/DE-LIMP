@@ -447,7 +447,7 @@ database_check_without_sidecar <- function(search_dir, n_groups_removed) {
 }
 
 # Is this a keratin sample (hair, wool, feather, skin, nail ...: keratin is the ANALYTE), and
-# which contaminant entries must the filter then leave in? Why (msalemi's hair benchmark SET28,
+# which contaminant entries must the filter then leave in? Why (a Core member's hair benchmark SET28,
 # skill 2.8.0): every precursor naming a Cont_ entry was removed, and ~46 keratin-family Cont_
 # entries (KRT34, KRTAPs, mouse hair and sheep wool keratins) took the hair's own keratin
 # peptides with them. Read, first that says so: run_de.R --keratin-sample; the FASTA sidecar's
@@ -705,7 +705,7 @@ contaminant_sample_loss <- function(census, tag) {
                                "%s lost some of them, %s lost all of them."),
                         tag, fmt(part), fmt(whole)),
     # "keep other peptides": in any kept group, their own or one shared with other proteins (on
-    # gabrig's HeL50 Sage run 57 = 36 as their own group + 21 only inside a shared one)
+    # a Core member's HeL50 Sage run 57 = 36 as their own group + 21 only inside a shared one)
     peptide = sprintf(paste0("Sample proteins named by a removed peptide (a peptide shared with a ",
                              "%s entry): %s keep other peptides, %s have no other peptide and are ",
                              "not quantified."), tag, fmt(part), fmt(whole)),

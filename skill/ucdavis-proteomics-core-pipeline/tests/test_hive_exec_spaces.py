@@ -9,6 +9,8 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
+import tarfile
 import tempfile
 import unittest
 
@@ -18,6 +20,12 @@ TOOLS = ("tar", "mkdir", "cp", "rm", "mktemp", "dirname", "basename", "cat", "ls
          "tr", "uname", "mv", "rmdir", "sed", "grep", "head", "awk", "sort", "wc", "chmod")
 SSH = '#!/bin/bash\nfor last; do :; done\nexec bash -c "$last"\n'
 RSYNC = '#!/bin/bash\nfor a in "$@"; do printf "%s\\n" "$a"; done >> "$LOGS/rsync.log"\necho --end-- >> "$LOGS/rsync.log"\n'
+# ssh that keeps what --put streams to HIVE (stream.N.tar) before HIVE's side unpacks it
+SSH_TEE = ('#!/bin/bash\nfor last; do :; done\nn=$(ls "$LOGS" | grep -c "^stream")\n'
+           'tee "$LOGS/stream.$n.tar" | bash -c "$last"\n')
+# tar that logs COPYFILE_DISABLE and its arguments, then runs the real one
+TAR_SPY = ('#!/bin/bash\nprintf "%s|%s\\n" "${COPYFILE_DISABLE:-}" "$*" >> "$LOGS/tar.log"\n'
+           'exec "$REAL_TAR" "$@"\n')
 
 
 class Spaces(unittest.TestCase):
@@ -52,10 +60,10 @@ class Spaces(unittest.TestCase):
             fh.write(body)
         os.chmod(p, os.stat(p).st_mode | stat.S_IXUSR)
 
-    def run_exec(self, *args, cwd=None):
+    def run_exec(self, *args, cwd=None, **extra):
         env = {"PATH": self.bin, "HOME": self._mk("home"), "LOGS": self.logs, "HIVE_USER": "tester",
                "HIVE_KEY": self.key, "HIVE_ENV_FILE": os.path.join(self.d, "no.env"),
-               "TMPDIR": self._mk("tmp"), "HIVE_PUT_FORCE": "1", "HIVE_SSH_MUX": "0"}
+               "TMPDIR": self._mk("tmp"), "HIVE_PUT_FORCE": "1", "HIVE_SSH_MUX": "0", **extra}
         return subprocess.run(["/bin/bash", HIVE_EXEC, *args], capture_output=True, text=True,
                               env=env, cwd=cwd or self.d, timeout=60)
 
@@ -169,6 +177,51 @@ class Spaces(unittest.TestCase):
         r = self.run_exec("--get", os.path.join(self.remote, "nope"), dest + "/")
         self.assertNotEqual(r.returncode, 0)
         self.assertEqual(os.listdir(dest), [])
+
+    def test_a_put_sends_no_appledouble_files_or_xattr_headers(self):
+        """Review M6 (the real HIVE test T5b): a push from a Mac to a session path with a space
+        went by tar, and macOS's bsdtar sent each file's extended attributes as "._<name>"
+        members, which HIVE's GNU tar unpacked as files beside the report. The stream is now made
+        with COPYFILE_DISABLE=1 and, on macOS, --no-mac-metadata --no-xattrs: no ._ member and
+        no xattr header in what goes to HIVE, and no ._ file there."""
+        real_tar = os.path.realpath(os.path.join(self.bin, "tar"))
+        os.remove(os.path.join(self.bin, "tar"))              # the symlink, not the real tar
+        self._exe("tar", TAR_SPY)
+        self._exe("ssh", SSH_TEE)
+        os.symlink(shutil.which("tee"), os.path.join(self.bin, "tee"))
+        out = self._mk("local", "output")
+        report = os.path.join(out, "Analysis_Report.html")
+        self.write(report, "R")
+        self.write(os.path.join(out, "podcast", "podcast_script.md"), "P")
+        mac = sys.platform == "darwin"
+        if mac:            # what nearly every file on a Mac carries (com.apple.provenance)
+            for f in (report, os.path.join(out, "podcast"),
+                      os.path.join(out, "podcast", "podcast_script.md")):
+                subprocess.run(["xattr", "-w", "com.example.skilltest", "v", f], check=True)
+        dest = os.path.join(self.d, "q", "My Lab", "session 1", "output") + "/"
+        for src in (report, os.path.join(out, "podcast")):    # a file into a folder; a folder
+            r = self.run_exec("--put", src, dest, REAL_TAR=real_tar)
+            self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(open(os.path.join(dest, "Analysis_Report.html")).read(), "R")
+        self.assertEqual(open(os.path.join(dest, "podcast", "podcast_script.md")).read(), "P")
+        made = [ln for ln in open(os.path.join(self.logs, "tar.log")).read().splitlines()
+                if " -cf - -- " in ln]
+        self.assertEqual(len(made), 2, made)
+        for ln in made:
+            self.assertTrue(ln.startswith("1|"), ln)          # COPYFILE_DISABLE=1
+            if mac:
+                self.assertIn("--no-mac-metadata --no-xattrs", ln)
+        streams = sorted(f for f in os.listdir(self.logs) if f.startswith("stream"))
+        self.assertEqual(len(streams), 2, streams)
+        for f in streams:
+            with tarfile.open(os.path.join(self.logs, f)) as t:
+                members = t.getmembers()
+            self.assertEqual([m.name for m in members if os.path.basename(m.name).startswith("._")],
+                             [], f)
+            self.assertEqual([k for m in members for k in m.pax_headers if "xattr" in k.lower()],
+                             [], f)
+        for root, _dirs, files in os.walk(os.path.join(self.d, "q", "My Lab")):
+            self.assertEqual([x for x in files if x.startswith("._")], [], root)
 
     def test_plain_paths_still_use_rsync(self):
         self._exe("rsync", RSYNC)

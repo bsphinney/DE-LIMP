@@ -1,0 +1,28 @@
+FragPipe (24.0) runtime properties
+Version info:
+FragPipe version 24.0
+MSFragger version 4.4.1
+MSBooster version 1.4.14
+Percolator version 3.7.1
+Philosopher version 5.1.3-RC9
+IonQuant version 1.11.20
+
+LCMS files:
+  Experiment/Group:
+  - /data/search/raw_stage/S1-a.raw	DDA
+
+3 commands to execute:
+MSFragger
+PeptideProphet
+ProteinProphet
+~~~~~~~~~~~~~~~~~~~~~~
+MSFragger [Work dir: /data/search]
+Process 'MSFragger' finished, exit code: 0
+PeptideProphet [Work dir: /data/search]
+Process 'PeptideProphet' finished, exit code: 0
+ProteinProphet [Work dir: /data/search]
+Process 'ProteinProphet' finished, exit code: 0
+PhilosopherFilter [Work dir: /data/search]
+/opt/fragpipe/tools/Philosopher/philosopher-v5.1.3-RC9 filter --sequential --prot 0.01 --picked --tag rev_ --pepxml /data/search --protxml /data/search/combined.prot.xml
+Process 'PhilosopherFilter' finished, exit code: 0
+=============================================================ALL JOBS DONE IN 1.2 MINUTES=============================================================

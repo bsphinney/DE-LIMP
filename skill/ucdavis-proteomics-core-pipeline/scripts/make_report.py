@@ -82,7 +82,36 @@ CATALOG = [
     (r".*\.speclib$|.*lib\.parquet$", "Search output",
      "Spectral library generated/used during the search."),
     (r"^lfq\.parquet$|^results\.sage\.parquet$", "Search output", "Sage output (LFQ intensities / PSMs)."),
-    (r"^combined_protein\.tsv$", "Search output", "FragPipe/IonQuant protein-level MaxLFQ table."),
+    (r"^combined_protein\.tsv$", "Search output",
+     "FragPipe/IonQuant's protein table: per experiment, spectral counts and the protein "
+     "Intensity, plus MaxLFQ Intensity when there were 3 or more experiments (IonQuant computes "
+     "no MaxLFQ below 3). Which column report.parquet uses is in fragpipe_quantity.json."),
+    (r"^(?:psm|peptide|protein)\.tsv$", "Search output",
+     "FragPipe/Philosopher's own table for one experiment, after its FDR filter: psm.tsv one row "
+     "per PSM, peptide.tsv one per peptide, protein.tsv one per protein group. A search for "
+     "identifications only is read from psm.tsv and peptide.tsv (identifications.tsv); "
+     "protein.tsv is the protein-level table of such a search."),
+    (r"^combined_(?:peptide|modified_peptide|ion)\.tsv$", "Search output",
+     "FragPipe/IonQuant's peptide, modified-peptide or peptide-ion table, per experiment. "
+     "combined_ion.tsv is what directLFQ reads when it is the protein quantity."),
+    (r"^faims_split\.json$", "Search output",
+     "FragPipe on a dataset that mixed FAIMS and non-FAIMS runs (run_search --faims-split): the "
+     "groups, their folders and run counts. Each group was searched and quantified on its own, "
+     "so quantities are not comparable across the groups."),
+    (r"^fragpipe_quantity\.json$", "Search output",
+     "FragPipe only: which protein quantity report.parquet carries (IonQuant MaxLFQ from 3 "
+     "experiments; directLFQ with 2, with IonQuant's Intensity beside it; IonQuant Intensity for "
+     "1), how many experiments, why it is not IonQuant's MaxLFQ, the run map, and directLFQ's "
+     "normalisation check (fragpipe_quant.py)."),
+    (r"^directlfq_record\.json$", "Search output",
+     "directLFQ's run on combined_ion.tsv: its versions and the check that its between-sample "
+     "normalisation was applied (pandas < 3, its copy flag off, shift applied = shift found); a "
+     "refused check means its numbers were not used (fragpipe_quant.py)."),
+    (r"^combined_ion\.tsv(?:\.no_norm)?\.(?:protein_intensities|run_config)\.tsv$",
+     "Search output",
+     "directLFQ's protein intensities from combined_ion.tsv (with, and with no_norm without, its "
+     "between-sample normalisation; the normalised one is report.parquet's quantity), or the "
+     "settings it ran with."),
     (r"^search_provenance\.json$", "Search output", "Exact search engine, version, and command used (reproducibility)."),
     (r"^contaminant_competition\.json$", "Search output",
      "Which of the sample's proteins the contaminant list took away (contaminant_competition.py, "
@@ -93,7 +122,7 @@ CATALOG = [
     (r"^sage_adapt\.json$", "Search output",
      "Sage only: which lfq.parquet rows became report.parquet -- targets at q_value <= 0.05, "
      "decoys and failing rows dropped -- with the counts per file."),
-    (r"^sage_lfq_check\.json$", "Search output",
+    (r"^(?:quantification_check|sage_lfq_check)\.json$", "Search output",
      "The search's quantification check, which the DE asks before it runs (sage_lfq_check.py). "
      "For a quantifying Sage search: whether Sage's LFQ window (quant.lfq_settings.ppm_tolerance) "
      "fit each run's median precursor mass error, and how many target MS1 peaks Sage kept at 5% "
@@ -123,7 +152,15 @@ CATALOG = [
      "(make_figures.R) -- a calibration check for the appendix, where a flat background with a "
      "peak near 0 means real signal on a well-behaved model, and a skew toward 1, a mid-range "
      "hump or a U shape flags a model/QC problem in that contrast."),
-    (r".*\.png$", "Figures", "Publication-quality figure (volcano / PCA / heatmap / QC) embedded in the analysis report."),
+    # By file name only, so this cannot tell a report figure from a search engine's own plot:
+    # say what is true of both (X8 F10). The figures of figures.json are embedded in the report;
+    # an engine's diagnostic plots (FragPipe's MSBooster retention-time and score plots, in the
+    # search folder) are files only.
+    (r".*\.png$", "Figures",
+     "A figure (PNG). The volcano, PCA, heatmap and QC figures listed in figures.json are "
+     "embedded in the analysis report; a search engine's own diagnostic plots (FragPipe's "
+     "MSBooster retention-time and score plots, in the search folder) are kept as files and are "
+     "not embedded in it."),
     (r"^figures\.json$", "Figures", "Figure manifest: each figure's file, type, and caption."),
 
     (r"^DE_silac_.*\.csv$", "Differential expression",
@@ -227,6 +264,18 @@ CATALOG = [
      "Experimental design: File.Name → Group (+ optional Batch/Covariates) used in the DE model."),
     (r".*\.fasta$|.*\.fa$", "Inputs", "Protein sequence database used for the search (proteome + contaminants)."),
     (r"^workflow\.manifest\.json$", "Inputs", "The search defaults that drove the run, derived from the data type (engine, version, FASTA spec, DE method, the skill's defaults version)."),
+    # FragPipe's workflows (2.15): the one that ran, and the two that share a name
+    (r"^fragpipe_input\.workflow$", "Inputs",
+     "The workflow FragPipe ran: the given workflow with its database set by run_search.py. "
+     "A replay uses this one (without the database line), never FragPipe's saved copy."),
+    (r"^fragpipe\.workflow$", "Inputs",
+     "A FragPipe workflow: in input/wf, the preset step 4 wrote (make_presets.py); in the "
+     "search folder, FragPipe's own saved copy of what it ran, which writes an enzyme dropdown "
+     "back beside the rule (read for the Methods' versions and filter, never replayed: "
+     "fragpipe_input.workflow is what ran)."),
+    (r".*\.(workflow|radiantConfig)\.provenance\.json$", "Inputs",
+     "make_presets.py's record of a FragPipe or Radiant preset: the vendor workflow it started "
+     "from and why, every key it changed and why; the Methods read it."),
     (r".*\.cfg$|^sage_config.*\.json$|.*\.workflow$|^params\..*$", "Inputs", "Engine search parameters actually used (estimated from the data type, or a validated SOP config)."),
     (r"^commands\.log$", "Inputs", "Verbatim log of every command the run executed (audit trail)."),
 
@@ -410,15 +459,15 @@ def collect(paths):
     return sorted(seen.values())
 
 
-def search_outs(a):
+def search_outs(search_out=None, session=None):
     """The search folder(s) to catalog: --search-out; else the session's (session.search_folder,
     the one answer to "which search"); when its records leave the choice open, every recorded
     search folder -- a catalog lists files, it does not say which search the results came
     from."""
-    if a.search_out or not a.session:
-        return [a.search_out]
+    if search_out or not session:
+        return [search_out]
     import session as sess
-    p = sess.paths_for(a.session)
+    p = sess.paths_for(session)
     c = sess.search_choice(p)
     folder = sess.search_folder(p, c)
     if folder:
@@ -426,31 +475,24 @@ def search_outs(a):
     return [os.path.dirname(x) for x in c["candidates"]]
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--out", default="OUTPUT_FILES.md")
-    ap.add_argument("--search-out")
-    ap.add_argument("--session", help="the analysis session: with no --search-out, its search "
-                                      "folder (session.search_folder: wherever the search is, "
-                                      "the one the DE read); records and none chosen: every "
-                                      "search folder, each listed")
-    ap.add_argument("--de-dir")
-    ap.add_argument("--repro")
-    ap.add_argument("--extra", nargs="*", default=[])
-    ap.add_argument("--root", default=".", help="base dir to show paths relative to")
-    a = ap.parse_args()
-
+def write_catalog(out, search_out=None, de_dir=None, repro=None, extra=(), root=".",
+                  session=None):
+    """Write the catalog to `out` and return the summary the CLI prints. THE one build: the CLI
+    (SKILL.md step 11) and session.py finalize, which builds it when step 11 was not run, both
+    come here. Written to `out`.part and renamed, so a failure never leaves half a catalog that
+    a later finalize would keep (finalize never rewrites an existing one).
+    With no `search_out`, `session` gives the search folder(s): search_outs()."""
     # the podcast (make_podcast.py) sits in podcast/ beside OUTPUT_FILES.md, and the peak check
     # (skyline_peaks.py) in skyline/: each listed when present (its skyline_work/ is scratch)
-    here = os.path.dirname(os.path.abspath(a.out))
+    here = os.path.dirname(os.path.abspath(out))
     podcast, skyline = os.path.join(here, "podcast"), os.path.join(here, "skyline")
-    files = collect([*search_outs(a), a.de_dir, a.repro, *a.extra,
+    files = collect([*search_outs(search_out, session), de_dir, repro, *extra,
                      podcast if os.path.isdir(podcast) else None,
                      skyline if os.path.isdir(skyline) else None])
-    root = os.path.abspath(a.root)
+    root = os.path.abspath(root)
     rows, by_cat, kinds = [], {}, {}
     for f in files:
-        if os.path.basename(f) == os.path.basename(a.out):
+        if os.path.basename(f) == os.path.basename(out):
             continue
         rel = os.path.relpath(f, root)
         try:
@@ -511,12 +553,36 @@ def main():
                  "*search* too (pinned engine, environment lock, checksums).")
     lines.append("")
 
-    with open(a.out, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(lines) + "\n")
+    part = out + ".part"                     # scratch (scratch_files.py): never zipped
+    try:
+        with open(part, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+        os.replace(part, out)
+    except BaseException:
+        if os.path.isfile(part):
+            os.remove(part)
+        raise
 
-    print(json.dumps({"report": os.path.abspath(a.out), "n_files": n_files,
-                      "categories": {c: len(by_cat.get(c, [])) for c in CATEGORY_ORDER if by_cat.get(c)},
-                      "unrecognized": n_unknown}, indent=2))
+    return {"report": os.path.abspath(out), "n_files": n_files,
+            "categories": {c: len(by_cat.get(c, [])) for c in CATEGORY_ORDER if by_cat.get(c)},
+            "unrecognized": n_unknown}
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--out", default="OUTPUT_FILES.md")
+    ap.add_argument("--search-out")
+    ap.add_argument("--session", help="the analysis session: with no --search-out, its search "
+                                      "folder (session.search_folder: wherever the search is, "
+                                      "the one the DE read); records and none chosen: every "
+                                      "search folder, each listed")
+    ap.add_argument("--de-dir")
+    ap.add_argument("--repro")
+    ap.add_argument("--extra", nargs="*", default=[])
+    ap.add_argument("--root", default=".", help="base dir to show paths relative to")
+    a = ap.parse_args()
+    print(json.dumps(write_catalog(a.out, a.search_out, a.de_dir, a.repro, a.extra, a.root,
+                                   session=a.session), indent=2))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,3 @@
+FragPipe (24.0) runtime properties
+System OS: Linux
+Process 'IonQuant' finished, exit code: 0

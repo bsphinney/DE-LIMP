@@ -82,7 +82,8 @@ CHECKS the script, RENDERS it to audio and LINKS the audio into the outputs.
 
 Privacy: only the final transcript (render: the turns, after pronunciation substitutions) and
 the rendered audio (verify, downsampled) ever leave the machine -- never the report -- and only
-with consent, recorded in podcast.json: --cloud-ok NOTE (the person whose data it is agreed), or
+with consent, recorded in podcast.json: --cloud-ok NOTE (the person whose data it is agreed, as
+"<who agreed>, <date>, <paid|free> key": CLOUD_OK_FORM, references/podcast.md's form), or
 --core-run for a Core run, which records CORE_CLOUD_OK (the Core director's standing approval;
 the one place that text lives). --core-run needs a CoreOmics submission (or, with `internal`,
 session.json saying internal Core work) and a person on the Core staff list; podcast.json says
@@ -131,6 +132,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 from notify_slack import REDACTED, redact as _redact    # noqa: E402  the ONE secret list
+from safe_write import sha256_file  # noqa: E402  the ONE chunked sha256
 from report_files import SHARE_NAME, SHARE_STALE    # noqa: E402  names defined once
 from client_text import draft_history, draft_history_loose  # noqa: E402  the ONE list
 from client_text import peak_check_overclaims, peak_check_overclaims_loose  # noqa: E402  "confirmed by Skyline"
@@ -185,7 +187,7 @@ TIER_MEMORY_DAYS = 7.0
 PREFLIGHT_LINES = ("This is a short sound check.", "And this is the second voice.")
 TERMS_URL = "https://ai.google.dev/gemini-api/terms"
 KEY_FILE = os.path.join("~", ".config", "ucdavis-proteomics", "gemini_key")
-# The Core's shared key on HIVE (Brett installs it: owner brettsp, group proteomics-grp, mode
+# The Core's shared key on HIVE (Brett installs it: owner a Core admin, group proteomics-grp, mode
 # 640). Read last, for a Core run only (--core-run), and only while slack_collab.trust_problem
 # holds (a Core admin owns it and its folder; nobody else can write either) and other accounts
 # cannot read it. Tests replace this constant; nothing in the environment can.
@@ -196,6 +198,10 @@ CORE_KEY_FILE = "/quobyte/proteomics-grp/.config/gemini_key"
 CORE_CLOUD_OK = ("Brett Phinney (Core director): standing approval for Core runs (2026-09-28; "
                  "podcast by default since 2026-10-15)")
 CORE_RUN_KINDS = ("submission", "internal")
+# THE form of --cloud-ok for anyone else's data (references/podcast.md "Privacy and consent"):
+# every message that asks for it says this, so the record says who, when and on which key tier
+# (2.15 Ruling 96.5; tests/test_podcast_consent_form.py keeps podcast.md the same).
+CLOUD_OK_FORM = '"<who agreed>, <date>, <paid|free> key"'
 VERIFY_FILES = ("verify.txt", "verify_transcript.txt")      # what verify writes beside the audio
 # Gemini 3 TTS needs client.interactions (2.25.0 has it). setup.sh installs at least this into
 # the pipeline env (its GENAI_MIN; tests/test_make_podcast_hive.py keeps the two equal).
@@ -412,14 +418,6 @@ def scrub(text):
 
 def sha256_bytes(b):
     return hashlib.sha256(b).hexdigest()
-
-
-def sha256_file(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as fh:
-        for block in iter(lambda: fh.read(1 << 20), b""):
-            h.update(block)
-    return h.hexdigest()
 
 
 def now_iso():
@@ -870,8 +868,8 @@ def title_tokens(text, initial=False):
 
 def spoken_digits(spoken):
     """The digits a spoken form says, in order: numerals as written, number words read the way
-    verify reads them ("two point eight six" -> 286, "sep two fifty" -> 250, "zero seven five
-    six" -> 0756, "oh" as 0)."""
+    verify reads them ("two point eight six" -> 286, "sep two fifty" -> 250, "zero eight zero
+    seven" -> 0807, "oh" as 0)."""
     words = [[("zero" if w.lower() == "oh" else w.lower()), 0, 0]
              for w in re.findall(r"[A-Za-z]+|\d+", spoken or "")]
     return "".join(c for t in _spoken_numbers(words) for c in t[0] if c.isdigit())
@@ -3490,66 +3488,22 @@ def _on_hive():
     return on_hive()
 
 
-def _uid_login():
-    """This account's login, by its uid: never $USER or $LOGNAME, which anyone can set."""
-    try:
-        import pwd
-        return pwd.getpwuid(os.getuid()).pw_name
-    except (ImportError, KeyError, AttributeError):
-        return None
-
-
-def _staff_check_on_hive():
-    """From a laptop: ask HIVE, through hive_exec.sh, whether the account this computer's HIVE
-    login reaches is on the Core staff list -- staff.py's own check, of `id -un` there (what the
-    ssh key proves), never a name this computer claims. -> (login, how, None) or (None, None,
-    why)."""
-    cmd = 'python3 ~/proteomics-pipeline/scripts/staff.py check --by "$(id -un)"'
-    try:
-        r = subprocess.run(["bash", os.path.join(HERE, "hive_exec.sh"), cmd],
-                           capture_output=True, text=True, timeout=120)
-        got = json.loads(r.stdout[r.stdout.find("{"):])      # past anything a login shell prints
-    except (OSError, subprocess.SubprocessError, ValueError) as e:
-        return None, None, ("the Core staff list is on HIVE and could not be asked from here "
-                            f"({type(e).__name__}): this computer needs its HIVE login "
-                            "(check_access.sh saves it) and the skill on HIVE "
-                            "(hive_exec.sh --put-skill)")
-    if not isinstance(got, dict):
-        return None, None, "HIVE's answer about the Core staff list was not readable"
-    checked = str(got.get("checked") or "")
-    if got.get("ok") and checked.startswith("on the Core staff list"):
-        return got.get("by"), checked + ", asked on HIVE", None
-    return None, None, str(got.get("error") or checked or "HIVE did not confirm it")
-
-
 def core_staff():
-    """Is the person running this on the Core staff list? -> (login, how it was checked, None)
-    or (None, None, why not). The Core's Gemini key is readable by every member of
-    proteomics-grp, but the standing approval and the key are for Core staff: on HIVE this
-    account (by uid) must be on the list staff.load_staff trusts (CORE_STAFF_FILE, owned by a
-    Core admin); on a laptop HIVE is asked about the account its key logs in as. Fails closed:
-    no usable list is no."""
-    if not _on_hive():
-        return _staff_check_on_hive()
+    """staff.core_staff: the one test of Core staff (the list on HIVE; from a laptop, HIVE asked)."""
     try:
         import staff
     except ImportError as e:
         return None, None, f"the Core staff list cannot be checked ({e})"
-    login = _uid_login()
-    logins, why = staff.load_staff()
-    if logins is None:
-        return None, None, f"the Core staff list cannot be used ({why})"
-    if not login or login not in logins:
-        return None, None, (f"{login or 'this account'} is not on the Core staff list "
-                            f"({staff.staff_file()}); a Core admin adds staff to it")
-    return login, f"on the Core staff list ({staff.staff_file()})", None
+    return staff.core_staff()
 
 
 def core_run_consent(script_path, kind):
     """--core-run: the consent of record for a Core run -> (CORE_CLOUD_OK, the Core run, None),
-    or (None, None, why not). `submission` (the default): the session the script sits in answers
-    a CoreOmics submission (submission_report.core_run, the one test); `internal`: its
-    session.json says it is internal Core work (analysis_for, from session.py init --internal).
+    or (None, None, why not). `submission` (the default): the session the script sits in is a
+    Core run (submission_report.core_run, the one test) -- a CoreOmics submission, or Core client
+    work Core staff marked with session.py core-client (kind "core_client", ruling 92);
+    `internal`: its session.json says it is internal Core work (analysis_for, from session.py
+    init --internal), and it is no client's (attached, named, or marked).
     Either way the person running it must be Core staff (core_staff). The Core run names the
     ROLE; its "login" is for the staff-only record (record_core_run), never podcast.json.
     Anyone else's data is never a Core run: they are asked, and --cloud-ok records the answer."""
@@ -3569,7 +3523,12 @@ def core_run_consent(script_path, kind):
             got = None
     named = [str(x) for x in ((work or {}).get("submissions") or [])] \
         if isinstance(work, dict) else []
+    client = bool(got and got.get("core_client"))   # marked Core client work, no submission yet
     if kind == "internal":
+        if client:                    # a client's data is never labelled as the Core's own
+            return None, None, ("--core-run internal: this session is Core client work "
+                                "(session.py core-client), a client's data, so its podcast is "
+                                "that client's: pass --core-run.")
         if got or named:              # a client's data is never labelled as the Core's own
             which = (got or {}).get("prot") or ", ".join(named) or "a CoreOmics submission"
             return None, None, (f"--core-run internal: this session is for {which}, a CoreOmics "
@@ -3580,7 +3539,7 @@ def core_run_consent(script_path, kind):
                                 "it is internal Core work (analysis_for, written by session.py "
                                 "init --internal \"<its board title>\"). For a CoreOmics "
                                 "submission pass --core-run; for anyone else's data, ask them "
-                                "and pass --cloud-ok \"<who agreed, when>\".")
+                                f"and pass --cloud-ok {CLOUD_OK_FORM}.")
         rec = {"kind": "internal", "title": work["internal"]}
     else:
         if not got and named:
@@ -3594,8 +3553,12 @@ def core_run_consent(script_path, kind):
                                 "(submission_report.core_run, asked of the session above the "
                                 "script's podcast/ folder). For internal Core work pass "
                                 "--core-run internal; for anyone else's data, ask them and "
-                                "pass --cloud-ok \"<who agreed, when>\".")
-        rec = {"kind": "submission", "prot": got.get("prot")}
+                                f"pass --cloud-ok {CLOUD_OK_FORM}.")
+        # Brett's ruling 92 (2026-11-04): Core client work that Core staff marked (session.py
+        # core-client) is a Core run for the standing approval -- the Core director's approval is
+        # enough to send a Core client's transcript to the TTS service -- recorded as its own kind
+        rec = ({"kind": "core_client"} if client else
+               {"kind": "submission", "prot": got.get("prot")})
     login, how, why = core_staff()
     if not login:
         return None, None, f"--core-run is for Core staff: {why}."
@@ -3877,7 +3840,7 @@ def cmd_render(a):
                 f"report -- to Google's Gemini API, and verify then sends the rendered AUDIO "
                 f"(downsampled) for transcription. On a free-tier key Google may use both to "
                 f"improve its products and human reviewers may read it ({TERMS_URL}). Once the "
-                f"user has agreed, re-run with --cloud-ok \"who agreed, when\" (a Core run: "
+                f"user has agreed, re-run with --cloud-ok {CLOUD_OK_FORM} (a Core run: "
                 f"--core-run, the Core director's standing approval), or use --tts local "
                 f"(Kokoro on HIVE) or --tts say (macOS), which send nothing.")
         return 2
@@ -4215,8 +4178,8 @@ _MULT = {"hundred": 100, "thousand": 1000, "million": 1000000}
 def _spoken_numbers(words):
     """Runs of number words as one number, the way a transcript that "writes numbers as digits"
     has them. Read the way people say numbers: "five thousand and twenty four" -> 5024, "forty
-    six" -> 46, "two fifty" -> 250, "nineteen ninety" -> 1990, and digit by digit, "zero seven
-    five six" -> 0756. A tens word takes a following unit; any other pair of number words
+    six" -> 46, "two fifty" -> 250, "nineteen ninety" -> 1990, and digit by digit, "zero eight
+    zero seven" -> 0807. A tens word takes a following unit; any other pair of number words
     without a multiplier between them starts a new group of digits."""
     out, i = [], 0
     isnum = lambda w: w in _UNITS or w in _TENS or w in _MULT        # noqa: E731
@@ -4636,7 +4599,7 @@ def cmd_verify(a):
             log(f"[verify] not sending anything. verify sends the rendered AUDIO (downsampled) "
                 f"to Google's Gemini API for transcription. On a free-tier key Google may use it "
                 f"to improve its products and human reviewers may hear it ({TERMS_URL}). Once "
-                f"the user has agreed, re-run with --cloud-ok \"who agreed, when\" (a Core run: "
+                f"the user has agreed, re-run with --cloud-ok {CLOUD_OK_FORM} (a Core run: "
                 f"--core-run), or check it on HIVE with --local (Whisper; nothing is sent).")
         return 2
     try:
@@ -6061,7 +6024,7 @@ def cmd_job(a):
     if not (consent or local):
         log("[job] refusing: " + (refusal or "the job sends the transcript and the audio to "
                                   "Google, so it needs consent: --core-run for a Core run, or "
-                                  "--cloud-ok \"<who agreed, when>\" from the person whose data "
+                                  f"--cloud-ok {CLOUD_OK_FORM} from the person whose data "
                                   "it is. Or --tts local: the local voice on HIVE, which sends "
                                   "nothing."))
         return 2
@@ -6198,8 +6161,8 @@ def main(argv=None):
     r.add_argument("--tts", required=True, choices=sorted(BACKENDS),
                    help="gemini: Gemini voices (cloud; consent needed); local: the local voice, "
                         "Kokoro on HIVE (nothing sent); say: macOS voices (offline)")
-    consent_args(r, "consent to send the transcript to the cloud TTS service; optionally a "
-                    "note of who agreed and when (recorded in podcast.json)")
+    consent_args(r, "consent to send the transcript to the cloud TTS service, as "
+                    f"{CLOUD_OK_FORM} (recorded in podcast.json)")
     r.add_argument("--model", action="append", help="Gemini TTS model(s) to use, in order "
                                                     "(default: read from the API)")
     r.add_argument("--rate-wait-budget", type=float, default=RATE_WAIT_BUDGET_MIN,
@@ -6253,7 +6216,7 @@ def main(argv=None):
                                       "spoken script (sends the audio to Google)")
     v.add_argument("script")
     v.add_argument("--out", help="the folder with podcast.json (default: the script's folder)")
-    consent_args(v, "consent to send the audio to Gemini for transcription")
+    consent_args(v, f"consent to send the audio to Gemini for transcription, as {CLOUD_OK_FORM}")
     v.add_argument("--local", action="store_true",
                    help="hear it back on HIVE with Whisper instead (sends nothing; always so for "
                         "an episode the local voice made)")
@@ -6282,8 +6245,8 @@ def main(argv=None):
     j.add_argument("--tts", choices=("gemini", "local"), default="gemini",
                    help="gemini (default; the local voice takes over if Gemini fails in a way "
                         "waiting cannot fix) or local (Kokoro on HIVE: no consent or key needed)")
-    consent_args(j, "consent to send the transcript and audio to Gemini: a note of who agreed "
-                    "and when (recorded in podcast.json)")
+    consent_args(j, "consent to send the transcript and audio to Gemini, as "
+                    f"{CLOUD_OK_FORM} (recorded in podcast.json)")
     j.add_argument("--model", action="append", help="Gemini TTS model(s) for render, in order")
     j.add_argument("--no-meaning-check", metavar="WHY",
                    help="render although no PASS meaning check is recorded for this script; the "

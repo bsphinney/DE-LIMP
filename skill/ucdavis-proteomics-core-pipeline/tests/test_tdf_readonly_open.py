@@ -73,7 +73,8 @@ ALLOW_UNSAFE_R = {("R", "helpers_instrument.R"),
                   ("testthat", "test-helpers_instrument_tdf.R")}
 
 
-def _sources(root, suffixes):
+def _walk(root, suffixes):
+    """Every readable source file under root, before the tdf filter."""
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
         for name in sorted(filenames):
@@ -85,12 +86,22 @@ def _sources(root, suffixes):
                     text = fh.read()
             except (OSError, UnicodeDecodeError):
                 continue
-            if "analysis.tdf" in text:       # only files that read a Bruker tdf
-                yield path, text
+            yield path, text
+
+
+def _sources(root, suffixes):
+    for path, text in _walk(root, suffixes):
+        if "analysis.tdf" in text:           # only files that read a Bruker tdf
+            yield path, text
+
+
+def walked_files(root):
+    """Every source file the walk reaches -- what proves the walk covers the checkout."""
+    return [p for p, _ in _walk(root, (".py", ".R", ".r"))]
 
 
 def scanned_files(root):
-    """Every file the two scans below look at -- what proves the walk is not empty."""
+    """Every file the two scans below look at (the walked files that read a tdf)."""
     return [p for p, _ in _sources(root, (".py", ".R", ".r"))]
 
 
@@ -777,15 +788,34 @@ class TestNoOtherTdfOpens(unittest.TestCase):
                          "open analysis.tdf with tdf_dbconnect_ro() (mode=ro&immutable=1)")
 
     def test_the_scan_reaches_past_this_skill(self):
-        """A scan that silently covered nothing would pass the two tests above for ever."""
+        """A scan that silently covered nothing would pass the two tests above for ever.
+
+        Two checkouts hold this skill: DE-LIMP (with the dev skill, cascadia/ and the app's R/
+        beside it) and, from 2.15, the skill's own repository (tools/ beside it, Ruling 87).
+        In either, the walk must reach files outside this skill and every one of the named
+        files the checkout has; a named file that reads a tdf must also be scanned. (In the
+        skill's own repository nothing outside the skill reads a tdf, so the reach is shown by
+        the walk, not by the scanned list.)"""
         scanned = scanned_files(ROOT)
+        walked = walked_files(ROOT)
         self.assertIn(os.path.join(SCRIPTS, "detect_acquisition.py"), scanned)
+        skill = os.path.dirname(HERE) + os.sep
         if ROOT != os.path.dirname(HERE):        # a full checkout, not a lone installed skill
-            for rel in ("skill/ucdavis-proteomics-dev/scripts/detect_acquisition.py",
-                        "skill/ucdavis-proteomics-dev/scripts/make_methods.py",
-                        "cascadia/bruker_mobility_filter.py",
-                        "R/helpers_instrument.R"):
-                self.assertIn(os.path.join(ROOT, *rel.split("/")), scanned, rel)
+            self.assertTrue([p for p in walked if not p.startswith(skill)],
+                            "the walk found nothing outside this skill")
+            named = [rel for rel in ("skill/ucdavis-proteomics-dev/scripts/detect_acquisition.py",
+                                     "skill/ucdavis-proteomics-dev/scripts/make_methods.py",
+                                     "cascadia/bruker_mobility_filter.py",
+                                     "R/helpers_instrument.R",
+                                     "tools/make_inventory.py")
+                     if os.path.isfile(os.path.join(ROOT, *rel.split("/")))]
+            self.assertTrue(named, "none of the checkout's own files is there")
+            for rel in named:
+                path = os.path.join(ROOT, *rel.split("/"))
+                self.assertIn(path, walked, rel)
+                with open(path, encoding="utf-8") as fh:
+                    if "analysis.tdf" in fh.read():
+                        self.assertIn(path, scanned, rel)
 
     def test_the_scan_catches_a_planted_offender(self):
         """...and a scan that found files but waved every open through would too."""

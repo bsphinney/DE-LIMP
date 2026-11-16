@@ -304,7 +304,7 @@ class WhichRunIsWhichSample(unittest.TestCase):
         run name (core_submission.match_space: a timsTOF name's DIA-<field>; other names without
         their plate tail), as locate does."""
         runs = ["03122025__60SPD_DIA-KG1_S3-A3_1_1234", "03122025__60SPD_DIA-1234_S3-A4_1_24004",
-                "20250312_QPlaceholder_100spd_7_S4-A1_1_5678", "Ex08312026_380_JE21"]
+                "20250312_QPlaceholder_100spd_7_S4-A1_1_5678", "Ex08312026_9380_XY21"]
         m = cc.match_to_runs
         self.assertEqual(cc.match_text(runs[0]), "DIA-KG1")
         self.assertEqual(cc.match_text(runs[2]), "20250312_QPlaceholder_100spd_7")
@@ -315,7 +315,7 @@ class WhichRunIsWhichSample(unittest.TestCase):
         self.assertEqual(m("60SPD", runs), [])                     # the speed names every run: none
         self.assertEqual(m("03122025", runs), [])                  # nor the date
         self.assertEqual(m("DIA-KG1_", runs), [runs[0]])           # written with the tag: still found
-        self.assertEqual(m("JE21", runs), [runs[3]])               # other names: the name itself
+        self.assertEqual(m("XY21", runs), [runs[3]])               # other names: the name itself
 
     def test_a_letters_only_label_naming_several_runs_is_asked_not_assigned(self):
         """'Ctrl' names Ctrl1, Ctrl2 and Ctrl3 (a letters-only word names itself plus digits):

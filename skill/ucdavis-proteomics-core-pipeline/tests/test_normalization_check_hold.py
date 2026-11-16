@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 The normalisation check cannot be skipped, is tied to its data, and never decides for a user
-who said nothing (2.10 review of 40c5b9f: HIGH 1, MED 5; tests/test_review210_results.py holds
+who said nothing (2.10 review of 40c5b9f: HIGH 1, MED 5; tests/test_normalization_check.py holds
 the reviewer's own cases).
 
   * a session that records an experiment type refuses a DE with neither --normalization-check

@@ -1209,8 +1209,8 @@ def clear_stale(*paths):
 
     must_exist() checks that a file is there, not that this run made it. A search re-run into
     the same --out still has the previous run's artefacts, and a DIA-NN that exits 0 having
-    written nothing leaves them untouched. Measured on HIVE, DIA-NN 2.7.0 (review srun
-    23512013): a re-run with no DOTNET_ROOT logged "ERROR: cannot read .raw files", exited 0,
+    written nothing leaves them untouched. Measured on HIVE, DIA-NN 2.7.0 (in a review
+    run): a re-run with no DOTNET_ROOT logged "ERROR: cannot read .raw files", exited 0,
     the old report.parquet and report.stats.tsv were unchanged by md5, and every guard passed
     on them -- a COMPLETED job reporting results from different parameters. Deleting beats a
     marker file checked with `-newer`: after a failed run the marker approach still leaves a
@@ -1251,7 +1251,7 @@ def refuse_unsafe_path(path, flag="--out", prog="diann_parallel"):
 # so the rest of the path becomes an "option" of its own. DIA-NN 2.7.0 does exactly that: a Core run
 # named `<date>__60SPD_DIA--sampA_<well>.d` logged "unrecognised option [--sampA_<well>.d]" and
 # "skipping .../<date>__60SPD_DIA - invalid raw MS data format", and searched the other runs (a
-# staff report, 2026-10-14). Re-run on HIVE (DIA-NN 2.7.0, srun 24807838): `--f <d>/x_DIA--sampA_S3
+# staff report, 2026-10-14). Re-run on HIVE (DIA-NN 2.7.0, a test run): `--f <d>/x_DIA--sampA_S3
 # .mzML --f <d>/plate--1/s1.mzML --f <d>/x_DIA-sampA_S3.mzML` (the last a link to the first) logged
 # "unrecognised option" for `--sampA_S3.mzML` and `--1/s1.mzML`, skipped `<d>/x_DIA` and
 # `<d>/plate`, and processed 1 file: the link. A '--' in a FOLDER is cut the same way. A single
@@ -1383,7 +1383,7 @@ def input_links_note(plan, prog):
 # source). A file name with no extension is therefore cut inside a FOLDER whose name has a '.': on
 # 2026-10-02 (DIA-NN 2.7.0) `--out-lib .../species_check/S07_A01.01dup2/diann_lib` wrote
 # species_check/S07_A01.predicted.speclib and S07_A01.log.txt one folder up, and the job's
-# guard failed. Re-run on HIVE (DIA-NN 2.7.0, job 24560319): `--out-lib <dot folder>/diann_lib`
+# guard failed. Re-run on HIVE (DIA-NN 2.7.0, a test job): `--out-lib <dot folder>/diann_lib`
 # -> both one level up; `<dot folder>/diann_lib.speclib` -> diann_lib.predicted.speclib and
 # diann_lib.log.txt inside it; a conversion's `<dot folder>/conv.parquet` -> conv.parquet and
 # conv.log.txt inside it. So every output file this skill names for DIA-NN has an extension, and a
@@ -1416,7 +1416,7 @@ def predicted_speclib(out_lib):
 
 # Wall clock per array task (steps 2 and 4), hours, for a task of TIME_REFERENCE_CPUS CPUs -- the
 # default every chain ran at before 2.10 -- and SCALED UP for fewer (array_task_hours). Real Core
-# runs (HIVE sacct, every brettsp step-2 task since 2026-07-01 at 16 CPUs, 6,182 completed):
+# runs (HIVE sacct, every Core-admin-account step-2 task since 2026-07-01 at 16 CPUs, 6,182 completed):
 # median 20 min, p95 65 min, p99 160 min, p99.5 248 min; 414 over 60 min, 84 over 120 min, 54
 # over 180 min, 32 over 240 min (blank and failed injections are the slowest). The base is 4 h:
 # all but those 32 -- the 2 h of 2.9.1 killed ~1% of real files even at 16 CPUs -- and staff pass
@@ -1436,7 +1436,7 @@ def array_task_hours(cpus, base=TIME_PER_FILE_HOURS):
 # Memory per task, GB: steps 1b and 2 (the predicted library), and step 4 (the smaller empirical
 # one). From real Core runs, not the one QC file 2.10 first measured (7.4-9.7 GB RSS): HIVE's sacct
 # MaxRSS counts page cache, so the lower bound of a task's own memory is MaxRSS - MaxDiskRead -
-# MaxDiskWrite, and for every brettsp chain task since 2026-07-01 that bound is over 32 GB for 65
+# MaxDiskWrite, and for every Core-admin-account chain task since 2026-07-01 that bound is over 32 GB for 65
 # step-2 tasks and 9 step-1b jobs, up to 61 GB (a blank-like 1.2 GB .d against the standard human
 # library hit its 64 GB limit, 2026-10-01); step 4's stays under 32. 64 GB costs no concurrency on
 # genome-center-grp/high: 8 tasks x 64 GB = 512 GB, under the 1 TB per-user cap. --mem-per-file
@@ -1452,26 +1452,73 @@ def task_memory(a):
             else (MEM_PER_FILE_GB, MEM_FINAL_PASS_GB))
 
 
+# Step 3 (empirical library assembly) is sized from the number of files, not a node's worth.
+# MEASURED on HIVE (sacct): 77 files, 48 CPUs -- 2:24 elapsed, 5 GB peak -- against a request of
+# 48 CPUs / 128 GB / 12 h that waited hours on the per-user CPU cap. So: 8 CPUs up to
+# ASSEMBLY_FILES_PER_8_CPUS files, 16 above that; 32 GB, +1 GB for every 4 files over 100, never
+# over the old 128; time from the measured 1.87 min a file at 48 CPUs, scaled to the CPUs taken
+# away, x2 headroom, at least 2 h, at most 48 h. The time is extrapolated from one measurement.
+# Step 5 (the report) keeps the --assembly-* values: it was not measured.
+ASSEMBLY_FILES_PER_8_CPUS = 40
+ASSEMBLY_MAX_CPUS = 16
+ASSEMBLY_MEM_BASE_GB = 32
+ASSEMBLY_MEM_FREE_FILES = 100
+ASSEMBLY_MEM_MAX_GB = 128
+ASSEMBLY_MIN_PER_FILE_AT_48 = 1.87
+ASSEMBLY_REFERENCE_CPUS = 48
+ASSEMBLY_TIME_HEADROOM = 2
+ASSEMBLY_HOURS = (2, 48)
+ASSEMBLY_MEASURED = ("77 files at 48 CPUs: 2:24 elapsed, 5 GB peak (HIVE, sacct)")
+
+
+def assembly_sizing(n):
+    """Step 3's (CPUs, memory GB, hours) for `n` files, and the rule in words -- the one place it
+    is decided."""
+    cpus = min(ASSEMBLY_MAX_CPUS, max(8, 8 * math.ceil(n / ASSEMBLY_FILES_PER_8_CPUS)))
+    mem = min(ASSEMBLY_MEM_MAX_GB, ASSEMBLY_MEM_BASE_GB
+              + max(0, math.ceil((n - ASSEMBLY_MEM_FREE_FILES) / 4)))
+    lo, hi = ASSEMBLY_HOURS
+    hours = min(hi, max(lo, math.ceil(n * ASSEMBLY_MIN_PER_FILE_AT_48
+                                      * ASSEMBLY_REFERENCE_CPUS / cpus
+                                      * ASSEMBLY_TIME_HEADROOM / 60)))
+    return cpus, mem, hours, (f"default for {n} files ({ASSEMBLY_MEASURED}; step 3 is not a "
+                              f"node's worth)")
+
+
 def size_cpus(a, n, array_queue, single_queue):
     """Size the chain's jobs to their queues: a.threads_per_file becomes the array tasks' CPUs
     (run_search.array_task_cpus, the one rule), and a.libpred_cpus / a.assembly_cpus are lowered
-    to what one job there can ever get (run_search.fit_to_queue) -- on a queue whose per-job or
+    to what one job there can ever get (run_search.single_job_cpus: fit_to_queue plus headroom under a per-user cap) -- on a queue whose per-job or
     per-user cap is below them they would wait for ever. Says what it chose on stderr. Returns
     (the record for search_provenance.json `cpu_sizing`, step 1b's CPUs)."""
     mem_first, mem_final = task_memory(a)
+    # step 3's size: the user's --assembly-* where given, else from the number of files
+    given = getattr(a, "assembly_given", {})
+    s3_cpus, s3_mem, s3_time, s3_rule = assembly_sizing(n)
+    s3 = {"cpus": a.assembly_cpus if given.get("cpus") else s3_cpus,
+          "mem": a.assembly_mem if given.get("mem") else s3_mem,
+          "time": a.assembly_time if given.get("time") else s3_time}
     try:
-        from run_search import user_limits, array_task_cpus, fit_to_queue
+        from run_search import (user_limits, array_task_cpus, single_job_cpus, fit_to_queue,
+                                SINGLE_JOB_HEADROOM_REASON)
         lim = user_limits(*array_queue)
         rec = array_task_cpus(n, a.threads_max, limits=lim, mem_per_task_gb=mem_first,
                               max_simultaneous=a.max_simultaneous, pinned=a.threads_per_file)
         single = user_limits(*single_queue) if single_queue != array_queue else lim
-        probe = fit_to_queue(a.threads_per_file or a.threads_max, single)
+        probe = single_job_cpus(a.threads_per_file or a.threads_max, single)
         lowered = {}
         for flag, attr in (("--libpred-cpus", "libpred_cpus"), ("--assembly-cpus", "assembly_cpus")):
-            v = fit_to_queue(getattr(a, attr), single)
+            v = single_job_cpus(getattr(a, attr), single)
             if v < getattr(a, attr):
-                lowered[flag] = {"asked": getattr(a, attr), "used": v}
+                fits = fit_to_queue(getattr(a, attr), single)
+                lowered[flag] = {"asked": getattr(a, attr), "used": v,
+                                 "reason": (SINGLE_JOB_HEADROOM_REASON if v < fits else
+                                            "fits the queue's per-job or per-user cap")}
                 setattr(a, attr, v)
+        if not given.get("cpus"):
+            s3["cpus"] = single_job_cpus(s3["cpus"], single)       # within the queue's caps
+        else:
+            s3["cpus"] = a.assembly_cpus
         if lowered:
             rec["single_jobs_lowered"] = lowered
     except Exception as e:                     # said, never silent: the old fixed sizing stands
@@ -1482,6 +1529,10 @@ def size_cpus(a, n, array_queue, single_queue):
                "summary": f"{t} CPUs per file (not sized to the queue: {e})"}
         probe = t
     a.threads_per_file = rec["cpus"]
+    a.s3_cpus, a.s3_mem, a.s3_time = s3["cpus"], s3["mem"], s3["time"]
+    rec["step3_sizing"] = {**s3, "rule": ("--assembly-* as given" if all(given.values()) and given
+                                          else s3_rule),
+                           "asked": {k: getattr(a, f"assembly_{k}", None) for k in given}}
     rec["step1b_cpus"] = probe
     if a.time_per_file is None:
         a.time_per_file = array_task_hours(rec["cpus"])
@@ -1495,7 +1546,7 @@ def size_cpus(a, n, array_queue, single_queue):
                               "MEM_PER_FILE_GB / MEM_FINAL_PASS_GB (sacct, real Core runs)")}
     sys.stderr.write(f"[diann_parallel] array steps 2 and 4: {rec['summary']}, "
                      f"{a.time_per_file} h each. {rec['reason']}."
-                     + "".join(f" {f} lowered {v['asked']} -> {v['used']} to fit the queue."
+                     + "".join(f" {f} lowered {v['asked']} -> {v['used']} ({v['reason']})."
                                for f, v in (rec.get("single_jobs_lowered") or {}).items()) + "\n")
     return rec, probe
 
@@ -1580,9 +1631,11 @@ def main():
                     help="hours per array task (steps 2/4). Default: TIME_PER_FILE_HOURS at "
                          "TIME_REFERENCE_CPUS CPUs per task, scaled up for fewer "
                          "(array_task_hours: 8 h at 8 CPUs)")
-    ap.add_argument("--assembly-cpus", type=int, default=64)
-    ap.add_argument("--assembly-mem", type=int, default=128)
-    ap.add_argument("--assembly-time", type=int, default=12)
+    # steps 3 and 5. Not given: step 5 keeps 64 / 128 / 12; step 3 is sized from the number of
+    # files (assembly_sizing) -- `assembly_given` says which were the user's
+    ap.add_argument("--assembly-cpus", type=int, default=None)
+    ap.add_argument("--assembly-mem", type=int, default=None)
+    ap.add_argument("--assembly-time", type=int, default=None)
     ap.add_argument("--libpred-cpus", type=int, default=16)
     ap.add_argument("--libpred-mem", type=int, default=64)
     ap.add_argument("--libpred-time", type=int, default=4)
@@ -1614,6 +1667,10 @@ def main():
                     help="no Slack post from the chain's jobs (same as SKILL_SLACK=0); the "
                          "run log and the FRAN hand-over still happen. "
                          "See references/notifications.md")
+    ap.add_argument("--no-record", action="store_true",
+                    help="a test run: leave this search out of the Core's shared run "
+                         "records, FRAN staging and the Core Slack channel; a --out under "
+                         "/skill_test/ does the same")
     ap.add_argument("--no-fran", action="store_true",
                     help="step 5 never hands the search to FRAN (same as FRAN_DEPOSIT=off when "
                          "generating); step 7c can still stage it")
@@ -1628,6 +1685,10 @@ def main():
                          "given a path with '--'); without it such an input is refused. A '--' "
                          "in a folder only is linked under the same file name either way")
     a = ap.parse_args()
+    a.assembly_given = {k: getattr(a, f"assembly_{k}") is not None for k in ("cpus", "mem", "time")}
+    a.assembly_cpus = a.assembly_cpus or 64          # step 5's (and the asked-for step 3's) own
+    a.assembly_mem = a.assembly_mem or 128
+    a.assembly_time = a.assembly_time or 12
     # checked here too: this generator is run by hand as well, and the value lands in a #SBATCH
     # line of every step (node_fault.exclude_nodes, the one rule)
     a.exclude_nodes = None
@@ -1809,7 +1870,7 @@ def main():
     run_check = os.path.join(os.path.dirname(os.path.abspath(__file__)), "check_report_runs.py")
 
     # QUEUE CHOICE, ported from DE-LIMP's select_best_partition()
-    # (R/helpers_search.R) + docs/QUEUE_SWITCHING.md:
+    # (R/helpers_search.R) + https://github.com/bsphinney/DE-LIMP/blob/main/docs/QUEUE_SWITCHING.md:
     #   steps 2 & 4 are ARRAYS -- embarrassingly parallel, one file per task, so a
     #     preemption costs one task. They are also exactly what the per-user CPU cap on
     #     the priority queue throttles, so prefer publicgrp/low when it has idle CPUs
@@ -1853,7 +1914,8 @@ def main():
                                                 fran_name=a.fran_name,
                                                 qc=(True if a.qc else
                                                     False if a.not_qc else None),
-                                                preflight=node_check).rstrip("\n")
+                                                preflight=node_check,
+                                                record=not a.no_record).rstrip("\n")
         p = os.path.join(out, name)
         write_file(p, body + "\n", 0o755); return name
 
@@ -1885,7 +1947,7 @@ def main():
     #
     # MASS ACCURACY ("mass-acc" in measure): only for a cfg estimate_params.py planned that way
     # -- an Orbitrap with a level outside DIA-NN's table (see parallel_safe). The same DIA-NN run
-    # per probe logs it: measured on HIVE with DIA-NN 2.7.0 (srun job 23522741, Exploris 480
+    # per probe logs it: measured on HIVE with DIA-NN 2.7.0 (a test run, Exploris 480
     # 120k/15k, full mouse library) the radius came at 1:34, "Recommended MS1 mass accuracy
     # setting: 4.1 ppm" at 1:35 and "Optimised mass accuracy: 14 ppm" at 2:27, of a 5:13 search.
     # The probes run with BOTH flags omitted -- DIA-NN 2.7.0 fixes both levels when either is
@@ -2073,7 +2135,7 @@ def main():
 
     # Step 3 — empirical library assembly (single job, --use-quant)
     s3 = write("step3_assembly.sbatch", "\n".join([
-        header("s3_assembly", a.assembly_cpus, a.assembly_mem, a.assembly_time, _ps, _as_, qos=_qs,
+        header("s3_assembly", a.s3_cpus, a.s3_mem, a.s3_time, _ps, _as_, qos=_qs,
                exclude=a.exclude_nodes), "",
         f'echo "Step 3/5 empirical library assembly"; date', *measured_guard,
         tmpguard("quant_step2"),
@@ -2084,9 +2146,9 @@ def main():
         f'{DN} {all_f} --fasta "{fasta}" --lib "{predicted}" --use-quant --quant-ori-names \\',
         f'  --rt-profiling --gen-spec-lib --out-lib "{empirical}" \\',
         f'  --temp "{D}/quant_step2" --out "{first_pass}" \\',
-        f'  --threads {a.assembly_cpus} {wflag}{mflag}{flags}',
+        f'  --threads {a.s3_cpus} {wflag}{mflag}{flags}',
         must_exist(empirical, "the empirical spectral library")]),
-        stage="step 3/5 empirical library assembly", hours=a.assembly_time)
+        stage="step 3/5 empirical library assembly", hours=a.s3_time)
 
     # Step 4 — final pass (array): empirical lib -> per-file .quant
     # --xic alone is not enough. DIA-NN names the XIC folder after the --out report
@@ -2209,7 +2271,7 @@ def main():
     # It runs under `set -euo pipefail`, and the orchestrator often reads only the first line of
     # what it prints (`bash submit.sh | head -1`). The reader then closes the pipe, and the next
     # echo killed bash with SIGPIPE -- after every sbatch had succeeded, but before the checkpoint
-    # and jobs.txt were written (msalemi, SET28 2026-09-25: a whole chain queued with no jobs.txt
+    # and jobs.txt were written (a Core member, SET28 2026-09-25: a whole chain queued with no jobs.txt
     # and no RECOVERY.md). So SIGPIPE is ignored, every message goes through say(), which cannot
     # fail, and jobs.txt and the checkpoint are written straight after the last sbatch, before
     # anything else is printed -- the order run_search.py's two-job submit.sh already uses.

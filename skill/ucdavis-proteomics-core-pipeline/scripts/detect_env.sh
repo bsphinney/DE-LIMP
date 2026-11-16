@@ -14,6 +14,7 @@
 set -euo pipefail
 
 have() { command -v "$1" >/dev/null 2>&1; }
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ver()  { "$@" 2>&1 | head -n1 | tr -d '"' | sed 's/[[:cntrl:]]//g' || true; }
 
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"   # linux | darwin
@@ -26,8 +27,8 @@ HAS_APPTAINER=false; ( have apptainer || have singularity ) && HAS_APPTAINER=tru
 HAS_CONDA=false;     ( have conda || have mamba || have micromamba ) && HAS_CONDA=true
 QUOBYTE=false;       [ -d /quobyte/proteomics-grp ] && QUOBYTE=true
 
-JAVA_VER=null
-if have java; then JAVA_VER="\"$(ver java -version)\""; fi
+JAVA_VER=null; JAVA_LINE=""
+if have java; then JAVA_LINE="$(ver java -version)"; JAVA_VER="\"$JAVA_LINE\""; fi
 R_VER=null
 if have Rscript; then R_VER="\"$(Rscript -e 'cat(as.character(getRversion()))' 2>/dev/null || echo unknown)\""; fi
 
@@ -96,6 +97,17 @@ if [ "$OS" = "darwin" ]; then
 elif $HAS_JAVA; then
   FRAGPIPE_OK=true; FRAGPIPE_HOW=native
   FRAGPIPE_NOTE="Linux build; MSFragger/IonQuant/diaTracer are licence-gated -- set FRAGPIPE_TOOLS_FOLDER"
+  # FragPipe 24.0 needs Java 11+: the floor and the reading of `java -version` are
+  # engine_choice.py's (one definition). No python3 here = not checked (the job records its Java).
+  JAVA_OK=unknown; JAVA_WHY=""
+  if have python3; then
+    IFS="$(printf '\t')" read -r JAVA_OK JAVA_WHY <<EOF_JAVA || true
+$(python3 "$SCRIPT_DIR/engine_choice.py" java --line "$JAVA_LINE" --tsv 2>/dev/null)
+EOF_JAVA
+  fi
+  if [ "$JAVA_OK" = "false" ]; then
+    FRAGPIPE_OK=false; FRAGPIPE_HOW=null; FRAGPIPE_NOTE="$JAVA_WHY"
+  fi
 else
   FRAGPIPE_OK=false; FRAGPIPE_HOW=null
   FRAGPIPE_NOTE="FragPipe needs Java and none is on PATH"

@@ -7,6 +7,16 @@ below** on the tables/figures you already have. Anything you flag goes into the 
 **Data Quality Notes** section and — if it changes a conclusion — is surfaced to the user
 immediately, not buried.
 
+<!-- contents: tests/test_skill_structure.py --toc -->
+**Contents** (section: line)
+- 20: Core principles
+- 37: Anomaly-check decision tree — run only the branches that apply
+- 79: Contamination diagnostics — `sample_quality.py`
+- 145: Conditional expert review — spawn only on triggers
+- 185: Collaborator deliverable — 3 reproduction options
+- 193: 8d. The expert review (step 8d)
+<!-- /contents -->
+
 ## Core principles
 
 - **Ask before assuming.** Experimental design, instrument, organism, reagents, and the
@@ -179,3 +189,30 @@ its `REPRODUCE.md` should offer **three** explicit paths: **(A)** re-fit the sta
 **(B)** re-render every figure and rebuild the report, **(C)** inspect the raw data without
 re-running anything — plus background, headline findings, next steps, provenance (cluster
 paths/md5 for raw `.d`/`.raw`), and a contact email.
+
+## 8d. The expert review (step 8d)
+
+Most analyses don't need a panel. If **any** trigger fires — a statistical claim goes to a
+collaborator; any `log2FC > 5` or `p < 1e-10`; a new organism/instrument/reagent; cross-tool
+discordance; or the user asks — spawn **three reviewers in parallel** (one message, three
+`Agent` calls; each gets the report + data paths + context): **proteomics**, **biology**
+("could contamination explain this?"), **statistics**. Tell each to also write its findings to
+`<S>/logs/review_<proteomics|biology|statistics>.md` (hive_remote: locally, then `hive_exec.sh
+--put` it there) and to name that file in its answer: a
+review then survives a hand-back that fails (it has), and stays with the analysis record
+(`logs/` is Core-internal, never delivered). Consolidate their findings (dedupe,
+sort by severity) into a `## Expert Review Notes` section and surface every **critical**
+issue to the user before finalizing. Skip for format conversion / FASTA prep / exploratory
+looks with no formal report.
+**The client never saw a draft, so the deliverables carry no draft history.** Expert Review
+Notes state, in the present tense, what was checked and where the report deals with each
+point ("The review checked the protein names against UniProt (Key Findings) and whether a
+loading difference explains the shift (Data Quality Notes)"), never "checked the first draft",
+"two names were wrong ... corrected", "an earlier version" or "now". The same holds for every
+section, the audit and the podcast. The review → fix history (what a reviewer found and what
+changed) goes in `logs/decisions.md` (staff only), with `log_decision.py`. A staff report: a
+changelog-style Expert Review Notes, an audit line saying an earlier reason was "corrected" and
+a podcast saying "the first draft of this report fell for it" nearly reached a client.
+`make_analysis_html.py` warns on these phrases in `AI_Analysis_Report.md`, and `make_podcast.py
+check` fails on the unambiguous ones and warns on the rest (one list: `scripts/client_text.py`);
+rewrite every one they name.

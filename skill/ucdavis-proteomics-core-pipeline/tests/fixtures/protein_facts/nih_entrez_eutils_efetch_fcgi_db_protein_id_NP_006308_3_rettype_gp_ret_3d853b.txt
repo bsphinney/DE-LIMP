@@ -1,0 +1,233 @@
+LOCUS       NP_006308                227 aa            linear   PRI 27-APR-2025
+DEFINITION  brain acid soluble protein 1 [Homo sapiens].
+ACCESSION   NP_006308
+VERSION     NP_006308.3
+DBSOURCE    REFSEQ: accession NM_006317.5
+KEYWORDS    RefSeq; MANE Select.
+SOURCE      Homo sapiens (human)
+  ORGANISM  Homo sapiens
+            Eukaryota; Metazoa; Chordata; Craniata; Vertebrata; Euteleostomi;
+            Mammalia; Eutheria; Euarchontoglires; Primates; Haplorrhini;
+            Catarrhini; Hominidae; Homo.
+REFERENCE   1  (residues 1 to 227)
+  AUTHORS   Meng,Z., Zhou,L., Hong,S., Qiu,X., Chen,Z., Liu,T., Inoki,K. and
+            Lin,J.D.
+  TITLE     Myeloid-specific ablation of Basp1 ameliorates diet-induced NASH in
+            mice by attenuating pro-inflammatory signaling
+  JOURNAL   Hepatology 79 (2), 409-424 (2024)
+   PUBMED   37505219
+  REMARK    GeneRIF: Myeloid-specific ablation of Basp1 ameliorates
+            diet-induced NASH in mice by attenuating pro-inflammatory
+            signaling.
+REFERENCE   2  (residues 1 to 227)
+  AUTHORS   Zhang,L., Zhao,Z., Quan,X., Xie,Z. and Zhao,J.
+  TITLE     Circ_0008285 silencing suppresses angiotensin II-induced vascular
+            smooth muscle cell apoptosis in thoracic aortic aneurysm via
+            miR-150-5p/BASP1 axis
+  JOURNAL   Thorac Cancer 14 (22), 2158-2167 (2023)
+   PUBMED   37337843
+  REMARK    GeneRIF: Circ_0008285 silencing suppresses angiotensin II-induced
+            vascular smooth muscle cell apoptosis in thoracic aortic aneurysm
+            via miR-150-5p/BASP1 axis.
+REFERENCE   3  (residues 1 to 227)
+  AUTHORS   Wang,T., Liu,X., Wang,T., Zhan,L. and Zhang,M.
+  TITLE     BASP1 expression is associated with poor prognosis and is
+            correlated with immune infiltration in gastric cancer
+  JOURNAL   FEBS Open Bio 13 (8), 1507-1521 (2023)
+   PUBMED   37243901
+  REMARK    GeneRIF: BASP1 expression is associated with poor prognosis and is
+            correlated with immune infiltration in gastric cancer.
+REFERENCE   4  (residues 1 to 227)
+  AUTHORS   Liao,X., Li,Z., Zheng,H., Qian,W., Zhang,S., Chen,S., Li,X.,
+            Tang,M., Xu,Y., Yu,R., Li,M., Song,L. and Li,J.
+  TITLE     Downregulation of BASP1 Promotes Temozolomide Resistance in Gliomas
+            via Epigenetic Activation of the FBXO32/NF-kappaB/MGMT Axis
+  JOURNAL   Mol Cancer Res 21 (7), 648-663 (2023)
+   PUBMED   36961398
+  REMARK    GeneRIF: Downregulation of BASP1 Promotes Temozolomide Resistance
+            in Gliomas via Epigenetic Activation of the FBXO32/NF-kappaB/MGMT
+            Axis.
+REFERENCE   5  (residues 1 to 227)
+  AUTHORS   Sun,F., Liu,J., Wang,Y., Yang,H., Song,D., Fu,H. and Feng,X.
+  TITLE     BASP1 promotes high glucose-induced endothelial apoptosis in
+            diabetes via activation of EGFR signaling
+  JOURNAL   J Diabetes Investig 14 (4), 535-547 (2023)
+   PUBMED   36756695
+  REMARK    GeneRIF: BASP1 promotes high glucose-induced endothelial apoptosis
+            in diabetes via activation of EGFR signaling.
+REFERENCE   6  (residues 1 to 227)
+  AUTHORS   Behan,A.T., Byrne,C., Dunn,M.J., Cagney,G. and Cotter,D.R.
+  TITLE     Proteomic analysis of membrane microdomain-associated proteins in
+            the dorsolateral prefrontal cortex in schizophrenia and bipolar
+            disorder reveals alterations in LAMP, STXBP1 and BASP1 protein
+            expression
+  JOURNAL   Mol Psychiatry 14 (6), 601-613 (2009)
+   PUBMED   18268500
+  REMARK    GeneRIF: proteomic assessments of membrane microdomains in
+            prefrontal cortex and validation in two brain series, strongly
+            implicates LAMP, STXBP1 and BASP1 in schizophrenia and supports the
+            view of a neuritic and synaptic dysfunction in the neuropathology
+REFERENCE   7  (residues 1 to 227)
+  AUTHORS   Carpenter,B., Hill,K.J., Charalambous,M., Wagner,K.J., Lahiri,D.,
+            James,D.I., Andersen,J.S., Schumacher,V., Royer-Pokora,B., Mann,M.,
+            Ward,A. and Roberts,S.G.
+  TITLE     BASP1 is a transcriptional cosuppressor for the Wilms' tumor
+            suppressor protein WT1
+  JOURNAL   Mol Cell Biol 24 (2), 537-549 (2004)
+   PUBMED   14701728
+  REMARK    GeneRIF: BASP1 can confer WT1 cosuppressor activity in transfection
+            assays, and elimination of endogenous BASP1 expression augments
+            transcriptional activation by WT1.
+REFERENCE   8  (residues 1 to 227)
+  AUTHORS   Fitzgibbon,J., Neat,M.J., Foot,N., Hill,A.S., Lister,T.A. and
+            Gupta,R.K.
+  TITLE     Assignment of brain acid-soluble protein 1 (BASP1) to human
+            chromosome 5p15.1-->p14, differential expression in human cancer
+            cell lines as a result of alterations in gene dosage
+  JOURNAL   Cytogenet Cell Genet 89 (3-4), 147-149 (2000)
+   PUBMED   10965107
+REFERENCE   9  (residues 1 to 227)
+  AUTHORS   Park,S., Kim,Y.I., Kim,B., Seong,C., Oh,Y., Baek,K. and Yoon,J.
+  TITLE     Characterization of bovine and human cDNAs encoding NAP-22 (22 kDa
+            neuronal tissue-enriched acidic protein) homologs
+  JOURNAL   Mol Cells 8 (4), 471-477 (1998)
+   PUBMED   9749536
+REFERENCE   10 (residues 1 to 227)
+  AUTHORS   Mosevitsky,M.I., Capony,J.P., Skladchikova,G.Yu., Novitskaya,V.A.,
+            Plekhanov,A.Yu. and Zakharov,V.V.
+  TITLE     The BASP1 family of myristoylated proteins abundant in axonal
+            termini. Primary structure analysis and physico-chemical properties
+  JOURNAL   Biochimie 79 (6), 373-384 (1997)
+   PUBMED   9310187
+COMMENT     REVIEWED REFSEQ: This record has been curated by NCBI staff. The
+            reference sequence was derived from CN355202.1, BC000518.2,
+            BU181147.1, BM973114.1 and HY258599.1.
+            
+            On May 16, 2003 this sequence version replaced NP_006308.2.
+            
+            Summary: This gene encodes a membrane bound protein with several
+            transient phosphorylation sites and PEST motifs. Conservation of
+            proteins with PEST sequences among different species supports their
+            functional significance. PEST sequences typically occur in proteins
+            with high turnover rates. Immunological characteristics of this
+            protein are species specific. This protein also undergoes
+            N-terminal myristoylation. Alternative splicing results in multiple
+            transcript variants that encode the same protein. [provided by
+            RefSeq, Oct 2012].
+            
+            Transcript Variant: This variant (1) represents the longer
+            transcript. Both variants 1 and 2 encode the same protein.
+            
+            Publication Note:  This RefSeq record includes a subset of the
+            publications that are available for this gene. Please see the Gene
+            record to access additional publications.
+            
+            ##Evidence-Data-START##
+            Transcript exon combination :: SRR1163655.174187.1,
+                                           SRR1163658.149186.1 [ECO:0000332]
+            RNAseq introns              :: single sample supports all introns
+                                           SAMEA1965299, SAMEA1966682
+                                           [ECO:0000348]
+            ##Evidence-Data-END##
+            
+            ##RefSeq-Attributes-START##
+            MANE Ensembl match     :: ENST00000322611.4/ ENSP00000319281.3
+            RefSeq Select criteria :: based on conservation, expression,
+                                      longest protein
+            ##RefSeq-Attributes-END##
+FEATURES             Location/Qualifiers
+     source          1..227
+                     /organism="Homo sapiens"
+                     /db_xref="taxon:9606"
+                     /chromosome="5"
+                     /map="5p15.1"
+     Protein         1..227
+                     /product="brain acid soluble protein 1"
+                     /note="brain acid-soluble protein 1; neuronal axonal
+                     membrane protein NAP-22; neuronal tissue-enriched acidic
+                     protein; 22 kDa neuronal tissue-enriched acidic protein"
+                     /calculated_mol_wt=22562
+     Region          1..227
+                     /region_name="Disordered.
+                     /evidence=ECO:0000256|SAM:MobiDB-lite"
+                     /note="propagated from UniProtKB/Swiss-Prot (P80723.2)"
+     Region          12..227
+                     /region_name="BASP1"
+                     /note="Brain acid soluble protein 1 (BASP1 protein);
+                     pfam05466"
+                     /db_xref="CDD:461658"
+     Site            31
+                     /site_type="phosphorylation"
+                     /note="Phosphothreonine.
+                     /evidence=ECO:0007744|PubMed:18669648; propagated from
+                     UniProtKB/Swiss-Prot (P80723.2)"
+     Site            36
+                     /site_type="phosphorylation"
+                     /note="Phosphothreonine.
+                     /evidence=ECO:0007744|PubMed:17081983,
+                     ECO:0007744|PubMed:18669648, ECO:0007744|PubMed:20068231,
+                     ECO:0007744|PubMed:23186163, ECO:0007744|PubMed:24275569;
+                     propagated from UniProtKB/Swiss-Prot (P80723.2)"
+     Site            40
+                     /site_type="phosphorylation"
+                     /note="Phosphoserine.
+                     /evidence=ECO:0000250|UniProtKB:Q91XV3; propagated from
+                     UniProtKB/Swiss-Prot (P80723.2)"
+     Site            164
+                     /site_type="phosphorylation"
+                     /note="Phosphoserine.
+                     /evidence=ECO:0007744|PubMed:18669648,
+                     ECO:0007744|PubMed:23186163; propagated from
+                     UniProtKB/Swiss-Prot (P80723.2)"
+     Site            170
+                     /site_type="phosphorylation"
+                     /note="Phosphoserine.
+                     /evidence=ECO:0007744|PubMed:18669648; propagated from
+                     UniProtKB/Swiss-Prot (P80723.2)"
+     Site            172
+                     /site_type="phosphorylation"
+                     /note="Phosphoserine.
+                     /evidence=ECO:0007744|PubMed:18669648; propagated from
+                     UniProtKB/Swiss-Prot (P80723.2)"
+     Site            176
+                     /site_type="phosphorylation"
+                     /note="Phosphoserine.
+                     /evidence=ECO:0007744|PubMed:18669648; propagated from
+                     UniProtKB/Swiss-Prot (P80723.2)"
+     Site            195
+                     /site_type="phosphorylation"
+                     /note="Phosphoserine.
+                     /evidence=ECO:0000250|UniProtKB:Q91XV3; propagated from
+                     UniProtKB/Swiss-Prot (P80723.2)"
+     Site            196
+                     /site_type="phosphorylation"
+                     /note="Phosphothreonine.
+                     /evidence=ECO:0007744|PubMed:18669648,
+                     ECO:0007744|PubMed:20068231; propagated from
+                     UniProtKB/Swiss-Prot (P80723.2)"
+     Site            205
+                     /site_type="phosphorylation"
+                     /note="Phosphoserine.
+                     /evidence=ECO:0007744|PubMed:18669648,
+                     ECO:0007744|PubMed:23186163; propagated from
+                     UniProtKB/Swiss-Prot (P80723.2)"
+     Site            219
+                     /site_type="phosphorylation"
+                     /note="Phosphoserine.
+                     /evidence=ECO:0007744|PubMed:23186163; propagated from
+                     UniProtKB/Swiss-Prot (P80723.2)"
+     CDS             1..227
+                     /gene="BASP1"
+                     /gene_synonym="CAP-23; CAP23; NAP-22; NAP22"
+                     /coded_by="NM_006317.5:190..873"
+                     /db_xref="CCDS:CCDS3888.1"
+                     /db_xref="GeneID:10409"
+                     /db_xref="HGNC:HGNC:957"
+                     /db_xref="MIM:605940"
+ORIGIN      
+        1 mggklskkkk gynvndekak ekdkkaegaa teeegtpkes epqaaaepae akegkekpdq
+       61 daegkaeeke gekdaaaake eapkaepekt egaaeakaep pkapeqeqaa pgpaaggeap
+      121 kaaeaaaapa esaapaagee pskeegepkk teapaapaaq etksdgapas dskpgsseaa
+      181 pssketpaat eapsstpkaq gpaasaeepk pveapaansd qtvtvke
+//
+

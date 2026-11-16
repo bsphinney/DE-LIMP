@@ -17,7 +17,7 @@ plus a line in an append-only master log and rows in an activity log.
   # after `session.py finalize` -- the finalize hook calls this
   python3 record_run.py analysis-done --session <session dir> [--out <dir>] [--zip <zip>] [--prot ..]
   # the registry, from every run_record.json (the logs are for people; this is the index)
-  python3 record_run.py list [--since 2026-09-01] [--user gabrig] [--status failed] [--tsv|--json]
+  python3 record_run.py list [--since 2026-09-01] [--user <user>] [--status failed] [--tsv|--json]
   python3 record_run.py --where        # which route and destination from here, and nothing else
   python3 record_run.py locate --session <dir>   # the record already holding it, read-only, here
   ... --dry-run                        # what it would write, written nowhere (preview on stderr)
@@ -60,6 +60,8 @@ Where it goes -- the routing report_issue.sh uses:
      writes the record.
   4. Anything else                                                 -> not recorded (not_on_hive).
 RECORD_RUN=off (or SKILL_RUNS_DIR=off) switches it off before anything is read, written or sent.
+So does --no-record, and so does a --out/--session path with a /skill_test/ folder in it (a test
+run: no_record_reason() is the one definition of "should this run be recorded").
 SKILL_RUNS_DIR is the destination on every route.
 
 Bounded: --timeout (45 s: the job-end hook allows 60), no directory walks, a per-file cap, a
@@ -143,10 +145,14 @@ QUANT_DIRS = ("quant", "quant_step2", "quant_step2_orig", "quant_step4")
 PARAMS_FALLBACK = ("params.resolved.cfg", "params_with_xic.cfg", "params.base.cfg", "params.cfg")
 # SLURM log names the skill's job scripts use: <step>_<jobid>.log, <step>_<jobid>_<task>.log.
 JOBLOG_RE = re.compile(r"_(\d{5,})(?:_(\d+))?\.(?:log|out|err)$")
-BAD_STATES = {"FAILED", "TIMEOUT", "OUT_OF_MEMORY", "CANCELLED", "NODE_FAIL", "BOOT_FAIL",
-              "DEADLINE", "PREEMPTED"}
-LIVE_STATES = {"PENDING", "RUNNING", "REQUEUED", "RESIZING", "SUSPENDED", "CONFIGURING",
-               "COMPLETING"}
+# What a Slurm state means: a COPY of slurm_states.py's lists, which watch_run.sh and checkpoint.py
+# read. A copy because this file is also piped to a remote python (`python3 - list`), where no
+# sibling can be imported; tests/test_watch_run_slurm_states.py fails when the two differ.
+BAD_STATES = frozenset({"FAILED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL", "CANCELLED", "PREEMPTED",
+                        "DEADLINE", "BOOT_FAIL", "REVOKED", "SPECIAL_EXIT"})
+LIVE_STATES = frozenset({"PENDING", "RUNNING", "SUSPENDED", "RESIZING", "CONFIGURING", "COMPLETING",
+                         "STOPPED", "SIGNALING", "STAGE_OUT", "REQUEUED", "REQUEUE_FED",
+                         "REQUEUE_HOLD"})
 # HIVE puts sacct on PATH only in a login shell (hive_exec.sh runs `bash -l -c` for that reason);
 # a hook may run without one. Verified 2026-09-24: `which sacct` in a HIVE login shell.
 SACCT_CANDIDATES = ("/cvmfs/hpc.ucdavis.edu/sw/spack/environments/core/view/generic/slurm/bin/sacct",
@@ -181,6 +187,14 @@ try:
     from core_submission import HEX_ID as HEX_ID_RE, normalize_submission  # noqa: E402
 except ImportError:
     HEX_ID_RE = normalize_submission = None
+# commands.log goes into the registry through staff.redact, the one redactor (2.15 review H3: the
+# reason staff give session.py core-client -- who the work is for -- must not travel). Piped alone
+# there is no sibling: a commands.log is then not copied rather than copied unredacted.
+try:
+    from staff import redact_log as redact_commands  # noqa: E402
+except ImportError:
+    redact_commands = None
+REDACTED_COPIES = ("commands.log",)
 UPLOAD_DIR = ".proteomics-pipeline/record_run_upload"
 # The shared files' lock. NOT flock: measured 2026-09-24 on /quobyte with two SLURM jobs on
 # different HIVE nodes writing 400 times each to one file, flock lost 578 of 800 updates -- the
@@ -196,7 +210,7 @@ LOCK_TIMEOUTS = []
 # The registry's own README.md, written by ensure_readme() when it is missing or carries an older
 # version marker than this. THE source: references/run-registry.md quotes it verbatim, and
 # tests/test_record_run.py fails when the two differ. Raise README_VERSION with any edit.
-README_VERSION = 2
+README_VERSION = 3
 README_TEXT = """# Skill run registry
 
 Every search the `ucdavis-proteomics-core-pipeline` skill runs for the UC Davis Proteomics Core,
@@ -226,7 +240,8 @@ Never copied: raw data, FASTAs, per-run `.quant` files, anything over 20 MB, or 
 looks like a credential -- the record says where they are.
 
 Only Proteomics Core (proteomics-grp) accounts can write here, so collaborators' runs are never
-recorded. To keep a run out: `RECORD_RUN=off`. To list the registry:
+recorded. To keep a run out: `--no-record` on run_search.py / session.py finalize (it is baked
+into the job's end hook), `RECORD_RUN=off`, or run it under a `/skill_test/` folder. To list the registry:
 `python3 <skill>/scripts/record_run.py list [--since YYYY-MM-DD] [--user U] [--status failed]`.
 Skill problems go to the sibling folder `../skill_issues/`.
 
@@ -243,6 +258,32 @@ def runs_dir():
 def disabled():
     return (os.environ.get("RECORD_RUN", "").strip().lower() in OFF
             or os.environ.get("SKILL_RUNS_DIR", "").strip().lower() == "off")
+
+
+#: A session or search folder with this path component is a test run: never recorded.
+TEST_PATH_MARKER = "/skill_test/"
+
+
+def no_record_reason(*paths, flag=False, check_env=True):
+    """THE ONE DEFINITION of "should this run be left out of the shared run records": None to
+    record it, else the reason in words. Reads, in order: --no-record (`flag`), RECORD_RUN=off /
+    SKILL_RUNS_DIR=off, and any of `paths` (the session / search folder, as given and as
+    resolved) holding a /skill_test/ folder. notify_slack.job_end_plan (what the job-end hook
+    bakes in), session.py finalize and record_run's own main() all ask this, so a test run is
+    kept out whichever way it ends. `check_env=False`: generation time asks only for the flag and
+    the path -- RECORD_RUN=off is read again where the job runs (and by the test harness's
+    isolation, which sets it), so it is not baked into a job script."""
+    if flag:
+        return "--no-record was given"
+    if check_env and disabled():
+        return "RECORD_RUN=off (or SKILL_RUNS_DIR=off)"
+    for p in paths:
+        if not p:
+            continue
+        for q in {str(p), os.path.abspath(str(p)), os.path.realpath(str(p))}:
+            if TEST_PATH_MARKER in q.replace("\\", "/").rstrip("/") + "/":
+                return f"{p} is under a {TEST_PATH_MARKER} folder: a test run is never recorded"
+    return None
 
 
 def issues_dir():
@@ -283,6 +324,7 @@ def ts_min(value=None):
     return s[:-2] + ":" + s[-2:]
 
 
+# Own copy on purpose (not safe_write.load_json): no sibling imports here, see sha256_bounded.
 def load_json(path):
     try:
         with open(path) as fh:
@@ -421,12 +463,25 @@ def copy_n(src, dst, n, deadline):
 
 def copy_file(src, dst, deadline):
     """Chunked, deadline-checked, written beside the target and renamed into place: a copy cut
-    short by the time limit leaves no half-file posing as the real one."""
+    short by the time limit leaves no half-file posing as the real one. A file named in
+    REDACTED_COPIES (commands.log) is copied as staff.redact_log gives it, or not at all (OSError,
+    recorded as a failed copy) when staff.py is not here. -> the redaction's notes (the
+    core-client commands it withheld whole; [] otherwise), for the record of the copy."""
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     part = f"{dst}.part{os.getpid()}"
+    notes = []
     try:
-        with open(src, "rb") as fi, open(part, "wb") as fo:
-            copy_n(fi, fo, os.fstat(fi.fileno()).st_size, deadline)
+        if os.path.basename(dst) in REDACTED_COPIES:
+            if redact_commands is None:
+                raise OSError("staff.py is not beside record_run.py: commands.log is not copied "
+                              "unredacted")
+            deadline.check()
+            text, notes = redact_commands(src)      # by value too: the staff record beside it
+            with open(part, "w", encoding="utf-8") as fo:
+                fo.write(text)
+        else:
+            with open(src, "rb") as fi, open(part, "wb") as fo:
+                copy_n(fi, fo, os.fstat(fi.fileno()).st_size, deadline)
         os.replace(part, dst)
     finally:
         if os.path.exists(part):
@@ -437,6 +492,7 @@ def copy_file(src, dst, deadline):
         os.utime(dst, (st.st_atime, st.st_mtime))
     except OSError:
         pass
+    return notes
 
 
 def write_text(path, text):
@@ -3045,8 +3101,11 @@ def _execute(plan, a, deadline, route_name, root, ident):
                      "bytes": len(text.encode()), "generated": True}
     for c in plan["copies"]:
         try:
-            copy_file(c.get("here") or c["src"], os.path.join(folder, c["rel"]), copy_deadline)
+            withheld = (copy_file(c.get("here") or c["src"], os.path.join(folder, c["rel"]),
+                                  copy_deadline) or c.get("redaction_notes"))
             done[c["rel"]] = {"from": c["src"], "bytes": c["bytes"], "copied_at": now_iso()}
+            if withheld:                    # never silent (ruling 97): said in the run's record
+                done[c["rel"]]["redaction_notes"] = withheld
         except (OSError, TimeoutError, Stop) as e:
             failed.append((c, f"copy failed: {e}"))
     if z.get("copy"):
@@ -3160,7 +3219,7 @@ def run_bounded(argv, timeout, stdin=None):
 
 def kill_tree(p):
     """Kill a child and everything it started. POSIX: its process group (start_new_session gave it
-    one). Windows has no killpg/SIGKILL -- gabrig's laptop is Windows -- so taskkill /T takes the
+    one). Windows has no killpg/SIGKILL -- a Core member's laptop is Windows -- so taskkill /T takes the
     tree (bash -> ssh) there. Best effort; never raises."""
     if hasattr(os, "killpg") and hasattr(signal, "SIGKILL"):
         try:
@@ -3180,6 +3239,8 @@ def kill_tree(p):
         pass
 
 
+# Own copy on purpose (not safe_write.sha256_file): this file is piped to a remote python with no
+# sibling modules, and this one gives up at a deadline.
 def sha256_bounded(path, deadline):
     """(hex, None) or (None, why): a checksum that gives up at the deadline rather than holding
     up the record."""
@@ -3264,7 +3325,9 @@ def ship(plan, a, deadline):
                 shutil.copy2(pj, os.path.join(stage, ".claude-plugin"))
         for c in list(plan["copies"]):
             try:
-                copy_file(c["src"], os.path.join(stage, "files", c["rel"]), stage_deadline)
+                w = copy_file(c["src"], os.path.join(stage, "files", c["rel"]), stage_deadline)
+                if w:                           # said in the record made on HIVE (below)
+                    c["redaction_notes"] = w
             except (OSError, TimeoutError) as e:
                 plan["copies"].remove(c)
                 plan["not_copied"].append(dict(c, reason=f"upload failed: {e}"))
@@ -3565,6 +3628,8 @@ def build_parser():
                        help="copy no single file larger than this (default 20 MB)")
         p.add_argument("--zip-cap-gb", type=float, default=env_num("RECORD_RUN_ZIP_CAP_GB", 5),
                        help="copy the session zip only below this size (default 5 GB)")
+        p.add_argument("--no-record", action="store_true",
+                       help="record nothing (a test run); a /skill_test/ path does the same")
         p.add_argument("--remote-hop", action="store_true", help=argparse.SUPPRESS)
         p.add_argument("--skill-version", default=None, help=argparse.SUPPRESS)
     s = sub.add_parser("search-done", help="record a finished (or failed) search")
@@ -3627,6 +3692,12 @@ def main(argv=None):
         # The kill switch: before any read, write or SSH attempt.
         print(json.dumps(not_recorded("disabled", "RECORD_RUN=off (or SKILL_RUNS_DIR=off)")))
         return 0
+    if a.cmd in ("search-done", "analysis-done"):
+        why = no_record_reason(a.out, a.session, flag=a.no_record)
+        if why:
+            say(f"not recorded: {why}")
+            print(json.dumps(not_recorded("disabled", why)))
+            return 0
     deadline = Deadline(a.timeout)
     if hasattr(signal, "SIGALRM"):
         def _alarm(*_):

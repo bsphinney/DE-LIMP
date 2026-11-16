@@ -17,7 +17,7 @@ data: run DIA-NN on several representative runs and review what it recommends. S
     table, and records the plan `measure_with_diann` in its rationale sidecar, with any level
     that does have a tier under `mass_accuracy_documented`. Neither flag is written on its own:
     DIA-NN 2.7.0 fixes BOTH levels when either is given ("automatic optimisation will not be
-    performed as at least one of MS1/MS2 mass accuracies is user-provided"; HIVE srun 23528991,
+    performed as at least one of MS1/MS2 mass accuracies is user-provided"; measured on HIVE,
     `--mass-acc-ms1 7` alone -> "Mass accuracy will be fixed to 2e-05 (MS2) and 7e-06 (MS1)"),
     so a lone `--mass-acc-ms1 7` would silently fix MS2 at 20 ppm.
   * The documented level is pinned as documented. Measuring it instead pinned MS1 4.2 at 120k,
@@ -229,7 +229,7 @@ class EstimateParamsTests(unittest.TestCase):
         """references/parameters.md's own override example, `{"--mass-acc": 8}`, at the pilot's
         120k/15k wrote ONLY `--mass-acc 8`, while the sidecar still planned measure_with_diann
         with MS1 7 documented. DIA-NN 2.7.0 fixes the other level at 20 ppm when one flag is given
-        (HIVE srun 23528991), the chain declined the cfg as mass_acc_unset, and a single-shot
+        (measured on HIVE), the chain declined the cfg as mass_acc_unset, and a single-shot
         search ran MS1 at 20 ppm with no probe. origin/main wrote `--mass-acc-ms1 7 --mass-acc 8`
         for the same input. The overridden level is given and the other has a table value, so
         both are known: both are written, and nothing is left to measure."""
@@ -362,13 +362,19 @@ class OtherRoutesTests(unittest.TestCase):
 
     def test_the_manifest_keeps_ms1_and_names_what_each_engine_does_with_ms2(self):
         with tempfile.TemporaryDirectory() as d:
-            for engine in ("diann", "radiant", "fragpipe"):
+            for engine in ("diann", "radiant"):
                 _, s = self._resolve(d, engine)
                 self.assertEqual((s["ms1_ppm"], s["ms2_ppm"]), (7, None), engine)
                 self.assertIn("15,000", s["ppm_source"], engine)
                 if engine != "diann":
                     self.assertNotIn("step 1b", s["ppm_source"], engine)
                     self.assertNotIn("measured", s["ppm_source"], engine)
+            # FragPipe searches its workflow's tolerances, not the README table's (X8 F5): the
+            # manifest records what the written workflow says
+            _, s = self._resolve(d, "fragpipe")
+            self.assertEqual((s["ms1_ppm"], s["ms2_ppm"]), (20.0, 20.0))
+            self.assertIn("as written in the FragPipe workflow", s["ppm_source"])
+            self.assertNotIn("step 1b", s["ppm_source"])
             _, s = self._resolve(d, "diann")
             self.assertIn("measured with DIA-NN", s["ppm_source"])
 

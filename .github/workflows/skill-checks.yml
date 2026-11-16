@@ -4,13 +4,18 @@ name: Skill checks
 # app.R, so skill/** shipped unverified for 20+ releases. That is how an arbitrary
 # 0644/0755 split survived — half the scripts were not executable, and the docs tell
 # users to invoke at least one of them directly.
+# The identifier guard (tests/test_no_real_identifiers.py) also reads what the skill's new
+# repository ships outside skill/ -- marketplace.json, the CHANGELOG's skill entries, the docs
+# pages the skill uses, LICENSE and this file -- so a change there runs the checks too.
 on:
   push:
     branches: [main]
-    paths: ['skill/**']
+    paths: ['skill/**', '.claude-plugin/**', 'CHANGELOG.md', 'LICENSE', 'docs/**',
+            '.github/workflows/skill-checks.yml']
   pull_request:
     branches: [main]
-    paths: ['skill/**']
+    paths: ['skill/**', '.claude-plugin/**', 'CHANGELOG.md', 'LICENSE', 'docs/**',
+            '.github/workflows/skill-checks.yml']
   workflow_dispatch:
 
 jobs:
@@ -50,6 +55,9 @@ jobs:
 
       # Stdlib only (unittest + sqlite3) on purpose -- no extra CI dependencies,
       # so this stage cannot start failing because a pinned test package moved.
+      # The identifier guard's client-name and staff-name parts SKIP here, and say so: their
+      # private lists never leave the Core director's Mac (Ruling 93 -- no secret, no copy).
+      # SKILL_REQUIRE_CLIENT_NAMES is never set in CI; the merges are checked on the Mac with it.
       - name: Python unit tests
         run: |
           python3 -m unittest discover \

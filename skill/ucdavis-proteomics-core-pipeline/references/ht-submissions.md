@@ -1,9 +1,22 @@
 # High-throughput submissions — searching a whole Core plate run
 
 **When this applies:** a UC Davis Proteomics Core member gives you a **submission number**
-("search 0793", "run the HT plate for 0793") instead of a folder of raw files. Everything
+("search 0807", "run the HT plate for 0807") instead of a folder of raw files. Everything
 here replaces step 1 only. From step 2 onward the run is completely ordinary — same
 acquisition detection, same defaults, same confirmation, same FRAN handover.
+
+<!-- contents: tests/test_skill_structure.py --toc -->
+**Contents** (section: line)
+- 21: Why a submission is not a folder
+- 69: 1. Get the file list
+- 96: 2. Honour the exit code — this is the whole point of the gates
+- 234: 3. Organism and FASTA — still asked, never inferred
+- 248: 4. Search — the DIA-NN parallel chain, automatically
+- 275: 5. Deposit to FRAN, then tell STAN
+- 313: Deployment status
+- 326: Two ways in — and which one a Core member can actually use
+- 401: 1a. The HT steps as the pipeline runs them (step 1a)
+<!-- /contents -->
 
 ## Why a submission is not a folder
 
@@ -17,38 +30,38 @@ themselves:
 * **Some samples are already known to be bad.** STAN flags them as needing another
   injection.
 * **Re-injections live elsewhere in the name.** A re-run is
-  `20260901_0793_rerun_SI-48_S1-A1_1_24200.d`; STAN maps it back to the same submission.
+  `20260901_0807_rerun_SI-48_S1-A1_1_24200.d`; STAN maps it back to the same submission.
 
 STAN knows which files a submission is. This skill knows how to search them. Neither
 learns the other's job — so ask STAN for the list, then proceed exactly as normal.
 
-### Measured, on submission 0793 (2026-08-31)
+### Measured, on a real HT submission (2026-08-31; shown here as 0807)
 
-Do not talk yourself into `ls | grep 793`. Against STAN's answer of **120 files**, a naive
+Do not talk yourself into `ls | grep 807`. Against STAN's answer of **120 files**, a naive
 substring grep over the acquisition directory returns **97** — and is wrong twice over:
 
 | | files | |
 |---|---|---|
 | STAN (truth) | **120** | 88 on tray S6, 32 on tray S5 |
-| naive `grep 793` | 97 | |
-| **missed** | **32** | the S5 continuation — `20260828_100spd_COH-12_S5-D2_1_24157.d` and friends. Their names never contain 793. |
-| **wrongly included** | **9** | `20260827_793_100spd_Hel50_S6-A12_...` — **HeLa standards**, not customer samples |
+| naive `grep 807` | 97 | |
+| **missed** | **32** | the S5 continuation — `20260828_100spd_SMP-12_S5-D2_1_24157.d` and friends. Their names never contain 807. |
+| **wrongly included** | **9** | `20260827_807_100spd_Hel50_S6-A12_...` — **HeLa standards**, not customer samples |
 
 So the shortcut drops a quarter of the submission *and* searches nine standards as if they
 were samples. Neither shows up as an error; the search just succeeds on the wrong files.
 
 **Three traps behind that:**
 
-* **A submission spans trays that never name it.** 0793 ran S6 on 2026-08-27
+* **A submission spans trays that never name it.** 0807 ran S6 on 2026-08-27
   (`..._1_24026.d` … `_1_24125.d`) and continued onto S5 the next day. The link is the
   **acquisition counter** — S5 begins at 24126, one after S6 ends — not the filename.
-* **Substring matching hits other customers.** `793` also matches `..._1_23793.d` and
-  `..._1_22793.d`. STAN matches the submission as a **delimited token with leading zeros
-  ignored**, which is why `0793` and `793` both work and neither over-matches.
+* **Substring matching hits other customers.** `807` also matches `..._1_23807.d` and
+  `..._1_22807.d`. STAN matches the submission as a **delimited token with leading zeros
+  ignored**, which is why `0807` and `807` both work and neither over-matches.
 * **Tray labels repeat.** `S6` is a tray *position*, reused every month since December. It
   is not a submission identifier.
 
-Since 2.12.0 a tray named without the number (0793's S5 above) is **not** searched from STAN's
+Since 2.12.0 a tray named without the number (0807's S5 above) is **not** searched from STAN's
 list: `named_for_submission` fails and lists its runs, and the operator confirms them through a
 curated list (`core_submission.py locate --files-from`) — because a tray STAN joins by position
 can just as well be another project's (2026-10-05, below).
@@ -59,8 +72,8 @@ can just as well be another project's (2026-10-05, below).
 its credential, and the raw files are. Drive it through `hive_exec.sh`:
 
 ```
-bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/ht_manifest.py fetch 0793 \
-    --summary ~/core/PROT_0793/submission_summary.json --out ~/ht0793'
+bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/ht_manifest.py fetch 0807 \
+    --summary ~/core/PROT_0807/submission_summary.json --out ~/ht0807'
 ```
 
 `--summary` is the submission's CoreOmics record, written by `core_submission.py fetch` and put
@@ -71,7 +84,7 @@ in the folder above (`~/core/`), for a sample list copied from another plate (ga
 `sample_list_copied`); `--summaries-dir <folder>` names another folder to compare with.
 
 `--include` takes `samples` (**default** — blanks and standards excluded), `rerun` (only
-what STAN flagged for re-injection), `standards`, or `all`. Both `0793` and `793` work.
+what STAN flagged for re-injection), `standards`, or `all`. Both `0807` and `807` work.
 
 It writes two files into `--out`:
 
@@ -87,7 +100,7 @@ It writes two files into `--out`:
 | **0** | safe | proceed to step 2 of the normal flow |
 | **2** | **HARD GATE FAILED** | **do not search.** Show the operator the failing gate and stop |
 | **3** | STAN unreachable, or too old to have `ht-manifest` | fix STAN; nothing was searched |
-| **4** | (`record` only) write-back failed | the **search is fine**; only STAN's HT tab is stale |
+| **4** | (`link` only) the search is not visible under the submission in FRAN yet, or FRAN could not be asked (not signed in, HTTP error, unreachable) | the **search is fine**; re-run `link` later (section 5) |
 
 The hard gates exist because each one otherwise produces a search that **succeeds while
 covering the wrong files**:
@@ -238,14 +251,22 @@ Nothing HT-specific. Pass `files.txt` to the normal flow and `run_search.py` rou
 a plate is far more than five files on a machine with SLURM, so it takes the **5-step
 parallel chain** (per-file passes as a job array) rather than one long single-node job.
 
-Two things the chain requires, both of which matter more at plate scale — read
-`references/diann_parallel.md` before submitting:
+The chain keeps the two settings DIA-NN would otherwise optimise per file the same across
+the plate (steps 3/5 reuse the per-file `.quant` files, so per-file values would be stitched
+together inconsistently). Nobody measures anything by hand first:
 
-* **Mass accuracy must be pinned**, not auto. Steps 3/5 reuse the per-file `.quant` files,
-  so anything DIA-NN auto-optimises per file gets stitched together inconsistently.
-* **Scan-window radius must be measured**, not left to auto — `probe_window.py`, once, on
-  one file. On an 18-file run DIA-NN inferred radius 7 for seventeen files and 8 for one,
-  and the chain combined them. With 120 files the chance of a split is higher, not lower.
+* **Mass accuracy** is pinned in the cfg by `estimate_params.py` (step 6b). When it planned
+  `measure_with_diann` instead (an Orbitrap level outside DIA-NN's table), the chain's step 1b
+  measures it on the same representative runs as the window and pins max(measured, SOP).
+* **The scan-window radius** is measured by the chain's step 1b: `probe_window.py` is handed the
+  whole plate, measures three representative runs (the median and quartile runs; never a blank,
+  wash, failed injection or damaged `.d`) and pins the median radius into steps 2–5. It never
+  probes just one file: left to DIA-NN per file, an 18-file run got radius 7 for seventeen files
+  and 8 for one, and with 120 files a split is more likely, not less. An omitted `--window` does
+  not decline the chain.
+
+Both are described in `references/diann_parallel.md` ("7. The chain as step 7 runs it", "Scan
+window MUST be pinned", "Which runs step 1b measures").
 
 Watch it with `watch_run.sh --all` (step 7b). A plate-sized array will usually lose a file
 or two to a stalled node; the documented playbook is to retry once, then drop that file and
@@ -277,7 +298,7 @@ under it — search id, engine, organism, precursor and protein counts. Nothing 
 Do confirm the loop closed, so a plate that silently failed to ingest is visible:
 
 ```
-bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/ht_manifest.py link 0793'
+bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/ht_manifest.py link 0807'
 ```
 
 **Exit 4 is not a search failure.** It means "no search visible under this submission
@@ -292,7 +313,7 @@ pass `--cookie` before treating a 404 as evidence of anything.
 ## Deployment status
 
 **STAN v1.0.43 is deployed on HIVE** at `/quobyte/proteomics-grp/brett/stan_venv/bin/stan`,
-with `ht-manifest` available — verified 2026-08-31 end to end against submission 0793:
+with `ht-manifest` available — verified 2026-08-31 end to end against a real HT submission:
 120 files, plates S5/S6, `counts {sample:120, standard:8, blank:7}`, 6 flagged for
 re-injection, every hard gate PASS. `--include rerun` returns 6; `--include all` returns
 135 (120+8+7); a mistyped `9999` hard-fails with exit 2.
@@ -343,10 +364,10 @@ Every other Core member gets *permission denied* at (4). That is expected, and i
 **So everyone who is not the owner uses the HTTP path with a share token:**
 
 ```
-printf '%s\n' '<tok>' | bash scripts/hive_exec.sh 'umask 077; mkdir -p ~/.stan && cat > ~/.stan/share_0793'
-bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/ht_manifest.py fetch 0793 \
-    --summary ~/core/PROT_0793/submission_summary.json --http https://ucd.stan-proteomics.org \
-    --share-token-file ~/.stan/share_0793 --out ~/ht0793'
+printf '%s\n' '<tok>' | bash scripts/hive_exec.sh 'umask 077; mkdir -p ~/.stan && cat > ~/.stan/share_0807'
+bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/ht_manifest.py fetch 0807 \
+    --summary ~/core/PROT_0807/submission_summary.json --http https://ucd.stan-proteomics.org \
+    --share-token-file ~/.stan/share_0807 --out ~/ht0807'
 ```
 
 **The token goes in a file, never on a command line.** A token in argv is in the process list,
@@ -359,7 +380,7 @@ the cookie and the PG credential in every line it prints and in `ht_manifest.jso
 the server echoes back, in an error or in a normal reply's plates, counts and example paths.
 
 Get `<tok>` from the submission's HT tab in the dashboard — the token is an HMAC of the
-submission number, so a link for 0793 opens 0793 and nothing else, and rotating
+submission number, so a link for 0807 opens 0807 and nothing else, and rotating
 `STAN_HT_SHARE_SECRET` invalidates every outstanding link at once. There is currently **no
 CLI to mint one**, so it comes from the web UI.
 
@@ -376,3 +397,78 @@ workflow usable by the Core rather than by one person.
 Less-used `ht_manifest.py` flags: `--stan <path>` (the stan binary), `--token <file>` (the STAN
 Postgres credential; or `STAN_PG_TOKEN` / `PGPASSWORD`), `--fran <url>` (the FRAN base URL for
 `link`; or `FRAN_URL`).
+
+## 1a. The HT steps as the pipeline runs them (step 1a)
+
+If the user gives a **submission number** instead of a folder ("search 0807", "run the HT
+plate"), the file list comes from STAN, not from a directory listing. **Do not glob.** A
+submission can span two trays whose second tray's filenames never mention the number; it
+contains well blanks and HeLa standards that must not be searched as samples; and STAN
+already knows which samples want re-injecting. Globbing gets all of that wrong, silently.
+
+```
+bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/ht_manifest.py fetch 0807 \
+    --summary ~/core/PROT_0807/submission_summary.json --out ~/ht0807'
+```
+
+`--summary` is the CoreOmics record (`core_submission.py fetch`, put on HIVE as in step 1c):
+with it, every sample on the record must have a run and every run a sample.
+**If you are not the owner of STAN's Postgres token** (mode 0600 — i.e. almost everyone),
+that fails with *permission denied*, which reads exactly like "no such submission". Use the
+hosted dashboard instead, with a per-submission share token from the HT tab — the one auth
+path that works headless. Sign-in is **Microsoft Entra, not CAS**:
+
+```
+printf '%s\n' '<tok>' | bash scripts/hive_exec.sh 'umask 077; mkdir -p ~/.stan && cat > ~/.stan/share_0807'
+bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/ht_manifest.py fetch 0807 \
+    --summary ~/core/PROT_0807/submission_summary.json --http https://ucd.stan-proteomics.org \
+    --share-token-file ~/.stan/share_0807 --out ~/ht0807'
+```
+
+The token goes into a mode-600 file on HIVE through stdin, and the search reads it from
+there. **Never put it on a command line or in `commands.log`**, and don't log the `printf` line
+above. The run registry copies `commands.log` into a folder the whole Core can read, and a
+token on a command line is in the process list too. `ht_manifest.py` masks the token in
+everything it prints.
+Writes `files.txt` (absolute resolved paths → feed to `--raw`/`--files`; **only the runs named
+for the submission**) and `ht_manifest.json` (STAN's payload + gate results). `--include` = `samples` (**default**,
+excludes blanks/standards), `rerun`, `standards`, `all`. Both `0807` and `807` work.
+
+**Honour the exit code.** `0` proceed · **`2` HARD GATE FAILED — do not search** · `3` STAN
+unreachable or too old. A hard gate means the search would *succeed while covering the wrong
+files*: `missing_paths` (runs STAN knows but has no path for — silently excluded from the
+list), `n_files` (nothing matched — usually a mistyped number), `paths_exist` (a resolved
+path the filesystem lacks — otherwise a 120-file array dies hours in). **STAN's list is
+checked, not trusted:** STAN assigns runs to a submission by *tray*, whoever's they are, and in
+2.10.0 a 96-sample plate came back as 136 files — 41 runs of other projects that used the tray
+earlier, at other methods (5 DDA), and one real run missing — with every gate PASS. So
+`named_for_submission` FAILS on any run whose name does not carry the number (`<date>_[PROT_]<n>_`)
+and lists every one; they are never in `files.txt`. `one_method` FAILS when the names declare
+different methods (`100spd` beside `60SPD DIA`, DIA beside DDA). `sample_list` (with `--summary`)
+FAILS naming each sample with no run and each run of no sample. When no listed run is named for
+the submission, `n_files` FAILS and says so. **The way past any of these is staff choosing the
+files**: write the confirmed list and stage it with `core_submission.py locate --files-from`
+(their choices are recorded) — never search STAN's list as given. **Surface every
+non-PASS gate before committing compute**, warnings included: `plates` >2, `counts` <12
+samples, `sample_list` not checked (no `--summary`), `one_method` for a name that declares no
+method (a `_rerun_` run), `needs_rerun` (those samples ARE in the default set — say so), `repeated_paths` (STAN
+listed a file more than once; `files.txt` holds it once and it is searched once) and
+`repeated_names` (different files share a run name: all kept and flagged, but `run_search.py`
+stops before searching them as given — ask the operator to rename one or split the search).
+**A CoreOmics HT submission is then staged from that list**: `core_submission.py locate
+--files-from ~/ht0807/files.txt` (step 1c). HT run names carry the submitter's `sample_name`,
+not the `unique_id`, so `--files-from` matches this submission's plate runs on `sample_name`
+(gate `ht_plate_runs`; pass `--ht-manifest ~/ht0807/ht_manifest.json` so `--reinjections
+latest` knows STAN's `needs_rerun`); samples that share a name get `choose_run` — ask staff, then
+`--choose <unique_id>=<file>`. Never `--allow-partial` for samples that were run.
+
+Then continue with step 2 exactly as normal — nothing after this point is HT-specific. That
+includes step 8e: a Core HT submission is a staff route, so `qc_bracket.py --session <S>` runs for
+the plate (qc-bracket.md "8e."), with a DE or without one. A plate with no DE skips 8–8d and 8f,
+never 8e (`references/no-de-route.md`, step 2).
+**Organism is still asked, never inferred**: STAN does not know it. Reuse a pre-staged
+proteome from `/quobyte/proteomics-grp/MRS/` (step 6, `--hive`, which looks only there); for
+any other organism let `fetch` download it. The plate will
+route itself to the **5-step DIA-NN parallel chain** at step 7, whose step 1b measures the scan
+window (and a planned mass accuracy) on representative runs itself; nothing is measured by hand
+first (section 4 above).

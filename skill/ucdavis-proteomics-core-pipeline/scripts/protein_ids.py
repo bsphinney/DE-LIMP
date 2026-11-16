@@ -29,7 +29,7 @@ A whole group, written the way DIA-NN writes Protein.Group, is group_accessions(
 read by header_accession(), isoform suffixes KEPT (the accession as the database has it). Sage's
 `proteins` is a ';' list of full FASTA IDs, and the contaminant filter (contaminants.R
 contaminant_regex: an accession STARTS with Cont_/contam_) matched none of them -- a Sage DE
-tested 171 Cont_ groups on gabrig's HeL50 UnvPe (2026-09-29) while its methods said "none":
+tested 171 Cont_ groups on a Core member's HeL50 UnvPe (2026-09-29) while its methods said "none":
 
     Sage proteins   sp|P12345|ALBU_HUMAN;sp|Cont_P02769|ALBU_BOVIN  -> P12345;Cont_P02769
     its entry names                                                  -> ALBU_HUMAN;ALBU_BOVIN
@@ -86,11 +86,22 @@ def fragpipe_group(protein, protein_id, indistinguishable=""):
     return ";".join(dict.fromkeys(a for a in [lead] + rest if a))
 
 
+def strip_isoform(accession):
+    """An accession without its isoform suffix (`P12345-2` -> `P12345`): the one reading of that
+    suffix, a dash and digits at the end. Anything else as given, trimmed (`ABC123-ALT` stays)."""
+    return _ISOFORM.sub("", str(accession or "").strip()).strip()
+
+
+def first_accession(group):
+    """A protein group's first member, read by header_accession(), isoform suffix KEPT. '' for a
+    blank group."""
+    return header_accession(str(group or "").split(";", 1)[0])
+
+
 def normalize_protein_id(group):
     """The accession a protein group is compared on: its first member, read by
     header_accession(), without an isoform suffix. '' for a blank group."""
-    first = str(group or "").split(";", 1)[0]
-    return _ISOFORM.sub("", header_accession(first)).strip()
+    return strip_isoform(first_accession(group))
 
 
 def group_accessions(group):

@@ -30,6 +30,10 @@ from test_run_de_contaminants import r_has  # noqa: E402
 from test_adapters_describe_themselves import FROZEN_2_0_1, FROZEN_2_1_2  # noqa: E402
 
 
+# fragpipe_quant.plan()'s object for an IonQuant MaxLFQ search (2.15 F4: the declaration's input)
+MAXLFQ3 = {"quantity": "IonQuant MaxLFQ Intensity", "n_experiments": 3}
+
+
 class Declared(unittest.TestCase):
     def setUp(self):
         self._t = tempfile.TemporaryDirectory()
@@ -51,7 +55,7 @@ class Declared(unittest.TestCase):
                             ("", "whether IonQuant normalised across runs is NOT RECORDED")):
             with self.subTest(line=line):
                 self.workflow(line)
-                dec = run_search.fragpipe_quantity_declaration(self.d, True)
+                dec = run_search.fragpipe_quantity_declaration(self.d, MAXLFQ3)
                 self.assertIn(words, dec["engine_normalisation"])
         self.assertIn("[confirm]", dec["engine_normalisation"])
 

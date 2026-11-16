@@ -10,7 +10,7 @@ it over the link. Every generator writes its scripts, lists and cfgs through it.
 
 Also: run_search.py's `#SBATCH --output=` is double-quoted, because sbatch refuses an unquoted
 path with a space ("Invalid directive found in batch script"; HIVE, 2026-10-15) and accepts and
-writes to a double-quoted one (job 24808508). diatracer_parallel.py's -o/-e likewise.
+writes to a double-quoted one (a test job). diatracer_parallel.py's -o/-e likewise.
 """
 import json
 import os

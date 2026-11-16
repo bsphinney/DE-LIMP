@@ -232,7 +232,7 @@ class Parse(Workspace):
 
 class RealFormat(Workspace):
     """tests/fixtures/podcast/format_v1_script.md copies, line for line, the layout of the first
-    real Signal to Noise script (PROT_0756, 2026-09-25): bold header bullets, hosts separated by
+    real Signal to Noise script (PROT_9756, 2026-09-25): bold header bullets, hosts separated by
     '·' with the voice in the parentheses, a Pronunciation table with a digits row, a Claims
     section with prose, nested bullets and no '## Transcript' heading, blank lines between turns,
     10 segments. The study itself is synthetic (the real one is unpublished client data)."""
@@ -277,7 +277,7 @@ class RealFormat(Workspace):
         self.assertIn("D I A N N 2.6.1", out)
 
     def test_the_reports_own_quantity_phrases_pass(self):
-        # PROT_0756 v1 (2026-09-25) failed on "hundreds of times", "half of the runs" and
+        # PROT_9756 v1 (2026-09-25) failed on "hundreds of times", "half of the runs" and
         # "thousands of proteins", all three verbatim in its report. The fixture carries the
         # same phrasings in the synthetic study's wording.
         os.makedirs(self.pod, exist_ok=True)
@@ -335,7 +335,7 @@ class Check(Workspace):
         self.assertIn("invites listeners to a survey, but this is not a UC Davis Core run", txt)
         import submission_report
         os.makedirs(os.path.join(self.d, "input"))
-        submission_report.attach(self.d, {"internal_id": "PROT_0756"})
+        submission_report.attach(self.d, {"internal_id": "PROT_9756"})
         rc, txt = self.check(said)                                    # a Core run: PASS
         self.assertEqual(rc, 0, txt)
         fails = lambda s: sorted(ln for ln in s.splitlines() if ln.startswith("FAIL"))
@@ -1395,7 +1395,7 @@ class FeedbackLine(ReportGenerator):
         if core:
             import submission_report
             os.makedirs(os.path.join(self.d, "input"))
-            submission_report.attach(self.d, {"internal_id": "PROT_0756"})
+            submission_report.attach(self.d, {"internal_id": "PROT_9756"})
         r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "make_analysis_html.py"),
                             "--session", self.d, "--out",
                             os.path.join(self.out, "Analysis_Report.html")],
@@ -1416,8 +1416,8 @@ class FeedbackLine(ReportGenerator):
     def test_link_asks_about_the_podcast_in_the_html_md_and_pdf(self):
         import core_submission as cs
         page, md, pdf = self.make(core=True)
-        before = {fmt: cs.feedback_line("report", "PROT_0756", False, fmt) for fmt in ("html", "md")}
-        after = {fmt: cs.feedback_line("report", "PROT_0756", True, fmt) for fmt in ("html", "md")}
+        before = {fmt: cs.feedback_line("report", "PROT_9756", False, fmt) for fmt in ("html", "md")}
+        after = {fmt: cs.feedback_line("report", "PROT_9756", True, fmt) for fmt in ("html", "md")}
         self.assertIn(before["html"], read(page))
         self.assertIn(before["md"], read(md))
         text = self.pdf_text(pdf)
@@ -1469,14 +1469,14 @@ class CoreFlow(Workspace):
         import core_submission as cs
         import submission_report
         os.makedirs(os.path.join(self.d, "input"))
-        submission_report.attach(self.d, {"internal_id": "PROT_0756"})
+        submission_report.attach(self.d, {"internal_id": "PROT_9756"})
         html_out = os.path.join(self.out, "Analysis_Report.html")
         r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "make_analysis_html.py"),
                             "--session", self.d, "--out", html_out, "--no-pdf"],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         twin = os.path.join(self.out, "Analysis_Report.md")
-        self.assertIn(cs.feedback_line("report", "PROT_0756"), read(twin))
+        self.assertIn(cs.feedback_line("report", "PROT_9756"), read(twin))
         said = script_text().replace("cousin we will not over-read.", "cousin we will not "
                                      "over-read. The report ends with a short survey; tell us "
                                      "what you thought of this episode.")
@@ -1492,11 +1492,11 @@ class CoreFlow(Workspace):
         rc, o, err = run("link", self.out)
         self.assertEqual(rc, 0, err)
         self.assertIn("the feedback survey line now asks about the podcast too", o)
-        self.assertIn(cs.feedback_line("report", "PROT_0756", podcast=True), read(twin))
+        self.assertIn(cs.feedback_line("report", "PROT_9756", podcast=True), read(twin))
         self.assertIsNone(mp.read_check(mp.parse_script(self.script))[2])   # still holds
         rc, o, err = run("share", self.out, "--no-browser")
         self.assertEqual(rc, 0, err)
-        self.assertIn(cs.feedback_line("share", "PROT_0756", True, "html"),
+        self.assertIn(cs.feedback_line("share", "PROT_9756", True, "html"),
                       read(os.path.join(self.out, mp.SHARE_NAME)))
         self.assertEqual(mp.share_state(self.out)[0], True)
         rc, o, err = run("link", self.out)                            # and again: no refusal
@@ -1514,14 +1514,14 @@ class ReviewFixes(Workspace):
 
     # 1 -- the Pronunciation table went to the voices unchecked
     def test_pronunciation_rows_may_only_respell(self):
-        rows = [("10.6", "40.2"), ("Ryr2", "Gapdh"), ("Jph3", "Michelle's favourite protein"),
+        rows = [("10.6", "40.2"), ("Ryr2", "Gapdh"), ("Jph3", "Morgan's favourite protein"),
                 ("C1qa", "C one Q A")]
-        rc, txt = self.check_txt(script_text(pron=rows), "--forbid-name", "Michelle")
+        rc, txt = self.check_txt(script_text(pron=rows), "--forbid-name", "Morgan")
         self.assertEqual(rc, 1)
         self.assertIn("pronunciation '10.6' -> '40.2': says the digits 402, not 106 in order", txt)
         self.assertIn("pronunciation 'Ryr2' -> 'Gapdh': 'Gapdh' is not a spelling of 'Ryr2'", txt)
-        self.assertIn("'Michelle' is not a spelling of 'Jph3'", txt)
-        self.assertIn("forbidden name 'Michelle' appears in: pronunciation 'Jph3'", txt)
+        self.assertIn("'Morgan' is not a spelling of 'Jph3'", txt)
+        self.assertIn("forbidden name 'Morgan' appears in: pronunciation 'Jph3'", txt)
         listed = txt.split("PRONUNCIATION (")[1].split("What check cannot")[0]
         for w, sp in rows:                                       # every row is listed
             self.assertIn(f"- {w} -> {sp}", listed)
@@ -1538,7 +1538,7 @@ class ReviewFixes(Workspace):
 
     def test_pronunciation_digits_must_read_in_order(self):
         rows = [("2.68", "two point eight six"), ("10.6", "sixty one"), ("Kcnj12", "K C N J 21"),
-                ("0756", "zero seven five six"), ("Cep250", "sep two fifty"),
+                ("0807", "zero eight zero seven"), ("Cep250", "sep two fifty"),
                 ("FKBP12.6", "F K B P twelve point six"), ("Hsp104", "H S P one oh four")]
         for w, sp in rows:
             probs = mp.pronunciation_problems(w, sp)
@@ -1934,7 +1934,7 @@ class Verify(Workspace):
         self.assertEqual(data[1] & 0xF0, 0xF0)
 
     def test_a_number_glued_to_letters_is_heard_and_a_misread_still_is_not(self):
-        # Michelle's 26-min episode, 2026-09-25: the ASR wrote "LRS124" / "LRS125" for the
+        # Morgan's 26-min episode, 2026-09-25: the ASR wrote "LRS124" / "LRS125" for the
         # script's "LRS-124" / "LRS-125", and verify flagged 124 and 125 four times.
         path = os.path.join(self.pod, "glued.md")
         write(path, script_text(segs=([("MAYA", "An AI-generated show. The thinnest runs were "
@@ -2313,19 +2313,19 @@ class Share(Workspace):
         import core_submission
         import submission_report
         os.makedirs(os.path.join(self.d, "input"))
-        submission_report.attach(self.d, {"internal_id": "PROT_0756"})
+        submission_report.attach(self.d, {"internal_id": "PROT_9756"})
         r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "make_analysis_html.py"),
                             "--session", self.d, "--out", self.html, "--no-pdf"],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
-        line = core_submission.feedback_line("report", "PROT_0756", podcast=True, fmt="html")
-        self.assertIn("prot=PROT_0756&amp;src=report", line)
+        line = core_submission.feedback_line("report", "PROT_9756", podcast=True, fmt="html")
+        self.assertIn("prot=PROT_9756&amp;src=report", line)
         self.assertIn("this report and the podcast", line)
         self.assertIn(line + "</main>", read(self.html))
         self.assertEqual(run("share", self.out, "--no-browser")[0], 0)
         # the copy made to be forwarded says so: src=share (review of f18d95e)
-        shared = core_submission.feedback_line("share", "PROT_0756", podcast=True, fmt="html")
-        self.assertIn("prot=PROT_0756&amp;src=share", shared)
+        shared = core_submission.feedback_line("share", "PROT_9756", podcast=True, fmt="html")
+        self.assertIn("prot=PROT_9756&amp;src=share", shared)
         self.assertIn(shared + "</main>", read(self.share))
         self.assertIn(line + "</main>", read(self.html))              # the report keeps its own
 

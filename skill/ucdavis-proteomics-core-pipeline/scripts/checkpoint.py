@@ -14,8 +14,8 @@ Writes two files in the session directory:
 Usage
   # after submitting jobs
   checkpoint.py record --session <dir> --stage search \
-      --jobs 19477495,19477496 --desc "DIA-NN 5-step chain" \
-      --watch-job 19477500 --watch-log <path> \
+      --jobs 9900009,9900010 --desc "DIA-NN 5-step chain" \
+      --watch-job 9900011 --watch-log <path> \
       --next "Rscript run_de.R --input <report> --metadata <conditions> --outdir <tables>"
 
   # on reconnect — queries SLURM live and says what is left
@@ -32,9 +32,9 @@ import argparse, json, os, re, subprocess, sys, glob, datetime
 REC_JSON = ".recovery.json"
 REC_MD = "RECOVERY.md"
 
-TERMINAL_OK = {"COMPLETED"}
-TERMINAL_BAD = {"FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL",
-                "BOOT_FAIL", "DEADLINE", "PREEMPTED"}
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# What a Slurm state means: slurm_states.py, the skill's one list (watch_run.sh reads the same)
+from slurm_states import OK_STATES as TERMINAL_OK, BAD_STATES as TERMINAL_BAD  # noqa: E402
 
 
 def _load(session):

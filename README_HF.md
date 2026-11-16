@@ -18,6 +18,9 @@ tags:
   - dia-nn
 ---
 
+> 📢 **The UC Davis Proteomics Core pipeline now lives at [github.com/bsphinney/UCD-Proteomics-AI-Skill](https://github.com/bsphinney/UCD-Proteomics-AI-Skill).**
+> This app is the previous version: it is kept as it is and no longer developed.
+
 # DE-LIMP: Differential Expression & Limpa Proteomics 🧬
 
 An interactive R Shiny application for differential expression analysis of DIA-NN proteomics data. Built on **Limpa** (a Bioconductor package for DIA proteomics normalization and quantification) and **Limma** (a widely-used statistical framework for differential expression), with optional AI assistance (Google Gemini or an OpenAI-compatible endpoint).

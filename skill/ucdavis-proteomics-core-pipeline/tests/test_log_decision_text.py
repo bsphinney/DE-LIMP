@@ -118,16 +118,25 @@ class TextAsData(unittest.TestCase):
     def test_skill_md_commands_run_as_written(self):
         """The decisions-log block: the local command, and the one through hive_exec.sh (a
         stand-in that runs the command as HIVE's login shell would, with the skill at
-        ~/proteomics-pipeline/scripts and standard input passed through, as ssh does)."""
+        ~/proteomics-pipeline/scripts and standard input passed through, as ssh does). The block
+        with both is references/outputs.md's (2.15: the router keeps the local form and names
+        outputs.md for the HIVE one)."""
         home = os.path.join(self.d, "home")
         os.makedirs(os.path.join(home, "proteomics-pipeline"))
         os.symlink(SCRIPTS, os.path.join(home, "proteomics-pipeline", "scripts"))
         stub = os.path.join(self.d, "hive_exec_stub.sh")
         with open(stub, "w") as fh:
             fh.write('#!/bin/bash\nexec bash -c "$1"\n')
-        skill = _read("SKILL.md")
+        router = _read("SKILL.md")
+        local_cmd = ("python3 scripts/log_decision.py --session <S> --step '3. design' "
+                     "--what-file - --why-file - <<'EOF'")
+        self.assertIn(local_cmd, router)
+        self.assertIn("No usable local Python: the same through `hive_exec.sh`, the text on "
+                      "standard input (outputs.md).", router)
+        skill = _read("references", "outputs.md")
         marker = "# no usable local Python: the same on HIVE (the text goes over ssh"
         block = self.block(skill, marker)
+        self.assertIn(local_cmd, block)
         local, hive = block.split(marker)
         self.assertIn("<<'EOF'", local)
         self.assertIn("<<'EOF'", hive)
@@ -146,9 +155,12 @@ class TextAsData(unittest.TestCase):
                                    "evidence>\n- **Step:** 3. design"), 2)
 
     def test_every_documented_example_reads_standard_input(self):
-        examples = [(where, line) for where, doc in (("SKILL.md", _read("SKILL.md")),
-                                                     ("core-submissions.md",
-                                                      _read("references", "core-submissions.md")))
+        # SKILL.md and every reference (step 0's "declined" example lives in access.md since
+        # the slim-down)
+        docs = [("SKILL.md", _read("SKILL.md"))] + [
+            (f, _read("references", f))
+            for f in sorted(os.listdir(os.path.join(SKILL, "references"))) if f.endswith(".md")]
+        examples = [(where, line) for where, doc in docs
                     for line in doc.splitlines() if "log_decision.py --session" in line]
         self.assertGreaterEqual(len(examples), 4, examples)
         for where, line in examples:

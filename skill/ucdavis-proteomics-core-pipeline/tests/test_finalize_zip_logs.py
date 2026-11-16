@@ -95,8 +95,16 @@ class ZipLeavesLogsOut(unittest.TestCase):
             self.assertIn("--by alice", fh.read(), "the session's own log keeps the command")
 
     def test_skill_md_says_logs_stays_out_except_commands_log(self):
+        # 2.15: the step's text is qc-bracket.md's "8e." section; the router names it, and keeps
+        # "`logs/` is never delivered"
         with open(os.path.join(os.path.dirname(HERE), "SKILL.md"), encoding="utf-8") as fh:
-            skill = " ".join(fh.read().split())
+            router = " ".join(fh.read().split())
+        self.assertIn("`logs/` is never delivered", router)
+        self.assertIn('qc-bracket.md "8e."', router)
+        with open(os.path.join(os.path.dirname(HERE), "references", "qc-bracket.md"),
+                  encoding="utf-8") as fh:
+            ref = fh.read()
+        skill = " ".join(ref[ref.index("## 8e. QC runs around this project"):].split())
         self.assertIn("`logs/` is Core-internal: it is never delivered, and the session zip leaves "
                       "it out except `logs/commands.log`, whose staff names are replaced by the "
                       "role.", skill)

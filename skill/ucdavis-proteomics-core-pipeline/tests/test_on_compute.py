@@ -25,6 +25,8 @@ import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+from job_env import no_cluster_env  # noqa: E402
 SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
 ON_COMPUTE = os.path.join(SCRIPTS, "on_compute.py")
 HIVE_EXEC = os.path.join(SCRIPTS, "hive_exec.sh")
@@ -79,10 +81,11 @@ class Harness(unittest.TestCase):
         _exe(os.path.join(self.bin, "sbatch"), "#!/bin/sh\nexit 0\n")
 
     def env(self, **extra):
-        e = dict(os.environ)
-        for k in ("SLURM_JOB_ID", "FAKE_SRUN_FAIL", "PROTEOMICS_ON_COMPUTE", "PROTEOMICS_SRUN_ACCOUNT"):
+        # hermetic on a real cluster node too: no HPCCF cluster file, no CVMFS SLURM, and no real
+        # sbatch/srun/module on PATH ("a laptop" must not be a HIVE login node)
+        e = no_cluster_env(self.d)
+        for k in ("FAKE_SRUN_FAIL", "PROTEOMICS_SRUN_ACCOUNT"):
             e.pop(k, None)
-        # hermetic on a real cluster node too: no HPCCF cluster file, no CVMFS SLURM
         e.update({"PATH": self.bin + os.pathsep + e["PATH"], "FAKE_SRUN_LOG": self.srun_log,
                   "FAKE_ASSOC": LAB, "USER": "staff1",
                   "UCD_HPC_CLUSTER_CONF": os.path.join(self.d, "no-cluster-file"),
@@ -321,14 +324,39 @@ class OwnCapOnHigh(QueueNeverPreempts):
         self.assertIn("--partition=high", call)
         self.assertIn("waiting behind your own 64 CPUs on high", r.stderr)
 
-    def test_below_the_cap_a_restartable_step_stays_on_high_silently(self):
+    def test_preemptible_is_honoured_below_the_cap_too(self):
+        """X7 (pep24): --preemptible said the command can be run again, yet below the user's
+        cap it still took high. It now takes the user's preemptible queue whenever there is one."""
         self.login_node()
         env = self.at_capacity()
         _exe(os.path.join(self.bin, "squeue"), "#!/bin/sh\necho 8\n")
         r = self.run_oc("--preemptible", **env)
         (call,) = self.srun_calls()
+        self.assertIn("--partition=low", call)
+        self.assertIn("--account=publicgrp", call)
+        self.assertIn("--qos=publicgrp-low-qos", call)
+        self.assertIn("--preemptible", r.stderr)
+
+    def test_preemptible_without_a_low_queue_stays_on_high(self):
+        self.login_node()
+        self.run_oc("--preemptible", FAKE_ASSOC=LAB)
+        (call,) = self.srun_calls()
         self.assertIn("--partition=high", call)
-        self.assertNotIn("your own", r.stderr)
+
+    def test_a_named_partition_beats_preemptible(self):
+        self.login_node()
+        self.run_oc("--preemptible", "--partition", "high", "--account", "genome-center-grp",
+                    **self.at_capacity())
+        (call,) = self.srun_calls()
+        self.assertIn("--partition=high", call)
+
+    def test_not_preemptible_below_the_cap_still_high(self):
+        self.login_node()
+        env = self.at_capacity()
+        _exe(os.path.join(self.bin, "squeue"), "#!/bin/sh\necho 8\n")
+        self.run_oc(**env)
+        (call,) = self.srun_calls()
+        self.assertIn("--partition=high", call)
 
 
 class SayWhichCase(Harness):
@@ -592,6 +620,32 @@ class HiveExecJob(Harness):
         self.assertEqual(r.returncode, 0, r.stderr)
         with open(self.ssh_log) as fh:
             self.assertIn("on_compute.py --preemptible --time 15 --", fh.read().replace("\\", ""))
+
+    def test_job_session_starts_there_and_carries_the_session_id(self):
+        """X7 (pep24): a --job ran with WorkDir=/home/<user>, so it could not be traced to its
+        session. --session DIR starts it there and names it in --comment."""
+        self.login_node()
+        ses = os.path.join(self.d, "sessions", "2026-11-11_trace_me")
+        os.makedirs(ses)
+        r = self.hive_exec("--job", "--session", ses, "true")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        (call,) = self.srun_calls()
+        self.assertIn("--chdir=" + ses, call)
+        self.assertIn("--comment=session:2026-11-11_trace_me", call)
+
+    def test_job_session_that_is_not_here_still_names_the_session(self):
+        self.login_node()
+        r = self.hive_exec("--job", "--session", "/nonexistent/2026-11-11_gone", "true")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        (call,) = self.srun_calls()
+        self.assertFalse([a for a in call if "--chdir" in a], call)
+        self.assertIn("--comment=session:2026-11-11_gone", call)
+
+    def test_job_without_a_session_is_unchanged(self):
+        self.login_node()
+        self.hive_exec("--job", "true")
+        (call,) = self.srun_calls()
+        self.assertFalse([a for a in call if "--chdir" in a or "--comment" in a], call)
 
     def test_job_refuses_a_bad_size_before_connecting(self):
         r = self.hive_exec("--job", "--mem", "lots", "true")

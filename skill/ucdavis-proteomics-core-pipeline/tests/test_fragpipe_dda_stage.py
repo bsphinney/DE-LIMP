@@ -35,6 +35,7 @@ sys.path.insert(0, HERE)
 
 import run_search  # noqa: E402
 import scratch_files  # noqa: E402
+from fake_fragpipe_install import fake_install, tools_json  # noqa: E402
 from job_env import job_env  # noqa: E402
 
 FP_WORKFLOW = os.path.join(HERE, "fixtures", "fragpipe24_nonspecific_peptidome",
@@ -46,10 +47,18 @@ FP_WORKFLOW = os.path.join(HERE, "fixtures", "fragpipe24_nonspecific_peptidome",
 # FAKE_FP_LFQ=1, and what FragPipe prints at the end. FAKE_FP_RC / FAKE_FP_DONE / FAKE_FP_IDS=0
 # shape a failure.
 FAKE_FRAGPIPE = r"""#!/bin/bash
-man=""; wd=""
+man=""; wd=""; args="$*"
 while [ $# -gt 0 ]; do case "$1" in --manifest) man="$2"; shift;; --workdir) wd="$2"; shift;;
   esac; shift; done
-: > "$wd/fragpipe-files.fp-manifest"; : > "$wd/.fake_fragpipe_ran"
+: > "$wd/fragpipe-files.fp-manifest"
+# what it was started with: its settings folder (FragPipe writes there) and its arguments.
+# It writes a settings file ONLY under a given XDG_CONFIG_HOME, never under $HOME: run against an
+# older run_search.py (a fail-first base, which sets none) it must not touch the account's real
+# ~/.config/FragPipe (it did once, on HIVE, 2026-11-04)
+printf 'XDG_CONFIG_HOME=%s\nARGS=%s\n' "${XDG_CONFIG_HOME:-}" "$args" > "$wd/.fake_fragpipe_ran"
+if [ -n "${XDG_CONFIG_HOME:-}" ]; then
+  d="$XDG_CONFIG_HOME/FragPipe/fragpipe/24.0"; mkdir -p "$d"; echo "cache" > "$d/fragpipe-ui.cache"
+fi
 while IFS=$'\t' read -r path exp rep kind; do
   stem="${path%.*}"
   : > "${stem}_uncalibrated.mzML"; : > "${stem}_uncalibrated.mzBIN"; : > "${stem}.mzBIN"
@@ -104,9 +113,11 @@ class StageHarness(unittest.TestCase):
         self.fp = _write(os.path.join(self.d, "bin", "fragpipe"), FAKE_FRAGPIPE, 0o755)
         self.out = os.path.join(self.d, "out")
         self.job = os.path.join(self.d, "fp_job.sh")
+        # the install tools.json records (fragpipe_tools) and the Java the job checks (2.15)
+        self.fp_install = fake_install(self.d)
 
     def generate(self, *extra, mono=True, files=None, workflow=None, acquisition="DDA",
-                 fasta=None):
+                 fasta=None, tools=None, bundle=None, env_extra=None):
         """`workflow`: the .workflow text to search with (default: the shipped
         Nonspecific-peptidome.workflow, which runs no quantification). `fasta`: the database
         given as --fasta (default: a one-entry db.fasta written here)."""
@@ -117,13 +128,14 @@ class StageHarness(unittest.TestCase):
         else:
             with open(params, "w", newline="") as fh:
                 fh.write(workflow)
-        tools = _write(os.path.join(self.d, "tools.json"), json.dumps({"fragpipe": self.fp}))
+        tools = tools or tools_json(self.d, self.fp, self.fp_install)
         bundle = _write(os.path.join(self.d, "bundle.json"), json.dumps(
-            {"engine": {"name": "fragpipe"}, "acquisition": acquisition}))
+            bundle or {"engine": {"name": "fragpipe"}, "acquisition": acquisition}))
         env = job_env(self.d, PATH=os.pathsep.join([os.path.dirname(sys.executable),
                                                     "/usr/bin", "/bin"]),
                       FRAGPIPE_MONO_BIN=self.mono if mono else os.path.join(self.d, "no_mono"))
         env.pop("FRAGPIPE_TOOLS_FOLDER", None)
+        env.update(env_extra or {})
         p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "run_search.py"),
                             "--tools", tools, "--bundle", bundle, "--params", params,
                             "--fasta", fasta, "--out", self.out,
@@ -135,6 +147,8 @@ class StageHarness(unittest.TestCase):
         return p
 
     def run_job(self, **extra):
+        extra.setdefault("JAVA_HOME", self.fp_install["java_home"])
+        extra.setdefault("HOME", os.path.join(self.d, "home"))
         env = job_env(self.d, PATH=os.environ["PATH"], **extra)
         return subprocess.run(["bash", self.job], cwd=self.out, capture_output=True, text=True,
                               env=env, timeout=240)
@@ -578,6 +592,10 @@ class StageNeverFollowsALink(StageHarness):
             self.assertEqual(r.stdout.strip(), "safe" if safe else "unsafe", path)
 
     def test_the_inline_search_refuses_a_linked_stage_and_the_raws_survive(self):
+        from unittest import mock
+        patcher = mock.patch.dict(os.environ, {"JAVA_HOME": self.fp_install["java_home"]})
+        patcher.start()
+        self.addCleanup(patcher.stop)
         out = os.path.join(self.d, "inline_out")
         os.makedirs(out)
         os.symlink(self.raw, os.path.join(out, scratch_files.FRAGPIPE_STAGE_DIR))
@@ -625,10 +643,10 @@ class StageNeverFollowsALink(StageHarness):
 
 
 class MonoAndDia(StageHarness):
-    """Review F12, F18: the no-mono refusal tells someone outside the Core how to proceed; the
+    """Review F12, F18: the no-mono refusal tells someone outside the Core how to proceed. The
     FragPipe DIA route on .raw/mzML -- which would write beside its inputs, with no mono check --
-    is refused before anything is written, with the way out (staged properly in 2.15). DIA on .d
-    keeps diatracer_stage.py (pin)."""
+    was refused in 2.14.2; 2.15 stages it in raw_stage like DDA (data type DIA, mono for a .raw,
+    the DIA-NN report in the job's check). DIA on .d keeps diatracer_stage.py (pin)."""
 
     def test_the_no_mono_refusal_says_how_outside_the_core(self):
         p = self.generate(mono=False)
@@ -636,16 +654,37 @@ class MonoAndDia(StageHarness):
         for words in ("conda-forge", "FRAGPIPE_MONO_BIN", "outside the Core"):
             self.assertIn(words, p.stderr)
 
-    def test_fragpipe_dia_on_raw_or_mzml_is_refused(self):
+    def test_fragpipe_dia_on_raw_or_mzml_is_staged(self):
+        """2.15 (review F18's "staged properly in 2.15"): a .raw is copied and an mzML linked into
+        <out>/raw_stage, the manifest says DIA, and the job's check waits for DIA-NN's report"""
         mz = _write(os.path.join(self.raw, "S4.mzML"), "")
+        before = listing(self.raw)
         for files in ([self.files[0]], [mz]):
+            shutil.rmtree(self.out, True)
             p = self.generate(files=files, acquisition="DIA")
-            self.assertNotEqual(p.returncode, 0, files)
-            for words in ("REFUSED", "nothing was written", "--engine diann", "mkdir -p"):
-                self.assertIn(words, p.stderr)
-            self.assertFalse(os.path.exists(self.job))
-            self.assertFalse(os.path.exists(self.out))
-        self.assertEqual(listing(self.raw), self.before + ["S4.mzML"])
+            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+            rows = self.manifest()
+            self.assertEqual([os.path.dirname(r[0]) for r in rows], [self.stage()])
+            self.assertEqual([r[1] for r in rows], [""])            # no experiment for DIA
+            self.assertEqual([r[3] for r in rows], ["DIA"])
+            text = open(self.job).read()
+            self.assertIn("dia-quant-output/report.parquet", text)
+            self.assertIn("dia-quant-output/report.tsv", text)
+        self.assertTrue(os.path.islink(os.path.join(self.stage(), "S4.mzML")))
+        self.assertEqual(listing(self.raw), before)
+
+    def test_fragpipe_dia_on_raw_needs_mono(self):
+        p = self.generate(files=[self.files[0]], acquisition="DIA", mono=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("mono", p.stderr)
+        self.assertFalse(os.path.exists(self.out))
+
+    def test_fragpipe_dia_mixing_d_and_raw_is_refused(self):
+        p = self.generate(files=[self.files[0], os.path.join(self.raw, "S3.d")],
+                          acquisition="DIA")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("mixes 1 timsTOF .d with 1 .raw/mzML", p.stderr)
+        self.assertFalse(os.path.exists(self.out))
 
     def test_fragpipe_dia_on_d_keeps_its_stage(self):
         """(pin) diatracer_stage.py links the .d"""
@@ -662,9 +701,10 @@ class TheDatabaseSearched(StageHarness):
 
     def test_the_job_searches_the_fasta_it_was_given(self):
         import hashlib
-        p = self.generate()
+        fasta = _write(os.path.join(self.d, "db.fasta"),
+                       ">sp|P1|X\nPEPTIDER\n>rev_sp|P1|X\nREDITPEP\n")       # targets + decoys
+        p = self.generate(fasta=fasta)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        fasta = os.path.join(self.d, "db.fasta")
         run_wf = os.path.join(self.out, run_search.FRAGPIPE_RUN_WORKFLOW)
         self.assertIn(f"--workflow {run_wf}", open(self.job).read())
         with open(run_wf, newline="") as fh:
@@ -674,8 +714,15 @@ class TheDatabaseSearched(StageHarness):
         prov = json.load(open(os.path.join(self.out, "search_provenance.json")))
         db = prov["fragpipe_database"]
         self.assertEqual(db["path"], fasta)
-        self.assertEqual(db["sha256"], hashlib.sha256(open(fasta, "rb").read()).hexdigest())
+        self.assertFalse(db["decoys_built_in_job"])
         self.assertIsNone(db["workflow_db_path"])          # the shipped workflow names none
+        # 2.15: hashed in the job, not on the login node -- then merged by --adapt-only
+        self.assertIsNone(db["sha256"])
+        r = self.run_job()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        job = json.load(open(os.path.join(self.out, "fragpipe_job.json")))
+        self.assertEqual(job["database"]["sha256"],
+                         hashlib.sha256(open(fasta, "rb").read()).hexdigest())
 
     def test_a_workflow_naming_another_database_is_refused(self):
         wf = open(FP_WORKFLOW, newline="").read() + "database.db-path=/elsewhere/other.fas\r\n"
@@ -693,9 +740,13 @@ class TheDatabaseSearched(StageHarness):
         prov = json.load(open(os.path.join(self.out, "search_provenance.json")))
         self.assertEqual(prov["fragpipe_database"]["workflow_db_path"], fasta)
 
-    def test_a_target_only_fasta_is_said(self):
+    def test_a_target_only_fasta_gets_its_decoys_in_the_job(self):
         p = self.generate()                              # db.fasta has no rev_ entries
-        self.assertIn("no decoys", p.stdout + p.stderr)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        db = json.load(open(os.path.join(self.out, "search_provenance.json")))[
+            "fragpipe_database"]
+        self.assertTrue(db["decoys_built_in_job"])
+        self.assertTrue(db["path"].startswith(os.path.join(self.out, "fragpipe_db") + os.sep))
 
 
 class InlineRoute(StageHarness):
@@ -705,6 +756,10 @@ class InlineRoute(StageHarness):
 
     def test_the_inline_search_runs_fragpipe_with_mono(self):
         import run_search
+        from unittest import mock
+        patcher = mock.patch.dict(os.environ, {"JAVA_HOME": self.fp_install["java_home"]})
+        patcher.start()
+        self.addCleanup(patcher.stop)
         out = os.path.join(self.d, "inline_out")
         params = os.path.join(self.d, "search.workflow")
         shutil.copy(FP_WORKFLOW, params)
@@ -763,9 +818,10 @@ class ExperimentNamesBackToRuns(unittest.TestCase):
         except ImportError:
             self.skipTest("pyarrow")
         with tempfile.TemporaryDirectory() as d:
-            self.write(d, None, [("x/S1_a.raw", "S1_a"), ("x/S2.raw", "S2")])
+            # 3 experiments: with 2, directLFQ is the quantity (test_fragpipe_dda_quantity.py)
+            self.write(d, None, [("x/S1_a.raw", "S1_a"), ("x/S2.raw", "S2"), ("x/S3.raw", "S3")])
             os.remove(os.path.join(d, "fragpipe-files.fp-manifest"))
-            self.assertEqual(self.runs(d), ["S1_a", "S2"])
+            self.assertEqual(self.runs(d), ["S1_a", "S2", "S3"])
 
 
 class StageIsScratch(unittest.TestCase):

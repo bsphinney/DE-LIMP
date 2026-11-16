@@ -61,6 +61,29 @@
         .topnav a:hover { color: #fff; }
         .topnav svg { width: 16px; height: 16px; flex-shrink: 0; }
 
+        /* Legacy notice (v4.1.2): the Core's pipeline moved to its own repository */
+        .legacy-bar {
+            background: var(--bg-warm);
+            border-bottom: 1px solid #fbd38d;
+            color: var(--text);
+            font-size: 0.92rem;
+            padding: 0.6rem 1rem;
+            text-align: center;
+            line-height: 1.5;
+        }
+        .legacy-bar a { color: var(--primary-mid); font-weight: 600; text-decoration: underline; }
+        .hero .legacy-note {
+            max-width: 700px;
+            margin: -0.75rem auto 1.75rem;
+            background: rgba(255,255,255,0.12);
+            border: 1px solid rgba(255,255,255,0.3);
+            border-radius: var(--radius);
+            padding: 0.75rem 1rem;
+            font-size: 0.98rem;
+            line-height: 1.55;
+        }
+        .hero .legacy-note a { color: #fff; font-weight: 700; text-decoration: underline; }
+
         /* Hero */
         .hero {
             background: linear-gradient(135deg, #1a365d 0%, #2c5282 50%, #2b6cb0 100%);
@@ -442,6 +465,13 @@
 </head>
 <body>
 
+    <!-- Legacy notice (v4.1.2) -->
+    <div class="legacy-bar" role="note">
+        <strong>The UC Davis Proteomics Core pipeline now lives at
+        <a href="https://github.com/bsphinney/UCD-Proteomics-AI-Skill">github.com/bsphinney/UCD-Proteomics-AI-Skill</a>.</strong>
+        This app is the previous version: it is kept as it is and no longer developed.
+    </div>
+
     <!-- Top Nav Bar: External Resources -->
     <nav class="topnav">
         <a href="https://www.youtube.com/channel/UCpulhf8gl-HVxACyJUEFPRw" target="_blank" rel="noopener">
@@ -467,9 +497,14 @@
         <div class="container">
             <p class="subtitle">UC Davis Proteomics Core Facility</p>
             <h1>DE-LIMP</h1>
-            <span class="version-badge">v4.0.0</span>
+            <span class="version-badge">v4.1.2</span>
             <p class="tagline">
                 Upload your DIA-NN proteomics data and instantly identify differentially expressed proteins with interactive volcano plots, pathway enrichment, and AI-powered interpretation. Supports phosphoproteomics, multi-omics integration, and core facility management.
+            </p>
+            <p class="legacy-note">
+                The UC Davis Proteomics Core pipeline now lives at
+                <a href="https://github.com/bsphinney/UCD-Proteomics-AI-Skill">github.com/bsphinney/UCD-Proteomics-AI-Skill</a>.
+                This app is the previous version: it is kept as it is and no longer developed.
             </p>
             <div class="btn-group">
                 <a href="https://github.com/bsphinney/DE-LIMP" class="btn btn-accent" target="_blank" rel="noopener">

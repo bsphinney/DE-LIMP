@@ -262,7 +262,7 @@ deliver_local() {
   bash -c "$WRITE" _ "$LOCAL_DIR" "$FILE" < "$ENTRY" || return 1
   echo "recorded locally: $LOCAL_DIR/$FILE"
   echo "  This machine cannot reach the Core's shared issue folder. Please send that file to the"
-  echo "  UC Davis Proteomics Core, or open an issue at https://github.com/bsphinney/DE-LIMP/issues"
+  echo "  UC Davis Proteomics Core, or open an issue at https://github.com/bsphinney/UCD-Proteomics-AI-Skill/issues"
 }
 
 case "$(route)" in

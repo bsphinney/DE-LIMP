@@ -1,0 +1,11 @@
+{
+  "about": "Where the Radiant preset in this folder comes from. Its one file, default.radiantConfig, is the default configuration shipped by radiant_fulcrum_workflow 0.3.3, copied verbatim (make_presets.py records it as template_is_vendor_default, template_note 'radiant_fulcrum_workflow 0.3.3 shipped default, copied verbatim'). make_presets.py copies it through and patches only the keys it names in its record (tolerances, threads).",
+  "vendor": "radiant_fulcrum_workflow 0.3.3",
+  "presets": {
+    "default.radiantConfig": {
+      "vendor_workflow": "default",
+      "sha256": "011af32f6876cde56081d761bbbc72724fc226b70428e8deabec533d855af7d9",
+      "used_for": "a Radiant search of Thermo DIA data (--engine radiant; Radiant cannot read Bruker .d)"
+    }
+  }
+}

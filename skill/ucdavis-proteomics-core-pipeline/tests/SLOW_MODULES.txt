@@ -1,0 +1,30 @@
+# Test modules that take more than a few seconds each, or start a tree of subprocesses.
+# tests/run_core.py runs every test module EXCEPT these; the full suite (python3 -m unittest
+# discover, CI and the HIVE runner) still runs all of them.
+#
+# One module name per line (no .py). Blank lines and # comments are ignored.
+# Rule for a new test: it goes in the core tier unless its module needs more than ~2 s or a
+# subprocess tree; then add the module here. A release runs the FULL suite, on HIVE and in CI.
+
+test_core_submission
+test_record_run
+test_skyline_peaks
+test_fran_health_backfill
+test_contaminant_competition
+test_slack_collab
+test_slack_notify
+test_notes
+test_hive_remote_transport
+test_make_podcast
+test_podcast_local
+test_save_transcript
+test_step1b_window_probe
+test_ht_manifest_plate_checks
+test_ht_manifest_gates
+test_single_shot_sbatch
+test_tdf_readonly_open
+# the protein screen: R (limpa) subprocesses, and the page rendered in many fixtures
+test_screen_data
+test_screen_data_vs_mockup
+test_protein_screen_page
+test_protein_facts

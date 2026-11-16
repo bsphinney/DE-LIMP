@@ -38,7 +38,7 @@ time.
 Claude Code, or run `/reload-plugins` if it is already open:
 
 ```
-claude plugin marketplace add https://github.com/bsphinney/DE-LIMP.git && claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core
+claude plugin marketplace add https://github.com/bsphinney/UCD-Proteomics-AI-Skill.git && claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core
 ```
 
 Inside Claude Code, do them one at a time: paste the first command, press Enter, then the second.
@@ -49,14 +49,14 @@ Pasting both at once does not work.
 A *marketplace* is a catalog. Adding one lets you browse it; nothing is installed yet.
 
 ```
-/plugin marketplace add https://github.com/bsphinney/DE-LIMP.git
+/plugin marketplace add https://github.com/bsphinney/UCD-Proteomics-AI-Skill.git
 ```
 
-Use the full `https://` address, not the short form `bsphinney/DE-LIMP`: for the short form
+Use the full `https://` address, not the short form `bsphinney/UCD-Proteomics-AI-Skill`: for the short form
 Claude Code tries SSH first, and a laptop with no GitHub SSH key can then fail to refresh the
 catalog later. If you already added the short form, keep it (removing a marketplace also
 uninstalls its plugins) and refresh it as under "Updating later". If that pull asks for SSH,
-use `git -C ~/.claude/plugins/marketplaces/ucdavis-proteomics-core pull --ff-only https://github.com/bsphinney/DE-LIMP.git main`.
+use `git -C ~/.claude/plugins/marketplaces/ucdavis-proteomics-core pull --ff-only https://github.com/bsphinney/UCD-Proteomics-AI-Skill.git main`.
 
 ## 3. Install the plugin
 
@@ -131,6 +131,16 @@ Inside the skill, Claude checks for a newer version at the start of a session an
 you.
 
 If something in the pipeline seems fixed for everyone else but not for you, update first.
+
+**Installed before 2.15?** Up to 2.15 the skill lived in `https://github.com/bsphinney/DE-LIMP.git`; from 2.15
+it has its own repository, `https://github.com/bsphinney/UCD-Proteomics-AI-Skill.git` (same marketplace and plugin
+names). You get 2.15.0 from the old address as usual, and 2.15.0 moves your catalogue to the new
+one by itself when a session starts, and tells you. If it could not (offline, or in Claude
+Desktop), do it yourself, in a terminal (one line), then `/reload-plugins`:
+
+```
+claude plugin marketplace remove ucdavis-proteomics-core && claude plugin marketplace add https://github.com/bsphinney/UCD-Proteomics-AI-Skill.git && claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core
+```
 
 ## Where everything lives
 

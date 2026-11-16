@@ -18,7 +18,7 @@
 # copy on HIVE is one) lists BOTH Microsoft.NETCore.App 8.0.0 and Microsoft.AspNetCore.App
 # 8.0.0 in its ThermoRawFileParser.runtimeconfig.json. With this script's old NETCore-only
 # install as DOTNET_ROOT it exits 150, "You must install or update .NET to run this
-# application." (gabrig 2026-09-23, 15 Fusion Lumos .raw: every file came back unknown). A
+# application." (a Core member, 2026-09-23, 15 Fusion Lumos .raw: every file came back unknown). A
 # root with both is ONE root that serves both readers -- HIVE's dotnet-core-sdk/8.0.4 module
 # has both runtimes but is 8.0.4, which DIA-NN rejects.
 #

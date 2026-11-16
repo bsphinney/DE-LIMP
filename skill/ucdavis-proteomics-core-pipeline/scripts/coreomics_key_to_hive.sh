@@ -4,9 +4,9 @@
 # CoreOmics steps (core_submission.py check / identify / fetch / bioshare / email-draft) can run
 # there. It is for hive_remote from a laptop with no usable Python: on Windows `python3` is
 # usually the Microsoft Store stub (check_access.sh: local_python3.usable false), so those steps
-# cannot run on the laptop, and HIVE had no key. Michelle (msalemi, 2026-10-08) saved her key with
-# the skill's own line and her Claude still could not read the submission; Gabriela (gabrig,
-# 2026-10-02) first reported it.
+# cannot run on the laptop, and HIVE had no key. A Core member (2026-10-08) saved her key with
+# the skill's own line and her Claude still could not read the submission; another Core member
+# (2026-10-02) first reported it.
 #
 #   bash coreomics_key_to_hive.sh             THE AGENT runs this. The key the user already saved
 #                                             on this computer goes to ~/.coreomics_token on HIVE.

@@ -70,7 +70,6 @@ state is not checked, and says so).
 """
 import argparse
 import datetime
-import hashlib
 import json
 import os
 import shlex
@@ -78,7 +77,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from check_report_runs import stats_path  # noqa: E402  one definition of <report>.stats.tsv
-from safe_write import write_file  # noqa: E402  no write through a planted link
+from safe_write import write_file, sha256_file as _sha256  # noqa: E402  no write through a planted link; the ONE sha256
 
 # DIA-NN 2.7.0 writes <report stem>-first-pass.parquet (that submission's output/search_dda/).
 FIRST_PASS_SUFFIX = "-first-pass.parquet"
@@ -194,14 +193,6 @@ def job_lines(search_cmd, report, provenance):
         '  exit "$_dia_rc"',
         "fi",
     ]
-
-
-def _sha256(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def _copy(src, dst):

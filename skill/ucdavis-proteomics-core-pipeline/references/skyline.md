@@ -5,6 +5,21 @@ under Wine in ProteoWizard's vendor-reader container, as SLURM jobs. For the top
 finished DIA-NN analysis it extracts each peptide's chromatograms from the raw files again, draws
 them, and lists the peaks where Skyline and DIA-NN disagree.
 
+<!-- contents: tests/test_skill_structure.py --toc -->
+**Contents** (section: line)
+- 23: What it is, and what it is not (the wording is fixed)
+- 44: When it runs
+- 145: Which proteins: the ONE rule (`select_targets`)
+- 160: Mass tolerance: DIA-NN's own, never a fixed number
+- 183: What the document copies from the search
+- 251: The container
+- 279: The jobs
+- 422: What it delivers (`<S>/output/skyline/`)
+- 514: Targeted follow-up list (PRM / SRM): Core staff, on request
+- 563: Where the numbers come from
+- 580: 8f. The peak check as SKILL.md runs it (step 8f)
+<!-- /contents -->
+
 ## What it is, and what it is not (the wording is fixed)
 
 - **The pictures are a visual check of DIA-NN's peaks.** Skyline reads DIA-NN's spectral library
@@ -30,7 +45,9 @@ them, and lists the peaks where Skyline and DIA-NN disagree.
 
 - **By default after DE in a Core analysis**, and for anyone else whose HIVE (or other SLURM
   cluster) can reach the pinned container. Run `plan` right after step 8's final DE. The import
-  jobs can take half an hour or more (32–37 minutes on zen4 nodes), so check `status` before the
+  jobs can take half an hour or more (32–37 minutes on zen4 nodes), and Thermo DIA with
+  staggered windows, which Skyline demultiplexes, up to 2.5 hours (149 minutes measured; such
+  imports get 4 hours, see "Staggered windows" under The jobs), so check `status` before the
   report (step 9): a report made while they run says the check was not part of it, and the
   delivery then leaves `skyline/` out until the report is made again.
 - **The user can turn it off:** `skyline_peaks.py skip --session <S> --reason '<their words>'`.
@@ -44,9 +61,17 @@ them, and lists the peaks where Skyline and DIA-NN disagree.
   - DDA data (DIA-NN `--dda`): the document extracts DIA;
   - DIA-NN's mass accuracy is not recorded (see below);
   - the search's command does not state a setting the document must copy;
-  - a fixed cysteine modification other than carbamidomethyl (a `--fixed-mod` on C that is not
-    UniMod:4): not yet tested with Skyline. A search with no fixed cysteine modification
-    (unalkylated samples) does run (see "What the document copies");
+  - a fixed cysteine modification the document cannot carry (`fixed_cysteine`): a name that is
+    not `UniMod:<id>`, sites other than C alone or a channel label, no usable mass, a mass that
+    is not UniMod's (Skyline extracts at UniMod's; within 0.001 Da, or UniMod's rounded to the
+    decimals the search wrote, at least two: 57.02 for carbamidomethyl passes), an id not in
+    `estimate_params.CYS_REAGENTS`, or two different ones. A search with no fixed cysteine
+    modification, or with any reagent the skill searches, does run (see "What the document
+    copies"). Tested on real data for NEM only (PXD037858, Thermo DIA); propionamide,
+    carboxymethyl, MMTS and pyridylethyl were checked with SkylineCmd test documents (a 6-peptide
+    FASTA, no library or import), and timsTOF with any of these not at all;
+  - the built document's fixed cysteine modification, read back (`check_document_mods`), is not
+    the search's;
   - not a Bruker timsTOF `.d` or Thermo `.raw` search;
   - ion-trap MS2;
   - no SLURM;
@@ -90,6 +115,9 @@ commands on a login node. Everything heavy runs in the three jobs.
   search's own record, with where it came from.
 - `--max-parallel K`: at most K import tasks at once (default 8; 8 x 4 CPUs = 32, half of a user's
   64-CPU cap on HIVE's `high`).
+- `--acquisition-json`: `detect_acquisition.py`'s output for the runs (default: the session's
+  `input/acquisition.json`). It says whether Skyline must demultiplex them, which sets the import
+  jobs' time limit (see "Staggered windows" under The jobs).
 - `--partition / --account / --qos`: the queue (default: the skill's queue rule,
   `run_search.slurm_queue`).
 - `--replan`: plan again although the last plan has not written its result. Its jobs still
@@ -112,7 +140,7 @@ commands on a login node. Everything heavy runs in the three jobs.
   `submit.sh` writes each job to `jobs.txt` the moment it is submitted, so a submission refused
   half way still names the jobs it made, and it refuses to submit a plan a second time.
 - Without `--session`: `--search <DIA-NN output folder> --out <folder>`, plus `--de-dir`,
-  `--manifest` and `--conditions` as available.
+  `--manifest`, `--conditions` and `--acquisition-json` as available.
 
 ## Which proteins: the ONE rule (`select_targets`)
 
@@ -171,7 +199,31 @@ run):
     "no fixed modification, as searched: cysteine unmodified, and Skyline's default
     carbamidomethyl modification cleared" (2.14.2). "Cysteine unmodified" is left out when the
     search had a variable cysteine modification (`--var-mod ...,C`);
-  - any other fixed C modification: the step is not run (not yet tested with Skyline);
+  - any other fixed C modification the skill searches (`estimate_params.CYS_REAGENTS`: NEM,
+    propionamide, carboxymethyl, MMTS, pyridylethyl; 2.15) is added to the document as a STATIC
+    modification by its UniMod id, at UniMod's mass, which must be the mass DIA-NN searched
+    (within 0.001 Da, or rounded to the decimals the search wrote). SkylineCmd 26.1.0.266 adds a `--pep-add-unimod` to the document's own
+    modifications and clears them only when nothing is added, and makes the added one variable
+    unless told otherwise (a test job on HIVE: one command gave every C carbamidomethyl plus NEM,
+    +182.069143; without `--pep-add-mod-variable=false`, each C bare and modified). So the build
+    is two commands in one `--batch-commands` call (`build_commands`, `build_batch.txt`): `--new
+    --overwrite --pep-clear-mods --save`, then `--in` with `--pep-add-unimod=<id>
+    --pep-add-unimod-aa=C --pep-add-mod-variable=false` and the rest of the build. Left to
+    `--import-search-add-mods`, the modification would be static or variable as Skyline guesses
+    from the library (`LibKeyModificationMatcher` makes a found modification variable, then
+    static again when its record of the library's residues says so). On a real NEM library
+    (PXD037858, a test job on HIVE) it came out static, the same document as the skill's (342
+    peptides, 40 with C); with carbamidomethyl kept, every C was +182.069143 and none of the 40
+    C peptides was made. The skill adds it itself, so the document never rests on that guess.
+    The record keeps the modification as `settings.fixed_cys` (UniMod name, id, the mass
+    searched, UniMod's mass, the flags), `settings.fixed_mods` (the Methods' words,
+    "Nethylmaleimide (C, +125.047679 Da, UniMod:108)"; when the search wrote the mass rounded,
+    the document's mass with the searched one beside it, "... UniMod:108; searched as +125.05
+    Da)", and the same for carbamidomethyl) and `settings.mod_args`; the Methods say "... as a
+    fixed modification, as searched, in place of Skyline's default carbamidomethyl modification";
+  - every build reads the document's fixed modifications back (`check_document_mods`,
+    `settings.document_fixed_mods`) and stops, with the reason, when its fixed cysteine
+    modification is not the search's;
 - variable modifications, which Skyline adds from the library (`--import-search-add-mods`:
   "Adds all modifications found in peptide search results files to the open document",
   SkylineCmd 26.1 `--help`). The Methods name the search's own (`settings.var_mods`, in
@@ -234,7 +286,7 @@ ucd-hpc's `lint-jobscript.sh`.
 | Job | What | Size |
 |---|---|---|
 | `sky_1_build.sbatch` | checks the container, chooses the proteins, cuts the FASTA to them, reads DIA-NN's rows for them, then **one** SkylineCmd call builds the document | 4 CPUs, 16G, 60 min |
-| `sky_2_import.sbatch` | a SLURM array, **one raw file per task** (`--import-no-join`) | 4 CPUs, 16G, 60 min each, at most `--max-parallel` at once |
+| `sky_2_import.sbatch` | a SLURM array, **one raw file per task** (`--import-no-join`) | 4 CPUs, 16G, 240 min each when Skyline demultiplexes the runs (staggered windows), else 60 min each; at most `--max-parallel` at once |
 | `sky_3_join.sbatch` | **one** `--batch-commands` call joins the per-file caches and exports the precursor and transition reports, the chromatograms of the targets and the `.sky.zip` (`--share-type=minimal`); then it draws the pictures and writes the record | 4 CPUs, 16G, 90 min |
 
 `submit.sh` chains the jobs:
@@ -261,11 +313,26 @@ report.
   join saves its results into `<name>_top_hits.sky`, so a task run again after a join (by hand,
   or requeued) would otherwise import into a document that already holds results (2.14.2). A
   plan built by 2.14.1 has no pristine copy: the task copies the document and its log says
-  `WARNING: no pristine copy`. Each task's status file names the document it copied. **The join
-  restores the pristine copy too** before its batch (`restore_pristine`; the joined cache
-  `<name>_top_hits.skyd` goes with it, the imports' per-file caches stay), so a join run again,
-  requeued on `low` or by hand, never re-imports the replicates into a joined document (2.14.2).
-  Re-running only the failed tasks and joining again is not a subcommand yet (2.15).
+  `WARNING: no pristine copy`. Each task's status file names the document it copied, and the
+  per-file cache it made (`caches`, 2.15). **The join restores the pristine copy too** before its
+  batch (`restore_pristine`; the joined cache `<name>_top_hits.skyd` goes with it), so a join run
+  again, requeued on `low` or by hand, never re-imports the replicates into a joined document
+  (2.14.2).
+- **The join keeps the per-file caches** (`keep_part_caches`, 2.15). Skyline's join deletes each
+  per-file cache it merges, so the next join of the same plan found none and imported those runs
+  again from the raw files, inside the join job, against its 90-min limit (PXD037858, 2.15
+  check: two runs re-importing at 48% after 40 min). Before its batch the join copies every
+  per-file cache beside the document to `skyline_work/caches/` (an import task run again
+  replaces its copy) and puts back any that is gone. A copy that cannot be made (a full disk) is
+  a warning in the join's log and the record's `cache_backup`, and the join goes on without it. A
+  run whose cache is in neither place is not handed to Skyline: it is a failed import, so the
+  join never imports a raw file itself; its reason in the report has no path and no instruction,
+  and what staff do next is the record's `action` and the join's log ("run its import task
+  again"). Re-running only the failed tasks is not a subcommand yet; by hand it is
+  `sbatch --array=<task numbers> sky_2_import.sbatch`, then
+  `sbatch --dependency=afterany:<that job> sky_3_join.sbatch`, in `skyline_work/`. In a Core
+  session each is a new job on the board, with its own record and hours (`board.md`: "A
+  resubmitted step is a new job").
 - **The time limit is Slurm's `--time`** (the table above). Slurm does not count the time it
   keeps a job suspended; the skill's own wall-clock timer did, and on HIVE's `high` it killed
   imports (rc 124) seconds after they resumed from ~28 min suspended (2.14.2). Only
@@ -324,9 +391,33 @@ report.
 | Data | Build | Import, per raw file | Join + exports |
 |---|---|---|---|
 | Thermo `.raw` | 23-27 s | about 40 s (0.7 GB file), 2.3-2.5 GB | about 1 min |
+| Thermo `.raw`, staggered DIA windows (2.15) | 46-75 s | 24-29 min (0.8-0.9 GB Lumos file) on a healthy node, 74 min on a busy one, 93-149 min with four on a node loaded past its CPUs; 3.8-4.2 GB | about 1.5 min (4 runs) |
 | timsTOF `.d` | about 47 s | 2.5-4 min, about 2 GB per task | about 2.3 min |
 
 Plus queue waits. A 12-run timsTOF project should take about 10-15 min of wall time.
+
+**Staggered windows are the slow case.** A Thermo DIA method whose windows overlap from one
+cycle to the next (PXD037858: 151 windows of 8 m/z, offset by 4 m/z) is read by Skyline as
+`Deconvolution is "Overlap Multiplexed"`, and demultiplexing is what costs the time: the same
+0.8 GB file imported in 1,658 s with it and 63 s with the scheme "Results only", on one node (two
+test jobs on HIVE). At 60 min two of that project's four imports were stopped (a node with more
+load than CPUs); at 240 min four of them on one node loaded past its CPUs took 93-149 min and all
+finished. The skill keeps demultiplexing: it is how Skyline reads these windows.
+
+So the import's `--time` depends on whether Skyline must demultiplex (`job_minutes`,
+`demultiplexing`, 2.15): **240 min** when any run's windows are staggered, **60 min** when none
+is. The plan reads it from the session's acquisition record (`input/acquisition.json`, or
+`--acquisition-json`): `detect_acquisition.py` writes `isolation_windows` for each Thermo DIA run
+(`staggered` when neighbouring windows overlap by more than a quarter of their width; 2.15). When
+the record does not say it for every run (none, or one written before 2.15): Thermo `.raw` 240
+min (its windows may be staggered), timsTOF `.d` 60 min (Skyline does not demultiplex
+diaPASEF). The record keeps the limit and why (`import_limit`). 240 min is four times the
+CPU-hours of 60 in the reservation (`cpu_hours_reserved`; the board records it and limits nothing), which is why it is not the limit for every run.
+
+Every job's limit has one definition, `JOB_MINUTES` with `job_minutes()` in `skyline_peaks.py`:
+the job scripts' `--time` is written from it, and the job table at the top of "The jobs" states it
+(a test compares them). The early warning before the limit reads the limit Slurm applied, not
+this table (see "A job Slurm stops says so").
 
 ## What it delivers (`<S>/output/skyline/`)
 
@@ -360,15 +451,35 @@ Plus queue waits. A 12-run timsTOF project should take about 10-15 min of wall t
   - HeLa: 3.2 MB against 12.5 MB, 348 precursor rows;
   - NIST: 21.5 MB against 23.0 MB, 2,824 precursor rows, with byte-identical chromatogram exports.
 - `skyline_provenance.json` (schema `skyline_peak_check/1`), the record. It holds:
-  - the status (`ok`, `skipped` with the reason and stage, or `planned`), and the plan's id: a job
-    writes the record only while it is its own plan's;
+  - the status (`ok`, `partial`, `skipped` with the reason and stage, or `planned`), and the
+    plan's id: a job writes the record only while it is its own plan's;
   - the sha256 of the `de_provenance.json` the proteins were chosen from;
   - the tool, its container, sha256 and how it was checked;
   - the tolerance and its source;
   - N and its source, and the selection mode;
   - every setting and where it came from;
-  - the runs imported and failed;
+  - the runs imported and failed (each failed run: file, array task, and the reason -- the task's
+    own, else the end of `skyline_work/logs/import_<n>.txt`);
+  - for a `partial` check, `retry`: the failed tasks and the command that runs them again;
   - the results, the figures with their captions, and the Methods paragraph.
+
+**A run that failed to import (2.15, `partial`).** One failed import task never makes the check
+`ok`. The join still joins the runs that imported and writes the record with status `partial`: a
+finished check that ships, but `missing_runs_sentence` (the one definition) says "Only N of M runs
+were imported, so this check does not cover <run> (<reason>)" in the Methods paragraph and at the
+top of the report's Peak-check section, and `MANIFEST.txt` has a `[WARN]` line with the same words
+and the command below. The follow-up assay (`prm`) refuses a `partial` check. To run the failed
+task(s) again and join again: `python3 scripts/skyline_peaks.py retry --session <S>` writes
+`skyline_work/retry.sh` (the failed array task(s) with the plan's own `sky_2_import.sbatch`, then
+`sky_3_join.sbatch` after them); `bash` it, then `status` once the join has finished: `ok` when
+every run is in. The join puts back the kept per-file caches of the runs already imported, so
+nothing is imported twice. A linked run (a `.d` in `raw_data/` that is a link) is given to SkylineCmd
+by its real path when the target has the same name (`skyline_path`), in the build, in each import
+task and in the join (which names each run again to attach its cache): SkylineCmd under Wine
+rejected a linked timsTOF `.d` as the isolation-scheme source, and could not open one at the join.
+On HIVE the build and the imports worked with linked runs; the join failed until it used the same
+path, and the same runs by their real paths joined and reported "ok". The fixed join has not been
+re-run on linked runs.
 
 **What the report says for each state** (`record_state`): "Not run." with the reason (skipped),
 cut of server paths and naming the engine by its label; for planned, submitted, out of date (the
@@ -465,3 +576,14 @@ HeLa search. Its findings:
   - run-to-run changes on HeLa r = 0.97.
 - **Failures:** two, both from how Skyline was run (two readers on one `.d`; the process-count
   option).
+
+## 8f. The peak check as SKILL.md runs it (step 8f)
+
+Skyline draws DIA-NN's peaks for the top 10 DE proteins (none significant: the most abundant), as
+SLURM jobs in the pinned container: `python3 scripts/skyline_peaks.py plan --session <S>`, then
+submit what it prints under "submit with". Exit 3 = not run here: its record says why, and so does
+the report. A user who does not want it: `skyline_peaks.py skip --session <S> --reason '<their
+words>'`. It is a visual check of DIA-NN's peaks, never "confirmed by Skyline". Core staff may ask
+for a PRM/SRM follow-up list from it ("Targeted follow-up list (PRM / SRM)" above).
+Core staff: board.md §3 row "other job submitted", right after `submit.sh` has run: its three
+jobs as one record, with the `cpu_hours_reserved` that `plan` printed.

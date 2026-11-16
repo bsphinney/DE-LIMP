@@ -564,7 +564,7 @@ class TestFeedbackSurvey(unittest.TestCase):
                     raw = subprocess.run(["pdftotext", pdf, "-"], capture_output=True,
                                          text=True).stdout
                     self.assertEqual(raw.count("Found this report useful?"), 1)
-                    self.assertIn(f"({repo})", raw)          # printed whole: no break in DE-LIMP
+                    self.assertIn(f"({repo})", raw)          # printed whole: no break at a hyphen
                 for doc in ("README.md", "README.html", "AGENTS.md"):
                     self.assertNotIn("Found this report useful", self.read(s, doc), doc)
 

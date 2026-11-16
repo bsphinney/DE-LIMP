@@ -81,17 +81,17 @@ class FindPriorIsFreshByDefault(unittest.TestCase):
         next_commands. The condition is the user coming back, and it comes before the bullets."""
         with open(os.path.join(SKILL, "SKILL.md"), encoding="utf-8") as fh:
             md = fh.read()
-        step = md[md.index("### 0c."):md.index("### 1. ")]
+        step = " ".join(md[md.index("### 0c."):md.index("### 1. ")].split())   # layout-free
         rule = step.index("resume only when it is unfinished work the user is coming back to")
         self.assertLess(rule, step.index("**COMPLETED"))
-        self.assertIn("A new request (new settings, or \"analyse\nthese files\") is fresh", step)
+        self.assertIn("A new request (new settings, or \"analyse these files\") is fresh", step)
         self.assertIn("never resubmit one that is RUNNING without asking", step)
         self.assertNotIn("Only unfinished work is a resume", step)
 
     def test_skill_md_step_1b_says_fresh_by_default(self):
         with open(os.path.join(SKILL, "SKILL.md"), encoding="utf-8") as fh:
             md = fh.read()
-        step = md[md.index("### 1b."):md.index("### 1c.")]
+        step = " ".join(md[md.index("### 1b."):md.index("### 1c.")].split())   # layout-free
         self.assertIn("fresh analysis by default", step)
         self.assertIn("read nothing from that session", step)
         self.assertIn("only when the user asks", step)

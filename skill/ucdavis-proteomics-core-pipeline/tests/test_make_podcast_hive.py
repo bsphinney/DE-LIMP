@@ -7,7 +7,7 @@ standing approval, make_podcast.CORE_CLOUD_OK, the one place that text lives. Wi
 no usable local Python, so their podcast runs on HIVE: check through hive_exec.sh, then a SLURM
 job (make_podcast.py job) that renders in Gemini voices, verifies, links and shares -- minutes of
 network calls never run on the login node. On HIVE the key is the Core's shared one
-(/quobyte/proteomics-grp/.config/gemini_key: owner brettsp, group proteomics-grp, mode 640),
+(/quobyte/proteomics-grp/.config/gemini_key: owner bstaff, group proteomics-grp, mode 640),
 read last, for a Core run only, and only while the Core's trust rule holds and accounts outside
 the group cannot read it. setup.sh puts google-genai >= GENAI_MIN in the pipeline env.
 
@@ -351,9 +351,9 @@ class CoreRunConsent(CoreKeyFile, T.Workspace):
             calls.append(argv)
             return subprocess.CompletedProcess(argv, 0, stdout=self.hive_answer, stderr="")
         answers = [
-            (json.dumps({"ok": True, "by": "brettsp", "checked": "on the Core staff list (/q)"}),
+            (json.dumps({"ok": True, "by": "bstaff", "checked": "on the Core staff list (/q)"}),
              0, None),
-            (json.dumps({"ok": True, "by": "brettsp", "checked": "NOT VERIFIED: no list"}), 2,
+            (json.dumps({"ok": True, "by": "bstaff", "checked": "NOT VERIFIED: no list"}), 2,
              "NOT VERIFIED"),
             (json.dumps({"ok": False, "error": "--by 'x' is not on the Core staff list"}), 2,
              "is not on the Core staff list"),
@@ -374,7 +374,7 @@ class CoreRunConsent(CoreKeyFile, T.Workspace):
         self.assertEqual(calls[0][-1], 'python3 ~/proteomics-pipeline/scripts/staff.py check '
                                        '--by "$(id -un)"')
         self.assertTrue(calls[0][1].endswith("hive_exec.sh"))
-        self.assertEqual(self.staff_record()[0]["by"], "brettsp")
+        self.assertEqual(self.staff_record()[0]["by"], "bstaff")
 
     def test_cloud_ok_never_reaches_the_core_key(self):
         self.core_session()
@@ -627,6 +627,17 @@ class Job(CoreKeyFile, T.Workspace):
         only_bash = os.path.join(self.d, "only_bash")                   # no ffmpeg, no afconvert
         os.makedirs(only_bash)
         os.symlink(shutil.which("bash"), os.path.join(only_bash, "bash"))
+        # The job sources HIVE's /etc/profile.d/modules.sh, which on a cluster node defines a
+        # `module` that really loads ffmpeg. Here that file is replaced by one whose `module`
+        # always fails: the case under test, "the module load failed", on any host.
+        no_modules = os.path.join(self.d, "failing_modules.sh")
+        with open(no_modules, "w") as fh:
+            fh.write("module() { return 1; }\n")
+        failing_job = os.path.join(self.d, "podcast_failing_module.sbatch")
+        with open(failing_job, "w") as fh:
+            fh.write(T.read(self.job_path).replace("/etc/profile.d/modules.sh", no_modules))
+        self.assertIn(no_modules, T.read(failing_job))
+        self.job_path = failing_job
         self.assertEqual(self.run_job(PATH=only_bash)[0], 0)
         self.assertIn("[WARN] no ffmpeg here (module load ffmpeg/7.0.2 failed)", self.job_stderr)
         self.assertIn("podcast.wav", self.job_stderr)

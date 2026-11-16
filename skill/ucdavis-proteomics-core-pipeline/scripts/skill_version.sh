@@ -68,6 +68,27 @@
 #     1  the update did NOT happen: `say` says why and gives the by-hand route
 #     5  it ran, but could not be checked against main (main unreadable, or the installed
 #        version could not be read). Not a confirmation.
+#   THE MOVE (2.15). Up to 2.15 the skill lived in bsphinney/DE-LIMP; from 2.15 it lives in its
+#   own repository (SKILL_REPO_URL, Ruling 87), and main's version is read there. A catalogue
+#   cloned from the old one (SKILL_OLD_REPO_URL, in any spelling: HTTPS, SSH, with or without
+#   .git) cannot be pulled to the new one: the histories are unrelated. Checked on Claude Code
+#   2.1.322 (2026-11-12) in a sandbox config with two local repositories: `claude plugin
+#   marketplace add <new>` refuses while the old source is declared under the same name, and
+#   `claude plugin marketplace remove`, `... add <new>`, `claude plugin install` lands the new
+#   version (remove uninstalls the plugin but leaves the running copy's cache folder). So when
+#   such a catalogue is behind main, --update first checks that the new address answers (git
+#   ls-remote, HTTPS), then runs those three; if the add fails it adds the old address back and
+#   reinstalls, so the computer is where it was. "moved" in both outputs says the catalogue
+#   is the old one; refresh "moved" / "move_failed" says what --update did.
+#   2.15.0 itself moves it, at once: --session-start (never --check-update, which stays read-only
+#   for the checks in the middle of an analysis) runs the same sv_move when the catalogue is the
+#   old one, at any version, before its checks, and says so in one sentence ("move"). It never
+#   runs on a catalogue that is already the new one, so it cannot repeat: once moved, the
+#   catalogue's origin is the new address. Skipped, with the by-hand line, when the new address
+#   does not answer (offline), git or claude is missing, or the session is not the Claude Code
+#   CLI or VS Code (CLAUDE_CODE_ENTRYPOINT claude-desktop, claude-desktop-3p, local-agent,
+#   remote_desktop, remote, ...: Claude Desktop keeps its own plugins). A move that failed after
+#   claude started is not tried again the same day (<plugins>/ucdavis-proteomics-core.move_failed).
 #   main's version is read over HTTPS (curl, which Git Bash has; SKILL_MAIN_URL), never SSH, and
 #   no Python is needed. --update refreshes a catalogue behind main with
 #   `git pull --ff-only` over HTTPS (an SSH remote is pulled from SKILL_REPO_URL instead), runs
@@ -76,6 +97,29 @@
 #   installed version from `claude plugin list --json`, or installed_plugins.json beside the
 #   catalogue. SKILL_MARKETPLACE_DIR overrides where the catalogue is. Tests point all four at
 #   stand-ins (a file:// URL, local git repositories, a fake claude); no test uses the network.
+#
+# ONE CALL AT THE START (SKILL.md step 0): --check-update, then --check-hive only with --mode
+# hive_remote (and not while a reload is pending), read into what the agent does next.
+#   bash skill_version.sh --session-start [--mode hive_remote|local]
+#   One JSON object; act on its fields in this order:
+#     up_to_date   true only when --check-update exited 0 and HIVE's release check is not
+#                  behind: the one case in which the skill may be called up to date
+#     relay_first  relay before any other work, or null: older than main or the release ("Your
+#                  copy of the skill is older than the Core's current release ..."), or the
+#                  /reload-plugins line of status reload_needed
+#     ask_update   ask whether to update now; yes -> --update. Not with reload_needed
+#     ask          a question for the user, or null: HIVE has a newer build and the update would
+#                  not bring this computer to it (--check-hive 4), or HIVE's copy is in use by
+#                  the user's jobs (6)
+#     next         run it at once, unasked, then --session-start again (--put-skill: the
+#                  user's own copy, --check-hive 3); after the questions when there are any
+#     say          one line to relay, or null: the move (below), a check that could not run,
+#                  HIVE's other notes
+#     move         {"status": moved | failed | skipped, "say", "manual"} when this computer's
+#                  catalogue was the old repository's (THE MOVE), else null
+#     update/hive  the two checks' objects, each with its "exit"; hive null when not run
+#   exit 2 the user must answer or act first (ask_update, ask, or the reload); else 3 `next`
+#   is set; else 0.
 # =============================================================================
 
 # The tag for a version that cannot be read -- skill_version.py's UNKNOWN, character for
@@ -216,8 +260,10 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   # refresh over HTTPS itself and checks the version that landed.
   UPDATE_CMD="bash scripts/skill_version.sh --update"
   UPDATE_HOW="$UPDATE_CMD, which refreshes the plugin catalogue over HTTPS when it is behind, runs claude plugin update $SKILL_PLUGIN_ID and checks the version that landed; then /reload-plugins. To stop this recurring: /plugin -> Marketplaces -> $SKILL_MARKETPLACE -> Enable auto-update"
-  SKILL_MAIN_URL="${SKILL_MAIN_URL:-https://raw.githubusercontent.com/bsphinney/DE-LIMP/main/skill/ucdavis-proteomics-core-pipeline/.claude-plugin/plugin.json}"
-  SKILL_REPO_URL="${SKILL_REPO_URL:-https://github.com/bsphinney/DE-LIMP.git}"
+  SKILL_MAIN_URL="${SKILL_MAIN_URL:-https://raw.githubusercontent.com/bsphinney/UCD-Proteomics-AI-Skill/main/skill/ucdavis-proteomics-core-pipeline/.claude-plugin/plugin.json}"
+  SKILL_REPO_URL="${SKILL_REPO_URL:-https://github.com/bsphinney/UCD-Proteomics-AI-Skill.git}"
+  # where the skill lived up to 2.15: a catalogue cloned from it is moved, not pulled (THE MOVE)
+  SKILL_OLD_REPO_URL="${SKILL_OLD_REPO_URL:-https://github.com/bsphinney/DE-LIMP.git}"
   SKILL_CLAUDE="${SKILL_CLAUDE:-claude}"
   ROOT="$(cd "$SV_HERE/.." && pwd)"
 
@@ -451,7 +497,9 @@ LIST
       printf '%s' "$s_rf" | LC_ALL=C grep -Eq '^\{("[a-z_]+": (true|false)(, )?)+\}$' || s_rf=null
       HIVE_SETUP="{\"ready_for\": $s_rf, \"skill_version\": $(sv_js "$s_sv"), \"written\": $(sv_js "$(sv_field setup_written)")}"
       if [ -n "$hive" ] && [ "$s_sv" != "$hive" ]; then
-        say="${say:+$say }HIVE's setup.json (its ready_for) was written by ${s_sv:+the setup.sh of skill $s_sv}${s_sv:-a setup.sh that did not record its version (before 2.13.1)}, not that of HIVE's skill $hive, so it may be out of date (a limpa or nanoparquet the skill now needs). Refresh it, installing nothing: bash scripts/hive_exec.sh 'bash ~/proteomics-pipeline/scripts/setup.sh --check', then read its ready_for and notes."
+        local s_by="a setup.sh that did not record its version (before 2.13.1)"
+        [ -z "$s_sv" ] || s_by="the setup.sh of skill $s_sv"   # not ${s_sv:-...}: that is $s_sv again
+        say="${say:+$say }HIVE's setup.json (its ready_for) was written by $s_by, not that of HIVE's skill $hive, so it may be out of date (a limpa or nanoparquet the skill now needs). Refresh it, installing nothing: bash scripts/hive_exec.sh 'bash ~/proteomics-pipeline/scripts/setup.sh --check', then read its ready_for and notes."
       fi
     fi
     if [ "$behind" = true ] && [ "$status" != hive_ahead ]; then
@@ -558,16 +606,44 @@ SH
   # PULL_TAIL: what `git pull --ff-only` pulls from. Nothing (the clone's own remote) unless that
   # remote is SSH; then the repository's HTTPS URL and main. The clone Claude Code made on
   # 2026-10-07 had an HTTPS remote, and a plain pull was the route that worked.
+  # A catalogue cloned from the old repository is pulled from the old one's HTTPS URL.
   sv_pull_tail() {
     PULL_TAIL=()
     case "$(git -C "$1" remote get-url origin 2>/dev/null)" in
       http://*|https://*|'') ;;
-      ssh://*|git@*|*@*:*) PULL_TAIL=("$SKILL_REPO_URL" main) ;;
+      ssh://*|git@*|*@*:*)
+        if sv_catalogue_moved "$1"; then PULL_TAIL=("$SKILL_OLD_REPO_URL" main)
+        else PULL_TAIL=("$SKILL_REPO_URL" main); fi ;;
     esac
+  }
+  # A repository URL in one spelling, to compare two: lower case, no scheme, user, ".git" or
+  # trailing "/"; git@host:owner/repo reads host/owner/repo.
+  sv_repo_key() {
+    local u
+    u="$(printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+    u="${u%/}"; u="${u%.git}"; u="${u%/}"
+    case "$u" in
+      *://*) u="${u#*://}"; case "${u%%/*}" in *@*) u="${u#*@}" ;; esac ;;
+      *@*:*) u="${u#*@}"; u="${u%%:*}/${u#*:}" ;;
+    esac
+    printf '%s\n' "$u"
+  }
+  # True when the catalogue at $1 was cloned from the old repository (THE MOVE).
+  sv_catalogue_moved() {
+    local o
+    o="$(git -C "$1" remote get-url origin 2>/dev/null)" || return 1
+    [ -n "$o" ] && [ "$(sv_repo_key "$o")" = "$(sv_repo_key "$SKILL_OLD_REPO_URL")" ] \
+      && [ "$(sv_repo_key "$SKILL_OLD_REPO_URL")" != "$(sv_repo_key "$SKILL_REPO_URL")" ]
+  }
+  # The move by hand: the three claude commands --update runs.
+  sv_move_manual() {
+    printf 'claude plugin marketplace remove %s && claude plugin marketplace add %s && claude plugin install %s' \
+      "$SKILL_MARKETPLACE" "$SKILL_REPO_URL" "$SKILL_PLUGIN_ID"
   }
   # The update by hand, as one line to paste in Git Bash or a terminal.
   sv_manual() {
     local t=""
+    if sv_catalogue_moved "$1"; then sv_move_manual; return; fi
     sv_pull_tail "$1"
     [ "${#PULL_TAIL[@]}" -eq 0 ] || t=" ${PULL_TAIL[*]}"
     printf 'git -C %s pull --ff-only%s && claude plugin update %s' \
@@ -688,11 +764,106 @@ SH
                    | awk 'NF { printf "%s%s", (n++ ? " / " : ""), $0 }' | cut -c1-500)"
   }
 
+  # One claude command for the move, with Claude Code's HTTPS switch. Its output is added to
+  # CLAUDE_SAID ("<command>: <output>"); CLAUDE_RC is its exit code.
+  sv_claude_step() {
+    local out
+    out="$(CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1 "$CLAUDE_CMD" "$@" </dev/null 2>&1)"
+    CLAUDE_RC=$?
+    out="$(printf '%s\n' "$out" | LC_ALL=C tr -d '\r' | LC_ALL=C tr -d '\200-\377' \
+           | awk 'NF { printf "%s%s", (n++ ? " / " : ""), $0 }' | cut -c1-300)"
+    CLAUDE_SAID="${CLAUDE_SAID:+$CLAUDE_SAID / }$*: ${out:-(nothing)}"
+    return "$CLAUDE_RC"
+  }
+
+  # THE MOVE: the catalogue at $1 came from the old repository. The new address must answer
+  # before anything is removed; then remove, add the new one, install. REFRESH = moved, or
+  # move_failed with REFRESH_ERR. A failed add puts the old address back.
+  sv_move() {
+    local out
+    REFRESH=move_failed; REFRESH_ERR=""; CLAUDE_RC=""; CLAUDE_SAID=""
+    if ! command -v git >/dev/null 2>&1; then REFRESH_ERR="git is not on PATH"; return 1; fi
+    if ! out="$(GIT_TERMINAL_PROMPT=0 git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 \
+                  ls-remote --heads "$SKILL_REPO_URL" main </dev/null 2>&1)" || [ -z "$out" ]; then
+      REFRESH_ERR="the skill's new address ($SKILL_REPO_URL) did not answer, so nothing was changed"
+      return 1
+    fi
+    sv_resolve_claude
+    if [ -z "$CLAUDE_CMD" ]; then REFRESH_ERR="nothing was changed"; return 1; fi
+    if ! sv_claude_step plugin marketplace remove "$SKILL_MARKETPLACE"; then
+      REFRESH_ERR="claude plugin marketplace remove failed (exit $CLAUDE_RC)"; return 1
+    fi
+    if ! sv_claude_step plugin marketplace add "$SKILL_REPO_URL"; then
+      out="$CLAUDE_RC"
+      if sv_claude_step plugin marketplace add "$SKILL_OLD_REPO_URL" \
+         && sv_claude_step plugin install "$SKILL_PLUGIN_ID"; then
+        REFRESH_ERR="adding the new address failed (exit $out); the old one was added back and the skill reinstalled from it"
+      else
+        REFRESH_ERR="adding the new address failed (exit $out), and adding the old one back failed too: the skill is not installed now. Install it as references/install.md says"
+      fi
+      CLAUDE_RC=""
+      return 1
+    fi
+    sv_claude_step plugin install "$SKILL_PLUGIN_ID"
+    REFRESH=moved
+  }
+
+  # THE MOVE at the start of a session (2.15.0): an old catalogue is moved at once, at any
+  # version, with sv_move (the one definition of the move). MOVE_STATUS = "" (not the old
+  # repository's catalogue: nothing to do, ever) | moved | failed | skipped; MOVE_SAY the one
+  # sentence for the user.
+  MOVE_STATUS=""; MOVE_SAY=""
+  sv_auto_move() {
+    local mp marker today by_hand new="${SKILL_REPO_URL%.git}"
+    MOVE_STATUS=""; MOVE_SAY=""
+    mp="$(sv_marketplace_dir)"
+    sv_catalogue_moved "$mp" || return 0
+    by_hand="To move it by hand, in a terminal: $(sv_move_manual), then /reload-plugins."
+    case "${CLAUDE_CODE_ENTRYPOINT:-}" in
+      ''|cli|claude-vscode) ;;
+      *) MOVE_STATUS=skipped
+         MOVE_SAY="The skill now lives in its own repository ($new), but this app (${CLAUDE_CODE_ENTRYPOINT}) keeps its own plugins, so its catalogue was not moved automatically. In Claude Desktop: + -> Plugins -> Manage plugins, remove the ucdavis-proteomics-core marketplace, add bsphinney/UCD-Proteomics-AI-Skill and install the skill again. $by_hand"
+         return 0 ;;
+    esac
+    marker="$(dirname "$(dirname "$mp")")/$SKILL_MARKETPLACE.move_failed"
+    today="$(date +%Y-%m-%d)"
+    if [ -f "$marker" ] && [ "$(head -n1 "$marker" 2>/dev/null)" = "$today" ]; then
+      MOVE_STATUS=skipped
+      MOVE_SAY="Moving this computer's skill catalogue to the skill's own repository ($new) failed earlier today, so it was not tried again. $by_hand"
+      return 0
+    fi
+    if sv_move "$mp" && [ "$CLAUDE_RC" = 0 ] && ! sv_catalogue_moved "$mp"; then
+      rm -f "$marker"
+      MOVE_STATUS=moved
+      MOVE_SAY="The skill now updates from its own repository ($new) instead of DE-LIMP: this computer's plugin catalogue was moved there and the skill reinstalled from it, so nothing else changes for you."
+      return 0
+    fi
+    if [ -z "$CLAUDE_SAID" ]; then      # stopped before claude ran: nothing was changed
+      [ -n "$CLAUDE_CMD" ] || [ -z "$CLAUDE_FOUND" ] \
+        || REFRESH_ERR="the claude command was not found, so nothing was changed"
+      MOVE_STATUS=skipped
+      MOVE_SAY="The skill now lives in its own repository ($new), but this computer's catalogue could not be moved there now (${REFRESH_ERR:-nothing was changed}); it is tried again next session. $by_hand"
+      return 0
+    fi
+    printf '%s\n' "$today" >"$marker" 2>/dev/null || true
+    MOVE_STATUS=failed
+    if [ "$REFRESH" = moved ]; then
+      REFRESH_ERR="claude plugin install failed (exit $CLAUDE_RC). Install it: claude plugin install $SKILL_PLUGIN_ID"
+    elif [ -z "$REFRESH_ERR" ]; then
+      REFRESH_ERR="the catalogue still points at the old address"
+    fi
+    MOVE_SAY="Moving this computer's skill catalogue to the skill's own repository ($new) did not work: ${REFRESH_ERR%.}. $by_hand"
+  }
+
   sv_check_update() {
-    local here inst="" state say="" next="" behind=null status code mp
+    local here inst="" state say="" next="" behind=null status code mp moved=false move=""
     MAIN=""; MAIN_ERR=""
     here="$(skill_version)"
     mp="$(sv_marketplace_dir)"
+    if sv_catalogue_moved "$mp"; then
+      moved=true
+      move=" The skill has moved to its own repository (${SKILL_REPO_URL%.git}); the update also moves this computer's plugin catalogue there."
+    fi
     if [ "$here" = "$SKILL_VERSION_UNKNOWN" ]; then
       status=local_unknown; code=5; here=""
       say="This copy of the skill has no readable .claude-plugin/plugin.json, so it cannot be compared with GitHub main. Reinstall it from the plugin marketplace (references/install.md)."
@@ -713,22 +884,24 @@ SH
           say="Skill $inst is installed on this computer, but this session still runs $here: type /reload-plugins (or restart Claude Code), then start again." ;;
         behind)
           status=behind; code=3; behind=true; next="$UPDATE_CMD"
-          say="This computer has skill $here; GitHub main ships $MAIN, so the fixes since $here do not run here yet. Updating takes a minute: $UPDATE_HOW." ;;
+          say="This computer has skill $here; GitHub main ships $MAIN, so the fixes since $here do not run here yet.$move Updating takes a minute: $UPDATE_HOW." ;;
         *) status=main_unknown; code=5
            say="Could not compare this computer's skill ($here) with GitHub main ($MAIN). That is not a confirmation that it is current; carrying on." ;;
       esac
     fi
     printf '{"status": %s, "local": %s, "main": %s, "installed": %s, "behind_main": %s, ' \
       "$(sv_js "$status")" "$(sv_js "$here")" "$(sv_js "$MAIN")" "$(sv_js "$inst")" "$behind"
-    printf '"next": %s, "manual": %s, "say": %s}\n' \
-      "$(sv_js "$next")" "$(sv_js "$(sv_manual "$mp")")" "$(sv_js "$say")"
+    printf '"moved": %s, "next": %s, "manual": %s, "say": %s}\n' \
+      "$moved" "$(sv_js "$next")" "$(sv_js "$(sv_manual "$mp")")" "$(sv_js "$say")"
     return "$code"
   }
 
   sv_update() {
     local here mp inst0="" inst1="" cat0 cat1 state=unknown status code say="" why="" c lc
+    local moved=false
     here="$(skill_version)"; [ "$here" != "$SKILL_VERSION_UNKNOWN" ] || here=""
     mp="$(sv_marketplace_dir)"
+    ! sv_catalogue_moved "$mp" || moved=true
     sv_fetch_main
     cat0="$(sv_catalogue_version "$mp")"
     REFRESH=not_needed; REFRESH_ERR=""; CLAUDE_RC=""; CLAUDE_SAID=""
@@ -751,19 +924,28 @@ SH
         if [ -n "$MAIN" ] && [ -n "$cat0" ] && c="$(skill_version_cmp "$(skill_version_core "$cat0")" \
              "$(skill_version_core "$MAIN")")" && [ "$c" != -1 ]; then
           REFRESH=not_needed
+          sv_claude_update
+        elif [ -n "$MAIN" ] && [ "$moved" = true ]; then
+          sv_move "$mp"               # THE MOVE: the old repository's catalogue is behind main
         else
           sv_refresh "$mp"
+          sv_claude_update
         fi
-        sv_claude_update
         inst1="$(sv_installed "$mp")"
         # Why, in words staff can be told. claude's own "already at the latest version" is never
         # repeated here (it is in claude_said): it compared against a stale catalogue.
         lc="$(printf '%s' "$CLAUDE_SAID" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
         cat1="$(sv_catalogue_version "$mp")"
-        if [ -z "$CLAUDE_RC" ] && sv_on_windows; then
+        if [ "$REFRESH" = move_failed ] && [ -n "$CLAUDE_CMD" ]; then
+          why=""                       # REFRESH_ERR below says what stopped the move
+        elif [ "$REFRESH" = move_failed ] && [ -z "$CLAUDE_FOUND" ]; then
+          why=""                       # stopped before claude was looked for
+        elif [ -z "$CLAUDE_RC" ] && sv_on_windows; then
           why="The claude command is not on PATH here, nor at $SV_WIN_CLAUDE_PLACES, so claude plugin update could not run (in Claude Code: /plugin -> Installed -> ucdavis-proteomics-core-pipeline -> Update now)."
         elif [ -z "$CLAUDE_RC" ]; then
           why="The claude command is not on PATH here, so claude plugin update could not run (in Claude Code: /plugin -> Installed -> ucdavis-proteomics-core-pipeline -> Update now)."
+        elif [ "$CLAUDE_RC" != 0 ] && [ "$REFRESH" = moved ]; then
+          why="claude plugin install failed (exit $CLAUDE_RC)."
         elif [ "$CLAUDE_RC" != 0 ]; then
           why="claude plugin update failed (exit $CLAUDE_RC)."
         else
@@ -774,6 +956,7 @@ SH
         fi
         case "$REFRESH" in
           failed|no_clone) why="Refreshing the plugin catalogue over HTTPS failed: ${REFRESH_ERR%.}.${why:+ $why}" ;;
+          move_failed) why="Moving the plugin catalogue to the skill's new address failed: ${REFRESH_ERR%.}.${why:+ $why}" ;;
         esac
         if [ -z "$MAIN" ]; then
           status=unverified; code=5
@@ -785,6 +968,8 @@ SH
              && [ "$c" != -1 ]; then
           status=updated; code=0
           say="Updated the skill from ${inst0:-${here:-an older version}} to $inst1, the version GitHub main ships. Type /reload-plugins (or restart Claude Code), then start again: this session still runs ${here:-the old copy}."
+          [ "$REFRESH" != moved ] \
+            || say="$say The plugin catalogue now comes from the skill's own repository (${SKILL_REPO_URL%.git}); later updates come from there."
         else
           status=not_updated; code=1
           say="The update did NOT happen: this computer still has skill $inst1, and GitHub main ships $MAIN.${why:+ $why} To do it by hand, in Git Bash or a terminal: $(sv_manual "$mp"), then /reload-plugins."
@@ -795,8 +980,110 @@ SH
       "$(sv_js "$status")" "$(sv_js "$here")" "$(sv_js "$MAIN")" "$(sv_js "$inst0")" "$(sv_js "$inst1")"
     printf '"catalogue_before": %s, "catalogue": %s, "refresh": %s, "refresh_error": %s, ' \
       "$(sv_js "$cat0")" "$(sv_js "$cat1")" "$(sv_js "$REFRESH")" "$(sv_js "$REFRESH_ERR")"
-    printf '"claude_exit": %s, "claude_said": %s, "manual": %s, "say": %s}\n' \
-      "${CLAUDE_RC:-null}" "$(sv_js "$CLAUDE_SAID")" "$(sv_js "$(sv_manual "$mp")")" "$(sv_js "$say")"
+    printf '"moved": %s, "claude_exit": %s, "claude_said": %s, "manual": %s, "say": %s}\n' \
+      "$moved" "${CLAUDE_RC:-null}" "$(sv_js "$CLAUDE_SAID")" "$(sv_js "$(sv_manual "$mp")")" "$(sv_js "$say")"
+    return "$code"
+  }
+
+  # ---- one call at the start: --session-start ----------------------------------------------
+
+  # A field of a one-line JSON object printed above (sv_emit, sv_check_update): a string's text,
+  # unescaped (sv_js escapes only \ and "), or a bare true / false / number; nothing for null.
+  # The keys are unique and a string never holds an unescaped quote, so `"<key>": ` matches
+  # only the field itself.
+  sv_json_field() {
+    local v
+    v="$(printf '%s\n' "$2" \
+         | LC_ALL=C sed -nE 's/.*"'"$1"'": ("([^"\\]|\\.)*"|[a-z0-9]+).*/\1/p' | head -n1)"
+    case "$v" in
+      null) ;;
+      \"*) v="${v#\"}"; printf '%s\n' "${v%\"}" | LC_ALL=C sed -E 's/\\(.)/\1/g' ;;
+      *)  printf '%s\n' "$v" ;;
+    esac
+  }
+  # A check's JSON object with its exit code added as "exit"; null when it printed none.
+  sv_with_exit() {
+    case "$1" in
+      "{"*"}") printf '%s, "exit": %s}' "${1%?}" "$2" ;;
+      *) printf 'null' ;;
+    esac
+  }
+  # The non-empty arguments, joined by a space.
+  sv_join() {
+    local out="" x
+    for x in "$@"; do [ -z "$x" ] || out="${out:+$out }$x"; done
+    printf '%s\n' "$out"
+  }
+
+  sv_session_start() {
+    local mode="$1" u urc st loc main h="" hrc="" hst="" hl="" hv="" rel="" hb=null jobs jt
+    local hs="" m base="" setup="" relay="" ask_update=false ask="" next="" say="" up=false
+    local code why mv=null
+    sv_auto_move                       # THE MOVE first: the checks below then read the new main
+    if [ -n "$MOVE_STATUS" ]; then
+      mv="$(printf '{"status": %s, "say": %s, "manual": %s}' "$(sv_js "$MOVE_STATUS")" \
+            "$(sv_js "$MOVE_SAY")" "$(sv_js "$(sv_move_manual)")")"
+    fi
+    u="$(sv_check_update)"; urc=$?
+    st="$(sv_json_field status "$u")"; loc="$(sv_json_field local "$u")"
+    main="$(sv_json_field main "$u")"
+    [ "$urc" != 5 ] || say="$(sv_json_field say "$u")"
+    case "$st" in
+      reload_needed)   # installed already: everything else waits for the reload
+        relay="$(sv_json_field say "$u")" ;;
+      behind)
+        relay="Your copy of the skill is older than the Core's current release (you have $loc, the Core is on $main). Updating takes a minute."
+        ask_update=true ;;
+    esac
+
+    if [ "$mode" = hive_remote ] && [ "$st" != reload_needed ]; then
+      h="$(sv_check_hive hive_remote)"; hrc=$?
+      hst="$(sv_json_field status "$h")"; hl="$(sv_json_field local "$h")"
+      hv="$(sv_json_field hive "$h")"; rel="$(sv_json_field release "$h")"
+      hb="$(sv_json_field behind_release "$h")"; hb="${hb:-null}"
+      jobs="$(sv_json_field jobs "$h")"; jt="$(sv_json_field jobs_total "$h")"
+      # its `say`, in the parts sv_check_hive joins: what it found, HIVE's setup.json note, and
+      # the release sentence -- relay_first and ask_update say that one
+      hs="$(sv_json_field say "$h")"
+      m="This computer has skill $hl, but the Core's current release is $rel:"
+      [ "$hb" != true ] || hs="${hs%%"$m"*}"
+      m="HIVE's setup.json (its ready_for) was written by"
+      case "$hs" in *"$m"*) setup="$m${hs#*"$m"}"; hs="${hs%%"$m"*}" ;; esac
+      base="${hs% }"; setup="${setup% }"
+      if [ "$hb" = true ]; then
+        [ -n "$relay" ] || relay="Your copy of the skill is older than the Core's current release (you have $hl, the Core is on $rel). Updating takes a minute."
+        ask_update=true
+      fi
+      case "$hrc" in
+        3) next="$(sv_json_field next "$h")" ;;       # the user's own copy: put it unasked
+        4) base=""                                    # the update brings this computer to it
+           if [ "$ask_update" = false ]; then
+             why=""
+             [ "$hb" != false ] || [ -z "$rel" ] \
+               || why=", a build not released yet (the Core's current release is $rel)"
+             ask="HIVE has a newer skill ($hv, in $HIVE_COPY) than this computer ($hl)$why. Keep HIVE's $hv, or put this computer's $hl back on HIVE ($PUT_SKILL)?"
+           fi ;;
+        5) [ "$hst" != local_unknown ] || [ "$st" != local_unknown ] || base="" ;;   # said once
+        6) base=""
+           case "$jobs" in
+             ''|*[!0-9]*) why="squeue on HIVE answered with an error, so your SLURM jobs that use it could not be counted"
+                          m="later, once squeue answers and none of them are running" ;;
+             *) why="$jobs of your${jt:+ $jt} SLURM job(s) on HIVE use it, and their end-of-job steps would run the new scripts"
+                m="after those jobs finish" ;;
+           esac
+           ask="HIVE's copy of the skill in $HIVE_COPY (${hv:-incomplete}) should be replaced with this computer's $hl, but $why. Replace it now ($PUT_SKILL), or $m?" ;;
+      esac
+    fi
+
+    say="$(sv_join "$MOVE_SAY" "$say" "$base" "$setup")"
+    if [ "$urc" = 0 ] && [ "$hb" != true ]; then up=true; fi
+    if [ "$ask_update" = true ] || [ -n "$ask" ] || [ "$st" = reload_needed ]; then code=2
+    elif [ -n "$next" ]; then code=3
+    else code=0; fi
+    printf '{"up_to_date": %s, "relay_first": %s, "ask_update": %s, "ask": %s, "next": %s, ' \
+      "$up" "$(sv_js "$relay")" "$ask_update" "$(sv_js "$ask")" "$(sv_js "$next")"
+    printf '"say": %s, "move": %s, "update": %s, "hive": %s}\n' \
+      "$(sv_js "$say")" "$mv" "$(sv_with_exit "$u" "$urc")" "$(sv_with_exit "$h" "$hrc")"
     return "$code"
   }
 
@@ -811,6 +1098,13 @@ SH
                        exit $? ;;
     --check-update)    [ $# -eq 1 ] || sv_die "usage: --check-update"
                        sv_check_update; exit $? ;;
+    --session-start)   case "$*" in
+                         "--session-start")                  sv_session_start "" ;;
+                         "--session-start --mode hive_remote") sv_session_start hive_remote ;;
+                         "--session-start --mode local")     sv_session_start local ;;
+                         *) sv_die "usage: --session-start [--mode hive_remote|local]" ;;
+                       esac
+                       exit $? ;;
     --update)          [ $# -eq 1 ] || sv_die "usage: --update"
                        sv_update; exit $? ;;
     --publish-release) case "${2:-}" in
@@ -818,7 +1112,8 @@ SH
                          --allow-older) [ $# -eq 2 ] || sv_die "usage"; sv_publish 1 ;;
                          *) sv_die "unknown argument: $2" ;;
                        esac ;;
-    -h|--help)         sed -n '3,78p' "$0" ;;
+    # the header: line 3 up to the closing rule, however long it grows
+    -h|--help)         sed -n '3,/^# =====/p' "$0" | sed '$d' ;;
     *)                 sv_die "unknown argument: $1 (see --help)" ;;
   esac
 fi

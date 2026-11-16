@@ -2,7 +2,7 @@
 """
 resolve_defaults.py -- pick the search defaults for a run FROM THE DATA TYPE.
 
-Replaces the old fetch_workflows.py registry. Same output contract
+Replaces the old fetch_workflows.py registry (removed in 2.15). Same output contract
 (workflow.manifest.json + a JSON summary on stdout), so run_search.py and
 provenance.py consume it unchanged -- but nothing is fetched over the network
 and there is no menu.
@@ -29,6 +29,11 @@ search. Site-specific overrides are explicit flags, not a remote lookup.
 
   python3 resolve_defaults.py --acquisition DIA --instrument "timsTOF HT" \
       --engine diann --dest ./wf [--env env.json] [--fasta db.fasta] [--threads 32]
+      [--tools tools.json] [--ids-only] [--enzyme none]
+  The engine is engine_choice.choose()'s (the one route table): timsTOF DDA-PASEF, and Orbitrap
+  DDA with --enzyme none (or pepsin; Ruling 120), -> FragPipe where it runs and is licensed, else
+  Sage, recorded in engine.selection (client-safe) and the staff-only
+  workflow.manifest.json.staff.json (the reason).
   Orbitrap: add --ms1-resolution 120000 --ms2-resolution 15000 [--resolution-source detected]
   (--ms1-res/--ms2-res are the same flags). Without them a DIA-NN or Radiant search of a
   non-Astral Orbitrap sets needs_confirmation + ask_user (exit 0). MS2 read in the ion trap
@@ -45,8 +50,16 @@ from estimate_params import (classify_instrument, MEASURE_CLASSES,  # noqa: E402
                              add_resolution_args, resolution_args_error, resolution_source,
                              resolution_record, resolution_question, SAGE_ITMS_FRAGMENT_DA,
                              override_setter, override_source, override_record,
-                             staff_record_name, record_override_setter)
+                             staff_record_name, record_override_setter,
+                             unit_resolution_amounts_refused)
 import staff  # noqa: E402  who may be called Core staff (role_for)
+# the ONE route table, the DE method by engine + acquisition, and the engine choice with its
+# FragPipe checks (2.15): resolve_defaults only reads them
+from engine_choice import (ROUTES, routes_for, de_method, choose, Refused, fragpipe_tools,  # noqa: E402
+                           java_record, TOOLS_ENV)
+# FragPipe's ion-trap MS2 setting is defined once, in make_presets (which writes the values and
+# records them); make_presets does not import this module, so the import is not circular
+from make_presets import ION_TRAP_SOURCE  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MANIFEST = "workflow.manifest.json"
@@ -84,26 +97,12 @@ SKYLINE_PIN = {
            "pwiz-skyline-i-agree-to-the-vendor-licenses_skyline_26.1.0.266-578b175.sif",
     "sif_sha256": "b5f135587e9b589dd2d4686ff520573ea237b84f53b1343d5b76213c16f302bf",
     # ProteoWizard msconvert's own version inside this image (run_search.py converts a timsTOF .d
-    # with it): read on HIVE 2026-11-01 (job 25387830) from the sif above -- `wine msconvert
+    # with it): read on HIVE 2026-11-01 (a test job) from the sif above -- `wine msconvert
     # --help` prints "ProteoWizard release: 3.0.26266 (578b175)" near its end (lines 613-614, so
     # `head` does not find it), and the mzML it writes records pwiz_Reader_Bruker 3.0.26266. Not
     # Skyline's 26.1.0.266, and not 3.0.26058 (the Windows build whose settings it runs with).
     "msconvert_version": "3.0.26266",
 }
-
-# Which engines are sensible for a data type, best first. Instrument class comes
-# from estimate_params.classify_instrument, so the ppm table and this table can
-# never disagree about what an instrument is.
-ROUTES = {
-    ("DIA", "timstof"): ["diann", "fragpipe"],
-    ("DIA", "orbitrap"): ["diann", "fragpipe", "radiant"],
-    ("DIA", "other"): ["diann"],
-    ("DDA", "timstof"): ["sage"],
-    ("DDA", "orbitrap"): ["sage"],
-    ("DDA", "other"): ["sage"],
-}
-
-DE_METHOD = {"diann": "dpc", "fragpipe": "dpc", "radiant": "dpc", "sage": "maxlfq"}
 
 # What each engine does with an Orbitrap mass-accuracy level that has no documented DIA-NN value
 # (ms1_ppm/ms2_ppm None: resolution unknown, or outside the README's 30k-240k table). Appended to
@@ -128,7 +127,9 @@ ION_TRAP_MS2_ROUTE = {
              "value), so mass accuracy is left to DIA-NN calibration",
     "radiant": "Radiant: nothing to derive an ion-trap MS2 width from, so its vendor 20 ppm MS2 "
                "extraction width (an Orbitrap-scale value) is kept",
-    "fragpipe": "FragPipe: its vendor Thermo preset tolerances are used",
+    # Ruling 90: FragPipe's own ion-trap MS2 setting (its TMT10-MS3/TMT16-MS3 workflows), not the
+    # 20 ppm of its label-free presets; make_presets.py writes the values and records them.
+    "fragpipe": f"FragPipe: {ION_TRAP_SOURCE}",
     "sage": f"Sage: fragment tolerance +/-{SAGE_ITMS_FRAGMENT_DA} Da, Sage's documented low-res "
             "MS/MS setting (estimate_params.py --engine sage --ms2-analyzer ITMS)",
 }
@@ -157,6 +158,25 @@ def load_env(path):
         return None
 
 
+def load_fragpipe_tools(tools_path, env, probe=True):
+    """tools.json's fragpipe_tools, or -- with no tools.json, or one from before 2.15 -- the same
+    check made here (engine_choice.fragpipe_tools), with the env's Java when it has one; None
+    without a tools.json record when `probe` is False."""
+    if tools_path:
+        try:
+            with open(tools_path) as fh:
+                ft = json.load(fh).get("fragpipe_tools")
+            if isinstance(ft, dict):
+                return ft
+        except (OSError, ValueError, AttributeError) as e:
+            sys.stderr.write(f"[resolve_defaults] could not read --tools {tools_path}: {e}\n")
+    if not probe:
+        return None
+    java = java_record(env.get("has_java")) if env and "has_java" in env else None
+    return fragpipe_tools(None, os.environ.get(TOOLS_ENV) or None,
+                          ENGINE_VERSIONS["fragpipe"], java=java)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -182,6 +202,23 @@ def main():
     ap.add_argument("--threads", type=int, default=None)
     ap.add_argument("--env", default=None, help="detect_env.sh JSON, to flag engines that "
                                                 "cannot run on this machine")
+    ap.add_argument("--tools", default=None,
+                    help="acquire_tools.sh's tools.json: its fragpipe_tools says whether FragPipe's "
+                         "licence-gated tools are here. Without it (or with a tools.json from "
+                         "before 2.15) the same check is made here (engine_choice.fragpipe_tools)")
+    ap.add_argument("--replay-of", default=None,
+                    help="a bundle's copy of the ORIGINAL workflow.manifest.json (reproduce.sh "
+                         "step 2): its engine.selection is kept, with `replayed` added")
+    ap.add_argument("--ids-only", action="store_true",
+                    help="identifications only, no differential expression: the engine is the "
+                         "same (FragPipe's Basic-Search workflow, or Sage without LFQ)")
+    ap.add_argument("--enzyme", default=None,
+                    help="the digest, in fetch_fasta's vocabulary (none = non-specific: "
+                         "FragPipe's Nonspecific workflow); passed to the FragPipe DDA preset")
+    ap.add_argument("--semi-specific", action="store_true",
+                    help="search the digest semi-specifically (one end of each peptide follows the "
+                         "--enzyme rule, else trypsin); passed to the Sage / FragPipe DDA preset. "
+                         "See make_presets.py --help")
     ap.add_argument("--dest", default="./wf")
     args = ap.parse_args()
 
@@ -193,36 +230,68 @@ def main():
     res_src = resolution_source(args.resolution_source, r1, r2, analyzer)
     cls, ms1, ms2, label, src = classify_instrument(args.instrument, r1, r2, res_src, analyzer)
     fam = family(cls)
-    routes = ROUTES[(acq, fam)]
+    # the data type's row, the digest included: a non-specific Orbitrap DDA search defaults to
+    # FragPipe (engine_choice.routes_for, Ruling 120)
+    try:
+        routes = routes_for(acq, fam, args.enzyme)
+    except Refused as e:
+        sys.exit(f"resolve_defaults: --enzyme {args.enzyme}: {e}")
 
     engine = (args.engine or "").strip().lower()
     if engine and engine not in ENGINE_VERSIONS:
         sys.exit(f"resolve_defaults: unknown engine '{engine}'. "
                  f"Known: {', '.join(sorted(ENGINE_VERSIONS))}")
+    # A unit-resolution DDA search reports no amounts on ANY engine: a fact about the data, so it
+    # is refused before the engine is chosen, nothing written (Ruling 107.3; the one rule is
+    # estimate_params.unit_resolution_amounts_refused)
+    no_amounts = unit_resolution_amounts_refused(args.instrument, acq, args.ids_only)
+    if no_amounts:
+        sys.exit(f"resolve_defaults: {no_amounts}. Nothing was written.")
     notes = []
     if engine and engine not in routes:
         # Honour it, but never silently: the user asked for something this data
         # type does not normally use.
         notes.append(f"{engine} is not a default route for {acq} on {label} "
                      f"(defaults: {', '.join(routes)}) -- running it because it was requested")
-    if not engine:
-        engine = routes[0]
 
-    # Platform gate. Verified facts live in detect_env.sh; we only read them.
+    # The choice (engine_choice.choose): a requested engine is honoured, and refused only when it
+    # cannot run here; the default timsTOF DDA route falls back from FragPipe to Sage, recorded.
+    # Verified platform facts live in detect_env.sh; we only read them.
     env = load_env(args.env)
-    availability = None
+    fp_tools = None
+    if (engine or routes[0]) == "fragpipe":
+        # a REQUESTED FragPipe is refused only on tools.json's word (a workflow may be prepared
+        # here for a search elsewhere); the DEFAULT route also looks here when there is none
+        fp_tools = load_fragpipe_tools(args.tools, env, probe=not engine)
+    try:
+        selection, staff_entry = choose(acq, fam, engine or None, env, fp_tools,
+                                        ids_only=args.ids_only, enzyme=args.enzyme, cls=cls)
+    except Refused as e:
+        sys.exit(f"resolve_defaults: {e}")
+    engine = selection["engine"]
+    availability = platform_note = None
     if env and isinstance(env.get("engines"), dict):
         info = env["engines"].get(engine) or {}
-        availability = info
-        if info and not info.get("available", True):
-            alt = [e for e in routes
-                   if (env["engines"].get(e) or {}).get("available")]
-            sys.exit(f"resolve_defaults: {engine} cannot run on this machine -- "
-                     f"{info.get('note', 'unavailable')}"
-                     + (f"\n  Available here for this data type: {', '.join(alt)}"
-                        if alt else "\n  No engine for this data type runs here; use HIVE."))
-        if info.get("note"):
-            notes.append(f"{engine}: {info['note']}")
+        # what the machine offers goes in the manifest; detect_env.sh's note about it (its
+        # wording names licences, jars, the tools-folder variable) goes to the staff-only record
+        # beside it: the manifest is in the bundle a client receives (review M1, Ruling 107.1)
+        availability = {k: v for k, v in info.items() if k != "note"}
+        platform_note = info.get("note") or None
+    if args.ids_only and (acq != "DDA" or engine not in ("fragpipe", "sage")):
+        sys.exit(f"resolve_defaults: --ids-only applies to DDA searches only (Sage or FragPipe); "
+                 f"a {acq} search with {engine} always quantifies. For a DIA analysis with no "
+                 f"differential expression, leave --ids-only out: the search's own report is the "
+                 f"result (references/no-de-route.md)")
+    # A bundle's reproduce.sh replays step 4 with --engine <what ran> and --replay-of its copy of
+    # the original manifest: the original choice is kept (a Sage FALLBACK is never relabelled
+    # "requested"), and the replay says so (Ruling 103)
+    replay_of = load_env(args.replay_of) if args.replay_of else None
+    orig_sel = ((replay_of or {}).get("engine") or {}).get("selection")
+    if isinstance(orig_sel, dict) and orig_sel.get("engine") == engine:
+        # its staff record stayed with the original session: this one names one only when this
+        # replay writes its own (below), never a file that is not here (review L6)
+        selection = dict(orig_sel, replayed=f"replayed with --engine {engine}",
+                         staff_record=None)
 
     dest = os.path.abspath(args.dest)
     os.makedirs(dest, exist_ok=True)
@@ -241,6 +310,15 @@ def main():
                           ("--fasta", args.fasta), ("--threads", args.threads)):
             if val is not None:
                 cmd += [flag, str(val)]
+        # the DDA digest flags (make_presets: Basic-Search for --ids-only, Nonspecific for
+        # --enzyme none)
+        if acq == "DDA":
+            if args.ids_only:
+                cmd.append("--ids-only")
+            if args.enzyme:
+                cmd += ["--enzyme", args.enzyme]
+            if args.semi_specific:
+                cmd.append("--semi-specific")
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode != 0:
             sys.exit(f"resolve_defaults: preset generation failed:\n{r.stderr.strip()}")
@@ -274,8 +352,30 @@ def main():
                if cls in MEASURE_CLASSES and (eff_ms1 is None or eff_ms2 is None) else src)
     ppm_source = ("; ".join(sop) if len(sop) == 2 else derived if not sop else
                   f"{sop[0]}; the instrument's own values: {derived}")
+    # FragPipe searches what its WORKFLOW says, not DIA-NN's instrument table: the manifest records
+    # the tolerances written there (read back, the one reader), in ppm where the workflow's unit is
+    # ppm, else None with the unit in ppm_source -- never the README's value beside a search that
+    # ran another (X8 F5; the preset's own record of why is tolerances.source)
+    if engine == "fragpipe" and params_file and preset_prov:
+        import fragpipe_params as fpp
+        wf_props, _ = fpp.read_workflow(params_file)
+        kv = {k[len("msfragger."):]: v for k, v in wf_props.items() if k.startswith("msfragger.")}
+        said = []
+        for which, label_ in (("precursor", "MS1"), ("fragment", "MS2")):
+            t = fpp.tolerance(kv, which)
+            val = t["hi"] if t and t["symmetric"] and t["unit"] == "ppm" else None
+            if which == "precursor":
+                eff_ms1 = val
+            else:
+                eff_ms2 = val
+            said.append(f"{label_} " + (f"+/-{t['hi']:g} {t['unit']}" if t and t["symmetric"] else
+                                        "as the workflow states" if t else "not read"))
+        tol_rec = preset_prov.get("tolerances")
+        tol_why = tol_rec.get("source") if isinstance(tol_rec, dict) else tol_rec
+        ppm_source = (f"as written in the FragPipe workflow ({', '.join(said)}); "
+                      f"{tol_why or 'FragPipe preset'}")
 
-    # gabrig 2026-09-23: a Fusion Lumos with no resolution exited 0 with "resolution unknown" in
+    # A Core member, 2026-09-23: a Fusion Lumos with no resolution exited 0 with "resolution unknown" in
     # the manifest and nothing asked the user. Still exit 0 -- callers rely on it -- but say so
     # on stderr and at the top of the manifest and stdout, where step 4's confirmation reads.
     ask = resolution_question(cls, engine, r1, r2)
@@ -298,10 +398,13 @@ def main():
         "ask_user": ask,
         "organism": None,
         "organism_taxid": int(args.organism_taxid) if args.organism_taxid else None,
-        "engine": {"name": engine, "version": ENGINE_VERSIONS[engine]},
+        "engine": {"name": engine, "version": ENGINE_VERSIONS[engine], "selection": selection},
         "fasta": {"path": os.path.abspath(args.fasta) if args.fasta else None,
                   "add_contaminants": True},
-        "de": {"method": DE_METHOD[engine], "q_cutoff": 0.01, "logfc": 1.0, "adjp": 0.05},
+        # an identifications-only search has no differential expression: no DE block to carry
+        # into the delivered run_manifest.json (X8 F5)
+        "de": (None if args.ids_only else
+               {"method": de_method(engine, acq), "q_cutoff": 0.01, "logfc": 1.0, "adjp": 0.05}),
         "search": {
             "estimate_params": engine not in PRESET_ENGINES,
             "params_file": params_file,
@@ -324,11 +427,25 @@ def main():
         "registry": {"source": "local skill defaults",
                      "defaults_version": DEFAULTS_VERSION,
                      "note": "no remote registry; parameters ship with the skill"},
-        "platform": availability,
+        "platform": (dict(availability, note_in=staff_record_name(
+            os.path.join(dest, MANIFEST))) if platform_note else availability),
         "alternatives": [e for e in routes if e != engine],
         "notes": notes,
     }
     mpath = os.path.join(dest, MANIFEST)
+    # detect_env.sh's note on the engine that runs: in the selection's entry when there is one,
+    # else an entry of its own (one entry per run of this step)
+    note = {"platform_note": platform_note} if platform_note else {}
+    if staff_entry:
+        # the reason, `why` and the checks name paths, versions and the licence: staff-only
+        staff.append(mpath + staff.STAFF_SUFFIX,
+                     dict(staff_entry, **note, account=staff.login(), at=staff.now()))
+        selection["staff_record"] = staff_record_name(mpath)
+    elif platform_note:
+        staff.append(mpath + staff.STAFF_SUFFIX,
+                     {"event": "platform_note", "engine": engine, **note,
+                      "source": "detect_env.sh (--env)", "account": staff.login(),
+                      "at": staff.now()})
     with open(mpath, "w") as fh:
         json.dump(manifest, fh, indent=2)
     if given:
@@ -336,7 +453,7 @@ def main():
 
     print(json.dumps({
         "id": manifest["id"], "dir": dest, "manifest": mpath,
-        "engine": manifest["engine"], "de": manifest["de"],
+        "engine": manifest["engine"], "de": manifest["de"], "selection": selection,
         "params_file": params_file,
         "estimate_params": manifest["search"]["estimate_params"],
         "ms1_ppm": manifest["search"]["ms1_ppm"],

@@ -165,6 +165,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 import acq_time  # noqa: E402  -- when a run was acquired, and its time zone: one reader
 import staff  # noqa: E402  -- who may sign a Core decision: the one check
+from safe_write import sha256_file as _sha256  # noqa: E402  the ONE chunked sha256
 
 SCHEMA = "qc_bracket/1"
 # The board reads these records: a field is never renamed or removed without bumping this.
@@ -1080,15 +1081,6 @@ def staff_markdown(rec, record_path=None):
         + f" QC runs from {rec['stan']['url']} (checked {rec['checked_at']}); the full record is "
           f"`{RECORD_NAME}`."]
     return "\n".join(L)
-
-
-def _sha256(path):
-    import hashlib
-    h = hashlib.sha256()
-    with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def _read_acks(path):

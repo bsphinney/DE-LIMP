@@ -35,7 +35,7 @@ import node_fault  # noqa: E402
 from job_env import job_env  # noqa: E402
 
 ENOTCONN_LOG = ("Step 3/5 empirical library assembly\n"
-                "/var/spool/slurm/job24176598/slurm_script: line 16: /quobyte/proteomics-grp/"
+                "/var/spool/slurm/job9900007/slurm_script: line 16: /quobyte/proteomics-grp/"
                 "dia-nn/build_270/diann-2.7.0/diann-linux: Transport endpoint is not connected\n"
                 "FAILED: DIA-NN exited 0 but did not write the empirical spectral library\n")
 

@@ -8,6 +8,28 @@ authorization for this — see golden rule #1's compute confirmation is for *sta
 the search, not for recovering a run that's already approved and in flight). Surface
 what you did afterwards; don't ask permission to unstick a job.
 
+<!-- contents: tests/test_skill_structure.py --toc -->
+**Contents** (section: line)
+- 33: Watch the WHOLE chain, not its last job
+- 55: Two failure modes it catches
+- 67: Loop pattern
+- 84: What a poll reads, and says
+- 90: Error classes → fixes (what `watch_run.sh` detects)
+- 122: Warnings that are not failures: proteins the contaminant list took
+- 132: Warnings that are not failures: a DIA-NN --dda search on its first pass
+- 143: Warnings that are not failures: Sage LFQ
+- 160: Warnings that are not failures: protein inference in step 5
+- 175: SLURM specifics (HIVE)
+- 193: Node faults: the node check every chain job runs first
+- 207: Keeping a search off nodes known to be bad (`--exclude`)
+- 232: Auto-recovery playbook (apply autonomously; log every action to `commands.log`)
+- 255: Don't
+- 273: Progress reporting (`--out`, `--poll`)
+- 308: 0c. Is this a resume? (step 0c)
+- 344: A closed laptop: `RECOVERY.md` (step 0c)
+- 353: 7b. The watch loop as SKILL.md runs it (step 7b)
+<!-- /contents -->
+
 ## Watch the WHOLE chain, not its last job
 
 For any multi-step chain (`diann_parallel.py`, `radiant_parallel.py`), watch with:
@@ -16,7 +38,10 @@ For any multi-step chain (`diann_parallel.py`, `radiant_parallel.py`), watch wit
 bash scripts/watch_run.sh --all <search out dir> --hive
 ```
 
-It reads `jobs.txt` (written by `submit.sh`) and reports every job's state at once.
+It reads `jobs.txt` (written by `submit.sh`) and reports every job's state at once. It takes the
+first all-digit word of each line as the job id, so the Skyline check's `<label><TAB><id>` lines
+(`skyline_work/jobs.txt`) work too, and it reads a failed job's log from the folder or its `logs/`
+(where the Skyline jobs write `sky_<step>_<id>.log`).
 **Do not** watch only the final job. If an earlier step dies, the final job sits
 `PENDING` on a dependency that can never be satisfied — which is indistinguishable
 from "still queued" if that is the only job you are looking at. This actually
@@ -28,8 +53,11 @@ pointed at step 5 alone reported "pending" for hours. `--all` returns
 until the run finishes, and on `failed` **or** `stalled` apply the fix and resubmit.
 
 ## Two failure modes it catches
-1. **Hard failure** — `sacct` reports FAILED / TIMEOUT / OUT_OF_MEMORY / NODE_FAIL /
-   CANCELLED. Matched against known error signatures → a fix.
+
+1. **Hard failure** — `sacct` reports a state that ended the job without finishing it
+   (FAILED / TIMEOUT / OUT_OF_MEMORY / NODE_FAIL / CANCELLED / PREEMPTED / DEADLINE /
+   BOOT_FAIL / REVOKED / SPECIAL_EXIT: `scripts/slurm_states.py`, the one list chain mode and
+   single-job mode both read). Matched against known error signatures → a fix.
 2. **Stall** — the job stays **RUNNING** but its log stops advancing (a hung file, e.g. a
    pathological DIA-NN run whose RT-window/search phase never returns). `sacct`/`squeue`
    will happily show RUNNING forever. `watch_run.sh --log <log> [--stall-min N]` flags
@@ -37,10 +65,13 @@ until the run finishes, and on `failed` **or** `stalled` apply the fix and resub
    `stalled: true`. **This is the NA41-class failure the first nail cohort hit.**
 
 ## Loop pattern
+
 ```
 # start the search (background locally, or sbatch on HIVE), capture the log path / job id
+n=0
 while true; do
-  status=$(bash scripts/watch_run.sh --slurm <jobid> --log <log> --hive)   # or --log <log> locally
+  n=$((n+1))      # --poll: one more each poll; --out: real progress
+  status=$(bash scripts/watch_run.sh --slurm <jobid> --log <log> --out <out> --poll $n --hive)   # or --log <log> --out <out> --poll $n locally
   echo "$status" | grep -qE '"done": ?true' && break      # no python needed (Windows)
   sleep 300       # SLURM: 5 min or more (each poll is several logins + sacct on the login
                   # node); a local run: 60. For long jobs, schedule a wake-up instead
@@ -50,16 +81,26 @@ done
 The agent itself is the watcher — `watch_run.sh` is its eyes. Surface progress and
 any auto-fix you applied to the user.
 
+## What a poll reads, and says
+
+`watch_run.sh` reads the **Slurm state** (`sacct`; `squeue` only for PENDING/RUNNING), never the log alone. `--out <search folder>` is enough: with no `--slurm`/`--all` it takes the job ids from `jobs.txt` (the whole chain) or from the `<step>_<jobid>.log` names, so a FAILED job can no longer pass for a running one. A job that ended is reported as it ended (`FAILED`, `OUT_OF_MEMORY`, `TIMEOUT`, `CANCELLED`, `NODE_FAIL`) with `exit_code`, the log's tail (`log_tail`, from `--out` when there is no `--log`) and an `error_class`; its `progress.summary` never says "running". A normalisation check that stopped to ask is **not** one of these: its job exits 0 (`normalization_check.py run --job-exit0`) and `<S>/output/norm_check/NEEDS_DECISION.json` makes the poll say `needs_decision: true` (`--session <S>`, or a `--log` in `<S>/logs`) -- a question for the user, not a failure, never resubmitted. Only for the job that wrote the marker (its `job_id`): any other finished job of that session keeps its own summary and carries a warning that a decision is owed; a marker that is there but cannot be read is a warning too, never "no decision owed".
+
+`search_provenance.json` `queue` is the queue that was **requested**; `queue_actual` (written by the job-end hook, `queue_actual.py`, from `sacct`) is where the jobs **ran** -- its `moved` is true when a pending job was moved (e.g. to `publicgrp`/`low`). Report the second in the Methods and to the user.
+
 ## Error classes → fixes (what `watch_run.sh` detects)
 | error_class | signal | fix |
 |---|---|---|
 | `node_fault` | a FAILED job whose node could not reach the storage: exit **75** (the job's node check: `NODE_FAULT: node=… check=… path=… detail=…`), SLURM `NODE_FAIL`, a storage I/O error in its log (`Transport endpoint is not connected`, `Stale file handle`, `Input/output error`), or a black-hole node: `FAILED`, ExitCode `0:53` (signal 53), Elapsed seconds and **no log at all** (a signal-53 job that wrote a log ran, and is not one; when the log cannot be read — no `--log` and no `--out`, a wrong path, an unreadable file, a failed `--hive` read — the watcher cannot tell, does not call it one, and its `fix` says the log could not be read) — never over OOM/TIMEOUT/CANCELLED. Checked first; the JSON carries `node_fault` (node, evidence, `say`) | **a node problem, not DIA-NN and not the data — say so to the user.** Run `node_fault.py retry --out <search out dir> --job <id>` on HIVE (from a laptop: `bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/node_fault.py retry --out … --job …'`): it resubmits the failed step — an array's failed tasks only, once the array has finished — and every step waiting on it with `--exclude=<node>` (every node that failed this search stays excluded), scancels the dependants left `DependencyNeverSatisfied`, rewrites `jobs.txt` and the session's `.recovery.json`, and records it in `<out>/node_faults.json` and `search_provenance.json` `node_faults`. Each failed task is judged on its own log and sacct row. At most **2** retries per step; it refuses (exit 3) a third, failures spread over more than 3 nodes (the storage, not a node), a step with ANY failed task that is not a node fault — an `OUT_OF_MEMORY` or `TIMEOUT` task, or one with no node-fault evidence: nothing is resubmitted, and `not_node_faults` lists each with its fix (`--force` overrides) — and a chain it cannot map; then tell the user and check the HIVE status page. `complete` is true only when every failed task and every step after it was resubmitted |
+| `sage_stack_overflow` | a Sage job that died with `fatal runtime error: stack overflow` (exit **134**), or whose `<out>/sage_failure.json` says `sage_stack_overflow` | an **intermittent** Rust crash, not memory and not the data: **re-run the same job once**, unchanged (jobs from 2.15 export `RUST_MIN_STACK`; regenerate an older one with `run_search.py --sbatch`). Report it if it crashes again with the stack raised |
 | `out_of_memory` | oom-kill, `std::bad_alloc`, OUT_OF_MEMORY | more memory, **re-generated, never by editing the sbatch by hand** (the job would run at the new size while `search_provenance.json` still records the old one): a single-job search `run_search.py --mem GB` (e.g. 64→128; recorded as `job_mem`); the 5-step chain `--mem-per-file` / `--assembly-mem`. DIA-NN: fewer threads. Resubmit the job it wrote |
+| `preempted` | state PREEMPTED (not requeued: a requeued job reads PENDING/RUNNING/REQUEUED) | not the search, not the data: a higher-priority job took the node on the preemptible queue. Resubmit the step on the high queue (not `--preemptible`), and the chain steps waiting on it |
+| `slurm_ended` | state DEADLINE / REVOKED / SPECIAL_EXIT (BOOT_FAIL is a `node_fault`) | Slurm ended it before it finished; check `sacct -j <id> -X`, then resubmit the step |
 | `timeout` | TIMEOUT / "DUE TO TIME LIMIT" | more time, re-generated the same way, never by hand: a single-job search `run_search.py --time HOURS` (recorded as `job_time`); the chain `--time-per-file`; or split the run. Resubmit the job it wrote |
+| `cancelled` | state CANCELLED, not for time or memory (those are `timeout` / `out_of_memory`): someone ran `scancel`, or Slurm cancelled it because a job it waited on failed. Checked before the log signatures below, which a cancelled job's log must not set (a cancelled FragPipe job once read `empty_results` from its own counts) | not a fault the search's log shows. Find out which (`sacct -j <id> -X -o JobID,State,Reason`; "CANCELLED by <uid>" names who) before resubmitting; in a chain, fix the step that failed first |
 | `diann_no_dotnet` | `dotnet: not found` | wrong DIA-NN container (no .NET → `.raw` silently skipped). Use the HIVE **native** build `build_<v>/diann-<v>/diann-linux` or a .NET image |
 | `diann_zero_ids` | `Number of IDs at 0.01 FDR: 0` | Completed but identified nothing — a **silent null result**, not a crash. **Preserve `report.log.txt` before re-running**; it is the only evidence. Check: library generated precursors → mzML really are DIA with isolation windows (`detect_acquisition.py`) → FASTA matches organism → mass accuracy. DIA-NN's warning about generating the predicted library in a separate step is **benign** (per its author) — don't chase it. |
 | `spark_heap` | `java.lang.OutOfMemoryError: Java heap space` / `Answer from Java side is empty` | JVM heap OOM in Fulcrum/Spark. **Raising `--mem` does not help** — Spark sizes its driver heap independently of the SLURM allocation. Set `spark.driver.memory` via the workflow TOML's `spark_config`. |
-| `empty_results` | 0 proteins / no fragment ions | FASTA/organism mismatch, mass-accuracy, or wrong acquisition type — check inputs |
+| `empty_results` | a job that FAILED and whose log says `0 proteins` (as a count, not the end of `=1340 proteins`) / `No fragment ions` / `No precursors` / `no spectra`; never a completed job, never the bare word "empty" | FASTA/organism mismatch, mass-accuracy, or wrong acquisition type — check inputs |
 | `gpu` | CUDA / no kernel image | AlphaDIA needs a GPU: submit to a GPU node (`--gres=gpu:1`) or reduce batch size |
 | `sage_no_mzml` | `FAILED: no mzML from …` / msconvert not found / needs mzML | the job's own conversion failed (it converts `.raw` with ThermoRawFileParser and `.d` with msconvert before Sage/Radiant). Read the converter's error above the FAILED line: for ThermoRawFileParser usually .NET (`bash scripts/ensure_dotnet8.sh`); for `.raw` through msconvert, a Linux build without vendor readers (bioconda's). Fix it, regenerate with `run_search.py --sbatch`, resubmit |
 | `disk` | Disk quota / No space left | free space or point `--out` elsewhere; resubmit |
@@ -68,7 +109,7 @@ any auto-fix you applied to the user.
 | `held` | job PENDING with reason **`JobHeldUser`** / **`JobHeldAdmin`** | it will **never start by itself**, and it is **not** failed — do **not** resubmit (that duplicates it). `JobHeldUser`: `scontrol release <jobid>` once whatever it was held for is fixed; `JobHeldAdmin`: ask the HIVE admins. (A PENDING job otherwise reports "queued, not started" only when nothing has run yet; a chain step waiting on earlier steps keeps its file count.) |
 | `dependency_failed` | job PENDING with reason **`DependencyNeverSatisfied`** (an upstream step failed) | the chain is dead but **sits PENDING forever** (never leaves the queue). `sacct -j <arrayjob>` to find the failed step, fix it, resubmit downstream steps reusing completed outputs. If it was **step 1b**, `scancel` the pending steps 2–5 (ids in `<out>/jobs.txt`), then resubmit `step1b_window.sbatch` and steps 2–5 chained `afterok` on its new id (reusing `step1.predicted.speclib`), or re-run `submit.sh`: steps 2–5 refuse to start without the `window.txt` / `massacc.txt` step 1b writes (without them DIA-NN would optimise per file). Since 2.9 step 1b does **not** fail when only the probe's own machinery failed (its log unreadable — e.g. an NFS `Stale file handle` — a crash, or a time limit): it retries a crash or an unreadable log once and then **falls back** (`window.txt` = `auto`, `<out>/probe_fallback.json`), and the chain runs on — `watch_run.sh --all` then reports `probe_fallback: true` with a CAUTION: say so to the user, with its `reason`. It still fails, as before, on everything else — the job log names which: a **refused** mass accuracy (implausible: check the FASTA, species and calibration first), no .NET / DIA-NN cannot start, the probe's arguments, runs DIA-NN finished without logging a radius, a signal |
 | `unknown_failure` | job FAILED with no known signature | read the full log; diagnose; fix; resubmit (and add the new signature here) |
-| `watcher_query_failed` | the watcher could not ask HIVE (unreachable, `HIVE_USER`/`HIVE_KEY` unset, or — with no local python3 — the skill not on HIVE: exit 3), or for `--slurm <id>` sacct and squeue both answered nothing (`state: query_failed`: SLURM tools not on PATH, or a wrong or aged-out id). Always `failed: false` | **not a job failure: never resubmit on it.** Fix the connection (or `bash scripts/hive_exec.sh --put-skill`), or check the id with `hive_exec.sh 'sacct -j <id> -X'`, then poll again |
+| `watcher_query_failed` | the watcher could not ask HIVE (unreachable, `HIVE_USER`/`HIVE_KEY` unset, or — with no local python3 — the skill not on HIVE: exit 3), or for `--slurm <id>` sacct and squeue both answered nothing (`state: query_failed`: SLURM tools not on PATH, or a wrong or aged-out id). A chain (`--all` / `--out` with `jobs.txt`) says the same for the ids neither answers for (`unknown_jobs`; `state: query_failed` when it is every id), and is never `done` while one is unknown. Always `failed: false` | **not a job failure: never resubmit on it.** Fix the connection (or `bash scripts/hive_exec.sh --put-skill`), or check the id with `hive_exec.sh 'sacct -j <id> -X'`, then poll again |
 | `watcher_no_python` | no usable `python3` on this computer and no `--hive` | **not a job failure** (`failed: false`). Install Python 3, or for a search on HIVE add `--hive` |
 
 **No python3 on this computer** (Windows, where `python3` is often the Microsoft Store stub
@@ -102,7 +143,7 @@ carry the same words. A crash with no first pass still fails the job, as before.
 ## Warnings that are not failures: Sage LFQ
 
 A Sage search can finish cleanly and still have quantities it could not measure. With
-`--out <search out dir>` the watcher reads `sage_lfq_check.json` (written by the Sage job,
+`--out <search out dir>` the watcher reads `quantification_check.json` (2.14.x: `sage_lfq_check.json`; written by the Sage job,
 and again by `run_search.py --adapt-only`); without it, it reads the log tail. It adds:
 
 - `sage_lfq`: `status` (`ok` / `warn` / `unchecked`), `target_ms1_peaks_5pct_fdr` (Sage's own
@@ -132,9 +173,18 @@ gave each precursor the same protein group but a different protein-level FDR (9,
 the protein-group matrix against 9,414). Tell staff it is benign, in one line, if they ask.
 
 ## SLURM specifics (HIVE)
-- State comes from `sacct -j <jobid> -o State` (falls back to `squeue`). Terminal
-  states: COMPLETED (done), FAILED / TIMEOUT / OUT_OF_MEMORY / NODE_FAIL / CANCELLED
-  (done + failed).
+- State comes from `sacct -j <jobid> -o State` (falls back to `squeue`, in chain mode too).
+  What each state means is `scripts/slurm_states.py` (also read by `record_run.py` and
+  `checkpoint.py`): COMPLETED (done); FAILED / TIMEOUT / OUT_OF_MEMORY / NODE_FAIL / CANCELLED
+  / PREEMPTED / DEADLINE / BOOT_FAIL / REVOKED / SPECIAL_EXIT (done + failed); PENDING /
+  RUNNING / REQUEUED / SUSPENDED and the other live states (not done). A state the list does
+  not know is never read as done.
+- **Preempted, then requeued.** `sacct -j` without `-D` returns only a job id's most recent
+  record, and the watcher never passes `-D`. A job preempted on the low queue and requeued by
+  Slurm therefore reads as its new instance (PENDING, then RUNNING; `REQUEUED` while Slurm puts
+  it back: `progress.summary` says it will run again): not done, not failed, nothing to do.
+  `PREEMPTED` in that newest record means Slurm did not requeue it: `error_class: preempted`,
+  resubmit the step on the high queue.
 - The job log is the sbatch `--output` file (the skill's `emit_sbatch` names it
   `<out>/<job>_<jobid>.log`).
 - When resubmitting after a fix, edit the sbatch (`--mem`/`--time`/`--gres`) and note
@@ -199,10 +249,11 @@ and nothing is written) and recorded in `search_provenance.json` as `queue.exclu
   this itself**, so a step resubmitted directly (as this playbook tells you to) cannot hit it;
   you should only ever see this from a hand-written sbatch or a cfg-supplied `--temp` on the
   single-shot path (which `run_search.ensure_temp_dirs` also creates).
-- **Whole-cohort restart is rarely needed** — resume from the earliest incomplete step,
+- **Never restart the whole cohort** — resume from the earliest incomplete step,
   reusing everything already computed.
 
 ## Don't
+
 - Don't declare a run "done" on a non-COMPLETED state, and don't proceed to DE until
   `report.parquet` exists.
 - Don't silently retry forever — after 2 failed auto-fix attempts of the same class,
@@ -253,3 +304,148 @@ it, do not add it.
 (the job and log the watcher follows for that stage). `check_report_runs.py --files-list <file>` gives the input paths
 one per line; `pipeline_notes.py --index <n>` rotates the progress notes (`--no-fact` leaves out
 the proteomics fact).
+
+## 0c. Is this a resume? (step 0c)
+
+A cluster search runs for hours and the user **will** close their laptop. The SLURM
+jobs survive that; the conversation does not. So before doing any work, check whether
+an earlier session already submitted something (step 0's version check,
+`skill_version.sh --check-update` and in `hive_remote` `--check-hive`, runs on a resume too,
+first; then its notes check, with `--session <dir>` once the session is found):
+
+```
+python3 scripts/checkpoint.py find --base <the project folder>   # never ~ or a whole share; HIVE: in the background
+python3 scripts/checkpoint.py status --session <session dir> --resume   # live sacct re-query
+```
+
+`status` returns each stage's real state, whether the expected output file exists, and
+`next_commands` — the exact commands still outstanding.
+
+**A run found here is a resume only when it is unfinished work the user is coming back to**
+("pick up where we left off", "is my search done?"). A new request (new settings, or "analyse
+these files") is fresh even when an unfinished run exists: mention it in one line, and still
+never resubmit one that is RUNNING without asking. A finished earlier analysis is never a resume
+(step 1b); nothing is reused from either unless the user asks. For a resume:
+
+- **Still RUNNING** → say so, give the job ids, and offer to wait (`watch_run.sh`) rather
+  than resubmitting. **Never resubmit a search that is already running** — it wastes hours
+  of cluster time and the user's budget.
+- **COMPLETED and the output exists** → skip the search entirely and continue from
+  `next_commands` (usually DE onward).
+- **FAILED or stalled** → apply the `watch_run.sh` playbook (step 7b) and resubmit only the
+  incomplete steps; finished `.quant` files and the predicted library are reused.
+
+**Core staff: a resume asks no submission question.** `status` prints the session's
+`analysis_for` (the submissions or the internal work's board title, from `session.py init`);
+`bash scripts/board.sh threads` (no usable local Python: `bash scripts/hive_exec.sh 'bash
+~/proteomics-pipeline/scripts/board.sh threads'`) gives its thread for the next milestone's
+record (`references/board.md` section 3).
+
+## A closed laptop: `RECOVERY.md` (step 0c)
+
+`submit.sh` writes `RECOVERY.md` + `.recovery.json` into the session directory
+automatically (a search whose `--out` is not inside a session gets them beside `--out`, and
+`submit.sh` says where; `node_fault.py retry` updates them in the same place), so this works
+even if the previous session ended mid-sentence. Tell the
+user, in plain words, that they can close their terminal and that the jobs will keep
+going — they do not need `tmux` or `screen` for this.
+
+## 7b. The watch loop as SKILL.md runs it (step 7b)
+
+**The moment a search starts, watch it — never leave a multi-hour search
+unmonitored.** Poll with `watch_run.sh` in a loop until it finishes:
+
+```
+# local: python3 scripts/run_search.py ... run_in_background, then loop:
+bash scripts/watch_run.sh --log <search log> --out <search out dir> --poll <n>
+# SLURM on HIVE:
+bash scripts/watch_run.sh --slurm <jobid> --log <job log> --out <out> --poll <n> --hive
+# multi-step chains (diann_parallel / radiant_parallel): watch EVERY step, never just the last
+bash scripts/watch_run.sh --all <search out dir> --hive
+```
+
+With `--hive` and no usable `python3` on this computer (Windows' Store stub), the watcher
+runs the poll on HIVE and prints HIVE's answer. `watcher_query_failed` and
+`watcher_no_python` are never a job failure: never resubmit on them; fix the connection and
+poll again (this file).
+
+**Always pass `--out` and increment `--poll` each time.** `--out` is what turns "still
+running" into real progress: the chain drops a `.quant` per finished file, so the watcher
+reports the actual step and file count rather than guessing. `--poll` rotates the note.
+
+**Report progress to the user on every poll — a search is hours long and silence reads as
+a hang.** Give them one short line from `progress.summary` plus `doing`, and pass along
+`note` (with `note_source`) so there's something to read while waiting. For example:
+
+> Step 2 of 5 — searching each file against the predicted library. 34 of 66 files done
+> (52%). *While you wait: decoy sequences exist to be wrong on purpose. How often a search
+> prefers a decoy is what calibrates the false discovery rate. (Elias & Gygi 2007)*
+
+Keep it to a couple of lines; don't dump the JSON. Never present the note as a finding
+about **their** data — it is general background, and it must not be mistaken for a result.
+It returns `{state, done, failed, stalled, error_class, fix}`. While `done` is false,
+keep polling: about every minute for a local run; **on SLURM every 5 minutes or more**, or a
+scheduled wake-up (each `--hive` poll is several logins and `sacct` calls on HIVE's shared login
+node, and a stall is only called after 15 minutes anyway).
+Pass `--log` so it can also catch **stalls** — a job stuck in `RUNNING` with its log
+frozen (a hung file; `sacct` will show RUNNING forever). **If `failed` OR `stalled` is
+true, apply the `fix` and resubmit AUTONOMOUSLY — do not wait for the user.** Starting
+the search needed confirmation (golden rule #1); recovering a run that's already in
+flight does not. Common auto-fixes (→ the playbook above):
+
+- **stalled/hung file:** `scancel` that task, retry once on a fresh node; if it stalls
+  again, **drop that one file** and continue (step 4 of the parallel chain auto-skips a
+  file with no `.quant`); note the dropped file in **Data Quality Notes**.
+- **failed step in the 5-step chain:** resubmit from the earliest incomplete step,
+  **reusing completed `.quant` and `step1.predicted.speclib`** — never restart the whole
+  cohort; broken `afterok` after a killed task → resubmit steps 3→4→5 fresh.
+- **`node_fault`** (a node could not reach the storage: exit 75 from the job's node check,
+  `NODE_FAIL`, or `Transport endpoint is not connected` / `Stale file handle` in a failed
+  job): tell the user it is a **node problem, not DIA-NN and not their data**, and run
+  `node_fault.py retry --out <out> --job <id>` on HIVE — it resubmits that step and the steps
+  waiting on it with `--exclude=<node>`, at most twice per step.
+- **Nodes already known to be bad** (the user says so, the HIVE status page, an earlier
+  failure): generate the search with `run_search.py ... --exclude <node[,node...]>` (ranges
+  like `hive-dc-7-4-[50-54]` work). Every job script then carries `#SBATCH --exclude`, so no
+  job can land there, and `search_provenance.json` records it. Do not `export SBATCH_EXCLUDE`:
+  sbatch ignores it. A later `node_fault.py retry` keeps these nodes excluded as well
+- OOM → raise `--mem`; timeout → raise `--time`; missing temp dir → `mkdir -p` first. A single-job search takes both from `run_search.py --mem GB --time HOURS` (recorded as `job_mem`/`job_time`); a non-specific or semi-specific Sage or FragPipe search already defaults to its broad-digest memory and time (`run_search.BROAD_DIGEST_SAGE_MEM_GB`, `BROAD_DIGEST_FRAGPIPE_MEM_GB`, `BROAD_DIGEST_HOURS`), recorded as that default — with the database's sequence count known (fetch_fasta's `.meta.json`) the memory is computed from it (`run_search.broad_digest_mem_gb`, from the measured points `SAGE_NONSPECIFIC_PEAKS`; recorded as `job_mem_estimate_gb` / `job_n_sequences`, and `job_mem_asked_gb` for your `--mem`), and an estimate over the queue's per-job cap is refused with the number — otherwise raise `--mem` for a database bigger than the one they were measured on (`BROAD_DIGEST_SEQUENCES`; `BROAD_DIGEST_MEASURED` says how). Every Sage job exports `RUST_MIN_STACK`; a stack overflow (exit 134) writes `sage_failure.json` with a re-run hint. A semi-specific FragPipe job's memory follows the measured peaks of semi-specific searches over a 12,685-sequence database (`FRAGPIPE_SEMISPECIFIC_PEAKS`: 23 runs 196 GiB, 36 runs 184, 58 runs 230, 183 runs 251), x1.15, rounded up to 8 (`run_search.fragpipe_broad_mem_gb`: 232G for 8 to 36 runs, 272G for 58, 296G for 183, 312G for 300; the job's memory is the larger of that and the database-sized estimate); a non-specific or tryptic one grows by `FRAGPIPE_MEM_GB_PER_RUN` a run past `FRAGPIPE_MEM_RUNS_BASE` runs (`run_search.fragpipe_runs_mem_gb`; a lower-bound estimate, the 200G default was full at 219 runs). The record says which numbers were measured. A FragPipe job's time follows its runs (`run_search.fragpipe_run_hours`: `FRAGPIPE_MINUTES_PER_RUN` a run × `FRAGPIPE_RUN_HEADROOM`, scaled up under `FRAGPIPE_RATE_CPUS` CPUs; the larger of that and the default), recorded as that default.
+- **A failed search is recorded in the Core run registry. When the chain dies before its last
+  job, record it yourself.** A job that SLURM kills (OOM, TIMEOUT, node failure, `scancel`)
+  never runs its own job-end hook. The jobs queued after it never start at all. So whenever the
+  watcher reports `failed`, run this on HIVE, then fix and resubmit. Recording again is safe:
+  it updates the same record.
+  `python3 scripts/record_run.py search-done --out <search out dir> --status failed
+  [--exit-code <N>] [--step <failed step's job name>]`.
+  → `references/run-registry.md`
+
+**Every search — single-shot or parallel array — must run under this watch loop.** Stop
+and tell the user only after 2 failed auto-fixes of the same class (dropping 1 pathological
+file out of many is success, not a failure). Report what you recovered. Only proceed to DE
+once `COMPLETED` and `report.parquet` exists.
+
+**5-step chain: check what the final pass kept before DE.** Step 5 compares its report with the
+chain's first pass (step 3's `step3_assembly.parquet`) run by run, prints the table in its log,
+and writes it to `<out>/pass_comparison.json` and `search_provenance.json` (`pass_comparison`).
+A run whose final pass kept less than half its first-pass precursors is flagged with a
+`WARNING`. DIA-NN's README says to compare the two and use the first pass when it performs
+better. **Those counts are before protein-group FDR; compare the post-filter rows before
+switching.** The table's "rows after q" columns count each report's rows that pass
+`run_de.R`'s q-value filter (the same definition, from `diann_q_columns.py`; they need pyarrow,
+and read "n/a" without it). On SET28 (hair DDA) 4 of 6 runs fell by more than half (126 -> 0,
+165 -> 1). At 1% on every q-column those four had 0 rows in BOTH reports; with `run_de.R`'s own
+filter, which holds PG.Q.Value at 5%, the first pass kept 109–160 rows for them against 0–9 --
+protein groups with a run-specific q between 1% and 5%, all of the gain. Tell the user where a
+gain comes from. **Show the table, and offer the first-pass report only for the runs
+`switch_recommended_for` names** -- those with more post-filter rows in the first pass:
+`run_de.R --input <out>/step3_assembly.parquet …`. That report is each run searched
+once against the predicted library, with no match-between-runs, and it has no DDA MS1 q columns.
+If they take it, `make_methods.py` says so in the Methods, from `de_provenance.json`'s `input`
+(never write that by hand), and `audit_results.py` reports the comparison in AUDIT.md either way.
+
+**Every DIA-NN search: the proteins the contaminant list took.** Its last job runs
+`contaminant_competition.py` (a report, never a gate); the watcher's `contaminant_competition`
+names COMPETED OUT genes (no quantity left) and SIPHONED ones. Tell the user; AUDIT.md carries
+it to the report. → `references/audit.md`.
+
+Core staff: board.md §3 row "search finished", once its last job has ended.

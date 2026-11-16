@@ -110,6 +110,7 @@ EMITTER_DEFAULT = "a 20 µm-bore CaptiveSpray emitter (Bruker)"
 # timsTOF HT's Bruker Column Toaster on 2026-09-02). Not recorded per run, so always DEF-tagged.
 COLUMN_TEMP_DEFAULT = "50 °C"
 DEF = "[facility default — confirm]"
+DEF_INNER = DEF[1:-1]          # the same words inside parentheses (tolerances)
 # A value this script could not find in any record of the run. Printed in place of the value,
 # never replaced by a plausible default (DE-LIMP rule #2).
 NR_TAG = "[not recorded — confirm]"
@@ -282,8 +283,9 @@ def column_record(user_column=None, runs=(), log_path=None, log_instrument=None,
                                        + (f", first run on it {anchor}" if anchor else "")),
                             "tag": None, "warnings": warn, "installed": when.isoformat()}
     if not core:
-        return {"text": "____", "source": "not recorded: the facility's standard column is a "
-                "timsTOF one and is not given for this instrument — confirm", "tag": NR_TAG,
+        return {"text": "____", "source": "not recorded: no --lc-column, HyStar ColumnInfo or "
+                "column-log entry covers this run, and the facility's standard column applies "
+                "only to a Core timsTOF .d — confirm", "tag": NR_TAG,
                 "warnings": warn}
     return {"text": LC_COLUMN_DEFAULT, "source": "facility default — confirm", "tag": DEF,
             "warnings": warn}
@@ -566,6 +568,31 @@ def acquisition_from_records(a):
     return None, None
 
 
+def instrument_from_records(a, sess_paths=None):
+    """(instrument, source) from the session's own records when --instrument was not given: step
+    2's input/acquisition.json (the instrument detect_acquisition.py read from the raw files, one
+    name when every file agrees), else the workflow manifest's `instruments`. (None, None) when no
+    record names ONE instrument -- the Methods then say so, never a guess. Without this the
+    instrument and the Core's grant text stayed blank, or a filename-prefix guess, although the
+    session knew the instrument (2.15 acceptance, five pairs)."""
+    path = _session_acquisition_json(a)
+    if not path and sess_paths and os.path.isfile(
+            os.path.join(sess_paths["input_dir"], "acquisition.json")):
+        path = os.path.join(sess_paths["input_dir"], "acquisition.json")
+    rec = _load_json(path) if path else None
+    if isinstance(rec, dict):
+        names = {str(r.get("instrument")).strip() for r in rec.get("files") or []
+                 if isinstance(r, dict) and r.get("instrument")}
+        if len(names) == 1:
+            return names.pop(), "input/acquisition.json: read from the raw files at step 2"
+    wf = getattr(a, "workflow_manifest", None) or (sess_paths or {}).get("workflow_manifest")
+    man = _load_json(wf) if wf else None
+    names = {str(x).strip() for x in (man or {}).get("instruments") or [] if x}
+    if len(names) == 1:
+        return names.pop(), f"workflow manifest ({os.path.basename(wf)}): step 2 detection"
+    return None, None
+
+
 def pick_ack(instrument, files):
     """The acknowledgment for the instrument NAME, matched across every registry entry first. The
     Thermo filename prefix is only a fallback for .raw files whose instrument nothing names -- a
@@ -715,6 +742,9 @@ def _fragpipe_record(rec, prov, pf, search_prov):
         if mv is not None:
             rec["max_var_mods"] = {"value": int(mv), "source": w}
         rec["met_excision"] = params.get("clip_nTerm_M") == "1"
+        if (params.get("isotope_error") or "").strip():
+            # MSFragger's precursor isotope errors, as run (Ruling 90: read from the run)
+            rec["isotope_error"] = {"value": params["isotope_error"].strip(), "source": w}
         # the database MSFragger read (fragger.params database_name), with the record's sha256
         # when it is the one run_search.py recorded (H7 bug 1)
         dbn = (params.get("database_name") or "").strip()
@@ -726,7 +756,18 @@ def _fragpipe_record(rec, prov, pf, search_prov):
                                "sha256": pdb.get("sha256") if same else None,
                                "n_entries": pdb.get("n_entries") if same else None,
                                "n_decoys": pdb.get("n_decoys") if same else None,
-                               "decoy_tag": pdb.get("decoy_tag") if same else None}
+                               "decoy_tag": pdb.get("decoy_tag") if same else None,
+                               # the decoys the search's job added (fragpipe_db.py), and whose
+                               # tag that is: the record's words, never assumed
+                               "decoys_built_in_job": bool(same and pdb.get("decoys_built_in_job")),
+                               "decoy_tool": ((pdb.get("decoy_build") or {}).get("tool")
+                                              if same else None),
+                               "decoy_tool_version": ((pdb.get("decoy_build") or {}).get("version")
+                                                      if same else None),
+                               "contaminants_added": ((pdb.get("decoy_build") or {})
+                                                      .get("contaminants_added") if same else None),
+                               "decoy_tag_default": bool(same and str(
+                                   pdb.get("decoy_tag_source") or "").startswith("default"))}
         for key, which in (("ms1_tol", "precursor"), ("ms2_tol", "fragment")):
             t = fpp.tolerance(params, which)
             if t:
@@ -734,11 +775,12 @@ def _fragpipe_record(rec, prov, pf, search_prov):
                             "source": w}
         # mass offsets, labile mode ... -- never described as a plain closed search (review F3)
         rec["fragger_extras"] = fpp.search_extras(params)
-        cal = _num(params.get("calibrate_mass"))
+        # MSFragger's mass calibration as the search's workflow set it: a statement of what ran,
+        # not a defect -- LFQ-MBR, the timsTOF DDA default, ships calibrate_mass=2 (C2 proteomics
+        # M5: it read "[... was on ... — confirm]" on every timsTOF search)
+        cal = fpp.calibration_sentence(params.get("calibrate_mass"), w)
         if cal:
-            rec["warnings"].append(f"MSFragger mass calibration was on (calibrate_mass="
-                                   f"{int(cal)} in {w}), so the tolerances it searched with may "
-                                   f"differ from these starting values; its log has the ones used")
+            rec["calibration"] = cal
     saved = fpp.find(out, fpp.SAVED_WORKFLOW)
     wf_path = saved or (pf if pf.endswith(".workflow") and os.path.isfile(pf) else None)
     if wf_path:
@@ -765,6 +807,35 @@ def _fragpipe_record(rec, prov, pf, search_prov):
                                      f"{os.path.basename(wf_path)} "
                                      + ("(the workflow FragPipe saved with the search)" if saved
                                         else "(the workflow given to the search)"))
+        if props.get("ionquant.mbr") in ("0", "1"):
+            rec["ionquant_mbr"] = props["ionquant.mbr"] == "1"
+    # the steps FragPipe ran and their versions, from its log (named and cited only when they ran)
+    rec["fragpipe_tools"] = fpp.tools_run(out) if out else None
+    # MSBooster's per-run RT bandwidth (Ruling 106): the record's, else read from the log the
+    # same way (a record written before the key existed)
+    bw = prov.get(fpp.MSBOOSTER_KEY)
+    if not isinstance(bw, dict) and out and "MSBooster" in ((rec["fragpipe_tools"] or {})
+                                                            .get("ran") or {}):
+        bw = fpp.msbooster_rt_bandwidths(out)
+    rec["msbooster_rt_bandwidth"] = bw if isinstance(bw, dict) else None
+    # the DDA quantity as declared (fragpipe_quant.plan via run_search's one declaration path)
+    q = prov.get("fragpipe_quantity")
+    if not isinstance(q, dict) and out:
+        q = _load_json(os.path.join(out, "fragpipe_quantity.json"))
+    rec["fragpipe_quantity"] = q if isinstance(q, dict) else None
+    # FAIMS runs split into their own searches (faims.py; run_search --faims-split)
+    fz = prov.get("faims")
+    rec["faims"] = fz if isinstance(fz, dict) else None
+    # the preset's own record (make_presets.py <workflow>.provenance.json): the vendor workflow it
+    # was built from, and the tolerance setting it adapted
+    fw = prov.get("fragpipe_workflow") if isinstance(prov.get("fragpipe_workflow"), dict) else {}
+    for cand in (fw.get("given"), prov.get("params_file"), prov.get("resolved_params_file"), pf):
+        side = _load_json(f"{cand}.provenance.json") if cand else None
+        if isinstance(side, dict) and side.get("engine") == "fragpipe":
+            rec["fragpipe_preset"] = {k: side.get(k) for k in ("template_choice", "tolerances",
+                                                               "ids_only", "cys_alkylation",
+                                                               "var_mods")}
+            break
 
 
 # DIA-NN echoes its argv, joined with single spaces and unquoted, near the top of its log; an
@@ -956,6 +1027,85 @@ def _labels(paths):
     return None
 
 
+def _first_sidecar(paths):
+    """The first params file's .rationale.json sidecar (estimate_params.py) that reads as a
+    record, else {}. It holds, for every value the cfg carries, whether the user gave it or it is
+    a DEFAULT (rule 2: the tag comes from the record, never decided here)."""
+    for path in paths:
+        side = _load_json(f"{path}.rationale.json") if path else None
+        if isinstance(side, dict):
+            return side
+    return {}
+
+
+def _is_default_source(source):
+    """True when a record's `source` text opens with DEFAULT: estimate_params.py's own word for a
+    value nobody chose for these data."""
+    return str(source or "").lstrip().upper().startswith("DEFAULT")
+
+
+# The sentence estimate_params.py / make_presets.py append when the protein N-terminal acetyl is
+# added to the variable modifications whatever was asked (build_sage; the FragPipe DDA preset)
+_NTERM_ACETYL_ALWAYS = "protein N-term acetyl (always)"
+
+
+def tag_defaults(rec, side, preset=None):
+    """Mark, in search_record()'s `rec`, every modification and tolerance whose recorded source
+    is a DEFAULT (DE-LIMP rule 2): m["default"] / t["default"], printed by mod_phrase() and the
+    tolerance sentence and table row -- prose and table alike, one place. `side` is the params'
+    sidecar; `preset` the FragPipe preset's own record (make_presets.py). Nothing is tagged
+    without a record: a value whose source is unknown is not claimed to be a default."""
+    preset = preset or {}
+    cys = rec.get("cys_alkylation") or preset.get("cys_alkylation") or {}
+    rat = side.get("rationale") if isinstance(side.get("rationale"), dict) else {}
+    vm = (rat.get("variable_mods") or {}).get("source") if rat.get("variable_mods") else None
+    if vm is None and isinstance(preset.get("var_mods"), dict):
+        vm = preset["var_mods"].get("source")
+    vm = str(vm or "")
+    for m in rec["mods"]:
+        if m.get("label"):
+            continue
+        if m["type"] == "fixed" and m.get("unimod") == CYS_REAGENTS["cam"]["unimod"] \
+                and "C" in str(m.get("targets") or "") and cys.get("given") is False:
+            m["default"] = DEF_INNER
+        elif m["type"] == "variable" and m.get("unimod") == VAR_MODS["ox"]["unimod"] \
+                and "M" in str(m.get("targets") or "") and _is_default_source(vm):
+            m["default"] = DEF_INNER
+        elif m["type"] == "variable" and m.get("unimod") == 1 \
+                and m.get("position") == "Protein N-term" and _NTERM_ACETYL_ALWAYS in vm:
+            m["default"] = DEF_INNER
+    # DIA-NN's precursor charge range is the skill's own choice (z=1 left out; estimate_params:
+    # "a reader must be able to see that a deliberate narrowing was applied on their behalf"):
+    # tagged unless the params' rationale says the user gave a bound, or the cfg's value is not
+    # the rationale's (a hand-edited cfg is not claimed to be a default)
+    pc = rec.get("pr_charge")
+    if pc and rec.get("engine") in (None, "diann"):
+        flags = (("--min-pr-charge", pc["value"][0]), ("--max-pr-charge", pc["value"][1]))
+        ents = [(rat.get(f), v) for f, v in flags if v is not None]
+        if ents and all(isinstance(e, dict) and e.get("value") == v
+                        and not str(e.get("source") or "").startswith("user override")
+                        for e, v in ents):
+            pc["default"] = DEF_INNER
+    # Sage and FragPipe tolerances are never measured: the instrument class's value, unless the
+    # user gave one (Sage: an override's source; FragPipe: the preset's mode "caller")
+    if rec.get("engine") in ("sage", "fragpipe"):
+        for key, entries in (("ms1_tol", ("precursor_tol_ppm",)),
+                             ("ms2_tol", ("fragment_tol_ppm", "fragment_tol_da"))):
+            t = rec.get(key)
+            if not t or t.get("default"):
+                continue
+            if rec["engine"] == "sage":
+                src = next((rat[e].get("source") for e in entries if rat.get(e)), None)
+                given = str(src or "").startswith("user override")
+                known = src is not None
+            else:
+                tol = preset.get("tolerances") or {}
+                known = bool(tol.get("mode"))
+                given = tol.get("mode") == "caller"
+            if known and not given:
+                t["default"] = DEF_INNER
+
+
 def search_record(params=None, search_prov=None, manifest=None):
     """What the database search ran with, each value with where it came from.
 
@@ -980,8 +1130,15 @@ def search_record(params=None, search_prov=None, manifest=None):
            "max_var_mods": None, "met_excision": False, "ms1_tol": None, "ms2_tol": None,
            "tol_note": None, "precursor_fdr": None, "library": None, "mbr": None, "dda": None,
            "search_mode": prov.get("search_mode"),
+           # how many runs this search used (its own record, not the staged files: a session
+           # may stage more raw files than one search took -- 2.15 acceptance, beer F9)
+           "n_runs": prov.get("n_files") if isinstance(prov.get("n_files"), int)
+           and not isinstance(prov.get("n_files"), bool) else None,
            "labelled": None, "labels": None, "cont_quant_exclude": None, "cys_alkylation": None,
            "protein_inference": None,
+           # True when the record says nothing was quantified (identifications only); None when
+           # it does not say -- the Methods then claim neither (set at the end of this function)
+           "ids_only": None,
            "probe_fallback": probe_fallback_record(prov),
            # a --dda search whose second pass crashed: its first-pass report was used
            "dda_first_pass": dda_first_pass_caution(prov),
@@ -998,6 +1155,10 @@ def search_record(params=None, search_prov=None, manifest=None):
                                  f"{fpp.methods_why(q.get('why')) or 'no quantification ran'}.")
     rec["route_from_record"] = isinstance(q, dict) and q.get("status") in ("not_applicable",
                                                                            "quantified")
+    # how the engine was chosen, in the record's own client-safe sentence (engine_choice.choose;
+    # null for the data type's default): quoted, never re-worded; the staff record is not read
+    sel = prov.get("engine_selection")
+    rec["selection_sentence"] = sel.get("sentence") if isinstance(sel, dict) else None
     if prov.get("version"):
         rec["version"] = str(prov["version"])
         rec["version_source"] = "search_provenance.json (the version that ran)"
@@ -1254,12 +1415,23 @@ def search_record(params=None, search_prov=None, manifest=None):
         rec["warnings"].append(f"the {rec['engine_label'] or 'search'} parameter file "
                                f"{os.path.basename(pf)} is not parsed here; its settings are "
                                "in that file")
+    tag_defaults(rec, _first_sidecar([pf] + [c for c, _ in cands]), rec.get("fragpipe_preset"))
+    if rec.get("route_sentence") or (rec.get("fragpipe_preset") or {}).get("ids_only") \
+            or (rec["engine"] == "sage" and (_load_json(pf) or {}).get("quant", {}).get("lfq")
+                is False and not (rec.get("labelled") or {}).get("value")):
+        rec["ids_only"] = True
     return rec
 
 
 def _g(x):
     """15.0 -> '15', 0.5 -> '0.5'; text passes through."""
     return ("%g" % x) if isinstance(x, (int, float)) else str(x)
+
+
+def _or_list(items):
+    """["0", "1", "2"] -> "0, 1 or 2"."""
+    items = [str(x).strip() for x in items if str(x).strip()]
+    return (", ".join(items[:-1]) + " or " + items[-1]) if len(items) > 1 else "".join(items)
 
 
 def _fmt_range(v, unit=""):
@@ -1290,7 +1462,8 @@ def mod_phrase(m):
     tgt = m["targets"] or ""
     site = " ".join(x for x in (where, tgt) if x)
     name = m["name"] if m["unimod"] in UNIMOD else f"{m['name']} [name not verified — confirm]"
-    return f"{name} ({site})" if site else name
+    phrase = f"{name} ({site})" if site else name
+    return f"{phrase} {DEF}" if m.get("default") else phrase
 
 
 def _first_pass_library(rec):
@@ -1437,6 +1610,128 @@ def search_fdr_sentence(rec, de_prov=None):
     return None
 
 
+# FragPipe's steps as its log names them -> what the Methods say each did, in the order FragPipe
+# runs them; a step is named (and cited: FRAGPIPE_STEP_CITE) only when its log says it finished
+# (fragpipe_params.tools_run). `{v}` is the version the log's header states for the tool.
+FRAGPIPE_STEPS = (
+    ("MSFragger", "MSFragger", "MSFragger{v} searched the spectra"),
+    ("MSBooster", "MSBooster", "MSBooster{v} added rescoring features from deep-learning "
+                               "predictions of each peptide's retention time and spectrum"),
+    ("Percolator", "Percolator", "Percolator{v} rescored the peptide-spectrum matches"),
+    ("PeptideProphet", "Philosopher", "PeptideProphet (Philosopher{v}) validated the "
+                                      "peptide-spectrum matches"),
+    ("ProteinProphet", "Philosopher", "ProteinProphet inferred the proteins"),
+    ("PhilosopherFilter", "Philosopher", "Philosopher{v} filtered the identifications at the "
+                                         "FDR stated below"),
+    ("IonQuant", "IonQuant", "IonQuant{v} quantified the ions{mbr}"),
+)
+# step -> run_search.CITE keys (the one citation table); Percolator: the two papers its own "How to
+# cite Percolator" page gives for the first publication and the 3.x release FragPipe runs
+FRAGPIPE_STEP_CITE = {"MSFragger": ("msfragger",), "MSBooster": ("msbooster",),
+                      "Percolator": ("percolator", "percolator3"),
+                      "PeptideProphet": ("philosopher",), "ProteinProphet": ("philosopher",),
+                      "PhilosopherFilter": ("philosopher",), "IonQuant": ("ionquant",)}
+
+
+def fragpipe_steps_sentence(rec):
+    """What FragPipe ran, in its own workflow's name when the skill's preset record gives it
+    (make_presets.py template_choice), each step only when its log says it finished, with the
+    version the log states. "" for another engine; a tag when no log was found."""
+    if rec.get("engine") != "fragpipe":
+        return ""
+    wf = ((rec.get("fragpipe_preset") or {}).get("template_choice") or {}).get("workflow")
+    where = f"Within FragPipe's {wf} workflow" if wf else "Within FragPipe"
+    tools = rec.get("fragpipe_tools")
+    if not tools:
+        return (f"{where}, the steps that ran: {NOT_RECORDED} (no FragPipe log, log_*.txt, in "
+                f"the search folder).")
+    ran, ver = tools.get("ran") or {}, tools.get("versions") or {}
+    mbr = rec.get("ionquant_mbr")
+    parts = []
+    for step, tool, text in FRAGPIPE_STEPS:
+        if step not in ran:
+            continue
+        parts.append(text.format(
+            v=f" {ver[tool]}" if ver.get(tool) else "",
+            mbr=(", with match-between-runs" if mbr is True else
+                 ", without match-between-runs" if mbr is False else "")))
+    if not parts:
+        return (f"{where}, its log ({tools.get('log')}) names none of the steps the Methods "
+                f"describe [confirm].")
+    failed = sorted(tools.get("failed") or {})
+    return (f"{where}, " + "; ".join(parts) + "."
+            + (f" [FragPipe's log records a non-zero exit for: {', '.join(failed)} — confirm]"
+               if failed else ""))
+
+
+def fragpipe_citations(rec):
+    """The papers of the FragPipe steps that ran (fragpipe_steps_sentence), and directLFQ's when
+    it made the report's quantity: from run_search.CITE, each Crossref-verified there."""
+    if rec.get("engine") != "fragpipe" or not rec.get("fragpipe_tools"):
+        return []
+    from run_search import CITE
+    ran = (rec["fragpipe_tools"].get("ran") or {})
+    keys = []
+    for step, _tool, _text in FRAGPIPE_STEPS:
+        if step in ran:
+            keys += [k for k in FRAGPIPE_STEP_CITE.get(step, ()) if k not in keys]
+    q = rec.get("fragpipe_quantity") or {}
+    import fragpipe_quant as fq
+    if q.get("quantity") == fq.QUANTITY_DIRECTLFQ and q.get("status") == "ok":
+        keys.append("directlfq")
+    return [CITE[k] for k in keys if k in CITE]
+
+
+def fragpipe_tolerance_sentence(rec):
+    """Where the tolerances came from when the skill's preset adapted FragPipe's own setting for
+    the instrument (make_presets.py tolerances.mode: ion trap, unit resolution); "" otherwise."""
+    mode = (((rec.get("fragpipe_preset") or {}).get("tolerances")) or {}).get("mode")
+    from make_presets import TOLERANCE_METHODS
+    if mode not in TOLERANCE_METHODS:
+        return ""
+    return ("These tolerances are " + TOLERANCE_METHODS[mode]
+            + (" (FragPipe ships no label-free workflow with an ion-trap fragment tolerance)"
+               if mode == "ion_trap" else "") + ".")
+
+
+def fragpipe_quantity_sentence(rec):
+    """How a FragPipe DDA search's protein quantities were made, from its declaration
+    (search_provenance.json fragpipe_quantity / fragpipe_quantity.json: fragpipe_quant.plan via
+    run_search.fragpipe_quantity_declaration): IonQuant's MaxLFQ, directLFQ with IonQuant's
+    Intensity beside it and why, or IonQuant's Intensity for one experiment. "" without one."""
+    q = rec.get("fragpipe_quantity")
+    if rec.get("engine") != "fragpipe" or not isinstance(q, dict) or not q.get("quantity"):
+        return ""
+    import fragpipe_quant as fq
+    n = q.get("n_experiments")
+    why = (q.get("why_not_maxlfq") or "").split(" IonQuant's log:")[0].strip()
+    if q.get("status") not in (None, "ok"):
+        return (f"Protein quantities: {q['quantity']} was planned but not delivered (status "
+                f"{q.get('status')}) [confirm].")
+    if q["quantity"] == fq.QUANTITY_DIRECTLFQ:
+        d = q.get("directlfq") or {}
+        v = (d.get("versions") or {})
+        guard = (d.get("guard") or {})
+        s = ((why.rstrip(".") + ". " if why else "")
+             + "Protein quantities were computed with directLFQ"
+             + (f" {v['directlfq']}" if v.get("directlfq") else "")
+             + " from IonQuant's ion intensities (combined_ion.tsv), with directLFQ's own "
+               "between-sample normalisation"
+             + (", checked to have taken effect" if guard.get("passed") else
+                " [whether it took effect is not recorded — confirm]") + ".")
+        if q.get("companion_column"):
+            s += (f" IonQuant's protein Intensity is reported beside it (column "
+                  f"{q['companion_column']}) but not used to compare samples: it sums ions "
+                  f"seen in one run only, so it is not comparable between runs whose depth "
+                  f"differs.")
+        return s
+    if q["quantity"] == fq.QUANTITY_MAXLFQ:
+        return (f"Protein quantities are IonQuant's MaxLFQ intensities"
+                + (f" ({n} experiments)" if n else "") + ".")
+    return ("Protein quantities are IonQuant's protein Intensity"
+            + (f" ({why.rstrip('.')})" if why else "") + f"; they are {fq.NOT_NORMALISED}.")
+
+
 def search_paragraph(rec, de_prov=None):
     """The Database-search paragraph. Every number comes from `rec`; anything missing prints
     as NOT_RECORDED rather than as a default."""
@@ -1461,6 +1756,10 @@ def search_paragraph(rec, de_prov=None):
     # its second pass failed, so no match-between-runs reached the report the caveat describes
     dda_fp = rec.get("dda_first_pass")
     s[0] += ", with match-between-runs." if mbr is True and not (first_pass or dda_fp) else "."
+    if rec.get("selection_sentence"):                  # how the engine was chosen, as recorded
+        s.append(rec["selection_sentence"])
+    if fragpipe_steps_sentence(rec):
+        s.append(fragpipe_steps_sentence(rec))
     for key in ("sage_route", "route_sentence"):       # how the search ran, in its own words
         if rec.get(key):
             s.append(rec[key])
@@ -1486,11 +1785,17 @@ def search_paragraph(rec, de_prov=None):
     if rec.get("pep_len"):
         digest.append(f"peptide length {_fmt_range(rec['pep_len']['value'])} residues")
     if rec.get("pr_charge"):
-        digest.append(f"precursor charge {_fmt_range(rec['pr_charge']['value'])}")
+        digest.append(f"precursor charge {_fmt_range(rec['pr_charge']['value'])}"
+                      + (f" ({rec['pr_charge']['default']})" if rec["pr_charge"].get("default")
+                         else ""))
     if rec.get("pr_mz"):
         digest.append(f"precursor m/z {_fmt_range(rec['pr_mz']['value'])}")
     if digest:
         s.append("In silico digestion used " + ", ".join(digest) + ".")
+    import cleavage_rules                      # the one caveat for a semi-specific search
+    semi = cleavage_rules.semi_specific_caveat(cl)
+    if semi:
+        s.append(semi)
     if rec.get("met_excision"):
         s.append("N-terminal methionine excision was enabled.")
     fixed = [mod_phrase(m) for m in rec["mods"] if m["type"] == "fixed" and not m.get("label")]
@@ -1528,19 +1833,43 @@ def search_paragraph(rec, de_prov=None):
                    else "")
             tol.append(f"{lvl} {sym}{_g(t['value'])} {t['unit']}"
                        + (f" ({t['default']})" if t.get("default") else ""))
+    iso = rec.get("isotope_error")
     if tol:
-        s.append("Mass tolerances were " + " and ".join(tol) + ".")
+        s.append("Mass tolerances were " + " and ".join(tol)
+                 + (f", with precursor isotope errors {_or_list(iso['value'].split('/'))}"
+                    if iso and iso.get("value") not in ("0", "") else
+                    ", with no precursor isotope error" if iso else "") + ".")
+    if fragpipe_tolerance_sentence(rec):
+        s.append(fragpipe_tolerance_sentence(rec))
     db = rec.get("database")
-    if db:
+    if db and db.get("decoys_built_in_job"):
+        # the search's job added the decoys to the target FASTA (fragpipe_db.py): said as such,
+        # with the tool and tag the record names
+        tool = (f"{db['decoy_tool']} {db['decoy_tool_version']}" if db.get("decoy_tool_version")
+                else db.get("decoy_tool") or "FragPipe's Philosopher")
+        s.append(f"Decoys (reversed protein sequences, tagged {db['decoy_tag']}"
+                 + (", FragPipe's default" if db.get("decoy_tag_default") else "")
+                 + f") were added to the target database by {tool} within the search job"
+                 + ("; the job added no contaminant entries of its own (any contaminants are those already in the target database)" if db.get("contaminants_added") is False
+                    else "")
+                 + (f", and MSFragger searched the resulting {db['n_entries']:,} entries "
+                    f"({db['n_decoys']:,} decoys; sha256 {db['sha256'][:12]}…)."
+                    if db.get("sha256") and db.get("n_entries") else
+                    " [the searched database's checksum is not recorded — confirm]."))
+    elif db:
         s.append(f"MSFragger searched {db['name']}"
                  + (f" ({db['n_entries']:,} entries, {db['n_decoys']:,} of them decoys tagged "
-                    f"{db['decoy_tag']}; sha256 {db['sha256'][:12]}…)" if db.get("sha256") else
+                    f"{db['decoy_tag']}"
+                    + (" (FragPipe's default)" if db.get("decoy_tag_default") else "")
+                    + f"; sha256 {db['sha256'][:12]}…)" if db.get("sha256") else
                     " [its checksum is not recorded for this search — confirm]") + ".")
     if rec.get("fragger_extras"):
         s.append("MSFragger also searched " + "; ".join(rec["fragger_extras"])
                  + " [settings as fragger.params records them — confirm].")
     elif rec.get("tol_note"):
         s.append(rec["tol_note"][0].upper() + rec["tol_note"][1:] + ".")
+    if rec.get("calibration"):
+        s.append(rec["calibration"])
     if probe_fallback_sentence(rec):
         s.append(probe_fallback_sentence(rec))
     if protein_inference_sentence(rec):
@@ -1548,6 +1877,19 @@ def search_paragraph(rec, de_prov=None):
     fdr = search_fdr_sentence(rec, de_prov)
     if fdr:
         s.append(fdr)
+    if fragpipe_quantity_sentence(rec):
+        s.append(fragpipe_quantity_sentence(rec))
+    fz = rec.get("faims")
+    if isinstance(fz, dict) and fz.get("group") and fz.get("sentence"):
+        s.append(fz["sentence"])         # rule 1: the record's own words (faims.methods_sentence)
+    if rec.get("engine") == "fragpipe":
+        import fragpipe_params as fpp       # the one sentence (Ruling 106; REPRODUCE.md too)
+        bw = fpp.msbooster_rerun_sentence(rec.get("msbooster_rt_bandwidth"))
+        if bw:
+            s.append(bw)
+    cites = fragpipe_citations(rec)
+    if cites:
+        s.append("Software citations: " + "; ".join(cites) + ".")
     for w in rec.get("warnings") or []:
         s.append(f"[{w} — confirm]")
     return " ".join(s)
@@ -1578,7 +1920,7 @@ def diann_contaminant_sentence(srec):
     """What DIA-NN did with the contaminant entries, from the parameters the search ran with.
     It used to be read off the FASTA sidecar's diann_cont_quant_exclude -- a recommendation,
     not a record -- and worded as "excluded from quantification and normalisation" although
-    run_de.R then re-quantified them (msalemi, 2026-09-24). Empty for a non-DIA-NN search."""
+    run_de.R then re-quantified them (a Core member, 2026-09-24). Empty for a non-DIA-NN search."""
     srec = srec or {}
     if srec.get("engine") not in (None, "diann"):
         return ""
@@ -2066,6 +2408,18 @@ def identification_filter(prov):
     return ident, filt
 
 
+def de_quantity_sentence(prov, srec=None):
+    """The DE paragraph's "Protein quantities" sentence. For a FragPipe DDA search whose quantity
+    the Database-search paragraph already describes from its record (fragpipe_quantity_sentence),
+    a one-line pointer to it, so the quantity has one description in the Methods (rule 3; Ruling
+    110.4); otherwise the DE record's own rollup_method (build_maxlfq.R's descriptor)."""
+    q = (srec or {}).get("fragpipe_quantity") or {}
+    if srec and fragpipe_quantity_sentence(srec):
+        return (f"Protein quantities: the search's own ({q.get('quantity')}), as described under "
+                f"Database search; the DE used them as reported (no re-rollup).")
+    return f"Protein quantities: {prov['rollup_method']}."
+
+
 def de_paragraph(prov, srec=None):
     """The Differential-expression paragraph, from run_de.R's de_provenance.json. Significance
     is described exactly as run_de.R applied it: an adjusted-p cutoff, with |log2FC| only a
@@ -2084,7 +2438,7 @@ def de_paragraph(prov, srec=None):
     if left_out:
         s.append(left_out)
     if prov.get("rollup_method"):
-        s.append(f"Protein quantities: {prov['rollup_method']}.")
+        s.append(de_quantity_sentence(prov, srec))
     fp = dda_first_pass_de_sentence(srec, prov)
     if fp:
         s.append(fp)
@@ -2137,7 +2491,8 @@ def de_paragraph(prov, srec=None):
     return " ".join(s)
 
 
-def acquisition_rows(rep, col, ser, n_files, record_source=None, acquisition=(None, None)):
+def acquisition_rows(rep, col, ser, n_files, record_source=None, acquisition=(None, None),
+                     n_runs_from_search=False):
     """(parameter, value, source) rows for the acquisition table -- every value with the file
     and field it was read from (bruker_method's `sources`), or the tag it carries.
     `acquisition`: acquisition_from_records()'s (mode, source), for a run whose own file does
@@ -2218,7 +2573,8 @@ def acquisition_rows(rep, col, ser, n_files, record_source=None, acquisition=(No
         ("Acquired", f"{ser['acquired_first']} to {ser['acquired_last']}"
          if ser.get("acquired_first") else None,
          "analysis.tdf GlobalMetadata AcquisitionDateTime (first – last run)"),
-        ("Files in series", n_files, "this run"),
+        ("Files in series", n_files, "the search record (runs the search used)"
+         if n_runs_from_search else "this run"),
         ("Series consistency", ("all runs share the acquisition method" if not
          ser.get("differences") else "runs differ in: " + ", ".join(ser["differences"]))
          if ser.get("acquired_first") else None,
@@ -2333,7 +2689,9 @@ def _write_text(path, text):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--raw", nargs="+", required=True, help="raw file paths/globs (.d or .raw)")
-    ap.add_argument("--out", default="methods.md")
+    ap.add_argument("--out", default=None,
+                    help="where to write the Methods (default: output/methods.md of --session, "
+                         "else methods.md here)")
     ap.add_argument("--lc-column", help="the analytical column, as it should read in the "
                                         "Methods (overrides every other source)")
     ap.add_argument("--column-log", help="a column-change log (CSV or JSON export of STAN's "
@@ -2363,6 +2721,19 @@ def main():
                                          "logs/qc_bracket.json): its one fixed Instrument "
                                          "performance sentence -- the verdict stays staff-only")
     a = ap.parse_args()
+    # --session names the session: its output/methods.md and its sequence-database record are the
+    # defaults, so the Methods are written where finalize looks and the database is never blank
+    # for want of --fasta-meta (2.15 acceptance, pep24-215fp F5)
+    sess_paths = None
+    if a.session:
+        import session as sess
+        if sess.is_session_dir(a.session):
+            sess_paths = sess.paths_for(a.session)
+    if not a.out:
+        a.out = sess_paths["methods_md"] if sess_paths else "methods.md"
+        os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
+    if not a.fasta_meta and sess_paths and os.path.isfile(sess_paths["fasta_meta"]):
+        a.fasta_meta = sess_paths["fasta_meta"]
     # several search records and none chosen (finalize passes every one it found): nothing of any
     # of them is described, and neither --params nor the manifest's pin stands in for them
     search_provs = a.search_prov or []
@@ -2396,6 +2767,9 @@ def main():
         files.extend(sorted(glob.glob(p)) or [p])
     rec_instr = (a.instrument or "").strip() or None
     rec_src = REC_SRC
+    if not rec_instr:
+        rec_instr, rec_src = instrument_from_records(a, sess_paths)
+        rec_src = rec_src or REC_SRC
     metas = detect(files, rec_instr)
     acq, acq_src = acquisition_from_records(a)
     for m in metas:
@@ -2444,6 +2818,10 @@ def main():
             ambiguous_search_record(search_provs) if len(search_provs) > 1 else
             search_record(a.params, a.search_prov, a.workflow_manifest))
     de_prov = _load_json(os.path.join(a.de_dir, "de_provenance.json")) if a.de_dir else None
+    # the runs counted in the text are the ones the search used (its record), not the files
+    # staged or listed on --raw; with no such record the files read are the count
+    n_runs_from_search = isinstance(srec.get("n_runs"), int) and srec["n_runs"] > 0
+    n_runs = srec["n_runs"] if n_runs_from_search else len(metas)
 
     # One paragraph describes the whole series only if every run was acquired the same way.
     ser = (bruker_method.series([{"values": m} for m in metas]) if not from_record
@@ -2492,7 +2870,8 @@ def main():
     else:
         n_bad = len(unreadable)
         w(f"*Generated by the UC Davis Proteomics Core pipeline skill from the raw data "
-          f"({len(metas)} file(s)"
+          f"({n_runs} file(s)"
+          + (f"; {len(metas)} read here" if n_runs_from_search and n_runs != len(metas) else "")
           + (f"; {n_bad} could not be read — see the note under Mass spectrometry" if n_bad
              else "") + f"). Values marked {DEF} are facility defaults to confirm and values "
           f"marked {NR_TAG} were not in any record; every other value is listed with its "
@@ -2568,7 +2947,7 @@ def main():
                 else "proteome")
         staged = fmeta.get("staged_file") if isinstance(fmeta.get("staged_file"), dict) else None
         if content_phrase is None and staged:
-            # 'as_staged' (--hive), from a sidecar that describes the copy (gabrig,
+            # 'as_staged' (--hive), from a sidecar that describes the copy (a Core member,
             # 2026-09-23). Proteome and organism are known; the release it was cut from
             # is not -- name the copy's date rather than invent a release, and label a
             # composition inferred from entry counts as inferred.
@@ -2602,6 +2981,9 @@ def main():
                     f"{fmeta.get('organism') or '____'} {kind} "
                     f"({fmeta.get('proteome') or '____'}, {rel}), comprising "
                     f"{content_phrase} ({n_p} sequences).")
+        # an identifications-only search quantified nothing: those proteins are identified
+        import fetch_fasta
+        own_acc = fetch_fasta.own_accession_verb((srec or {}).get("ids_only"))
         n_c = fmeta.get("n_contaminants_appended") or 0
         n_already = fmeta.get("n_contaminants_already_present") or 0
         if not n_c and n_already:
@@ -2624,12 +3006,12 @@ def main():
                 sent += (f" {n_drop} contaminant entries that the search could not tell apart "
                          f"from {fmeta.get('organism') or '____'} proteins (identical or "
                          f"contained sequence, or fewer than {k} peptides of their own) were "
-                         f"removed from the library first, so those proteins are quantified "
-                         f"under their own accessions.")
+                         f"removed from the library first, so those proteins are "
+                         f"{own_acc} under their own accessions.")
             elif n_drop:
                 sent += (f" {n_drop} contaminant entries identical to (or contained in) "
                          f"{fmeta.get('organism') or '____'} proteins were removed from the "
-                         f"library first, so those proteins are quantified under their own "
+                         f"library first, so those proteins are {own_acc} under their own "
                          f"accessions.")
         else:
             sent += " No contaminant database was appended."
@@ -2690,7 +3072,7 @@ def main():
     if a.de_dir:
         import skyline_peaks
         pk_state, pk = skyline_peaks.record_state(os.path.dirname(os.path.abspath(a.de_dir)))
-        if pk_state == "ok" and pk and pk.get("methods_paragraph"):
+        if pk_state in skyline_peaks.FINISHED and pk and pk.get("methods_paragraph"):
             w("## " + skyline_peaks.SECTION_TITLE)
             w("")
             w(pk["methods_paragraph"])
@@ -2709,8 +3091,8 @@ def main():
     w("")
     w("| Parameter | Value | Source |")
     w("|---|---|---|")
-    rows = acquisition_rows(rep, col, ser, len(metas), rec_src if from_record else None,
-                            (acq, acq_src))
+    rows = acquisition_rows(rep, col, ser, n_runs, rec_src if from_record else None,
+                            (acq, acq_src), n_runs_from_search=n_runs_from_search)
     for name, val, src in rows:
         if val is None: continue
         w(f"| {name} | {val} | {src} |")
@@ -2741,7 +3123,9 @@ def main():
         for key, label in (("pep_len", "Peptide length"), ("pr_charge", "Precursor charge"),
                            ("pr_mz", "Precursor m/z")):
             if srec.get(key):
-                srows.append((label, _fmt_range(srec[key]["value"]), srec[key]["source"]))
+                srows.append((label, _fmt_range(srec[key]["value"])
+                              + (f" ({srec[key]['default']})" if srec[key].get("default")
+                                 else ""), srec[key]["source"]))
         for m in srec["mods"]:
             if m.get("label") and (srec.get("labels") or {}).get("channels"):
                 continue                      # the SILAC label: the channel rows below say it
@@ -2774,6 +3158,24 @@ def main():
         if srec.get("precursor_fdr"):
             f = srec["precursor_fdr"]
             srows.append(("Precursor FDR", f"q ≤ {f['value']:g}", f["source"]))
+        # FragPipe: the workflow, isotope errors, decoys and protein quantity, each from its record
+        tc = ((srec.get("fragpipe_preset") or {}).get("template_choice") or {})
+        if tc.get("workflow"):
+            srows.append(("FragPipe workflow", tc["workflow"],
+                          "make_presets.py's record of the preset (template_choice)"))
+        if srec.get("isotope_error"):
+            srows.append(("Precursor isotope errors", srec["isotope_error"]["value"],
+                          srec["isotope_error"]["source"]))
+        db = srec.get("database") or {}
+        if db.get("decoys_built_in_job"):
+            srows.append(("Decoys", f"added in the search job by {db.get('decoy_tool') or 'Philosopher'}"
+                          f" (tag {db.get('decoy_tag')})", "search_provenance.json fragpipe_database"))
+        fq = srec.get("fragpipe_quantity") or {}
+        if fq.get("quantity"):
+            srows.append(("Protein quantity", fq["quantity"]
+                          + (f" (IonQuant Intensity beside it: {fq['companion_column']})"
+                             if fq.get("companion_column") else ""),
+                          "search_provenance.json fragpipe_quantity"))
         for name, val, src in srows:
             if val is None or val == "":
                 continue
@@ -2798,7 +3200,7 @@ def main():
         print(f"make_methods: database build warning (not in {os.path.basename(a.out)}): {x}",
               file=sys.stderr)
     print(json.dumps({"methods": os.path.abspath(a.out), "instrument": instrument,
-                      "acknowledgment_for": ack_label, "n_files": len(metas),
+                      "acknowledgment_for": ack_label, "n_files": n_runs,
                       "params_json": os.path.splitext(a.out)[0] + "_params.json",
                       # for the agent, never the client's Methods: tell the user, resolve them
                       "database_build_warnings": build_warnings,

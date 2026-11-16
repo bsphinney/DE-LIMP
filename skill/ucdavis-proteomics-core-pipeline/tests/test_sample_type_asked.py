@@ -161,24 +161,31 @@ class TheBrief(unittest.TestCase):
 class SkillMdAsksIt(unittest.TestCase):
     def test_step_3_asks_outside_users_and_core_staff_only_when_it_matters(self):
         with open(os.path.join(SKILL, "SKILL.md"), encoding="utf-8") as fh:
-            md = fh.read()
+            md = " ".join(fh.read().split())        # line breaks are layout, not content
         self.assertIn("**Sample type — never infer it; ask outside users, and Core staff only when "
-                      "a choice\n  depends on it.**", md)
-        self.assertIn("**Outside users: ask**", md)
+                      "a choice depends on it.**", md)
+        # the question in full is in study-questions.md since the slim-down
+        with open(os.path.join(SKILL, "references", "study-questions.md"), encoding="utf-8") as fh:
+            sq = " ".join(fh.read().split())
+        self.assertIn("**Outside users: ask**", sq)
         # any Core staff analysis, internal work too (staff review of 2.12): not asked, or what
         # they already said recorded as stated
         self.assertIn("**Core staff, any analysis (a CoreOmics submission or internal work): do "
-                      "not ask it.**\n    Record `--not-asked` (step 3b) — or `--stated` with what "
-                      "they already said (\"HeLa digest\n    standard\")", md)
-        self.assertIn("a submission record, when there is one, describes the samples", md)
-        self.assertIn("though Core staff (any analysis: a\n   submission or internal work) are "
+                      "not ask it.** Record `--not-asked` (step 3b) — or `--stated` with what "
+                      "they already said (\"HeLa digest standard\")", sq)
+        self.assertIn("a submission record, when there is one, describes the samples", sq)
+        self.assertIn("though Core staff (any analysis: a submission or internal work) are "
                       "asked it only when a step depends on it", md)
         self.assertIn("scripts/sample_type.py set --session <session> --stated", md)
-        self.assertIn("scripts/sample_type.py set --session <session> --not-asked", md)
+        with open(os.path.join(SKILL, "references", "outputs.md"), encoding="utf-8") as fh:
+            self.assertIn("scripts/sample_type.py set --session <session> --not-asked", fh.read())
+        self.assertIn("--not-asked", md)
         self.assertIn("--workflow-manifest ./wf/workflow.manifest.json --session <session>", md)
-        self.assertIn("**sample type** (tissue,\n   cell line, biofluid, IP …) is likewise "
+        self.assertIn("**sample type** (tissue, cell line, biofluid, IP …) is likewise "
                       "**asked, never inferred**", md)
-        self.assertIn("ask what the samples are only when a panel flags", md)
+        with open(os.path.join(SKILL, "references", "audit.md"), encoding="utf-8") as fh:
+            self.assertIn("ask what the samples are only when a panel flags",
+                          " ".join(fh.read().split()))
 
 
 if __name__ == "__main__":

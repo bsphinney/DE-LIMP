@@ -5,7 +5,7 @@ A stand-in for ThermoRawFileParser that replays output captured from the real on
 It is deliberately strict about the command line, because the defect it exists to catch was
 a command line: detect_acquisition.py called `ThermoRawFileParser metadata -i <raw>` and
 `ThermoRawFileParser query -i <raw>`, and the real parser (v.2.0.0-dev, 2.0.0.0, on HIVE,
-srun job 23510571) rejected both, with exit 255 and these first lines on stderr:
+in a test run) rejected both, with exit 255 and these first lines on stderr:
 
     Unexpected extra arguments                     <- there is no `metadata` subcommand
     -s, --scans: specify a valid scan range        <- `query` requires -n

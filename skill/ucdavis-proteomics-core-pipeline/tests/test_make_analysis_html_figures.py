@@ -310,7 +310,7 @@ class Restyle(unittest.TestCase):
         # the header's Submission fact is the attached record's label (submission_report.py)
         import submission_report
         os.makedirs(os.path.join(s, "input"))
-        submission_report.attach(s, {"internal_id": "PROT_0001"})
+        submission_report.attach(s, {"internal_id": "PROT_9101"})
         out = os.path.join(s, "r.html")
         r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "make_analysis_html.py"),
                             "--session", s, "--out", out, "--no-pdf"],
@@ -339,7 +339,7 @@ class Restyle(unittest.TestCase):
         out = re.findall(r'<a\b[^>]*\bhref="((?:https?:)?//[^"]*)"', p)
         import core_submission
         self.assertEqual(out, [mah.HOW_MADE_URL, core_submission.repository_url(),
-                               core_submission.FEEDBACK_URL + "?prot=PROT_0001&amp;src=report"])
+                               core_submission.FEEDBACK_URL + "?prot=PROT_9101&amp;src=report"])
 
     def test_toc_links_resolve(self):
         ids = set(re.findall(r'\bid="([^"]+)"', self.page))
@@ -362,7 +362,7 @@ class Restyle(unittest.TestCase):
 
     def test_header_tiles_callouts_and_figure_cards(self):
         p = self.page
-        self.assertIn("<b>Submission</b>PROT_0001", p)
+        self.assertIn("<b>Submission</b>PROT_9101", p)
         self.assertIn('class="tiles"', p)
         self.assertIn("Some values are inferred, not measured", p)          # 60% inferred -> warning
         self.assertRegex(p, r'callout warning[^>]*>.*?Some values are inferred', )

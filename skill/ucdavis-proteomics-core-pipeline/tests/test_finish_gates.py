@@ -1048,10 +1048,21 @@ class ReferenceText(unittest.TestCase):
         self.assertIn("builds the reproducibility bundle when it is missing or out of date", text)
 
     def test_step_12_relays_note_lines(self):
+        # 2.15: the step's text is outputs.md's "12." section; the router's step 12 says it too
         with open(os.path.join(SKILL, "SKILL.md"), encoding="utf-8") as fh:
-            text = " ".join(fh.read().split())
+            router = " ".join(fh.read().split())
+        self.assertIn("Relay every `[SKIPPED]` and `[NOTE]` in `MANIFEST.txt`", router)
+        text = _outputs_section("## 12. Finalize the session")
         self.assertIn("**Read `MANIFEST.txt` and relay every `[SKIPPED]` and `[NOTE]` line with "
                       "its reason**", text)
+
+
+def _outputs_section(head):
+    """references/outputs.md from the heading `head` to the next ## heading, on one line."""
+    with open(os.path.join(SKILL, "references", "outputs.md"), encoding="utf-8") as fh:
+        ref = fh.read()
+    sec = ref[ref.index(head):]
+    return " ".join(sec[:sec.index("\n## ", 3)].split())
 
 
 class SkillMdText(unittest.TestCase):
@@ -1060,8 +1071,12 @@ class SkillMdText(unittest.TestCase):
             self.text = " ".join(fh.read().split())
 
     def test_golden_rule_9(self):
+        # 2.15: the rule is golden rule 16 in the router (its 9 is another rule), one line that
+        # names outputs.md "Golden rule 16", where the rule's text is, verbatim
+        self.assertIn('16. **Stay on the standard path**; off it, log why and still finish: '
+                      'outputs.md "Golden rule 16".', self.text)
         self.assertIn(
-            "9. **Stay on the standard path; leave it only when it is clearly better.** When you "
+            "**Stay on the standard path; leave it only when it is clearly better.** When you "
             "must (a step fails, the data need something no script does), record why with "
             "`log_decision.py` at that moment, and still run the finish steps: the report (step "
             "9, `make_analysis_html.py`), Methods (9d), the reproducibility bundle (10), finalize "
@@ -1075,7 +1090,8 @@ class SkillMdText(unittest.TestCase):
             "reason. Before you tell the user an analysis is finished, run "
             "`python3 scripts/session.py status --session <session>` and show its result: exit 0 "
             "is complete, exit 3 lists each missing item with the command that makes it. Finish "
-            "every missing item first.", self.text)
+            "every missing item first.",
+            _outputs_section("## Golden rule 16"))
 
     def test_golden_rule_9_names_what_each_tool_needs(self):
         """(pin) F11: the rule says what report_files.FINISH_NEEDS says, tool by tool."""
@@ -1094,7 +1110,7 @@ class SkillMdText(unittest.TestCase):
             "\"<why>\"`. When the bundle (step 10) is missing or out of date, finalize builds it, "
             "with step 10's flags read from the session's records; it refuses, naming the exact "
             "`provenance.py` command, only when a record it needs is absent (no raw-file list).",
-            self.text)
+            _outputs_section("## 12. Finalize the session"))     # 2.15: the step's text is there
 
 
 if __name__ == "__main__":

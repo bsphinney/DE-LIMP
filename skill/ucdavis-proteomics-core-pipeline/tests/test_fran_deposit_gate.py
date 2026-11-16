@@ -12,11 +12,14 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
 sys.path.insert(0, SCRIPTS)
 
+sys.path.insert(0, HERE)
+import fasta_fixture  # noqa: E402
 import fran_deposit as fd  # noqa: E402
 
 
@@ -65,7 +68,8 @@ class Args:
     def __init__(self, out, **kw):
         self.out = out
         for k, v in dict(skip=False, force=False, dry_run=False, organism=None, taxon=None,
-                         fasta_meta=None, name=None).items():
+                         fasta_meta=None, name=None,
+                         database_ok="test fixture: the guard has its own tests").items():
             setattr(self, k, kw.get(k, v))
 
 
@@ -94,8 +98,10 @@ def search_dir(root, engine="diann", empty=False):
         # ...and a finished Fulcrum write: Spark's commit marker
         open(os.path.join(d, "radiant_results", "fulcrum-results", "_SUCCESS"), "w").close()
     # run_search.py writes this for EVERY engine
+    # ...naming the database it read: a real reference proteome (fasta_guard clears it)
+    db = fasta_fixture.write_real_db(root)
     with open(os.path.join(d, "search_provenance.json"), "w") as fh:
-        json.dump({"engine": engine, "version": "9.9"}, fh)
+        json.dump({"engine": engine, "version": "9.9", "fasta": db}, fh)
     return d
 
 
@@ -126,12 +132,33 @@ class GateTests(unittest.TestCase):
             os.chmod(drop, 0o500)                       # readable, NOT writable
             os.environ["FRAN_DROP_DIR"] = drop
             try:
-                r = fd.check(Args(out))
+                # not a member of proteomics-grp, whatever account the suite runs as: on HIVE it
+                # runs as one, and the gate then reports a permission problem instead
+                with mock.patch.object(fd, "_in_core_group", return_value=False):
+                    r = fd.check(Args(out))
             finally:
                 os.chmod(drop, 0o755)
                 del os.environ["FRAN_DROP_DIR"]
             self.assertFalse(r["eligible"])
             self.assertEqual(r["reason"], "not_core_facility")
+
+    def test_a_member_who_cannot_write_the_drop_dir_has_a_permission_problem(self):
+        """The twin: a Core member with an unwritable drop directory is told to fix the
+        permission, and it is not recorded as a decision."""
+        with tempfile.TemporaryDirectory() as d:
+            out = search_dir(d)
+            drop = os.path.join(d, "incoming")
+            os.makedirs(drop)
+            os.chmod(drop, 0o500)
+            os.environ["FRAN_DROP_DIR"] = drop
+            try:
+                with mock.patch.object(fd, "_in_core_group", return_value=True):
+                    r = fd.check(Args(out))
+            finally:
+                os.chmod(drop, 0o755)
+                del os.environ["FRAN_DROP_DIR"]
+            self.assertFalse(r["eligible"])
+            self.assertEqual(r["reason"], "drop_dir_not_writable")
 
     def test_zero_byte_report_is_incomplete(self):
         """DIA-NN can exit 0 having identified nothing. Staging an empty report would put a

@@ -70,6 +70,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
+from safe_write import sha256_file as _sha256  # noqa: E402  the ONE chunked sha256
 
 CONV_DIR = os.path.join("logs", "conversation")
 SKILL_NAME = "ucdavis-proteomics-core-pipeline"
@@ -225,7 +226,7 @@ def _user_text(e):
 
 def _opening_request(lines, load):
     """When Claude invoked the skill itself (a Skill tool call), the user's request that led to
-    it ("analyse PROT_0802, Old vs Young") -- but only when the Skill call DIRECTLY answers it:
+    it ("analyse PROT_0807, Old vs Young") -- but only when the Skill call DIRECTLY answers it:
     the assistant's first turn after the request, with no tool call and no tool result between
     (a tool's output there -- another client's results -- is not this analysis's). Else None. A
     slash command or an injected load carries the request itself."""
@@ -734,14 +735,6 @@ def _chmod(path, mode):
         os.chmod(path, mode)
     except OSError:
         pass                                    # a filesystem without modes: nothing to do
-
-
-def _sha256(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as fh:
-        for b in iter(lambda: fh.read(1 << 20), b""):
-            h.update(b)
-    return h.hexdigest()
 
 
 def _stats(path):

@@ -3,7 +3,7 @@
 submission_report.py  --  The CoreOmics submission a session answers: stored once in the
 session, shown in every report.
 
-A Core analysis answers a request. A lab filled in a CoreOmics form (PROT_0756) saying what
+A Core analysis answers a request. A lab filled in a CoreOmics form (PROT_0807) saying what
 the samples are, who prepared them, which organism, and what they want done. That record is
 the only thing that ties a report back to what was asked for, so the report shows it by
 default, and the Methods, the analysis brief and the run log read the same record.
@@ -30,8 +30,8 @@ SOURCE. A record read from CoreOmics says `source: CoreOmics`. With no CoreOmics
 agent asks the key facts, and `attach --given` records them as `source: given by the user`.
 They are never presented as the CoreOmics record.
 
-    python3 submission_report.py attach --session <S> --record ~/core/PROT_0756
-    python3 submission_report.py attach --session <S> --given '{"internal_id": "PROT_0756",
+    python3 submission_report.py attach --session <S> --record ~/core/PROT_0807
+    python3 submission_report.py attach --session <S> --given '{"internal_id": "PROT_0807",
         "organism": "mouse", "prot_or_pep": "peptides", "sample_prep": "lab"}'
     python3 submission_report.py show  --session <S> [--format md|html|json]
     python3 submission_report.py notes --session <S>
@@ -45,6 +45,7 @@ import html
 import json
 import os
 import re
+import shlex
 import sys
 from collections import Counter, OrderedDict, defaultdict
 
@@ -59,7 +60,7 @@ SOURCE_COREOMICS = "CoreOmics"
 SOURCE_USER = "given by the user"
 
 # The CoreOmics form fields that may leave CoreOmics: (key in the record, key in the form's
-# submission_data). Verified against PROT_0756's form schema (2026-09-24).
+# submission_data). Verified against a real submission's form schema (2026-09-24).
 FORM_FIELDS = (
     ("organism", "organism"),               # "Organism and Organism Expressed In"
     ("uniprot", "uniprot"),                 # free text: a link, an accession, or blank
@@ -75,7 +76,7 @@ FORM_FIELDS = (
 TEXT_KEYS = tuple(k for k, _ in FORM_FIELDS)
 SAMPLE_KEYS = ("unique_id", "sample_name", "condition_name")
 
-# sample_prep's two answers on the form (PROT_0756's schema enum). A record given by the user
+# sample_prep's two answers on the form (a real submission's schema enum). A record given by the user
 # says "lab" or "core" instead.
 LAB_PREP = "i have prepped my samples"
 CORE_PREP = "i want the proteomics core to prepare"
@@ -93,6 +94,10 @@ PHONE = re.compile(r"(?<![\w+])(?:1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}(
 COREOMICS_URL = re.compile(r"^https://[a-z0-9.-]+/submissions/[0-9a-f]{12}$")
 UNIPROT_URL = re.compile(r"^https://(?:www\.|rest\.)?uniprot\.org/[\w./?=&%:-]*$")
 MISSING, BLANK = "not in the record", "left blank on the form"
+# session.json: Core staff marked a session with no CoreOmics submission as Core client work
+# (session.py core-client), so core_run answers yes and its report carries the Core's survey
+CORE_CLIENT = "core_client"
+
 FROM_SUMMARY = "not in submission_summary.json (attach fetch's submission.json)"
 
 
@@ -351,18 +356,53 @@ def load(session):
     return sanitize(obj)
 
 
+# The staff-only record of who marked a session as Core client work (session.py core-client): the
+# login, the time, the reason. A mark in session.json counts only with its entry here.
+CORE_CLIENT_STAFF_RECORD = os.path.join("logs", "core_client.staff.json")
+
+
+def core_client_mark(sj, session_dir=None):
+    """session.json's Core client work mark (session.py core-client), when it is one: an object
+    with a `marked` time, whose staff-only record (CORE_CLIENT_STAFF_RECORD, in `session_dir`)
+    ends with the matching entry -- event "core-client", by a login, at that time. session.py
+    core-client writes both, only for Core staff (staff.core_staff); a mark typed into
+    session.json by hand has no such entry and is ignored (survey_off_note says so). Anything
+    else is None: fail closed."""
+    b = sj.get(CORE_CLIENT) if isinstance(sj, dict) else None
+    if not (isinstance(b, dict) and isinstance(b.get("marked"), str) and b["marked"].strip()
+            and session_dir):
+        return None
+    import staff
+    try:
+        entries = staff.read(os.path.join(session_dir, CORE_CLIENT_STAFF_RECORD))
+    except (OSError, ValueError):
+        return None
+    ours = [e for e in entries if cs._s(e.get("event")).startswith("core-client")]
+    last = ours[-1] if ours else {}
+    if (last.get("event") != "core-client" or last.get("at") != b["marked"]
+            or not cs._s(last.get("by"))):
+        return None
+    return b
+
+
 def core_run(session=None, record=None):
-    """Is this a UC Davis Core run -- does it answer a CoreOmics submission? THE one test for
-    what only the Core's own clients see (its feedback survey), asked of the SESSION alone by the
-    report and its .md twin, README, AGENTS.md and make_podcast.py (check, link, share); a
-    --submission given to make_analysis_html feeds only the Submission section. `record` (a
-    delivery's summary, already read) is for the delivery README and its email. Yes when a record
-    that names a submission (a PROT number or a CoreOmics id) loads -- `record`, or the one
-    attached to `session` -- or when session.json parses and announces one, by that number or
-    id, whose record file is missing (the report says so; still the Core's). Anything else is NO,
-    fail closed: a damaged session.json or record, a block or record naming no submission. The
-    skill is used outside the Core too, and those users must never be sent the Core's survey.
-    -> {"prot": "PROT_0807" | None}, or None."""
+    """Is this a UC Davis Core run -- does it answer a CoreOmics submission, or did Core staff mark
+    it as Core client work? THE one test for what only the Core's own clients see (its feedback
+    survey), asked of the SESSION alone by the report and its .md twin, README, AGENTS.md and
+    make_podcast.py (check, link, share, and the podcast's standing consent); a --submission given
+    to make_analysis_html feeds only the Submission section. `record` (a delivery's summary,
+    already read) is for the delivery README and its email. Yes when a record that names a
+    submission (a PROT number or a CoreOmics id) loads -- `record`, or the one attached to
+    `session` -- or when session.json parses and announces one, by that number or id, whose
+    record file is missing (the report says so; still the Core's). Yes too, with no number, when
+    session.json carries Core staff's mark that the session is Core client work with no
+    submission (core_client_mark: with its staff record; session.py core-client, 2.15): a pilot
+    or a rush job before its submission exists. Anything else is NO, fail closed: a damaged
+    session.json or record, a block or record naming no submission, a mark without its staff
+    record. The skill is used outside the Core too, and those users must never be sent the
+    Core's survey. -> {"prot": "PROT_0807" | None}, {"prot": None, "core_client": True} when the
+    yes rests on the mark alone (no CoreOmics submission: nothing to deliver through CoreOmics),
+    or None."""
     def named(rec):
         return ({"prot": rec.get("internal_id")}
                 if rec and (rec.get("internal_id") or rec.get("id")) else None)
@@ -380,16 +420,161 @@ def core_run(session=None, record=None):
         return None                                  # damaged session.json
     if sj is not None and not isinstance(sj, dict):
         return None
+    mark = ({"prot": None, "core_client": True} if core_client_mark(sj, p["session_dir"])
+            else None)
     block = (sj or {}).get("coreomics")
     if not os.path.lexists(p["submission_record"]):
         prot = _internal_id(block.get("internal_id")) if isinstance(block, dict) else None
         if prot or (isinstance(block, dict) and _hex_id(block.get("id"))):
             return {"prot": prot}                    # announced by number or id, record missing
-        return None
+        return mark
     try:
-        return named(load(session))
+        return named(load(session)) or mark
     except RecordError:
+        return mark
+
+
+def _core_work(p):
+    """Do the session's own records say it is Core work? session.json with what init records for
+    Core staff only (analysis_for: --submission / --internal, SKILL.md step 0a), a CoreOmics block
+    or a Core client mark, or an attached record. Only then is the staff list asked
+    (survey_off_note): anyone else's session costs no check, and no SSH from a laptop."""
+    try:
+        sj = _read_json(p["session_json"])
+    except RecordError:
+        sj = None
+    if isinstance(sj, dict) and (isinstance(sj.get("analysis_for"), dict) or CORE_CLIENT in sj
+                                 or isinstance(sj.get("coreomics"), dict)):
+        return True
+    return os.path.lexists(p["submission_record"])
+
+
+def _mark_unbacked(sj, p):
+    """A core_client block in session.json with no matching staff record (core_client_mark
+    says no): typed by hand, or a laptop copy pulled without logs/core_client.staff.json."""
+    return (isinstance(sj, dict) and CORE_CLIENT in sj
+            and not core_client_mark(sj, p["session_dir"]))
+
+
+def _survey_off_reason(p):
+    """Why core_run says no, from the session's records: the clause survey_off_note opens with."""
+    try:
+        sj = _read_json(p["session_json"])
+    except RecordError:
+        return "its session.json cannot be read"
+    if sj is not None and not isinstance(sj, dict):
+        return "its session.json is not a JSON object"
+    if _mark_unbacked(sj, p):
+        return (f"session.json's Core client work mark is ignored (it has no matching entry in "
+                f"{CORE_CLIENT_STAFF_RECORD}, and session.py core-client writes both)")
+    rel = os.path.relpath(p["submission_record"], p["session_dir"])
+    if os.path.lexists(p["submission_record"]):
+        try:
+            load(p["session_dir"])
+        except RecordError:
+            return f"its CoreOmics record ({rel}) cannot be read"
+        return f"its CoreOmics record ({rel}) names no submission"
+    from session import read_analysis_for
+    named = (read_analysis_for(p["session_dir"])[0] or {}).get("submissions") or []
+    if named:
+        return (f"session.json names {', '.join(str(x) for x in named)} (session.py init "
+                f"--submission), but no CoreOmics record is attached")
+    return "this session answers no CoreOmics submission"
+
+
+SURVEY_STEPS = ("report", "finalize", "status")
+
+
+def survey_off_note(session, step="report"):
+    """THE line a Core staff member sees when a session's report, README and AGENTS.md will NOT
+    carry the Core's feedback survey (core_run says no), with the two ways to add it -- printed by
+    make_analysis_html.py at the report step (`step` "report") and by session.py finalize, and
+    listed by session.py status as a note (there it also says to run finalize again: finalize has
+    written README, AGENTS.md and the zip without it). A warning, never a gate. None when core_run
+    says yes, without a session, when the session's records say nothing of Core work (_core_work),
+    or when this account is not Core staff (staff.core_staff, asked once): a user outside the Core
+    never sees it."""
+    if step not in SURVEY_STEPS:
+        raise ValueError(f"survey_off_note step {step!r}: one of {', '.join(SURVEY_STEPS)}")
+    if not session:
         return None
+    p = paths_for(os.path.abspath(os.path.expanduser(session)))
+    if core_run(p["session_dir"]) or not _core_work(p):
+        return None
+    if step != "report" and _report_carries_survey(p)[0]:
+        return None                      # survey_missing_note says the report is out of date
+    import staff
+    if not staff.core_staff()[0]:
+        return None
+    q = shlex.quote(p["session_dir"])
+    try:
+        unbacked = _mark_unbacked(_read_json(p["session_json"]), p)
+    except RecordError:
+        unbacked = False
+    lead = (f"If it was marked on HIVE, pull {CORE_CLIENT_STAFF_RECORD} with session.json and "
+            "rebuild the report. Otherwise, for" if unbacked else "For")
+    then = ("then rebuild the report." if step == "report" else
+            "then rebuild the report (make_analysis_html.py; a report built on a laptop needs "
+            f"session.json and {CORE_CLIENT_STAFF_RECORD} pulled again first) and run finalize "
+            "again.")
+    return (f"The Core's feedback survey will NOT be included: {_survey_off_reason(p)}, so its "
+            f"report, README and AGENTS.md go out without it. {lead} work for a Core client, "
+            f"attach the submission (python3 scripts/submission_report.py attach --session {q} "
+            f"--record <its fetch folder>) or mark the session as Core client work (python3 "
+            f"scripts/session.py core-client --session {q} --why-file - <<'EOF', then the "
+            f"reason, then EOF), " + then)
+
+
+def _report_carries_survey(p):
+    """(carries, cannot): does output/Analysis_Report.html carry the Core's survey line
+    (core_submission.FEEDBACK_URL)? carries None when there is no report; cannot = why it could
+    not be read (carries None then too)."""
+    page = os.path.join(p["output_dir"], "Analysis_Report.html")
+    try:
+        with open(page, encoding="utf-8", errors="replace") as fh:
+            return cs.FEEDBACK_URL in fh.read(), None
+    except FileNotFoundError:
+        return None, None
+    except OSError as e:
+        return None, f"{type(e).__name__}: {e.strerror or e}"
+
+
+def survey_missing_note(session):
+    """THE line when the report and the session disagree about the Core's survey line, said by
+    session.py finalize and status. Either way round:
+      * the session IS a Core run (core_run says yes) but output/Analysis_Report.html does not
+        carry the survey: built before the submission was attached or the session marked -- or on
+        a laptop from a session.json pulled before (2.15 review H4c); refresh_feedback only
+        rewords a line that is there, so nothing else would ever add it;
+      * the session is NOT a Core run but the report carries it: built while the session was
+        marked, before session.py core-client --clear (2.15 review2 L3) -- a survey sent to
+        someone it is not for.
+    None when there is no report yet or the two agree."""
+    if not session:
+        return None
+    p = paths_for(os.path.abspath(os.path.expanduser(session)))
+    core = core_run(p["session_dir"])
+    carries, cannot = _report_carries_survey(p)
+    pull = (f"a report built on a laptop needs session.json, input/submission.json and "
+            f"{CORE_CLIENT_STAFF_RECORD} pulled again first")
+    if not core:
+        if not carries:
+            return None
+        return ("The report (output/Analysis_Report.html) carries the Core's feedback survey, "
+                "but this session is no longer a Core run (it answers no CoreOmics submission and "
+                "carries no Core client work mark -- the mark was cleared, or the record taken "
+                f"away, after the report was built). Rebuild it (make_analysis_html.py; {pull}), "
+                "then run finalize again.")
+    if carries or (carries is None and not cannot):
+        return None
+    what = (f"CoreOmics submission {core['prot']}" if core.get("prot") else
+            "Core client work (session.py core-client)" if core.get("core_client") else
+            "a CoreOmics submission")
+    head = (f"The report (output/Analysis_Report.html) cannot be read ({cannot}), so whether it "
+            f"carries the Core's feedback survey is not known" if cannot else
+            f"The report (output/Analysis_Report.html) does not carry the Core's feedback survey, "
+            f"although this session is {what}: it was built before that was recorded")
+    return head + f". Rebuild it (make_analysis_html.py; {pull}), then run finalize again."
 
 
 def resolve(source=None, session=None):
@@ -569,13 +754,160 @@ def sheet_groups(rec):
 
 
 # ------------------------------------------------------------ matching sheet to runs --
-def run_owners(samples, names):
-    """{name: {unique_id, ...}} by core_submission's matching: delimited tokens, the timsTOF
-    sample field only, the longest id owns a run. Two ids on one run is an ambiguous run."""
-    universe, cache = cs.id_universe(samples, [], "", None), {}
-    return {n: {o["uid"] for o in cs.file_owners(
-                cs.prepare_entry({"path": n, "name": os.path.basename(n.rstrip("/\\"))}),
-                universe, cache)} for n in names}
+# run_owners' "matched on" for a run whose name stage_map cannot place
+UNKNOWN_SIDE = "unknown side"
+
+
+def run_owners(samples, names, internal_id=None, smap=None, maybe=None):
+    """({name: {unique_id, ...}}, {name: what it was matched on}) by core_submission's rule for
+    one run (run_matches -- the rule locate and the HT manifest use): delimited tokens, the
+    timsTOF sample field only, the longest id owns a run; a run of this submission's HT plate
+    (core_submission.ht_plate_run) in its sample field, by unique_id or else by sample_name. Two
+    ids on one run is an ambiguous run. `smap` (stage_map): a run Core staff renamed when staging
+    is matched by its delivered (corrected) name -- staff's correction of which sample it is --
+    whichever side of the rename the analysis used; a run whose name stage_map cannot place
+    (UNKNOWN_SIDE) is matched to no sample, never by a guess. `maybe` (a dict): filled with each
+    such run's possible samples (by either of its names), so the notes call them undetermined,
+    not missing (2.15 review2 L4)."""
+    universe = cs.id_universe(samples, [], "", None)
+    plate = cs.ht_pattern(internal_id)
+    snames = cs.name_universe(samples) if plate else []
+    owners, on = {}, {}
+    for n in names:
+        r = _stage_run(n, smap)
+        if r and r["side"] == "unknown":
+            owners[n], on[n] = set(), UNKNOWN_SIDE
+            if maybe is not None:
+                maybe[n] = {o["uid"] for x in (r.get("either") or []) if x
+                            for o in cs.run_matches(x, universe, snames, plate)[0]}
+            continue
+        found, how = cs.run_matches(r["delivered"] if r and r["side"] else n, universe, snames,
+                                    plate)
+        owners[n], on[n] = {o["uid"] for o in found}, how
+    return owners, on
+
+
+def _stage_run(name, smap):
+    from collect_conditions import run_name
+    return ((smap or {}).get("runs") or {}).get(run_name(cs._s(name)))
+
+
+def _place(names, pairs):
+    """{run name: {"side", "acquired", "delivered", "renamed"}} for each name analysed here, against
+    the stage record's pairs [(name as acquired, delivered name, target path)]. The side is which
+    of the pair the analysis read: "acquired" (the instrument's file -- its path is the pair's
+    target, or its name is a name as acquired and no delivered one), "delivered" (a corrected
+    link: its path leads to the target under the delivered name, or its name is only a delivered
+    one), "unchanged" (both names are one), None (in no pair). A name that is one run's acquired
+    name and ANOTHER's delivered name (a swap) takes the side the session's other runs used; when
+    they say nothing it is "unknown": never matched by a guess (2.15 review H2)."""
+    from collect_conditions import run_name
+
+    def placed(side, pair):
+        return {"side": side, "acquired": pair[0], "delivered": pair[1],
+                "renamed": run_name(pair[0]) != run_name(pair[1])}
+    acq, dlv, tgt = {}, {}, {}
+    for a, d, t in pairs:
+        acq.setdefault(run_name(a), (a, d))
+        dlv.setdefault(run_name(d), (a, d))
+        if t:                              # input/raw_names.tsv has no paths
+            tgt.setdefault(os.path.normpath(t), (a, d))
+    runs, undecided = {}, []
+    for n in names:
+        s, rn = cs._s(n).rstrip("/\\"), run_name(cs._s(n))
+        if rn in runs or rn in undecided:
+            continue
+        base = os.path.basename(s)
+        exact = tgt.get(os.path.normpath(s)) if os.path.isabs(s) else None
+        if exact is None and os.path.isabs(s) and os.path.lexists(s):
+            real = tgt.get(os.path.realpath(s))       # a link to the run: which name it carries
+            if real and base == real[1] and base != real[0]:
+                runs[rn] = placed("delivered", real)
+                continue
+            exact = real if real and base == real[0] else None
+        a_hit, d_hit = acq.get(rn), dlv.get(rn)
+        if exact is not None:
+            runs[rn] = placed("acquired" if run_name(exact[0]) != run_name(exact[1]) else
+                              "unchanged", exact)
+        elif a_hit and d_hit and a_hit != d_hit:
+            undecided.append(rn)
+        elif a_hit:
+            runs[rn] = placed("unchanged" if a_hit == d_hit else "acquired", a_hit)
+        elif d_hit:
+            runs[rn] = placed("delivered", d_hit)
+        else:
+            runs[rn] = {"side": None, "acquired": None, "delivered": None, "renamed": False}
+    used = {r["side"] for r in runs.values() if r["side"] in ("acquired", "delivered")}
+    for rn in undecided:
+        if used == {"acquired"}:
+            runs[rn] = placed("acquired", acq[rn])
+        elif used == {"delivered"}:
+            runs[rn] = placed("delivered", dlv[rn])
+        else:                             # renamed either way: both of its pairs are renames
+            # `either`: the name it is matched by under each reading (its pair as acquired, as
+            # delivered) -- for the samples it may be, never for a match (review2 L4)
+            runs[rn] = {"side": "unknown", "acquired": None, "delivered": None, "renamed": True,
+                        "either": [acq[rn][1], dlv[rn][1]]}
+    return runs
+
+
+def stage_map(rec, p, names):
+    """How the runs analysed here (`names`: input/raw_files.txt entries, or run names) stand in
+    THIS submission's stage record: the service project's .core_submission.json, whose `links`
+    name each raw/ link (a corrected name when staff fixed the instrument's) and its target (the
+    run as acquired) -- core_submission.find_service_record, the one lookup (deliver's; without
+    its slow search of the service tree), and raw_names. Without one above the session -- a copy
+    pulled to a laptop for the report (step 9) -- the session's own input/raw_names.tsv
+    (write_name_map), which travels with it. -> {"source": "stage record" | "input/raw_names.tsv"
+    | None, "problem": None | "not found" | "unreadable" (said in the notes for a CoreOmics
+    record, which the Core stages), "foreign": another submission's record above the session,
+    "runs": _place, "renamed": [run names analysed here that staff renamed]}."""
+    out = {"source": None, "problem": None, "foreign": None, "runs": {}, "renamed": []}
+    if not p or not names or not rec.get("id"):
+        return out
+    stage, where, out["foreign"] = cs.find_service_record(
+        {"id": rec["id"], "internal_id": rec.get("internal_id")}, p["session_dir"], None,
+        search_tree=False)
+    if stage is not None:
+        pairs = [(os.path.basename(cs._s(t).rstrip("/")), d, cs._s(t))
+                 for d, t in cs.raw_names(stage) if d and t]
+        out["source"] = "stage record"
+    else:
+        try:
+            with open(p["raw_names"], encoding="utf-8") as fh:
+                pairs = [(a, d, "") for a, d, _pos in cs.parse_raw_name_map(fh.read())]
+            out["source"] = "input/raw_names.tsv"
+        except FileNotFoundError:
+            pairs = None
+        except (OSError, ValueError) as e:          # said, never taken for "no rename"
+            pairs, out["map_problem"] = None, f"{type(e).__name__}: {e}"
+        if pairs is None:
+            if rec.get("source") == SOURCE_COREOMICS:
+                out["problem"] = ("unreadable" if cs.STAGE_RECORD_UNREADABLE in cs._s(where)
+                                  else "not found")
+            return out
+    out["runs"] = _place(names, pairs)
+    out["renamed"] = [k for k, r in out["runs"].items() if r["renamed"]]
+    return out
+
+
+def _run_label(name, smap):
+    """A raw file's name as the notes list it: its base name -- and, when staff renamed runs
+    analysed here (stage_map), which side of the rename it is, with the other name."""
+    base = os.path.basename(cs._s(name).rstrip("/\\"))
+    if not (smap or {}).get("renamed"):
+        return base
+    r = _stage_run(base, smap)
+    if r is None or r["side"] is None:
+        return f"{base} (not in the stage record)"
+    if r["side"] == "unknown":
+        return (f"{base} (one run's name as acquired and another's delivered name: which this "
+                "is, the records do not say)")
+    if not r["renamed"]:
+        return f"{base} (as acquired and as delivered)"
+    if r["side"] == "delivered":
+        return f"{base} (as delivered; acquired as {r['acquired']})"
+    return f"{base} (as acquired; delivered as {r['delivered']})"
 
 
 def session_locate(p):
@@ -605,15 +937,17 @@ def session_locate(p):
     return d
 
 
-def run_assignment(rec, p, names):
-    """({name: {unique_id, ...}}, basis): which sheet sample each run is. A run is matched by
+def run_assignment(rec, p, names, smap=None):
+    """({name: {unique_id, ...}}, basis, how): which sheet sample each run is. A run is matched by
     collect_conditions.run_name, so raw paths and conditions.csv's File.Name both work. Staff's
     locate result settles every run it assigned (matched by itself or by `--choose`; a record
     from skill 2.13.1 or older lists only the staff choices): the one record of sample identity,
     and the only one when the names do not carry the ids (sheet S01, runs DIA-S1). Every other
-    run is matched by name (core_submission's run_owners): an empty or partial locate record
-    never erases a name match (review of 2.13.2). basis: "locate" when locate assigned every
-    run here, "mixed" when some, "names" when none."""
+    run is matched by name (run_owners: by unique_id, or an HT plate run by sample_name; a run
+    staff renamed when staging by its delivered name): an empty or partial locate record never
+    erases a name match (review of 2.13.2). basis: "locate" when locate assigned every run here,
+    "mixed" when some, "names" when none. how: {"on": {name: what each run matched by name was
+    matched on (core_submission.MATCHED_ON_*, or UNKNOWN_SIDE)}, "smap": stage_map}."""
     from collect_conditions import run_name
     loc = session_locate(p) if p else None
     uids = {s["unique_id"] for s in rec["samples"] if s["unique_id"]}
@@ -629,11 +963,15 @@ def run_assignment(rec, p, names):
     for a in given:
         if isinstance(a, dict) and a.get("sample") and a.get("file"):
             by_run[run_name(a["file"])].add(uid_of(a["sample"]))
-    by_name = run_owners(rec["samples"], [n for n in names if run_name(n) not in by_run])
+    if smap is None:
+        smap = stage_map(rec, p, names)
+    maybe = {}
+    by_name, on = run_owners(rec["samples"], [n for n in names if run_name(n) not in by_run],
+                             rec.get("internal_id"), smap, maybe)
     owners = {n: set(by_run[run_name(n)]) if run_name(n) in by_run else by_name[n] for n in names}
     covered = sum(run_name(n) in by_run for n in names)
     return owners, ("locate" if names and covered == len(names) else
-                    "mixed" if covered else "names")
+                    "mixed" if covered else "names"), {"on": on, "smap": smap, "maybe": maybe}
 
 
 def _read_conditions(p):
@@ -831,54 +1169,253 @@ def _pairing_note(rec, p):
     return ("pairing", " ".join(bits))
 
 
-def _sheet_vs_raw(rec, p):
+def _sheet_vs_raw(rec, p, smap=None):
+    """The sheet against the runs analysed here (input/raw_files.txt), each note with the basis
+    it was matched on: "locate" / "mixed" (staff's assignment), "unique_id" (an ordinary
+    submission: the run names carry the sample IDs), "sample_name" (an HT plate: its runs carry
+    the sample names, never the sheet's IDs), "unique_id or sample_name", or "none" (an HT plate
+    whose sheet gives no sample names: nothing can match by design, said in one neutral line).
+    A run matched by name to more than one sample (a sample name several samples share, two IDs
+    of one length on one run) is AMBIGUOUS, as locate's curated_rows has it: it counts for none of
+    them, and no note claims a full match then (2.15 review H1). Raw names are listed as
+    _run_label gives them; `names` says which names the runs were matched by ("delivered" when
+    the stage record renamed runs analysed here, else "as analysed": the names in
+    input/raw_files.txt, with no record that any was changed). A run stage_map cannot place is
+    neither matched nor "loose": _stage_notes says so."""
     names = read_raw_list(p["session_dir"])
     if not names or not rec["samples"]:
         return []
-    owners, basis = run_assignment(rec, p, names)
-    found = {uid for o in owners.values() for uid in o}
-    loose = [n for n, o in owners.items() if not o]
+    owners, basis, how = run_assignment(rec, p, names, smap)
+    smap = how["smap"]
+    tag = {"names": "delivered" if smap["renamed"] else "as analysed"}
+    on = how["on"]                        # the runs matched by name, and on what
+    HT = (cs.MATCHED_ON_HT_ID, cs.MATCHED_ON_HT_NAME)
+    shared = [n for n in names if n in on and len(owners[n]) > 1]
+    sole = {u for n in names if n not in on or len(owners[n]) == 1 for u in owners[n]}
+    in_shared = {u for n in shared for u in owners[n]}
+    loose = [n for n in names if not owners[n] and on.get(n) != UNKNOWN_SIDE]
     uids = [s["unique_id"] for s in rec["samples"] if s["unique_id"]]
-    none = [u for u in uids if u not in found]
+    # samples whose only possible runs are renamed runs stage_map could not place: undetermined,
+    # not missing (review2 L4; _stage_notes says which runs)
+    undecided = {u for v in (how.get("maybe") or {}).values() for u in v} - sole - in_shared
+    none = [u for u in uids if u not in sole and u not in in_shared and u not in undecided]
+    sheet_name = {s["unique_id"]: s["sample_name"] for s in rec["samples"] if s["unique_id"]}
+    such = f", such as {uids[0]}" if uids else ""          # never a made-up example (rule 2)
     out = []
-    files = lambda ns: _examples(os.path.basename(n.rstrip("/")) for n in ns)   # noqa: E731
+    files = lambda ns: _examples(_run_label(n, smap) for n in ns)   # noqa: E731
+
+    def note(nid, text, on_key):
+        out.append((nid, text, dict(tag, basis=on_key)))
+
+    def ambiguous(key, on_key):
+        if not shared:
+            return
+        if key == "sample name":
+            counts = Counter(sheet_name.get(u) or u for u in in_shared)
+            who = ", ".join(f"{k} on {v}" for k, v in sorted(counts.items()))
+        else:
+            who = _examples(sorted(in_shared))
+        note("sheet_ambiguous",
+             f"Sample sheet vs raw files: {len(shared)} of {len(names)} raw files carry a {key} "
+             f"that more than one sample on the sheet has ({len(in_shared)} samples: {who}), so "
+             f"the names cannot tell which of those samples each of these runs is "
+             f"({files(shared)}). The Core's assignment of runs to samples (core_submission.py "
+             f"locate --choose) settles it.", on_key)
+
+    if undecided:
+        note("sheet_undetermined",
+             f"Sample sheet vs raw files: {len(undecided)} of {len(uids)} samples on the sheet "
+             f"cannot be told from the runs analysed here: their runs are ones Core staff renamed "
+             f"when staging, and which side of the rename this analysis used could not be placed "
+             f"(the raw file names note says which runs) ({_examples(sorted(undecided))}).",
+             "stage record")
     if basis == "mixed":                  # some runs by staff's assignment, the rest by name
+        key = ("sample ID or sample name" if any(on.get(n) in HT for n in names)
+               else "sample ID")
+        ambiguous(key, "mixed")
         if none:
-            out.append(("sheet_ids_without_raw",
-                        f"Sample sheet vs raw files: {len(none)} of {len(uids)} sample IDs on the "
-                        f"sheet have no raw file analysed here, by the Core's assignment of runs "
-                        f"to samples or, for the runs it did not assign, by name "
-                        f"({_examples(none)})."))
+            note("sheet_ids_without_raw",
+                 f"Sample sheet vs raw files: {len(none)} of {len(uids)} sample IDs on the "
+                 f"sheet have no raw file analysed here, by the Core's assignment of runs "
+                 f"to samples or, for the runs it did not assign, by name "
+                 f"({_examples(none)}).", "mixed")
         if loose:
-            out.append(("raw_without_sheet_id",
-                        f"Sample sheet vs raw files: {len(loose)} of {len(names)} raw files "
-                        f"analysed here were assigned to no sample and carry no sample ID from the "
-                        f"sheet ({files(loose)})."))
+            note("raw_without_sheet_id",
+                 f"Sample sheet vs raw files: {len(loose)} of {len(names)} raw files "
+                 f"analysed here were assigned to no sample and carry no {key} from the "
+                 f"sheet ({files(loose)}).", "mixed")
         return out
     if basis == "locate":                 # staff assigned the runs: say so, not "match"
         if none:
-            out.append(("sheet_ids_without_raw",
-                        f"Sample sheet vs raw files: {len(none)} of {len(uids)} sample IDs on the "
-                        f"sheet have no raw file analysed here in the Core's assignment of runs to "
-                        f"samples ({_examples(none)})."))
+            note("sheet_ids_without_raw",
+                 f"Sample sheet vs raw files: {len(none)} of {len(uids)} sample IDs on the "
+                 f"sheet have no raw file analysed here in the Core's assignment of runs to "
+                 f"samples ({_examples(none)}).", "locate")
         if loose:
-            out.append(("raw_without_sheet_id",
-                        f"Sample sheet vs raw files: {len(loose)} of {len(names)} raw files "
-                        f"analysed here are assigned to no sample on the sheet ({files(loose)})."))
+            note("raw_without_sheet_id",
+                 f"Sample sheet vs raw files: {len(loose)} of {len(names)} raw files "
+                 f"analysed here are assigned to no sample on the sheet ({files(loose)}).",
+                 "locate")
         return out                        # how well ids match names no longer matters
+    ht = any(on.get(n) in HT for n in names)
+    by_id = any(owners[n] and on.get(n) in (cs.MATCHED_ON_ID, cs.MATCHED_ON_HT_ID)
+                for n in names)
+    by_name = any(owners[n] and on.get(n) == cs.MATCHED_ON_HT_NAME for n in names)
+    has_names = any(s["sample_name"] for s in rec["samples"])
+    if ht and not has_names and not by_id:
+        note("sheet_not_compared",
+             f"Sample sheet vs raw files: not compared by name. HT plate runs carry the plate "
+             f"position and a sample name, never the sheet's sample IDs (unique_id{such}), and "
+             f"the sheet gives no sample names.", "none")
+        return out
+    if ht and has_names and (by_name or not by_id):      # an HT plate: by sample name
+        if by_name and by_id:
+            key, on_key = "sample ID or sample name", "unique_id or sample_name"
+            lead = ("matched by sample ID, and the HT plate runs that carry none by sample name "
+                    "(sample_name)")
+        elif by_name:
+            key, on_key = "sample name", "sample_name"
+            lead = (f"matched by sample name. HT plate runs carry the sheet's sample names "
+                    f"(sample_name), not its sample IDs (unique_id{such})")
+        else:
+            key, on_key = "sample name", "sample_name"
+            lead = (f"compared by sample name (HT plate runs carry sample names, not the sheet's "
+                    f"sample IDs{such}), and none of the runs analysed here carries a sample "
+                    f"name from the sheet")
+        # no full match while the stage record is missing or unreadable: the names analysed
+        # may be the instrument's wrong ones (2.15 review M2)
+        full = (by_name and not none and not loose and not shared and not undecided
+                and not smap["problem"])
+        note("sheet_match_basis",
+             "Sample sheet vs raw files: " + lead
+             + ("; every sample on the sheet has a run analysed here, and every run a sample."
+                if full else ".")
+             + (" Runs Core staff renamed when staging were matched by the name they are "
+                "delivered under." if tag["names"] == "delivered" else ""), on_key)
+        ambiguous(key, on_key)
+        if none:
+            note("sheet_ids_without_raw",
+                 f"Sample sheet vs raw files: {len(none)} of {len(uids)} samples on the sheet "
+                 f"match no raw file analysed here by {key} ("
+                 + _examples(f"{u} ({sheet_name[u]})" if sheet_name.get(u) else u for u in none)
+                 + ").", on_key)
+        if loose:
+            note("raw_without_sheet_id",
+                 f"Sample sheet vs raw files: {len(loose)} of {len(names)} raw files carry no "
+                 f"{key} from the sheet ({files(loose)}).", on_key)
+        return out
+    ambiguous("sample ID", "unique_id")
     if none:
-        out.append(("sheet_ids_without_raw", f"Sample sheet vs raw files: {len(none)} of "
-                                             f"{len(uids)} sample IDs on the sheet match no raw "
-                                             f"file analysed here ({_examples(none)})."))
+        note("sheet_ids_without_raw", f"Sample sheet vs raw files: {len(none)} of "
+                                      f"{len(uids)} sample IDs on the sheet match no raw "
+                                      f"file analysed here ({_examples(none)}).", "unique_id")
     if loose:
-        out.append(("raw_without_sheet_id", f"Sample sheet vs raw files: {len(loose)} of "
-                                            f"{len(names)} raw files carry no sample ID from the "
-                                            f"sheet ({files(loose)})."))
+        note("raw_without_sheet_id", f"Sample sheet vs raw files: {len(loose)} of "
+                                     f"{len(names)} raw files carry no sample ID from the "
+                                     f"sheet ({files(loose)}).", "unique_id")
     weak = [u for u in uids if cs.weak_reason(u)]
     if weak and (none or loose or len(weak) == len(uids)):
-        out.append(("weak_sample_ids", f"{len(weak)} sample IDs are too short or numeric to "
-                                       f"match file names reliably ({_examples(weak)})."))
+        note("weak_sample_ids", f"{len(weak)} sample IDs are too short or numeric to "
+                                f"match file names reliably ({_examples(weak)}).", "unique_id")
     return out
+
+
+def write_name_map(session, service_project=None):
+    """input/raw_names.tsv from this submission's stage record (core_submission.raw_name_map and
+    format_raw_name_map: the one format), when Core staff renamed runs when staging: the pairs
+    that travel with the session -- the step-9 pull, the zip -- and that deliver delivers as
+    RAW_NAMES.tsv. Written by attach and finalize, where the stage record is (HIVE). -> (level,
+    note): ("OK", what) written; ("SKIPPED", why) the stage record or the submission record
+    cannot be read; (None, why) nothing to write -- no submission, no stage record above the
+    session (a laptop copy keeps the map it was pulled with), or nothing renamed (an old map is
+    then removed: it would describe renames the stage record no longer has). `service_project`
+    (attach --service-project, as deliver's): the staged project of a session that is not inside
+    it -- its map is then written here and the notes read it (2.15 review2 L7)."""
+    p = paths_for(os.path.abspath(os.path.expanduser(session)))
+    try:
+        rec = load(p["session_dir"])
+    except RecordError as e:
+        return "SKIPPED", f"the submission record cannot be read ({e})"
+    if not rec or not rec.get("id"):
+        return None, "no CoreOmics submission attached"
+    stage, where, _foreign = cs.find_service_record(
+        {"id": rec["id"], "internal_id": rec.get("internal_id")}, p["session_dir"],
+        os.path.abspath(os.path.expanduser(service_project)) if service_project else None,
+        search_tree=False)
+    if stage is None:
+        if service_project:
+            return "SKIPPED", f"--service-project: {where}"
+        if cs.STAGE_RECORD_UNREADABLE in cs._s(where):
+            return "SKIPPED", f"the stage record above the session ({cs.MARKER}) cannot be read"
+        return None, "no stage record above the session"
+    rows = cs.raw_name_map(stage)
+    renamed = cs.raw_name_map_renamed(rows)
+    if not renamed:
+        if os.path.exists(p["raw_names"]):
+            os.remove(p["raw_names"])
+        return None, "the stage record renames no run"
+    tmp = p["raw_names"] + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(cs.format_raw_name_map(rows))
+    os.replace(tmp, p["raw_names"])
+    return "OK", f"{len(rows)} staged runs, {len(renamed)} renamed by Core staff when staging"
+
+
+def _stage_notes(rec, p, smap):
+    """What the stage record says about the runs' names (stage_map): that it was not found above
+    the session or cannot be read (a CoreOmics submission's -- the Core stages those -- so the
+    names in the notes are only as analysed); or, when staff corrected names when staging, how
+    many runs, which names the analysis used, and how the notes label them."""
+    names = read_raw_list(p["session_dir"])
+    if not names:
+        return []
+    if smap["problem"]:
+        other = (f" The stage record above it is {smap['foreign']}'s." if smap["foreign"] else "")
+        if smap.get("map_problem"):
+            other += (f" input/raw_names.tsv cannot be read either ({smap['map_problem']}).")
+        if smap["problem"] == "unreadable":
+            return [("stage_record_unreadable",
+                      f"Raw file names: the stage record of {label(rec)} above this session "
+                      f"({cs.MARKER}) cannot be read, so whether Core staff corrected run names "
+                      f"when staging is not known here; the names in these notes are as "
+                      f"analysed. Repair it, or stage again (core_submission.py stage --apply).")]
+        return [("stage_record_not_found",
+                  f"Raw file names: no stage record of {label(rec)} ({cs.MARKER}, written by "
+                  f"core_submission.py stage) was found in the folders above this session, so "
+                  f"whether Core staff corrected run names when staging is not known here; the "
+                  f"names in these notes are as analysed." + other)]
+    if not smap["renamed"]:
+        return []
+    from collect_conditions import run_name
+    runs = [smap["runs"].get(run_name(n)) or {} for n in names]
+    sides = Counter(r.get("side") for r in runs if r.get("renamed") and r.get("side") != "unknown")
+    if not sides:
+        used = "names the stage record cannot place (below)"
+    elif set(sides) == {"acquired"}:
+        used = "the names as acquired"
+    elif set(sides) == {"delivered"}:
+        used = "the corrected (delivered) names"
+    else:
+        used = (f"the names as acquired for {sides['acquired']} of them and the delivered names "
+                f"for {sides['delivered']}")
+    unknown = sum(r.get("side") == "unknown" for r in runs)
+    absent = sum(r.get("side") is None for r in runs)
+    return [("raw_names_corrected",
+             f"Raw file names: Core staff corrected the names of {len(smap['renamed'])} of the "
+             f"{len(names)} runs analysed here when staging them, and the delivered raw/ folder "
+             f"holds those runs under the corrected names. input/raw_files.txt, the search and its "
+             f"tables use {used}. Raw-file names in these notes are labelled as acquired or as "
+             f"delivered; join on the delivered name or the plate position, never on a name as "
+             f"acquired. "
+             + (f"input/raw_names.tsv (delivered as {cs.RAW_NAME_MAP}, beside the report) lists "
+                f"every pair, with the plate position: join on it."
+                if os.path.isfile(p["raw_names"]) else
+                f"Every pair is in the stage record ({cs.MARKER}); finalize writes them to "
+                f"input/raw_names.tsv, delivered as {cs.RAW_NAME_MAP}.")
+             + (f" {unknown} run(s) carry a name that is one run's name as acquired and "
+                f"another's delivered name, and nothing here says which: they are matched to no "
+                f"sample." if unknown else "")
+             + (f" {absent} run(s) are not in the stage record." if absent else ""))]
 
 
 def _conditions_vs_analysed(rec, p):
@@ -961,16 +1498,17 @@ def locate_decisions(locate_json):
             "source": os.path.abspath(locate_json), "source_mtime": os.path.getmtime(locate_json)}
 
 
-def _locate_notes(p):
+def _locate_notes(p, smap=None):
     d = session_locate(p)
     if not isinstance(d, dict):
         return []
     out = []
+    lab = lambda ns: ", ".join(_run_label(n, smap) for n in ns)   # noqa: E731
     reinj = d.get("reinjections") or {}
     if reinj:
         pol = d.get("reinjections_policy")
-        each = "; ".join(f"{k}: kept {', '.join(v.get('kept') or [])}"
-                         + (f", set aside {', '.join(v['set_aside'])}" if v.get("set_aside") else "")
+        each = "; ".join(f"{k}: kept {lab(v.get('kept') or [])}"
+                         + (f", set aside {lab(v['set_aside'])}" if v.get("set_aside") else "")
                          for k, v in reinj.items())
         out.append(("reinjections",
                     f"Re-injections: {len(reinj)} sample(s) had several runs of their own, and staff "
@@ -983,14 +1521,17 @@ def _locate_notes(p):
                     f"Run choices: Core staff assigned the run by hand for "
                     f"{len(d['staff_choices'])} sample(s), where the file names alone did not "
                     f"settle which run is the sample ("
-                    + "; ".join(f"{c['sample']}: {c['file']}" for c in d["staff_choices"]) + ")."))
+                    + "; ".join(f"{c['sample']}: {_run_label(c['file'], smap)}"
+                                for c in d["staff_choices"]) + ")."))
     return out
 
 
 def quality_notes(rec, session=None):
     """[{"id", "text"}]: gaps in the submission, and places where it disagrees with what was
     analysed. Each is checked against the session's own files; a check with nothing to read
-    (no FASTA record yet, no conditions.csv) says nothing rather than guessing."""
+    (no FASTA record yet, no conditions.csv) says nothing rather than guessing. The sheet-vs-raw
+    notes also say what they matched on ("basis") and by which names ("names": "as analysed",
+    or "delivered" when staff renamed runs when staging -- raw_names_corrected then says so)."""
     p = paths_for(os.path.expanduser(session)) if session else None
     notes = []
     if rec["source"] == SOURCE_USER:
@@ -1022,13 +1563,16 @@ def quality_notes(rec, session=None):
                                                  "groups analysed were not taken from it and are "
                                                  "not corroborated by it."))
     if p:
-        notes += _sheet_vs_raw(rec, p)
+        smap = stage_map(rec, p, read_raw_list(p["session_dir"]))
+        notes += _stage_notes(rec, p, smap)
+        notes += _sheet_vs_raw(rec, p, smap)
         notes += _conditions_vs_analysed(rec, p)
-        notes += _locate_notes(p)
+        notes += _locate_notes(p, smap)
     pn = _pairing_note(rec, p)
     if pn:
         notes.append(pn)
-    return [{"id": i, "text": t} for i, t in notes]
+    # a note may carry more than its text: the sheet check's basis and which names it matched by
+    return [dict({"id": n[0], "text": n[1]}, **(n[2] if len(n) > 2 else {})) for n in notes]
 
 
 # ---------------------------------------------------------------------- rendering --
@@ -1218,6 +1762,9 @@ def cmd_attach(a):
             lp = paths_for(session)["locate_decisions"]
             _write_json(lp, dec)
             paths["locate_decisions"] = lp
+    nm_level, nm_note = write_name_map(session, a.service_project)
+    if nm_level:
+        paths["raw_names"] = {"level": nm_level, "note": nm_note}
     who, why = prepared_by(rec)
     return _emit({"attached": label(rec), "source": rec["source"], "prepared_by": who,
                   "prepared_by_basis": why, "n_samples": len(rec["samples"]),
@@ -1256,6 +1803,9 @@ def main(argv=None):
     at.add_argument("--given", help="JSON of facts the user gave (no CoreOmics token)")
     at.add_argument("--replace", action="store_true",
                     help="replace a DIFFERENT submission already attached (only if it was wrong)")
+    at.add_argument("--service-project", default=None,
+                    help="the staged service project, for a session that is not inside it (as "
+                         "deliver's): its raw-name map is then copied to input/raw_names.tsv")
     at.set_defaults(func=cmd_attach)
     for name, fn, hlp in (("show", cmd_show, "print the Submission section"),
                           ("notes", cmd_notes, "print the data-quality notes")):

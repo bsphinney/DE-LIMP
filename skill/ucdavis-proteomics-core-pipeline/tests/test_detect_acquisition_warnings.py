@@ -39,9 +39,13 @@ import test_tdf_readonly_open as tdf      # noqa: E402
 FILE_KEYS = {"file", "vendor", "acquisition", "confidence", "reason", "instrument",
              "precursor_mz_range", "precursor_mz_range_source", "tdf_integrity", "warnings",
              "reader",
+             # Thermo DIA: whether its windows are staggered (2.15; the peak check's import limit)
+             "isolation_windows",
              "ms1_resolution", "ms2_resolution", "ms2_analyzer", "resolution_note",
              # acq_time.result(): when the run was acquired (qc_bracket.py), or why not
-             "acquired_at", "acquired_at_source", "acquired_at_note"}
+             "acquired_at", "acquired_at_source", "acquired_at_note",
+             # FAIMS compensation voltages (faims.py): [] none, [cv, ...] FAIMS, null not read
+             "faims_cvs"}
 
 
 class _MixedCohort(trfp._FakeParserCase):

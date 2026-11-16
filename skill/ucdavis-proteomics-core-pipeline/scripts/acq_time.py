@@ -12,7 +12,7 @@ Two vendors, two different records of the same moment:
                Core's TRFP 2.0.0.0 on HIVE (invariant culture), "9/30/2026 3:06:18 AM" from a
                US-English Windows.
 
-What the Thermo value IS, measured on HIVE (srun job 24264231, 2026-10-01): for an Orbitrap
+What the Thermo value IS, measured on HIVE (in a test run, 2026-10-01): for an Orbitrap
 Exploris 480 QC run on a 120-min gradient, TRFP printed 03:06:18, and the .raw was last written
 at 05:06:20 PDT -- the end of the run. A Fusion Lumos QC run: 13:39:43, last written 15:39:46
 PDT. TRFP printed the same value with TZ=UTC and TZ=Asia/Tokyo, so the parser does not convert

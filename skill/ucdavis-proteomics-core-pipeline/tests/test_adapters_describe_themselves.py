@@ -4,7 +4,7 @@
 adapt_fragpipe_dda (IonQuant combined_protein.tsv), adapt_alphadia (pg.matrix) and adapt_radiant
 (Fulcrum) write one engine-made value per protein and run into the DE contract's PG.MaxLFQ
 column. build_maxlfq.R used to describe every such DE as "MaxLFQ + limma" / "DIA-NN
-PG.MaxLFQ" / "Quantification: DIA-NN MaxLFQ (Demichev et al. 2020)" -- Michelle's SET28
+PG.MaxLFQ" / "Quantification: DIA-NN MaxLFQ (Demichev et al. 2020)" -- Morgan's SET28
 FragPipe 23 session (2026-09-25) carries exactly that. Each adapter now declares its quantity
 (level "protein", the engine's own name and version, its FDR, the Crossref-verified citation),
 and maxlfq_descriptor()'s protein branch passes it through with no re-rollup described.
@@ -190,7 +190,11 @@ class FragPipeDda(_Case):
         self.assertNotIn("filtered at Q.Value", para)
         self.assertIn("Yu et al. 2021", prov["citation"])
         self.assertIn("Cox et al. 2014", prov["citation"])
-        self.assertIsNone(prov.get("caveat"))
+        # no run map in this output (no fragpipe.fp-manifest): said, never silent (2.15 F4)
+        import fragpipe_quant
+        self.assertEqual(prov.get("caveat"), fragpipe_quant.NO_MAP_CAVEAT)
+        self.assertEqual(prov["declared_quantity"]["quantity"], fragpipe_quant.QUANTITY_MAXLFQ)
+        self.assertEqual(prov["declared_quantity"]["n_experiments"], "6")
 
 
 @unittest.skipUnless(HAVE_ARROW and r_has(*NEEDS), "needs pyarrow and R with " + "/".join(NEEDS))
@@ -240,6 +244,9 @@ class Radiant(_Case):
         self.assertIn("≤ 0.01", para)
 
 
+MAXLFQ3 = {"quantity": "IonQuant MaxLFQ Intensity", "n_experiments": 3}   # fragpipe_quant.plan()
+
+
 @unittest.skipUnless(HAVE_ARROW, "needs pyarrow")
 class DeclarationDetails(unittest.TestCase):
     def setUp(self):
@@ -264,7 +271,9 @@ class DeclarationDetails(unittest.TestCase):
         self.assertEqual((dec["level"], dec["q_columns"]), ("protein", "real"))
 
     def test_missing_version_sources_are_said_not_guessed(self):
-        dec = self.rs.fragpipe_quantity_declaration(self.d, maxlfq_columns=False)
+        import fragpipe_quant as fq
+        dec = self.rs.fragpipe_quantity_declaration(
+            self.d, {"quantity": fq.QUANTITY_INTENSITY, "n_experiments": 1})
         self.assertIn("FragPipe (version not recorded) / IonQuant (version not recorded) "
                       "protein intensity (not MaxLFQ)", dec["value"])
         self.assertIn("not recorded: no fragpipe.workflow", dec["identification"])
@@ -298,10 +307,10 @@ class DeclarationDetails(unittest.TestCase):
         with open(os.path.join(self.d, "fragpipe.workflow"), "w") as fh:
             fh.write("# FragPipe version 23.1\nionquant.mbr=0\n")
         self.assertIn("match-between-runs off",
-                      self.rs.fragpipe_quantity_declaration(self.d, True)["value"])
+                      self.rs.fragpipe_quantity_declaration(self.d, MAXLFQ3)["value"])
         os.remove(os.path.join(self.d, "fragpipe.workflow"))
         self.assertIn("match-between-runs not recorded (no fragpipe.workflow)",
-                      self.rs.fragpipe_quantity_declaration(self.d, True)["value"])
+                      self.rs.fragpipe_quantity_declaration(self.d, MAXLFQ3)["value"])
 
     def test_main_s_engine_version_is_used_when_the_output_has_none(self):
         self.rs.ENGINE_VERSION = "2.3.3"

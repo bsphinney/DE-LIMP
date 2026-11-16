@@ -44,9 +44,33 @@ def flat(text):
     return " ".join(text.split())
 
 
+# 2.15 (the slim router): SKILL.md's no-DE blocks of steps 3 and 8 live in no-de-route.md, step 4
+# in parameters.md "4."; the router points to them (step 3: a one-line bullet; step 8: its heading)
+def reference(rel):
+    with open(os.path.join(SKILL, "references", rel), encoding="utf-8") as fh:
+        return fh.read()
+
+
+# 2.15 fix round (Ruling 93, review LOW 2): no-de-route.md's copy of SKILL.md's old step-3 and
+# step-8 blocks is gone. What the router's step 3 and step 8 point at is the one definition:
+# "When it applies" + "The route, in order" (+ "Work done outside the skill") for step 3, and the
+# route from its step 2 ("Skip steps 8-8d and 8f") on for step 8.
+def no_de_block(step):
+    ref = reference("no-de-route.md")
+    if step == 3:
+        return ref[ref.index("## When it applies"):]
+    return between(ref, "2. **Skip steps 8", "\n## Work done outside")
+
+
+def router_step(head, nxt):
+    return flat(between(skill_md(), head, nxt))
+
+
 class TheSignposts(unittest.TestCase):
     def test_skill_md_names_the_no_de_route_before_step_4(self):
-        s3 = flat(between(skill_md(), "\n### 3. ", "\n### 4. "))
+        self.assertIn("No DE?", router_step("\n### 3. ", "\n### 3b. "))
+        self.assertIn("no-de-route.md", router_step("\n### 3. ", "\n### 3b. "))
+        s3 = flat(no_de_block(3)) + " references/no-de-route.md"   # the router's pointer, above
         self.assertIn("deliver --mode no-de", s3)
         self.assertIn("--ids-only", s3)
         self.assertIn("references/no-de-route.md", s3)
@@ -55,23 +79,33 @@ class TheSignposts(unittest.TestCase):
 
     def test_step_3_block_comes_before_3b(self):
         text = skill_md()
-        block = text.index("**No differential expression?**")
+        block = text.index("**No DE?**")                        # 2.15: the router's pointer
         self.assertLess(text.index("\n### 3. "), block)
         self.assertLess(block, text.index("\n### 3b. "))
+        ref = reference("no-de-route.md")
+        self.assertNotIn("## Steps 3 and 8", ref)              # the duplicate is gone (LOW 2)
+        self.assertLess(ref.index("## When it applies"), ref.index("## The route, in order"))
+        self.assertLess(ref.index("1. **The search (step 7)."), ref.index("2. **Skip steps 8"))
 
     def test_step_4_confirms_it_with_the_defaults(self):
-        s4 = flat(between(skill_md(), "\n### 4. ", "\n### 5. "))
+        ref = reference("parameters.md")
+        a = ref.index("## 4. Resolving the defaults")
+        s4 = flat(ref[a:ref.index("\n## ", a + 3)])
         self.assertIn("If step 3 chose the no-DE route, confirm it with the defaults", s4)
 
     def test_step_8_opens_with_the_no_de_branch(self):
         """Ruling 38: the branch is at the TOP of step 8, before anything a DE needs."""
         s8 = between(skill_md(), "\n### 8. Differential expression", "\n### 8a. ")
-        top = flat("\n".join(s8.splitlines()[1:5]))
-        self.assertIn("No DE wanted?", top)
-        self.assertIn("NOT done", top)
+        # 2.15: the router's step 8 heading carries the branch; its text is no-de-route.md's
+        self.assertIn("no-de-route.md", s8.splitlines()[1])
+        self.assertLess(s8.index("no-de-route.md"), s8.index("SILAC"))
+        self.assertIn("none wanted", s8.splitlines()[1])
+        top = flat(no_de_block(8)) + " references/no-de-route.md"
+        self.assertIn("Skip steps 8–8d and 8f", top)
+        self.assertIn("Core runs still do step 8e", top)
         self.assertIn("deliver --mode no-de", top)
         self.assertIn("references/no-de-route.md", top)
-        self.assertLess(s8.index("No DE wanted?"), s8.index("SILAC"))
+        self.assertIn("NOT done", flat(no_de_block(3)))
 
     def test_the_route_matches_the_finish_steps(self):
         """The reference: the steps in order, finalize making the documents for every analysis
@@ -97,10 +131,7 @@ class TheReviewsGaps(unittest.TestCase):
     step-3 chain named no podcast (9e) while step 8's did."""
 
     def test_both_blocks_and_the_reference_name_step_11_and_11a(self):
-        text = skill_md()
-        s3 = flat(text[text.index("**No differential expression?**"):text.index("\n### 3b. ")])
-        s8 = flat("\n".join(between(text, "\n### 8. Differential expression",
-                                     "\n### 8a. ").splitlines()[1:6]))
+        s3, s8 = flat(no_de_block(3)), flat(no_de_block(8))     # 2.15: no-de-route.md
         with open(REF, encoding="utf-8") as fh:
             ref = flat(fh.read())
         for where, t in (("step 3", s3), ("step 8", s8), ("reference", ref)):
@@ -110,12 +141,11 @@ class TheReviewsGaps(unittest.TestCase):
         self.assertEqual(order, sorted(order))
 
     def test_step_3_says_in_addition_to_the_bundle_and_names_9e(self):
-        text = skill_md()
-        s3 = flat(text[text.index("**No differential expression?**"):text.index("\n### 3b. ")])
-        self.assertIn("in addition to the bundle, never instead", s3)
-        self.assertIn("9e (Core)", s3)
-        self.assertLess(s3.index("9d"), s3.index("9e (Core)"))
-        self.assertLess(s3.index("9e (Core)"), s3.index("12 `finalize`"))
+        s3 = flat(no_de_block(3))                               # 2.15: no-de-route.md
+        self.assertIn("in addition to the skill's bundle, never instead", s3.lower())
+        self.assertIn("5. **The podcast (step 9e)**, for a CoreOmics submission", s3)
+        self.assertLess(s3.index("(step 9d)"), s3.index("(step 9e)"))
+        self.assertLess(s3.index("(step 9e)"), s3.index("(step 12)"))
 
 
 class TheBrief(unittest.TestCase):

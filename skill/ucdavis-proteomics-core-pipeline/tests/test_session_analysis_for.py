@@ -182,14 +182,17 @@ class TheDocsSayIt(unittest.TestCase):
     def test_step_0a_asks_core_staff_only(self):
         step = _flat(self.skill[self.skill.index("### 0a."):self.skill.index("### 0. ")])
         self.assertIn("\"Do you work for the UC Davis Proteomics Core (staff)?\"", step)
-        self.assertIn("Core staff only — yes to 2 AND `check_access.sh` below says `core_member: "
+        # 2.15 Ruling 95: Core staff = the staff list (core_staff), never group read (core_member)
+        self.assertIn("Core staff only — yes to 2 AND `check_access.sh` below says `core_staff: "
                       "true` — right after that check: \"Which CoreOmics submission is this "
                       "analysis for?\"", step)
         self.assertIn("\"none\" for internal work", step)
-        self.assertIn("when the user is coming back to an earlier analysis (step 0c checks it)", step)
-        self.assertIn("Anyone else (no to 2, or `core_member: false`): never ask it, skip every "
-                      "board step, and never mention the board, CoreOmics or a submission number",
-                      step)
+        self.assertIn("\"not yet\" for client work (core-submissions.md \"Core client work\")", step)
+        self.assertIn("or on a resume (step 0c checks it)", step)
+        self.assertIn("Anyone else (no to 2, or `core_staff` not true: relay `core_staff_detail`): "
+                      "never ask it, skip every board step, and never mention the board, CoreOmics "
+                      "or a submission number", step)
+        self.assertNotIn("core_member: true", step)
         self.assertIn("--submission PROT_0807", step)
         self.assertIn("--internal '<its title on the board>'", step)
 
@@ -197,7 +200,7 @@ class TheDocsSayIt(unittest.TestCase):
         """2.12 staff review: step 1 asked outside users for a PROT number."""
         step = _flat(self.skill[self.skill.index("### 1. "):self.skill.index("### 1a.")])
         self.assertIn("From here to step 1a: Core staff only (step 0a: yes to question 2 and "
-                      "`core_member: true`). Anyone else skips it: never run `identify`", step)
+                      "`core_staff: true`). Anyone else skips it: never run `identify`", step)
         self.assertNotIn("Ask for a number only when there is evidence", step)
         self.assertNotIn("whether the samples were run by the UC Davis Proteomics Core", step)
         # a number staff gave at step 0a is not confirmed a second time
@@ -206,8 +209,9 @@ class TheDocsSayIt(unittest.TestCase):
 
     def test_free_text_is_never_double_quoted_on_this_computer(self):
         """2.12 security review: double-quoted text is run by the shell (twice via hive_exec)."""
-        step0a = _flat(self.skill[self.skill.index("### 0a."):self.skill.index("### 0. ")])
-        self.assertIn("inside a `hive_exec.sh` command use none of", step0a)
+        # golden rule 11 since the slim-down (it applies to every step, not only 0a)
+        rules = _flat(self.skill[self.skill.index("## Golden rules"):self.skill.index("## Flow")])
+        self.assertIn("inside a `hive_exec.sh` command use none of", rules)
         for text, where in ((self.skill, "SKILL.md"), (self.board, "board.md"), (self.core, "core-submissions.md")):
             for line in text.splitlines():
                 local = line.strip()
@@ -227,10 +231,16 @@ class TheDocsSayIt(unittest.TestCase):
         self.assertIn("None (internal work) → no `identify` and no submission. Put it on the board "
                       "now, before step 2", step)
         self.assertIn("bash scripts/board.sh start --internal --title '<the analysis short name>'", step)
+        # 2.15: the HIVE form (no usable local Python) is board.md's "Step 1 for Core staff"
+        self.assertIn('no usable local Python: "Step 1 for Core staff" has the HIVE form', step)
+        sec = self.board[self.board.index("## Step 1 for Core staff"):]
+        sec = _flat(sec[:sec.index("\n## ", 3)])
         self.assertIn("bash scripts/hive_exec.sh 'bash ~/proteomics-pipeline/scripts/board.sh start "
-                      "--internal --title \"<the analysis short name>\"", step)
-        self.assertIn("--goal '<what it is, in your words>' --hours 336\n", self.skill)
+                      "--internal --title \"<the analysis short name>\"", sec)
+        self.assertIn("--goal '<what it is, in your words>'\n", self.skill)
+        self.assertNotIn("--hours 336", self.skill + self.board)
         self.assertNotIn("bsphinney@ucdavis.edu", step)
+        self.assertNotIn("bsphinney@ucdavis.edu", sec)
 
     def test_the_core_session_records_its_submission(self):
         step = self.skill[self.skill.index("### 1c."):self.skill.index("### 2. ")]
@@ -255,23 +265,25 @@ class TheDocsSayIt(unittest.TestCase):
 
     def test_the_chat_go_ahead_starts_a_job_with_its_hours(self):
         """Brett, 2026-10-15: the go-ahead in the chat starts the jobs; each is recorded with the
-        CPU-hours a script printed; the board approves under 10,000 CPU- and GPU-hours, and 10,000
-        or more is asked for on the board first (core-board 1164632)."""
+        CPU-hours a script printed. Since 2026-11-09 the board limits no hours and approves nothing:
+        no request for hours, no wait."""
         ref = _flat(self.board)
         self.assertNotIn("Asking for cluster time", self.board)
         self.assertIn("--go-ahead chat --cpu-hours <cpu_hours_reserved>", ref)
         self.assertIn("never work one out, round it or guess it", ref)
         self.assertIn("python3 scripts/cpu_hours.py <its job script(s)>", ref)
-        self.assertIn("10,000 or more of either: ask before you submit", ref)
-        self.assertIn("Exit 3 `job_needs_decision` on a job under 10,000", ref)
+        self.assertNotIn("10,000", ref)
+        self.assertNotIn("ask before you submit", ref)
+        self.assertIn("No one approves a job on the board.", ref)
         self.assertNotIn("None is printed today", ref)
         board_sec = _flat(self.skill[self.skill.index("## The Core Project Board"):
                                      self.skill.index("## Working with other Claudes")])
         self.assertIn("A job starts on your person's go-ahead in this conversation", board_sec)
-        self.assertIn("10,000 or more of either: ask on the board before submitting", board_sec)
+        self.assertNotIn("10,000", board_sec)
+        self.assertNotIn("ask on the board before submitting", board_sec)
         rule1 = _flat(self.skill[self.skill.index("1. **Confirm before committing compute.**"):
                                  self.skill.index("2. **Never fabricate parameters.**")])
-        self.assertIn("approves it by itself when both are under 10,000", rule1)
+        self.assertIn("the board only records each job's hours; it limits and approves nothing", rule1)
 
     def test_each_milestone_step_names_its_board_row(self):
         rows = {"### 1c.": "session made", "### 3b.": "session made", "### 7. ": "search submitted",
@@ -283,14 +295,15 @@ class TheDocsSayIt(unittest.TestCase):
             with self.subTest(step=head):
                 i = self.skill.index(head)
                 j = min([h for h in heads if h > i] + [len(self.skill)])
-                self.assertIn(f'board.md §3 row "{row}"', self.skill[i:j])
+                self.assertIn(f'board.md §3 row "{row}"', _flat(self.skill[i:j]))
                 self.assertIn(f"| {row} |", self.board)
 
     def test_no_thread_names_brett_by_default(self):
         """Brett, 2026-10-20: "I don't need to approve things like this." A thread a Claude starts
         for its own person opens at once; the Core admin sees and can act and approve in every
         thread without being named, so no start command adds him. --with stays for a colleague."""
-        for text, where in ((self.skill, "SKILL.md"), (self.board, "board.md")):
+        for text, where in ((self.skill, "SKILL.md"), (self.board, "board.md"),
+                            (self.core, "core-submissions.md")):
             with self.subTest(where=where):
                 self.assertNotIn("--with bsphinney", text)
                 self.assertNotIn("Brett approves it", text)
@@ -302,7 +315,10 @@ class TheDocsSayIt(unittest.TestCase):
         self.assertIn("A colleague (e.g. the staff member who did the original analysis): add "
                       "`--with <their UPN>`", ref)
         self.assertIn("blocked_reason: kickoff_pending", ref)
-        step1c = _flat(self.skill[self.skill.index("### 1c."):self.skill.index("### 2. ")])
+        # 2.15: step 1c's text is core-submissions.md's "1c." section (the router names it)
+        self.assertIn('Read core-submissions.md "1c. The service run, step by step" first.', self.skill)
+        sec = self.core[self.core.index("## 1c. The service run, step by step"):]
+        step1c = _flat(sec[:sec.index("\n## ", 3)])
         self.assertIn("scripts/board.sh start --prot PROT_0807 ...` (the whole command", step1c)
         self.assertIn("never add `--with` for him unless staff ask", step1c)
 

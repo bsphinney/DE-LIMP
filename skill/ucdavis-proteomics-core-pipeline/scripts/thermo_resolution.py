@@ -6,15 +6,15 @@ scan trailer with Thermo's own RawFileReader (.NET), through pythonnet.
 Why this exists: estimate_params.py pins DIA-NN's documented Orbitrap mass tolerances from the
 MS1/MS2 resolution (240k->4, 120k->7, 60k->10, 30k->15 ppm). Without it an Orbitrap classes as
 `orbitrap_generic`: DIA-NN calibrates per run and the 5-step parallel chain declines the cfg
-(gabrig 2026-09-23, 15 Fusion Lumos .raw). The instrument writes the resolution into every
+(a Core member, 2026-09-23, 15 Fusion Lumos .raw). The instrument writes the resolution into every
 scan's trailer, but ThermoRawFileParser never outputs it -- TRFP master cf548e4 reads trailer
 keys internally and writes no resolution to metadata, mzML, MGF or `query`; its
 "mass resolution" (MS:1000011) is a generic 0.5. Verified on HIVE: a Fusion Lumos writes
-'Orbitrap Resolution:' (jobs 23989081, 23989291: MS1 60000, MS2 15000); an Exploris 480 writes
-'FT Resolution:' at both levels (job 23989339: two HeLa DIA runs 120000/15000, a DDA sample
+'Orbitrap Resolution:' (two test jobs: MS1 60000, MS2 15000); an Exploris 480 writes
+'FT Resolution:' at both levels (a test job: two HeLa DIA runs 120000/15000, a DDA sample
 60000/15000). The instrument method TEXT is not used, only because it is not always there: the
 Exploris 480 blank first probed (Exploris480/Blanx/Ex1900V600nL4B-...raw, 1,973 scans) has
-InstrumentMethodsCount 0. Where it is there it agrees -- the three Exploris runs of job 23989339
+InstrumentMethodsCount 0. Where it is there it agrees -- the three Exploris runs of that job
 have 2 methods each, whose "Orbitrap Resolution = " lines match the trailer exactly (and use a
 different label from the trailer's 'FT Resolution:', so a port must accept both).
 

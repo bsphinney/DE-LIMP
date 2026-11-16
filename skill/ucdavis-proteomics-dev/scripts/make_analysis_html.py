@@ -22,7 +22,7 @@ FIGURES SIT WHERE THE TEXT DISCUSSES THEM
 Each `![alt](figures/x.png)` in AI_Analysis_Report.md becomes an embedded, numbered
 figure AT THAT POSITION -- the alt text is its title, figures.json's caption (when
 there is one) its caption. The report used to print those references as literal
-Markdown (28 of them on Silva08172026, 2026-09-24) while dumping every image in
+Markdown (28 of them on a mouse-brain IP cohort, 2026-09-24) while dumping every image in
 figures/ into galleries at the top, a stale pca_original_labels.png included.
   * an image the report does not reference is NOT embedded; one warning line names it;
   * a referenced image that is missing becomes a visible "figure missing: <file>" note
@@ -466,7 +466,7 @@ def fmt_p(p):
 
 
 # Figures that say nothing when the expression matrix is complete by construction: every
-# bar of "proteins quantified per sample" is the same number (Silva08172026: 30 bars of
+# bar of "proteins quantified per sample" is the same number (a mouse-brain IP cohort: 30 bars of
 # 6,112). make_figures.R no longer draws it then, but an older figures/ folder -- and the
 # narrative written against it -- still can; Brett flagged it twice (2026-09-25).
 SUPPRESS_WHEN_COMPLETE = ("qc_protein_counts",)

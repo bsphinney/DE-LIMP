@@ -279,7 +279,7 @@ def why_missing(name, stats, stats_file):
     A run is absent both when DIA-NN could not load it and when it loaded the run but nothing
     passed the q-value filter (a blank or a failed injection), and the log line naming load
     failures exists only for the first. The stats file separates them only one way round: a
-    run with MS1/MS2 signal was read. Measured on DIA-NN 2.7.0 (HIVE srun 23512769): a wash
+    run with MS1/MS2 signal was read. Measured on DIA-NN 2.7.0 (on HIVE): a wash
     injection searched beside a real run had MS1.Signal 3.48e11 and MS2.Signal 5.39e9 with 1
     precursor identified, where the unreadable runs of the earlier measurement had 0. All zeros
     is NOT proof of a load failure, though: two readable runs searched against an empty library

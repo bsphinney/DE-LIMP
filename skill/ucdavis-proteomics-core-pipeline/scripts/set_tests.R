@@ -387,7 +387,7 @@ check_limma_internals <- function() {
 # coordinate by coordinate, and fry's robust variance takes each protein's largest squared
 # coordinate. limma takes the residual basis from a Householder QR -- of the design, or with
 # precision weights of each protein's own weighted design -- and that basis is not unique: on
-# PROT_0756 R's qr() of the SAME design matrix came out with different reflection signs on an
+# the mouse-brain IP cohort R's qr() of the SAME design matrix came out with different reflection signs on an
 # AMD EPYC 9554 HIVE node than on EPYC 7532/7763 nodes (floating-point zeros in a 0/1 design
 # landing either side of zero), so residual effects were rotated -- 1,184 of 6,231 proteins
 # with weights -- and camera and fry p-values moved by up to 0.09 between otherwise identical
@@ -629,7 +629,7 @@ measured_rows <- function(evidence) which(!(evidence %in% UNMEASURED_LABELS))
 # uncorrelated with the between-condition comparison under the null (independent filtering,
 # Bourgon et al. 2010 PNAS 107:9546). "Enriched at EVERY condition" is not: when recovery
 # differs, it keeps a protein that fell in one condition only if it was still enriched there
-# (review B1: 10.7 of 20 members of a set truly down 0.8 kept, against 19.4 pooled; PROT_0756
+# (review B1: 10.7 of 20 members of a set truly down 0.8 kept, against 19.4 pooled; the mouse-brain IP cohort
 # JPH3 had 225 Old / 974 Young enriched). The minimum enrichment keeps out weak interactors,
 # whose "change" relative to the complex is mostly the control background changing (review S2:
 # null sets of the weakest interactors 0.29-0.68 false positives without it, 0.087 with it; the cost,
@@ -642,7 +642,7 @@ pooled_enrichment_contrast <- function(cmat, vs_control)
 # a lower pooled enrichment (by half the fall) and can drop below the minimum before any test.
 # Losses are harder to detect than gains, by how much depends on how close the interactome sits
 # to the minimum: in sim_set_tests.R --what ip (enrichment 0.3-3 log2) a falling set is almost
-# never tested; on PROT_0756, whose interactomes have a median of 2.4-2.6 log2, 54-63% of the
+# never tested; on the mouse-brain IP cohort, whose interactomes have a median of 2.4-2.6 log2, 54-63% of the
 # tested sets would survive a 0.8 log2 fall. So each bait's reading gives its own numbers.
 ip_direction_bias <- function(min_enrichment) {   # the general statement (report, brief)
   if (!is.finite(min_enrichment) || min_enrichment <= 0) return(NA_character_)
@@ -677,7 +677,7 @@ ip_losses_reading <- function(ls, min_enrichment) {   # one bait's sentence, fro
 # "Weak" interactors, relative to the interactome itself (review M3): its bottom quarter of pooled
 # enrichment over the control, where a change in the control background weighs most. A random set
 # of the interactome has a quarter of its members here and is flagged (over half) rarely; a
-# margin above the minimum ("within 1 log2") flagged 73-88% of PROT_0756's tested sets and every
+# margin above the minimum ("within 1 log2") flagged 73-88% of the mouse-brain IP cohort's tested sets and every
 # simulated one. enrich: the interactome's pooled log2 enrichment; returns one TRUE/FALSE each.
 weak_interactors <- function(enrich, q = SET_DEFAULTS$ip_weak_quantile)
   enrich <= stats::quantile(enrich, q, names = FALSE)

@@ -39,6 +39,7 @@ sys.path.insert(0, SCRIPTS)
 sys.path.insert(0, HERE)
 
 import run_search  # noqa: E402
+import sage_lfq_check  # noqa: E402
 from test_sage_sbatch_conversion import _Harness, _exe  # noqa: E402
 # self.env() is job_env() (see _Harness.env); imported so the guard can see that.
 from job_env import job_env  # noqa: E402,F401
@@ -437,7 +438,7 @@ class AnEarlierSearchsOutputsAreSetAsideAtGeneration(_IdsHarness):
         for name in ("report.parquet", "lfq.parquet", "sage_adapt.json"):
             self.assertFalse(os.path.exists(os.path.join(self.out, name)), name)
             self.assertEqual(len(self.stale(name)), 1, name)
-        with open(os.path.join(self.out, "sage_lfq_check.json")) as fh:
+        with open(os.path.join(self.out, sage_lfq_check.RECORD)) as fh:
             self.assertEqual(json.load(fh)["status"], "not_applicable")
         self.assertEqual(len(self.stale("sage_lfq_check.json")), 1)
         moved = self.provenance()["result"]["previous_artefacts_moved_to"]
@@ -519,7 +520,7 @@ class IdsOnlyResults(_IdsHarness):
                           one["psms_kept"], one["precursors"]), (8, 1, 1, 1, 1, 4, 3))
         self.assertEqual(rec["totals"]["peptides"], 3)
         self.assertEqual(prov["sage_lfq_check"]["status"], "not_applicable")
-        with open(os.path.join(self.out, "sage_lfq_check.json")) as fh:
+        with open(os.path.join(self.out, sage_lfq_check.RECORD)) as fh:
             self.assertEqual(json.load(fh)["status"], "not_applicable")
 
     def test_an_earlier_report_is_set_aside_not_left_beside_identifications(self):
@@ -633,7 +634,7 @@ class IdsOnlyResults(_IdsHarness):
         self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
         self.assertIn("no target peptide at 1% FDR", p.stderr)
         self.assertFalse(os.path.exists(os.path.join(self.out, "report.parquet")))
-        with open(os.path.join(self.out, "sage_lfq_check.json")) as fh:
+        with open(os.path.join(self.out, sage_lfq_check.RECORD)) as fh:
             self.assertEqual(json.load(fh)["status"], "unchecked")              # H2-3
 
     def test_a_quantifying_adapt_of_ids_output_says_why(self):

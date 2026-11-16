@@ -27,6 +27,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 UNKNOWN = "(unknown — plugin.json not found)"
 # The same tag in ASCII, for a file whose validators may take nothing else (sdrf.tsv)
 UNKNOWN_ASCII = UNKNOWN.strip("()").replace(" — ", " - ")
+# The skill's repository when plugin.json names none (from 2.15 its own; up to 2.15 it was
+# DE-LIMP). plugin.json's `repository` is what records use; this is only its stand-in.
+REPOSITORY = "https://github.com/bsphinney/UCD-Proteomics-AI-Skill"
 
 
 def skill_version(here=HERE):

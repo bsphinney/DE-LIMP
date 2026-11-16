@@ -609,7 +609,7 @@ class Review212(unittest.TestCase):
         plate = core_submission.ht_pattern("PROT_9001")
         cases = {
             "20260901_9001_rerun_Liver_24m_3_S5-B2_1_24100.d": None,
-            "20260901_0793_rerun_XY4_S5-A4_1_24100.d": None,               # another plate: whole name
+            "20260901_9793_rerun_XY4_S5-A4_1_24100.d": None,               # another plate: whole name
             "20261005_PROT_9001_100spd_XY1_S3-A1_1_25000.d": "100spd",
             "20260827_9001_100spd_Liver_24m_3_S5-A1_1_24000.d": "100spd",
             "20260827_9001_60SPD_DIA-XY1_S5-A1_1_24000.d": "60spd DIA",

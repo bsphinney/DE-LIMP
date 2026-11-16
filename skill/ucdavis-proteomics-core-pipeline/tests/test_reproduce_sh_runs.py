@@ -52,21 +52,25 @@ def continuation_breaks(sh):
             (not lines[i + 1].strip() or lines[i + 1].lstrip().startswith("#"))]
 
 
-def run_steps_5_and_6(d, out, sh):
-    """Execute reproduce.sh from step 5 to the end with stubs; -> the calls, in order."""
+def run_steps_5_and_6(d, out, sh, **extra_env):
+    """Execute reproduce.sh from step 5 to the end with stubs; -> the calls, in order. The
+    sbatch branch of an identifications-only replay is off unless REPRO_SBATCH is passed (a
+    HIVE host has a real sbatch)."""
     skill = os.path.join(d, "skill")
     os.makedirs(os.path.join(skill, "scripts"), exist_ok=True)
     bindir = os.path.join(d, "bin")
     os.makedirs(bindir, exist_ok=True)
     for path, prog in ((os.path.join(skill, "scripts", "run_search.py"), "run_search.py"),
-                       (os.path.join(bindir, "Rscript"), "Rscript")):
+                       (os.path.join(bindir, "Rscript"), "Rscript"),
+                       (os.path.join(bindir, "sbatch"), "sbatch")):
         with open(path, "w") as fh:
             fh.write(STUB % prog)
         os.chmod(path, 0o755)
     body = sh[sh.index("\n# 5. "):sh.index('\necho "Done.')]
     log = os.path.join(d, "argv.jsonl")
-    env = dict(os.environ, SKILL=skill, ARGV_LOG=log,
+    env = dict(os.environ, SKILL=skill, ARGV_LOG=log, REPRO_SBATCH="0",
                PATH=bindir + os.pathsep + os.environ["PATH"])
+    env.update(extra_env)
     p = subprocess.run(["bash", "-c", "set -euo pipefail\n" + body], cwd=out, env=env,
                        capture_output=True, text=True, timeout=120)
     assert p.returncode == 0, p.stderr

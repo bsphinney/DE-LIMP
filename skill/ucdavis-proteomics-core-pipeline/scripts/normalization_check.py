@@ -50,6 +50,8 @@ differently from a classic IP?); run_de.R copies it into de_provenance.json
       --de-normalised <S>/output/norm_check/normalised --de-raw <S>/output/norm_check/raw \\
       --session <S> [--bait GENE] [--out <S>/output/norm_check]
       # the bait: --bait, else the recorded one, else the ONE --add-fasta sequence (unconfirmed)
+  # in a Slurm job script add --job-exit0: a trip then exits 0 (the job is COMPLETED, not FAILED)
+  # and NEEDS_DECISION.json, beside the check record, says a decision is owed
   # tripped (exit 3): show NORMALIZATION_CHECK.md, ask, then record THEIR answer -- the decision
   # is a Core staff member's, never Claude's: --by is their HIVE login (staff.py checks it)
   python3 normalization_check.py decide --check <S>/output/norm_check/normalization_check.json \\
@@ -81,7 +83,6 @@ Stdlib, plus pyarrow to read a parquet report (without it B1-B3 are "not assesse
 import argparse
 import csv
 import datetime
-import hashlib
 import itertools
 import json
 import math
@@ -97,6 +98,7 @@ if HERE not in sys.path:
 
 import experiment_type as et  # noqa: E402  the type, its default, the pull-down design
 import staff  # noqa: E402  who may decide (--by), and the role client documents name instead
+from safe_write import sha256_file as _sha256_file  # noqa: E402  the ONE chunked sha256
 from check_report_runs import run_name, normalisation_instability  # noqa: E402
 
 SCHEMA, SCHEMA_VERSION = "normalization_check", 1
@@ -557,14 +559,10 @@ def carboxylase_stability(de_dir, descriptions=None):
 
 def sha256(path):
     """sha256 of a file (a report can be GBs: read in chunks), or None when it cannot be read."""
-    h = hashlib.sha256()
     try:
-        with open(path, "rb") as fh:
-            for chunk in iter(lambda: fh.read(1 << 20), b""):
-                h.update(chunk)
+        return _sha256_file(path)
     except OSError:
         return None
-    return h.hexdigest()
 
 
 def check_dir(session):
@@ -1274,6 +1272,12 @@ def _carboxylase_note(rec, pick):
     return note
 
 
+#: Left beside the check record while a decision is owed (and removed once it is made): a job
+#: that ran the check exits 0 (`run --job-exit0`), so Slurm says COMPLETED, and this file is what
+#: watch_run.sh and `session.py status` read to say a question is waiting -- not a crash.
+NEEDS_DECISION = "NEEDS_DECISION.json"
+
+
 def write(rec, out):
     path = os.path.join(out, RECORD)
     with open(path + ".tmp", "w", encoding="utf-8") as fh:
@@ -1282,6 +1286,30 @@ def write(rec, out):
     os.replace(path + ".tmp", path)
     with open(os.path.join(out, SUMMARY), "w", encoding="utf-8") as fh:
         fh.write(summary_md(rec))
+    # beside the record, and in the session's own check folder (where watch_run.sh and `session.py
+    # status` look) when the record was written elsewhere (--out, or the DE folders' parent)
+    here = os.path.abspath(out)
+    homes = [here]
+    if rec.get("session"):
+        sd = check_dir(rec["session"])
+        if sd != here:
+            homes.append(sd)
+    owed = rec.get("needs_decision") and not rec.get("decision")
+    why = "; ".join(rec.get("trips") or []) or rec.get("needs_decision_why") or "undecided"
+    for home in homes:
+        marker = os.path.join(home, NEEDS_DECISION)
+        if owed:
+            os.makedirs(home, exist_ok=True)
+            with open(marker + ".tmp", "w", encoding="utf-8") as fh:
+                json.dump({"needs_decision": True, "exit_code": TRIPPED_EXIT, "why": why,
+                           "check": os.path.abspath(path),
+                           "summary": os.path.abspath(os.path.join(out, SUMMARY)),
+                           "job_id": os.environ.get("SLURM_JOB_ID"), "written": staff.now()},
+                          fh, indent=2)
+                fh.write("\n")
+            os.replace(marker + ".tmp", marker)
+        elif os.path.lexists(marker):
+            os.remove(marker)                   # answered (or nothing was owed): no question left
     return path
 
 
@@ -1519,6 +1547,11 @@ def main():
     r.add_argument("--out")
     r.add_argument("--report-raw", help="the report the non-normalised DE read, when it is not "
                                         "--report (MaxLFQ: a search with --no-norm)")
+    r.add_argument("--job-exit0", action="store_true",
+                   help="for a Slurm job script: exit 0 when the check stops to ask (exit 3 ends "
+                        "the job FAILED, which a watcher cannot tell from a crash). The question "
+                        "is still said on stderr and left in NEEDS_DECISION.json beside the "
+                        "check record, which watch_run.sh and session.py status read")
     d = sub.add_parser("decide", help="record a Core staff member's decision (theirs, never "
                                       "Claude's)")
     d.add_argument("--check", required=True)
@@ -1575,6 +1608,11 @@ def main():
                 print(f"[normalization_check] {'TRIPPED' if rec['tripped'] else 'NO EXPERIMENT TYPE'}"
                       f" -- stop before the final DE: show {os.path.join(out, SUMMARY)} to the "
                       "user and ask.", file=sys.stderr)
+                if a.job_exit0:
+                    print(f"[normalization_check] --job-exit0: exiting 0 (the job completes); "
+                          f"{os.path.join(out, NEEDS_DECISION)} records that a decision is owed "
+                          f"(exit {TRIPPED_EXIT} otherwise).", file=sys.stderr)
+                    return 0
                 return TRIPPED_EXIT
         elif a.cmd == "decide":
             rec = decide(a.check, a.quantities, a.by, a.reason)

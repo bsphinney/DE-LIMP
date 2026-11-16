@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-DIA-NN on DDA data, through every route -- the four defects msalemi hit on SET28 (PROT_0000, 28
+DIA-NN on DDA data, through every route -- the four defects mstaff hit on SET28 (PROT_0000, 28
 Exploris 480 DDA .raw, 60k/15k, skill 2.6.0, 2026-09-25):
 
   (a) no --dda in the 5-step chain. run_search.py appended it to the SINGLE-SHOT command only;
@@ -693,7 +693,7 @@ class BrukerAcquisitionAndRange(unittest.TestCase):
         return r
 
     def test_the_real_ddapasef_shape_is_dda_with_the_ms1_acquisition_range(self):
-        """msalemi 2026-09-29: the three dia-PASEF tables present but EMPTY, beside PASEF rows
+        """mstaff 2026-09-29: the three dia-PASEF tables present but EMPTY, beside PASEF rows
         and MsMsType-8 frames, came back "DIA, high confidence". Table existence is not
         acquisition."""
         r = self.classify("ddapasef.d", "dda")

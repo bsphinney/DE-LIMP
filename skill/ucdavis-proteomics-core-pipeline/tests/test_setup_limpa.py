@@ -2,9 +2,9 @@
 """setup.sh builds an env whose limpa is >= 1.4.0, solves with its own channels, and says
 plainly when limpa is too old.
 
-HIVE brettsp, 2026-09-27: (1) sbatch 24154212 -- ~/.condarc with `defaults` and
+HIVE bstaff, 2026-09-27: (1) a test job -- ~/.condarc with `defaults` and
 channel_priority strict left libmamba only defaults' r-statmod (R <= 4.3), and bioconductor-limma
-3.66 was unsolvable: setup.sh now passes --override-channels. (2) sbatch 24154221 -- the env had
+3.66 was unsolvable: setup.sh now passes --override-channels. (2) a second test job -- the env had
 bioconda's only limpa, 1.2.5, and run_de.R died in readDIANN(annotation.columns =), limpa >= 1.4.0.
 setup.sh now installs limpa from the Bioconductor 3.23 source repository (pure R), checks
 packageVersion("limpa") >= 1.4.0 last, reports it in setup.json, and exits 1 when it is short.
@@ -110,7 +110,11 @@ class SetupLimpaGate(setup_t.SetupCheckHarness):
                "FAKE_MM_LOG": self.mm_log, "FAKE_PY": sys.executable, "FAKE_TRFP": trfp.FAKE,
                "PROTEOMICS_ENSURE_DOTNET8": self.ensure, "FAKE_ENSURE_LOG": os.path.join(self.d, "e.log"),
                "FAKE_ENSURE_ROOT": self.dotnet_root, "FAKE_R_LOG": self.r_log,
-               "FAKE_LIMPA_STATE": self.state, "FAKE_NP_STATE": ""}
+               "FAKE_LIMPA_STATE": self.state, "FAKE_NP_STATE": "",
+               # hermetic on a cluster node too (as tests/job_env.py): no SLURM and no HPCCF
+               # cluster file, or setup.sh takes the test for a login node and refuses
+               "HPCCF_SLURM_BIN": os.path.join(self.d, "no_slurm_bin"),
+               "UCD_HPC_CLUSTER_CONF": os.path.join(self.d, "no_cluster_file")}
         env.update(extra)
         r = subprocess.run([self.bash, setup_t.SETUP, *args], capture_output=True, text=True,
                            env=env, timeout=300)

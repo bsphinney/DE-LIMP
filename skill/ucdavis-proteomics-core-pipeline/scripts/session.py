@@ -17,7 +17,7 @@ Documents). The orchestrator asks the user which they want (see SKILL.md).
         figures/                # plots (reserved)
         reproducibility/        # the full reproducibility bundle
         AI_Analysis_Report.md   # the interpretation
-        OUTPUT_FILES.md         # catalog of every file
+        OUTPUT_FILES.md         # catalog of every file (written at finalize when step 11 was not)
         methods.md / .docx      # publication Methods (ensured at finalize)
         DATA_SUBMISSION/        # PRIDE/MassIVE deposit package (written at finalize)
       MANIFEST.txt              # [OK]/[SKIPPED] log of what finalize produced, and why not
@@ -41,10 +41,11 @@ Subcommands:
   #   -> prints JSON with every canonical path + "placement"; route later steps into them
 
   # at the end — ensure the publication Methods, write the deposit package
-  # (output/DATA_SUBMISSION, see make_deposit.py), README + MANIFEST.txt, optionally zip,
+  # (output/DATA_SUBMISSION, see make_deposit.py), the file catalog (output/OUTPUT_FILES.md,
+  # when step 11 did not write it; never rewritten), README + MANIFEST.txt, optionally zip,
   # then log the run (record_run.py) and post "analysis complete" to the Core's Slack channel
   # (notify_slack.py)
-  python3 session.py finalize --dir <session_dir> [--zip] [--no-deposit] [--no-notify]
+  python3 session.py finalize --dir <session_dir> [--zip] [--no-deposit] [--no-notify] [--no-record]
   #   it refuses (exit 2, nothing written) without the skill's own report, or for a Claude Code
   #   analysis with no saved conversation; it BUILDS a missing or stale reproducibility bundle
   #   (refusing only when a record the bundle needs is absent); --override-finish "<reason>" /
@@ -53,6 +54,14 @@ Subcommands:
 
   # before telling the user an analysis is finished: the finish checklist (exit 0 complete, 3 not)
   python3 session.py status --session <session_dir> [--json]     # --dir works too, as finalize
+
+  # Core staff: Core client work with no CoreOmics submission yet (a pilot, a favour, a rush job)
+  # -- its report, README and AGENTS.md then carry the Core's feedback survey, with no number.
+  # Refused unless this account is on the Core staff list (staff.core_staff); the reason from a
+  # quoted heredoc (never on the command line: commands.log travels); --clear takes it away.
+  python3 session.py core-client --session <session_dir> --why-file - <<'EOF'
+  <who it is for, and why there is no submission yet>
+  EOF
 
   # README.md + README.html + AGENTS.md alone (e.g. for a session finalized before they existed)
   python3 session.py docs --dir <session_dir>
@@ -66,6 +75,9 @@ import sys, os, json, re, glob, shutil, argparse, datetime
 NOT_RECORDED = "not recorded"      # a fact the session's records do not give -- never a guess
 # session.json: what a Core staff analysis is for (init --submission / --internal)
 ANALYSIS_FOR = "analysis_for"
+
+# the search report a laptop copy of a HIVE search holds (has_results)
+SEARCH_REPORT_FILES = ("report.parquet", "report.tsv", "identifications.tsv")
 
 SUBDIRS = ["input", "output", "output/search", "output/tables", "output/figures",
            "output/reproducibility", "scripts", "logs"]
@@ -126,6 +138,9 @@ def paths_for(session_dir):
         "workflow_dir": os.path.join(d, "input", "wf"),
         "workflow_manifest": os.path.join(d, "input", "wf", "workflow.manifest.json"),
         "raw_list": os.path.join(d, "input", "raw_files.txt"),
+        # the raw files' names as acquired and as delivered, from the stage record
+        # (core_submission.RAW_NAME_MAP's format; submission_report.write_name_map writes it)
+        "raw_names": os.path.join(d, "input", "raw_names.tsv"),
         "output_dir": os.path.join(d, "output"),
         # the DEFAULT search folder (init makes it; a new search goes here). A search may be
         # elsewhere (output/search_dda/, output/search_sage/): THE search record is
@@ -219,18 +234,71 @@ def analysis_for(session_dir):
 def _record_analysis_for(p, block):
     """Add "analysis_for" to session.json, keeping what is there (submission_report.py attach
     writes "coreomics" into the same file). Refuses a session.json that is not a JSON object."""
+    _set_session_key(p, ANALYSIS_FOR, block, "init")
+
+
+def _set_session_key(p, key, value, who):
+    """Set (value None: remove) one key of session.json, keeping the rest (init's analysis_for,
+    core-client's mark, submission_report.py attach's coreomics); written through a .tmp file
+    and a rename. Refuses -- exits, nothing written -- a session.json that is not a JSON object:
+    `who` (the command) says so."""
     sj = {}
     if os.path.isfile(p["session_json"]):
         sj = _load(p["session_json"])
         if not isinstance(sj, dict):
-            sys.exit(f"{p['session_json']} is not readable JSON: look at it before init writes "
+            sys.exit(f"{p['session_json']} is not readable JSON: look at it before {who} writes "
                      "to it again")
-    sj[ANALYSIS_FOR] = block
+    if value is None:
+        sj.pop(key, None)
+    else:
+        sj[key] = value
     tmp = p["session_json"] + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(sj, fh, indent=2)
         fh.write("\n")
     os.replace(tmp, p["session_json"])
+
+
+_OS_FIELD = re.compile(r"\bOS=(.+?)(?=\s[A-Z]{2}=|$)")
+_OX_FIELD = re.compile(r"\bOX=(\d+)")
+
+
+def database_organisms(fmeta, fallback_name=None, fallback_taxid=None):
+    """THE organism line of a session's documents (README, AGENTS.md, the report header): every
+    species the searched database holds -- the proteome's own organism (fetch_fasta's `organism`
+    and `taxid`), then each other species the sequences added with --add-fasta bring (the OS=/OX=
+    of their headers, else the species code of their UniProt entry names), once each, in that
+    order. "Homo sapiens (taxid 9606)" for one; "Homo sapiens (taxid 9606); Saccharomyces
+    cerevisiae (taxid 559292, added sequences)" for a human + yeast database. None when no record
+    names one (the caller says "not recorded"). A two-species search once read "Homo sapiens"
+    alone in the report and AGENTS.md (2.15 acceptance, pxd4)."""
+    fm = fmeta if isinstance(fmeta, dict) else {}
+    name = fm.get("organism") or fallback_name or None
+    tax = fm.get("taxid") or fallback_taxid or None
+    out = [(name, tax, False)] if (name or tax) else []
+    seen = {str(name or "").lower()} | ({f"taxid:{tax}"} if tax else set())
+    for f in fm.get("added_sequences") or []:
+        for e in (f or {}).get("entries") or []:
+            head = str((e or {}).get("header") or "")
+            m, x = _OS_FIELD.search(head), _OX_FIELD.search(head)
+            org, ox = (m.group(1).strip() if m else None), (x.group(1) if x else None)
+            if not org:
+                from fetch_fasta import species_code         # the one entry-name reader
+                code = species_code(e.get("name"))
+                org = f"species code {code}" if code else None
+            if not org:
+                continue
+            key = f"taxid:{ox}" if ox else org.lower()
+            if org.lower() in seen or key in seen:
+                continue
+            seen.update({org.lower(), key})
+            out.append((org, ox, True))
+    if not out:
+        return None
+    return "; ".join(
+        (f"{n} (taxid {t}" + (", added sequences)" if added else ")")) if n and t else
+        (f"{n}" + (" (added sequences)" if added else "")) if n else f"taxid {t}"
+        for n, t, added in out)
 
 
 def read_raw_list(session_dir):
@@ -580,10 +648,18 @@ def _finish_hooks(a, session_dir, zip_path, not_finalized=None, finish_override=
         rl = ("SKIPPED", "Core run log", "not logged as a finished analysis: the session is not "
                                          "finalized -- finalize again once it is")
     else:
-        run_log = notify_slack.record_run("analysis-done", session=session_dir)
+        run_log = notify_slack.record_run("analysis-done", session=session_dir,
+                                          no_record=getattr(a, "no_record", False))
         rl = notify_slack.run_log_manifest(run_log)
+    # the ONE no-record reason (--no-record, a /skill_test/ folder) keeps a test run out of the
+    # Core channel as well as the run log (C2 ux H2); words with no path (MANIFEST travels)
+    test_why = notify_slack.no_record_reason(session_dir, flag=getattr(a, "no_record", False),
+                                             check_env=False)
     if a.no_notify:
         sent, detail = False, "--no-notify was given"
+    elif test_why:
+        sent, detail = False, (f"off: {notify_slack.no_record_words(test_why)} -- the Core "
+                               "channel is not told about a test run")
     elif not_finalized:
         # "analysis complete" is for a finalized session only (report_files.FINISH_NEEDS
         # "announce"): this finalize refused to stamp, so the channel is not told
@@ -720,12 +796,22 @@ def _write_docs(session_docs, p, man, registry, registry_note, ok_lines=True, pe
         listed = skill_doc_paths(p["session_dir"], kept=True) + [p["manifest_txt"]]
         listed.append(p["raw_list"])
         listed.append(os.path.join(p["output_dir"], make_podcast.SHARE_NAME))   # when there is one
+        # the work finalize folded in (custom_work.py), when the catalog's own body does not
+        # list it -- a step-11 catalog was made before it was copied in (2.15 review M7); the
+        # finalize block is rebuilt here, so what it held before does not count
+        if os.path.isfile(p["output_files_md"]):
+            with open(p["output_files_md"], encoding="utf-8", errors="replace") as fh:
+                catalog = fh.read()
+            head, _, rest = catalog.partition(make_report.FINALIZE_BEGIN)
+            catalog = head + rest.partition(make_report.FINALIZE_END)[2]
+            listed += [f for f in make_report.collect(custom_work_paths(p))
+                       if f"`{os.path.relpath(f, p['session_dir'])}`" not in catalog]
         if os.path.isfile(p["output_files_md"]) and man is not None:
             n = make_report.add_finalize_files(p["output_files_md"], listed, p["session_dir"])
             man.ok("OUTPUT_FILES.md: files written at finalize", f"{n} listed")
-        elif man is not None:
+        elif man is not None:                   # finalize could not write it (output_files_step)
             man.info("OUTPUT_FILES.md: files written at finalize",
-                     "no output/OUTPUT_FILES.md (step 11 was not run)")
+                     "no output/OUTPUT_FILES.md to add them to (its own line says why)")
     except Exception as e:
         if man is not None:
             man.skip("OUTPUT_FILES.md: files written at finalize", f"{type(e).__name__}: {e}")
@@ -807,7 +893,7 @@ def has_de(p):
 
 def peak_check_step(p, man):
     """The peak check (skyline_peaks.py, step 8f): its outcome as one MANIFEST.txt line -- [OK]
-    with its counts, [SKIPPED] with the record's reason (the user turned it off, the container was
+    with its counts, [WARN] naming the runs a partial check is missing and why, [SKIPPED] with the record's reason (the user turned it off, the container was
     not reachable, a job failed) or because no record exists for a session with a DE. A session
     with neither has no DE to check: [SKIPPED] with NO_DE_REASON. Never fatal."""
     name = PEAK_CHECK_PART
@@ -818,7 +904,7 @@ def peak_check_step(p, man):
         man.skip(name, f"{type(e).__name__}: {e}")
         return
     if got:
-        {"OK": man.ok, "SKIPPED": man.skip}.get(got[0], man.info)(got[1], got[2])
+        {"OK": man.ok, "SKIPPED": man.skip, "WARN": man.warn}.get(got[0], man.info)(got[1], got[2])
     else:
         man.skip(name, NO_DE_REASON)
 
@@ -860,6 +946,26 @@ def search_record_step(p, man):
         # the key phrase first: a MANIFEST reason is cut at 200 characters
         man.skip(SEARCH_RECORD_PART, "the README, AGENTS.md and the Methods describe none of "
                                      f"them -- {c['why']}")
+
+
+def faims_step(p, man):
+    """A search that was split by FAIMS group (run_search --faims-split): one [NOTE] line per
+    group's search_provenance.json `faims` record, in the record's own words -- quantities are not
+    comparable across the groups. Nothing for a session without one."""
+    import glob
+    seen = set()
+    for f in sorted(glob.glob(os.path.join(p["output_dir"], "*", "search_provenance.json"))
+                    + glob.glob(os.path.join(p["output_dir"], "*", "*", "search_provenance.json"))):
+        try:
+            with open(f, encoding="utf-8") as fh:
+                z = (json.load(fh) or {}).get("faims")
+        except (OSError, ValueError):
+            continue
+        if isinstance(z, dict) and z.get("group") and z.get("sentence"):
+            name = f"FAIMS group search ({os.path.relpath(os.path.dirname(f), p['output_dir'])})"
+            if name not in seen:
+                seen.add(name)
+                man.note(name, z["sentence"])
 
 
 def custom_step(p, gate):
@@ -940,6 +1046,66 @@ def conversation_step(p, man, call_id=None, no_transcript=None):
     else:
         man.skip(name, "no conversation and no decisions log (log_decision.py): nothing records "
                        "how this analysis was done -- " + (got.get("skipped") or "nothing saved"))
+
+
+# What SKILL.md step 11 hands make_report.py as --extra, beside the search, tables and
+# reproducibility folders: output/ files by name, plus the Methods' Word copy, draft and
+# parameters that finalize itself may have written by the time output_files_step runs.
+CATALOG_OUTPUT_FILES = ("AUDIT.md", "SAMPLE_QUALITY.md", "AI_Analysis_Report.md",
+                        "Analysis_Report.html", "Analysis_Report.md", "Analysis_Report.pdf",
+                        "methods.md", "methods.docx", "methods_complete_draft.md",
+                        "methods_params.json")
+
+
+def custom_work_paths(p):
+    """The work finalize folded in -- custom_work.py's items, output/custom/<kind>/<name>
+    (--code-dir, --extra-dir, --methods, --report), and their record custom.json -- for
+    OUTPUT_FILES.md, which lists every file (2.15 review M7: it named them nowhere). Existing
+    paths inside output/custom/ only; [] when nothing was folded in."""
+    import custom_work
+    root = os.path.realpath(custom_work.custom_dir(p["output_dir"]))
+    items = custom_work.load(p["output_dir"])
+    paths = [os.path.join(p["session_dir"], *str(i.get("dest") or "").split("/"))
+             for i in items if i.get("dest")]
+    if items:
+        paths.append(custom_work.record_path(p["output_dir"]))
+    return [x for x in paths if os.path.exists(x)
+            and os.path.commonpath([os.path.realpath(x), root]) == root]
+
+
+def output_files_step(p):
+    """output/OUTPUT_FILES.md, the catalog of every file (make_report.py), when SKILL.md step 11
+    was not run: built here from the session's own folders -- step 11's inputs -- so a delivered
+    folder always has one. It runs after the Methods, the deposit package, the report PDF and the
+    work folded in (custom_work_paths), so it lists them; README, AGENTS.md, the raw-file list
+    (and MANIFEST.txt, once it exists) are
+    added to it after (_write_docs: make_report.add_finalize_files), as to a catalog step 11
+    wrote. One that exists is never rewritten. Returns the MANIFEST.txt line (level, part, note),
+    or None when the catalog was already there. Never fatal."""
+    name = "OUTPUT_FILES.md"
+    if os.path.isfile(p["output_files_md"]):
+        return None
+    extra = [p["conditions"], p["fasta"], p["workflow_dir"], p["figures_dir"],
+             *(os.path.join(p["output_dir"], n) for n in CATALOG_OUTPUT_FILES)]
+    try:
+        # the deposit package, less upload_staging/: raw archives prepare_upload.sbatch stages
+        # there, which the zip leaves out too
+        if os.path.isdir(p["deposit_dir"]):
+            extra += [os.path.join(p["deposit_dir"], n)
+                      for n in sorted(os.listdir(p["deposit_dir"])) if n != "upload_staging"]
+        extra += custom_work_paths(p)            # folded in just before (custom_work.apply)
+        import make_report
+        # the search folder(s) from the session's one answer (T44: wherever the search went,
+        # the one the DE read; none chosen: every recorded one), not the fixed output/search
+        got = make_report.write_catalog(
+            p["output_files_md"], session=p["session_dir"], de_dir=p["de_dir"],
+            repro=p["repro_dir"], extra=[e for e in extra if os.path.exists(e)],
+            root=p["session_dir"])
+    except Exception as e:                      # recorded, never swallowed
+        return ("SKIPPED", name, f"not written at finalize (step 11 had not run): "
+                                 f"{type(e).__name__}: {e}")
+    return ("OK", name, f"written at finalize (step 11 had not run); {got['n_files']} file(s) "
+                        "listed")
 
 
 # ------------------------------------------------------------------------- the finish gates --
@@ -1325,6 +1491,15 @@ def do_finalize(a):
                                                         for g in gate["gaps"])))
         (man.ok if raw_list[0] == "OK" else man.skip)("input/raw_files.txt (where the raw data are)",
                                                        raw_list[1])
+        # the raw files' names as acquired and as delivered, when staff renamed runs when staging
+        try:
+            import submission_report
+            nm = submission_report.write_name_map(p["session_dir"])
+        except Exception as e:                  # recorded, not swallowed
+            nm = ("SKIPPED", f"{type(e).__name__}: {e}")
+        if nm[0]:
+            (man.ok if nm[0] == "OK" else man.skip)(
+                "input/raw_names.tsv (the raw files' names as acquired and as delivered)", nm[1])
         # The reproducibility bundle (step 10): kept when current, else built now -- after the
         # raw list it reads, before the work folded in below, whose checksums go into it
         # (L5b review H1: finalize MAKES it, for a session with a DE or without)
@@ -1337,6 +1512,7 @@ def do_finalize(a):
     custom_lines = custom_step(p, gate)
     if man is not None:
         search_record_step(p, man)
+        faims_step(p, man)
         if gate.get("commands_log"):          # the gate's warning, in MANIFEST.txt too
             man.warn(COMMANDS_LOG_PART, gate["commands_log"].replace("WARNING: ", "", 1))
         for level, part, note in custom_lines:
@@ -1357,6 +1533,11 @@ def do_finalize(a):
         peak_check_step(p, man)
         podcast_share_step(p, man)             # before the README, which lists it
         conversation_step(p, man, getattr(a, "call_id", None), gate["no_transcript"])
+    # The file catalog when step 11 was not run: after every part above, which it lists, and
+    # before README, AGENTS.md and MANIFEST.txt, which _write_docs then adds to it.
+    catalog = output_files_step(p)
+    if catalog and man is not None:
+        {"OK": man.ok, "SKIPPED": man.skip}[catalog[0]](catalog[1], catalog[2])
     registry, registry_note = _registry_lookup(p["session_dir"])
     docs = _write_docs(session_docs, p, man, registry, registry_note,
                        pending=("manifest",))        # MANIFEST.txt is written right below
@@ -1369,6 +1550,8 @@ def do_finalize(a):
                      f"{import_error}\n")
         _append_manifest(p["manifest_txt"], raw_list[0], "input/raw_files.txt (where the raw data are)",
                          raw_list[1])
+        if catalog:
+            _append_manifest(p["manifest_txt"], *catalog)
         _append_manifest(p["manifest_txt"], "SKIPPED", "Reproducibility bundle (output/"
                          "reproducibility)", "not built: " + import_error)
         for level, part, note in custom_lines + docs["manifest"]:
@@ -1407,6 +1590,11 @@ def do_finalize(a):
     # for the agent, never the zip: make_methods' database build warnings, when finalize built the
     # Methods (make_deposit.methods_build_warnings) -- tell the user
     result.update(getattr(man, "for_agent", None) or {})
+    # ... and, for Core staff only, the line saying the Core's feedback survey is not included
+    # (submission_report.survey_off_note: a warning, never a gate; None for anyone else)
+    result["survey"] = (status_notes(p["session_dir"], "finalize") or [None])[0]
+    if result["survey"]:
+        sys.stderr.write(f"[session] NOTE: {result['survey']}\n")
 
     # re-analysis: write DIFFERENCES.md vs the parent (read, never written to)
     parent = a.reanalysis_of or (reanalysis_of(p["session_dir"]) or {}).get("session")
@@ -1505,6 +1693,7 @@ def do_finalize(a):
             return (os.path.abspath(d) == os.path.abspath(p["search_out"])
                     or os.path.isfile(os.path.join(d, "search_provenance.json")))
 
+        redaction_notes = []            # core-client commands withheld whole (staff.redact_log)
         with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as z:
             for root, dirs, files in os.walk(sdir):
                 if os.path.abspath(root) in skips:
@@ -1553,10 +1742,10 @@ def do_finalize(a):
                         continue
                     if fn == os.path.basename(p["commands_log"]):
                         # every command verbatim (logs/, or a copy anywhere), but who decided is
-                        # staff-only (staff.redact)
-                        with open(full, encoding="utf-8", errors="replace") as fh:
-                            z.writestr(os.path.join(base, os.path.relpath(full, sdir)),
-                                       staff.redact(fh.read()))
+                        # staff-only and a core-client reason never travels (staff.redact_log)
+                        logged, withheld = staff.redact_log(full, sdir)
+                        z.writestr(os.path.join(base, os.path.relpath(full, sdir)), logged)
+                        redaction_notes += [(os.path.relpath(full, sdir), w) for w in withheld]
                         continue
                     z.write(full, os.path.join(base, os.path.relpath(full, sdir)))
         excluded[quant_label] = n_quant
@@ -1573,6 +1762,7 @@ def do_finalize(a):
             excluded[superseded_label] = n_superseded
         result["zip"] = archive
         result["zip_excluded"] = excluded
+        result["zip_redaction_notes"] = [f"{rel}: {w}" for rel, w in redaction_notes]
 
     # The run log and Slack go once everything they point at exists -- after the zip. Their
     # outcomes are the last two lines of MANIFEST.txt, so the zip's copy (added now) says them.
@@ -1600,6 +1790,9 @@ def do_finalize(a):
         result["zip_docs"] = how
         if how != "added":
             hooks["manifest"].insert(0, ("SKIPPED", "README / AGENTS.md in the zip", how))
+    for rel_w in result.get("zip_redaction_notes") or []:      # never silent (ruling 97)
+        rel, _, w = rel_w.partition(": ")
+        hooks["manifest"].insert(0, ("NOTE", f"{rel} in the zip", w))
     for level, part, note in hooks["manifest"]:
         try:
             _append_manifest(p["manifest_txt"], level, part, note)
@@ -1666,6 +1859,12 @@ def _not_finalized_hints(p, a, missing):
 
 
 STATUS_COMPLETE, STATUS_INCOMPLETE = 0, 3
+
+
+# Finish items that act OUTSIDE the session -- the delivery makes Bioshare links and the client
+# email plan. A reminder (finish_stop_hook.py) never tells the agent to do these "now": it says to
+# ask the person first (C2 review ux M5). One definition, read by every reminder.
+OUTWARD_FINISH_ITEMS = frozenset({"delivery"})
 
 
 def finish_status(session_dir):
@@ -1769,6 +1968,11 @@ def finish_status(session_dir):
         add("delivery", "The delivery (core_submission.py deliver)", True, "not_needed",
             "not a CoreOmics submission: the session itself is the result")
         return items
+    if core.get("core_client"):                   # marked by Core staff, no submission (2.15)
+        add("delivery", "The delivery (core_submission.py deliver)", True, "not_needed",
+            "Core client work with no CoreOmics submission (session.py core-client): nothing to "
+            "deliver through CoreOmics; the session itself is the result")
+        return items
     dj = os.path.join(s, "delivery.json")
     d = _load(dj) if os.path.isfile(dj) else None
     deliver_cmd = (f"python3 scripts/core_submission.py deliver --summary <submission_summary.json> "
@@ -1821,7 +2025,7 @@ def _sha256_or_none(path):
 
 
 def do_status(a):
-    """`session.py status --session <S>`: the finish checklist (golden rule 9: run it before
+    """`session.py status --session <S>`: the finish checklist (golden rule 16: run it before
     telling the user an analysis is finished, and show its result). Exit 0 when every item is
     done, 3 when one is not."""
     p = paths_for(a.session)
@@ -1829,13 +2033,24 @@ def do_status(a):
         sys.stderr.write(f"session dir not found: {p['session_dir']}\n")
         sys.exit(2)
     items = finish_status(p["session_dir"])
+    notes = status_notes(p["session_dir"])
+    screen = screen_data_note(p)
+    if screen:
+        notes.append(screen)
+    # the same warning finalize gives (commands_log_warning, the one definition): a log that is
+    # missing, empty or behind the steps is a WARN -- never a missing item -- but "Complete" must
+    # not pass over it in silence while finalize says it (2.15 acceptance, every run)
+    cmd_log = commands_log_warning(p)
+    if cmd_log:
+        notes.append(cmd_log)
     missing = [i for i in items if not i["done"]]
     # done only because finalize was told to go ahead without it (--override-finish) or to waive
     # it (--no-transcript): never "every item is done" while one is (L5b review H1)
     excused = [i for i in items if i["done"] and i["state"] in ("overridden", "waived")]
     if a.json:
         print(json.dumps({"session_dir": p["session_dir"], "complete": not missing,
-                          "overridden_or_waived": excused, "items": items}, indent=2))
+                          "overridden_or_waived": excused, "items": items, "notes": notes},
+                         indent=2))
     else:
         print(f"Finish checklist for {p['session_dir']}:")
         for i in items:
@@ -1843,15 +2058,324 @@ def do_status(a):
                 print(f"  done     {i['label']} -- {i['detail']}")
             else:
                 print(f"  missing  {i['label']} -- {i['detail']}: {i['command']}")
+        for n in notes:                            # warnings, never items: completeness ignores them
+            print(f"  note     {n}")
         if missing:
             print(f"NOT complete: {len(missing)} item(s) missing. Finish each one before telling "
-                  "the user the analysis is finished (SKILL.md golden rule 9).")
+                  "the user the analysis is finished (SKILL.md golden rule 16).")
         elif excused:
             print(f"Complete, with {len(excused)} overridden/waived: " + "; ".join(
                 f"{i['label']} ({i['state']}: {i.get('reason')})" for i in excused))
         else:
             print("Complete: every item is done.")
     sys.exit(STATUS_COMPLETE if not missing else STATUS_INCOMPLETE)
+
+
+def status_notes(session_dir, step="status"):
+    """The finish checklist's notes (`step`: "status" or "finalize"): warnings that are no finish
+    item and never make a session incomplete -- the Core's feedback survey will not be included
+    (submission_report.survey_off_note: Core staff only, None for anyone else), or a Core run's
+    report does not carry it (survey_missing_note: built before the record or the mark). At most
+    one of the two applies: the first needs core_run's no, the second its yes."""
+    owed = decision_owed_note(session_dir)
+    for rec_path in sorted(glob.glob(os.path.join(session_dir, "output", "sage_failure.json"))
+                           + glob.glob(os.path.join(session_dir, "output", "*", "sage_failure.json"))):
+        rec = _load(rec_path)
+        if isinstance(rec, dict) and rec.get("failure"):   # X2's record of how a Sage job died
+            owed = (owed + "; " if owed else "") + (
+                f"a Sage job failed ({rec['failure']}, exit {rec.get('exit_code')}) -- "
+                f"{rec.get('hint') or 'see ' + os.path.relpath(rec_path, session_dir)}")
+    try:
+        import submission_report
+    except ImportError:
+        return [owed] if owed else []
+    notes = [submission_report.survey_off_note(session_dir, step),
+             submission_report.survey_missing_note(session_dir)]
+    return [n for n in notes if n] + ([owed] if owed else [])
+
+
+def decision_owed_note(session_dir):
+    """A normalisation check stopped to ask and nobody has answered: its job exited 0 (Slurm says
+    COMPLETED), and NEEDS_DECISION.json beside the check record says so (normalization_check.write).
+    One sentence, or None. A note, never a finish item: the final DE is what the answer unblocks."""
+    rec = _load(os.path.join(session_dir, "output", "norm_check", "NEEDS_DECISION.json"))
+    if not (isinstance(rec, dict) and rec.get("needs_decision")):
+        return None
+    return (f"a normalisation decision is owed ({rec.get('why') or 'the check stopped to ask'}): "
+            f"show {rec.get('summary') or 'output/norm_check/NORMALIZATION_CHECK.md'} to the user "
+            "and record THEIR answer with normalization_check.py decide -- the final DE waits "
+            "for it (SKILL.md step 8)")
+
+
+def has_results(session_dir):
+    """True once a session has produced something to finish: a search (a record from
+    search_records, or a search report -- output/report.parquet, output/<out>/report.parquet,
+    output/<a>/<b>/report.parquet -- as the hive_remote runbook fetches it with
+    `hive_exec.sh --get`), a DE table (paths_for de_dir has a file), or a finalize stamp.
+    THE answer to "has this analysis got results" (the Stop hook reads it; DE-LIMP rule 3)."""
+    p = paths_for(session_dir)
+    out = p["output_dir"]
+    if os.path.isfile(os.path.join(out, "FINALIZED.json")):
+        return True
+    if search_records(out):
+        return True
+    try:
+        if any(os.path.isfile(os.path.join(p["de_dir"], n)) for n in os.listdir(p["de_dir"])):
+            return True
+    except OSError:
+        pass
+    for depth in ((), ("*",), ("*", "*")):
+        for name in SEARCH_REPORT_FILES:
+            if glob.glob(os.path.join(out, *depth, name)):
+                return True
+    return False
+
+
+HOLD_FILE = os.path.join("logs", "finish_hold.json")
+
+
+def finish_hold(session_dir):
+    """The person's hold on this session's finish reminders, or None: {"why", "at"} from
+    logs/finish_hold.json (`session.py hold`). A person who paused, stopped or abandoned the
+    analysis (or paused you on the board: the agent runs `session.py hold`, references/board.md) is not nagged to finish it;
+    the Stop hook (finish_stop_hook.py) reads this, the one definition."""
+    rec = _load(os.path.join(session_dir, HOLD_FILE))
+    return rec if isinstance(rec, dict) and rec.get("held") else None
+
+
+def do_log_command(a):
+    """`session.py log-command --session <S> "<command>"`: append one line -- the UTC time and the
+    command, as typed -- to logs/commands.log (SKILL.md golden rule 5). No skill script writes the
+    log when it is run over plain ssh, so the agent does, after each command it runs. Prints the
+    log's path. Never put a secret in the command (the log travels, redacted by staff.py)."""
+    p = paths_for(a.session)
+    if not os.path.isdir(p["session_dir"]):
+        sys.stderr.write(f"session dir not found: {p['session_dir']}\n")
+        sys.exit(2)
+    text = " ".join(" ".join(a.command).split())
+    if not text:
+        sys.stderr.write("[session] log-command needs the command to record\n")
+        sys.exit(2)
+    os.makedirs(os.path.dirname(p["commands_log"]), exist_ok=True)
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with open(p["commands_log"], "a", encoding="utf-8") as fh:
+        fh.write(f"{stamp} {text}\n")
+    print(p["commands_log"])
+
+
+def do_hold(a):
+    """`session.py hold --session <S> [--why TEXT]` / `--release`: record that a person has
+    stopped, paused or abandoned this analysis, so the Stop hook does not remind the agent to
+    finish it. Only ever silences a reminder; it changes no finish item."""
+    p = paths_for(a.session)
+    if not os.path.isdir(p["session_dir"]):
+        sys.stderr.write(f"session dir not found: {p['session_dir']}\n")
+        sys.exit(2)
+    path = os.path.join(p["session_dir"], HOLD_FILE)
+    if a.release:
+        if os.path.isfile(path):
+            os.remove(path)
+        print(json.dumps({"session_dir": p["session_dir"], "held": False}))
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    rec = {"held": True, "why": (a.why or "a person stopped or paused this analysis"),
+           "at": datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()}
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(rec, fh, indent=2)
+        fh.write("\n")
+    print(json.dumps({"session_dir": p["session_dir"], **rec}))
+
+
+SCREEN_STATUS_FILE = "screen_data_status.json"     # make_screen_data.R's own run record (output/)
+
+
+def screen_data_note(p):
+    """The protein screen data's state as one optional line for `session.py status` (step 8g,
+    make_screen_data.R): built / refused (route and reason) / failed (one line) / started and not
+    finished / not built. A note, never a finish item (finish_status does not look at it), so it
+    cannot make finalize or the Stop hook ask for the screen. None for a session with no DE (there
+    is nothing to screen)."""
+    if not has_de(p):
+        return None
+    rec = _load(os.path.join(p["output_dir"], SCREEN_STATUS_FILE))
+    built = os.path.isfile(os.path.join(p["output_dir"], "screen_data", "manifest.json"))
+    state = rec.get("state") if isinstance(rec, dict) else None
+    why = " ".join(str(rec.get("reason") or "").split()) if isinstance(rec, dict) else ""
+    route = rec.get("route") if isinstance(rec, dict) else None
+    if state == "built":
+        return "protein screen data: built (output/screen_data; optional)"
+    if state == "refused":
+        return (f"protein screen data: not built, refused"
+                f"{f' ({route})' if route else ''}: {why or 'no reason recorded'} (optional)")
+    if state == "failed":
+        return f"protein screen data: failed: {why or 'no reason recorded'} (optional; step 8g)"
+    if state == "running":
+        return ("protein screen data: started and not finished (still running, or it stopped part-way; "
+                "optional; step 8g)")
+    if built:
+        return "protein screen data: built (output/screen_data; optional)"
+    return "protein screen data: not built (optional)"
+
+
+CORE_CLIENT_STEP = "core client work"
+
+
+def do_core_client(a):
+    """`session.py core-client --session <S> --why-file -` (the reason from a quoted heredoc): Core
+    staff mark a session that has no CoreOmics submission (yet) as Core client work -- a pilot, a
+    favour, a rush job -- so submission_report.core_run answers yes and its report, README and
+    AGENTS.md carry the Core's feedback survey (core_submission.feedback_url leaves the number
+    out). Only Core staff: the Core staff list (staff.core_staff, the one test: on HIVE the list
+    itself; from a laptop, HIVE asked) must say so, or it is refused and nothing is written.
+    Recorded three ways: session.json "core_client"
+    (when, by ROLE -- the file is zipped -- and how the staff list was checked), the decisions log
+    (logs/decisions.md: what and why, log_decision.py) and the staff-only record
+    (logs/core_client.staff.json: the login). --clear takes the mark away, recorded the same way.
+    A session that answers a CoreOmics submission needs no mark: nothing is written; one whose
+    session.json names a submission (init --submission) is refused: attach that submission
+    instead. The three records are written together or not at all -- the staff record, then
+    session.json, then the decisions log, each undone when a later one fails (exit 2, JSON).
+    The reason is read from --why-file (- for standard input, from a quoted heredoc) so it stays
+    out of the command line and so out of commands.log; staff.redact takes a --why typed anyway
+    out of every copy of commands.log that travels. Prints one JSON object; exit 0 done or
+    nothing to do, 2 refused or not recorded."""
+    import shlex
+    import log_decision
+    import staff
+    import submission_report as sr
+
+    def done(obj, code=0):
+        print(json.dumps(obj, indent=2))
+        sys.exit(code)
+
+    def snapshot(path):
+        try:
+            with open(path, "rb") as fh:
+                return fh.read()
+        except FileNotFoundError:
+            return None
+        except OSError as e:             # review2 L1: unreadable -> refused, nothing written
+            done({"error": f"core-client cannot read {os.path.relpath(path, s)} "
+                           f"({type(e).__name__}: {e}), so it could not undo a failed write: "
+                           "nothing was written"}, 2)
+
+    def restore(path, data):
+        if data is None:
+            if os.path.lexists(path):
+                os.remove(path)
+            return
+        tmp = path + ".restore"
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp, path)
+
+    def record(entry, value, what):
+        """The three records, all or none (review L1) -> the decisions log's path."""
+        before = {x: snapshot(x) for x in (staff_path, p["session_json"], decisions)}
+        at = staff_path
+        try:
+            staff.append(staff_path, entry)
+            at = p["session_json"]
+            _set_session_key(p, sr.CORE_CLIENT, value, "core-client")
+            at = decisions
+            return log_decision.append(s, what, why, step=CORE_CLIENT_STEP)
+        except (Exception, SystemExit) as e:     # any failure undoes all three (review2 L1)
+            stuck = []
+            for path, data in before.items():
+                try:
+                    restore(path, data)
+                except OSError as e2:
+                    stuck.append(f"{os.path.relpath(path, s)} ({e2})")
+            done({"error": f"core-client could not write {os.path.relpath(at, s)} "
+                           f"({type(e).__name__}: {e}); "
+                           + (f"and could not undo {', '.join(stuck)}: look at them before "
+                              "running it again" if stuck else "nothing was changed")}, 2)
+    p = paths_for(a.session)
+    s = p["session_dir"]
+    decisions = os.path.join(s, "logs", "decisions.md")
+    if not is_session_dir(s):
+        done({"error": f"not an analysis session folder (no session.json, input/ and output/): "
+                       f"{s}"}, 2)
+    try:
+        why = (log_decision._read(a.why_file, log_decision.TEXT_MAX) if a.why_file
+               else a.why or "")
+    except OSError as e:
+        done({"error": f"--why-file: could not read the reason ({e})"}, 2)
+    if not why.strip():
+        done({"error": "--why: say why this is Core client work (who it is for, why there is no "
+                       "submission yet); it goes in the decisions log"}, 2)
+    # ruling 98 (known limit): outside a core-client command the redactor replaces a reason by
+    # value only when it is 2+ words and 12+ characters -- a shorter one is said, never refused
+    short = (None if len(why.strip()) >= staff.OUTSIDE_MIN_CHARS
+             and len(why.split()) >= staff.OUTSIDE_MIN_WORDS else
+             f"the reason is under {staff.OUTSIDE_MIN_CHARS} characters or one word: a copy of "
+             "commands.log the redactor cannot parse may keep it (references/core-submissions.md, "
+             "known limit). Say who the work is for and why there is no submission yet, from "
+             "the documented heredoc.")
+    login, how, why_not = staff.core_staff()
+    if not login:
+        done({"error": f"session.py core-client is for UC Davis Proteomics Core staff: {why_not}. "
+                       "Nothing was written."}, 2)
+    if os.path.isfile(p["session_json"]) and not isinstance(_load(p["session_json"]), dict):
+        done({"error": f"{p['session_json']} is not readable JSON: look at it before core-client "
+                       "writes to it. Nothing was written."}, 2)
+    sj = _load(p["session_json"]) or {}
+    core = sr.core_run(s)
+    now = staff.now()
+    staff_path = os.path.join(s, sr.CORE_CLIENT_STAFF_RECORD)
+    if a.clear:
+        if sr.CORE_CLIENT not in sj:
+            done({"session_dir": s, "core_client": None, "survey": "on" if core else "off",
+                  "note": "this session carries no Core client work mark: nothing was written"})
+        logged = record({"event": "core-client --clear", "by": login, "at": now,
+                         "staff_check": how, "why": log_decision.one(why),
+                         "why_text": why.strip()}, None,
+                        "Removed the Core client work mark (session.py core-client --clear): the "
+                        "Core's feedback survey now follows a CoreOmics submission alone")
+        done({"session_dir": s, "core_client": None,
+              "survey": "on" if sr.core_run(s) else "off", "logged": logged,
+              "staff_record": staff_path,
+              "next": "rebuild the report (make_analysis_html.py) and the README / AGENTS.md "
+                      "(session.py docs, or finalize)"})
+    if core and not core.get("core_client"):
+        done({"session_dir": s, "core_client": None, "survey": "on",
+              "note": (f"this session answers CoreOmics submission "
+                       f"{core.get('prot') or '(by its CoreOmics id)'}: its report already "
+                       "carries the survey, with the submission's number. Nothing was written.")})
+    if core:
+        done({"session_dir": s, "core_client": sr.core_client_mark(sj, s), "survey": "on",
+              "note": "already marked as Core client work: nothing was written"})
+    work = analysis_for(s) or {}
+    named = [str(x) for x in work.get("submissions") or []]
+    if named:                    # review M5: then the survey comes from the record, with its number
+        done({"error": f"session.json says this session is for {', '.join(named)} (session.py "
+                       f"init --submission): attach that submission instead (python3 "
+                       f"scripts/submission_report.py attach --session {shlex.quote(s)} --record "
+                       f"<its fetch folder>); its survey then names it. Nothing was written."}, 2)
+    block = {"marked": now, "by": staff.ROLE, "staff_check": how,
+             "recorded_in": ["logs/decisions.md", sr.CORE_CLIENT_STAFF_RECORD.replace(os.sep, "/")]}
+    # why_text: the reason as given, so staff.redact_log can take it out of every travelling
+    # copy of commands.log by value, whatever its quoting (ruling 97); this record never travels
+    logged = record({"event": "core-client", "by": login, "at": now, "staff_check": how,
+                     "why": log_decision.one(why), "why_text": why.strip()}, block,
+                    "Marked this session as Core client work with no CoreOmics submission "
+                    "(session.py core-client): the Core's feedback survey goes in its report, "
+                    "README and AGENTS.md, without a submission number")
+    note = None
+    if work.get("internal"):
+        note = (f"session.json also says internal Core work (analysis_for: "
+                f"\u201c{work['internal']}\u201d, kept for the Core Project Board): the survey "
+                "now goes in, and its podcast is Core client work (make_podcast.py --core-run); "
+                "--core-run internal refuses it -- a client's data is never labelled the Core's "
+                "own")
+    if short:
+        sys.stderr.write(f"[session] WARNING: {short}\n")
+    done({"session_dir": s, "core_client": block, "survey": "on", "staff_check": how,
+          "logged": logged, "staff_record": staff_path, "note": note, "warning": short,
+          "next": "rebuild the report (make_analysis_html.py) and the README / AGENTS.md "
+                  "(session.py docs, or finalize) so they carry the survey; when the submission "
+                  "exists, attach it (submission_report.py attach) and rebuild: the survey then "
+                  "names it"})
 
 
 def do_docs(a):
@@ -1900,12 +2424,21 @@ def params_file(p, resolved=True):
 SEARCH_RECORD = "search_provenance.json"
 # search_choice's `how` when there are records and none is chosen: every reader treats the two
 # alike (no search described, and the reason said) -- search_unchosen()
-SEARCH_UNCHOSEN = ("ambiguous", "unrecorded_input")
-# How the user chooses then (T44 follow-up N1): the refusals and SKILL.md step 12b say it
-SEARCH_HOW_TO_CHOOSE = ("to choose one, rename each other search folder to "
-                        "output/superseded_<name>/ (a folder whose name holds \"superseded\" is "
-                        "not a candidate), or deliver every search folder with "
-                        "core_submission.py deliver --mode interim")
+SEARCH_UNCHOSEN = ("ambiguous", "unrecorded_input", "faims_split")
+# A search split by FAIMS group (run_search --faims-split): its groups are valid searches of one
+# dataset, quantified separately -- never "superseded", never "no search output". choose_search's
+# `why` for them starts with this phrase (analysis_prompt says it instead of "No search output").
+FAIMS_SPLIT_WHY = "this session holds a search split by FAIMS group"
+# The file that names the chosen search without renaming any folder (choose-search writes it)
+SEARCH_CHOICE_FILE = "search_choice.json"
+# How the user chooses then (T44 follow-up N1): the refusals below, methods.md and core-submissions.md
+# ("Several searches") say it; a FAIMS split: search-engines.md "Finishing a FAIMS-split session"
+SEARCH_HOW_TO_CHOOSE = ("to choose one, run session.py choose-search --dir <session> --folder "
+                        "<its folder under output/> (nothing is renamed: the other searches stay "
+                        "as results of their own) or, for a search that really was replaced, "
+                        "rename its folder to output/superseded_<name>/ (a folder whose name "
+                        "holds \"superseded\" is not a candidate), or deliver every search folder "
+                        "with core_submission.py deliver --mode interim")
 
 
 def search_folder_of(report):
@@ -1976,8 +2509,22 @@ def choose_search(output_dir, de_input=None):
             return dict(res, how="unrecorded_input", why=(
                 f"the DE read {rel(de_input)}, which no search record describes (the session's: "
                 f"{names})"), short="the search the DE read has no search record")
+    chosen = _chosen_by_file(output_dir, cands)
+    if chosen:
+        return dict(res, path=chosen, how="chosen")
     if len(cands) == 1:
         return dict(res, path=cands[0], how="only")
+    groups = [(c, (_load(c) or {}).get("faims")) for c in cands]
+    groups = [(c, z) for c, z in groups if isinstance(z, dict) and z.get("group")]
+    if len(groups) >= 2:
+        named = ", ".join(f"{rel(os.path.dirname(c))} ({z['group']}, {z.get('n_runs')} run(s))"
+                          for c, z in groups)
+        return dict(res, how="faims_split",
+                    short=f"search split by FAIMS group ({len(groups)} groups), none chosen",
+                    why=(f"{FAIMS_SPLIT_WHY}: {named}. Each group is a valid search of its own "
+                         f"runs, quantified separately (not comparable across the groups); the "
+                         f"report, Methods and bundle describe one search at a time, and none is "
+                         f"chosen yet"))
     if not cands:
         return dict(res, how="none", why="no search record in this session (no output/<folder>/"
                                          "search_provenance.json)", short="no search record")
@@ -1986,6 +2533,70 @@ def choose_search(output_dir, de_input=None):
         (f"the report the DE read ({rel(de_input)}) is in none of their folders" if de_input
          else "the DE's record names no report it read" if de_input is not None
          else "there is no DE to choose by")))
+
+
+def _chosen_by_file(output_dir, cands):
+    """The record of the candidate folder output/search_choice.json names ({"folder": "<path under
+    output/>"}), or None: no file, a file that cannot be read, or a folder that holds no record."""
+    d = _load(os.path.join(output_dir, SEARCH_CHOICE_FILE))
+    folder = d.get("folder") if isinstance(d, dict) else None
+    if not isinstance(folder, str) or not folder.strip():
+        return None
+    want = os.path.realpath(os.path.join(output_dir, folder))
+    return next((c for c in cands if os.path.realpath(os.path.dirname(c)) == want), None)
+
+
+def do_choose_search(a):
+    """`choose-search`: name the session's search (a folder under output/ that holds a
+    search_provenance.json) without renaming anything -> output/search_choice.json. A folder that
+    is not a search of this session is refused with the folders that are."""
+    p = paths_for(a.dir)
+    if not os.path.isdir(p["session_dir"]):
+        sys.exit(f"session dir not found: {p['session_dir']}")
+    cands = search_records(p["output_dir"])
+    folders = [os.path.relpath(os.path.dirname(c), p["output_dir"]).replace(os.sep, "/")
+               for c in cands]
+    want = os.path.normpath(a.folder).replace(os.sep, "/")
+    if want.startswith("output/"):
+        want = want[len("output/"):]
+    if want not in folders:
+        sys.exit(f"choose-search: {a.folder!r} is not a search folder of this session "
+                 f"(output/<folder>/search_provenance.json). The searches: "
+                 f"{', '.join(folders) or 'none'}")
+    # The DE's input outranks a choice (choose_search: the tables ARE that search's). A choice of
+    # another search would be ignored by every reader, and "chosen" printed for it is how a
+    # report could describe one search over another's tables (C2 review ux M1): refuse, and say
+    # what to do instead. Nothing is written.
+    de_in = de_input_of(p)
+    by_de = choose_search(p["output_dir"], de_in) if de_in else None
+    if by_de and by_de["how"] in ("de_input", "unrecorded_input"):
+        read = (os.path.relpath(os.path.dirname(by_de["path"]), p["output_dir"]).replace(os.sep, "/")
+                if by_de["path"] else None)
+        if read != want:
+            sys.exit(f"choose-search: NOT chosen. This session's DE read "
+                     f"{'output/' + read if read else de_in + ' (no search record describes it)'}"
+                     f", so its tables, report, Methods and bundle describe "
+                     f"{'that search' if read else 'that report'}, whatever is chosen here; a "
+                     f"choice of output/{want} would be ignored. To report output/{want}, run the "
+                     f"DE on its report (then every reader follows it), or deliver it as a search "
+                     f"of its own (core_submission.py deliver --mode interim).")
+    import safe_write
+    safe_write.write_file(os.path.join(p["output_dir"], SEARCH_CHOICE_FILE), json.dumps(
+        {"folder": want, "chosen_by": "choose-search",
+         "note": "names the search the report, Methods and bundle describe; no folder "
+                 "was renamed and the other searches remain results of their own"}, indent=2))
+    # what every reader will now use -- never "chosen" for a search they will not describe
+    now = search_choice(p)
+    used = (os.path.relpath(os.path.dirname(now["path"]), p["output_dir"]).replace(os.sep, "/")
+            if now.get("path") else None)
+    if used != want:
+        sys.exit(f"choose-search: output/{SEARCH_CHOICE_FILE} names output/{want}, but the "
+                 f"session's readers use {('output/' + used) if used else 'no search'} "
+                 f"({now.get('how')}: {now.get('why') or 'see search_choice'}); it is NOT the "
+                 f"search the report describes.")
+    print(f"chosen: output/{want} (output/{SEARCH_CHOICE_FILE}); the report, Methods, bundle and "
+          f"delivery describe it" + (" -- the search the DE read" if now["how"] == "de_input"
+                                     else ""))
 
 
 def find_search_provenance(output_dir, de_input=None):
@@ -2344,6 +2955,11 @@ def main():
     f.add_argument("--no-deposit", action="store_true",
                    help="skip the repository-deposit package (output/DATA_SUBMISSION); the "
                         "publication Methods are still ensured")
+    f.add_argument("--no-record", action="store_true",
+                   help="a test run: leave this analysis out of the Core's shared run records "
+                        "(skill_runs/) and do not post 'analysis complete' to the Core Slack "
+                        "channel. A session under a /skill_test/ folder does the same; "
+                        "RECORD_RUN=off turns off the run records only")
     f.add_argument("--no-notify", action="store_true",
                    help="do not post 'analysis complete' to the Core's Slack channel (same as "
                         "SKILL_SLACK=0; see references/notifications.md)")
@@ -2382,6 +2998,42 @@ def main():
                     help="the session directory (--dir works too)")
     st.add_argument("--json", action="store_true", help="the checklist as JSON")
     st.set_defaults(func=do_status)
+    lc = sub.add_parser("log-command", help="append one command to logs/commands.log (golden rule "
+                                            "5): the skill's scripts do not write it when run "
+                                            "over plain ssh, so the agent does")
+    lc.add_argument("--session", "--dir", dest="session", required=True,
+                    help="the session directory (--dir works too)")
+    lc.add_argument("command", nargs="+", help="the command, as it was run (one quoted string)")
+    lc.set_defaults(func=do_log_command)
+    hp = sub.add_parser("hold", help="a person stopped/paused/abandoned this analysis: the Stop "
+                                     "hook stops reminding the agent to finish it (--release "
+                                     "undoes it)")
+    hp.add_argument("--session", "--dir", dest="session", required=True)
+    hp.add_argument("--why", default=None, help="what the person said (kept in logs/finish_hold.json)")
+    hp.add_argument("--release", action="store_true")
+    hp.set_defaults(func=do_hold)
+    cc = sub.add_parser("core-client", help="Core staff: mark a session with no CoreOmics "
+                                            "submission as Core client work, so its report, "
+                                            "README and AGENTS.md carry the Core's feedback "
+                                            "survey (refused unless this account is on the "
+                                            "Core staff list)")
+    cc.add_argument("--session", "--dir", dest="session", required=True,
+                    help="the session directory (--dir works too)")
+    cw = cc.add_mutually_exclusive_group(required=True)
+    cw.add_argument("--why", help="why this is Core client work: who it is for, why there is no "
+                                  "submission yet. Prefer --why-file - and a quoted heredoc: the "
+                                  "reason names the client, and a --why typed here goes into "
+                                  "commands.log (staff.redact takes it out of every copy that "
+                                  "travels)")
+    cw.add_argument("--why-file", metavar="F|-",
+                    help="the reason, from a file or - (standard input: a quoted <<'EOF' heredoc, "
+                         "the documented form). Known limit: every travelling copy of "
+                         "commands.log is redacted, but a very short reason (under 12 "
+                         "characters) may stay in a log the redactor cannot parse; "
+                         "core-client warns then")
+    cc.add_argument("--clear", action="store_true",
+                    help="take the mark away (a session marked by mistake); recorded the same way")
+    cc.set_defaults(func=do_core_client)
     d = sub.add_parser("docs", help="(re)write README.md, README.html and AGENTS.md -- and "
                                     "input/raw_files.txt if missing -- without finalizing")
     d.add_argument("--dir", required=True, help="the session directory")
@@ -2399,6 +3051,14 @@ def main():
                         "identifications.tsv and its record -- the workflow manifest), one per "
                         "line, session-relative")
     w.set_defaults(func=do_which_search)
+    cs = sub.add_parser("choose-search", help="name the session's search (the one the report, "
+                                              "Methods and bundle describe) without renaming any "
+                                              "folder: writes output/search_choice.json")
+    cs.add_argument("--dir", "--session", dest="dir", required=True,
+                    help="the session directory")
+    cs.add_argument("--folder", required=True,
+                    help="the search's folder under output/, e.g. search/faims_none")
+    cs.set_defaults(func=do_choose_search)
     a = ap.parse_args()
     if a.cmd == "finalize":
         # The finish gate before anything else -- on a login node, before the re-exec below, so a
@@ -2418,7 +3078,8 @@ def main():
             import on_compute
             on_compute.ensure_compute_node("session.py finalize builds the documents and zips the "
                                            "session", minutes=120 if gate.get("build_bundle")
-                                           else 60, mem="8G", script=__file__)
+                                           else 60, mem="8G", script=__file__,
+                                           session=getattr(a, "dir", None))
         except ImportError:
             pass                          # a partial scripts/ without on_compute.py: as before
     a.func(a)

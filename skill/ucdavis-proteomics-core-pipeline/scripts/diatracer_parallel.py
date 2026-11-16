@@ -38,19 +38,29 @@ from safe_write import write_file  # noqa: E402
 DEFAULTS = {"-dI": "0.01", "-dR": "3", "-mC": "0.3",
             "-mF": "1", "-mO": "0.1", "-r": "0", "-rM": "500"}
 
-HIVE_JAR = "/quobyte/proteomics-grp/fragpipe24/fragpipe-24.0/tools/diatracer-2.2.1.jar"
+# Where the Core's licensed FragPipe lives, and how a jar is found in a tools folder (two levels
+# down, any case: tools_licensed keeps diatracer-2.2.1/diaTracer-2.2.1.jar; the highest version),
+# are engine_choice.py's -- one definition each.
+import engine_choice  # noqa: E402
 
 
-def find_jar(explicit):
+def find_jar(explicit, tools_json=None):
+    """--jar; else the diaTracer jar tools.json `fragpipe_tools` recorded (acquire_tools.sh);
+    else the one in the Core's install; else in $FRAGPIPE_TOOLS_FOLDER."""
     if explicit:
         return explicit
-    if os.path.exists(HIVE_JAR):
-        return HIVE_JAR
-    env = os.environ.get("FRAGPIPE_TOOLS_FOLDER")
-    if env:
-        hits = sorted(glob.glob(os.path.join(env, "**", "diatracer*.jar"), recursive=True))
-        if hits:
-            return hits[-1]
+    if tools_json:
+        try:
+            with open(tools_json) as fh:
+                rec = ((json.load(fh).get("fragpipe_tools") or {}).get("jars") or {}).get("diatracer")
+            if rec and os.path.isfile(rec.get("path") or ""):
+                return rec["path"]
+        except (OSError, ValueError, AttributeError):
+            pass
+    for folder in (engine_choice.core_tools(), os.environ.get(engine_choice.TOOLS_ENV)):
+        hit = engine_choice.find_jar(folder, "diatracer") if folder else None
+        if hit:
+            return hit["path"]
     return None
 
 
@@ -60,6 +70,8 @@ def main():
     ap.add_argument("--stage", required=True, help="staging dir of .d symlinks (diatracer_stage.py)")
     ap.add_argument("--out", required=True, help="where to write the sbatch + logs")
     ap.add_argument("--jar")
+    ap.add_argument("--tools", default=None,
+                    help="tools.json (acquire_tools.sh): its fragpipe_tools names the diaTracer jar")
     ap.add_argument("--threads", type=int, default=16)
     ap.add_argument("--mem", type=int, default=96, help="GB per task")
     ap.add_argument("--time", type=int, default=6, help="hours per task")
@@ -89,9 +101,9 @@ def main():
     todo = [d for d in dfiles if not os.path.exists(d[:-2] + "_diatracer.mzML")]
     n = len(dfiles)
 
-    jar = find_jar(a.jar)
+    jar = find_jar(a.jar, a.tools)
     if not jar:
-        sys.exit("diaTracer jar not found. Pass --jar, or set FRAGPIPE_TOOLS_FOLDER. "
+        sys.exit("diaTracer jar not found. Pass --jar or --tools, or set FRAGPIPE_TOOLS_FOLDER. "
                  "It is licence-gated (MSFragger/IonQuant/diaTracer) and cannot be "
                  "downloaded by script.")
 

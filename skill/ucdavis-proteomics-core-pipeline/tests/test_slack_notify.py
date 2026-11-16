@@ -21,6 +21,7 @@ fake record_run.py, FRAN_DEPOSIT=off, and FRAN_DROP_DIR inside the test's temp d
 import base64
 import glob
 import http.server
+import contextlib
 import io
 import json
 import os
@@ -46,6 +47,7 @@ sys.path.insert(0, HERE)
 import notify_slack as ns  # noqa: E402
 import run_search  # noqa: E402
 from job_env import job_env  # noqa: E402  (the shared isolation; base_env builds on it)
+import slack_guard  # noqa: E402  (review A10: no test reaches the Core's real Slack)
 
 PY = sys.executable
 # The CLI tests run a COPY of scripts/ (setUpModule) whose record_run.py is a fake, so no test
@@ -138,6 +140,13 @@ def search_session(root, name="2026-09-24_HeLa_liver_DIA"):
           "/raw/PatientA_tumour_01.raw\t45210\t6120\n/raw/PatientB_normal_02.raw\t44001\t6050\n"
           "/raw/PatientC_tumour_03.raw\t46900\t6200\n/raw/blank.raw\t0\t0\n")
     write(os.path.join(out, "report.parquet"), "PAR1" + "x" * 200)
+    # a real-looking reference database the search names, so fran_deposit's database guard
+    # can check it (a search that names no FASTA is never staged); its sidecar keeps the organism
+    import fasta_fixture
+    fasta = fasta_fixture.write_real_db(os.path.join(sess, "input"), "search.fasta")
+    prov = json.loads(read(os.path.join(out, "search_provenance.json")))
+    prov["fasta"] = fasta
+    write(os.path.join(out, "search_provenance.json"), json.dumps(prov))
     write(os.path.join(sess, "input", "search.fasta.meta.json"),
           json.dumps({"organism": "Homo sapiens", "taxid": 9606}))
     return sess, out
@@ -202,12 +211,18 @@ def scripts_copy(d, record_run=FAKE_RECORD_RUN, fran=None):
 
 def setUpModule():
     global NOTIFIER, _MODULE_TMP
+    # belt and braces (A10): nothing in this module may read a webhook file outside a temp dir,
+    # post to a real Slack URL or relay through the real HIVE; tearDownModule fails loudly if one
+    # tried (slack_guard records what it stopped)
+    slack_guard.install()
+    slack_guard.clear()
     _MODULE_TMP = tempfile.mkdtemp()
     NOTIFIER = os.path.join(scripts_copy(_MODULE_TMP), "notify_slack.py")
 
 
 def tearDownModule():
     shutil.rmtree(_MODULE_TMP, ignore_errors=True)
+    slack_guard.check()
 
 
 def order_log(path):
@@ -216,8 +231,18 @@ def order_log(path):
     return [json.loads(ln) for ln in read(path).splitlines() if ln.strip()]
 
 
+@contextlib.contextmanager
 def env_patch(d, **extra):
-    return mock.patch.dict(os.environ, base_env(d, **extra), clear=True)
+    """base_env() in os.environ AND notify_slack's import-time paths: GROUP_FILE and
+    CORE_GROUP_DIR were read from the environment when notify_slack was imported, so patching
+    the environment alone left an in-process call on HIVE reading the Core's real group webhook
+    -- and posting a test alert to the Core channel (review A10, Ruling 109.1). A test that wants
+    a group file patches ns.GROUP_FILE inside this, with a file in its own temp dir."""
+    env = base_env(d, **extra)
+    with mock.patch.dict(os.environ, env, clear=True), \
+            mock.patch.object(ns, "GROUP_FILE", env["SKILL_SLACK_GROUP_FILE"]), \
+            mock.patch.object(ns, "CORE_GROUP_DIR", env["SKILL_CORE_GROUP_DIR"]):
+        yield
 
 
 class Payloads(unittest.TestCase):
@@ -844,6 +869,41 @@ class Generators(unittest.TestCase):
                                   "fran": "off" if no_fran else "stage",
                                   "fran_name": None, "qc": None})
 
+    def test_run_search_no_record_is_baked_into_every_job_and_the_plan(self):
+        """X7: --no-record (or a /skill_test/ --out) reaches every job's end hook and the
+        recorded plan, and is said on stderr; a normal search is unchanged."""
+        for extra, sub, off in (([], "", False), (["--no-record"], "", True),
+                                ([], "skill_test", True)):
+            with tempfile.TemporaryDirectory() as d:
+                raws, fasta, cfg, tools, bundle = self._setup(d)
+                out = os.path.join(d, sub, "out")
+                env = self._env(d)
+                env.pop("SKILL_SLACK", None)
+                env.pop("FRAN_DEPOSIT", None)
+                env.pop("RECORD_RUN", None)
+                p = subprocess.run([PY, os.path.join(SCRIPTS, "run_search.py"),
+                                    "--tools", tools, "--bundle", bundle, "--params", cfg,
+                                    "--fasta", fasta, "--out", out, "--files", *raws,
+                                    "--engine", "diann", "--threads", "8", "--sbatch", "job.sh",
+                                    *extra], capture_output=True, text=True, env=env, cwd=d,
+                                   timeout=240)
+                self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+                for st in ("1_lib", "2_search"):
+                    self.assertEqual(" --no-record" in read(os.path.join(d, f"job_{st}.sh")),
+                                     off, (extra, sub, st))
+                self.assertEqual("will NOT be recorded" in p.stderr, off, p.stderr)
+                prov = json.loads(read(os.path.join(out, "search_provenance.json")))
+                self.assertEqual(prov["job_end_hook"]["run_log"], "off" if off else "on")
+                self.assertEqual("run_log_off_because" in prov["job_end_hook"], off)
+                # one reason, three records: no FRAN staging and no Slack post either (ux H2)
+                self.assertEqual(prov["job_end_hook"]["slack"], "off" if off else "on")
+                self.assertEqual(prov["job_end_hook"]["fran"], "off" if off else "stage")
+                self.assertEqual("fran_off_because" in prov["job_end_hook"], off)
+                self.assertEqual("slack_off_because" in prov["job_end_hook"], off)
+                for st in ("1_lib", "2_search"):
+                    js = read(os.path.join(d, f"job_{st}.sh"))
+                    self.assertEqual(" --no-slack" in js and " --no-fran" in js, off, st)
+
     def test_run_search_records_the_name_and_the_qc_decision(self):
         for extra, qc in ((["--fran-name", "Lumos QC 2026-09-24", "--qc"], True),
                           (["--fran-name", "Lumos QC 2026-09-24", "--not-qc"], False)):
@@ -1017,6 +1077,62 @@ class Finalize(unittest.TestCase):
             self.assertRegex(res["run_log"]["detail"], r"(NotADirectoryError|FileExistsError)")
             self.assertIn("run log: error: ", r.stderr)     # the full text, on the terminal
 
+    def test_no_record_leaves_the_run_out_and_says_so_in_the_manifest(self):
+        """X7 (PROT_9812 F11): finalize wrote the registry for a test run, with no flag to stop
+        it. --no-record: record_run.py is never started, and MANIFEST.txt says why."""
+        import test_deposit_package as tdp
+        with tempfile.TemporaryDirectory() as d:
+            p = tdp.dia_session(d)
+            m = Mock("ok")                    # a webhook that WOULD take the post (C2 ux H2)
+            try:
+                r = self._finalize(p["session_dir"], base_env(d, SKILL_SLACK_WEBHOOK=m.url),
+                                   "--no-record")
+            finally:
+                m.close()
+            self.assertEqual(m.bodies, [], "a test run was posted to the Core channel")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            res = json.loads(r.stdout)
+            self.assertTrue(res["run_log"]["off"], res["run_log"])
+            calls = order_log(os.path.join(os.path.dirname(p["session_dir"]), "order.log"))
+            self.assertNotIn("analysis-done", [c["argv"][0] for c in calls])
+            line = [ln for ln in read(p["manifest_txt"]).splitlines() if "Core run log" in ln]
+            self.assertEqual(len(line), 1, line)
+            self.assertTrue(line[0].startswith("[INFO]"), line)
+            self.assertIn("off (a test run: --no-record was given)", line[0])
+            self.assertIn("run log: off (a test run: --no-record was given)", r.stderr)
+            # the same reason keeps the Core channel out of it (C2 ux H2)
+            sl = [ln for ln in read(p["manifest_txt"]).splitlines() if "Slack notification" in ln]
+            self.assertEqual(len(sl), 1, sl)
+            self.assertTrue(sl[0].startswith("[INFO]") and "a test run" in sl[0], sl)
+            self.assertFalse(res["slack"]["sent"], res["slack"])
+
+    def test_a_skill_test_session_is_never_recorded(self):
+        import test_deposit_package as tdp
+        with tempfile.TemporaryDirectory() as d:
+            root = os.path.join(d, "skill_test")
+            os.makedirs(root)
+            p = tdp.dia_session(root)
+            runs = os.path.join(d, "runs")
+            m = Mock("ok")                    # a webhook that WOULD take the post (C2 ux H2)
+            try:
+                r = self._finalize(p["session_dir"], base_env(d, SKILL_RUNS_DIR=runs,
+                                                              SKILL_SLACK_WEBHOOK=m.url),
+                                   record_run=None)                   # the REAL record_run.py
+            finally:
+                m.close()
+            self.assertEqual(m.bodies, [], "a test run was posted to the Core channel")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            res = json.loads(r.stdout)
+            self.assertTrue(res["run_log"]["off"], res["run_log"])
+            self.assertIn("/skill_test/", res["run_log"]["detail"])
+            self.assertFalse(os.path.exists(runs), "the registry was touched")
+            line = [ln for ln in read(p["manifest_txt"]).splitlines() if "Core run log" in ln]
+            self.assertIn("/skill_test/", line[0])
+            self.assertTrue(line[0].startswith("[INFO]"), line)
+            # MANIFEST.txt travels to collaborators: the reason, never the folder's path
+            self.assertNotIn(d, read(p["manifest_txt"]))
+            self.assertFalse(res["slack"]["sent"], res["slack"])
+
     def test_no_notify_still_logs_the_run(self):
         import test_deposit_package as tdp
         with tempfile.TemporaryDirectory() as d:
@@ -1186,7 +1302,7 @@ class RunLogOutcomes(unittest.TestCase):
                      "out_not_found", "session_not_found"):
             res, _ = self._rr({"recorded": False, "reason": code,
                                "detail": "PermissionError: [Errno 13] Permission denied: "
-                                         "'/quobyte/proteomics-grp/skill_runs/x' (brettsp@hive)"})
+                                         "'/quobyte/proteomics-grp/skill_runs/x' (bstaff@hive)"})
             self.assertIs(res.get("error"), True, code)
             self.assertTrue(res["detail"].startswith(f"{code}: PermissionError"), res)
             self.assertIn("/quobyte/", res["detail"])          # the full text stays in the result
@@ -1198,13 +1314,13 @@ class RunLogOutcomes(unittest.TestCase):
         """MANIFEST.txt goes to collaborators in the zip: the failure's KIND only."""
         for detail in ("error: FileExistsError: [Errno 17] File exists: "
                        "'/quobyte/proteomics-grp/skill_runs/sessions'",
-                       "ssh_failed: brettsp@hive.hpc.ucdavis.edu: Permission denied (publickey)",
+                       "ssh_failed: bstaff@hive.hpc.ucdavis.edu: Permission denied (publickey)",
                        "out_not_found: /quobyte/proteomics-grp/SERVICE/x/search_out",
-                       "record_run.py exit 1: Traceback ... /home/brettsp/x.py"):
+                       "record_run.py exit 1: Traceback ... /home/bstaff/x.py"):
             reason = detail.split(":")[0].replace("record_run.py exit 1", "error")
             note = ns.run_log_manifest({"logged": False, "error": True, "reason": reason,
                                         "detail": detail})[2]
-            for leak in ("/quobyte", "/home", "brettsp", "hive.hpc", "@"):
+            for leak in ("/quobyte", "/home", "bstaff", "hive.hpc", "@"):
                 self.assertNotIn(leak, note, (detail, note))
             self.assertTrue(note.endswith("-- see the finalize output"), note)
 
@@ -1350,10 +1466,10 @@ class JobEndChoices(unittest.TestCase):
         """The shape of fran_deposit.stage_argv() (the FRAN side's builder, on its branch):
         stage --out O [--fasta-meta M] [--name N] [--qc | --not-qc]; a blank name dropped."""
         py = sys.executable
-        self.assertEqual(ns._stage_argv("/s/fran_deposit.py", "/o", name=" PROT_0793 mouse — x ",
+        self.assertEqual(ns._stage_argv("/s/fran_deposit.py", "/o", name=" PROT_9793 mouse — x ",
                                         qc=True, fasta_meta="/m"),
                          [py, "/s/fran_deposit.py", "stage", "--out", "/o", "--fasta-meta", "/m",
-                          "--name", "PROT_0793 mouse — x", "--qc"])
+                          "--name", "PROT_9793 mouse — x", "--qc"])
         self.assertEqual(ns._stage_argv("/f", "/o", name="  ", qc=False),
                          [py, "/f", "stage", "--out", "/o", "--not-qc"])
         self.assertEqual(ns._stage_argv("/f", "/o"), [py, "/f", "stage", "--out", "/o"])
@@ -1364,7 +1480,7 @@ class JobEndChoices(unittest.TestCase):
         Both ship in this skill, so pin them to each other on every input shape."""
         import fran_deposit as fd
         path = os.path.abspath(fd.__file__)
-        for kw in ({}, {"name": " PROT_0793 mouse — x "}, {"name": "  "}, {"qc": True},
+        for kw in ({}, {"name": " PROT_9793 mouse — x "}, {"name": "  "}, {"qc": True},
                    {"qc": False}, {"fasta_meta": "/m"},
                    {"name": "Lumos QC", "qc": True, "fasta_meta": "/m"},
                    {"name": "HeLa study", "qc": False}):

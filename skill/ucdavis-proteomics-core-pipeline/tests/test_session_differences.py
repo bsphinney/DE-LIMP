@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """DIFFERENCES.md -- what a re-analysis changed from the session it re-analyses.
 
-PROT_0756's v2 re-ran the DE with --block and nothing else, and DIFFERENCES.md read "identical
+PROT_9756's v2 re-ran the DE with --block and nothing else, and DIFFERENCES.md read "identical
 settings; difference is data/environment only": the block, the contaminant policy, the database's
 sidecar state, the design, the skill and limpa versions were never compared, and a dead
 "Validated workflow commit" row was. A setting neither session records is said to be not

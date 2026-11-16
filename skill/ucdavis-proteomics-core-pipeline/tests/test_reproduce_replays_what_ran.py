@@ -141,7 +141,9 @@ class SageIdentificationsOnly(Base):
         self.assertEqual(read(os.path.join(self.out, "inputs", "sage_config.json")), read(cfg),
                          "the cfg that ran, byte for byte")
         calls, _err = run_steps_5_and_6(self.d, self.out, sh)
-        self.assertEqual([c["prog"] for c in calls], ["run_search.py"], "nothing after the search")
+        # the search, then --adapt-only (X8 F9): nothing else
+        self.assertEqual([c["prog"] for c in calls], ["run_search.py", "run_search.py"])
+        self.assertIn("--adapt-only", calls[1]["argv"])
         s = calls[0]["argv"]
         self.assertEqual(arg(s, "--params"), "./inputs/sage_config.json")
         self.assertEqual(s[s.index("--files") + 1:], self.raws)
@@ -264,6 +266,45 @@ class FragPipeSearch(Base):
         self.assertTrue(os.path.isfile(os.path.join(self.out, "inputs", "fragpipe.workflow")),
                         "the workflow it was given is kept beside it")
         self.assertIn("copied the workflow FragPipe ran (fragpipe_input.workflow)", man)
+
+    def test_fragpipes_saved_workflow_is_never_what_step_5_replays(self):
+        """(pin, 2.15 merge; F1's HIVE dry runs and the merge's T12 run) FragPipe's own SAVED
+        <out>/fragpipe.workflow writes msfragger.misc.fragger.enzyme-dropdown-1=trypsin back
+        beside the rule it ran. Reloaded, that dropdown turns an Asp-N rule (cut D, sense N, no
+        no-cut) into no-cut P / sense C: a different search. Step 5 replays the workflow
+        run_search.py wrote (fragpipe_input.workflow, the record's fragpipe_workflow.run) -- also
+        when the file handed to the bundle as --params is that saved copy."""
+        search = os.path.join(self.d, "output", "search")
+        rule = ("msfragger.search_enzyme_name_1=nonspecific\nmsfragger.search_enzyme_cut_1=D\n"
+                "msfragger.search_enzyme_nocut_1=\nmsfragger.search_enzyme_sense_1=N\n"
+                "msfragger.num_enzyme_termini=2\n")
+        dropdown = "msfragger.misc.fragger.enzyme-dropdown-1=trypsin\n"
+        given = write(os.path.join(self.d, "input", "wf", "fragpipe.workflow"), rule)
+        ran = write(os.path.join(search, "fragpipe_input.workflow"),
+                    rule + "database.db-path=/orig/session/search/fragpipe_db/db.fas\n")
+        saved = write(os.path.join(search, "fragpipe.workflow"),
+                      dropdown + rule + "database.db-path=/orig/session/search/fragpipe_db/db.fas\n")
+        rec = write(os.path.join(search, "search_provenance.json"), json.dumps({
+            "engine": "fragpipe", "version": "24.0", "params_file": given, "files": self.raws,
+            "quantified": False,
+            "fragpipe_workflow": {"given": given, "run": ran},
+            "result": {"engine": "fragpipe", "fragpipe_workflow": {"given": given, "run": ran}}}))
+        for handed in (given, saved):
+            shutil.rmtree(self.out, True)
+            sh, _md, _man = self.provenance("--workflow-manifest", self.manifest("fragpipe"),
+                                            "--params", handed, "--search-record", rec,
+                                            "--engine", "fragpipe")
+            calls, _err = run_steps_5_and_6(self.d, self.out, sh)
+            used = arg(calls[0]["argv"], "--params")
+            self.assertEqual(used, "./inputs/fragpipe_input.workflow", handed)
+            replayed = read(os.path.join(self.out, used))
+            self.assertNotIn("enzyme-dropdown-1", replayed, handed)
+            self.assertEqual(replayed, rule, handed)
+        import cleavage_rules
+        import fragpipe_params
+        props, _ = fragpipe_params.read_workflow(saved)
+        self.assertIn("sense N -> C", cleavage_rules.fragpipe_dropdown_conflict(props),
+                      "the saved copy WOULD change the search: this is what is guarded")
 
 
 class FinalizesCommand(Base):

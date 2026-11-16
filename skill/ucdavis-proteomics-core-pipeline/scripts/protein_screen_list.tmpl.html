@@ -1,0 +1,152 @@
+<!doctype html>
+<!-- protein_screen_list.tmpl.html -- The list page of the most significant changed proteins (make_protein_screen.py --top), linking each one's protein page. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="generator" content="make_protein_screen.py">
+<title>Top changed proteins</title>
+<style>
+
+  :root {
+    --bg-primary: #f3f4f6; --bg-secondary: #ffffff; --bg-tertiary: #e4e6ea; --border: #cdd1d8;
+    --text-primary: #16181d; --text-secondary: #5b616e; --text-tertiary: #9aa0ab;
+    --accent: #0b63ce; --selected-bg: #e6f0fc; --success: #23864a; --warning: #b86e00; --error: #c4252e;
+    --num: #c2185b; --den: #2e86de; --other: #9a9ea6; --inf: #d4880f; --sel: #13a089;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg-primary: #14161a; --bg-secondary: #1d2026; --bg-tertiary: #2b2f37; --border: #3a3f49;
+      --text-primary: #eef0f3; --text-secondary: #a7adb8; --text-tertiary: #6f7682;
+      --accent: #5aa7ff; --selected-bg: rgba(90,167,255,.16); --success: #3fca73; --warning: #f0a33a; --error: #ff6b6b;
+      --num: #d63370; --den: #2e86de; --other: #6e737b; --inf: #c0820f; --sel: #13a089;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg-primary: #14161a; --bg-secondary: #1d2026; --bg-tertiary: #2b2f37; --border: #3a3f49;
+    --text-primary: #eef0f3; --text-secondary: #a7adb8; --text-tertiary: #6f7682;
+    --accent: #5aa7ff; --selected-bg: rgba(90,167,255,.16); --success: #3fca73; --warning: #f0a33a; --error: #ff6b6b;
+    --num: #d63370; --den: #2e86de; --other: #6e737b; --inf: #c0820f; --sel: #13a089;
+    color-scheme: dark;
+  }
+  body { margin: 0; background: var(--bg-primary); color: var(--text-primary); font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+         font-size: 15px; line-height: 1.5; padding: 0 16px 48px; }
+  .wrap { max-width: 1280px; margin: 0 auto; }
+  h1.title { font-size: clamp(26px, 4vw, 38px); line-height: 1.1; margin: 26px 0 6px; overflow-wrap: anywhere; }
+  .subtitle { color: var(--text-secondary); font-size: 14px; margin: 0 0 12px; max-width: 95ch; overflow-wrap: anywhere; }
+  .subtitle b { color: var(--text-primary); font-weight: 600; }
+  .rule { border-left: 3px solid var(--accent); background: var(--bg-secondary); padding: 8px 12px; border-radius: 6px; margin: 0 0 12px; max-width: 95ch; }
+  .rule.only { border-left-color: var(--warning); }
+  .tblwrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-secondary); }
+  table.top { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.top th { text-align: left; font-size: 10.5px; font-weight: 600; color: var(--text-secondary); padding: 8px 8px; vertical-align: bottom; text-transform: uppercase; letter-spacing: .03em; border-bottom: 1px solid var(--border); }
+  table.top td { padding: 7px 8px; border-top: 1px solid var(--bg-tertiary); vertical-align: top; }
+  table.top tr:first-child td { border-top: none; }
+  table.top td.num, table.top th.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  table.top td.nw { white-space: nowrap; }
+  .gene { font-weight: 700; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; font-variant-ligatures: none; overflow-wrap: anywhere; }
+  .muted { color: var(--text-secondary); }
+  .none { color: var(--text-secondary); font-style: italic; }
+  .yes { color: var(--inf); font-weight: 700; } .no { color: var(--text-secondary); }
+  .up { color: var(--num); font-weight: 600; } .dn { color: var(--den); font-weight: 600; }
+  a { color: var(--accent); }
+  .foot { font-size: 12px; color: var(--text-secondary); margin: 14px 0 0; max-width: 100ch; overflow-wrap: anywhere; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1 class="title" id="lt-title">Top changed proteins</h1>
+<p class="subtitle" id="lt-sub"></p>
+<div id="lt"><noscript>This page draws itself with JavaScript, which is off in this browser.</noscript></div>
+</div>
+<script>
+window.onerror = function (msg) { try { document.body.dataset.render = 'error: ' + msg; } catch (e) { /* nothing left to report to */ } };
+</script>
+<script>
+(function () {
+'use strict';
+/* ---------- the data: D is the list, written by make_protein_screen.py ---------- */
+const D = __SCREEN_DATA__;
+const CT = D.contrast || {}, ADJP = CT.adjp, A = D.analysis || {}, PROV = D.provenance || {};
+const ROWS = D.proteins || [];
+const VS = CT.num != null && CT.den != null ? CT.num + ' vs ' + CT.den : String(CT.name || '');
+const isNum = v => typeof v === 'number' && isFinite(v);
+const esc = x => String(x == null ? '' : x).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const SUP = { '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴', '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹', '-': '⁻' };
+const sci = v => { const e = v.toExponential(1).split('e'); return e[0] + ' × 10' + String(+e[1]).split('').map(c => SUP[c] || c).join(''); };
+const fmtP = p => !isNum(p) ? '—' : p >= 0.001 ? String(+p.toPrecision(3)) : sci(p);   /* 3 significant: 0.0497 must not read as the 0.05 cutoff */
+const sgn = v => isNum(v) ? (v >= 0 ? '+' : '−') + Math.abs(v).toFixed(2) : '—';
+const fold = v => !isNum(v) ? '—' : (v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2)) + '×';
+const day = t => t ? String(t).slice(0, 10) : '';
+const plural = (n, w) => n + ' ' + w + (n === 1 ? '' : 's');
+const DIR = { up: 'up in ' + CT.num, down: 'down in ' + CT.num, both: '' }[D.direction] || '';
+
+const K = ROWS.length;
+let rule = '<div class="rule' + (K < D.asked ? ' only' : '') + '" id="lt-rule">' +
+  '<b>' + K + ' of ' + D.asked + '</b> requested' + (DIR ? ' (' + esc(DIR) + ')' : '') + '. ' +
+  'Called changed at adjusted p &lt; ' + esc(ADJP) + '; ranked by p-value; no fold-change cut.';
+if (K < D.asked) rule += ' <b>Only ' + plural(K, 'protein') + (K === 1 ? ' is' : ' are') + ' called changed in ' + esc(VS) + '</b>' +
+  (DIR ? ' (' + esc(DIR) + ')' : '') + '; a protein that is not called is never added to fill the list.';
+else if (D.called > K) rule += ' ' + plural(D.called, 'protein') + ' are called changed in ' + esc(VS) + (DIR ? ' (' + esc(DIR) + ')' : '') + '; these are the first ' + K + ' by p-value.';
+rule += '</div>';
+
+const ACC_OK = a => typeof a === 'string' && /^([OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2})$/.test(a);
+const SRC_OK = u => typeof u === 'string' && /^https:\/\/(rest|www)\.uniprot\.org\//.test(u);
+const relOf = r => r.fact_src ? (r.fact_src.release ? 'release ' + r.fact_src.release : 'release not stated by the source') + ', fetched ' + (r.fact_src.fetched_at || 'date not recorded') : '';
+const SRCS = ROWS.filter(r => r.fact_src).map(relOf).filter((x, i, a) => a.indexOf(x) === i);
+const PER_ROW = SRCS.length > 1;
+function factCell(r) {
+  if (!r.fact) return '<span class="none">' + esc(r.fact_why || 'not reached') + '</span>';
+  const f = r.fact_src || {};
+  const t = ACC_OK(f.acc) ? '<a href="https://www.uniprot.org/uniprotkb/' + esc(f.acc) + '/entry">' + esc(r.fact) + '</a>' : esc(r.fact);
+  const rec = SRC_OK(f.url) ? ' <a class="muted" style="font-size:11px" href="' + esc(f.url) + '">record</a>' : '';
+  return t + rec + (r.fact_note ? '<br><span class="muted" style="font-size:11px">' + esc(r.fact_note) + '</span>' : '') +
+    (PER_ROW ? '<br><span class="muted" style="font-size:11px">UniProt ' + esc(relOf(r)) + '</span>' : '');
+}
+
+function row(r) {
+  const up = isNum(r.logFC) && r.logFC > 0;
+  const det = (r.det || []).map(d => esc(d[0]) + ' ' + (d[1] == null ? '—' : esc(d[1]))).join(' · ');
+  return '<tr><td class="num">' + r.rank + '</td>' +
+    '<td><span class="gene">' + (r.gene ? esc(r.gene) : '<span class="none">no gene name</span>') + '</span><br><span class="mono muted">' + esc(r.pg) + '</span></td>' +
+    '<td>' + (r.names ? esc(r.names) : '—') + '</td>' +
+    '<td class="num"><span class="' + (up ? 'up' : 'dn') + '">' + sgn(r.logFC) + '</span> log2<br><span class="muted">' + fold(r.fold) + '</span></td>' +
+    '<td class="num">' + fmtP(r.adjP) + '</td>' +
+    '<td class="nw">' + det + '</td>' +
+    '<td class="nw">' + (r.inferred ? '<span class="yes">yes</span>' : '<span class="no">no</span>') + '</td>' +
+    '<td class="nw">' + (r.shared ? '<span class="yes">yes</span>' : '<span class="no">no</span>') + '</td>' +
+    '<td>' + factCell(r) + '</td>' +
+    '<td class="nw"><a href="' + esc(r.link) + '">' + esc(r.link) + '</a></td></tr>';
+}
+
+function render() {
+  let h = rule;
+  if (K) {
+    h += '<div class="tblwrap"><table class="top" id="lt-table"><thead><tr><th class="num">Rank</th><th>Gene</th><th>Protein (from the search)</th>' +
+      '<th class="num">Change in ' + esc(VS) + '</th><th class="num">Adjusted p</th><th>Found in n/N samples</th>' +
+      '<th>Inferred samples</th><th>Shared peptides</th><th>UniProt recommended name</th><th>Page</th></tr></thead><tbody>' +
+      ROWS.map(row).join('') + '</tbody></table></div>';
+  }
+  h += '<p class="foot">Built by make_protein_screen.py from screen_data/ (' + esc(PROV.written_by) + ', ' + esc(day(PROV.written_at)) + ')' +
+    ((PROV.verified || []).length ? '; checksums verified for ' + (PROV.verified || []).map(esc).join(', ') : '') +
+    ((PROV.not_checked || []).length ? '; not checked here (not beside the screen data): ' + (PROV.not_checked || []).map(esc).join(', ') : '') +
+    (SRCS.length === 1 ? '. Protein names: UniProt ' + esc(SRCS[0]) : '') + '. Found in n/N is the DE table’s count of samples with a found value, per group. Inferred: some sample of the comparison had none of the protein’s precursors found. ' +
+    'Shared: some peptide is also in another protein group. The name is UniProt’s, copied from its entry; each name links to its UniProt entry page, and “record” links the exact record the value was fetched from.</p>';
+  document.getElementById('lt').innerHTML = h;
+}
+const title = 'Top ' + (K === 1 ? 'changed protein' : K + ' changed proteins') + ' in ' + VS;
+document.title = title;
+document.getElementById('lt-title').textContent = title;
+document.getElementById('lt-sub').innerHTML = 'Comparison <b>' + esc(VS) + '</b>' +
+  (CT.default === true ? ' · the first comparison, chosen by default (DEFAULT — not user-confirmed)' : '') + ' · ' + esc(A.display_label || '') +
+  (isNum(D.n_tested) ? ' · ' + plural(D.n_tested, 'protein') + ' tested' : '') + ' · screen data written ' + esc(day(PROV.written_at));
+render();
+document.body.dataset.render = 'ok';
+})();
+</script>
+</body>
+</html>

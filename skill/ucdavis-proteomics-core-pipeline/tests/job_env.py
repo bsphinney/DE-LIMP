@@ -16,6 +16,15 @@ tests/test_job_env_guard.py fails any test module that runs a generated job scri
 """
 import os
 
+import slack_guard
+
+# Every test process that imports this is kept away from the Core's real Slack from here on:
+# notify_slack's import-time webhook paths point into a temp folder, and a webhook file outside a
+# temp dir, a real Slack URL or a relay through the real HIVE is refused and recorded (review
+# A10, Ruling 109.1; tests/slack_guard.py). A unittest discover imports every module before it
+# runs any test, so the whole suite is covered.
+slack_guard.install()
+
 # Dropped from the base environment before the switches below are set, so nothing inherited --
 # a real webhook, a HIVE login, a job id, a FRAN or run-log override -- can leak through.
 _DROPPED_PREFIXES = ("SLURM_", "SKILL_SLACK", "FRAN_", "RECORD_RUN", "SKILL_RUNS_DIR", "HIVE_",
@@ -37,7 +46,7 @@ def job_env(tmpdir, base=None, **extra):
     names it in `extra`. Only the fake sbatch a test puts on PATH makes a login node: a real one
     inherited on PATH (a HIVE job's login shell loads the slurm module) would make every finalize
     a login-node run, and on_compute would hand it to a REAL srun that cannot see the test's
-    node-local tmpdir (2.14.2 C2, job 25404434), so PATH loses every directory holding one."""
+    node-local tmpdir (2.14.2 C2, a test job), so PATH loses every directory holding one."""
     env = {k: v for k, v in (os.environ if base is None else base).items()
            if not k.startswith(_DROPPED_PREFIXES)}
     if "PATH" in env:
@@ -51,8 +60,32 @@ def job_env(tmpdir, base=None, **extra):
                SKILL_CONFIG_DIR=os.path.join(tmpdir, "skill_config"),
                HPCCF_SLURM_BIN=os.path.join(tmpdir, "no_slurm_bin"),
                UCD_HPC_CLUSTER_CONF=os.path.join(tmpdir, "no_cluster_file"))
+    env["PYTHONPATH"] = os.pathsep.join(
+        [roomy_disk_dir(tmpdir)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
     env.update({k: str(v) for k, v in extra.items()})
     return env
+
+
+_ROOMY_DISK = (
+    "import shutil\n"
+    "_real = shutil.disk_usage\n"
+    "def disk_usage(path):\n"
+    "    t, u, f = _real(path)\n"
+    "    return shutil._ntuple_diskusage(max(t, 1 << 50), u, max(f, 1 << 50))\n"
+    "shutil.disk_usage = disk_usage\n")
+
+
+def roomy_disk_dir(tmpdir):
+    """A folder whose sitecustomize.py makes a job-script test's child process see 1 PiB free.
+    run_search refuses a FragPipe search whose stage would not fit (1.2 GB a run), and a test
+    that builds 100-219 runs asks for 120-260 GB: the answer must not depend on the disk of the
+    machine running the suite (a GitHub runner has 87 GB). The refusal itself is tested in
+    test_fragpipe_dda_stage.py, in-process, with shutil.disk_usage mocked."""
+    d = os.path.join(tmpdir, "_roomy_disk")
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "sitecustomize.py"), "w") as fh:
+        fh.write(_ROOMY_DISK)
+    return d
 
 
 # The system folders stay even if a cluster put sbatch there: dropping /usr/bin would break the
@@ -70,3 +103,43 @@ def _without_slurm(path):
             continue
         keep.append(d)
     return os.pathsep.join(keep)
+
+
+# What a cluster node's login shell adds that makes a subprocess behave as if it were on one:
+# the environment-modules / Lmod state, and the files bash reads for a non-interactive shell.
+# A test that fakes "a laptop" or "a stranger" must not inherit any of it (HIVE-only failures of
+# 2.14.x, Ruling 109 item A).
+_MODULE_PREFIXES = ("LMOD_", "__LMOD", "_LMFILES_", "LOADEDMODULES", "MODULEPATH", "MODULESHOME",
+                    "_ModuleTable", "BASH_ENV", "BASH_FUNC_module", "BASH_FUNC_ml", "BASH_FUNC_which")
+
+
+def no_cluster_env(tmpdir, base=None, **extra):
+    """job_env() for a test that must see NO cluster at all: the same switches (no SLURM job, no
+    sbatch or srun on PATH, HPCCF_SLURM_BIN and UCD_HPC_CLUSTER_CONF pointing at nothing, nothing
+    that reaches the Core's Slack, FRAN or run log) and, on top, no `module` function, no Lmod
+    state and no BASH_ENV, whatever the machine running the suite has. Use it for every subprocess
+    a test starts when the code under test asks "is this a cluster?", "is this a login node?",
+    "is the module command here?" -- on HIVE all three answers are yes and a bare os.environ copy
+    carries them in. A test that wants a cluster names its pieces in `extra`. A PATH given in `extra` is kept as
+    it is (a stub-only PATH may hold a FAKE sbatch on purpose); one inherited in `base` loses
+    the directories that hold a real sbatch or srun."""
+    src = dict(os.environ if base is None else base)
+    clean = {k: v for k, v in src.items() if not k.startswith(_MODULE_PREFIXES)}
+    return job_env(tmpdir, base=clean, **extra)
+
+
+class neutral_umask:
+    """Context manager: umask 022 for the files a test writes, whatever the account's default is
+    (HIVE's is group-writable, and a trust check that refuses a group-writable token then fails
+    on a fixture the test made itself)."""
+
+    def __init__(self, mask=0o022):
+        self.mask = mask
+
+    def __enter__(self):
+        self.old = os.umask(self.mask)
+        return self
+
+    def __exit__(self, *exc):
+        os.umask(self.old)
+        return False

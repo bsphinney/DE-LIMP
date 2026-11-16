@@ -78,8 +78,8 @@ class ProtNumbers(unittest.TestCase):
     def test_prot_keeps_its_zero(self):
         self.assertEqual(fix("an AI-generated discussion of the PROT_0807 report."),
                          "an AI-generated discussion of the P R O T zero eight zero seven report.")
-        self.assertEqual(fix("PROT 0807 and prot-0012"),
-                         "P R O T zero eight zero seven and P R O T zero zero one two")
+        self.assertEqual(fix("PROT 0807 and prot-0000"),
+                         "P R O T zero eight zero seven and P R O T zero zero zero zero")
         self.assertEqual(fix("PROT_0807's results"), "P R O T zero eight zero seven's results")
 
     def test_words_starting_with_prot_stay(self):

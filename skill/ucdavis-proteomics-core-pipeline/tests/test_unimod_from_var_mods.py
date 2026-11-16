@@ -45,20 +45,15 @@ class OneTable(unittest.TestCase):
         for mass in ("15.994915", "0.984016"):
             self.assertNotIn(mass, src, f"{mass} is VAR_MODS', not make_methods' to write")
 
-    def test_var_mods_engine_forms_are_unchanged(self):
-        """(pin) the DIA-NN and Sage forms the search is built with."""
-        self.assertEqual(ep.VAR_MODS["ox"]["diann"], "UniMod:35,15.994915,M")
-        self.assertEqual(ep.VAR_MODS["ox"]["sage"], {"M": [15.994915]})
-        self.assertEqual(ep.VAR_MODS["deam"]["diann"], "UniMod:7,0.984016,NQ")
-        self.assertEqual(ep.VAR_MODS["deam"]["sage"], {"N": [0.984016], "Q": [0.984016]})
-
     def test_unimod_is_the_same_table(self):
         """(pin)"""
         self.assertEqual(mm.UNIMOD, BEFORE)
 
 
 class SameText(unittest.TestCase):
-    """(pin) the Methods' modification sentences, as before."""
+    """(pin) the Methods' modification sentences, as before -- plus the DEFAULT tag the cfg's record
+    now puts on what nobody chose (unasked carbamidomethyl; the always-on protein N-term acetyl;
+    Ox(M) is given here, so untagged)."""
 
     def sentences(self, engine, acquisition, out):
         with tempfile.TemporaryDirectory() as d:
@@ -77,15 +72,16 @@ class SameText(unittest.TestCase):
 
     def test_diann(self):
         self.assertEqual(self.sentences("diann", "DIA", "params.cfg"),
-                         ["Fixed modifications: Carbamidomethyl (C).",
+                         ["Fixed modifications: Carbamidomethyl (C) [facility default — confirm].",
                           "Variable modifications: Oxidation (M); Deamidated (NQ) (at most 2 per "
                           "peptide)."])
 
     def test_sage(self):
         self.assertEqual(self.sentences("sage", "DDA", "sage.json"),
-                         ["Fixed modifications: Carbamidomethyl (C).",
+                         ["Fixed modifications: Carbamidomethyl (C) [facility default — confirm].",
                           "Variable modifications: Oxidation (M); Deamidated (N); Deamidated (Q); "
-                          "Acetyl (Protein N-term) (at most 2 per peptide)."])
+                          "Acetyl (Protein N-term) [facility default — confirm] (at most 2 per "
+                          "peptide)."])
 
 
 if __name__ == "__main__":

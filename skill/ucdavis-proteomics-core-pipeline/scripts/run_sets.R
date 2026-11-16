@@ -859,7 +859,7 @@ prov <- list(
                            "polar factor of the design's residual projector applied to a fixed matrix",
                            sprintf("(seed %d), and with precision weights its polar projection into each", SET_DEFAULTS$ref_seed),
                            "protein's weighted residual space. limma's Householder basis is not unique: R's qr() of",
-                           "the same design gave different reflection signs on different HIVE CPU types (PROT_0756:",
+                           "the same design gave different reflection signs on different HIVE CPU types (a mouse-brain IP cohort:",
                            "p-values moved by up to 0.09 between otherwise identical runs). A change of reference",
                            "rotates every protein's basis by the same rotation, with weights too, and camera is",
                            "invariant to that: it does not depend on the reference. fry depends on it only through",
