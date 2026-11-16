@@ -1,6 +1,9 @@
 """Cascadia inference on a Bruker diaPASEF .d with Cascadia's OWN augmentation (bruker_native_augment).
 
-Usage: cascadia_native_run.py <run.d> <tag> <outdir> <tmpdir> name=ckpt [name=ckpt ...]
+Usage: cascadia_native_run.py [--top-n N] [--calib RUN.calib.json] <run.d> <tag> <outdir> <tmpdir>
+                              name=ckpt [name=ckpt ...]
+--top-n / --calib must match what the checkpoint was trained on (prepare_training_native.py
+--variants / its RUN.calib.json); the stock checkpoint saw 150 peaks and no calibration.
 Writes <outdir>/<name>/<tag>.ssl with every prediction (score threshold 0; filter later).
 Same model construction and preprocessing as cascadia.cascadia.sequence(); the ASF and HDF5 index
 go in <tmpdir> (use node-local $TMPDIR, never Quobyte).
@@ -35,15 +38,25 @@ _sd._hash_obj = lambda obj: hashlib.sha1(
 
 MAX_CHARGE, BATCH, WIDTH = 4, 32, 2   # cascadia sequence defaults (-c 4, -b 32, -w 2)
 
-dfile, tag, outdir, tmp = sys.argv[1:5]
-models = dict(a.split("=", 1) for a in sys.argv[5:])
+import argparse as _ap  # noqa: E402
+import json as _json  # noqa: E402
+_p = _ap.ArgumentParser()
+_p.add_argument("--top-n", type=int, default=150)
+_p.add_argument("--calib", default=None)
+_p.add_argument("rest", nargs="+")
+_args = _p.parse_args()
+dfile, tag, outdir, tmp = _args.rest[:4]
+models = dict(a.split("=", 1) for a in _args.rest[4:])
+CALIB = _json.load(open(_args.calib)) if _args.calib else None
+print("top_n", _args.top_n, "calib", {k: CALIB[k]["a"] for k in ("ms2", "ms1")} if CALIB else None, flush=True)
 os.makedirs(tmp, exist_ok=True)
 print("numpy", np.__version__, "torch", torch.__version__, "CUDA", torch.cuda.is_available(),
       torch.cuda.get_device_name(0) if torch.cuda.is_available() else "", flush=True)
 tok = PeptideTokenizer.from_massivekb(reverse=False, replace_isoleucine_with_leucine=True)
 
 t0 = time.time()
-asf, window_size, cycle_time = augment_spectra_bruker_native(dfile, tmp, max_charge=MAX_CHARGE)
+asf, window_size, cycle_time = augment_spectra_bruker_native(dfile, tmp, top_n=_args.top_n, max_charge=MAX_CHARGE,
+                                                               calib=CALIB)
 n_rec = sum(1 for line in open(asf) if line.startswith("BEGIN IONS"))
 print(f"native augment: {n_rec} records, {os.path.getsize(asf)/1e9:.2f} GB, window {window_size} m/z, "
       f"cycle {cycle_time:.3f} s, {time.time()-t0:.0f}s", flush=True)

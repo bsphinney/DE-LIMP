@@ -20,6 +20,11 @@ filtering, charge enumeration and the returned window size / cycle time are Casc
 * RT: timsrust/Bruker ``Frames.Time`` is SECONDS; mzML 'scan start time' is minutes, so records
   carry rt/60 and ``augment`` multiplies back by 60.
 
+m/z calibration: the boundary formula ignores the instrument's TOF calibration (MzCalibration
+table, temperature terms) and lands ~-25 ppm off on timsTOF HT (2026-11-16). ``calib`` applies a
+per-run linear ppm correction fitted by prepare_training_native.py (RUN.calib.json): true = obs *
+(1 - (a + b*obs)*1e-6), separately for MS2 and MS1. Training applies it, so inference must too.
+
 Peaks are pre-truncated to the ``top_n`` most intense (augment takes the same top_n again), which
 keeps memory bounded on long runs. The raw .d is only read: analysis.tdf is opened
 ``mode=ro&immutable=1``.
@@ -93,8 +98,17 @@ def _top(mz, inten, top_n):
     return mz[o], inten[o]
 
 
-def read_bruker_records(d_folder, top_n=150):
-    """mzML-shaped records (the subset of keys cascadia.augment reads), in RT order."""
+def _correct(mz, coef):
+    if not coef:
+        return mz
+    return mz * (1.0 - (float(coef["a"]) + float(coef["b"]) * mz) * 1e-6)
+
+
+def read_bruker_records(d_folder, top_n=150, calib=None):
+    """mzML-shaped records (the subset of keys cascadia.augment reads), in RT order.
+    calib: {"ms2": {"a","b"}, "ms1": {"a","b"}} ppm correction, or None."""
+    c2 = (calib or {}).get("ms2")
+    c1 = (calib or {}).get("ms1")
     import timsrust_pyo3 as timsrust
 
     d_folder = str(d_folder)
@@ -109,7 +123,7 @@ def read_bruker_records(d_folder, top_n=150):
         if mz.size == 0:
             n_empty2 += 1
             continue
-        mz, it = _top(mz, it, top_n)
+        mz, it = _top(_correct(mz, c2), it, top_n)
         half = float(sp.isolation_width) / 2.0
         records.append((float(sp.precursor.rt), 2, {
             "ms level": 2,
@@ -123,6 +137,7 @@ def read_bruker_records(d_folder, top_n=150):
     n_empty1 = 0
     for fr in timsrust.FrameReader(d_folder).read_ms1_frames():
         mz, it = centroid_ms1_frame(fr.tof_indices, fr.intensities, conv, top_n)
+        mz = _correct(mz, c1)
         if mz.size == 0:
             n_empty1 += 1
             continue
@@ -151,11 +166,11 @@ class _RecordReader:
 
 
 def augment_spectra_bruker_native(d_folder, temp_path, top_n=150, scan_width=1, max_pep_length=30,
-                                  max_charge=3):
+                                  max_charge=3, calib=None):
     """Drop-in for cascadia.augment.augment_spectra on a .d: returns (asf_path, window_size, cycle_time)."""
     from cascadia import augment as aug
 
-    records = read_bruker_records(d_folder, top_n=top_n)
+    records = read_bruker_records(d_folder, top_n=top_n, calib=calib)
     out = os.path.join(temp_path, "temp.asf")
     if os.path.exists(out):
         os.remove(out)  # augment appends
