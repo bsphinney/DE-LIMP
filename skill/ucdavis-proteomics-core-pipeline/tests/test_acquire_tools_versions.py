@@ -36,6 +36,8 @@ import unittest
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+from job_env import no_cluster_env  # noqa: E402
 SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
 ACQUIRE = os.path.join(SCRIPTS, "acquire_tools.sh")
 
@@ -132,10 +134,15 @@ class AcquireHarness(unittest.TestCase):
         # sage, docker, apptainer or pip on the machine running the tests can leak in.
         # RADIANT_HIVE_DIRS points the HIVE Radiant .sif search at empty mocked folders, so
         # the real /quobyte/proteomics-grp/apptainers on HIVE cannot answer for a test.
-        env = {"PATH": f"{self.bin}:{self.sys}", "HOME": self.d, "FIXTURES": self.fix,
-               "DIANN_HIVE_DIR": self.hive, "PIN_ENGINE": pin_engine,
-               "PIN_VERSION": pin_version,
-               "RADIANT_HIVE_DIRS": f"{self.radiant_dirs[0]}:{self.radiant_dirs[1]}"}
+        # no cluster: on HIVE the script sees a login node (HPCCF's cluster file) and downloads
+        # nothing. ALPHADIA_HIVE_SIF points at nothing for the same reason as RADIANT_HIVE_DIRS.
+        # (PATH goes in as an extra so no_cluster_env keeps it: self.bin may hold a FAKE sbatch)
+        env = no_cluster_env(self.d, base={}, PATH=f"{self.bin}:{self.sys}", **{
+            "HOME": self.d, "FIXTURES": self.fix,
+            "DIANN_HIVE_DIR": self.hive, "PIN_ENGINE": pin_engine,
+            "PIN_VERSION": pin_version,
+            "ALPHADIA_HIVE_SIF": os.path.join(self.d, "no_alphadia.sif"),
+            "RADIANT_HIVE_DIRS": f"{self.radiant_dirs[0]}:{self.radiant_dirs[1]}"})
         env.update(extra_env or {})
         r = subprocess.run([self.bash, ACQUIRE, platform_class, self.root],
                            capture_output=True, text=True, env=env, timeout=120)
@@ -510,7 +517,7 @@ class HiveRadiantSifTests(AcquireHarness):
         return p
 
     def test_an_unpinned_hive_sif_records_the_release_its_name_carries(self):
-        """HIVE's real layout. origin/main recorded "latest" here (srun 23512217)."""
+        """HIVE's real layout. origin/main recorded "latest" here (in a test run on HIVE)."""
         p = self.sif("radiant-fulcrum-2.3.3.sif")
         t = self.acquire("hpc", extra_env={"ACQUIRE_RADIANT": "1"})
         self.assertEqual(t["radiant_image"], p)

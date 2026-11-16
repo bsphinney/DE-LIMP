@@ -227,7 +227,7 @@ class TheGateSeesTheBetweenRunStep(unittest.TestCase):
 
     def test_scenario_b_a_2_14_1_check_then_an_auto_final_is_refused(self):
         # what auto gives is known once the report is read: the step that runs is compared (C1
-        # review F1, tests/test_check_before_2142.py); on a DIA-NN report it is none
+        # review F1, tests/test_normalization_check.py); on a DIA-NN report it is none
         dc = nc.design_check(self.check(), dict(self.MAXLFQ, between_run="auto"), et.NORMALISED)
         self.assertEqual(dc["between_run_pending"], "quantile")
         dc = nc.design_check(self.check(), dict(self.MAXLFQ, between_run="auto"), et.NORMALISED,

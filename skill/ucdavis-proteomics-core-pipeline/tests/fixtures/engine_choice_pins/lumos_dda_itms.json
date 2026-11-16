@@ -1,0 +1,59 @@
+{
+  "acquisition": "DDA",
+  "alternatives": [],
+  "ask_user": null,
+  "de": {
+    "adjp": 0.05,
+    "logfc": 1.0,
+    "method": "maxlfq",
+    "q_cutoff": 0.01
+  },
+  "engine": {
+    "name": "sage",
+    "version": "0.14.7"
+  },
+  "fasta": {
+    "add_contaminants": true,
+    "path": null
+  },
+  "id": "sage_orbitrap_dda",
+  "instrument_class": "orbitrap_iontrap",
+  "instrument_label": "Orbitrap, MS1 120,000 resolution / MS2 read in the ion trap (ITMS), supplied by the user",
+  "instruments": [
+    "Orbitrap Fusion Lumos"
+  ],
+  "name": "sage \u2014 Orbitrap, MS1 120,000 resolution / MS2 read in the ion trap (ITMS), supplied by the user (DDA)",
+  "needs_confirmation": false,
+  "notes": [],
+  "organism": null,
+  "organism_taxid": null,
+  "path": null,
+  "platform": null,
+  "registry": {
+    "defaults_version": "2026-09-23",
+    "note": "no remote registry; parameters ship with the skill",
+    "source": "local skill defaults"
+  },
+  "resolution": {
+    "ms1": 120000,
+    "ms2": null,
+    "ms2_analyzer": "ITMS",
+    "source": "user",
+    "source_label": "supplied by the user"
+  },
+  "search": {
+    "estimate_params": true,
+    "ms1_ppm": 7,
+    "ms2_ppm": null,
+    "overrides": {},
+    "params_file": null,
+    "ppm_source": "MS1 120,000: DIA-NN README, Orbitrap resolution->accuracy table; MS2: read in the ion trap (ITMS) -- no Orbitrap-table MS2 value; Sage: fragment tolerance +/-0.4 Da, Sage's documented low-res MS/MS setting (estimate_params.py --engine sage --ms2-analyzer ITMS)",
+    "preset_provenance": null
+  },
+  "validated": {
+    "by": null,
+    "dataset": null,
+    "date": null,
+    "notes": "Parameters are this skill's data-type defaults (resolve_defaults.py 2026-09-23), not a site validation run. They are reproducible from the skill version alone."
+  }
+}

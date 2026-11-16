@@ -31,15 +31,19 @@ Usage
   python3 fragpipe_bootstrap.py --python <python-with-easypqp> \\
       [--diann <diann binary>] [--fragpipe-version 24.0] [--check]
 
-  # UC Davis HIVE (paths already installed):
-  python3 fragpipe_bootstrap.py \\
-      --python /quobyte/proteomics-grp/fragpipe24/easypqp_venv/bin/python \\
-      --diann  /quobyte/proteomics-grp/fragpipe24/fragpipe-24.0/tools/diann/1.8.2_beta_8/linux/diann-1.8.1.8
+  # UC Davis HIVE: the Core's install (engine_choice.CORE_FRAGPIPE_INSTALL, the one definition)
+  # bundles DIA-NN 1.8.2 beta 8; --check prints its path as core_install_diann, and tools.json
+  # fragpipe_tools.diann.path names the same file. The easypqp venv sits beside the install:
+  python3 fragpipe_bootstrap.py --python <fragpipe24>/easypqp_venv/bin/python \\
+      --diann <core_install_diann from --check>
 
 Then run FragPipe with --config-tools-folder <fragpipe>/tools (the folder holding
 MSFragger, IonQuant, diatracer AND speclib/ — not a jars-only directory).
 """
 import argparse, os, subprocess, sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import engine_choice  # noqa: E402  where the Core's FragPipe is, and the DIA-NN it bundles
 
 KEY_PY = "fragpipe-config.bin-python"
 KEY_DIANN = "fragpipe-config.bin-diann"
@@ -96,6 +100,9 @@ def main():
             KEY_PY: cur.get(KEY_PY),
             KEY_DIANN: cur.get(KEY_DIANN),
             "speclib_ready": bool(cur.get(KEY_PY)),
+            "core_install": engine_choice.core_install(),
+            "core_install_diann": (engine_choice.bundled_diann_of(engine_choice.core_install())
+                                   or {}).get("path"),
             "hint": ("Pass --python <interpreter with easypqp> to write it. Without "
                      f"{KEY_PY} set, headless FragPipe rejects the Spectral Library "
                      "Generation module no matter what CLI flags you pass."),

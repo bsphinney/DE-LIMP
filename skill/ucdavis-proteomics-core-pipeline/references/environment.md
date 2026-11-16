@@ -2,6 +2,18 @@
 
 How the skill adapts to where it's running, plus FASTA resolution.
 
+<!-- contents: tests/test_skill_structure.py --toc -->
+**Contents** (section: line)
+- 17: Platform classes (`detect_env.sh`)
+- 30: DIA-NN by environment
+- 69: The R stack: limpa >= 1.4.0 (`setup.sh`)
+- 145: Version pinning (reproducibility)
+- 257: FASTA resolution (`fetch_fasta.py`)
+- 436: SLURM submission (hpc)
+- 507: 5. Acquiring the pinned engine (step 5)
+- 554: 6. Building the FASTA (step 6)
+<!-- /contents -->
+
 ## Platform classes (`detect_env.sh`)
 
 | class | how detected | engine acquisition | execution |
@@ -58,19 +70,19 @@ Container runtime preference: hpc→apptainer, mac→docker, linux→native.
 
 `run_de.R --method dpc` reads the DIA-NN report with `limpa::readDIANN()`. The pinned stack is
 **limpa >= 1.4.0** (Bioconductor 3.23). bioconda's only build is limpa **1.2.5**
-(Bioconductor 3.22, R 4.5), and a 2.8.0 `run_de.R` died on it (HIVE sbatch 24154221:
+(Bioconductor 3.22, R 4.5), and a 2.8.0 `run_de.R` died on it (in a test job on HIVE:
 `unused argument (annotation.columns = dpc_ann)` — 1.2.x calls that argument `extra.columns`).
 
 - **What `setup.sh` builds.** A conda env, solved with `--override-channels -c conda-forge -c
   bioconda` (a `~/.condarc` listing `defaults` with `channel_priority: strict` otherwise left
-  libmamba only defaults' R ≤ 4.3 `r-statmod`, and the solve failed: sbatch 24154212), with
+  libmamba only defaults' R ≤ 4.3 `r-statmod`, and the solve failed in a test job), with
   R 4.5 + bioconda `bioconductor-limma` 3.66 + `r-statmod` / `r-data.table` /
   `r-nanoparquet`. Step 2a then installs **limpa from the Bioconductor 3.23 source
   repository** into that env (`PROTEOMICS_LIMPA_BIOC` overrides the release). limpa is pure R
   (no `src/`), has no R-version floor, and every limma function it imports is in limma 3.66,
   so no compiler and no second Bioconductor stack are needed — conda-forge has `r-base` 4.6
-  but no R 4.6 builds of `r-statmod`, `r-arrow` … yet. Measured on PROT_0756 v2 (HIVE sbatch
-  24176224): limpa 1.4.0 on the setup.sh env (limma 3.66) reproduces the delivered v2 tables
+  but no R 4.6 builds of `r-statmod`, `r-arrow` … yet. Measured on the mouse-brain IP cohort v2 (a test job
+  on HIVE): limpa 1.4.0 on the setup.sh env (limma 3.66) reproduces the delivered v2 tables
   (limpa 1.4.0 / limma 3.68.5) exactly — every contrast's significant set identical.
 - **The check.** The last thing `setup.sh` does is verify `packageVersion("limpa") >=
   "1.4.0"`. `setup.json` → `limpa` = `{version, required, ok, source}`; when it fails,
@@ -118,8 +130,8 @@ Container runtime preference: hpc→apptainer, mac→docker, linux→native.
   1.2.x a SEEDED RANDOM sample (`set.seed(20250620)`, `sample.int`); in 1.4 a SYSTEMATIC one
   (rows ordered by missingness, then mean; every n/2000-th) — github.com/bioc/limpa
   RELEASE_3_22 vs RELEASE_3_23 `R/dpcCN.R`. The curve, and so every protein value and
-  p-value, moves a little. Measured on PROT_0756 v2 (83,587 precursors, 30 runs, `--block
-  Mouse`, same env, sbatch 24176224): DPC (β0, β1) = (−13.200, 1.184) on 1.2.5 vs (−13.072,
+  p-value, moves a little. Measured on the mouse-brain IP cohort v2 (83,587 precursors, 30 runs, `--block
+  Mouse`, same env, a test job on HIVE): DPC (β0, β1) = (−13.200, 1.184) on 1.2.5 vs (−13.072,
   1.178) on 1.4.0; protein matrix |Δ| median 0.010, max 0.052 log2; within-mouse correlation
   0.1883 vs 0.1882; per contrast |ΔlogFC| median 0.002–0.006, max 0.064; significant sets
   Jaccard 0.958–1.000 (1.2.5 calls 0–4 more per contrast, e.g. RyR-vs-IgG Old 71 vs 68).
@@ -149,6 +161,13 @@ note — an unpinned Radiant image (`seerbio/radiant-fulcrum:latest`) is one suc
 is a cached Sage whose release tarball is gone. It is never the **request**: echoing
 `PIN_VERSION` back recorded the manifest's own pin as the build that ran, which
 `run_search.py` could then only compare with itself.
+
+**Gotcha — the Sage 0.14.7 binary prints 0.14.6.** The `sage/0.14.7/` directory holds a binary
+that reports `sage 0.14.6`; it is byte-identical to the official v0.14.7 release asset (an
+upstream self-report bug: the crate version was not bumped). It is not a wrong download. Provenance
+records `environment/versions.txt` `sage_self_reported_version` with `binary_sha256` and
+`release_of_record` (`release v0.14.7 (binary self-reports 0.14.6)`); the hash is the identity,
+the printed number is not.
 
 There is a key per engine — `diann`, `sage`, `radiant`, `fragpipe`, `alphadia`. A *missing*
 key is worse than an empty one: it makes every search that engine ever runs record
@@ -243,8 +262,7 @@ report, so it is never deposited as `measured`. "Was the window measured?" is `s
 NCBI taxid, or a `UP…` accession (`--taxid` also works). Show the user `selected`
 and confirm. When `needs_menu` is true, present the menu instead of auto-picking.
 
-`scripts/resolve_organism.py` is a thin alias for this same resolver, kept for
-older call sites. **One implementation** — don't add a third.
+**One implementation** — `fetch_fasta.py resolve`; don't add a second.
 
 How it picks, and why each rule exists:
 - **Curated table first.** 18 organisms a core facility actually sees map
@@ -270,6 +288,7 @@ Common IDs (still confirm with `resolve`): human `UP000005640`, mouse
 `UP000000589`, rat `UP000002494`, yeast `UP000002311`, E. coli `UP000000625`.
 
 ### `fetch` — proteome → search FASTA
+
 Priority, cheapest/most-trusted first:
 1. `--path` override → used verbatim (pre-staged proteome). Its organism is the user's answer:
    `--organism '<scientific name>' --taxid <taxid>` (or `--organism none` for a database with
@@ -283,6 +302,7 @@ Priority, cheapest/most-trusted first:
 3. **UniProt.**
 
 ### Database type (`--content`, default `one_per_gene`)
+
 | value | what you get | human size |
 |---|---|---|
 | `one_per_gene` | canonical, one protein per gene — **the default** | 20,652 |
@@ -315,6 +335,7 @@ script warn loudly, record the warning in its output, and fall back to the REST 
 never swaps databases silently. If REST also fails it exits with the reason.
 
 ### User-supplied target sequences (`--add-fasta <file>`, repeatable)
+
 A bait, a tag or a construct the experiment is about (EGFP, TurboID). Each entry is a TARGET,
 written after the proteome and before the contaminants, and recorded in the sidecar under
 `added_sequences` (the file's path and sha256; each entry's accession, name, length and sequence
@@ -334,14 +355,18 @@ contaminant's own peptides against **every** target -- the proteome AND the adde
 one whose peptides are split between a proteome protein and a bait (one of its own left in the
 whole database) is removed. Refused: text before the file's first `>` header (it would be
 written onto the previous entry's sequence), an entry with a contaminant tag, no sequence, or an
-accession (`protein_ids.header_accession`) used twice or already in the database. An entry
-identical to a proteome entry is warned. Methods and `reproduce.sh` carry them.
+accession (`protein_ids.header_accession`) used twice or already in the database. A file that is
+a whole database already holding the proteome (entries with the database's own accession and
+sequence) is refused with the right advice: add only the extra sequences in a small FASTA, or
+search that file as the database with `--path`. An entry identical to a proteome entry under a
+different accession is warned. Methods and `reproduce.sh` carry them.
 
 ### Contaminants (`--contaminants`, default `universal`)
+
 Sets: `universal` (default; what the Core stages on HIVE), `cell_culture`,
 `mouse_tissue`, `rat_tissue`, `neuron_culture`, `stem_cell_culture`, `none`.
 Source order: `--contaminants-path` → HIVE (matching the *requested* set) →
-a DE-LIMP checkout's `contaminants/` → the Hao lab GitHub repo (public;
+the Hao lab GitHub repo (public;
 Frankenfield et al. 2022, JPR 21(9):2104-2113, doi:10.1021/acs.jproteome.2c00145).
 
 Headers are `Cont_`-tagged, so DIA-NN's `--cont-quant-exclude Cont_` keeps them
@@ -363,7 +388,7 @@ intensity).
 
 **So are entries the search cannot tell apart from a target protein.** Identity misses the
 near-identical ones: bovine EF1A1 and 1433Z each differ from the MOUSE protein by one residue,
-and in a 30-run mouse-brain search (PROT_0756, DIA-NN 2.6.1) both were `Cont_`-only groups in
+and in a 30-run mouse-brain search (an IP cohort, DIA-NN 2.6.1) both were `Cont_`-only groups in
 every run while mouse Eef1a1 had no protein group at all. `fetch` therefore also digests every
 contaminant and target entry with the search's own digest (`estimate_params.DIANN_DIGEST`:
 `--cut K*,R*`, 1 missed cleavage, 7–30 aa, N-terminal Met excision; I and L equal) and drops a
@@ -445,9 +470,10 @@ they do not move to `low` on their own when `high` is merely busy or `squeue` is
 (`diann_parallel.py` does ask `slurm_queue()` for a separate array-step queue, but it has
 already filled in partition and account by then, and an explicit pair is returned
 unchanged.) The whole chain moves to `low` only under rule A. Because `need` is capped at
-16, the chain's 64-CPU steps (3 and 5 by default; step 1 asks for 16) **go to `high`
-whenever 16 or more of your CPUs were free there at generation, and then wait on `high`**
-for the rest; they do not move to `low` because the 64 they ask for are unavailable. To put
+16, the chain's big single steps (3 and 5: 64 CPUs by default, 48 on a 64-CPU per-user cap,
+see `single_job_cpus`; step 1 asks for 16) **go to `high` whenever 16 or more of your CPUs
+were free there at generation, and then wait on `high`** for the rest; they do not move to
+`low` because the CPUs they ask for are unavailable. To put
 the chain on `low`, pass `--partition low --account publicgrp` (the generator adds
 `--qos=publicgrp-low-qos`).
 
@@ -477,3 +503,200 @@ instead, which has no single job script: `job.sh` is not written, an existing re
 that name is renamed to `job.sh.stale-<time>` once the chain is generated, and
 `run_search.py` exits 3. Submit `<out>/submit.sh`
 (→ `references/diann_parallel.md`).
+
+## 5. Acquiring the pinned engine (step 5)
+
+Honor the manifest's exact version — not "latest":
+
+```
+PIN_ENGINE=diann PIN_VERSION=2.7.0 bash scripts/acquire_tools.sh <platform_class>
+```
+
+Reads/writes `~/.proteomics-pipeline/tools/tools.json`. On HIVE it reuses the Core's
+native DIA-NN build for that version (downloading it if the Core has none — a download runs
+itself on a compute node, so run the call in the background); on mac it uses
+Docker for DIA-NN. **Read `tools.json` `notes`** — license gates (FragPipe, Radiant) and
+missing-runtime warnings surface there. `tools.json` `versions` is the build it found,
+never `latest` and never the version that was ASKED for (`""` when it cannot tell, `env` for
+a `sage` on PATH). `run_search.py` records it as the engine version only if it is shaped
+like one — `2.6.1`, `v0.14.7` — so any other word there ends as `version: null`, not as a
+version deposited to FRAN. If `run_search.py`
+later prints an **engine version mismatch WARNING**, the version the user confirmed is not
+the one about to run — say so before submitting (both land in `search_provenance.json`). If
+it prints that the record is **`version: null`**, say that too: the search will be recorded
+and deposited with no engine version.
+
+**FragPipe (2.15):** `PIN_ENGINE=fragpipe PIN_VERSION=24.0` uses the Core's install where it is
+readable and is the pinned release (on HIVE: no download into your home; the one path is
+`engine_choice.CORE_FRAGPIPE_INSTALL`), else one already unpacked under the tools root, else a
+download. The tools folder is `$FRAGPIPE_TOOLS_FOLDER` when set, else the install's own `tools/`
+(then the Core's). It writes `tools.json` `fragpipe_tools`: the tools folder, the MSFragger/IonQuant/diaTracer jars found in it,
+the install's own Philosopher and bundled DIA-NN, the EasyPQP Python for spectral-library
+workflows, Java (version, `ok`), `licensed`, `ready` and why. `run_search.py` reads only that
+record (a `tools.json` from before 2.15 is refused for FragPipe: re-run this step). FragPipe
+needs **Java 11 or newer**: `detect_env.sh` marks FragPipe unavailable below it (there is no Java
+module to load), and the search job records `java -version` and stops below 11. The licence
+notes are unchanged and stay in the staff records (no delivered file carries them). A FragPipe
+that is not licensed, not ready to run, or whose licence could not be checked (no `python3`) is
+not used by step 4: the timsTOF DDA-PASEF route then falls back to Sage (search-engines.md "4c.").
+
+Radiant is a ~3 GB image pull, so it is **not** acquired unless asked for:
+
+```
+ACQUIRE_RADIANT=1 PIN_ENGINE=radiant PIN_VERSION=2.3.3 bash scripts/acquire_tools.sh <platform_class>
+```
+
+It needs Docker or Apptainer — Seer ships no native binary. On HIVE the `.sif` must
+already exist; building one pulls ~3 GB and **must run on a compute node, never the
+login node** (the note in `tools.json` gives the exact line: `on_compute.py` with the queue
+spelled out, and the pull's cache in the job's `$TMPDIR`, off the 20 GB home).
+
+## 6. Building the FASTA (step 6)
+
+Use the proteome, database type, and contaminant set the **user confirmed in
+step 3**:
+
+```
+python3 scripts/fetch_fasta.py fetch --proteome <confirmed UPID> \
+    --content <one_per_gene|reviewed|reviewed_isoforms|full|full_isoforms> \
+    --contaminants <universal|cell_culture|...|none> \
+    [--enzyme trypsin,lysc] --keratin-sample|--no-keratin-sample --out ./search.fasta [--hive]
+```
+
+Pass the step-3 answer every time: `--no-keratin-sample` when the samples are not keratin. With
+neither, the sidecar records `keratin_sample_source: default` and every downstream step tags the
+"not keratin" as an assumption (`run_de.R` writes one `DEFAULT — not user-confirmed` methods line
+when keratin precursors were removed on it).
+`--keratin-sample` for a keratin sample (step 3): every keratin-family `Cont_` entry (gene
+KRT*/KRTAP*, or a protein name starting "Keratin" — the sheep wool keratins have no gene
+name) leaves the contaminant set; a `--path` database that already carries `Cont_` entries loses
+its keratin ones too (still build with `--proteome`, as below).
+The sidecar records `keratin_sample: true`, the removed entries under
+`contaminants_dropped_keratin_sample` (each with its `source`) and
+`keratin_contaminants_in_database: []`. Every other build records `keratin_sample: false` and
+lists the keratin-family `Cont_` accessions its database still holds.
+`--enzyme` names the digestion enzyme(s) actually used (trypsin, lysc, gluc, chymotrypsin,
+aspn, argc, lysn, pepsin; comma- or slash-separated — `Trypsin/P` and `Trypsin/Lys-C` work). The default `trypsin,lysc` is the Core's usual
+mix — leave it unless the user says otherwise; change it for a different digest (`--enzyme
+gluc`, `--enzyme trypsin,pepsin`). Only those enzymes' contaminant entries stay `Cont_` when
+they match a protein of the searched organism (their autolysis peptides stay out of quant);
+any other protease is treated as sample protein — which matters for organisms that make the
+enzyme themselves (S. aureus's own SspA is the Glu-C entry, quantified on a trypsin digest).
+The search's enzyme answer (the digest step 6b searches with) also sets `--enzyme` here: `--enzyme none` for a sample no enzyme was added to (a hydrolysate or peptidome searched non-specifically), so a trypsin entry identical to a target is dropped as a target, not kept as a reagent.
+Defaults are `--content one_per_gene` (the canonical set, from UniProt's
+reference-proteome FTP tree) and `--contaminants universal`. **Do not pass
+`--content full` casually** — for human that is 147,506 sequences instead of
+20,652, a 7× larger search space. UniProt's REST `onePerGene` parameter is
+silently ignored, which is why the canonical set must come from FTP.
+
+Pass `--hive` when `uc_davis_hive` is true to reuse pre-staged proteomes +
+contaminants under `/quobyte/proteomics-grp/MRS/` instead of downloading.
+A staged copy's UniProt release is unknown (it was downloaded earlier), so
+`uniprot_release` stays empty; the sidecar records the copy's date and sha256 under
+`staged_file`, fills organism/taxid from UniProt (or, offline, from the filename taxid —
+see `organism_source`), and reports `content_inferred`, a one-per-gene check of the entry
+count against UniProt's geneCount — an inference, not a verification. `--content` is not
+applied to a staged file; if it matters, omit `--hive`.
+
+**Non-model organisms → NCBI.** UniProt reference proteomes cover a few thousand
+species; wildlife, agricultural and other non-model organisms often have an
+annotated RefSeq genome and no UniProt proteome. `resolve` searches NCBI
+automatically when UniProt returns nothing and lists hits under `ncbi_candidates`:
+
+```
+python3 scripts/fetch_fasta.py fetch --ncbi-accession GCF_007827085.1 \
+    --ncbi-organism "Peromyscus californicus insignis" --ncbi-taxid 42520 \
+    --contaminants universal --out ./search.fasta
+```
+
+- **Confirm the assembly with the user — never auto-pick one.** It's a different
+  kind of database and they need to know that's what they're searching.
+- **Use the RefSeq `GCF_` accession.** A GenBank `GCA_` record usually reports no
+  protein count and its download ZIP contains no `protein.faa` at all.
+- **It includes every isoform** — the analogue of UniProt `full_isoforms`, *not*
+  the `one_per_gene` default. The Core's Peromyscus assembly is 51,825 sequences
+  against 21,877 protein-coding genes. `fetch` counts them and warns; carry that
+  into the methods rather than calling it a "reference proteome".
+
+**A database you supply (`--path`) needs its organism named** — nothing else reports it, and
+Methods, the report and FRAN read it from the sidecar: `--organism '<scientific name>' --taxid
+<taxid>` (the step-3 answer; `--ncbi-organism/--ncbi-taxid` work too), or `--organism none` for
+a database with no single organism (several species, synthetic). Without them `fetch` stops and
+asks. With `--proteome` the organism is UniProt's, and an organism flag there is refused.
+
+**The user's own sequences — a bait (EGFP, a BirA/TurboID construct), a tag — go in with
+`--add-fasta <file>`** (repeatable), on top of the usual `--proteome` build; never by
+concatenating files by hand, which bypasses the contaminant rules and loses the organism and
+release. They are TARGETS, written after the proteome. A contaminant entry **most of which is an
+added protein** — identical, contained, or with at least half of its own peptides in one
+(`fetch_fasta.ADDED_SEQUENCE_SHARED_FRACTION` = 0.5, the search's digest) — is removed, so the
+added sequence keeps those peptides: the Universal set's wild-type GFP (`Cont_P42212`) shares 21
+of its 28 peptides with EGFP (75%), and the ordinary 2-own-peptide rule had kept it. An entry
+sharing fewer **stays** — its own peptides are the evidence of real contamination with it — and
+the peptides it shares are flagged **by name** as ambiguous between the two
+(`contaminants_sharing_peptides_with_added_sequences`, the Methods and a report callout). The
+digestion enzymes in use stay. The sidecar records each file (path, sha256) and entry
+(`added_sequences`) and the removed entries (`contaminants_dropped_for_added_sequences`);
+`reproduce.sh` replays `--add-fasta`. An entry with a `Cont_` tag, an accession used twice or
+already in the proteome is refused. Tell the user which contaminant entries left, and which
+peptides of the added sequences are ambiguous.
+**Then the bait, once the database is built** (an enrichment with added sequences): put the
+FASTA sidecar in the session (`<session>/input/search.fasta.meta.json`), run
+`python3 scripts/experiment_type.py propose --session <session>`, and when its `ask_bait` is not
+null (it is null when the bait is already answered) ask it in its own words and record the answer:
+
+```
+python3 scripts/experiment_type.py set-bait --session <session> --bait <accession>   # the bait
+python3 scripts/experiment_type.py set-bait --session <session> --bait none          # none is
+```
+
+It is kept as `bait_confirmed` (the answer, who, when) in `input/experiment_type.json`, and a
+re-recorded type keeps it. Without an answer the data check would take the ONE added sequence as
+the bait, unconfirmed -- never leave it there. More than 10 added sequences (a whole proteome) are
+counted, not listed (`n_added_sequences`): ask for the bait by name, and `set-bait` takes its
+accession, entry name or gene.
+
+**Read the returned JSON** (also written to `<out>.meta.json` for the repro
+bundle) and act on it:
+
+- `warnings` non-empty → tell the user before searching; a one-per-gene→full
+  fallback changes the database out from under them.
+- `diann_cont_quant_exclude` → pass as `--cont-quant-exclude Cont_` to DIA-NN in
+  step 7 so contaminants are identified but kept out of DIA-NN's normalisation. That flag
+  does NOT reach the DE, which re-quantifies from the report: `run_de.R` removes them
+  itself (step 8).
+- `n_contaminants_dropped_as_target` > 0 is normal, not a failure. The universal
+  contaminant set holds sequences identical to real proteins (human keratins; bovine
+  ACTB/EEF1A1/tubulins that are residue-for-residue the human proteins) and near-identical to
+  others (bovine EEF1A1 and YWHAZ each differ from the MOUSE protein by one residue). Left in,
+  DIA-NN reports those proteins ONLY as `Cont_` groups, which `--cont-quant-exclude` and
+  `run_de.R`'s contaminant filter (step 8) then drop from quant — ACTB, EEF1A1 and KRT8
+  vanished from a real HeLa search this way, and EEF1A1 and
+  YWHAZ from every run of a mouse-brain study. `fetch` removes every contaminant entry
+  identical to (or contained in) a target entry, and every entry that shares peptides with a
+  target but has fewer than 2 non-overlapping peptides of its own in the search's digest (I =
+  L; `--min-unique-peptides`, 0 = identity rule only), lists them under
+  `contaminants_dropped_as_target` with each one's `reason`, target and `n_unique_peptides`,
+  and warns (expect ~161 for human: 152 identical + 1 contained + 8 by peptide; ~41 for mouse:
+  31 + 10 — bovine EEF1A1, YWHAZ, TUBA1D and seven hair KRTAPs);
+  the digestion enzyme(s) named by `--enzyme` are the exception and stay contaminants
+  (`contaminants_kept_despite_target_match`; a warning naming a protease dropped as "not in
+  --enzyme" means: if that enzyme WAS used, re-run `fetch` with it in `--enzyme`). Tell the user those proteins — skin keratins
+  included — are now quantified and count toward normalisation; step 8c flags them.
+  An entry with 2+ peptides of its own **stays**, even when the sample shows only the peptides it
+  shares with a target (horse myoglobin `Cont_P68082` has 9 of its own; in human heart its group
+  rested on human MB's peptides, one differing only by I/L): which peptides a sample shows only
+  the search can say, so step 8c's `contaminant_evidence` flags such a group. `--drop-contaminant
+  <accession>` (repeatable) then leaves that entry out of a rebuild: recorded in the sidecar, named
+  in the Methods, replayed by `reproduce.sh`; an accession that matches no contaminant entry stops
+  the build.
+- A `--path` database that already contains `Cont_` entries cannot be fixed: `fetch` warns
+  and lists them under `contaminants_identical_to_target_kept` — rebuild it with
+  `--proteome` instead. The Core's Sep-2025 `MRS/UP000005640_9606_plus_universal_contam.fasta`
+  (kept only for old searches' provenance) has this problem: do not pass it with `--path`.
+  Its rebuild, `MRS/UP000005640_9606_plus_universal_contam_2026-09.fasta`, was made by this
+  `fetch` (sidecar beside it, state `current`) with a DIA-NN 2.7.0
+  `..._2026-09.predicted.speclib`, for searches run outside the skill. Inside the skill keep
+  building the database with `fetch --proteome`.
+- Contaminants that can't be fetched are a **hard stop**, not a warning. Fix the
+  source or have the user explicitly choose `--contaminants none`.

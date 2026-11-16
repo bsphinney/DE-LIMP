@@ -1205,7 +1205,7 @@ class CautionTests(unittest.TestCase):
         params = {"scan_window": {"mode": "fallback_auto"}, "mass_acc": {"mode": "measured"},
                   "probe_fallback": {"reason": self.REASON}}
         rec = {"search": {"out_dir": "/x/out", "parameters": params, "status": "completed"},
-               "prot": {"prot": "PROT_0001"}}
+               "prot": {"prot": "PROT_9101"}}
         notes = record_run.data_quality_notes(rec)
         hits = [n for n in notes if "scan window was NOT measured" in n["what"]]
         self.assertEqual(len(hits), 1, notes)

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 detect_acquisition.py  --  Decide DDA vs DIA for each input file, so the
-pipeline can auto-route to the right engine (DIA -> DIA-NN, DDA -> Sage by
-default; FragPipe selectable for either).
+pipeline can auto-route to the right engine (engine_choice.ROUTES, the one table: DIA ->
+DIA-NN; timsTOF DDA-PASEF -> FragPipe, else Sage; other DDA -> Sage, FragPipe on request).
 
 Detection per format (best-effort, with a confidence score):
   Bruker .d   read analysis.tdf (SQLite). Presence of a DiaFrameMsMsInfo /
@@ -36,6 +36,10 @@ Detection per format (best-effort, with a confidence score):
   picks its precursors from its survey scans: the Thermo scan filter's "Full ms [lo-hi]", the
   mzML MS1 scan window, a timsTOF .d's GlobalMetadata MzAcqRange. It used to be null for DDA,
   and a DIA-NN DDA search then ran on a 380-980 fallback (SET28: survey 350-1500).
+
+  A Thermo DIA run's `isolation_windows` (2.15, staggered_windows) says whether its windows are
+  staggered -- overlapping by about half a window from one cycle to the next -- which Skyline
+  demultiplexes; the peak check sizes its import jobs by it (skyline_peaks.demultiplexing).
 
 Every Bruker .d is also checked for a truncated or at-risk analysis.tdf
 (bruker_tdf.tdf_integrity): WAL-mode header, a non-empty -wal/-journal beside it,
@@ -74,13 +78,14 @@ from bruker_method import ms1_acq_range  # noqa: E402
 from thermo_resolution import PYTHONNET_MISSING  # noqa: E402
 # When each run was acquired, and which time zone that is: the one reader (qc_bracket.py's too).
 import acq_time  # noqa: E402
+import faims  # noqa: E402
 # The name a run whose file name holds '--' is searched under: the one rule (run_search.py too).
 from check_report_runs import RENAME_DASHED_FLAG, dashed_file_names  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Instrument extraction (PLAN.md §7d) — mirrors DE-LIMP R/helpers_instrument.R.
-# The matcher in fetch_workflows.py scores on instrument; null is allowed and
-# falls back to score 0 (user confirms). Best-effort, never fatal.
+# resolve_defaults.py classifies the instrument (estimate_params.classify_instrument); null is
+# allowed and falls back to automatic calibration (the user confirms). Best-effort, never fatal.
 # ---------------------------------------------------------------------------
 def instrument_bruker_d(path):
     tdf = os.path.join(path, "analysis.tdf")
@@ -165,7 +170,7 @@ def detect_bruker_d(path):
         dia-PASEF 09112026__60SPD_DIA-NS10 MsMsType {0: 1146, 9: 12598}; DiaFrameMsMsInfo
                                           12,598 rows, 36 windows; no Pasef tables
     The detector used to key on the dia-PASEF tables EXISTING, so the first came back "DIA,
-    high confidence" (msalemi, 2026-09-29) -- a DDA run headed for a library-free DIA search
+    high confidence" (a Core member, 2026-09-29) -- a DDA run headed for a library-free DIA search
     with nothing asking the user.
 
     Evidence that disagrees -- frames of both types, or typed frames with the OTHER kind's
@@ -232,7 +237,58 @@ def detect_bruker_d(path):
         try: con.close()
         except Exception: pass
 
-def _iter_mzml(path, cap=3000):
+# What an mzML carries about the instrument (verified on 14 public Thermo mzML written by
+# msconvert, 2026-11-11: Orbitrap Fusion / Eclipse / Exploris 480, Q Exactive / Plus / HF, and
+# two SCIEX TripleTOF files): the model is a cvParam of the referenceableParamGroup (or
+# instrumentConfiguration) -- e.g. accession MS:1002634 name "Q Exactive Plus" -- beside the
+# serial number (MS:1000529); the MS2 analyser is the first word of each MS2 scan's
+# "filter string" (MS:1000512), "FTMS + c NSI d Full ms2 403.8@hcd30.00 [120-1257]" or "ITMS + ...".
+MZML_NOT_MODEL = {"MS:1000529"}                  # instrument serial number
+MZML_FILTER_STRING = "MS:1000512"
+MZML_ANALYZER_WORDS = {"FTMS", "ITMS"}           # Thermo's own scan-filter analyser words
+
+
+def mzml_instrument(path):
+    """The instrument model an mzML names in its header (the first cvParam of its
+    referenceableParamGroup / instrumentConfiguration that is not the serial number), or None.
+    Stops at the first spectrum: only the header is read."""
+    import xml.etree.ElementTree as ET
+    opn = gzip.open if path.endswith(".gz") else open
+    try:
+        with opn(path, "rb") as fh:
+            stack = []
+            for ev, el in ET.iterparse(fh, events=("start", "end")):
+                tag = el.tag.rsplit("}", 1)[-1]
+                if ev == "start":
+                    if tag in ("spectrumList", "chromatogramList"):
+                        return None
+                    stack.append(tag)
+                    continue
+                stack.pop()
+                if tag == "cvParam" and stack and stack[-1] in (
+                        "referenceableParamGroup", "instrumentConfiguration"):
+                    acc, name = el.get("accession") or "", (el.get("name") or "").strip()
+                    if acc.startswith("MS:") and acc not in MZML_NOT_MODEL and name \
+                            and "serial" not in name.lower():
+                        return name
+                if tag == "instrumentConfigurationList":
+                    return None
+    except Exception:
+        return None
+    return None
+
+
+def mzml_ms2_analyzer(words):
+    """The MS2 analyser of a run from the scan-filter words of its MS2 scans: "FTMS" (Orbitrap),
+    "ITMS" (ion trap) or "mixed" (both) -- detect_acquisition's own values for a Thermo .raw --
+    else None (no MS2 scan carried a filter string we know)."""
+    got = {w for w in words if w in MZML_ANALYZER_WORDS}
+    if not got:
+        return None
+    return "mixed" if len(got) > 1 else got.pop()
+
+
+def _iter_mzml(path, cap=3000, analyzers=None):
     """Yield (ms_level, iso_target, iso_width, lo, hi) for spectra, streaming.
 
     For an MS2, lo/hi are the ACQUIRED isolation bounds (target -/+ the CV offsets). They are
@@ -243,20 +299,23 @@ def _iter_mzml(path, cap=3000):
     limit" / MS:1000500 "scan window upper limit", as msconvert writes them (350 / 1500 on a
     Thermo DDA mzML, read 2026-09-29) -- yielded as (1, None, None, lo, hi), and only when both
     are there. A DDA run's precursors are picked from these scans. `cap` counts MS2 spectra.
-    Every value is reset where a spectrum STARTS, so nothing outside one leaks into it."""
+    Every value is reset where a spectrum STARTS, so nothing outside one leaks into it.
+    `analyzers`, a set, collects the first word of each MS2 scan's filter string (MS:1000512)."""
     import xml.etree.ElementTree as ET
     opn = gzip.open if path.endswith(".gz") else open
     ms_level = iso_target = lower = upper = win_lo = win_hi = None
+    filt = None
     n = 0
     with opn(path, "rb") as fh:
         for ev, el in ET.iterparse(fh, events=("start", "end")):
             tag = el.tag.rsplit("}", 1)[-1]
             if ev == "start":
                 if tag == "spectrum":
-                    ms_level = iso_target = lower = upper = win_lo = win_hi = None
+                    ms_level = iso_target = lower = upper = win_lo = win_hi = filt = None
                 continue
             if tag == "cvParam":
                 acc = el.get("accession"); val = el.get("value")
+                if acc == MZML_FILTER_STRING and val: filt = val
                 if acc == "MS:1000511": ms_level = int(float(val))
                 elif acc == "MS:1000827" and val: iso_target = float(val)
                 elif acc == "MS:1000828" and val: lower = float(val)
@@ -267,6 +326,8 @@ def _iter_mzml(path, cap=3000):
                 elif acc == "MS:1000500" and val:
                     win_hi = float(val) if win_hi is None else max(win_hi, float(val))
             elif tag == "spectrum":
+                if ms_level == 2 and analyzers is not None and filt:
+                    analyzers.add(filt.split(None, 1)[0].upper())
                 if ms_level == 2:
                     w = (lower or 0) + (upper or 0)
                     lo = hi = None
@@ -297,6 +358,32 @@ def _cap_medium(conf):
 # (a read cut off mid-cycle leaves the last few once).
 TILED_MIN_WINDOWS, TILED_SHARE = 5, 0.9
 TILED_WHY = "a tiled set of {n} windows, each acquired again every cycle at the same edges"
+
+# Staggered (overlapping) DIA windows: each window overlaps its neighbours by about half its width,
+# the scheme offset by half a window from one cycle to the next (8 m/z windows offset by 4 m/z).
+# Skyline reads such a scheme from the raw file as "Overlap Multiplexed" and demultiplexes it,
+# which made one Thermo import about 26 times slower in the 2.15 peak-check test (1,658 s against
+# 63 s): the peak check sizes its import jobs by it (skyline_peaks.job_minutes). A tiled scheme's
+# windows abut or share a margin of a few percent of their width. STAGGER_SHARE: the median overlap
+# of neighbouring windows, as a share of the median width, above which they are staggered.
+STAGGER_SHARE = 0.25
+
+
+def staggered_windows(los, his):
+    """Whether the MS2 isolation windows (their ACQUIRED edges) overlap like a staggered scheme
+    -> {"staggered", "n_windows", "median_width", "median_overlap", "rule"}, or None when fewer
+    than TILED_MIN_WINDOWS distinct windows were read. The distinct windows are sorted by their
+    lower edge; a pair of neighbours overlaps by (upper edge of the first - lower edge of the
+    next), negative for a gap."""
+    edges = sorted({(round(lo, 3), round(hi, 3)) for lo, hi in zip(los, his) if hi > lo})
+    if len(edges) < TILED_MIN_WINDOWS:
+        return None
+    width = statistics.median(hi - lo for lo, hi in edges)
+    overlap = statistics.median(h0 - l1 for (_, h0), (l1, _) in zip(edges, edges[1:]))
+    return {"staggered": overlap > STAGGER_SHARE * width, "n_windows": len(edges),
+            "median_width": round(width, 3), "median_overlap": round(overlap, 3),
+            "rule": f"staggered when neighbouring windows overlap by more than "
+                    f"{STAGGER_SHARE:g} of the median width"}
 
 
 def tiled_window_set(los, his):
@@ -394,10 +481,10 @@ def survey_scan_range(ranges, where):
                  f"from {where} of {len(ranges)} MS1 scan(s)")
 
 
-def detect_mzml(path):
+def detect_mzml(path, analyzers=None):
     widths, targets, los, his, survey = [], [], [], [], []
     try:
-        for lvl, tgt, w, lo, hi in _iter_mzml(path):
+        for lvl, tgt, w, lo, hi in _iter_mzml(path, analyzers=analyzers):
             if lvl == 1:
                 survey.append((lo, hi))
                 continue
@@ -423,7 +510,7 @@ def detect_mzml(path):
 #
 # The command lines below are the only ones this parser accepts. The previous code called
 # `ThermoRawFileParser metadata -i <raw>` and `ThermoRawFileParser query -i <raw>`; on
-# TRFP 2.0.0.0 (HIVE srun job 23510571) both exit 255 -- "Unexpected extra arguments"
+# TRFP 2.0.0.0 (measured on HIVE) both exit 255 -- "Unexpected extra arguments"
 # (there is no `metadata` subcommand) and "specify a valid scan range" (query needs -n).
 # The exit codes were ignored and the empty stdout grepped for "dia", so EVERY .raw came
 # back unknown / instrument null / range null and estimate_params.py searched 380-980 on
@@ -443,7 +530,7 @@ TRFP_RELEASES = "https://github.com/compomics/ThermoRawFileParser/releases"
 TRFP_ENV = "THERMORAWFILEPARSER"     # a full command, e.g. "dotnet /opt/trfp/ThermoRawFileParser.dll"
 TRFP_NAMES = ("ThermoRawFileParser", "thermorawfileparser")   # release binary / bioconda link
 # The last place looked: shared copies a site already keeps, as an os.pathsep list (empty =
-# none). gabrig 2026-09-23 (15 Fusion Lumos .raw on HIVE, a Core member): the Core has kept
+# none). A Core member, 2026-09-23 (15 Fusion Lumos .raw on HIVE): the Core has kept
 # TRFP 2.0.0.0 at the path below all along, but nothing looked there, so every file came back
 # "not found" -- acquisition unknown, and a search that would have run 380-980 on a method
 # that acquired 357-1105. Other sites set their own; the tests set it to mock the layout.
@@ -574,7 +661,7 @@ def _trfp_not_found():
 # framework-dependent one: the `-net8` zip run as `dotnet ThermoRawFileParser.dll`, or an
 # apphost beside a ThermoRawFileParser.runtimeconfig.json -- the Core's shared copy on HIVE,
 # whose runtimeconfig lists Microsoft.NETCore.App 8.0.0 AND Microsoft.AspNetCore.App 8.0.0.
-# gabrig 2026-09-23, 15 Fusion Lumos .raw: with no .NET the apphost exits 131 "You must install
+# A Core member, 2026-09-23, 15 Fusion Lumos .raw: with no .NET the apphost exits 131 "You must install
 # .NET to run this application."; with ensure_dotnet8.sh's old NETCore-only install as
 # DOTNET_ROOT it exits 150 "You must install or update .NET to run this application." Both
 # came back as 15 identical per-file read failures, one srun after another.
@@ -1029,7 +1116,7 @@ def query_scan_range(meta):
 
 # An MS1 survey scan's filter string names the m/z range it was acquired over -- "FTMS + p NSI
 # Full ms [350.0000-1500.0000]" in the Exploris 480 DDA fixture (real TRFP 2.0.0.0 output, HIVE
-# srun job 23510571), the range msalemi confirmed for SET28. "Full ms" then the bracket: "Full ms2
+# test run), the range a Core member confirmed for SET28. "Full ms" then the bracket: "Full ms2
 # 572.3181@hcd30.00 [...]" is an MS2 and never matches; SIM scans are not survey scans.
 FULL_MS1_RE = re.compile(r"\bFull\s+ms\s+\[([^\]]+)\]")
 MZ_PAIR_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*-\s*([0-9]+(?:\.[0-9]+)?)")
@@ -1051,11 +1138,14 @@ def thermo_isolation_windows(spectra):
     Edges are target -/+ the lower/upper offsets TRFP reports, which already fold in the
     instrument's isolation-width offset -- the same values it writes to mzML, so the two
     readers agree: detect_mzml() on the full TRFP 2.0.0.0 mzML of the runs above gave
-    350.0-1201.0 and 350.04999389648435-1200.9499755859374 (HIVE srun jobs 23508203/23508208),
-    this reader 350.0-1201.0 and 350.05-1200.95 after rounding (job 23511567).
+    350.0-1201.0 and 350.04999389648435-1200.9499755859374 (two test runs on HIVE),
+    this reader 350.0-1201.0 and 350.05-1200.95 after rounding (a test run on HIVE).
     """
     w = {"widths": [], "centres": [], "los": [], "his": [],
-         "n_ms2": 0, "n_filter": 0, "n_dependent": 0, "n_ms1": 0, "ms1_ranges": []}
+         "n_ms2": 0, "n_filter": 0, "n_dependent": 0, "n_ms1": 0, "ms1_ranges": [],
+         # FAIMS compensation voltages from the scan filters' "cv=-55.00" (faims.py), and how
+         # many filters were read: none read = status unknown, not "no FAIMS"
+         "faims_cvs": set(), "n_filters_seen": 0}
     for s in spectra:
         attrs = {}
         for a in (s.get("attributes") or []) if isinstance(s, dict) else []:
@@ -1065,6 +1155,10 @@ def thermo_isolation_windows(spectra):
             level = int(float(attrs.get("MS:1000511")))
         except (TypeError, ValueError):
             continue
+        filt_any = attrs.get(CV_FILTER) or attrs.get(CV_FILTER_PRE_1_4_5)
+        if isinstance(filt_any, str) and filt_any.strip():
+            w["n_filters_seen"] += 1
+            w["faims_cvs"].update(faims.cvs_from_filter(filt_any))
         if level == 1:
             w["n_ms1"] += 1
             rng = ms1_filter_range(attrs.get(CV_FILTER) or attrs.get(CV_FILTER_PRE_1_4_5))
@@ -1162,7 +1256,8 @@ def read_thermo_raw(path):
     acquired_at_source, acquired_at_note (from the same metadata call).
     """
     out = {"acquisition": "unknown", "confidence": "low", "reason": "",
-           "precursor_mz_range": None, "instrument": None, "warnings": [], "reader": None}
+           "precursor_mz_range": None, "instrument": None, "warnings": [], "reader": None,
+           "isolation_windows": None, "faims_cvs": None}
     out.update(acq_time.result(note="not read: ThermoRawFileParser did not run (see warnings)"))
     cmd = find_trfp()
     if not cmd:
@@ -1204,6 +1299,7 @@ def read_thermo_raw(path):
     out["warnings"].extend(q_notes)
 
     w = thermo_isolation_windows(spectra)
+    out["faims_cvs"] = sorted(w["faims_cvs"]) if w["n_filters_seen"] else None
     kind, conf, why, rng = classify_thermo_windows(w)
     if kind == "DDA":
         # DDA has no window scheme to take a range from: its precursors come from the survey
@@ -1228,7 +1324,10 @@ def read_thermo_raw(path):
         # and it returns the method's own 350.05 / 1200.95.
         rng = (round(rng[0], 3), round(rng[1], 3))
     out.update(acquisition=kind, confidence=conf, precursor_mz_range=rng,
-               reason=f"ThermoRawFileParser query of scans {first}-{last}: {why}")
+               reason=f"ThermoRawFileParser query of scans {first}-{last}: {why}",
+               # a DDA run has no window scheme; for the rest, whether its windows are staggered
+               isolation_windows=(None if kind == "DDA" else
+                                  staggered_windows(w["los"], w["his"])))
     if kind == "DIA" and not rng:
         out["warnings"].append(f"DIA, but no isolation window edges were readable: "
                                f"{FALLBACK_CONSEQUENCE}")
@@ -1258,13 +1357,19 @@ def classify(path):
     p = path.rstrip("/")
     low = p.lower()
     mz_range = None
-    warnings, reader, instrument = [], None, None
+    warnings, reader, instrument, windows = [], None, None, None
+    mzml_analyzer = None
+    faims_cvs = None            # [] none / [cv, ...] FAIMS / None not read or not applicable
     acquired = acq_time.result(note="not read for this format (only a Bruker .d and a Thermo "
                                     ".raw are)")
     if low.endswith(".d"):
         kind, conf, why, mz_range = detect_bruker_d(p); vendor = "Bruker"
     elif low.endswith((".mzml", ".mzml.gz")):
-        kind, conf, why, mz_range = detect_mzml(p); vendor = "mzML"
+        mz_words = set()
+        kind, conf, why, mz_range = detect_mzml(p, mz_words); vendor = "mzML"
+        faims_cvs = faims.run_cvs(p)
+        instrument = mzml_instrument(p)
+        mzml_analyzer = mzml_ms2_analyzer(mz_words)
     elif low.endswith(".raw") and os.path.isdir(p):
         # Waters .raw is a FOLDER; handing it to a Thermo reader only produces a confusing
         # "not a valid RAW file" from the wrong vendor's tool.
@@ -1276,12 +1381,14 @@ def classify(path):
                                      t["precursor_mz_range"])
         # instrument comes from the same metadata call -- do not run the parser twice
         instrument, warnings, reader = t["instrument"], t["warnings"], t["reader"]
+        windows = t.get("isolation_windows")
+        faims_cvs = t.get("faims_cvs")
         acquired = {k: t[k] for k in ("acquired_at", "acquired_at_source", "acquired_at_note")}
     elif low.endswith((".wiff", ".wiff2")):
         kind, conf, why, vendor = "unknown", "low", "SCIEX .wiff: convert to mzML to classify", "SCIEX"
     else:
         kind, conf, why, vendor = "unknown", "low", "unrecognized extension", "?"
-    if vendor != "Thermo":
+    if vendor not in ("Thermo", "mzML"):
         instrument = detect_instrument(p)
     if vendor == "Bruker":
         acquired = acq_time.read_bruker(p)
@@ -1312,6 +1419,13 @@ def classify(path):
             "warnings": warnings,
             # the external reader and its version, when one was needed (Thermo .raw)
             "reader": reader,
+            # Thermo .raw only (else null; null too for DDA, or too few windows read):
+            # staggered_windows() -- whether Skyline will demultiplex the run's DIA windows
+            "isolation_windows": windows,
+            # FAIMS compensation voltages of the run (faims.py, the one definition): [] = read,
+            # none; [-50.0, ...] = FAIMS; null = not read here or not applicable (a Bruker .d).
+            # run_search.py refuses a FragPipe quantification that mixes the two.
+            "faims_cvs": faims_cvs,
             # When the run was acquired (start), as UTC ISO 8601 "...Z" -- or null, with
             # acquired_at_note saying why. acquired_at_source names the field; for a .raw the
             # note also states the time-zone assumption (acq_time.py). qc_bracket.py reads these.
@@ -1320,14 +1434,18 @@ def classify(path):
             # batches -- see add_resolutions(). resolution_note says where from, or why not;
             # ms2_analyzer is "FTMS" (Orbitrap), "ITMS" (ion trap: no Orbitrap resolution) or
             # "mixed" (both: see MS2_MIXED_NOTE)
-            "ms1_resolution": None, "ms2_resolution": None, "ms2_analyzer": None,
-            "resolution_note": None}
+            "ms1_resolution": None, "ms2_resolution": None,
+            # an mzML: read from its MS2 scans' filter strings (mzml_ms2_analyzer); else null
+            "ms2_analyzer": mzml_analyzer if vendor == "mzML" else None,
+            "resolution_note": (f"MS2 analyser read from the MS2 scan filter strings of the "
+                                f"mzML ({mzml_analyzer})" if vendor == "mzML" and mzml_analyzer
+                                else None)}
 
 # ---------------------------------------------------------------------------
 # A cohort of .raw on a cluster login node.
 #
 # Reading a .raw is two parser processes that read the raw. Measured on HIVE compute nodes
-# (srun jobs 23511567, 23512661, 23513356, 23515380; TRFP 2.0.0.0, 3.5 GB raws): 3.1-7.0 s
+# (four test runs; TRFP 2.0.0.0, 3.5 GB raws): 3.1-7.0 s
 # per file, ~1 core (68-98% CPU), 286-354 MB peak RSS, a 1.2-8.8 MB query JSON in $TMPDIR
 # (deleted per file); 6 files in one call took 27-33 s. With the old command line the calls died at
 # argument parsing, so step 2 cost nothing -- and SKILL.md 0a drives step 2 over SSH, i.e.
@@ -1338,7 +1456,7 @@ def classify(path):
 # scheduler => no refusal: a laptop is not a shared login node, and gets progress lines
 # instead. No parser => no refusal either: each .raw fails at once with the not-found
 # warning, and a detour through srun would only delay that message. The same for a parser
-# that cannot start (trfp_launch: its .NET is missing) -- gabrig's 15 .raw went through two
+# that cannot start (trfp_launch: its .NET is missing) -- a Core member's 15 .raw went through two
 # srun jobs to learn what a directory check on the login node already knew.
 # ---------------------------------------------------------------------------
 LOGIN_NODE_MAX_RAW = 5
@@ -1353,13 +1471,13 @@ CANNOT_START_SEE_ABOVE = ("not read -- ThermoRawFileParser cannot start on this 
 # ---------------------------------------------------------------------------
 # Orbitrap resolution. estimate_params.py pins DIA-NN's documented Orbitrap tolerances from the
 # MS1/MS2 RESOLUTION; without it an Orbitrap classes as `orbitrap_generic`, DIA-NN calibrates
-# mass accuracy per run, and the 5-step parallel chain declines the cfg (gabrig 2026-09-23,
+# mass accuracy per run, and the 5-step parallel chain declines the cfg (a Core member, 2026-09-23,
 # 15 Fusion Lumos .raw). ThermoRawFileParser never outputs it (TRFP master cf548e4: nothing in
 # metadata, mzML, MGF or `query`; its "mass resolution" MS:1000011 is a generic 0.5), but every
 # scan's trailer has it -- 'Orbitrap Resolution:' on a Fusion Lumos, 'FT Resolution:' on an
 # Exploris 480. thermo_resolution.py reads it with the RawFileReader DLLs TRFP ships, through
 # pythonnet, in ONE subprocess for all files (a CoreCLR load or crash cannot take this script
-# down). Measured on HIVE (job 23989170): three Lumos DIA runs 60000/15000, an Exploris 480 DIA
+# down). Measured on HIVE (a test job): three Lumos DIA runs 60000/15000, an Exploris 480 DIA
 # run 120000/15000 and a DDA run 60000/15000 -- 5 files in 18 s including the runtime start.
 # Read only for `orbitrap_generic`: an Astral's documented tolerances do not use it.
 # A file it cannot read stays in `orbitrap_resolution_unknown`, and the user is asked. Not a
@@ -1376,14 +1494,14 @@ RAWFILEREADER_DLLS = ("ThermoFisher.CommonCore.RawFileReader.dll",
 RES_PYTHON_ENV = "THERMO_RESOLUTION_PYTHON"
 # The RawFileReader DLLs target .NETCoreApp 8.0, and a SELF-CONTAINED parser's bundled runtime
 # cannot host pythonnet (hostfxr: "Initialization for self-contained components is not
-# supported", job 23989170) -- so a separate root with Microsoft.NETCore.App 8+ is needed.
+# supported", in that test job) -- so a separate root with Microsoft.NETCore.App 8+ is needed.
 RES_DOTNET_NEEDS = [("Microsoft.NETCore.App", (8, 0, 0), True)]
 # Batches, each with its own timeout: one timeout for a whole cohort let a stall inside a .NET
 # call (where the reader's own walk budget is never checked) block for 120 + 90 s x N -- ~5 h
 # for 200 files -- and then lose every answer. A hang now costs its batch; two batches in a row
 # that hang (a stalled mount, not one bad file) stop the rest, which say so.
 RES_BATCH = 10
-RES_TIMEOUT_BASE_S = 60       # starting .NET: ~3 s measured (HIVE jobs 23989170, 23989291)
+RES_TIMEOUT_BASE_S = 60       # starting .NET: ~3 s measured (two test jobs on HIVE)
 RES_TIMEOUT_EACH_S = 30       # per file: ~3 s measured; the reader's own walk stops at 20 s
 RES_HUNG_BATCHES_STOP = 2
 RESOLUTION_ASK = (

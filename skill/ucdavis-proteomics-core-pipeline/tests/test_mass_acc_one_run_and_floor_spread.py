@@ -3,7 +3,7 @@
 
 1. A ONE-FILE search (a QC run, a method test) always failed the probe: "only 1 run logged
    everything asked; mass accuracy is pinned from the median of at least 2 representative runs"
-   (Exploris 480 60k/15k, msalemi 2026-10-05: MS2 measured 12 ppm, job FAILED after the library,
+   (Exploris 480 60k/15k, mstaff 2026-10-05: MS2 measured 12 ppm, job FAILED after the library,
    nothing searched). A cohort of one run has no second run to measure, so its own measurement is
    pinned -- inside the band, floored at the SOP like any other. Cohorts of 2+ keep the rule.
 2. Step 1b refused an MS2 spread over 50% on 18 streptavidin pull-down runs (20/24/10 ppm,

@@ -14,6 +14,7 @@ stand-in (SKILL_SQUEUE) that prints the batch-script paths listed in $FAKE_SQUEU
 fails like a timed-out slurmctld with FAKE_SQUEUE_FAIL=1 -- the release folder is a temporary
 one, and a separate case drives the real hive_exec.sh through a fake `ssh`.
 """
+import hashlib
 import json
 import os
 import pwd
@@ -29,6 +30,10 @@ SKILL = os.path.dirname(HERE)
 SCRIPTS = os.path.join(SKILL, "scripts")
 sys.path.insert(0, HERE)
 from job_env import job_env     # noqa: E402
+
+# The shipped scripts/core_admins.txt, pinned without naming anyone (the repository is public):
+# sha256 of its names joined by "\n". Changing the list is a code change: update this with it.
+SHIPPED_ADMINS_SHA256 = "b73e182de1908f14f15c49a634638160874dd42c0019a629cab14c9c3ce7a327"
 
 PUT = "bash scripts/hive_exec.sh --put-skill"
 UPDATE = "claude plugin update ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core"
@@ -49,10 +54,12 @@ class Harness(unittest.TestCase):
         os.makedirs(os.path.join(self.laptop, "scripts"))
         for f in ("skill_version.sh", "hive_exec.sh", "hive_path.sh", "hive_shares.tsv"):
             shutil.copy(os.path.join(SCRIPTS, f), os.path.join(self.laptop, "scripts"))
-        # the admins: the shipped list plus whoever runs the suite -- `id -un` on the stand-in
-        # HIVE -- so the publish tests can publish (PublishRelease.test_only_an_admin_... not)
+        # the admins: the shipped list, bstaff (the stand-in admin the fake stat names as owner:
+        # the shipped list's real login is not spelled out in this public repository) and
+        # whoever runs the suite -- `id -un` on the stand-in HIVE -- so the publish tests can
+        # publish (PublishRelease.test_only_an_admin_... not)
         self.me = pwd.getpwuid(os.getuid()).pw_name
-        self.admins([self.me])
+        self.admins(["bstaff", self.me])
         # $HOME on "HIVE", reached through a symlink (as /home -> /quobyte/home can be)
         self.hive_home_real = os.path.realpath(os.path.join(self.d, "hive_home_real"))
         os.makedirs(self.hive_home_real)
@@ -80,8 +87,8 @@ class Harness(unittest.TestCase):
         # who owns a path on "HIVE": the release file FAKE_FILE_OWNER, anything else (the
         # folder) FAKE_DIR_OWNER -- an admin unless a test says otherwise
         self.owner = sh_exe(os.path.join(self.d, "fake_owner"),
-                            'case "$1" in */CURRENT_VERSION) echo "${FAKE_FILE_OWNER-brettsp}" ;;\n'
-                            '  *) echo "${FAKE_DIR_OWNER-brettsp}" ;; esac\n')
+                            'case "$1" in */CURRENT_VERSION) echo "${FAKE_FILE_OWNER-bstaff}" ;;\n'
+                            '  *) echo "${FAKE_DIR_OWNER-bstaff}" ;; esac\n')
         # squeue -h -u <user> -o %o: one batch-script path (or command) per job
         self.squeue = sh_exe(os.path.join(self.d, "fake_squeue"),
                              'if [ "${FAKE_SQUEUE_FAIL:-0}" = 1 ]; then\n'
@@ -117,7 +124,7 @@ class Harness(unittest.TestCase):
 
     def hive_copy(self, version, scripts=True):
         """~/proteomics-pipeline on HIVE as --put-skill leaves it: this computer's scripts/ and a
-        plugin.json with `version` (None: no .claude-plugin/, as msalemi's copy had)."""
+        plugin.json with `version` (None: no .claude-plugin/, as mstaff's copy had)."""
         if scripts:
             shutil.rmtree(os.path.join(self.hive_root, "scripts"), ignore_errors=True)
             shutil.copytree(os.path.join(self.laptop, "scripts"),
@@ -136,7 +143,7 @@ class Harness(unittest.TestCase):
                     FAKE_HIVE_HOME=self.hive_home, FAKE_CALLS=self.calls, TMPDIR=self.d,
                     LC_ALL="C.UTF-8", LANG="C.UTF-8")
         if login:
-            e.update(HIVE_USER="gabrig", HIVE_KEY=self.key, HIVE_EXEC=self.fake)
+            e.update(HIVE_USER="gstaff", HIVE_KEY=self.key, HIVE_EXEC=self.fake)
         e.update({k: str(v) for k, v in extra.items()})
         return e
 
@@ -217,9 +224,18 @@ class CheckHive(Harness):
         j = self.check(0, "--mode", "hive_remote")
         self.assertEqual((j["hive_setup"]["skill_version"], j["hive_setup"]["written"], j["say"]),
                          ("2.13.1", "2026-10-16T08:00:00Z", None))
+        # written by another release's setup.sh: its version said once (2026-10-20 on HIVE: the
+        # message read "the setup.sh of skill 2.13.12.13.1")
+        with open(sj, "w") as fh:
+            fh.write('{\n  "skill_version": "2.13.0", "written": "2026-10-15T08:00:00Z", '
+                     '"check_only": true,\n' + rf + '  "notes": []\n}\n')
+        j = self.check(0, "--mode", "hive_remote")
+        self.assertIn("written by the setup.sh of skill 2.13.0, not that of HIVE's skill 2.13.1",
+                      j["say"])
+        self.assertNotIn("2.13.02.13.0", j["say"])
 
     def test_a_hive_copy_without_claude_plugin_is_put_again(self):
-        """msalemi's HIVE copy: scripts/ but no .claude-plugin/ -- every record said 'unknown'."""
+        """mstaff's HIVE copy: scripts/ but no .claude-plugin/ -- every record said 'unknown'."""
         self.plugin(self.laptop, "2.9.0")
         self.hive_copy(None)
         j = self.check(3)
@@ -385,7 +401,7 @@ class CheckHive(Harness):
         self.assertIn("test build", j["say"])
 
     def test_a_laptop_behind_the_release_is_warned_with_the_update_that_works(self):
-        """gabrig: laptop 2.6.0, HIVE 2.6.0 (in step with each other), release 2.9.0. The update
+        """gstaff: laptop 2.6.0, HIVE 2.6.0 (in step with each other), release 2.9.0. The update
         is `claude plugin update` -- `/plugin marketplace update` only refreshes the catalogue
         (checked on Claude Code 2.1.285)."""
         self.plugin(self.laptop, "2.6.0")
@@ -510,7 +526,7 @@ class CheckHive(Harness):
         self.hive_copy("2.9.0")
         cfg = os.path.join(self.d, "hive.env")
         with open(cfg, "w") as fh:
-            fh.write(f"HIVE_USER='gabrig'\nHIVE_KEY='{self.key}'\n")
+            fh.write(f"HIVE_USER='gstaff'\nHIVE_KEY='{self.key}'\n")
         j = self.check(0, "--mode", "hive_remote", HIVE_ENV_FILE=cfg, HIVE_EXEC=self.fake,
                        login=False)
         self.assertEqual(j["status"], "in_step")
@@ -554,7 +570,7 @@ class ReleaseTrust(Harness):
                          ("2.9.0", "published", True))
 
     def test_a_members_file_or_folder_is_not(self):
-        for who in ({"FAKE_FILE_OWNER": "gabrig"}, {"FAKE_DIR_OWNER": "gabrig"},
+        for who in ({"FAKE_FILE_OWNER": "gstaff"}, {"FAKE_DIR_OWNER": "gstaff"},
                     {"FAKE_FILE_OWNER": "", "FAKE_DIR_OWNER": ""}):   # owner unknown: not trusted
             with self.subTest(**who):
                 j = self.check(0, **who)
@@ -565,7 +581,7 @@ class ReleaseTrust(Harness):
         """No stand-in: GNU `stat -c %U` on HIVE, BSD `stat -f %Su` here on a Mac."""
         j = self.check(0, SKILL_OWNER_CMD="")
         self.assertEqual(j["release_state"], "published")      # the runner is an admin here
-        self.admins(text="# nobody who runs this suite\nbrettsp-not-me\n")
+        self.admins(text="# nobody who runs this suite\nbstaff-not-me\n")
         self.hive_copy("2.6.0")
         self.assertEqual(self.check(0, SKILL_OWNER_CMD="")["release_state"], "untrusted")
 
@@ -579,24 +595,27 @@ class CoreAdmins(unittest.TestCase):
         return r.stdout.splitlines()
 
     def test_the_shipped_list(self):
-        self.assertEqual(self.admins(), ["brettsp"])
+        admins = self.admins()
+        self.assertEqual(len(admins), 1, admins)
+        self.assertEqual(hashlib.sha256("\n".join(admins).encode()).hexdigest(), SHIPPED_ADMINS_SHA256)
 
     def test_comments_blank_lines_spaces_and_crlf(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = os.path.join(tmp, "core_admins.txt")
             with open(p, "w", newline="") as fh:
-                fh.write("# admins\r\n\r\n  brettsp  \r\n\t# indented comment\n"
-                         "gabrig # staff, 2026\n\n#msalemi\n")
-            self.assertEqual(self.admins(p), ["brettsp", "gabrig"])
+                fh.write("# admins\r\n\r\n  bstaff  \r\n\t# indented comment\n"
+                         "gstaff # staff, 2026\n\n#mstaff\n")
+            self.assertEqual(self.admins(p), ["bstaff", "gstaff"])
             self.assertEqual(self.admins(os.path.join(tmp, "missing.txt")), [])
 
     def test_membership_is_the_whole_name(self):
-        r = subprocess.run(["bash", "-c", '. "$1"; for u in brettsp brett rettsp ""; do '
+        admin = self.admins()[0]                     # the shipped admin, its name cut both ways
+        r = subprocess.run(["bash", "-c", '. "$1"; for u in "$2" "$3" "$4" ""; do '
                             'skill_is_core_admin "$u" && echo "$u"; done', "bash",
-                            os.path.join(SCRIPTS, "skill_version.sh")],
+                            os.path.join(SCRIPTS, "skill_version.sh"), admin, admin[:-2], admin[1:]],
                            capture_output=True, text=True, timeout=30,
                            env=job_env(tempfile.gettempdir()))
-        self.assertEqual(r.stdout.split(), ["brettsp"])
+        self.assertEqual(r.stdout.split(), [admin])
 
 
 class VersionCompare(unittest.TestCase):
@@ -701,7 +720,9 @@ class PublishRelease(Harness):
 
     def test_only_an_admin_publishes(self):
         self.plugin(self.laptop, "2.9.0")
-        self.admins()                                  # the shipped list: not the runner
+        # a list the runner is not on: the account the suite runs as (on HIVE, a Core admin) is
+        # the shipped list's one entry, and test_the_shipped_list pins the shipped content
+        self.admins(text="someoneelse\n")
         r = self.run_sv("--publish-release")
         self.assertEqual(r.returncode, 2)
         self.assertIn(f"'{self.me}' is not a Proteomics Core admin", r.stderr)
@@ -710,9 +731,9 @@ class PublishRelease(Harness):
     def test_a_folder_a_member_made_is_not_published_into(self):
         self.plugin(self.laptop, "2.9.0")
         os.makedirs(self.release_dir)
-        r = self.run_sv("--publish-release", FAKE_DIR_OWNER="gabrig")
+        r = self.run_sv("--publish-release", FAKE_DIR_OWNER="gstaff")
         self.assertEqual(r.returncode, 2)
-        self.assertIn("owned by 'gabrig', not a Core admin", r.stderr)
+        self.assertIn("owned by 'gstaff', not a Core admin", r.stderr)
         self.assertEqual(os.listdir(self.release_dir), [])
 
     def test_an_account_outside_the_core_cannot_publish(self):
@@ -747,19 +768,39 @@ class Documented(unittest.TestCase):
         with open(os.path.join(SKILL, *rel), encoding="utf-8") as fh:
             return fh.read()
 
+    def access_step0(self):
+        """access.md's step-0 section: the full check, every exit code (SKILL.md step 0 is a
+        router since the slim-down: one --session-start call and its fields)."""
+        ref = self.read("references", "access.md")
+        i = ref.index("\n## Step 0: is this skill current?")
+        j = ref.find("\n## ", i + 1)
+        return ref[i:j if j > 0 else len(ref)]
+
     def test_skill_md_step_0_runs_the_check_and_says_what_each_exit_means(self):
         md = self.read("SKILL.md")
-        step0 = md[md.index("### 0. "):md.index("### 0b.")]
-        self.assertIn("bash scripts/skill_version.sh --check-hive --mode hive_remote", step0)
+        step0 = " ".join(md[md.index("### 0. "):md.index("### 0b.")].split())
+        self.assertIn("bash scripts/skill_version.sh --session-start [--mode hive_remote]", step0)
+        for field in ("relay_first", "ask_update", "`next`", "`ask`", "`say`", "up_to_date"):
+            self.assertIn(field, step0)
+        self.assertIn('access.md "Step 0: is this skill current?"', step0)
+        ref = self.access_step0()
+        self.assertIn("bash scripts/skill_version.sh --check-hive --mode hive_remote", ref)
         for code in ("exit 0", "exit 3", "exit 4", "exit 5", "exit 6"):
-            self.assertIn(code, step0)
-        self.assertIn("--put-skill", step0)
+            self.assertIn(code, ref)
+        self.assertIn("--put-skill", ref)
+        self.assertIn("--session-start", ref)
 
     def test_step_0_puts_the_update_question_first(self):
         """Brett: staff must hear it plainly -- relayed before any other work, an offer to
         update now (the steps that work), the decline recorded, and auto-update recommended."""
         md = self.read("SKILL.md")
-        step0 = " ".join(md[md.index("### 0. "):md.index("### 0b.")].split())
+        router = " ".join(md[md.index("### 0. "):md.index("### 0b.")].split())
+        for text in ("before any other work", "ask whether to update now", "/reload-plugins",
+                     "record that they declined", "Never tell the user the skill is up to date",
+                     "recommend turning on auto-update",
+                     "Marketplaces → ucdavis-proteomics-core → Enable auto-update"):
+            self.assertIn(text, router)
+        step0 = " ".join(self.access_step0().split())
         for text in ("Relay it FIRST, before any other work",
                      "Your copy of the skill is older than the Core's current release",
                      "ask whether to update now",
@@ -796,14 +837,19 @@ class Documented(unittest.TestCase):
     # Every place that shows how to install. Brett pasted the README's Install block -- two
     # /plugin commands in one code block -- into Claude Code, and it failed: they have to be
     # entered one at a time. The terminal one-liner (checked on claude 2.1.285) is the easy path.
+    # The repository's front page is README.md in the skill's own repository (2.15) and
+    # README_GITHUB.md in DE-LIMP (README.md there is its copy): front_readme().
     INSTALL_DOCS = ("README_GITHUB.md", "README.md", "docs/skill-install.html",
                     "docs/STUDENT_SETUP.md",
                     "skill/ucdavis-proteomics-core-pipeline/SKILL.md",
                     "skill/ucdavis-proteomics-core-pipeline/references/install.md",
                     "skill/ucdavis-proteomics-core-pipeline/references/access.md")
     # By its HTTPS URL (2026-10-07): for the owner/repo shorthand Claude Code tries SSH first, and
-    # a Windows laptop with no GitHub SSH key could not refresh the catalogue.
-    ONE_LINE = ("claude plugin marketplace add https://github.com/bsphinney/DE-LIMP.git && "
+    # a Windows laptop with no GitHub SSH key could not refresh the catalogue. The repository is
+    # plugin.json's (the one definition; from 2.15 the skill's own, Ruling 87).
+    with open(os.path.join(SKILL, ".claude-plugin", "plugin.json"), encoding="utf-8") as _fh:
+        REPOSITORY = json.load(_fh)["repository"].rstrip("/")
+    ONE_LINE = (f"claude plugin marketplace add {REPOSITORY}.git && "
                 "claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core")
 
     def install_docs(self):
@@ -815,6 +861,15 @@ class Documented(unittest.TestCase):
                 with open(p, encoding="utf-8") as fh:
                     found[rel] = fh.read()
         return found
+
+    @staticmethod
+    def front_readme(docs):
+        """The repository's front page: README_GITHUB.md in DE-LIMP, else README.md (the skill's
+        own repository), or None (the skill installed on its own has no repo docs)."""
+        for rel in ("README_GITHUB.md", "README.md"):
+            if rel in docs:
+                return rel
+        return None
 
     @staticmethod
     def copy_blocks(rel, text):
@@ -830,7 +885,8 @@ class Documented(unittest.TestCase):
 
     def test_no_copy_block_holds_two_plugin_commands(self):
         docs = self.install_docs()
-        if "README_GITHUB.md" not in docs:
+        front = self.front_readme(docs)
+        if front is None or "docs/skill-install.html" not in docs:
             self.skipTest("no repo docs beside this skill")
         bad = []
         for rel, text in docs.items():
@@ -840,35 +896,43 @@ class Documented(unittest.TestCase):
                     bad.append(f"{rel}: {cmds}")
         self.assertEqual(bad, [], "a slash command per block: pasted together they fail")
         # the check sees blocks at all (a regex that matched nothing would pass anything)
-        self.assertTrue(any("/plugin install" in b for b in
-                            self.copy_blocks("README_GITHUB.md", docs["README_GITHUB.md"])))
+        self.assertTrue(any("/plugin install" in b for b in self.copy_blocks(front, docs[front])))
         self.assertTrue(any("/plugin install" in b for b in
                             self.copy_blocks("x.html", docs["docs/skill-install.html"])))
 
     def test_the_one_line_terminal_install_is_offered(self):
         docs = self.install_docs()
-        if "README_GITHUB.md" not in docs:
+        front = self.front_readme(docs)
+        if front is None or "docs/skill-install.html" not in docs:
             self.skipTest("no repo docs beside this skill")
-        for rel in ("README_GITHUB.md", "docs/skill-install.html", "docs/STUDENT_SETUP.md",
+        for rel in (front, "docs/skill-install.html", "docs/STUDENT_SETUP.md",
                     "skill/ucdavis-proteomics-core-pipeline/references/install.md"):
             with self.subTest(rel=rel):
                 self.assertTrue(any(b.strip() == self.ONE_LINE
                                     for b in self.copy_blocks(rel, docs[rel])), rel)
-        self.assertIn("press Enter, then the second", docs["README_GITHUB.md"])
-        self.assertIn("Enable\nauto-update", docs["README_GITHUB.md"])
+        self.assertIn("press Enter, then the second", docs[front])
+        self.assertIn("Enable auto-update", " ".join(docs[front].split()))
 
     def test_no_copy_block_adds_the_marketplace_by_the_shorthand(self):
         """Every command a reader copies adds the marketplace by its HTTPS URL, and the pages
         that tell how to update give the HTTPS refresh of the catalogue."""
         docs = self.install_docs()
-        if "README_GITHUB.md" not in docs:
+        front = self.front_readme(docs)
+        if front is None or "docs/skill-install.html" not in docs:
             self.skipTest("no repo docs beside this skill")
         bad = [f"{rel}: {b.strip()}" for rel, text in docs.items()
-               for b in self.copy_blocks(rel, text) if "marketplace add bsphinney/DE-LIMP" in b]
+               for b in self.copy_blocks(rel, text) if "marketplace add bsphinney/" in b]
         self.assertEqual(bad, [])
+        # every marketplace a reader adds is the skill's repository
+        added = [(rel, b.strip()) for rel, text in docs.items() for b in self.copy_blocks(rel, text)
+                 if "marketplace add " in b]
+        self.assertTrue(added)
+        for rel, b in added:
+            with self.subTest(rel=rel, block=b):
+                self.assertIn(f"marketplace add {self.REPOSITORY}.git", b)
         pull = "git -C ~/.claude/plugins/marketplaces/ucdavis-proteomics-core pull --ff-only"
-        for rel in ("README_GITHUB.md", "README.md", "docs/skill-install.html",
-                    "docs/STUDENT_SETUP.md"):
+        for rel in sorted({front, "README.md", "docs/skill-install.html",
+                           "docs/STUDENT_SETUP.md"} & set(docs)):
             with self.subTest(rel=rel):
                 self.assertTrue(any(b.strip() == pull for b in self.copy_blocks(rel, docs[rel])),
                                 rel)

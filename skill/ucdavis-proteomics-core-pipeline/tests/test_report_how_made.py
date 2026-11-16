@@ -139,7 +139,7 @@ class HowMade(unittest.TestCase):
         self.assertIn(f'<a href="{mah.HOW_MADE_URL}">{mah.HOW_MADE_LINK}</a>', doc)
         self.assertIn(f"[{mah.HOW_MADE_LINK}]({mah.HOW_MADE_URL})", m)
         self.assertEqual(mah.HOW_MADE_URL,
-                         "https://bsphinney.github.io/DE-LIMP/how-reports-are-made.html")
+                         "https://bsphinney.github.io/UCD-Proteomics-AI-Skill/how-reports-are-made.html")
         self.assertIsNone(re.search(r"</?[A-Za-z][A-Za-z0-9]*\b[^>]*>", m))   # no tags in the .md
         self.assertIn('href="#how-this-report-was-made"', doc)                  # in the contents
 

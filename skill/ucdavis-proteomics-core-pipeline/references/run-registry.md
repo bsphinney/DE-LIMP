@@ -28,6 +28,23 @@ Answering "what did the Core search last month, for which submission, with which
 deep did it go?" meant opening each of these, if anyone still knew where they were. Now the
 master log answers it for people, and `record_run.py list` answers it as a table.
 
+<!-- contents: tests/test_skill_structure.py --toc -->
+**Contents** (section: line)
+- 48: Who is recorded, and who must not be
+- 120: When it runs
+- 184: Layout
+- 221: SEARCH_LOG.md
+- 300: CoreOmics submission
+- 316: Locking: `mkdir`, not `flock`
+- 369: The master log: `data_analysis.md`
+- 392: The activity log: `activity_log.csv`
+- 407: What is never copied
+- 427: The session zip
+- 491: The directory README
+- 540: `list`
+- 551: Tests
+<!-- /contents -->
+
 ## Who is recorded, and who must not be
 
 **Proteomics Core runs only.** The gate is **write permission** on the registry, which lives
@@ -49,6 +66,27 @@ inside `/quobyte/proteomics-grp` (mode 2770, group `proteomics-grp`).
 - `RECORD_RUN=off` turns it off (`SKILL_RUNS_DIR=off` is an alias). It returns
   `{"recorded": false, "reason": "disabled"}` before anything is read, written or sent. No SSH is
   attempted.
+- **`--no-record`** keeps one test run out of **all three Core records**: this registry, FRAN
+  staging and the Core Slack channel. `run_search.py --no-record` (and the chain generators) bake
+  it into every job's end hook as `--no-record --no-fran --no-slack`, because a hive_remote
+  shell's environment does not reach the job; the plan is in `search_provenance.json`
+  `job_end_hook`: `run_log`, `fran` and `slack` all `"off"`, with `run_log_off_because`,
+  `fran_off_because` and `slack_off_because`. The hook stages with `--skip`, so the search's
+  `fran_deposit.json` says `opted_out` and a later backfill leaves it alone. `session.py finalize
+  --no-record` logs nothing and posts no "analysis complete" (MANIFEST.txt: `[INFO] ... off (a
+  test run: --no-record was given)` for both). `record_run.py search-done|analysis-done
+  --no-record` answers `"reason": "disabled"` with the reason.
+- **A `/skill_test/` folder in the session or search path** does the same, automatically, and is
+  read again where the job ends (an older job script, a folder moved later): a test run is never
+  recorded, never staged to FRAN (`fran_deposit.py check` refuses it as `test_run`, recorded in
+  the receipt, so `stage`, the agent and `backfill` all skip it) and never posted. It is said on
+  stderr ("this search will NOT be recorded, staged to FRAN or posted ...") and in
+  `search_provenance.json`. `record_run.no_record_reason()` is the one definition of a test run;
+  MANIFEST.txt gives its reason without the folder's path. Entries already in the registry are
+  never edited or removed by any of this.
+- **`RECORD_RUN=off` is the registry's switch only** (the test harness's isolation sets it): read
+  where the job runs, it keeps the run log off and leaves FRAN and Slack to their own switches
+  (`FRAN_DEPOSIT=off`, `SKILL_SLACK=0`).
 - `SKILL_RUNS_DIR` is the destination on every route, including on HIVE. Tests point it at a
   temporary folder.
 - `record_run.py --where` prints the route from here and does nothing else.
@@ -284,7 +322,7 @@ run's `run_record.json`. **`flock` does not work across nodes on /quobyte.** Mea
 torn JSON.
 
 The registry uses FRAN's lock instead (`ingest/auto_ingest_state.py`), which lost 0 of 800 in
-the same test. Re-measured for this registry's own appends on 2026-09-24 (job 23991970, two
+the same test. Re-measured for this registry's own appends on 2026-09-24 (a test job on two
 nodes, 400 appends each to one `activity_log.csv`-shaped file on /quobyte):
 
 | Lock | Result |
@@ -489,11 +527,12 @@ Never copied: raw data, FASTAs, per-run `.quant` files, anything over 20 MB, or 
 looks like a credential -- the record says where they are.
 
 Only Proteomics Core (proteomics-grp) accounts can write here, so collaborators' runs are never
-recorded. To keep a run out: `RECORD_RUN=off`. To list the registry:
+recorded. To keep a run out: `--no-record` on run_search.py / session.py finalize (it is baked
+into the job's end hook), `RECORD_RUN=off`, or run it under a `/skill_test/` folder. To list the registry:
 `python3 <skill>/scripts/record_run.py list [--since YYYY-MM-DD] [--user U] [--status failed]`.
 Skill problems go to the sibling folder `../skill_issues/`.
 
-<!-- record_run.py README v2: written by the skill; edit README_TEXT in record_run.py, not this
+<!-- record_run.py README v3: written by the skill; edit README_TEXT in record_run.py, not this
 file -->
 ```
 <!-- README:END -->
@@ -502,7 +541,7 @@ file -->
 
 ```bash
 python3 scripts/record_run.py list                                   # a table
-python3 scripts/record_run.py list --since 2026-09-01 --user gabrig  # filters (--user/--status repeat)
+python3 scripts/record_run.py list --since 2026-09-01 --user staff1  # filters (--user/--status repeat)
 python3 scripts/record_run.py list --status failed --tsv             # every column, for a spreadsheet
 python3 scripts/record_run.py list --json
 ```

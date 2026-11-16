@@ -9,7 +9,8 @@ The searches and DEs are sbatch jobs already; this is the skill's one way to sen
 command to a compute node (a walk of a share, an install, a zip of a session, hashing raw files):
 
   python3 on_compute.py [--time MIN] [--mem SIZE] [--cpus N] [--name NAME] [--preemptible]
-                        [--partition P] [--account A] [--qos Q] [--why TEXT] [--print]
+                        [--partition P] [--account A] [--qos Q] [--why TEXT] [--session DIR]
+                        [--print]
                         -- COMMAND [ARG ...]
   python3 on_compute.py --is-login-node          # exit 0 on a cluster login node, else 1
 
@@ -21,8 +22,12 @@ command to a compute node (a walk of a share, an install, a zip of a session, ha
   * The queue is one that does not preempt: an srun that is preempted is cancelled, not
     requeued, and these commands install, copy or write. genome-center-grp/high when the account
     has it, else another account's `high`; only an account with nothing but `low` gets low (and
-    is told so). --preemptible lets run_search.slurm_queue (the skill's queue rule for jobs)
-    choose, `low` included. A named --partition/--account/--qos is used as given.
+    is told so). --preemptible says the command can be run again: it goes to the user's
+    preemptible queue (publicgrp/low) whenever there is one, whatever high is doing. A named
+    --partition/--account/--qos is used as given.
+  * --session DIR: the session folder the command serves. The srun starts there (--chdir, when
+    DIR exists on this machine) and carries --comment=session:<name>, so the job can be traced
+    to its session (it otherwise runs in the user's home).
   * Inside a job (SLURM_JOB_ID set) or where there is no SLURM (a laptop): the command runs here,
     unchanged, so one documented line works everywhere.
   * --print: print the srun line on stdout and run nothing.
@@ -117,7 +122,20 @@ def _own_cpus_on_high():
     return cap - free, cap
 
 
-def pick_queue(cpus=1, preemptible_ok=False, partition=None, account=None, qos=None):
+def _low_queue(lows):
+    """(partition, account, qos) of the preemptible queue to use out of the associations' `lows`
+    (publicgrp's first), or None. The one place the low queue and its QOS are chosen."""
+    import run_search
+    low = ([x for x in lows if x[0] == "publicgrp"] or lows or [None])[0]
+    if not low:
+        return None
+    la, lp, lq = low
+    lq = lq if lq and "," not in lq else run_search._public_low_qos(lp, la, None)
+    return lp, la, lq
+
+
+def pick_queue(cpus=1, preemptible_ok=False, partition=None, account=None, qos=None,
+               prefer_low=False):
     """(partition, account, qos) for an srun. A preempted srun is CANCELLED, not requeued, so:
       * not preemptible (the default: an install, an --apply copy, a write): a queue that never
         preempts -- genome-center-grp/high, else the one account's `high` (the free tier within its
@@ -128,7 +146,10 @@ def pick_queue(cpus=1, preemptible_ok=False, partition=None, account=None, qos=N
         now instead of waiting behind the user's own searches, and says so.
     Two accounts that could both run it, neither genome-center-grp: QueueChoice (who is billed is
     the user's call: --account, or PROTEOMICS_SRUN_ACCOUNT for a script). A named queue goes to
-    run_search.slurm_queue, which checks it."""
+    run_search.slurm_queue, which checks it.
+    prefer_low (on_compute.py --preemptible, hive_exec.sh --job --preemptible: the caller SAID
+    the command can be run again): the preemptible queue whenever the user has one, whether or
+    not their own jobs fill high -- it was staying on high below the cap (a test job, 2026-11)."""
     import run_search
     account = account or os.environ.get(ACCOUNT_ENV) or None
     if partition or account or qos:
@@ -142,10 +163,21 @@ def pick_queue(cpus=1, preemptible_ok=False, partition=None, account=None, qos=N
              f"preempts can be chosen: using the skill's fallback {a}/{p}. A preempted srun is "
              f"cancelled, not requeued -- run it again if it is.")
         return p, a, q
+    lows = [x for x in assoc if x[1] in PREEMPTIBLE_PARTITIONS]
+    if prefer_low and not (partition or account or qos) and _low_queue(lows):
+        lp, la, lq = _low_queue(lows)
+        used, cap = _own_cpus_on_high()
+        if used is not None and cap - used < cpus:
+            _say(f"your own jobs use {used} of your {cap} CPUs on high; this step can be run "
+                 f"again from the start, so it runs on {la}/{lp} now instead of waiting behind "
+                 f"them (preemptible: if it is stopped, run it again).")
+        else:
+            _say(f"--preemptible: this command can be run again, so it runs on {la}/{lp} (a "
+                 f"stopped srun is cancelled, not requeued: run it again if it is).")
+        return lp, la, lq
     nonpre = [x for x in assoc if x[1] and x[1] not in PREEMPTIBLE_PARTITIONS and "gpu" not in x[1]]
     over_free_cap = [x for x in nonpre if x[0] == "publicgrp" and x[1] == "high" and cpus > 8]
     nonpre = [x for x in nonpre if x not in over_free_cap]
-    lows = [x for x in assoc if x[1] in PREEMPTIBLE_PARTITIONS]
     if not nonpre:
         why = (f"publicgrp's `high` allows 8 CPUs per job and this asks for {cpus}"
                if over_free_cap else f"{user} can use only a preemptible queue")
@@ -167,10 +199,8 @@ def pick_queue(cpus=1, preemptible_ok=False, partition=None, account=None, qos=N
     if (a, p) == ("genome-center-grp", "high"):
         used, cap = _own_cpus_on_high()
         if used is not None and cap - used < cpus:
-            low = ([x for x in lows if x[0] == "publicgrp"] or lows or [None])[0]
-            if preemptible_ok and low:
-                la, lp, lq = low
-                lq = lq if lq and "," not in lq else run_search._public_low_qos(lp, la, None)
+            if preemptible_ok and _low_queue(lows):
+                lp, la, lq = _low_queue(lows)
                 _say(f"your own jobs use {used} of your {cap} CPUs on high; this step can be run "
                      f"again from the start, so it runs on {la}/{lp} now instead of waiting behind "
                      f"them (preemptible: if it is stopped, run it again).")
@@ -188,14 +218,19 @@ def check_size(mem):
 
 
 def srun_argv(command, minutes=DEFAULT_MINUTES, mem=DEFAULT_MEM, cpus=1, name=None,
-              preemptible_ok=False, partition=None, account=None, qos=None):
+              preemptible_ok=False, partition=None, account=None, qos=None, prefer_low=False,
+              session=None, chdir=False):
     """The srun line for `command` (a list), the queue written out. Asks SLURM (sacctmgr) which
-    queue this user can submit to (pick_queue)."""
+    queue this user can submit to (pick_queue). `session`: the session folder this serves --
+    --comment=session:<its name>, so the job can be traced to its session (a job otherwise runs
+    in the user's home); `chdir` also starts it there (--chdir, when the folder exists here),
+    for a caller that gave the folder on purpose -- relative paths in the command then start
+    from it."""
     check_size(mem)
     minutes, cpus = int(minutes), int(cpus)
     if minutes < 1 or cpus < 1:
         raise ValueError("--time and --cpus must be at least 1")
-    part, acct, q = pick_queue(cpus, preemptible_ok, partition, account, qos)
+    part, acct, q = pick_queue(cpus, preemptible_ok, partition, account, qos, prefer_low)
     name = name or "pp_" + re.sub(r"[^A-Za-z0-9_.-]", "_", os.path.basename(str(command[0])))[:40]
     argv = [_srun_path()]
     argv += [f"--account={acct}"] if acct else []
@@ -203,6 +238,11 @@ def srun_argv(command, minutes=DEFAULT_MINUTES, mem=DEFAULT_MEM, cpus=1, name=No
     argv += [f"--qos={q}"] if q else []
     argv += [f"--time={minutes}", f"--mem={mem}", "--ntasks=1", f"--cpus-per-task={cpus}",
              f"--job-name={name}"]
+    if session:
+        sess = os.path.abspath(str(session))
+        argv += [f"--comment=session:{re.sub(r'[^A-Za-z0-9_.-]', '_', os.path.basename(sess.rstrip('/')))}"]
+        if chdir and os.path.isdir(sess):
+            argv += [f"--chdir={sess}"]
     return argv + list(command)
 
 
@@ -225,7 +265,7 @@ def _exec(argv, srun=False):
 
 def ensure_compute_node(why, minutes=DEFAULT_MINUTES, mem=DEFAULT_MEM, cpus=1,
                         preemptible_ok=False, argv=None, script=None, partition=None,
-                        account=None, qos=None):
+                        account=None, qos=None, session=None):
     """First thing in a script whose work does not belong on a login node: there, replace this
     process with the same command under srun (never returns). Anywhere else, return. `script`
     (the caller's __file__): only when that script IS this process's program -- a test or
@@ -241,7 +281,7 @@ def ensure_compute_node(why, minutes=DEFAULT_MINUTES, mem=DEFAULT_MEM, cpus=1,
     try:
         line = srun_argv(cmd, minutes, mem, cpus, preemptible_ok=preemptible_ok,
                          name="pp_" + os.path.splitext(os.path.basename(argv[0]))[0],
-                         partition=partition, account=account, qos=qos)
+                         partition=partition, account=account, qos=qos, session=session)
     except QueueChoice as e:
         sys.stderr.write(f"[on_compute] {why}, which is work for a compute node, but {e}\n")
         sys.exit(2)
@@ -255,7 +295,7 @@ def _usage(msg):
     sys.stderr.write(f"on_compute.py: {msg}\n"
                      "usage: on_compute.py [--time MIN] [--mem SIZE] [--cpus N] [--name NAME] "
                      "[--preemptible] [--partition P] [--account A] [--qos Q] [--why TEXT] "
-                     "[--print] -- COMMAND [ARG ...]\n"
+                     "[--session DIR] [--print] -- COMMAND [ARG ...]\n"
                      "       on_compute.py --header LOGDIR --name NAME [--time MIN] [--mem SIZE] "
                      "[--cpus N] [--no-preempt]\n"
                      "       on_compute.py --is-login-node\n")
@@ -300,7 +340,7 @@ def main(args):
         print(__doc__.strip())
         return 0
     o = {"time": DEFAULT_MINUTES, "mem": DEFAULT_MEM, "cpus": 1, "name": None, "partition": None,
-         "account": None, "qos": None, "why": None, "header": None}
+         "account": None, "qos": None, "why": None, "header": None, "session": None}
     flags = {"print": False, "no-preempt": False, "preemptible": False, "is-login-node": False}
     k = 0
     while k < len(opts):
@@ -331,7 +371,8 @@ def main(args):
             raise ValueError("--time and --cpus must be at least 1")
         line = srun_argv(cmd, o["time"], o["mem"], o["cpus"], o["name"],
                          preemptible_ok=flags["preemptible"], partition=o["partition"],
-                         account=o["account"], qos=o["qos"]) if (flags["print"] or on_login_node()) \
+                         account=o["account"], qos=o["qos"], prefer_low=flags["preemptible"],
+                         session=o["session"], chdir=True) if (flags["print"] or on_login_node()) \
             else None
     except ValueError as e:
         return _usage(str(e))

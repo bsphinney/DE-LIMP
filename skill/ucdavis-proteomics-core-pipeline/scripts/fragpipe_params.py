@@ -109,6 +109,68 @@ def _pct(x):
     return f"{x * 100:g}%"
 
 
+# Ruling 120 condition 1: a filter with no protein-level FDR (--prot 1, as FragPipe 24.0's
+# Nonspecific-peptidome and Nonspecific-HLA workflows ship) is KEPT and disclosed, never "fixed".
+# Philosopher's protein FDR is not a filter on the protein list alone: with a protein inference
+# both its --sequential and its 2D filter keep only the PSMs of proteins that pass it
+# (Nesvilab/philosopher lib/fil/fil.go: Run, extractPSMfromPepXML -- read 2026-11-11), so
+# --prot 0.01 would drop every endogenous peptide of a protein seen by one or two peptides, which
+# is most of a peptidome. The vendor's workflows leave it off for that reason; so does the skill.
+PROTEIN_FDR_OFF_WHY = (
+    "Philosopher's protein-level FDR also removes the PSMs of every protein that fails it (with a "
+    "protein inference both its --sequential and its 2D filter keep only the PSMs of passing "
+    "proteins: philosopher lib/fil/fil.go, extractPSMfromPepXML), so in a non-specific "
+    "(peptidome) search it would remove the endogenous peptides of the many proteins seen by one "
+    "or two peptides. FragPipe's Nonspecific workflows ship --prot 1 for that reason, and the "
+    "skill keeps it; the peptide-level FDR is the result")
+PROTEIN_GROUPS_UNCONTROLLED = ("the proteins the peptides map to are therefore not FDR-controlled, "
+                               "and no protein count is reported as a result")
+
+
+def protein_fdr_record(text):
+    """Whether a Philosopher filter line applies a protein-level FDR -- THE reading, for the
+    preset's record (make_presets: the manifest), fragpipe_identifications.json and the analysis
+    brief. -> {"applied": True | False | None (no filter recorded), "threshold", "filter", "why",
+    "protein_filter": the sentence a reader is given}."""
+    if not (text or "").strip():
+        return {"applied": None, "threshold": None, "filter": None,
+                "why": "the Philosopher filter this search ran is not recorded",
+                "protein_filter": "not recorded (the Philosopher filter is not known): give no "
+                                  "protein-level FDR and no protein count as a result"}
+    f = philosopher_filter(text)
+    if f["prot"] >= 1:
+        return {"applied": False, "threshold": None, "filter": f["raw"],
+                "why": PROTEIN_FDR_OFF_WHY,
+                "protein_filter": (f"none (the Philosopher filter {f['raw']} sets --prot "
+                                   f"{f['prot']:g}): {PROTEIN_GROUPS_UNCONTROLLED}")}
+    how = "picked protein FDR" if f["picked"] else "protein FDR"
+    dflt = "" if "prot" in f["set"] else " (Philosopher's default; not set in the filter)"
+    return {"applied": True, "threshold": f["prot"], "filter": f["raw"],
+            "why": f"the filter sets a protein-level FDR ({how}){dflt}",
+            "protein_filter": f"protein {_pct(f['prot'])} FDR ({how}, Philosopher filter "
+                              f"{f['raw']}){dflt}"}
+
+
+def no_protein_fdr(pfdr):
+    """THE predicate on a protein_fdr_record(): True when the record says the protein groups rest
+    on no protein-level FDR (applied False, or None: the filter is not recorded); False when it
+    says one was applied, or there is no record at all (an older search: nothing is claimed
+    either way). The adapters, the analysis brief and the report's callouts all ask this, never
+    a test of their own (C2 proteomics H1)."""
+    return isinstance(pfdr, dict) and "applied" in pfdr and pfdr["applied"] is not True
+
+
+def recorded_protein_fdr(*records):
+    """The protein_fdr_record() a search's own record carries: the first of `records`
+    (fragpipe_identifications.json for an identifications-only search, search_provenance.json's
+    `fragpipe_quantity` for a quantified one) whose `protein_fdr` is a dict, else None."""
+    for rec in records:
+        p = rec.get("protein_fdr") if isinstance(rec, dict) else None
+        if isinstance(p, dict):
+            return p
+    return None
+
+
 def philosopher_methods_sentence(text):
     """The Methods sentence for a Philosopher filter line, every threshold as the line set it or
     as Philosopher's default (said so)."""
@@ -130,7 +192,8 @@ def philosopher_methods_sentence(text):
     if f["razor"]:
         how.append("razor peptides for protein scoring")
     if f["prot"] >= 1:
-        parts.append(f"no protein-level FDR filter (--prot {f['prot']:g})")
+        parts.append(f"no protein-level FDR filter (--prot {f['prot']:g}): "
+                     f"{PROTEIN_GROUPS_UNCONTROLLED}")
     else:
         parts.append(f"protein {_pct(f['prot'])} FDR" + (f" ({'; '.join(how)})" if how else "")
                      + ("" if "prot" in f["set"] else " (Philosopher's default)"))
@@ -254,6 +317,17 @@ def search_extras(params):
     return out
 
 
+# FragPipe's console logs: log_<date>.txt, written into the search's workdir. The ONE list of
+# them every reader walks (the Philosopher filter, IonQuant's MaxLFQ line, MSBooster's bandwidth):
+# newest first -- the date in the name sorts as text.
+LOG_GLOB = "log_*.txt"
+
+
+def logs(out):
+    """FragPipe's console logs in the search folder `out`, NEWEST FIRST; [] when there are none."""
+    return sorted(glob.glob(os.path.join(out, LOG_GLOB)), reverse=True) if out else []
+
+
 # FragPipe's console log (log_<date>.txt in the workdir): each Philosopher filter it ran, as
 # "PhilosopherFilter [Work dir: <dir>]" and then the command line (FragPipe 24.0). The filter AS
 # RUN can differ from the workflow's phi-report.filter: FragPipe added --razor and --tag in both
@@ -325,8 +399,7 @@ def filter_scope_sentence(runs, n_runs=None):
 def find_filter_runs(out):
     """The Philosopher filter runs FragPipe's newest log in `out` (log_*.txt) shows
     (read_filter_runs), [] when none is read."""
-    logs = sorted(glob.glob(os.path.join(out, "log_*.txt"))) if out else []
-    for log in reversed(logs):
+    for log in logs(out):
         try:
             runs = read_filter_runs(log)
         except OSError:
@@ -354,6 +427,153 @@ def filter_as_recorded(out, workflow_filter=None):
         except (ValueError, IndexError, TypeError, KeyError) as e:
             err = f"{type(e).__name__}: {e}"
     return {"filter": workflow_filter, "from_log": False, "runs": [], "log_error": err}
+
+
+# MSBooster (FragPipe 24.0 runs v1.4.14) fits each run's retention times to the predicted ones
+# with a LOESS whose bandwidth it CHOOSES for that run by a grid search; FragPipe's log says so per
+# run: "Processing pin <...>/<experiment>/<run>.pin", "RT regression using 126 PSMs", then "Best
+# average bandwidth for mass  from grid search of 0.01,0.05,0.1,0.2 after 5 iterations is 0.1"
+# (the same words follow each IM regression after it, which is not the RT one). It is no setting
+# of the skill or the workflow, and two searches of the same input can choose differently: the
+# two-run timsTOF DDA reference gave 0.1 once and 0.11 another time for one run, and with it
+# 6,797 PSMs / 187 protein groups or 6,762 / 186 (everything before MSBooster byte-identical;
+# Ruling 106). So the value is recorded as MSBooster's choice, from the log, or as not stated.
+MSBOOSTER_CHOSEN = "chosen by MSBooster"
+# its key in search_provenance.json, fragpipe_quantity.json and fragpipe_identifications.json
+MSBOOSTER_KEY = "msbooster_rt_bandwidth"
+NOT_STATED = "not stated in the log"
+_MSB_PIN = re.compile(r"\bProcessing pin (.+\.pin)\s*$")
+_MSB_RT = re.compile(r"\bRT regression using (\d+) PSMs")
+_MSB_IM = re.compile(r"\bIM regression\b")
+_MSB_BW = re.compile(r"\bBest average bandwidth\b.*?(?:grid search of (\S+).*?)?\bis\s+"
+                     r"([0-9]*\.?[0-9]+(?:[eE][-+]?\d+)?)\s*$")
+
+
+def msbooster_rt_bandwidths(out):
+    """MSBooster's retention-time LOESS bandwidth for each run, as FragPipe's newest log in `out`
+    states it (logs()[0]: the search that left these files). -> {"what", "source", "log" (its file
+    name), "status": "stated" | NOT_STATED, "runs": [{"run" (the .pin's name), "experiment" (its
+    folder), "bandwidth": the number MSBooster chose | NOT_STATED, "source": MSBOOSTER_CHOSEN |
+    NOT_STATED, "rt_regression_psms", "grid"}]}. A run's bandwidth is the line after ITS "RT
+    regression", never an IM regression's. File names only, never a path."""
+    found = logs(out)
+    log = found[0] if found else None
+    rec = {"what": "MSBooster's retention-time LOESS bandwidth, per run",
+           "source": (f"{MSBOOSTER_CHOSEN}: it picks the bandwidth for each run by a grid search "
+                      f"-- not a setting of the skill or the workflow; read from FragPipe's log"
+                      + (f" ({os.path.basename(log)})" if log else "")),
+           "log": os.path.basename(log) if log else None, "status": NOT_STATED, "runs": []}
+    if not log:
+        rec["source"] = f"{NOT_STATED}: no FragPipe log (log_*.txt) in the search folder"
+        return rec
+    runs, cur, state = [], None, None
+    try:
+        with open(log, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.rstrip("\r\n")
+                m = _MSB_PIN.search(line)
+                if m:
+                    pin = m.group(1).replace("\\", "/")
+                    cur = {"run": os.path.basename(pin)[:-len(".pin")],
+                           "experiment": os.path.basename(os.path.dirname(pin)) or None,
+                           "bandwidth": NOT_STATED, "source": NOT_STATED,
+                           "rt_regression_psms": None, "grid": None}
+                    runs.append(cur)
+                    state = None
+                    continue
+                if cur is None:
+                    continue
+                m = _MSB_RT.search(line)
+                if m:
+                    cur["rt_regression_psms"], state = int(m.group(1)), "rt"
+                    continue
+                if _MSB_IM.search(line):
+                    state = "im"
+                    continue
+                m = _MSB_BW.search(line)
+                if m and state == "rt" and cur["source"] == NOT_STATED:
+                    cur.update(bandwidth=float(m.group(2)), source=MSBOOSTER_CHOSEN,
+                               grid=m.group(1))
+                    state = None
+    except OSError as e:
+        rec["source"] = f"{NOT_STATED}: FragPipe's log could not be read ({type(e).__name__})"
+        return rec
+    rec["runs"] = runs
+    if any(r["source"] == MSBOOSTER_CHOSEN for r in runs):
+        rec["status"] = "stated"
+    elif not runs:
+        rec["source"] = (f"{NOT_STATED}: FragPipe's log ({os.path.basename(log)}) shows no "
+                         f"MSBooster run")
+    return rec
+
+
+def msbooster_rerun_sentence(bw):
+    """THE sentence (Ruling 106) for the Methods (make_methods.py) and REPRODUCE.md
+    (provenance.py): a re-run can differ slightly because MSBooster chose its RT bandwidth per run,
+    with the values this search ran with, from the record msbooster_rt_bandwidths() wrote. None
+    when the record shows no MSBooster run. It names no run file (Ruling 110.2: file names can
+    carry sample or lab names, and Methods travel into papers): the range across the runs, how
+    many runs the log does not state, and where each run's value is (the search record)."""
+    if not isinstance(bw, dict) or not bw.get("runs"):
+        return None
+    runs = bw["runs"]
+    vals = [r["bandwidth"] for r in runs if r.get("source") == MSBOOSTER_CHOSEN
+            and isinstance(r.get("bandwidth"), (int, float))]
+    n_missing = len(runs) - len(vals)
+    n = len(runs)
+    head = ("A re-run of this FragPipe search can differ slightly from it, because MSBooster "
+            "chooses its retention-time smoothing (the LOESS bandwidth) for each run itself; ")
+    where = f"each run's value is in the search record, {MSBOOSTER_KEY} in search_provenance.json"
+    if not vals:
+        return (head + "FragPipe's log does not state the value for "
+                + ("its run" if n == 1 else f"any of its {n} runs") + f" ({where}).")
+    lo, hi = min(vals), max(vals)
+    if len(vals) == 1:
+        given = f"{lo:g} for one run"
+    elif lo == hi:
+        given = f"{lo:g} for {'both runs' if len(vals) == 2 else f'each of the {len(vals)} runs'}"
+    else:
+        given = f"{lo:g}–{hi:g} across the {len(vals)} runs"
+    if n_missing:
+        given += f"; the log does not state it for {n_missing} of the {n} runs"
+    return head + f"this search ran with {given} ({MSBOOSTER_CHOSEN}, as FragPipe's log states; {where})."
+
+
+# The steps FragPipe ran, as its console log closes each one: "Process '<step>' finished, exit
+# code: <n>" (FragPipe 24.0; the command list at the top of the log is only the plan). The Methods
+# name and cite a tool only when it ran (make_methods.py), with the version the log's header
+# states ("<Tool> version <v>").
+_PROCESS_DONE = re.compile(r"Process '([^']+)' finished, exit code: (-?\d+)")
+_LOG_VERSION = re.compile(r"^([A-Za-z][\w .-]*?) version (\S.*?)\s*$")
+
+
+def tools_run(out):
+    """What FragPipe's newest log in `out` says ran: {"log" (its file name), "ran" {step: times it
+    finished with exit code 0}, "failed" {step: times it finished otherwise}, "versions" {tool:
+    version as the log's header states it; "N/A" left out}}; None with no log or an unreadable
+    one. File names only, never a path."""
+    found = logs(out)
+    if not found:
+        return None
+    rec = {"log": os.path.basename(found[0]), "ran": {}, "failed": {}, "versions": {}}
+    try:
+        with open(found[0], encoding="utf-8", errors="replace") as fh:
+            head = True
+            for line in fh:
+                line = line.rstrip("\r\n")
+                if head:
+                    m = _LOG_VERSION.match(line.strip())
+                    if m and m.group(2) != "N/A":
+                        rec["versions"].setdefault(m.group(1).strip(), m.group(2))
+                    if line.startswith("LCMS files"):
+                        head = False
+                m = _PROCESS_DONE.search(line)
+                if m:
+                    key = "ran" if m.group(2) == "0" else "failed"
+                    rec[key][m.group(1)] = rec[key].get(m.group(1), 0) + 1
+    except OSError:
+        return None
+    return rec
 
 
 def manifest_rows(out):
@@ -411,6 +631,36 @@ def tolerance(params, which):
     if tol is None or unit is None:
         return None
     return {"value": tol, "unit": unit, "symmetric": True, "lo": -tol, "hi": tol}
+
+
+# MSFragger's calibrate_mass, in fragger.params' own comment: "0 for OFF, 1 for ON, 2 for ON and
+# find optimal parameters, 4 for ON and find the optimal fragment mass tolerance". FragPipe 24.0's
+# LFQ-MBR (the timsTOF DDA default) ships 2, its Nonspecific workflows 0.
+CALIBRATE_MASS = {
+    1: "recalibrated the precursor and fragment masses",
+    2: "recalibrated the precursor and fragment masses and chose its search parameters from the "
+       "data",
+    4: "recalibrated the precursor and fragment masses and chose the fragment mass tolerance from "
+       "the data",
+}
+
+
+def calibration_sentence(value, source):
+    """The Methods sentence for MSFragger's calibrate_mass as the search's workflow set it
+    (`source`: the file it was read from) -- a statement of what ran, never a warning (C2
+    proteomics M5). "" when off (0) or not recorded; an unknown value is named as such."""
+    v = _num(value)
+    if not v:
+        return ""
+    what = CALIBRATE_MASS.get(int(v))
+    head = (f"MSFragger {what} (calibrate_mass={int(v)}, as the search's workflow sets it; "
+            if what else
+            f"MSFragger ran with calibrate_mass={int(v)}, a value not described here ("
+            f"the search's workflow sets it; ")
+    if int(v) == 1:
+        return head + f"{source})."
+    return (head + f"{source}), so the tolerances given here are its starting values; the values "
+            f"it searched with are in FragPipe's log.")
 
 
 # FragPipe 24.0's quantification switches, as its shipped workflows set them (read 2026-11-03):

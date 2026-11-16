@@ -1,0 +1,28 @@
+FragPipe (24.0) runtime properties
+System OS: Linux
+MSBooster [Work dir: /data/search]
+2026-11-05 00:21:02 [INFO] - MSBooster v1.4.14
+2026-11-05 00:21:23 [INFO] - Loading predicted retention times: /data/search/MSBooster/spectraRT.predicted.bin
+2026-11-05 00:21:24 [INFO] - Processing pin /data/search/S1_a/S1-a.pin
+2026-11-05 00:21:24 [INFO] - Processing /data/search/raw_stage/S1-a_uncalibrated.mzML
+2026-11-05 00:21:29 [INFO] - Setting pin entries
+...10%...20%...30%...40%...50%...60%...70%...80%...90%...100%
+2026-11-05 00:21:30 [INFO] - RT regression using 126 PSMs
+Iteration 1...2...3...4...5...
+2026-11-05 00:21:31 [INFO] - Best average bandwidth for mass  from grid search of 0.01,0.05,0.1,0.2 after 5 iterations is 0.11
+2026-11-05 00:21:32 [INFO] - IM regression using 101 PSMs for charge 2
+Iteration 1...2...3...4...5...
+2026-11-05 00:21:32 [INFO] - Best average bandwidth for mass  from grid search of 0.01,0.05,0.1,0.2 after 5 iterations is 1.0
+2026-11-05 00:21:34 [INFO] - Writing features
+2026-11-05 00:21:24 [INFO] - Processing pin /data/search/S2_b/S2-b.pin
+2026-11-05 00:21:24 [INFO] - Processing /data/search/raw_stage/S2-b_uncalibrated.mzML
+2026-11-05 00:21:29 [INFO] - Setting pin entries
+...10%...20%...30%...40%...50%...60%...70%...80%...90%...100%
+2026-11-05 00:21:30 [INFO] - RT regression using 264 PSMs
+Iteration 1...2...3...4...5...
+2026-11-05 00:21:31 [INFO] - Best average bandwidth for mass  from grid search of 0.01,0.05,0.1,0.2 after 5 iterations is 0.17
+2026-11-05 00:21:32 [INFO] - IM regression using 101 PSMs for charge 2
+Iteration 1...2...3...4...5...
+2026-11-05 00:21:32 [INFO] - Best average bandwidth for mass  from grid search of 0.01,0.05,0.1,0.2 after 5 iterations is 0.14
+2026-11-05 00:21:34 [INFO] - Writing features
+Process 'MSBooster' finished, exit code: 0

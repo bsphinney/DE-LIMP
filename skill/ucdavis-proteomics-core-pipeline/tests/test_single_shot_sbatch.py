@@ -254,7 +254,7 @@ class QueueTests(unittest.TestCase):
 
 
 # HIVE's real associations for a facility member who is also in publicgrp, read with
-# `sacctmgr -nP show assoc user=brettsp format=account,partition,qos` on 2026-09-16.
+# `sacctmgr -nP show assoc user=bstaff format=account,partition,qos` on 2026-09-16.
 HIVE_ASSOCIATIONS = """genome-center-grp|gpu-a100|genome-center-grp-gpu-a100-qos
 genome-center-grp|high|genome-center-grp-high-qos
 publicgrp|high|publicgrp-high-qos
@@ -415,7 +415,7 @@ class StaleArtefactTests(unittest.TestCase):
     search", "re-search with different parameters"). If DIA-NN then exits 0 without writing --
     no .NET on the node, an unmounted path -- the previous report is still there, the guards
     read it, and the job reports success on results from other parameters. Reproduced on HIVE
-    with DIA-NN 2.7.0 (review srun 23512013): an old report.parquet + report.stats.tsv, a search
+    with DIA-NN 2.7.0 (in a review run): an old report.parquet + report.stats.tsv, a search
     with no DOTNET_ROOT, "ERROR: cannot read .raw files", exit 0, both files unchanged by md5,
     and check_report_runs.py printed "OK: report holds all 2 runs"."""
 
@@ -689,8 +689,16 @@ class ChainResourceTests(unittest.TestCase):
                                    max_simultaneous=None)
             os.makedirs(w.out, exist_ok=True)
             run_search.run_diann_parallel(w.diann, w.cfg, w.runs, w.fasta, w.out, 16, a)
-            self.assertIn("#SBATCH --cpus-per-task=64",
-                          _headers(os.path.join(w.out, "step3_assembly.sbatch")))
+            # Step 5 keeps the generator's own 64 (X2: not measured, so not resized). 64 asked, the
+            # queue's per-user cap is 64: one single job leaves a quarter of it free for the
+            # user's other jobs (run_search.single_job_cpus, Ruling 116)
+            self.assertIn("#SBATCH --cpus-per-task=48",
+                          _headers(os.path.join(w.out, "step5_report.sbatch")))
+            # Step 3 is sized from the file count since X2 (diann_parallel.assembly_sizing): 3 files
+            # are 8 CPUs / 32G / 2 h, not the old fixed 48; an unset --assembly-* flag asks for that
+            s3 = _headers(os.path.join(w.out, "step3_assembly.sbatch"))
+            for h in ("#SBATCH --cpus-per-task=8", "#SBATCH --mem=32G", "#SBATCH --time=2:00:00"):
+                self.assertIn(h, s3)
 
 
 class ChainStaleArtefactTests(unittest.TestCase):

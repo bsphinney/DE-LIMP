@@ -4,7 +4,16 @@ Generates a drop-in LC-MS/MS Methods section straight from facility raw data, pl
 the correct UC Davis Proteomics Core instrument-grant acknowledgment. Can run as
 part of a full analysis or **standalone** (just `--raw` at the facility data).
 
+<!-- contents: tests/test_skill_structure.py --toc -->
+**Contents** (section: line)
+- 15: What it extracts vs. defaults
+- 135: Instrument grant acknowledgments (verified 2026-06)
+- 159: Output + workflow
+- 172: 9d. The Methods section (step 9d)
+<!-- /contents -->
+
 ## What it extracts vs. defaults
+
 - **Extracted from the raw metadata** (shown with its source in a parameter table):
   - Bruker `.d`, read by `bruker_method.py`. It reads small metadata files only, never the
     `analysis.tdf_bin`, and opens every sqlite file read-only and immutable.
@@ -103,29 +112,6 @@ precursor FDR, library mode, MBR), read by `search_record()` — the same reader
 `make_deposit.py` uses for the SDRF. A value in no record prints as
 `____ [not recorded — confirm]`, never as a default.
 
-**Which search, and what its record says (2.14.2):**
-- `--session <S>` (with no `--search-prov`) takes the session's own search record,
-  `session.search_choice`: wherever the search went (`output/search_sage/` …), and with several,
-  the one the DE read. Several records and none chosen: the paragraph is **tagged blanks**, with
-  why, never one search's values; `--search-prov` given more than once does the same. A
-  `--search-prov` file that is not there is refused. Choose a search as SKILL.md step 12b says.
-- The acquisition mode comes from `--acquisition`, then the workflow manifest's `acquisition`,
-  then the session's `input/acquisition.json` (step 2); with none, `[DDA/DIA — confirm]`.
-- DIA-NN's mass accuracy is "optimised automatically per run" only when the record says DIA-NN
-  chose it; measured-and-pinned says so; with no record of the run it is
-  `[not recorded — confirm]` (a search pinned at 10/20 ppm was once called optimised).
-- Sage's settings are read from its `results.json` (the search as it ran), FragPipe's from
-  `fragger.params` and the saved `fragpipe.workflow` (the Philosopher filter as run, the
-  database MSFragger read).
-- An identifications-only search (Sage `--ids-only`, a FragPipe workflow with no
-  quantification) says so, with its FDR rule; a timsTOF `.d` searched by Sage says whether
-  Sage read it directly (identifications only) or it was converted to mzML first (with the
-  msconvert options); a DIA-NN `--dda` search whose second pass crashed says the first-pass
-  report was used and that DIA-NN's protein MaxLFQ quantities are absent.
-- The **Differential expression** paragraph states the between-run normalisation the DE record
-  names (`de_provenance.json` `normalisation`; on the MaxLFQ route, the `--between-run` step,
-  `references/de-analysis.md`).
-
 With `--submission <session>` (a CoreOmics submission attached by `submission_report.py`),
 it adds a **Sample preparation** section from the record, through `prepared_by()`, the one
 reading of the form. When the lab sent peptides, it says the submitting laboratory prepared
@@ -171,13 +157,119 @@ links the source page; confirm the current wording there before publishing. To a
 an instrument, extend the `ACKS` table in `make_methods.py`.
 
 ## Output + workflow
+
 - `methods.md` — the drop-in prose (LC, MS, sequence database, [database search],
   [differential expression], parameter tables, Acknowledgments).
 - `methods_params.json` — the extracted parameters, machine-readable.
 - Render to Word with `to_docx.py --in methods.md --out methods.docx`.
 
 The agent should **verify the draft against the parameter table and polish the
-prose** (the example in `~/Documents/DataAnalysis/.../timsTOF_Methods` shows the
+prose** (the example in `<your folder of instrument method files>` shows the
 target quality), resolve every `[… — confirm]` tag in the list above from a record or the
 user's answer (never with a guess: an unresolved tag stays), and keep the acknowledgment
 verbatim.
+
+## 9d. The Methods section (step 9d)
+
+Generate a drop-in LC-MS/MS Methods section from the facility raw data and the session's own
+records, with the correct UC Davis Proteomics Core instrument-grant acknowledgment:
+
+```
+python3 scripts/make_methods.py --raw /path/to/*.d \
+    --fasta-meta <session>/input/search.fasta.meta.json \
+    --params <session>/input/wf/<params_file> \
+    --session <session> \
+    --workflow-manifest <session>/input/wf/workflow.manifest.json \
+    --out <session>/output/methods.md --de-dir <session>/output/tables \
+    [--submission <session>] \
+    [--qc-bracket <session>/logs/qc_bracket.json]     # Core staff runs (step 8e)
+python3 scripts/to_docx.py --in <session>/output/methods.md \
+    --out <session>/output/methods.docx
+```
+
+**Which search, and what its record says (2.14.2):**
+- `--session <S>` (with no `--search-prov`) takes the session's own search record,
+  `session.search_choice`: wherever the search went (`output/search_sage/` …), and with several,
+  the one the DE read. Several records and none chosen: the paragraph is **tagged blanks**, with
+  why, never one search's values. `--search-prov <file>` names one by hand; given more than once
+  it does the same as none chosen, and a file that is not there is refused. To choose one for
+  `--session`, run `session.py choose-search --dir <session> --folder <its folder under output/>`
+  (nothing is renamed -- the groups of a FAIMS split are valid searches), or rename a replaced one
+  to `output/superseded_<name>/` before finalize (a folder whose name holds "superseded" is not a
+  candidate); a Core delivery: core-submissions.md
+  "12b.", "Several searches".
+- The acquisition mode comes from `--acquisition`, then the workflow manifest's `acquisition`,
+  then the session's `input/acquisition.json` (step 2); with none, `[DDA/DIA — confirm]`.
+- DIA-NN's mass accuracy is "optimised automatically per run" only when the record says DIA-NN
+  chose it; measured-and-pinned says so; with no record of the run it is
+  `[not recorded — confirm]` (a search pinned at 10/20 ppm was once called optimised).
+- Sage's settings are read from its `results.json` (the search as it ran), FragPipe's from
+  `fragger.params` and the saved `fragpipe.workflow` (the Philosopher filter as run, the
+  database MSFragger read).
+- An identifications-only search (Sage `--ids-only`, a FragPipe workflow with no
+  quantification) says so, with its FDR rule; a timsTOF `.d` searched by Sage says whether
+  Sage read it directly (identifications only) or it was converted to mzML first (with the
+  msconvert options); a DIA-NN `--dda` search whose second pass crashed says the first-pass
+  report was used and that DIA-NN's protein MaxLFQ quantities are absent.
+- The **Differential expression** paragraph states the between-run normalisation the DE record
+  names (`de_provenance.json` `normalisation`; on the MaxLFQ route, the `--between-run` step,
+  `references/de-analysis.md`).
+
+(Step 12's `finalize` runs this for you when `output/methods.md` does not exist yet, passing
+`--submission` itself when one is attached, and `--qc-bracket <session>/logs/qc_bracket.json`
+when step 8e ran: an **Instrument performance** paragraph of ONE fixed sentence, the same
+whatever the verdict. The verdict itself is staff-only.) `--submission` adds **Sample preparation** from
+the CoreOmics record: when the lab sent peptides it says the submitting laboratory prepared
+them, with no Core-side placeholder; when the Core prepared them the protocol stays a tagged
+blank to fill.
+
+What it extracts, and what it only defaults:
+
+- It extracts the acquisition parameters from the raw metadata (Thermo by facility filename
+  prefix). From a Bruker `.d` it reads the LC system, its method and run time, the ion source
+  and its settings, the TIMS ramp, the dia-PASEF window scheme, the cycle time and the
+  collision-energy ramp. It writes them in the order published timsTOF Methods use.
+- The analytical column comes from `--lc-column`, else from HyStar's ColumnInfo, else from
+  `--column-log`. That flag takes an export of STAN's column-change log, and the column in place
+  at the first acquisition is used. With none of these, **for a timsTOF `.d` only**, the
+  facility's standard column (PepSep MAX C18, 10 cm × 150 µm, 1.5 µm) is printed **tagged
+  `[facility default — confirm]`**; any other run (a Thermo `.raw`, an mzML, outside data) gets
+  `____ [not recorded — confirm]`.
+  STAN keeps that log in PG Farm, which needs credentials, so the script never connects to it.
+- It tags what no file records: column temperature, emitter, mobile phases, Evotip loading and
+  peptide amount. STAN's 50 °C and the 20 µm emitter are given as facility defaults, tagged,
+  **for a timsTOF `.d` only**; the facility's mobile phases only for a Core `.d` or `.raw`;
+  anything else unknown is tagged `[not recorded — confirm]`.
+- **The tags you will meet**, each resolved from a record or the user's answer and **never
+  replaced with a guess** (an unresolved tag stays): `[facility default — confirm]`,
+  `[not recorded — confirm]`, `[raw file not readable here — confirm]`, `[DDA/DIA — confirm]`,
+  `[vendor — confirm]` (the instrument name names no one vendor: an mzML is not called Thermo),
+  and `[acquired at the UC Davis Proteomics Core? — confirm]` after the acknowledgment (a Core
+  instrument's name on data that are not a Core `.d`/`.raw`; keep the acknowledgment only if the
+  Core acquired it). → the full list: **Tags** above.
+- It builds parameter tables showing the source of each value.
+- It appends the instrument's grant acknowledgment (Fusion Lumos → S10OD021801; Exploris 480 →
+  S10OD026918-01A1; timsTOF → Dr. Neil Hunter / HHMI).
+
+What each input adds:
+
+- `--fasta-meta` writes the **Sequence database** paragraph: organism, proteome ID, UniProt
+  release, database type, entry count, and the contaminant library with its citation. The
+  database's build warnings are not in `methods.md`: tell the user the ones it prints under
+  `database_build_warnings` (step 12's `finalize`, when it writes the Methods, prints them under
+  the same key).
+- `--params` / `--search-prov` / `--workflow-manifest` write the **Database search** paragraph
+  from the parameters the search actually ran with: engine, the version that ran, cleavage rule,
+  missed cleavages, peptide/charge/m/z ranges, modifications, mass tolerances, precursor FDR,
+  library mode, and MBR.
+- `--de-dir` writes the **Differential expression** paragraph from `de_provenance.json`. It states
+  significance as run_de.R applies it: adj.P.Val only, with |log2FC| a volcano reference line,
+  never presented as a filter.
+
+A value in no record prints as `____ [not recorded — confirm]`, never as a guess. If the raw files
+are not readable where you run it, add `--instrument "<name>" --acquisition <DIA|DDA>` from the
+workflow manifest: the Methods are then written from the session record, with the acquisition
+values blank and tagged. **Verify the draft against the parameter tables and polish the prose;
+keep the acknowledgment exact** (confirm the wording at the source URL). This can also be run
+standalone — point `--raw` at facility data; no search or DE is needed. The sections above give
+the detail of each part.

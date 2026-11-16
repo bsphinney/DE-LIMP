@@ -35,6 +35,14 @@ Usage (the orchestrator fills these from earlier steps):
                                       # optional (default: the one beside --de-dir's folder):
                                       # the peak check's record (skyline_peaks.py), copied in
 
+Inside an analysis session (session.py init), all of that is in the session's own records:
+  python3 provenance.py --session <session dir>
+Every argument not given explicitly takes the value finalize would give it
+(make_deposit.bundle_flags, the one definition -- so the bundle is the one finalize would build);
+an explicit one always wins. One with no record stays unset, exactly as when it is not given,
+and is listed under `from_session.not_found` in the printed JSON -- never guessed. A --session
+that is not a readable session exits 2.
+
 Outputs under --outdir:
   run_manifest.json          everything, machine-readable
   REPRODUCE.md               human-readable methods + how-to-rerun
@@ -46,12 +54,14 @@ Outputs under --outdir:
                              FragPipe search's workflow as it ran, fragpipe_input.workflow)
   checksums/                 sha256 of inputs, report, and DE outputs
 """
-import sys, os, json, glob, shutil, hashlib, argparse, subprocess, platform, shlex
+import sys, os, re, json, glob, shutil, hashlib, argparse, subprocess, platform, shlex
 
 # one definition each, where it is written
 from fetch_fasta import (KEEP_TARGET_CONTAMINANTS_RULE, MIN_UNIQUE_PEPTIDES, sidecar_state,
                          keratin_sample_recorded, enzyme_arg)
 from skill_version import skill_version, plugin_meta, label as skill_label
+from skill_version import REPOSITORY as SKILL_REPOSITORY
+from safe_write import sha256_file, load_json  # noqa: E402  the ONE chunked sha256
 
 MANIFEST_LINES = []
 def ok(msg):      MANIFEST_LINES.append(f"[OK]      {msg}")
@@ -59,14 +69,6 @@ def skip(w, why): MANIFEST_LINES.append(f"[SKIPPED] {w} -- {why}")
 def note(msg):    MANIFEST_LINES.append(f"[NOTE]    {msg}")
 
 MAX_HASH_BYTES = 5 * 1024**3   # don't sha256 files bigger than 5 GB (record size instead)
-
-
-def sha256_file(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def fingerprint(path):
@@ -145,13 +147,6 @@ def _utc_now():
         microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def load_json(path):
-    try:
-        return json.load(open(path))
-    except Exception:
-        return None
-
-
 def read_fasta_info(text=None, path=None):
     """fetch_fasta.py's sidecar (<fasta>.meta.json) for the bundle -> (dict, None), or (None, the
     problem). From --fasta-info-file <path> or --fasta-info @<path>, or --fasta-info '<JSON>' (the
@@ -191,7 +186,11 @@ def fasta_info_for_bundle(info):
         {k: f.get(k) for k in ("file", "sha256", "n_entries")} for f in info["added_sequences"]])
 
 
-# PROT_0756 v2 (2026-09-28): identical inputs, software and flags on a zen4 and a zen2 HIVE node.
+# An --add-fasta file larger than this is referenced by its sha256, not copied into the bundle
+ADDED_COPY_MAX_BYTES = 50 * 2**20
+
+
+# A mouse-brain IP cohort, v2 (2026-09-28): identical inputs, software and flags on a zen4 and a zen2 HIVE node.
 CPU_FAMILY_EVIDENCE = ("|ΔlogFC| ≤ 0.0022 and |Δt| ≤ 0.0064 across 12 contrasts, no significance "
                        "call changed; each family reproduced its own tables exactly")
 
@@ -403,9 +402,144 @@ The DE ran on {where}, BLAS `{compute.get('blas')}`, LAPACK `{compute.get('lapac
 (de_provenance.json `compute`). DPC-Quant fits each protein with an optimiser that stops at a
 tolerance, and the BLAS library's CPU-specific kernels round the last bit differently, so the
 same inputs and software give slightly different numbers on another CPU family. Measured on
-PROT_0756 v2 (a zen4 and a zen2 HIVE node): {CPU_FAMILY_EVIDENCE}. {how} Do not set
+a mouse-brain IP cohort, v2 (a zen4 and a zen2 HIVE node): {CPU_FAMILY_EVIDENCE}. {how} Do not set
 `OPENBLAS_CORETYPE` to force one kind of kernel: it crashed limpa's dpcQuant on an EPYC 9734.
 """
+
+
+# ---- --session: every argument not given, from the session's own records --------------------
+# SKILL.md step 10 had the agent hand-type a 12-line command, so a bundle could quietly get the
+# wrong inputs. With --session <S> each argument below that is not given explicitly takes the
+# value finalize would give it: make_deposit.bundle_flags, the one definition of the bundle's
+# flags (finalize's command, bundle_command, is built from it), so the bundle step 10 builds is
+# the bundle finalize would build -- an identifications-only search's record and identifications
+# included (2.15 review H1). One with no record stays unset -- exactly as when it is not given,
+# so the [SKIPPED] lines are the same -- and is listed (stderr, MANIFEST.txt [NOTE], the printed
+# JSON's `from_session.not_found`): never guessed. The workflow manifest's `de` block is
+# resolve_defaults.py's DEFAULTS, never a record of the DE: the DE's settings come from
+# de_provenance.json alone (architectural rule #2). --search-output (repeatable) is filled too.
+SESSION_FILLED = ("outdir", "workflow_manifest", "setup_json", "tools_json", "params",
+                  "search_record", "conditions", "fasta", "fasta_info_file", "raw", "report",
+                  "de_dir", "engine", "engine_version", "de_method", "contrasts", "q_cutoff",
+                  "logfc", "adjp", "acquisition", "instrument", "organism_taxid", "commands",
+                  "qc_bracket", "peak_check", "timestamp")
+_UNSET = object()
+
+
+def _flag(dest):
+    return "--" + dest.replace("_", "-")
+
+
+def session_or_exit(path):
+    """The session dir --session names (absolute), or exit 2 saying why it is not one: no such
+    folder, not a session (session.is_session_dir: session.json, or init's input/ + output/), or
+    a session.json that cannot be read. init writes session.json only for Core staff (--submission
+    / --internal), so a session without one is still a session."""
+    import session as sm
+    d = os.path.abspath(os.path.expanduser(path))
+
+    def die(why):
+        sys.stderr.write(f"provenance.py --session {path}: {why}\n")
+        sys.exit(2)
+    if not os.path.isdir(d):
+        die("no such folder")
+    if not sm.is_session_dir(d):
+        die("not an analysis session (no session.json, and not the input/ + output/ layout "
+            "`session.py init` makes): give the session folder, or the arguments themselves")
+    sj = sm.paths_for(d)["session_json"]
+    if os.path.exists(sj):
+        try:
+            with open(sj, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError) as e:         # UnicodeDecodeError is a ValueError
+            die(f"{sj} cannot be read ({type(e).__name__}: {e}): look at it before the bundle "
+                "is built from this session")
+        if not isinstance(data, dict):
+            die(f"{sj} is not a JSON object: look at it before the bundle is built from this "
+                "session")
+    return d
+
+
+def fill_from_session(a, given, sdir):
+    """Fill every argument of `a` not in `given` from session `sdir`: the value
+    make_deposit.bundle_flags gives it (the one definition). -> the `from_session` record:
+    {session, filled: {flag: {from, value | n_files}}, explicit, not_found: {flag: why}, notes}.
+    An explicit --fasta or --de-dir replaces the session's own before the flags are worked out
+    (make_deposit.gather), so the sidecar and the DE's settings are those of the files named."""
+    import make_deposit
+    f = make_deposit.gather(sdir, fasta=a.fasta if "fasta" in given else None,
+                            de_dir=a.de_dir if "de_dir" in given else None)
+    b = make_deposit.bundle_flags(f)
+    filled, not_found = {}, {}
+    notes = [f"left out: {u}" for u in b["unnamed"]]
+    # where the session's own files and what ran differ: REPRODUCE.md says them (--note), as in
+    # the bundle finalize builds
+    about = {"Raw files:": "raw", "Parameters:": "params", "Database (FASTA):": "fasta"}
+    replay = [n for n in b["notes"]                 # not about a file given explicitly
+              if not any(n.startswith(k) and d in given for k, d in about.items())]
+    a.note = list(a.note) + [n for n in replay if n not in a.note]
+    # --fasta-info (the older form) given is the sidecar given
+    taken = set(given) | ({"fasta_info_file"} if a.fasta_info is not None else set())
+    outputs = [x["value"] for x in b["flags"] if x["flag"] == "--search-output" and x["value"]]
+    for x in b["flags"]:
+        flag = x["flag"]
+        dest = flag[2:].replace("-", "_")
+        if flag == "--search-output":
+            continue
+        if dest in taken:
+            continue
+        if x["value"] is not None:
+            setattr(a, dest, str(x["value"]))
+            filled[flag] = {"from": x["from"], "value": str(x["value"])}
+        elif flag not in make_deposit.BUNDLE_OPTIONAL:
+            not_found[flag] = x["why"]
+    # the search's other result files: the chosen search's, unless another record or other
+    # outputs were given (they would not belong to it)
+    outputs_given = bool(a.search_output)
+    if outputs_given or "search_record" in given:
+        if not outputs_given and outputs:
+            notes.append("--search-output: --search-record was given, so the session's search "
+                         "results are not fingerprinted; name that search's with --search-output")
+    elif outputs:
+        a.search_output = list(outputs)
+        filled["--search-output"] = {"from": next(x["from"] for x in b["flags"]
+                                                  if x["flag"] == "--search-output"),
+                                     "n_files": len(outputs)}
+    if "raw" not in given:
+        if b["raws"]:
+            a.raw = list(b["raws"])
+            filled["--raw"] = {"from": b["raws_from"], "n_files": len(b["raws"])}
+        else:
+            not_found["--raw"] = b["missing"][0] if b["missing"] else "no record of the raw files"
+    if "timestamp" not in given:
+        a.timestamp = _utc_now()
+        filled["--timestamp"] = {"from": "now (UTC): when this bundle was made -- not a session "
+                                         "record", "value": a.timestamp}
+    explicit = sorted([_flag(d) for d in given if d in SESSION_FILLED]
+                      + (["--search-output"] if outputs_given else []))
+    return {"session": sdir, "filled": filled, "explicit": explicit, "not_found": not_found,
+            "notes": notes, "replay_notes": replay}
+
+
+def say_from_session(rec):
+    """from_session on stderr (for the agent to relay) and as MANIFEST.txt [NOTE] lines."""
+    w = max([len(f) for f in list(rec["filled"]) + list(rec["not_found"])] + [10])
+    lines = [f"[provenance] --session {rec['session']}: arguments read from the session's records:"]
+    lines += [f"  {f:<{w}}  {v['from']}" for f, v in rec["filled"].items()]
+    if rec["explicit"]:
+        lines.append(f"[provenance] given explicitly (these win): {' '.join(rec['explicit'])}")
+    if rec["not_found"]:
+        lines.append("[provenance] NOT FOUND in the session's records -- left unset, as when not "
+                     "given (pass them explicitly if they exist):")
+        lines += [f"  {f:<{w}}  {why}" for f, why in rec["not_found"].items()]
+    lines += [f"[provenance] NOTE {n}" for n in rec["notes"] + rec.get("replay_notes", [])]
+    sys.stderr.write("\n".join(lines) + "\n")
+    note(f"arguments read from session {rec['session']}: "
+         + "; ".join(f"{f} from {v['from']}" for f, v in rec["filled"].items()))
+    for f, why in rec["not_found"].items():
+        note(f"--session: {f} not found in the session's records ({why}); left unset")
+    for n in rec["notes"]:
+        note(f"--session: {n}")
 
 
 def de_ran_of(de_rec, de_method, de_dir):
@@ -515,6 +649,34 @@ def identified_only(sp_path, sp):
                                                 record=sp)
 
 
+def _engine_line(wfman):
+    """REPRODUCE.md's engine line from the manifest's `engine` record: its name and version, and
+    how step 4 chose it (engine_choice.choose: `how`, and its client sentence quoted as written)
+    -- never the record printed raw. A manifest whose `engine` is a plain name is printed as is."""
+    eng = (wfman or {}).get("engine")
+    if not isinstance(eng, dict):
+        return str(eng) if eng else "not recorded"
+    line = " ".join(str(x) for x in (eng.get("name"), eng.get("version")) if x) or "not recorded"
+    sel = eng.get("selection") if isinstance(eng.get("selection"), dict) else {}
+    if sel.get("how"):
+        line += f" (chosen: {sel['how']})"
+    if sel.get("sentence"):
+        line += f". {sel['sentence']}"
+    return line
+
+
+def rerun_note(sp):
+    """REPRODUCE.md's note that a FragPipe re-run can differ slightly (Ruling 106): the one sentence
+    (fragpipe_params.msbooster_rerun_sentence) from the search record's MSBooster bandwidths; "" for
+    any other search or a record without them."""
+    sp = sp if isinstance(sp, dict) else {}
+    if str(sp.get("engine") or "").lower() != "fragpipe":
+        return ""
+    import fragpipe_params
+    s = fragpipe_params.msbooster_rerun_sentence(_record_key(sp, fragpipe_params.MSBOOSTER_KEY))
+    return f"\n\n{s}" if s else ""
+
+
 def analysis_section(sp, engine, de_ran, ids_only=False):
     """REPRODUCE.md's "What this analysis was", for an analysis with no DE: the search, how its
     inputs went in, and -- for one that did not quantify (`ids_only`, identified_only) -- where
@@ -577,6 +739,9 @@ def main():
                          "(results.sage.parquet). finalize passes session.search_result_files")
     ap.add_argument("--de-dir")
     ap.add_argument("--engine")
+    ap.add_argument("--engine-version", help="the engine build the search ran (run_search.py's "
+                                             "search_provenance.json `version`); recorded in "
+                                             "run_manifest.json as `engine_version`")
     ap.add_argument("--de-method")
     ap.add_argument("--contrasts", default="")
     ap.add_argument("--q-cutoff"); ap.add_argument("--logfc"); ap.add_argument("--adjp")
@@ -591,7 +756,23 @@ def main():
                                          "skyline_provenance.json); default: the one beside the "
                                          "--de-dir folder, when there is one")
     ap.add_argument("--timestamp", default="", help="ISO timestamp (script can't call clock)")
-    a = ap.parse_args()
+    ap.add_argument("--note", action="append", default=[], metavar="TEXT",
+                    help="where the session's own files and what ran differ (repeat it): said in "
+                         "REPRODUCE.md and MANIFEST.txt. finalize passes make_deposit.bundle_flags' "
+                         "notes; --session adds them itself")
+    ap.add_argument("--session", metavar="DIR",
+                    help="an analysis session (session.py init): every argument not given is read "
+                         "from its records; what has none stays unset and is listed "
+                         "(from_session.not_found in the printed JSON)")
+    # Which arguments were GIVEN (an explicit one always wins over the session's record): each
+    # starts as a sentinel argparse leaves alone unless the flag is on the command line.
+    a = ap.parse_args(namespace=argparse.Namespace(**{d: _UNSET for d in SESSION_FILLED}))
+    given = {d for d in SESSION_FILLED if getattr(a, d) is not _UNSET}
+    for d in SESSION_FILLED:
+        if d not in given:
+            setattr(a, d, ap.get_default(d))
+    # a --session that is not a readable session stops here, before any move to a compute node
+    sdir = session_or_exit(a.session) if a.session is not None else None
     # sha256 of every input raw file (up to 5 GB each) and the report: I/O for a compute node.
     # On a cluster login node this runs itself again there (on_compute.py; HPC@UCD's ucd-hpc rules).
     try:
@@ -601,6 +782,12 @@ def main():
                                        preemptible_ok=True, script=__file__)
     except ImportError:
         pass                              # a partial scripts/ without on_compute.py: as before
+    from_session = None
+    if sdir:
+        from_session = fill_from_session(a, given, sdir)
+        say_from_session(from_session)
+    for n in a.note:                              # REPRODUCE.md says them too (replay_section)
+        note(f"what ran: {n}")
     # The database record is checked before anything is written: a bundle whose database replay
     # silently fell back to the workflow defaults would reproduce a different database.
     fasta_info = None
@@ -754,8 +941,27 @@ def main():
         # which was which. Kept, under a name that says what it is: it is still the only thing
         # that reports the binary actually on disk, and a disagreement with the release is
         # itself worth seeing.
+        self_rep = run_capture(f"{setup['sage']} --version").strip()
+        rel = ((tools or {}).get("versions") or {}).get("sage")
+        m_rep = re.search(r"\d+(?:\.\d+)+", self_rep)
+        rep = m_rep.group(0) if m_rep else None
+        try:
+            sha = sha256_file(setup["sage"])
+        except OSError as e:
+            sha = f"(not hashed: {type(e).__name__})"
+        if not rel:
+            release = "unknown (no release record: tools.json names no Sage release)"
+        elif rep and rep != rel:
+            release = f"release v{rel} (binary self-reports {rep})"
+        else:
+            release = f"release v{rel}"
         versions["sage_self_reported_version"] = {
-            "value": run_capture(f"{setup['sage']} --version").strip(),
+            "value": self_rep,
+            # the bytes, and the release they are: the v0.14.7 directory's binary self-reports
+            # 0.14.6 and is byte-identical to the official v0.14.7 release asset (an upstream
+            # self-report bug, verified), so the hash -- not the printed number -- is the identity
+            "binary_sha256": sha,
+            "release_of_record": release,
             "note": "`sage --version` as the binary prints it. This is NOT necessarily the "
                     "release it came from: the v0.14.7 release binary prints 0.14.6. The "
                     "release of record is `tools_versions.sage` above (read from the release "
@@ -769,12 +975,14 @@ def main():
         "name": skill_meta.get("name", "ucdavis-proteomics-core-pipeline"),
         "version": skill_version(),                 # skill_version.py: the one reader
         "title": "UC Davis Proteomics Core pipeline",
-        "repository": skill_meta.get("repository", "https://github.com/bsphinney/DE-LIMP"),
+        "repository": skill_meta.get("repository", SKILL_REPOSITORY),
         "marketplace": "ucdavis-proteomics-core",
         "install": [
             # by its HTTPS URL: for the owner/repo shorthand Claude Code tries SSH first, and a
-            # laptop with no GitHub SSH key then cannot refresh it (references/install.md)
-            "claude plugin marketplace add https://github.com/bsphinney/DE-LIMP.git",
+            # laptop with no GitHub SSH key then cannot refresh it (references/install.md).
+            # The repository plugin.json names (2.15: the skill's own; DE-LIMP before it).
+            "claude plugin marketplace add "
+            + skill_meta.get("repository", SKILL_REPOSITORY).rstrip("/") + ".git",
             "claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core",
         ],
     }
@@ -794,12 +1002,14 @@ def main():
                        ("workflow.manifest.json", a.workflow_manifest),
                        ("commands.log", a.commands)):
         if src and os.path.exists(src) and label == "commands.log":
-            # every command verbatim -- but who decided is staff-only: names become the role
-            with open(src, encoding="utf-8", errors="replace") as fh:
-                logged = fh.read()
+            # every command verbatim -- but who decided is staff-only: names become the role,
+            # and a core-client reason (who the work is for) is taken out (staff.redact_log)
+            logged, withheld = staff.redact_log(src)
             with open(os.path.join(in_dir, os.path.basename(src)), "w", encoding="utf-8") as fh:
-                fh.write(staff.redact(logged))
-            ok(f"copied {label} (names after --by replaced by \"<{staff.ROLE}>\", after --override-by by \"{staff.REDACTED_SETTER}\")")
+                fh.write(logged)
+            ok(f"copied {label} (names after --by replaced by \"<{staff.ROLE}>\", after --override-by by \"{staff.REDACTED_SETTER}\"; core-client reasons taken out)")
+            for w in withheld:
+                note(f"{label}: {w}")
         elif src and os.path.exists(src):
             if label == "workflow.manifest.json":
                 # its --ms1-ppm/--ms2-ppm overrides (resolve_defaults.py), labelled by role:
@@ -949,6 +1159,8 @@ def main():
         "query": {"acquisition": a.acquisition, "organism_taxid": a.organism_taxid,
                   "instrument": a.instrument},
         "engine": a.engine,
+        # the build that ran (search_provenance.json `version`), only when it is known
+        **({"engine_version": a.engine_version} if a.engine_version else {}),
         # `ran`: whether a DE ran at all (de_ran_of), and from what that was read
         "de": {"method": a.de_method, "contrasts": de_contrasts,
                "q_cutoff": a.q_cutoff, "logfc": a.logfc, "adjp": a.adjp,
@@ -1004,6 +1216,11 @@ def main():
     if _res_flags and _res.get("source"):
         _res_flags.append(f"--resolution-source {shlex.quote(str(_res['source']))}")
     res_repro = (" \\\n  " + " ".join(_res_flags)) if _res_flags else ""
+    # the original choice travels with the replay: a Sage FALLBACK replayed with --engine sage
+    # keeps how=fallback (engine_choice / resolve_defaults --replay-of, Ruling 103)
+    replay_of_repro = (" \\\n  --replay-of ./inputs/"
+                       + os.path.basename(a.workflow_manifest)
+                       if a.workflow_manifest and os.path.exists(a.workflow_manifest) else "")
     raw_arg = " ".join(f"'{f}'" for f in raw_files) or "/path/to/raw/*"
     # A run whose file name holds '--' was searched under a new name (run_search.py
     # --rename-dashed-runs; search_provenance.json `input_links`): the replay must rename it the
@@ -1124,11 +1341,35 @@ def main():
                              f"{', '.join(_named)} {'was' if len(_named) == 1 else 'were'} left "
                              f"out by name (--drop-contaminant).")
     # The user's own target sequences (fetch --add-fasta), from the files the sidecar records.
-    for f in (fi or {}).get("added_sequences") or []:
-        fasta_repro_keep += f" --add-fasta {shlex.quote(f.get('file') or '<added sequences file>')}"
-        fasta_repro_note += (f" Target sequences were added from {f.get('file') or '?'} "
+    for i, f in enumerate((fi or {}).get("added_sequences") or []):
+        # The added file is a bundle input (X8 F9): copied to inputs/added_sequences/ when it can
+        # be read here and is the file the search used (its sha256 is the sidecar's), so the
+        # replay does not depend on a path of the machine that ran. Otherwise the path stays and
+        # the note carries the whole sha256 to check it against.
+        src, want = f.get("file"), f.get("sha256")
+        arg_path, copied = shlex.quote(src or "<added sequences file>"), False
+        if src and os.path.isfile(src):
+            try:
+                have = sha256_file(src)
+            except OSError:
+                have = None
+            if have and (not want or have == want) and os.path.getsize(src) <= ADDED_COPY_MAX_BYTES:
+                rel = f"inputs/added_sequences/{i + 1}_{os.path.basename(src)}"
+                os.makedirs(os.path.join(out, "inputs", "added_sequences"), exist_ok=True)
+                shutil.copy2(src, os.path.join(out, rel))
+                arg_path, copied = shlex.quote("./" + rel), True
+                ok(f"added sequences {os.path.basename(src)} copied to {rel}")
+        if not copied:
+            skip("added sequences file", f"{src or 'no path recorded'} was not copied into the "
+                 f"bundle (not readable here, changed since the search, or over "
+                 f"{ADDED_COPY_MAX_BYTES // 2**20} MB): reproduce.sh step 4 reads it from that "
+                 f"path; its sha256 is {want or 'not recorded'}")
+        fasta_repro_keep += f" --add-fasta {arg_path}"
+        fasta_repro_note += (f" Target sequences were added from {src or '?'} "
                              f"({f.get('n_entries', '?')} entries, sha256 "
-                             f"{(f.get('sha256') or '?')[:12]}...): check that file is unchanged.")
+                             f"{(want or '?')[:12]}...)"
+                             + (f": a copy is in the bundle ({arg_path})." if copied else
+                                f": check that file is unchanged (full sha256 {want or '?'})."))
     if fasta_repro_content in ("unknown", "as_staged"):
         # A --path override or a HIVE-staged file: not reconstructible from a proteome ID.
         # fetch_fasta.py's entry-count check (content_inferred) is the best guess at what a
@@ -1209,10 +1450,15 @@ def main():
                                "step 2's defaults for the data\n#    type do not.")
     # Where it runs: run_search.py refuses an inline search on a cluster login node, and a search
     # for identifications only writes identifications.tsv (after the job: --adapt-only)
-    search_params_note += ("\n#    On a SLURM cluster's login node run_search.py refuses to search "
-                           "inline: add --sbatch ./search_job.sh\n#    and submit what it prints"
-                           + ("; when the job ends, run this line again with --adapt-only."
-                              if ids_only else "."))
+    if ids_only:
+        search_params_note += ("\n#    On a SLURM cluster (sbatch found; REPRO_SBATCH=0 or 1 "
+                               "overrides) this step submits the search as a job\n#    "
+                               "(--sbatch ./search_job.sh, sbatch --wait), never on the login "
+                               "node, then runs step 5b: --adapt-only.")
+    else:
+        search_params_note += ("\n#    On a SLURM cluster's login node run_search.py refuses to "
+                               "search inline: add --sbatch ./search_job.sh\n#    and submit "
+                               "what it prints.")
     if ids_only:
         search_params_note += ("\n#    Identifications only (its record says it did not quantify): "
                                "the result is ./search_out/identifications.tsv,\n#    not a "
@@ -1269,6 +1515,27 @@ def main():
     de_section = (f"\n# 6. Re-run differential expression with identical settings.{de_where}\n"
                   f"{de_step or run_de_step}\n" if de_ran else
                   "\n# No differential expression ran in this analysis, so there is no step 6.\n")
+    search_args = (f'--tools ~/.proteomics-pipeline/tools/tools.json \\\n'
+                   f'  --bundle ./wf/workflow.manifest.json --params {search_params} \\\n'
+                   f"  --fasta ./search.fasta --out ./search_out --files {raw_arg}"
+                   f"{' --keratin-sample' if fasta_repro_keratin else ''}{rename_repro}")
+    if ids_only:
+        # X8 F9: an identifications-only replay ends in the fingerprinted identifications.tsv
+        # (--adapt-only builds it from the engine's tables), and on a cluster (sbatch found;
+        # REPRO_SBATCH=0/1 overrides) the search is a job, never run on the login node.
+        search_step = (
+            f'RUN_SEARCH=(python3 "$SKILL/scripts/run_search.py" {search_args})\n'
+            'if [ "${REPRO_SBATCH:-$(command -v sbatch >/dev/null 2>&1 && echo 1 || echo 0)}" = 1 ]; then\n'
+            '  "${RUN_SEARCH[@]}" --sbatch ./search_job.sh\n'
+            '  sbatch --wait ./search_job.sh\n'
+            'else\n'
+            '  "${RUN_SEARCH[@]}"\n'
+            'fi\n'
+            "# 5b. Rebuild identifications.tsv, the file checksums/checksums.json fingerprints, "
+            "from the engine's tables.\n"
+            '"${RUN_SEARCH[@]}" --adapt-only')
+    else:
+        search_step = f'python3 "$SKILL/scripts/run_search.py" {search_args}'
     repro = f"""#!/usr/bin/env bash
 # Auto-generated by provenance.py — re-creates this exact analysis.
 # Requires: this skill's scripts/ on $SKILL, and internet for the registry + UniProt.
@@ -1289,7 +1556,7 @@ fi
 #    Original defaults_version: {defaults_version}
 bash "$SKILL/scripts/detect_env.sh" > ./env.json
 python3 "$SKILL/scripts/resolve_defaults.py" --acquisition {acq_repro} \\
-  --instrument {instr_repro} --engine {engine_repro}{tax_repro}{res_repro} \\
+  --instrument {instr_repro} --engine {engine_repro}{tax_repro}{res_repro}{replay_of_repro} \\
   --env ./env.json --dest ./wf
 
 # 3. Resolve the same engine + version.
@@ -1303,9 +1570,7 @@ python3 "$SKILL/scripts/fetch_fasta.py" fetch --proteome {fasta_repro_proteome} 
   --content {fasta_repro_content} --contaminants {fasta_repro_contam} --enzyme {fasta_repro_enzyme}{fasta_repro_keep} --out ./search.fasta
 
 # 5. Re-run the search (inputs from inputs/checksums; verify against checksums/checksums.json).{search_params_note}{de_nonorm_note}
-python3 "$SKILL/scripts/run_search.py" --tools ~/.proteomics-pipeline/tools/tools.json \\
-  --bundle ./wf/workflow.manifest.json --params {search_params} \\
-  --fasta ./search.fasta --out ./search_out --files {raw_arg}{' --keratin-sample' if fasta_repro_keratin else ''}{rename_repro}
+{search_step}
 {de_section}
 echo "Done. {done_line}"
 """
@@ -1370,7 +1635,7 @@ make input drift visible.
                 if de_ran else
                 "rebuilds the FASTA, and re-runs the search with the parameters it ran with\n"
                 "(`inputs/`). Compare its results to `checksums/checksums.json`. No DE ran, so "
-                "there is\nno DE step.")
+                "there is\nno DE step.") + rerun_note(sp)
     methods_text = methods or ("(methods.txt not found — run run_de.R to generate it)" if de_ran
                                else "No differential expression ran, so there is no DE "
                                     "methods.txt. The publication Methods are the session's "
@@ -1388,6 +1653,9 @@ make input drift visible.
     checksums_line = ("sha256 of " + (", ".join(_held[:-1]) + " and " + _held[-1]
                                       if len(_held) > 1 else _held[0])
                       if _held else "nothing was fingerprinted (see MANIFEST.txt)")
+    # where the session's own files and what ran differ (--note: bundle_flags' notes)
+    replay_section = ("## What ran, where the session's own files differ\n"
+                      + "".join(f"- {n}\n" for n in a.note) + "\n") if a.note else ""
     md = f"""# Reproducibility — {(wfman or {}).get('name', 'proteomics analysis')}
 
 {head}
@@ -1405,7 +1673,7 @@ make input drift visible.
 ## Validated workflow
 - id: `{wf_id}`
 - registry: {REGISTRY_LINE(reg)}
-- engine: {(wfman or {}).get('engine')}
+- engine: {_engine_line(wfman)}
 {de_line}
 - query: acquisition=`{a.acquisition}`, organism_taxid=`{a.organism_taxid}`, instrument=`{a.instrument}`
 
@@ -1418,7 +1686,7 @@ re-derives the search defaults from the data type (they ship with the skill vers
 defaults table `{defaults_version}`), re-resolves the engine,
 {how_line}
 
-## What's captured
+{replay_section}## What's captured
 - `run_manifest.json` — full machine-readable record
 - `environment/` — conda lock, pip freeze, R sessionInfo (all package versions), tool versions
 - `inputs/` — the exact params file, conditions.csv, workflow manifest{', commands.log' if a.commands else ''}
@@ -1436,10 +1704,12 @@ See `MANIFEST.txt` for exactly what was and wasn't captured.
         "Reproducibility bundle — capture log\n" + "=" * 40 + "\n" + "\n".join(MANIFEST_LINES) + "\n")
 
     n_skip = sum(1 for l in MANIFEST_LINES if l.startswith("[SKIPPED]"))
-    print(json.dumps({"bundle": out, "captured": sum(1 for l in MANIFEST_LINES
-                                                     if l.startswith("[OK]")),
-                      "skipped": n_skip, "manifest": os.path.join(out, "MANIFEST.txt"),
-                      "reproduce": rp}, indent=2))
+    result = {"bundle": out, "captured": sum(1 for l in MANIFEST_LINES if l.startswith("[OK]")),
+              "skipped": n_skip, "manifest": os.path.join(out, "MANIFEST.txt"), "reproduce": rp}
+    if from_session is not None:
+        # which argument came from which record, and which had none (relay those gaps)
+        result["from_session"] = from_session
+    print(json.dumps(result, indent=2))
 
 
 def REGISTRY_LINE(reg):

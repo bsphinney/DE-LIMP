@@ -30,10 +30,15 @@ class SessionRecords(unittest.TestCase):
         self.assertLess(attach, etype)
 
     def test_the_copy_back_list_brings_the_session_records(self):
-        line = next(ln for ln in text().splitlines()
-                    if ln.strip().startswith("for f in submission.json samples.tsv"))
+        """The pull list lives in scripts/core_sync.sh since the slim-down (SKILL.md step 1c.7
+        and core-submissions.md call it instead of a hand-copied loop)."""
+        self.assertIn("core_sync.sh --get --session", " ".join(text().split()))
+        with open(os.path.join(os.path.dirname(SKILL), "scripts", "core_sync.sh"),
+                  encoding="utf-8") as fh:
+            sync = fh.read()
+        records = re.search(r'GET_RECORDS="([^"]*)"', sync).group(1)
         for f in ("sample_type.json", "experiment_type.json", "locate_decisions.json"):
-            self.assertIn(f, line)
+            self.assertIn("input/" + f, records.split())
 
     def test_the_bait_is_asked_after_step_6_and_recorded(self):
         s = text()
@@ -52,7 +57,19 @@ class CallIdIsExplained(unittest.TestCase):
         """Review of 2.13.1, round 4: the token is needed whenever a subagent ran in the last
         6 hours (finalize after 8d's reviewers too), typed literally, fresh, in the foreground."""
         s = text()
-        b = s[s.index("### 3b."):s.index("**Core data with a CoreOmics submission")]
+        router = " ".join(s[s.index("### 3b."):s.index("### 4.")].split())
+        self.assertIn("When a subagent ran in the last 6 hours, `--call-id <token>` on `init`, "
+                      "`finalize`, `checkpoint.py status` and `save_transcript.py`", router)
+        for want in ("typed literally", "fresh each call", "in the foreground"):
+            self.assertIn(want, router)
+        # and the finalize line carries it (review of the slim-down, H3)
+        twelve = " ".join(s[s.index("### 12. "):s.index("### 12b.")].split())
+        self.assertIn("finalize --dir <session> --zip [--call-id <token>]", twelve)
+        with open(os.path.join(os.path.dirname(SKILL), "references", "outputs.md"),
+                  encoding="utf-8") as fh:
+            ref = fh.read()
+        b = ref[ref.index("## 3b. Creating the analysis session"):
+                ref.index("**Core data with a CoreOmics submission")]
         for want in ("`--call-id` whenever any subagent or teammate of this conversation ran in "
                      "the last 6 hours", "never `$(uuidgen)`", "fresh for every call",
                      "a background call is never counted"):
@@ -64,7 +81,7 @@ class ReviewsAreKept(unittest.TestCase):
         """2026-10: three step-8d reviewers, run from a teammate, all ended without handing
         their report back (twice); told to also write it to a file, they delivered."""
         s = text()
-        d8 = s[s.index("### 8d."):s.index("### 8e.")]
+        d8 = " ".join(s[s.index("### 8d."):s.index("### 8e.")].split())     # layout-free
         self.assertIn("<S>/logs/review_<proteomics|biology|statistics>.md", d8)
         self.assertIn("never delivered", d8)
-        self.assertIn("hive_remote: locally, then `hive_exec.sh\n--put`", d8)
+        self.assertIn("hive_remote: locally, then `hive_exec.sh --put`", d8)

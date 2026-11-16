@@ -73,6 +73,27 @@ case "$1 $2" in
     fi
     write_state "$c"
     echo "Plugin \"ucdavis-proteomics-core-pipeline\" updated from $i to $c. Restart to apply."; exit 0 ;;
+  "plugin marketplace")
+    # as Claude Code 2.1.322 does (checked in a sandbox config, 2026-11-12): remove uninstalls
+    # the plugin; add refuses while the name is declared from another source; add clones.
+    MP="$FAKE_PLUGINS/marketplaces/ucdavis-proteomics-core"
+    case "$3" in
+      remove)
+        [ "${FAKE_CLAUDE_REMOVE_FAIL:-0}" = 1 ] && { echo "Failed to remove marketplace" >&2; exit 1; }
+        rm -rf "$MP"; rm -f "$STATE"; echo "Removed marketplace ucdavis-proteomics-core"; exit 0 ;;
+      add)
+        if [ -n "${FAKE_CLAUDE_ADD_FAIL:-}" ] && [ "$4" = "$FAKE_CLAUDE_ADD_FAIL" ]; then
+          echo "Failed to add marketplace: clone failed" >&2; exit 1
+        fi
+        [ -e "$MP" ] && { echo "Cannot add marketplace: its source doesn't match" >&2; exit 1; }
+        git clone -q --depth 1 "$4" "$MP" >/dev/null 2>&1 || { echo "clone failed" >&2; exit 1; }
+        echo "Successfully added marketplace: ucdavis-proteomics-core"; exit 0 ;;
+    esac ;;
+  "plugin install")
+    [ "$3" = "$ID" ] || { echo "Plugin \"$3\" not found" >&2; exit 1; }
+    c="$(cat_v 2>/dev/null)"
+    [ -n "$c" ] || { echo "Marketplace \"ucdavis-proteomics-core\" not found" >&2; exit 1; }
+    write_state "$c"; echo "Successfully installed plugin: $ID (scope: user)"; exit 0 ;;
 esac
 echo "fake claude: unexpected: $*" >&2; exit 2
 '''
@@ -173,7 +194,7 @@ class Harness(unittest.TestCase):
         return root
 
     def laptop(self, main="2.11.2", installed="2.10.0"):
-        """msalemi's laptop on 2026-10-07: main at 2.11.2, installed and catalogue at 2.10.0."""
+        """mstaff's laptop on 2026-10-07: main at 2.11.2, installed and catalogue at 2.10.0."""
         self.release(installed)
         self.catalogue()
         self.release(main)
@@ -188,7 +209,9 @@ class Harness(unittest.TestCase):
                     LC_ALL="C.UTF-8", LANG="C.UTF-8")
         for k in [k for k in e if k.startswith("GIT_SSH") or k in ("CLAUDE_CONFIG_DIR",
                                                                    "SKILL_MARKETPLACE_DIR",
-                                                                   "SKILL_REPO_URL")]:
+                                                                   "SKILL_REPO_URL",
+                                                                   "SKILL_OLD_REPO_URL",
+                                                                   "CLAUDE_CODE_ENTRYPOINT")]:
             e.pop(k)
         e.update({k: str(v) for k, v in extra.items()})
         return e
@@ -302,7 +325,7 @@ class CheckUpdate(Harness):
 class UpdateOverHttps(Harness):
     def test_the_fake_reproduces_the_laptop(self):
         """Without the refresh, `claude plugin update` alone says 'already at the latest
-        version (2.10.0)' with main at 2.11.2 -- what msalemi saw."""
+        version (2.10.0)' with main at 2.11.2 -- what mstaff saw."""
         self.laptop()
         r = subprocess.run([self.claude, "plugin", "update", ID], capture_output=True, text=True,
                            env=self.env(FAKE_CLAUDE_SSH=1), timeout=30)
@@ -362,7 +385,7 @@ class UpdateOverHttps(Harness):
         (SKILL_REPO_URL; here the local "GitHub"), never over SSH."""
         self.laptop()
         self.git("-C", self.market, "remote", "set-url", "origin",
-                 "git@github.com:bsphinney/DE-LIMP.git")
+                 "git@github.com:bsphinney/UCD-Proteomics-AI-Skill.git")
         url = "file://" + self.github
         j = self.sv(0, "--update", SKILL_REPO_URL=url)
         self.assertEqual((j["status"], j["installed"], j["refresh"]),
@@ -470,6 +493,246 @@ class UpdateOverHttps(Harness):
 
 
 @unittest.skipUnless(shutil.which("git") and shutil.which("curl"), "needs git and curl")
+@unittest.skipUnless(shutil.which("git") and shutil.which("curl"), "needs git and curl")
+class MovedRepository(Harness):
+    """THE MOVE (2.15, Ruling 87). Up to 2.15 the catalogue was a clone of DE-LIMP; from 2.15
+    main is the skill's own repository. A DE-LIMP catalogue cannot be pulled to it (unrelated
+    histories), so --update moves it: remove, add the new address, install."""
+
+    def old_laptop(self, old="2.15.0", main="2.16.0"):
+        """Installed from the old repository at `old`; the new one's main ships `main`."""
+        self.github = os.path.join(self.d, "github", "DE-LIMP.git")
+        self.work = os.path.join(self.d, "maintainer_old")
+        self.release(old)
+        self.catalogue()
+        self.installed(old)
+        self.old_url = "file://" + self.github
+        self.github = os.path.join(self.d, "github", "UCD-Proteomics-AI-Skill.git")
+        self.work = os.path.join(self.d, "maintainer_new")
+        self.main_url = "file://" + os.path.join(self.work, PLUGIN_REL)
+        self.release(main)
+        self.new_url = "file://" + self.github
+
+    def urls(self, **extra):
+        return dict(SKILL_OLD_REPO_URL=self.old_url, SKILL_REPO_URL=self.new_url, **extra)
+
+    def origin(self):
+        return self.git("-C", self.market, "remote", "get-url", "origin")
+
+    def test_the_check_says_the_skill_moved(self):
+        self.old_laptop()
+        j = self.sv(3, "--check-update", **self.urls())
+        self.assertEqual((j["status"], j["local"], j["main"], j["moved"]),
+                         ("behind", "2.15.0", "2.16.0", True))
+        self.assertIn("moved to its own repository", j["say"])
+        self.assertEqual(j["next"], UPDATE_CMD)
+        self.assertEqual(j["manual"],
+                         "claude plugin marketplace remove ucdavis-proteomics-core && claude "
+                         f"plugin marketplace add {self.new_url} && claude plugin install {ID}")
+        self.assertNeverCurrent(j["say"])
+
+    def test_update_moves_the_catalogue_and_installs_main(self):
+        self.old_laptop()
+        j = self.sv(0, "--update", **self.urls())
+        self.assertEqual((j["status"], j["installed_before"], j["installed"], j["refresh"],
+                          j["moved"]), ("updated", "2.15.0", "2.16.0", "moved", True))
+        self.assertIn("now comes from the skill's own repository", j["say"])
+        self.assertIn("/reload-plugins", j["say"])
+        self.assertEqual(self.origin(), self.new_url)
+        self.assertEqual(self.catalogue_version(), "2.16.0")
+        calls = [c for c in self.claude_calls() if not c.startswith("plugin list")]
+        self.assertEqual(calls, [
+            "plugin marketplace remove ucdavis-proteomics-core PREFER_HTTPS=1",
+            f"plugin marketplace add {self.new_url} PREFER_HTTPS=1",
+            f"plugin install {ID} PREFER_HTTPS=1"])
+        self.assertEqual(self.ssh_calls(), [], "nothing went over SSH")
+        # and the next check is against the new repository, with nothing left to move
+        self.running_copy("2.16.0")
+        j = self.sv(0, "--check-update", **self.urls())
+        self.assertEqual((j["status"], j["moved"], j["say"]), ("current", False, None))
+
+    def test_an_unreachable_new_address_changes_nothing(self):
+        self.old_laptop()
+        gone = "file://" + os.path.join(self.d, "gone", "UCD-Proteomics-AI-Skill.git")
+        j = self.sv(1, "--update", **dict(self.urls(), SKILL_REPO_URL=gone))
+        self.assertEqual((j["status"], j["installed"], j["refresh"]),
+                         ("not_updated", "2.15.0", "move_failed"))
+        self.assertTrue(j["say"].startswith("The update did NOT happen"), j["say"])
+        self.assertIn("did not answer, so nothing was changed", j["say"])
+        self.assertEqual([c for c in self.claude_calls() if not c.startswith("plugin list")], [])
+        self.assertEqual(self.origin(), self.old_url)
+        self.assertNeverCurrent(j["say"])
+
+    def test_a_failed_add_puts_the_old_address_back(self):
+        self.old_laptop()
+        j = self.sv(1, "--update", **self.urls(FAKE_CLAUDE_ADD_FAIL=self.new_url))
+        self.assertEqual((j["status"], j["installed"], j["refresh"]),
+                         ("not_updated", "2.15.0", "move_failed"))
+        self.assertIn("the old one was added back and the skill reinstalled", j["say"])
+        self.assertEqual(self.origin(), self.old_url)
+        self.assertNeverCurrent(j["say"])
+
+    def test_an_old_catalogue_already_at_main_is_only_updated(self):
+        """2.15.0 ships from both repositories: an old catalogue at main's version is not moved."""
+        self.old_laptop(old="2.15.0", main="2.15.0")
+        self.installed("2.14.2")
+        self.running_copy("2.14.2")
+        j = self.sv(0, "--update", **self.urls())
+        self.assertEqual((j["status"], j["installed"], j["refresh"], j["moved"]),
+                         ("updated", "2.15.0", "not_needed", True))
+        self.assertEqual(self.origin(), self.old_url)
+        self.assertEqual(self.updates(), [f"plugin update {ID} PREFER_HTTPS=1"])
+
+    def test_in_step_on_the_old_catalogue_says_nothing(self):
+        self.old_laptop(old="2.15.0", main="2.15.0")
+        j = self.sv(0, "--check-update", **self.urls())
+        self.assertEqual((j["status"], j["moved"], j["say"], j["next"]),
+                         ("current", True, None, None))
+
+    def test_every_spelling_of_the_old_address_is_the_old_repository(self):
+        """The defaults (no SKILL_OLD_REPO_URL): DE-LIMP by HTTPS, SSH, any case, with or
+        without .git, is moved; the new repository by SSH is not."""
+        self.old_laptop()
+        env = {"SKILL_REPO_URL": self.new_url}
+        for origin, moved in (("https://github.com/bsphinney/DE-LIMP.git", True),
+                              ("https://github.com/bsphinney/de-limp", True),
+                              ("git@github.com:bsphinney/DE-LIMP.git", True),
+                              ("ssh://git@github.com/bsphinney/DE-LIMP", True),
+                              ("https://github.com/bsphinney/UCD-Proteomics-AI-Skill.git", False),
+                              ("git@github.com:bsphinney/UCD-Proteomics-AI-Skill.git", False)):
+            with self.subTest(origin=origin):
+                self.git("-C", self.market, "remote", "set-url", "origin", origin)
+                j = self.sv(3, "--check-update", **env)
+                self.assertIs(j["moved"], moved)
+                self.assertEqual("marketplace remove" in j["manual"], moved, j["manual"])
+
+
+@unittest.skipUnless(shutil.which("git") and shutil.which("curl"), "needs git and curl")
+class MovedAtSessionStart(Harness):
+    """2.15.0 moves everyone at once (Brett, 2026-11-12): --session-start moves a DE-LIMP
+    catalogue at the same version, says so in one sentence, and never runs on a new one."""
+
+    old_laptop = MovedRepository.old_laptop
+    urls = MovedRepository.urls
+    origin = MovedRepository.origin
+
+    MOVE_CALLS = ["plugin marketplace remove ucdavis-proteomics-core PREFER_HTTPS=1",
+                  "plugin marketplace add {new} PREFER_HTTPS=1",
+                  f"plugin install {ID} PREFER_HTTPS=1"]
+
+    def start(self, want_rc=0, **extra):
+        return self.sv(want_rc, "--session-start", **self.urls(**extra))
+
+    def changes(self):
+        return [c for c in self.claude_calls() if not c.startswith("plugin list")]
+
+    def marker(self):
+        return os.path.join(self.plugins, "ucdavis-proteomics-core.move_failed")
+
+    def test_an_old_catalogue_is_moved_at_the_same_version(self):
+        self.old_laptop(old="2.15.0", main="2.15.0")
+        j = self.start()
+        self.assertEqual(j["move"]["status"], "moved")
+        self.assertEqual(self.origin(), self.new_url)
+        self.assertEqual(self.changes(), [c.format(new=self.new_url) for c in self.MOVE_CALLS])
+        self.assertEqual(self.catalogue_version(), "2.15.0")
+        self.assertIn("now updates from its own repository", j["say"])
+        self.assertTrue(j["say"].startswith(j["move"]["say"]), j["say"])
+        self.assertEqual(j["move"]["say"].count(". "), 0, "one sentence")
+        self.assertEqual((j["update"]["status"], j["update"]["moved"], j["up_to_date"]),
+                         ("current", False, True))
+        self.assertFalse(os.path.exists(self.marker()))
+        # the next session: the catalogue is the new one, so nothing runs again
+        before = len(self.changes())
+        j = self.start()
+        self.assertIsNone(j["move"])
+        self.assertEqual(len(self.changes()), before, "the move never repeats")
+        self.assertIsNone(j["say"])
+
+    def test_a_new_catalogue_is_never_moved(self):
+        self.old_laptop(old="2.15.0", main="2.15.0")
+        self.git("-C", self.market, "remote", "set-url", "origin", self.new_url)
+        j = self.start()
+        self.assertIsNone(j["move"])
+        self.assertEqual(self.changes(), [])
+        self.assertEqual(j["up_to_date"], True)
+
+    def test_check_update_alone_stays_read_only(self):
+        """The checks before steps 7 and 12 run --check-update alone: never a move mid-analysis."""
+        self.old_laptop(old="2.15.0", main="2.15.0")
+        j = self.sv(0, "--check-update", **self.urls())
+        self.assertEqual((j["status"], j["moved"]), ("current", True))
+        self.assertEqual(self.changes(), [])
+        self.assertEqual(self.origin(), self.old_url)
+
+    def test_a_failed_add_puts_the_old_address_back_and_waits_a_day(self):
+        self.old_laptop(old="2.15.0", main="2.15.0")
+        j = self.start(FAKE_CLAUDE_ADD_FAIL=self.new_url)
+        self.assertEqual(j["move"]["status"], "failed")
+        self.assertIn("the old one was added back and the skill reinstalled", j["move"]["say"])
+        self.assertIn(j["move"]["manual"], j["move"]["say"])
+        self.assertEqual(self.origin(), self.old_url)
+        self.assertEqual(self.catalogue_version(), "2.15.0")
+        with open(os.path.join(self.plugins, "installed_plugins.json")) as fh:
+            self.assertIn('"version": "2.15.0"', fh.read())
+        self.assertTrue(os.path.exists(self.marker()))
+        # the same day: not tried again, and the by-hand line is given
+        before = len(self.changes())
+        j = self.start()
+        self.assertEqual(j["move"]["status"], "skipped")
+        self.assertIn("failed earlier today", j["move"]["say"])
+        self.assertEqual(len(self.changes()), before)
+        # another day: tried again, and it works
+        with open(self.marker(), "w") as fh:
+            fh.write("2000-01-01\n")
+        j = self.start()
+        self.assertEqual(j["move"]["status"], "moved")
+        self.assertEqual(self.origin(), self.new_url)
+        self.assertFalse(os.path.exists(self.marker()))
+
+    def test_offline_is_skipped_with_nothing_changed(self):
+        self.old_laptop(old="2.15.0", main="2.15.0")
+        gone = "file://" + os.path.join(self.d, "gone", "UCD-Proteomics-AI-Skill.git")
+        r = self.run_sv("--session-start", **dict(self.urls(), SKILL_REPO_URL=gone))
+        j = json.loads(r.stdout)
+        self.assertEqual(j["move"]["status"], "skipped")
+        self.assertIn("did not answer, so nothing was changed", j["move"]["say"])
+        self.assertIn("tried again next session", j["move"]["say"])
+        self.assertIn("marketplace remove", j["move"]["manual"])
+        self.assertEqual(self.changes(), [])
+        self.assertEqual(self.origin(), self.old_url)
+        self.assertFalse(os.path.exists(self.marker()))
+
+    def test_no_claude_is_skipped_with_nothing_changed(self):
+        self.old_laptop(old="2.15.0", main="2.15.0")
+        j = self.start(SKILL_CLAUDE=os.path.join(self.d, "no-such-claude"))
+        self.assertEqual(j["move"]["status"], "skipped")
+        self.assertIn("claude command was not found", j["move"]["say"])
+        self.assertEqual(self.origin(), self.old_url)
+
+    def test_claude_desktop_is_skipped_and_told_how(self):
+        self.old_laptop(old="2.15.0", main="2.15.0")
+        for ep in ("claude-desktop", "local-agent", "remote_desktop"):
+            with self.subTest(entrypoint=ep):
+                j = self.start(CLAUDE_CODE_ENTRYPOINT=ep)
+                self.assertEqual(j["move"]["status"], "skipped")
+                self.assertIn("Manage plugins", j["move"]["say"])
+                self.assertIn(j["move"]["manual"], j["move"]["say"])
+                self.assertEqual(self.changes(), [])
+                self.assertEqual(self.origin(), self.old_url)
+        j = self.start(CLAUDE_CODE_ENTRYPOINT="cli")
+        self.assertEqual(j["move"]["status"], "moved")
+
+    def test_moved_to_a_newer_main_asks_for_the_reload(self):
+        """New main ahead of the copy that runs: the install brings it, and the check after
+        the move says /reload-plugins."""
+        self.old_laptop(old="2.15.0", main="2.15.1")
+        j = self.start(want_rc=2)
+        self.assertEqual(j["move"]["status"], "moved")
+        self.assertEqual(j["update"]["status"], "reload_needed")
+        self.assertIn("/reload-plugins", j["relay_first"])
+
+
 class WindowsDesktopClaude(Harness):
     """I01: on Windows the desktop app's Claude Code has no `claude` on Git Bash's PATH; its
     claude.exe is under %APPDATA%\\Claude\\claude-code\\<version>\\ (or the CLI installer's
@@ -632,6 +895,14 @@ class Documented(unittest.TestCase):
         md = self.read("SKILL.md")
         return " ".join(md[md.index("### 0. "):md.index("### 0b.")].split())
 
+    def access_step0(self):
+        """access.md's step-0 section: the update route in full (SKILL.md step 0 is a router
+        since the slim-down)."""
+        ref = self.read("references", "access.md")
+        i = ref.index("\n## Step 0: is this skill current?")
+        j = ref.find("\n## ", i + 1)
+        return " ".join(ref[i:j if j > 0 else len(ref)].split())
+
     def section(self, start, end):
         md = self.read("SKILL.md")
         return " ".join(md[md.index(start):md.index(end)].split())
@@ -641,16 +912,16 @@ class Documented(unittest.TestCase):
         out. The check sat in the middle of "### 0. One-time setup", after setup.sh: a heading
         an agent on an already-set-up computer skips, and a resume never ran it."""
         s = self.step0()
-        self.assertLess(s.index("bash scripts/skill_version.sh --check-update"),
+        self.assertLess(s.index("bash scripts/skill_version.sh --session-start"),
                         s.index("bash scripts/setup.sh"))
-        head = s[:s.index("bash scripts/skill_version.sh --check-update")]
+        head = s[:s.index("bash scripts/skill_version.sh --session-start")]
         self.assertIn("every conversation", head.lower())
         self.assertIn("already set up", head)
         self.assertIn("resume", head)
 
     def test_a_resume_and_the_milestones_check_again(self):
         resume = self.section("### 0c.", "### 1. ")
-        self.assertIn("--check-update", resume)
+        self.assertIn("--session-start", resume)       # it runs --check-update first
         s = self.step0()
         again = s[s.index("**Check again**"):]
         self.assertIn("skill_version.sh --check-update", again)
@@ -659,13 +930,14 @@ class Documented(unittest.TestCase):
 
     def test_step_0_checks_main_first_in_every_mode(self):
         s = self.step0()
-        self.assertIn("bash scripts/skill_version.sh --check-update", s)
-        self.assertLess(s.index("--check-update"),
-                        s.index("bash scripts/skill_version.sh --check-hive --mode hive_remote"))
+        self.assertIn("bash scripts/skill_version.sh --session-start [--mode hive_remote]", s)
         self.assertIn("every mode", s.lower())
+        ref = self.access_step0()           # --session-start: --check-update, then --check-hive
+        self.assertLess(ref.index("bash scripts/skill_version.sh --check-update"),
+                        ref.index("bash scripts/skill_version.sh --check-hive --mode hive_remote"))
 
     def test_step_0_updates_through_the_https_route_and_checks_it(self):
-        s = self.step0()
+        s = self.access_step0()
         for text in ("bash scripts/skill_version.sh --update",
                      "git -C ~/.claude/plugins/marketplaces/ucdavis-proteomics-core pull --ff-only",
                      "marketplace not refreshed",
@@ -673,7 +945,8 @@ class Documented(unittest.TestCase):
                      "already at the latest version",
                      "CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1"):
             self.assertIn(text, s)
-        self.assertIn("Never tell the user the skill is up to date", s)
+        self.assertIn("bash scripts/skill_version.sh --update", self.step0())
+        self.assertIn("Never tell the user the skill is up to date", self.step0())
 
     def test_the_install_docs_describe_the_refresh_route(self):
         for rel in (("references", "install.md"), ("references", "access.md")):
@@ -681,8 +954,25 @@ class Documented(unittest.TestCase):
                 t = " ".join(self.read(*rel).split())
                 self.assertIn("git -C ~/.claude/plugins/marketplaces/ucdavis-proteomics-core "
                               "pull --ff-only", t)
-                self.assertIn("https://github.com/bsphinney/DE-LIMP.git", t)
+                self.assertIn("https://github.com/bsphinney/UCD-Proteomics-AI-Skill.git", t)
                 self.assertIn("skill_version.sh --update", t)
+
+    def test_the_move_is_documented_where_the_update_is(self):
+        """A computer that installed from DE-LIMP (up to 2.15) is moved by --update; the
+        update section says so, and gives the three commands for doing it by hand."""
+        t = self.access_step0()
+        self.assertIn("https://github.com/bsphinney/DE-LIMP.git", t)
+        self.assertIn("claude plugin marketplace remove ucdavis-proteomics-core && claude plugin "
+                      "marketplace add https://github.com/bsphinney/UCD-Proteomics-AI-Skill.git "
+                      "&& claude plugin install " + ID, t)
+        with open(SV, encoding="utf-8") as fh:
+            sv = fh.read()
+        self.assertIn('SKILL_REPO_URL="${SKILL_REPO_URL:-https://github.com/bsphinney/'
+                      'UCD-Proteomics-AI-Skill.git}"', sv)
+        self.assertIn("raw.githubusercontent.com/bsphinney/UCD-Proteomics-AI-Skill/main/skill/"
+                      "ucdavis-proteomics-core-pipeline/.claude-plugin/plugin.json", sv)
+        self.assertIn('SKILL_OLD_REPO_URL="${SKILL_OLD_REPO_URL:-https://github.com/bsphinney/'
+                      'DE-LIMP.git}"', sv)
 
 
 if __name__ == "__main__":

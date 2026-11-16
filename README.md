@@ -1,3 +1,7 @@
+> [!IMPORTANT]
+> **The UC Davis Proteomics Core pipeline now lives at [github.com/bsphinney/UCD-Proteomics-AI-Skill](https://github.com/bsphinney/UCD-Proteomics-AI-Skill).**
+> This app is the previous version: it is kept as it is and no longer developed.
+
 <img src="https://github.com/user-attachments/assets/2aeb5863-2c10-4faa-99e8-25835a9e9330" align="left" width="150" style="margin-right: 20px;" alt="DE-LIMP Logo" />
 
 # DE-LIMP: Differential Expression & Limpa Proteomics
@@ -18,145 +22,44 @@ Built on R Shiny with the [limpa](https://bioconductor.org/packages/limpa/) pipe
 
 ---
 
-## 🤖 Also available as an AI agentic skill for Claude Code
+## The Core's pipeline is now a skill for Claude
 
-**This whole workflow runs as a Claude Code skill — you point it at a folder of raw mass-spec files and describe what you want in plain English, and it does the rest.** No GUI, no scripts to write.
-
-📺 **[Watch it search timsTOF and Orbitrap DIA data](https://www.youtube.com/watch?v=roHknILC-Ec)** — *Searching Proteomics Data using the Claude Code UCD Proteomics Skill*
-
-### What the skill does
-
-Give it `.raw`, `.d` or `.mzML` files and it takes them all the way to differentially expressed proteins:
-
-- **Works out the search parameters from your data**, not from a template. It detects the acquisition type and instrument and derives mass accuracy from that — every value carries its source, so you can see *why* it chose 15 ppm rather than being told to trust it.
-- **Runs the engine for you** — DIA-NN or Radiant/Fulcrum (DIA), Sage (DDA), or FragPipe + diaTracer — downloading the pinned version so the same skill version always produces the same search.
-- **Uses a cluster properly if you have one.** On SLURM it automatically fans a DIA-NN run out into a 5-step parallel chain: files are searched concurrently instead of one at a time, and it picks a queue your account can actually submit to. It watches the jobs and fixes what it can on its own — out-of-memory, timeouts, a hung file — instead of leaving a chain dead in the queue overnight.
-- **Then does the statistics** — limpa/limma differential expression, with QC, figures, and a written interpretation of your results.
-- **Writes the methods section**, publication-ready, with the instrument grant acknowledgment.
-- **Ships a reproducibility bundle**: the analysis as flat R with every value literal, exact tool versions, input checksums, and a runnable `reproduce.sh`. A result you cannot reproduce is not a result.
-
-You can also ask it for just one piece — *"re-run this search with the settings matched to the Spectronaut run"* — without wanting the full analysis.
-
-### New in skill 2.10
-
-- **IPs and pull-downs default to non-normalised quantities.** The skill records what kind of experiment it is and checks the data before the final analysis; when the data disagree with the default it stops and shows both versions side by side for you to choose. The check cannot be skipped: the final analysis and a Core delivery wait for it.
-- **Add your own sequences to the search** (a GFP bait, a tag): they are searched as proteins, and a contaminant that is really the same protein no longer takes their peptides. You are asked which one is the bait, and the data check looks for it.
-- **The skill never decides which file is which sample.** When a label matches several files, two samples share a label, or a sample was injected twice, it asks.
-- **Fewer silent surprises:** a cut-short database download stops instead of becoming the full proteome; a Sage quantification window that misses your instrument's mass error stops with the fix; the Methods name each engine's own contaminant rule; the sample type is asked, never guessed.
-- **For UC Davis Proteomics Core runs:**
-  - Core staff check the instrument's QC runs around each project (from STAN) before the results are delivered;
-  - the Core's LIMS spreadsheet is read directly, and replicate labels such as `ctrl_mix_1` … `_5` become conditions;
-  - decisions such as a QC sign-off are made by a named member of the Core staff, never by the assistant;
-  - searches on the cluster use the CPUs and memory real runs need, and a failure caused by a broken node comes with the command to re-run it elsewhere.
-
-The full list is in the [CHANGELOG](CHANGELOG.md).
-
-<details>
-<summary><strong>New in skill 2.9.1</strong></summary>
-
-- **STAN's database credential must never be shared.** Earlier versions suggested a shared copy of it; it is a long-lived secret, and staff use the STAN dashboard with a share token instead.
-- **HT plate files named `<date>_PROT_<n>` are now found.** Before, such a plate was not recognised and none of its samples were found.
-
-</details>
-
-<details>
-<summary><strong>New in skill 2.9.0</strong></summary>
-
-- **If you ran Sage or FragPipe DDA with an earlier version, re-run the differential expression.** Earlier versions let contaminants (BSA, trypsin, keratins ...) into the statistics as if they were sample proteins, and for Sage they also counted decoy matches and failed measurements. Both are fixed, and the fixes change the results. The search itself does not need to be repeated, but its output has to be read again with this version (the search's `run_search.py` command with `--adapt-only`) before the DE is re-run; a DE on the old adapted report would repeat the old mistakes.
-- **Your copy of the skill stays current.** At the start of each session the skill checks your computer's copy, your copy on the cluster and the Core's current release. If you are behind, it tells you first and gives you the one-minute update; your cluster copy is refreshed for you, never while your jobs are using it. Installing is now one line in a terminal.
-- **DDA data can be searched with DIA-NN on the cluster.** Large DDA cohorts now go through the parallel search as DDA, with the precursor range read from your survey scans. The Methods say that DIA-NN searched the spectra as DDA, and mark any setting taken from the Core's defaults rather than measured. The parallel search also no longer stops when its first measuring step fails on the cluster's network storage: it retries once, then carries on with the Core's documented settings and says so in the Methods.
-- **Keratin samples keep their keratin.** For hair, wool, feather, skin or nail, the skill asks at the start and builds a search database that does not treat the sample's own keratins as contaminants, so they are quantified and tested like any other protein. Trypsin, BSA and other contaminants are still removed.
-- **Sage results are described as what they are.** A Sage analysis now says that each protein's amount is its most intense peptide, with a caveat, instead of calling it MaxLFQ. The skill also warns when Sage's quantification window does not fit your instrument's mass error. FragPipe, AlphaDIA and Radiant results name their own quantification too.
-- **Send the report with its audio as one file.** `Analysis_Report_with_audio.html` is the report with the audio discussion and its transcript built in, so a collaborator can forward it and the audio still plays. The skill builds it when the analysis is finalized, if there is an audio discussion. Before keeping it, the skill reads the audio back out of the file and checks it. If the file is too big to email, it says so and suggests Bioshare.
-- **Protein-set tests when few single proteins pass.** When a comparison has fewer than 10 significant proteins, the skill offers to test predefined sets of proteins (GO, Reactome, or a list you supply with its source). This can find a group of proteins that shifted together even when none passed on its own.
-  - Two tests, camera and fry, run side by side on the same model as the differential expression, including paired designs.
-  - Each result is checked against run depth, model-estimated values and the choice of reference.
-  - Where a test has little power in your design (camera in a pulldown, for example), the report says so and does not present its zero as a result.
-  - **Pulldowns (IPs) have their own mode, with stated limits.** Comparisons are made relative to each bait's complex. A protein must be enriched at least 4-fold over the control to count as part of the complex, so losses from a complex are harder to detect than gains: finding nothing does not mean the complex lost nothing. Each bait's result states this with its own numbers.
-  - Nothing significant is reported as "not detectable in this design", never as "unchanged".
-- **Exact reproducibility names the CPU.** The quantification's last decimal places can differ between CPU families; on a real dataset this changed logFC by up to 0.002 and changed no significance calls. The run now records which CPU family it ran on, and `REPRODUCE.md` says how to re-run on the same kind of machine for identical numbers.
-- **A record of how each analysis was done.** A decisions log records each choice and the reason for it. In Claude Code, the analysis conversation is also saved, with passwords, keys and tokens redacted, so a reviewer (a person or an AI) can check the work later. Both stay in the session folder: they are left out of the session zip, and a Core delivery never includes them.
-- **A new request starts a new analysis.** An earlier analysis of the same data is mentioned, not reused, unless you ask for a re-analysis.
-- **For UC Davis Proteomics Core runs:**
-  - **"How did we do?"** The report, README and delivery email end with a link to the Core's short feedback survey, pre-filled with the submission number. It appears only on Core runs, never on analyses done outside the Core.
-  - **Reaching CoreOmics.** The skill shows staff how to make their CoreOmics key and save it with one line in their own terminal, never in the chat, including on Windows. `core_submission.py check` then says in plain words whether the key works and, if not, what to fix, without ever showing the key.
-  - **Submission numbers are read strictly.** Only ordinary digits count as a PROT number. Before, a number written in another script's digits, such as Arabic-Indic, was read as one, which could turn an outside analysis into a Core run. When there is no sign that the Core ran the samples, the skill asks before asking for a number.
-  - **Notes from the Core.** The Core can leave a note for a staff member's Claude, which shows it at the start of their next session and passes their reply back.
-- **Coming later: Claudes working together in Slack.** Two people's Claude sessions will be able to work on one analysis in one Slack thread, each acting only when its own person approves. It ships switched off, and does nothing until the Core sets up its Slack app.
-
-</details>
-
-<details>
-<summary><strong>New in skill 2.8.0</strong></summary>
-
-- **One report you can open and share.** Every analysis produces a single self-contained `Analysis_Report.html`, the report of record, with every figure embedded. It comes with a PDF copy and a plain-text twin you can feed to NotebookLM. The session folder opens from `README.html`. An `AGENTS.md` explains every file to an AI assistant, including where the raw data, search and database live on the cluster.
-- **Listen to your results (optional).** You can have a two-host audio discussion of your results ("Signal to Noise": a biologist and a statistician). It covers what your data show, how your samples were measured, and how proteomics works, all using your own numbers.
-  - It is written from your report, and every number and protein name in it is checked against the report.
-  - After recording, the audio is transcribed back and compared with the script.
-  - A **Listen** card sits at the top of the report.
-  - Voices come from Google Gemini, or from offline Mac voices if you prefer.
-- **Paired designs handled properly.** `--block` models samples that come from the same animal or patient: as a fixed effect for simple before/after designs, and as a random effect when animals are nested within groups. It warns wherever a comparison can't be trusted.
-- **You can see what was actually measured.** Every results table now reports, for each group, how many runs detected each protein, and whether a hit was measured in both groups, partly estimated by the model, or is a presence-only call. Hits are ranked by significance, and model-estimated values are never presented as measurements.
-- **Figures built for small studies.** The top-protein plots show measured and model-estimated points differently, and join paired samples. The PCA circles each group. The p-value diagnostics move into one appendix panel.
-- **Real proteins are no longer lost as "contaminants".** The search database now drops contaminant entries that are identical, or nearly identical, to your organism's own proteins, such as bovine EEF1A1 against mouse. Actin, tubulin and similar proteins are therefore quantified. An older database gets an explicit warning that names the proteins affected.
-- **Methods written from the raw files.** LC–MS settings are read from the instrument's own files: the dia-PASEF window scheme, ion-mobility ramp, collision energy and source settings. They are written up in the order recent timsTOF papers use, and anything the files don't record is clearly marked for you to fill in.
-- **Sample-quality checks that respect your design.** Signal from blood, muscle, skin and contaminants is tested separately within animals and between animals. With only a few animals per group, you get a caution rather than a false alarm.
-- **For UC Davis Proteomics Core runs:**
-  - the CoreOmics submission (PI, organism, sample sheet, who prepared the samples) appears in every report;
-  - Bioshare deliveries include the report, methods, `README.html`, `AGENTS.md` and the audio discussion when there is one;
-  - finished searches are handed to the FRAN corpus automatically and recorded in a central registry.
-- **Simpler setup.** One setup script installs the toolchain (including limpa 1.4 from Bioconductor), checks it, and prints the exact fix if anything is wrong.
-
-</details>
-
-### Install
-
-Requires [Claude Code](https://claude.com/claude-code).
-
-**Easiest, in a terminal** (one line; paste it whole):
+The UC Davis Proteomics Core pipeline runs as a skill for Claude Code: point it at a folder of raw
+mass-spec files, describe the experiment in your own words, and it does the search, the statistics,
+the report, the Methods and a reproducibility bundle
+([video](https://www.youtube.com/watch?v=roHknILC-Ec)). Its documentation is at
+**[github.com/bsphinney/UCD-Proteomics-AI-Skill](https://github.com/bsphinney/UCD-Proteomics-AI-Skill)**.
+Install it in a terminal (one line):
 
 ```
-claude plugin marketplace add https://github.com/bsphinney/DE-LIMP.git && claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core
+claude plugin marketplace add https://github.com/bsphinney/UCD-Proteomics-AI-Skill.git && claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core
 ```
 
-Then start Claude Code, or run `/reload-plugins` if it is already open.
-
-**Or inside Claude Code:** paste the first command, press Enter, then the second. Pasting both
-at once does not work.
+Or inside Claude Code: paste the first command, press Enter, then the second.
 
 ```
-/plugin marketplace add https://github.com/bsphinney/DE-LIMP.git
+/plugin marketplace add https://github.com/bsphinney/UCD-Proteomics-AI-Skill.git
 ```
 
 ```
 /plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core
 ```
 
-**Keep it current:** `/plugin` → **Marketplaces** → **ucdavis-proteomics-core** → **Enable
-auto-update**. Automatic updates are off by default for marketplaces that are not Anthropic's.
-
-**Update later:** `claude plugin update ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core`, then `/reload-plugins`.
-If it says "already at the latest version" while a newer release is out, or warns that the
-marketplace was not refreshed (seen on a Windows laptop with no GitHub SSH key), refresh the
-catalogue over HTTPS first, then run the update again:
+Keep it current: `/plugin` → **Marketplaces** → **ucdavis-proteomics-core** → **Enable
+auto-update**. If an update says "already at the latest version" while a newer one is out, refresh
+the catalogue first:
 
 ```
 git -C ~/.claude/plugins/marketplaces/ucdavis-proteomics-core pull --ff-only
 ```
 
-Inside the skill, Claude checks this for you at the start of every session.
-The marketplace is added by its HTTPS URL because Claude Code tries SSH first for the
-`bsphinney/DE-LIMP` shorthand. If you added it that way before, keep it, and refresh it as
-above; if that pull asks for SSH, use
-`git -C ~/.claude/plugins/marketplaces/ucdavis-proteomics-core pull --ff-only https://github.com/bsphinney/DE-LIMP.git main`.
+**Installed the skill from here before 2.15?** Nothing to do. The `skill/` folder and
+`.claude-plugin/marketplace.json` stay in this repository on purpose, at 2.15.0, so that older
+installs can still update from here. 2.15.0 then moves your plugin catalogue to the new repository
+by itself at the start of its first session. Please do not delete `skill/` or `.claude-plugin/`
+from DE-LIMP: an install from before 2.15 would stop getting updates.
 
-Then just ask, in your own words:
-
-```
-analyze my proteomics data in /path/to/raw_files
-```
-
-It installs its own toolchain on first run (R, limpa/limma, the search engine) with no admin rights needed, and works entirely on your own machine — a cluster is optional. UC Davis Proteomics Core members with a HIVE account get the facility's installed software and pre-staged FASTAs reused automatically.
+This app stays here as it is, for anyone who wants a point-and-click interface for DIA-NN results.
 
 ---
 
@@ -375,80 +278,6 @@ All dependencies install automatically on first run:
 - **"R version: 4.x.y (NEED: 4.5+)"** -- you have an older R. Upgrade from <https://cloud.r-project.org/bin/macosx/> and rerun.
 - **Permission denied when installing packages** -- you're trying to install into the system library. Either run RStudio normally (it sets up a personal library automatically) or, in a Terminal R session, type `dir.create(Sys.getenv("R_LIBS_USER"), recursive = TRUE, showWarnings = FALSE)` once.
 - **Port 3838 already in use** -- another R session is already serving the app. In RStudio, click "Session → Restart R", then relaunch. Or change the port: `shiny::runApp(..., port = 3839)`.
-
----
-
-## Claude Skill: UC Davis Proteomics Core pipeline
-
-Prefer to just *describe* your experiment and let an AI run the whole thing? DE-LIMP
-ships a **Claude skill** (`ucdavis-proteomics-core-pipeline`) that goes from raw mass-spec files to
-differentially expressed proteins end-to-end — it detects DIA/DDA + instrument,
-auto-installs the toolchain (no admin needed), runs DIA-NN or Sage with parameters
-derived from your data type, then limpa/limma DE, and writes a biological analysis
-report plus a full reproducibility bundle, all packaged into tidy session folders.
-It runs in **Claude Code** and **Claude Desktop**.
-
-- **One self-contained HTML report** (`Analysis_Report.html`) is the report of record — QC,
-  volcano plots, PCA and violins embedded, with a PDF copy and a plain-text twin for NotebookLM;
-  the session opens from `README.html`.
-- **Publication Methods** and a **PRIDE/MassIVE deposit package** in every session.
-- **UC Davis Proteomics Core runs** carry their CoreOmics submission (PI, organism, sample sheet,
-  who prepared the samples) in every report, and deliver to the collaborator's Bioshare folder.
-- **Optional audio discussion** of the results for the collaborator (AI-generated, on request).
-
-**Install (one time)** — for **Claude Code**:
-
-**Easiest, in a terminal** (one line; paste it whole):
-
-```
-claude plugin marketplace add https://github.com/bsphinney/DE-LIMP.git && claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core
-```
-
-Then start Claude Code, or run `/reload-plugins` if it is already open.
-
-**Or inside Claude Code:** paste the first command, press Enter, then the second. Pasting both
-at once does not work.
-
-```
-/plugin marketplace add https://github.com/bsphinney/DE-LIMP.git
-```
-
-```
-/plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core
-```
-
-**Keep it current:** `/plugin` → **Marketplaces** → **ucdavis-proteomics-core** → **Enable
-auto-update**. Automatic updates are off by default for marketplaces that are not Anthropic's.
-
-**Update later:** `claude plugin update ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core`, then `/reload-plugins`.
-If it says "already at the latest version" while a newer release is out, or warns that the
-marketplace was not refreshed (seen on a Windows laptop with no GitHub SSH key), refresh the
-catalogue over HTTPS first, then run the update again:
-
-```
-git -C ~/.claude/plugins/marketplaces/ucdavis-proteomics-core pull --ff-only
-```
-
-Inside the skill, Claude checks this for you at the start of every session.
-The marketplace is added by its HTTPS URL because Claude Code tries SSH first for the
-`bsphinney/DE-LIMP` shorthand. If you added it that way before, keep it, and refresh it as
-above; if that pull asks for SSH, use
-`git -C ~/.claude/plugins/marketplaces/ucdavis-proteomics-core pull --ff-only https://github.com/bsphinney/DE-LIMP.git main`.
-
-On **Claude Desktop**: click the **+** button beside the prompt box → *Plugins* →
-*Add plugin*, add the marketplace `bsphinney/DE-LIMP`, then install
-**ucdavis-proteomics-core-pipeline**.
-
-📖 **[Step-by-step install guide](https://bsphinney.github.io/DE-LIMP/skill-install.html)** —
-written for biologists, covers both apps, first run, platform notes, and troubleshooting.
-
-**Use it:** just say *"analyze my proteomics data in `~/data/HeLaQC` — it's human,
-first 3 are control, last 3 treated."* It asks only for what it can't detect
-(organism, conditions) and does the rest. First run installs its toolchain (a few
-minutes, one time).
-
-Source and docs: [`skill/ucdavis-proteomics-core-pipeline/`](skill/ucdavis-proteomics-core-pipeline).
-Search parameters ship with the skill, so its version pins them.
 
 ---
 

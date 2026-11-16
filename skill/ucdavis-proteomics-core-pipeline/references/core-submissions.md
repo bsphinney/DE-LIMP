@@ -14,6 +14,31 @@ short form; this is the runbook and the evidence behind it. Everything marked *m
 A **high-throughput plate** is a different route: STAN knows its file list
 (`references/ht-submissions.md`). `core_submission.py locate` notices a plate and exits 4.
 
+<!-- contents: tests/test_skill_structure.py --toc -->
+**Contents** (section: line)
+- 42: Why this needs its own script
+- 60: Where each step runs
+- 88: What staff need first
+- 248: 0. `identify` — which submission is this data? (where the key is)
+- 337: 1. `fetch` — the submission, its neighbours, its shares (where the key is)
+- 412: 2. `locate` — find each sample's raw file (HIVE)
+- 609: 3. `stage` — link the raw files into the service directory (HIVE)
+- 678: Symlink visibility — measured, and the rules that follow
+- 698: 4. `conditions` — the design from CoreOmics
+- 723: 5. The search and DE — session on HIVE, report written locally
+- 794: 6. `deliver` — real files into the Bioshare folder (HIVE)
+- 990: 7. `bioshare` — register and share (where the key is)
+- 1026: 8. `email-draft`
+- 1062: Several submissions in one analysis
+- 1109: Core client work with no CoreOmics submission yet (the feedback survey)
+- 1187: Troubleshooting by exit code
+- 1203: The linked-share lesson
+- 1214: Less-used flags
+- 1224: Step 1 for Core staff: where the CoreOmics steps run, and `identify`
+- 1255: 1c. The service run, step by step (step 1c)
+- 1464: 12b. Deliver to the collaborator (step 12b)
+<!-- /contents -->
+
 ## Why this needs its own script
 
 A service run attaches a PI, a sample sheet and a Bioshare folder to a set of raw files.
@@ -25,7 +50,7 @@ When any link in that chain is wrong, nothing errors:
 - **The service directory is organized by people, not a formula** (`Doe jane`,
   `Institution_X/Lab_Y`), so "where does PROT_0807 live" is a lookup that can be wrong.
 - **A share built from links depends on server settings nobody watches.** Links into
-  `/quobyte` served nothing over https, and SMB hides absolute links (the PROT_0793 lesson,
+  `/quobyte` served nothing over https, and SMB hides absolute links (the linked-share lesson,
   below).
 
 `scripts/core_submission.py` does the bookkeeping deterministically and hands every judgment
@@ -39,9 +64,9 @@ call back as an **exit code plus the exact question**. It never runs a search en
 Windows' `python3` is usually the Microsoft Store stub. `check_access.sh` says which
 (`coreomics_runs_on: hive | this_computer`); on HIVE every KEY step runs through `hive_exec.sh`
 (`python3 ~/proteomics-pipeline/scripts/core_submission.py …`). `none` means the user is not
-Core staff (`core_member: false`): no CoreOmics step runs, and none is mentioned to them. Until 2026-10-08 these were
+Core staff (`core_member` or `core_staff` false): no CoreOmics step runs, and none is mentioned to them. Until 2026-10-08 these were
 "local" and HIVE deliberately had no key, so staff with no Python on their laptop could not
-look a submission up at all (Gabriela 2026-10-02, Michelle 2026-10-08).
+look a submission up at all (two Core members, 2026-10-02 and 2026-10-08).
 
 | step | runs | why there |
 |---|---|---|
@@ -213,10 +238,10 @@ refused, because urllib would send the `Authorization` header with it.
 | `key_malformed` | the file holds more than the key: the word `Token`, a space or line break, quotes, odd characters | save it again, the key alone |
 | `key_unreadable` | the key file exists but cannot be opened (permissions) | save it again |
 | `key_mode_wrong` | **on HIVE only:** the key file can be read by other accounts (any group or other permission bit), or another account owns it. The key was not used | `bash scripts/hive_exec.sh 'chmod 600 ~/.coreomics_token'`, then `check` again; a file not yours → delete it and `coreomics_key_to_hive.sh` again. Readable for long → Regenerate the key in CoreOmics and put the new one on HIVE |
-| `key_rejected` | CoreOmics' own JSON reply to a 401/403 is `Invalid token.`: copied wrongly, or replaced in CoreOmics since | copy the current key and save it again. `COREOMICS_TOKEN`, if set, wins over the file: fix or unset it. A freshly copied key refused too → ask Brett (brettsp) |
-| `no_lab_access` | the key works, but the account sees no Proteomics submissions (count 0 on `submissions/?lab=PROTEOMICS&page_size=1`, or CoreOmics' JSON 403 "You do not have permission…") | ask Brett (brettsp) to add the CoreOmics account to the Proteomics lab; nothing changes on the computer |
+| `key_rejected` | CoreOmics' own JSON reply to a 401/403 is `Invalid token.`: copied wrongly, or replaced in CoreOmics since | copy the current key and save it again. `COREOMICS_TOKEN`, if set, wins over the file: fix or unset it. A freshly copied key refused too → ask Brett (the Core director) |
+| `no_lab_access` | the key works, but the account sees no Proteomics submissions (count 0 on `submissions/?lab=PROTEOMICS&page_size=1`, or CoreOmics' JSON 403 "You do not have permission…") | ask Brett (the Core director) to add the CoreOmics account to the Proteomics lab; nothing changes on the computer |
 | `unreachable` | no answer (DNS, timeout, TLS, refused) or a CoreOmics 5xx | check the network and retry later. Off campus the UC Davis VPN might be needed (not confirmed). A TLS failure can be a network that inspects traffic |
-| `unexpected` | something other than CoreOmics answered: a web page (a Wi-Fi sign-in, or a 401/403 page from a proxy or firewall — its HTTP status is named, and it says nothing about the key), a redirect to another server (never followed: the key would go with it), a reply that is not HTTP; a proxy removed the key; a CoreOmics refusal not listed above (quoted); a `COREOMICS_BASE_URL` that is not a web address; or a bug (check reports it rather than crash) | finish any network sign-in or try another network; check or unset `COREOMICS_BASE_URL`; a quoted CoreOmics refusal → ask Brett (brettsp); otherwise `report_issue.sh` |
+| `unexpected` | something other than CoreOmics answered: a web page (a Wi-Fi sign-in, or a 401/403 page from a proxy or firewall — its HTTP status is named, and it says nothing about the key), a redirect to another server (never followed: the key would go with it), a reply that is not HTTP; a proxy removed the key; a CoreOmics refusal not listed above (quoted); a `COREOMICS_BASE_URL` that is not a web address; or a bug (check reports it rather than crash) | finish any network sign-in or try another network; check or unset `COREOMICS_BASE_URL`; a quoted CoreOmics refusal → ask Brett (the Core director); otherwise `report_issue.sh` |
 
 `users/me/` answers 403 even with a valid key, so `check` never uses it.
 
@@ -224,7 +249,7 @@ refused, because urllib would send the `Authorization` header with it.
 
 Every report carries its submission, so the number is settled at the start: Core staff give it
 when SKILL.md step 0a asks, and step 1 checks it against the files. Never guessed. Only Core
-staff run this (`core_member: true`); for anyone else it never runs. `--text` carries only the
+staff run this (`core_staff: true`); for anyone else it never runs. `--text` carries only the
 words that name the submission, never a whole message: the shell reads it (single quotes here;
 through `hive_exec.sh`, double quotes and none of `$` `` ` `` `\` `"` `'`):
 
@@ -232,10 +257,10 @@ through `hive_exec.sh`, double quotes and none of `$` `` ` `` `\` `"` `'`):
 python3 scripts/core_submission.py identify <raw files and/or their folder> --text 'submission 807'
 ```
 
-1. **Named ids.** A `PROT_####` token (`PROT_0756`, `prot-756`) or a 12-character CoreOmics id
+1. **Named ids.** A `PROT_####` token (`PROT_0807`, `prot-807`) or a 12-character CoreOmics id
    (with a letter and a digit — a 12-digit timestamp is not one) anywhere in the paths, or
-   "submission 756" in the message (3-4 digits; `prot_10ug` is an amount, not PROT_0010). A bare number in a FILE name never counts: Exploris
-   runs carry counters (`Ex08312026_380_JE21`), and a 12-hex tail of a UUID/GUID is not an id.
+   "submission 807" in the message (3-4 digits; `prot_10ug` is an amount, not a submission). A bare number in a FILE name never counts: Exploris
+   runs carry counters (`Ex08312026_9380_XY21`), and a 12-hex tail of a UUID/GUID is not an id.
    With a token every named id is looked up: several that are one submission are merged; one
    CoreOmics does not know is `not_found`; one whose sample IDs are in none of the file names
    is `named_unconfirmed`. Without a token a single named id is `named` (unverified).
@@ -252,16 +277,17 @@ python3 scripts/core_submission.py identify <raw files and/or their folder> --te
 |---|---|---|
 | 0 | `named`, `matched` | the number staff gave at step 0a: go on, no second confirmation. Otherwise confirm in one line — the JSON's `ask` (it says how many file names carry the sample IDs) |
 | 2 | `none`, `ambiguous`, `weak`, `named_unconfirmed`, `not_found` | ask the user for the number — the JSON's `ask` |
-| 3 | `needs_token`, `lookup_failed` (CoreOmics refused or unreachable) | ask for the number, relay `token_help`; ask the key facts and `attach --given` (below) |
+| 3 | `needs_token`, `lookup_failed` (CoreOmics refused or unreachable) | set the key up first ("What staff need first"; on HIVE the agent does it) and run `identify` again; if that cannot be done now, carry on with the number staff gave, relay `token_help`, ask the key facts and `attach --given` (below) |
 
 **Never search `/quobyte/proteomics-grp/coreomics/.submissions_db`.** It is a stale snapshot
-(March 2026), and a free-text search for `0756` there matched an unrelated 2019 record.
+(March 2026), and a free-text search for `0807` there matched an unrelated 2019 record.
 
-**The record goes into the session once** (SKILL.md step 3b):
+**The record goes into the session once** (SKILL.md step 1c.7 for a service run, through
+`hive_exec.sh` since the session is on HIVE; otherwise step 3b):
 ```
-python3 scripts/submission_report.py attach --session <S> --record ~/core/PROT_0756
+python3 scripts/submission_report.py attach --session <S> --record ~/core/PROT_0807
 python3 scripts/submission_report.py attach --session <S> --given \
-    '{"internal_id": "PROT_0756", "organism": "mouse", "prot_or_pep": "peptides", "sample_prep": "lab"}'
+    '{"internal_id": "PROT_0807", "organism": "mouse", "prot_or_pep": "peptides", "sample_prep": "lab"}'
 ```
 `input/submission.json` holds an **allowlisted** copy (identity, PI name/department/institution,
 submitter name, submitted date, organism, UniProt, description, experiment type, proteins or
@@ -277,9 +303,36 @@ read that one record. `--given` records are labelled "given by the user" everywh
 blank or disagreeing with the FASTA searched; UniProt blank (the Core chose the database); sheet
 ids with no raw file, and raw files with no sheet id; conditions analysed that pool or split the
 sheet's; beads blank on an affinity experiment; a form that contradicts itself about who
-prepared the samples; and **pairing** — PROT_0756's names are `Old - JPH3 - Mouse 1`: every mouse
+prepared the samples; and **pairing** — a mouse-brain IP cohort's names are `Old - JPH3 - Mouse 1`: every mouse
 gave all five IPs (JPH3, JPH4, Kv2.1, RyR, IgG) and mice 1–3 are Old, 4–6 Young, so samples from
 one mouse are not independent, and the note says whether the design analysed carries the mouse.
+
+**The sheet against the raw files (2.15).** Each run is matched by the rule `locate` and the HT
+manifest use (`core_submission.run_matches`): an ordinary run by its `unique_id`, exactly as
+before; a run of the submission's HT plate (named `<date>_[PROT_]<n>_...`) in its sample field,
+by `unique_id` and else by `sample_name`. An HT plate's runs carry the sheet's sample names,
+never its `unique_id` values (CoreOmics row IDs: a letter and a number), which once read as
+"96 of 96 sample IDs on the sheet match no raw file". Each note says the basis it used (`basis`:
+`unique_id`, `sample_name`, `locate`, `mixed`, or `none`), and an HT plate whose sheet gives no
+sample names gets one neutral line ("not compared by name") instead of counts.
+
+**Runs renamed when staging (2.15).** When staff staged corrected names into `raw/` (the
+instrument's sample names were wrong, as on an HT plate typed for the wrong wells), the stage
+record `.core_submission.json` is the one record of each pair: `links[].name` is the corrected
+name delivered in `raw/`, `links[].target` the run as acquired. The notes find it with deliver's
+lookup (`core_submission.find_service_record`, without its slow search of the service tree): in
+the folders above the session, where stage puts one. For each run they work out which side of the
+rename the analysis used (the instrument's file, or a corrected link); a swap that nothing else
+settles is matched to no sample and said. A `raw_names_corrected` note then says how many runs
+were renamed and which names `input/raw_files.txt`, the search and its tables use; each run is
+matched to the sheet by its delivered name; every raw name the notes list is labelled "as
+acquired" or "as delivered". The pairs that join the tables to the delivered `raw/` are in
+`input/raw_names.tsv` (`as_acquired`, `delivered`, `plate_position`; written by `attach` and
+`finalize` from the stage record) and are delivered as `RAW_NAMES.tsv` beside the report. A session
+that is not inside its staged service project has no stage record above it: give `attach
+--service-project <the project>` (deliver's flag) and the map is copied from there. No stage
+record above the session, or one that cannot be read, is a note of its own, and then no note
+claims a full match.
 
 ## 1. `fetch` — the submission, its neighbours, its shares (where the key is)
 
@@ -305,8 +358,8 @@ line) -- never a `~/core` that is a link or another account's.
 
 - **Look up by number with the exact filter:**
   `GET submissions/?lab=PROTEOMICS&internal_id=PROT_0807` returns exactly one record.
-  **Never `search=`** — `search=0807` returns two. Numbers are `PROT_%04d` (PROT_0763 …
-  PROT_0807 seen). The script accepts `PROT_0807`, `prot-807`, `0807`, `807`, `#807`, or the
+  **Never `search=`** — `search=0807` returns two. Numbers are `PROT_%04d` (four digits,
+  e.g. PROT_0807). The script accepts `PROT_0807`, `prot-807`, `0807`, `807`, `#807`, or the
   12-hex CoreOmics id (`GET submissions/<id>/`), and re-checks `internal_id` client-side.
 - **List:** `GET submissions/?lab=PROTEOMICS&page=N&page_size=100&ordering=-submitted`
   (DRF `count/next/results`). List results **already include** `submission_data.samples`,
@@ -369,10 +422,11 @@ bash scripts/hive_exec.sh --get '~/core/PROT_0807/locate.json' ~/core/PROT_0807/
 a Mac the SMB mount is `/Volumes/proteomics/...`, on Windows `R:\...`). Raw files are in
 `Data/raw_data/{tTOF_HT,Exploris480,Lumos1}/<month folder>/`. **Month folder names are
 free-form** — `sep26`, `Aug26`, `JUL26`, `June26`, `jan25AndPM`, `Std_He_...` — so every
-folder is scanned. About 20k `.raw`/`.d` entries in total; a listing is fine on the login
-node. The requested instrument's folder is scanned first but never exclusively: staff
-sometimes run a sample on another instrument (gate `instrument` warns). Compute nodes can
-read this tree (the PROT_0793 search did).
+folder is scanned. About 20k `.raw`/`.d` entries in total; on HIVE's login node `locate` runs
+itself on a compute node to list them (one blocking `srun`: run it in the background, or with a
+Bash timeout of at least 70 minutes, as 12b below says). The requested instrument's folder is
+scanned first but never exclusively: staff sometimes run a sample on another instrument (gate
+`instrument` warns). Compute nodes can read this tree (an earlier submission's search did).
 
 **Filename conventions (measured on the full listing):**
 
@@ -405,22 +459,22 @@ find `KG13`. Four further rules, each from a failure found by review:
   240, never more than fetch's neighbour window) count.
 
 **Measured on the 45 newest submissions:** token matching found 1:1 files for many timsTOF
-submissions (PROT_0772 4/4, 0771 12/12, 0768 10/10, 0764 6/6). It failed in four ways, and
+submissions (four of them 4/4, 12/12, 10/10 and 6/6). It failed in four ways, and
 each has a gate:
 
 | failure mode seen | example | handling |
 |---|---|---|
 | short / well-like / numeric / too-common ids match hundreds–thousands of files | `A3`, `H10`, `001` | **weak id** (alnum < 3, all digits, `^[A-H](1-12)$`, or > 10 files overall): never auto-assigned → `weak_ids` FAIL |
-| the same ids reused by another submission | `BN1–6` in 0794 **and** 0776; `SG001`; `GV1` | **ambiguous label**: a run is ambiguous when ANY other submission — older, same day or newer — uses the label and was submitted on or before the run. Only ambiguous runs → `ambiguous_label` FAIL; an unambiguous run as well → `choose_run` FAIL (staff say which) |
+| the same ids reused by another submission | `BN1–6` in two different submissions; `SG001`; `GV1` | **ambiguous label**: a run is ambiguous when ANY other submission — older, same day or newer — uses the label and was submitted on or before the run. Only ambiguous runs → `ambiguous_label` FAIL; an unambiguous run as well → `choose_run` FAIL (staff say which) |
 | older runs of the same label | 2025 files for a 2026 submission | date window; counted in `out_of_window` INFO |
 | several files per sample | re-injections | **staff decide, once** — none is picked by default: `choose_run` FAIL (`kind: reinjections`) lists each candidate; `--reinjections latest` (newest injection) or `--reinjections all` (technical replicates) settles every such sample, `--choose <key>=<file>` one |
 
 **Labels alone cannot decide an ambiguous run, so staff do.** The `ambiguous_label` detail
 names each other submission and whether it already has **earlier unambiguous runs** of that
 label (runs acquired after it was submitted and before anyone else used the label). Measured
-example: PROT_0776 and PROT_0794 both use BN1–6. For 0776, the Aug-24 BN runs are unambiguous
-(0794 had not been submitted) and are chosen. For 0794, the Sep-8 BN runs are ambiguous —
-0776 was submitted first — so `locate` fails, and the detail says 0776 already has its own
+example: two submissions, an earlier A and a later B, both use BN1–6. For A, the Aug-24 BN runs
+are unambiguous (B had not been submitted) and are chosen. For B, the Sep-8 BN runs are ambiguous —
+A was submitted first — so `locate` fails, and the detail says A already has its own
 Aug-24 runs. That fact is what lets staff decide: re-run with `--accept-ambiguous` (recorded in
 `locate.json` under `accepted`) if these runs are this submission's, `--choose` the one run that
 is, or `--files-from` their own list.
@@ -430,7 +484,9 @@ several runs (`alternates` WARN) and an unambiguous run over an ambiguous one
 (`ambiguous_files_excluded` WARN); a duplicate label was later resolved without the user on a
 real submission, and identity really was in doubt. Now a sample with several candidate runs is
 `needs_choice` and `choose_run` FAILs, listing each candidate (file, acquired date, any other
-submission using the label). Staff answer with `--choose <unique_id>=<file>` (repeatable) or
+submission using the label). A run whose name carries the label followed by letters (a digest suffix: label `S1`, run
+`…S1CT…`) is never a candidate by itself, but `--choose S1=<that file>` is accepted (recorded in
+the note; a digit after the label, `KG13` for `KG1`, is still refused). Staff answer with `--choose <unique_id>=<file>` (repeatable) or
 `--choices FILE` (one `UNIQUE_ID=FILE` per line): the file must be a run whose name carries
 that id (in the window or not; a weak id too). The answers go into `locate.json`
 (`accepted.choices`), the row (`chosen_by`, note), the `staff_choices` INFO gate, `stage`'s
@@ -509,7 +565,7 @@ run is recorded as `accepted_ambiguous`. With no surname in the summary nothing 
 (`_807_`, `_0807_`, `_PROT_0807_` or `_PROT0807_`, any case), `locate` exits **4**: use
 `ht_manifest.py`. The number is matched only right after the leading date and must end there
 (`_PROT_08070_` is not 0807), because anywhere else it collides with run counters —
-Exploris `Ex08312026_380_JE21.raw` would otherwise impersonate submission 0380. Before 2.9.1
+Exploris `Ex08312026_9380_XY21.raw` would otherwise impersonate submission 9380. Before 2.9.1
 the `PROT_` form was not recognised, so such a plate went to sample matching and found none
 of its samples. Its `next_step` passes this summary to `ht_manifest.py` (`--summary`), which then
 checks STAN's list against the record: only runs named for the submission go into its
@@ -587,13 +643,19 @@ exists because the looser version picked a wrong folder with exit 0:
   otherwise a new `<Institution>/<PI last>`. "University of Washington" is not
   `Washington_State_Univ`, and "UT Southwestern" is not `Texas_AM`.
 - **One clean candidate** is reused; **none** proposes a new folder; **anything else** exits 2
-  with the candidates and reasons — re-run with `--service-dir <folder>`, which must resolve
-  under the service root.
+  with the candidates and reasons (`service_dir_options`: each folder with the `--service-dir`
+  that picks it) — re-run with `--service-dir <folder>`, which must resolve under the service root.
 
 **The chosen folder is part of the single staff confirmation**, together with the file list —
 a new-folder proposal is often a spelling of a folder that already exists.
 
-**The project** is `<group>/<internal_id>`. A `.core_submission.json` there naming a different
+**The project** is `<group>/<internal_id>`, or the folder that already holds the submission's raw
+files or an earlier analysis of it (`--project-dir` when staff name another). Folders of the submission that stage does not use —
+any folder under the group named for it with or without the underscore (`PROT_9812`,
+`…-PROT9812`), and with `--service-dir` also a folder holding its raw files or a session — are
+listed in the dry run (`group_resolution.existing_folders_not_used`, a warning); `--project-dir
+<that folder>` stages there. `--service-dir` itself always asks for a NEW `<group>/<id>/`. A
+`.core_submission.json` there naming a different
 submission → exit 2; the same submission → idempotent re-run. `--apply` refuses a `files.txt`
 whose `locate.json` (beside it) hard-failed, unless it came from `--files-from`. It creates:
 
@@ -618,7 +680,7 @@ Folders it creates are `g+rwxs,o+rx` (the tree is shared; umask 077 would lock c
 | link | on HIVE | over SMB (Mac/Windows) | Bioshare |
 |---|---|---|---|
 | **relative**, source and target both under the Flinders root (CoreOmics `views/`, e.g. `../../../../../../projects/2019/02/<id>`) | works | **visible and followable** — verified for a relative link to a `.raw` file and to a `.d` folder: both visible and readable | untested for `Data/raw_data` (see step 6) |
-| **absolute** `/nfs/lssc0/...` | works | **invisible** — PROT_0793 `share/raw`: 210 links on HIVE, 0 entries on the Mac mount; an absolute link placed beside the relative ones above was invisible too | — |
+| **absolute** `/nfs/lssc0/...` | works | **invisible** — an earlier submission's `share/raw`: 210 links on HIVE, 0 entries on the Mac mount; an absolute link placed beside the relative ones above was invisible too | — |
 | **into `/quobyte/...`** | works | **invisible** | **works only if Bioshare's file-streaming allows `/quobyte`** — the same submission's `share/search`: 59 links → `/quobyte/proteomics-grp/…/PROT_####` served nothing because Bioshare streams files through an Apache module whose allowed-folder list had `/quobyte` for http (port 80) but not https (443) — fixed 2026-09-16 by the Bioshare admins |
 
 Bioshare (`bioshareX/sendfile.py`) also serves a file only if its **realpath** is under the
@@ -626,7 +688,7 @@ server's `DIRECTORY_WHITELIST`, and `check_symlinks_dfs` raises `IllegalPathExce
 symlink whose target is outside it — on the older code path that **locks the share**. Which
 paths are allowed is server configuration, and it can differ between http and https: Bioshare
 hands downloads to an Apache module with its own allowed-folder list, which had `/quobyte` for
-port 80 but not 443 until 2026-09-16. Brett reports PROT_0793's absolute `Data/raw_data` links
+port 80 but not 443 until 2026-09-16. Brett reports an earlier submission's absolute `Data/raw_data` links
 download.
 
 So: **links between two Flinders paths are relative. Deliverables in a share are real files,
@@ -661,45 +723,46 @@ labels are the groups).
 ## 5. The search and DE — session on HIVE, report written locally
 
 **"I only require raw data" submissions get no search and no DE** unless staff explicitly ask:
-go straight to step 6 with `--mode raw-only`.
+go straight to step 12b (section 6, `deliver`) with `--mode raw-only`.
 
-Otherwise run SKILL.md steps 2–9 with the **session of record on HIVE**, under the work dir:
+Otherwise run SKILL.md steps 2–9 with the **session of record on HIVE**, under the work dir (the
+same run step by step, as SKILL.md step 1c sends you to it: "1c. The service run, step by step"
+below):
 ```
 bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/session.py init \
-    --name PROT_0807 --base <work_dir> --raw $(cat ~/core/PROT_0807/files.txt)'
+    --name PROT_0807 --base <work_dir> --raw $(cat ~/core/PROT_0807/files.txt) --submission PROT_0807'
 S=<the session dir it printed>
 ```
 Search, DE, figures, audit, `sample_quality.py`, `make_methods.py` (it reads raw metadata) and
 provenance all run there — heavy steps as SLURM jobs. Writing the report needs the data
-locally, so pull a working copy. `session.py which-search --paths` lists the search the DE
-read -- its search_provenance.json and report, wherever the search went (output/search_sage/
-...) -- and the workflow manifest: without them the report cannot name the engine or carry the
-scan-window caution. With none chosen it exits 3 with the reason, pulls nothing, and the block
-prints STOP: choose one first (SKILL.md step 12b), then pull again.
+locally, so pull a working copy (the lists of what moves live in `scripts/core_sync.sh`). Its `--get`
+asks `session.py which-search --paths` on HIVE for the search the DE read -- its
+search_provenance.json and report, wherever the search went (output/search_sage/ ...) -- and the
+workflow manifest: without them the report cannot name the engine or carry the scan-window
+caution. With none chosen it pulls the rest, prints STOP and exits 1: choose one first ("12b."
+below, "Several searches"), then pull again.
 ```
-mkdir -p ~/core/PROT_0807/session/output
-for d in tables figures; do bash scripts/hive_exec.sh --get "$S/output/$d" ~/core/PROT_0807/session/output/; done
-if P=$(bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/session.py which-search --dir $(printf %q "$S") --paths"); then
-  while IFS= read -r f; do [ -n "$f" ] || continue; D=~/core/PROT_0807/session/"$(dirname "$f")"
-    mkdir -p "$D" && bash scripts/hive_exec.sh --get "$S/$f" "$D"/ </dev/null; done <<< "$P"
-else echo "STOP (which-search exit $?): no search is chosen -- choose one (step 12b), then pull again"; fi
-for f in AUDIT.md SAMPLE_QUALITY.md methods.md; do bash scripts/hive_exec.sh --get "$S/output/$f" ~/core/PROT_0807/session/output/; done
+bash scripts/core_sync.sh --get --session "$S" --local ~/core/PROT_0807/session
 ```
 Attach the submission to `$S` right after `init` (`submission_report.py attach --session "$S"
---record ~/core/PROT_0807`, on HIVE: the allowlisted `hive/submission.json` put there in step 1), and pull
-`$S/session.json` and `$S/input/{submission.json,samples.tsv,raw_files.txt,conditions.csv,
-search.fasta.meta.json}` with the rest. Then locally: write `AI_Analysis_Report.md`;
+--record ~/core/PROT_0807`, on HIVE: the allowlisted `hive/submission.json` put there in step 1);
+`--get` also brings `$S/session.json`, the session records in `$S/input/` (the submission,
+samples, raw files, conditions, the FASTA's metadata, the sample type, the experiment type, the
+locate decisions and `input/raw_names.tsv`) and `logs/core_client.staff.json`, as
+`core_sync.sh --get` lists them (the one list). `input/raw_names.tsv` is there when staff renamed
+runs when staging: without it a report built here has no stage record to read, and says so.
+`logs/core_client.staff.json` is there for Core client work marked with `session.py
+core-client`: the mark counts only with it. One that is not on HIVE is reported "missing",
+harmlessly. Pull again after any attach or mark on HIVE, before rebuilding the report here. Then
+locally: write `AI_Analysis_Report.md`;
 `make_analysis_html.py --session ~/core/PROT_0807/session --out
 ~/core/PROT_0807/session/output/Analysis_Report.html` (its Submission section comes from the
 attached record, never an email address); `to_docx.py` for the Methods only (no Word copy of the report). **Push the finished files back before delivering** — `deliver` copies from `$S`.
 `report_provenance.json` goes with the report: it is the report's record, written beside it by
 `make_analysis_html.py` (and again by `make_podcast.py link`); without it, finalize, deliver and
-the podcast on HIVE take the report for one made before 2.14.2:
+the podcast on HIVE take the report for one made before 2.14.2 (`core_sync.sh --put` sends it):
 ```
-L=~/core/PROT_0807/session/output
-for f in AI_Analysis_Report.md Analysis_Report.html Analysis_Report.md Analysis_Report.pdf Analysis_Report_with_audio.html methods.md methods.docx report_provenance.json; do
-  [ -f "$L/$f" ] && bash scripts/hive_exec.sh --put "$L/$f" "$S/output/"; done
-[ -d "$L/podcast" ] && bash scripts/hive_exec.sh --put "$L/podcast" "$S/output/"   # when it was made here
+bash scripts/core_sync.sh --put --session "$S" --local ~/core/PROT_0807/session   # podcast/ too, when it was made here
 ```
 The podcast (SKILL.md step 9e) is made by default for a submission. Made here, it goes back with
 the report; made on HIVE (no usable Python here), its job writes it into `$S` after the report
@@ -747,7 +810,7 @@ with YYYY and MM the **literal** first two `-`-separated fields of `submitted` (
 `build_views.ensure_canonical`: `y, m = submitted.split()[0].split("-")[:2]`) — no timezone
 conversion, so `2026-08-31T23:30:00-07:00` is `2026/08`. **Verified live:** all 6 CoreOmics
 submissions made on the last evening of a month (already the next month in UTC) are filed under
-their LOCAL, literal month. Directories are `amschaal:proteomics-grp 2775`. The builder had
+their LOCAL, literal month. Directories are `<Bioshare admin>:proteomics-grp 2775`. The builder had
 **not** created `2026/09/` by 2026-09-16, so `deliver --apply` creates `<id>/share` itself —
 and never writes `<id>/.submission/`, which the builder owns. `/quobyte/proteomics-grp/coreomics/`
 is a **stale** copy (stops at 2026/03); never use it. Existing shares (4 of the 200 newest
@@ -757,10 +820,19 @@ submissions) have
 **Before writing anything, `deliver` refuses (exit 2)** when:
 
 - **the session is not this submission's.** It must sit under the staged `work_dir`, or its
-  `input/raw_files.txt` must list exactly the staged files. A stage record for a DIFFERENT
-  submission above the session is refused outright. With no stage record at all, only
-  `--force`, after staff confirm (recorded as `session_ownership: NOT CHECKED`). A PROT_0806
-  session once delivered into PROT_0807's share with `verified: true`.
+  `input/raw_files.txt` must list only staged files: all of them, or a SUBSET (a 96-file plate
+  with the 77 study samples analysed and the NIST / QC runs left out). A subset is delivered, and
+  the plan (`session_left_out`, a warning), delivery.json and the email draft name the staged
+  files it left out, and the CLIENT is told in the README (.md/.html) and the email body, in
+  `left_out_text()`'s words: "N of the M submitted files were analysed. Not analysed, and not in
+  this share: <names, at most 20>. Ask us if you want them processed." The raw-folder line says
+  whose raw files it holds. Raw links (`--include-raw yes`, or an interim delivery) then cover the analysed files only;
+  `--include-raw all` links every staged file, the left-out ones too. One file the stage record lacks (another submission's, or a superset) is
+  refused; stage it first (`stage --apply`). A stage record for a DIFFERENT submission above the
+  session is refused outright. With no stage record at all, only `--force`, after staff confirm
+  (recorded as `session_ownership: NOT CHECKED`); `--force` never bypasses the check against a
+  stage record that exists. A session of one
+  submission once delivered into another submission's share with `verified: true`.
 - **the delivery folder already has files.** Two deliveries mixed in one folder leave stale
   results beside new ones — use a new `--label`. (A size-guard job resuming its own interrupted
   folder is recognised by the `.core_delivery.json` it left.)
@@ -788,7 +860,7 @@ submissions) have
 - **an interim delivery's session has no search record** (no `output/<folder>/search_provenance.json`):
   there is nothing to deliver early; raw files alone go with `--mode raw-only`.
 - **an analysis or no-de delivery whose finish steps are not done** (the finish gate, SKILL.md
-  golden rule 9; `report_files.FINISH_NEEDS["deliver"]`, dry run included, nothing copied). It
+  golden rule 16; `report_files.FINISH_NEEDS["deliver"]`, dry run included, nothing copied). It
   needs:
   - the skill's own report: `Analysis_Report.html` with its `report_provenance.json` (a report
     with the skill's footer and no record passes with a warning; a hand-made one is held);
@@ -845,9 +917,12 @@ files are relative links in `<share>/raw/`.
 
 **Several searches and no DE to choose by** (`session.search_choice`: the DE's record names the
 report it read; without one, none is chosen): an analysis or no-de delivery carries no search and
-its MANIFEST says why. Rename each other search folder to `output/superseded_<name>/` (a folder
-whose name holds "superseded" is not a candidate; `session.py which-search --dir "$S"` names the
-one left), or deliver every search folder with `--mode interim`.
+its MANIFEST says why. Name one with `session.py choose-search --dir "$S" --folder <its folder
+under output/>` (nothing is renamed; a search split by FAIMS group, `faims_split.json`, is chosen
+this way, one group at a time -- the other group is a valid result, never "superseded"), or, for a
+search that really was replaced, rename its folder to `output/superseded_<name>/` (a folder whose
+name holds "superseded" is not a candidate; `session.py which-search --dir "$S"` names the one
+left), or deliver every search folder with `--mode interim`.
 
 **Interim mode** (`--mode interim`, 2.14.2) is the raw files and the search results delivered
 **before the report**, so no agent copies search folders by hand (three earlier HT submissions:
@@ -873,8 +948,9 @@ Every delivery also gets:
   because of an error (architectural rule #4).
 - **`README.html`** (what the collaborator double-clicks) and **`README.md`** (the same text) —
   every claim traced to a delivered file: "searched" only with `search/` output, "compared
-  between sample groups" only with `DE_*.csv` tables; every item a link that works in this
-  folder; no email addresses. Its only paths are the **"Where this lives on HIVE"** table, from
+  between sample groups" only with `DE_*.csv` tables; every item a link in README.html
+  (README.md names the files without links: Bioshare breaks relative links there); no email
+  addresses. Its only paths are the **"Where this lives on HIVE"** table, from
   `session_docs.py` (the session's own), so the Core can find the session and raw data again.
 - **`AGENTS.md`** — the session's guide for an AI assistant (`session_docs.agents_md`, from its
   records), with a note under the title mapping its `output/<x>` paths onto this folder's `<x>`.
@@ -891,18 +967,19 @@ once let a copy overwrite a file outside the share).
 relative links in `<share>/raw/` to the staged files. The service project gets a relative
 `results_<date>` link to the delivery (a failure there is `[SKIPPED]`, not fatal).
 
-> ⚠ **Check once: relative `raw/` links in Bioshare.** Brett reports PROT_0793's absolute raw
+> ⚠ **Check once: relative `raw/` links in Bioshare.** Brett reports an earlier submission's absolute raw
 > links download from Bioshare, and a relative link resolves to the same files, but nobody has
 > opened a relative one in Bioshare yet. For the first raw-link delivery, **open the Bioshare
 > link yourself and download one raw file before `bioshare send`**. `deliver` prints this
 > warning and records `raw_whitelist_unverified: true`.
 
 **Size guard:** above `--max-gb` (default 5) it writes `deliver_job.sh` and exits **5** —
-`sbatch` it; the login node is for small copies only (golden rule #3).
+`sbatch` it (golden rule #3). A smaller copy runs in `deliver` itself, which on HIVE's login
+node runs itself on a compute node (12b below).
 
 **Verification on `--apply` walks the WHOLE share:** a symlink inside this delivery, or a
 `raw/` link this run created that is absolute, broken or outside the Flinders root, fails.
-Links already in the share that this run did not create (PROT_0793's `search/ -> /quobyte`)
+Links already in the share that this run did not create (an earlier submission's `search/ -> /quobyte`)
 are listed as warnings and left untouched. Inside the delivery folder every file must be one this
 run delivered and readable by group and other. An error part-way still writes the MANIFEST,
 checksums and `delivery.json` with `verified: false`. **Exit 2 means do not share.**
@@ -926,7 +1003,7 @@ python3 scripts/core_submission.py bioshare send   --summary ~/core/PROT_0807/su
 - **`status`** — `GET plugins/bioshare/submissions/<id>/submission_shares/` (verified with a
   staff token; paginated or a bare list, both handled). Keys: `id, submission, bioshare_id,
   name, notes, sub_folder, link_to_path, url`. The share whose `link_to_path` equals this
-  submission's share dir is marked linked (verified live on PROT_0793's real share). (`GET
+  submission's share dir is marked linked (verified live on a real submission's share). (`GET
   plugins/bioshare/shares/?lab_id=PROTEOMICS` returns **403** for lab members — not used.)
 - **`ensure`** — if nothing is linked, `POST` the same endpoint with
   `{"submission": <id>, "name": ..., "notes": ..., "link_to_path": <share_dir>}`, exactly what
@@ -1029,6 +1106,84 @@ EOF
 6. **The board:** one thread per submission, the records in the main one's thread
    (`references/board.md` section 2, "Several submissions in one analysis").
 
+## Core client work with no CoreOmics submission yet (the feedback survey)
+
+The Core's "How did we do?" survey goes only to the Core's own clients: the report, README,
+AGENTS.md, the podcast page and the delivery README carry it when `submission_report.core_run`
+says yes. A session that answers a CoreOmics submission gets it from the attached record. Client
+work that has no submission yet (a pilot, a favour, a rush job) does not, until staff say so:
+```
+bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/session.py core-client --session $(printf %q "$S") --why-file -" <<'EOF'
+<who it is for, and why there is no submission yet: the staff member's words>
+EOF
+```
+- **Asked at the start.** At step 0a (question 3), client work whose submission does not exist yet
+  is answered "not yet": `init --internal '<board title>'` for now (the board has no other place
+  for it), then mark it right after `init` with the command above.
+- **The reason only from a heredoc** (`--why-file -` and a quoted `<<'EOF'`), never typed after
+  `--why` on the command line: the reason says who the work is for, and every command goes into
+  `logs/commands.log`, which travels. `staff.redact_log` takes a core-client reason out of every
+  copy that travels anyway (the bundle's `inputs/`, the session zip, the run registry): by its
+  recorded text, and by the command's form; a command it cannot cut cleanly is withheld as one
+  line, `[core-client mark: reason withheld]`, and a `[NOTE]` says so. The decisions log keeps it.
+- **Known limit.** Lines after a withheld command are kept as logged and cleaned by the reason's
+  text only, which outside a core-client command must be 2+ words and 12+ characters (so an
+  unrelated path or title is never changed). A very short reason may therefore stay in a log the
+  redactor cannot parse. Give the reason with the documented heredoc, in a sentence (who the work
+  is for, why there is no submission yet); core-client warns when it is under 12 characters.
+- **Core staff only.** It asks the Core staff list (`staff.core_staff`, the one test of Core
+  staff: on HIVE the list `staff.load_staff` trusts; from a laptop, HIVE is asked about the
+  account the saved login reaches) and is refused, with nothing written, unless that says yes.
+  Reading `/quobyte/proteomics-grp` is not enough: not every member of the group is Core staff.
+- **Recorded three ways, all or none.** The staff-only `logs/core_client.staff.json` gets the login,
+  the time and the reason (never delivered or zipped); `session.json` gets `core_client` (when,
+  `by: "Core staff"`, how the list was checked); `logs/decisions.md` gets what was decided and
+  why. A failure undoes the others (exit 2). A mark counts only with its staff record: one
+  typed into `session.json` by hand is ignored, and the line below says so.
+- **Not for a session that names a submission** (`init --submission`): it is refused; attach that
+  submission instead, and its survey names it.
+- **Then rebuild** the report (`make_analysis_html.py`) and README / AGENTS.md (`session.py docs`,
+  or `finalize`). The survey link has no `prot=`: there is no number to give. A report built on
+  a laptop needs `$S/session.json` and `$S/logs/core_client.staff.json` pulled after the mark
+  (`core_sync.sh --get` brings both).
+- **A session registered as internal work** (`init --internal`, the only way an external pilot
+  could go on the board before) keeps its board title; marking it is allowed. Its podcast is Core
+  client work: `make_podcast.py --core-run` takes it under Brett's standing approval (his ruling
+  of 2026-11-04: the Core director's approval is enough to send a Core client's transcript to the TTS
+  service), recorded as `core_run` kind `core_client`; `--core-run internal` refuses it.
+- **When the submission arrives**, attach it (`submission_report.py attach`, step 1c.7) and
+  rebuild: the survey then names it (`prot=PROT_####`). The mark can stay. `status` owes no
+  CoreOmics delivery for a marked session with no submission.
+- **Marked by mistake:** `session.py core-client --session <S> --clear --why-file -` with the reason
+  from a heredoc, recorded the same way.
+
+**When the survey is off, Core staff are told.** For a Core staff member (`staff.core_staff`) whose
+session's records say it is Core work (`session.json` from `init --submission` / `--internal`, a
+CoreOmics block or a mark, or an attached record) and whose `core_run` says no,
+`make_analysis_html.py` prints one line, `session.py finalize` prints it and returns it as
+`"survey"`, and `session.py status` lists it as a `note` (never a missing item). At the report
+step it reads:
+
+> The Core's feedback survey will NOT be included: this session answers no CoreOmics submission,
+> so its report, README and AGENTS.md go out without it. For work for a Core client, attach the
+> submission (python3 scripts/submission_report.py attach --session <S> --record <its fetch
+> folder>) or mark the session as Core client work (python3 scripts/session.py core-client
+> --session <S> --why-file - <<'EOF', then the reason, then EOF), then rebuild the report.
+
+At finalize and status it ends "then rebuild the report (make_analysis_html.py; a report built on
+a laptop needs session.json and logs/core_client.staff.json pulled again first) and run finalize
+again." -- finalize has written README, AGENTS.md and the zip without it. The reason comes from the
+session's records: a submission named at `init` but not attached, a record that cannot be read,
+or a mark without its staff record is said as such. Internal Core work sees the line too: say
+nothing more when it really is internal. Anyone outside the Core never sees it, and a session
+whose records say nothing of Core work costs no check at all (`submission_report.survey_off_note`).
+
+**A Core run's report without the survey is said too.** When `core_run` says yes but
+`output/Analysis_Report.html` does not carry the survey -- built before the submission was
+attached or the session marked, or on a laptop from a `session.json` pulled before -- `finalize`
+and `status` say so in one line (`submission_report.survey_missing_note`): rebuild the report,
+then run finalize again.
+
 ## Troubleshooting by exit code
 
 | exit | from | usual cause | fix |
@@ -1037,7 +1192,7 @@ EOF
 | 2 | `locate` | `choose_run`, `weak_ids`, `ambiguous_label`, `duplicate_ids`, `duplicate_assignment`, `unmatched_samples` (with `proposed_runs`: runs proposed by name and number), `no_files`; `--max-days` wider than the neighbour window; a `--choose` that names no candidate | show the proposal; `--reinjections latest|all` for re-injections, `--choose <key>=<file>` for collisions and confirmed proposals, `--files-from` a corrected list, `--accept-ambiguous` or `--allow-partial` as staff decide; re-fetch with `--neighbor-days` |
 | 2 | `stage` | several candidate folders, or one naming someone else; project owned by another submission; `--apply` on a hard-failed locate | `--service-dir <folder>`; resolve the locate gates |
 | 2 | `conditions` | blank / case-variant / single / all-unique / singleton conditions | ask exactly the `questions` |
-| 2 | `deliver` | no `Analysis_Report.html`; session not this submission's; folder not empty; symlink in the path or the share; raw requested but no staged project; **held by `qc_gate`** (QC check, step 8e: check/concern, unplaced files, not run, or for another file list); **held by `normalization_gate`** (DE without a decided check); **"this session has no differential expression"** (auto/analysis); **no-de refused**: the session has DE output (`de_output`); **held: the skill's finish steps are not done** (analysis/no-de: the skill's report, Methods, bundle, a current finalize stamp; `finish_gaps`); any verification failure | finish step 9 and push it; for the finish gate, each `finish_gaps` command (usually `session.py finalize`), or `--override-finish "<reason>"` (raw-only and interim are never gated); use the right session (or `--force` with staff); `--label`; remove the offending link; `stage --apply`; for `qc_gate`, a staff member reads `logs/qc_bracket.md` and records `qc_bracket.py ack --by <login>` — or re-runs step 8e when it says so; for `normalization_gate`, step 8; no DE: `--mode no-de` if a delivery without it is intended, else step 8; no-de refused: `--mode analysis` |
+| 2 | `deliver` | no `Analysis_Report.html`; session not this submission's; folder not empty; symlink in the path or the share; raw requested but no staged project; **held by `qc_gate`** (QC check, step 8e: check/concern, unplaced files, not run, or for another file list); **held by `normalization_gate`** (DE without a decided check); **"this session has no differential expression"** (auto/analysis); **no-de refused**: the session has DE output (`de_output`); **held: the skill's finish steps are not done** (analysis/no-de: the skill's report, Methods, bundle, a current finalize stamp; `finish_gaps`); any verification failure | finish step 9 and push it; for the finish gate, each `finish_gaps` command (usually `session.py finalize`), or `--override-finish "<reason>"` (raw-only and interim are never gated); use the right session (a subset of the staged files is fine; `--force` only when there is no stage record, with staff); `--label`; remove the offending link; `stage --apply`; for `qc_gate`, a staff member reads `logs/qc_bracket.md` and records `qc_bracket.py ack --by <login>` — or re-runs step 8e when it says so; for `normalization_gate`, step 8; no DE: `--mode no-de` if a delivery without it is intended, else step 8; no-de refused: `--mode analysis` |
 | 2 | `email-draft` | a placeholder (no Bioshare link, no submitter address); an address failed its check (`address_problems`); the delivery's session was not finalized (`delivery.json`) | paste the link; confirm the address with the staff member before sending; finalize, deliver again and use the new `delivery.json`, or `--override-finish "<reason>"` (the draft then says NOT FINALIZED) |
 | 2 | `bioshare send` | no share linked; no or unverified `delivery.json`, or one for another share; the delivery's session was not finalized | `bioshare ensure --apply`; deliver again and `--get` the new `delivery.json`; for the finish gate, finalize then deliver again, or `--override-finish "<reason>"` |
 | 3 | `check`, `fetch`, `bioshare` | no usable key, a rejected key, no Proteomics lab access; CoreOmics down; DRF validation error; a redirect or unexpected reply to a write | `core_submission.py check` names the problem and the fix (table above); read the detail |
@@ -1045,15 +1200,16 @@ EOF
 | 4 | `locate` | the submission is an HT plate | `ht_manifest.py` (step 1a) |
 | 5 | `deliver` | more than `--max-gb` to copy | `sbatch deliver_job.sh` |
 
-## The PROT_0793 lesson
+## The linked-share lesson
 
-PROT_0793 was searched and "shared" by linking: `share/raw` held 210 absolute `/nfs/...` links
-and `share/search` held 59 links into `/quobyte/proteomics-grp/brett/PROT_0793`. On HIVE the
+One submission was searched and "shared" by linking: `share/raw` held 210 absolute `/nfs/...` links
+and `share/search` held 59 links into `/quobyte/proteomics-grp/…/PROT_####`. On HIVE the
 share looked complete. Over SMB it showed **0** raw entries. The `search/` links served the
 collaborator nothing, because Bioshare streams files through an Apache module whose allowed-folder list had `/quobyte` for http (port 80) but not https (443) — fixed 2026-09-16 by the Bioshare admins. Nothing about the share was wrong on
 HIVE, and nothing reported an error.
 That is why `deliver` copies real files, makes only relative Flinders-to-Flinders links, and
-refuses to call a delivery done until it has walked the whole share and found no other symlink.
+refuses to call a delivery done until it has walked the whole share and found no symlink inside
+the delivery and no bad `raw/` link of its own (older links in the share are listed as warnings).
 
 ## Less-used flags
 - `identify --no-lookup`: read ids from the names and the message only; never ask CoreOmics.
@@ -1064,3 +1220,368 @@ refuses to call a delivery done until it has walked the whole share and found no
 - `bioshare send --email | --no-email`: whether Bioshare emails the recipients (default: silent).
 - `submission_report.py attach --replace`: replace a DIFFERENT submission already attached —
   only when the first one was wrong.
+
+## Step 1 for Core staff: where the CoreOmics steps run, and `identify`
+
+**The CoreOmics steps (`check`, `identify`, `fetch`, `bioshare`, `email-draft`) run where the
+CoreOmics key is** — step 0a's `check_access.sh` says `coreomics_runs_on`. `this_computer`: on
+the user's computer, as below. **`hive`** (hive_remote with `local_python3.usable: false`, the
+Windows Store stub — or the key is on HIVE only): the same subcommand ON HIVE, through
+`hive_exec.sh`, with HIVE paths (`hive_path.sh`) and the key in `~/.coreomics_token` there
+(step 1c.1 puts it there once). `--text` carries only the words that name the submission, never
+the user's whole message (step 0a's free-text rule):
+
+```
+python3 scripts/core_submission.py identify <raw files and/or their folder> --text 'submission 807'
+# coreomics_runs_on: hive
+bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/core_submission.py identify <HIVE paths> --text "submission 807"'
+```
+
+It reads the `PROT_####` (or 12-character CoreOmics id) in the text or the paths and, with a
+token, checks that submission's sample IDs are in the file names (weak ids are no evidence; a
+label two submissions share is ambiguous). Exit **0** → the files carry the number staff gave:
+go on to step 1c with no second confirmation. Exit **2** → relay its `ask` (the files do not
+carry that submission's sample IDs, or CoreOmics does not know the number). Exit **3** (no
+token, or CoreOmics refused it) → set the key up first (step 1c.1: on HIVE the agent does it)
+and run identify again; if that cannot be done now, carry on with the number staff gave, relay
+`token_help`, ask the key facts (PI, organism, UniProt, proteins or peptides and who prepared
+them, buffer, beads, sample sheet) and record them with `submission_report.py attach --given`
+(step 3b) — labelled "given by the user", never as the CoreOmics record. **Never search
+`/quobyte/proteomics-grp/coreomics/.submissions_db`**: a stale snapshot, where a search for
+0807 matched an unrelated 2019 record. Then fetch the record where the key is
+(`core_submission.py fetch <number> --out ~/core/PROT_####`, step 1c) and attach it once the
+session exists (step 1c.7, or 3b).
+
+## 1c. The service run, step by step (step 1c)
+
+When Core staff answer step 0a's question with a **CoreOmics submission**, or name one ("search
+the data from submission 807", "analyze PROT_0807"), the PI, sample sheet, conditions and
+delivery folder come from CoreOmics — but the raw files must be *found*: a submission records
+`unique_id`s, not paths. Those ids are short, reused by other submissions (BN1–6 in two
+different submissions) and collide with plate wells (`A3` matches hundreds of files), so a
+glob quietly searches another lab's runs. `scripts/core_submission.py` does the bookkeeping and
+hands every judgment call back as an exit code. It never runs an engine. Keep one folder per
+submission, the same path locally and on HIVE (`~/core/PROT_0807`).
+
+1. **Fetch — where the CoreOmics key is** (`coreomics_runs_on`, step 0a). **`hive`** (no
+   usable local Python — Windows' `python3` is usually the Store stub — or the key is on HIVE
+   only): every CoreOmics step runs ON HIVE, `bash scripts/hive_exec.sh 'python3
+   ~/proteomics-pipeline/scripts/core_submission.py <subcommand> …'`, reading
+   `~/.coreomics_token` there; never ask staff to install Python for it. **`this_computer`**:
+   `python3 scripts/core_submission.py …` here. First `check --json` (there); go on only at `ok`,
+   else relay its `say` and `fix` and check again once the user has acted. It reports the key's
+   place and mode (`runs_on`, `key_source`, `key_mode`).
+   - **The key on HIVE — set up once BY YOU, the agent; staff type nothing on HIVE.** Follow
+     `check_access.sh`'s `coreomics_key_advice`. `coreomics_key_on_hive: true` → nothing to do.
+     A key saved on this computer (`coreomics_key_on_this_computer: true`, e.g. by the line
+     below) → run `bash scripts/coreomics_key_to_hive.sh` yourself: it sends that file to HIVE
+     as ssh's standard input (never printed, never on a command line, never a temporary file
+     here) into a new mode-600 `~/.coreomics_token`, and keeps the laptop copy (Brett's call;
+     `--remove-local` deletes it). No key anywhere → the user makes one in CoreOmics (Profile →
+     "API Key" → Create) and runs, **in their own Git Bash window**, the `bash '…/coreomics_key_to_hive.sh'
+     --paste` line from `coreomics_key_advice` (its full path): it waits, silent, for the paste
+     and saves the key only on HIVE. Then `check` on HIVE again. `key_mode_wrong` (HIVE only: other
+     accounts can read the file — HIVE home folders are open to every account, so the mode is
+     the key's only protection) → `bash scripts/hive_exec.sh 'chmod 600 ~/.coreomics_token'` and
+     check again; if it was readable for long, the user Regenerates the key and it is put there
+     again. `bash scripts/coreomics_key_to_hive.sh --status` re-checks the key on HIVE alone.
+   - **The key on this computer** — `no_key` / `key_empty` / `key_malformed` / `key_rejected` →
+     they make a key in CoreOmics (Profile → "API Key" → Create) and save it **in their own Git
+     Bash window**, never in this chat, with this ONE line (it then waits, silent, for the paste;
+     macOS/Linux: a terminal, `F="$HOME/.coreomics_token"`). The key never shows on screen or
+     lands in the history, and pasted as one line it can never run as a command:
+     ```
+     read -rs TOK && [ -n "$TOK" ] && F="$(cygpath "$USERPROFILE")/.coreomics_token" && (umask 077; printf '%s\n' "$TOK" > "$F") && chmod 600 "$F"; unset TOK
+     ```
+
+   **Never ask for the key in the chat, echo it, or print the file**; a key pasted here anyway
+   must be Regenerated in CoreOmics. `key_in_wrong_place` → the `mv` in `fix`. `no_lab_access`
+   → ask Brett (the Core director) to add their CoreOmics account to the Proteomics lab.
+   ```
+   # coreomics_runs_on: this_computer
+   python3 scripts/core_submission.py fetch 807 --out ~/core/PROT_0807
+   bash scripts/hive_exec.sh '(umask 077; mkdir -p ~/core/PROT_0807) && chmod 700 ~/core/PROT_0807'
+   bash scripts/hive_exec.sh --put ~/core/PROT_0807/hive/submission_summary.json '~/core/PROT_0807/'
+   bash scripts/hive_exec.sh --put ~/core/PROT_0807/hive/submission.json '~/core/PROT_0807/'
+   # coreomics_runs_on: hive -- nothing to --put
+   bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/core_submission.py fetch 807 --out ~/core/PROT_0807'
+   ```
+
+   **HIVE's steps read only the HIVE copies** at `~/core/PROT_0807/`: a summary with no email
+   or contact, and the allowlisted record. The raw `submission.json` and the
+   full summary (emails, PPMS/billing) stay on this computer — or, when `fetch` ran on HIVE, in
+   `~/core/PROT_0807/private/` (mode 700, files 600) — where `bioshare` and `email-draft` read
+   them (given the HIVE copy's path, they find `private/` themselves).
+
+   **Then put it on the Core Project Board** (a minute, and never a reason to wait): `bash
+   scripts/board.sh whoami` first (when it answers, its `owner.person` is `--owner`: a HIVE
+   login is not always the UPN), then `bash scripts/board.sh connect --owner <their UPN>`
+   (exit 9 the first time on
+   this computer: show its `link` and `tell_your_person` word for word), then `bash
+   scripts/board.sh start --prot PROT_0807 ...` (the whole command,
+   with its single-quoted titles and goal: `references/board.md` section 2). No usable local
+   Python: each through HIVE, `bash scripts/hive_exec.sh 'bash
+   ~/proteomics-pipeline/scripts/board.sh connect --owner <their UPN>'`, and
+   `start` the same way, its titles and goal in double quotes without `$` `` ` `` `\` `"` `'`.
+   You create the project and its thread yourself, and it opens at once: Brett sees every thread
+   without being named, so never add `--with` for him unless staff ask. Carry on.
+   Later, one record at each milestone (`references/board.md` section 3); a search starts on
+   staff's go-ahead here and is recorded on the board right after it is submitted. **`fetch`
+   cannot run yet** (a key problem): `start` anyway, with the PI's surname and project as staff
+   tell you; what the first `start` writes is kept. **Several submissions:** fetch and `start`
+   each; the milestones go to the main one's thread only. → `references/board.md` section 2.
+2. **Locate the raw files — on HIVE** (writes `files.txt`, `sample_files.tsv`, `locate.json`),
+   then pull the proposal back for the local steps:
+   ```
+   bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/core_submission.py locate \
+       --summary ~/core/PROT_0807/submission_summary.json --out ~/core/PROT_0807'
+   bash scripts/hive_exec.sh --get '~/core/PROT_0807/sample_files.tsv' ~/core/PROT_0807/
+   bash scripts/hive_exec.sh --get '~/core/PROT_0807/locate.json' ~/core/PROT_0807/
+   ```
+3. **Stage dry run — on HIVE:** `stage --summary ~/core/PROT_0807/submission_summary.json
+   --files ~/core/PROT_0807/files.txt` names the service folder it would use: a folder that
+   already holds the submission's raw files or an earlier analysis of it, else a new
+   `<group>/PROT_n` (`--project-dir` / `--service-dir` when staff say otherwise). Exit 2 with
+   `apply_will_refuse` means `locate` hard-failed: resolve that first, never show staff the plan.
+4. **ONE staff confirmation: the file list AND the service folder together** — sample → raw
+   file → acquired date, every non-PASS gate, and "staged under `<folder>`". Not a menu.
+   **Which run IS a sample is a call only staff can make — never pick one yourself.**
+   `choose_run` lists each sample with its candidates and a `kind`:
+   - **`reinjections`** — several runs of ONE sample. Ask staff ONE question for all of them:
+     `--reinjections latest` (the newest injection; never one STAN flags `needs_rerun` while
+     another is not — pass `--ht-manifest <ht_manifest.json>` for an HT list) or
+     `--reinjections all` (every injection, kept as technical replicates — `conditions` writes
+     each run's sample into conditions.csv's `Sample` column, and `run_de.R` blocks on it, so
+     they are never counted as independent samples). `--choose` still picks one
+     sample's run. The policy and each sample's result go into `locate.json`, `sample_files.tsv`
+     (`reinjections`), `SUBMISSION.md`, the stage record and — through `submission_report.py
+     attach` — the report's Data Quality Notes (gate `reinjections` names every sample).
+   - **`acquisition_methods`** — a sample's runs declare different methods (a DDA run beside the
+     DIA run): not re-injections. Ask which acquisition this analysis is for, then
+     `--acquisition DIA|DDA` (one decision; the other mode's runs are set aside, noted per row);
+     `--reinjections` never applies to them.
+   - **`collision`** — the label is another sample's or another submission's too: ask which run
+     is whose, one sample at a time, then `--choose <key>=<file>` (or `--choices <file>`, one
+     `KEY=FILE` per line); `--reinjections` never applies.
+   `ambiguous_label` (another submission used the same label before these
+   runs) → `--choose`, `--accept-ambiguous`, or `--files-from` their own list;
+   `duplicate_ids` (two samples of this submission share a label, so no run is assigned to
+   either by it) → ask which run is which, then `--choose <key>=<file>` with the keys the gate
+   lists (`KG1#1`, `KG1#2`); one that was not run → `--allow-partial`. `proposed_runs` (a run
+   named for the person and numbered for the sample, which `locate` proposes but never assigns)
+   → part of this same confirmation, not a separate question; each one staff confirm →
+   `--choose <key>=<file>`.
+5. **Stage `--apply` — on HIVE.** Relative raw links in `<folder>/PROT_0807/raw/`, a
+   staff-facing `SUBMISSION.md`, and the compute `work_dir` it prints. It refuses a file list
+   whose `locate` hard-failed.
+6. **"I only require raw data"** (`raw_data_only: true`) → **no search and no DE** unless staff
+   explicitly ask. Go straight to step 12b, `deliver --mode raw-only`.
+7. **Otherwise steps 2–9, with the session ON HIVE under the work dir** — HIVE holds the
+   session of record; the local copy exists only to write the report.
+   ```
+   bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/session.py init \
+       --name PROT_0807 --base <work_dir> --raw $(cat ~/core/PROT_0807/files.txt) --submission PROT_0807'
+   S=<the session dir it printed>
+   bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/submission_report.py attach \
+       --session $(printf %q "$S") --record ~/core/PROT_0807"
+   ```
+
+   Core staff: board.md §3 row "session made".
+   - **Conditions (local):** `core_submission.py conditions --summary
+     ~/core/PROT_0807/submission_summary.json --sample-files ~/core/PROT_0807/sample_files.tsv
+     --out ~/core/PROT_0807/conditions.csv`. Ask **only** if `needs_user_input` — and then
+     exactly its `questions` (a condition per replicate is answered by re-running with
+     `--replicate-labels collapse|keep`). Put the final CSV back: `--put
+     ~/core/PROT_0807/conditions.csv "$S/input/"`. No usable local Python: the same on HIVE
+     through `hive_exec.sh`, with `--out $(printf %q "$S")/input/conditions.csv` (in a remote
+     command `$S` is always quoted so: a lab folder can hold a space) and nothing to put back.
+   - **Organism:** `organism_as_submitted` is the submitter's free text. Put it to the staff
+     member as the proposed answer and get it confirmed — golden rule #4 still applies.
+   - **On HIVE in `$S`:** search, DE, figures, audit, `sample_quality.py`, the QC check
+     (step 8e, staff-only: `qc_bracket.py --session "$S"`), `make_methods.py --submission "$S"
+     --qc-bracket "$S/logs/qc_bracket.json"` (it reads the raw metadata; the flag adds the one
+     fixed Instrument performance sentence) and provenance — heavy steps as SLURM jobs.
+   - **Pull what the report needs** (the tables, figures, AUDIT.md, SAMPLE_QUALITY.md,
+     methods.md, `session.json` and the session records in `input/`; the lists live in
+     `scripts/core_sync.sh`). `which-search --paths` lists the search the DE read -- its record
+     and report, wherever the search went -- and the workflow manifest; `core_sync.sh --get` asks
+     it on HIVE. With none chosen it exits 3 with the reason, nothing of the search is pulled, and
+     core_sync.sh prints STOP and exits 1: choose one first, step 12b, then pull again -- a report
+     written without them cannot name the engine:
+     ```
+     bash scripts/core_sync.sh --get --session "$S" --local ~/core/PROT_0807/session
+     ```
+   - **Step 8d always fires** — this is a collaborator deliverable.
+   - **Step 9 (local):** write `AI_Analysis_Report.md`, then `make_analysis_html.py --session
+     ~/core/PROT_0807/session --out ~/core/PROT_0807/session/output/Analysis_Report.html` (the
+     Submission section comes from the attached record), and `to_docx.py` for `methods.md` only
+     (step 9: no Word copy of the report). **No usable local Python** (step 0a,
+     `local_python3.usable: false`, Windows staff): keep the pull above (`--get` falls back to
+     scp; it is what you read to write the report). Run `analysis_prompt.py` (step 9) on HIVE
+     through `hive_exec.sh` with `--out $(printf %q "$S")/output/ANALYSIS_PROMPT.md` and `--get` the brief;
+     write `AI_Analysis_Report.md` here, `--put` it into `"$S/output/"`, then build on HIVE:
+     `make_analysis_html.py --session "$S" --out "$S/output/Analysis_Report.html"` and
+     `to_docx.py --in "$S/output/methods.md" --out "$S/output/methods.docx"`. Nothing then needs
+     pushing back but edits to the report text.
+   - **Push the finished files back BEFORE deliver** — `deliver` copies from `$S`. The PDF
+     exists only where a headless browser printed it. The podcast (step 9e, made by default for
+     a submission) goes back with them when it was made here; made on HIVE (Windows staff), it
+     is in `$S` already, its job submitted as soon as `job` wrote it. Never wait for it: if the
+     job has not ended when the delivery is otherwise ready, `scancel` it, say so in one line,
+     finalize and deliver without it, and add the audio later (`references/podcast.md`).
+     `report_provenance.json` goes back with the report: it is the report's record, written
+     beside it by `make_analysis_html.py` (and again by `make_podcast.py link`). Without it,
+     finalize, deliver and the podcast on HIVE take the report for one made before 2.14.2:
+     ```
+     bash scripts/core_sync.sh --put --session "$S" --local ~/core/PROT_0807/session
+     ```
+     (each report file and its `report_provenance.json`, the Methods and `podcast/` that exist
+     here go into `$S/output/`)
+   - **Then on HIVE, finish the session:** the output-files report (step 11), then `finalize`
+     (step 12: README.html, AGENTS.md, the deposit package, MANIFEST.txt, the zip, the run log):
+     ```
+     bash scripts/hive_exec.sh "cd $(printf %q "$S") && python3 ~/proteomics-pipeline/scripts/make_report.py \
+         --out output/OUTPUT_FILES.md --session . --de-dir output/tables \
+         --repro output/reproducibility --extra input/conditions.csv output/figures \
+         output/AUDIT.md output/SAMPLE_QUALITY.md output/Analysis_Report.html \
+         output/Analysis_Report.md output/Analysis_Report.pdf output/methods.md"
+     bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/session.py finalize --dir $(printf %q "$S") --zip"
+     bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/session.py status --session $(printf %q "$S")"
+     ```
+     `status` (exit 0 complete, 3 not) is what you show before saying the analysis is finished;
+     a submission's stays at exit 3 ("The delivery of …: not delivered yet") until step 12b.
+8. **Deliver, share, draft the email** — step 12b.
+
+| exit | meaning | what to do |
+|---|---|---|
+| **0** | ok | continue |
+| **2** | a human decision / hard gate — proposal files are still written | show the failing gates. `locate`: `unmatched_samples` (→ `--allow-partial` only if staff confirm those were not run), `choose_run` (→ re-injections: ONE `--reinjections latest|all`; collisions: `--choose <key>=<file>` each), `ambiguous_label` (→ staff decide: `--choose`, `--accept-ambiguous` or `--files-from`), `weak_ids` (→ `--choose`, or `--files-from`), `duplicate_ids` (→ `--choose <key>=<file>`, keys `KG1#1`/`KG1#2` from the gate), `duplicate_assignment` (→ staff pick the files, `--files-from`), `no_files`. `stage`: several folders, or one naming a different person or institution (→ `--service-dir`); a folder owned by another submission; `--apply` on a hard-failed locate. `deliver`: **not verified — do not share** (see 12b); **held by `qc_gate`** (step 8e) → a staff member reads `logs/qc_bracket.md` and records `qc_bracket.py ack` (or re-runs 8e when it says so) |
+| **3** | CoreOmics or the filesystem unreachable, auth failed, or the scripts directory is incomplete | a key problem: `core_submission.py check` names it and the fix; run where the data is (`fetch`/`bioshare` where the key is — `coreomics_runs_on`; `locate`/`stage`/`deliver` on HIVE); re-put the skill: `hive_exec.sh --put-skill` |
+| **4** | the files look like an **HT plate** | step 1a, `ht_manifest.py` |
+| **5** | delivery too big for one interactive step (`--max-gb`, 5 GB) | `sbatch` the `deliver_job.sh` it wrote |
+
+
+## 12b. Deliver to the collaborator (step 12b)
+
+Only for a step-1c run. Core staff: board.md §3 row "delivered", once delivered.
+Deliverables go into the share as **real files**, so a delivery depends
+on no server setting. One submission's `search/` was 59 links into `/quobyte`, and they silently
+served nothing to the collaborator because Bioshare's Apache file-streaming allowed `/quobyte`
+over http but not https (fixed 2026-09-16); links into `/quobyte` are also invisible to staff
+over SMB. So `deliver` copies (about 0.5 GB per search), and the only links it makes are
+relative raw-data links inside the Flinders tree. **Links already in a share are never
+touched** — `deliver` lists them as warnings.
+
+**On HIVE — always the dry run first** (file list, size, and any refusal), then the same
+command with `--apply`. `locate`, `stage` and `deliver` walk the shares, so on HIVE's login node
+each runs itself on a compute node (one blocking `srun`, its line printed first; HPC@UCD's
+`ucd-hpc` rules): run each call in the background (or with a Bash timeout of at least 70
+minutes) and wait for it — a killed call cancels the copy half way:
+
+```
+python3 ~/proteomics-pipeline/scripts/core_submission.py deliver \
+    --summary ~/core/PROT_0807/submission_summary.json --session "$S"
+python3 ~/proteomics-pipeline/scripts/core_submission.py deliver \
+    --summary ~/core/PROT_0807/submission_summary.json --session "$S" --apply
+# "I only require raw data": no session needed (add one only to include its methods.md)
+python3 ~/proteomics-pipeline/scripts/core_submission.py deliver \
+    --summary ~/core/PROT_0807/submission_summary.json --mode raw-only         # then --apply
+# A report WITHOUT differential expression: a QC report, an identification list, or results
+# delivered before the statistics (the DE waits on the study design, or there will be none)
+python3 ~/proteomics-pipeline/scripts/core_submission.py deliver \
+    --summary ~/core/PROT_0807/submission_summary.json --session "$S" --mode no-de   # then --apply
+# The raw files and the search results BEFORE the report (never copy search folders by hand)
+python3 ~/proteomics-pipeline/scripts/core_submission.py deliver \
+    --summary ~/core/PROT_0807/submission_summary.json --session "$S" --mode interim   # then --apply
+```
+
+**Then where the CoreOmics key is** (`coreomics_runs_on`, step 1c.1). Shown for this computer;
+with `hive`, run the same `core_submission.py` lines on HIVE through `hive_exec.sh`
+(`python3 ~/proteomics-pipeline/scripts/core_submission.py …`), with `--delivery` pointing at
+the `delivery.json` deliver printed (no `--get`), and hand the staff member the draft's text from
+HIVE (`hive_exec.sh --get` it, or `cat` it there):
+
+```
+bash scripts/hive_exec.sh --get '<delivery_json printed by deliver>' ~/core/PROT_0807/delivery.json
+python3 scripts/core_submission.py bioshare ensure --summary ~/core/PROT_0807/submission_summary.json   # dry run, then --apply
+python3 scripts/core_submission.py bioshare send --summary ~/core/PROT_0807/submission_summary.json \
+    --delivery ~/core/PROT_0807/delivery.json                                   # dry run: who gets access
+python3 scripts/core_submission.py email-draft --summary ~/core/PROT_0807/submission_summary.json \
+    --delivery ~/core/PROT_0807/delivery.json --share-url <url from ensure> --out ~/core/PROT_0807/EMAIL_DRAFT.md
+```
+
+- **`deliver` refuses before writing (exit 2)** when the session is not this submission's (not
+  under the staged `work_dir`, and its `input/raw_files.txt` does not match the staged files;
+  with no stage record at all, only `--force` after staff confirm), when the delivery folder
+  already has files (→ a new `--label`), or when the path passes through a symlink or leaves
+  the Flinders root. **It also holds an analysis delivery** when the session's QC check (step
+  8e) says check or concern, could not run, or is missing, until a staff member records
+  `qc_bracket.py ack` (its `qc_gate` says why; `delivery.json` keeps it, staff-side); when its
+  DE ran without a decided normalisation check (step 8); and **when the session has no
+  differential expression at all** (no `output/tables/de_provenance.json`). That last hold
+  says so plainly: ask the staff member whether a delivery without the DE is intended. If it is
+  (a QC report, an identification list, results before the statistics), deliver with
+  `--mode no-de`; if not, run step 8 first. `deliver` never switches modes by itself.
+- **Several searches, and no DE to choose by:** an analysis or no-de delivery carries none of
+  them and says why. Choose one: `session.py choose-search --dir "$S" --folder <its folder under
+  output/>` (nothing is renamed; use it for the groups of a FAIMS split, which are valid searches,
+  not superseded ones), or rename a search that really was replaced to
+  `output/superseded_<name>/` (a folder whose name holds "superseded" is not a candidate;
+  `session.py which-search --dir "$S"` then names the one left), or deliver every search folder
+  with `--mode interim`.
+- **`--mode interim`** links the raw files (under their staged names) and copies every search
+  folder (wherever its `search_provenance.json` is: `output/search_dda/` ...) into
+  `<share>/PROT_0807_interim_<date>/`, behind the same QC check; it needs no report, Methods,
+  bundle or finalize. Its README, MANIFEST and email draft say what is still owed (the report,
+  Methods, the bundle), and `delivery.json` `owed` keeps `session.py status` open: the work is
+  not finished until a later `--mode no-de` or `analysis` delivery.
+- **`--mode no-de`** delivers the session's report without differential expression into
+  `<share>/PROT_0807_report_<date>/`, with the same files and rules as an analysis delivery
+  (`Analysis_Report.html` required, raw links as asked). The QC check holds it exactly as it
+  holds an analysis delivery; there is no DE, so no normalisation check. It **refuses** (exit 2)
+  a session that has a DE record or any file the DE wrote (`DE_*.csv`, `Expression_Matrix.csv`,
+  volcano plots …, `report_files.is_de_output`): deliver that with `--mode analysis`. Its README
+  and MANIFEST say there is no differential expression, and `delivery.json` records
+  `mode: no-de`, `differential_expression: false`. When the DE is done later, the analysis
+  delivery goes beside it (`PROT_0807_analysis_<date>/`) in the same share.
+- An analysis delivery fills `<share>/PROT_0807_analysis_<date>/` with `Analysis_Report.html`
+  (required), the reports (and its `.pdf`/`.md`), methods, `tables/`, `figures/`,
+  `reproducibility/`, the search matrices and, when one was made, `podcast/` (the audio and
+  `transcript.html` only — never its script, checks or consent record), plus `README.html` +
+  `README.md` (every claim from a file actually delivered, every item a link in README.html --
+  README.md names files without links, since Bioshare breaks relative links there -- and the
+  session's "Where this lives on HIVE" table), `AGENTS.md` (the session's guide for an AI assistant, its
+  paths mapped onto the delivery), `MANIFEST.txt`
+  (`[OK]` / `[SKIPPED] <name> -- <reason>`, architectural rule #4) and `checksums.sha256`, all
+  group- and world-readable. A raw-only delivery holds README.html/.md, MANIFEST, checksums and any
+  methods (no AGENTS.md: there is no session), with the raw files as relative links in
+  `<share>/raw/`.
+- **Verification walks the whole share**: a symlink inside this delivery, a `raw/` link this
+  run made that is absolute, broken or outside the Flinders root, any file in the delivery this
+  run did not deliver, or anything unreadable fails it. Links already in the share that this run
+  did not make are listed as warnings and left alone. An error mid-copy still writes the
+  MANIFEST and `delivery.json` with `verified: false`. **Exit 2 from `--apply` means do not
+  share.** Over 5 GB it exits 5 with a `deliver_job.sh` (golden rule #3).
+- **Check raw links once in Bioshare.** Brett reported an earlier submission's (absolute) raw links download
+  from Bioshare; relative links resolve to the same files, but nobody has yet opened one there.
+  On the first raw-link delivery, open the Bioshare link and download one raw file before `send`.
+- `bioshare ensure --apply` registers the share dir with CoreOmics' Bioshare plugin (after
+  `deliver --apply` created it) and prints its URL.
+- **Ask once, in plain words: "Share with <submitter>, <PI> and the submission's contacts
+  now?"** Only on a yes, `bioshare send --delivery ~/core/PROT_0807/delivery.json --apply`. It
+  refuses a `delivery.json` that did not verify or belongs to another share. It grants view +
+  download — outward-facing, and separate from the compute yes (golden rule #1). Silent by
+  default; `--email` also has Bioshare notify them.
+- `email-draft` writes a draft and never sends. Give it to the staff member to send. Its wording
+  follows the delivery's `mode` (a no-de delivery: the report and the raw data, with the
+  statistics not included — never "raw data only" when a report went out). Its header names each
+  recipient and where the address came from: the submitter (To) and PI (Cc) addresses **as typed
+  on the CoreOmics form**, where a typo can go unnoticed. An address that cannot be right (no
+  `@`, a space, a comma, no domain ending) or looks like a typo of `ucdavis.edu` is marked
+  `[CHECK THIS ADDRESS: …]` and the draft exits 2 (`address_problems`): show the staff member
+  the address and the reason, and have them confirm the right one before sending.
+- **Then check the session is finished**, on HIVE:
+  `python3 ~/proteomics-pipeline/scripts/session.py status --session "$S"` (from a laptop
+  through `hive_exec.sh`, as in step 1c). It stays at exit 3 while anything is missing, and after
+  an interim delivery until the no-de or analysis delivery (`owed`); show its result before
+  telling the staff member the submission is done.

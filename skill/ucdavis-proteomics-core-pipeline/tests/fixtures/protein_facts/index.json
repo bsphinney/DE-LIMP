@@ -1,0 +1,194 @@
+{
+ "accessions": [
+  "P80723",
+  "P02768",
+  "P15108",
+  "O43596",
+  "P04277",
+  "NP_006308.3"
+ ],
+ "recorded_by": "record.py",
+ "responses": {
+  "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=protein&id=NP_006308.3&rettype=gp&retmode=text&tool=ucdavis_proteomics_skill": {
+   "file": "nih_entrez_eutils_efetch_fcgi_db_protein_id_NP_006308_3_rettype_gp_ret_3d853b.txt",
+   "headers": {
+    "content-type": "text/plain",
+    "x-final-url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=protein&id=NP_006308.3&rettype=gp&retmode=text&tool=ucdavis_proteomics_skill"
+   },
+   "recorded_at": "2026-10-28T20:44:43+00:00",
+   "status": 200
+  },
+  "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=gene&id=10409&retmode=json&tool=ucdavis_proteomics_skill": {
+   "file": "nih_entrez_eutils_esummary_fcgi_db_gene_id_10409_retmode_json_tool_ucd_057cde.json",
+   "headers": {
+    "content-type": "application/json; charset=UTF-8",
+    "x-final-url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=gene&id=10409&retmode=json&tool=ucdavis_proteomics_skill"
+   },
+   "recorded_at": "2026-10-28T20:44:23+00:00",
+   "status": 200
+  },
+  "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=gene&id=213&retmode=json&tool=ucdavis_proteomics_skill": {
+   "file": "nih_entrez_eutils_esummary_fcgi_db_gene_id_213_retmode_json_tool_ucdav_34f9b8.json",
+   "headers": {
+    "content-type": "application/json; charset=UTF-8",
+    "x-final-url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=gene&id=213&retmode=json&tool=ucdavis_proteomics_skill"
+   },
+   "recorded_at": "2026-10-28T20:44:34+00:00",
+   "status": 200
+  },
+  "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=gene&id=855224&retmode=json&tool=ucdavis_proteomics_skill": {
+   "file": "nih_entrez_eutils_esummary_fcgi_db_gene_id_855224_retmode_json_tool_uc_54f6b4.json",
+   "headers": {
+    "content-type": "application/json; charset=UTF-8",
+    "x-final-url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=gene&id=855224&retmode=json&tool=ucdavis_proteomics_skill"
+   },
+   "recorded_at": "2026-10-28T20:44:37+00:00",
+   "status": 200
+  },
+  "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=protein&id=NP_006308.3&retmode=json&tool=ucdavis_proteomics_skill": {
+   "file": "nih_entrez_eutils_esummary_fcgi_db_protein_id_NP_006308_3_retmode_json_27d474.json",
+   "headers": {
+    "content-type": "application/json; charset=UTF-8",
+    "x-final-url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=protein&id=NP_006308.3&retmode=json&tool=ucdavis_proteomics_skill"
+   },
+   "recorded_at": "2026-10-28T20:44:42+00:00",
+   "status": 200
+  },
+  "https://rest.ensembl.org/info/data?content-type=application/json": {
+   "file": "ensembl_info_data_content_type_application_json_762d3f.json",
+   "headers": {
+    "content-type": "application/json",
+    "x-final-url": "https://rest.ensembl.org/info/data?content-type=application/json"
+   },
+   "recorded_at": "2026-10-28T20:44:31+00:00",
+   "status": 200
+  },
+  "https://rest.ensembl.org/lookup/id/ENSG00000163631?content-type=application/json": {
+   "file": "ensembl_lookup_id_ENSG00000163631_content_type_application_json_ebc568.json",
+   "headers": {
+    "content-type": "application/json",
+    "x-final-url": "https://rest.ensembl.org/lookup/id/ENSG00000163631?content-type=application/json"
+   },
+   "recorded_at": "2026-10-28T20:44:35+00:00",
+   "status": 200
+  },
+  "https://rest.ensembl.org/lookup/id/ENSG00000176788?content-type=application/json": {
+   "file": "ensembl_lookup_id_ENSG00000176788_content_type_application_json_dd1962.json",
+   "headers": {
+    "content-type": "application/json",
+    "x-final-url": "https://rest.ensembl.org/lookup/id/ENSG00000176788?content-type=application/json"
+   },
+   "recorded_at": "2026-10-28T20:44:31+00:00",
+   "status": 200
+  },
+  "https://rest.ensembl.org/lookup/id/YMR186W?content-type=application/json": {
+   "file": "ensembl_lookup_id_YMR186W_content_type_application_json_caaf97.json",
+   "headers": {
+    "content-type": "application/json",
+    "x-final-url": "https://rest.ensembl.org/lookup/id/YMR186W?content-type=application/json"
+   },
+   "recorded_at": "2026-10-28T20:44:40+00:00",
+   "status": 200
+  },
+  "https://rest.genenames.org/fetch/hgnc_id/HGNC:399": {
+   "file": "genenames_fetch_hgnc_id_HGNC_399_bc02a0.json",
+   "headers": {
+    "content-type": "application/json;charset=utf-8",
+    "x-final-url": "https://rest.genenames.org/fetch/hgnc_id/HGNC:399"
+   },
+   "recorded_at": "2026-10-28T20:44:34+00:00",
+   "status": 200
+  },
+  "https://rest.genenames.org/fetch/hgnc_id/HGNC:957": {
+   "file": "genenames_fetch_hgnc_id_HGNC_957_10120a.json",
+   "headers": {
+    "content-type": "application/json;charset=utf-8",
+    "x-final-url": "https://rest.genenames.org/fetch/hgnc_id/HGNC:957"
+   },
+   "recorded_at": "2026-10-28T20:44:24+00:00",
+   "status": 200
+  },
+  "https://rest.genenames.org/info": {
+   "file": "genenames_info_f22f30.json",
+   "headers": {
+    "content-type": "application/json;charset=utf-8",
+    "x-final-url": "https://rest.genenames.org/info"
+   },
+   "recorded_at": "2026-10-28T20:44:25+00:00",
+   "status": 200
+  },
+  "https://rest.uniprot.org/uniprotkb/O43596.json": {
+   "file": "uniprot_uniprotkb_O43596_json_cdf0d3.json",
+   "headers": {
+    "content-type": "application/json",
+    "x-final-url": "https://rest.uniprot.org/uniprotkb/P80723?from=O43596",
+    "x-uniprot-release": "2026_03",
+    "x-uniprot-release-date": "02-September-2026"
+   },
+   "recorded_at": "2026-10-28T20:44:42+00:00",
+   "status": 200
+  },
+  "https://rest.uniprot.org/uniprotkb/P02768.json": {
+   "file": "uniprot_uniprotkb_P02768_json_38122e.json",
+   "headers": {
+    "content-type": "application/json",
+    "x-final-url": "https://rest.uniprot.org/uniprotkb/P02768.json",
+    "x-uniprot-release": "2026_03",
+    "x-uniprot-release-date": "02-September-2026"
+   },
+   "recorded_at": "2026-10-28T20:44:33+00:00",
+   "status": 200
+  },
+  "https://rest.uniprot.org/uniprotkb/P04277.json": {
+   "file": "uniprot_uniprotkb_P04277_json_18bc37.json",
+   "headers": {
+    "content-type": "application/json",
+    "x-final-url": "https://rest.uniprot.org/uniprotkb/P04277.json",
+    "x-uniprot-release": "2026_03",
+    "x-uniprot-release-date": "02-September-2026"
+   },
+   "recorded_at": "2026-10-28T20:44:42+00:00",
+   "status": 200
+  },
+  "https://rest.uniprot.org/uniprotkb/P15108.json": {
+   "file": "uniprot_uniprotkb_P15108_json_1541d6.json",
+   "headers": {
+    "content-type": "application/json",
+    "x-final-url": "https://rest.uniprot.org/uniprotkb/P15108.json",
+    "x-uniprot-release": "2026_03",
+    "x-uniprot-release-date": "02-September-2026"
+   },
+   "recorded_at": "2026-10-28T20:44:37+00:00",
+   "status": 200
+  },
+  "https://rest.uniprot.org/uniprotkb/P80723.json": {
+   "file": "uniprot_uniprotkb_P80723_json_8d7411.json",
+   "headers": {
+    "content-type": "application/json",
+    "x-final-url": "https://rest.uniprot.org/uniprotkb/P80723.json",
+    "x-uniprot-release": "2026_03",
+    "x-uniprot-release-date": "02-September-2026"
+   },
+   "recorded_at": "2026-10-28T20:44:23+00:00",
+   "status": 200
+  },
+  "https://www.proteinatlas.org/ENSG00000163631.json": {
+   "file": "proteinatlas_ENSG00000163631_json_c575ef.json",
+   "headers": {
+    "content-type": "application/json",
+    "x-final-url": "https://www.proteinatlas.org/ENSG00000163631.json"
+   },
+   "recorded_at": "2026-10-28T20:44:36+00:00",
+   "status": 200
+  },
+  "https://www.proteinatlas.org/ENSG00000176788.json": {
+   "file": "proteinatlas_ENSG00000176788_json_38184b.json",
+   "headers": {
+    "content-type": "application/json",
+    "x-final-url": "https://www.proteinatlas.org/ENSG00000176788.json"
+   },
+   "recorded_at": "2026-10-28T20:44:32+00:00",
+   "status": 200
+  }
+ }
+}

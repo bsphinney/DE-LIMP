@@ -25,9 +25,10 @@
 #           as qualitative on/off calls.
 #
 # Input contract: a DIA-NN report (report.parquet preferred, or report.tsv).
-# For Sage / FragPipe DDA results, first convert to a DIA-NN-shaped precursor
-# report or a peptide matrix (see references/de-analysis.md, "Feeding non
-# DIA-NN engines into the DE step"); then point --input at that.
+# For Sage / FragPipe / AlphaDIA / Radiant results, use the DIA-NN-shaped report.parquet
+# run_search.py's adapter writes (--method maxlfq), or for --method dpc a precursor-level
+# report (see references/de-analysis.md, "DE-input contract (§8.3)" and "Method choice —
+# limpa/DPC is the default"); then point --input at that.
 #
 # Usage:
 #   Rscript run_de.R --input report.parquet --metadata conditions.csv \
@@ -219,6 +220,13 @@ local({
   f <- .sibling("runtime_record.R")
   if (is.null(f))
     stop("runtime_record.R not found next to run_de.R -- it records the R the DE ran in.")
+  source(f)
+})
+# CPU family + file_sha256 (compute_record.R, shared with make_screen_data.R).
+local({
+  f <- .sibling("compute_record.R")
+  if (is.null(f))
+    stop("compute_record.R not found next to run_de.R -- it defines the CPU-family record and file_sha256.")
   source(f)
 })
 # The protein-set tests' defaults and definitions (the trigger below; run_sets.R uses the rest).
@@ -525,12 +533,17 @@ search_dir <- search_folder(input)
 # wrong: run_search.py --adapt-only refuses to build its report, and so does this, for a report
 # built before that gate (2.10). Open again once the search is re-run with the corrected window,
 # or once the user accepts the quantities (run_search.py --adapt-only --accept-lfq-window). The
-# rule is sage_lfq_check.gated(), asked here -- never re-decided.
-if (!is.null(search_dir) && file.exists(file.path(search_dir, "sage_lfq_check.json"))) {
+# rule is sage_lfq_check.gated(), asked here -- never re-decided. The record's file has an
+# engine-neutral name and 2.14.x's name: either is the gate (sage_lfq_check.RECORD_NAMES; a test
+# ties this list to it).
+QUANTIFICATION_RECORDS <- c("quantification_check.json", "sage_lfq_check.json")
+.qrec <- if (is.null(search_dir)) character(0) else
+  Filter(file.exists, file.path(search_dir, QUANTIFICATION_RECORDS))
+if (length(.qrec)) {
   .lfq <- python_json("sage_lfq_check.py", "gate", c("--out", shQuote(search_dir)),
-                      "read the Sage LFQ window gate")
+                      "read the search's quantification gate")
   if (is.null(.lfq$res))
-    stop("this Sage search has an LFQ window check (", file.path(search_dir, "sage_lfq_check.json"),
+    stop("this search has a quantification record (", .qrec[[1]],
          ") that could not be evaluated: ", .lfq$why, ". Fix that, then run the DE again.",
          call. = FALSE)
   if (isTRUE(.lfq$res$refused)) stop(.lfq$res$message, call. = FALSE)
@@ -1722,12 +1735,12 @@ writeLines(methods_txt, file.path(outdir, "methods.txt"))
 # Faithful capture of the stack that actually ran this DE (not re-derived later).
 # The machine the numbers came from. DPC-Quant's per-protein fits (limpa dpcQuant: optim BFGS
 # at its default tolerance) stop at slightly different points on different CPU families, because
-# OpenBLAS picks CPU-specific kernels whose last-bit rounding differs: PROT_0756 v2, zen4 vs zen2
+# OpenBLAS picks CPU-specific kernels whose last-bit rounding differs: a mouse-brain IP cohort, v2, zen4 vs zen2
 # HIVE nodes, identical inputs and software -- |dlogFC| <= 0.0022, |dt| <= 0.0064, no call
 # changed; the same family reproduces bit for bit (references/reproducibility.md). So the record
 # names the CPU, the BLAS/LAPACK libraries and, on a SLURM node, its CPU-family feature (what
 # `sbatch --constraint=` selects). OPENBLAS_CORETYPE is recorded, never set: forcing it
-# segfaulted dpcQuant on an EPYC 9734 (sbatch 24180764).
+# segfaulted dpcQuant on an EPYC 9734 (a test job).
 compute_record <- function() {
   sh <- function(cmd, args) tryCatch(suppressWarnings(system2(cmd, args, stdout = TRUE, stderr = FALSE)),
                                      error = function(e) character(0))
@@ -1737,14 +1750,7 @@ compute_record <- function() {
   } else if (nzchar(Sys.which("sysctl"))) {
     v <- sh("sysctl", c("-n", "machdep.cpu.brand_string")); if (length(v)) v[1] else NA_character_
   } else NA_character_
-  node <- Sys.getenv("SLURMD_NODENAME", "")
-  feats <- if (nzchar(node) && nzchar(Sys.which("scontrol"))) {
-    out <- sh("scontrol", c("show", "node", node))
-    f <- regmatches(out, regexpr("AvailableFeatures=[^ ]*", out))
-    if (length(f)) strsplit(sub("^AvailableFeatures=", "", f[1]), ",")[[1]] else character(0)
-  } else character(0)
-  fam <- grep("^(zen[0-9]*|icelake|cascadelake|skylake|sapphirerapids|emeraldrapids|haswell|broadwell)$",
-              feats, value = TRUE)
+  cf <- slurm_cpu_family(); node <- cf$node; feats <- cf$feats; fam <- cf$fam
   si <- utils::sessionInfo()
   list(cpu_model = cpu, slurm_node = if (nzchar(node)) node else NULL,
        slurm_features = if (length(feats)) as.list(feats) else NULL,
@@ -1797,16 +1803,6 @@ jsonlite_or_manual <- function(x) {
   enc(x)
 }
 pkg_ver <- function(p) tryCatch(as.character(packageVersion(p)), error = function(e) NA_character_)
-file_sha256 <- function(path) tryCatch(
-  if (!file.exists(path)) NA_character_
-  else if (requireNamespace("digest", quietly = TRUE))
-    digest::digest(path, algo = "sha256", file = TRUE)
-  else if (nzchar(Sys.which("sha256sum")))
-    sub(" .*", "", system2("sha256sum", shQuote(path), stdout = TRUE)[1])
-  else if (nzchar(Sys.which("shasum")))
-    sub(" .*", "", system2("shasum", c("-a", "256", shQuote(path)), stdout = TRUE)[1])
-  else NA_character_,
-  error = function(e) NA_character_)
 input_sha256 <- file_sha256(input)
 # the conditions file too: normalization_check.py run checks its two DEs read the check's own
 metadata_sha256 <- file_sha256(meta_path)

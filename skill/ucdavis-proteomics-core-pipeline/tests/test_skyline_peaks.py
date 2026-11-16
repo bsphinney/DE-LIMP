@@ -158,8 +158,8 @@ class TestSearchSettings(unittest.TestCase):
     def test_no_cam_search_clears_skyline_default_mods(self):
         """2.14.2, I37 (I25): unalkylated samples are searched with no fixed C modification, but
         SkylineCmd --new starts with Skyline's default Carbamidomethyl (C), so no cysteine peptide
-        of DIA-NN's library would match. --pep-clear-mods (SkylineCmd 26.1.0.266 --help, HIVE job
-        25386172) clears it, right after --new and --overwrite."""
+        of DIA-NN's library would match. --pep-clear-mods (SkylineCmd 26.1.0.266 --help, a test job
+        on HIVE) clears it, right after --new and --overwrite."""
         s = sp.search_settings(sp.command_flags(CMD.replace("--unimod4 ", "")))
         self.assertEqual(s["fixed_mods"], [])
         self.assertEqual(s["mod_args"], ["--pep-clear-mods"])
@@ -239,13 +239,20 @@ class TestSearchSettings(unittest.TestCase):
         self.assertNotIn("Not carried over", old)
 
     def test_other_fixed_c_mod_still_skips(self):
-        for flags in ("--fixed-mod UniMod:24,71.037114,C ", "--unimod4 --fixed-mod "
-                      "UniMod:39,45.987721,C ", "--fixed-mod Carbamidomethyl,57.021464,C "):
+        """Changed in 2.15: a fixed C modification other than carbamidomethyl is carried into the
+        document (TestFixedCysteineCarried), so --fixed-mod UniMod:24 (propionamide) now plans.
+        What cannot be carried still skips, each with its own reason: two different fixed C
+        modifications, and a name that is not UniMod:<id> (DIA-NN writes C(Carbamidomethyl),
+        which Skyline cannot match to a modification)."""
+        for flags, why in (("--unimod4 --fixed-mod UniMod:39,45.987721,C ",
+                            "two different fixed cysteine modifications"),
+                           ("--fixed-mod Carbamidomethyl,57.021464,C ", "not a UniMod:<id>")):
             with self.subTest(flags=flags), self.assertRaises(sp.Skip) as e:
                 sp.search_settings(sp.command_flags(CMD.replace("--unimod4 ", flags)))
-            self.assertIn("a fixed cysteine modification other than carbamidomethyl is not yet "
-                          "tested with Skyline", str(e.exception))
+            self.assertIn(why, str(e.exception))
             self.assertIn(flags.split("--fixed-mod ")[1].strip(), str(e.exception))
+        self.assertEqual(sp.search_settings(sp.command_flags(CMD.replace(
+            "--unimod4 ", "--fixed-mod UniMod:24,71.037114,C ")))["fixed_cys"]["unimod"], 24)
         # a fixed modification on another residue is not a cysteine one
         s = sp.search_settings(sp.command_flags(CMD + " --fixed-mod SILAC,0.0,KR,label"))
         self.assertEqual(s["fixed_mods"], ["Carbamidomethyl (C)"])
@@ -276,6 +283,237 @@ class TestSearchSettings(unittest.TestCase):
                            "resolution": {"ms2_analyzer": "ITMS"}}, ["/a/x.raw"])):
             with self.assertRaises(sp.Skip):
                 sp.instrument_family(man, raw)
+
+
+# The <peptide_modifications> block of real SkylineCmd 26.1.0.266 documents (a test job on HIVE):
+# --new's default (A.sky); NEM added
+# static after --pep-clear-mods in an earlier command (D.sky); NEM added without
+# --pep-add-mod-variable=false, which Skyline makes variable (E.sky); and the 2.14.2 no-CAM
+# document, cleared (H4's H4_search_top_hits.built.sky), which has no <static_modifications>.
+def mods_block(*mods):
+    inner = ("        <static_modifications>\n" + "".join(f"          {m}\n" for m in mods)
+             + "        </static_modifications>\n") if mods else ""
+    return ('      <peptide_modifications max_variable_mods="3" max_neutral_losses="1">\n' + inner
+            + "        <heavy_modifications />\n      </peptide_modifications>\n")
+
+
+SKY_CAM = ('<static_modification name="Carbamidomethyl (C)" aminoacid="C" formula="H3C2NO" '
+           'unimod_id="4" short_name="CAM" />')
+SKY_NEM = ('<static_modification name="Nethylmaleimide (C)" aminoacid="C" formula="H7C6NO2" '
+           'unimod_id="108" />')
+SKY_NEM_VAR = ('<static_modification name="Nethylmaleimide (C)" aminoacid="C" variable="true" '
+               'formula="H7C6NO2" unimod_id="108" />')
+NEM_FLAG = "--fixed-mod UniMod:108,125.047679,C "
+NEM_ADD = ["--pep-add-unimod=108", "--pep-add-unimod-aa=C", "--pep-add-mod-variable=false"]
+
+
+class TestFixedCysteineCarried(unittest.TestCase):
+    """2.15 (issue 2026-11-04, skill 2.14.0): the peak check refused every search whose fixed
+    cysteine modification was not carbamidomethyl. It now carries the search's own one -- NEM,
+    propionamide, carboxymethyl, MMTS, pyridylethyl -- into the document as a STATIC (fixed)
+    modification, by its UniMod id, at the mass DIA-NN searched. SkylineCmd 26.1.0.266 (a test
+    job on HIVE): a --pep-add-unimod in the same command as --pep-clear-mods is ADDED to --new's
+    carbamidomethyl (C[+182.069143] = 57.021464 + 125.047679 on every C), and without
+    --pep-add-mod-variable=false the added modification is variable (each C both bare and
+    modified). So the document is made and cleared by a first command, and the search's
+    modification added static by a second, in one --batch-commands call."""
+
+    def nem(self, flags=NEM_FLAG):
+        return sp.search_settings(sp.command_flags(CMD.replace("--unimod4 ", flags)))
+
+    def test_a_nem_search_plans_and_records_the_modification(self):
+        s = self.nem()
+        self.assertEqual(s["fixed_cys"], {"name": "Nethylmaleimide", "unimod": 108,
+                                          "mass": 125.047679, "unimod_mass": 125.047679,
+                                          "searched_as": ["--fixed-mod UniMod:108,125.047679,C"]})
+        self.assertEqual(s["fixed_mods"], ["Nethylmaleimide (C, +125.047679 Da, UniMod:108)"])
+        self.assertEqual(s["mod_args"], ["--pep-clear-mods"] + NEM_ADD)
+        self.assertEqual(s["mod_masses"][108], 125.047679)
+        p = dict(plan_for(), settings=s, plan_id="p", skill_version="t", family_source="t",
+                 top={"value": 10, "source": "skill default"}, search={"dir": "/s"})
+        rec = sp.planned_record(p)["settings"]
+        self.assertEqual((rec["fixed_mods"], rec["mod_args"], rec["fixed_cys"]["unimod"]),
+                         (s["fixed_mods"], s["mod_args"], 108))
+
+    def test_the_document_is_made_by_two_commands(self):
+        p = dict(plan_for(), settings=self.nem())
+        cmds = sp.build_commands(p, 2.0)
+        self.assertEqual(len(cmds), 2)
+        doc = sp.win(p["doc"])
+        self.assertEqual(cmds[0], [f"--new={doc}", "--overwrite", "--pep-clear-mods", "--save"])
+        main = cmds[1]
+        self.assertEqual(main, sp.build_args(p, 2.0))
+        self.assertEqual(main[:4], [f"--in={doc}"] + NEM_ADD)
+        self.assertNotIn("--pep-clear-mods", main)
+        self.assertFalse(any(a.startswith("--new=") for a in main))
+        self.assertIn("--import-search-add-mods", main)
+        self.assertLess(main.index("--pep-add-mod-variable=false"),
+                        main.index("--import-search-add-mods"))
+        self.assertEqual(main[-1], "--save")
+        # one SkylineCmd call: the two commands as a --batch-commands file
+        lines = sp.build_batch(cmds).splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(lines[0].startswith('--new="Z:\\w\\skyline_work\\T_top_hits.sky"'))
+        self.assertIn("--pep-add-unimod=108 --pep-add-unimod-aa=C --pep-add-mod-variable=false",
+                      lines[1])
+
+    def test_the_cam_and_unalkylated_builds_are_one_command_as_before(self):
+        """(pin) 2.14.2's two cases: one SkylineCmd command, unchanged."""
+        cam = plan_for()
+        self.assertEqual(sp.build_commands(cam, 2.0), [sp.build_args(cam, 2.0)])
+        self.assertEqual(sp.build_args(cam, 2.0)[:2], [f"--new={sp.win(cam['doc'])}",
+                                                       "--overwrite"])
+        self.assertEqual(cam["settings"]["fixed_cys"]["unimod"], 4)
+        self.assertEqual(cam["settings"]["fixed_cys"]["searched_as"], ["--unimod4"])
+        none = dict(plan_for(), settings=sp.search_settings(sp.command_flags(
+            CMD.replace("--unimod4 ", ""))))
+        self.assertIsNone(none["settings"]["fixed_cys"])
+        (one,) = sp.build_commands(none, 2.0)
+        self.assertEqual(one[1:3], ["--overwrite", "--pep-clear-mods"])
+        self.assertFalse(any(a.startswith("--pep-add-") for a in one))
+
+    def test_the_methods_name_the_modification_and_its_mass(self):
+        s = self.nem()
+        rec = dict(OK_REC, settings=dict(OK_REC["settings"], **{
+            k: s[k] for k in ("fixed_mods", "mod_args", "fixed_cys")}))
+        text = sp.methods_paragraph(rec)
+        self.assertIn("fragments 200-1800 m/z, Nethylmaleimide (C, +125.047679 Da, UniMod:108) "
+                      "as a fixed modification, as searched, in place of Skyline's default "
+                      "carbamidomethyl modification), centroided spectra", text)
+        self.assertNotIn("Carbamidomethyl (C)", text)
+        self.assertNotIn("unmodified", text)
+        self.assertNotIn("))", text)
+
+    def test_every_reagent_the_skill_searches(self):
+        """estimate_params.CYS_REAGENTS, the one table: each fixed C modification it writes is
+        carried, by its UniMod id. The real SkylineCmd 26.1 found each on C in its UniMod
+        (a test job on HIVE: Propionamide, Carboxymethyl, Methylthio, Pyridylethyl (C))."""
+        from estimate_params import CYS_REAGENTS, cys_diann_flags
+        for key, r in CYS_REAGENTS.items():
+            if r is None or key == "cam":
+                continue
+            with self.subTest(reagent=key):
+                s = self.nem(" ".join(cys_diann_flags(key)) + " ")
+                self.assertEqual((s["fixed_cys"]["unimod"], s["fixed_cys"]["name"]),
+                                 (r["unimod"], r["mod"]))
+                self.assertEqual(s["fixed_cys"]["mass"], r["mass"])
+                self.assertIn(f"--pep-add-unimod={r['unimod']}", s["mod_args"])
+
+    def test_what_cannot_be_carried_skips_with_its_reason(self):
+        cases = {
+            "--fixed-mod UniMod:108,,C ": "no usable mass",
+            "--fixed-mod UniMod:108,heavy,C ": "no usable mass",
+            "--fixed-mod UniMod:108,125.1,C ": "differs from UniMod's +125.047679",
+            "--fixed-mod UniMod:108,125.047679,C --fixed-mod UniMod:24,71.037114,C ":
+                "two different fixed cysteine modifications",
+            "--unimod4 --fixed-mod UniMod:108,125.047679,C ":
+                "two different fixed cysteine modifications",
+            "--fixed-mod NEM,125.047679,C ": "not a UniMod:<id>",
+            "--fixed-mod UniMod:108,125.047679,CK ": "on C alone",
+            "--fixed-mod UniMod:108,125.047679,C,label ": "on C alone",
+            "--fixed-mod UniMod:17,99.068414,C ": "not in the skill's table",
+        }
+        for flags, why in cases.items():
+            with self.subTest(flags=flags), self.assertRaises(sp.Skip) as e:
+                self.nem(flags)
+            self.assertIn(why, str(e.exception))
+            self.assertIn("peak check", str(e.exception))
+        # the same modification twice is one modification
+        s = self.nem("--unimod4 --fixed-mod UniMod:4,57.021464,C ")
+        self.assertEqual((s["fixed_mods"], s["mod_args"]), (["Carbamidomethyl (C)"], []))
+        s = self.nem(NEM_FLAG + NEM_FLAG)
+        self.assertEqual(s["fixed_cys"]["unimod"], 108)
+
+    def test_a_plan_written_by_2_14_2_reads_as_before(self):
+        """A plan of 2.14.2 has fixed_mods [CAM_FIXED] or [] and mod_args [] or
+        ["--pep-clear-mods"], and no fixed_cys; one of 2.14.1 has neither (it ran only on
+        --unimod4 searches). Each still builds with one command, and its Methods read as
+        before."""
+        old = {k: v for k, v in sp.search_settings(sp.command_flags(CMD)).items()
+               if k != "fixed_cys"}
+        cleared = dict(old, fixed_mods=[], mod_args=["--pep-clear-mods"])
+        oldest = {k: v for k, v in old.items() if k not in ("fixed_mods", "mod_args")}
+        for s, first, unimod in ((old, ["--overwrite"], 4),
+                                 (cleared, ["--overwrite", "--pep-clear-mods"], None),
+                                 (oldest, ["--overwrite"], 4)):
+            with self.subTest(settings=sorted(s)):
+                p = dict(plan_for(), settings=s)
+                (one,) = sp.build_commands(p, 2.0)
+                self.assertTrue(one[0].startswith("--new="))
+                self.assertEqual(one[1:1 + len(first)], first)
+                self.assertNotEqual(one[1 + len(first)], "--pep-clear-mods")
+                self.assertEqual(sp.fixed_cys_unimod(s), unimod)
+        self.assertIn("Carbamidomethyl (C) as a fixed modification), ", sp.methods_paragraph(
+            dict(OK_REC, settings=dict(OK_REC["settings"], fixed_mods=old["fixed_mods"]))))
+        self.assertIn("no fixed modification, as searched: cysteine unmodified, and Skyline's "
+                      "default carbamidomethyl modification cleared), ", sp.methods_paragraph(
+                          dict(OK_REC, settings=dict(OK_REC["settings"], fixed_mods=[],
+                                                     mod_args=["--pep-clear-mods"]))))
+
+    def test_the_document_must_hold_the_searchs_fixed_modification(self):
+        """The build reads the document's static modifications back (document_fixed_mods) and
+        refuses one whose fixed cysteine modification is not the search's -- the summed
+        CAM + NEM of a one-command build, a variable NEM, a CAM left in a cleared one."""
+        nem, cam = self.nem(), sp.search_settings(sp.command_flags(CMD))
+        none = sp.search_settings(sp.command_flags(CMD.replace("--unimod4 ", "")))
+        self.assertEqual(sp.document_fixed_mods(mods_block(SKY_CAM)),
+                         [{"name": "Carbamidomethyl (C)", "aa": "C", "unimod": 4}])
+        self.assertEqual(sp.document_fixed_mods(mods_block(SKY_NEM_VAR)), [])
+        self.assertEqual(sp.document_fixed_mods(mods_block()), [])
+        ok = ((nem, mods_block(SKY_NEM)), (cam, mods_block(SKY_CAM)), (none, mods_block()),
+              (none, mods_block(SKY_NEM_VAR)))
+        for s, text in ok:
+            self.assertEqual(sp.check_document_mods(text, s),
+                             [m["name"] for m in sp.document_fixed_mods(text)])
+        bad = ((nem, mods_block(SKY_CAM, SKY_NEM)), (nem, mods_block(SKY_CAM, SKY_NEM_VAR)),
+               (nem, mods_block()), (none, mods_block(SKY_CAM)), (cam, mods_block()))
+        for s, text in bad:
+            with self.subTest(text=text), self.assertRaises(sp.Skip) as e:
+                sp.check_document_mods(text, s)
+            self.assertIn("fixed cysteine modification", str(e.exception))
+
+    def test_the_build_job_runs_both_commands_in_one_call(self):
+        with tempfile.TemporaryDirectory() as td:
+            w, p = TestImportTimeAndDocument().work(td)
+            p["settings"] = self.nem()
+            with open(os.path.join(w, "plan.json"), "w") as fh:
+                json.dump(p, fh)
+            calls = []
+
+            def fake(plan, args, log_name, rw=(), timeout_s=None):
+                calls.append(list(args))
+                with open(p["doc"], "w") as fh:
+                    fh.write("<srm_settings>" + mods_block(SKY_NEM)
+                             + '<peptide sequence="LCEVTDGFAPSCYK"/>')
+                return 0, os.path.join(w, "logs", log_name)
+            sel = {"mode": "de_hits", "targets": [{"protein_group": "P1", "gene": "G1"}]}
+            with mock.patch.object(sp, "needs_for_pictures", lambda: None), \
+                    mock.patch.object(sp, "verify_container", lambda plan: {"name": "Skyline"}), \
+                    mock.patch.object(sp, "select_targets", lambda plan: dict(sel)), \
+                    mock.patch.object(sp, "fasta_subset", lambda *a: {"P1"}), \
+                    mock.patch.object(sp, "diann_rows", lambda *a: (4, 30.0)), \
+                    mock.patch.object(sp, "run_skyline", fake), \
+                    mock.patch("sys.stderr", new=io.StringIO()):
+                self.assertEqual(sp.main(["build", "--work", w, "--plan-id", "p1"]), 0)
+            batch = os.path.join(w, "build_batch.txt")
+            self.assertEqual(calls, [[f"--batch-commands={sp.win(batch)}"]])
+            with open(batch) as fh:
+                self.assertEqual(fh.read(), sp.build_batch(sp.build_commands(p, 2.0)))
+            with open(os.path.join(w, "status", "build.json")) as fh:
+                st = json.load(fh)
+            self.assertTrue(st["ok"])
+            self.assertEqual(st["document_fixed_mods"], ["Nethylmaleimide (C)"])
+
+    def test_nem_precursors_match_by_mass_and_never_a_cam_one(self):
+        """DIA-NN's C(UniMod:108) and Skyline's C[+125.0] (its report's one decimal) are one
+        precursor, by the mass the search gave UniMod:108; a C[+57.0] is not."""
+        sp.use_search_mod_masses(self.nem()["mod_masses"])
+        dia = sp.precursor_key("LC(UniMod:108)EVTDGFAPSC(UniMod:108)YK", "2")
+        self.assertEqual(sp.precursor_key("LC[+125.0]EVTDGFAPSC[+125.0]YK", 2), dia)
+        self.assertEqual(sp.precursor_key("LC[+125.047679]EVTDGFAPSC[+125.047679]YK", 2), dia)
+        self.assertNotEqual(sp.precursor_key("LC[+57.0]EVTDGFAPSC[+57.0]YK", 2), dia)
+        self.assertNotEqual(sp.precursor_key("LC[+182.1]EVTDGFAPSC[+182.1]YK", 2), dia)
+        self.assertNotEqual(sp.precursor_key("LCEVTDGFAPSCYK", 2), dia)
 
 
 class TestCommandBuilders(unittest.TestCase):
@@ -814,7 +1052,7 @@ class ChainLayout(unittest.TestCase):
     empirical.parquet). Skyline pairs a library with the report by a shared leading name ("unable
     to determine DIA-NN report filename for 'empirical.parquet.skyline.speclib'"), so the build
     failed on every chain search. The library is linked under the report's paired name whatever it
-    is called itself; a link under that name built and imported on HIVE (jobs 25168317-9)."""
+    is called itself; a link under that name built and imported on HIVE (test jobs)."""
 
     def test_the_paired_name(self):
         self.assertEqual(sp.speclib_link_name("/s/report.parquet"),
@@ -1828,7 +2066,10 @@ class TestImportTimeAndDocument(unittest.TestCase):
 
             def fake(plan, args, log_name, rw=(), timeout_s=None):
                 self.assertIsNone(timeout_s)
-                self.put(stem + ".sky", '<srm_settings><peptide sequence="PEPTIDEK"/>')
+                # a CAM search: the document holds Skyline's carbamidomethyl, as the real one
+                # does (2.15: the build checks it, check_document_mods)
+                self.put(stem + ".sky", "<srm_settings>" + mods_block(SKY_CAM)
+                         + '<peptide sequence="PEPTIDEK"/>')
                 self.put(stem + ".blib", "lib")
                 return 0, os.path.join(w, "logs", log_name)
             sel = {"mode": "de_hits", "targets": [{"protein_group": "P1", "gene": "G1"}]}
@@ -1920,7 +2161,7 @@ time.sleep(300)
 
 
 # A stand-in for `scontrol show job -o <id>` inside a job: HIVE's form of the line
-# ("... RunTime=00:00:05 TimeLimit=00:15:00 TimeMin=N/A ...", h2 job 25387830), with the limit
+# ("... RunTime=00:00:05 TimeLimit=00:15:00 TimeMin=N/A ...", a test job), with the limit
 # the test gives (FAKE_SCONTROL_LIMIT).
 FAKE_SCONTROL = """#!{python}
 import os, sys
@@ -2446,6 +2687,646 @@ class TestPictures(unittest.TestCase):
             self.assertTrue(os.path.getsize(os.path.join(out, "areas_GENE1.png")) > 1000)
             self.assertTrue(os.path.isfile(os.path.join(out, "peaks_disagreements.png")))
             self.assertEqual(client_text.peak_check_overclaims(rec["methods_paragraph"]), [])
+
+
+
+class TestImportLimitOneDefinition(unittest.TestCase):
+    """2.15, Ruling 94 F1 and Ruling 100 M1: the 60-min import limit stopped two of four real
+    imports of a Lumos DIA project with staggered windows, which Skyline demultiplexes (24-29 min
+    on a healthy node, up to 149 min on a loaded one; 1,658 s vs 63 s without demultiplexing).
+    The import gets 240 min when Skyline must demultiplex the runs, else 60 -- 240 for every run
+    would have made a large plate's CPU-hour reservation four times what it needs. Read from the
+    acquisition record (detect_acquisition.py's isolation_windows); without it, Thermo 240 and
+    timsTOF 60. ONE definition (JOB_MINUTES, job_minutes) that the job scripts and
+    references/skyline.md's job table read; the near-limit warning reads Slurm's own limit."""
+
+    QUEUE = ("high", "genome-center-grp", "genome-center-grp-high-qos")
+
+    @staticmethod
+    def record(td, runs):
+        """An acquisition record: {raw path: isolation_windows (or a missing key, None)}."""
+        files = []
+        for raw, iw in runs.items():
+            f = {"file": raw, "vendor": "Thermo", "acquisition": "DIA"}
+            if iw != "absent":
+                f["isolation_windows"] = iw
+            files.append(f)
+        path = os.path.join(td, "acquisition.json")
+        with open(path, "w") as fh:
+            json.dump({"overall": "DIA", "files": files}, fh)
+        return path
+
+    STAG = {"staggered": True, "n_windows": 151, "median_width": 8.0, "median_overlap": 4.0}
+    TILED = {"staggered": False, "n_windows": 40, "median_width": 15.0, "median_overlap": 1.0}
+
+    def minutes(self, plan, step="import"):
+        import re
+        t = sp.job_script(plan, step, self.QUEUE, array="1-2%2" if step == "import" else None)
+        (got,) = re.findall(r"^#SBATCH --time=(\S+)$", t, re.M)
+        return int(got)
+
+    def test_each_case_of_the_acquisition_record(self):
+        raws = ["/data/a.raw", "/data/b.raw"]
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as td:
+            cases = [
+                ("one run staggered", {raws[0]: self.STAG, raws[1]: self.TILED}, "orbitrap",
+                 True, "1 of the 2 runs are staggered"),
+                ("none staggered", {raws[0]: self.TILED, raws[1]: self.TILED}, "orbitrap",
+                 False, "none of the 2 runs"),
+                ("a record of 2.14.2 (no field), Thermo", {r: "absent" for r in raws},
+                 "orbitrap", True, "does not say for 2 of the 2 runs"),
+                ("a record of 2.14.2 (no field), timsTOF", {r: "absent" for r in raws},
+                 "timstof", False, "Skyline does not demultiplex"),
+                ("one run not said, the other tiled", {raws[0]: self.TILED, raws[1]: "absent"},
+                 "orbitrap", True, "does not say for 1 of the 2 runs"),
+                ("too few windows read (null)", {raws[0]: None, raws[1]: None}, "orbitrap",
+                 True, "Thermo .raw runs"),
+            ]
+            for name, runs, fam, want, said in cases:
+                with self.subTest(case=name):
+                    d = sp.demultiplexing(self.record(td, runs), raws, fam)
+                    self.assertIs(d["demultiplexed"], want)
+                    self.assertIn(said, d["source"])
+                    plan = dict(plan_for(raw=raws), family=fam, demultiplex=d)
+                    self.assertEqual(self.minutes(plan), 240 if want else 60)
+                    self.assertEqual(sp.import_limit(plan)["minutes"], 240 if want else 60)
+            for fam, want in (("orbitrap", 240), ("timstof", 60)):    # no record at all
+                with self.subTest(case=f"no record, {fam}"):
+                    d = sp.demultiplexing(None, raws, fam)
+                    self.assertIn("no acquisition record", d["source"])
+                    self.assertEqual(self.minutes(dict(plan_for(raw=raws), family=fam,
+                                                       demultiplex=d)), want)
+
+    def test_a_plan_without_the_answer_goes_by_its_family(self):
+        self.assertEqual(sp.job_minutes("import", {"family": "orbitrap"}), 240)
+        self.assertEqual(sp.job_minutes("import", {"family": "timstof"}), 60)
+        self.assertEqual(self.minutes(plan_for()), 240)            # plan_for: an orbitrap plan
+
+    def test_every_job_script_writes_its_limit_from_job_minutes(self):
+        for demux in (True, False):
+            p = dict(plan_for(), demultiplex={"demultiplexed": demux, "source": "test"})
+            for step in sp.JOB_MINUTES:
+                with self.subTest(step=step, demux=demux):
+                    self.assertEqual(self.minutes(p, step), sp.job_minutes(step, p))
+        self.assertEqual(sp.JOB_MINUTES["import"], {"demultiplexed": 240, "plain": 60})
+
+    def test_the_job_table_in_skyline_md_states_job_minutes(self):
+        with open(os.path.join(os.path.dirname(SCRIPTS), "references", "skyline.md"),
+                  encoding="utf-8") as fh:
+            text = fh.read()
+        imp = sp.JOB_MINUTES["import"]
+        for script, step, want in (
+                ("sky_1_build.sbatch", "build", f"{sp.JOB_MINUTES['build']} min"),
+                ("sky_2_import.sbatch", "import",
+                 f"{imp['demultiplexed']} min each when Skyline demultiplexes"),
+                ("sky_2_import.sbatch", "import", f"else {imp['plain']} min each"),
+                ("sky_3_join.sbatch", "join", f"{sp.JOB_MINUTES['join']} min")):
+            row = [x for x in text.splitlines() if x.startswith(f"| `{script}` |")]
+            self.assertEqual(len(row), 1, script)
+            size = row[0].rstrip(" |").rsplit("|", 1)[1]
+            self.assertIn(f"{sp.JOB_CPUS} CPUs, {sp.JOB_MEM}, ", size, script)
+            self.assertIn(want, size, script)
+
+    def test_the_early_warning_reads_slurms_limit_not_the_table(self):
+        """The near-the-limit warning (stop_on_signals) names the limit Slurm applied: whatever
+        job_minutes wrote, or a --time given by hand."""
+        import signal
+        for secs, said in ((240 * 60, "240 min"), (60 * 60, "60 min"), (90 * 60, "90 min")):
+            with mock.patch.object(sp, "job_time_limit", return_value=(secs, "scontrol")):
+                self.assertIn(f"(Slurm's --time, {said})",
+                              sp.stopped_reason("import", signal.SIGUSR1))
+
+    def test_the_plan_reads_the_sessions_record_or_the_flag(self):
+        import argparse
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as td:
+            given = self.record(td, {"/data/a.raw": self.STAG})
+            a = argparse.Namespace(session=None, search=td, out=td, de_dir=None, manifest=None,
+                                   conditions=None, name=None, acquisition_json=given)
+            self.assertEqual(sp.resolve_inputs(a)["acquisition"], given)
+            a.acquisition_json = None
+            self.assertIsNone(sp.resolve_inputs(a)["acquisition"])
+
+
+class TestRealDataFixesOfTheReview(unittest.TestCase):
+    """Ruling 100: the review's M2 and LOWs."""
+
+    def test_no_path_or_staff_step_reaches_the_client_report(self):
+        """M2: a failed run's reason is printed in the client report: the cache-missing reason the
+        join writes, a Skyline log tail, an exception -- no server path, no staff instruction."""
+        import re
+        from make_methods import _ABS_PATH
+        w = "/quobyte/proteomics-grp/SERVICE/campus/lab/PROT_9900/sessions/s/output/skyline/skyline_work"
+        failed = [
+            {"file": "/quobyte/x/run1.raw",
+             "reason": "its import finished, but the file Skyline saved it to "
+                       "(run1_123.raw.skyd) was missing when the runs were joined",
+             "action": "run its import task again (task 1 of sky_2_import.sbatch), then the "
+                       "join: the join does not import a raw file itself"},
+            {"file": "/quobyte/x/run2.raw",
+             "reason": f"Error: cannot read {w}/tasks/2/T_top_hits.sky (the import's log tail)"},
+            {"file": "/quobyte/x/run3.raw",
+             "reason": f"the import job failed: OSError: [Errno 28] No space left on device: "
+                       f"'{w}/run3_123.raw.skyd'"}]
+        md = sp.report_section(dict(OK_REC, runs={"imported": ["a"], "failed": failed}))["md"]
+        line = [x for x in md.splitlines() if x.startswith("Runs left out")]
+        self.assertEqual(len(line), 1)
+        self.assertEqual(_ABS_PATH.findall(line[0]), [])
+        self.assertNotIn("quobyte", md)
+        for staff in ("run its import task again", "sbatch", "task 1 of"):
+            self.assertNotIn(staff, md)
+        self.assertIn("run1.raw (its import finished, but the file Skyline saved it to "
+                      "(run1_123.raw.skyd) was missing when the runs were joined)", line[0])
+        self.assertIn("T_top_hits.sky", line[0])          # the path cut to its file name
+        self.assertTrue(re.search(r"run3_123\.raw\.skyd", line[0]))
+
+    def test_rounded_unimod_masses_still_match(self):
+        """L6: a hand-made search's rounded UniMod mass (57.02 for carbamidomethyl) planned in
+        2.14.2 and still does; a wrong one, or one rounded past two decimals, does not."""
+        for flag, ok in (("UniMod:4,57.02,C", True), ("UniMod:4,57.021,C", True),
+                         ("UniMod:4,57.021464,C", True), ("UniMod:4,57.03,C", False),
+                         ("UniMod:4,57.0,C", False), ("UniMod:108,125.05,C", True),
+                         ("UniMod:108,125.0477,C", True), ("UniMod:108,125.1,C", False),
+                         ("UniMod:108,125.06,C", False)):
+            with self.subTest(flag=flag):
+                flags = sp.command_flags(CMD.replace("--unimod4 ", f"--fixed-mod {flag} "))
+                if ok:
+                    fc = sp.search_settings(flags)["fixed_cys"]
+                    self.assertEqual(fc["unimod"], int(flag.split(",")[0].split(":")[1]))
+                else:
+                    with self.assertRaises(sp.Skip) as e:
+                        sp.search_settings(flags)
+                    self.assertIn("differs from UniMod's", str(e.exception))
+
+    def test_the_methods_give_the_documents_mass_beside_the_searched_one(self):
+        """L7: Skyline extracts at UniMod's mass; where the search wrote another (rounded), the
+        Methods say both."""
+        for flag, words in (
+                ("UniMod:108,125.047679,C", "Nethylmaleimide (C, +125.047679 Da, UniMod:108)"),
+                ("UniMod:108,125.05,C",
+                 "Nethylmaleimide (C, +125.047679 Da, UniMod:108; searched as +125.05 Da)"),
+                ("UniMod:4,57.02,C",
+                 "Carbamidomethyl (C, +57.021464 Da, UniMod:4; searched as +57.02 Da)"),
+                ("UniMod:4,57.021464,C", "Carbamidomethyl (C)")):
+            with self.subTest(flag=flag):
+                s = sp.search_settings(sp.command_flags(
+                    CMD.replace("--unimod4 ", f"--fixed-mod {flag} ")))
+                self.assertEqual(s["fixed_mods"], [words])
+                self.assertIn(words + " as a fixed modification",
+                              sp.methods_paragraph(dict(OK_REC, settings=dict(
+                                  OK_REC["settings"], **s))))
+        s = sp.search_settings(sp.command_flags(CMD))                 # --unimod4: as before
+        self.assertEqual(s["fixed_mods"], [sp.CAM_FIXED])
+
+
+class TestRejoinKeepsPerFileCaches(unittest.TestCase):
+    """2.15, Ruling 94 F2. Skyline's join DELETES the per-file caches it merges (HIVE, PXD037858:
+    after one join the caches it had joined were gone). A join run again -- requeued on `low`, or
+    after failed import tasks were run again -- found none, and SkylineCmd imported those runs
+    from the raw files inside the join job (a test job: two at 48% after 40 of its 90 minutes).
+    The join now keeps a copy of each per-file cache (skyline_work/caches/) and puts it back
+    first; a run whose cache is gone everywhere is a failed import, never a raw import."""
+
+    RAWS = ["/d/r1.raw", "/d/r2.raw"]
+
+    @staticmethod
+    def cache(raw):
+        return sp.run_of(raw) + "_3447593447.raw.skyd"
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp(dir=os.environ.get("TMPDIR"))
+        self.addCleanup(__import__("shutil").rmtree, self.td, True)
+        self.w = w = os.path.join(self.td, sp.WORK)
+        for d in ("status", "logs"):
+            os.makedirs(os.path.join(w, d))
+        self.p = p = dict(plan_for(raw=list(self.RAWS), work=w), out=self.td, plan_id="p1")
+        sp.write_json(os.path.join(w, "plan.json"), p)
+        self.stem = os.path.splitext(p["doc"])[0]
+        for ext, text in ((".sky", "<built/>"), (".blib", "built lib")):
+            for s in (self.stem, self.stem + sp.BUILT_TAG):
+                with open(s + ext, "w") as fh:
+                    fh.write(text)
+        sp.write_json(sp.record_path(self.td), {"schema": sp.SCHEMA, "status": "planned",
+                                                "plan_id": "p1"})
+        sp.write_json(os.path.join(w, "status", "build.json"), {"ok": True, "plan_id": "p1"})
+        self.from_raw, self.loaded = [], []
+
+    def imported(self, i, raw, write=True, caches=None):
+        name = self.cache(raw)
+        if write:
+            with open(os.path.join(self.w, name), "w") as fh:
+                fh.write(f"cache of {raw}")
+        sp.write_json(os.path.join(self.w, "status", f"import_{i}.json"),
+                      {"rc": 0, "plan_id": "p1", "file": raw,
+                       "caches": [name] if caches is None else caches})
+
+    def skyline(self, plan, args, log_name, rw=(), timeout_s=None):
+        """SkylineCmd's join as it behaves: each --import-file whose per-file cache is beside the
+        document is loaded from it and the cache is DELETED once joined; one without its cache
+        is imported from the raw file (what must never happen in the join job)."""
+        with open(os.path.join(self.w, "join_batch.txt")) as fh:
+            batch = fh.read()
+        import re
+        for raw in re.findall(r'--import-file="?Z:([^"\s]+)', batch):
+            raw = raw.replace("\\", "/")
+            c = os.path.join(self.w, self.cache(raw))
+            if os.path.exists(c):
+                self.loaded.append(raw)
+                os.remove(c)
+            else:
+                self.from_raw.append(raw)
+        for f in (os.path.join(self.td, "skyline_precursors.tsv"),
+                  os.path.join(self.w, "skyline_transitions.tsv"),
+                  os.path.join(self.w, "skyline_chromatograms.tsv"), plan["share_zip"],
+                  self.stem + ".skyd"):
+            with open(f, "w") as fh:
+                fh.write("x")
+        return 0, os.path.join(self.w, "logs", log_name)
+
+    def join(self):
+        done = {"schema": sp.SCHEMA, "status": "ok", "results": {"flagged": 0, "compared": 1}}
+        seen = {}
+
+        def finish(plan, build, imported, failed):
+            seen.update(imported=list(imported), failed=list(failed))
+            return dict(done)
+        with mock.patch.object(sp, "run_skyline", self.skyline), \
+                mock.patch.object(sp, "finish", finish), \
+                mock.patch("sys.stderr", new=io.StringIO()) as err:
+            rc = sp.main(["join", "--work", self.w, "--plan-id", "p1"])
+        self.err = err.getvalue()
+        return rc, seen
+
+    def test_a_copy_that_fails_warns_and_the_join_goes_on(self):
+        """Ruling 100 L2: the copy is only insurance for a later join. One that cannot be made (a
+        full disk) is a warning in the join's log and the record's cache_backup, and the join goes
+        on -- it does not fail a join that 2.14.2 would have run."""
+        for i, raw in enumerate(self.RAWS, 1):
+            self.imported(i, raw)
+        real = sp._copy_atomic
+
+        def full(src, dst):
+            if os.path.dirname(dst) == os.path.join(self.w, sp.CACHE_KEEP):
+                raise OSError(28, "No space left on device")
+            return real(src, dst)
+        with mock.patch.object(sp, "_copy_atomic", full):
+            rc, seen = self.join()
+        self.assertEqual((rc, seen["imported"], self.from_raw), (0, self.RAWS, []))
+        self.assertIn("WARNING: keeping a copy of", self.err)
+        backup = sp.load_record(self.td)["cache_backup"]
+        self.assertEqual(sorted(x["file"] for x in backup["not_kept"]),
+                         sorted(self.cache(r) for r in self.RAWS))
+        self.assertIn("this join went on without one", backup["note"])
+        self.assertEqual(os.listdir(os.path.join(self.w, sp.CACHE_KEEP)), [])   # no .part left
+
+    def test_a_join_run_again_imports_no_raw_file(self):
+        for i, raw in enumerate(self.RAWS, 1):
+            self.imported(i, raw)
+        for _ in range(2):
+            rc, seen = self.join()
+            self.assertEqual(rc, 0)
+            self.assertEqual(seen["imported"], self.RAWS)
+        self.assertEqual(self.from_raw, [])                       # never inside the join
+        self.assertEqual(self.loaded, self.RAWS * 2)
+        keep = os.path.join(self.w, sp.CACHE_KEEP)
+        self.assertEqual(sorted(os.listdir(keep)), sorted(self.cache(r) for r in self.RAWS))
+
+    def test_failed_imports_run_again_then_joined_need_no_raw_file(self):
+        """The 2.15 real case: two imports stopped at their limit, the join went on with two
+        runs (and consumed their caches), the two were imported again, and joined with all four
+        -- here two of two."""
+        self.imported(1, self.RAWS[0])
+        sp.write_json(os.path.join(self.w, "status", "import_2.json"),
+                      {"rc": 1, "plan_id": "p1", "reason": "ran out of its time limit"})
+        rc, seen = self.join()
+        self.assertEqual((rc, seen["imported"]), (0, self.RAWS[:1]))
+        self.imported(2, self.RAWS[1])                            # the task run again
+        rc, seen = self.join()
+        self.assertEqual((rc, seen["imported"], seen["failed"]), (0, self.RAWS, []))
+        self.assertEqual(self.from_raw, [])
+
+    def test_a_cache_gone_everywhere_is_a_failed_import_not_a_raw_import(self):
+        self.imported(1, self.RAWS[0])
+        self.imported(2, self.RAWS[1], write=False)               # neither beside nor kept
+        rc, seen = self.join()
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen["imported"], self.RAWS[:1])
+        (f,), = [seen["failed"]]
+        self.assertEqual(f["file"], self.RAWS[1])
+        # the reason reaches the client report: no path, no instruction (Ruling 100 M2); what
+        # staff do next is the record's `action` and the join's log
+        self.assertIn(self.cache(self.RAWS[1]), f["reason"])
+        self.assertNotIn(self.w, f["reason"])
+        self.assertNotIn("run its import task again", f["reason"])
+        self.assertIn("run its import task again (task 2 of sky_2_import.sbatch)", f["action"])
+        self.assertIn("run its import task again", self.err)
+        self.assertEqual(self.from_raw, [])
+
+    def test_an_import_task_run_again_replaces_the_kept_copy(self):
+        self.imported(1, self.RAWS[0])
+        self.imported(2, self.RAWS[1])
+        self.join()
+        kept = os.path.join(self.w, sp.CACHE_KEEP, self.cache(self.RAWS[0]))
+        with open(os.path.join(self.w, self.cache(self.RAWS[0])), "w") as fh:
+            fh.write("a newer import")                            # the task run again
+        os.utime(os.path.join(self.w, self.cache(self.RAWS[0])), (2e9, 2e9))
+        self.join()
+        with open(kept) as fh:
+            self.assertEqual(fh.read(), "a newer import")
+
+    def test_the_import_task_records_the_cache_it_made(self):
+        self.p["raw_files"] = ["/d/r1.raw"]
+        sp.write_json(os.path.join(self.w, "plan.json"), self.p)
+
+        def fake(plan, args, log_name, rw=(), timeout_s=None):
+            doc = args[0].split("=", 1)[1][2:].replace("\\", "/")
+            open(os.path.join(os.path.dirname(doc), self.cache("/d/r1.raw")), "w").close()
+            return 0, os.path.join(self.w, "logs", log_name)
+        with mock.patch.object(sp, "run_skyline", fake):
+            self.assertEqual(sp.main(["import", "--work", self.w, "--task", "1",
+                                      "--plan-id", "p1"]), 0)
+        st = sp.load_json(os.path.join(self.w, "status", "import_1.json"))
+        self.assertEqual(st["caches"], [self.cache("/d/r1.raw")])
+        self.assertTrue(os.path.isfile(os.path.join(self.w, self.cache("/d/r1.raw"))))
+
+    def test_a_status_of_2_14_2_without_caches_still_joins(self):
+        self.imported(1, self.RAWS[0], caches=[])
+        self.imported(2, self.RAWS[1], caches=[])
+        for i in (1, 2):                                          # as 2.14.2 wrote it
+            st = sp.load_json(os.path.join(self.w, "status", f"import_{i}.json"))
+            st.pop("caches")
+            sp.write_json(os.path.join(self.w, "status", f"import_{i}.json"), st)
+        rc, seen = self.join()
+        self.assertEqual((rc, seen["imported"]), (0, self.RAWS))
+        rc, seen = self.join()                                    # kept, put back
+        self.assertEqual(self.from_raw, [])
+
+
+@unittest.skipUnless(HAVE_MPL, "needs matplotlib")
+class TestPictureTitlesFit(unittest.TestCase):
+    """2.15, Ruling 94 F3: with 1 or 2 runs drawn, the figure is 4.0-4.6 in wide and the title's
+    one-line caption ran off both edges (PXD037858, 2 runs imported). It is wrapped to the
+    figure's width, and the panels start below it."""
+
+    RUNS = ["20220322_JLMR_JK_DIA_IP-NEG3", "20220322_JLMR_JK_DIA_IP-NEG4"]
+
+    def drawn(self, draw):
+        """Where the title and the panels are as the picture is saved (measured then: plt.close
+        leaves the figure without its Agg canvas)."""
+        from matplotlib.figure import Figure
+        seen, orig = [], Figure.savefig
+
+        def keep(fig, *a, **k):
+            fig.canvas.draw()
+            r = fig.canvas.get_renderer()
+            seen.append((fig.bbox.width, fig.bbox.height,
+                         fig._suptitle.get_window_extent(r),
+                         [a.get_tightbbox(r) for a in fig.axes]))
+            return orig(fig, *a, **k)
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as td, \
+                mock.patch.object(Figure, "savefig", keep):
+            os.environ.setdefault("MPLCONFIGDIR", os.path.join(td, ".mpl"))
+            draw(os.path.join(td, "x.png"))
+        (one,) = seen
+        return one
+
+    def assert_fits(self, drawn):
+        width, height, box, panels = drawn
+        self.assertGreaterEqual(box.x0, 0)
+        self.assertLessEqual(box.x1, width)
+        self.assertLessEqual(box.y1, height)
+        for b in panels:                                          # the panels start below it
+            self.assertLessEqual(b.y1, box.y0 + 1)
+
+    def test_peaks_and_areas_of_one_and_two_runs(self):
+        key = sp.precursor_key("AGKPVIC[+125]ATQMLESMIK", 3)
+        t = [100.0 + i * 0.05 for i in range(40)]
+        y = [float(i * (40 - i)) for i in range(40)]
+        for n in (1, 2):
+            runs = self.RUNS[:n]
+            chrom = {(key, r): [("y8+", t, y), ("y7+", t, y)] for r in runs}
+            sky = {(key, r): {"start": 100.5, "end": 101.0, "apex": 100.8, "dotp": 0.9}
+                   for r in runs}
+            dia = {(key, r): {"start": 100.4, "stop": 101.1} for r in runs}
+            tran = [{"FragmentIon": "y8", "PeptideModifiedSequence": "AGKPVIC[+125]ATQMLESMIK",
+                     "PrecursorCharge": 3, "ProductCharge": 1, "FileName": r + ".raw",
+                     "Area": 100} for r in runs]
+            for title in ("PKM (P14618)", "Where Skyline picked a different peak (the largest "
+                                          "differences)"):
+                with self.subTest(runs=n, title=title):
+                    self.assert_fits(self.drawn(lambda path: sp.draw_peaks(
+                        path, title, [key], runs, chrom, sky, dia,
+                        f" {n} of 12 runs shown, chosen across the groups.")))
+                    self.assert_fits(self.drawn(lambda path: sp.draw_areas(
+                        path, title, [key], runs, tran, sky)))
+
+
+class TestPartialImport(unittest.TestCase):
+    """2.15 lane X5 (bat4-2142 F15): one of 77 import tasks failed (Skyline: "Index was outside
+    the bounds of the array", only in skyline_work/logs/import_<n>.txt) and the check was still
+    "ok": Methods, the report and MANIFEST said nothing about the missing run. A check with a run
+    missing is "partial" -- finished and shippable, never "ok" -- and every place that says what
+    the check did names the run and why; a failed task can be run again and the join repeated."""
+
+    RAWS = ["/d/r1.raw", "/d/r2.raw"]
+    BAD = "Index was outside the bounds of the array"
+    LOG = ("INFO: Importing results\n[1] 40%\nUnhandled Exception: System.IndexOutOfRangeException"
+           ": " + "Index was outside the bounds of the array.\n"
+           "   at pwiz.Skyline.Model.Lib.LibraryManager.Align()\n"
+           "   at pwiz.Skyline.Model.Lib.LibraryManager.Load()\n"
+           "   at pwiz.Skyline.Program.Main()\n"
+           "   at SkylineCmd.Run()\n")
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp(dir=os.environ.get("TMPDIR"))
+        self.addCleanup(__import__("shutil").rmtree, self.td, True)
+        self.w = w = os.path.join(self.td, sp.WORK)
+        for d in ("status", "logs"):
+            os.makedirs(os.path.join(w, d))
+        self.p = dict(plan_for(raw=list(self.RAWS), work=w), out=self.td, plan_id="p1")
+        sp.write_json(os.path.join(w, "plan.json"), self.p)
+
+    def failed(self):
+        return [{"file": self.RAWS[1], "task": 2, "reason": self.BAD}]
+
+    def record(self, status="partial", failed=None):
+        failed = self.failed() if failed is None else failed
+        return dict(OK_REC, status=status, plan_id="p1", runs={"n": 2, "imported": self.RAWS[:1],
+                                                 "failed": failed})
+
+    def test_log_tail_names_a_bare_dotnet_exception(self):
+        log = os.path.join(self.w, "logs", "import_2.txt")
+        with open(log, "w") as fh:
+            fh.write(self.LOG)
+        self.assertIn(self.BAD, sp.log_tail(log))
+
+    def test_the_join_copies_the_reason_from_the_import_log(self):
+        """The status file of a task Slurm killed has no reason; the task's own log has it."""
+        for i, raw in enumerate(self.RAWS, 1):
+            sp.write_json(os.path.join(self.w, "status", f"import_{i}.json"),
+                          {"rc": 0 if i == 1 else 1, "plan_id": "p1", "file": raw, "caches": []})
+        with open(os.path.join(self.w, "logs", "import_2.txt"), "w") as fh:
+            fh.write(self.LOG)
+        sp.write_json(os.path.join(self.w, "status", "build.json"), {"ok": True, "plan_id": "p1"})
+        seen = {}
+
+        def finish(plan, build, imported, failed):
+            seen.update(imported=list(imported), failed=list(failed))
+            raise sp.Skip("stop here")
+        with mock.patch.object(sp, "run_skyline", lambda *a, **k: (0, "/none")), \
+                mock.patch.object(sp, "restore_pristine"), \
+                mock.patch.object(sp, "keep_part_caches", lambda p: {"not_kept": [], "not_restored": []}), \
+                mock.patch.object(sp, "finish", finish), \
+                mock.patch.object(sp, "_fail"), \
+                mock.patch("sys.stderr", new=io.StringIO()) as err:
+            for f in ("skyline_precursors.tsv",):
+                open(os.path.join(self.td, f), "w").write("x")
+            for f in ("skyline_transitions.tsv", "skyline_chromatograms.tsv"):
+                open(os.path.join(self.w, f), "w").write("x")
+            open(self.p["share_zip"], "w").write("x")
+            sp.main(["join", "--work", self.w, "--plan-id", "p1"])
+        (f,) = seen["failed"]
+        self.assertEqual((f["file"], f["task"]), (self.RAWS[1], 2))
+        self.assertIn(self.BAD, f["reason"])
+        self.assertIn(self.BAD, err.getvalue())                  # in the join's own log too
+
+    def test_finish_writes_partial_when_a_run_failed(self):
+        with mock.patch.object(sp, "skyline_precursors", lambda rows: [{"key": sp.precursor_key("PEPTIDEK", 2), "run": "r1", "accession": "P1", "area_fragment": 1.0}]), \
+                mock.patch.object(sp, "diann_index", lambda rows: {}), \
+                mock.patch.object(sp, "read_tsv", lambda p: []), \
+                mock.patch.object(sp, "disagreements", lambda s, d: ([{"protein": "P1"}], [])), \
+                mock.patch.object(sp, "write_disagreements"), \
+                mock.patch.object(sp, "chromatograms", lambda r: {}), \
+                mock.patch.object(sp, "draw_peaks"), mock.patch.object(sp, "draw_areas"), \
+                mock.patch.object(sp, "agreement_summary", lambda c: {}):
+            p = dict(self.p, group_of={}, family_source="t", top={"value": 1, "source": "u"},
+                     search={"dir": "/s"}, skill_version="t")
+            build = {"tool": {"name": "Skyline", "version": SKYLINE_PIN["version"]},
+                     "selection": {"mode": "de_hits", "adjp": 0.05, "adjp_source": "x",
+                                   "targets": [{"protein_group": "P1", "gene": "G1",
+                                                "contrast": "A - B", "adj_p": 0.001}]},
+                     "rt_window": {"minutes": 1.0, "source": "t"}}
+            whole = sp.finish(p, build, list(self.RAWS), [])
+            part = sp.finish(p, build, self.RAWS[:1], self.failed())
+        self.assertEqual(whole["status"], "ok")
+        self.assertNotIn("retry", whole)
+        self.assertEqual(part["status"], "partial")
+        self.assertEqual(part["retry"]["tasks"], [2])
+        self.assertIn("skyline_peaks.py retry", part["retry"]["command"])
+        for text in (part["methods_paragraph"],):
+            self.assertIn("r2.raw", text)
+            self.assertIn(self.BAD, text)
+            self.assertIn("1 of 2", text)
+
+    def test_a_partial_check_is_finished_and_says_what_is_missing(self):
+        os.makedirs(os.path.join(self.td, "skyline"))
+        sp.write_json(sp.record_path(os.path.join(self.td, "skyline")), self.record())
+        self.assertEqual(sp.record_state(self.td)[0], "partial")
+        ok, state, why = sp.deliverable(self.td)
+        self.assertEqual((ok, state, why), (True, "partial", None))
+        level, _name, note = sp.manifest_line(self.td, True)
+        self.assertEqual(level, "WARN")
+        for word in ("1 of 2", "r2.raw", self.BAD):
+            self.assertIn(word, note)
+        md = sp.report_data(self.td)["md"]
+        for word in ("1 of 2", "r2.raw", self.BAD):
+            self.assertIn(word, md)
+        self.assertEqual(sp.report_data(self.td)["state"], "partial")
+
+    def test_a_whole_check_is_still_ok(self):
+        os.makedirs(os.path.join(self.td, "skyline"))
+        sp.write_json(sp.record_path(os.path.join(self.td, "skyline")), self.record("ok", []))
+        self.assertEqual(sp.manifest_line(self.td, True)[0], "OK")
+        self.assertNotIn("Only", sp.report_data(self.td)["md"])
+
+    def test_the_manifest_step_files_a_partial_check_as_a_warning(self):
+        import session
+        os.makedirs(os.path.join(self.td, "skyline"))
+        sp.write_json(sp.record_path(os.path.join(self.td, "skyline")), self.record())
+        seen = []
+
+        class Man:
+            def ok(self, *a): seen.append(("ok",) + a)
+            def skip(self, *a): seen.append(("skip",) + a)
+            def warn(self, *a): seen.append(("warn",) + a)
+            def info(self, *a): seen.append(("info",) + a)
+        with mock.patch.object(session, "has_de", lambda p: True):
+            session.peak_check_step({"output_dir": self.td}, Man())
+        self.assertEqual([x[0] for x in seen], ["warn"])
+        self.assertIn("r2.raw", seen[0][2])
+
+    def test_the_follow_up_assay_needs_a_whole_check(self):
+        os.makedirs(os.path.join(self.td, "skyline"))
+        sp.write_json(sp.record_path(os.path.join(self.td, "skyline")), self.record())
+        with self.assertRaises(SystemExit) as e:
+            sp.main(["prm", "--out", os.path.join(self.td, "skyline"), "--instrument", "x",
+                     "--no-staff-check"])
+        self.assertIn("partial", str(e.exception))
+
+    def retry(self, *extra):
+        os.makedirs(os.path.join(self.td, "skyline"), exist_ok=True)
+        with mock.patch("sys.stdout", new=io.StringIO()) as out:
+            rc = sp.main(["retry", "--out", self.td, *extra])
+        return rc, out.getvalue()
+
+    def test_retry_writes_a_script_for_the_failed_tasks_and_the_join(self):
+        sp.write_json(sp.record_path(self.td), self.record())
+        rc, out = self.retry()
+        self.assertEqual(rc, 0)
+        with open(os.path.join(self.w, "retry.sh")) as fh:
+            text = fh.read()
+        self.assertIn("--array=2", text)
+        self.assertIn("sky_2_import.sbatch", text)
+        self.assertIn("--dependency=afterany:", text)
+        self.assertIn("sky_3_join.sbatch", text)
+        self.assertIn("retry.sh", out)
+        self.assertEqual(os.stat(os.path.join(self.w, "retry.sh")).st_mode & stat.S_IXUSR,
+                         stat.S_IXUSR)
+
+    def test_retry_refuses_a_check_with_nothing_to_run_again(self):
+        sp.write_json(sp.record_path(self.td), self.record("ok", []))
+        with self.assertRaises(SystemExit) as e:
+            self.retry()
+        self.assertIn("no failed", str(e.exception))
+        self.assertFalse(os.path.exists(os.path.join(self.w, "retry.sh")))
+
+    def test_a_symlinked_run_is_given_to_skyline_by_its_real_path(self):
+        real = os.path.join(self.td, "real")
+        links = os.path.join(self.td, "links")
+        os.makedirs(os.path.join(real, "r1.d"))
+        os.makedirs(os.path.join(real, "other.d"))
+        os.makedirs(links)
+        os.symlink(os.path.join(real, "r1.d"), os.path.join(links, "r1.d"))
+        os.symlink(os.path.join(real, "other.d"), os.path.join(links, "renamed.d"))
+        same, renamed = os.path.join(links, "r1.d"), os.path.join(links, "renamed.d")
+        self.assertEqual(sp.skyline_path(same), os.path.realpath(same))
+        self.assertEqual(sp.skyline_path(renamed), renamed)        # the run name is the link's
+        self.assertEqual(sp.skyline_path("/no/such/run.raw"), "/no/such/run.raw")
+        plan = dict(self.p, raw_files=[same, renamed], family="timstof")
+        iso = [a for a in sp.build_args(plan, 5.0) if a.startswith("--full-scan-isolation")][0]
+        self.assertIn(os.path.realpath(same).replace("/", "\\"), iso)
+        imp = sp.import_args(plan, 2)
+        self.assertTrue(any(renamed.replace("/", "\\") in a for a in imp))
+        imp1 = sp.import_args(plan, 1)
+        self.assertTrue(any(os.path.realpath(same).replace("/", "\\") in a for a in imp1))
+
+    def test_the_join_names_a_symlinked_run_by_the_path_its_import_used(self):
+        real = os.path.join(self.td, "real")
+        links = os.path.join(self.td, "links")
+        os.makedirs(os.path.join(real, "r1.d"))
+        os.makedirs(os.path.join(real, "other.d"))
+        os.makedirs(links)
+        os.symlink(os.path.join(real, "r1.d"), os.path.join(links, "r1.d"))
+        os.symlink(os.path.join(real, "other.d"), os.path.join(links, "renamed.d"))
+        same, renamed = os.path.join(links, "r1.d"), os.path.join(links, "renamed.d")
+        plan = dict(self.p, raw_files=[same, renamed], family="timstof")
+        first = sp.join_batch(plan, [same, renamed]).splitlines()[0]
+        real_win = os.path.realpath(same).replace("/", "\\")
+        self.assertIn(real_win, first)                       # the real path, as the import used
+        self.assertNotIn(same.replace("/", "\\") + '"', first)   # not the link
+        self.assertIn(renamed.replace("/", "\\"), first)    # a renamed link stays the link
+        for i, f in ((1, same), (2, renamed)):
+            imp = [a for a in sp.import_args(plan, i) if a.startswith("--import-file=")][0]
+            self.assertIn(sp.batch_line([imp]), first)       # join and import name it the same
 
 
 if __name__ == "__main__":

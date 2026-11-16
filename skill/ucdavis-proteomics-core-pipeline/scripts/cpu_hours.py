@@ -13,9 +13,8 @@ GPU-hours the same way, from the GPU lines (--gres=gpu[:type]:N, --gpus / -G, --
 of the skill asks for a GPU today (2.12), so it is 0 everywhere; it is said anyway, beside the CPU
 figure, so a GPU route added later is counted by the same rule.
 
-Why it exists (Brett, 2026-10-15): on the Core board a request under 10,000 CPU- or GPU-hours is
-approved automatically and one of 10,000 or more needs a person, so a Claude can work unattended
-overnight. Every search states these figures before it is submitted: run_search.py (every --sbatch
+Why it exists (Brett, 2026-10-15; since 2026-11-09 the Core board limits no hours, it only shows them):
+every job the skill records on the board carries its reserved hours. Every search states these figures before it is submitted: run_search.py (every --sbatch
 route), diann_parallel.py and radiant_parallel.py print `cpu_hours_reserved` and
 `gpu_hours_reserved` in their JSON, and each submit.sh carries them in a header comment. Every job
 script the skill writes has an #SBATCH --time, so for a SLURM job neither figure is ever null

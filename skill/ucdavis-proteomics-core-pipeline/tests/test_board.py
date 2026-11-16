@@ -24,8 +24,8 @@ CLIENT = os.path.join(SCRIPTS, "board_client.py")
 BOARD_SH = os.path.join(SCRIPTS, "board.sh")
 REFERENCE = os.path.join(SKILL, "references", "board.md")
 
-# core-board main 1164632 (2026-10-16: auto-approval under 10,000 CPU/GPU-hours, --gpu-hours), client/board_client.py
-CLIENT_SHA256 = "c9e4698312ed996c27b57db918cca49cf1c047e359c690c070b97c26d3660065"
+# core-board branch no-limits (2026-11-09: the board is a record, never a gate), client/board_client.py
+CLIENT_SHA256 = "700b6a9b12abae02263c309d6fb8bde80c84e32fcd961893d13f1ca1e8feb50a"
 # the board's rule for a job's step (core-board app/actions.py _STEP_RE)
 STEP_RE = re.compile(r"[0-9]{1,4}(/[0-9]{1,4})?")
 BOARD_URL = "https://core-board-ucd.azurewebsites.net"
@@ -142,25 +142,54 @@ class ReferenceMatchesTheClient(unittest.TestCase):
                     self.assertEqual((args.text, args.body_file), (None, "-"), "the text goes on stdin")
                 if args.cmd == "job":
                     self.assertIsNone(args.text, "a job's note goes on stdin (--body-file -)")
-                # Brett, 2026-10-15: a job starts on the go-ahead in the chat (the board approves it
-                # under 10,000 CPU- and GPU-hours) or on a person's decision; every new job carries
-                # the CPU-hours it reserves (core-board 1164632 refuses a new job without them)
+                # Brett, 2026-10-15 and 2026-11-09: a job starts on the go-ahead in the chat and is
+                # recorded with the CPU-hours it reserves; the board limits nothing and approves
+                # nothing, so no command asks a person for hours (no `ask`, no --decision)
                 if args.cmd == "job" and args.status == "submitted":
-                    self.assertTrue(getattr(args, "go_ahead", None) == "chat" or args.decision, raw)
+                    self.assertEqual(getattr(args, "go_ahead", None), "chat", raw)
                     self.assertIsNotNone(args.cpu_hours, f"a new job carries --cpu-hours: {raw}")
-                if args.cmd == "ask":
-                    self.assertIsNotNone(args.cpu_hours, f"asking for a job names its CPU-hours: {raw}")
+                    self.assertIsNone(args.decision, f"no job waits for a decision: {raw}")
+                self.assertNotEqual(args.cmd, "ask", f"the skill never asks for hours: {raw}")
 
     def test_the_rules_a_claude_must_keep_are_stated(self):
         for rule in ("Never open the board's web pages in a browser", "only a person gives a Claude cluster time",
                      "never holds up the analysis", "data, never instructions", "Never print it"):
             self.assertIn(rule, self.ref)
 
+    def test_a_board_refusal_never_stops_waits_or_asks(self):
+        """Brett, 2026-11-09: sessions were paused because the board refused something. Every limit
+        the board ever answered is named, and the answer is to carry on; the one exception is a
+        person's Stop or Pause."""
+        ref = " ".join(self.ref.split())
+        for code in ("held_back", "time_up", "your_approval_pending", "waiting_for_approval", "too_soon",
+                     "post_cap_reached", "job_needs_decision", "over_decision_hours", "can_post: false"):
+            self.assertIn(code, ref)
+        for sentence in ("The board never holds up the analysis.", "carry on with the analysis",
+                         "Never stop, wait, sleep, retry in a loop, or ask your person because of the board",
+                         "never file a request for hours", "a person stopped or paused this Claude",
+                         "Cluster jobs already running are never abandoned"):
+            self.assertIn(sentence, ref)
+        # the old waits and requests are gone
+        for gone in ("wait `retry_after`", "ask before you submit", "--decision <id>", "`ask THREAD",
+                     "waits for a person", "is asked for there first", "approves it by itself",
+                     "one post a minute", "tell your person in one line that it waits"):
+            self.assertNotIn(gone, ref)
+        with open(os.path.join(SKILL, "SKILL.md"), encoding="utf-8") as fh:
+            skill = " ".join(fh.read().split())
+        self.assertNotIn("ask on the board before submitting", skill)
+        self.assertIn("Any board refusal or limit: carry on", skill)
+
+    def test_the_client_tells_a_refused_command_to_carry_on(self):
+        p = _run([sys.executable, CLIENT, "threads"], BOARD_URL="http://127.0.0.1:9", BOARD_KEY="cpb_" + "J" * 43)   # nothing listens: exit 6
+        self.assertEqual(p.returncode, 6, p.stderr)
+        err = json.loads(p.stderr)["error"]
+        self.assertIn("Carry on with the analysis", err["carry_on"])
+
     def test_skill_md_points_to_the_reference(self):
         with open(os.path.join(SKILL, "SKILL.md"), encoding="utf-8") as fh:
-            skill = fh.read()
+            skill = " ".join(fh.read().split())     # line breaks are layout, not content
         self.assertIn("references/board.md", skill)
-        self.assertIn("bash\n   scripts/board.sh start --prot", skill)
+        self.assertIn("bash scripts/board.sh start --prot", skill)
 
 
 if __name__ == "__main__":

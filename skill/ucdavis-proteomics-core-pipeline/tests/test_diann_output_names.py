@@ -7,8 +7,8 @@ DIA-NN names everything it writes beside an output -- `<name>.predicted.speclib`
 (remove_extension(), diann.cpp at tag 1.8). On 2026-10-02 (DIA-NN 2.7.0) a one-file search into
 `.../species_check/S07_A01.01dup2` passed `--out-lib <out>/diann_lib`: DIA-NN wrote
 `species_check/S07_A01.predicted.speclib` and `S07_A01.log.txt` one folder UP, the
-library job's guard failed, and the search job never ran. Re-run on HIVE (DIA-NN 2.7.0, job
-24560319): the same with `--out-lib <out>/diann_lib.speclib` writes both inside the folder.
+library job's guard failed, and the search job never ran. Re-run on HIVE (DIA-NN 2.7.0, a
+test job): the same with `--out-lib <out>/diann_lib.speclib` writes both inside the folder.
 
 The fake DIA-NN here derives names exactly that way (bash `${path%.*}` is remove_extension), so a
 generated job that hands DIA-NN an output file name without an extension misplaces its output

@@ -39,7 +39,7 @@ The 300 s budget is there because, over SSH, a laptop may upload up to ~300 MB o
 to the registry. The subprocess cap is 310 s, so `record_run.py` can report its own timeout.
 The job hook's `record_run` stays at 60 s.
 
-**"Analysis complete" needs the finalize stamp** (SKILL.md golden rule 9;
+**"Analysis complete" needs the finalize stamp** (SKILL.md golden rule 16;
 `report_files.FINISH_NEEDS["announce"]`). finalize posts just before it writes the stamp, and
 holds the post when it will not stamp. `notify_slack.py analysis-done --session <S>` run by hand
 refuses ("not sent: …", each gap with its command) without a current stamp: no stamp, or one gone
@@ -55,6 +55,22 @@ search-failed posts are not gated.
   `stage` 300 s (or less near the limit) and the whole Slack delivery 25 s, webhook lookup
   included, all inside a `timeout 480` around the hook.
 
+<!-- contents: tests/test_skill_structure.py --toc -->
+**Contents** (section: line)
+- 74: Telling the user, and opting out
+- 99: Setting up the webhook (once, by a Core admin)
+- 121: Where the webhook is looked for (first one set wins)
+- 140: What finalize writes to MANIFEST.txt
+- 166: Which job does what
+- 192: What a message contains
+- 214: Rules the code keeps (from STAN's `stan/notify.py`)
+- 247: Notes from the Core (`note`)
+- 255: Posting from another script (`send_alert`)
+- 267: How the hook is wired into a job (`wrap_job_script`)
+- 287: Running the skill's tests
+- 306: 7. Before submitting: the notes again, and the job-end hook (step 7)
+<!-- /contents -->
+
 ## Telling the user, and opting out
 
 Before submitting a Core search, the agent says in one line that its end will be posted to the
@@ -63,8 +79,8 @@ Core's Slack channel and handed to FRAN. If the user says not to, the agent pass
 
 | What | How | Effect |
 |---|---|---|
-| No Slack post | `run_search.py … --no-notify` (or `SKILL_SLACK=0` when generating); `finalize --no-notify` | The job carries `--no-slack`. The run is still logged and staged. |
-| No FRAN hand-over | `run_search.py … --no-fran` (or `FRAN_DEPOSIT=off` when generating) | The job carries `--no-fran`. On success it runs `stage --out <out> [--name …] --skip`, with the same time bounds as any stage, which stages nothing but records `opted_out` in `<out>/fran_deposit.json`, so a later `fran_deposit.py backfill` leaves the search alone. The post says `skipped: off for this search`. Step 7c must then not stage it either. |
+| No Slack post | `run_search.py … --no-notify`; `finalize --no-notify` | The job carries `--no-slack`. The run is still logged and staged. |
+| No FRAN hand-over | `run_search.py … --no-fran` | The job carries `--no-fran`. On success it runs `stage --out <out> [--name …] --skip`, with the same time bounds as any stage, which stages nothing but records `opted_out` in `<out>/fran_deposit.json`, so a later `fran_deposit.py backfill` leaves the search alone. The post says `skipped: off for this search`. Step 7c must then not stage it either. |
 | An instrument QC / standard run | `run_search.py … --qc` | The job never stages it. On success it runs `stage --out <out> --name … --qc`, which stages nothing and records the QC decision, so a later stage or backfill honours it. The post says `skipped: instrument QC / standard run`. The decision is made at generation, because a QC session named without a "QC" token would otherwise be staged by the hook before the agent's own `stage --name "... QC"`. |
 | FRAN's name for the search | `run_search.py … --fran-name "<the session's descriptive name>"` (always) | Passed to the job's `stage --name`. `--not-qc` (the user said it is not a QC run, whatever its name) is passed through to `stage` as well. |
 | The run log | — | It always runs where `record_run.py` is installed, which is what makes it complete. |
@@ -129,14 +145,15 @@ and of the zip's copy. Neither is an export part.
 | Line | When |
 |---|---|
 | `[OK]      Core run log -- logged` / `[OK] Slack notification (Core channel) -- sent` | done |
-| `[INFO]    Core run log -- not configured for this user`, `[INFO] Core notification -- not configured for this user`, `… -- off (--no-notify)`, `… -- off (SKILL_SLACK=0)`, `… -- off (RECORD_RUN=off)` | not configured, or opted out. A notice: the agent does **not** relay `[INFO]` lines as missing parts. |
+| `[INFO]    Core run log -- not configured for this user`, `[INFO] Core notification -- not configured for this user`, `… -- off (--no-notify)`, `… -- off (SKILL_SLACK=0)`, `… -- off (RECORD_RUN=off)`, `… -- off (a test run: --no-record was given)`, `… -- off (a test run: under a /skill_test/ folder)` (the run log and the Slack line alike: a test run is neither logged nor posted, and the folder's path is not named) | not configured, or opted out. A notice: the agent does **not** relay `[INFO]` lines as missing parts. |
 | `[SKIPPED] Slack notification (Core channel) -- not sent: …` / `[SKIPPED] Core run log -- error (FileExistsError) -- see the finalize output` | attempted and failed. The run-log line names only the reason and the kind of failure, never the text: record_run's detail carries registry paths, users and hosts, and the zip goes to collaborators. The full text is in the finalize JSON (`run_log.detail`) and on its stderr. |
 
 `record_run.py` always exits 0 and says what happened in one JSON object. The hook reads its
 reason code:
 - `error`, `timeout`, `ssh_failed`, `bad_input`, `nothing_to_record`, `out_not_found` and
   `session_not_found` mean it tried and failed. That is `[SKIPPED] … -- <reason>: <detail>`.
-- `disabled` is the `off (RECORD_RUN=off)` notice.
+- `disabled` is the `off (...)` notice: `RECORD_RUN=off`, `--no-record` (run_search.py, finalize)
+  or a `/skill_test/` folder in the session or search path.
 - `not_core_member` and `not_on_hive` are `not configured for this user`.
 - An unknown code is `[INFO] … -- not recorded (<code>)`.
 
@@ -259,8 +276,8 @@ The design follows two measurements on HIVE (bash 5.1.16, 2026-09-24):
 - **At the time limit, SLURM sends SIGTERM to the batch shell only.** Bash runs a trap only
   after the foreground command returns. With DIA-NN in the foreground, the trap never ran, and
   SIGKILL followed 130 s later (`KillWait`). `wait` is interrupted by a trapped signal, so the
-  handler runs at once and then re-raises SIGTERM: the job still dies by the signal (job
-  23990802: `TIMEOUT`, batch `0:15`).
+  handler runs at once and then re-raises SIGTERM: the job still dies by the signal (a test
+  job: `TIMEOUT`, batch `0:15`).
 - **Without a TERM trap, bash's EXIT trap sees `$? = 0` on SIGTERM.** A timed-out search would
   have been treated as finished, and staged.
 
@@ -285,3 +302,27 @@ The job-end hook calls `notify_slack.py` with flags a person never types: `--fro
 outside a SLURM job), `--facts-b64` (the run's facts, encoded by the generated trap),
 `--started` / `--time-limit-min` / `--signal` (timing and how the job ended), `--fail-only` (not
 the route's last job: post only a failure) and `--fran-stage` (stage a finished search for FRAN).
+
+## 7. Before submitting: the notes again, and the job-end hook (step 7)
+
+- **Just before submitting, check the notes from the Core again** (step 0: `notes.py check
+  --json --session <dir>`). A note about this search changes it only if the user agrees.
+- **Every search job ends with the job-end hook**, on the cluster, whether or not anyone is
+  watching. The last job, in this order:
+  - if it is a DIA-NN search that succeeded, hands it to FRAN (step 7c);
+  - logs the run in the Core's run log (`record_run.py`), after FRAN so the record carries the
+    FRAN outcome;
+  - posts "finished" or "FAILED" to the Core's Slack channel.
+
+  Earlier chain jobs report only a failure. The job's exit status is unchanged and no webhook
+  is ever in it. **Before submitting a Core search, tell the user in one line** that its end
+  will be posted to the Core Slack channel and staged for FRAN. **If they say not to**, pass
+  `--no-notify` (no post) and/or `--no-fran` (not to FRAN) to `run_search.py`. Pass them as
+  flags at generation. An environment variable (`SKILL_SLACK=0`, `FRAN_DEPOSIT=off`) counts only
+  in the same call as `run_search.py`; one set in an earlier `hive_exec.sh` call (`hive_remote`)
+  never reaches the job.
+  **Always pass `--fran-name "<the session's descriptive name>"`**: the job-end hook hands the
+  search to FRAN under that name. Also pass **`--qc`** when the user describes the run as QC, or
+  it is an instrument QC standard (e.g. a HeLa QC series), so it is never handed to FRAN. If
+  FRAN's QC rule misfires on a real experiment whose name contains a standalone "QC", pass
+  `--not-qc` instead. This does not replace 7b: still watch the search.

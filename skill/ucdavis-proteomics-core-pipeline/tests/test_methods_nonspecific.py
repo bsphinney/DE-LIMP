@@ -264,7 +264,8 @@ class FragPipeWorkflowSearch(Tmp):
         self.assertIn("(Any C-term)", text)                 # -0.98402 c^
         self.assertIn("(at most 3 per peptide)", text)
         self.assertEqual(len([m for m in rec["mods"] if m["type"] == "variable"]), 5)
-        self.assertIn("Mass tolerances were precursor (MS1) ±20 ppm and fragment (MS2) ±25 ppm.",
+        self.assertIn("Mass tolerances were precursor (MS1) ±20 ppm and fragment (MS2) ±25 ppm, with "
+                      "precursor isotope errors 0, 1 or 2.",
                       text)
         self.assertIn("N-terminal methionine excision was enabled.", text)
         self.assertIn("Philosopher (filter --sequential --prot 1)", text)

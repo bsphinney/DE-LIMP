@@ -34,6 +34,10 @@ PhilosopherFilter [Work dir: {d}/exp_runB]
 """
 
 
+# fragpipe_quant.plan()'s object for an IonQuant MaxLFQ search (2.15 F4: the declaration's input)
+MAXLFQ3 = {"quantity": "IonQuant MaxLFQ Intensity", "n_experiments": 3}
+
+
 class FilterAsRun(unittest.TestCase):
     def setUp(self):
         self._t = tempfile.TemporaryDirectory()
@@ -55,7 +59,7 @@ class FilterAsRun(unittest.TestCase):
 
     def test_the_declaration_quotes_the_filter_as_run_with_its_scope(self):
         self.log()
-        ident = run_search.fragpipe_quantity_declaration(self.d, True)["identification"]
+        ident = run_search.fragpipe_quantity_declaration(self.d, MAXLFQ3)["identification"]
         self.assertIn("--razor", ident)
         self.assertIn("FragPipe's log, the filter as run", ident)
         self.assertNotIn("(fragpipe.workflow)", ident)
@@ -64,7 +68,7 @@ class FilterAsRun(unittest.TestCase):
         self.assertTrue(ident.endswith(run_search.PLACEHOLDER_Q), ident)
 
     def test_without_a_log_the_workflow_line_is_tagged(self):
-        ident = run_search.fragpipe_quantity_declaration(self.d, True)["identification"]
+        ident = run_search.fragpipe_quantity_declaration(self.d, MAXLFQ3)["identification"]
         self.assertIn(f"Philosopher filter {WORKFLOW_FILTER} (fragpipe.workflow)", ident)
         self.assertIn("This is the workflow's filter line", ident)
         self.assertIn("confirm", ident)
@@ -74,7 +78,7 @@ class FilterAsRun(unittest.TestCase):
         st = fpp.fdr_statement(self.d, WORKFLOW_FILTER)
         self.assertTrue(st["from_log"])
         self.assertIn(st["sentence"],
-                      run_search.fragpipe_quantity_declaration(self.d, True)["identification"])
+                      run_search.fragpipe_quantity_declaration(self.d, MAXLFQ3)["identification"])
         with open(os.path.join(self.d, "search_provenance.json"), "w") as fh:
             fh.write('{"engine": "fragpipe", "version": "23.1"}')
         rec = make_methods.search_record(

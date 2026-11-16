@@ -275,6 +275,27 @@ class SageSelfReportedVersionTests(unittest.TestCase):
         self.assertIn("0.14.6", note)
         self.assertIn("tools_versions.sage", note)
 
+    def test_the_binary_is_recorded_by_sha256_and_the_release_it_is(self):
+        """X2: the 0.14.7 directory holds a binary that prints 0.14.6 (it is byte-identical to the
+        official v0.14.7 asset: an upstream self-report bug). The hash is what ties the record to
+        the bytes; the release of record says what the disagreement is."""
+        import hashlib
+        v = self._versions({"versions": {"sage": "0.14.7"}, "sage": "/opt/sage/sage"})
+        rec = v["sage_self_reported_version"]
+        want = hashlib.sha256(b"#!/bin/sh\necho 'sage 0.14.6'\n").hexdigest()
+        self.assertEqual(rec["binary_sha256"], want)
+        self.assertEqual(rec["release_of_record"],
+                         "release v0.14.7 (binary self-reports 0.14.6)")
+
+    def test_an_agreeing_binary_gets_no_disagreement_wording(self):
+        v = self._versions({"versions": {"sage": "0.14.6"}, "sage": "/opt/sage/sage"})
+        self.assertEqual(v["sage_self_reported_version"]["release_of_record"], "release v0.14.6")
+
+    def test_without_a_release_record_it_says_it_cannot_tell(self):
+        v = self._versions()
+        self.assertIn("unknown", v["sage_self_reported_version"]["release_of_record"])
+        self.assertTrue(v["sage_self_reported_version"]["binary_sha256"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

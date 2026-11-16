@@ -1,0 +1,153 @@
+{
+  "schema": "screen_data/1",
+  "written_by": "make_screen_data.R (hand-made fixture)",
+  "written_at": "2026-10-28T00:00:00Z",
+  "supported": true,
+  "unsupported_reason": null,
+  "partial": false,
+  "analysis": {
+    "pipeline_id": "dpc",
+    "display_label": "DPC-Quant + limma (limpa)",
+    "normalisation": "DIA-NN's cross-run normalisation (Precursor.Normalised); limpa applies none of its own",
+    "quantities": "normalised",
+    "q_columns": [
+      "Q.Value",
+      "Lib.Q.Value"
+    ],
+    "q_cutoffs": [
+      0.01,
+      0.01
+    ],
+    "filters_applied": [
+      "Q.Value <= 0.01",
+      "Lib.Q.Value <= 0.01"
+    ],
+    "rollup_method": "DPC-Quant (Detection Probability Curve quantification, dpcCN) of Precursor.Normalised",
+    "de_engine": "limpa::dpcDE (voomaLmFitWithImputation) -> contrasts.fit -> eBayes",
+    "significance_rule": "adj.P.Val < adjp (BH); no fold-change filter"
+  },
+  "samples": [
+    "a1",
+    "a2",
+    "b1",
+    "b2",
+    "c1",
+    "c2"
+  ],
+  "groups": [
+    "A",
+    "A",
+    "B",
+    "B",
+    "C",
+    "C"
+  ],
+  "contrasts": [
+    {
+      "name": "B-A",
+      "numerator": "B",
+      "denominator": "A",
+      "table": "DE_dpc_B.A.csv",
+      "n_tested": 3,
+      "n_sig": 2,
+      "adjp": 0.05
+    },
+    {
+      "name": "C-A",
+      "numerator": "C",
+      "denominator": "A",
+      "table": "DE_dpc_C.A.csv",
+      "n_tested": 4,
+      "n_sig": 2,
+      "adjp": 0.05
+    }
+  ],
+  "dpc": [
+    -12.5,
+    0.7
+  ],
+  "prior": {
+    "prior.mean": 20.0,
+    "prior.sd": 1.8,
+    "prior.logFC": 1
+  },
+  "n_precursors": 5,
+  "run_stats": null,
+  "sources": {
+    "tables/DE_dpc_B.A.csv": "f889315f229dabfcbcbbb68287508f2b741f32fbffa48f9f97b9264110fd3765"
+  },
+  "parts": {
+    "parts/part-0001.json.gz": "768dc4eccba34775fbec6f5889cb3972b6ead7a27f4d5d4b22076ceac979243f",
+    "index.tsv": "8bc314c67d1b3da9625b022ea6547e7bffdd129dbf986ebb2061a774dfe59102"
+  },
+  "index": "index.tsv",
+  "skipped": [
+    {
+      "block": "run_stats",
+      "reason": "search/report.stats.tsv does not exist"
+    },
+    {
+      "block": "xic",
+      "reason": "added in a later part (design section 12)"
+    },
+    {
+      "block": "library_uniqueness",
+      "reason": "added in a later part (design section 12)"
+    },
+    {
+      "block": "check_routes",
+      "reason": "added in a later part (design section 12)"
+    },
+    {
+      "block": "fran",
+      "reason": "added in a later part (design section 12)"
+    },
+    {
+      "block": "report_text",
+      "reason": "added in a later part (design section 12)"
+    }
+  ],
+  "shares": {
+    "method": "derivative",
+    "tolerance": 1e-06,
+    "settle_tolerance": 1e-05,
+    "withheld": [
+      {
+        "pg": "P10004",
+        "reason": "refit differs from the delivered value by 5.15e-05"
+      }
+    ],
+    "nudge_check": {
+      "proteins": [
+        "P10001"
+      ],
+      "cells_checked": 11,
+      "cells_found": 11,
+      "step": 0.001,
+      "max_diff": 4e-10,
+      "tolerance": 0.0001,
+      "passed": true,
+      "elapsed_s": 0.1
+    },
+    "limpa_version": "1.4.0"
+  },
+  "detection": {
+    "withheld": [
+      {
+        "pg": "P10004",
+        "reason": "refit differs from the delivered value by 5.15e-05"
+      }
+    ]
+  },
+  "elapsed_s": {
+    "total": 1.0,
+    "read": 0.1,
+    "shares": 0.1,
+    "records": 0.1,
+    "write": 0.1
+  },
+  "compute": {
+    "de": "zen4",
+    "here": "zen4"
+  }
+}

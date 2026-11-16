@@ -82,8 +82,8 @@ are measured leads to follow up, not bugs in shipped behaviour.
 
 ### 2.10 backlog — DIA-NN on DDA (proteomics review of `fix/2.9-dda-chain`, 2026-09-29)
 
-Evidence: the SET28 test chain on HIVE (6 Exploris 480 DDA hair runs, DIA-NN 2.7.0, jobs
-24197069–24197073, `/quobyte/proteomics-grp/claude/dda_chain_test_20260929/`) and msalemi's
+Evidence: the SET28 test chain on HIVE (6 Exploris 480 DDA hair runs, DIA-NN 2.7.0, five jobs,
+`/quobyte/proteomics-grp/claude/dda_chain_test_20260929/`) and a staff member's
 28-run SET28 chain. Do not implement these without the A/B each one names.
 
 1. **`--fwhm` into steps 4 and 5, behind an A/B.** Step 3 and step 5 both log
@@ -167,8 +167,8 @@ never a merge.
 **What.** Sage integrates MS1 for LFQ only within ±`quant.lfq_settings.ppm_tolerance` of the
 theoretical mass (default 5.0; Sage 0.14.7 `crates/sage/src/lfq.rs` `build_feature_map`).
 `estimate_params.py` never sets it, and the search's `precursor_tol` is ±10 ppm. So a cohort
-whose MS1 sits a few ppm off identifies normally and quantifies badly. gabrig 2026-09-29
-(HeLa, Fusion Lumos, `skill_issues/2026-09-29_gabrig_HeL50_UnvPe_HCDOT_28sep26.md`):
+whose MS1 sits a few ppm off identifies normally and quantifies badly. a staff report of 2026-09-29
+(HeLa, Fusion Lumos, `skill_issues/2026-09-29_<staff>_HeL50_UnvPe_HCDOT_28sep26.md`):
 - at +7.1/+7.7 ppm: 29,846 PSMs, but "discovered 0 target MS1 peaks at 5% FDR";
 - at +1.8 to +5.8 ppm: 17,288 peaks, protein CV 50% against MSFragger's 14%.
 
@@ -190,14 +190,14 @@ recorded). Tests: `tests/test_sage_lfq_gate.py`.
 low peak count with a fitting window, whose cause is unknown):
 1. write a copy of the Sage config with `quant.lfq_settings.ppm_tolerance` =
    `suggested_ppm_tolerance`, or with a per-run recalibration if a single window cannot cover
-   the spread of per-run offsets (gabrig's cohort spans +1.8 to +7.7 ppm);
+   the spread of per-run offsets (the staff HeL50 cohort spans +1.8 to +7.7 ppm);
 2. re-run LFQ as a new job (Sage has no LFQ-only mode, so this is a full re-search);
 3. re-check, and adapt from whichever run passes.
 
 It needs a decision first. A wider window also admits more co-eluting interference, so the
 target/decoy separation of the re-run must be compared, not assumed better. And a changed
 search setting is a new search to confirm (golden rule 1), not a silent retry. Validate it on
-gabrig's HeL50 cohort against the MSFragger CVs before shipping.
+the staff HeL50 cohort against the MSFragger CVs before shipping.
 
 ---
 
@@ -370,7 +370,7 @@ backstop for the tsv route, which cannot pre-filter.
 So `lfq.parquet` / `lfq.tsv` report, for every target, the q of whichever of it and its decoy
 scored lower. That is always ≥ its own q. The file cannot reproduce Sage's own logged count.
 
-**Measured:** gabrig's HeL50 UnvPe `lfq.parquet` (2026-09-29): identical q in 1,489 of 1,489
+**Measured:** the staff HeL50 UnvPe `lfq.parquet` (2026-09-29): identical q in 1,489 of 1,489
 target/decoy pairs. Filtering targets at stored q ≤ 0.05 gives 16,649 against Sage's logged
 17,288: 639 (3.5%) that Sage counted are lost. It errs conservative, so there is no FDR harm.
 
@@ -408,7 +408,7 @@ reproducibility_log.R (architectural rule 1).
   would also model the missingness.
 
 The adapter would then declare a level the descriptor turns into that method's name. Validate
-against MSFragger/IonQuant on gabrig's HeL50 UnvPe. She reported protein CV 50% for Sage against
+against MSFragger/IonQuant on the staff HeL50 UnvPe. The staff member reported protein CV 50% for Sage against
 MSFragger's 14% there; her rollup for that is in `sessions/comparisons/harmonised_compare.py`.
 
 ## Contaminant ids from the other adapters: what 2.9 checked and what it did not (open)
@@ -445,7 +445,7 @@ searches; or DIA-NN `--dda` for timsTOF DDA.
   the decoys (`write_lfq`), and Sage counts a peak only at its own `q_value` ≤ 0.05 (`fdr.rs
   picked_precursor`, compared in f32). The adapter now keeps non-decoy rows whose STORED q ≤ 0.05
   and records the counts per file (`sage_adapt.json`). The stored q is shared with the decoy
-  (below), so this is a conservative subset of Sage's count, and both are recorded. Measured read-only on gabrig's HeL50 Sage outputs
+  (below), so this is a conservative subset of Sage's count, and both are recorded. Measured read-only on the staff HeL50 Sage outputs
   (2026-09-29, Flinders `deLimpClawd_28sep26/sessions`; no DE had been run on them):
   - **UnvPe**, 4 runs, well calibrated: 1,561 decoy + 1,620 failing rows per file. With them
     dropped, 19–20% of proteins per file change their summed intensity by more than 10%.
@@ -457,7 +457,7 @@ searches; or DIA-NN `--dda` for timsTOF DDA.
   described as DIA-NN's for every engine** — fixed in 2.9 (post-merge).
   - The filter's rule (contaminants.R: an accession *starts* with `Cont_`/`contam_`) tests bare
     accessions. `adapt_sage` wrote Sage's `proteins` as full FASTA ids
-    (`sp|Cont_P02769|ALBU_BOVIN`), so nothing matched. On gabrig's HeL50 UnvPe the Sage DE
+    (`sp|Cont_P02769|ALBU_BOVIN`), so nothing matched. On the staff HeL50 UnvPe the Sage DE
     limma-tested 171 `Cont_` groups (BSA, gelsolin, mouse keratins) while methods.txt said
     "Contaminants : none", and a keratin sample's exemption could never apply.
   - `adapt_sage` (and `adapt_radiant`) now write bare accessions through
@@ -483,8 +483,8 @@ searches; or DIA-NN `--dda` for timsTOF DDA.
     (`make_methods.diann_cont_quant_exclude`, which `search_record` uses too). Otherwise they say
     `[not recorded -- confirm]`. FragPipe's DIA route is not assumed to have had the flag.
     - **Fixed after sage-review's re-check of ca9aff2:** DIA-NN logs `--cfg <file>`
-      unexpanded. This was seen in DIA-NN 1.8.1 (FragPipe), 2.6.1 (taha_dog) and 2.7.0
-      (PROT_0002). So every `run_search.py --one-step` search, whose flags sit in the `--cfg`
+      unexpanded. This was seen in DIA-NN 1.8.1 (FragPipe), 2.6.1 (another project) and 2.7.0
+      (a Core submission). So every `run_search.py --one-step` search, whose flags sit in the `--cfg`
       file, read "not set" in the DE, the Methods and the run record.
     - The reader now opens each `--cfg` file where it stands on the command line, as DIA-NN
       does. A relative path resolves in DIA-NN's working directory: the log's folder minus the
@@ -492,7 +492,7 @@ searches; or DIA-NN `--dda` for timsTOF DDA.
       its parent.
     - A `--cfg` that can't be read falls back to the parameters file, then NOT RECORDED, never
       "not set".
-    - Checked read-only on real HIVE logs: taha_dog's `diann_lib.log.txt` (`--cfg`) gives
+    - Checked read-only on real HIVE logs: another project's `diann_lib.log.txt` (`--cfg`) gives
       `Cont_` from `params.cfg`; FragPipe's `dia-quant-output/report.log.txt` gives "no flag"
       from its `filelist_diann.txt`.
   - Also from that review:
@@ -504,7 +504,7 @@ searches; or DIA-NN `--dda` for timsTOF DDA.
     one of them on a TypeError from `keratin_sample_check`'s new engine argument, not on an
     assertion). Sixteen after the review: 9 of them fail on b1b94f5, plus
     `test_keratin_sample.py`'s DIA-NN log test.
-  - Confirmed on real data (HIVE jobs 24210171 and 24210605, the latter on the final scripts; read-only copies of gabrig's HeL50 UnvPe
+  - Confirmed on real data (two HIVE jobs, the second on the final scripts; read-only copies of the staff HeL50 UnvPe
     outputs, `/quobyte/proteomics-grp/claude/contam_check_20260930/`):
     - Sage: 686 peptides removed, all 171 `Cont_` groups, 101 of them also naming a human
       protein. Those named 120 human proteins: 57 keep other peptides (36 as their own group,
@@ -528,7 +528,7 @@ searches; or DIA-NN `--dda` for timsTOF DDA.
     Tests: `tests/test_record_run.py` ContQuantExcludeIsReadFromTheRun (5).
 - **FragPipe-DDA, AlphaDIA and Radiant DEs were described as "DIA-NN PG.MaxLFQ" / Demichev** —
   fixed in 2.9. Their numbers were right (one engine-made value per protein and run), but the
-  description was not. Seen in Michelle's PI_Example SET1-28 `2026-09-25_SET28_DDA_FragPipe23`, whose
+  description was not. Seen in a staff member's example set SET1-28 `2026-09-25_SET28_DDA_FragPipe23`, whose
   de_provenance.json says "DIA-NN PG.MaxLFQ". Each adapter now declares level `protein` with the
   engine's own quantity, version, FDR and citation, and `maxlfq_descriptor()` passes it through
   (`tests/test_adapters_describe_themselves.py`). To re-render the methods of such a session,
@@ -537,8 +537,8 @@ searches; or DIA-NN `--dda` for timsTOF DDA.
 
   Every Sage DE made before 2.9 should be re-run. A search the same day found no other adapted
   Sage report (an `lfq.parquet` with a `report.parquet` beside it). It covered every
-  `lfq.parquet` under Flinders `Data/lab/service`, `/quobyte/proteomics-grp` and gabrig's and
-  msalemi's homes (srun, depth 11). The other eight are `brett/<a client lab>_hair_gvp` identification
+  `lfq.parquet` under Flinders `Data/lab/service`, `/quobyte/proteomics-grp` and two staff
+  members' homes (srun, depth 11). The other eight are `brett/<a client lab>_hair_gvp` identification
   runs that were never adapted. Not searched: other users' homes, and runs made off HIVE.
 
 All verified present in `c29f269`:

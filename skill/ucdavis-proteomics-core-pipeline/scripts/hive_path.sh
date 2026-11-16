@@ -8,7 +8,7 @@
 #   bash hive_path.sh --no-verify <path>     # the mapping only: no ssh, verified stays false
 #                                            # (share_map.py uses this for a session README)
 #
-# gabrig 2026-09-23: the raw folder was T:\Data\lab\service\..., and T: is
+# A Core member, 2026-09-23: the raw folder was T:\Data\lab\service\..., and T: is
 # \\128.120.208.24\proteomics -- the Flinders share HIVE mounts at
 # /nfs/lssc0/flinders/proteomics. Nothing mapped one to the other, so the agent searched
 # /quobyte, decided the files were not on HIVE, and uploaded 7.1 GB that already was
@@ -28,7 +28,7 @@
 # Exit: 0 verified | 1 on a share but nothing verified | 3 not on a network share (no
 # ssh was made) | 2 usage.
 #
-# Plain bash 3.2 + coreutils, no python: gabrig's laptop had no working python3. Tests
+# Plain bash 3.2 + coreutils, no python: a Core member's laptop had no working python3. Tests
 # replace the ssh step with HIVE_EXEC=<command> and shim uname, net, mount,
 # powershell.exe and cygpath on PATH.
 # =============================================================================

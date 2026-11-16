@@ -11,6 +11,15 @@ Reproducibility here has **two levels**, and they answer different questions.
 defensible. Produce both — but when you point a user at "the reproducibility", point
 at the R script first.
 
+<!-- contents: tests/test_skill_structure.py --toc -->
+**Contents** (section: line)
+- 23: Level 1 — the analysis as plain R
+- 51: Level 2 — the pinned bundle
+- 227: Golden rule 5: every run reproducible, at two levels
+- 250: For maintainers: adding a new `--method` or analysis path
+- 274: 10. The bundle (step 10)
+<!-- /contents -->
+
 ## Level 1 — the analysis as plain R
 
 `run_de.R` writes `reproducibility_log.R` into the DE output directory: the whole
@@ -153,6 +162,7 @@ difference rather than hiding behind an unchanged sequence count.
   over a bundle that silently dropped a critical artifact.
 
 ### Bundle layout
+
 ```
 reproducibility/
 ├── run_manifest.json        # full machine-readable record (the master file)
@@ -186,7 +196,7 @@ zen2), and they round the last bit differently; that moves where BFGS stops, ins
 tolerance. So identical inputs, software and flags give slightly different numbers on a
 different CPU family — and identical numbers on the same one.
 
-Measured on PROT_0756 v2 (2026-09-28): v2's DE ran on a zen4 node (EPYC 9734), the re-runs on
+Measured on the mouse-brain IP cohort v2 (2026-09-28): v2's DE ran on a zen4 node (EPYC 9734), the re-runs on
 zen2 nodes (EPYC 7532/7662), same env (R 4.6.1, limpa 1.4.0, limma 3.68.5, OpenBLAS 0.3.34), same
 input md5s and command. Across 12 contrasts **|ΔlogFC| ≤ 0.0022, |Δt| ≤ 0.0064, 0 significance
 calls changed**. v2's command re-run on its own zen4 node reproduced its tables exactly, and a
@@ -207,9 +217,102 @@ What the skill does about it:
   `sinfo -N -o '%N %f'` lists each node's.
 - **Do not pin `OPENBLAS_CORETYPE`** to force one kind of kernel: on the EPYC 9734 node,
   `OPENBLAS_CORETYPE=Haswell` (8 threads or 1) and `=Zen` all segfaulted in `dpcQuant`
-  (sbatch 24180764, 24180793, 24180794).
+  (three test jobs on HIVE).
 
 A difference at this level is not an error in either run, and it is far below what would
 change a conclusion; but "reproduces exactly" means "on the same CPU family", and the record now
 says which one that was. (limpa's `newton.polish = TRUE` would polish each fit to machine
 precision; that is a method choice for limpa, not the skill.)
+
+## Golden rule 5: every run reproducible, at two levels
+
+5. **Every run must be completely reproducible**, at two levels. This is not optional.
+   - **The analysis, as code.** `run_de.R` writes `reproducibility_log.R` — the whole
+     DE as flat R with every value literal, runnable with just R + limpa/limma. This
+     is the artifact to point a user at; it's what they mean by "the R code".
+   - **The whole run, pinned.** As you go, append every command you run (verbatim,
+     with all arguments) to a `commands.log` -- **by you**: no skill script writes it when
+     run over plain ssh (`hive_remote`), so after each command run
+     `python3 scripts/session.py log-command --session <S> "<the command>"` (one line, UTC
+     time first; `status` and finalize warn while it is missing). At the end you MUST produce the
+     reproducibility bundle (step 10) capturing the skill version (from
+     `.claude-plugin/plugin.json`, written to `reproducibility/environment/skill.txt`),
+     exact tool + package versions, all parameters, input and output checksums, and
+     a runnable `reproduce.sh`. Parameters ship with the skill, so recording the
+     skill version pins them — there is no external commit to chase.
+
+   Never describe a result without both. (DE-LIMP architectural rules #1, #4.)
+   "Exactly" means on the same CPU family: DPC-Quant's numbers shift in about the third
+   decimal between zen2 and zen4 nodes (de_provenance.json `compute` records the machine). To
+   match an earlier HIVE run exactly, submit with `sbatch --constraint=<its family>`; never pin
+   `OPENBLAS_CORETYPE` (`references/reproducibility.md`).
+
+## For maintainers: adding a new `--method` or analysis path
+
+`tests/test_reproducibility_contract.py` enforces one rule: **every analysis path
+the skill can run must emit a `reproducibility_log.R` that reproduces it.** A new
+`--method` fails CI until it is listed in `COVERED` there *and* its emitter is
+verified against a real run.
+
+That guard exists because the same defect shipped twice. `repro_script.R` has a
+separate emitter per method, and both wrote the scalar `--q-cutoff` where the run
+applied per-column cutoffs — so the emitted script ran clean and returned
+different numbers than the analysis beside it:
+
+| method | run | emitted script |
+|---|---|---|
+| dpc | 4,648 proteins / 1,859 sig | 4,624 / 1,846 |
+| maxlfq | 4,526 / 1,326 | 4,444 / 1,281 |
+
+Nothing errored either time. Fixing dpc alone is what let maxlfq ship broken.
+
+Before adding a path: run it, execute the script it emits, and diff the results —
+`DELIMP_TEST_REPORT=<report.parquet> python3 tests/test_reproducibility_contract.py
+TestEndToEndReproduction`. Reading the emitted script is not enough; both bugs
+were invisible on inspection and obvious on execution.
+
+## 10. The bundle (step 10)
+
+Inside an analysis session, **`python3 scripts/provenance.py --session <session>`** fills every
+argument below with the value finalize gives it (`make_deposit.bundle_flags`, one definition: the
+step-10 bundle is the one finalize would build): the raw files (`input/raw_files.txt`, else the
+search record's `files`), the search record and the search's other results (an
+identifications-only search's `identifications.tsv`), the engine, its version and `tools.json`
+(`search_provenance.json`), the params file and the FASTA as the search ran them (the search
+record's first, with a note when the session's own file differs) and the FASTA's sidecar
+(taxid), the DE method, contrasts and cutoffs and the report the DE read (`de_provenance.json`),
+the workflow manifest, the commands log, `logs/qc_bracket.json` and the peak check's record. An
+explicit argument wins. A value with no record stays unset and is listed under `from_session.not_found` in the
+printed JSON and as a MANIFEST.txt `[NOTE]` — relay those gaps; nothing is guessed. The full
+form, for a run outside a session:
+
+Assemble the bundle that makes the whole analysis reproducible (it hashes every input file; on
+HIVE's login node it moves itself to a compute node — run it in the background):
+
+```
+python3 scripts/provenance.py --outdir ./reproducibility \
+  --workflow-manifest ./wf/workflow.manifest.json \
+  --setup-json ~/.proteomics-pipeline/setup.json \
+  --tools-json ~/.proteomics-pipeline/tools/tools.json \
+  --params ./wf/<params_file> --conditions ./conditions.csv \
+  --fasta ./search.fasta --fasta-info-file ./search.fasta.meta.json \
+  --raw /path/to/*.d --report ./search_out/report.parquet --de-dir ./de_results \
+  --engine <engine> --de-method <dpc|maxlfq> --contrasts "<...>" \
+  --q-cutoff 0.01 --logfc 1.0 --adjp 0.05 \
+  --acquisition <DIA|DDA> --organism-taxid <taxid> --instrument "<name>" \
+  --commands ./commands.log --timestamp "$(date -u +%FT%TZ)" \
+  [--qc-bracket <session>/logs/qc_bracket.json]     # step 8e: path + sha256 only, no verdict
+```
+
+This writes `reproducibility/` with `run_manifest.json`, `reproduce.sh`,
+`REPRODUCE.md`, the conda lock + pip freeze + R sessionInfo + tool versions, a
+`skill.txt` recording **which skill produced this and how it was installed**, copies
+of the params and conditions, and sha256 checksums of inputs/outputs. This step is
+**mandatory and must always run** — code + versions are not optional. The environment it
+captures is **the one the DE ran in**, from run_de.R's `runtime` record in `de_provenance.json`
+(R home, Rscript, library paths, conda env, container) and the DE's own `sessionInfo.txt` — not
+setup.json's, which names only the env setup.sh built. A `[NOTE]` in `MANIFEST.txt` says when
+setup.json names another env (e.g. a DE run in a separate R 4.6 env): relay it. A DE record with
+no `runtime` (before 2.10) falls back to setup.json / PATH and says so (`[SKIPPED] DE runtime`).
+Still, **check the returned `skipped` count** and, if the conda
+lock / R sessionInfo / checksums were skipped, fix the cause and re-run.

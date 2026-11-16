@@ -1,5 +1,5 @@
 {
-  "description": "Save the analysis conversation into its session before a compaction and when the session ends (scripts/transcript_hook.py). A no-op unless session.py / save_transcript.py recorded this Claude Code session for an analysis; it never blocks and never fails the session.",
+  "description": "Save the analysis conversation into its session before a compaction and when the session ends (scripts/transcript_hook.py). A no-op unless session.py / save_transcript.py recorded this Claude Code session for an analysis; it never blocks and never fails the session. Stop: reminds the agent once, with the finish checklist, when an analysis it ran has finish items missing (scripts/finish_stop_hook.py); silent otherwise, never fails the turn.",
   "hooks": {
     "PreCompact": [
       {
@@ -19,6 +19,17 @@
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/transcript_hook.py\" || python \"${CLAUDE_PLUGIN_ROOT}/scripts/transcript_hook.py\"",
             "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/finish_stop_hook.py\" || python \"${CLAUDE_PLUGIN_ROOT}/scripts/finish_stop_hook.py\"",
+            "timeout": 20
           }
         ]
       }

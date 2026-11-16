@@ -1,5 +1,142 @@
 # Changelog
 
+## [Skill 2.15.0] — 2026-11-12
+
+2.15 does five big things and then fixes what real data showed.
+- **SKILL.md is now a router.** It went from 3,632 lines to 499. It says where to go; the detail lives in the reference files.
+- **FragPipe becomes the engine for timsTOF DDA and for non-specific Orbitrap DDA.** Sage stays as the fallback and for ordinary tryptic Orbitrap DDA.
+- **The protein screen, part 1** ("show me the data for <protein>"). It has its own section below.
+- **Test and synthetic sequences can no longer reach FRAN.**
+- **The skill has its own repository:** https://github.com/bsphinney/UCD-Proteomics-AI-Skill. DE-LIMP stays as the app's home. A computer that installed from DE-LIMP gets 2.15.0 from there as usual, and 2.15.0 moves its plugin catalogue to the new repository at the start of its first session, at the same version (`skill_version.sh --session-start`: remove, add the new address, install; the old address is put back if the add fails), and says so in one sentence. It is skipped, with the one-line command to do it by hand, when the new address does not answer, git or claude is missing, or the session runs in Claude Desktop. DE-LIMP keeps its `skill/` folder at 2.15.0 so that older installs can still update. Reports link the new repository's "How these reports are made" page, and their star line names it.
+
+The release was then run end to end, 2.14.2 against 2.15, on seven real datasets: public and Core-style DIA and DDA, from 2 to 300 runs. Those runs found defects, and twelve fix lanes closed them. The results are under "How it was checked".
+
+### What the client sees
+- **Non-specific peptidome DDA finds the peptides.** Before, on a public Orbitrap peptidome study, Sage at the skill's 10 ppm window found 179 peptides. The paper reported 14,270. The true matches sit about 8.5 ppm off, at the edge of Sage's window, and Sage does no mass calibration. Now:
+  - non-specific Orbitrap DDA (`--enzyme none`, pepsin and similar) goes to FragPipe. Its non-specific workflow searches a wider ±20 ppm window and rescores with MSBooster and Percolator. It does no mass calibration either (`calibrate_mass=0`). It found 16,203 peptides on the same data: it recovers the matches Sage's window lost. This is not a validation. The paper reported 14,270 with different FDR handling, and finding more than a paper does not show the matches are right. This search applies no protein-level FDR (`--prot 1`), and no entrapment or other independent estimate of its peptide FDR was made;
+  - `--engine sage` is still honoured and is recorded as "requested";
+  - when Sage runs anyway, it checks where the confident matches sit in the precursor window. If the median is in the outer half, it warns with the numbers and writes a copy of the settings with the window centred, in Sage's own sign (Sage's window is calculated minus observed mass, the opposite of the measured offset). It never re-runs anything by itself. The offered window was checked on real data: on 8 runs of the peptidome, Sage's 882 PSMs at 1% with ±10 ppm became 4,034 with the corrected window `[-19, +2]`. So the window was a large part of Sage's loss; that run was not counted in peptides, so how much of FragPipe's lead it closes is not known. (A first version offered the mirror image, `[-2, +19]`, which found 0 PSMs at 1%; it was fixed before release.)
+- **timsTOF DDA-PASEF goes to FragPipe.** A two-run chymotrypsin timsTOF HT set gave 6,536 PSMs, 969 peptides and 165 protein groups in 6 min 50 s on 2.15. The same set on 2.14.2 (Sage, a hand-built override) gave 5,756 PSMs and 1,041 peptides. If FragPipe cannot run or is not licensed, Sage runs and the record says it was the fallback and why.
+- **Enzymes are real options.** `--enzyme chymotrypsin|none|...` replaces hand-written override files, and `--semi-specific` is new. A semi-specific search's Methods, report and brief say its peptide counts are not comparable with a fully specific search and that some semi-specific peptides may be in-source fragments. A vendor or user FragPipe workflow is never refused for the name in its enzyme dropdown.
+- **Honest protein counts for FragPipe identifications.** FragPipe's identifications-only route applies no protein-level FDR. Now the report, the Methods and the analysis brief say so, and give PSMs and peptides, never a protein-group count. The skill's `Cont_` contaminant entries are flagged in `identifications.tsv`, and the share of contaminant PSMs is reported on its own. On one peptidome set a single porcine pepsin entry was 23.5% of the PSMs and had been counted as ordinary. A non-specific search that quantifies (amounts wanted) has no protein-level FDR either: its record now says so, and the brief and report no longer call its protein rows "already FDR-filtered" or give a protein count as a result.
+- **Quantities from FragPipe say who made them.** One experiment (FragPipe's grouping of runs) gives IonQuant's intensities; there is no between-run step, so the Methods and report say they are not normalised between runs and runs should be compared with care. Two experiments give directLFQ, because IonQuant's MaxLFQ needs three. Three or more give IonQuant's MaxLFQ. `--directlfq` asks for directLFQ at any count, and the Methods say "requested". A search that cannot resolve fragments (unit resolution) gives identifications only.
+- **The Methods tag every default they print.** Before, carbamidomethyl-C, oxidation(M), the N-terminal acetyl, DDA tolerances and the charge range printed as if the client had chosen them, in all six runs of the acceptance round. Now each one reads "[facility default — confirm]" when the search record says it was a default, in the text and in the parameter table. Where no record exists, nothing is claimed.
+- **The Methods and report describe what ran.**
+  - They count the runs the search used (183), not every file staged (300).
+  - They name every species in the database, not only the main proteome.
+  - Identifications-only results read "identified", never "quantified".
+  - A FragPipe search says its workflow, isotope errors, decoys and protein quantity, read from the records. MSFragger's mass calibration is stated as the workflow's own setting (LFQ-MBR, the timsTOF DDA default, ships `calibrate_mass=2`), not as a "[... — confirm]" warning; its ±20 ppm window is used on timsTOF too, as a starting value.
+  - The line about contaminants says the job added none of its own; any are those already in the database.
+  - An mzML now gives its instrument model and MS2 analyser (read from the file header).
+- **A failed Skyline import is no longer "ok".** Before, one failed import task left "ok" on the peak check, and the Methods, report and MANIFEST said nothing. Now the check is "partial", with a sentence saying which runs it does not cover and why (the Methods, the top of the report section and the MANIFEST all use the same one), and a retry command that re-runs only the failed tasks. A timsTOF `.d` reached through a link is now passed to Skyline by its real path, in the build, the imports and the join (see limitations).
+- **Delivery works for part of a plate.** Before, a session that analysed 77 of 96 staged files was refused, and `--force` did not help. Now a session that analysed a subset of the staged files can be delivered. The plan, the client README and the email body say "N of the M submitted files were analysed" and name the files not analysed and not in the share (at most 20, then "and N more"); the raw-folder line says it holds the analysed files' raw data only. Raw links cover only the analysed files unless `--include-raw all` is given. A session holding a file that was never staged is still refused, with the offending files named.
+- **A FragPipe search that mixes FAIMS and non-FAIMS runs is refused.** Before, FragPipe's IonQuant crashed after 2.6 hours (about 85 CPU-hours) when one search mixed the two. Now the skill reads each run's FAIMS status, refuses the mix before anything is written, and offers `--faims-split`, which runs one search per group. The check covers FragPipe searches that quantify, and only runs whose status is known (see limitations). Methods, the report and the MANIFEST say the groups are valid but not comparable. On a login node the check reads at most five runs' mzML heads (40 MB); with more unrecorded runs the command moves to a compute node to read them, as the `.d` check does.
+- **Fewer wrong or missing words elsewhere.** A no-DE FragPipe report shows distinct peptides instead of table rows. An OUTPUT_FILES list no longer calls MSBooster PNGs report figures. The no-DE AGENTS.md no longer says "Search + DE".
+
+### For staff
+- **Memory is sized from the data.** Before, non-specific Sage asked for 192G whatever the database. It peaked at 405 GiB on a 22,939-sequence bovine database and 345 GB on a human one-per-gene database, and the warning gave no number.
+  - Sage and FragPipe: the request now comes from the sequence count, from three measured points, with 15% headroom, rounded up to 8 GB. A `--mem` below the estimate prints a note. An estimate above the queue's per-job or per-user memory cap is refused with the numbers and the options (reviewed-only database, a tryptic search, a bigger queue).
+  - FragPipe also grows with the run count, and the semi-specific rule follows measured peaks (see "Known limitations" for how narrow that evidence is). The Java heap is the request minus 12G.
+  - Sage jobs set `RUST_MIN_STACK`. Exit 134 or "stack overflow" now writes `sage_failure.json` with a re-run hint. The overflow is intermittent: an identical job with the identical binary crashed once and ran once. The stack setting is not shown to prevent it. Only the detection is verified.
+  - The Sage binary the Core pins reports "0.14.6" but is byte-identical to the official v0.14.7 release asset. The provenance now records its sha256 and says so.
+- **DIA-NN assembly (step 3) is sized from the file count.** Before, 77 files got 48 CPUs and 12 hours for a job that used 2:24 and 5 GB, and sat for hours behind the per-user CPU cap. A single chain job also leaves a quarter of the per-user cap free (a 64-CPU cap gives 48).
+- **Watchers and status tell the truth.**
+  - `watch_run.sh --out` read no Slurm state and called a failed job "running". It now reads `sacct`, and reports state, exit code and the log tail. A cancelled chain no longer reads as done.
+  - A normalisation check that needs a decision no longer shows as a failed Slurm job (`--job-exit0`, with a `NEEDS_DECISION.json` marker).
+  - `status` says when `commands.log` is missing; `session.py log-command` writes a line to it. `status` now also prints the full `provenance.py --session` command, which avoids a degraded bundle.
+  - Job-end records the queue each job really ran in (`queue_actual`).
+  - A cancelled job is now `cancelled` (find out who or what cancelled it), not a cause read from its log: a cancelled FragPipe search read "empty results" from its own count line. "Empty results" now needs a failed job and the engines' own words.
+  - Watching the Skyline peak check as a chain (`--out skyline_work`) reads its job ids and its failed job's log; before, each label in `jobs.txt` read as an unknown job and no log was found.
+- **Test runs stay out of the Core run records.** `--no-record` on `run_search.py`, the chain scripts and `finalize`, and any session or search path with `/skill_test/` in it, skip all three Core records: the run registry, FRAN staging (the job-end hook stages nothing; `fran_deposit.py` refuses a `/skill_test/` search as `test_run`) and the Core Slack channel (the search-done post and finalize's "analysis complete"). The MANIFEST and `search_provenance.json` say each was off and why. `RECORD_RUN=off` turns off the registry only. `hive_exec.sh --job --preemptible` now takes the low queue; `--session` makes a job traceable to its session.
+- **Sessions with several searches.** `session.py choose-search --folder <name>` picks the search a report is built from. Nothing is renamed or marked "superseded". A FAIMS-split session names each group and run count instead of saying "no search output found".
+- **Staff commands.** `locate --choose` takes a run label that carries the digest suffix. `stage` lists an existing submission folder it did not use, and `--service-dir` options are named when two folders match. `reproduce.sh` for an identifications-only search rebuilds `identifications.tsv` (`--adapt-only`), submits as a job on a cluster, and carries the added FASTA. `analysis_prompt.py --de-dir` is optional for a no-DE brief. A whole-database `--add-fasta` that already holds the proteome now says what to do instead of "rename". The contaminant overlap check follows `--enzyme`. A FragPipe protein or peptide table counts as a search file in a no-DE delivery.
+- **Core client work and the board.**
+  - A session can be marked as Core client work (`session.py core-client`, staff only; the login stays in a staff-only log). The client survey and the HT plate sheet match (by sample name, with the as-acquired names shown) follow from it.
+  - The Core board is a record, never a gate: no limit on hours, time or posts pauses a session. Any refusal from it means carry on, unless a person paused or stopped the Claude.
+  - A Stop hook reminds once when finish items are missing.
+- **FRAN guard.** `fasta_guard.py` is the one definition of a database FRAN must never learn: test and synthetic sequences. `fetch_fasta --test-database` marks one. The deposit check refuses a marked database and asks about ones it cannot clear. A session can opt out of FRAN (`NO_FRAN` or `fran: false` in `session.json`). `fran_deposit.py audit` prints the audit SQL (it never connects to PG Farm) and, with `--lance-dir`, scans the Lance spectrum corpus read-only. Databases the skill itself fetched are not held up.
+- **Skyline.** Any fixed cysteine modification (not only carbamidomethyl) works in the peak check. The import time limit follows whether Skyline has to demultiplex overlapping windows: 240 minutes then, 60 otherwise (measured 1,658 s against 63 s).
+- **Cleanup.** One definition each for sha256, JSON read-or-None and the Slurm binary path. Dead code removed. Reference contents lists regenerated.
+- **Identifier guard.** The slim-down's tests now fail on real submission numbers, client names, staff logins and job numbers. They found 61 such items added during 2.14.x. These were anonymised, and the guard runs on every merge.
+
+### How it was checked
+Fresh agent sessions ran the same brief on the released 2.14.2 build and on the 2.15 candidate, with the same staff answers. FragPipe-on-request and a public multi-lab beer DDA study (2.15 only) were added. Verdict: no regressions in behaviour.
+
+| Dataset | 2.14.2 | 2.15 |
+|---|---|---|
+| timsTOF HT DIA, 15 runs: precursors / peptides / protein groups | 85,925 / 75,289 / 9,327 | 85,655 / 75,067 / 9,324 |
+| timsTOF HT DIA, 15 runs: significant calls over five contrasts | 1,484 / 197 / 1,559 / 125 / 70 | identical |
+| public DIA benchmark (known ratios, 4 m/z windows): significant / false / yeast found | 1,671 / 39 (2.3%) / 84.7% | identical |
+| public peptidome, Sage: peptides | 179 | 179 |
+| same, FragPipe on request: peptides | - | 16,203 (paper 14,270, different FDR handling; not a validation) |
+| 77-run timsTOF HT DIA time course: precursors / protein groups | 10,991 / 849 | 11,150 / 915 |
+| same: normalisation check recommends | raw (staff chose normalised) | normalised (as staff chose); why it changed was not isolated |
+| same: Skyline runs imported | 76 of 77, loss unreported | 77 of 77 |
+| bovine peptidome, full database, Sage | crashed (stack overflow) | completed (needed hand-set 500G); sizing now estimates it |
+
+- **Reading the table.** The two deterministic DIA sets are identical to the call. The 77-run set's DE differs: one contrast went from 30 to 17 calls, and the search found 66 more protein groups. Both DEs used normalised quantities (the staff answer). The cause of the difference was not isolated: it could be the search input, the DE run itself, or both. Nobody re-ran one build's DE on the other build's report.
+- **Beer study (300 mzML, FragPipe + directLFQ, semi-specific, no DE).** It first hit the FAIMS crash above. It was then run as four searches (Orbitrap or ion-trap MS2, with or without FAIMS: 183, 36, 58 and 23 runs; 70,081 peptides and 3,976 protein groups in the largest). Against an earlier Sage session on the same database, PSMs were 30% (Orbitrap) and 55% (ion trap) higher. Different engines, so a soft comparison.
+- **Fixed in this round:** the FAIMS crash; FragPipe memory too small for 58 to 219 runs; a split session that could not be reported at all (it can now, one group at a time; see limitations); the Sage memory and crash handling; the failed-Skyline "ok"; the plate-subset refusal; the watcher that called failures "running"; the untagged defaults.
+
+### Known limitations
+- **One report per FAIMS group.** When a search is split by FAIMS, each group has its own search, and the report, Methods and finalize are built for one group at a time (`choose-search`). There is no single combined report. `deliver --mode interim` links every search folder if both groups must go out.
+- **Semi-specific FragPipe memory was measured on one database.** The four measured points (23, 36, 58 and 183 runs) all come from one semi-specific database of about 12.7k sequences. A much larger semi-specific database is covered only by the Sage-based estimate. Each point is a peak of a job whose Java heap was set to 244G, so a peak is not a pure need.
+- **FragPipe memory beyond the measured range is an estimate.** The slope past 183 runs is extrapolated. The 219-run attempt hit its 200G ceiling, so it gives a lower bound only.
+- **A FAIMS group can hold a whole condition.** `--faims-split` prints runs per condition and group from the session's `conditions.csv` and warns, without refusing, when a condition lies wholly in one group: a comparison with the other group would be a FAIMS difference. With no `conditions.csv` yet, `faims_split.json` says this was not checked.
+- **Mixed FAIMS voltages inside one group are untested.** Whether IonQuant quantifies runs with different compensation voltages together was not tried. A FAIMS group with several voltages may need splitting by voltage.
+- **The FAIMS mix check covers FragPipe only.** DIA-NN and Sage searches are not checked for FAIMS mixing, and an identifications-only FragPipe search may run mixed. Runs whose FAIMS status is unknown are not counted by the check: a set of known and unknown runs passes with a note.
+- **A `.raw` file is only called FAIMS if step 2 recorded it.** `run_search` does not read the scans itself, so an unrecorded `.raw` is "unknown": ignored by the mix check and refused by `--faims-split`.
+- **Q Exactive mzML with 3 to 4 Da isolation windows can show acquisition "unknown".** The width rule is ambiguous there, and the classifier does not guess. The instrument now shows, so staff can answer the question knowingly.
+- **`--semi-specific` is tested on presets and records only.** No real FragPipe or Sage run used it yet. Its Methods wording is tested, its search is not.
+- **Chymotrypsin and the default trypsin FragPipe presets are written as FragPipe's own named dropdown rows.** This was checked against FragPipe 24.0's source, not by loading them in FragPipe. The default trypsin preset changed name and dropdown from "nonspecific" to "trypsin".
+- **Sage precursor-window check only warns.** It never re-runs the search: staff run the offered command and compare. The 0.5 edge fraction is a heuristic. The corrected window was verified in PSMs on one peptidome (above), not in peptides or on a second dataset.
+- **Already-normalised engine quantities get a second, quantile step.** With `--between-run auto` (the default), directLFQ, IonQuant MaxLFQ and AlphaDIA quantities, which are already normalised between runs, are quantile-normalised again in the DE. This was not benchmarked for these engines; on DIA-NN's normalised quantities the same pattern gave many wrong calls (2.14.2). The Methods name both steps; `--between-run none` skips the second. Planned for 2.16 (`references/de-analysis.md`).
+- **Skyline on timsTOF dia-PASEF `.d` reached through a link.** On HIVE the build and the imports worked with linked runs; the join failed until it too used the real path, and the same runs by their real paths reached "ok". The fixed join was not re-run on linked runs. The retry command was never submitted on HIVE. After a failed build the plan still exits 0 and the dependent join stays pending.
+- **Some sizing rests on one measurement.** DIA-NN step 3's time comes from 77 files at 48 CPUs, scaled linearly. Step 5 keeps its old size.
+- **Not changed.** The ion-trap fragment tolerance stays 0.6 Da, as in FragPipe 24.0's own ion-trap workflows. `provenance` still fingerprints all staged files, which took 33 minutes on 300 runs.
+- **The `commands.log` is written by the agent, not by a script.** Nothing in the skill wrote it before; the new `log-command` helps but does not force it.
+- **Watcher, two small gaps.** After a Skyline `retry`, the original failed import job is still listed, so watching the whole chain (`watch_run.sh --all`) reports it as failed. A FragPipe DDA job's watcher narration still uses the DIA wording (`pipeline_notes.py`).
+- **Not run on HIVE:** the Skyline `retry` command, the join on linked runs after its fix, `queue_actual`'s unavailable branch, and Sage's stack-overflow path (only detection is tested, with a fake Sage).
+
+### Checked on HIVE after the merge
+The merged fixes were run on real HIVE jobs and data (small subsets, about 17 CPU-hours on the free low queue):
+- **Contaminants:** on a real FragPipe result, all 820 contaminant peptides matched an independent recount. Most flagged PSMs are flagged because a shared human, bovine or mouse protein in their mapped list is a contaminant entry.
+- **Sage memory and crash handling:** the job script sets `RUST_MIN_STACK`; a full bovine peptidome search asked 424G from the database size and used 345 to 351 GiB.
+- **FragPipe 24.0 presets:** the default DDA preset (now named trypsin), an explicit trypsin preset and a chymotrypsin preset all load in FragPipe.
+- **`--semi-specific`:** a real FragPipe run searched one enzymatic terminus (94 of 134 PSMs semi-specific) and a real Sage run had `semi_enzymatic` on; the Methods said semi-specific in both.
+- **Watchers:** `watch_run.sh`, `queue_actual` and the normalisation check's decision marker read real Slurm records correctly. Three defects found there were fixed before release: a cancelled FragPipe job read as "empty results", the Skyline logs were not found, and a job label was read as a job id.
+- **Skyline with linked `.d` files:** the build and imports worked; the join failed until it used the real path too (fixed; see limitations).
+- **Sage precursor window:** the first version offered a window mirrored the wrong way, which found nothing; corrected before release (see "What the client sees").
+- **FAIMS check on a login node:** it read only file headers, but with no total limit; it now reads at most 40 MB there and moves the rest to a compute node.
+
+### The protein screen ("show me the data for <protein>"), part 1
+
+#### What the client sees
+- **A page for one protein.** Gene, accession and name, the protein's change and adjusted p-value in the chosen comparison, how many runs found it per group, the precursors behind it and the DIA-NN report rows with the checks each failed, how much each precursor shapes each sample's protein value, the chance limpa gave each precursor of being found, and how limma weighted the samples. Facts about the protein come from UniProt, NCBI, HGNC, Ensembl and the Human Protein Atlas, looked up when the page is made and shown as each source wrote them, with release, date and link; nothing comes from the AI's memory. The page makes no network request. Not in this part: peak traces (XICs), the second-opinion check routes, FRAN facts, tracing the report's numbers, and delivery with the results.
+- **The top N changed proteins.** A list page linking each protein's page: the proteins the comparison calls changed (adjusted p-value alone, no fold-change cut), best first, at most 100; fewer called than asked is said on the page.
+- **Which analyses get it.** Part 1 covers limpa DPC-Quant over a DIA-NN report (native, or FragPipe's DIA route) with a plain group design. Every other route is refused with its own name, read from the analysis's own record: DIA-NN MaxLFQ + limma, an engine's own protein quantities (FragPipe IonQuant, directLFQ, AlphaDIA, Radiant), Sage's highest-peptide route, SILAC, a limpa DE over another engine's report, and blocked or covariate designs. The page builder then makes no page and says which route the analysis used (`references/protein-screen.md` "Which analyses part 1 covers").
+
+#### For staff
+- **Step 8g builds the screen data** (`make_screen_data.R`, on a compute node and on the DE's CPU family, `--constraint` when submitted) into `output/screen_data/`: a checksummed manifest, an index and gzipped parts. limpa's refit must reproduce the delivered values to 1e-6; a protein that does not is withheld with the reason. 8,500-10,300 proteins took 106-155 s on PXD063416 (zen2, 8 CPUs). It reads the report the DE read, wherever the session keeps it (`de_provenance.json` `input`, checked by its sha256), and the manifest names that file.
+- **`make_protein_screen.py`** builds the page anywhere (Python only) and checks every file against the manifest first. SKILL.md routes "show me the data" to `references/protein-screen.md` (commands, the never-from-memory rule) and step 8g to it; `references/protein-card-sources.md` lists the fact sources. Design: `docs/specs/protein-data-screen-design.md`.
+- `run_de.R` takes its CPU-family record and `file_sha256` from the new `compute_record.R`, shared with `make_screen_data.R` (one definition each); `protein_ids.py` gains `strip_isoform` and `first_accession`.
+
+## [4.1.2] — 2026-11-12
+
+### Changed
+- **DE-LIMP is now the app's legacy home.** The UC Davis Proteomics Core pipeline (the Claude
+  Code skill) moves to its own repository at the 2.15 release:
+  [github.com/bsphinney/UCD-Proteomics-AI-Skill](https://github.com/bsphinney/UCD-Proteomics-AI-Skill).
+  This app is kept as it is and no longer developed. A notice saying so, with the link, is at the
+  top of the README (GitHub and Hugging Face), of the project website (`docs/index.html`, which
+  also shows this version now instead of v4.0.0) and of the app's sidebar, where it is seen on the
+  start screen. The README's two long skill sections become one short one: what the skill is, a
+  link to the new repository, and the install commands, which add the marketplace from the new
+  repository (switched at the skill's 2.15 release). Nothing in the app's analysis changed.
+- The repository itself stays live: every delivered report links
+  `https://bsphinney.github.io/DE-LIMP/how-reports-are-made.html`, every reproducibility bundle
+  names this marketplace and a version tag here, and the Hugging Face sync runs from it.
+
 ## [Skill 2.14.2] — 2026-11-04
 
 A Core analysis of two timsTOF DDA-PASEF runs went off the skill's standard path. Sage refused the `.d` files, and DIA-NN's `--dda` second pass crashed. The analysis was then delivered as a plain hand-made report, with no reproducibility bundle, no Methods and no AGENTS.md. Two more sessions ended the same way: a re-analysis with no DE, and three HT-plate submissions that stopped at search QC.
@@ -758,7 +895,7 @@ it was done.
 - **The Core's current release** is `/quobyte/proteomics-grp/skill_release/CURRENT_VERSION`,
   written by a maintainer with `skill_version.sh --publish-release` as the last step of a
   release. It is trusted only while the file and its folder belong to a Core admin.
-- **`scripts/core_admins.txt`** is the one list of Core admins (today `brettsp`). It ships with
+- **`scripts/core_admins.txt`** is the one list of Core admins (today the Core director's HIVE login). It ships with
   the skill; it is never read from the shared folder, which any group member can change. It has
   two readers, `skill_version.sh` (bash) and `skill_version.py` (Python), kept equal by a test.
 - **Updating the plugin**: `/plugin` → Installed → Update now, or `claude plugin update
@@ -926,12 +1063,12 @@ it was done.
     `sets_provenance.json`, `sets_methods.txt` and `sets_<contrast>.png`.
   - The report, the analysis brief, AGENTS.md and methods.md quote the record's own reading,
     for example "not detectable in this design", with n and residual df, never "unchanged".
-  - Validation on PROT_0756 v2, and the simulations behind the defaults, are in
+  - Validation on the mouse-brain IP cohort (v2), and the simulations behind the defaults, are in
     `references/set-tests.md`.
 
 ### Reproducibility: exact numbers need the same CPU family
-- DPC-Quant's per-protein BFGS fit runs through OpenBLAS's CPU-specific kernels. On PROT_0756 v2
-  the same inputs, software and command gave |ΔlogFC| ≤ 0.0022 and 0 changed significance calls
+- DPC-Quant's per-protein BFGS fit runs through OpenBLAS's CPU-specific kernels. On the mouse-brain IP
+  cohort (v2) the same inputs, software and command gave |ΔlogFC| ≤ 0.0022 and 0 changed significance calls
   between zen4 and zen2 nodes. Each family reproduced its own tables exactly.
 - `run_de.R` now records the machine in `de_provenance.json` `compute` and at the top of
   `sessionInfo.txt`: the CPU model, the BLAS and LAPACK libraries, `OPENBLAS_CORETYPE` as found,
@@ -962,7 +1099,7 @@ it was done.
 ### CoreOmics keys: staff can make, save and check one
 - **`core_submission.py check`** says in plain words whether this computer's CoreOmics key
   works, and what to do if it does not: `ok`, `no_key`, `key_in_wrong_place`, `key_empty`,
-  `key_malformed`, `key_unreadable`, `key_rejected`, `no_lab_access` (ask brettsp to add the
+  `key_malformed`, `key_unreadable`, `key_rejected`, `no_lab_access` (ask the Core director to add the
   account to the Proteomics lab), `unreachable` or `unexpected`. It never prints the key.
   SKILL.md step 1c runs it before `fetch`. Two staff could not reach CoreOmics from the skill:
   nothing said how to get a key, and on a Windows domain account a key saved in Git Bash's `~`
@@ -987,7 +1124,8 @@ it was done.
 
 ### CoreOmics submission numbers
 - **A submission number is ASCII digits only.** Python's `\d` also matched Arabic-Indic and
-  fullwidth digits, which `int()` reads, so `٧٥٦` attached PROT_0756 and made a run the Core's.
+  fullwidth digits, which `int()` reads, so a number in those digits (`٩٧٥٦`, read as
+  PROT_9756) attached a Core submission and made a run the Core's.
 - `record_run.py` now reads PROT numbers with `core_submission.normalize_submission`, which is the
   one definition, instead of keeping its own copy.
 - `identify` asks for a number only when there is evidence the data are the Core's. Otherwise it

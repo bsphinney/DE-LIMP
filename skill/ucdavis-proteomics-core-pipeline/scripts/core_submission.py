@@ -9,11 +9,11 @@ Bioshare folder the collaborator opens. Every step in between is a place where t
 silently attach to the wrong thing:
 
   * The sample sheet's `unique_id`s are the ONLY link to the raw files, and they are short,
-    reused by other submissions (BN1-6 in both PROT_0794 and PROT_0776), and collide with
+    reused by other submissions (BN1-6 in two different submissions), and collide with
     plate wells (A3, H10) that match thousands of files.
   * The service directory is organized by human-named folders (`Doe jane`,
     `Institution_X/Lab_Y`), so "where does this project live" is a lookup, not a formula.
-  * A share built from links depends on server settings. PROT_0793's links into /quobyte
+  * A share built from links depends on server settings. One submission's links into /quobyte
     served nothing over https because Bioshare's Apache file-streaming allowed /quobyte on
     port 80 but not 443 (fixed 2026-09-16); absolute /nfs links are invisible over SMB. So deliverables are
     copied as real files, and the only links this script makes are relative raw/ links.
@@ -144,7 +144,7 @@ SYNC_HINT = ("the scripts directory is incomplete: sync the whole scripts/ direc
              ".claude-plugin/ beside it, to ~/proteomics-pipeline/ (bash scripts/hive_exec.sh "
              "--put-skill)")
 RAW_WHITELIST_WARNING = (
-    "Check once: Brett reported (2026-09-16) that PROT_0793's raw/ links download from Bioshare, "
+    "Check once: Brett reported (2026-09-16) that an earlier submission's raw/ links download from Bioshare, "
     "and relative links resolve to the same files, but nobody has checked a relative raw/ link "
     "in Bioshare itself. Before `bioshare send`, open the link and download one raw file.")
 
@@ -597,7 +597,7 @@ def local_share_dir(summary: dict, warnings: list) -> str:
 # users/get_token/ and users/create_token/ calls), and the API takes the key as
 # `Authorization: Token <key>`. The key lives where the CoreOmics steps run: on the staff
 # member's computer, or -- in hive_remote from a computer with no usable Python (the Windows
-# Store stub: Michelle, 2026-10-08) -- on HIVE, as ~/.coreomics_token with mode 600, put there
+# Store stub: a Core member, 2026-10-08) -- on HIVE, as ~/.coreomics_token with mode 600, put there
 # once by scripts/coreomics_key_to_hive.sh over ssh stdin.
 KEY_NAME = ".coreomics_token"
 KEY_TO_HIVE = "bash scripts/coreomics_key_to_hive.sh"
@@ -618,7 +618,7 @@ SAVE_KEY_LINE = {
     "windows": ("read -rs TOK && [ -n \"$TOK\" ] && F=\"$(cygpath \"$USERPROFILE\")/.coreomics_token\" "
                 "&& (umask 077; printf '%s\\n' \"$TOK\" > \"$F\") && chmod 600 \"$F\"; unset TOK"),
 }
-LAB_ADMIN = "a Core admin (Brett Phinney, brettsp)"
+LAB_ADMIN = "a Core admin (Brett Phinney, the Core director)"
 CHECK_ON_HIVE = "bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/core_submission.py check'"
 
 
@@ -1690,7 +1690,7 @@ def token_pattern(uid: str):
     separator on both sides, so EB_001 finds EB-001; letters/digits may not touch either
     end, so KG1 does not find KG13.
 
-    Where letters meet digits a separator may also be added or dropped: PROT_0756's sheet
+    Where letters meet digits a separator may also be added or dropped: a mouse-brain IP cohort's sheet
     says LRS96 and every one of its 30 runs says DIA-LRS-96 (measured on the share), so LRS96
     finds LRS-96 and EB_001 finds EB001. Between two runs of digits, or two of letters, the
     separator stays required -- SG-001-2 must not find SG0012."""
@@ -1710,6 +1710,15 @@ def token_pattern(uid: str):
     for prev, p in zip(parts, parts[1:]):
         body += (r"[-_\s]*" if boundary(prev[-1], p[0]) else required) + part(p)
     return re.compile(r"(?<![A-Za-z0-9])" + body + r"(?![A-Za-z0-9])", re.I)
+
+
+def suffixed_label_pattern(uid: str):
+    """token_pattern, but letters may follow the label (S1 finds S1CT; KG1 still not KG13). Only
+    for a run staff name outright (locate --choose): never used to find candidates."""
+    pat = token_pattern(uid)
+    if not pat or not pat.pattern.endswith("(?![A-Za-z0-9])"):
+        return None
+    return re.compile(pat.pattern[:-len("(?![A-Za-z0-9])")] + "(?![0-9])", re.I)
 
 
 # timsTOF runs carry the sample id in ONE fixed field:
@@ -1818,10 +1827,10 @@ def prepare_entry(e: dict) -> dict:
 
 def ht_pattern(internal_id):
     """HT plate filenames put the submission number straight after the leading date, bare or
-    with its `PROT_` prefix: `20260827_793_100spd_...`, `20260901_0793_rerun_...`,
+    with its `PROT_` prefix: `20260827_807_100spd_...`, `20260901_0807_rerun_...`,
     `20260930_PROT_0807_...` (`PROT0807` too, any case). Anchoring there (rather than anywhere
-    in the name) keeps run counters such as Exploris `Ex08312026_380_JE21` from impersonating
-    submission 0380, and the number must end there: `PROT_08070` is not 0807. Before 2.9.1 the
+    in the name) keeps run counters such as Exploris `Ex08312026_9380_XY21` from impersonating
+    submission 9380, and the number must end there: `PROT_08070` is not 0807. Before 2.9.1 the
     prefix was not allowed, so a plate named `<date>_PROT_<n>_...` was not recognised and
     locate found 0 of its 96 samples."""
     m = re.search(r"(\d+)$", _s(internal_id))
@@ -1911,6 +1920,43 @@ def name_universe(samples: list) -> list:
             out.append({"uid": _s(smp.get("unique_id")), "label": n, "norm": key,
                         "pattern": pat, "sub": "", "submitted": None, "ours": True, "sample": smp})
     return out
+
+
+MATCHED_ON_ID, MATCHED_ON_HT_ID, MATCHED_ON_HT_NAME = (
+    "unique_id", "unique_id (HT plate run)", "sample_name (HT plate run)")
+
+
+def ht_plate_run(name: str, plate) -> bool:
+    """Is `name` one of this submission's HT plate runs? THE test, for run_matches (locate's
+    curated list, the HT manifest's sample_list check, the report's notes): the Core's HT plate
+    naming in full -- the plate token straight after the date (`plate`, ht_pattern) AND the
+    plate-position tail (HT_TAIL, `_S<plate>-<well>_<n>_<acq#>.d`). Neither the CoreOmics record
+    nor the session says that a submission is an HT plate (checked on a real HT record, 2.15), so
+    the naming is the marker; a name with the token alone -- an Astral run
+    `<date>_PROT_<n>_<...>.raw` -- is an ordinary run, matched by unique_id (2.15 review M3)."""
+    name = os.path.basename(_s(name).rstrip("/"))
+    return bool(plate and plate.match(name) and HT_TAIL.search(name))
+
+
+def run_matches(path: str, universe: list, names: list, plate) -> tuple:
+    """(owners, matched on) for ONE run: THE rule by which a run is matched to the sample sheet --
+    for locate's curated list (curated_rows, which the HT manifest's sample_list check uses) and
+    for the report's sheet-vs-raw notes (submission_report.run_owners). A run of this
+    submission's HT plate (ht_plate_run: the plate token and the plate position) is matched ONLY
+    in its sample field (after the plate token, before the plate position: a unique_id A1 must
+    not take the run in the Core's well A1, 2.10 review HIGH 3): by unique_id (`universe`), else
+    by sample_name (`names`, name_universe) -- an HT run carries the submitter's sample name,
+    never a unique_id. Any other run by unique_id, in match_space. `owners` are the universe
+    entries the longest match picks (file_owners); `matched on` is one of MATCHED_ON_*."""
+    name = os.path.basename(path.rstrip("/"))
+    if ht_plate_run(name, plate):
+        field = ht_sample_field(name, plate)
+        e = {"path": path, "name": name, "space": field, "norm": normkey(field)}
+        owners = file_owners(e, universe, {})
+        if owners:
+            return owners, MATCHED_ON_HT_ID
+        return file_owners(e, names, {}), MATCHED_ON_HT_NAME
+    return file_owners(prepare_entry({"path": path, "name": name}), universe, {}), MATCHED_ON_ID
 
 
 def _mtime(path: str) -> float:
@@ -2297,6 +2343,15 @@ def match_samples(samples: list, entries: list, neighbors: list, lo: dt.date, hi
         its id -- in the window or not -- or, when none does, the runs proposed for it by name
         and number (`what` says which). Anything else is refused, never guessed at."""
         hit = next((e for e in pool if _same_file(e["path"], pick["file"])), None)
+        suffixed = False
+        if hit is None:
+            # staff name a run that carries the label followed by letters (a digest suffix:
+            # S1 -> S1CT): never a candidate by itself, but naming it is their decision. A
+            # digit after the label (KG1 -> KG13) is another sample's id and stays refused.
+            loose = suffixed_label_pattern(smp.get("unique_id", ""))
+            hit = next((e for e in entries if loose and loose.search(e["space"])
+                        and _same_file(e["path"], pick["file"])), None)
+            suffixed = hit is not None
         if hit is None:
             raise Stop(EXIT_DECIDE, {
                 "error": f"{pick['source']} {smp.get('unique_id')}={pick['file']}: not one of the "
@@ -2310,8 +2365,10 @@ def match_samples(samples: list, entries: list, neighbors: list, lo: dt.date, hi
                     alternates=[x[0]["path"] for x in cands if x[0] is not hit],
                     ambiguous=list(amb_info), accepted_ambiguous=any(x[0] is hit for x in amb),
                     out_of_window=n_out, shadowed=list(shadowed)[:5], chosen_by=pick["source"],
-                    note=f"chosen by staff ({pick['source']}) from "
-                         f"{len(cands) or len(pool)} candidate run(s)")
+                    note=(f"chosen by staff ({pick['source']}) from "
+                          f"{len(cands) or len(pool)} candidate run(s)" if not suffixed else
+                          f"chosen by staff ({pick['source']}): the run's name carries "
+                          f"{smp.get('unique_id')} followed by letters, not as a separate token"))
 
     rows = []
     for smp in samples:
@@ -2348,6 +2405,9 @@ def match_samples(samples: list, entries: list, neighbors: list, lo: dt.date, hi
                 rows.append(_row(smp, status="unmatched", sample_key=skey,
                                  proposed=[proposal_view(x) for x in props],
                                  note=proposal_note(skey, props)))
+            continue
+        if not hits and pick:
+            rows.append(chosen(smp, pick, []))      # a suffixed label only (chosen refuses the rest)
             continue
         owned, shadowed = [], []
         for e in hits:
@@ -2524,19 +2584,7 @@ def curated_rows(samples: list, paths: list, raw: str, choices: dict | None = No
             smp, src = picked[p]
             by_sample.setdefault(id(smp), []).append((p, src, "staff choice"))
             continue
-        name = os.path.basename(p.rstrip("/"))
-        if plate and plate.match(name):
-            # This submission's HT plate run: ids and names are matched ONLY in its sample field
-            # (after the plate token, before the plate position) -- a unique_id A1 must not take
-            # the run in the Core's well A1 (2.10 review, HIGH 3).
-            field = ht_sample_field(name, plate)
-            e = {"path": p, "name": name, "space": field, "norm": normkey(field)}
-            owners, on = file_owners(e, universe, {}), "unique_id (HT plate run)"
-            if not owners:
-                owners, on = file_owners(e, names, {}), "sample_name (HT plate run)"
-        else:
-            e = prepare_entry({"path": p, "name": name})
-            owners, on = file_owners(e, universe, {}), "unique_id"
+        owners, on = run_matches(p, universe, names, plate)
         who = {id(o["sample"]): o["sample"] for o in owners}
         wells = [o for o in owners if well_like(o.get("label", o["uid"]))]
         if len(who) == 1 and not wells:
@@ -2987,9 +3035,9 @@ def cmd_locate(a) -> int:
 # can carry the submission. Named ids are read only where they are written on purpose: a
 # PROT_#### token in a path or message, a 12-hex CoreOmics id, or "submission 807" typed by the
 # user. A bare number in a FILE name is never read as one -- Exploris runs carry counters
-# (Ex08312026_380_JE21). Everything else goes through the same sample-id matching as `locate`.
+# (Ex08312026_9380_XY21). Everything else goes through the same sample-id matching as `locate`.
 # 3-5 digits after PROT: "Total_prot_10ug" and "WT_prot1" are protein amounts and names, not
-# submissions; 5 because SUBMISSION_NUMBER (and record_run's --prot) take up to 5, so PROT_10234
+# submissions; 5 because SUBMISSION_NUMBER (and record_run's --prot) take up to 5, so PROT_91234
 # is one. PROT_TOKEN is THE definition of a submission id written in a name or path: fran_deposit's
 # QC rule imports it, and FRAN's find_uningested.PROT_ID_RE is a pinned literal copy of it.
 # A hex id preceded by "xxxx-" is the tail of a UUID/GUID, not a CoreOmics id.
@@ -3076,13 +3124,13 @@ def cmd_identify(a) -> int:
     for hit in ids_in(a.text or "", typed=True):
         named.setdefault(hit, []).append("in the user's message")
     base = {"never_search": f"{STALE_SNAPSHOT} is a stale snapshot -- never search it for a "
-                            f"submission (a search for 0756 there matched an unrelated 2019 record)"}
+                            f"submission (a search for 0807 there matched an unrelated 2019 record)"}
     # No evidence of Core data: ask whether the Core ran the samples at all -- an outside user
     # asked "which submission?" answers with a number, and the run becomes the Core's.
     ask_none = ("Were these samples run by the UC Davis Proteomics Core? If so, what is the PROT "
                 "number?")
     ask_number = ("Which CoreOmics submission is this data from? Give the PROT number (e.g. "
-                  "PROT_0756) or the 12-character CoreOmics id.")
+                  "PROT_0807) or the 12-character CoreOmics id.")
 
     def label_of(kind, key):
         return key if kind == "internal_id" else f"CoreOmics id {key}"
@@ -3502,6 +3550,19 @@ def folders_holding_submission(group: str, files: list, internal_id, skip: str) 
     return out
 
 
+def folders_named_for_submission(group: str, internal_id, skip: str) -> list:
+    """Folders under the group folder whose NAME carries this submission's number, written with
+    or without the underscore (`PROT_9812`, `...-PROT9812`) -- an earlier analysis of it that
+    holds neither the listed raw files by name nor a recorded session (2.15 after-run, F15)."""
+    m = re.match(r"\s*([A-Za-z]+)[_\- ]*0*(\d+)\s*$", _s(internal_id))
+    if not m:
+        return []
+    pat = re.compile(r"(?<![A-Za-z0-9])" + re.escape(m.group(1)) + r"[_\- ]?0*" + m.group(2)
+                     + r"(?!\d)", re.I)
+    return [d for d in _subdirs(group)
+            if os.path.realpath(d) != os.path.realpath(skip) and pat.search(os.path.basename(d))]
+
+
 def cmd_stage(a) -> int:
     s = load_summary(a.summary)
     label = submission_label(s)
@@ -3544,7 +3605,16 @@ def cmd_stage(a) -> int:
             raise Stop(EXIT_DECIDE, {
                 "error": f"cannot pick the service folder for {label}: {resolution.get('reason') or 'several candidates'}",
                 "group_resolution": resolution,
-                "hint": "ask staff which folder, then re-run with --service-dir <folder>"})
+                # each candidate with the command that picks it (2.15 after-run F16); stage never chooses
+                "service_dir_options": [
+                    {"folder": os.path.basename(c), "path": c,
+                     "why_not_sure": (resolution.get("contradictions") or {}).get(c, ""),
+                     "rerun_with": f"--service-dir {os.path.basename(c)!r}"}
+                    for c in resolution.get("candidates") or []],
+                "hint": "ask staff which folder, then re-run with --service-dir <folder>"
+                        + (": " + " or ".join(f"--service-dir {os.path.basename(c)!r}"
+                                              for c in resolution["candidates"])
+                           if resolution.get("candidates") else "")})
         group = resolution["group_dir"]
 
     project = os.path.join(group, label)
@@ -3586,6 +3656,23 @@ def cmd_stage(a) -> int:
                 "existing_folders": existing,
                 "hint": "re-run with --project-dir <folder> (one of them), or --service-dir "
                         f"{os.path.basename(group)!r} for a new {label}/ folder"})
+    if not a.project_dir and resolution.get("project_mode") != "existing" \
+            and not os.path.exists(os.path.join(project, MARKER)):
+        # Folders of this submission that stage does NOT adopt are still listed, so staff see them
+        # (2.15 after-run F15: --service-dir skipped the search, and a folder named for the
+        # submission without its underscore was never found). --project-dir <folder> stages there.
+        listed = {os.path.realpath(x["dir"]): x for x in
+                  (folders_holding_submission(group, files, _s(s.get("internal_id")), project)
+                   if a.service_dir else [])}
+        for d in folders_named_for_submission(group, _s(s.get("internal_id")), project):
+            listed.setdefault(os.path.realpath(d), {"dir": d, "raw_files_there": 0, "sessions": []})
+        if listed:
+            resolution = dict(resolution, existing_folders_not_used=list(listed.values()))
+            warnings.append(
+                "this group folder already has folder(s) for this submission, not used: "
+                + ", ".join(os.path.basename(x["dir"]) + "/" for x in listed.values())
+                + f" -- staging into a NEW {label}/ folder; to stage into one of them instead, re-run "
+                  "with --project-dir <that folder>")
     marker = os.path.join(project, MARKER)
     prior = None
     if os.path.exists(marker):
@@ -3939,7 +4026,19 @@ SEARCH_FILES = ("report.parquet", "report.pg_matrix.tsv", "report.pr_matrix.tsv"
                 # product and what it kept; optional, SKIPPED when absent (L7R-F4)
                 "identifications.tsv", "sage_identifications.json",
                 # ...and a FragPipe search whose workflow ran no quantification (Ruling 73a)
-                "fragpipe_identifications.json")
+                "fragpipe_identifications.json",
+                # a FragPipe DDA search's own tables (IonQuant/Philosopher), the source of its
+                # report.parquet, and which protein quantity that carries and why
+                # (fragpipe_quant.py); optional, SKIPPED when absent (2.15 F4). Its logs, manifests
+                # and workflow hold internal paths and stay behind: their parameters reach the
+                # Methods.
+                "combined_protein.tsv", "combined_peptide.tsv", "combined_modified_peptide.tsv",
+                "combined_ion.tsv", "fragpipe_quantity.json",
+                # ...and the Philosopher tables a pooled FragPipe search (Basic-Search, no
+                # IonQuant) writes at the search folder's root in place of combined_*.tsv: the
+                # protein and peptide tables that DO exist (X8 F13). Not psm.tsv: it is one row
+                # per spectrum with the instrument file's name and path.
+                "protein.tsv", "peptide.tsv")
 EXCLUDED_DIRS = {"xic", "report_xic", "temp", "tmp", ".tmp", "__pycache__", "raw_data",
                  "skyline_work"}
 # The analysis conversation (save_transcript.py -> logs/conversation/) and the decisions log are
@@ -4163,24 +4262,42 @@ def plan_interim(output_dir: str) -> tuple:
     return items, folders
 
 
-def find_service_record(summary: dict, session_dir, explicit) -> tuple:
-    """(record, where, foreign) for the staged service project. `foreign` names a DIFFERENT
-    submission whose stage record sits above the session -- a session that belongs to it."""
+def _read_stage_record(path):
+    """(record, None); (None, None) when there is no such file; or (None, why) when one is there
+    but cannot be read -- which every reader reports, never takes for "none" (rule 4)."""
+    try:
+        with open(path) as fh:
+            r = json.load(fh)
+    except FileNotFoundError:
+        return None, None
+    except (OSError, ValueError) as e:
+        return None, f"{path} cannot be read ({type(e).__name__}: {e})"
+    if not isinstance(r, dict):
+        return None, f"{path} cannot be read (not a JSON object)"
+    return r, None
+
+
+STAGE_RECORD_UNREADABLE = " cannot be read ("     # the words of every such `where` (above)
+
+
+def find_service_record(summary: dict, session_dir, explicit, search_tree=True) -> tuple:
+    """(record, where, foreign): THE lookup of a submission's stage record -- for deliver and for
+    the report's notes (submission_report.stage_map, which needs its corrected run names). First
+    the folders above the session (stage puts a session under the work dir, which carries a copy;
+    the record counts while its service project still has it), then `explicit`, then -- with
+    `search_tree` -- the service tree by label: deliver's; minutes on a login node, so the notes
+    never search it. `where` is the service project, or why there is none; a record that is there
+    but cannot be read ends the lookup with that reason (STAGE_RECORD_UNREADABLE), never skipped.
+    `foreign` names a DIFFERENT submission whose stage record sits above the session -- a session
+    that belongs to it."""
     sid = _s(summary.get("id"))
-
-    def read(path):
-        try:
-            with open(path) as fh:
-                r = json.load(fh)
-            return r if isinstance(r, dict) else None
-        except (OSError, ValueError):
-            return None
-
     foreign = None
     if session_dir:
         d = os.path.abspath(session_dir)
         while True:
-            r = read(os.path.join(d, MARKER))
+            r, bad = _read_stage_record(os.path.join(d, MARKER))
+            if bad:
+                return None, bad, foreign
             if r and _s(r.get("id")) != sid:
                 foreign = foreign or (r.get("internal_id") or r.get("id"))
             elif r and r.get("service_dir") and os.path.exists(os.path.join(r["service_dir"], MARKER)):
@@ -4190,22 +4307,31 @@ def find_service_record(summary: dict, session_dir, explicit) -> tuple:
                 break
             d = parent
     if explicit:
-        r = read(os.path.join(explicit, MARKER))
+        r, bad = _read_stage_record(os.path.join(explicit, MARKER))
+        if bad:
+            return None, bad, foreign
         if r and _s(r.get("id")) == sid:
             return r, explicit, foreign
         return None, f"no {MARKER} for this submission in {explicit}", foreign
+    if not search_tree:
+        return None, f"no {MARKER} for this submission in the folders above the session", foreign
     label = submission_label(summary)
-    hits = []
+    hits, damaged = [], []
     for campus in ("on_campus", "off_campus"):
         for depth in ("*", os.path.join("*", "*")):
             for m in glob.glob(os.path.join(service_root(), campus, depth, label, MARKER)):
-                r = read(m)
-                if r and _s(r.get("id")) == sid:
-                    hits.append(os.path.dirname(m))
+                r, bad = _read_stage_record(m)
+                if bad:
+                    damaged.append(bad)
+                elif r and _s(r.get("id")) == sid:
+                    hits.append((os.path.dirname(m), r))
     if len(hits) == 1:
-        return read(os.path.join(hits[0], MARKER)), hits[0], foreign
+        return hits[0][1], hits[0][0], foreign
     if len(hits) > 1:
-        return None, "several staged service projects: " + ", ".join(hits) + " (pass --service-project)", foreign
+        return None, ("several staged service projects: " + ", ".join(h for h, _ in hits)
+                      + " (pass --service-project)"), foreign
+    if damaged:
+        return None, damaged[0], foreign
     return None, "no staged service project found (run `stage --apply` first, or pass --service-project)", foreign
 
 
@@ -4230,12 +4356,63 @@ def raw_names(record: dict) -> list:
     return [(os.path.basename(f.rstrip("/")), f) for f in record.get("files") or []]
 
 
+# The raw files' names, as acquired and as delivered (2.15 review M4): the table that joins the
+# search's run names to the files a delivery's raw/ links carry when staff corrected names when
+# staging. Names only -- no path, no CoreOmics field, no staff: it is delivered.
+RAW_NAME_MAP = "RAW_NAMES.tsv"                           # in a delivery, beside the report
+RAW_NAME_MAP_COLUMNS = ("as_acquired", "delivered", "plate_position")
+
+
+def raw_name_map(record: dict) -> list:
+    """[(name as acquired, delivered name, plate position or "")] for every staged run of a stage
+    record (raw_names: each link's name and its target), in its order. The plate position
+    (PLATE_POSITION, `S2-A1`) is read from the delivered name, else the acquired one."""
+    rows = []
+    for name, target in raw_names(record or {}):
+        if not name or not target:
+            continue
+        acq = os.path.basename(target.rstrip("/"))
+        pos = PLATE_POSITION.search(name) or PLATE_POSITION.search(acq)
+        rows.append((acq, name, pos.group(0) if pos else ""))
+    return rows
+
+
+def raw_name_map_renamed(rows) -> list:
+    """The rows of a raw_name_map whose delivered name is not the name as acquired."""
+    return [r for r in rows if r[0] != r[1]]
+
+
+def format_raw_name_map(rows) -> str:
+    """RAW_NAME_MAP's text: a tab-separated header (RAW_NAME_MAP_COLUMNS) and one row per run."""
+    clean = lambda v: re.sub(r"[\t\r\n]+", " ", _s(v))   # noqa: E731
+    return "".join("\t".join(clean(v) for v in r) + "\n"
+                   for r in [RAW_NAME_MAP_COLUMNS] + list(rows))
+
+
+def parse_raw_name_map(text: str) -> list:
+    """format_raw_name_map's rows back; ValueError when the text is not such a table."""
+    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    if not lines or tuple(lines[0].split("\t")) != RAW_NAME_MAP_COLUMNS:
+        raise ValueError(f"not a raw-name table (its header is not {', '.join(RAW_NAME_MAP_COLUMNS)})")
+    rows = []
+    for ln in lines[1:]:
+        f = ln.split("\t")
+        if len(f) != len(RAW_NAME_MAP_COLUMNS) or not f[0] or not f[1]:
+            raise ValueError(f"a raw-name table row with {len(f)} field(s): {ln[:80]!r}")
+        rows.append(tuple(f))
+    return rows
+
+
 def session_ownership(session_dir: str, record: dict) -> tuple:
-    """A session belongs to a submission when it lives under the staged work dir, or when it
-    searched exactly the staged raw files. Anything else is another submission's results."""
+    """(owned, why, left_out). A session belongs to a submission when it lives under the staged
+    work dir, or when every raw file it searched is one of the staged files: exactly those, or a
+    SUBSET (a plate of 96 staged, the 77 study samples analysed, the NIST / QC runs left out).
+    `left_out` is then the staged files the session did not search ([] otherwise). A session with
+    even one file the stage record does not have is another submission's results (or a superset
+    of this one): refused."""
     wd = record.get("work_dir")
     if wd and is_under(session_dir, wd):
-        return True, "the session is under the staged work dir"
+        return True, "the session is under the staged work dir", []
     # session.read_raw_list: the one reader, which also reads a list skill 2.7 wrote in cp1252
     try:
         raws = {os.path.realpath(r) for r in sibling("session").read_raw_list(session_dir)}
@@ -4243,9 +4420,17 @@ def session_ownership(session_dir: str, record: dict) -> tuple:
         raws = set()
     staged = {os.path.realpath(f) for f in record.get("files") or []}
     if raws and raws == staged:
-        return True, "the session's input/raw_files.txt matches the staged files"
-    return False, (f"the session is not under the staged work dir ({wd}) and its raw_files.txt "
-                   f"({len(raws)} file(s)) does not match the {len(staged)} staged file(s)")
+        return True, "the session's input/raw_files.txt matches the staged files", []
+    if raws and raws < staged:
+        return (True, f"the session searched {len(raws)} of the {len(staged)} staged files (a subset)",
+                sorted(staged - raws))
+    foreign = sorted(raws - staged)
+    why = (f"the session is not under the staged work dir ({wd}) and its raw_files.txt "
+           f"({len(raws)} file(s)) is not a subset of the {len(staged)} staged file(s)")
+    if foreign:
+        why += (f": {len(foreign)} file(s) are not in the stage record, e.g. "
+                + ", ".join(os.path.basename(f.rstrip("/")) for f in foreign[:3]))
+    return False, why, []
 
 
 def symlinked_components(path: str, root: str) -> list:
@@ -4407,9 +4592,44 @@ def _folder_quantified(quantified, folder):
     return not got or any(got)
 
 
+LEFT_OUT_SHOWN = 20     # file names a client text lists before "and N more"
+
+
+def left_out_text(left):
+    """THE client-facing words for a part-plate delivery (C2 review bio H1): deliver's
+    `session_left_out` ({names, n_staged, raw_all_linked}) -> {"sentence", "raw"} or None when every
+    submitted file was analysed. The README (.md and .html) and the email draft both say it with
+    these words, so a PI who submitted 96 samples is told which ones are not in the share.
+      sentence  "N of the M submitted files were analysed. Not analysed, and not in this share:
+                 <names, at most LEFT_OUT_SHOWN>. Ask us if you want them processed."
+      raw       what the raw folder holds: the analysed files' raw data only, unless
+                 --include-raw all linked every submitted file."""
+    if not isinstance(left, dict) or not left.get("names"):
+        return None
+    names = [str(n) for n in left["names"]]
+    k = len(names)
+    try:
+        n = int(left.get("n_staged") or 0)
+    except (TypeError, ValueError):
+        n = 0
+    shown = ", ".join(names[:LEFT_OUT_SHOWN]) + (
+        f", and {k - LEFT_OUT_SHOWN} more" if k > LEFT_OUT_SHOWN else "")
+    raw_all = bool(left.get("raw_all_linked"))
+    head = (f"{n - k} of the {n} submitted files were analysed." if n > k else
+            f"{k} submitted file{'s were' if k != 1 else ' was'} not analysed.")
+    where = (" (their raw files are in the raw folder)" if raw_all
+             else ", and not in this share")
+    return {"sentence": f"{head} Not analysed{where}: {shown}. Ask us if you want them processed.",
+            "raw": ("the raw instrument files of every submitted file, the ones not analysed "
+                    "included" if raw_all else
+                    f"the raw instrument files of the {n - k} analysed file{'s' if n - k != 1 else ''} "
+                    "only" if n > k else "the raw instrument files of the analysed files only")}
+
+
 def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "analysis",
                  html_twin: bool = False, for_html: bool = False, hive_md=None,
-                 podcast: bool = False, search_dir: str = "search", quantified=None) -> str:
+                 podcast: bool = False, search_dir: str = "search", quantified=None,
+                 left_out=None) -> str:
     """Collaborator-facing. Every claim comes from the submission record or from a file that
     was actually delivered -- no email addresses, no numbers that are not in the inputs, and no
     "we compared your groups" without a comparison table beside it. The only paths are the
@@ -4421,8 +4641,13 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
     the run's podcast (delivered_podcast), so the survey line asks about it too. `search_dir`:
     the folder an analysis delivery's search went to (delivery_search: search_sage, ...).
     `quantified`: searches_quantified() of the delivered search folders, so an
-    identifications-only search is described as one (SEARCH_DID, SEARCH_FOLDER_HOLDS)."""
+    identifications-only search is described as one (SEARCH_DID, SEARCH_FOLDER_HOLDS).
+    `left_out`: deliver's session_left_out (a part-plate session): left_out_text() says which
+    submitted files were not analysed, and the raw-folder row says whose raw files it holds."""
     sd = (search_dir or "search").strip("/") + "/"
+    lo = left_out_text(left_out) if mode != "raw-only" else None
+    raw_row = (f"{lo['raw']}, in the `raw` folder next to this one" if lo else
+               "your raw instrument files, in the `raw` folder next to this one")
     label = submission_label(summary)
     pi_name = (summary.get("pi") or {}).get("name")
     fixed = ("MANIFEST.txt", "checksums.sha256") + (("README.html",) if html_twin else ())
@@ -4482,14 +4707,18 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
               "**Still to come, in a later delivery:** "
               + "; ".join(DELIVERY_MODES["interim"]["owed"]) + ". There is no report"
               + (" or statistical comparison" if any(did.values()) else "")
-              + " in this folder yet.", "",
-              "## What is in this folder", "", "| item | what it is |", "|---|---|"]
+              + " in this folder yet.", ""]
+        if lo:
+            L += [f"**Not every submitted file is here.** {lo['sentence']}", ""]
+        L += ["## What is in this folder", "", "| item | what it is |", "|---|---|"]
         for d in folders:
             L.append(f"| {item(d + '/')} | the search engine's output: "
                      f"{SEARCH_FOLDER_HOLDS[did[d]]} |")
         for name, text in (("README.html", "this README as a web page, with working links"),
                            ("AGENTS.md", "a guide to this folder for an AI assistant: give it "
                                          "this file with the folder"),
+                           (RAW_NAME_MAP, "the raw files' names as acquired and as delivered "
+                                          "(with the plate position)"),
                            ("MANIFEST.txt", "what was included in this folder and, for anything "
                                             "not included, why"),
                            ("checksums.sha256", "SHA-256 checksums to verify the download "
@@ -4497,8 +4726,7 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
             if name in delivered or name in fixed:
                 L.append(f"| {item(name)} | {text} |")
         if raw_names:
-            L.append(f"| {item('../raw/')} | your raw instrument files, in the `raw` folder next "
-                     "to this one |")
+            L.append(f"| {item('../raw/')} | {raw_row} |")
     else:
         de = DELIVERY_MODES[mode]["de"]
         L = [f"# {label} — {'results' if de else 'report'} from the UC Davis Proteomics Core", ""]
@@ -4521,6 +4749,8 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
                           "table per comparison in `tables/`.")
         L += [f"This folder holds what the UC Davis Proteomics Core prepared for CoreOmics submission "
               f"{label}{_submission_details(summary)}." + ("" if not claims else " " + " ".join(claims)), ""]
+        if lo:
+            L += [f"**Not every submitted file was analysed.** {lo['sentence']}", ""]
         if not de:
             L += ["**This delivery has no differential expression:** no statistical comparison "
                   "between sample groups is in it. It is a report delivered without those "
@@ -4566,6 +4796,8 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
             ("AUDIT.md", "automated checks of the experimental design and results, with caveats"),
             ("SAMPLE_QUALITY.md", "sample-quality checks (e.g. contamination that can mimic biology)"),
             ("OUTPUT_FILES.md", "a catalogue of every file and what it is"),
+            (RAW_NAME_MAP, "the raw files' names as acquired and as delivered (with the plate "
+                                 "position): join the search's run names to the files in `raw` on it"),
             ("MANIFEST.txt", "what was included in this folder and, for anything not included, why"),
             ("checksums.sha256", "SHA-256 checksums to verify the download (`shasum -a 256 -c checksums.sha256`)"),
         )
@@ -4583,7 +4815,7 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
                         "skyline/", [doc] if doc else []):
                     L.append(f"| {item(path)} | {text} |")
         if raw_names:
-            L.append(f"| {item('../raw/')} | your raw instrument files, in the `raw` folder next to this one |")
+            L.append(f"| {item('../raw/')} | {raw_row} |")
         methods = []
         if "methods.md" in delivered:
             methods.append("- **Methods text:** `methods.md`" + (" (and `methods.docx`)" if "methods.docx" in delivered
@@ -4645,7 +4877,7 @@ def delivered_skyline(items: list, delivered) -> dict:
 
 
 def delivery_docs(summary: dict, session_dir, delivery: str, delivered: set, raw_names: list,
-                  mode: str, froot: str, warnings: list) -> list:
+                  mode: str, froot: str, warnings: list, left_out=None) -> list:
     """AGENTS.md, README.html and README.md for a delivery -- what every collaborator
     deliverable carries (Brett, 2026-09-24): a page to double-click, a guide for an AI assistant
     handed the folder, and where it all lives on HIVE. The session's facts, AGENTS.md text and
@@ -4695,7 +4927,7 @@ def delivery_docs(summary: dict, session_dir, delivery: str, delivered: set, raw
         try:
             src = build_readme(summary, delivered, raw_names, mode, html_twin=True, for_html=True,
                                hive_md=hive, podcast=delivered_podcast(session_dir, delivered),
-                               search_dir=sdir, quantified=quantified)
+                               search_dir=sdir, quantified=quantified, left_out=left_out)
             write_text_nofollow(os.path.join(delivery, "README.html"),
                                 docs._render_html(src, src.splitlines()[0].lstrip("# ").strip()),
                                 froot, warnings)
@@ -4709,13 +4941,15 @@ def delivery_docs(summary: dict, session_dir, delivery: str, delivered: set, raw
     write_text_nofollow(os.path.join(delivery, "README.md"),
                         build_readme(summary, delivered, raw_names, mode, html_twin=html_ok,
                                      hive_md=hive, podcast=delivered_podcast(session_dir, delivered),
-                                     search_dir=sdir, quantified=quantified),
+                                     search_dir=sdir, quantified=quantified, left_out=left_out),
                         froot, warnings)
     delivered.add("README.md")
     lines.append(("README.md", None))
     return lines
 
 
+# Own copy on purpose (not safe_write.sha256_file): a partial copy of scripts/ must reach the
+# "sync the whole scripts/ directory" refusal (exit 3), not a traceback.
 def sha256_of(path: str) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as fh:
@@ -4733,7 +4967,7 @@ def verify_delivery(delivery_dir: str, share_dir: str, froot: str, expected=None
     by name) must be relative and resolve under the Flinders root.
 
     Links already in the share that this run did not create are reported as NOTES and left
-    alone. PROT_0793's share/search -> /quobyte links are the model case: they are valid, and
+    alone. An earlier submission's share/search -> /quobyte links are the model case: they are valid, and
     stopped serving only because of a Bioshare server setting (fixed 2026-09-16), so treating
     them as a failure would block every later delivery into that share for something this run
     neither made nor can fix."""
@@ -4816,7 +5050,7 @@ def write_deliver_job(a, session_dir, where_dir: str, label: str, total: int, wa
         raise Stop(EXIT_DECIDE, {"error": f"the delivery job's log path holds a quote or a line "
                                           f"break, which #SBATCH --output cannot carry: {log!r}"})
     # the log path double-quoted: an unquoted space makes sbatch refuse the script ("Invalid
-    # directive"); quoted, HIVE's SLURM writes the log there (job 24808508, 2026-10-15)
+    # directive"); quoted, HIVE's SLURM writes the log there (a test job, 2026-10-15)
     L = ["#!/bin/bash", f"#SBATCH --job-name=deliver_{label}",
          f'#SBATCH --output="{log}"',
          "#SBATCH --cpus-per-task=1", "#SBATCH --mem=2G", "#SBATCH --time=24:00:00"]
@@ -4865,14 +5099,25 @@ def cmd_deliver(a) -> int:
     if foreign:
         raise Stop(EXIT_DECIDE, {"error": f"this session belongs to {foreign}, not {label}",
                                  "session": session_dir})
-    ownership = None
+    ownership, session_left_out, left_paths = None, None, []
     if session_dir:
         if record:
-            owned, why = session_ownership(session_dir, record)
+            owned, why, left_out = session_ownership(session_dir, record)
+            left_paths = list(left_out)
             if not owned:
                 raise Stop(EXIT_DECIDE, {"error": f"the session does not belong to {label}: {why}",
-                                         "hint": "deliver the session made for this submission"})
+                                         "hint": "deliver the session made for this submission; to analyse "
+                                                 "files that are not staged, add them with `stage --apply` "
+                                                 "first. --force only covers a submission with NO stage "
+                                                 "record: it does not bypass this check"})
             ownership = why
+            if left_out:
+                names = [os.path.basename(f.rstrip("/")) for f in left_out]
+                session_left_out = {"n": len(names), "n_staged": len(record.get("files") or []),
+                                    "names": names}
+                shown = ", ".join(names[:20]) + (f", ... ({len(names) - 20} more)" if len(names) > 20 else "")
+                warnings.append(f"{len(names)} staged file{'s' if len(names) != 1 else ''} not in this "
+                                f"analysis: {shown}")
         elif not a.force:
             raise Stop(EXIT_DECIDE, {"error": f"no stage record for {label} ({where}), so nothing proves "
                                               f"this session is {label}'s",
@@ -4881,8 +5126,10 @@ def cmd_deliver(a) -> int:
             ownership = "NOT CHECKED (--force)"
             warnings.append("--force: no stage record, so the session was not checked against the submission")
     # an interim delivery carries the raw files unless --include-raw no (an HT submission: raw + search)
-    want_raw = (mode == "raw-only" or a.include_raw == "yes" or (mode == "interim" and a.include_raw != "no")
+    want_raw = (mode == "raw-only" or a.include_raw in ("yes", "all") or (mode == "interim" and a.include_raw != "no")
                 or (a.include_raw == "auto" and s.get("raw_data_only") is True))
+    if session_left_out:            # whose raw files the share holds (left_out_text, bio H1)
+        session_left_out["raw_all_linked"] = bool(want_raw and a.include_raw == "all")
     if want_raw and not record:
         # say WHY raw data is wanted: an interim delivery links the raw files by default, which
         # nobody asked for out loud (L5b review N3)
@@ -4932,9 +5179,25 @@ def cmd_deliver(a) -> int:
     total = sum(i["bytes"] for i in ok)
     missing_required = [i["name"] for i in items if i.get("required") and i["status"] != "OK"]
 
+    # the stage record's names, delivered as RAW_NAME_MAP when staff renamed any run
+    # a subset session links the analysed files only; --include-raw all links every staged file
+    raw_record = record
+    if record and left_paths and a.include_raw != "all":
+        gone = set(left_paths)
+        keep = lambda tgt: not tgt or os.path.realpath(tgt) not in gone          # noqa: E731
+        raw_record = dict(record,
+                          links=[x for x in record.get("links") or []
+                                 if not isinstance(x, dict) or keep(x.get("target"))],
+                          files=[f for f in record.get("files") or [] if keep(f)])
+        if want_raw:
+            warnings.append(f"raw links: the {len(session_left_out['names'])} staged file(s) not in this "
+                            f"analysis are not linked; --include-raw all links every staged file")
+    name_map = raw_name_map(raw_record) if record else []
+    name_map = name_map if raw_name_map_renamed(name_map) else []
+    name_map_line = None
     raw_plan = []
     if want_raw:
-        for name, f in raw_names(record):
+        for name, f in raw_names(raw_record):
             if not name or not f:
                 # shown by what the stage record has; never linked under a guessed name
                 raw_plan.append({"name": name or (os.path.basename(f.rstrip("/")) if f else "?"),
@@ -4960,10 +5223,14 @@ def cmd_deliver(a) -> int:
             "internal_id": s.get("internal_id"), "id": s.get("id"),
             "delivery_dir": delivery, "share_dir": server_share, "share_dir_local": share,
             "session": session_dir, "session_ownership": ownership,
+            "session_left_out": session_left_out,
             "n_files": len(ok), "bytes": total, "gb": round(total / 1024 ** 3, 3), "max_gb": a.max_gb,
             "items": [{k: v for k, v in i.items() if k != "src"} for i in items],
             "raw": {"wanted": want_raw, "include_raw": a.include_raw, "links": raw_plan,
-                    "service_project": where if record else None},
+                    "service_project": where if record else None,
+                    "name_map": ({"file": RAW_NAME_MAP, "runs": len(name_map),
+                                  "renamed": len(raw_name_map_renamed(name_map))}
+                                 if name_map else None)},
             # what this delivery leaves to a later one (interim): delivery.json `owed`, with what
             # an earlier delivery left owed when this one does not deliver it (owed_after)
             "owed": owed_after(mode, session_dir or (record or {}).get("work_dir")),
@@ -5106,6 +5373,19 @@ def cmd_deliver(a) -> int:
                 expected.add(i["name"])
             except (OSError, UnsafePath) as e:
                 i.update(status="SKIPPED", reason=f"copy failed: {getattr(e, 'strerror', None) or e}")
+        # the raw files' names as acquired and as delivered, when staff corrected any when
+        # staging: what joins the search's run names to the raw/ links (review M4)
+        if name_map:
+            try:
+                write_text_nofollow(os.path.join(delivery, RAW_NAME_MAP),
+                                    format_raw_name_map(name_map), froot, warnings)
+                expected.add(RAW_NAME_MAP)
+                name_map_line = (f"[OK] {RAW_NAME_MAP} -- the raw files' names as acquired and as "
+                                 f"delivered ({len(name_map)} runs, "
+                                 f"{len(raw_name_map_renamed(name_map))} renamed)")
+            except (OSError, UnsafePath) as e:
+                name_map_line = (f"[SKIPPED] {RAW_NAME_MAP} -- could not be written: "
+                                 f"{getattr(e, 'strerror', None) or e}")
         if raw_plan:
             mkdirs_nofollow(share_raw, froot, warnings)
         for r in raw_plan:
@@ -5153,7 +5433,7 @@ def cmd_deliver(a) -> int:
                 warnings.append(f"results_ link in the service project not made: {results_link['reason']}")
         raw_linked = [r["name"] for r in raw_plan if r["status"] == "OK"]
         doc_lines = delivery_docs(s, session_dir, delivery, expected, raw_linked, mode, froot,
-                                  warnings)
+                                  warnings, left_out=session_left_out)
         readme_ok = True
     except Exception as e:                               # recorded in MANIFEST + delivery.json, exit 2
         fatal = f"{type(e).__name__}: {e}"
@@ -5169,6 +5449,9 @@ def cmd_deliver(a) -> int:
     for r in raw_plan:
         manifest_lines.append(f"[OK] ../raw/{r['name']} -- linked to the raw instrument file"
                               if r["status"] == "OK" else f"[SKIPPED] ../raw/{r['name']} -- {r['reason']}")
+    if name_map:
+        manifest_lines.append(name_map_line or f"[SKIPPED] {RAW_NAME_MAP} -- not written "
+                                               "(delivery stopped early)")
     if plan.get("finish_override"):
         fo = plan["finish_override"]
         manifest_lines.append(f"[OVERRIDE] the skill's finish steps -- {fo['reason']}; delivered "
@@ -5235,7 +5518,8 @@ def cmd_deliver(a) -> int:
               "internal_id": s.get("internal_id"), "id": s.get("id"),
               "label": label, "delivered_at": now_utc(), "delivery_dir": delivery,
               "share_dir": server_share, "share_dir_local": share, "session": session_dir,
-              "session_ownership": ownership, "resumed": resume,
+              "session_ownership": ownership, "session_left_out": session_left_out,
+              "resumed": resume,
               "n_files": len(files_now),
               "bytes": sum(os.lstat(p).st_size for p in files_now if not os.path.islink(p)),
               "contents": sorted(x for x in os.listdir(delivery) if x != DELIVERY_MARKER) if os.path.isdir(delivery) else [],
@@ -5243,6 +5527,7 @@ def cmd_deliver(a) -> int:
                          + [f"../raw/{r['name']} -- {r['reason']}" for r in raw_plan if r["status"] != "OK"]
                          + ([f"results link -- {results_link['reason']}"] if results_link and results_link.get("state") == "SKIPPED" else []),
               "raw_links": raw_result, "raw_whitelist_unverified": bool(raw_plan), "results_link": results_link,
+              "raw_name_map": plan["raw"]["name_map"],
               "podcast": delivered_podcast(session_dir, expected),
               "skyline": delivered_skyline(items, expected),
               # the search folder an analysis / no-de delivery carried (delivery_search): its own
@@ -5590,6 +5875,13 @@ def cmd_email_draft(a) -> int:
                  + (ADDRESS_SOURCE if r["email"] else "no address on the submission"))
         if r["problem"]:
             L.append(f"    CHECK BEFORE SENDING: {r['problem']}")
+    left = delivery.get("session_left_out") if isinstance(delivery.get("session_left_out"), dict) else None
+    lo = left_out_text(left) if not raw_only else None       # the client's words (bio H1)
+    raw_line = (f"The raw folder of the same share holds {lo['raw']}." if lo else
+                "Your raw instrument files are in the raw folder of the same share.")
+    if left and left.get("names"):
+        L.append(f"  CHECK: {len(left['names'])} staged file(s) were not in this analysis: "
+                 + ", ".join(str(n) for n in left["names"]))
     L += ["-->", ""]
     for r in recipients:
         addr = r["email"] or "[SUBMITTER EMAIL]"
@@ -5627,7 +5919,7 @@ def cmd_email_draft(a) -> int:
               "Still to come, in a later delivery: " + "; ".join(owed) + ". We will email you "
               "when they are ready."]
         if n_raw:
-            L += ["", "Your raw instrument files are in the raw folder of the same share."]
+            L += ["", raw_line]
     else:
         if no_de:
             L += [f"Subject: Proteomics report for {label} is ready", "", f"Hi {sub.get('first') or 'there'},", "",
@@ -5660,7 +5952,9 @@ def cmd_email_draft(a) -> int:
                 if name in contents and (name != "skyline" or names_skyline):
                     L.append(f"  - {text}")
         if n_raw:
-            L += ["", "Your raw instrument files are in the raw folder of the same share."]
+            L += ["", raw_line]
+    if lo:
+        L += ["", lo["sentence"]]
     if delivery.get("n_files") and delivery.get("bytes"):
         L.append(f"  ({delivery['n_files']} files, {human_size(delivery['bytes'])} in the delivery folder)")
     ack = ("the wording, including the instrument grant, is at the end of methods.md."
@@ -5717,7 +6011,7 @@ def main(argv=None) -> int:
                                           "(names first, then sample ids; never guesses)")
     idn.add_argument("paths", nargs="*", help="raw files and/or their folder, as the user gave them")
     idn.add_argument("--files-from", default=None, help="a file listing raw paths, one per line")
-    idn.add_argument("--text", default="", help="the user's message, for 'PROT_0756' / 'submission 756'")
+    idn.add_argument("--text", default="", help="the user's message, for 'PROT_0807' / 'submission 807'")
     idn.add_argument("--max-days", type=int, default=240,
                      help="a run counts for a submission made up to this many days before it (default 240)")
     idn.add_argument("--no-lookup", action="store_true",
@@ -5732,7 +6026,7 @@ def main(argv=None) -> int:
                     help="accept files acquired up to this many days after submission (default 240; "
                          "never more than the neighbour window fetch recorded)")
     lo.add_argument("--allow-partial", action="store_true",
-                    help="staff confirmed the unmatched samples were not run: downgrade that gate to WARN")
+                    help="staff confirmed the unmatched samples are not part of this analysis (not run, or run in another mode): downgrade that gate to WARN")
     lo.add_argument("--accept-ambiguous", action="store_true",
                     help="staff confirmed runs whose label another submission also uses are THIS "
                          "submission's (recorded in locate.json)")
@@ -5797,11 +6091,13 @@ def main(argv=None) -> int:
     de.add_argument("--label", default=None,
                     help="folder suffix instead of " + " / ".join(f"{m['suffix']}_<date>"
                                                                   for m in DELIVERY_MODES.values()))
-    de.add_argument("--include-raw", choices=["auto", "yes", "no"], default="auto",
-                    help="auto = only when CoreOmics says the submitter wants raw data")
+    de.add_argument("--include-raw", choices=["auto", "yes", "all", "no"], default="auto",
+                    help="auto = only when CoreOmics says the submitter wants raw data. For a session that "
+                         "analysed a SUBSET of the staged files, yes (and an interim delivery) links the "
+                         "analysed files only; all links every staged file, the left-out ones too")
     de.add_argument("--service-project", default=None, help="staged service project (default: discovered)")
     de.add_argument("--force", action="store_true",
-                    help="deliver a session with NO stage record (staff confirmed it is this submission's)")
+                    help="deliver a session with NO stage record (staff confirmed it is this submission's). It does NOT bypass the check against a stage record: with one, the session must be under its work dir or have searched only (a subset of) the staged files")
     de.add_argument("--apply", action="store_true", help="copy, link, verify")
     de.add_argument("--max-gb", type=float, default=5.0,
                     help="above this, write deliver_job.sh and exit 5 instead of copying (default 5)")

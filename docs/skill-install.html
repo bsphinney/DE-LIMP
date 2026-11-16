@@ -290,7 +290,7 @@ footer p { max-width: var(--col); }
 
 <header class="mast">
   <div class="wrap">
-    <p class="eyebrow">UC Davis Proteomics Core &middot; DE-LIMP</p>
+    <p class="eyebrow">UC Davis Proteomics Core &middot; Proteomics AI Skill</p>
     <h1>Analyze your proteomics data by asking Claude</h1>
     <p class="standfirst">
       This guide installs a skill that takes you from raw mass-spec files to a list of
@@ -387,17 +387,17 @@ footer p { max-width: var(--col); }
         <p class="sub">The terminal version</p>
         <p><strong>Easiest, in a terminal:</strong> paste this one line whole, then start Claude
         Code (or run <code>/reload-plugins</code> if it is already open).</p>
-        <div class="cmd" data-copy="claude plugin marketplace add https://github.com/bsphinney/DE-LIMP.git &amp;&amp; claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core">
+        <div class="cmd" data-copy="claude plugin marketplace add https://github.com/bsphinney/UCD-Proteomics-AI-Skill.git &amp;&amp; claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core">
           <button class="copy" type="button">Copy</button>
           <div class="cmd-label">Add the source and install, in one line</div>
-          <pre><code>claude plugin marketplace add https://github.com/bsphinney/DE-LIMP.git &amp;&amp; claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core</code></pre>
+          <pre><code>claude plugin marketplace add https://github.com/bsphinney/UCD-Proteomics-AI-Skill.git &amp;&amp; claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core</code></pre>
         </div>
         <p><strong>Or inside Claude Code:</strong> paste the first command, press Enter, then the
         second. Pasting both at once does not work.</p>
-        <div class="cmd" data-copy="/plugin marketplace add https://github.com/bsphinney/DE-LIMP.git">
+        <div class="cmd" data-copy="/plugin marketplace add https://github.com/bsphinney/UCD-Proteomics-AI-Skill.git">
           <button class="copy" type="button">Copy</button>
           <div class="cmd-label">Step one &mdash; add the source</div>
-          <pre><code>/plugin marketplace add https://github.com/bsphinney/DE-LIMP.git</code></pre>
+          <pre><code>/plugin marketplace add https://github.com/bsphinney/UCD-Proteomics-AI-Skill.git</code></pre>
         </div>
         <div class="cmd" data-copy="/plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core">
           <button class="copy" type="button">Copy</button>
@@ -417,7 +417,7 @@ footer p { max-width: var(--col); }
         <ul class="plain">
           <li>Click <strong>+</strong>, then choose <strong>Plugins</strong>.</li>
           <li>Choose <strong>Add plugin</strong> to open the plugin browser.</li>
-          <li>Add the marketplace <code>bsphinney/DE-LIMP</code>.</li>
+          <li>Add the marketplace <code>bsphinney/UCD-Proteomics-AI-Skill</code>.</li>
           <li>Find <strong>ucdavis-proteomics-core-pipeline</strong> and click <strong>Install</strong>.</li>
         </ul>
         <p>
@@ -470,12 +470,33 @@ footer p { max-width: var(--col); }
       <pre><code>git -C ~/.claude/plugins/marketplaces/ucdavis-proteomics-core pull --ff-only</code></pre>
     </div>
     <p>
-      Note the two different names: <code>https://github.com/bsphinney/DE-LIMP.git</code> is the GitHub repository you add, while
+      Note the two different names: <code>https://github.com/bsphinney/UCD-Proteomics-AI-Skill.git</code> is the GitHub repository you add, while
       <code>ucdavis-proteomics-core</code> is the marketplace inside it that later commands refer
       to. The repository is added by its HTTPS address because Claude Code tries SSH first for the
-      short form <code>bsphinney/DE-LIMP</code>, and many laptops have no GitHub SSH key. If you
+      short form <code>bsphinney/UCD-Proteomics-AI-Skill</code>, and many laptops have no GitHub SSH key. If you
       added the short form before, keep it and refresh it as above. If that pull asks for SSH,
-      use <code>git -C ~/.claude/plugins/marketplaces/ucdavis-proteomics-core pull --ff-only https://github.com/bsphinney/DE-LIMP.git main</code>.
+      use <code>git -C ~/.claude/plugins/marketplaces/ucdavis-proteomics-core pull --ff-only https://github.com/bsphinney/UCD-Proteomics-AI-Skill.git main</code>.
+    </p>
+    <h3 id="moved">Installed before 2.15? The skill has a new home</h3>
+    <p>
+      Up to version 2.15 the skill lived in the DE-LIMP repository
+      (<code>https://github.com/bsphinney/DE-LIMP.git</code>). From 2.15 it has its own repository,
+      <a href="https://github.com/bsphinney/UCD-Proteomics-AI-Skill">github.com/bsphinney/UCD-Proteomics-AI-Skill</a>. The marketplace and plugin names did not
+      change. If you added the old address, you still get 2.15.0 from it as usual, and 2.15.0
+      moves your catalogue to the new address for you when a session starts, and tells you so.
+      If it could not (you were offline, or you use Claude Desktop, where it is done in
+      <strong>+</strong> &rarr; <strong>Plugins</strong> &rarr; <strong>Manage plugins</strong>),
+      paste this one line in a terminal, then run <code>/reload-plugins</code>:
+    </p>
+    <div class="cmd" data-copy="claude plugin marketplace remove ucdavis-proteomics-core &amp;&amp; claude plugin marketplace add https://github.com/bsphinney/UCD-Proteomics-AI-Skill.git &amp;&amp; claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core">
+      <button class="copy" type="button">Copy</button>
+      <div class="cmd-label">Move the catalogue to the new address and reinstall</div>
+      <pre><code>claude plugin marketplace remove ucdavis-proteomics-core &amp;&amp; claude plugin marketplace add https://github.com/bsphinney/UCD-Proteomics-AI-Skill.git &amp;&amp; claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core</code></pre>
+    </div>
+    <p>
+      The first command removes the old catalogue (and, with it, the installed skill); the next two
+      add the new address and install the skill again. Claude Code will not add the new address
+      while the old one is still there under the same name.
     </p>
   </div>
 </section>
@@ -696,8 +717,8 @@ footer p { max-width: var(--col); }
     <h2>Questions</h2>
     <p>
       The skill's source, the search defaults it ships with, and the issue tracker all live in
-      the DE-LIMP repository:
-      <a href="https://github.com/bsphinney/DE-LIMP">github.com/bsphinney/DE-LIMP</a>.
+      the skill's repository:
+      <a href="https://github.com/bsphinney/UCD-Proteomics-AI-Skill">github.com/bsphinney/UCD-Proteomics-AI-Skill</a>.
       If something here is wrong or unclear, open an issue &mdash; that's the fastest way to get it
       fixed for the next person.
     </p>
@@ -713,9 +734,10 @@ footer p { max-width: var(--col); }
 <footer>
   <div class="wrap">
     <p>
-      <strong>UC Davis Proteomics Core</strong> &mdash; part of the
+      <strong>UC Davis Proteomics Core</strong> &mdash; the
+      <a href="https://github.com/bsphinney/UCD-Proteomics-AI-Skill">UCD-Proteomics-AI-Skill</a> repository; before 2.15, part of the
       <a href="https://github.com/bsphinney/DE-LIMP">DE-LIMP</a> project.
-      Searches run in DIA-NN or Sage; differential expression uses
+      Searches run in DIA-NN, FragPipe or Sage; differential expression uses
       <a href="https://bioconductor.org/packages/limpa/">limpa</a> and limma.
       Every analysis ships with the provenance needed to reproduce it.
     </p>

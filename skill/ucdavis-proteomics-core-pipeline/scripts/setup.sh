@@ -78,6 +78,7 @@ NOTES=()
 # otherwise be read as current -- was not rewritten. Exit 2: no way to a compute node here.
 UCD_SLURM_BIN="${HPCCF_SLURM_BIN:-/cvmfs/hpc.ucdavis.edu/sw/spack/environments/core/view/generic/slurm/bin}"
 UCD_CONF="${UCD_HPC_CLUSTER_CONF:-/opt/hpccf/etc/cluster_name.conf}"
+slurm_here() { have sbatch || [ -x "$UCD_SLURM_BIN/sbatch" ] || [ -r "$UCD_CONF" ]; }   # a cluster
 if [ -z "${SLURM_JOB_ID:-}" ] && [ -z "${PROTEOMICS_ON_COMPUTE:-}" ]; then
   OC_PY="$(command -v python3 2>/dev/null || true)"
   if [ -n "$OC_PY" ] && [ -f "$SCRIPT_DIR/on_compute.py" ]; then
@@ -102,7 +103,7 @@ if [ -z "${SLURM_JOB_ID:-}" ] && [ -z "${PROTEOMICS_ON_COMPUTE:-}" ]; then
       fi
       exit $OC_RC
     fi
-  elif command -v sbatch >/dev/null 2>&1 || [ -x "$UCD_SLURM_BIN/sbatch" ] || [ -r "$UCD_CONF" ]; then
+  elif slurm_here; then
     say "[setup] REFUSING to run on a cluster login node (SLURM is here, SLURM_JOB_ID is unset),"
     say "[setup] and there is no python3 + on_compute.py here to move it to a compute node. Run it in a"
     say "[setup] job, with your account and partition: srun --account=<yours> --partition=<yours> \\"
@@ -161,12 +162,12 @@ create_env() {
   if [ "$OS" = "linux" ]; then pkgs+=(proteowizard); fi
 
   say "[setup] solving + installing the analysis environment (this can take a few minutes)..."
-  # -p, not -n: a user .condarc `envs_dirs` outranks -r for a NAMED env. On HIVE (brettsp,
+  # -p, not -n: a user .condarc `envs_dirs` outranks -r for a NAMED env. On HIVE (a Core admin's account,
   # 2026-09-23) envs_dirs is the relative "quobyte/proteomics-grp/conda_envs/", so `-r ROOT -n
   # NAME` built the env under $PWD/quobyte/... -- env_ready never found it, and setup.json said
   # rscript "" after a successful create.
   # --override-channels: the skill names its own channels. A user .condarc with `defaults`
-  # and channel_priority strict (HIVE brettsp, sbatch 24154212) made libmamba consider only
+  # and channel_priority strict (HIVE, a Core admin's account, in a test job) made libmamba consider only
   # defaults' r-statmod, built for R <= 4.3, and bioconductor-limma 3.66 was unsolvable.
   case "$CONDA" in
     *micromamba)
@@ -191,7 +192,7 @@ fi
 # ---- 2a. limpa >= 1.4.0 -------------------------------------------------------
 # run_de.R reads DIA-NN with readDIANN(annotation.columns =): limpa >= 1.4.0, Bioconductor
 # 3.23. bioconda's only build is 1.2.5 (Bioconductor 3.22, R 4.5), and a 2.8.0 run_de.R died
-# on it (HIVE sbatch 24154221). limpa is pure R -- github.com/bioc/limpa RELEASE_3_23 has no
+# on it (in a test job on HIVE). limpa is pure R -- github.com/bioc/limpa RELEASE_3_23 has no
 # src/, Depends limma with no version and no R floor, Imports data.table / statmod -- and
 # every limma function it imports (lmFit, duplicateCorrelation, squeezeVar, arrayWeights,
 # asMatrixWeights, chooseLowessSpan, loessFit, plotMDS) is in bioconda's limma 3.66. So the
@@ -228,12 +229,13 @@ if env_ready && { $LIMPA_OK || [ -n "$LIMPA_VERSION" ]; }; then
   esac
 fi
 LIMPA_FIX="bash $SCRIPT_DIR/setup.sh (it installs it; on a cluster it runs itself on a compute node), or by hand -- on a cluster inside a job, never on a login node: $ENV_PREFIX/bin/Rscript -e \"install.packages('limpa', repos = '$LIMPA_REPO', type = 'source')\", then bash setup.sh --check"
+LIMPA_STATE="limpa ${LIMPA_VERSION:-is not installed}${LIMPA_VERSION:+ is older than $LIMPA_MIN}"
 if env_ready && ! $LIMPA_OK; then
-  NOTES+=("limpa ${LIMPA_VERSION:-is not installed}${LIMPA_VERSION:+ is older than $LIMPA_MIN}: run_de.R --method dpc needs limpa >= $LIMPA_MIN (it can still read the report with limpa 1.2.x and records that it did, but the pinned stack is >= $LIMPA_MIN). Fix: $LIMPA_FIX.")
+  NOTES+=("$LIMPA_STATE: run_de.R --method dpc needs limpa >= $LIMPA_MIN (it can still read the report with limpa 1.2.x and records that it did, but the pinned stack is >= $LIMPA_MIN). Fix: $LIMPA_FIX.")
 fi
 
 # ---- 2b. ThermoRawFileParser + pythonnet + pandas: their own install ---------
-# gabrig 2026-09-23 (15 Fusion Lumos .raw, HIVE): nothing had installed a parser, step 2 read
+# A Core member, 2026-09-23 (15 Fusion Lumos .raw, HIVE): nothing had installed a parser, step 2 read
 # every file as "not found" while setup.json said ready_for.dia, and the search would have run
 # the 380-980 FALLBACK on a method that acquired 357-1105. bioconda's build is the
 # self-contained .NET 8 one (run deps icu, libzlib, openssl, wget -- no dotnet), for linux-64,
@@ -245,7 +247,7 @@ fi
 # with the RawFileReader DLLs TRFP ships -- TRFP never outputs it, and without it
 # estimate_params.py cannot pin DIA-NN's documented tolerances. Its .NET is ensure_dotnet8.sh's
 # (a self-contained TRFP's bundled runtime cannot host it). Installed = its conda-meta record.
-# pandas (conda-forge) rides along: gabrig's follow-up (#15) found none in the HIVE env, and
+# pandas (conda-forge) rides along: a Core member's follow-up (#15) found none in the HIVE env, and
 # ad-hoc analysis reaches for it first. Here, not in create_env, because create_env only runs
 # for a MISSING env -- this step is how an env that already exists gets it on a re-run.
 trfp_in_env() { [ -x "$ENV_PREFIX/bin/ThermoRawFileParser" ] || [ -x "$ENV_PREFIX/bin/thermorawfileparser" ]; }
@@ -632,11 +634,91 @@ if [ -n "$PY" ]; then
     && THERMO_READY=true
 fi
 case "$THERMO_READER" in "{"*) ;; *) THERMO_READY=false; THERMO_READER="" ;; esac
+THERMO_UNASKED="Could not ask detect_acquisition.py whether Thermo .raw can be read (python: ${PY:-none found}). Re-run setup.sh to build the env, then setup.sh --check."
 $THERMO_READY || NOTES+=("Thermo .raw cannot be read yet (only matters for .raw input): see thermo_raw_reader.note in setup.json for the exact fix.")
 
 [ -z "$RSCRIPT" ] && NOTES+=("R/Rscript not available — DE cannot run. Re-run setup.sh to install it into the conda env.")
 [ -z "$SAGE" ]    && NOTES+=("Sage not found — DDA search unavailable until the conda env is built.")
-[ "$OS" = "darwin" ] && [ -z "$MSCONVERT" ] && NOTES+=("msconvert is Linux-only on bioconda (and has no vendor readers). Sage still searches here: Thermo .raw through ThermoRawFileParser, mzML as it is, and a timsTOF .d read directly for identifications only (estimate_params.py --ids-only). To QUANTIFY a .d with Sage, run the search on HIVE, where the job converts it with the Core's pinned ProteoWizard container, or convert it to mzML elsewhere with a vendor-enabled msconvert (e.g. Windows ProteoWizard) first. DIA-NN reads .d/.raw natively.")
+MSCONVERT_NOTE="msconvert is Linux-only on bioconda (and has no vendor readers). Sage still searches here: Thermo .raw through ThermoRawFileParser, mzML as it is, and a timsTOF .d read directly for identifications only (estimate_params.py --ids-only). To QUANTIFY a .d with Sage, run the search on HIVE, where the job converts it with the Core's pinned ProteoWizard container, or convert it to mzML elsewhere with a vendor-enabled msconvert (e.g. Windows ProteoWizard) first. DIA-NN reads .d/.raw natively."
+[ "$OS" = "darwin" ] && [ -z "$MSCONVERT" ] && NOTES+=("$MSCONVERT_NOTE")
+
+# ---- 3b. next_steps: the fix for each thing that is not ready, for THIS platform ------------
+# setup.json next_steps {key: one sentence} and a "[setup] next:" line each at the end, so the
+# agent relays a fix instead of deriving one from ready_for. Keys de, limpa, dia, dda, thermo_raw,
+# resolution_reader; a ready item has none, so all ready is {}. Each sentence says when it matters
+# and reuses the fix the notes above give (LIMPA_FIX, NANOPARQUET_FIX, DIANN_NOTE, MSCONVERT_NOTE,
+# thermo_raw_reader's own notes) -- never a second wording of it. "A cluster" is setup.sh's own
+# test (section 0): in a SLURM job, or SLURM / HPCCF's cluster file here.
+ON_CLUSTER=false
+if [ -n "${SLURM_JOB_ID:-}" ] || slurm_here; then ON_CLUSTER=true; fi
+if $ON_CLUSTER; then
+  RERUN_SETUP="bash $SCRIPT_DIR/setup.sh (without --check; from a login node it runs itself on a compute node in one blocking srun, so run it in the background and wait for it, and never install with conda, R or .NET on a login node by hand)"
+  BY_HAND="by hand inside a job, never on a login node"
+else
+  RERUN_SETUP="bash $SCRIPT_DIR/setup.sh (without --check)"
+  BY_HAND="by hand"
+fi
+# thermo_raw_reader's note and resolution_reader's, one line each (whitespace folded)
+THERMO_NOTE="$THERMO_UNASKED"; RES_READY=""; RES_NOTE=""
+if [ -n "$THERMO_READER" ]; then
+  THERMO_FIELDS="$("$PY" -I -c 'import json, sys
+d = json.loads(sys.argv[1]); r = d.get("resolution_reader") or {}
+ready = {True: "true", False: "false"}.get(r.get("ready"), "")
+for v in (d.get("note"), ready, r.get("note")):
+    print(" ".join(str(v or "").split()))' "$THERMO_READER" 2>/dev/null)"
+  { IFS= read -r THERMO_NOTE; IFS= read -r RES_READY; IFS= read -r RES_NOTE; } <<THERMO_EOF
+$THERMO_FIELDS
+THERMO_EOF
+  [ -n "$THERMO_NOTE" ] || THERMO_NOTE="thermo_raw_reader in setup.json says why"
+fi
+NEXT_STEPS=""       # "key|sentence" lines (set_ann_status_json's form), in the order above
+next_step() { NEXT_STEPS="$NEXT_STEPS$1|$2
+"; }
+MAXLFQ_TOO=""; $R_READ_OK && MAXLFQ_TOO="; --method maxlfq can still run meanwhile (arrow + limma, no limpa)"
+if ! $DE_READY; then
+  if ! env_ready; then
+    next_step de "No DE can run until the skill's own env ($ENV_PREFIX) is built: run $RERUN_SETUP."
+  elif ! $R_READ_OK; then
+    next_step de "No DE can run: arrow (or limma) cannot be loaded in $ENV_PREFIX, and run_de.R reads report.parquet with arrow on both methods; run $RERUN_SETUP."
+  elif [ "$DE_READER" = nanoparquet ]; then
+    next_step de "nanoparquet cannot be loaded in $ENV_PREFIX, and $NANOPARQUET_COST with the default method (dpc); run $RERUN_SETUP, which installs it, or $BY_HAND: $NANOPARQUET_FIX$MAXLFQ_TOO."
+  else
+    next_step de "No DE with the default method (dpc) can run: $LIMPA_STATE in $ENV_PREFIX; fix: $LIMPA_FIX$MAXLFQ_TOO."
+  fi
+fi
+if ! $LIMPA_OK; then
+  if [ -n "$LIMPA_VERSION" ]; then      # an upgrade: other analyses may be running on this limpa
+    next_step limpa "$LIMPA_STATE: run_de.R --method dpc needs limpa >= $LIMPA_MIN; fix: $LIMPA_FIX -- but upgrading an env other analyses run on changes their limpa mid-analysis, so Core staff ask the Core's director first."
+  elif env_ready; then
+    next_step limpa "$LIMPA_STATE: run_de.R --method dpc needs limpa >= $LIMPA_MIN; fix: $LIMPA_FIX."
+  else
+    next_step limpa "limpa >= $LIMPA_MIN comes with the skill's env ($ENV_PREFIX), which is not built yet: run $RERUN_SETUP."
+  fi
+fi
+if ! $DIA_READY; then
+  if $DIANN_READY; then
+    next_step dia "Only for DIA data: DIA-NN can run here, but R is not installed yet (${DIANN_NOTE}); run $RERUN_SETUP."
+  elif [ "$OS" = "darwin" ]; then
+    next_step dia "Only for DIA data, and never by falling back to a DDA engine: run bash $SCRIPT_DIR/build_diann_docker.sh and relay what it prints to the user (install Docker Desktop, open it once) -- $DIANN_NOTE"
+  else
+    next_step dia "Only for DIA data: setup.sh knows no DIA-NN route on $OS; references/install.md says how to run DIA-NN there (Windows: its native build, from Git Bash or MSYS2)."
+  fi
+fi
+if ! $DDA_READY; then
+  DDA_MISSING=""
+  [ -z "$SAGE" ] && DDA_MISSING="Sage"
+  [ -z "$RSCRIPT" ] && DDA_MISSING="$DDA_MISSING${DDA_MISSING:+ and }R"
+  DDA_MAC=""; [ "$OS" = "darwin" ] && [ -z "$MSCONVERT" ] && DDA_MAC=" Even then, $MSCONVERT_NOTE"
+  next_step dda "Only for DDA data (DIA data goes to DIA-NN instead): $DDA_MISSING not found here; run $RERUN_SETUP.$DDA_MAC"
+fi
+if ! $THERMO_READY; then
+  THERMO_THEN="; then bash $SCRIPT_DIR/setup.sh --check until ready_for.thermo_raw is true."
+  [ -n "$THERMO_READER" ] || THERMO_THEN="."      # THERMO_UNASKED says that itself
+  next_step thermo_raw "Only if the input has Thermo .raw files (not for .d or mzML), before step 2: ${THERMO_NOTE%.}$THERMO_THEN"
+fi
+if [ "$RES_READY" = false ]; then
+  next_step resolution_reader "Only for Thermo Orbitrap .raw input: step 2 cannot read the Orbitrap resolution here, so it will ask the user for it; to read it instead: ${RES_NOTE%.}."
+fi
 
 # ---- 4. write activate.sh + setup.json --------------------------------------
 if ! $CHECK_ONLY || [ ! -f "$ACTIVATE" ]; then
@@ -656,6 +738,15 @@ EOF
 fi
 
 j() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+next_steps_json() {   # NEXT_STEPS (section 3b) as JSON members
+  local line sep=""
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    printf '%s"%s": "%s"' "$sep" "${line%%|*}" "$(j "${line#*|}")"; sep=", "
+  done <<NEXT_EOF
+$NEXT_STEPS
+NEXT_EOF
+}
 # Which skill's setup.sh wrote this, and when: skill_version.sh --check-hive reads them on HIVE,
 # so a setup.json older than the skill there is visible (2026-10: one written for 2.12 said
 # ready_for.de true where 2.13's limpa and nanoparquet were missing)
@@ -700,9 +791,9 @@ SETUP_SKILL_VERSION="$( (. "$SCRIPT_DIR/skill_version.sh" && skill_version) 2>/d
          "$($DDA_READY && echo true || echo false)" \
          "$($THERMO_READY && echo true || echo false)"
   if [ -n "$THERMO_READER" ]; then printf '  "thermo_raw_reader": %s,\n' "$THERMO_READER"
-  else printf '  "thermo_raw_reader": {"ready": false, "note": "%s"},\n' \
-         "$(j "Could not ask detect_acquisition.py whether Thermo .raw can be read (python: ${PY:-none found}). Re-run setup.sh to build the env, then setup.sh --check.")"
+  else printf '  "thermo_raw_reader": {"ready": false, "note": "%s"},\n' "$(j "$THERMO_UNASKED")"
   fi
+  printf '  "next_steps": {%s},\n' "$(next_steps_json)"
   printf '  "notes": ['
   for i in "${!NOTES[@]}"; do
     printf '%s"%s"' "$( [ "$i" -gt 0 ] && echo ', ' )" "$(j "${NOTES[$i]}")"
@@ -729,5 +820,14 @@ if env_ready && ! $NANOPARQUET_OK; then
   say "[setup] ERROR: nanoparquet cannot be loaded in $ENV_PREFIX -- limpa >= $LIMPA_MIN reads report.parquet with it, and run_de.R its contaminant share."
   say "[setup]        Fix: $NANOPARQUET_FIX   ($NANOPARQUET_WHY)"
   R_STACK_OK=false
+fi
+# setup.json next_steps, one line each
+if [ -n "$NEXT_STEPS" ]; then
+  say ""
+  while IFS= read -r NS_LINE; do
+    [ -n "$NS_LINE" ] && say "[setup] next: ${NS_LINE%%|*}: ${NS_LINE#*|}"
+  done <<NEXT_EOF
+$NEXT_STEPS
+NEXT_EOF
 fi
 if ! $R_STACK_OK && ! $CHECK_ONLY; then exit 1; fi

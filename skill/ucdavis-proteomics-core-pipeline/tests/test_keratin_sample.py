@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A keratin sample (hair, wool, feather, skin, nail) keeps its keratin: it is the analyte.
 
-msalemi's hair benchmark (SET28, skill 2.8.0): the Universal contaminant set carries ~190
+mstaff's hair benchmark (SET28, skill 2.8.0): the Universal contaminant set carries ~190
 keratin-family Cont_ entries. The target-identity rule removes the ones identical to human
 proteins, but ~46 survive for human -- KRT34, KRTAPs, mouse hair and sheep wool keratins -- and
 for a hair sample those are the analyte's paralogs. DIA-NN's --cont-quant-exclude Cont_ keeps
@@ -1234,37 +1234,52 @@ class SkillDocAsksAtStep3(unittest.TestCase):
         nxt = re.search(r"^### ", self.doc[start + len(head):], re.M)
         return self.doc[start:start + len(head) + (nxt.start() if nxt else len(self.doc))]
 
+    @staticmethod
+    def ref_section(name, head):
+        """A reference's ## section, whitespace-flattened: SKILL.md is a router since the
+        slim-down, and each step's detail lives in the reference section it names."""
+        with open(os.path.join(SKILL, "references", name), encoding="utf-8") as fh:
+            ref = fh.read()
+        i = ref.index("\n## " + head)
+        j = ref.find("\n## ", i + 1)
+        return " ".join(ref[i:j if j > 0 else len(ref)].split())
+
     def test_step3_asks_the_sample_type(self):
-        s3 = self.section("### 3. Ask organism + experimental design")
+        s3 = " ".join(self.section("### 3. Ask organism + experimental design").split())
         # asked since 2.10 -- of Core staff since 2.12 only when a choice depends on it
         # (tests/test_sample_type_asked.py); keratin is decided from that answer, and Core staff
         # get the one keratin question when the submission names a keratin tissue
         self.assertIn("**Sample type — never infer it; ask outside users, and Core staff only "
-                      "when a choice\n  depends on it.**", s3)
+                      "when a choice depends on it.**", s3)
         self.assertIn("**Is the sample keratin?** Decide it from the sample type the user gave",
                       s3)
         self.assertIn("ask only \"are the samples keratin tissue", s3)
         for tissue in ("hair", "wool", "feather", "skin", "nail"):
             self.assertIn(tissue, s3)
         self.assertIn("Deciding it after the search is too late", s3)
-        self.assertIn("fetch_fasta.KERATIN_SAMPLE_TISSUES", s3)
+        self.assertIn("study-questions.md", s3)
+        ker = self.ref_section("study-questions.md", "Keratin samples")
+        self.assertIn("fetch_fasta.KERATIN_SAMPLE_TISSUES", ker)
+        self.assertIn("Deciding it after the search is too late", ker)
 
     def test_each_step_carries_it(self):
-        s6 = self.section("### 6. Build the FASTA")
-        self.assertIn("--keratin-sample|--no-keratin-sample --out ./search.fasta", s6)
+        s6 = " ".join(self.section("### 6. Build the FASTA").split())       # layout-free
+        self.assertIn("--keratin-sample|--no-keratin-sample --enzyme <step 3's answer, e.g. none>",
+                      s6)   # 2.15 C2F2: the digest goes on step 6 too
+        self.assertIn("--out ./search.fasta", s6)
         self.assertIn("DEFAULT — not user-confirmed", s6)
         s7 = self.section("### 7. Run the search")
         self.assertIn("[--keratin-sample]", s7)
         self.assertIn("REFUSED", s7)
-        self.assertIn("pass `--keratin-sample`", self.section("### 8. Differential expression"))
-        self.assertIn("read it from `--fasta-meta`",
-                      self.section("### 8c. Audit the results"))
+        self.assertIn("pass `--keratin-sample`",
+                      self.ref_section("de-analysis.md", "Step 8: keratin samples and contaminants"))
+        self.assertIn("read it from `--fasta-meta`", self.ref_section("audit.md", "8c."))
 
     def test_the_limits_are_documented(self):
-        s3 = self.section("### 3. Ask organism + experimental design")
+        ker = self.ref_section("study-questions.md", "Keratin samples")
         for part in ("KRT1/2/9/10", "FLG/FLG2/HRNR/DMKN", "Poorly annotated species"):
-            self.assertIn(part, s3)
-        s8 = self.section("### 8. Differential expression")
+            self.assertIn(part, ker)
+        s8 = self.ref_section("de-analysis.md", "Step 8: keratin samples and contaminants")
         self.assertIn("refuses a FragPipe search on such a database", s8)
         self.assertNotIn("FragPipe adds when it searches", s8)
 

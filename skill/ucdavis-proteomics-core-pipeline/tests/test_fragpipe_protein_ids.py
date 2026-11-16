@@ -108,6 +108,15 @@ class TheReading(unittest.TestCase):
             with self.subTest(given=given):
                 self.assertEqual(pid.normalize_protein_id(given), want)
 
+    def test_isoform_suffix_and_first_member(self):
+        # the one reading of an isoform suffix (-<digits>) and of a group's first member
+        for given, want in {"P80723-2": "P80723", "P80723": "P80723", "ABC123-ALT": "ABC123-ALT",
+                            "Q9Y223-12": "Q9Y223", "": ""}.items():
+            self.assertEqual(pid.strip_isoform(given), want, given)
+        self.assertEqual(pid.first_accession("P80723-2;Q1"), "P80723-2")       # isoform kept
+        self.assertEqual(pid.first_accession("sp|P12345|ALBU_HUMAN;Q1"), "P12345")
+        self.assertEqual(pid.normalize_protein_id("P80723-2;Q1"), "P80723")
+
     def test_fragpipe_protein_id(self):
         for prot, p_id, _, _ in FRAGPIPE:
             with self.subTest(prot=prot):

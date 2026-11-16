@@ -22,6 +22,9 @@ works for every Core member and not just whoever owns the corpus token.
   python3 fran_deposit.py verify --out <search out dir>
   # can a staged search reach FRAN right now?  (logs + a few small files; login-node safe)
   python3 fran_deposit.py health [--alert]
+  # has anything synthetic ALREADY reached FRAN?  PRINTS the audit SQL (it never connects to PG Farm)
+  # and scans the Lance corpus read-only (--lance-dir; in a compute job, alphadia2 env (pylance 8))
+  python3 fran_deposit.py audit [--lance-dir <dir>] [--report <json>]
   # past searches that were never staged  (dry run; --sbatch writes the job, --apply stages)
   python3 fran_deposit.py backfill --sbatch
 
@@ -66,10 +69,17 @@ permission on the directory is the enforcement, not a flag in this file.
   search_incomplete    no report, or a zero-byte one: a failed search must never be ingested
   engine_unsupported   FRAN's corpus schema covers the DIA engines (DIA-NN / FragPipe /
                        Radiant / Spectronaut). Sage + AlphaDIA runs are skipped, not faked.
+  dda_search           a DDA search by an engine that also searches DIA: FragPipe DDA (its
+                       fp-manifest rows are all DDA) or DIA-NN --dda (its cfg or log). The corpus
+                       is DIA-only (Ruling 57.2), so it is skipped -- not "incomplete": nothing is
+                       wrong with the search (search_acquisition)
   not_core_facility    the drop directory is not writable -> not a Core account
   no_drop_dir          FRAN's drop directory does not exist and cannot be created
   already_staged       this search is already staged (--force to redo)
   opted_out            FRAN_DEPOSIT=off, or --skip
+  test_run             the search or its session is under a /skill_test/ folder
+                       (record_run.no_record_reason, the one definition of a test run): never
+                       staged, by the job-end hook, the agent or backfill
   qc_run               a QC run (is_qc_run: --qc/--not-qc, session `qc`, FRAN's QC trees, or
                        FRAN's QC name rule). Never staged; one staged earlier is marked qc: true
   needs_agent_check    the QC name rule fired on a name that also carries a Core submission id
@@ -212,6 +222,69 @@ DETECT_MARKERS = [
 ]
 
 
+# FragPipe's manifest data types that are DIA (its fourth column; FragPipe 24.0 InputLcmsFile):
+# a diaTracer reuse also lists the pseudo-MS/MS mzML as DDA rows beside the DIA-Quant .d, so ANY
+# of these makes the search DIA.
+FRAGPIPE_DIA_TYPES = ("DIA", "DIA-QUANT", "DIA-LIB", "GPF-DIA")
+DDA_SKIPPED = ("FRAN's corpus is a DIA corpus (Ruling 57.2): a DDA search -- {what} -- is never "
+               "staged, because its rows would carry a DIA acquisition label they do not have. "
+               "Nothing is wrong with the search; it simply does not go to FRAN")
+
+
+def search_acquisition(out, prov=None):
+    """(the acquisition a search searched -- "DDA", "DIA" or None -- and the evidence), read from
+    the search's own files, in order:
+      * FragPipe: its fp-manifest's data-type column (fragpipe.fp-manifest, run_search.py's, else
+        FragPipe's own fragpipe-files.fp-manifest): DIA when any row is a DIA type, else DDA;
+      * DIA-NN: the cfg it ran with (search_provenance.json resolved_params_file / params_file):
+        DDA when it holds estimate_params.DIANN_DDA_FLAG -- the ONE definition of "this cfg
+        searches DDA", which every DIA-NN route refuses a mismatch of -- else DIA;
+      * DIA-NN's log (report.log.txt): its echoed command line with --dda;
+      * the bundle search_provenance.json names (its `acquisition`).
+    None when none of them says."""
+    prov = prov if isinstance(prov, dict) else {}
+    for name in ("fragpipe.fp-manifest", "fragpipe-files.fp-manifest"):
+        try:
+            with open(os.path.join(out, name), errors="replace") as fh:
+                kinds = [ln.rstrip("\r\n").split("\t")[3].strip().upper() for ln in fh
+                         if ln.strip() and len(ln.split("\t")) > 3]
+        except OSError:
+            continue
+        if kinds:
+            dia = any(k in FRAGPIPE_DIA_TYPES for k in kinds)
+            return ("DIA" if dia else "DDA",
+                    f"{name}: {len(kinds)} run(s), data types {', '.join(sorted(set(kinds)))}")
+    from estimate_params import DIANN_DDA_FLAG
+    for key in ("resolved_params_file", "params_file"):
+        cfg = prov.get(key)
+        if not (isinstance(cfg, str) and cfg.endswith(".cfg") and os.path.isfile(cfg)):
+            continue
+        try:
+            import diann_parallel
+            flags = [f for f, _ in diann_parallel.cfg_groups(diann_parallel.cfg_tokens(cfg))]
+        except (OSError, ValueError, ImportError):
+            continue
+        return (("DDA", f"{cfg} has {DIANN_DDA_FLAG}") if DIANN_DDA_FLAG in flags else
+                ("DIA", f"{cfg} has no {DIANN_DDA_FLAG}"))
+    try:
+        with open(os.path.join(out, "report.log.txt"), errors="replace") as fh:
+            head = fh.read(65536)
+        if re.search(r"(^|\s)" + re.escape(DIANN_DDA_FLAG) + r"(\s|$)", head):
+            return "DDA", f"report.log.txt: DIA-NN ran with {DIANN_DDA_FLAG}"
+    except OSError:
+        pass
+    bundle = prov.get("bundle")
+    if isinstance(bundle, str) and os.path.isfile(bundle):
+        try:
+            with open(bundle) as fh:
+                acq = str((json.load(fh) or {}).get("acquisition") or "").strip().upper()
+        except (OSError, ValueError, AttributeError):
+            acq = ""
+        if acq in ("DDA", "DIA"):
+            return acq, f"the search's bundle {bundle} says {acq}"
+    return None, "no manifest, cfg, log or bundle says which acquisition was searched"
+
+
 def jout(d, code=0):
     print(json.dumps(d, indent=2))
     sys.exit(code)
@@ -275,7 +348,7 @@ def completion_marker(out, engine, report):
     DIA-NN needs none here: every skill route writes the report last, behind must_exist().
 
     Found by LOOKING at every Radiant and FragPipe output under the Core trees on HIVE (read-only
-    find, job 23992239, 2026-09-24):
+    find in a job, 2026-09-24):
       FragPipe  16 workdirs; dia-quant-output/report.tsv exists in ALL of them, including 2 whose
                 log says "Cancelling N remaining tasks" and 3 that never finished -- so a report
                 is no evidence at all. The newest log_<date>.txt in the workdir ends "ALL JOBS
@@ -386,7 +459,7 @@ def _meta_candidates(out, explicit_meta=None):
     """The <fasta>.meta.json files that describe THIS search's database, best first.
 
     Globbing the neighbourhood and taking the first hit is how a mouse search was handed to FRAN
-    with the HUMAN database: PROT_0793/ holds human_, mouse_ and mouse_mousecont .fasta.meta.json
+    with the HUMAN database: one submission's folder holds human_, mouse_ and mouse_mousecont .fasta.meta.json
     side by side, `sorted()` puts human first, and search_mouse_mousecont's manifest recorded
     human_UP000005640.fasta (seen in the drop dir on 2026-09-24). So a neighbouring meta is only
     used when it can be tied to a FASTA the search really used (search_fastas), and when the
@@ -781,7 +854,7 @@ def write_receipt(out, data):
 #             "07162026_HE50_60-spd-dia-_S1-A1_1_23036", "FL030926_HeL50_90m_3"
 #   kept:     "HeLa_digest_timecourse", "aqc_buffer_study", "QCM_study", "Plasma_liver2",
 #             "HeLa50ng_titration"
-#   agent:    "PROT_0812 plasma + pooled QC" -> needs_agent_check
+#   agent:    "PROT_0807 plasma + pooled QC" -> needs_agent_check
 # "HeLa" alone is deliberately NOT a QC signal: HeLa digests are real experiments too.
 QC_NAME_RE = re.compile(r"(?i)(?<![a-z0-9])qc(?![a-z])")
 # The Core's HeLa STANDARD -- 50 ng of HeLa digest, named HE50 / HeL50 / Hel-50 / HeLa50(ng) on its
@@ -792,7 +865,7 @@ QC_NAME_RE = re.compile(r"(?i)(?<![a-z0-9])qc(?![a-z])")
 HELA_STD_RE = re.compile(r"(?i)(?<![a-z0-9])he(?:la?)?[-_]?50(?:ng)?(?!\d)")
 RUN_METHOD_RE = re.compile(r"(?i)(?<![a-z0-9])\d{2,3}[-_]?(?:spd|m|min)(?![a-z0-9])")
 # A Core submission id (PROT_ID_RE, imported above). A name or path that carries one is a
-# CUSTOMER study, whatever QC word it also carries ("PROT_0812 plasma + pooled QC"), so the name
+# CUSTOMER study, whatever QC word it also carries ("PROT_0807 plasma + pooled QC"), so the name
 # rule refers it to a person (needs_agent_check) instead of deciding qc_run -- and qc_run, once
 # recorded, blocks later stages.
 # What a NAME-rule verdict says in its reason text. A qc_run recorded on one of these is re-judged
@@ -909,7 +982,7 @@ def is_qc_run(out, session=None, *, names=(), override=None):
     labelled += [("output_dir", c) for c in [x for x in real.split("/") if x][-3:]]
     # The QC signal is read on the last three path components, as FRAN reads them; a PROT id on
     # EVERY component. The Core files a search wherever the submission's tree puts it (in
-    # SERVICE/<lab>/PROT_0812/diann/2.7.0/search_out it is 4th from the end), and a PROT id can
+    # SERVICE/<lab>/PROT_0807/diann/2.7.0/search_out it is 4th from the end), and a PROT id can
     # only turn qc_run into needs_agent_check -- reading further can never exclude anything.
     prot_texts = [t for _, t in labelled] + [c for p in dict.fromkeys((out, real))
                                              for c in p.split("/") if c]
@@ -942,7 +1015,7 @@ def _recorded_qc(receipt, manifest):
 
     EXCEPT a verdict the NAME rule reached (NAME_RULE_MARKS in its qc_rule): that is not binding.
     decide_qc re-judges it by today's rule, with the name it was judged on. Otherwise a rule fix
-    could never reach a search it had already misjudged -- "PROT_0812 plasma + pooled QC", recorded
+    could never reach a search it had already misjudged -- "PROT_0807 plasma + pooled QC", recorded
     qc_run, stayed blocked for every later stage."""
     if receipt.get("status") == "qc_run" and not _name_rule_verdict(receipt.get("qc_rule")):
         return True, (f"QC run: excluded by policy (recorded by {receipt.get('decided_by') or '?'} "
@@ -1027,6 +1100,82 @@ def _utc_now():
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+SESSION_OPT_OUT_FILE = "NO_FRAN"
+
+
+def session_opt_out(out, unreadable=None):
+    """(file, why) when this search sits under a session that opted out of FRAN, else (None, None).
+    Any ANCESTOR directory of the search counts: a `NO_FRAN` file, or `"fran": false` in its
+    session.json / input/session.json (SESSION_QC_FILES' neighbours). One switch for a test or
+    benchmark session, honoured by stage AND backfill (both go through check()).
+    An existing session.json that cannot be parsed is reported on stderr and appended to
+    `unreadable` (a list the caller passes): it might say "fran": false."""
+    unreadable = [] if unreadable is None else unreadable
+    d = os.path.abspath(out)
+    while True:
+        d = os.path.dirname(d)
+        if os.path.lexists(os.path.join(d, SESSION_OPT_OUT_FILE)):
+            f = os.path.join(d, SESSION_OPT_OUT_FILE)
+            return f, f"{f} exists"
+        for rel in ("session.json", os.path.join("input", "session.json")):
+            p = os.path.join(d, rel)
+            if not os.path.isfile(p):
+                continue
+            try:
+                with open(p, encoding="utf-8-sig") as fh:
+                    v = json.load(fh).get("fran")
+            except (OSError, ValueError, AttributeError) as e:
+                # An existing session.json that cannot be read might say "fran": false. Say so,
+                # and ask a person (check() records nothing): never fail open without a word.
+                print(f"fran_deposit: {p} exists but cannot be read ({type(e).__name__}: {e}); "
+                      f'a "fran": false in it would be missed', file=sys.stderr)
+                unreadable.append(p)
+                continue
+            if v is False:
+                return p, f'{p} says "fran": false'
+        if d == os.path.dirname(d):
+            return None, None
+
+
+def _load_json_file(path):
+    import safe_write
+    return safe_write.load_json(path)
+
+
+def database_verdict(out):
+    """The FASTA guard for one search: (verdict, reasons, detail) over EVERY FASTA the search used
+    (search_fastas), worst verdict wins -- test_database over needs_agent_check over ok. The rules
+    live in fasta_guard.py (ONE definition); this only applies them to a search."""
+    import fasta_guard
+    fastas = search_fastas(os.path.abspath(out))
+    if not fastas:
+        return ("needs_agent_check",
+                ["the search names no FASTA (no `fasta` in search_provenance.json, no --fasta in "
+                 "report.log.txt), so its database cannot be checked"], {"fastas": []})
+    verdict, reasons, detail = "ok", [], {"fastas": list(fastas), "checked": []}
+    # A search the skill ran records the fetch_fasta.py sidecar it used (run_search.py: search_provenance
+    # `fasta_meta.path`), so an older search whose sidecar is no longer beside the FASTA is still a
+    # skill-fetched database; only a truly hand-built one has none (`--fasta-meta none`).
+    prov = _load_json_file(os.path.join(out, "search_provenance.json")) or {}
+    fm = prov.get("fasta_meta") if isinstance(prov, dict) else None
+    known = (f"search_provenance.json fasta_meta.path = {fm['path']}"
+             if isinstance(fm, dict) and fm.get("path") else None)
+    prov_fasta = os.path.basename(str(prov.get("fasta") or "")) if isinstance(prov, dict) else ""
+    rank = {"ok": 0, "needs_agent_check": 1, "test_database": 2}
+    for f in fastas:
+        v, rs, d = fasta_guard.classify(
+            f, sidecar_known=known if known and os.path.basename(f) == prov_fasta else None,
+            meta_path=(fm.get("path") if known and os.path.basename(f) == prov_fasta else None)
+        ) if os.path.isfile(f) else (
+            ("test_database" if fasta_guard.read_nofran(f) else "needs_agent_check"),
+            [f"{f} is not readable here, so it cannot be checked"], {"fasta": f})
+        detail["checked"].append({"fasta": f, "verdict": v, **{k: d[k] for k in d if k != "fasta"}})
+        reasons += [f"{os.path.basename(f)}: {x}" for x in rs]
+        if rank[v] > rank[verdict]:
+            verdict = v
+    return verdict, reasons, detail
+
+
 def check(a):
     out = os.path.abspath(a.out)
     r = {"eligible": False, "reason": None, "search_dir": out, "fran": FRAN_URL,
@@ -1035,10 +1184,32 @@ def check(a):
     if a.skip or os.environ.get("FRAN_DEPOSIT", "").lower() in ("off", "0", "no", "false"):
         r.update(reason="opted_out", detail="FRAN_DEPOSIT=off (or --skip)")
         return r
+    # A test run never enters the corpus (C2 ux H2): the same /skill_test/ rule that keeps it out
+    # of the Core run log (record_run.no_record_reason, through notify_slack's reader of it, as
+    # the job-end hook asks). Only the path -- the --no-record flag reaches stage as --skip
+    # through the job-end hook (receipt opted_out).
+    import notify_slack
+    test_why = notify_slack.no_record_reason(out, check_env=False)
+    if test_why:
+        r.update(reason="test_run", detail=f"a test run is never handed to FRAN: {test_why}")
+        return r
     if not os.path.isdir(out):
         r.update(reason="not_on_hive",
                  detail=f"{out} does not exist here. Run this ON HIVE (hive_exec.sh) with the "
                         f"HIVE-side search directory.")
+        return r
+    bad_session = []
+    sess_file, sess_why = session_opt_out(out, bad_session)
+    if sess_file:
+        r.update(reason="opted_out_session", opt_out_file=sess_file,
+                 detail=f"this session opted out of FRAN: {sess_why}. Remove that file (or set "
+                        f'"fran": true) only if the session really holds Core searches.')
+        return r
+    if bad_session:
+        r.update(reason="needs_agent_check", session_json_unreadable=bad_session,
+                 detail=f"{', '.join(bad_session)} exists but is not valid JSON, so whether this "
+                        f'session opted out of FRAN ("fran": false) is unknown. Repair or remove '
+                        f"it, then stage again. Nothing is recorded.")
         return r
     # QC before anything else that could make it look eligible: a QC run is never staged, and one
     # staged before it was known to be QC is withdrawn by stage() (see _withdraw_qc_entry).
@@ -1095,6 +1266,16 @@ def check(a):
     if engine not in ENGINE_REPORTS:
         r.update(reason="engine_unsupported",
                  detail=f"engine '{engine}' has no FRAN corpus adapter ({engine_src})")
+        return r
+    # A DDA search by a DIA engine (FragPipe DDA, DIA-NN --dda): the corpus is DIA-only. Before
+    # 2.15 a FragPipe DDA search was refused as `search_incomplete` (no report.tsv) -- a failed
+    # search, which it was not -- and a DIA-NN --dda one was staged (review M8).
+    acq, acq_ev = search_acquisition(out, r["search_provenance"])
+    r["acquisition"] = {"value": acq, "evidence": acq_ev}
+    if acq == "DDA":
+        what = {"fragpipe": "FragPipe's DDA route", "diann": "DIA-NN with --dda"}.get(
+            engine, f"{engine}, DDA")
+        r.update(reason="dda_search", detail=f"{DDA_SKIPPED.format(what=what)} ({acq_ev}).")
         return r
 
     report = find_report(out, engine)
@@ -1181,6 +1362,38 @@ def check(a):
                      detail=f"{drop} is not writable by {r['user']}, so this is not a Proteomics "
                             f"Core run. Collaborator searches are never handed to the Core corpus.")
         return r
+
+    # THE DATABASE GUARD (after the Core gate, so a collaborator's search is still `not_core_facility`): no sequence that does not exist may reach the corpus. Content-based, so it
+    # catches a test database nobody remembered to mark (fasta_guard.py has the rules).
+    dbv, dbwhy, dbdet = database_verdict(out)
+    r["database_check"] = {"verdict": dbv, "reasons": dbwhy, **dbdet}
+    if dbv == "test_database":
+        r.update(reason="test_database",
+                 detail="the search's database holds sequences that do not exist, so it is never "
+                        "handed to FRAN: " + "; ".join(dbwhy)
+                        + ". --database-ok does NOT clear this. If the refusal is wrong: fix the "
+                          "headers or the database (rename the entries, rebuild it) and search "
+                          "again, or opt the session out of FRAN (a NO_FRAN file or "
+                          '"fran": false in session.json) if it is a test session.')
+        return r
+    if dbv == "needs_agent_check":
+        raw_ok = getattr(a, "database_ok", None)
+        ok_why = (raw_ok or "").strip()
+        if raw_ok is not None and not ok_why:
+            r.update(reason="needs_agent_check",
+                     detail="--database-ok needs a reason (who looked and why the database is "
+                            "real); an empty or blank one is refused. Reasons: " + "; ".join(dbwhy))
+            return r
+        if not ok_why:
+            r.update(reason="needs_agent_check",
+                     detail="the search's database needs a person to look at it: "
+                            + "; ".join(dbwhy)
+                            + f'. Nothing is recorded. If it is a real database, run: python3 '
+                              f'{os.path.abspath(__file__)} stage --out {shlex.quote(out)} '
+                              f'--database-ok "<why it is real>"')
+            return r
+        r["database_ok"] = {"why": ok_why, "by": r["user"], "at": _utc_now(), "reasons": dbwhy,
+                            "unattended_job": os.environ.get("SLURM_JOB_ID") or None}
 
     bad_meta = explicit_meta_mismatch(out, a.fasta_meta)
     org, tax, org_src = organism_from_meta(out, a.fasta_meta)
@@ -1274,7 +1487,8 @@ def stage(a):
 # Receipt statuses stage() records for a DECISION not to hand a search over, so a later `backfill`
 # (run by someone else, months on) honours it instead of staging the search anyway. None of them
 # blocks an explicit `stage`: BLOCKING_STATUS is an allowlist and these are not on it.
-DECISION_STATUS = ("opted_out", "not_core_facility", "qc_run")
+DECISION_STATUS = ("opted_out", "opted_out_session", "not_core_facility", "qc_run",
+                   "test_database", "test_run")
 
 
 def _record_decision(a, c):
@@ -1456,6 +1670,7 @@ def do_stage(a):
         # is authoritative there, and --not-qc records qc_rule "user override".
         "qc": False,
         "qc_rule": c.get("qc_rule"),
+        **({"database_ok": c["database_ok"]} if c.get("database_ok") else {}),
         "staged_by_pipeline": "ucdavis-proteomics-core-pipeline/fran_deposit.py",
         "search_provenance": c.get("search_provenance"),
         # TWO forms of the same thing, on purpose. `suggested_ingest` is an argv ARRAY, correct for
@@ -1474,6 +1689,8 @@ def do_stage(a):
                "xic": c["xic"], "linked": linked, "staged_by": c["user"], "fran": FRAN_URL}
     if c.get("link_errors"):
         receipt["link_errors"] = c["link_errors"]
+    if c.get("database_ok"):
+        receipt["database_ok"] = c["database_ok"]
     write_receipt(out, receipt)
     return {**c, "staged": True, "entry": entry, "linked": linked,
             "manifest": os.path.join(entry, MANIFEST),
@@ -1687,7 +1904,7 @@ def verify(a):
 
 INGEST_LOG_DIR = "/quobyte/proteomics-grp/de-limp/fran_refresh/logs"
 SUBMIT_LOG = "auto_ingest_submit.log"
-# The cron's own cadence and limits (brettsp crontab `23 */4 * * *`; fran_auto_ingest.sbatch
+# The cron's own cadence and limits (a Core admin's crontab `23 */4 * * *`; fran_auto_ingest.sbatch
 # `--time=08:00:00`). A run is "overdue" after three missed 4-hourly ticks.
 NOT_RUNNING_AFTER_H = 12
 JOB_TIME_LIMIT_H = 8
@@ -2628,6 +2845,31 @@ def send_alert(h, cache_path=None, now=None):
     return {"sent": ok, "why": None if ok else status}
 
 
+def audit(a):
+    """E: detection. Prints the audit SQL for a person with a PG Farm login to run (this script never
+    connects to PG Farm, and an agent never mints or uses a PG Farm token), and with --lance-dir
+    scans the Lance spectrum corpus on HIVE, read-only. Needs a compute job for the scan."""
+    import fasta_guard
+    res = {"action": "audit", "pg_farm": "NOT CONTACTED: run these statements yourself",
+           "sql": fasta_guard.audit_sql(), "lance_scan": None}
+    if a.lance_dir:
+        if not (os.environ.get("SLURM_JOB_ID") or a.allow_login_node):
+            res["lance_scan"] = {"refused": "login_node",
+                                 "detail": "scanning the Lance corpus reads hundreds of GB over "
+                                           "Quobyte: run it in a compute job (sbatch, alphadia2 "
+                                           "env), not on a login node"}
+        else:
+            res["lance_scan"] = fasta_guard.lance_scan(a.lance_dir)
+    else:
+        res["lance_scan"] = {"how": f"python3 {os.path.abspath(__file__)} audit --lance-dir "
+                                    f"/quobyte/proteomics-grp/brett/glendon/spectra_lance "
+                                    f"--report <json>   # in a compute job, alphadia2 env (pylance 8)"}
+    if a.report:
+        with open(a.report, "w") as fh:
+            json.dump(res, fh, indent=1)
+    jout(res)
+
+
 def health(a):
     """The full check. Also the ONLY writer of the status file stage() reads."""
     h = health_report(check_code=not a.no_code)
@@ -2651,7 +2893,7 @@ def health(a):
 
 # Where Core searches live. The Quobyte SERVICE tree and the Flinders service tree hold the facility's
 # customer work; ~/proteomics-pipeline is the skill's install on HIVE (verified 2026-09-24 to hold
-# only presets/, references/, scripts/ for brettsp -- kept so a member's sessions there are found).
+# only presets/, references/, scripts/ for the Core admin -- kept so a member's sessions there are found).
 # The Flinders share's HIVE path and its service tree are hive_shares.tsv's (share_map.py), read
 # when a backfill needs them -- never a second copy here.
 
@@ -2903,7 +3145,7 @@ class _StageArgs:
         self.out, self.dry_run, self.name = out, dry_run, name
         self.name_source = "derived from the folder name by `fran_deposit.py backfill`"
         self.skip = self.force = self.qc = self.not_qc = False
-        self.organism = self.taxon = self.fasta_meta = None
+        self.organism = self.taxon = self.fasta_meta = self.database_ok = None
         self.require_completion_marker = True     # unattended: no marker, no stage
 
 
@@ -2916,7 +3158,7 @@ def plan_backfill(dirs, apply=False, members=None, prefixes=None, runs=None):
     and then check() -- the same gate `stage` uses, with its reason codes.
 
     The log check matters: searches have reached FRAN by other routes than the drop dir. On
-    2026-09-08 FRAN's own queue ingested PROT_0793/search_mouse and search_hela by their real paths,
+    2026-09-08 FRAN's own queue ingested a submission's search_mouse and search_hela by their real paths,
     and neither has a receipt -- staging them again would only put two duplicates in front of the
     cron's duplicate guard."""
     prefixes = core_prefixes() if prefixes is None else prefixes      # read once, not per dir
@@ -3082,7 +3324,7 @@ def write_backfill_sbatch(a):
         "#!/bin/bash -l",
         "#SBATCH --job-name=fran_backfill",
         # double-quoted: an unquoted space makes sbatch refuse the script ("Invalid directive");
-        # quoted, HIVE's SLURM writes the log there (job 24808508, 2026-10-15)
+        # quoted, HIVE's SLURM writes the log there (a test job, 2026-10-15)
         f'#SBATCH --output="{d}/fran_backfill_%j.log"',
         "#SBATCH --cpus-per-task=1",
         "#SBATCH --mem=2G",
@@ -3172,7 +3414,7 @@ def backfill(a):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("action", choices=["check", "stage", "verify", "health", "backfill"])
+    ap.add_argument("action", choices=["check", "stage", "verify", "health", "audit", "backfill"])
     ap.add_argument("--out", help="the search output directory (on HIVE); check/stage/verify")
     ap.add_argument("--name", default=None, help="corpus search name (default: from the raw files)")
     ap.add_argument("--organism", default=None,
@@ -3181,6 +3423,9 @@ def main():
     ap.add_argument("--fasta-meta", default=None, help="<fasta>.meta.json from fetch_fasta.py")
     ap.add_argument("--force", action="store_true", help="re-stage even if a receipt exists")
     ap.add_argument("--skip", action="store_true", help="opt this run out of FRAN")
+    ap.add_argument("--database-ok", default=None, metavar="WHY",
+                    help="a person has looked at a database `check` could not clear (U/O/B/Z "
+                         "residues, no fetch_fasta sidecar) and says why it is real; recorded")
     ap.add_argument("--dry-run", action="store_true", help="show what would be linked, link nothing")
     q = ap.add_mutually_exclusive_group()
     q.add_argument("--qc", action="store_true",
@@ -3192,6 +3437,8 @@ def main():
                    help="post a short Slack alert when not healthy (needs notify_slack.py)")
     h.add_argument("--no-code", action="store_true",
                    help="skip the GitHub comparison of FRAN's ingest code (no network)")
+    u = ap.add_argument_group("audit")
+    u.add_argument("--lance-dir", default=None, help="the Lance spectrum corpus to scan read-only")
     b = ap.add_argument_group("backfill")
     b.add_argument("--roots", action="append", default=None,
                    help="walk these instead of the Core trees (default: Quobyte's SERVICE tree "
@@ -3215,7 +3462,7 @@ def main():
     if a.action in ("check", "stage", "verify") and not a.out:
         ap.error(f"{a.action} needs --out <search out dir>")
     {"check": lambda: jout(check(a)), "stage": lambda: stage(a), "verify": lambda: verify(a),
-     "health": lambda: health(a), "backfill": lambda: backfill(a)}[a.action]()
+     "health": lambda: health(a), "audit": lambda: audit(a), "backfill": lambda: backfill(a)}[a.action]()
 
 
 if __name__ == "__main__":

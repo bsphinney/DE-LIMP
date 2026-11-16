@@ -1765,7 +1765,12 @@ class Documented(unittest.TestCase):
         self.assertEqual(missing, [], "references/podcast.md")
 
     def test_skill_md_points_to_it(self):
-        self.assertTrue("--tts local" in self.read("SKILL.md"), "SKILL.md names --tts local")
+        # 2.15: the router names the step's section; the step's text, --tts local included,
+        # moved there verbatim
+        self.assertIn('podcast.md "9e."', self.read("SKILL.md"))
+        ref = self.read("references", "podcast.md")
+        sec = ref[ref.index("## 9e. The audio discussion (step 9e)"):]
+        self.assertTrue("--tts local" in sec, "podcast.md step 9e names --tts local")
 
 
 if __name__ == "__main__":

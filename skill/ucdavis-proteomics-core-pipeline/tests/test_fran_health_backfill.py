@@ -139,7 +139,7 @@ class Env:
             os.utime(p, (self.now - age_h * H, self.now - age_h * H))
         return p
 
-    def submit(self, age_h=0.2, line="Submitted batch job 23990862"):
+    def submit(self, age_h=0.2, line="Submitted batch job 9900005"):
         p = os.path.join(self.logs, fd.SUBMIT_LOG)
         with open(p, "w") as fh:
             fh.write(f"{ts(self.now - age_h * H - 420)} {line}\n")
@@ -151,7 +151,7 @@ class Env:
         and the age must never be read from it."""
         d = os.path.join(self.drop, name)
         os.makedirs(d)
-        man = {"output_dir": output_dir or f"/real/{name}", "engine": "diann", "staged_by": "brettsp"}
+        man = {"output_dir": output_dir or f"/real/{name}", "engine": "diann", "staged_by": "bstaff"}
         if staged:
             man["staged_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                              time.gmtime(self.now - age_h * H))
@@ -751,8 +751,10 @@ def search_dir(root, name="search_out", engine="diann", empty=False, prov=True, 
     with open(os.path.join(d, "report.parquet"), "w") as fh:
         fh.write("" if empty else "x" * 64)
     if prov:
+        import fasta_fixture
+        db = fasta_fixture.write_real_db(root, f"real_{name}.fasta")
         with open(os.path.join(d, "search_provenance.json"), "w") as fh:
-            json.dump({"engine": engine, "version": "2.7.0"}, fh)
+            json.dump({"engine": engine, "version": "2.7.0", "fasta": db}, fh)
     for f in extra:
         with open(os.path.join(d, f), "w") as fh:
             fh.write("x")
@@ -763,7 +765,8 @@ class Args:
     def __init__(self, out, **kw):
         self.out = out
         for k, v in dict(skip=False, force=False, dry_run=False, organism=None, taxon=None,
-                         fasta_meta=None, name=None, qc=False, not_qc=False).items():
+                         fasta_meta=None, name=None, qc=False, not_qc=False,
+                         database_ok="test fixture: the guard has its own tests").items():
             setattr(self, k, kw.get(k, v))
 
 
@@ -1116,7 +1119,7 @@ class QcRuleTests(unittest.TestCase):
         with env_vars(FRAN_DROP_DIR=os.path.join(d, "incoming"), FRAN_HEALTH="off"):
             return run_quiet(fd.stage, Args(out, **kw))[1]
 
-    def test_gabrigs_run_is_caught_once_its_name_is_known_and_withdrawn(self):
+    def test_gstaffs_run_is_caught_once_its_name_is_known_and_withdrawn(self):
         """The real case: session '2026-09-23_chkLUppm_HeLa50_2026' (no QC token, no conditions),
         staged by the job-end hook, then named '... Lumos QC' by the agent at step 7c."""
         with tempfile.TemporaryDirectory() as d:
@@ -1299,7 +1302,7 @@ class QcRuleTests(unittest.TestCase):
                      "12May2026_DIA_60spd_HeLa50_S1-A5", "30apr26_HeL50Flextr-tf9d0_100spd_S4-A1",
                      "FL050525_HeL50-Dda-newDualIT-HCDIT_60m_1", "Hel-50_100spd"]
     HELA_KEPT = ["HeLa50ng_titration", "buffer 100mM HeLa50", "HeLa_digest_timecourse"]
-    AGENT = ["PROT_0812 plasma + pooled QC", "PROT_10234 plasma + pooled QC"]
+    AGENT = ["PROT_9812 plasma + pooled QC", "PROT_91234 plasma + pooled QC"]
     # core_submission.PROT_TOKEN's pattern and flags, which FRAN's find_uningested.PROT_ID_RE
     # copies literally (it cannot import the skill); FRAN's test pins this same string.
     PROT_PATTERN = r"(?<![A-Za-z0-9])prot[_\-# ]?(\d{3,5})(?![A-Za-z0-9])"
@@ -1323,18 +1326,18 @@ class QcRuleTests(unittest.TestCase):
         self.assertIsNone(fd.PROT_ID_UNAVAILABLE)
         self.assertEqual((cs.PROT_TOKEN.pattern, cs.PROT_TOKEN.flags & re.I),
                          (self.PROT_PATTERN, re.I))
-        self.assertEqual(cs.ids_in("PROT_10234 plasma"), [("internal_id", "PROT_10234")])
-        self.assertEqual(cs.normalize_submission("PROT_10234"), ("internal_id", "PROT_10234"))
+        self.assertEqual(cs.ids_in("PROT_91234 plasma"), [("internal_id", "PROT_91234")])
+        self.assertEqual(cs.normalize_submission("PROT_91234"), ("internal_id", "PROT_91234"))
 
     def test_a_prot_id_anywhere_up_the_path_goes_to_an_agent(self):
         """The QC signal is read on the last three components (FRAN's reach); a PROT id on all of
         them -- here it is the fourth from the end."""
         with tempfile.TemporaryDirectory() as d:
-            out = search_dir(os.path.join(d, "SERVICE", "Lab", "PROT_0812", "diann", "2.7.0"))
+            out = search_dir(os.path.join(d, "SERVICE", "Lab", "PROT_9812", "diann", "2.7.0"))
             q, why = fd.is_qc_run(out, names=["Lumos QC"])
             self.assertIsNone(q, why)
             self.assertIn("needs_agent_check", why)
-            self.assertIn("PROT_0812", why)
+            self.assertIn("PROT_9812", why)
             q, why = fd.is_qc_run(search_dir(os.path.join(d, "SERVICE", "Lab", "x", "diann", "2.7.0")),
                                   names=["Lumos QC"])
             self.assertIs(q, True, why)                    # no id anywhere: still QC
@@ -1364,33 +1367,33 @@ class QcRuleTests(unittest.TestCase):
 
     def test_a_customer_study_naming_its_pooled_qc_goes_to_an_agent_and_blocks_nothing(self):
         with tempfile.TemporaryDirectory() as d:
-            out = self._session(d, "PROT_0812_plasma")
-            res = self._stage(d, out, name="PROT_0812 plasma + pooled QC")
+            out = self._session(d, "PROT_9812_plasma")
+            res = self._stage(d, out, name="PROT_9812 plasma + pooled QC")
             self.assertFalse(res["staged"])
             self.assertEqual(res["reason"], "needs_agent_check")
             self.assertIsNone(res["qc"])
-            self.assertIn("PROT_0812", res["qc_rule"])
+            self.assertIn("PROT_9812", res["qc_rule"])
             self.assertIn("--not-qc", res["detail"])
             self.assertFalse(os.path.exists(os.path.join(d, "incoming", fd.entry_name(out))))
             self.assertNotEqual((fd.read_receipt(out) or {}).get("status"), "qc_run")  # nothing recorded
-            ok = self._stage(d, out, name="PROT_0812 plasma + pooled QC", not_qc=True)
+            ok = self._stage(d, out, name="PROT_9812 plasma + pooled QC", not_qc=True)
             self.assertTrue(ok["staged"], ok.get("detail"))
         with tempfile.TemporaryDirectory() as d:
-            out = self._session(d, "PROT_0812_plasma")
-            self.assertEqual(self._stage(d, out, name="PROT_0812 plasma + pooled QC",
+            out = self._session(d, "PROT_9812_plasma")
+            self.assertEqual(self._stage(d, out, name="PROT_9812 plasma + pooled QC",
                                          qc=True)["reason"], "qc_run")
 
     def _legacy_name_rule_qc_run(self, out):
         """A receipt the OLD rule wrote: qc_run, reached by the name rule, on a customer study."""
         with open(os.path.join(out, fd.RECEIPT), "w") as fh:
             json.dump({"status": "qc_run", "search_dir": out, "decided_by": "someone",
-                       "at": "2026-09-24T10:00:00", "search_name": "PROT_0812 plasma + pooled QC",
-                       "qc_rule": "QC run: excluded by policy (search_name 'PROT_0812 plasma + "
+                       "at": "2026-09-24T10:00:00", "search_name": "PROT_9812 plasma + pooled QC",
+                       "qc_rule": "QC run: excluded by policy (search_name 'PROT_9812 plasma + "
                                   "pooled QC' matches QC_NAME_RE)"}, fh)
 
     def test_an_old_name_rule_qc_run_is_rejudged_not_binding(self):
         with tempfile.TemporaryDirectory() as d:
-            out = self._session(d, "PROT_0812_plasma")
+            out = self._session(d, "PROT_9812_plasma")
             self._legacy_name_rule_qc_run(out)
             res = self._stage(d, out)                              # a plain, flagless stage
             self.assertEqual(res["reason"], "needs_agent_check", res.get("detail"))
@@ -1406,7 +1409,7 @@ class QcRuleTests(unittest.TestCase):
     def test_backfill_does_not_block_on_an_old_name_rule_qc_run(self):
         with tempfile.TemporaryDirectory() as d:
             t = Tree(d)
-            out = search_dir(os.path.join(t.svc_root, "on_campus", "Smith", "PROT_0812_plasma"),
+            out = search_dir(os.path.join(t.svc_root, "on_campus", "Smith", "PROT_9812_plasma"),
                              "search_out")
             self._legacy_name_rule_qc_run(out)
             with env_vars(FRAN_DROP_DIR=t.drop, FRAN_HEALTH="off"):
@@ -1480,12 +1483,11 @@ class AlertTests(unittest.TestCase):
     def test_a_stuck_cron_alone_never_pages(self):
         """FRAN's runner alerts on its own progress; a second page from here is a duplicate."""
         mod = self._fake()
-        sys.modules["notify_slack"] = mod
-        try:
+        # the real (slack_guard-protected) notify_slack is put back after, never deleted: a
+        # later lazy `import notify_slack` must not load a fresh, unguarded copy (A10)
+        with mock.patch.dict(sys.modules, {"notify_slack": mod}):
             r = fd.send_alert({"verdict": "stuck", "summary": "FRAN ingest STUCK: 41 runs",
                                "ingest_code": {"verdict": "current"}}, cache_path="/nonexistent/c")
-        finally:
-            del sys.modules["notify_slack"]
         self.assertFalse(r["sent"])
         self.assertEqual(mod.calls, [])
         self.assertIsNone(fd.alert_reason({"verdict": "not_running", "ingest_code": {}}))
@@ -1500,26 +1502,24 @@ class AlertTests(unittest.TestCase):
     def test_sends_once_then_holds_the_same_alert_for_a_day(self):
         with tempfile.TemporaryDirectory() as d:
             mod = self._fake()
-            sys.modules["notify_slack"] = mod
-            try:
+            # the real (slack_guard-protected) notify_slack is put back after, never deleted: a
+            # later lazy `import notify_slack` must not load a fresh, unguarded copy (A10)
+            with mock.patch.dict(sys.modules, {"notify_slack": mod}):
                 cache = os.path.join(d, "c.json")
                 r1 = fd.send_alert(self.STUCK, cache_path=cache, now=NOW)
                 r2 = fd.send_alert(self.STUCK, cache_path=cache, now=NOW + 3600)
                 r3 = fd.send_alert(self.STUCK, cache_path=cache, now=NOW + 25 * 3600)
-            finally:
-                del sys.modules["notify_slack"]
             self.assertEqual((r1["sent"], r2["sent"], r3["sent"]), (True, False, True))
             self.assertEqual(len(mod.calls), 2)
             self.assertIn("41 runs", mod.calls[0][0])
 
     def test_healthy_is_never_posted(self):
         mod = self._fake()
-        sys.modules["notify_slack"] = mod
-        try:
+        # the real (slack_guard-protected) notify_slack is put back after, never deleted: a
+        # later lazy `import notify_slack` must not load a fresh, unguarded copy (A10)
+        with mock.patch.dict(sys.modules, {"notify_slack": mod}):
             r = fd.send_alert({"verdict": "healthy", "summary": "ok",
                                "ingest_code": {"verdict": "current"}}, cache_path="/nonexistent/c")
-        finally:
-            del sys.modules["notify_slack"]
         self.assertFalse(r["sent"])
         self.assertEqual(mod.calls, [])
 
@@ -1531,11 +1531,10 @@ class AlertTests(unittest.TestCase):
 
     def test_a_webhook_that_is_not_configured_is_reported_not_retried_forever(self):
         with tempfile.TemporaryDirectory() as d:
-            sys.modules["notify_slack"] = self._fake(sent=False)
-            try:
+            # the real (slack_guard-protected) notify_slack is put back after, never deleted: a
+            # later lazy `import notify_slack` must not load a fresh, unguarded copy (A10)
+            with mock.patch.dict(sys.modules, {"notify_slack": self._fake(sent=False)}):
                 r = fd.send_alert(self.STUCK, cache_path=os.path.join(d, "c.json"), now=NOW)
-            finally:
-                del sys.modules["notify_slack"]
             self.assertFalse(r["sent"])
             self.assertIn("no webhook", r["why"])
 
@@ -1551,7 +1550,7 @@ class MetaSelectionTests(unittest.TestCase):
         return fa
 
     def test_the_search_fasta_picks_the_sidecar_not_the_alphabet(self):
-        """PROT_0793: human_, mouse_ and mouse_mousecont sidecars side by side; sorted() picks
+        """PROT_9793: human_, mouse_ and mouse_mousecont sidecars side by side; sorted() picks
         human for the mouse search. The search's own --fasta decides."""
         with tempfile.TemporaryDirectory() as d:
             self._meta(d, "human_UP000005640", "Homo sapiens", 9606)
@@ -1577,7 +1576,7 @@ class MetaSelectionTests(unittest.TestCase):
 
     def test_session_layout_is_found_through_provenance(self):
         """<session>/output/search with the sidecar in <session>/input -- the old globs looked in
-        <session>/output/input and missed it, so the gabrig search reached FRAN with no database."""
+        <session>/output/input and missed it, so the gstaff search reached FRAN with no database."""
         with tempfile.TemporaryDirectory() as d:
             inp = os.path.join(d, "sess", "input")
             os.makedirs(inp)
@@ -1868,7 +1867,7 @@ class ReviewFixTests(unittest.TestCase):
             saved_owner = fd._owner
             fd._owner = lambda p: "proteomics-class-03"
             try:
-                core, why = fd.core_search(out, {"brettsp"}, prefixes=(os.path.realpath(d) + "/",))
+                core, why = fd.core_search(out, {"bstaff"}, prefixes=(os.path.realpath(d) + "/",))
             finally:
                 fd._owner = saved_owner
             self.assertFalse(core)
@@ -2227,7 +2226,11 @@ class Tree:
         self.session = search_dir(os.path.join(svc, "LabB", "2026", "sess", "output"), "search")
         # a 5-step chain run through hive_remote: no provenance on HIVE, only the chain's logs
         self.chain = search_dir(os.path.join(svc, "LabC", "run"), "search_out", prov=False,
-                                extra=("step5_report.sbatch", "s5_report_23945276.log"))
+                                extra=("step5_report.sbatch", "s5_report_9900006.log"))
+        import fasta_fixture
+        with open(os.path.join(self.chain, "report.log.txt"), "w") as fh:     # DIA-NN echoes it
+            fh.write("diann-linux --fasta " + fasta_fixture.write_real_db(svc, "chain.fasta")
+                     + " --threads 8\n")
         # the DE-LIMP app writes the same step names, but its jobs are diann_<name>_<step>
         self.app = search_dir(os.path.join(svc, "LabD", "app"), "out", prov=False,
                               extra=("step5_report.sbatch", "diann_proj_step5_1.log"))
@@ -2320,7 +2323,7 @@ class PlanTests(unittest.TestCase):
             self.assertEqual(rows[t.skill]["decision"], "would_stage")
             self.assertEqual(rows[t.session]["decision"], "would_stage")
             self.assertEqual(rows[t.chain]["decision"], "would_stage")
-            self.assertEqual(rows[t.chain]["marker"], "s5_report_23945276.log")
+            self.assertEqual(rows[t.chain]["marker"], "s5_report_9900006.log")
             self.assertEqual(rows[t.app]["reason"], "not_a_skill_search")
             self.assertEqual(rows[t.failed]["reason"], "search_incomplete")
             self.assertEqual(rows[t.sage]["reason"], "engine_unsupported")
@@ -2339,7 +2342,7 @@ class PlanTests(unittest.TestCase):
             t = Tree(d)
             os.makedirs(os.path.join(t.drop, fd.entry_name(t.skill)))            # entry, no receipt
             with open(os.path.join(t.session, fd.RECEIPT), "w") as fh:
-                json.dump({"status": "opted_out", "decided_by": "gabrig", "at": "2026-09-01"}, fh)
+                json.dump({"status": "opted_out", "decided_by": "gstaff", "at": "2026-09-01"}, fh)
             with open(os.path.join(t.chain, fd.RECEIPT), "w") as fh:
                 json.dump({"status": "staged"}, fh)
             rows = self._plan(t)
@@ -2357,7 +2360,7 @@ class PlanTests(unittest.TestCase):
             self.assertEqual(rows[t.skill]["decision"], "would_stage")
 
     def test_a_search_fran_already_ingested_by_another_route_is_not_restaged(self):
-        """PROT_0793/search_mouse reached FRAN through its queue on 2026-09-08, by its real path,
+        """PROT_9793/search_mouse reached FRAN through its queue on 2026-09-08, by its real path,
         with no receipt. Staging it again only feeds the duplicate guard."""
         with tempfile.TemporaryDirectory() as d:
             t = Tree(d)

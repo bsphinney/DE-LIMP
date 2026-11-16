@@ -66,7 +66,7 @@ class IdentificationsOnly(Base):
         write(os.path.join(d, "search_provenance.json"), {
             "engine": "fragpipe", "quantification": slc.not_applicable(engine="fragpipe")})
         write(os.path.join(d, "fragpipe_identifications.json"), {"per_run": {"r1": 40}})
-        self.assertIn("r1: 40 peptides", mah.identifications_only_note({}, self.s)["text"])
+        self.assertIn("r1: 40 peptide forms", mah.identifications_only_note({}, self.s)["text"])
 
     def test_a_quantifying_search_has_no_such_note(self):
         write(os.path.join(self.s, "output", "search", "search_provenance.json"),

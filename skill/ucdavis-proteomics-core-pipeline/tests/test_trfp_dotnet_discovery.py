@@ -2,7 +2,7 @@
 """
 Finding ThermoRawFileParser, and the .NET a framework-dependent build of it runs on.
 
-gabrig 2026-09-23, HIVE, 15 Fusion Lumos .raw, a Core member:
+gstaff 2026-09-23, HIVE, 15 Fusion Lumos .raw, a Core member:
   - detect_acquisition.py said "ThermoRawFileParser not found" for all 15, although the Core
     keeps TRFP 2.0.0.0 at /quobyte/proteomics-grp/tools/ThermoRawFileParser/ -- nothing
     looked there, and setup.json still said ready_for.dia. The search would have run the
@@ -40,6 +40,7 @@ import estimate_params                     # noqa: E402
 # collected and run a second time here.
 import test_thermo_raw_detection as trfp   # noqa: E402
 import test_setup_diann_readiness as setup_t  # noqa: E402
+from job_env import no_cluster_env             # noqa: E402
 
 NETCORE, ASPNET = "Microsoft.NETCore.App", "Microsoft.AspNetCore.App"
 TRFP2_RUNTIMECONFIG = {"runtimeOptions": {"tfm": "net8.0", "frameworks": [
@@ -143,7 +144,7 @@ class ParserIsFoundWhereItIs(_DotnetCase):
         self.assertIn("THERMORAWFILEPARSER_SHARED", da.locate_trfp()[1])
 
     def test_the_default_shared_copy_is_the_core_one(self):
-        """The one path gabrig's session needed, and nothing looked at."""
+        """The one path gstaff's session needed, and nothing looked at."""
         self.assertEqual(da.TRFP_SHARED_DEFAULT,
                          "/quobyte/proteomics-grp/tools/ThermoRawFileParser/ThermoRawFileParser")
         os.environ.pop("THERMORAWFILEPARSER_SHARED")
@@ -302,7 +303,7 @@ class ACannotStartParserFailsOnceUpFront(_DotnetCase):
                             for ln in warn), warn)
 
     def test_on_a_login_node_it_is_not_sent_to_srun_first(self):
-        """gabrig's two srun jobs: the refusal sent a cohort to a compute node only for every
+        """gstaff's two srun jobs: the refusal sent a cohort to a compute node only for every
         file to fail there the way a directory check on the login node already knew."""
         sbin = os.path.join(self.tmp, "sbin")
         _exe(os.path.join(sbin, "sbatch"), "#!/bin/sh\nexit 0\n")
@@ -452,10 +453,13 @@ class EnsureDotnet8(unittest.TestCase):
         _exe(os.path.join(self.bin, "curl"), FAKE_CURL)
         self.log = os.path.join(self.d, "log")
         self.dest = os.path.join(self.d, "dotnet8")
-        self.env = {"PATH": self.bin, "HOME": self.d, "PROTEOMICS_DOTNET_DIR": self.dest,
-                    "FAKE_LOG": self.log,
-                    "FAKE_INSTALLER": _exe(os.path.join(self.d, "installer.sh"), FAKE_INSTALLER),
-                    "FAKE_DOTNET": _exe(os.path.join(self.d, "fake_dotnet"), FAKE_DOTNET)}
+        # no cluster: on HIVE the script would see HPCCF's cluster file, take this for a login
+        # node and download nothing
+        self.env = no_cluster_env(self.d, base={
+            "PATH": self.bin, "HOME": self.d, "PROTEOMICS_DOTNET_DIR": self.dest,
+            "FAKE_LOG": self.log,
+            "FAKE_INSTALLER": _exe(os.path.join(self.d, "installer.sh"), FAKE_INSTALLER),
+            "FAKE_DOTNET": _exe(os.path.join(self.d, "fake_dotnet"), FAKE_DOTNET)})
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -649,11 +653,12 @@ class SetupInstallsTheParserSeparately(setup_t.SetupCheckHarness):
         self.prefix = os.path.join(self.home, "micromamba", "envs", "proteomics-pipeline")
 
     def setup(self, *args, **extra):
-        env = {"PATH": self.sys, "HOME": self.d, "PP_HOME": self.home, "QUOBYTE_DIR": "",
-               "THERMORAWFILEPARSER_SHARED": "", "PROTEOMICS_DOTNET_SYSTEM_ROOTS": "",
-               "FAKE_MM_LOG": self.mm_log, "FAKE_PY": sys.executable, "FAKE_TRFP": trfp.FAKE,
-               "PROTEOMICS_ENSURE_DOTNET8": self.ensure, "FAKE_ENSURE_LOG": self.ensure_log,
-               "FAKE_ENSURE_ROOT": self.dotnet_root}
+        env = no_cluster_env(self.d, base={
+            "PATH": self.sys, "HOME": self.d, "PP_HOME": self.home, "QUOBYTE_DIR": "",
+            "THERMORAWFILEPARSER_SHARED": "", "PROTEOMICS_DOTNET_SYSTEM_ROOTS": "",
+            "FAKE_MM_LOG": self.mm_log, "FAKE_PY": sys.executable, "FAKE_TRFP": trfp.FAKE,
+            "PROTEOMICS_ENSURE_DOTNET8": self.ensure, "FAKE_ENSURE_LOG": self.ensure_log,
+            "FAKE_ENSURE_ROOT": self.dotnet_root})
         env.update(extra)
         r = subprocess.run([self.bash, setup_t.SETUP, *args], capture_output=True, text=True,
                            env=env, timeout=300)
@@ -702,7 +707,7 @@ class SetupInstallsTheParserSeparately(setup_t.SetupCheckHarness):
         self.assertIs(s["ready_for"]["thermo_raw"], True, "the parser alone decides that")
 
     def test_an_existing_env_gets_pandas_on_a_rerun(self):
-        """gabrig #15: the HIVE env had no pandas. create_env never runs again for an env that
+        """gstaff #15: the HIVE env had no pandas. create_env never runs again for an env that
         exists, so this step is how it arrives."""
         self.setup()
         os.remove(os.path.join(self.prefix, "conda-meta", "pandas-2.3.2-py311h0000000_0.json"))
@@ -764,7 +769,7 @@ class SetupInstallsTheParserSeparately(setup_t.SetupCheckHarness):
 class ActivateExportsTheDotnetRoot(setup_t.SetupCheckHarness):
     def _source(self, **env):
         self.check()
-        full = {"PATH": self.sys, "HOME": self.d}
+        full = no_cluster_env(self.d, base={"PATH": self.sys, "HOME": self.d})
         full.update(env)
         p = subprocess.run([self.bash, "-c", f'. "{self.home}/activate.sh"; '
                             'printf "%s\\n%s\\n" "${DOTNET_ROOT:-}" "$PATH"'],

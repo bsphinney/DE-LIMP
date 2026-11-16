@@ -10,6 +10,17 @@ channels, independent samples per channel, label swaps, label-check injections.
 spectral library (`--seed-lib`); chemical labels (mTRAQ, dimethyl); a turnover / pulsed-SILAC
 *analysis* (the search runs, `run_silac.R` refuses); protein-set tests on the ratios.
 
+<!-- contents: tests/test_skill_structure.py --toc -->
+**Contents** (section: line)
+- 24: 1. What to ask (step 3)
+- 93: 2. The search (steps 6b and 7)
+- 163: 3. The ratio analysis (step 8)
+- 225: 4. Reading the results (say these in the report)
+- 287: 5. The rest of the pipeline
+- 306: 6. Statistical review (2026-10-15) and what is still open
+- 326: Step 8 for a SILAC session
+<!-- /contents -->
+
 ## 1. What to ask (step 3)
 
 Ask; never guess. Each answer goes into `logs/decisions.md` (`log_decision.py`).
@@ -48,6 +59,7 @@ Ask; never guess. Each answer goes into `logs/decisions.md` (`log_decision.py`).
    `Replicate` defaults to `File.Name`. Runs that share a `Replicate` are re-injections of one
    mix: they must hold the same samples in the same channels, their ratios are averaged, and they
    count as one replicate (question 5). A channel that holds no sample has no row. Group names: letters, digits, `_` or `.`, starting with a letter.
+
    `python3 scripts/silac.py design --validate input/silac_design.csv --against
    ./search_out/report.parquet` checks it (every report run needs rows and every row a run, no
    group twice in a run, at least one run with two groups). A searched run the user decides to
@@ -67,6 +79,7 @@ Ask; never guess. Each answer goes into `logs/decisions.md` (`log_decision.py`).
    The ratio analysis reads raw `Precursor.Quantity`, so this setting does not change its
    numbers; it changes DIA-NN's normalised columns (`Precursor.Normalised`, `PG.MaxLFQ`), which
    a client may use.
+
 4. **The comparisons** (step 8): which group over which. A ratio A/B reads "higher in A" when
    positive. The default, every pair with the group in the heavier channel over the lighter, is
    recorded as a DEFAULT, and the Methods and the report name each comparison with its direction.
@@ -103,7 +116,7 @@ lines without writing a cfg.
 is `--fixed-mod SILAC,0.0,KR,label --lib-fixed-mod SILAC`, for a *label-free library* that the
 label must be pasted into. Every route of this skill predicts its library from the FASTA, and
 `--fixed-mod` already applies the label during that digest ("applying fixed modifications during
-FASTA digest", README `--fixed-mod`). Measured on DIA-NN 2.7.0 (HIVE srun 24808559,
+FASTA digest", README `--fixed-mod`). Measured on DIA-NN 2.7.0 (on HIVE,
 2026-10-15, a 6-protein FASTA): `--fixed-mod` alone gives `K(SILAC)`; with `--lib-fixed-mod`,
 `K(SILAC)(SILAC)`. A hand-set triple-SILAC search (2026-10-14) carried both: its library read
 `K(SILAC)(SILAC)`, the search step applied the label again (`K(SILAC)(SILAC)(SILAC)`), and DIA-NN
@@ -309,3 +322,28 @@ count is reported instead. Still open:
   `Channel.Evidence`, or the light channel's intensity distribution) could give one.
 - **Power reading** uses the median posterior variance; a simulation from the fitted prior
   would be better.
+
+## Step 8 for a SILAC session
+
+**A SILAC session (`--labels` in step 6b) does not use `run_de.R` or the normalisation check.**
+Its comparison is a ratio inside each run:
+
+```
+python3 scripts/silac.py design --validate input/silac_design.csv --against ./search_out/report.parquet \
+    [--exclude <run> --reason "<why, in the user's words>"]   # only on the user's decision
+Rscript scripts/run_silac.R --input ./search_out/report.parquet --design input/silac_design.csv \
+    --outdir <S>/output/tables --figures-dir <S>/output/figures --params ./wf/params.cfg \
+    --fasta ./search.fasta [--comparisons "KO-WT,DKO-WT"] [--replicates biological] \
+    [--min-replicates N] [--run-level-only]
+```
+
+It writes the `DE_silac_*.csv` tables, the channel-specific detections, the figures and a
+`de_provenance.json` that the report, Methods, audit, delivery gate and reproducibility bundle
+read like any DE record (its normalisation check is recorded as not applicable, with why).
+Skip 8a (no set tests yet) and 8b (it drew its own figures); in 8c run the audit without
+`--conditions`, and `sample_quality.py` on `SILAC_sample_matrix.csv` + `SILAC_samples.csv`.
+Ask which comparisons the user wants (the default, every pair heavier/lighter, is tagged).
+It filters on every q-value column the report has, like the label-free path; `--run-level-only`
+(recorded) keeps the run-specific two only. Unset minimum replicates = max(3, half), tagged.
+→ sections 3–4 above, which also say how to read centred vs uncentred ratios and the
+detection patterns ("detected in X (k/n); not detected in Y (0/n)" — not a test).

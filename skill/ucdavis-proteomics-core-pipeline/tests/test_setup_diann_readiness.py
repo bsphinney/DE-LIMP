@@ -22,9 +22,12 @@ import platform
 import shutil
 import subprocess
 import tempfile
+import sys
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+from job_env import no_cluster_env  # noqa: E402
 SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
 SETUP = os.path.join(SCRIPTS, "setup.sh")
 
@@ -53,8 +56,10 @@ class SetupCheckHarness(unittest.TestCase):
         self._tmp.cleanup()
 
     def check(self, quobyte_dir=None, extra_env=None):
-        env = {"PATH": self.sys, "HOME": self.d, "PP_HOME": self.home,
-               "QUOBYTE_DIR": self.quobyte if quobyte_dir is None else quobyte_dir}
+        # no cluster: on HIVE setup.sh would otherwise see a login node (cluster file, slurm at the
+        # fixed path) and hand the run to a real srun, or refuse it (exit 2)
+        env = no_cluster_env(self.d, base={"PATH": self.sys, "HOME": self.d, "PP_HOME": self.home})
+        env["QUOBYTE_DIR"] = self.quobyte if quobyte_dir is None else quobyte_dir
         env.update(extra_env or {})
         r = subprocess.run([self.bash, SETUP, "--check"], capture_output=True, text=True,
                            env=env, timeout=300)

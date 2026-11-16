@@ -14,7 +14,7 @@ single-shot search. That is not a slow path, it is a different order of magnitud
 parallelises within a run, not across runs, so at ~30 min/file a 310-file cohort is ~155 h
 sequential against a few hours for the chain. Nothing errors; the user just waits a week.
 
-Observed on a real 310-file timsTOF cohort (PROT_0793, 2026-09-03) with mass accuracy
+Observed on a real 310-file timsTOF cohort (PROT_9793, 2026-09-03) with mass accuracy
 correctly pinned at 15/15:
 
     [run_search] parallel routing: no -- 310 files, but mass accuracy is not pinned in
@@ -239,7 +239,7 @@ class OneCfgRuleTests(_SlurmStub):
         them as set."""
         with tempfile.TemporaryDirectory() as d:
             cfg = _cfg(d, "--qvalue 0.01   # 1% FDR\n--mass-acc 15\n--mass-acc-ms1 15\n"
-                          "--window 7   # measured on PROT_0793\n--cut K*,R*\n")
+                          "--window 7   # measured on PROT_9793\n--cut K*,R*\n")
             self.assertTrue(dp.parallel_safe(cfg)["ok"])
             flags = dp.read_cfg_flags(cfg)
             argv = subprocess.run(["bash", "-c", f"printf '%s\\n' {flags}"],

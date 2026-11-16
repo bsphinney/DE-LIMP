@@ -7,7 +7,7 @@ human P60709, EEF1A1 = P68104, TUBB5 = P07437 ...; plus Cont_Q3LI67 as an exact 
 31 identical to mouse. In a real DIA-NN 2.7.0 HeLa search ACTB, EEF1A1 and KRT8 came out ONLY
 as Cont_ protein groups, and --cont-quant-exclude Cont_ kept them out of quantification.
 
-PROT_0756 (mouse brain IPs, 2026-09-25): identity is not enough -- bovine EF1A1 and 1433Z
+PROT_9756 (mouse brain IPs, 2026-09-25): identity is not enough -- bovine EF1A1 and 1433Z
 differ from mouse by ONE residue, and both were Cont_-only groups in all 30 runs. So an entry
 that shares peptides with a target and has fewer than 2 independent peptides of its own in the
 search's digest (I = L) is dropped too.
@@ -193,7 +193,9 @@ class PeptideRule(unittest.TestCase):
         self.assertEqual([(e["cont_acc"], e["match"], e["target_acc"]) for e in enzymes],
                          [("Cont_P00761", "shared_peptides", "P00761")])
         # Not the digest (--enzyme gluc): dropped like any other protein, and says why.
-        by, enzymes = self.drop(near, PIG_TARGET, enzymes_used=("gluc",))
+        # (counted in the tryptic digest here: this short synthetic entry has no peptide in a
+        # Glu-C digest to share, and the exemption is what is under test)
+        by, enzymes = self.drop(near, PIG_TARGET, enzymes_used=("gluc",), digest=ff.DIANN_DIGEST)
         self.assertEqual(enzymes, [])
         self.assertEqual(by["Cont_P00761"]["enzyme_not_used"], "trypsin")
 

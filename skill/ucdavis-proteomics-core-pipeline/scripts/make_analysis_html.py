@@ -48,6 +48,7 @@ from client_text import draft_history, draft_history_loose  # noqa: E402  -- the
 from client_text import peak_check_overclaims, peak_check_overclaims_loose  # noqa: E402  -- "confirmed by Skyline"
 import skyline_peaks      # noqa: E402  -- the peak check's section (step 8f), from its own record
 import audit_results      # noqa: E402  -- the audit's plain words: the client's Audit & caveats
+from session import database_organisms  # noqa: E402  -- the one organism line (every species)
 from session_docs import IP_CONTROL_NAME  # noqa: E402  -- which groups are pull-down controls
 from fetch_fasta import CONTAMINANT_TAGS  # noqa: E402  -- Cont_ and FragPipe's contam_: one definition
 
@@ -544,13 +545,12 @@ def session_facts(a, prov, submission=None):
     s = os.path.abspath(a.session) if a.session else None
     man = load_record(os.path.join(s, "input", "wf", "workflow.manifest.json")) if s else {}
     fmeta = load_record(os.path.join(s, "input", "search.fasta.meta.json")) if s else {}
-    org = fmeta.get("organism") or man.get("organism")
-    tax = fmeta.get("taxid") or man.get("organism_taxid")
     eng, ver = search_engine(a.session, prov)
     unchosen = search_not_recorded_text(a.session, prov)
     pinned = search_engine_pinned(a.session, prov)
     return [("Submission", submission),
-            ("Organism", f"{org} (taxid {tax})" if org and tax else org),
+            ("Organism", database_organisms(fmeta, man.get("organism"),
+                                            man.get("organism_taxid"))),
             ("Instrument", ", ".join(man.get("instruments") or []) or None),
             ("Search", (" ".join(x for x in (eng, ver) if x)
                         + (" (workflow manifest pin)" if eng and pinned else ""))
@@ -581,6 +581,42 @@ def search_engine(session, prov=None):
     e = _engine_facts(session, prov)
     eng = e.get("engine") or ""
     return ENGINE_LABEL.get(eng, eng) or None, e.get("version")
+
+
+def search_quantity_clause(session, prov=None):
+    """For a page with no DE: who made a FragPipe DDA search's protein amounts, from the search
+    record's fragpipe_quantity (fragpipe_quant.plan, through run_search's one declaration path):
+    directLFQ from FragPipe's ion intensities, IonQuant's MaxLFQ, or IonQuant's protein intensity.
+    None for any other search, a refused quantity, or no record."""
+    if not session:
+        return None
+    import session as sess
+    c = sess.search_choice(sess.paths_for(os.path.abspath(session)), (prov or {}).get("input"))
+    rec = load_record(c["path"]) if c.get("path") else None
+    q = (rec or {}).get("fragpipe_quantity") if isinstance(rec, dict) else None
+    if not isinstance(q, dict) or q.get("status") not in (None, "ok"):
+        return None
+    import fragpipe_quant as fq
+    why = fq.reason_phrase(q) if q.get("quantity") == fq.QUANTITY_DIRECTLFQ else None
+    return {fq.QUANTITY_DIRECTLFQ: "directLFQ estimated the protein amounts from FragPipe's ion "
+                                   "intensities" + (f" ({why})" if why else ""),
+            fq.QUANTITY_MAXLFQ: "IonQuant (in FragPipe) estimated the protein amounts by MaxLFQ",
+            fq.QUANTITY_INTENSITY: "IonQuant (in FragPipe) measured the protein intensities "
+                                   f"({fq.NOT_NORMALISED})"
+            }.get(q.get("quantity"))
+
+
+def search_faims_sentence(session, prov=None):
+    """For a search that was split by FAIMS group (run_search --faims-split): the record's own
+    sentence -- searched and quantified separately, quantities not comparable across the groups
+    (faims.methods_sentence). None for any other search or no record."""
+    if not session:
+        return None
+    import session as sess
+    c = sess.search_choice(sess.paths_for(os.path.abspath(session)), (prov or {}).get("input"))
+    rec = load_record(c["path"]) if c.get("path") else None
+    z = (rec or {}).get("faims") if isinstance(rec, dict) else None
+    return z.get("sentence") if isinstance(z, dict) and z.get("group") else None
 
 
 def search_engine_pinned(session, prov=None):
@@ -836,7 +872,7 @@ def figure_summary(name, tables, qc_path, em_path):
 
 # Rows a reader must not take for the sample's biology: the antibody's own chains and
 # common-contaminant entries. An Ig chain is recognised three ways, because many have no gene
-# name (PROT_0756: P06330 HVM51_MOUSE, P01647 KV5AE_MOUSE ... -- Genes empty):
+# name (a mouse-brain IP cohort: P06330 HVM51_MOUSE, P01647 KV5AE_MOUSE ... -- Genes empty):
 #  1. the gene: IMGT symbols, human and mouse/rat forms alike (IGHG1, Ighg2c, IGKC, IGKV1-5,
 #     IGLC2, IGLV1-40, JCHAIN/IGJ, rat Igg-2a) -- whole symbol, so IGHMBP2 (a helicase),
 #     IGLL1/IGLL5, IgLON (IGLON5) and IGF are not;
@@ -966,7 +1002,9 @@ def audit_plain(path):
 # Every report's section on how it was made (before the appendix), and the public page that
 # explains it
 HOW_MADE_TITLE = "How this report was made"
-HOW_MADE_URL = "https://bsphinney.github.io/DE-LIMP/how-reports-are-made.html"
+# From 2.15 the page is the skill repository's (Ruling 89a); DE-LIMP's copy stays live for the
+# reports made before it.
+HOW_MADE_URL = "https://bsphinney.github.io/UCD-Proteomics-AI-Skill/how-reports-are-made.html"
 HOW_MADE_LINK = ("How these reports are made, step by step, and how your lab can run the same "
                  "pipeline")
 
@@ -1002,8 +1040,14 @@ def how_made(a, prov, md_text, report_secs):
                       "not available)" if pinned else "") + " searched the raw instrument files")
     if prov.get("display_label"):
         did.append(f"{prov['display_label']} estimated the protein amounts and ran the statistics")
+    elif search_quantity_clause(a.session, prov):
+        # no DE: a FragPipe DDA search's own protein quantity, as its record declares it (rule 1)
+        did.append(search_quantity_clause(a.session, prov))
     p1 = ("The numbers in this report come from established scientific software: "
           + ", and ".join(did) + ".") if did else ""
+    faims_note = search_faims_sentence(a.session, prov)
+    if faims_note:
+        p1 += (" " if p1 else "") + faims_note
     if unchosen:
         p1 += (" " if p1 else "") + (f"Which search these numbers come from was not recorded "
                                      f"({unchosen}).")
@@ -1171,6 +1215,7 @@ def glance_data(prov, tables, tables_dir, session=None):
         tiles.append((max(r["tested"] for r in rows), "proteins tested"))
     notes = [n for n in (search_measurement_note(prov, session), first_pass_note(prov, session),
                          identifications_only_note(prov, session),
+                         protein_fdr_note(prov, session), semi_specific_note(prov, session),
                          search_inputs_note(prov, session),
                          runs_left_out_note(prov),
                          added_sequences_note(session), inferred_note(prov, tables_dir),
@@ -1345,20 +1390,41 @@ def identifications_only_note(prov, session=None):
     folder = os.path.dirname(path)
     if sage_lfq_check.search_quantified(folder):
         return None
-    per = []
+    per, extra = [], []
     for name, unit in (("sage_identifications.json", "precursors"),
                        ("fragpipe_identifications.json", "peptides")):
         rec = load_record(os.path.join(folder, name))
+        # FragPipe: per_run counts identifications.tsv rows (peptide forms: a peptide with a
+        # modification is a second row); per_run_peptides the distinct peptides (X8 F4). A record
+        # without the second says "forms", never "peptides".
+        distinct = rec.get("per_run_peptides") or {}
         for run, n in sorted((rec.get("per_run") or {}).items()):
             n = n.get("precursors") if isinstance(n, dict) else n
-            if isinstance(n, int) and not isinstance(n, bool):
+            if not (isinstance(n, int) and not isinstance(n, bool)):
+                continue
+            d = distinct.get(run)
+            if unit == "peptides" and isinstance(d, int) and not isinstance(d, bool):
+                forms = f" ({n:,} peptide forms)" if n != d else ""
+                per.append(f"{run}: {d:,} peptides{forms}")
+            elif unit == "peptides":
+                per.append(f"{run}: {n:,} peptide forms")
+            else:
                 per.append(f"{run}: {n:,} {unit}")
+        # a FragPipe record's contaminant share (the skill's classifier) and, when its protein
+        # groups have no protein-level FDR, that they are not FDR-controlled (Ruling 120)
+        if isinstance(rec.get("contaminant_summary"), str) and rec["contaminant_summary"].strip():
+            extra.append("Contaminants: " + rec["contaminant_summary"].strip())
+        import fragpipe_params
+        if (fragpipe_params.no_protein_fdr(rec.get("protein_fdr"))
+                and isinstance(rec.get("protein_filter"), str)):
+            extra.append("Protein-level filter: " + rec["protein_filter"].strip() + ".")
     return {"kind": "info", "title": "Identifications only: no quantities",
             "text": "This search was for identifications only: it measured no protein or "
                     "peptide amounts, so this report has no differential expression and compares "
                     "no amounts between samples. The identifications are in the search folder's "
                     "identifications.tsv"
-                    + (" (identified per run: " + "; ".join(per) + ")." if per else ".")}
+                    + (" (identified per run: " + "; ".join(per) + ")." if per else ".")
+                    + "".join(" " + x for x in extra)}
 
 
 def _beside_record(report):
@@ -1369,6 +1435,45 @@ def _beside_record(report):
     import session as sess
     path = os.path.join(sess.search_folder_of(report), sess.SEARCH_RECORD)
     return path if os.path.exists(path) else None
+
+
+def protein_fdr_note(prov, session=None):
+    """The fixed CAUTION for a quantified FragPipe search whose protein groups rest on no
+    protein-level FDR (the Nonspecific workflows' --prot 1): its record's `protein_fdr`
+    (run_search.adapt_fragpipe_dda), asked through fragpipe_params.no_protein_fdr -- the one
+    predicate the analysis brief asks too (C2 proteomics H1). An identifications-only search says
+    it in identifications_only_note. None otherwise."""
+    import fragpipe_params
+    q = search_record(prov, session).get("fragpipe_quantity")
+    pfdr = fragpipe_params.recorded_protein_fdr(q)
+    if not (isinstance(q, dict) and q.get("status") in (None, "ok")
+            and fragpipe_params.no_protein_fdr(pfdr)):
+        return None
+    return {"kind": "warning", "title": "The protein groups have no protein-level FDR",
+            "text": "The search filtered its peptide matches at its false discovery rate, but not "
+                    "the protein groups those peptides map to. Protein-level filter: "
+                    + str(pfdr.get("protein_filter") or "").strip().rstrip(".")
+                    + ". So the number of proteins in this report is not a controlled result; "
+                      "read each protein with its peptide evidence."}
+
+
+def semi_specific_note(prov, session=None):
+    """The fixed callout for a semi-specific search (its parameters, read by
+    make_methods.search_record, the reader the Methods use): cleavage_rules.SEMI_SPECIFIC_CAVEAT,
+    the one wording (C2 bio M3). None for any other digest or no search record."""
+    path = search_record_path(prov, session)
+    if not path:
+        return None
+    import cleavage_rules
+    import make_methods
+    try:
+        rec = make_methods.search_record(search_prov=path)
+    except (OSError, ValueError) as e:            # said, never a silent pass
+        print(f"[make_analysis_html] the search record {path} could not be read for its digest: "
+              f"{e}", file=sys.stderr)
+        return None
+    text = cleavage_rules.semi_specific_caveat((rec or {}).get("cleavage"))
+    return {"kind": "info", "title": "A semi-specific search", "text": text} if text else None
 
 
 def added_sequences_note(session=None):
@@ -2044,6 +2149,13 @@ def main():
         import core_submission
         fb = {fmt: core_submission.feedback_line("report", core["prot"], pod, fmt)
               for fmt in ("html", "md")}
+    elif a.session:
+        # Not a Core run: for Core staff only, one line saying the survey is left out and how to
+        # add it (submission_report.survey_off_note; None for anyone outside the Core) -- a
+        # warning, never a gate
+        off = submission_report.survey_off_note(a.session)
+        if off:
+            print(f"[make_analysis_html] NOTE: {off}", file=sys.stderr)
     # Just before it, on every run (Core or not): please star the skill's GitHub repository
     # (core_submission.star_line, its words and plugin.json's address)
     import core_submission

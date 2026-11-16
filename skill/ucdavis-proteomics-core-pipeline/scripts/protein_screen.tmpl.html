@@ -1,0 +1,1362 @@
+<!doctype html>
+<!-- protein_screen.tmpl.html -- The page for one protein ("show me the data for <protein>"): make_protein_screen.py fills in the data it assembled, and this page draws it. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="generator" content="make_protein_screen.py">
+<title>Protein screen</title>
+<style>
+  :root {
+    --bg-primary: #f3f4f6; --bg-secondary: #ffffff; --bg-tertiary: #e4e6ea; --border: #cdd1d8;
+    --text-primary: #16181d; --text-secondary: #5b616e; --text-tertiary: #9aa0ab;
+    --accent: #0b63ce; --selected-bg: #e6f0fc; --success: #23864a; --warning: #b86e00; --error: #c4252e;
+    --num: #c2185b; --den: #2e86de; --other: #9a9ea6; --inf: #d4880f; --sel: #13a089;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg-primary: #14161a; --bg-secondary: #1d2026; --bg-tertiary: #2b2f37; --border: #3a3f49;
+      --text-primary: #eef0f3; --text-secondary: #a7adb8; --text-tertiary: #6f7682;
+      --accent: #5aa7ff; --selected-bg: rgba(90,167,255,.16); --success: #3fca73; --warning: #f0a33a; --error: #ff6b6b;
+      --num: #d63370; --den: #2e86de; --other: #6e737b; --inf: #c0820f; --sel: #13a089;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg-primary: #14161a; --bg-secondary: #1d2026; --bg-tertiary: #2b2f37; --border: #3a3f49;
+    --text-primary: #eef0f3; --text-secondary: #a7adb8; --text-tertiary: #6f7682;
+    --accent: #5aa7ff; --selected-bg: rgba(90,167,255,.16); --success: #3fca73; --warning: #f0a33a; --error: #ff6b6b;
+    --num: #d63370; --den: #2e86de; --other: #6e737b; --inf: #c0820f; --sel: #13a089;
+    color-scheme: dark;
+  }
+  body { margin: 0; background: var(--bg-primary); color: var(--text-primary); font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+         font-size: 15px; line-height: 1.5; padding: 0 16px 48px; }
+  .wrap { max-width: 1120px; margin: 0 auto; }
+  h1.title { font-size: clamp(26px, 4vw, 38px); line-height: 1.1; margin: 26px 0 6px; overflow-wrap: anywhere; }
+  .subtitle { color: var(--text-secondary); font-size: 14px; margin: 0 0 16px; max-width: 95ch; overflow-wrap: anywhere; }
+  .subtitle b { color: var(--text-primary); font-weight: 600; }
+  .qt * { box-sizing: border-box; }
+  .qt { font-size: 14px; max-width: 1120px; }
+  .qt h3 { font-family: inherit; }
+  .qt .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; font-variant-ligatures: none; }
+  .qt-path { display:flex; flex-wrap:wrap; align-items:stretch; gap:4px; margin:0 0 14px; }
+  .qt-node { border:1px solid var(--border); background:var(--bg-secondary); border-radius:10px; padding:6px 10px; min-width:0; cursor:pointer; max-width:100%; overflow-wrap:anywhere; }
+  .qt-node .t { font-size:10.5px; text-transform:uppercase; letter-spacing:.05em; color:var(--text-secondary); }
+  .qt-node .v { font-weight:700; font-size:14px; }
+  .qt-node .s { font-size:11.5px; color:var(--text-secondary); }
+  .qt-node.na { border-style:dashed; color:var(--text-secondary); }
+  .qt-node.inf { border-color:var(--inf); }
+  .qt-arrow { align-self:center; color:var(--text-tertiary); font-size:11px; padding:0 2px; text-align:center; line-height:1.1; }
+  .qt-step { border:1px solid var(--border); border-radius:14px; background:var(--bg-secondary); margin:0 0 14px; overflow:hidden; }
+  .qt-step.na { border-style:dashed; background:transparent; }
+  .qt-step > .hd { display:flex; align-items:center; gap:10px; padding:10px 14px; border-bottom:1px solid var(--bg-tertiary); }
+  .qt-step > .hd .n { width:24px; height:24px; border-radius:50%; background:var(--accent); color:#fff; font-weight:700; font-size:13px; display:flex; align-items:center; justify-content:center; flex:none; }
+  .qt-step.na > .hd .n { background:var(--text-tertiary); }
+  .qt-step > .hd h3 { margin:0; font-size:16px; }
+  .qt-step > .hd .tool { margin-left:auto; font-size:11px; border:1px solid var(--border); border-radius:10px; padding:2px 8px; color:var(--text-secondary); white-space:nowrap; }
+  .qt-step > .bd { padding:12px 14px; }
+  .qt-step > .ft { padding:8px 14px; border-top:1px solid var(--bg-tertiary); font-size:11.5px; color:var(--text-secondary); background:var(--bg-primary); overflow-wrap:anywhere; }
+  .qt-step > .ft b { color:var(--text-primary); font-weight:600; }
+  .qt-two { display:grid; grid-template-columns:minmax(0,1.35fr) minmax(0,1fr); gap:14px; align-items:start; }
+  @media (max-width: 820px) { .qt-two { grid-template-columns:1fr; } }
+  .qt svg { width:100%; height:auto; display:block; }
+  .qt-big { font-size:28px; font-weight:800; line-height:1.1; }
+  .qt-big small { font-size:14px; font-weight:600; color:var(--text-secondary); }
+  .qt p { margin:6px 0; line-height:1.45; }
+  .qt .note { font-size:12px; color:var(--text-secondary); }
+  .qt-callout { border-left:3px solid var(--inf); background:var(--bg-primary); padding:8px 10px; border-radius:6px; margin:8px 0; }
+  .qt-callout.ok { border-left-color:var(--success); }
+  .qt-miss { font-size:12.5px; color:var(--text-secondary); border:1px dashed var(--border); border-radius:8px; padding:6px 10px; margin:8px 0; overflow-wrap:anywhere; }
+  .qt-miss b { color:var(--text-primary); font-weight:600; }
+  .qt-receipt { border:1px solid var(--border); border-radius:10px; padding:10px 12px; background:var(--bg-primary); }
+  .qt-receipt .t { font-weight:700; }
+  .qt-receipt .f { font-size:11.5px; color:var(--text-secondary); word-break:break-all; }
+  .qt-receipt .v { font-size:20px; font-weight:800; margin:4px 0; }
+  .qt-chips { display:flex; flex-wrap:wrap; gap:6px; margin:4px 0 10px; }
+  .qt-chips.many { max-height:196px; overflow-y:auto; padding:2px; border:1px solid var(--bg-tertiary); border-radius:8px; }
+  .qt-scroll { max-height:680px; overflow-y:auto; }
+  .qt-step > .bd > .qt-sankey:first-child { margin-top:0; padding-top:0; border-top:none; }
+  .qt-chips button { border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); border-radius:8px; padding:3px 8px; cursor:pointer; font-family:ui-monospace, Menlo, monospace; font-size:11.5px; }
+  .qt-chips button.on { border-color:var(--accent); background:var(--selected-bg); color:var(--accent); font-weight:700; }
+  .qt-chips button.drop { color:var(--text-tertiary); text-decoration:line-through; }
+  .qt-chips button .c { font-family:system-ui, sans-serif; font-size:10.5px; color:var(--text-secondary); margin-left:4px; text-decoration:none; display:inline-block; }
+  .qt-tbl { width:100%; border-collapse:collapse; font-size:12.5px; }
+  .qt-tbl th { text-align:left; font-size:10.5px; font-weight:600; color:var(--text-secondary); padding:4px 6px; vertical-align:bottom; text-transform:uppercase; letter-spacing:.03em; }
+  .qt-tbl td { padding:6px 6px; border-top:1px solid var(--bg-tertiary); vertical-align:middle; white-space:nowrap; }
+  .qt-tbl tr.sel td { background:var(--selected-bg); }
+  .qt-tbl tr.sel td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+  .qt-tbl tr.click { cursor:pointer; }
+  .qt-tbl td.gap { color:var(--text-secondary); font-style:italic; white-space:normal; }
+  .qt-tbl .up, .qt-tbl .dn { color:var(--text-secondary); }
+  .qt-tblwrap { overflow-x:auto; }
+  .qt .yes { color:var(--success); font-weight:700; } .qt .no { color:var(--error); font-weight:700; }
+  .qt-qbar { display:inline-block; width:44px; height:6px; background:var(--bg-tertiary); border-radius:3px; vertical-align:middle; margin-right:6px; overflow:hidden; }
+  .qt-qbar i { display:block; height:100%; background:var(--accent); }
+  .qt-flow { display:grid; grid-template-columns:minmax(0,1fr) 28px minmax(0,1fr) 28px minmax(0,1fr); gap:6px; align-items:center; margin:6px 0 10px; }
+  @media (max-width: 700px) { .qt-flow { grid-template-columns:1fr; } .qt-flow .ar { transform:rotate(90deg); } }
+  .qt-flow .box { border:1px solid var(--border); border-radius:10px; padding:8px 10px; background:var(--bg-secondary); font-size:12.5px; min-height:74px; }
+  .qt-flow .box.black { background:var(--text-primary); color:var(--bg-secondary); border-color:var(--text-primary); }
+  .qt-flow .box .h { font-weight:700; font-size:13px; margin-bottom:3px; }
+  .qt-flow .ar { text-align:center; color:var(--text-tertiary); font-size:20px; }
+  .qt-lab { fill:var(--text-secondary); font-size:11px; }
+  .qt-labs { fill:var(--text-primary); font-size:12px; font-weight:600; }
+  .qt-ax { stroke:var(--text-tertiary); stroke-width:1; }
+  .qt-grid { stroke:var(--bg-tertiary); stroke-width:1; }
+  .qt-hit { cursor:pointer; }
+  .qt-mini { border:1px solid var(--border); background:var(--bg-primary); color:var(--accent); border-radius:10px; padding:1px 8px; font:inherit; font-size:11.5px; cursor:pointer; margin-left:4px; }
+  .qt-pills { display:flex; flex-wrap:wrap; gap:8px; margin:4px 0 12px; }
+  .qt-pills button { border:1px solid var(--border); background:var(--bg-secondary); color:var(--text-primary); border-radius:18px; padding:6px 14px; cursor:pointer; font:inherit; }
+  .qt-pills button.on { border-color:var(--accent); background:var(--selected-bg); color:var(--accent); font-weight:600; }
+  .qt-bars { display:flex; flex-direction:column; gap:6px; margin:8px 0 6px; }
+  .qt-bars .grp { font-size:11px; text-transform:uppercase; letter-spacing:.05em; font-weight:700; margin-top:4px; overflow-wrap:anywhere; }
+  .qt-bars .row { display:grid; grid-template-columns:150px minmax(0,1fr) 92px; gap:10px; align-items:center; }
+  @media (max-width: 640px) { .qt-bars .row { grid-template-columns:96px minmax(0,1fr); } .qt-bars .max { display:none; } }
+  .qt-bars .row.on .lab { text-decoration:underline; text-decoration-color:var(--accent); text-underline-offset:3px; }
+  .qt-bars .lab { font-size:12.5px; cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .qt-bars .bar { position:relative; display:flex; height:26px; border-radius:5px; overflow:hidden; background:var(--bg-primary); }
+  .qt-bars .bar .mark { position:absolute; top:0; bottom:0; z-index:1; border-left:2px dashed var(--text-primary); pointer-events:none; }
+  .qt-bars .pull { grid-column:2 / -1; margin-top:-4px; font-size:11.5px; color:var(--text-secondary); }
+  .qt-bars .seg { min-width:0; flex-shrink:1; height:100%; border-right:2px solid var(--bg-secondary); font-size:11px; font-weight:600; line-height:26px; padding:0 5px; white-space:nowrap; overflow:hidden; text-overflow:clip; cursor:pointer; }
+  .qt-bars .seg:last-child { border-right:none; }
+  .qt-bars .max { font-size:11.5px; color:var(--text-secondary); text-align:right; }
+  .qt-second { margin-top:14px; padding-top:12px; border-top:1px solid var(--bg-tertiary); }
+  .qt-second h4, .qt-health h4 { margin:0 0 4px; font-size:14px; }
+  .qt-health { margin:0 0 12px; }
+  .qt-htbl { width:100%; border-collapse:separate; border-spacing:6px 0; font-size:11.5px; color:var(--text-secondary); }
+  .qt-htbl td { background:var(--bg-primary); border:1px solid var(--bg-tertiary); border-radius:8px; padding:6px 8px; vertical-align:top; line-height:1.5; white-space:nowrap; }
+  .qt-htbl .mono { color:var(--text-primary); }
+  .qt-checks { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-top:12px; }
+  .qt-checks .lab { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--text-secondary); margin-right:4px; }
+  .qt-chk { border:1px solid var(--border); border-radius:12px; padding:3px 10px; font-size:12px; background:var(--bg-primary); }
+  .qt-chk.ok { border-color:var(--success); } .qt-chk.warn { border-color:var(--inf); color:var(--text-primary); background:color-mix(in srgb, var(--inf) 12%, var(--bg-primary)); }
+  .qt-chk.bad { border-color:var(--error); background:color-mix(in srgb, var(--error) 12%, var(--bg-primary)); font-weight:600; } .qt-chk.na { color:var(--text-secondary); }
+  .qt-explain { margin-top:26px; border-top:2px solid var(--border); padding-top:14px; }
+  .qt-explain h3 { margin:0 0 4px; font-size:18px; } .qt-explain h4 { margin:16px 0 6px; font-size:14px; }
+  .qt-explain .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px 28px; margin:0; }
+  @media (max-width: 760px) { .qt-explain .grid { grid-template-columns:1fr; } }
+  .qt-explain dt { font-weight:700; font-size:13px; } .qt-explain dd { margin:2px 0 0; font-size:13px; line-height:1.45; }
+  .qt-explain .src { display:block; font-size:11px; color:var(--text-secondary); margin-top:2px; }
+  .qt-explain .refs { font-size:12px; color:var(--text-secondary); padding-left:18px; overflow-wrap:anywhere; }
+  .qt-story { border:2px solid var(--accent); border-radius:14px; background:var(--bg-secondary); padding:12px 16px 8px; margin:0 0 14px; }
+  .qt-story h3 { margin:0 0 4px; font-size:17px; }
+  .qt-story ol { margin:6px 0 4px 20px; padding:0; } .qt-story li { margin:5px 0; line-height:1.5; }
+  .qt-link { border:none; background:none; color:var(--accent); font:inherit; font-size:12.5px; cursor:pointer; padding:0 2px; text-decoration:underline; white-space:nowrap; }
+  .qt-det { margin:14px 0 0; }
+  .qt-detbtn { border:1px dashed var(--border); background:var(--bg-primary); color:var(--accent); border-radius:10px; padding:7px 12px; font:inherit; font-size:13px; font-weight:600; cursor:pointer; width:100%; text-align:left; }
+  .qt-det.open > .qt-detbtn { border-style:solid; margin-bottom:6px; }
+  .qt-det > .qt-second, .qt-det > .qt-sankey, .qt-det > .qt-health { border-top:none; margin-top:0; padding-top:4px; }
+  .qt-how { border:1px solid var(--border); border-radius:14px; background:var(--bg-secondary); padding:12px 16px; margin:0 0 14px; }
+  .qt-how h3 { margin:0 0 6px; font-size:16px; } .qt-how > p:first-of-type { margin:0; line-height:1.6; font-size:14px; }
+  .qt-fig { margin:10px 0 0; } .qt-fig figcaption { font-size:12px; color:var(--text-secondary); margin-top:6px; line-height:1.45; }
+  .qt-pic { width:100%; height:auto; display:block; color:var(--text-primary); background:var(--bg-primary); border-radius:12px; }
+  .qt-foot { font-size:12px; color:var(--text-secondary); margin-top:6px; overflow-wrap:anywhere; }
+  .qt-ask { display:flex; align-items:center; gap:10px; margin:4px 0 2px; flex-wrap:wrap; }
+  .qt-ask .who { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--text-secondary); }
+  .qt-ask .bubble { background:var(--accent); color:#fff; border-radius:16px 16px 16px 4px; padding:8px 14px; font-size:15px; font-weight:600; overflow-wrap:anywhere; }
+  .qt-asknote { font-size:12px; color:var(--text-secondary); margin:4px 0 10px; }
+  .qt-card { border:1px solid var(--border); border-radius:14px; background:var(--bg-secondary); padding:14px 16px 10px; margin:0 0 14px; }
+  .qt-card .top { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap; }
+  .qt-card .gene { font-size:30px; font-weight:800; line-height:1; overflow-wrap:anywhere; }
+  .qt-card .pname { font-size:16px; font-weight:600; margin-top:4px; }
+  .qt-card .meta { font-size:12px; color:var(--text-secondary); margin-top:4px; overflow-wrap:anywhere; }
+  .qt-card .links { display:flex; gap:8px; flex-wrap:wrap; }
+  .qt-ext { display:inline-block; border:1px solid var(--border); border-radius:14px; padding:4px 10px; font-size:12.5px; font-weight:600; color:var(--accent); text-decoration:none; background:var(--bg-primary); }
+  .qt-ext:hover { border-color:var(--accent); }
+  .qt-card .cols { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.3fr) minmax(0,1fr); gap:16px; margin-top:12px; }
+  @media (max-width: 860px) { .qt-card .cols { grid-template-columns:1fr; } }
+  .qt-card h5 { margin:0 0 4px; font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--text-secondary); }
+  .qt-facts { display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:10px 16px; margin-top:12px; border-top:1px solid var(--bg-tertiary); padding-top:10px; }
+  .qt-fact { min-width:0; }
+  .qt-fact dl { display:grid; grid-template-columns:minmax(0,5fr) minmax(0,6fr); gap:2px 10px; margin:0 0 4px; font-size:12.5px; }
+  .qt-fact dt { color:var(--text-secondary); overflow-wrap:anywhere; }
+  .qt-fact dd { margin:0; overflow-wrap:anywhere; }
+  .qt-fact .none { color:var(--text-secondary); font-style:italic; }
+  .qt-fact .fsrc { font-size:11px; color:var(--text-secondary); overflow-wrap:anywhere; }
+  .qt-card .src { font-size:11px; color:var(--text-secondary); border-top:1px solid var(--bg-tertiary); margin-top:10px; padding-top:8px; overflow-wrap:anywhere; }
+  .qt-sankey { margin-top:16px; padding-top:12px; border-top:1px solid var(--bg-tertiary); }
+  .qt-sankey h4 { margin:0 0 4px; font-size:14px; }
+  .qt-keys { display:flex; flex-wrap:wrap; gap:6px 16px; font-size:12px; color:var(--text-secondary); margin:6px 0 8px; }
+  .qt-key i { display:inline-block; width:14px; height:10px; border-radius:2px; margin-right:6px; vertical-align:-1px; }
+  .qt-key b { color:var(--text-primary); }
+  .qt-xgrid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }
+  @media (max-width: 900px) { .qt-xgrid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+  @media (max-width: 560px) { .qt-xgrid { grid-template-columns:1fr; } }
+  .qt-xpanel { border:1px solid var(--border); border-radius:10px; padding:6px 8px; background:var(--bg-primary); cursor:pointer; }
+  .qt-xpanel.on { border-color:var(--accent); box-shadow:0 0 0 2px var(--selected-bg); }
+  .qt-xpanel .xh { display:flex; justify-content:space-between; gap:8px; font-size:12.5px; font-weight:700; margin-bottom:2px; }
+  .qt-xpanel .xh .note { font-weight:400; }
+  .qt-xpanel .xf { font-size:11px; color:var(--text-secondary); }
+  .qt-xempty { height:150px; display:flex; align-items:center; justify-content:center; text-align:center; color:var(--text-secondary); font-size:12px; border:1px dashed var(--border); border-radius:8px; margin:4px 0; padding:8px; }
+  .qt-frag:hover { stroke-width:3.5; opacity:1; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1 class="title" id="qt-title">Protein screen</h1>
+<p class="subtitle" id="qt-sub"></p>
+<div class="qt" id="qt"><noscript>This page draws itself with JavaScript, which is off in this browser.</noscript></div>
+</div>
+<script>
+window.onerror = function (msg) { try { document.body.dataset.render = 'error: ' + msg; } catch (e) { /* nothing left to report to */ } };
+</script>
+<script>
+(function () {
+'use strict';
+/* ---------- the data: D is this protein's screen data, written by make_protein_screen.py ---------- */
+const D = __SCREEN_DATA__;
+const S = D.samples, G = D.groups, N = S.length;
+const CT = D.contrast || {}, NUM = CT.num, DEN = CT.den, ADJP = CT.adjp;
+const A = D.analysis || {}, MISS = D.missing || {}, FILES = D.files || {}, PROV = D.provenance || {};
+const PG = Object.keys(D.proteins)[0], P = D.proteins[PG];
+const INFO = (D.info || {})[PG] || null;
+const FACTS = (INFO && INFO.facts) || (D.facts_no_uniprot || {})[PG] || [];
+const CB = (D.contrib || {})[PG] || null;
+const DP = (D.detprob || {})[PG] || null;
+const RT = (D.routes || {})[PG] || null;
+const SHR = (D.shared || {})[PG] || (INFO && INFO.shared) || {};
+const PEP = D.peptides || {};
+const STATS = D.stats || {};
+const XIC = D.xic || {};
+const HAS_XIC = !MISS.xic && Object.keys(XIC).length > 0;
+const HAS_ROUTES = !!(RT && (RT.ml || RT.mo)) && !MISS.check_routes;
+const ROWS = D.rows || [];
+const PREC = P.prec_ids || [];
+const NOBS = P.nobs || [];
+const VS = NUM != null && DEN != null ? NUM + ' vs ' + DEN : String(CT.name || '');
+
+/* ---------- samples: the comparison's two groups first (denominator, then numerator), then the rest ---------- */
+const GROUPS = [];
+[DEN, NUM].forEach(g => { if (g != null && G.indexOf(g) >= 0 && GROUPS.indexOf(g) < 0) GROUPS.push(g); });
+G.forEach(g => { if (GROUPS.indexOf(g) < 0) GROUPS.push(g); });
+const ORD = S.map((s, i) => i).sort((a, b) => GROUPS.indexOf(G[a]) - GROUPS.indexOf(G[b]) || a - b);
+const INC = i => G[i] === NUM || G[i] === DEN;
+const CMP = ORD.filter(INC);
+const OUTG = GROUPS.filter(g => g !== NUM && g !== DEN);
+const SHORT = [];
+(function () { const k = {}; ORD.forEach(i => { k[G[i]] = (k[G[i]] || 0) + 1; SHORT[i] = G[i] + ' ' + k[G[i]]; }); })();
+const GCOL = g => g === NUM ? 'var(--num)' : g === DEN ? 'var(--den)' : 'var(--other)';
+const GTXT = g => (g === NUM || g === DEN) ? GCOL(g) : 'var(--text-secondary)';
+
+/* ---------- formatting ---------- */
+const isNum = v => typeof v === 'number' && isFinite(v);
+const esc = x => String(x == null ? '' : x).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const clip = (t, n) => { t = String(t == null ? '' : t); return t.length > n ? t.slice(0, n - 1) + '…' : t; };
+const f1 = v => isNum(v) ? v.toFixed(1) : '—';
+const f2 = v => isNum(v) ? v.toFixed(2) : '—';
+const SUP = { '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴', '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹', '-': '⁻' };
+const sci = v => { const e = v.toExponential(1).split('e'); return e[0] + ' × 10' + String(+e[1]).split('').map(c => SUP[c] || c).join(''); };
+const fmtP = p => !isNum(p) ? '—' : p >= 0.001 ? p.toFixed(3) : sci(p);
+const fmtE = v => !isNum(v) ? '—' : v === 0 ? '0' : Math.abs(v) >= 0.001 ? String(+v.toPrecision(3)) : sci(v);
+const big = n => !isNum(n) ? '—' : n >= 1e7 ? (n / 1e6).toFixed(1) + ' M' : n >= 1e6 ? (n / 1e6).toFixed(2) + ' M' : n >= 1e3 ? Math.round(n / 1e3) + ' k' : String(Math.round(n));
+const pct = q => { if (!isNum(q)) return '—'; const v = q * 100; let s = v >= 0.5 ? v.toPrecision(4) : v.toPrecision(2); if (v >= 0.5 && s.indexOf('.') >= 0) s = s.replace(/0+$/, '').replace(/\.$/, ''); return s + '%'; };
+const spc = v => isNum(v) && v > 0 && v < 0.005 ? '&lt;1%' : Math.round((v || 0) * 100) + '%';
+const sgn = v => isNum(v) ? (v >= 0 ? '+' : '−') + Math.abs(v).toFixed(2) : '—';
+const mean = a => a.length ? a.reduce((x, y) => x + y, 0) / a.length : null;
+const median = a => { if (!a.length) return null; const b = a.slice().sort((x, y) => x - y), m = b.length >> 1; return b.length % 2 ? b[m] : (b[m - 1] + b[m]) / 2; };
+const uniq = a => a.filter((x, i) => a.indexOf(x) === i);
+const plural = (n, w) => n + ' ' + w + (n === 1 ? '' : 's');
+const list = a => a.length < 2 ? a.join('') : a.slice(0, -1).join(', ') + ' and ' + a[a.length - 1];
+const day = t => t ? String(t).slice(0, 10) : '';
+const loc = n => isNum(n) ? n.toLocaleString('en-US') : '—';
+
+/* ---------- a block whose data is not here says so, in one line, and shows no controls ---------- */
+const FALLBACK = {
+  xic: 'this screen data holds no XIC excerpts', check_routes: 'this screen data holds no check-route results',
+  fran: 'this screen data holds no FRAN facts', report_text: 'this screen data holds no report-text record',
+  uniprot: 'UniProt was not consulted', run_stats: 'this screen data holds no run statistics',
+  shares: 'this protein’s shares are not in the screen data', detection: 'this protein’s detection chances are not in the screen data',
+  weights: 'this protein’s weights are not in the screen data', library_uniqueness: 'this screen data holds no library-uniqueness result',
+  coverage: 'not placed on UniProt’s sequence for this protein group'
+};
+const LATER = 'Not in this version of the screen data';
+function missLine(block, what, lead, tag) {
+  const why = String(MISS[block] || FALLBACK[block] || 'not recorded').replace(/\.\s*$/, '');
+  return '<' + (tag || 'p') + ' class="qt-miss" data-missing="' + esc(block) + '">' + (what ? '<b>' + what + '.</b> ' : '') + esc(lead || LATER) + ': ' + esc(why) + '.</' + (tag || 'p') + '>';
+}
+
+/* ---------- this protein ---------- */
+const seqZ = id => { const m = String(id).match(/^(.*?)(\d+)$/); return m ? { seq: m[1].replace(/\(UniMod:4\)/g, '*'), z: m[2] } : { seq: String(id), z: '?' }; };
+const pname = id => { const q = seqZ(id); return esc(q.seq) + ' <span class="note">' + esc(q.z) + '+</span>'; };
+const pepOf = id => PEP[id] != null ? PEP[id] : String(id);
+const rowSample = r => r.sample != null ? r.sample : r.Run;
+const rowFor = (pid, si) => ROWS.find(r => r['Precursor.Id'] === pid && rowSample(r) === S[si]) || null;
+const fails = r => !r ? [] : Array.isArray(r.failed) ? r.failed : r.failed ? String(r.failed).split(',') : [];
+const usedRow = r => !!r && (r.used != null ? !!r.used : !fails(r).length);
+const allPrec = () => { const ids = PREC.slice(); ROWS.forEach(r => { if (ids.indexOf(r['Precursor.Id']) < 0) ids.push(r['Precursor.Id']); }); return ids; };
+const limpaVal = (pid, si) => { const k = PREC.indexOf(pid); return k < 0 ? null : P.prec[k][si]; };
+const inferred = i => NOBS[i] === 0;
+const TESTED = !!P.tested && isNum(P.logFC);
+const SIG = TESTED && isNum(P.adjP) && isNum(ADJP) && P.adjP < ADJP;
+const GENE = P.gene || (INFO && INFO.gene) || PG;
+const USED_PEPS = uniq(PREC.map(pepOf));
+const QTY = A.quantities === 'raw' ? 'Precursor.Quantity' : 'Precursor.Normalised';
+/* repo rule 2: a default that reaches the page is tagged. The quantity falls back to Precursor.Normalised when
+   the analysis record names neither; the comparison is the first when nobody chose one (D.contrast.default). */
+const QTY_TAG = A.quantities === 'raw' || A.quantities === 'normalised' ? ''
+  : ' (DEFAULT — not user-confirmed: this screen data does not record which quantity the analysis read)';
+const DEFAULT_CMP = 'the first comparison, chosen by default (DEFAULT — not user-confirmed)';
+const detOf = g => {
+  const d = (P.det || {})[g], m = d != null ? String(d).match(/^(\d+)\s*\/\s*(\d+)$/) : null;
+  if (m) return { k: +m[1], n: +m[2] };
+  const idx = ORD.filter(i => G[i] === g);
+  return { k: idx.filter(i => NOBS[i] > 0).length, n: idx.length };
+};
+const foldTxt = () => { const f = Math.pow(2, Math.abs(P.logFC)).toFixed(2);
+  return f === '1.00' ? 'about the same in ' + esc(NUM) + ' as in ' + esc(DEN) + ' (1.00×)' : f + '× ' + (P.logFC >= 0 ? 'higher' : 'lower') + ' in ' + esc(NUM) + ' than in ' + esc(DEN); };
+const untestedWhy = () => {
+  const a = detOf(DEN), b = detOf(NUM);
+  return a.k === 0 && b.k === 0
+    ? 'none of its precursors was found in any sample of ' + esc(DEN) + ' or ' + esc(NUM) + ', so all its values there are inferred, and the analysis leaves such a protein out of this comparison’s test'
+    : 'the DE table has no fold change for it' + (P.evidence ? ' (its Evidence column: “' + esc(P.evidence) + '”)' : '');
+};
+
+/* ---------- the analysis's confidence checks: its own q-value columns and cutoffs (de_provenance.json) ---------- */
+const QLAB = { 'Q.Value': 'run-level', 'Lib.Q.Value': 'library-level', 'Global.Q.Value': 'experiment-wide',
+               'PG.Q.Value': 'protein run-level', 'Lib.PG.Q.Value': 'protein library-level', 'Global.PG.Q.Value': 'protein experiment-wide' };
+const qlab = k => QLAB[k] || k;
+const QCOLS = Array.isArray(A.q_columns) ? A.q_columns : [];
+const CUT = {};
+QCOLS.forEach((k, j) => { const c = Array.isArray(A.q_cutoffs) ? A.q_cutoffs[j] : null; if (isNum(c)) CUT[k] = c; });
+const cutList = () => QCOLS.map(k => esc(k) + ' ' + pct(CUT[k])).join(', ');
+const FILTERS = Array.isArray(A.filters_applied) ? A.filters_applied : null;
+const quantumsFilterTxt = () => {
+  if (!FILTERS) return '';
+  const qf = FILTERS.filter(f => /Quality/.test(String(f)));
+  return qf.length ? 'Quality filters this analysis applied: ' + qf.map(esc).join('; ') + '.' : 'No quality-score cutoff was among the filters this analysis applied.';
+};
+const NOFC = /no fold-change filter/i.test(String(A.significance_rule || ''));
+
+/* ---------- the detection curve ---------- */
+const B0 = Array.isArray(D.dpc) ? D.dpc[0] : null, B1 = Array.isArray(D.dpc) ? D.dpc[1] : null;
+const HAS_DPC = isNum(B0) && isNum(B1) && B1 > 0;
+const pFound = y => 1 / (1 + Math.exp(-(B0 + B1 * y)));
+const Y50 = HAS_DPC ? -B0 / B1 : null;
+const FOUND_VALS = [];
+(P.prec || []).forEach(r => r.forEach(v => { if (isNum(v)) FOUND_VALS.push(v); }));
+const REF = median(FOUND_VALS);
+const DR = (function () {
+  if (!HAS_DPC) return [0, 1];
+  let lo = Math.min.apply(null, [Y50].concat(FOUND_VALS)), hi = Math.max.apply(null, [Y50].concat(FOUND_VALS));
+  lo = Math.floor(lo - 1.5); hi = Math.ceil(hi + 1.5);
+  if (hi - lo < 8) { const m = (hi + lo) / 2; lo = Math.floor(m - 4); hi = Math.ceil(m + 4); }
+  return [lo, hi];
+})();
+const DETP = (id, si) => {
+  if (!DP) return null;
+  const k = DP.ids.indexOf(id); if (k < 0) return null;
+  const o = DP.pf_obs[k][si]; if (o != null) return { kind: 'obs', p: o };
+  const f = DP.pf_fit[k][si]; return f != null ? { kind: 'fit', p: f } : null;
+};
+const detCell = (id, si) => {
+  if (!DP) return '<span class="note">—</span>';
+  if (PREC.indexOf(id) < 0) return '<span class="note">— (not used by limpa)</span>';
+  const x = DETP(id, si); if (!x) return '<span class="note">—</span>';
+  return x.kind === 'obs' ? '<b>' + Math.round(x.p * 100) + '%</b> <span class="note">at this value</span>'
+    : '<b style="color:var(--inf)">' + Math.round(x.p * 100) + '%</b> <span class="note">expected by limpa’s fit, not found' + (x.p >= 0.8 ? ': a surprising gap' : x.p <= 0.4 ? ': an unsurprising gap' : '') + '</span>';
+};
+
+/* ---------- shares (our calculation with limpa) ---------- */
+function shareOf(si) {
+  const rows = CB.ids.map((id, i) => { const f = limpaVal(id, si) != null; return { id, share: f ? (CB.own[i][si] || 0) : 0, found: f }; });
+  return { rows, other: CB.other[si] || 0, prior: 1 - (CB.total[si] || 0) };
+}
+/* A sample's parts -- each found peptide's or precursor's share, the same ones found in other samples (other), and
+   limpa's prior and the gaps (prior = 1 - total) -- add up to its protein value, 100%. A part can be negative: it
+   then pulls the value the other way (limpa's prior and the gaps do when the total is above 100%). A figure cannot
+   draw a negative part, so the drawn parts add up to more than 100% (pos), and the page says which part pulls the
+   other way, and by how much: never hidden, never clamped away. parts: [{v, what, pl}] (pl: the plural verb). */
+function partsOf(parts) {
+  const pulls = parts.filter(p => p.v < 0);
+  return { pos: parts.reduce((a, p) => a + Math.max(0, p.v), 0), pulls };
+}
+const OTHER_PART = { what: 'the same peptides found in other samples', pl: true };
+const PRIOR_PART = { what: 'limpa’s prior and the gaps', pl: true };
+const overPc = v => Math.round(v * 100) <= 100 ? 'just over 100%' : Math.round(v * 100) + '%';
+const pullTxt = pulls => list(pulls.map(p => p.what + (p.pl ? ' pull' : ' pulls') + ' the other way, by ' + spc(-p.v)));
+const pcRange = vs => { const L = spc(Math.min.apply(null, vs)), H = spc(Math.max.apply(null, vs)); return L === H ? L : L.replace(/%$/, '') + '–' + H; };
+function shareMethodText() {
+  const m = D.share_method || {}, c = m.check || {};
+  let t = 'for each found precursor value, how much the sample’s protein value moves when that value moves, taken from limpa’s own fit' + (m.limpa_version ? ' (limpa ' + esc(m.limpa_version) + ')' : '');
+  if (CB && isNum(CB.refit_max_diff)) t += '; limpa’s fit, re-run for this protein, reproduces the delivered protein values (largest difference ' + fmtE(CB.refit_max_diff) + (isNum(m.tolerance) ? ', allowed ' + fmtE(m.tolerance) : '') + ')';
+  if (c.passed === true) {
+    const b = [];
+    if (Array.isArray(c.proteins) && c.proteins.length) b.push(plural(c.proteins.length, 'protein') + ' of this analysis');
+    if (isNum(c.cells_checked)) b.push(c.cells_checked + ' values');
+    if (isNum(c.max_diff)) b.push('largest difference ' + fmtE(c.max_diff) + (isNum(c.tolerance) ? ', allowed ' + fmtE(c.tolerance) : ''));
+    t += '; checked against direct recalculation' + (b.length ? ' (' + b.join('; ') + ')' : '');
+  }
+  return t;
+}
+const topShareTxt = si => { if (!CB) return ''; const r = shareOf(si).rows.reduce((a, x) => x.share > a.share ? x : a, { share: 0 }); return r.id ? 'The largest share of this value, ' + spc(r.share) + ', rests on ' + pname(r.id) + '.' : ''; };
+
+/* ---------- what limma's weights show for the comparison's samples ---------- */
+/* "About evenly" means every sample's share of its group's weighted mean is within EVEN_TOL of an equal
+   share (1 / the group's size); the page says so in words. "Less weight" for inferred values means, in
+   every group with both, their mean share is below that of the group's found samples. */
+const EVEN_TOL = 0.05;
+/* Step 1 says the weights "matter" when limma's log2 fold change and a plain average of the same protein values
+   differ by more than WEIGHTS_TOL log2, and "barely matter" otherwise; the page states the cut-off with it. */
+const WEIGHTS_TOL = 0.05;
+const WF = (function () {
+  const ws = RT && Array.isArray(RT.wshare) ? RT.wshare : null;
+  if (!ws || !CMP.length || CMP.some(i => !isNum(ws[i]))) return null;
+  const inG = g => CMP.filter(i => G[i] === g), pc = v => Math.round(v * 100) + '%';
+  const groups = [DEN, NUM].filter(g => inG(g).length);
+  const both = groups.filter(g => inG(g).some(inferred) && inG(g).some(i => !inferred(i)));
+  const less = both.length > 0 && both.every(g => mean(inG(g).filter(inferred).map(i => ws[i])) < mean(inG(g).filter(i => !inferred(i)).map(i => ws[i])));
+  const inferredTxt = both.map(g => {
+    const f = inG(g).filter(i => !inferred(i)).map(i => Math.round(ws[i] * 100)), lo = Math.min.apply(null, f), hi = Math.max.apply(null, f);
+    return inG(g).filter(inferred).map(i => esc(SHORT[i]) + ': ' + pc(ws[i])).join(', ') + ' of the ' + esc(g) + ' mean, against ' + (lo === hi ? lo : lo + '–' + hi) + '% for its found sample' + (f.length > 1 ? 's' : '');
+  }).join('; ');
+  const dev = CMP.map(i => ({ i, eq: 1 / inG(G[i]).length, d: ws[i] - 1 / inG(G[i]).length }));
+  const worst = dev.reduce((a, x) => Math.abs(x.d) > Math.abs(a.d) ? x : a);
+  const all = CMP.map(i => Math.round(ws[i] * 100));
+  return { less, both: both.length > 0, inferredTxt, even: Math.abs(worst.d) <= EVEN_TOL, worst,
+           range: Math.min.apply(null, all) === Math.max.apply(null, all) ? all[0] + '%' : Math.min.apply(null, all) + '–' + Math.max.apply(null, all) + '%' };
+})();
+function weightSentence() {
+  if (!WF) return '';
+  const infC = CMP.filter(inferred), pc = v => Math.round(v * 100) + '%';
+  if (infC.length && WF.both) return WF.less ? 'limma gave the inferred values less weight (' + WF.inferredTxt + ').' : 'limma’s weights for the inferred values: ' + WF.inferredTxt + '.';
+  if (infC.length) return '';                  /* a whole group inferred: no found sample in it to compare with */
+  if (WF.even) return 'limma weighted the ' + CMP.length + ' samples of ' + esc(VS) + ' about evenly (' + WF.range + ' of each group’s mean; each within ' + Math.round(EVEN_TOL * 100) + ' percentage points of an equal share).';
+  const w = WF.worst;
+  return 'limma weighted the samples unevenly: ' + esc(SHORT[w.i]) + ' carries ' + pc(RT.wshare[w.i]) + ' of the ' + esc(G[w.i]) + ' mean, where an equal share would be ' + pc(w.eq) + '.';
+}
+
+/* ---------- shared peptides (DIA-NN's Protein.Ids for this search) ---------- */
+const sharedWith = pep => { const s = SHR[pep]; return s ? s.others.map(o => (o.gene ? esc(o.gene) + ' (' + esc(o.acc) + ')' : esc(o.acc))) : []; };
+const SHARED_USED = USED_PEPS.filter(p => sharedWith(p).length);
+const sharedTxt = peps => {
+  const by = {}, order = [];
+  peps.forEach(p => { const k = sharedWith(p).join(', '); if (!by[k]) { by[k] = []; order.push(k); } by[k].push(p); });
+  return order.map(k => { const a = by[k], shown = a.slice(0, 8).map(esc).join(', ') + (a.length > 8 ? ' and ' + (a.length - 8) + ' more' : '');
+    return shown + (a.length === 1 ? ' is' : ' are') + ' also in ' + k; }).join('; ');
+};
+
+/* ---------- checksums ---------- */
+const checksumTxt = rel => {
+  if (!rel) return '';
+  if ((PROV.verified || []).indexOf(rel) >= 0) return esc(rel) + '’s sha256 matches the one recorded when the screen data was made <span class="yes">✓</span>';
+  if ((PROV.not_checked || []).indexOf(rel) >= 0) return esc(rel) + ' was not beside the screen data, so its checksum was not checked here';
+  return '';
+};
+
+/* ---------- interaction state ---------- */
+const st = { s: ORD.length ? ORD[0] : 0, p: PREC[0] || allPrec()[0] || '', xshared: true, skw: CB ? 'share' : 'int', open: {} };
+(function () {
+  const firstInf = CMP.find(inferred), firstNum = CMP.find(i => G[i] === NUM);
+  st.s = firstInf != null ? firstInf : firstNum != null ? firstNum : st.s;
+  if (CB) { const r = shareOf(st.s).rows.reduce((a, x) => x.share > a.share ? x : a, { share: -1 }); if (r.id) st.p = r.id; }
+  else { const f = PREC.find(id => limpaVal(id, st.s) != null); if (f) st.p = f; }
+})();
+
+/* ---------- the request ---------- */
+function askHTML() {
+  return '<div class="qt-ask"><span class="who">Request</span><span class="bubble">show me the data for ' + esc(GENE) + '</span></div>' +
+    '<p class="qt-asknote">Built by make_protein_screen.py from this analysis’s screen data. Every block reads only this project’s result files' + (INFO ? ', plus UniProt' + (FACTS.some(f => f.status === 'ok' && f.source !== 'UniProt') ? ' and the public sources named in the card' : '') + ',' : '') + ' and says which file each number came from.</p>';
+}
+
+/* ---------- protein card ---------- */
+const ext = (href, label) => '<a class="qt-ext" href="' + esc(href) + '" target="_blank" rel="noopener">' + label + ' ↗</a>';
+function covSVG(I) {
+  const W = 600, H = 26, L = 4, R = 4, X = i => L + (W - L - R) * (i - 1) / I.length;
+  const used = new Set(USED_PEPS), selPep = pepOf(st.p), ids = allPrec();
+  let s = '<svg viewBox="0 0 ' + W + ' ' + (H + 14) + '" role="img" aria-label="Sequence coverage"><rect x="' + L + '" y="6" width="' + (W - L - R) + '" height="' + (H - 12) + '" rx="3" fill="var(--bg-tertiary)"/>';
+  Object.keys(I.pos).sort((a, b) => (a === selPep) - (b === selPep)).forEach(pep => {
+    const p = I.pos[pep]; if (!p) return;
+    const pid = ids.find(id => pepOf(id) === pep), on = pep === selPep, u = used.has(pep);
+    s += '<rect class="qt-hit"' + (pid ? ' data-p="' + esc(pid) + '"' : '') + ' x="' + X(p[0]) + '" y="' + (on ? 2 : 6) + '" width="' + Math.max(2, X(p[1] + 1) - X(p[0])) + '" height="' + (on ? H - 4 : H - 12) + '" rx="2" fill="' +
+         (on ? 'var(--sel)' : u ? 'var(--text-secondary)' : 'transparent') + '"' + (u ? ' opacity="' + (on ? 1 : 0.55) + '"' : ' stroke="var(--text-tertiary)" stroke-dasharray="3 2"') +
+         '><title>' + esc(pep) + ' (' + p[0] + '–' + p[1] + ')' + (u ? '' : ' — not used') + '</title></rect>';
+  });
+  s += '<text class="qt-lab" x="' + L + '" y="' + (H + 12) + '">1</text><text class="qt-lab" x="' + (W - R) + '" y="' + (H + 12) + '" text-anchor="end">' + I.length + '</text>';
+  return s + '</svg>';
+}
+function sharedCardHTML() {
+  if (!USED_PEPS.length) return '';
+  const sh = SHARED_USED;
+  if (!sh.length) return '<p class="note">Every peptide used is unique to this protein group in the database this search used (DIA-NN’s Protein.Ids).</p>';
+  const all = sh.length === USED_PEPS.length;
+  return '<div class="qt-callout"><b>' + sh.length + ' of ' + plural(USED_PEPS.length, 'peptide') + ' used ' + (sh.length === 1 ? 'is' : 'are') + ' shared with other proteins.</b> ' +
+    sharedTxt(sh) + ' (DIA-NN’s Protein.Ids for this search). ' +
+    (all ? 'All of ' + esc(GENE) + '’s value rests on shared peptides, so it may partly be those proteins’ signal.' : 'Those peptides’ signal may partly belong to the other proteins.') + '</div>' +
+    (all ? missLine('library_uniqueness', 'Whether the search library holds a peptide unique to one of them') : '');
+}
+/* ---------- facts looked up in established sources (protein_facts.py); every value is the source's own ---------- */
+const FACT_OFF = { not_found: 'Not found', not_reached: 'Not reached', not_applicable: 'Not applicable' };
+function factVal(v, label, source) {
+  if (v == null) return '<span class="none">' + (source === 'Human Protein Atlas' ? 'no HPA value' : 'none given by the source') + '</span>';
+  // thousands separators are for display only; the number is the source's
+  if (isNum(v) || (typeof v === 'string' && /^\d+$/.test(v) && /\[[^\]]+\]/.test(label))) {
+    const n = Number(v);
+    if (isFinite(n) && Math.abs(n) >= 10000) return esc(n.toLocaleString('en-US'));
+  }
+  if (Array.isArray(v)) return esc(v.join(', '));
+  if (typeof v === 'object') return esc(JSON.stringify(v));
+  return esc(v);
+}
+function factHTML(f) {
+  const head = '<h5>' + esc(f.source) + '</h5>';
+  if (f.status !== 'ok')
+    return '<div class="qt-fact" data-fact="' + esc(f.source) + '" data-status="' + esc(f.status) + '">' + head +
+      '<p class="note"><b>' + esc(FACT_OFF[f.status] || f.status) + (f.note ? ':</b> ' + esc(f.note) : '.</b>') + '</p></div>';
+  if (f.source === 'UniProt' && !f.note) return '';      // the UniProt columns above already show this entry
+  const rows = (f.fields || []).map(r => '<dt>' + esc(r[0]) + '</dt><dd>' + factVal(r[1], r[0], f.source) + '</dd>').join('');
+  const link = typeof f.url === 'string' && f.url.indexOf('https://') === 0 ? ' · ' + ext(f.url, 'record') : '';
+  return '<div class="qt-fact" data-fact="' + esc(f.source) + '" data-status="ok">' + head +
+    (f.note ? '<p class="note">' + esc(f.note) + '.</p>' : '') + (rows ? '<dl>' + rows + '</dl>' : '') +
+    '<div class="fsrc">' + (f.release ? 'release ' + esc(f.release) : 'version not stated by the source') + ', fetched ' + esc(f.fetched_at) +
+    (f.licence ? ', licence: ' + esc(f.licence) : '') + link + '</div></div>';
+}
+function factsHTML() {
+  const h = FACTS.map(factHTML).join('');
+  return h ? '<div class="qt-facts" id="qt-facts">' + h + '</div>' : '';
+}
+function cardHTML() {
+  const I = INFO, nDrop = allPrec().length - PREC.length;
+  const top = I
+    ? '<div><div class="gene">' + esc(I.gene || GENE) + '</div><div class="pname">' + esc(I.name || '') + '</div>' +
+      '<div class="meta">' + [esc(I.acc), esc(I.id), esc(I.reviewed), I.organism ? '<i>' + esc(I.organism) + '</i>' : '', isNum(I.length) ? I.length + ' amino acids' : ''].filter(Boolean).join(' · ') + '</div></div>' +
+      '<div class="links">' + ext('https://www.uniprot.org/uniprotkb/' + encodeURIComponent(I.acc) + '/entry', 'UniProt') + '</div>'
+    : '<div><div class="gene">' + esc(GENE) + '</div><div class="pname">' + esc(P.name || '') + '</div>' +
+      '<div class="meta">Protein.Group ' + esc(PG) + ' · gene and name as DIA-NN reported them (Genes, Protein.Names)</div></div>';
+  /* a group of several accessions: the builder looked up the first (D.lookup), and the card says so */
+  const LK = D.lookup || {}, ACCS = Array.isArray(LK.accessions) ? LK.accessions : [];
+  const uni = (I
+    ? '<p>' + (I.function ? esc(I.function) : '<span class="note">UniProt has no function summary for this entry.</span>') + '</p>' +
+      '<p class="note">Location: ' + (I.location && I.location.length ? esc(I.location.join('; ')) : 'not given') + '</p>'
+    : missLine('uniprot', '', 'Not on this page')) +
+    (ACCS.length > 1 && LK.accession ? '<p class="note">This protein group holds ' + ACCS.length + ' accessions (' + esc(ACCS.join(', ')) + '); the facts on this card are for the first, ' + esc(LK.accession) + '.</p>' : '');
+  let exp;
+  if (TESTED) {
+    exp = '<p><b>' + sgn(P.logFC) + '</b> log2 (' + foldTxt() + '), adjusted p ' + fmtP(P.adjP) + ': ' +
+      (SIG ? 'one of the ' + loc(D.n_sig) + ' proteins called changed in ' : 'not among the ' + loc(D.n_sig) + ' proteins called changed in ') + esc(VS) + ' (adjusted p below ' + ADJP + ').</p>';
+  } else exp = '<p><b>Not tested in this comparison</b> (' + esc(VS) + '): ' + untestedWhy() + '.</p>';
+  const a = detOf(DEN), b = detOf(NUM);
+  exp += '<p>Found in ' + a.k + ' of ' + a.n + ' ' + esc(DEN) + ' and ' + b.k + ' of ' + b.n + ' ' + esc(NUM) + ' samples. ' +
+    plural(PREC.length, 'precursor') + ' from ' + plural(USED_PEPS.length, 'peptide') + ' were used' + (nDrop ? '; ' + nDrop + ' more ' + (nDrop === 1 ? 'was' : 'were') + ' reported by DIA-NN but not used' : '') + '.</p>';
+  if (I && I.pos) exp += covSVG(I) + '<p class="note">The peptides used cover <b>' + (100 * I.cov.reduce((x, y) => x + y, 0) / I.length).toFixed(0) + '%</b> of the sequence. Click a peptide to follow it.</p>';
+  else if (I && MISS.coverage) exp += missLine('coverage', 'Sequence coverage and peptide positions', 'Not shown');
+  exp += sharedCardHTML();
+  const src = (I ? 'Sources: UniProt ' + esc(I.acc) + (I.release ? ' (release ' + esc(I.release) : ' (release not stated') + (I.uniprot_version != null ? ', entry version ' + esc(I.uniprot_version) : '') + (I.uniprot_updated ? ', annotation updated ' + esc(I.uniprot_updated) : '') + '), fetched ' + esc(I.fetched_at) + ' · ' : 'Sources: ') +
+    'this project’s ' + esc(FILES.de_table) + ' and ' + esc(FILES.session_rds) + ', via screen_data/ (written ' + esc(day(PROV.written_at)) + ' by ' + esc(PROV.written_by) + ')';
+  return '<div class="qt-card" id="qt-card"><div class="top">' + top + '</div><div class="cols">' +
+    '<div><h5>What UniProt says</h5>' + uni + '</div>' +
+    '<div><h5>In this experiment</h5>' + exp + '</div>' +
+    '<div><h5>In FRAN</h5>' + missLine('fran', 'FRAN, the Core’s database of past searches') + '</div></div>' +
+    factsHTML() + checksHTML() + '<div class="src">' + src + '</div></div>';
+}
+
+/* ---------- checks strip ---------- */
+function checksHTML() {
+  const out = [];
+  const chk = (cls, txt, tip) => out.push('<span class="qt-chk ' + cls + '" title="' + esc(tip || '') + '">' + ({ ok: '✓', warn: '⚠', bad: '✖', na: '–' })[cls] + ' ' + txt + '</span>');
+  const ninf = CMP.filter(inferred).length;
+  chk(ninf ? 'warn' : 'ok', ninf ? ninf + ' of ' + CMP.length + ' samples inferred' : 'no inferred samples', 'samples of ' + VS + ' where none of its precursors was found');
+  const sh = SHARED_USED.length;
+  if (USED_PEPS.length) chk(sh ? 'warn' : 'ok', sh ? (sh === USED_PEPS.length ? 'rests only on shared peptides' : plural(sh, 'shared peptide')) : 'unique peptides', 'in DIA-NN’s protein list for this search');
+  if (Object.keys(STATS).length) {
+    const shaky = CMP.filter(i => STATS[S[i]] && isNum(STATS[S[i]]['Normalisation.Instability']) && STATS[S[i]]['Normalisation.Instability'] >= 0.3).map(i => esc(SHORT[i]));
+    chk(shaky.length ? 'warn' : 'ok', shaky.length ? shaky.join(', ') + ': unstable normalisation' : 'stable normalisation', 'normalisation instability at or above 0.3 (the skill’s warning line), in report.stats.tsv');
+  } else chk('na', 'normalisation stability not recorded', MISS.run_stats || FALLBACK.run_stats);
+  return '<div class="qt-checks"><span class="lab">Checks</span>' + out.join('') + '</div>' +
+    '<p class="note" style="margin:4px 0 0">⚠ look closer (this screen only) · ✓ passed · – not recorded · explained at the bottom of the page.</p>' +
+    (HAS_ROUTES ? '' : missLine('check_routes', 'Checks against the other routes to a fold change'));
+}
+
+/* ---------- folding: details stay closed until asked for ---------- */
+function det(key, label, fn) {
+  const open = !!st.open[key];
+  return '<div class="qt-det' + (open ? ' open' : '') + '" id="det-' + key + '"><button class="qt-detbtn" data-act="det:' + key + '">' + (open ? '▾ Hide: ' : '▸ Show details: ') + label + '</button>' + (open ? fn() : '') + '</div>';
+}
+
+/* ---------- the short answer, written from this protein's data ---------- */
+function storyHTML() {
+  const link = (txt, attr) => ' <button class="qt-link" ' + attr + '>' + txt + ' →</button>';
+  const out = [], infC = CMP.filter(inferred);
+  if (TESTED) out.push('<b>' + esc(GENE) + ' is ' + sgn(P.logFC) + ' log2</b> (' + foldTxt() + '), adjusted p ' + fmtP(P.adjP) + ': ' + (SIG ? 'called changed' : 'not called changed') + ' in ' + esc(VS) + ' (cutoff ' + ADJP + ').' + link('the change', 'data-go="qt-s1"'));
+  else out.push('<b>' + esc(GENE) + ' is not tested in this comparison</b> (' + esc(VS) + '): ' + untestedWhy() + '.' + link('the values', 'data-go="qt-s1"'));
+  if (SHARED_USED.length && SHARED_USED.length === USED_PEPS.length)
+    out.push('⚠ It rests only on shared peptides: ' + sharedTxt(SHARED_USED) + '. Part of the signal may be theirs.' + link('shared peptides', 'data-go="qt-card"'));
+  let b = 'Each sample’s value is built from ' + plural(PREC.length, 'precursor') + ' (' + plural(USED_PEPS.length, 'peptide') + ')' +
+    (infC.length ? '; in ' + list(infC.map(i => esc(SHORT[i]))) + ' none was found, so limpa inferred ' + (infC.length > 1 ? 'those values' : 'that value') : ', with at least one found in each of the ' + CMP.length + ' samples of ' + esc(VS)) + '.';
+  if (CB) {
+    let top = { share: 0 };
+    CMP.forEach(si => { const by = {}; shareOf(si).rows.forEach(r => { if (r.found) by[pepOf(r.id)] = (by[pepOf(r.id)] || 0) + r.share; });
+      Object.keys(by).forEach(k => { if (by[k] > top.share) top = { share: by[k], pep: k, si }; }); });
+    if (USED_PEPS.length === 1) {
+      const v = CMP.filter(si => NOBS[si] > 0).map(si => Math.round(shareOf(si).rows.reduce((a, r) => a + (r.found ? r.share : 0), 0) * 100));
+      if (v.length) { const lo = Math.min.apply(null, v), hi = Math.max.apply(null, v); b += ' Its only peptide carries ' + (lo === hi ? lo : lo + '–' + hi) + '% of each sample’s value; ' +
+        (hi <= 100 ? 'the rest comes from other samples and limpa’s prior.' : 'other samples and limpa’s prior make up the difference, pulling the other way where it is above 100%.'); }
+    } else if (top.pep) b += top.share >= 0.5 ? ' One peptide carries ' + spc(top.share) + ' of ' + esc(SHORT[top.si]) + '’s value (' + esc(top.pep) + ').' : ' No single peptide carries more than ' + spc(top.share) + ' of any sample’s value.';
+  }
+  out.push(b + link(CB ? 'per-peptide shares' : 'each sample’s value', 'data-go="qt-s2"'));
+  const wsen = weightSentence();
+  if (wsen) out.push(wsen + link('weights', 'data-act="open:weights"'));
+  const q = ROWS.filter(r => PREC.indexOf(r['Precursor.Id']) >= 0 && usedRow(r) && isNum(r['Quantity.Quality'])).map(r => r['Quantity.Quality']);
+  let surp = 0;
+  if (DP) PREC.forEach(id => ORD.forEach(si => { const x = DETP(id, si); if (x && x.kind === 'fit' && x.p >= 0.8) surp++; }));
+  if (q.length) out.push('DIA-NN’s quality scores for the precursor values limpa used have a median of ' + median(q).toFixed(2) +
+    (surp ? '; ' + plural(surp, 'gap') + (surp > 1 ? ' were' : ' was') + ' surprising (limpa expected at least an 80% chance of finding ' + (surp > 1 ? 'them' : 'it') + ')' : '') + '.' + link('the precursor table', 'data-go="qt-s3"'));
+  const left = [];
+  if (!HAS_ROUTES) left.push('what the other routes to a fold change say');
+  if (!HAS_XIC) left.push('the peaks behind each value');
+  return '<div class="qt-story" id="qt-story"><h3>The short answer</h3><ol>' + out.map(x => '<li>' + x + '</li>').join('') + '</ol>' +
+    '<p class="note">Written by this page from this protein’s data (' + esc(FILES.de_table) + ', ' + esc(FILES.session_rds) + ' and ' + esc(FILES.report) + ', via screen_data/). Each line links to the part of the page that shows it; extra detail is folded away until you ask for it.' +
+    (left.length ? ' Not covered, because this version of the screen data does not hold it: ' + list(left) + '.' : '') + '</p></div>';
+}
+
+/* ---------- how all of this works, in one paragraph ---------- */
+function howItWorksHTML() {
+  const s = [];
+  s.push('Each sample goes through the mass spectrometer, and <b>DIA-NN</b> looks in it for the peptides of its spectral library.');
+  s.push('For each peptide at each charge state (a <i>precursor</i>) it records the signal of its fragment ions and of the intact peptide (MS1), and its QuantUMS step combines them into one number, giving the less noisy signals more weight.');
+  if (A.normalisation) s.push('Between-run normalisation, as this analysis records it: ' + esc(A.normalisation) + '.');
+  if (QCOLS.length) s.push('The analysis then applies ' + plural(QCOLS.length, 'confidence check') + ' (' + cutList() + '); a precursor is <i>found</i> in a sample only when DIA-NN reported a value for it there that passes them, and otherwise it is <i>not found</i>.');
+  s.push('<b>limpa</b> then turns a protein’s precursors into one value per sample: on a log scale it treats each precursor’s value as the protein’s level plus that precursor’s own offset, counts every found value equally, ' +
+    'and reads a precursor that wasn’t found as “probably low”, using a detection curve that says how often a precursor of a given intensity is found.');
+  s.push('Where none of a protein’s precursors was found, its value in that sample is <i>inferred</i> and gets a wide error bar.');
+  s.push('Finally <b>limma</b> compares the groups: it weights each value using its error bar, borrows information across all the proteins to judge how noisy each one is, and corrects the p-values for testing ' + loc(D.n_tested) + ' proteins at once.');
+  return '<div class="qt-how"><h3>How a protein’s number is made</h3><p>' + s.join(' ') + '</p>' +
+    '<p class="note">The method, as this analysis records it (tables/de_provenance.json, copied into screen_data/manifest.json): ' + [A.display_label, A.rollup_method, A.de_engine].filter(Boolean).map(esc).join('; ') + '.</p>' +
+    det('picture', 'the picture: this chain drawn with ' + esc(GENE) + '’s own numbers', pictureHTML) + '</div>';
+}
+
+/* ---------- path overview ---------- */
+function xicFor(pid, si) { const x = XIC[pid]; return x ? x[S[si]] || null : null; }
+function pathHTML() {
+  const si = st.s, nobs = NOBS[si], lv = limpaVal(st.p, si), r = rowFor(st.p, si), q = seqZ(st.p);
+  const node = (t, v, s, cls, tgt) => '<div class="qt-node ' + (cls || '') + '" data-go="' + tgt + '"><div class="t">' + t + '</div><div class="v">' + v + '</div><div class="s">' + s + '</div></div>';
+  const arr = '<div class="qt-arrow">←<br>came<br>from</div>';
+  let h = '<div class="qt-path">';
+  h += node('The number', TESTED ? esc(GENE) + ' ' + sgn(P.logFC) : 'not tested', TESTED ? 'log2 fold change, ' + esc(VS) : 'in ' + esc(VS), TESTED ? '' : 'na', 'qt-s1') + arr;
+  h += node(esc(SHORT[si]) + ' protein value', f2(P.prot[si]) + ' ± ' + f2(P.se[si]),
+    (nobs === 0 ? 'inferred: 0 precursors found' : nobs + ' of ' + PREC.length + ' precursors found') + (INC(si) ? '' : ' · not in this comparison'), nobs === 0 ? 'inf' : '', 'qt-s2') + arr;
+  h += node('Precursor in ' + esc(SHORT[si]), esc(clip(q.seq, 16)) + ' ' + esc(q.z) + '+',
+    lv != null ? 'log2 value ' + f2(lv) : (r ? 'reported, but not used' : 'not found in this sample'), lv != null ? '' : 'na', 'qt-s3') + arr;
+  h += node('DIA-NN', r ? big(r['Precursor.Quantity']) + ' × ' + (isNum(r['Normalisation.Factor']) ? r['Normalisation.Factor'].toFixed(3) : '—') : 'no value',
+    r ? 'raw quantity × normalisation' : 'no value reported in this sample', r ? '' : 'na', 'qt-s3');
+  if (HAS_XIC) { const xx = xicFor(st.p, si), nf = xx ? Object.keys(xx).length - (xx.ms1 ? 1 : 0) : 0;
+    h += arr + node('The peaks (XIC)', xx ? nf + ' fragments + MS1' : 'no trace', 'in ' + esc(SHORT[si]) + ', step 4', xx ? '' : 'na', 'qt-s4'); }
+  else h += arr + node('The peaks (XIC)', 'not here', 'not in this version of the screen data', 'na', 'qt-s4');
+  return h + '</div>';
+}
+
+/* ---------- step 1: fold change ---------- */
+function foldSVG() {
+  const idx = CMP; if (!idx.length) return '';
+  const W = 420, H = 230, L = 46, R = 12, T = 14, Bm = 40;
+  const vals = []; idx.forEach(i => { if (isNum(P.prot[i])) { vals.push(P.prot[i] - (P.se[i] || 0)); vals.push(P.prot[i] + (P.se[i] || 0)); } });
+  if (!vals.length) return '';
+  const lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals);
+  const pad = (hi - lo) * 0.12 + 0.1, y0 = lo - pad, y1 = hi + pad;
+  const Y = v => T + (H - T - Bm) * (1 - (v - y0) / (y1 - y0));
+  const gx = {}; gx[DEN] = L + (W - L - R) * 0.28; gx[NUM] = L + (W - L - R) * 0.72;
+  const nIn = g => idx.filter(i => G[i] === g).length;
+  let s = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Protein value in each sample of the comparison">';
+  const step = [0.02, 0.05, 0.1, 0.2, 0.25, 0.5, 1, 2, 5].find(x => (y1 - y0) / x <= 5) || 10, dec = step < 0.1 ? 2 : step < 1 ? (step === 0.25 ? 2 : 1) : 0;
+  for (let k = Math.ceil(y0 / step); k * step <= y1; k++) { const v = k * step;
+    s += '<line class="qt-grid" x1="' + L + '" x2="' + (W - R) + '" y1="' + Y(v) + '" y2="' + Y(v) + '"/><text class="qt-lab" x="' + (L - 6) + '" y="' + (Y(v) + 4) + '" text-anchor="end">' + v.toFixed(dec) + '</text>'; }
+  s += '<text class="qt-lab" transform="translate(12,' + ((T + H - Bm) / 2) + ') rotate(-90)" text-anchor="middle">protein value (log2)</text>';
+  const cnt = {};
+  idx.forEach(i => {
+    const g = G[i], n = nIn(g), k = (cnt[g] = (cnt[g] || 0) + 1) - 1, sp = Math.min(34, 140 / Math.max(1, n));
+    const x = gx[g] + (k - (n - 1) / 2) * sp, v = P.prot[i], inf = inferred(i), sel = i === st.s, c = inf ? 'var(--inf)' : GCOL(g);
+    if (!isNum(v)) return;
+    s += '<g class="qt-hit" data-s="' + i + '">';
+    if (sel) s += '<circle cx="' + x + '" cy="' + Y(v) + '" r="11" fill="none" stroke="var(--accent)" stroke-width="2"/>';
+    s += '<line x1="' + x + '" x2="' + x + '" y1="' + Y(v - P.se[i]) + '" y2="' + Y(v + P.se[i]) + '" stroke="' + c + '" stroke-width="2"/>';
+    s += '<line x1="' + (x - 5) + '" x2="' + (x + 5) + '" y1="' + Y(v - P.se[i]) + '" y2="' + Y(v - P.se[i]) + '" stroke="' + c + '" stroke-width="2"/>';
+    s += '<line x1="' + (x - 5) + '" x2="' + (x + 5) + '" y1="' + Y(v + P.se[i]) + '" y2="' + Y(v + P.se[i]) + '" stroke="' + c + '" stroke-width="2"/>';
+    s += inf ? '<circle cx="' + x + '" cy="' + Y(v) + '" r="6" fill="var(--bg-secondary)" stroke="var(--inf)" stroke-width="2.5"/>' : '<circle cx="' + x + '" cy="' + Y(v) + '" r="6" fill="' + c + '"/>';
+    s += '<rect x="' + (x - Math.max(6, sp / 2)) + '" y="' + T + '" width="' + Math.max(12, sp) + '" height="' + (H - T - Bm) + '" fill="transparent"><title>' + esc(SHORT[i]) + ' (' + esc(S[i]) + '): ' + f2(v) + '</title></rect></g>';
+  });
+  [DEN, NUM].forEach(g => s += '<text class="qt-labs" x="' + gx[g] + '" y="' + (H - 14) + '" text-anchor="middle" style="fill:' + GCOL(g) + '">' + esc(clip(g, 22)) + '</text>');
+  if (idx.some(inferred)) s += '<circle cx="' + (W - R - 128) + '" cy="' + (T + 6) + '" r="5" fill="var(--bg-secondary)" stroke="var(--inf)" stroke-width="2.5"/><text class="qt-lab" x="' + (W - R - 119) + '" y="' + (T + 10) + '" style="fill:var(--inf);font-weight:700">inferred (0 found)</text>';
+  return s + '</svg>';
+}
+function step1HTML() {
+  const den = CMP.filter(i => G[i] === DEN && isNum(P.prot[i])).map(i => P.prot[i]), nm = CMP.filter(i => G[i] === NUM && isNum(P.prot[i])).map(i => P.prot[i]);
+  const infC = CMP.filter(inferred);
+  let t;
+  if (TESTED) {
+    const plain = den.length && nm.length ? mean(nm) - mean(den) : null, differ = plain != null && Math.abs(plain - P.logFC) > WEIGHTS_TOL;
+    t = '<div class="qt-big">' + sgn(P.logFC) + ' <small>log2 · ' + foldTxt() + ' · adjusted p ' + fmtP(P.adjP) + '</small></div>';
+    t += '<p>limma compares the ' + CMP.length + ' protein values of ' + esc(DEN) + ' and ' + esc(NUM) + ' on the right. A value with a larger error bar counts for less: limma’s weights come from a trend fitted to each value’s error bar together with the protein’s average level (vooma).</p>';
+    if (plain != null) t += differ
+      ? '<div class="qt-callout"><b>Here the weights matter</b> (the plain average and limma’s answer differ by more than ' + WEIGHTS_TOL + ' log2). A plain average of the ' + CMP.length + ' values gives ' + sgn(plain) + '. limma’s answer is ' + sgn(P.logFC) + ', because limma does not weight the values equally' +
+        (infC.length && WF && WF.less ? ' (here the inferred value' + (infC.length > 1 ? 's' : '') + ' in ' + list(infC.map(i => esc(SHORT[i]))) + ' got less weight)' : '') + '.' + (SIG ? '' : ' Adjusted p ' + fmtP(P.adjP) + ' is not below the ' + ADJP + ' cutoff, so it is not called changed.') + '</div>'
+      : '<div class="qt-callout ok">Here the weights barely matter (the plain average and limma’s answer are within ' + WEIGHTS_TOL + ' log2): a plain average of the ' + CMP.length + ' values gives ' + (plain >= 0 ? '+' : '−') + Math.abs(plain).toFixed(3) + ', limma ' + (P.logFC >= 0 ? '+' : '−') + Math.abs(P.logFC).toFixed(3) + '.' +
+        (infC.length ? '' : ' All ' + CMP.length + ' values rest on precursors found in that sample.') + '</div>';
+  } else {
+    t = '<div class="qt-big">not tested <small>in ' + esc(VS) + '</small></div><p>' + untestedWhy().replace(/^./, c => c.toUpperCase()) + '. The values limpa gave each sample are on the right.</p>';
+  }
+  if (OUTG.length) t += '<p class="note">Samples of ' + list(OUTG.map(g => esc(g))) + ' are not in this comparison, so they are not drawn here; they appear, in grey, in steps 2 and 3.</p>';
+  t += '<p class="note">Click a dot to follow that sample down.</p>';
+  const engine = String(A.de_engine || A.display_label || 'the analysis');
+  return step(1, 'The fold change', 'limma', '<div class="qt-two"><div>' + t + '</div><div>' + foldSVG() + '</div></div>' +
+    (RT ? det('weights', 'how limma weighs each sample', limmaWeightsHTML) : missLine('weights', 'How limma weighs each sample', 'Not in this screen data')) +
+    (HAS_ROUTES ? '' : missLine('check_routes', 'Other routes to a fold change, for comparison')),
+    'Read from <b>' + esc(FILES.de_table) + '</b> → logFC, adj.P.Val · made by <b>' + esc(engine) + '</b>' +
+    (/dpcDE/.test(engine) ? ' (limma with vooma weights; limpa’s error bars are a predictor in the weight trend, read from limpa’s code)' : '') +
+    ' · plain average computed on this page from the protein values (y_protein in ' + esc(FILES.session_rds) + ')', 'qt-s1');
+}
+
+/* ---------- how limma uses limpa's information ---------- */
+function limmaWeightsHTML() {
+  const R = RT;
+  const rows = ORD.map(i => '<tr><td style="color:' + GTXT(G[i]) + ';font-weight:600">' + esc(SHORT[i]) + '</td><td class="mono">' + f2(P.prot[i]) + '</td><td class="mono">±' + f2(P.se[i]) + '</td><td>' +
+    (inferred(i) ? '<span style="color:var(--inf);font-weight:700">inferred</span>' : NOBS[i] + ' found') + '</td><td>' +
+    (R.wshare && isNum(R.wshare[i]) ? '<span class="qt-qbar"><i style="width:' + Math.round(R.wshare[i] * 100) + '%"></i></span><b>' + Math.round(R.wshare[i] * 100) + '%</b> of the ' + esc(G[i]) + ' mean' : '—') +
+    (INC(i) ? '' : ' <span class="note">(not in this comparison)</span>') + '</td></tr>').join('');
+  return '<div class="qt-second"><h4>How limma uses limpa’s information</h4>' +
+    '<p>limma doesn’t treat the ' + N + ' values equally. limpa hands it each value’s error bar, and limma (through vooma) fits a trend of each protein’s spread against its average level and those error bars. ' +
+    'Each value then gets a weight of 1 / (its predicted SD)⁴, so a value with a wide error bar, such as one limpa inferred, counts for less in its group’s mean.</p>' +
+    '<div class="qt-tblwrap"><table class="qt-tbl"><thead><tr><th>Sample</th><th>limpa value</th><th>error bar</th><th>precursors</th><th>Weight in its group’s mean</th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
+    '<p class="note">One more rule: if every sample in a group were inferred (an on/off protein), limpa would also leave those values out when estimating the protein’s variance, so they can’t make the test look more certain than it is. ' +
+    (isNum(R.df_res) ? 'Here limma has ' + R.df_res + ' residual degrees of freedom for this protein' + (isNum(R.df_prior) ? ', and borrows ' + f1(R.df_prior) + ' more from all the proteins (its prior degrees of freedom)' : '') + '. ' : '') +
+    'Weights read from the delivered fit (its vooma weights, kept by run_de.R in tables/set_test_inputs.rds), never recomputed.</p></div>';
+}
+
+/* ---------- step 2: precursors -> protein ---------- */
+function colLayout(idx, gap) {
+  const pos = {}; let x = 0;
+  idx.forEach((i, k) => { if (k && G[i] !== G[idx[k - 1]]) x += gap; pos[i] = x + 0.5; x += 1; });
+  return { pos, span: Math.max(x, 1) };
+}
+function profileSVG() {
+  const W = Math.max(600, 70 + N * 72), H = 330, L = 46, R = 16, T = 22, Bm = 80;
+  const vals = FOUND_VALS.slice();
+  ORD.forEach(i => { if (isNum(P.prot[i])) { vals.push(P.prot[i] - (P.se[i] || 0)); vals.push(P.prot[i] + (P.se[i] || 0)); } });
+  if (!vals.length) return '';
+  const y0 = Math.floor(Math.min.apply(null, vals) - 0.3), y1 = Math.ceil(Math.max.apply(null, vals) + 0.3);
+  const Y = v => T + (H - T - Bm) * (1 - (v - y0) / ((y1 - y0) || 1));
+  const lay = colLayout(ORD, 0.35), plotW = W - L - R, X = i => L + plotW * lay.pos[i] / lay.span, cw = Math.min(60, 0.92 * plotW / lay.span);
+  const rail = H - Bm + 22;
+  let s = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Precursor values per sample with the protein value">';
+  s += '<rect x="' + (X(st.s) - cw / 2) + '" y="' + T + '" width="' + cw + '" height="' + (H - T - 6) + '" rx="8" fill="var(--selected-bg)"/>';
+  const ystep = (y1 - y0) > 12 ? 2 : 1;
+  for (let v = y0; v <= y1; v += ystep) s += '<line class="qt-grid" x1="' + L + '" x2="' + (W - R) + '" y1="' + Y(v) + '" y2="' + Y(v) + '"/><text class="qt-lab" x="' + (L - 6) + '" y="' + (Y(v) + 4) + '" text-anchor="end">' + v + '</text>';
+  s += '<text class="qt-lab" transform="translate(12,' + ((T + H - Bm) / 2) + ') rotate(-90)" text-anchor="middle">log2 intensity</text>';
+  s += '<line class="qt-ax" x1="' + L + '" x2="' + (W - R) + '" y1="' + (rail - 12) + '" y2="' + (rail - 12) + '" stroke-dasharray="3 3"/><text class="qt-lab" x="' + (L - 6) + '" y="' + (rail + 4) + '" text-anchor="end">not</text><text class="qt-lab" x="' + (L - 6) + '" y="' + (rail + 16) + '" text-anchor="end">found</text>';
+  OUTG.forEach(g => { const xs = ORD.filter(i => G[i] === g).map(X); s += '<text class="qt-lab" x="' + mean(xs) + '" y="' + (T - 8) + '" text-anchor="middle">' + esc(clip(g, 14)) + ': not in this comparison</text>'; });
+  ORD.forEach(i => s += '<rect class="qt-hit" data-s="' + i + '" x="' + (X(i) - cw / 2) + '" y="' + T + '" width="' + cw + '" height="' + (H - Bm - T + 40) + '" fill="transparent"/>');
+  const order = PREC.map((id, k) => k).sort((a, b) => (PREC[a] === st.p) - (PREC[b] === st.p));
+  const miss = {}; ORD.forEach(i => miss[i] = 0);
+  order.forEach(k => {
+    const id = PREC[k], sel = id === st.p, col = sel ? 'var(--sel)' : 'var(--text-tertiary)', r = P.prec[k];
+    let d = '', pen = false;
+    ORD.forEach(i => { const v = r[i]; if (!isNum(v)) { pen = false; return; } d += (pen ? 'L' : 'M') + X(i).toFixed(1) + ' ' + Y(v).toFixed(1) + ' '; pen = true; });
+    s += '<g class="qt-hit" data-p="' + esc(id) + '">' + (d ? '<path d="' + d + '" fill="none" stroke="transparent" stroke-width="10"/><path d="' + d + '" fill="none" stroke="' + col + '" stroke-width="' + (sel ? 2.5 : 1.2) + '" opacity="' + (sel ? 1 : 0.55) + '"/>' : '');
+    ORD.forEach(i => {
+      const v = r[i];
+      if (isNum(v)) { s += '<circle cx="' + X(i) + '" cy="' + Y(v) + '" r="' + (sel ? 3.5 : 2.2) + '" fill="' + col + '" opacity="' + (sel ? 1 : 0.7) + '"/>'; return; }
+      const j = miss[i]++; if (j >= 18) return;
+      const cx = X(i) - 18 + (j % 6) * 7, cy = rail + Math.floor(j / 6) * 8;
+      s += '<circle cx="' + cx + '" cy="' + cy + '" r="' + (sel ? 3.6 : 2.8) + '" fill="var(--bg-secondary)" stroke="var(--inf)" stroke-width="' + (sel ? 2 : 1.2) + '"><title>' + esc(seqZ(id).seq) + ' not found in ' + esc(SHORT[i]) + '</title></circle>';
+    });
+    s += '</g>';
+  });
+  ORD.forEach(i => { if (miss[i] > 18) s += '<text class="qt-lab" x="' + (X(i) + 24) + '" y="' + (rail + 20) + '">+' + (miss[i] - 18) + '</text>'; });
+  let pd = '', pen = false;
+  ORD.forEach(i => { if (!isNum(P.prot[i])) { pen = false; return; } pd += (pen ? 'L' : 'M') + X(i).toFixed(1) + ' ' + Y(P.prot[i]).toFixed(1) + ' '; pen = true; });
+  s += '<path d="' + pd + '" fill="none" stroke="var(--text-primary)" stroke-width="3" opacity="0.85"/>';
+  ORD.forEach(i => {
+    const v = P.prot[i]; if (!isNum(v)) return;
+    const inf = inferred(i), c = inf ? 'var(--inf)' : GCOL(G[i]);
+    s += '<line x1="' + X(i) + '" x2="' + X(i) + '" y1="' + Y(v - P.se[i]) + '" y2="' + Y(v + P.se[i]) + '" stroke="' + c + '" stroke-width="3"/>';
+    s += inf ? '<circle cx="' + X(i) + '" cy="' + Y(v) + '" r="6" fill="var(--bg-secondary)" stroke="var(--inf)" stroke-width="3"/>' : '<circle cx="' + X(i) + '" cy="' + Y(v) + '" r="6" fill="' + c + '" stroke="var(--bg-secondary)" stroke-width="1.5"/>';
+  });
+  const last = ORD[ORD.length - 1];
+  if (last != null && isNum(P.prot[last])) s += '<text class="qt-labs" x="' + (X(last) + 10) + '" y="' + (Y(P.prot[last]) - 10) + '" text-anchor="end">protein value</text>';
+  ORD.forEach(i => {
+    s += '<text class="qt-labs" x="' + X(i) + '" y="' + (H - 22) + '" text-anchor="middle" style="fill:' + GTXT(G[i]) + '">' + esc(clip(SHORT[i], 10)) + '</text>';
+    s += '<text class="qt-lab" x="' + X(i) + '" y="' + (H - 8) + '" text-anchor="middle"' + (inferred(i) ? ' style="fill:var(--inf);font-weight:700"' : '') + '>' + NOBS[i] + '/' + PREC.length + ' found</text>';
+    s += '<rect class="qt-hit" data-s="' + i + '" x="' + (X(i) - cw / 2) + '" y="' + (H - 36) + '" width="' + cw + '" height="34" fill="transparent"/>';
+  });
+  return s + '</svg>';
+}
+function dpcSVG() {
+  if (!HAS_DPC) return '';
+  const W = 340, H = 190, L = 40, R = 10, T = 12, Bm = 34, x0 = DR[0], x1 = DR[1];
+  const X = v => L + (W - L - R) * (v - x0) / (x1 - x0), Y = p => T + (H - T - Bm) * (1 - p);
+  let s = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Detection curve">';
+  [0, 0.5, 1].forEach(p => s += '<line class="qt-grid" x1="' + L + '" x2="' + (W - R) + '" y1="' + Y(p) + '" y2="' + Y(p) + '"/><text class="qt-lab" x="' + (L - 5) + '" y="' + (Y(p) + 4) + '" text-anchor="end">' + Math.round(p * 100) + '%</text>');
+  const tk = (x1 - x0) > 14 ? 4 : 2;
+  for (let v = Math.ceil(x0 / tk) * tk; v <= x1; v += tk) s += '<text class="qt-lab" x="' + X(v) + '" y="' + (H - Bm + 14) + '" text-anchor="middle">' + v + '</text>';
+  s += '<text class="qt-lab" x="' + ((L + W - R) / 2) + '" y="' + (H - 4) + '" text-anchor="middle">precursor log2 intensity</text>';
+  let d = ''; for (let k = 0, n = 140; k <= n; k++) { const v = x0 + (x1 - x0) * k / n; d += (k ? 'L' : 'M') + X(v).toFixed(1) + ' ' + Y(pFound(v)).toFixed(1) + ' '; }
+  s += '<path d="' + d + '" fill="none" stroke="var(--text-primary)" stroke-width="2.2"/>';
+  if (Y50 >= x0 && Y50 <= x1) s += '<line x1="' + X(Y50) + '" x2="' + X(Y50) + '" y1="' + Y(0) + '" y2="' + Y(0.5) + '" stroke="var(--text-tertiary)" stroke-dasharray="3 3"/><text class="qt-lab" x="' + (X(Y50) + 4) + '" y="' + (Y(0.5) + 14) + '">50% at ' + Y50.toFixed(1) + '</text>';
+  (P.prec || []).forEach((r, k) => { const v = r[st.s]; if (!isNum(v)) return; const sel = PREC[k] === st.p;
+    s += '<line x1="' + X(v) + '" x2="' + X(v) + '" y1="' + (Y(0) - (sel ? 12 : 7)) + '" y2="' + Y(0) + '" stroke="' + (sel ? 'var(--sel)' : 'var(--text-tertiary)') + '" stroke-width="' + (sel ? 2.5 : 1.3) + '"/>'; });
+  const lv = limpaVal(st.p, st.s);
+  if (isNum(lv)) s += '<circle cx="' + X(lv) + '" cy="' + Y(pFound(lv)) + '" r="5" fill="var(--sel)"/>';
+  return s + '</svg>';
+}
+function dpcCap() {
+  const lv = limpaVal(st.p, st.s), q = seqZ(st.p), x = DETP(st.p, st.s);
+  return '<p class="note" style="color:var(--sel);font-weight:600;margin:0 0 2px">' + esc(q.seq) + ' ' + esc(q.z) + '+ in ' + esc(SHORT[st.s]) + ': ' +
+    (isNum(lv) ? lv.toFixed(2) + (HAS_DPC ? '. A precursor at this intensity is found ' + Math.round(pFound(lv) * 100) + '% of the time.' : '.')
+      : 'not found.' + (x && x.kind === 'fit' ? ' limpa’s fit gave it a ' + Math.round(x.p * 100) + '% chance of being found here.' : '')) + '</p>';
+}
+function receiptHTML(si) {
+  const nobs = NOBS[si], n = PREC.length, missing = PREC.filter((id, k) => P.prec[k][si] == null);
+  let rc = '<div class="qt-receipt"><div class="t" style="color:' + GTXT(G[si]) + '">' + esc(SHORT[si]) + (INC(si) ? '' : ' <span class="note">not in this comparison</span>') + '</div><div class="f">' + esc(S[si]) + '</div>' +
+    '<div class="v">' + f2(P.prot[si]) + ' <span class="note">± ' + f2(P.se[si]) + ' (log2)</span></div>';
+  if (nobs === 0) {
+    rc += '<div class="qt-callout"><b>Inferred.</b> None of ' + esc(GENE) + '’s ' + n + ' precursors was found in this sample: DIA-NN reported no value there that passed the analysis’s confidence checks. limpa doesn’t drop the sample or fill in a fixed low number. ' +
+      'It reads each gap through the detection curve below (a gap usually means “low”) and combines that with ' + esc(GENE) + '’s values in the other samples. ' +
+      'Its best estimate is ' + f2(P.prot[si]) + ', with a wide error bar (±' + f2(P.se[si]) + ') because no precursor was found there.</div>';
+  } else {
+    rc += '<p>Built from <b>' + nobs + ' of ' + n + '</b> precursors found in this sample. ' + topShareTxt(si) + (missing.length ? ' Not found here: ' + missing.map(pname).join(', ') + '.' : '') + '</p>';
+  }
+  return rc + '</div>';
+}
+function step2HTML() {
+  const si = st.s;
+  const lead = '<p>limpa turns this protein’s precursors (thin lines, one per precursor) into one value per sample (thick line, with error bars). ' +
+    'Each precursor keeps its own level; limpa estimates the protein’s level from how they all move together. Gaps are not dropped: limpa treats them as probably low signal, using the detection curve.</p>' +
+    '<p class="note">Click a sample name or a line. Hollow amber circles at the bottom are precursors not found in that sample.</p>';
+  const dpcTxt = HAS_DPC ? '<p class="note"><b>Detection curve, fitted to this experiment.</b> Low signals are often missed: at ' + Y50.toFixed(1) + ' a precursor is found half the time' +
+    (isNum(REF) ? ', and at ' + REF.toFixed(1) + ' (the middle of this protein’s found values) ' + Math.round(pFound(REF) * 100) + '% of the time' : '') + '. Ticks on the bottom axis are the precursors found in ' + esc(SHORT[si]) + '.</p>' : '';
+  const body = shareBarsBlock() +
+    det('profile', 'precursor by precursor: lines, detection curve and the selected sample', () => lead + '<div class="qt-two"><div>' + profileSVG() + '</div><div>' + receiptHTML(si) + '<div style="margin-top:10px">' + dpcCap() + dpcSVG() + dpcTxt + '</div></div></div>') +
+    det('sankey', CB ? 'the same shares as a flow diagram (Sankey), with intensity and count views' : 'every precursor value as a flow diagram (Sankey), by intensity or by count', sankeyBlock) +
+    (Object.keys(STATS).length ? det('health', 'the ' + N + ' samples’ run quality', healthHTML) : missLine('run_stats', 'Each sample’s run quality', 'Not in this screen data'));
+  const foot = 'Read from <b>' + esc(FILES.session_rds) + '</b> → raw_data (precursor values: log2 of DIA-NN’s ' + QTY + QTY_TAG + '), y_protein (protein values, error bars, number found), dpc_fit (the curve: intercept ' + f2(B0) + ', slope ' + (isNum(B1) ? B1.toFixed(3) : '—') + ')' +
+    ' · made by <b>' + esc(A.rollup_method || A.display_label || 'limpa') + '</b>' +
+    ' · shares, our calculation with limpa: ' + (CB ? shareMethodText() : 'withheld for this protein (' + esc(MISS.shares || FALLBACK.shares) + ')') +
+    ' · detection chances: ' + (DP ? 'our calculation with limpa’s own fit (make_screen_data.R)' : 'withheld (' + esc(MISS.detection || FALLBACK.detection) + ')');
+  return step(2, 'Each sample’s protein value', 'limpa DPC-Quant', body, foot, 'qt-s2');
+}
+
+/* ---------- the easy figure: what each sample's value rests on, by peptide ---------- */
+function shareBarsBlock() {
+  const head = '<h4>How much of each sample’s protein value each peptide carries</h4>';
+  if (!CB) return '<div class="qt-sankey">' + head + missLine('shares', 'Shares', 'Withheld for this protein') + '</div>';
+  const selPep = pepOf(st.p);
+  let top = { share: 0 };
+  const rows = ORD.map(si => {
+    const x = shareOf(si), byPep = {};
+    x.rows.forEach(r => { if (!r.found) return; const k = pepOf(r.id); (byPep[k] = byPep[k] || { share: 0, id: r.id, n: 0 }); byPep[k].share += r.share; byPep[k].n++; });
+    const peps = Object.keys(byPep).map(k => ({ pep: k, share: byPep[k].share, id: byPep[k].id, n: byPep[k].n })).sort((a, b) => b.share - a.share);
+    peps.forEach(p => { if (p.share > top.share) top = { share: p.share, pep: p.pep, si }; });
+    const parts = partsOf(peps.map(p => ({ v: p.share, what: esc(p.pep) }))
+      .concat([Object.assign({ v: x.other }, OTHER_PART), Object.assign({ v: x.prior }, PRIOR_PART)]));
+    return { si, peps, other: x.other, prior: x.prior, parts };
+  });
+  /* One scale for every bar: 100% of a sample's value is 1/SCALE of the track (the dashed mark when SCALE > 1),
+     so each slice is as wide as its label says, and a bar whose drawn parts add up to more than 100% still fits. */
+  const SCALE = Math.max.apply(null, [1].concat(rows.map(r => r.parts.pos)));
+  const mark = SCALE > 1 ? '<i class="mark" style="left:' + (100 / SCALE).toFixed(2) + '%" title="100% of the sample’s protein value"></i>' : '';
+  const seg = (w, bg, label, title, attrs, dark) => { if (w <= 0.002) return '';
+    const f = w / SCALE, fits = f * 820 > label.replace(/&[a-z#0-9]+;/g, 'x').length * 6.6 + 12;
+    return '<div class="seg"' + (attrs || '') + ' style="width:' + (f * 100).toFixed(2) + '%;' + (fits ? '' : 'padding:0;') + 'background:' + bg + ';color:' + (dark ? '#fff' : 'var(--text-primary)') + '" title="' + title + '">' + (fits ? label : '') + '</div>'; };
+  let h = '<div class="qt-bars">', prev = null;
+  rows.forEach(r => {
+    const g = G[r.si], inf = inferred(r.si);
+    if (g !== prev) { prev = g; h += '<div class="grp" style="color:' + GTXT(g) + '">' + esc(g) + (INC(r.si) ? '' : ': not in this comparison') + '</div>'; }
+    let bar = '';
+    r.peps.forEach((p, j) => {
+      const on = p.pep === selPep, pc = spc(p.share);
+      bar += seg(p.share, on ? 'var(--sel)' : (j % 2 ? 'var(--text-tertiary)' : 'var(--text-secondary)'), esc(clip(p.pep, 12)) + ' ' + pc,
+        esc(p.pep) + (p.n > 1 ? ' (' + p.n + ' charge states)' : '') + ': ' + pc + ' of ' + esc(SHORT[r.si]) + '’s value', ' data-p="' + esc(p.id) + '"', true);
+    });
+    bar += seg(r.other, 'var(--bg-tertiary)', 'other samples ' + Math.round(r.other * 100) + '%', 'the same peptides, found in other samples: ' + Math.round(r.other * 100) + '%');
+    bar += seg(r.prior, 'var(--inf)', 'not found ' + Math.round(r.prior * 100) + '%', 'peptides not found in this sample — limpa reads those gaps through the detection curve, plus its prior: ' + Math.round(r.prior * 100) + '%', '', true);
+    const b1 = r.peps[0];
+    h += '<div class="row' + (r.si === st.s ? ' on' : '') + '"><div class="lab qt-hit" data-s="' + r.si + '" title="' + esc(S[r.si]) + '"><b style="color:' + GTXT(g) + '">' + esc(clip(SHORT[r.si], 12)) + '</b> ' + f2(P.prot[r.si]) +
+      (inf ? ' <span style="color:var(--inf);font-weight:700">inferred</span>' : '') + '</div><div class="bar">' + mark + bar + '</div><div class="max">' + (b1 ? spc(b1.share) + ' largest' : 'none found') + '</div>' +
+      (r.parts.pulls.length ? '<div class="pull">Its slices add up to ' + overPc(r.parts.pos) + ': ' + pullTxt(r.parts.pulls) + '.</div>' : '') + '</div>';
+  });
+  h += '</div>';
+  const over = rows.some(r => r.parts.pulls.length);
+  return '<div class="qt-sankey">' + head +
+    '<p>One bar per sample: its slices add up to that sample’s protein value (100%)' +
+    (over ? ', except where part of the value pulls the other way. A bar cannot draw that part, so there the slices add up to more than 100% (the dashed mark is 100%), and the bar says by how much' : '') +
+    '. Each grey slice is one peptide found in that sample (its charge states added together). ' +
+    'The light slice, drawn where that part is positive, comes from the same peptides found in other samples, and the amber slice, likewise, rests on peptides not found in this sample (limpa reads those gaps through the detection curve, plus its prior). A big slice means one peptide carries the number. ' +
+    '<i>Found</i> means DIA-NN reported a value for that peptide in that sample that passed the analysis’s confidence checks; <i>not found</i> means it reported no such value.</p>' +
+    h + '<p class="note">' + (top.pep ? 'Largest single peptide share for ' + esc(GENE) + ': <b>' + spc(top.share) + '</b> (' + esc(top.pep) + ' in ' + esc(SHORT[top.si]) + '). ' : '') +
+    'A share is our calculation with limpa: ' + shareMethodText() + '. Click a slice to follow that peptide.</p>' + shareNoteHTML() + '</div>';
+}
+
+/* ---------- what decides a share ---------- */
+function shareNoteHTML() {
+  const h = D.prior || {};
+  return '<div class="qt-callout ok" style="margin-top:8px"><b>What decides a share</b> (read from limpa’s code, <span class="mono">peptides2ProteinBFGS</span>): ' +
+    'every found precursor value enters the fit with the same weight — limpa uses no intensity or QuantUMS quality weights (limpa paper: “all precursors, in fact all observations, are weighted equally by default”). Each precursor gets its own level, estimated from the samples where it was found. ' +
+    'A precursor that wasn’t found enters as its chance of being missed, read off the detection curve. The gaps carry far less information than found values (Li &amp; Smyth 2023).' +
+    (isNum(h['prior.mean']) ? ' Two starting assumptions pull gently: a typical protein level of ' + f1(h['prior.mean']) + ' (±' + f1(h['prior.sd']) + ') and sample-to-sample changes of about ±' + f1(h['prior.logFC']) + ' log2.' : '') +
+    ' So a share depends on how many precursors were found in that sample and where else they were found, not on how intense they are. QuantUMS acts one step earlier: it makes each precursor’s value (step 3) but doesn’t set its share.</div>';
+}
+
+/* ---------- Sankey views ---------- */
+const SK = {
+  found:    { col: 'var(--text-tertiary)', op: 0.42, lab: 'found, used by limpa' },
+  gap:      { col: 'var(--inf)', op: 0.8, lab: 'not found: limpa reads the gap as probably low' },
+  failgap:  { col: 'var(--inf)', op: 0.8, lab: 'reported but not used: limpa reads it as a gap' },
+  failed:   { col: 'var(--error)', op: 0.75, lab: 'reported but not used, and the precursor is not used anywhere' },
+  notfound: { col: 'var(--border)', op: 1, lab: 'not found: precursor not used' }
+};
+function slotStatus(pid, si) {
+  const k = PREC.indexOf(pid), r = rowFor(pid, si);
+  if (k >= 0) return isNum(P.prec[k][si]) ? 'found' : (r ? 'failgap' : 'gap');
+  return r ? 'failed' : 'notfound';
+}
+function slotRaw(pid, si, stt) {
+  if (stt === 'found') return Math.pow(2, limpaVal(pid, si));
+  if (stt === 'failed') { const r = rowFor(pid, si); return r && isNum(r[QTY]) ? r[QTY] : null; }
+  return null;
+}
+function sankeySVG() {
+  const ids = allPrec(), nL = PREC.length, byInt = st.skw !== 'count';
+  const W = 900, LX = 250, RX = 610, NW = 12, T = 10, HAIR = 1.6;
+  const sl = ids.map(id => { const o = {}; ORD.forEach(si => { const stt = slotStatus(id, si); o[si] = { stt, raw: byInt ? slotRaw(id, si, stt) : 1 }; }); return o; });
+  let tot = 0; sl.forEach(r => ORD.forEach(si => tot += r[si].raw || 0));
+  const budget = byInt ? 360 : Math.max(2.4, Math.min(8, 330 / (ids.length * N))) * ids.length * N, k = budget / (tot || 1);
+  sl.forEach(r => ORD.forEach(si => { const x = r[si]; x.w = x.raw ? Math.max(x.raw * k, 0.8) : HAIR; }));
+  const key = (stt, si) => (stt === 'failed' || stt === 'notfound') ? 'sink' : 's' + si;
+  const lh = sl.map(r => ORD.reduce((a, si) => a + r[si].w, 0)), rh = {}, rsig = {}, rest = {};
+  sl.forEach(r => ORD.forEach(si => { const x = r[si], kk = key(x.stt, si); rh[kk] = (rh[kk] || 0) + x.w; if (x.stt === 'found') rsig[kk] = (rsig[kk] || 0) + x.raw; else if (x.raw && kk !== 'sink') rest[kk] = (rest[kk] || 0) + x.raw; }));
+  const RN = ORD.map(i => 's' + i).concat(rh.sink ? ['sink'] : []);
+  const ly = [], ry = {}; let y = T;
+  lh.forEach((h, i) => { ly[i] = y + (Math.max(h, 14) - h) / 2; y += Math.max(h, 14) + 4; });
+  const leftSpan = y - T, rmin = RN.reduce((a, kk) => a + Math.max(rh[kk] || 0, 34), 0), gapR = Math.max(10, (leftSpan - rmin) / Math.max(1, RN.length - 1));
+  y = T; RN.forEach(kk => { const h = rh[kk] || 0; ry[kk] = y; y += Math.max(h, 34) + gapR; });
+  const H = Math.max(T + leftSpan, y - gapR) + 8;
+  const lo = ids.map(() => 0), ro = {}; RN.forEach(kk => ro[kk] = 0);
+  let links = '', nodes = '';
+  ids.forEach((id, i) => {
+    const selP = id === st.p, q = seqZ(id);
+    ORD.forEach(si => {
+      const x = sl[i][si], kk = key(x.stt, si), y0 = ly[i] + lo[i], y1 = ry[kk] + ro[kk]; lo[i] += x.w; ro[kk] += x.w;
+      const x0 = LX + NW, x1 = RX, xm = (x0 + x1) / 2, c = SK[x.stt];
+      const d = 'M' + x0 + ' ' + y0 + ' C' + xm + ' ' + y0 + ' ' + xm + ' ' + y1 + ' ' + x1 + ' ' + y1 + ' L' + x1 + ' ' + (y1 + x.w) + ' C' + xm + ' ' + (y1 + x.w) + ' ' + xm + ' ' + (y0 + x.w) + ' ' + x0 + ' ' + (y0 + x.w) + ' Z';
+      const fill = selP && x.stt === 'found' ? 'var(--sel)' : c.col, op = selP ? Math.min(1, c.op + 0.25) : c.op * 0.6;
+      links += '<path class="qt-hit" data-p="' + esc(id) + '" d="' + d + '" fill="' + fill + '" opacity="' + op.toFixed(2) + '"><title>' + esc(q.seq) + ' ' + esc(q.z) + '+ in ' + esc(SHORT[si]) + ': ' + c.lab + (x.raw && byInt ? ' · intensity ' + big(Math.round(x.raw)) : '') + '</title></path>';
+    });
+    const used = PREC.indexOf(id) >= 0;
+    nodes += '<g class="qt-hit" data-p="' + esc(id) + '"><rect x="' + LX + '" y="' + ly[i] + '" width="' + NW + '" height="' + Math.max(lh[i], 1.5) + '" rx="1.5" fill="' + (selP ? 'var(--sel)' : used ? 'var(--text-secondary)' : 'var(--border)') + '"/>' +
+      '<text x="' + (LX - 6) + '" y="' + (ly[i] + lh[i] / 2 + 4) + '" text-anchor="end" class="' + (selP ? 'qt-labs' : 'qt-lab') + '"' + (selP ? ' style="fill:var(--sel)"' : used ? '' : ' style="text-decoration:line-through"') + '>' + esc(clip(q.seq, 28)) + ' ' + esc(q.z) + '+</text></g>';
+  });
+  RN.forEach(kk => {
+    const yy = ry[kk], h = Math.max(rh[kk] || 0, 1.5), ty = yy + Math.min(Math.max(h, 34) / 2, 14) + 2;
+    if (kk === 'sink') {
+      const f = ids.reduce((a, id, i) => a + ORD.filter(si => sl[i][si].stt === 'failed').length, 0), nf = ids.reduce((a, id, i) => a + ORD.filter(si => sl[i][si].stt === 'notfound').length, 0);
+      nodes += '<rect x="' + RX + '" y="' + yy + '" width="' + NW + '" height="' + h + '" rx="1.5" fill="var(--border)"/><text class="qt-labs" x="' + (RX + NW + 8) + '" y="' + ty + '">Not used</text>' +
+        '<text class="qt-lab" x="' + (RX + NW + 8) + '" y="' + (ty + 14) + '">precursor not used: ' + f + ' reported, ' + nf + ' not found</text>';
+      return;
+    }
+    const i = +kk.slice(1), inf = inferred(i), gaps = nL - NOBS[i];
+    nodes += '<g class="qt-hit" data-s="' + i + '"><rect x="' + RX + '" y="' + yy + '" width="' + NW + '" height="' + h + '" rx="1.5" fill="' + (inf ? 'var(--inf)' : GCOL(G[i])) + '"' + (i === st.s ? ' stroke="var(--accent)" stroke-width="2.5"' : '') + '/>' +
+      '<text class="qt-labs" x="' + (RX + NW + 8) + '" y="' + ty + '"><tspan style="fill:' + GTXT(G[i]) + '">' + esc(clip(SHORT[i], 14)) + '</tspan> → ' + f2(P.prot[i]) + ' ± ' + f2(P.se[i]) + (inf ? ' (inferred)' : '') + '</text>' +
+      '<text class="qt-lab" x="' + (RX + NW + 8) + '" y="' + (ty + 14) + '">' + NOBS[i] + ' found · ' + gaps + ' not found' + (byInt && rsig[kk] ? ' · signal ' + big(Math.round(rsig[kk])) : '') + (INC(i) ? '' : ' · not in this comparison') + '</text></g>';
+  });
+  return '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Where each precursor value went">' + links + nodes + '</svg>';
+}
+function sankeyShareSVG() {
+  const ids = CB.ids, W = 900, LX = 250, RX = 610, NW = 12, T = 10, HAIR = 1.4, SC = 64;
+  const SRC = ids.concat(['_other', '_prior']), sh = {};
+  ORD.forEach(si => sh[si] = shareOf(si));
+  const bands = SRC.map(() => ({}));
+  /* a negative part has no band (the text above the figure says which part pulls the other way, and by how much) */
+  ids.forEach((id, k) => ORD.forEach(si => { const r = sh[si].rows[k]; bands[k][si] = { si, share: r.share, w: r.found && r.share > 0 ? Math.max(r.share * SC, 0.8) : HAIR, stt: r.found ? 'found' : 'gap' }; }));
+  ORD.forEach(si => { bands[ids.length][si] = { si, share: sh[si].other, w: Math.max(0, sh[si].other) * SC, stt: 'other' }; bands[ids.length + 1][si] = { si, share: sh[si].prior, w: Math.max(0, sh[si].prior) * SC, stt: 'prior' }; });
+  const COL = { found: 'var(--text-tertiary)', gap: 'var(--inf)', other: 'var(--text-secondary)', prior: 'var(--inf)' }, OP = { found: 0.45, gap: 0.9, other: 0.3, prior: 0.7 };
+  const lh = bands.map(b => ORD.reduce((a, si) => a + b[si].w, 0)), rh = {};
+  ORD.forEach(si => rh[si] = bands.reduce((a, b) => a + b[si].w, 0));
+  const ly = [], ry = {}; let y = T;
+  lh.forEach((h, i) => { if (i === ids.length) y += 10; ly[i] = y + (Math.max(h, 14) - h) / 2; y += Math.max(h, 14) + 4; });
+  const leftSpan = y - T, rmin = ORD.reduce((a, si) => a + Math.max(rh[si], 34), 0), gapR = Math.max(10, (leftSpan - rmin) / Math.max(1, N - 1));
+  y = T; ORD.forEach(si => { ry[si] = y; y += Math.max(rh[si], 34) + gapR; });
+  const H = Math.max(T + leftSpan, y - gapR) + 8, lo = SRC.map(() => 0), ro = {};
+  ORD.forEach(si => ro[si] = 0);
+  let links = '', nodes = '';
+  SRC.forEach((src, i) => ORD.forEach(si => {
+    const x = bands[i][si], y0 = ly[i] + lo[i], y1 = ry[si] + ro[si]; lo[i] += x.w; ro[si] += x.w;
+    if (x.w <= 0) return;
+    const x0 = LX + NW, x1 = RX, xm = (x0 + x1) / 2, selP = src === st.p;
+    const d = 'M' + x0 + ' ' + y0 + ' C' + xm + ' ' + y0 + ' ' + xm + ' ' + y1 + ' ' + x1 + ' ' + y1 + ' L' + x1 + ' ' + (y1 + x.w) + ' C' + xm + ' ' + (y1 + x.w) + ' ' + xm + ' ' + (y0 + x.w) + ' ' + x0 + ' ' + (y0 + x.w) + ' Z';
+    const what = src === '_other' ? 'the same precursors, found in other samples' : src === '_prior' ? 'the detection curve and limpa’s starting assumptions (precursors not found here)' :
+      esc(seqZ(src).seq) + ' ' + esc(seqZ(src).z) + '+ ' + (x.stt === 'gap' ? 'was not found here: 0%' : 'found here');
+    links += '<path class="qt-hit"' + (src[0] !== '_' ? ' data-p="' + esc(src) + '"' : '') + ' d="' + d + '" fill="' + (selP && x.stt === 'found' ? 'var(--sel)' : COL[x.stt]) + '" opacity="' + (selP ? 0.95 : OP[x.stt]) + '"><title>' + esc(SHORT[x.si]) + ': ' + spc(x.share) + ' of the protein value rests on ' + what + '</title></path>';
+  }));
+  SRC.forEach((src, i) => {
+    const special = src[0] === '_', selP = src === st.p, h = Math.max(lh[i], 1.5);
+    const lab = src === '_other' ? 'Same precursors, other samples' : src === '_prior' ? 'Detection curve + limpa’s prior' : (q => esc(clip(q.seq, 28)) + ' ' + esc(q.z) + '+')(seqZ(src));
+    nodes += '<g class="qt-hit"' + (special ? '' : ' data-p="' + esc(src) + '"') + '><rect x="' + LX + '" y="' + ly[i] + '" width="' + NW + '" height="' + h + '" rx="1.5" fill="' + (selP ? 'var(--sel)' : src === '_prior' ? 'var(--inf)' : 'var(--text-secondary)') + '"/>' +
+      '<text x="' + (LX - 6) + '" y="' + (ly[i] + lh[i] / 2 + 4) + '" text-anchor="end" class="' + (selP || special ? 'qt-labs' : 'qt-lab') + '"' + (selP ? ' style="fill:var(--sel)"' : '') + '>' + lab + '</text></g>';
+  });
+  ORD.forEach(si => {
+    const yy = ry[si], h = rh[si], ty = yy + Math.min(Math.max(h, 34) / 2, 14) + 2, inf = inferred(si), x = sh[si];
+    const top = x.rows.reduce((a, r) => r.share > a.share ? r : a, { share: 0 });
+    const line2 = inf ? Math.round(x.other * 100) + '% other samples · ' + Math.round(x.prior * 100) + '% curve + prior'
+      : top.id ? 'largest share: ' + esc(clip(seqZ(top.id).seq, 15)) + ' ' + spc(top.share) : '';
+    nodes += '<g class="qt-hit" data-s="' + si + '"><rect x="' + RX + '" y="' + yy + '" width="' + NW + '" height="' + h + '" rx="1.5" fill="' + (inf ? 'var(--inf)' : GCOL(G[si])) + '"' + (si === st.s ? ' stroke="var(--accent)" stroke-width="2.5"' : '') + '/>' +
+      '<text class="qt-labs" x="' + (RX + NW + 8) + '" y="' + ty + '"><tspan style="fill:' + GTXT(G[si]) + '">' + esc(clip(SHORT[si], 14)) + '</tspan> → ' + f2(P.prot[si]) + ' ± ' + f2(P.se[si]) + (inf ? ' (inferred)' : '') + '</text>' +
+      '<text class="qt-lab" x="' + (RX + NW + 8) + '" y="' + (ty + 14) + '">' + line2 + (INC(si) ? '' : ' · not in this comparison') + '</text></g>';
+  });
+  return '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Share of each sample’s protein value">' + links + nodes + '</svg>';
+}
+function sankeyBlock() {
+  const mode = CB ? st.skw : (st.skw === 'share' ? 'int' : st.skw);
+  const tog = '<div class="qt-pills" style="margin:4px 0 6px">' + (CB ? '<button class="' + (mode === 'share' ? 'on' : '') + '" data-act="skw-share">Width: share of the protein value</button>' : '') +
+    '<button class="' + (mode === 'int' ? 'on' : '') + '" data-act="skw-int">Width: intensity</button><button class="' + (mode === 'count' ? 'on' : '') + '" data-act="skw-count">Width: one band per precursor and sample</button></div>';
+  if (mode !== 'share') return sankeyBlockCounts(tog, mode);
+  let top = { share: 0 };
+  ORD.forEach(si => shareOf(si).rows.forEach(r => { if (r.share > top.share) top = { share: r.share, id: r.id, si }; }));
+  const keys = [['var(--text-tertiary)', 'a precursor found in that sample'], ['var(--text-secondary)', 'the same precursors, found in other samples'], ['var(--inf)', 'precursors not found here: the detection curve and limpa’s prior']]
+    .map(k => '<span class="qt-key"><i style="background:' + k[0] + '"></i>' + k[1] + '</span>').join('');
+  const over = ORD.map(si => {
+    const x = shareOf(si);
+    return { si, p: partsOf(x.rows.filter(r => r.found).map(r => ({ v: r.share, what: esc(seqZ(r.id).seq) + ' ' + esc(seqZ(r.id).z) + '+' }))
+      .concat([{ v: x.other, what: 'the same precursors found in other samples', pl: true }, Object.assign({ v: x.prior }, PRIOR_PART)])) };
+  }).filter(o => o.p.pulls.length);
+  return '<div class="qt-sankey"><h4>What each sample’s protein value rests on</h4>' + tog +
+    '<p>Each sample’s bands add up to 100% of its protein value' +
+    /* one or two such samples are named; more are summarised, and each sample's bar in the figure above names its part */
+    (over.length > 2 ? ', except in ' + over.length + ' samples, where part of the value pulls the other way, by ' + pcRange(over.map(o => -o.p.pulls.reduce((a, p) => a + p.v, 0))) +
+       ', which a band cannot show; each sample’s bar in the figure above says which part'
+     : over.length ? ', except in ' + over.map(o => esc(SHORT[o.si]) + ', where they add up to ' + overPc(o.p.pos) + ': ' + pullTxt(o.p.pulls)).join('; in ') + ', which a band cannot show' : '') +
+    '. A band’s width is the share that rests on one precursor’s value in that sample: ' + shareMethodText() + '.</p>' +
+    '<div class="qt-keys">' + keys + '</div><div class="qt-scroll">' + sankeyShareSVG() + '</div>' +
+    '<p class="note">limpa counts every precursor it has a value for about equally, whatever its intensity, so the share depends on how many were found, not how loud they are.' +
+    (top.id ? ' Largest single share here: <b>' + spc(top.share) + '</b> (' + esc(seqZ(top.id).seq) + ' in ' + esc(SHORT[top.si]) + ').' : '') + ' A precursor not found in a sample carries 0% there (thin amber line). Click a precursor or a sample.</p></div>';
+}
+function sankeyBlockCounts(tog, mode) {
+  const ids = allPrec(), n = { found: 0, gap: 0, failgap: 0, failed: 0, notfound: 0 }, byInt = mode !== 'count';
+  ids.forEach(id => ORD.forEach(si => n[slotStatus(id, si)]++));
+  const keyh = Object.keys(SK).filter(k => n[k]).map(k => '<span class="qt-key"><i style="background:' + SK[k].col + ';opacity:' + Math.min(1, SK[k].op + 0.2) + '"></i>' + SK[k].lab + ' <b>' + n[k] + '</b></span>').join('');
+  const how = byInt
+    ? 'Each band is one precursor in one sample, as wide as its intensity there (the quantity limpa read, ' + QTY + QTY_TAG + ', linear scale). Wide bands are where the signal is. Precursors not found there have no value, so they are thin amber lines.'
+    : 'Each band is one precursor in one sample, all the same width: ' + ids.length + ' precursors × ' + N + ' samples = <b>' + ids.length * N + '</b> bands.';
+  return '<div class="qt-sankey"><h4>Where every precursor value went</h4>' + tog + '<p>' + how + ' Grey bands were found and used; amber ones were gaps limpa read through the detection curve.</p>' +
+    '<div class="qt-keys">' + keyh + '</div><div class="qt-scroll">' + sankeySVG() + '</div>' +
+    '<p class="note">' + (byInt ? 'This view shows where the signal is, not what limpa counted: limpa gives every found precursor the same weight, however intense' + (CB ? ' (see the share view)' : '') + '. ' : 'Band widths are counts, not weights. ') + 'Click a precursor or a sample.</p></div>';
+}
+
+/* ---------- sample health ---------- */
+function healthHTML() {
+  const cells = ORD.map(i => {
+    const x = STATS[S[i]] || {}, ni = x['Normalisation.Instability'], warn = isNum(ni) && ni >= 0.3, out = [];
+    if (isNum(x['Precursors.Identified'])) out.push('<span class="mono">' + loc(Math.round(x['Precursors.Identified'])) + '</span> precursors');
+    if (isNum(x['Proteins.Identified'])) out.push('<span class="mono">' + loc(Math.round(x['Proteins.Identified'])) + '</span> proteins');
+    if (isNum(ni)) out.push('<span' + (warn ? ' style="color:var(--inf);font-weight:700"' : '') + '>norm. instability <span class="mono">' + ni.toFixed(2) + '</span>' + (warn ? ' ⚠' : '') + '</span>');
+    if (isNum(x['Median.Mass.Acc.MS1'])) out.push('MS1 error <span class="mono">' + x['Median.Mass.Acc.MS1'].toFixed(1) + (isNum(x['Median.Mass.Acc.MS1.Corrected']) ? '→' + x['Median.Mass.Acc.MS1.Corrected'].toFixed(1) : '') + '</span> ppm');
+    return '<td><b style="color:' + GTXT(G[i]) + '">' + esc(SHORT[i]) + '</b>' + (INC(i) ? '' : ' <span class="note">not in this comparison</span>') + '<br>' + (out.length ? out.join('<br>') : 'no statistics for this run') + '</td>';
+  }).join('');
+  return '<div class="qt-health"><h4>The ' + N + ' samples</h4><div class="qt-tblwrap"><table class="qt-htbl"><tr>' + cells + '</tr></table></div>' +
+    '<p class="note">From DIA-NN’s ' + esc(FILES.stats) + '. ⚠ marks a normalisation instability at or above 0.3, the skill’s warning line (DIA-NN publishes no cutoff). MS1 error is the median before → after DIA-NN’s own mass correction.</p></div>';
+}
+
+/* ---------- step 3: DIA-NN precursor value ---------- */
+function sharedPepLine() {
+  const pep = pepOf(st.p), w = sharedWith(pep);
+  return '<p class="note" style="margin:-6px 0 10px">' + (w.length ? '<b style="color:var(--inf)">Shared:</b> ' + esc(pep) + ' is also in ' + w.join(', ') + ' in the searched database.' : esc(pep) + ' is unique to this protein group in the searched database.') + ' (DIA-NN’s Protein.Ids)</p>';
+}
+function step3HTML() {
+  const ids = allPrec();
+  const chips = '<div class="qt-chips' + (ids.length > 40 ? ' many' : '') + '">' + ids.map(id => {
+    const used = PREC.indexOf(id) >= 0, n = ORD.filter(si => rowFor(id, si)).length, q = seqZ(id);
+    return '<button class="' + (id === st.p ? 'on ' : '') + (used ? '' : 'drop') + '" data-p="' + esc(id) + '">' + esc(q.seq) + ' ' + esc(q.z) + '+<span class="c">' + (used ? n + '/' + N : 'not used') + '</span></button>';
+  }).join('') + '</div>';
+  const used = PREC.indexOf(st.p) >= 0;
+  let summary = '';
+  if (!used) {
+    const rs = ORD.map(si => rowFor(st.p, si)).filter(Boolean);
+    summary = '<div class="qt-callout"><b>Not used anywhere.</b> ' + (rs.length ? 'DIA-NN reported this precursor only in ' + list(rs.map(r => esc(SHORT[S.indexOf(rowSample(r))]))) +
+      (rs.some(r => fails(r).length) ? ', where it failed ' + rs.filter(r => fails(r).length).map(r => fails(r).map(k => 'the ' + esc(qlab(k)) + ' check (' + pct(r[k]) + ', cutoff ' + pct(CUT[k]) + ')').join(' and ')).join('; ') : '') +
+      (rs.some(r => r.contaminant) ? '; its protein group counts as a contaminant there' : '') + '.' : 'DIA-NN reported no value for it.') + '</div>';
+  }
+  let t = '<div class="qt-tblwrap"><table class="qt-tbl"><thead><tr><th>Sample</th><th>DIA-NN quantity<br>(QuantUMS)</th><th>× normalisation</th><th>= normalised</th><th>log2 → limpa</th><th>Quality score<br>(QuantUMS, 0–1)</th><th>Detection chance<br>(limpa’s curve)</th><th>Confidence checks</th><th>Used?</th></tr></thead><tbody>';
+  ORD.forEach(i => {
+    const r = rowFor(st.p, i), sel = i === st.s ? ' sel' : '', lv = limpaVal(st.p, i);
+    const lab = '<td style="color:' + GTXT(G[i]) + ';font-weight:600">' + esc(SHORT[i]) + (INC(i) ? '' : '<br><span class="note" style="font-weight:400">not in this comparison</span>') + '</td>';
+    if (!r) { t += '<tr class="click' + sel + '" data-s="' + i + '">' + lab + '<td colspan="5" class="gap">DIA-NN reported no value for it in this sample, so limpa sees a gap' + (xicFor(st.p, i) ? ' (its trace is in step 4)' : '') + '</td><td style="white-space:normal;min-width:150px">' + detCell(st.p, i) + '</td><td></td><td>—</td></tr>'; return; }
+    const nf = r['Normalisation.Factor'], ch = isNum(nf) ? (nf - 1) * 100 : null, fail = fails(r), u = usedRow(r);
+    const qs = QCOLS.filter(k => isNum(r[k]) && isNum(CUT[k]));
+    const worst = qs.reduce((a, k) => a == null || r[k] / CUT[k] > r[a] / CUT[a] ? k : a, null);
+    const conf = fail.length ? '<span class="no">✗</span> ' + fail.map(k => esc(qlab(k)) + ' ' + pct(r[k]) + ' &gt; ' + pct(CUT[k])).join('; ')
+      : qs.length ? '<span class="yes">✓</span> all ' + qs.length + ' passed <span class="note">(closest to its cutoff: ' + esc(qlab(worst)) + ' ' + pct(r[worst]) + ')</span>'
+      : '<span class="yes">✓</span> none failed';
+    const l2 = isNum(lv) ? lv.toFixed(2) : isNum(r[QTY]) && r[QTY] > 0 ? '<s>' + Math.log2(r[QTY]).toFixed(2) + '</s>' : '—';
+    t += '<tr class="click' + sel + '" data-s="' + i + '">' + lab +
+      '<td class="mono">' + big(r['Precursor.Quantity']) + '</td>' +
+      '<td class="mono">× ' + (isNum(nf) ? nf.toFixed(3) + ' <span class="' + (ch >= 0 ? 'up' : 'dn') + '">(' + (ch >= 0 ? '+' : '−') + Math.abs(ch).toFixed(0) + '%)</span>' : '—') + '</td>' +
+      '<td class="mono">' + big(r['Precursor.Normalised']) + '</td>' +
+      '<td class="mono"><b>' + l2 + '</b></td>' +
+      '<td>' + (isNum(r['Quantity.Quality']) ? '<span class="qt-qbar"><i style="width:' + Math.round(r['Quantity.Quality'] * 100) + '%"></i></span>' + r['Quantity.Quality'].toFixed(2) : '—') + '</td>' +
+      '<td style="white-space:normal;min-width:150px">' + detCell(st.p, i) + '</td>' +
+      '<td style="white-space:normal;min-width:170px">' + conf + '</td>' +
+      '<td>' + (u ? '<span class="yes">yes</span>' : '<span class="no">no</span>' + (r.contaminant ? ' <span class="note">contaminant</span>' : '')) + '</td></tr>';
+  });
+  t += '</tbody></table></div>';
+  const lead = '<p>Each precursor’s number starts as DIA-NN’s raw quantity, which QuantUMS builds from the precursor’s fragment and MS1 signals. DIA-NN then multiplies it by a normalisation factor; ' +
+    'the factor differs from precursor to precursor within a run. limpa uses the log2 of ' + (QTY === 'Precursor.Quantity' ? 'the raw quantity' : 'the result') + QTY_TAG + ', but only if the precursor passes ' + (QCOLS.length ? 'all ' + QCOLS.length + ' confidence checks' : 'the analysis’s confidence checks') + '.</p>' +
+    '<p class="note">' + (QCOLS.length ? 'This analysis’s cutoffs (tables/de_provenance.json): ' + cutList() + '. ' : 'This screen data does not record the analysis’s q-value cutoffs. ') + quantumsFilterTxt() +
+    ' The quality score is 1 / (1 + the estimated error SD) (DIA-NN README); DIA-NN recommends it for filtering, and limpa does not use it. ' +
+    '<b>Detection chance</b>: for a found value, the chance limpa’s detection curve gives a precursor at that intensity (descriptive only: limpa’s fit uses the curve just for gaps); for a gap, the chance of being found that limpa’s own fit used (from the level it expects for this precursor here). A high chance that came up empty pulls the protein value down. Click a precursor to switch.</p>' +
+    (DP ? '' : missLine('detection', 'Detection chances', 'Withheld for this protein'));
+  return step(3, 'Each precursor’s value', 'DIA-NN', lead + chips + sharedPepLine() + summary + t,
+    'Read from <b>' + esc(FILES.report) + '</b> → Precursor.Quantity, Normalisation.Factor, Precursor.Normalised, Quantity.Quality and ' + (QCOLS.length ? 'the ' + plural(QCOLS.length, 'q-value column') + ' · cutoffs from <b>tables/de_provenance.json</b>' : 'the q-value columns · the cutoffs are not in this screen data') +
+    (checksumTxt(FILES.report) ? ' · ' + checksumTxt(FILES.report) : ''), 'qt-s3');
+}
+
+/* ---------- step 4: the XICs ---------- */
+const arr = a => Array.isArray(a) ? a : [a];
+function xicPanel(pid, si, fmaxS, mmaxS) {
+  const x = xicFor(pid, si), r = rowFor(pid, si), lv = limpaVal(pid, si);
+  const status = isNum(lv) ? '<span class="yes">used</span> <span class="note">log2 ' + lv.toFixed(2) + '</span>'
+    : r && !usedRow(r) ? '<span class="no">reported, not used</span>'
+    : x ? '<span style="color:var(--inf);font-weight:700">trace, no value reported</span>'
+    : '<span class="note">no trace</span>';
+  let body;
+  if (!x) body = '<div class="qt-xempty">No traces were extracted for this precursor in this run.</div>';
+  else {
+    const W = 300, Hf = 118, Hm = 38, L = 38, R = 8, T = 8, gp = 16, B = 16, H = T + Hf + gp + Hm + B;
+    const feats = Object.keys(x).filter(f => f !== 'ms1'), pk = f => Math.max.apply(null, arr(x[f].v));
+    const allrt = [].concat.apply([], Object.keys(x).map(f => arr(x[f].rt))), r0 = Math.min.apply(null, allrt), r1 = Math.max.apply(null, allrt);
+    const fmax = fmaxS || Math.max.apply(null, [1].concat(feats.map(pk))), mmax = mmaxS || (x.ms1 ? Math.max(1, pk('ms1')) : 1);
+    const X = t => L + (W - L - R) * (t - r0) / ((r1 - r0) || 1);
+    const Yf = v => T + Hf * (1 - v / fmax), Ym = v => T + Hf + gp + Hm * (1 - v / mmax);
+    let s = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="XIC in ' + esc(SHORT[si]) + '">';
+    s += '<line class="qt-ax" x1="' + L + '" x2="' + (W - R) + '" y1="' + Yf(0) + '" y2="' + Yf(0) + '"/><line class="qt-ax" x1="' + L + '" x2="' + (W - R) + '" y1="' + Ym(0) + '" y2="' + Ym(0) + '"/>';
+    s += '<text class="qt-lab" x="' + (L - 4) + '" y="' + (Yf(fmax) + 9) + '" text-anchor="end">' + big(Math.round(fmax)) + '</text><text class="qt-lab" x="' + (L - 4) + '" y="' + Yf(0) + '" text-anchor="end">0</text>';
+    s += '<text class="qt-lab" x="' + (L - 4) + '" y="' + (Ym(mmax) + 9) + '" text-anchor="end">' + big(Math.round(mmax)) + '</text>';
+    s += '<text class="qt-lab" x="' + (L + 4) + '" y="' + (T + 10) + '">fragments</text><text class="qt-lab" x="' + (L + 4) + '" y="' + (Ym(mmax) + 9) + '">MS1</text>';
+    s += '<text class="qt-lab" x="' + L + '" y="' + (H - 2) + '">' + r0.toFixed(2) + '</text><text class="qt-lab" x="' + (W - R) + '" y="' + (H - 2) + '" text-anchor="end">' + r1.toFixed(2) + ' min</text>';
+    if (r && isNum(r.RT)) s += '<line x1="' + X(r.RT) + '" x2="' + X(r.RT) + '" y1="' + T + '" y2="' + Ym(0) + '" stroke="var(--text-secondary)" stroke-dasharray="3 3"/>';
+    feats.sort((a, b) => pk(a) - pk(b)).forEach((f, j) => {
+      const z = x[f], rt = arr(z.rt), v = arr(z.v);
+      const d = rt.map((t, k) => (k ? 'L' : 'M') + X(t).toFixed(1) + ' ' + Yf(v[k]).toFixed(1)).join(' ');
+      s += '<path class="qt-frag" d="' + d + '" fill="none" stroke="var(--sel)" stroke-width="1.7" opacity="' + (0.3 + 0.7 * (j + 1) / feats.length).toFixed(2) + '"' + (f[0] === 'b' ? ' stroke-dasharray="4 2"' : '') + '><title>' + esc(f) + ': tallest point ' + big(Math.round(pk(f))) + '</title></path>';
+    });
+    if (x.ms1) { const rt = arr(x.ms1.rt), v = arr(x.ms1.v);
+      s += '<path d="' + rt.map((t, k) => (k ? 'L' : 'M') + X(t).toFixed(1) + ' ' + Ym(v[k]).toFixed(1)).join(' ') + '" fill="none" stroke="var(--text-secondary)" stroke-width="2"><title>MS1: tallest point ' + big(Math.round(pk('ms1'))) + '</title></path>'; }
+    body = s + '</svg>';
+  }
+  const nfr = x ? Object.keys(x).length - (x.ms1 ? 1 : 0) : 0;
+  const foot = r ? 'Quality ' + (isNum(r['Quantity.Quality']) ? r['Quantity.Quality'].toFixed(2) : '—') + (isNum(r.RT) ? ' · apex ' + r.RT.toFixed(2) + ' min' : '') + (x ? ' · ' + nfr + ' fragments' : '') : x ? nfr + ' fragments · no value reported' : ' ';
+  return '<div class="qt-xpanel' + (si === st.s ? ' on' : '') + '" data-s="' + si + '"><div class="xh"><span style="color:' + GTXT(G[si]) + '">' + esc(SHORT[si]) + '</span>' + status + '</div>' + body + '<div class="xf">' + foot + (INC(si) ? '' : ' · not in this comparison') + '</div></div>';
+}
+function step4HTML() {
+  const title = 'The peaks behind each precursor’s number', tool = 'DIA-NN XICs';
+  if (!HAS_XIC) return step(4, title, tool, missLine('xic', 'The peaks (XICs) for each sample'),
+    'Source, when present: excerpts of DIA-NN’s XIC files (--xic), written into screen_data/ by make_screen_data.R; this folder’s manifest.json lists the block as skipped', 'qt-s4', true);
+  const pid = st.p, q = seqZ(pid);
+  let fmax = 0, mmax = 0;
+  ORD.forEach(si => { const x = xicFor(pid, si); if (!x) return;
+    Object.keys(x).forEach(f => { const m = Math.max.apply(null, arr(x[f].v)); if (f === 'ms1') mmax = Math.max(mmax, m); else fmax = Math.max(fmax, m); }); });
+  const tog = '<div class="qt-pills" style="margin:6px 0 10px"><button class="' + (st.xshared ? 'on' : '') + '" data-act="xshared">Same scale for all ' + N + ' samples</button>' +
+    '<button class="' + (!st.xshared ? 'on' : '') + '" data-act="xown">Each sample scaled to its own peak</button></div>';
+  let grid = '<div class="qt-xgrid">';
+  ORD.forEach(si => grid += xicPanel(pid, si, st.xshared ? fmax : null, st.xshared ? mmax : null));
+  grid += '</div>';
+  const r = rowFor(pid, st.s);
+  const flow = '<div class="qt-flow"><div class="box"><div class="h">These traces</div>' + (xicFor(pid, st.s) ? 'The fragment and MS1 peaks above, in ' + esc(SHORT[st.s]) + '.' : 'No traces in ' + esc(SHORT[st.s]) + '.') + '</div>' +
+    '<div class="ar">→</div><div class="box black"><div class="h">QuantUMS</div>Combines these signals into one number, weighting each by how noisy it looks (an error model learned from the data). DIA-NN reports the result and a quality score, not the per-signal weights.</div>' +
+    '<div class="ar">→</div><div class="box"><div class="h">Raw quantity</div>' + (r ? '<b>' + big(r['Precursor.Quantity']) + '</b> in ' + esc(SHORT[st.s]) + ', the number in step 3.' : 'No row in the report for ' + esc(SHORT[st.s]) + '.') + '</div></div>';
+  const lead = '<p>The chromatograms DIA-NN extracted for <b>' + esc(q.seq) + ' ' + esc(q.z) + '+</b> in each sample: its fragment ions on top (solid y ions, dashed b ions; darker = taller) and its MS1 signal below. ' +
+    'Tall, smooth peaks that rise and fall together are what a trustworthy number looks like; ragged or flat traces are noise. The dashed vertical line is the apex DIA-NN reports.</p>' +
+    '<p class="note">With the same scale for all samples, a weak sample looks weak. Switch to each sample’s own scale to judge peak shape. Click a panel to follow that sample; hover a line for the fragment name.</p>';
+  const note = '<p class="note" style="margin-top:8px">A panel marked “trace, no value reported” shows peaks DIA-NN extracted but reported no value for; limpa saw a gap there. <b>Not shown:</b> DIA-NN’s own number for each fragment and QuantUMS’s weights.</p>';
+  return step(4, title, tool, lead + tog + grid + det('quantums', 'what QuantUMS does with these peaks, and what isn’t shown', () => flow + note),
+    'Read from the XIC excerpts in <b>screen_data/</b> (DIA-NN --xic) · quality score and apex from <b>' + esc(FILES.report) + '</b>', 'qt-s4');
+}
+
+/* ---------- block 10: tracing a number in the report text ---------- */
+function reportHTML() {
+  return '<h3 style="margin:22px 0 6px">Also: tracing a number in the report text</h3>' +
+    missLine('report_text', 'Each number in the analysis report, with the file, rule and step behind it') +
+    '<p class="qt-foot">Source, when present: the report’s own record of each number it states (its file, rule and step), never the prose; this folder’s manifest.json lists the block as skipped.</p>';
+}
+
+/* ---------- the picture: the same chain, drawn with this protein's own numbers ---------- */
+function pictureHTML() {
+  const si = st.s, q = seqZ(st.p), r = rowFor(st.p, si), lv = limpaVal(st.p, si), x = xicFor(st.p, si);
+  const T = (x0, y0, txt, o) => '<text x="' + x0 + '" y="' + y0 + '" font-size="' + ((o && o.fs) || 12) + '"' + (o && o.anchor ? ' text-anchor="' + o.anchor + '"' : '') +
+    (o && o.bold ? ' font-weight="700"' : '') + ' fill="' + ((o && o.fill) || 'currentColor') + '"' + (o && o.op ? ' opacity="' + o.op + '"' : '') + '>' + txt + '</text>';
+  const box = (x0, y0, w, h, lines, o) => '<rect x="' + x0 + '" y="' + y0 + '" width="' + w + '" height="' + h + '" rx="7" fill="' + ((o && o.bg) || 'none') + '" stroke="' + ((o && o.stroke) || 'currentColor') + '" stroke-opacity="' + ((o && o.sop) || 0.45) + '" stroke-width="' + ((o && o.sw) || 1.2) + '"/>' +
+    lines.map((l, i) => T(x0 + w / 2, y0 + h / 2 + (i - (lines.length - 1) / 2) * 14 + 4, l, { anchor: 'middle', fs: i ? 11 : 12, bold: !i && !(o && o.plain), op: i ? 0.75 : 1, fill: o && o.fill })).join('');
+  const arrow = (x1, y1, x2, y2, lab, lx, ly, anchor) => '<line x1="' + x1 + '" y1="' + y1 + '" x2="' + x2 + '" y2="' + y2 + '" stroke="currentColor" stroke-opacity="0.6" stroke-width="1.3" marker-end="url(#qtArrow)"/>' +
+    (lab ? T(lx, ly, lab, { fs: 10.5, anchor: anchor || 'start', op: 0.8 }) : '');
+  let s = '<svg class="qt-pic" viewBox="0 0 1000 352" role="img" aria-label="How ' + esc(GENE) + '’s number is made: DIA-NN reports precursors, limpa makes one value per sample, limma compares the groups.">' +
+    '<defs><marker id="qtArrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor" fill-opacity="0.6"/></marker></defs>';
+  [[10, '1  DIA-NN reports each precursor'], [345, '2  limpa makes one value per sample'], [680, '3  limma compares the groups']].forEach(p => {
+    s += '<rect x="' + p[0] + '" y="30" width="310" height="300" rx="12" fill="none" stroke="currentColor" stroke-opacity="0.18"/>' + T(p[0] + 12, 22, p[1], { fs: 13, bold: true });
+  });
+  /* panel 1: one precursor in one sample */
+  s += T(22, 50, 'one precursor, one sample', { fs: 10.5, op: 0.75 });
+  s += T(22, 68, esc(clip(q.seq, 20)) + ' ' + esc(q.z) + '+ in ' + esc(clip(SHORT[si], 12)), { fs: 11, bold: true, fill: 'var(--sel)' });
+  if (x) {
+    const feats = Object.keys(x).filter(f => f !== 'ms1'), all = [].concat.apply([], Object.keys(x).map(f => arr(x[f].rt))), r0 = Math.min.apply(null, all), r1 = Math.max.apply(null, all);
+    const fm = Math.max.apply(null, [1].concat(feats.map(f => Math.max.apply(null, arr(x[f].v))))), mm = x.ms1 ? Math.max(1, Math.max.apply(null, arr(x.ms1.v))) : 1;
+    const X = t => 22 + 150 * (t - r0) / ((r1 - r0) || 1);
+    feats.forEach(f => { const rt = arr(x[f].rt), v = arr(x[f].v); s += '<polyline fill="none" stroke="var(--sel)" stroke-width="1.1" opacity="0.8" points="' + rt.map((t, k) => X(t).toFixed(1) + ',' + (150 - 66 * v[k] / fm).toFixed(1)).join(' ') + '"/>'; });
+    if (x.ms1) { const rt = arr(x.ms1.rt), v = arr(x.ms1.v); s += '<polyline fill="none" stroke="currentColor" stroke-opacity="0.6" stroke-width="1.3" points="' + rt.map((t, k) => X(t).toFixed(1) + ',' + (196 - 32 * v[k] / mm).toFixed(1)).join(' ') + '"/>'; }
+    s += '<line x1="22" x2="172" y1="150" y2="150" stroke="currentColor" stroke-opacity="0.3"/><line x1="22" x2="172" y1="196" y2="196" stroke="currentColor" stroke-opacity="0.3"/>';
+    s += T(22, 164, feats.length + ' fragment ions', { fs: 10.5, op: 0.8 }) + T(22, 210, 'MS1 (intact peptide)', { fs: 10.5, op: 0.8 });
+  } else if (HAS_XIC) s += T(22, 130, 'no trace in this sample', { fs: 11, op: 0.7 });
+  else s += T(22, 124, 'its peaks: not in this version', { fs: 11, op: 0.7 }) + T(22, 138, 'of the screen data', { fs: 11, op: 0.7 });
+  const fl = fails(r);
+  s += box(186, 78, 128, 36, ['QuantUMS', 'weighs cleaner signals']);
+  s += arrow(176, 118, 184, 100, '', 0, 0);
+  s += box(186, 132, 128, 36, [r ? 'raw ' + big(r['Precursor.Quantity']) : 'no value', 'one number']);
+  s += arrow(250, 114, 256, 130);
+  s += box(186, 186, 128, 36, [r && isNum(r['Normalisation.Factor']) ? '× ' + r['Normalisation.Factor'].toFixed(3) : '—', 'normalisation']);
+  s += arrow(250, 168, 256, 184);
+  s += box(186, 240, 128, 36, [QCOLS.length ? plural(QCOLS.length, 'check') : 'checks', r ? (fl.length ? 'failed: ' + fl.length : usedRow(r) ? 'all passed' : 'not used') : 'no row']);
+  s += arrow(250, 222, 256, 238);
+  const found = isNum(lv);
+  s += box(170, 290, 142, 32, [found ? 'found: log2 ' + lv.toFixed(2) : 'not found'], { stroke: found ? 'var(--sel)' : 'var(--inf)', sop: 1, sw: 2, fill: found ? 'var(--sel)' : 'var(--inf)' });
+  s += arrow(250, 276, 256, 288);
+  /* panel 2: precursors -> one value per sample */
+  const n = PREC.length, rows = Math.min(n, 18), cw = Math.min(16, 110 / Math.max(1, N)), ch = Math.min(9, 108 / Math.max(1, rows)), gx0 = 360, gy0 = 66;
+  s += T(gx0, 50, 'precursors × samples', { fs: 10.5, op: 0.75 });
+  ORD.forEach((i, c) => s += '<rect x="' + (gx0 + c * cw + 1) + '" y="' + (gy0 - 4) + '" width="' + Math.max(1.5, cw - 3) + '" height="3" fill="' + GCOL(G[i]) + '"/>');
+  PREC.slice(0, rows).forEach((id, k) => ORD.forEach((i, c) => {
+    const v = P.prec[k][i], sel = id === st.p;
+    s += '<rect x="' + (gx0 + c * cw + 1) + '" y="' + (gy0 + 2 + k * ch) + '" width="' + Math.max(1.5, cw - 3) + '" height="' + Math.max(2, ch - 2) + '" rx="1.5" fill="' + (isNum(v) ? (sel ? 'var(--sel)' : 'currentColor') : 'none') + '"' +
+      (isNum(v) ? ' fill-opacity="' + (sel ? 1 : 0.35) + '"' : ' stroke="var(--inf)" stroke-width="1.2"') + '/>';
+  }));
+  const gyEnd = gy0 + 4 + rows * ch, ly0 = gyEnd + (n > rows ? 24 : 13);
+  if (n > rows) s += T(gx0, gyEnd + 11, '+' + (n - rows) + ' more precursors', { fs: 9.5, op: 0.7 });
+  s += T(gx0, ly0, 'grey = found', { fs: 10, op: 0.8 }) + T(gx0, ly0 + 12, 'amber = not found', { fs: 10, fill: 'var(--inf)' });
+  const cx0 = 480, cy0 = 70, cwid = 150, chh = 52, Xc = v => cx0 + cwid * (v - DR[0]) / (DR[1] - DR[0]), Yc = p => cy0 + chh * (1 - p);
+  if (HAS_DPC) { let dc = ''; for (let k = 0; k <= 56; k++) { const v = DR[0] + (DR[1] - DR[0]) * k / 56; dc += (k ? 'L' : 'M') + Xc(v).toFixed(1) + ' ' + Yc(pFound(v)).toFixed(1) + ' '; }
+    s += '<path d="' + dc + '" fill="none" stroke="currentColor" stroke-width="1.6"/>'; }
+  s += '<line x1="' + cx0 + '" x2="' + (cx0 + cwid) + '" y1="' + Yc(0) + '" y2="' + Yc(0) + '" stroke="currentColor" stroke-opacity="0.3"/>';
+  s += T(cx0, cy0 + chh + 14, 'detection curve: chance found', { fs: 10, op: 0.8 }) + T(cx0, cy0 + chh + 27, 'gaps read as “probably low”', { fs: 10, op: 0.8 });
+  s += T(cx0, 170, 'each precursor = protein level', { fs: 10.5 }) + T(cx0, 183, '+ its own fixed brightness;', { fs: 10.5 }) + T(cx0, 196, 'every found value gets', { fs: 10.5 }) + T(cx0, 209, 'an equal vote', { fs: 10.5 });
+  const pv = []; ORD.forEach(i => { if (isNum(P.prot[i])) { pv.push(P.prot[i] - P.se[i]); pv.push(P.prot[i] + P.se[i]); } });
+  const lo = pv.length ? Math.min.apply(null, pv) : 0, hi = pv.length ? Math.max.apply(null, pv) : 1, Yp = v => 300 - 60 * (v - lo) / ((hi - lo) || 1);
+  const lay = colLayout(ORD, 0.35), Xp = i => 372 + 260 * lay.pos[i] / lay.span;
+  s += T(360, 228, 'one protein value per sample (± error bar)', { fs: 10.5, op: 0.8 });
+  ORD.forEach(i => { const v = P.prot[i]; if (!isNum(v)) return; const inf = inferred(i), c = inf ? 'var(--inf)' : GCOL(G[i]);
+    s += '<line x1="' + Xp(i) + '" x2="' + Xp(i) + '" y1="' + Yp(v - P.se[i]) + '" y2="' + Yp(v + P.se[i]) + '" stroke="' + c + '" stroke-width="2"/>' +
+      '<circle cx="' + Xp(i) + '" cy="' + Yp(v) + '" r="' + (N > 12 ? 3 : 5) + '" fill="' + (inf ? 'var(--bg-secondary)' : c) + '" stroke="' + c + '" stroke-width="2"/>' +
+      (i === si ? '<circle cx="' + Xp(i) + '" cy="' + Yp(v) + '" r="9" fill="none" stroke="var(--accent)" stroke-width="1.6"/>' : ''); });
+  GROUPS.forEach(g => { const xs = ORD.filter(i => G[i] === g).map(Xp); if (xs.length) s += T(mean(xs), 324, esc(clip(g, 10)), { fs: 9, anchor: 'middle', fill: GTXT(g) }); });
+  if (ORD.some(inferred)) s += T(640, 242, 'hollow = inferred', { fs: 10, anchor: 'end', fill: 'var(--inf)' });
+  s += arrow(314, 306, 352, 306, 'log2', 318, 299);
+  if (ly0 + 22 < 214) s += arrow(440, ly0 + 18, 440, 214);
+  /* panel 3: limma */
+  const wl = colLayout(CMP, 1), Xw = i => 712 + 250 * wl.pos[i] / wl.span, ws = RT && Array.isArray(RT.wshare) ? RT.wshare : null;
+  const wmax = ws ? Math.max.apply(null, CMP.map(i => ws[i]).filter(isNum).concat([1e-9])) : 1;
+  s += T(692, 50, ws ? 'dot size = weight (from error bars)' : 'the comparison’s values (weights not in this screen data)', { fs: 10.5, op: 0.75 });
+  CMP.forEach(i => { const v = P.prot[i]; if (!isNum(v)) return;
+    const rr = ws && isNum(ws[i]) ? 4 + 9 * Math.sqrt(ws[i] / wmax) : 6, inf = inferred(i), c = inf ? 'var(--inf)' : GCOL(G[i]);
+    s += '<circle cx="' + Xw(i) + '" cy="' + (118 - 50 * (v - lo) / ((hi - lo) || 1)) + '" r="' + rr.toFixed(1) + '" fill="' + c + '" fill-opacity="' + (inf ? 0.35 : 0.8) + '" stroke="' + c + '"/>' +
+      (ws && isNum(ws[i]) && CMP.length <= 12 ? T(Xw(i), 146, Math.round(ws[i] * 100) + '%', { fs: 9.5, anchor: 'middle', op: 0.8 }) : ''); });
+  [DEN, NUM].forEach(g => { const xs = CMP.filter(i => G[i] === g).map(Xw); if (xs.length) s += T(mean(xs), 160, esc(clip(g, 14)), { fs: 10.5, anchor: 'middle', fill: GCOL(g) }); });
+  s += box(700, 172, 270, 34, ['borrow across ' + loc(D.n_tested) + ' proteins', RT && isNum(RT.df_prior) ? f1(RT.df_prior) + ' degrees of freedom borrowed' : 'limma’s empirical Bayes step'], { plain: true });
+  s += arrow(835, 164, 835, 170);
+  s += box(700, 220, 270, 34, ['correct for ' + loc(D.n_tested) + ' tests', 'Benjamini–Hochberg adjusted p'], { plain: true });
+  s += arrow(835, 206, 835, 218);
+  s += box(700, 270, 270, 46, [TESTED ? 'change ' + sgn(P.logFC) + ', adjusted p ' + fmtP(P.adjP) : 'not tested in ' + esc(clip(VS, 24)), TESTED ? (SIG ? 'called changed' : 'not called changed') : 'no fold change'], { stroke: 'var(--accent)', sop: 1, sw: 2 });
+  s += arrow(835, 254, 835, 268);
+  s += arrow(640, 272, 702, 196, CMP.length + ' values', 662, 264);
+  s += T(12, 346, 'Drawn with ' + esc(GENE) + '’s own values; the left panel follows the selected precursor in the selected sample. Click elsewhere on the page to change either.', { fs: 10.5, op: 0.7 });
+  s += '</svg>';
+  return '<figure class="qt-fig">' + s + '<figcaption>The chain behind ' + esc(GENE) + '’s number, left to right: DIA-NN turns each precursor’s peaks into a value, limpa turns a protein’s precursors into one value per sample, and limma compares the groups. ' +
+    'Every number in the picture comes from this project’s files.</figcaption></figure>' + (HAS_ROUTES ? '' : missLine('check_routes', 'The check routes that would run along the bottom of this picture'));
+}
+
+/* ---------- explain everything ---------- */
+function explainHTML() {
+  const h = D.prior || {}, item = (term, text, src) => '<div class="it"><dt>' + term + '</dt><dd>' + text + (src ? '<span class="src">' + src + '</span>' : '') + '</dd></div>';
+  const grp = (title, items) => '<h4>' + title + '</h4><dl class="grid">' + items.filter(Boolean).join('') + '</dl>';
+  const files = uniq([FILES.report, FILES.stats, FILES.session_rds, FILES.de_table, 'tables/de_provenance.json', 'tables/set_test_inputs.rds', 'screen_data/manifest.json'].filter(Boolean)).map(esc).join(', ');
+  return '<div class="qt-explain" id="qt-explain"><h3>How to read this page</h3>' +
+    '<p>Every term on this page, in plain words, with where it comes from. A protein’s number is made in three stages: DIA-NN reports precursors in each sample, limpa turns them into one protein value per sample, and limma compares the groups.</p>' +
+    grp('1. The search (DIA-NN)', [
+      item('Peptide and precursor', 'A peptide is an amino-acid sequence. A precursor is that peptide at one charge state (2+, 3+); DIA-NN quantifies precursors, so one peptide can give two or three.', 'DIA-NN report'),
+      item('Found / not found', '<i>Found</i>: DIA-NN reported a value for the precursor in that sample that passed the analysis’s confidence checks. <i>Not found</i>: it reported no such value. Only protein values are ever called <i>inferred</i>.', 'wording agreed for this screen'),
+      item('Match-between-runs', 'When a search uses it, DIA-NN looks for every precursor of one shared library in every sample, so <i>not found</i> means it looked and nothing passed. The skill’s DIA-NN searches build that library from all the samples. This screen data does not record the search’s settings; the search’s own record (search/search_provenance.json) does.', 'DIA-NN README; the skill’s search (diann_parallel.py)'),
+      QCOLS.length ? item('Confidence checks (q-values)', 'Each check is an estimated false-discovery rate. This analysis applied ' + QCOLS.length + ': ' + QCOLS.map(k => esc(k) + ' (' + esc(qlab(k)) + ') at ' + pct(CUT[k])).join(', ') + '. A precursor value over any cutoff is not used.', 'DIA-NN README; this project’s de_provenance.json') : '',
+      item('QuantUMS', 'DIA-NN’s method for turning a precursor’s fragment-ion signals and its MS1 signal into one number. It weights each signal by how noisy it looks, using an error model learned from the data. The weights are not reported.', 'Grossmann, Kistner … Demichev, Nat Biotechnol 2026, Supplement pp. 8–11'),
+      item('Quality score', 'QuantUMS’s confidence in a precursor’s number: 1 / (1 + its estimated error SD), from 0 to 1. DIA-NN recommends it for filtering. limpa does not use it. ' + quantumsFilterTxt(), 'DIA-NN README; this project’s de_provenance.json (filters_applied)'),
+      item('Normalisation factor', 'DIA-NN multiplies each precursor’s raw quantity by a factor to even out loading between runs: normalised = factor × raw. The factor differs from precursor to precursor within a run.' + (A.normalisation ? ' This analysis: ' + esc(A.normalisation) + '.' : ''), 'DIA-NN README; this project’s de_provenance.json'),
+      HAS_XIC ? item('XIC (chromatogram)', 'The signal of each fragment ion and of the MS1 precursor over retention time, around the peak. Tall, smooth peaks that rise and fall together are what a trustworthy value looks like.', 'DIA-NN --xic files') : ''
+    ]) +
+    grp('2. From precursors to a protein value (limpa)', [
+      item('DPC-Quant', 'limpa’s method. On the log scale, each precursor value is modelled as the protein’s level in that sample plus the precursor’s own offset. Every found value counts equally: “all precursors, in fact all observations, are weighted equally by default”.', 'limpa paper (Li, Cobbold &amp; Smyth, bioRxiv 2025) p.17; limpa 1.4.0 code, peptides2ProteinBFGS'),
+      HAS_DPC ? item('Detection curve (DPC)', 'One curve for the whole experiment: the chance a precursor is found at a given intensity. Here it is found half the time at ' + Y50.toFixed(1) + (isNum(REF) ? ' and ' + Math.round(pFound(REF) * 100) + '% of the time at ' + REF.toFixed(1) + ', the middle of this protein’s found values' : '') + '. It is fitted from precursor-level data.', 'Li &amp; Smyth, Bioinformatics 2023; this analysis’s dpc_fit') : '',
+      item('Gaps', 'A precursor not found in a sample is not dropped and not filled in. limpa reads it as “probably low”: the chance of missing it, from the detection curve. Gaps carry far less information than found values.', 'limpa code; Li &amp; Smyth 2023 §3.8'),
+      item('Detection chance', 'Per precursor, per sample. For a found value: the chance a precursor at that intensity is found, read off the curve. This is descriptive: limpa’s fit uses found values only as values, and uses the curve only for gaps. For a gap: the chance of being found that limpa’s fit used, from the level it expects for that precursor there. A gap where the chance was high is surprising and pulls the value down.', 'our calculation with limpa’s own fit (make_screen_data.R); limpa code (peptides2ProteinBFGS: the missing-value term)'),
+      item('Inferred', 'A protein value in a sample where none of its precursors was found. It rests on the detection curve, the protein’s values in other samples and limpa’s starting assumptions, and gets a wide error bar.', 'limpa (n.observations = 0)'),
+      isNum(h['prior.mean']) ? item('Starting assumptions', 'Two gentle pulls that limpa sets from this dataset: a typical protein level of ' + f1(h['prior.mean']) + ' (±' + f1(h['prior.sd']) + ') and sample-to-sample changes of about ±' + f1(h['prior.logFC']) + ' log2.', 'limpa paper p.24 (empirical Bayes); this analysis’s y_protein') : '',
+      item('Error bar (±)', 'limpa’s standard error for each protein value. Few found precursors, or none, means a wider bar.', 'limpa (standard.error)'),
+      item('Shares', 'How much of a sample’s protein value rests on each precursor’s value: ' + shareMethodText() + '. limpa doesn’t report them. They depend on how many precursors were found, not on intensity.', 'our calculation with limpa (make_screen_data.R; screen_data/manifest.json, shares)')
+    ]) +
+    grp('3. The change (limma)', [
+      item('log2 fold change', '+1 means twice as high in ' + esc(NUM) + ' as in ' + esc(DEN) + ', −1 half as high. limma fits it from the protein values of the two groups.', esc(FILES.de_table) + ' (logFC)'),
+      item('Weights', 'limma doesn’t treat the values equally. vooma fits a trend of each protein’s spread against its average level and limpa’s error bars; each value’s weight is 1 / (its predicted SD)⁴. A wide error bar, such as an inferred value’s, means less weight. If a whole group is inferred, limpa also leaves those values out of the protein’s variance estimate.', 'limpa code: dpcDE, voomaLmFitWithImputation; weights from the delivered fit'),
+      item('Adjusted p', 'The p-value corrected for testing many proteins at once (Benjamini–Hochberg across the ' + loc(D.n_tested) + ' proteins tested in ' + esc(VS) + '). Below ' + ADJP + ' puts a protein in the changed list' + (NOFC ? '; no fold-change filter is applied' : '') + '.', 'this project’s de_provenance.json (adjp' + (A.significance_rule ? ', significance_rule: “' + esc(A.significance_rule) + '”' : '') + ')')
+    ]) +
+    grp('4. Checks and flags', [
+      item('⚠ Look closer', 'The value rests on inferred samples, a peptide used is shared with other proteins, or a sample’s normalisation was unstable. These flags stay on this screen. A flag says the answer depends on the method or the data, not that it is wrong.', 'this screen'),
+      item('Shared peptide', 'A peptide that DIA-NN also assigns to other proteins in the searched database. Its signal may partly belong to them.', 'DIA-NN report (Protein.Ids, Proteotypic)'),
+      Object.keys(STATS).length ? item('Sample health', 'Per run: precursors and proteins identified; normalisation instability (a DIA-NN stats-file measure the README does not define; the skill warns at 0.3); and MS1 mass error before → after DIA-NN’s own correction.', 'DIA-NN ' + esc(FILES.stats)) : ''
+    ]) +
+    '<h4>Sources</h4><ul class="refs">' +
+    '<li>DIA-NN README, github.com/vdemichev/DiaNN (report column definitions, QuantUMS, match-between-runs)</li>' +
+    '<li>Grossmann JL, Kistner F, … Demichev V. Accurate quantification in proteomics with QuantUMS. Nat Biotechnol 2026. doi:10.1038/s41587-026-03131-2</li>' +
+    '<li>Li M, Cobbold SA, Smyth GK. bioRxiv 2025. doi:10.1101/2025.04.28.651125 (limpa and DPC-Quant)</li>' +
+    '<li>Li M, Smyth GK. Bioinformatics 2023;39(5):btad200, PMC10174703 (the detection probability curve)</li>' +
+    '<li>limpa source code (dpcQuant, peptides2ProteinBFGS, dpcDE); limma (voomaLmFitWithImputation)</li>' +
+    '<li>This project’s files: ' + files + '</li></ul></div>';
+}
+
+function step(n, title, tool, body, foot, id, na) {
+  return '<div class="qt-step' + (na ? ' na' : '') + '" id="' + id + '"><div class="hd"><div class="n">' + n + '</div><h3>' + title + '</h3><span class="tool">' + tool + '</span></div>' +
+    '<div class="bd">' + body + '</div><div class="ft">' + foot + '</div></div>';
+}
+
+function render() {
+  let h = askHTML() + cardHTML() + storyHTML() + howItWorksHTML() + pathHTML() + step1HTML() + step2HTML() + step3HTML() + step4HTML() + reportHTML() + explainHTML();
+  h += '<p class="qt-foot">Built by make_protein_screen.py from screen_data/ (' + esc(PROV.written_by) + ', ' + esc(day(PROV.written_at)) + ')' +
+    ((PROV.verified || []).length ? '; checksums verified for ' + (PROV.verified || []).map(esc).join(', ') : '') +
+    ((PROV.not_checked || []).length ? '; not checked here (not beside the screen data): ' + (PROV.not_checked || []).map(esc).join(', ') : '') + '.</p>';
+  document.getElementById('qt').innerHTML = h;
+}
+
+document.title = GENE + ': where its number comes from';
+document.getElementById('qt-title').textContent = GENE + ': where its number comes from';
+document.getElementById('qt-sub').innerHTML = 'Comparison <b>' + esc(VS) + '</b> (' + esc(FILES.de_table) + ')' + (CT.default === true ? ' · ' + DEFAULT_CMP : '') + ' · ' + esc(A.display_label || '') + ' · protein group ' + esc(PG) +
+  ' · ' + plural(N, 'sample') + ' in ' + plural(GROUPS.length, 'group') + ' · screen data written ' + esc(day(PROV.written_at));
+
+document.getElementById('qt').addEventListener('click', e => {
+  const t = e.target.closest('[data-act],[data-s],[data-p],[data-go]');
+  if (!t) return;
+  const act = t.dataset.act;
+  if (act && act.indexOf('det:') === 0) { const k = act.slice(4); st.open[k] = !st.open[k]; }
+  else if (act && act.indexOf('open:') === 0) { const k = act.slice(5); st.open[k] = true; render(); const el = document.getElementById('det-' + k); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
+  else if (act === 'xshared') st.xshared = true;
+  else if (act === 'xown') st.xshared = false;
+  else if (act === 'skw-share') st.skw = 'share';
+  else if (act === 'skw-int') st.skw = 'int';
+  else if (act === 'skw-count') st.skw = 'count';
+  else if (t.dataset.s != null) st.s = +t.dataset.s;
+  else if (t.dataset.p) st.p = t.dataset.p;
+  else if (t.dataset.go) { const el = document.getElementById(t.dataset.go); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
+  render();
+});
+try {
+  const hp = new URLSearchParams((location.hash || '').slice(1));
+  if (hp.get('s') != null && hp.get('s') !== '') { const v = +hp.get('s'); if (v >= 0 && v < N) st.s = v; }
+  if (hp.get('p') && allPrec().indexOf(hp.get('p')) >= 0) st.p = hp.get('p');
+  (hp.get('open') || '').split(',').filter(Boolean).forEach(k => { st.open[k] = true; });
+  if (hp.get('theme') === 'dark' || hp.get('theme') === 'light') document.documentElement.dataset.theme = hp.get('theme');
+} catch (e) { /* a malformed #hash keeps the defaults */ }
+render();
+document.body.dataset.render = 'ok';
+})();
+</script>
+</body>
+</html>

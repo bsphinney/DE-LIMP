@@ -74,7 +74,8 @@ Checks:
                     quoted as the pipeline states it (WARN)
   sage_lfq          (--search-out, Sage searches) the runs' MS1 mass error does not fit
                     Sage's LFQ window, or Sage kept (almost) no MS1 peaks: quantities
-                    unreliable (WARN) -- sage_lfq_check.py's record, quoted as written
+                    unreliable (WARN) -- sage_lfq_check.py's record (quantification_check.json;
+                    2.14.x's sage_lfq_check.json is still read), quoted as written
   normalization_check
                     the DE's quantities (normalised / non-normalised), the experiment type's
                     default and whether normalization_check.py's data check agreed -- quoted
@@ -518,7 +519,8 @@ def audit_acquisition(findings, acq_json):
     if overall == "mixed":
         add(findings, "acquisition_mix", "FAIL",
             "DIA and DDA files are mixed in one analysis. They must be searched separately "
-            "(DIA→DIA-NN, DDA→Sage); mixing them produces invalid quantification.",
+            "(DIA and DDA each by its own route: search-engines.md \"4a.\" and \"4c.\"); "
+            "mixing them produces invalid quantification.",
             {"files": [(f.get("file"), f.get("acquisition")) for f in data.get("files", [])]})
     elif overall in ("DIA", "DDA"):
         add(findings, "acquisition_mix", "PASS", f"All files are {overall}.")
@@ -1393,7 +1395,8 @@ def main():
                          "common-contaminant sequences. Default: ./search.fasta.meta.json if present")
     ap.add_argument("--search-out",
                     help="the search's output directory: a Sage search's LFQ mass-window check "
-                         "(sage_lfq_check.json) becomes the sage_lfq finding")
+                         "(quantification_check.json; 2.14.x: sage_lfq_check.json) becomes the "
+                         "sage_lfq finding")
     a = ap.parse_args()
     fasta_meta = a.fasta_meta or ("search.fasta.meta.json"
                                   if os.path.exists("search.fasta.meta.json") else None)

@@ -1,0 +1,53 @@
+{
+  "acquisition": "DDA",
+  "alternatives": [],
+  "ask_user": null,
+  "de": {
+    "adjp": 0.05,
+    "logfc": 1.0,
+    "method": "maxlfq",
+    "q_cutoff": 0.01
+  },
+  "engine": {
+    "name": "sage",
+    "version": "0.14.7"
+  },
+  "fasta": {
+    "add_contaminants": true,
+    "path": null
+  },
+  "id": "sage_orbitrap_dda",
+  "instrument_class": "orbitrap_generic",
+  "instrument_label": "Orbitrap (resolution unknown -- pass --ms1-resolution/--ms2-resolution to use DIA-NN's documented table)",
+  "instruments": [
+    "Orbitrap Fusion Lumos"
+  ],
+  "name": "sage \u2014 Orbitrap (resolution unknown -- pass --ms1-resolution/--ms2-resolution to use DIA-NN's documented table) (DDA)",
+  "needs_confirmation": false,
+  "notes": [],
+  "organism": null,
+  "organism_taxid": null,
+  "path": null,
+  "platform": null,
+  "registry": {
+    "defaults_version": "2026-09-23",
+    "note": "no remote registry; parameters ship with the skill",
+    "source": "local skill defaults"
+  },
+  "resolution": null,
+  "search": {
+    "estimate_params": true,
+    "ms1_ppm": null,
+    "ms2_ppm": null,
+    "overrides": {},
+    "params_file": null,
+    "ppm_source": "no documented DIA-NN value (resolution unknown)",
+    "preset_provenance": null
+  },
+  "validated": {
+    "by": null,
+    "dataset": null,
+    "date": null,
+    "notes": "Parameters are this skill's data-type defaults (resolve_defaults.py 2026-09-23), not a site validation run. They are reproducible from the skill version alone."
+  }
+}

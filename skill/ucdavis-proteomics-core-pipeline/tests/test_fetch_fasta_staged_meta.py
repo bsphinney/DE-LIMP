@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A pre-staged HIVE proteome must still describe itself in <fasta>.meta.json.
 
-gabrig, 2026-09-23 (human HeLa, HIVE Core member): `fetch --proteome UP000005640 --hive`
+gstaff, 2026-09-23 (human HeLa, HIVE Core member): `fetch --proteome UP000005640 --hive`
 reused /quobyte/proteomics-grp/MRS/UP000005640_9606.fasta and wrote organism "", taxid 0,
 uniprot_release "" -- although the proteome ID was known. make_methods.py (methods text) and
 fran_deposit.py (the FRAN corpus row) both read organism/taxid from that sidecar.

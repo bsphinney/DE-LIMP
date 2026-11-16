@@ -8,7 +8,7 @@ ThermoRawFileParser with a command line the parser does not accept -- `metadata 
 `query -i <raw>` (query requires -n: exit 255, "specify a valid scan range") -- ignored the
 exit codes, and grepped the empty stdout for "dia". Every .raw therefore came back
 acquisition unknown / confidence low / instrument null / precursor_mz_range null, so
-estimate_params.py searched its 380-980 FALLBACK. Measured on HIVE (srun job 23510571)
+estimate_params.py searched its 380-980 FALLBACK. Measured on HIVE (in a test run)
 against both FRAN pilot Orbitraps, whose methods acquire much wider than that:
 
     Orbitrap Exploris 480   25 x 35.0 m/z windows   350.0 -1201.0
@@ -89,6 +89,10 @@ class _FakeParserCase(unittest.TestCase):
         # test_orbitrap_resolution.py sets one up with fakes
         os.environ["THERMO_RESOLUTION_PYTHON"] = ""
         os.environ.pop("THERMO_RAWFILEREADER_DIR", None)
+        # no cluster here unless a test puts a fake sbatch on PATH: on HIVE HPCCF's cluster file
+        # and SLURM at its fixed path exist, and would make every test a login node
+        os.environ["UCD_HPC_CLUSTER_CONF"] = os.path.join(self.tmp, "no_cluster_file")
+        os.environ["HPCCF_SLURM_BIN"] = os.path.join(self.tmp, "no_slurm_bin")
 
     def tearDown(self):
         os.environ.clear()
@@ -263,6 +267,33 @@ class ThermoRawIsReadThroughTheRealCommandLine(_FakeParserCase):
         self.assertEqual(r["acquisition"], "DIA", r["reason"])
         self.assertEqual(r["instrument"], "Orbitrap Fusion Lumos")
 
+
+class StaggeredWindowsAreRecorded(_FakeParserCase):
+    """2.15 (Ruling 100 M1): each Thermo DIA run's record says whether its isolation windows are
+    staggered (`isolation_windows`), which Skyline demultiplexes ("Overlap Multiplexed") -- the
+    peak check's import limit is set from it (skyline_peaks.demultiplexing)."""
+
+    def test_the_fixtures_tiled_windows_are_not_staggered(self):
+        for stem in (EXPLORIS, LUMOS):
+            with self.subTest(stem=stem):
+                iw = da.classify(self.raw(stem))["isolation_windows"]
+                self.assertIs(iw["staggered"], False)
+                self.assertGreaterEqual(iw["n_windows"], da.TILED_MIN_WINDOWS)
+                self.assertLess(iw["median_overlap"], da.STAGGER_SHARE * iw["median_width"])
+
+    def test_dda_has_none(self):
+        self.assertIsNone(da.classify(self.raw(DDA))["isolation_windows"])
+
+    def test_a_staggered_scheme_is_staggered(self):
+        """The real 2.15 test project's scheme: 151 windows of 8 m/z, offset by 4 m/z (two cycles),
+        and the same read in acquisition order."""
+        los = [392.43 + 8 * i for i in range(76)] + [396.43 + 8 * i for i in range(75)]
+        iw = da.staggered_windows(los, [x + 8 for x in los])
+        self.assertEqual((iw["staggered"], iw["n_windows"], iw["median_width"],
+                          iw["median_overlap"]), (True, 151, 8.0, 4.0))
+        tiled = [350 + 14 * i for i in range(40)]                  # 15 m/z, a 1 m/z margin
+        self.assertIs(da.staggered_windows(tiled, [x + 15 for x in tiled])["staggered"], False)
+        self.assertIsNone(da.staggered_windows([400, 410], [410, 420]))   # too few windows
 
 class IncompleteWindowEdgesAreNeverHigh(unittest.TestCase):
     """A range read from PART of a method is not a measured range.
@@ -645,7 +676,7 @@ class SkillMdExplainsTheDdaRange(_FakeParserCase):
 
 class ThermoRawCohortOnALoginNode(_FakeParserCase):
     """Reading a .raw is now real work: two .NET parser processes per file that read the raw
-    (3.1-7.0 s per file on HIVE compute nodes, srun jobs 23511567 to 23515380). With the
+    (3.1-7.0 s per file on HIVE compute nodes, four test runs). With the
     old command line the parser calls died at argument parsing, so step 2 cost nothing --
     and SKILL.md 0a drives step 2 over SSH, i.e. on the cluster login node. A 200-file cohort
     there is ~20 min of parser I/O on a shared host, which golden rule #3 forbids. So a
@@ -712,7 +743,7 @@ class ThermoRawCohortOnALoginNode(_FakeParserCase):
         self.assertIn("not found", res.stderr)
 
     def test_inside_a_slurm_allocation_the_cohort_is_read(self):
-        os.environ["SLURM_JOB_ID"] = "23511567"
+        os.environ["SLURM_JOB_ID"] = "9900008"
         n = da.LOGIN_NODE_MAX_RAW + 1
         res = self._run(*self.cohort(n))
         self.assertEqual(res.returncode, 0, res.stderr)

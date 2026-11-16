@@ -6,9 +6,10 @@ A FragPipe search on a database holding Philosopher's `contam_` entries is refus
 (run_search.refuse_fragpipe_contam_database), and the refusal says how to build the skill's own
 database instead. Its hint ended at fetch_fasta.py's search.fasta and pointed the workflow at it:
 a target-only FASTA, which MSFragger refuses ("No decoys found in the FASTA file",
-references/fragpipe-diatracer.md). The hint now builds the target+decoy `.fas` from it with
-FragPipe's Philosopher -- without --contam, which would bring the `contam_` entries back -- and
-points database.db-path at that.
+references/fragpipe-diatracer.md). 2.14.2's hint built the target+decoy `.fas` by hand; since 2.15
+(review H3) the search's own job adds the decoys to a target-only FASTA with FragPipe's
+Philosopher -- without --contam, which would bring the `contam_` entries back -- so the hint
+searches the target FASTA as it is and leaves database.db-path to run_search.py.
 
 Stdlib only; a three-entry FASTA.
 """
@@ -29,7 +30,7 @@ DB = (">sp|P04406|G3P_HUMAN GAPDH OS=Homo sapiens OX=9606 GN=GAPDH PE=1 SV=3\nMG
 
 
 class Hint(unittest.TestCase):
-    def test_the_hint_names_the_target_decoy_fas(self):
+    def test_the_hint_searches_the_target_fasta_and_the_job_adds_decoys(self):
         with tempfile.TemporaryDirectory() as d:
             db = os.path.join(d, "fragpipe.fas")
             with open(db, "w") as fh:
@@ -41,8 +42,8 @@ class Hint(unittest.TestCase):
                 run_search.refuse_fragpipe_contam_database(wf, db)
             msg = str(cm.exception)
         self.assertIn("fetch_fasta.py fetch", msg)
-        self.assertRegex(msg.replace(db, ""), r"\.fas(?![a-z])",
-                         "the hint names the target+decoy .fas, not only a .fasta")
+        self.assertIn("--fasta ./search.fasta", msg)          # the target FASTA, as it is
+        self.assertIn("job adds the decoys", msg)
         self.assertIn("database --custom", msg)
         self.assertIn("--prefix rev_", msg)
         self.assertIn("without --contam", msg)

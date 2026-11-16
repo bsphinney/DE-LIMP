@@ -13,7 +13,7 @@ step 3 from the raw names, so learning that at step 7 meant rebuilding the desig
     names into conditions.csv; --validate passes them against the report and names a row that
     still holds the raw name;
   * FragPipe's DIA-NN step reads its runs from a --cfg file list that DIA-NN also cuts at '--'
-    (HIVE srun 24807938), and has no renaming: run_search.py refuses such a path there;
+    (measured on HIVE), and has no renaming: run_search.py refuses such a path there;
   * a run missing from the report says what to do, and not to resubmit.
 """
 import csv
@@ -157,15 +157,17 @@ class Conditions(unittest.TestCase):
 
 class FragPipeRoute(unittest.TestCase):
     """FragPipe 24.0's CmdDiann writes `--f <path>` lines to filelist_diann.txt and hands DIA-NN
-    `--cfg <filelist>--`; DIA-NN cuts that text at every '--' (HIVE srun 24807938)."""
+    `--cfg <filelist>--`; DIA-NN cuts that text at every '--' (measured on HIVE)."""
 
     def generate(self, d, files, runs_diann=True, acquisition="DIA"):
-        tools = write(os.path.join(d, "tools.json"), json.dumps(
-            {"fragpipe": os.path.join(d, "fake-fragpipe"), "versions": {"fragpipe": "24.0"}}))
+        # 2.15: tools.json fragpipe_tools, and the workflow's label-free switch said
+        from fake_fragpipe_install import fake_install, tools_json
+        tools = tools_json(d, os.path.join(d, "fake-fragpipe"), fake_install(d))
         bundle = write(os.path.join(d, "manifest.json"), json.dumps(
             {"engine": {"name": "fragpipe"}, "acquisition": acquisition}))
         wf = write(os.path.join(d, "DIA_SpecLib_Quant_diaPASEF.workflow"),
-                   f"workflow.misc.save-sdrf=false\ndiann.run-dia-nn={str(runs_diann).lower()}\n")
+                   f"workflow.misc.save-sdrf=false\ndiann.run-dia-nn={str(runs_diann).lower()}\n"
+                   f"quantitation.run-label-free-quant=false\n")
         fasta = write(os.path.join(d, "search.fasta"), ">sp|P1|X\nPEPTIDER\n")
         out = os.path.join(d, "search_out")
         p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "run_search.py"),
@@ -199,11 +201,21 @@ class FragPipeRoute(unittest.TestCase):
             with open(os.path.join(out, "fragpipe.fp-manifest")) as fh:
                 self.assertNotIn("--", fh.read())
         with tempfile.TemporaryDirectory() as d:
-            # mzML goes to FragPipe as given, folder and all
+            # 2.15: a DIA mzML is staged too (a link in <out>/raw_stage/ under its own file
+            # name), so a '--' in its FOLDER no longer reaches DIA-NN ...
             files = [write(os.path.join(d, "p--1", f"s{i}.mzML")) for i in range(2)]
             p, out = self.generate(d, files)
+            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+            with open(os.path.join(out, "fragpipe.fp-manifest")) as fh:
+                self.assertNotIn("--", fh.read())
+        with tempfile.TemporaryDirectory() as d:
+            # ... but one in its FILE name does: the staged link keeps the name (refused)
+            files = [write(os.path.join(d, "raw", DASHED + ".mzML")),
+                     write(os.path.join(d, "raw", "ok.mzML"))]
+            p, out = self.generate(d, files)
             self.assertNotEqual(p.returncode, 0)
-            self.assertIn("(a folder holds '--')", p.stderr)
+            self.assertIn("REFUSING: this FragPipe workflow runs DIA-NN", p.stderr)
+            self.assertFalse(os.path.exists(os.path.join(out, "fragpipe.fp-manifest")))
 
     def test_no_diann_in_the_workflow_no_refusal(self):
         with tempfile.TemporaryDirectory() as d:

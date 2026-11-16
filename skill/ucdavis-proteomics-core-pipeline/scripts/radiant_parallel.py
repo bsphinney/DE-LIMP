@@ -145,6 +145,10 @@ def main():
                     help="no Slack post from the chain's jobs (same as SKILL_SLACK=0); the "
                          "run log and the FRAN hand-over still happen. "
                          "See references/notifications.md")
+    ap.add_argument("--no-record", action="store_true",
+                    help="a test run: leave this search out of the Core's shared run "
+                         "records, FRAN staging and the Core Slack channel; a --out under "
+                         "/skill_test/ does the same")
     ap.add_argument("--no-fran", action="store_true",
                     help="accepted for symmetry: this chain never stages for FRAN from a job "
                          "(no completeness guard); step 7c does")
@@ -242,7 +246,7 @@ def main():
         return f"{cmap[os.path.dirname(h)]}/{os.path.basename(h)}"
 
     prefix = container_prefix(a.runtime, a.image, pairs)
-    # QUEUE CHOICE, per DE-LIMP's rule (docs/QUEUE_SWITCHING.md):
+    # QUEUE CHOICE, per DE-LIMP's rule (https://github.com/bsphinney/DE-LIMP/blob/main/docs/QUEUE_SWITCHING.md):
     #   step 2 is an ARRAY -- embarrassingly parallel and idempotent, so preemption
     #     costs one task's work. It is also the step the per-user CPU cap on the
     #     priority queue throttles, so send it to publicgrp/low when low has capacity.
@@ -271,7 +275,8 @@ def main():
                                                 stage=stage, slack=not a.no_notify,
                                                 fran=not a.no_fran, fran_name=a.fran_name,
                                                 qc=(True if a.qc else
-                                                    False if a.not_qc else None)).rstrip("\n")
+                                                    False if a.not_qc else None),
+                                                record=not a.no_record).rstrip("\n")
         return write_file(os.path.join(D, name), text + "\n", 0o755)
 
     scripts = {}

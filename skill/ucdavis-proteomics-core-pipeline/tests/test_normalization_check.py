@@ -688,5 +688,381 @@ class EndToEnd(unittest.TestCase):
             self.assertNotIn("normalizeBetweenArrays", fh.read())
 
 
+# --------------------------------------------------------------------------------------------
+# Independent review of 2.10 (review210-results): the normalisation decision -- ways a client can
+#
+#   1. The check is skippable: the chain's recovery step (diann_parallel.py --next, which a resumed
+#      session reads from RECOVERY.md / checkpoint.py status) runs the final DE with no check, and
+#      run_de.R without --normalization-check reads normalised quantities whatever the session's
+#      recorded type says -- an IP gets DIA-NN's normalised quantities, flagged only as INFO.
+#   2. The gate is not tied to the data: a decision made on one report authorises a DE of another
+#      report (and the DE then records the other report's check as its own).
+#   3. The recommendation ignores the experiment type: B1 alone makes it say "raw" for a
+#      whole-proteome cohort whose raw volcano is the broken one, and "normalised" for an IP; for a
+#      TurboID with low controls it says raw and, in the same sentence, that normalisation corrects.
+# --------------------------------------------------------------------------------------------
+from test_normalization_check import HAVE_ARROW, NEEDS, make_report, session  # noqa: E402
+
+
+
+CHECK = os.path.join(SCRIPTS, "normalization_check.py")
+RUN_DE = os.path.join(SCRIPTS, "run_de.R")
+GENERATOR = os.path.join(SCRIPTS, "diann_parallel.py")
+PINNED = "--qvalue 0.01\n--mass-acc 15\n--mass-acc-ms1 15\n--window 7\n--cont-quant-exclude Cont_\n"
+
+
+class TheCheckIsNotSkippable(unittest.TestCase):
+    def test_the_recovery_next_step_runs_the_normalisation_check(self):
+        """diann_parallel.py:1893 records `--next "Rscript run_de.R ... --method dpc ..."` (no
+        check, no --quantities) -- the command RECOVERY.md and `checkpoint.py status`
+        (next_commands) hand a session that resumes after the chain finishes."""
+        d = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, True)
+        sess = os.path.join(d, "sess")
+        os.makedirs(os.path.join(sess, "input"))
+        raws = []
+        for i in range(4):
+            raws.append(os.path.join(d, f"f{i}.d"))
+            os.makedirs(raws[-1])
+        with open(os.path.join(d, "db.fasta"), "w") as fh:
+            fh.write(">sp|P1|X\nPEPTIDER\n")
+        with open(os.path.join(d, "params.cfg"), "w") as fh:
+            fh.write(PINNED)
+        out = os.path.join(sess, "output", "search")
+        p = subprocess.run([sys.executable, GENERATOR, "--diann", "/bin/true", "--raw", *raws,
+                            "--fasta", os.path.join(d, "db.fasta"), "--out", out,
+                            "--cfg", os.path.join(d, "params.cfg")],
+                           capture_output=True, text=True, cwd=d, timeout=120)
+        self.assertEqual(p.returncode, 0, p.stderr[-2000:])
+        with open(os.path.join(out, "submit.sh")) as fh:
+            nxt = [ln for ln in fh.read().splitlines() if "--next" in ln]
+        self.assertTrue(nxt, "no --next recorded")
+        self.assertIn("normalization_check", nxt[0],
+                      "the recovery step goes straight to the final DE: " + nxt[0].strip())
+
+    @unittest.skipUnless(HAVE_ARROW and r_has(*NEEDS), "needs pyarrow and R with " + "/".join(NEEDS))
+    def test_a_de_with_no_check_in_an_ip_session_is_not_silently_normalised(self):
+        """The session records an IP (default non-normalised). A DE run without
+        --normalization-check -- the recovery command above, or any re-run -- reads
+        Precursor.Normalised; the record says status not_run, the audit says INFO."""
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        report, cond, contrast = make_report(os.path.join(d, "ip"), "ip")
+        s = session(os.path.join(d, "ip"), "ip", bait="BAITX")
+        meta = os.path.join(s, "input", "conditions.csv")
+        shutil.copy(cond, meta)                       # where the chain's DE reads it
+        out = os.path.join(s, "output", "tables")
+        r = subprocess.run(["Rscript", RUN_DE, "--input", report, "--metadata", meta,
+                            "--contrasts", contrast, "--outdir", out],
+                           capture_output=True, text=True, timeout=900, cwd=d)
+        if r.returncode != 0:
+            return                                    # refused: not silent
+        with open(os.path.join(out, "de_provenance.json")) as fh:
+            prov = json.load(fh)
+        self.assertEqual(prov.get("quantities"), et.RAW,
+                         "an IP session's DE read DIA-NN's NORMALISED quantities with no check: "
+                         f"{prov.get('normalisation')!r}, check status "
+                         f"{(prov.get('normalization_check') or {}).get('status')!r}")
+
+
+@unittest.skipUnless(HAVE_ARROW and r_has(*NEEDS), "needs pyarrow and R with " + "/".join(NEEDS))
+class TheGateIsTiedToTheData(unittest.TestCase):
+    def test_a_check_of_one_report_does_not_authorise_a_de_of_another(self):
+        """normalization_check.gate(path, quantities) never looks at the DE's --input or
+        --metadata; the record names its own report and conditions (rec["report"],
+        rec["conditions"]). A decision on search v1 then passes the DE of search v2 (or of
+        corrected conditions), and de_provenance/Methods say "a check of the data agreed"."""
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        report, cond, contrast = make_report(os.path.join(d, "ip"), "ip")
+        s = session(os.path.join(d, "ip"), "ip", bait="BAITX")
+        dirs = {}
+        for q in (et.NORMALISED, et.RAW):
+            dirs[q] = os.path.join(d, "ip", "norm_check", q)
+            p = subprocess.run(["Rscript", RUN_DE, "--input", report, "--metadata", cond,
+                                "--contrasts", contrast, "--quantities", q, "--outdir", dirs[q]],
+                               capture_output=True, text=True, timeout=900, cwd=d)
+            self.assertEqual(p.returncode, 0, p.stderr[-2000:])
+        p = subprocess.run([sys.executable, CHECK, "run", "--report", report, "--conditions", cond,
+                            "--de-normalised", dirs[et.NORMALISED], "--de-raw", dirs[et.RAW],
+                            "--session", s], capture_output=True, text=True, timeout=300)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        path = json.loads(p.stdout)["check"]
+        # another report (a re-search, another project) with the same decision's quantities
+        other, ocond, ocontrast = make_report(os.path.join(d, "other"), "whole", seed=11)
+        out = os.path.join(d, "final")
+        r = subprocess.run(["Rscript", RUN_DE, "--input", other, "--metadata", ocond,
+                            "--contrasts", ocontrast, "--quantities", et.RAW,
+                            "--normalization-check", path, "--outdir", out],
+                           capture_output=True, text=True, timeout=900, cwd=d)
+        if r.returncode == 0:
+            with open(os.path.join(out, "de_provenance.json")) as fh:
+                n = json.load(fh)["normalization_check"]
+            self.fail(f"a check of {n.get('report')} was accepted for a DE of {other} "
+                      f"(recorded as status {n.get('status')!r}, decided by "
+                      f"{(n.get('decision') or {}).get('by')!r})")
+
+
+def rec_for(etype, fc, anomalies, carbox=None):
+    """A tripped record as normalization_check.run() builds it, for recommend()."""
+    d = et.default_for(etype)
+    vol = {k: {"contrasts": {"A-B": {"anomalies": [f"x{i}" for i in range(n)]}}}
+           for k, n in anomalies.items()}
+    return {"experiment_type": {"type": etype}, "default": {"quantities": d["quantities"],
+                                                            "why": d["why"]},
+            "checks": {"factor_confound": fc}, "volcano": vol, "tripped": True,
+            "trips": ["B1 ..."], "carboxylases": carbox}
+
+
+class TheRecommendationRespectsTheType(unittest.TestCase):
+    CONF = {"large_and_confounded": True, "large_unexplained": False, "gap_fold": 2.1}
+    LOOSE = {"large_and_confounded": False, "large_unexplained": True, "gap_fold": 1.4}
+
+    def test_a_whole_proteome_is_not_told_raw_when_the_raw_volcano_is_the_broken_one(self):
+        """A whole-proteome 2 vs 2 whose loading happens to follow the groups (B1: 2-fold,
+        separated -- 4-13% of 2 vs 2 cohorts with 0.5-0.7 log2 loading noise, simulated) and
+        whose RAW volcano is shifted and lopsided: the recommendation still says raw."""
+        rec = rec_for("whole_proteome", self.CONF, {et.NORMALISED: 0, et.RAW: 3})
+        r = nc.recommend(rec)
+        self.assertFalse(r.startswith("non-normalised (raw) quantities"),
+                         "recommended raw for a whole proteome against its own volcanoes: " + r)
+
+    def test_an_ip_is_not_told_to_normalise_when_the_normalised_volcano_is_the_broken_one(self):
+        """An IP with one IgG lane carrying more background (factors not separating): B1
+        'unexplained' and the recommendation is to normalise -- the thing the IP default
+        exists to prevent -- though the normalised volcano shows depleted background."""
+        rec = rec_for("ip", self.LOOSE, {et.NORMALISED: 2, et.RAW: 0})
+        r = nc.recommend(rec)
+        self.assertFalse(r.startswith("normalised quantities"),
+                         "recommended normalising an IP against its own volcanoes: " + r)
+
+    def test_separation_fractions_are_not_steered_to_normalisation_by_the_volcano(self):
+        """SEC / organelle fractions (default non-normalised, per DIA-NN's README): their raw
+        volcano is shifted and lopsided BY DESIGN (each fraction holds a different proteome),
+        and only enrichment contrasts are exempted (volcano_version raw=True) -- so the check
+        trips on the raw volcano and the anomaly count recommends normalising."""
+        none = {"large_and_confounded": False, "large_unexplained": False}
+        rec = rec_for("fractions_separation", none, {et.NORMALISED: 0, et.RAW: 3})
+        r = nc.recommend(rec)
+        self.assertFalse(r.startswith("normalised quantities"),
+                         "recommended normalising separation fractions: " + r)
+
+    def test_a_turboid_recommendation_does_not_contradict_itself(self):
+        """test_turboid_whose_controls_came_out_low_still_trips: proximity (default normalised),
+        controls low -> 'non-normalised (raw) quantities ...' followed by '... consistent with
+        the controls carrying less material, which normalisation corrects'."""
+        cx = {et.NORMALISED: {"median_sd_log2": 0.1}, et.RAW: {"median_sd_log2": 0.9}}
+        rec = rec_for("proximity", self.CONF, {et.NORMALISED: 1, et.RAW: 1}, cx)
+        r = nc.recommend(rec)
+        self.assertFalse(r.startswith("non-normalised (raw) quantities")
+                         and "which normalisation corrects" in r, r)
+
+
+# --------------------------------------------------------------------------------------------
+# A normalisation check made before 2.14.2, and a final MaxLFQ DE made with 2.14.2 (C1 review, F1).
+#
+# A session whose two check DEs ran under 2.14.1 reaches its final DE under 2.14.2. The check record
+# names no between-run step, so it counts as quantile -- 2.14.1 quantile-normalised every
+# normalised MaxLFQ DE (normalization_check.LEGACY_MAXLFQ_BETWEEN_RUN). The final DE asks for the
+# default, auto. The gate compared the REQUESTED steps (quantile vs auto) and refused, and its first
+# way forward was "Run this DE with --between-run quantile": on a DIA-NN report that is 2.14.1's
+# quantile step on top of DIA-NN's normalisation again (I20: 61-77% of the significant calls wrong
+# on the PXD063416 benchmark), and the Methods then said the check agreed. On a Sage/FragPipe report auto IS
+# quantile, so the refusal stopped a step identical to the one the check's DE had.
+#
+# Now, for a check from before 2.14.2, the gate compares the step this DE APPLIES with the old
+# rule's quantile. For auto that is known only once run_de.R has read the report (build_maxlfq.R
+# maxlfq_between_run, the one rule), so the gate first says the comparison is pending and run_de.R
+# asks it again with the applied step (--between-run-applied):
+#
+#   * DIA-NN report, auto -> none: refused; the first way forward is to run the check again with
+#     this skill; --between-run quantile is said to repeat 2.14.1's quantile step on top of
+#     DIA-NN's normalisation, for reproducing a 2.14.1 analysis only. The harm is said to be the
+#     quantile step itself, not normalising twice (C2 statistician L1: alone, on un-normalised
+#     quantities, it gave 46-72% wrong calls);
+#   * Sage report, auto -> quantile: the same step as the check's DE -- it runs, "design matches";
+#   * an explicit other step (none, median): refused at once, the same way forward first.
+#
+# A check made by 2.14.2 records its normalised DE's requested step, and is held to it as before.
+#
+# Unit tests are stdlib; the end-to-end class needs pyarrow and R with limma/arrow/dplyr/tidyr/
+# jsonlite (skips otherwise). Hermetic.
+# --------------------------------------------------------------------------------------------
+from test_maxlfq_between_run import HAVE_ARROW, NEEDS, SAGE_META, write_report  # noqa: E402
+
+
+
+CHECK = os.path.join(SCRIPTS, "normalization_check.py")
+RUN_DE = os.path.join(SCRIPTS, "run_de.R")
+
+MAXLFQ = {"method": "maxlfq", "formula": "~ 0 + groups", "numeric_covariates": [],
+          "block_column": None, "block_effect": None, "block_scope": None,
+          "contrasts": ["B-A"], "flags": ["--contrasts", "B-A"]}
+OLD = {"check_design": dict(MAXLFQ, status="recorded")}      # 2.14.1: no between_run
+RERUN = "run the normalisation check again with this skill"
+
+
+def old_record(path, report=None, conditions=None):
+    """A decided check record as 2.14.1 wrote it (no between_run in check_design) -> its path."""
+    rec = dict(OLD, schema=nc.SCHEMA, schema_version=nc.SCHEMA_VERSION, tripped=False, trips=[],
+               de_method="maxlfq",
+               decision={"quantities": et.NORMALISED, "source": "default", "by": "the skill",
+                         "reason": "the default for this experiment type"},
+               default={"quantities": et.NORMALISED, "why": "x"},
+               experiment_type={"type": "whole_proteome", "label": "whole proteome",
+                                "source": "user"})
+    if report:
+        rec.update(report=report, report_sha256=nc.sha256(report))
+    if conditions:
+        rec.update(conditions=conditions, conditions_sha256=nc.sha256(conditions))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as fh:
+        json.dump(rec, fh)
+    return path
+
+
+class TheResolvedStepIsCompared(unittest.TestCase):
+    def check(self, final, applied=None):
+        return nc.design_check(OLD, dict(MAXLFQ, between_run=final), et.NORMALISED,
+                               applied=applied)
+
+    def test_auto_is_compared_once_the_report_is_read(self):
+        dc = self.check("auto")
+        self.assertIsNone(dc["refusal"])
+        self.assertEqual(dc["between_run_pending"], "quantile")
+        # said, so a record that never got the second answer does not read as "matches"
+        self.assertNotEqual(dc["match"], "matches")
+        self.assertIn("between-run step", dc["match"])
+
+    def test_dia_nn_auto_none_is_refused_and_running_the_check_again_comes_first(self):
+        r = self.check("auto", applied="none")["refusal"]
+        self.assertIsNotNone(r)
+        self.assertIn(RERUN, r)
+        self.assertIn("--between-run quantile", r)
+        self.assertLess(r.index(RERUN), r.index("--between-run quantile"))
+        self.assertNotIn("Run this DE with --between-run quantile", r)
+        self.assertIn("quantile step on top of DIA-NN's normalisation", r)
+        self.assertNotIn("double normalisation", r)          # C2 statistician L1: not the mechanism
+        self.assertIn("not normalising twice", r)
+        self.assertIn("46-72%", r)
+        self.assertIn("only to reproduce a 2.14.1 analysis", r.lower())
+        self.assertIn("before 2.14.2", r)
+
+    def test_sage_auto_quantile_is_the_checks_own_step(self):
+        dc = self.check("auto", applied="quantile")
+        self.assertEqual((dc["match"], dc["refusal"]), ("matches", None))
+        self.assertNotIn("between_run_pending", dc)
+
+    def test_an_explicit_other_step_is_refused_at_once_the_same_way(self):
+        for step in ("none", "median"):
+            with self.subTest(step=step):
+                r = self.check(step)["refusal"]
+                self.assertIsNotNone(r)
+                self.assertIn(f"--between-run {step}", r)
+                self.assertLess(r.index(RERUN), r.index("--between-run quantile"))
+                self.assertNotIn("Run this DE with --between-run quantile", r)
+        # ... and quantile asked for explicitly is the check's own step
+        self.assertEqual(self.check("quantile")["match"], "matches")
+
+    def test_contrasts_are_still_warned_while_the_step_is_pending(self):
+        dc = nc.design_check(OLD, dict(MAXLFQ, between_run="auto", contrasts=["A-B"]),
+                             et.NORMALISED)
+        self.assertEqual(dc["between_run_pending"], "quantile")
+        self.assertTrue(any("the check did not look at A-B" in w for w in dc["warnings"]))
+
+    def test_a_2_14_2_check_is_held_to_its_requested_step_as_before(self):
+        new = {"check_design": dict(MAXLFQ, status="recorded", between_run="auto")}
+        dc = nc.design_check(new, dict(MAXLFQ, between_run="auto"), et.NORMALISED)
+        self.assertEqual((dc["match"], dc["refusal"]), ("matches", None))
+        self.assertNotIn("between_run_pending", dc)
+        dc = nc.design_check(new, dict(MAXLFQ, between_run="quantile"), et.NORMALISED,
+                             applied="quantile")
+        self.assertIsNotNone(dc["refusal"])
+        self.assertNotIn(RERUN, dc["refusal"])
+
+    def test_a_raw_final_de_has_no_step_to_compare(self):
+        dc = nc.design_check(OLD, dict(MAXLFQ, between_run="auto"), et.RAW)
+        self.assertEqual((dc["match"], dc["refusal"]), ("matches", None))
+        self.assertNotIn("between_run_pending", dc)
+
+
+class TheGateAsksTwice(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d, True)
+        self.path = old_record(os.path.join(self.d, "nc", nc.RECORD))
+        self.design = os.path.join(self.d, "design.json")
+        with open(self.design, "w") as fh:
+            json.dump(dict(MAXLFQ, between_run="auto"), fh)
+
+    def gate(self, *extra):
+        p = subprocess.run([sys.executable, CHECK, "gate", "--check", self.path, "--quantities",
+                            et.NORMALISED, "--design-json", self.design, *extra],
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return json.loads(p.stdout)
+
+    def test_first_pending_then_decided_by_the_applied_step(self):
+        first = self.gate()
+        self.assertTrue(first["ok"], first["message"])
+        self.assertEqual(first["between_run_pending"], "quantile")
+        dia_nn = self.gate("--between-run-applied", "none")
+        self.assertFalse(dia_nn["ok"])
+        self.assertIn(RERUN, dia_nn["message"])
+        self.assertIsNone(dia_nn["between_run_pending"])
+        sage = self.gate("--between-run-applied", "quantile")
+        self.assertTrue(sage["ok"], sage["message"])
+        self.assertEqual(sage["design_match"], "matches")
+        self.assertIsNone(sage["between_run_pending"])
+
+    def test_gate_function(self):
+        ok, msg, _ = nc.gate(self.path, et.NORMALISED, design=dict(MAXLFQ, between_run="auto"),
+                             applied="none")
+        self.assertFalse(ok)
+        self.assertIn(RERUN, msg)
+        ok, msg, _ = nc.gate(self.path, et.NORMALISED, design=dict(MAXLFQ, between_run="auto"),
+                             applied="quantile")
+        self.assertTrue(ok, msg)
+        self.assertIn("design matches", msg)
+
+
+@unittest.skipUnless(HAVE_ARROW and r_has(*NEEDS), "needs pyarrow and R with " + "/".join(NEEDS))
+class RunDeWithA2141Check(unittest.TestCase):
+    """run_de.R --method maxlfq under a check record 2.14.1 wrote."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d, True)
+
+    def final(self, name, **report):
+        rep, cond, _ = write_report(os.path.join(self.d, name), **report)
+        path = old_record(os.path.join(self.d, name, "nc", nc.RECORD), rep, cond)
+        out = os.path.join(self.d, name, "final")
+        p = subprocess.run(["Rscript", RUN_DE, "--input", rep, "--metadata", cond, "--method",
+                            "maxlfq", "--quantities", et.NORMALISED, "--contrasts", "B-A",
+                            "--normalization-check", path, "--outdir", out],
+                           capture_output=True, text=True, timeout=900, cwd=self.d)
+        return p, out
+
+    def test_a_dia_nn_report_is_refused_and_told_to_run_the_check_again_first(self):
+        p, out = self.final("dn")
+        self.assertNotEqual(p.returncode, 0)
+        flat = " ".join(p.stderr.split())
+        self.assertIn(RERUN, flat)
+        self.assertLess(flat.index(RERUN), flat.index("--between-run quantile"))
+        self.assertIn("quantile step on top of DIA-NN's normalisation", flat)
+        self.assertNotIn("double normalisation", flat)
+        self.assertFalse(os.path.exists(os.path.join(out, "de_provenance.json")))
+
+    def test_a_sage_report_runs_its_quantile_step_and_matches(self):
+        p, out = self.final("sage", declared=SAGE_META)
+        self.assertEqual(p.returncode, 0, p.stderr[-3000:])
+        with open(os.path.join(out, "de_provenance.json")) as fh:
+            prov = json.load(fh)
+        self.assertEqual(prov["between_run"]["method"], "quantile")
+        self.assertEqual(prov["normalization_check"]["design_match"], "matches")
+        self.assertNotIn("between_run_pending", prov["normalization_check"])
+
+
 if __name__ == "__main__":
     unittest.main()

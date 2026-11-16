@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Every search states the most CPU-hours it can use, from the job scripts it actually wrote.
 
-Brett (2026-10-15): on the Core board a request under 10,000 CPU-hours is approved automatically;
-10,000+ needs a person. cpu_hours.py (the one rule) sums CPUs per task x time limit x array tasks
+Brett (2026-10-15; since 2026-11-09 the Core board limits no hours and only records them):
+cpu_hours.py (the one rule) sums CPUs per task x time limit x array tasks
 over every job script a search submits; run_search.py, diann_parallel.py and radiant_parallel.py
 print it as `cpu_hours_reserved`, and each submit.sh carries it in a header comment. The expected
 figures below are the arithmetic of the sizes each test asks for.
@@ -142,11 +142,14 @@ class Routes(unittest.TestCase):
 
     def test_fragpipe(self):
         with tempfile.TemporaryDirectory() as d:
-            tools = _write(os.path.join(d, "tools.json"), json.dumps(
-                {"fragpipe": os.path.join(d, "fake-fragpipe"), "versions": {"fragpipe": "24.0"}}))
+            # 2.15: tools.json fragpipe_tools (the tools folder, Philosopher) and a workflow that
+            # says whether it quantifies
+            from fake_fragpipe_install import fake_install, tools_json
+            tools = tools_json(d, os.path.join(d, "fake-fragpipe"), fake_install(d))
             bundle = _write(os.path.join(d, "manifest.json"), json.dumps(
                 {"engine": {"name": "fragpipe"}, "acquisition": "DDA"}))
-            wf = _write(os.path.join(d, "LFQ.workflow"), "diann.run-dia-nn=false\n")
+            wf = _write(os.path.join(d, "LFQ.workflow"),
+                        "diann.run-dia-nn=false\nquantitation.run-label-free-quant=true\n")
             fasta = _write(os.path.join(d, "db.fasta"), ">sp|P1|X\nPEPTIDEK\n")
             runs = [_write(os.path.join(d, f"r{i}.mzML"), "") for i in range(2)]
             p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "run_search.py"),

@@ -118,8 +118,15 @@ class ThePullTakesTheList(Tmp):
         for rel in ("SKILL.md", os.path.join("references", "core-submissions.md")):
             text = read(os.path.join(SKILL, rel))
             self.assertNotIn('--get "$S/output/search/report.parquet"', text, rel)
-            # $S quoted for the remote shell: a lab folder can hold a space (verify V1)
-            self.assertIn('session.py which-search --dir $(printf %q "$S") --paths', text, rel)
+            # 2.15: the pull is core_sync.sh --get, which asks which-search on HIVE
+            self.assertIn("core_sync.sh --get", text, rel)
+        sync = read(os.path.join(SKILL, "scripts", "core_sync.sh"))
+        self.assertIn("which-search --dir", sync)
+        self.assertNotIn("output/search/report.parquet", sync.split("USAGE=")[0].split("GET_RECORDS=")[0]
+                         .split("GET_OUTPUT=")[1])
+        # $S quoted for the remote shell: a lab folder can hold a space (verify V1;
+        # tests/test_core_sync.py test_a_lab_folder_and_a_search_folder_with_a_space)
+        self.assertIn('rq() { case "$1" in', sync)
 
 
 class ACopyWithNoRecordSaysSo(Tmp):
@@ -195,9 +202,10 @@ class HowToChoose(Tmp):
                          ("only", "search_sage"))
 
     def test_the_docs_say_how_to_choose(self):
-        for rel in ("SKILL.md", os.path.join("references", "core-submissions.md")):
-            text = read(os.path.join(SKILL, rel))
-            self.assertIn("superseded_<name>", text, rel)
+        # 2.15: step 12b's text is core-submissions.md's "12b."; the router names it
+        self.assertIn('core-submissions.md "12b."', read(os.path.join(SKILL, "SKILL.md")))
+        text = read(os.path.join(SKILL, "references", "core-submissions.md"))
+        self.assertGreaterEqual(text.count("superseded_<name>"), 2)   # its own text and step 12b's
 
 
 if __name__ == "__main__":

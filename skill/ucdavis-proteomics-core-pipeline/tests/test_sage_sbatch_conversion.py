@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 `run_search.py --engine sage --sbatch` converted .raw -> mzML BEFORE writing the job: run_sage()
-called ensure_mzml() first, so msconvert ran on the HIVE login node for every file (gabrig
+called ensure_mzml() first, so msconvert ran on the HIVE login node for every file (gstaff
 2026-09-29, 4 Fusion Lumos .raw, ~2.4 GB, login2). It failed at once only because bioconda's
 Linux msconvert has no vendor readers; had it worked it would have broken golden rule 3.
 
@@ -30,6 +30,7 @@ sys.path.insert(0, HERE)
 
 from job_env import job_env  # noqa: E402
 import test_sage_lfq_check as lfqfx  # noqa: E402  (Sage output fixture)
+import sage_lfq_check  # noqa: E402
 
 FAKE_TRFP = r'''#!{py}
 import json, os, sys
@@ -192,7 +193,7 @@ class SageSbatchConvertsInTheJob(_Harness):
         self.assertIn("discovered 0 target MS1 peaks", open(os.path.join(self.out,
                                                                          "sage.log")).read())
         self.assertIn("[sage_lfq_check] WARNING:", r.stderr)
-        with open(os.path.join(self.out, "sage_lfq_check.json")) as fh:
+        with open(os.path.join(self.out, sage_lfq_check.RECORD)) as fh:
             rec = json.load(fh)
         self.assertEqual(rec["status"], "warn")
         self.assertEqual(rec["target_ms1_peaks_5pct_fdr"], 0)

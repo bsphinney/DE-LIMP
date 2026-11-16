@@ -6,6 +6,37 @@ emits a complete, ready-to-run params file plus a `rationale` that tags every
 value's provenance. This replaces shipping static `.cfg`/`.json` files (which go
 stale and hide which values were actually chosen vs. guessed).
 
+<!-- contents: tests/test_skill_structure.py --toc -->
+**Contents** (section: line)
+- 30: Where the defaults come from (the skill version pins the search)
+- 40: What actually varies by data type
+- 48: Known-good mass tolerances (DIA-NN README, verified 2026-06)
+- 140: Sage tolerances are derived
+- 148: Sage for identifications only (`--ids-only`)
+- 157: FragPipe DDA: digest, ion-trap MS2 and unit resolution (2.15)
+- 199: Defaults that are NOT data-dependent (universal)
+- 203: Variable modifications (`--var-mods`)
+- 246: SILAC labels (`--labels silac2|silac3 --label-preset ... [--channel-norm spec|run]`)
+- 254: Cysteine: which alkylating agent, or none (`--cys-alkylation`)
+- 292: CPU-hours a search reserves (`cpu_hours_reserved`)
+- 306: Golden rule 2: never fabricate parameters
+- 313: Provenance (DE-LIMP rule #2)
+- 340: Overriding a setting (the user's choice)
+- 367: Golden rule 1: confirm before committing compute
+- 383: 4. Resolving the defaults, and the one confirmation (step 4)
+- 462: 6b. Estimating the search parameters (step 6b)
+<!-- /contents -->
+
+## Where the defaults come from (the skill version pins the search)
+
+Take a user from **raw MS files → differentially expressed proteins** using
+parameters derived from their **data type** (instrument + acquisition), never
+ad-hoc numbers. Those defaults ship with this skill — `scripts/estimate_params.py`
+holds the instrument → mass-accuracy table, `scripts/resolve_defaults.py` picks the
+engine and version, `scripts/make_presets.py` writes FragPipe/Radiant configs. So
+**the skill version fully determines the search**, and nothing is fetched at run
+time. Every number carries its source; surface it rather than asserting it.
+
 ## What actually varies by data type
 
 Only two things genuinely depend on the data; everything else is a stable
@@ -48,7 +79,7 @@ from the value recommended (7 ppm) for the Orbitrap resolution of this run (1200
 **Neither flag is written on its own.** DIA-NN 2.7.0 fixes BOTH levels when either is given —
 `WARNING: note the mass accuracy settings used by DIA-NN, automatic optimisation will not be
 performed as at least one of MS1/MS2 mass accuracies is user-provided`, and `--mass-acc-ms1 7`
-alone gave `Mass accuracy will be fixed to 2e-05 (MS2) and 7e-06 (MS1)` (HIVE srun 23528991) — so
+alone gave `Mass accuracy will be fixed to 2e-05 (MS2) and 7e-06 (MS1)` (measured on HIVE) — so
 a cfg with only `--mass-acc-ms1 7` would silently search MS2 at 20 ppm. The cfg omits both; the
 measurement writes both. A search that cannot measure (`--one-step`: no library exists before the
 search) says so and leaves DIA-NN's first-run optimisation. The same holds for an SOP override
@@ -123,6 +154,48 @@ LFQ check. Without the flag `lfq` stays `true`. With `--engine diann` it is refu
 DIA-NN search always quantifies), and so is an `--overrides` that sets `quant` beside it; either
 refusal leaves nothing at `--out`.
 
+## FragPipe DDA: digest, ion-trap MS2 and unit resolution (2.15)
+`--enzyme` is one DDA flag of `estimate_params.py` (Sage) and `make_presets.py` (FragPipe), and
+step 4 passes it to the FragPipe preset. It takes `fetch_fasta.py`'s words (`--enzyme none` is
+the same word as fetch's: no enzyme, a non-specific search), each searched with FragPipe 24.0's
+rule for it (`cleavage_rules.ENZYME_RULES`, FragPipe's enzyme list); pepsin has no rule there and
+is searched non-specifically. Without `--enzyme`, both engines search the skill's DDA digest
+(`estimate_params.DDA_DIGEST`: trypsin, no cut before P, its missed cleavages and lengths), and
+`--enzyme trypsin` is the same search. An `--enzyme` rule keeps that digest's missed cleavages
+and lengths.
+
+`--enzyme gluc` searches FragPipe's `gluc` rule (cut after D and E, not before P: the
+phosphate-buffer specificity); for a Glu-C digest in ammonium bicarbonate, which cuts after E
+only, give the rule with `--overrides` (Sage: `{"database": {"enzyme": {"cleave_at": "E"}}}`;
+FragPipe: `{"msfragger.search_enzyme_cut_1": "E"}`).
+
+`--semi-specific` (same two scripts, and `resolve_defaults.py`, which passes it to the preset)
+searches the digest semi-specifically: one end of each peptide must follow the `--enzyme` rule
+(the skill's trypsin, not before P, when `--enzyme` is not given), the other may be anywhere. Sage:
+`database.enzyme.semi_enzymatic` true. FragPipe DDA: `msfragger.num_enzyme_termini` 1. The search
+space is far larger (memory is sized for it, `run_search.py`). Refused with DIA-NN, with
+`--enzyme none` (already non-specific), and beside `--overrides` that set `semi_enzymatic` or
+`num_enzyme_termini` (give one or the other). The Methods read the digest back from the cfg or
+workflow and say "semi-specific <enzyme> cleavage". Use it instead of `--overrides
+num_enzyme_termini=1`.
+
+**Ion-trap MS2 on FragPipe** (on request: tryptic Orbitrap DDA routes to Sage; a non-specific
+one to FragPipe, Ruling 120): `--ms2-analyzer ITMS`
+gets FragPipe 24.0's own ion-trap setting, adapted from its TMT10-MS3 / TMT16-MS3 workflows
+(`make_presets.ION_TRAP_KEYS`: fragment 0.6 Da, precursor ±20 ppm, isotope errors 0–3); FragPipe
+ships no label-free workflow with an ion-trap fragment tolerance, and the record and Methods say
+"adapted from". `mixed` searches every MS2 at 0.6 Da and leaves MSFragger's analyzer filter at
+`all` (filtering would drop the other analyzer's spectra). `--ms2-ppm` with ITMS/mixed is refused.
+
+**A unit-resolution instrument (a Thermo Stellar, by name: `estimate_params.unit_resolution`)**
+is searched for **identifications only** (`--ids-only`), by Sage or FragPipe alike: its MS1
+cannot support label-free quantities (and FragPipe's own Stellar-DDA workflow runs none). The
+rule is about the data, so asking for amounts is refused once, before the engine is chosen, with
+the same message for both engines; for amounts, targeted quantification (PRM, with Skyline:
+skyline.md) is the route. On FragPipe it gets the Stellar-DDA setting
+(`make_presets.UNIT_RESOLUTION_KEYS`: fragment 0.3 Da, precursor ±1.5 Da, no mass calibration
+or deisotoping); `--ms1-ppm`/`--ms2-ppm` on a Stellar are refused.
+
 ## Defaults that are NOT data-dependent (universal)
 Trypsin/P, 1–2 missed cleavages, peptide length 7–30, charge 2–4, fixed
 carbamidomethyl (C).
@@ -161,6 +234,10 @@ the rationale's `variable_mods`:
 - **DIA-NN (DIA or DDA): none.** The DIA-NN README notes variable mods don't improve depth for
   relative quant. `--var-mods ox` adds Ox(M).
 - **Sage, DIA: none** (the quant default). `--var-mods ox` adds it.
+- **FragPipe, DDA (`make_presets.py`): Ox(M) on**, the same default and tag as Sage DDA (one
+  table). `deam` adds FragPipe's own N/Q deamidation row; protein N-terminal acetyl is always on.
+  At most `estimate_params.DDA_MAX_VAR_MODS` per peptide for an enzymatic preset (Sage's limit
+  too); the non-specific workflows keep FragPipe's own 3, recorded as FragPipe's default.
 
 The Methods read the modifications from the parameters file (`make_methods.search_record`), so
 they name Oxidation (M) for a default Sage DDA search and say none were searched for a default
@@ -175,6 +252,7 @@ FASTA-predicted library twice). SILAC flags in `--overrides` are refused. The pr
 question and why: `references/silac.md`.
 
 ## Cysteine: which alkylating agent, or none (`--cys-alkylation`)
+
 Each alkylating agent leaves its own fixed modification on C, and a search for the wrong one (or
 for one at all, on samples never alkylated) identifies almost no cysteine peptide: three on-bead
 Core searches had 0.03–0.5% of identified peptides with a C, against 7.8% on an S-Trap prep with
@@ -222,8 +300,15 @@ in their JSON; each `submit.sh` has it in a header comment. `gpu_hours_reserved`
 by the same rule from the GPU lines (`--gres=gpu…`, `--gpus`, `--gpus-per-task`,
 `--gpus-per-node`): 0 today, since no route of the skill asks for a GPU. Every job script the skill
 writes carries an `#SBATCH --time`, so for a SLURM job neither figure is null
-(`tests/test_cpu_hours.py` checks every generator). The Core board approves a request under
-10,000 CPU- or GPU-hours automatically and sends 10,000 or more to a person.
+(`tests/test_cpu_hours.py` checks every generator). The Core board records these figures
+and limits nothing.
+
+## Golden rule 2: never fabricate parameters
+
+2. **Never fabricate parameters.** If a value isn't a shipped default or given by
+   the user, say so — don't invent an FDR, organism, or instrument. Every default
+   carries its source (`ppm_source`); quote it rather than asserting the number.
+   (DE-LIMP architectural rule #2.)
 
 ## Provenance (DE-LIMP rule #2)
 Every emitted value is tagged in the `rationale`:
@@ -253,6 +338,7 @@ reproducibility bundle automatically. Surface it to the user so a derived defaul
 is never mistaken for a confirmed setting.
 
 ## Overriding a setting (the user's choice)
+
 Two ways, both honored:
 - `param_overrides` in the workflow.yaml, or `--overrides` (e.g. `{"--mass-acc": 8}` or
   `{"fragment_tol": {"ppm": [-15, 15]}}`) — merged on top of the estimate, tagged as a user
@@ -277,3 +363,227 @@ Two ways, both honored:
   cfg and now fails — see the changelog entry.
 - Ship a full validated `params_file` in the workflow — used verbatim, estimation
   skipped entirely. Use this when a method is locked and must not move.
+
+## Golden rule 1: confirm before committing compute
+
+1. **Confirm before committing compute.** A search is multi-hour. Show the resolved
+   defaults (engine + version, mass accuracy + source) with the organism/design and
+   get an explicit "go" before running the engine. **One confirmation, not a menu.**
+   After that go, the jobs that carry out the confirmed plan need no further yes, so the
+   work can run unattended overnight: the chain's later steps, retries from the
+   `watch_run.sh` playbook, DE, set tests, figures, the podcast. A new search with settings
+   the user has not seen (another database, engine or parameters) needs their go again,
+   unless they told you to carry on yourself ("run it overnight, decide as you go"): then
+   log each such decision (`log_decision.py`) and go ahead. Core staff: each job is
+   recorded on the board with the CPU-hours (and any GPU-hours) its scripts reserve, and the
+   board only records them: it limits and approves nothing (`references/board.md` section 3).
+   Sharing results with a collaborator (`core_submission.py bioshare send`) is a **second,
+   separate** explicit yes — never bundled into the compute confirmation.
+
+## 4. Resolving the defaults, and the one confirmation (step 4)
+
+```
+python3 scripts/resolve_defaults.py \
+    --acquisition DIA --instrument "timsTOF HT" \
+    [--ms1-resolution <MS1> (--ms2-resolution <MS2> | --ms2-analyzer <ITMS|mixed>) [--resolution-source detected]] \
+    [--engine diann] [--env env.json] [--tools tools.json] [--ids-only] [--enzyme <name|none>] [--semi-specific] \
+    [--fasta db.fasta] [--threads 32] --dest ./wf
+```
+
+Writes `./wf/workflow.manifest.json` (engine + pinned version, mass accuracy and its
+source, DE method) and, for FragPipe/Radiant, generates the config file itself. Pass
+`--env` (step 1's `detect_env.sh` output) so an engine that **cannot run on this
+machine** fails here with a usable alternative rather than mid-search.
+
+**Orbitrap resolution — pass it, and say where it came from.** For a Thermo Orbitrap other
+than the Astral, pass step 2's top-level `ms1_resolution`/`ms2_resolution` with
+`--resolution-source detected` (read from the `.raw` scan trailer). Numbers the user told
+you: omit `--resolution-source` (it defaults to `user`); copied from an earlier run's
+configuration: `--resolution-source cfg`. (`--ms1-res`/`--ms2-res` are the same flags.)
+**Ion-trap MS2:** for step 2's `ms2_ion_trap` files (common on Fusion Lumos/Eclipse OT/IT
+methods) pass `--ms1-resolution <MS1> --ms2-analyzer ITMS` and **no** `--ms2-resolution` (there
+is none; the two together are refused), and never ask the user for one. A file whose MS2 is
+read in BOTH analyzers (step 2's `mixed_files`) is `--ms2-analyzer mixed` and gets the same
+ion-trap tolerances. DIA-NN then pins
+neither mass-accuracy level (there is no Orbitrap MS2 value, and either flag fixes both), so it
+is left to DIA-NN's calibration; Sage uses its documented low-res fragment window (±0.4 Da —
+with ±10 ppm a real Sage 0.14.7 run matched nothing on ion-trap fragments). Quote the
+manifest's `ppm_source`, which says which. A cohort in which some files are ion-trap and some
+Orbitrap MS2 (`resolution_mixed`) needs either `--ms2-analyzer mixed` for all of them or
+separate searches. The
+manifest's `resolution.source_label` and `instrument_label` carry the source — quote it as
+written, and never say "read from the data" about numbers the user gave.
+
+**`needs_confirmation: true` means a question is still open, even with exit code 0.** It is
+set for an Orbitrap with no resolution on a route that uses it (DIA-NN, Radiant). Put
+`ask_user` to the user as part of the one confirmation below — get the MS1/MS2 resolution
+(or run `detect_acquisition.py`, which reads it from the `.raw`), then re-run this step with
+it. If the user does not know, say that mass accuracy is left to DIA-NN's per-run
+calibration (results then depend on file order, and a cohort that would run as the 5-step
+chain runs as one single-node search), and continue.
+
+**Confirm once, then run.** State the pick in one breath — data type, engine +
+version, mass accuracy + where it came from, FASTA, DE method — and get a yes:
+
+> timsTOF HT dia-PASEF → DIA-NN 2.7.0, MS1/MS2 15 ppm (DIA-NN README), mouse
+> UP000000589 + contaminants, limpa DPC-Quant + limma. Run it?
+
+> Exploris 480 DIA, MS1 120,000 / MS2 15,000 resolution read from the raw file (scan
+> trailer) → DIA-NN 2.7.0, MS1 7 ppm (DIA-NN table), MS2 measured on representative runs
+> before the search, human UP000005640 + contaminants, limpa DPC-Quant + limma. Run it?
+
+Do **not** turn this into a menu. There is exactly one confirmation before compute,
+and it is this one. If step 3 chose the no-DE route, confirm it with the defaults, and with it
+the search: identifications only (`--ids-only`), or quantified because amounts are wanted.
+
+- **`--engine` is honoured, never overridden.** If the user names an engine that
+  isn't the default for their data type, it runs anyway and `notes` says so; one that cannot
+  run here stops step 4 with the reason. Never silently substitute a different engine. The
+  one automatic change is the timsTOF DDA-PASEF fallback to Sage (search-engines.md "4c."):
+  the manifest's `engine.selection.sentence` says it, and you say that sentence as written in
+  the confirmation, then log it (`log_decision.py --from-json ./wf/workflow.manifest.json`).
+- **`alternatives`** lists the other engines valid for this data type. Mention them
+  in one clause; don't make the user adjudicate.
+- **Overrides are explicit, and they are the user's.** `--ms1-ppm/--ms2-ppm` force a value
+  the user chose. Pass `--override-by "<who chose it>"` and `--override-reason "<why, in their
+  words>"` (e.g. "instrument ~20 ppm off calibration; user chose 25 ppm"): the manifest's
+  `ppm_source` and `overrides` record each as a **user override** with its value, "set by <Core
+  staff|the user>" (the role, `staff.role_for`), and why — never as an SOP, which the skill cannot know it is. The manifest and the cfg
+  sidecar reach the client, so who set it, by name, goes only into the staff-only
+  `<file>.staff.json` beside them. Without `--override-by` that is the login that ran it, and the
+  record says so. Without a reason the record says "reason not given". Don't override without
+  asking the user why, and keep names out of the reason.
+- Parameters come from the skill, so **record the skill version**, not a registry
+  commit: `provenance.py` reads it from `.claude-plugin/plugin.json` into
+  `reproducibility/environment/skill.txt` and `run_manifest.json` (`skill.version`).
+  `registry.defaults_version` in the manifest is only the date of the defaults table
+  (e.g. `2026-09-23`), not a version.
+
+## 6b. Estimating the search parameters (step 6b)
+
+Search parameters are **derived from what the data is**, not hand-maintained.
+For DIA-NN and Sage, generate them (for FragPipe/Radiant see 6c — step 4 already
+wrote their config):
+
+```
+python3 scripts/estimate_params.py --engine <diann|sage> \
+    --acquisition <DIA|DDA> --instrument "<detected instrument>" \
+    --precursor-mz-range <LO> <HI> \
+    [--ms1-resolution <MS1> (--ms2-resolution <MS2> | --ms2-analyzer <ITMS|mixed>) [--resolution-source detected]] \
+    [--var-mods ox|deam|ox,deam|none] [--ids-only] [--cys-alkylation <agent>|none] \
+    [--labels silac2|silac3 --label-preset <K4R6,K8R10|K8R10|...> [--channel-norm spec|run]] \
+    [--enzyme <name|none>] [--semi-specific] \
+    [--overrides '<the user's values as JSON>' \
+     --override-by "<who chose them>" --override-reason "<why, in their words>"] \
+    --fasta-meta ./search.fasta.meta.json \
+    --out ./wf/params.<cfg|json>
+```
+
+**`--enzyme` / `--semi-specific` carry step 3's digest answer** (the same two flags, with the same
+words, go to `resolve_defaults.py` at step 4, `fetch_fasta.py fetch --enzyme` at step 6, this script for
+Sage and `make_presets.py` for FragPipe). Omitting them searches the skill's tryptic default, so a Sage
+file written for a peptidome after a step 4 `--enzyme none` would be tryptic: pass the same answer at
+every step. `run_search.py` has no digest flag; it runs the params file or workflow it is given.
+
+**`--var-mods`** (a comma list of `ox`, `deam`, or `none`): Sage DDA searches Ox(M) by default
+(the FragPipe/MaxQuant default, tagged DEFAULT, so a new Sage DDA search differs from one made
+before 2.14.2); DIA-NN and Sage DIA search none. Giving `--var-mods` replaces the default: `deam`
+alone drops Ox(M), `ox,deam` keeps both, `none` turns it off; any other word is refused.
+**`--ids-only`** (Sage only; refused with DIA-NN): identifications, no quantification and no DE;
+Sage then searches a timsTOF `.d` directly. It is the no-DE route's search **unless amounts are
+wanted** (the one rule: `references/no-de-route.md`, step 1): then leave it off and the search
+quantifies. → "Sage for identifications only
+(`--ids-only`)" above, and "Variable modifications" above for `--var-mods`.
+
+**`--labels` for a SILAC sample** (step 3): writes DIA-NN's plexDIA declaration into the cfg
+(`--fixed-mod SILAC,0.0,KR,label`, `--channels`, `--original-mods`, the channel-normalisation
+flag) and the sidecar's `labels` record, the normalisation tagged DEFAULT unless given. Never
+pass these flags as `--overrides` (refused), and never add `--lib-fixed-mod`: on a library
+predicted from the FASTA it labels K and R twice (`K(SILAC)(SILAC)`); both search routes refuse
+such a cfg. DIA with DIA-NN only. → `references/silac.md`.
+**`--cys-alkylation`** carries step 3's answer: the agent's fixed modification on C (`cam`:
+`--unimod4`; another agent: `--fixed-mod UniMod:<n>,<mass>,C`; Sage: `static_mods C`), or `none`
+for cysteine unmodified, and the Methods name it. The sidecar's `cys_alkylation` records the
+choice and who made it. Not asked → omit it: fixed carbamidomethyl-C, tagged DEFAULT.
+`sample_quality.py --report` (step 8c) warns when a fixed C modification was searched and under
+1% of the identified precursors hold a C, pooled or in any one run: confirm the prep, then
+re-search with `none` or the agent the lab used.
+**Always pass `--precursor-mz-range`**, taking `precursor_mz_range` straight from
+step 2's `detect_acquisition.py` output. Without it a DIA range falls back to
+380–980 — which on a timsTOF method acquiring 299.5–1200.5 silently discards both
+tails, does not error, and is invisible in the results. The rationale tags the
+value `measured …` or `FALLBACK …` so you can tell which you got; if it says
+FALLBACK, say so to the user before committing to a multi-hour search.
+**For a DDA run `precursor_mz_range` is the MS1 survey scan range**
+(`precursor_mz_range_source: ms1_survey_scan`): a DDA run picks its precursors from its
+survey scans, so none lies outside it. Step 2 reads it from the Thermo scan filter
+(`Full ms [350.0000-1500.0000]`), the mzML MS1 scan window, or a timsTOF `.d`'s
+`MzAcqRange`. Pass it exactly as for DIA. **`estimate_params.py --engine diann --acquisition
+DDA` refuses to write a cfg without it** — there is no 380–980 fallback for DDA (SET28's
+Exploris surveyed 350–1500 and its PSMs spanned 360–1315 m/z, so a third would have been
+cut). A DDA file with no readable range gets a NOTE (in its `reason`, and the top-level
+`dda_range_note`), not a warning: Sage's DDA config does not use the range, so it does not set
+`needs_confirmation`. For a DIA-NN search, ask the user for the survey scan range from the
+instrument method.
+A `null` on a **DIA** input means the range could not be read, the `warnings` say why, and
+the search will run on the FALLBACK unless you supply the range yourself.
+
+**DIA-NN on DDA** (`--engine diann --acquisition DDA`): the cfg carries `--dda`. Every route
+reads it from the cfg — the 5-step chain included — and `run_search.py` refuses a cfg whose
+`--dda` disagrees with the bundle's acquisition. **Nothing is measured for DDA**: DIA-NN logs
+no scan-window radius in DDA mode, so a probe would only run to its 3600 s timeout (SET28 lost
+~3 h that way). The level that has a DIA-NN tier keeps it (60k MS1 → 10 ppm); a level DIA
+would measure (a 15k MS2) is pinned at the SOP (MS2 20 ppm / MS1 7 ppm) and tagged
+`DEFAULT, not user-confirmed` (`mass_accuracy_default` in the sidecar). The Methods text and the
+run record say so from the run's provenance ("fragment (MS2) 20 ppm (Core SOP default for this
+instrument, not measured on these data)"). **Tell the user**, and offer `--overrides` if their
+instrument needs another value. `--window` stays unset, and the
+chain has no step 1b for DDA.
+
+Always pass `--fasta-meta` (step 6's sidecar): it carries the contaminant tag, so
+the cfg gets `--cont-quant-exclude Cont_` and contaminants are identified but kept
+out of DIA-NN's normalisation and its quantities for sample proteins. Both the single and 5-step parallel
+DIA-NN paths read this cfg, so the flag applies to library generation *and*
+analysis. With `--contaminants none` the flag is correctly absent.
+The estimator keys mass tolerances on the instrument class from DIA-NN's
+known-good table (Astral → MS1 4/MS2 10 ppm; timsTOF → 15 ppm; Orbitrap by
+resolution, 30k–240k; unidentified → automatic calibration). An **Orbitrap level
+outside 30k–240k**, e.g. a 15k MS2, is not extrapolated: the cfg omits *both*
+mass-accuracy flags (DIA-NN fixes both levels when either is given), the sidecar plans
+`measure_with_diann`, and the level that has a tier keeps it
+(`mass_accuracy_documented`, e.g. MS1 7 ppm at 120k). DIA-NN measures the missing level
+on representative runs before the search — step 1b of the parallel chain, or a probe
+inside the single-shot search job (step 7) — and the measurement is **refused unless it
+is plausible**: MS2 3–30 ppm, MS1 1.5–25 ppm, from at least 2 runs agreeing to within
+50% (a one-file search pins its one run; a disagreement whose median is at or below the SOP,
+with no run above 1.5× it, only warns, since the SOP is pinned either way). What is pinned is then **max(measured, SOP)** (`estimate_params.SOP_MASS_ACC`: MS2
+20 ppm, MS1 7 ppm) — the measurement is used only where it is WIDER than the SOP,
+because a tolerance tighter than the SOP costs identifications and buys nothing.
+Both numbers are recorded; a documented level is never floored. An Orbitrap whose **resolution is unknown** is *not* measured (both levels would be,
+and a measured MS1 is what DIA-NN warns about): it falls to automatic calibration, and the
+chain declines it. Pass the same resolution flags as step 4 — step 2's
+`ms1_resolution`/`ms2_resolution` with `--resolution-source detected`, or, for files in
+`orbitrap_resolution_unknown`, the user's answer with no `--resolution-source` (it defaults to
+`user`); for `ms2_ion_trap` files, `--ms2-analyzer ITMS` instead of `--ms2-resolution` (step 4 —
+Sage then writes `fragment_tol {"da": [-0.4, 0.4]}`, `deisotope: false` and a larger
+`bucket_size`, Sage's own low-res MS/MS settings; DIA-NN omits both mass-accuracy flags).
+**Pass the SAME `--ms2-analyzer` here as in step 4** — only this step changes Sage's config, and
+`run_search.py` refuses a Sage search whose config does not match the manifest (a ppm fragment
+window for an ion-trap MS2, or a Da window for an Orbitrap MS2) before converting or submitting
+anything. With
+them a 60k/15k Fusion Lumos becomes `orbitrap_untabled`: MS1 is pinned at
+10 ppm from DIA-NN's table and the 15k MS2 is measured by step 1b (`measure_with_diann`), so
+the 5-step chain can run. If step 2 reported `resolution_mixed`, do not pass one value for the
+whole cohort. The rationale's `class_label`, `resolution.source_label` and each mass-accuracy
+line then say where the numbers came from, and that is what the methods text quotes; if the
+sidecar still says `needs_confirmation: true`, relay `ask_user`. Without them mass accuracy is
+left to DIA-NN's per-run calibration (results then depend on file order), and a cohort
+that would run as the 5-step parallel chain runs as one single-node search. If the user
+does not know, say so and continue. An `--overrides` that sets only one of
+the two flags gets the other level from the table, and is refused when the table has no value
+for it (written alone, that flag would fix the other level at 20 ppm): relay the refusal to the
+user. It sets DIA/DDA window mode from acquisition, and uses
+standard trypsin/LFQ defaults for the rest. **It prints a `rationale` tagging
+every value's provenance** — surface this to the user (and it flows into the
+methods text), so a derived default is never mistaken for a confirmed setting.
+Use the resulting file as `--params` in step 7.

@@ -10,6 +10,7 @@ sources it, and its --check-hive reads HIVE's copy with it) and skill_version.R 
 carry mirrors; this file keeps each one equal to the original. It also keeps skill_version.py's
 core_admins() equal to skill_version.sh's skill_core_admins, the two readers of core_admins.txt.
 """
+import hashlib
 import json
 import os
 import re
@@ -28,6 +29,10 @@ sys.path.insert(0, HERE)
 import skill_version as sv      # noqa: E402
 import notify_slack             # noqa: E402
 from job_env import job_env     # noqa: E402
+
+# The shipped scripts/core_admins.txt, pinned without naming anyone (the repository is public):
+# sha256 of its names joined by "\n". Changing the list is a code change: update this with it.
+SHIPPED_ADMINS_SHA256 = "b73e182de1908f14f15c49a634638160874dd42c0019a629cab14c9c3ce7a327"
 
 PLUGIN = os.path.join(SKILL, ".claude-plugin", "plugin.json")
 
@@ -170,12 +175,12 @@ class BashMirror(unittest.TestCase):
 
 #: core_admins.txt files that differ only in what both readers must strip or skip.
 ADMIN_FILES = {
-    "comments_and_blank_lines": "# admins\n\n#msalemi\n   # indented comment\nbrettsp\n",
-    "blanks_at_both_ends": "  brettsp  \n\tgabrig\t\n \x0b\x0cmsalemi \x0c\n",
-    "crlf_and_a_lone_cr": "brettsp\r\n\r\ngab\rrig\r\n \r \n",
-    "comments_after_a_name": "brettsp # the director\ngabrig#staff\n#\n",
-    "no_final_newline": "brettsp\ngabrig",
-    "a_blank_or_comma_inside_and_twice": "Bad Name\na,b\nbrettsp\nbrettsp\n",
+    "comments_and_blank_lines": "# admins\n\n#mstaff\n   # indented comment\nbstaff\n",
+    "blanks_at_both_ends": "  bstaff  \n\tgstaff\t\n \x0b\x0cmstaff \x0c\n",
+    "crlf_and_a_lone_cr": "bstaff\r\n\r\ngab\rrig\r\n \r \n",
+    "comments_after_a_name": "bstaff # the director\ngstaff#staff\n#\n",
+    "no_final_newline": "bstaff\ngstaff",
+    "a_blank_or_comma_inside_and_twice": "Bad Name\na,b\nbstaff\nbstaff\n",
     "empty": "",
     "only_comments_and_blanks": "# nobody\n\n   \n\t\n",
 }
@@ -211,7 +216,9 @@ class CoreAdminsMirror(unittest.TestCase):
 
     def test_same_admins_for_the_shipped_list(self):
         self.assertEqual(self.bash_admins(None, "C.UTF-8"), sv.core_admins())
-        self.assertEqual(sv.core_admins(), ["brettsp"])
+        self.assertEqual(len(sv.core_admins()), 1, sv.core_admins())
+        self.assertEqual(hashlib.sha256("\n".join(sv.core_admins()).encode()).hexdigest(),
+                         SHIPPED_ADMINS_SHA256)
 
 
 class ReportIssueMirror(unittest.TestCase):

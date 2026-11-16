@@ -103,6 +103,14 @@ class SizingRuleTests(unittest.TestCase):
         self.assertEqual(run_search.fit_to_queue(64, PUB_HIGH), 8)
         self.assertEqual(run_search.fit_to_queue(64, PUB_LOW), 64)
 
+    def test_single_jobs_leave_headroom_under_a_per_user_cap(self):
+        self.assertEqual(run_search.single_job_cpus(64, GC_HIGH), 48)    # 64 - 64 // 4
+        self.assertEqual(run_search.single_job_cpus(96, GC_HIGH), 48)
+        self.assertEqual(run_search.single_job_cpus(16, GC_HIGH), 16)    # below it: as asked
+        self.assertEqual(run_search.single_job_cpus(32, GC_HIGH), 32)
+        self.assertEqual(run_search.single_job_cpus(64, PUB_HIGH), 8)    # per-job cap still wins
+        self.assertEqual(run_search.single_job_cpus(64, PUB_LOW), 64)    # no per-user cap
+
     def test_tres_strings(self):
         self.assertEqual(run_search._tres("cpu=64,gres/gpu=0,mem=1T", "cpu"), 64)
         self.assertEqual(run_search._tres("cpu=64,gres/gpu=0,mem=1T", "mem"), 1024)
@@ -111,6 +119,64 @@ class SizingRuleTests(unittest.TestCase):
         self.assertEqual(run_search._tres("mem=2048", "mem"), 2)          # MB when no unit
         self.assertIsNone(run_search._tres("", "cpu"))
         self.assertIsNone(run_search._tres("gres/gpu=0", "cpu"))
+
+
+class SizeCpusTests(unittest.TestCase):
+    """diann_parallel.size_cpus: the chain's single jobs (steps 1, 1b, 3, 5) on a capped queue."""
+
+    def run_size(self, limits, **kw):
+        import argparse
+        import contextlib
+        import io
+        import diann_parallel
+        a = argparse.Namespace(threads_per_file=None, threads_max=16, max_simultaneous=None,
+                               mem_per_file=None, time_per_file=None, libpred_cpus=16,
+                               assembly_cpus=64)
+        for k, v in kw.items():
+            setattr(a, k, v)
+        orig = run_search.user_limits
+        run_search.user_limits = lambda *q: dict(limits)
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                rec, _probe = diann_parallel.size_cpus(a, 29, ("high", "x", None),
+                                                       ("high", "x", None))
+        finally:
+            run_search.user_limits = orig
+        return a, rec, err.getvalue()
+
+    def test_default_assembly_asks_for_48_of_a_64_cap(self):
+        a, rec, err = self.run_size(GC_HIGH)
+        self.assertEqual(a.assembly_cpus, 48)
+        self.assertEqual(a.libpred_cpus, 16)
+        low = rec["single_jobs_lowered"]["--assembly-cpus"]
+        self.assertEqual((low["asked"], low["used"]), (64, 48))
+        self.assertIn("1/4 of the per-user cap", low["reason"])
+        self.assertIn("--assembly-cpus lowered 64 -> 48", err)
+
+    def test_a_per_job_cap_of_8_gives_8(self):
+        a, rec, _ = self.run_size(PUB_HIGH)
+        self.assertEqual(a.assembly_cpus, 8)
+        self.assertNotIn("1/4", rec["single_jobs_lowered"]["--assembly-cpus"]["reason"])
+
+    def test_no_per_user_cap_keeps_64(self):
+        a, rec, _ = self.run_size(PUB_LOW)
+        self.assertEqual(a.assembly_cpus, 64)
+        self.assertNotIn("single_jobs_lowered", rec)
+
+    def test_an_explicit_32_is_kept(self):
+        a, rec, _ = self.run_size(GC_HIGH, assembly_cpus=32)
+        self.assertEqual(a.assembly_cpus, 32)
+        self.assertNotIn("single_jobs_lowered", rec)
+
+    def test_an_explicit_64_is_lowered_and_said(self):
+        a, rec, err = self.run_size(GC_HIGH, assembly_cpus=64)
+        self.assertEqual(a.assembly_cpus, 48)
+        self.assertIn("lowered 64 -> 48", err)
+
+    def test_step_1b_probe_leaves_headroom_too(self):
+        _, rec, _ = self.run_size(GC_HIGH, threads_max=64)
+        self.assertEqual(rec["step1b_cpus"], 48)
 
 
 class StubbedSlurm(unittest.TestCase):
@@ -193,7 +259,10 @@ class ChainHeaderTests(StubbedSlurm):
             path = os.path.join(out, f"{step}.sbatch")
             self.assertEqual(self.cpus(path), 8, step)
             self.assertIn("--threads 8 ", _read(path), step)
-        self.assertEqual(self.cpus(os.path.join(out, "step3_assembly.sbatch")), 64)
+        # X2: step 3 is sized from the files (29 -> 8 CPUs); step 5 keeps 64 asked, lowered to 48
+        # (a quarter of the cap stays free)
+        self.assertEqual(self.cpus(os.path.join(out, "step3_assembly.sbatch")), 8)
+        self.assertEqual(self.cpus(os.path.join(out, "step5_report.sbatch")), 48)
         for step in ("step2_firstpass", "step4_finalpass"):
             text = _read(os.path.join(out, f"{step}.sbatch"))
             self.assertIn("#SBATCH --time=8:00:00", text)    # 4 h at 16 CPUs, scaled to 8
@@ -202,6 +271,25 @@ class ChainHeaderTests(StubbedSlurm):
         rec = info["cpu_sizing"]
         self.assertEqual((rec["cpus"], rec["concurrent"], rec["per_user_cpu_cap"]), (8, 8, 64))
         self.assertIn("up to 8 of 29 files at once", err)
+
+    def test_step_3_is_sized_from_the_files_and_step_5_keeps_its_own_size(self):
+        out, info, _ = self.chain("--threads-max", "32")       # 29 files
+        s3 = _read(os.path.join(out, "step3_assembly.sbatch"))
+        s5 = _read(os.path.join(out, "step5_report.sbatch"))
+        self.assertIn("#SBATCH --mem=32G", s3)
+        self.assertIn("--threads 8 ", s3)
+        self.assertNotIn("#SBATCH --time=12:00:00", s3)
+        self.assertIn("#SBATCH --mem=128G", s5)
+        self.assertIn("#SBATCH --time=12:00:00", s5)
+        self.assertEqual(info["cpu_sizing"]["step3_sizing"]["mem"], 32)
+
+    def test_step_3_takes_the_users_assembly_flags(self):
+        out, _, _ = self.chain("--threads-max", "32", "--assembly-cpus", "24",
+                               "--assembly-mem", "96", "--assembly-time", "20")
+        s3 = _read(os.path.join(out, "step3_assembly.sbatch"))
+        self.assertIn("#SBATCH --mem=96G", s3)
+        self.assertIn("#SBATCH --time=20:00:00", s3)
+        self.assertEqual(self.cpus(os.path.join(out, "step3_assembly.sbatch")), 24)
 
     def test_step1b_keeps_the_cpus_asked_for(self):
         out, info, _ = self.chain("--threads-max", "32", window=False)
@@ -251,7 +339,7 @@ class MeasuredDefaultsTests(unittest.TestCase):
                       "(`run_search.ARRAY_TASK_MIN_CPUS`)", doc)
         self.assertIn(f"(`diann_parallel.TIME_PER_FILE_HOURS` = {diann_parallel.TIME_PER_FILE_HOURS}"
                       f" h at `TIME_REFERENCE_CPUS` = {diann_parallel.TIME_REFERENCE_CPUS} CPUs", doc)
-        self.assertIn("jobs 24276579–82", doc)
+        self.assertIn("(HIVE, 2026-10-01, four test jobs)", doc)
         self.assertIn(f"(default {diann_parallel.MEM_PER_FILE_GB} GB, "
                       "`diann_parallel.MEM_PER_FILE_GB`;", doc)
         self.assertIn(f"({diann_parallel.MEM_FINAL_PASS_GB} GB, "
@@ -296,6 +384,66 @@ class RunSearchForwardingTests(unittest.TestCase):
                         self.assertNotIn("--threads-per-file", argv)
             finally:
                 run_search.subprocess.run = orig
+
+
+class AssemblySizing(unittest.TestCase):
+    """X2 5/5: step 3 (empirical library assembly) asked for 48 CPU / 128G / 12 h and used 2:24
+    and 5 GB on 77 files, after waiting hours on the per-user CPU cap."""
+
+    def test_the_measured_case_gets_a_small_job(self):
+        import diann_parallel as dp
+        cpus, mem, hours, rule = dp.assembly_sizing(77)
+        self.assertEqual((cpus, mem), (16, 32))
+        self.assertGreaterEqual(hours, 3)             # measured 2:24 at 48 CPUs; at 16 it is longer
+        self.assertLessEqual(hours, 24)
+        self.assertIn("77 files", rule)
+        self.assertIn("2:24", rule)
+
+    def test_it_scales_with_the_files_and_stays_inside_the_old_request(self):
+        import diann_parallel as dp
+        small, big, huge = (dp.assembly_sizing(n) for n in (5, 300, 5000))
+        self.assertEqual(small[0], 8)
+        self.assertLessEqual(huge[0], 16)
+        self.assertLessEqual(huge[1], 128)
+        self.assertLessEqual(huge[2], 48)
+        self.assertGreater(big[1], small[1])
+        self.assertGreater(big[2], small[2])
+        self.assertGreaterEqual(small[2], 2)
+
+    def run_size(self, n, **kw):
+        import argparse
+        import contextlib
+        import io
+        import diann_parallel
+        a = argparse.Namespace(threads_per_file=None, threads_max=16, max_simultaneous=None,
+                               mem_per_file=None, time_per_file=None, libpred_cpus=16,
+                               assembly_cpus=64, assembly_mem=128, assembly_time=12,
+                               assembly_given={"cpus": False, "mem": False, "time": False})
+        for k, v in kw.items():
+            setattr(a, k, v)
+        orig = run_search.user_limits
+        run_search.user_limits = lambda *q: dict(GC_HIGH)
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                rec, _ = diann_parallel.size_cpus(a, n, ("high", "x", None), ("high", "x", None))
+        finally:
+            run_search.user_limits = orig
+        return a, rec
+
+    def test_size_cpus_sets_step_3_and_records_the_rule(self):
+        a, rec = self.run_size(77)
+        self.assertEqual((a.s3_cpus, a.s3_mem), (16, 32))
+        self.assertEqual(a.assembly_cpus, 48)         # step 5: the old ask, under the cap rule
+        self.assertEqual(a.assembly_mem, 128)
+        r = rec["step3_sizing"]
+        self.assertEqual((r["cpus"], r["mem"]), (16, 32))
+        self.assertIn("default for 77 files", r["rule"])
+
+    def test_the_users_assembly_flags_win_for_step_3(self):
+        a, rec = self.run_size(77, assembly_cpus=32, assembly_mem=96, assembly_time=20,
+                               assembly_given={"cpus": True, "mem": True, "time": True})
+        self.assertEqual((a.s3_cpus, a.s3_mem, a.s3_time), (32, 96, 20))
+        self.assertIn("as given", rec["step3_sizing"]["rule"])
 
 
 if __name__ == "__main__":

@@ -21,7 +21,16 @@ to a record. session.py (the session zip) and make_report.py (OUTPUT_FILES.md) b
     beside them, a second copy of the raw data (~1 GB a run); and every `diatracer_stage`
     directory, the DIA route's links to the .d and diaTracer's pseudo-MS/MS mzML (L11 N1, N4);
   * MSFragger's `*_uncalibrated.mzML`, `*_uncalibrated.mzBIN` and `*.mzBIN` -- what it writes
-    next to each input, wherever that was;
+    next to each input, wherever that was -- and its `*.pepindex` peptide index files, which it
+    writes next to the database it searches (two of ~8 MB for a 2,403-entry database; far more for
+    a large or non-specific one);
+  * every `fragpipe_db` directory -- the target+decoy database a FragPipe search's job builds from
+    the target FASTA with Philosopher (fragpipe_db.py: rebuilt the same way by a replay; its sha256
+    is in search_provenance.json) and MSFragger's index beside it;
+  * every `fragpipe_settings` directory -- the settings folder each FragPipe start is given
+    (XDG_CONFIG_HOME, run_search.py), so it never reads or rewrites the account's shared
+    ~/.config/FragPipe: FragPipe's copy of its 78 workflows and its cache, which names this
+    search's paths (~1 MB a start; the job removes its own after a finished search);
   * every `input_links` directory -- a DIA-NN search's links to its raw runs under names DIA-NN
     can read (diann_parallel.INPUT_LINKS_DIR, --rename-dashed). An interim delivery walks a search
     folder FOLLOWING links, and copied every linked .d a second time (C2 security L7).
@@ -34,8 +43,13 @@ import os
 FRAGPIPE_STAGE_DIR = "raw_stage"
 DIATRACER_STAGE_DIR = "diatracer_stage"
 INPUT_LINKS_DIR = "input_links"        # diann_parallel.INPUT_LINKS_DIR (a test ties the two)
+# The target+decoy database a FragPipe job builds (fragpipe_db.DB_DIR), and the per-start FragPipe
+# settings folder (run_search.py's XDG_CONFIG_HOME), both inside the search folder
+FRAGPIPE_DB_DIR = "fragpipe_db"
+FRAGPIPE_SETTINGS_DIR = "fragpipe_settings"
 SCRATCH_DIRS = frozenset({".cache", "skyline_work", ".partial", FRAGPIPE_STAGE_DIR,
-                          DIATRACER_STAGE_DIR, INPUT_LINKS_DIR})
+                          DIATRACER_STAGE_DIR, INPUT_LINKS_DIR, FRAGPIPE_DB_DIR,
+                          FRAGPIPE_SETTINGS_DIR})
 # Why a scratch folder stays out, where the generic reason would mislead (a delivery's SKIPPED)
 DIR_REASONS = {
     FRAGPIPE_STAGE_DIR: "excluded: the search's staged copies of the raw files and MSFragger's "
@@ -45,13 +59,19 @@ DIR_REASONS = {
                          "pseudo-MS/MS mzML, a working copy of the raw data (the raw files are "
                          "in raw/)",
     INPUT_LINKS_DIR: "excluded: the search's links to the raw files under names DIA-NN can read, "
-                     "not data of their own (the raw files are in raw/)"}
-# MSFragger writes these beside each input (lower-cased for the test)
-MSFRAGGER_SCRATCH_SUFFIXES = ("_uncalibrated.mzml", "_uncalibrated.mzbin", ".mzbin")
-LABEL = ("scratch: .cache, skyline_work, .partial, raw_stage, diatracer_stage and input_links "
-         "folders, "
-         "*.part/*.partial files, *.stale.pdf/.html, MSFragger's *_uncalibrated.mzML/*.mzBIN, "
-         "podcast.wav beside podcast.m4a (kept on disk)")
+                     "not data of their own (the raw files are in raw/)",
+    FRAGPIPE_DB_DIR: "excluded: the target+decoy database the search's job built from the target "
+                     "FASTA (Philosopher's decoys, rebuilt the same way by a replay; its sha256 is "
+                     "in search_provenance.json) and MSFragger's peptide index beside it",
+    FRAGPIPE_SETTINGS_DIR: "excluded: FragPipe's own settings folder for this search (its copy of "
+                           "its workflows and a cache naming this search's paths), not a result"}
+# MSFragger writes these beside each input, and its peptide index beside the database
+# (<database>.<n>.pepindex; lower-cased for the test)
+MSFRAGGER_SCRATCH_SUFFIXES = ("_uncalibrated.mzml", "_uncalibrated.mzbin", ".mzbin", ".pepindex")
+LABEL = ("scratch: .cache, skyline_work, .partial, raw_stage, diatracer_stage, input_links, "
+         "fragpipe_db and fragpipe_settings folders, "
+         "*.part/*.partial files, *.stale.pdf/.html, MSFragger's *_uncalibrated.mzML/*.mzBIN/"
+         "*.pepindex, podcast.wav beside podcast.m4a (kept on disk)")
 
 
 def is_scratch_dir(name):

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-hive_remote from a Windows laptop: what one real session (gabrig, 2026-09-23, Windows 11 +
+hive_remote from a Windows laptop: what one real session (gstaff, 2026-09-23, Windows 11 +
 Git Bash) ran into, and what now stops it.
 
   1. The raw folder was T:\\Data\\lab\\service\\..., and T: is \\\\128.120.208.24\\proteomics --
@@ -11,7 +11,7 @@ Git Bash) ran into, and what now stops it.
   2. Git Bash has no rsync, so --put/--get died. They fall back to scp -- keeping rsync's
      meaning, which scp -r does not have on its own.
   3. First contact failed "Host key verification failed"; the default ssh user was the AD
-     login `AD3+gabrig` ("Permission denied"); python3 was the Microsoft Store stub.
+     login `AD3+gstaff` ("Permission denied"); python3 was the Microsoft Store stub.
      check_access.sh now says which of these it is, instead of hive_ssh: "failed".
 
 No test contacts a real host: ssh, scp, rsync, ssh-keygen and ssh-keyscan are recorders on a
@@ -65,11 +65,14 @@ SHIMS = {
                 'echo "$SHAREROOT$p"\n'),
     "ssh": RECORD.format(name="ssh") + (
         'case "${FAKE_SSH:-ok}" in\n'
-        # FAKE_CK: what check_access.sh's probe of ~/.coreomics_token answers on "HIVE"
-        '  ok) echo HAS_SBATCH; echo HAS_GRP; [ -z "${FAKE_CK:-}" ] || echo "COREOMICS_KEY=$FAKE_CK" ;;\n'
+        # FAKE_CK: what check_access.sh's probe of ~/.coreomics_token answers on "HIVE";
+        # FAKE_STAFF: a file holding what its staff probe printed there
+        '  ok) echo HAS_SBATCH; echo HAS_GRP; [ -z "${FAKE_CK:-}" ] || echo "COREOMICS_KEY=$FAKE_CK"\n'
+        '      [ -z "${FAKE_STAFF:-}" ] || cat "$FAKE_STAFF" ;;\n'
         '  old_ls_d) echo HAS_SBATCH; echo /quobyte/proteomics-grp ;;\n'
         # a HIVE account outside the Core: sbatch, but proteomics-grp cannot be listed
-        '  not_core) echo HAS_SBATCH; [ -z "${FAKE_CK:-}" ] || echo "COREOMICS_KEY=$FAKE_CK" ;;\n'
+        '  not_core) echo HAS_SBATCH; [ -z "${FAKE_CK:-}" ] || echo "COREOMICS_KEY=$FAKE_CK"\n'
+        '            [ -z "${FAKE_STAFF:-}" ] || cat "$FAKE_STAFF" ;;\n'
         '  hostkey) echo "Warning: Permanently added x" >&2; echo "Host key verification failed." >&2; exit 255 ;;\n'
         '  denied) echo "UC Davis HPC -- authorised use only" >&2\n'
         '          echo "tester@hive.hpc.ucdavis.edu: Permission denied (publickey)." >&2; exit 255 ;;\n'
@@ -210,7 +213,7 @@ class HivePathWindowsTests(Harness):
         return r, json.loads(r.stdout)
 
     def test_a_mapped_drive_resolves_to_the_flinders_mount_and_is_verified(self):
-        """gabrig's exact path shape. One ssh call, and HIVE having an extra file the laptop
+        """gstaff's exact path shape. One ssh call, and HIVE having an extra file the laptop
         has not seen yet (an instrument still writing) does not break the match."""
         for form in ("T:\\Data\\lab\\service\\P1", "T:/Data/lab/service/P1"):
             with self.subTest(form=form):
@@ -273,7 +276,7 @@ class HivePathWindowsTests(Harness):
         self.assertEqual(j["hive_path"].lower(), f"{FLINDERS}/Data/lab/service/P1".lower())
 
     def test_a_local_disk_is_not_a_share_and_makes_no_ssh_call(self):
-        r, j = self.resolve("C:\\Users\\gabrig\\raw")
+        r, j = self.resolve("C:\\Users\\gstaff\\raw")
         self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
         self.assertEqual(j["candidates"], [])
         self.assertEqual(self.hive_calls(), 0)
@@ -394,11 +397,11 @@ class PutGuardTests(Harness):
         self.assertIn("ControlMaster=auto", ssh_e)
 
     def test_a_windows_domain_login_is_refused_before_ssh(self):
-        for user in ("AD3+gabrig", "AD3\\gabrig"):
+        for user in ("AD3+gstaff", "AD3\\gstaff"):
             with self.subTest(user=user):
                 r = self.run_script(HIVE_EXEC, "hostname", HIVE_USER=user)
                 self.assertEqual(r.returncode, 2)
-                self.assertIn("'gabrig'", r.stderr)
+                self.assertIn("'gstaff'", r.stderr)
         self.assertEqual(self.calls("ssh"), [])
 
     def test_every_ssh_call_accepts_a_new_host_key(self):
@@ -561,8 +564,8 @@ class CheckAccessTests(Harness):
                 self.assertIn(text, j["hive_ssh_error"]["detail"])      # not the banner line
 
     def test_a_windows_domain_login_is_flagged_and_not_tried(self):
-        j = self.check(user="AD3+gabrig")
-        self.assertIn("'gabrig'", j["hive_user_warning"])
+        j = self.check(user="AD3+gstaff")
+        self.assertIn("'gstaff'", j["hive_user_warning"])
         self.assertEqual(j["hive_ssh"], "failed")
         self.assertEqual(self.calls("ssh"), [])
 
@@ -586,7 +589,7 @@ class CheckAccessTests(Harness):
 
 class CheckAccessCoreOmicsKeyTests(Harness):
     """check_access.sh reports the CoreOmics key on HIVE -- asked in the SAME ssh call (HIVE
-    throttles new connections) -- and where the CoreOmics steps run (Michelle, 2026-10-08: a
+    throttles new connections) -- and where the CoreOmics steps run (Morgan, 2026-10-08: a
     Windows laptop whose python3 is the Store stub, the key on the laptop, none on HIVE)."""
 
     FAKE_KEY = "c0reFAKE" + "00112233445566778899aabbccdd"
@@ -618,7 +621,7 @@ class CheckAccessCoreOmicsKeyTests(Harness):
         self.assertIn("mode 600", j["coreomics_key_on_hive_detail"])
         self.assertEqual(j["recommended_mode"], "hive_remote")
 
-    def test_michelle_before_setup_runs_on_hive_and_is_told_to_move_the_key(self):
+    def test_morgan_before_setup_runs_on_hive_and_is_told_to_move_the_key(self):
         j = self.check(laptop_key=True, FAKE_CK="absent")
         self.assertIs(j["local_python3"]["usable"], False)
         self.assertIs(j["coreomics_key_on_hive"], False)
@@ -687,6 +690,102 @@ class CheckAccessCoreOmicsKeyTests(Harness):
         self.assertIs(j["core_member"], True)
         self.assertEqual(j["coreomics_runs_on"], "hive")
         self.assertTrue(j["coreomics_key_advice"])
+
+
+class CheckAccessCoreStaffTests(Harness):
+    """2.15 Ruling 95: ONE definition of Core staff -- the staff list, through staff.py's own check.
+    core_member says only that the group folder is readable. check_access.sh reports both, the
+    staff answer asked in the same SSH call from the skill's copy on HIVE. The staff probe runs
+    here for real (staff.py, a trusted list this account owns, under the test switch); only its
+    printed answer is carried to the fake ssh."""
+
+    ME = __import__("getpass").getuser()
+
+    def probe_text(self):
+        with open(CHECK_ACCESS, encoding="utf-8") as fh:
+            src = fh.read()
+        import re
+        (probe,) = re.findall(r"^STAFF_PROBE='([^']*)'$", src, re.M)
+        return probe
+
+    def staff_answer(self, staff_list=None, skill_on_hive=True):
+        """What the probe prints on "HIVE": HOME with the skill at ~/proteomics-pipeline, the
+        staff list at CORE_STAFF_FILE (None: no list there)."""
+        home = self._mk("hive_home")
+        if skill_on_hive and not os.path.exists(os.path.join(home, "proteomics-pipeline")):
+            os.makedirs(os.path.join(home, "proteomics-pipeline"))
+            os.symlink(SCRIPTS, os.path.join(home, "proteomics-pipeline", "scripts"))
+        pybin = self._mk("pybin")
+        if not os.path.exists(os.path.join(pybin, "python3")):
+            os.symlink(sys.executable, os.path.join(pybin, "python3"))
+        env = {"HOME": home, "PATH": f"{pybin}:/usr/bin:/bin", "SKILL_SLACK_TEST_LOOPBACK": "1",
+               "SKILL_CORE_ADMINS": self.ME, "CORE_STAFF_FILE": os.path.join(self.d, "none.txt"),
+               "PYTHONDONTWRITEBYTECODE": "1"}
+        if staff_list is not None:
+            d = self._mk("staffcfg")
+            os.chmod(d, 0o755)
+            path = os.path.join(d, "core_staff.txt")
+            with open(path, "w") as fh:
+                fh.write("# the Core's staff\n" + "".join(f"{x}\n" for x in staff_list))
+            os.chmod(path, 0o644)
+            env["CORE_STAFF_FILE"] = path
+        r = subprocess.run(["bash", "-c", "true" + self.probe_text()], capture_output=True,
+                           text=True, env=env, timeout=60)
+        out = os.path.join(self.d, "staff_answer.txt")
+        with open(out, "w") as fh:
+            fh.write(r.stdout)
+        return out
+
+    def check(self, **env):
+        r = self.run_script(CHECK_ACCESS, "tester", self.key,
+                            **{"FAKE_KNOWN_FP": PUBLISHED_ED25519, **env})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)
+
+    def test_the_probe_is_staffs_own_check_in_the_same_call(self):
+        sys.path.insert(0, SCRIPTS)
+        try:
+            import staff
+        finally:
+            sys.path.remove(SCRIPTS)
+        self.assertIn(staff.STAFF_CHECK_ON_HIVE, self.probe_text())   # one definition
+        self.assertNotIn("'", self.probe_text())
+        j = self.check()
+        (argv,) = self.calls("ssh")
+        self.assertIn(staff.STAFF_CHECK_ON_HIVE, argv[-1])
+        self.assertIn("core_staff", j)
+        self.assertIsNone(j["core_staff"])                      # no answer: never assumed
+        self.assertIn("no answer", j["core_staff_detail"])
+        self.assertIs(j["core_member"], True)
+
+    def test_on_the_list_is_core_staff(self):
+        j = self.check(FAKE_STAFF=self.staff_answer([self.ME]), FAKE_CK="mode:600")
+        self.assertIs(j["core_staff"], True, j["core_staff_detail"])
+        self.assertIs(j["core_member"], True)
+        self.assertEqual(j["coreomics_runs_on"], "hive")
+
+    def test_a_group_member_not_on_the_list_is_not_core_staff(self):
+        j = self.check(FAKE_STAFF=self.staff_answer(["someone_else"]), FAKE_CK="mode:600")
+        self.assertIs(j["core_member"], True)                   # reads the group folder ...
+        self.assertIs(j["core_staff"], False)                   # ... and is still not staff
+        self.assertIn("not on the Core staff list", j["core_staff_detail"])
+        self.assertEqual(j["coreomics_runs_on"], "none")
+        self.assertIsNone(j["coreomics_key_advice"])
+
+    def test_no_usable_list_is_null_and_says_why(self):
+        j = self.check(FAKE_STAFF=self.staff_answer(None))
+        self.assertIsNone(j["core_staff"])
+        self.assertIn("cannot be used", j["core_staff_detail"])
+
+    def test_no_skill_on_hive_yet_is_null_and_says_step_0(self):
+        j = self.check(FAKE_STAFF=self.staff_answer([self.ME], skill_on_hive=False))
+        self.assertIsNone(j["core_staff"])
+        self.assertIn("step 0 puts it there", j["core_staff_detail"])
+
+    def test_without_ssh_nothing_is_claimed(self):
+        j = self.check(FAKE_SSH="denied")
+        self.assertIsNone(j["core_staff"])
+        self.assertIn("SSH login to HIVE failed", j["core_staff_detail"])
 
 
 class HiveLoginSavedTests(Harness):
@@ -764,9 +863,9 @@ class HiveLoginSavedTests(Harness):
                 os.environ["HIVE_ENV_FILE"] = old
 
     def test_a_windows_key_path_is_saved_as_git_bash_spells_it(self):
-        """Review: C:\\Users\\gabrig\\.ssh\\id_ed25519 has no "/", so dirname said "." and
+        """Review: C:\\Users\\gstaff\\.ssh\\id_ed25519 has no "/", so dirname said "." and
         "$PWD/C:\\Users\\..." was saved. cygpath -u gives the path Git Bash reads."""
-        win = "C:\\Users\\gabrig\\.ssh\\id_ed25519"
+        win = "C:\\Users\\gstaff\\.ssh\\id_ed25519"
         open(os.path.join(self.d, win), "w").close()        # what -f sees, here, for that path
         j = self.check(key=win, FAKE_CYGPATH_OUT=self.key, FAKE_KNOWN_FP=PUBLISHED_ED25519)
         self.assertIs(j["hive_login_saved"]["saved"], True, j["hive_login_saved"])
@@ -774,7 +873,7 @@ class HiveLoginSavedTests(Harness):
         self.assertNotIn(self.d + "/C:", self.read())
 
     def test_a_path_that_resolves_to_no_file_is_saved_as_given(self):
-        win = "C:\\Users\\gabrig\\.ssh\\id_ed25519"
+        win = "C:\\Users\\gstaff\\.ssh\\id_ed25519"
         open(os.path.join(self.d, win), "w").close()
         j = self.check(key=win, FAKE_CYGPATH_OUT=os.path.join(self.d, "not", "there"),
                        FAKE_KNOWN_FP=PUBLISHED_ED25519)
@@ -798,7 +897,7 @@ class HiveLoginSavedWithoutCygpathTests(HiveLoginSavedTests):
     SKIP_SHIMS = ("cygpath",)
 
     def test_a_windows_key_path_is_saved_as_git_bash_spells_it(self):
-        win = "C:\\Users\\gabrig\\.ssh\\id_ed25519"
+        win = "C:\\Users\\gstaff\\.ssh\\id_ed25519"
         open(os.path.join(self.d, win), "w").close()
         j = self.check(key=win, FAKE_KNOWN_FP=PUBLISHED_ED25519)
         self.assertIs(j["hive_login_saved"]["saved"], True)

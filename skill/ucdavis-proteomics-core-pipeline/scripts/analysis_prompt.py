@@ -232,6 +232,63 @@ def search_files(session, report):
     return folder, sp, sage_lfq_check.search_quantified(folder), why
 
 
+def semi_specific_brief(w, folder, manifest=None):
+    """The brief's line for a semi-specific search: cleavage_rules.SEMI_SPECIFIC_CAVEAT (the one
+    wording; the Methods and the report's callout quote it too), from the search's parameters as
+    make_methods.search_record reads them (C2 bio M3). Nothing for any other digest."""
+    if not folder:
+        return
+    import cleavage_rules
+    import make_methods
+    sp = os.path.join(folder, "search_provenance.json")
+    if not os.path.isfile(sp):
+        return
+    try:
+        rec = make_methods.search_record(None, sp, manifest)
+    except (OSError, ValueError) as e:
+        print(f"[analysis_prompt] {sp} could not be read for its digest: {e}", file=sys.stderr)
+        w(f"- Digest: the search record could not be read here ({e}); do not describe the "
+          "digest's specificity.")
+        return
+    semi = cleavage_rules.semi_specific_caveat((rec or {}).get("cleavage"))
+    if semi:
+        w(f"- **Semi-specific search (say this in Data Quality Notes, and wherever you give "
+          f"peptide counts):** {semi}")
+
+
+def report_parquet_what(sp):
+    """What report.parquet is, for the file list: a FragPipe DDA search's is a protein-group x run
+    table (run_search.adapt_fragpipe_dda; columns fragpipe_quant.dda_report_columns, the one
+    list), every other engine's a precursor report."""
+    sp = sp if isinstance(sp, dict) else {}
+    fq_rec = sp.get("fragpipe_quantity")
+    if str(sp.get("engine") or "").lower() == "fragpipe" and isinstance(fq_rec, dict) \
+            and fq_rec.get("status") == "ok":
+        import fragpipe_params
+        import fragpipe_quant
+        cols = fragpipe_quant.dda_report_columns(fq_rec.get("companion_column"))
+        pfdr = fragpipe_params.recorded_protein_fdr(fq_rec)
+        # what FragPipe's filter did at the protein level, from the search's record (C2
+        # proteomics H1: a --prot 1 search was called "already FDR-filtered")
+        if fragpipe_params.no_protein_fdr(pfdr):
+            fdr = ("FragPipe's Philosopher filter set the PSM and peptide FDR, but the protein "
+                   f"groups in these rows carry NO protein-level FDR ({pfdr['protein_filter']})")
+        elif pfdr:
+            fdr = ("the rows passed FragPipe's Philosopher filter, protein level included "
+                   f"({pfdr['protein_filter']})")
+        else:
+            fdr = ("FragPipe's Philosopher filter is the identification rule; whether it set a "
+                   "protein-level FDR is not in this search's record, so give no protein count as "
+                   "an FDR-controlled result")
+        return ("the search's protein report: one row per protein group and run, NOT per "
+                f"precursor (columns: {', '.join(cols)}; Genes and Protein.Names only where "
+                f"FragPipe's table had them). PG.MaxLFQ holds the protein quantity "
+                f"({fq_rec.get('quantity') or 'see fragpipe_quantity'}); the q-value columns are "
+                f"0.0 placeholders, so never read them as q-values: {fdr}")
+    return ("the search's precursor report: one row per precursor and run "
+            "(Run, Protein.Group, Q.Value, PG.Q.Value, and the precursor quantities)")
+
+
 def no_de_body(L, a, session, engine, eng_ver, eng_note, acq, embed, failed, fig_error,
                fdir_rel):
     """The body of the brief for a session with no differential expression (C2 biologist H1 +
@@ -273,6 +330,16 @@ def no_de_body(L, a, session, engine, eng_ver, eng_note, acq, embed, failed, fig
           "significant proteins. Whether the search quantified anything is not recorded here; "
           "say nothing about quantities.")
     rule = None                                   # the identification rule, as recorded
+    # a FragPipe identifications record whose protein groups rest on no protein-level FDR
+    # (fragpipe_params.protein_fdr_record; the Nonspecific workflows' --prot 1, Ruling 120): no
+    # protein-group count is a result. Only a record that says so -- an older one keeps the brief
+    # -- or a quantified search's fragpipe_quantity record (C2 proteomics H1): one predicate
+    import fragpipe_params
+    pfdr = fragpipe_params.recorded_protein_fdr(
+        ids_rec[1] if ids_rec else None, (sp or {}).get("fragpipe_quantity"))
+    no_protein_fdr = fragpipe_params.no_protein_fdr(pfdr)
+    contaminant_summary = (ids_rec[1].get("contaminant_summary")
+                           if ids_rec and isinstance(ids_rec[1], dict) else None)
     if ids_rec and isinstance(ids_rec[1], dict):
         r = ids_rec[1]
         rule = r.get("methods_sentence") if isinstance(r.get("methods_sentence"), str) else None
@@ -292,6 +359,9 @@ def no_de_body(L, a, session, engine, eng_ver, eng_note, acq, embed, failed, fig
         w(f"- Identification rule: {rule}" if rule else
           "- Identification rule: **not recorded** in the search record. Say so, and state no "
           "FDR threshold.")
+        if no_protein_fdr:
+            w(f"- Protein-level filter: {pfdr['protein_filter']}")
+    semi_specific_brief(w, folder, a.workflow_manifest)
     if first_pass:
         w(f"- **First-pass report (say this in Overview and Data Quality Notes):** {first_pass}")
     w("- The instrument's QC check around this project (`logs/qc_bracket.*`) is STAFF-ONLY: "
@@ -320,8 +390,7 @@ def no_de_body(L, a, session, engine, eng_ver, eng_note, acq, embed, failed, fig
                  "what was kept and dropped per run, and the totals"),
                 ("fragpipe_identifications.json", "how the identifications were built: the "
                  "Philosopher filter, the tables read, what was kept per run"),
-                ("report.parquet", "the search's precursor report: one row per precursor and run "
-                 "(Run, Protein.Group, Q.Value, PG.Q.Value, and the precursor quantities)"),
+                ("report.parquet", report_parquet_what(sp)),
                 ("report.stats.tsv", "the engine's per-run statistics"),
                 ("report.pg_matrix.tsv", "the engine's protein-group matrix (per run)"),
                 ("search_provenance.json", "what ran: the engine, its version and settings")):
@@ -331,9 +400,16 @@ def no_de_body(L, a, session, engine, eng_ver, eng_note, acq, embed, failed, fig
                 w(f"- `{rel(path)}` — {what}.")
                 listed.append(name)
     if not listed:
-        w("- **No search output was found** for this session"
-          + (f" ({unchosen})" if unchosen else "") + ". Say so; do not report identification "
-          "numbers you cannot read from a file.")
+        import session as _sess
+        if unchosen and unchosen.startswith(_sess.FAIMS_SPLIT_WHY):
+            # a split search has output -- in one folder per group, none chosen for this brief
+            w(f"- **No single search is chosen for this brief**: {unchosen}. Say that this "
+              "report covers none of the groups' results until one is chosen (`session.py "
+              "choose-search`); do not report identification numbers you cannot read from a file.")
+        else:
+            w("- **No search output was found** for this session"
+              + (f" ({unchosen})" if unchosen else "") + ". Say so; do not report identification "
+              "numbers you cannot read from a file.")
     if a.conditions:
         w(f"- `{a.conditions}` — the runs and their conditions (File.Name → Group).")
     if a.qc and os.path.exists(a.qc):
@@ -343,13 +419,25 @@ def no_de_body(L, a, session, engine, eng_ver, eng_note, acq, embed, failed, fig
     w("- per run: the identifications "
       + ("at the search's recorded FDR (the identification rule above)" if rule else
          "(the FDR rule they rest on is not recorded: say so)")
-      + " — precursors or PSMs, distinct peptides and protein groups" + (
-          "; with Sage's list, protein groups at `protein_q` ≤ 0.01 are those identified at 1% "
-          "protein-level FDR, and the rest are listed without a protein-level filter — say which "
-          "you count" if ids_rec and ids_rec[0].startswith("sage") else "") + ";")
+      + (" — PSMs and distinct peptides. The protein groups have no protein-level FDR (the "
+         "record's protein-level filter above), so report PSMs and peptides only — never a "
+         "protein-group count as a result, per run or in total; name proteins only as presence, "
+         "with their peptides"
+         if no_protein_fdr else
+         " — precursors or PSMs, distinct peptides and protein groups" + (
+             "; with Sage's list, protein groups at `protein_q` ≤ 0.01 are those identified at 1% "
+             "protein-level FDR, and the rest are listed without a protein-level filter — say "
+             "which you count" if ids_rec and ids_rec[0].startswith("sage") else "")) + ";")
     w("- how consistent the identification depth is between runs, and any run far below the "
       "others;")
-    w("- contaminant (`Cont_`) and keratin entries among the identifications.")
+    if isinstance(contaminant_summary, str) and contaminant_summary.strip():
+        # the search's own count by the skill's contaminant classifier (run_search.
+        # adapt_fragpipe_ids): quoted, so the share is never re-derived by hand (Ruling 120)
+        w(f"- contaminant entries, as the identifications record counts them: "
+          f"{contaminant_summary.strip()} Report that share separately, and keratin entries "
+          f"among the contaminants.")
+    else:
+        w("- contaminant (`Cont_`) and keratin entries among the identifications.")
     w("Use gene names where available; a protein with no gene name goes by its UniProt entry "
       "name, not its accession. **Never fabricate a value, protein, pathway, or citation you "
       "cannot ground in the data or established biology.**")
@@ -413,6 +501,8 @@ def no_de_body(L, a, session, engine, eng_ver, eng_note, acq, embed, failed, fig
     w("### Data Quality Notes")
     w("The caveats above, each said once: " + "; ".join(x for x in (
         "identifications only, no quantities" if quantified is False else None,
+        "no protein-level FDR on the protein groups, so no protein count" if no_protein_fdr
+        else None,
         "the first-pass report" if first_pass else None,
         "conditions without a comparison" if caveat else None,
         "the sample type as stated (or not stated)") if x) + ".")
@@ -555,7 +645,10 @@ def never_in_control(de_dir, de_file, contrast, control, adjp, det, groups, k=15
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", default="ANALYSIS_PROMPT.md")
-    ap.add_argument("--de-dir", required=True)
+    ap.add_argument("--de-dir", default=None,
+                    help="the DE tables folder (output/tables). Optional: a session with no "
+                         "differential expression has none, and the brief is then the no-DE "
+                         "brief. Default: <session>/output/tables, or ./output/tables")
     ap.add_argument("--report")
     ap.add_argument("--conditions")
     ap.add_argument("--figures-dir")
@@ -572,6 +665,12 @@ def main():
                                       "(sample_type.py) is quoted in the brief. Default: "
                                       "--submission when that is a session dir")
     a = ap.parse_args()
+    if a.de_dir is None:
+        # X8 F8: the no-DE brief needs no DE folder; the loaders below read what is there and
+        # find nothing in a folder that does not exist
+        sess = a.session or (a.submission if a.submission and os.path.isdir(
+            os.path.join(a.submission, "input")) else None)
+        a.de_dir = os.path.join(sess or ".", "output", "tables")
 
     # the page's loaders: UTF-8 whatever the locale, and a record that exists but cannot be
     # read is said (stderr + a line in this brief), never a silent {}
@@ -784,6 +883,20 @@ def main():
           f"adj.P.Val < {adjp_txt} and say in the report that this cutoff is a default, not the "
           f"rule the DE applied. Do not claim that no fold-change filter was used unless "
           f"`methods.txt` says so.")
+    # a FragPipe search whose protein groups rest on no protein-level FDR (--prot 1; the record
+    # adapt_fragpipe_dda writes, fragpipe_params.no_protein_fdr the one predicate): the DE tests
+    # those groups, so a protein count is not an FDR-controlled result (C2 proteomics H1)
+    import fragpipe_params
+    _sfolder, _sp, _q, _w = search_files(session, a.report)
+    de_pfdr = fragpipe_params.recorded_protein_fdr((_sp or {}).get("fragpipe_quantity"))
+    if fragpipe_params.no_protein_fdr(de_pfdr):
+        w(f"- **No protein-level FDR (say this in Data Quality Notes):** the protein groups the DE "
+          f"tested come from a search whose protein level was not FDR-filtered "
+          f"({de_pfdr['protein_filter']}). Its peptides passed the search's FDR; the protein "
+          "groups they map to did not. Never give the number of protein groups (tested, "
+          "identified or quantified) as an FDR-controlled result, and describe each protein you "
+          "name with its peptide evidence.")
+    semi_specific_brief(w, _sfolder, a.workflow_manifest)
     w(f"- Contrasts — name each exactly this way everywhere (text, tables, figure notes): "
       + "; ".join(f"`{c}` = **{contrast_label(c)}**" for c in contrasts)
       + f". {LOGFC_DIRECTION}" if contrasts else f"- {LOGFC_DIRECTION}")
