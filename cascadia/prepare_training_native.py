@@ -15,11 +15,15 @@ Why this replaces prepare_training_data.py / prepare_training_data_mobfilter.py 
   3. True charge. The old writer emitted every precursor at charges 2..max_charge with one label.
   4. Modifications. Labels are DIA-NN Modified.Sequence in the ProForma names of Cascadia's
      MassIVE-KB tokenizer; precursors carrying any other mod are skipped.
-  5. m/z calibration. bruker_native_augment converts TOF with timsrust's boundary formula, which
-     ignores the instrument calibration: fragments sit ~-27 ppm off (mouse benchmark run, 2026-11-16).
-     A per-run linear correction ppm(mz) = a + b*mz is fitted separately for MS2 (labelled b/y
-     ions) and MS1 (labelled precursor m/z), applied to every peak, and saved in RUN.calib.json so
-     inference can apply the same one (cascadia_native_run.py --calib).
+  5. m/z calibration drift. The boundary TOF->m/z formula reproduces the instrument's stored
+     calibration (Bruker libtimsdata, analysis.tdf MzCalibration) to within +/-3 ppm, but a run
+     can drift from that calibration with nothing in the file to record it. Over 339 FRAN timsTOF
+     runs the offset at m/z 700 has a median of -2.7 ppm (90% between -7.5 and +2.9), with
+     outliers to -22 / +33 ppm; the mouse benchmark run is one of them (-25 ppm, calibrated with
+     Tuning Mix the day before, 0.16 ppm SD). A per-run linear correction ppm(mz) = a + b*mz is
+     fitted separately for MS2 (labelled b/y ions) and MS1 (labelled precursor m/z), applied to
+     every peak, and saved in RUN.calib.json so inference can apply the same one
+     (cascadia_native_run.py --calib).
   6. Peak budget. A diaPASEF window spectrum holds ~8,400 peaks; inference keeps 150, which drops
      most of a peptide's fragments (median b/y coverage 0.04 at 10 ppm, vs 0.22 at 1,000 peaks and
      0.46 at 3,000). --variants writes one ASF per top_n from the SAME labelled precursors, so the

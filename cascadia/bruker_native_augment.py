@@ -20,10 +20,11 @@ filtering, charge enumeration and the returned window size / cycle time are Casc
 * RT: timsrust/Bruker ``Frames.Time`` is SECONDS; mzML 'scan start time' is minutes, so records
   carry rt/60 and ``augment`` multiplies back by 60.
 
-m/z calibration: the boundary formula ignores the instrument's TOF calibration (MzCalibration
-table, temperature terms) and lands ~-25 ppm off on timsTOF HT (2026-11-16). ``calib`` applies a
-per-run linear ppm correction fitted by prepare_training_native.py (RUN.calib.json): true = obs *
-(1 - (a + b*obs)*1e-6), separately for MS2 and MS1. Training applies it, so inference must too.
+m/z calibration: the boundary formula matches the instrument's stored calibration (Bruker
+libtimsdata on analysis.tdf's MzCalibration) to within +/-3 ppm. What it cannot see is drift
+since that calibration: usually a few ppm, but -25 ppm on the mouse benchmark run. ``calib``
+applies a per-run linear ppm correction fitted by prepare_training_native.py (RUN.calib.json):
+true = obs * (1 - (a + b*obs)*1e-6), separately for MS2 and MS1.
 
 Peaks are pre-truncated to the ``top_n`` most intense (augment takes the same top_n again), which
 keeps memory bounded on long runs. The raw .d is only read: analysis.tdf is opened
