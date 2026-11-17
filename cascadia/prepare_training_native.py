@@ -198,6 +198,8 @@ def main():
     ap.add_argument("--max-per-run", type=int, default=1000)
     ap.add_argument("--min-coverage", type=float, default=0.25)
     ap.add_argument("--gate-top", type=int, default=3000)
+    ap.add_argument("--own-min-coverage", type=float, default=0.0,
+                    help="per variant, keep a record only if this fraction of its b/y ions is in its own top-N")
     ap.add_argument("--gate-ppm", type=float, default=10.0)
     ap.add_argument("--scan-width", type=int, default=1, help="cycles of RT window (augment: (w+1)*cycle)")
     ap.add_argument("--max-pep-length", type=int, default=30)
@@ -314,15 +316,21 @@ def main():
             break
     stats["gated"] = len(kept)
 
-    # --- write one ASF per variant, same precursors, inference's own record construction
-    n = 0
+    # --- write one ASF per variant, same precursors, inference's own record construction.
+    # --own-min-coverage additionally drops, per variant, records whose b/y ions are not in that
+    # variant's own top-N peaks (the top-3000 gate alone left top-150 records with ~4% coverage).
+    per_variant = {}
     for v in variants:
         path = f"{a.out}.top{v}.asf"
+        n = 0
         with open(path + ".tmp", "w") as out:
-            for n, (p, i, j) in enumerate(kept, 1):
+            for p, i, j in kept:
                 prec_c, half, t_c = float(c2[i]), float(h2[i]), float(t2[i])
                 mz2, it2 = _augment_peaks(correct(ms2[i]["m/z array"], cal2),
                                           np.asarray(ms2[i]["intensity array"], dtype=float), v, 0.5)
+                if a.own_min_coverage > 0 and by_coverage(p[4], mz2, p[5], a.gate_ppm) < a.own_min_coverage:
+                    continue
+                n += 1
                 mz1, it1 = _augment_peaks(correct(ms1[j]["m/z array"], cal1),
                                           np.asarray(ms1[j]["intensity array"], dtype=float), v, 0.25)
                 d1 = float(t1[j] - t_c)
@@ -333,7 +341,8 @@ def main():
                 out.writelines(f"{x}\t{y}\t{d1}\t1\n" for x, y in zip(mz1[keep1], it1[keep1]))
                 out.write("END IONS\n")
         os.replace(path + ".tmp", path)
-    stats.update(written=len(kept), cycle_s=round(cycle, 4), time_width_s=round(tw, 4),
+        per_variant[v] = n
+    stats.update(written=len(kept), written_per_variant=per_variant, cycle_s=round(cycle, 4), time_width_s=round(tw, 4),
                  rt_s_min=round(min(t2[i] for _, i, _ in kept), 1) if kept else None,
                  rt_s_max=round(max(t2[i] for _, i, _ in kept), 1) if kept else None,
                  seconds=round(time.time() - t0))
