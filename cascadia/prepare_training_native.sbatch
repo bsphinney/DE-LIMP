@@ -11,6 +11,7 @@
 # One array task per slice of the worklist (rows task::ntasks); each run writes its own files
 # (<split>/<run>.top<N>.asf, .calib.json, .json) -- one writer per file on Quobyte.
 #   sbatch --array=0-39%20 prepare_training_native.sbatch <worklist.tsv> <outdir> 40
+# Env: VARIANTS (default 150,1000), OWN_MIN (per-variant own-top-N coverage filter, default 0 = off).
 set -u
 B=/quobyte/proteomics-grp/brett/scratch/training_pilot_20261112/scan_lane/bruker_native
 export PATH=/quobyte/proteomics-grp/envs/cascadia5/bin:$PATH
@@ -22,7 +23,8 @@ tail -n +2 "$WL" | awk -F'\t' -v t=$T -v n=$NT '(NR-1)%n==t' | while IFS=$'\t' r
   [ -s "$o.json" ] && { echo "have $o"; continue; }
   cap=1000; [ "$split" != train ] && cap=300          # val/test: fewer per run is plenty
   python3 -u -W ignore "$B/prepare_training_native.py" --report "$rep" --run "$run" --d "$d" --out "$o" \
-      --variants 150,1000 --max-per-run $cap --seed $T > "$o.log" 2>&1
+      --variants "${VARIANTS:-150,1000}" --own-min-coverage "${OWN_MIN:-0}" --max-per-run $cap --seed $T \
+      > "$o.log" 2>&1
   rc=$?
   echo "rc=$rc $split $run $(tail -1 "$o.log" | cut -c1-200)"
 done
