@@ -105,14 +105,43 @@ def _correct(mz, coef):
     return mz * (1.0 - (float(coef["a"]) + float(coef["b"]) * mz) * 1e-6)
 
 
+@contextlib.contextmanager
+def _without_appledouble(d_folder):
+    """Yield a .d path timsrust can open. A Mac copy leaves AppleDouble files such as
+    ``._analysis.tdf`` beside the real one; timsrust picks the first ``*.tdf`` it finds, opens the
+    4 KB metadata stub and fails with "file is not a database" (35 of 378 FRAN runs, 2026-11-16).
+    When such files exist, read through a temporary folder of symlinks that leaves them out."""
+    import shutil
+    import tempfile
+    names = os.listdir(d_folder)
+    if not any(n.startswith("._") for n in names):
+        yield d_folder
+        return
+    tmp = tempfile.mkdtemp(prefix="dclean_")
+    clean = os.path.join(tmp, os.path.basename(d_folder.rstrip("/")))
+    os.mkdir(clean)
+    for n in names:
+        if not n.startswith("._"):
+            os.symlink(os.path.join(os.path.abspath(d_folder), n), os.path.join(clean, n))
+    try:
+        yield clean
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def read_bruker_records(d_folder, top_n=150, calib=None):
     """mzML-shaped records (the subset of keys cascadia.augment reads), in RT order.
     calib: {"ms2": {"a","b"}, "ms1": {"a","b"}} ppm correction, or None."""
     c2 = (calib or {}).get("ms2")
     c1 = (calib or {}).get("ms1")
+    d_folder = str(d_folder)
+    with _without_appledouble(d_folder) as d_read:
+        return _read_bruker_records(d_read, top_n, c1, c2)
+
+
+def _read_bruker_records(d_folder, top_n, c1, c2):
     import timsrust_pyo3 as timsrust
 
-    d_folder = str(d_folder)
     mz_lower, mz_upper, dns = _tdf_meta(d_folder)
     conv = lambda t: tof_to_mz(t, mz_lower, mz_upper, dns)  # noqa: E731
     t0 = time.time()
