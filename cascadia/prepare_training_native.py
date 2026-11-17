@@ -119,6 +119,24 @@ def by_ions(masses, nterm_add=0.0):
     return np.asarray(theo, dtype=float).reshape(-1, 2)
 
 
+def plain_masses(modseq: str):
+    """Residue masses with every modification ignored: an approximate fragment ladder for a
+    competing precursor whose mods have no Cascadia token (it can still dominate a spectrum)."""
+    s = re.sub(r"\(UniMod:\d+\)", "", modseq or "")
+    return [_AA[c] for c in s if c in _AA]
+
+
+def explained(masses, mzs, its, nterm_add=0.0, ppm=15.0):
+    """Summed intensity of the peaks (mzs sorted ascending) matching any b/y ion (1+ or 2+); a peak
+    is counted once."""
+    if len(masses) < 2 or len(mzs) == 0:
+        return 0.0
+    theo = np.sort(by_ions(masses, nterm_add).ravel())
+    j = np.clip(np.searchsorted(theo, mzs), 1, len(theo) - 1)
+    near = np.minimum(np.abs(theo[j] - mzs), np.abs(theo[j - 1] - mzs))
+    return float(its[near <= mzs * ppm * 1e-6].sum())
+
+
 def by_coverage(masses, mzs, nterm_add=0.0, ppm=20.0):
     """Fraction of theoretical b/y ions (1+ or 2+, an ion counted once) present in mzs."""
     if len(masses) < 2 or len(mzs) == 0:
@@ -187,6 +205,76 @@ def _augment_peaks(mz, it, n, root):
     return mz, it
 
 
+def write_dominant(a, stats, variants, paired, rivals, ms2, ms1, t2, c2, h2, t1, tw, cal1, cal2, cycle, t0):
+    """One record per (centre scan, charge), labelled with the DIA-NN precursor that explains the most
+    fragment intensity in that variant's top-N peaks, kept only if it beats the runner-up (any
+    q-passing precursor of that charge, isolated by the window and eluting within the time window)
+    by --dominant-margin and covers >= --own-min-coverage of its own b/y ions.
+
+    A diaPASEF window spectrum holds ~20 co-eluting DIA-NN precursors. Labelling it with a random one
+    teaches the decoder a spread distribution: teacher-forced accuracy improves while free decoding
+    mixes residues of several peptides (train_v1, 2026-11-17)."""
+    rv_rt = np.array([r[1] for r in rivals])
+    rv_mz = np.array([r[0] for r in rivals])
+    rv_z = np.array([r[2] for r in rivals])
+    o = np.argsort(rv_rt)
+    centres = sorted({(i, p[2]): j for p, i, j in paired}.items())
+    centres = [centres[x] for x in np.random.default_rng(a.seed).permutation(len(centres))]  # cap: not RT-ordered
+    per_variant = {}
+    reasons = {}
+    for v in variants:
+        path = f"{a.out}.top{v}.asf"
+        n = 0
+        why = {}
+        with open(path + ".tmp", "w") as out:
+            for (i, z), j in centres:
+                if n >= a.max_per_run:
+                    break
+                prec_c, half, t_c = float(c2[i]), float(h2[i]), float(t2[i])
+                mzc = correct(ms2[i]["m/z array"], cal2)
+                mz2, it2 = _top(mzc, np.asarray(ms2[i]["intensity array"], dtype=float), v)
+                lo, hi = np.searchsorted(rv_rt[o], [t_c - tw, t_c + tw])
+                k = o[lo:hi]
+                k = k[(rv_z[k] == z) & (rv_mz[k] > prec_c - half) & (rv_mz[k] < prec_c + half)]
+                if k.size == 0:
+                    why["no_rival_set"] = why.get("no_rival_set", 0) + 1
+                    continue
+                sc = np.array([explained(rivals[x][4], mz2, it2, rivals[x][5], a.gate_ppm) for x in k])
+                order = np.argsort(sc)[::-1]
+                w = rivals[k[order[0]]]
+                second = sc[order[1]] if k.size > 1 else 0.0
+                if sc[order[0]] <= 0 or sc[order[0]] < a.dominant_margin * second:
+                    why["not_dominant"] = why.get("not_dominant", 0) + 1
+                    continue
+                if w[3] is None or len(w[4]) > a.max_pep_length:
+                    why["winner_unlabelable"] = why.get("winner_unlabelable", 0) + 1
+                    continue
+                if by_coverage(w[4], mz2, w[5], a.gate_ppm) < a.own_min_coverage:
+                    why["low_own_coverage"] = why.get("low_own_coverage", 0) + 1
+                    continue
+                it2s = it2 ** 0.5
+                it2s = it2s / it2s.max()
+                mz1, it1 = _augment_peaks(correct(ms1[j]["m/z array"], cal1),
+                                          np.asarray(ms1[j]["intensity array"], dtype=float), v, 0.25)
+                d1 = float(t1[j] - t_c)
+                n += 1
+                out.write(f"BEGIN IONS\nTITLE={a.run}:{n}\nPEPMASS={prec_c}\nCHARGE={z}\nSCAN={n}\n"
+                          f"RT={t_c}\nSEQ={w[3]}\n")
+                out.writelines(f"{x}\t{y}\t0.0\t2\n" for x, y in zip(mz2, it2s))
+                keep1 = np.abs(mz1 - prec_c) < half + 1
+                out.writelines(f"{x}\t{y}\t{d1}\t1\n" for x, y in zip(mz1[keep1], it1[keep1]))
+                out.write("END IONS\n")
+        os.replace(path + ".tmp", path)
+        per_variant[v] = n
+        reasons[v] = why
+    stats.update(mode="dominant", centres=len(centres), rivals=len(rivals), written_per_variant=per_variant,
+                 dropped_per_variant=reasons, cycle_s=round(cycle, 4), time_width_s=round(tw, 4),
+                 seconds=round(time.time() - t0))
+    json.dump(stats, open(a.out + ".json", "w"), indent=1)
+    log.info(json.dumps(stats))
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--report", required=True)
@@ -198,6 +286,9 @@ def main():
     ap.add_argument("--max-per-run", type=int, default=1000)
     ap.add_argument("--min-coverage", type=float, default=0.25)
     ap.add_argument("--gate-top", type=int, default=3000)
+    ap.add_argument("--dominant-margin", type=float, default=0.0,
+                    help="> 0: one record per (scan, charge), labelled with the precursor explaining the most "
+                         "top-N fragment intensity, if it beats the runner-up by this factor")
     ap.add_argument("--own-min-coverage", type=float, default=0.0,
                     help="per variant, keep a record only if this fraction of its b/y ions is in its own top-N")
     ap.add_argument("--gate-ppm", type=float, default=10.0)
@@ -228,12 +319,19 @@ def main():
     df = df.sort_values("Q.Value").drop_duplicates(["Modified.Sequence", "Precursor.Charge"])
     rng = np.random.default_rng(a.seed)
     labels = []
+    rivals = []          # (mz, rt_s, z, label or None, masses, nadd): every q-passing precursor
     for ms, z, mz, rt in zip(df["Modified.Sequence"], df["Precursor.Charge"], df["Precursor.Mz"], df["RT"]):
         z = int(z)
+        lab, masses = to_proforma(ms)
+        if lab is None:
+            rivals.append((float(mz), float(rt) * 60.0, z, None, plain_masses(ms),
+                           42.01057 if str(ms).startswith("(UniMod:1)") else 0.0))
+        else:
+            rivals.append((float(mz), float(rt) * 60.0, z, lab, masses,
+                           next((v for k, v in _NTERM_MASS.items() if lab.startswith(k)), 0.0)))
         if not 2 <= z <= a.max_charge:
             skip("charge")
             continue
-        lab, masses = to_proforma(ms)
         if lab is None:
             skip(masses)
             continue
@@ -246,7 +344,8 @@ def main():
         log.error("no usable labels for run %s", a.run)
         return 2
     order = rng.permutation(len(labels))
-    cand = [labels[i] for i in order[: max(a.max_per_run * 3, 3000)]]   # gate drops some; calib wants many
+    n_cand = len(labels) if a.dominant_margin > 0 else max(a.max_per_run * 3, 3000)
+    cand = [labels[i] for i in order[:n_cand]]   # gate drops some; calib wants many
     stats["candidates"] = len(cand)
 
     recs = read_bruker_records(a.d, top_n=max(a.gate_top, max(variants)))
@@ -303,6 +402,8 @@ def main():
     stats["calib"] = calib
     if a.calib_only:
         return 0
+    if a.dominant_margin > 0:
+        return write_dominant(a, stats, variants, paired, rivals, ms2, ms1, t2, c2, h2, t1, tw, cal1, cal2, cycle, t0)
 
     # --- evidence gate on the calibrated top gate_top peaks of the centre scan
     kept = []
