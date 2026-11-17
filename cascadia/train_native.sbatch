@@ -25,5 +25,5 @@ rm -f train_gpu.hdf5 val_gpu.hdf5 train*.hdf5 val*.hdf5   # an index left by a f
 [ -s val.asf ]   || cat "$D"/val/*.top$V.asf > val.asf
 echo "variant top$V: train $(grep -c '^BEGIN IONS' train.asf), val $(grep -c '^BEGIN IONS' val.asf); node $(hostname) $(date -Is)"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
-python3 -u /quobyte/proteomics-grp/brett/scratch/training_pilot_20261112/scan_lane/bruker_native/cascadia_train_wrap.py train train.asf val.asf -m "$CKPT" -b 32 -e "$E" -lr 1e-5 -c 10 2>&1 | grep -v 'lines/s\]$'
+python3 -u /quobyte/proteomics-grp/brett/scratch/training_pilot_20261112/scan_lane/bruker_native/cascadia_train_wrap.py train train.asf val.asf -m "$CKPT" -b 32 -e "$E" -lr 1e-5 -c 10 2>&1 | grep --line-buffered -v 'lines/s\]$'
 echo "train exit=${PIPESTATUS[0]} $(date -Is)"; ls -l checkpoint_*/ 2>/dev/null
