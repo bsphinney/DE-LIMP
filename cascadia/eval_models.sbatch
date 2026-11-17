@@ -22,13 +22,16 @@ IFS=$'\t' read -r N D REP CAL < <(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" "$RUNS"
 TMP=${TMPDIR:-/tmp}/ce_${SLURM_JOB_ID}; mkdir -p "$TMP"; trap 'rm -rf "$TMP"' EXIT
 O="$OUT/$N"; mkdir -p "$O"
 echo "run $N node $(hostname) $(date -Is)"
-run() { local tag=$1; shift; python3 -W ignore $B/cascadia_native_run.py "$@" "$D" "$N" "$O/$tag" "$TMP/$tag" 2>&1 | grep -E '^\[|native augment|top_n'; rm -rf "$TMP/$tag"; }
+# run TAG "RUNNER OPTIONS" name=ckpt...   (the runner wants: [options] run.d name outdir tmpdir name=ckpt...)
+run() { local tag=$1 opts=$2; shift 2
+  python3 -W ignore $B/cascadia_native_run.py $opts "$D" "$N" "$O/$tag" "$TMP/$tag" "$@" > "$O/$tag.log" 2>&1
+  echo "$tag exit=$? $(date -Is)"; grep -E '^\[|native augment|top_n|Error|Traceback' "$O/$tag.log" | tail -5; rm -rf "$TMP/$tag"; }
 M150="stock=$STOCK"; [ "$F150" != - ] && M150="$M150 ft150=$F150"
-run t150      --top-n 150                $M150
-run t150cal   --top-n 150  --calib "$CAL" $M150
+run t150    "--top-n 150"                 $M150
+run t150cal "--top-n 150 --calib $CAL"    $M150
 if [ "$F1000" != - ]; then
-  run t1000     --top-n 1000               ft1000=$F1000
-  run t1000cal  --top-n 1000 --calib "$CAL" ft1000=$F1000
+  run t1000    "--top-n 1000"              ft1000=$F1000
+  run t1000cal "--top-n 1000 --calib $CAL" ft1000=$F1000
 fi
 arms=()
 for a in stock:t150/stock stock_cal:t150cal/stock ft150:t150/ft150 ft150_cal:t150cal/ft150 \
