@@ -274,13 +274,13 @@ record it in **Data Quality Notes** rather than restarting the cohort.
 
 ## 5. Deposit to FRAN, then tell STAN
 
-FRAN handover is unchanged — `fran_deposit.py stage` symlinks the output into
+FRAN handover is unchanged — `fran_deposit.py stage` copies the reports into
 `/quobyte/proteomics-grp/fran/incoming/` and FRAN's cron ingests it (`references/fran.md`).
 
 > ⚠ **Never write HT search output under `/quobyte/proteomics-grp/STAN/`.** That subtree is
 > on FRAN's `DEFAULT_EXCLUDES` list deliberately: STAN writes a DIA-NN `report.parquet` for
 > every QC run, and ingesting those as customer searches would corrupt every corpus count.
-> Write somewhere else and let `fran_deposit.py stage` link it in.
+> Write somewhere else and let `fran_deposit.py stage` hand it over.
 
 **There is no write-back, and that is deliberate.** STAN v1.0.42 briefly added an
 `ht_searches` table and an `ht-record-search` command; **v1.0.43 reverted both**. The

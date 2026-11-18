@@ -674,7 +674,8 @@ class JobTrap(unittest.TestCase):
         self.assertEqual(len(entries), 1, entries)
         man = json.loads(read(os.path.join(drop, entries[0], "fran_manifest.json")))
         self.assertEqual((man["engine"], man["organism"]), ("diann", "Homo sapiens"))
-        self.assertTrue(os.path.islink(os.path.join(drop, entries[0], "report.parquet")))
+        staged = os.path.join(drop, entries[0], "report.parquet")        # copied, not linked
+        self.assertTrue(os.path.isfile(staged) and not os.path.islink(staged))
 
     def test_fran_deposit_off_is_reported_as_skipped(self):
         r = self._run("true\n", fran=None)                      # base_env: FRAN_DEPOSIT=off

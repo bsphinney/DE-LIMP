@@ -235,23 +235,92 @@ class StagingTests(unittest.TestCase):
         finally:
             del os.environ["FRAN_DROP_DIR"]
 
-    def test_the_entry_is_a_real_dir_of_symlinks_not_a_symlink(self):
+    def test_the_entry_is_a_real_dir_holding_a_real_report(self):
         """FRAN's scanner walks with os.walk(followlinks=False): a symlinked DIRECTORY is never
         descended into, so a bare symlink to the search dir would be invisible to the cron and
-        the search would silently never be ingested."""
+        the search would silently never be ingested. The report inside is a copy, not a link."""
         with tempfile.TemporaryDirectory() as d:
             out, entry = self._stage(d)
             self.assertTrue(os.path.isdir(entry))
             self.assertFalse(os.path.islink(entry))
-            self.assertTrue(os.path.islink(os.path.join(entry, "report.parquet")))
+            rp = os.path.join(entry, "report.parquet")
+            self.assertTrue(os.path.isfile(rp))
+            self.assertFalse(os.path.islink(rp))
+            man = _load_json(os.path.join(entry, fd.MANIFEST))
+            self.assertIn("report.parquet", man["copied"])
+            self.assertNotIn("copy_deferred", man)
+            self.assertFalse([f for f in os.listdir(entry) if f.endswith(fd.PARTIAL)])
 
-    def test_nothing_is_copied(self):
-        """A search directory is tens of GB. Every linked item must be a link, not a copy."""
+    def test_the_entry_survives_a_renamed_search_folder(self):
+        """2026-11-17: 5 Core searches were quarantined because staff renamed their session
+        folders after staging (`_reAnlyOxAcetyl` -> `-reAnlyOxAcetyl`, `search_noCAM` -> `search`)
+        and every symlinked report pointed at nothing. A copy must outlive the rename."""
         with tempfile.TemporaryDirectory() as d:
             out, entry = self._stage(d)
-            for f in os.listdir(entry):
-                if f != fd.MANIFEST:
-                    self.assertTrue(os.path.islink(os.path.join(entry, f)), f)
+            with open(os.path.join(out, "report.parquet"), "rb") as fh:
+                before = fh.read()
+            os.rename(out, out + "_renamed")
+            rp = os.path.join(entry, "report.parquet")
+            self.assertTrue(os.path.exists(rp))
+            with open(rp, "rb") as fh:
+                self.assertEqual(fh.read(), before)
+            self.assertEqual(fd.detect_engine(entry)[0], "diann")
+
+    def test_chromatograms_over_the_xic_limit_are_linked_and_deferred(self):
+        saved = fd.COPY_XIC_MAX_BYTES
+        fd.COPY_XIC_MAX_BYTES = 0
+        self.addCleanup(setattr, fd, "COPY_XIC_MAX_BYTES", saved)
+        with tempfile.TemporaryDirectory() as d:
+            out = search_dir(d)
+            td = os.path.join(out, "xic", "t0_xic")
+            os.makedirs(td)
+            with open(os.path.join(td, "run0.xic.parquet"), "w") as fh:
+                fh.write("x")
+            os.environ["FRAN_DROP_DIR"] = os.path.join(d, "incoming")
+            try:
+                c = fd.check(Args(out))
+                with self.assertRaises(SystemExit):
+                    fd.stage(Args(out))
+            finally:
+                del os.environ["FRAN_DROP_DIR"]
+            xd = os.path.join(c["entry"], "report_xic")
+            self.assertTrue(os.path.islink(os.path.join(xd, "run0.xic.parquet")))
+            self.assertFalse(os.path.islink(os.path.join(c["entry"], "report.parquet")))
+            man = _load_json(os.path.join(c["entry"], fd.MANIFEST))
+            self.assertIn("report_xic/", man["copy_deferred"])
+
+    def test_over_the_login_node_budget_it_links_and_says_so(self):
+        """Copying gigabytes is not login-node work. Outside a Slurm job a report over
+        COPY_LOGIN_MAX_BYTES is linked as before, and the manifest says it was deferred."""
+        saved_budget, saved_job = fd.COPY_LOGIN_MAX_BYTES, os.environ.pop("SLURM_JOB_ID", None)
+        fd.COPY_LOGIN_MAX_BYTES = 0
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                out, entry = self._stage(d)
+                self.assertTrue(os.path.islink(os.path.join(entry, "report.parquet")))
+                man = _load_json(os.path.join(entry, fd.MANIFEST))
+                self.assertIn("report.parquet", man["copy_deferred"])
+                self.assertIn("report.parquet", man["linked"])
+        finally:
+            fd.COPY_LOGIN_MAX_BYTES = saved_budget
+            if saved_job is not None:
+                os.environ["SLURM_JOB_ID"] = saved_job
+
+    def test_restaging_replaces_the_copy(self):
+        """A resumed chain rewrites report.parquet; a re-stage must hand over the NEW report, not
+        keep the first copy."""
+        with tempfile.TemporaryDirectory() as d:
+            out, entry = self._stage(d)
+            with open(os.path.join(out, "report.parquet"), "wb") as fh:
+                fh.write(b"second run")
+            os.environ["FRAN_DROP_DIR"] = os.path.join(d, "incoming")
+            try:
+                with self.assertRaises(SystemExit):
+                    fd.stage(Args(out, force=True))
+            finally:
+                del os.environ["FRAN_DROP_DIR"]
+            with open(os.path.join(entry, "report.parquet"), "rb") as fh:
+                self.assertEqual(fh.read(), b"second run")
 
     def test_each_engine_stages_what_makes_it_detectable(self):
         """After staging, FRAN's own marker test must find the SAME engine in the entry that ran
@@ -316,7 +385,9 @@ class StagingTests(unittest.TestCase):
                 xd = os.path.join(c["entry"], "report_xic")
                 self.assertTrue(os.path.isdir(xd))
                 self.assertEqual(len([f for f in os.listdir(xd) if f.endswith(".xic.parquet")]), 3)
-                self.assertTrue(all(os.path.islink(os.path.join(xd, f)) for f in os.listdir(xd)))
+                # copied, not linked, so FRAN's XIC job can read them after a folder rename
+                self.assertFalse(any(os.path.islink(os.path.join(xd, f)) for f in os.listdir(xd)))
+                self.assertFalse(os.path.exists(xd + fd.PARTIAL))
                 self.assertTrue(os.path.exists(os.path.join(xd, "run0.xic.parquet")))
             finally:
                 del os.environ["FRAN_DROP_DIR"]
@@ -405,7 +476,11 @@ class VerifyTests(unittest.TestCase):
     def test_pending_is_not_a_failure_and_a_dead_link_is(self):
         """Right after a run the only honest answer is "handed over, cron hasn't run yet". But a
         link whose target has moved leaves an entry that LOOKS staged and that the cron will skip
-        in silence -- that one has to be called out."""
+        in silence -- that one has to be called out. Reports are copied now, so the dead link is
+        made the way it still happens: a report too big to copy from a login node is linked."""
+        for k in ("COPY_LOGIN_MAX_BYTES", "COPY_MAX_BYTES"):      # login node or job alike
+            self.addCleanup(setattr, fd, k, getattr(fd, k))
+            setattr(fd, k, 0)
         with tempfile.TemporaryDirectory() as d:
             out = search_dir(d)
             drop = os.path.join(d, "incoming")

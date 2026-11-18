@@ -15,7 +15,7 @@ works for every Core member and not just whoever owns the corpus token.
 
   # 1. is this run eligible, and what would be handed over?  (login-node safe)
   python3 fran_deposit.py check --out <search out dir>
-  # 2. stage it for the cron (symlinks -- nothing is copied)
+  # 2. stage it for the cron (copies the reports; links the chromatograms)
   python3 fran_deposit.py stage --out <search out dir> [--name "..."] \
       [--organism "Homo sapiens" --taxon 9606] [--fasta-meta <search.fasta.meta.json>]
   # 3. later: did the cron actually take it?  (DB-free: answers from the cron's own logs)
@@ -41,17 +41,31 @@ log) and compares the ingest code HIVE runs with FRAN's GitHub `main`, because t
 changes often and a stale copy writes rows that look fine. `stage` prints the one-line result
 as a warning when the answer is bad; it never fails because of it.
 
-## Symlinks, never copies
+## Reports and chromatograms are copied
 
-A search directory is tens of GB. The drop entry is a **real directory** holding **symlinks**
-to the search's outputs — `report.parquet`, `report_xic/` (DIA-NN `--xic` chromatograms),
-the logs and `search_provenance.json` — plus a small real `fran_manifest.json`.
+The drop entry is a **real directory** holding **copies** of the search's reports
+(`report.parquet` / `report.tsv` / the engine's report directory, `report.log.txt`,
+`report.stats.tsv`), `report_xic/` (DIA-NN `--xic` chromatograms, copied when they fit
+`COPY_XIC_MAX_BYTES`, 20 GB, else linked), and a small real `fran_manifest.json`.
 
-It has to be a real directory of links rather than one symlink to the search dir, because
-FRAN's scanner walks with `os.walk(..., followlinks=False)`: a symlinked *directory* is never
-descended into, so a bare symlink would be silently invisible to the cron. A real directory
-is walked normally and `os.path.exists()` follows the links inside it, so the scanner detects
-the engine exactly as it would in the original tree.
+Until 2026-11-17 the reports were symlinked too, and that broke silently. Staff rename and tidy
+session folders after delivery (`_reAnlyOxAcetyl` -> `-reAnlyOxAcetyl`, `search_noCAM` ->
+`search`). Every link into the old path then pointed at nothing. The cron failed each such entry
+3 times and quarantined it, and 5 Core searches sat like that for a month. FRAN reads the report
+from the manifest's `output_dir` while it exists and from the entry otherwise, so a copy keeps
+the search ingestible whatever happens to the session folder afterwards. FRAN's nightly
+chromatogram job (fill_diann_xic_lanes.py) likewise falls back to the entry's `report_xic/`.
+
+Copies are written as `<name>.partial` and renamed into place, so the cron never reads a
+half-written report. Copying gigabytes is not login-node work: outside a Slurm job only
+`COPY_LOGIN_MAX_BYTES` is copied, and anything over it is linked as before, with the result
+saying so (`copy_deferred`) and how to finish it. The job-end hook stages from inside the
+search's own job, so the normal route always copies. An item over `COPY_MAX_BYTES` is linked
+even inside a job.
+
+It has to be a real directory rather than one symlink to the search dir, because FRAN's scanner
+walks with `os.walk(..., followlinks=False)`: a symlinked *directory* is never descended into,
+so a bare symlink would be silently invisible to the cron.
 
 The entry name is **deterministic** — `<search dir name>__<8 hex of its real path>` — so
 re-staging the same search reuses the same path instead of creating a second candidate.
@@ -123,6 +137,7 @@ import math
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import threading
@@ -168,10 +183,10 @@ PY_CANDIDATES = [os.environ.get("FRAN_INGEST_PYTHON"),
 TOKEN_CANDIDATES = [os.environ.get("DELIMP_PG_TOKEN_FILE"),
                     os.path.expanduser("~/.pgfarm_token")]
 
-# What gets linked into the drop entry. A curated list, not the whole directory: the search dir
-# also holds tens of GB of per-file .quant temporaries and a predicted library, and linking those
-# would make the handover unreadable to a person without helping either ingester. Everything the
-# corpus ingest, the XIC lane, or a later audit actually reads is here.
+# What gets copied into the drop entry (see "Reports are copied" above; the name predates that).
+# A curated list, not the whole directory: the search dir also holds tens of GB of per-file .quant
+# temporaries and a predicted library, and handing those over would make the entry unreadable to
+# a person without helping either ingester. Everything the corpus ingest or a later audit reads.
 LINK_ITEMS = [
     "report.parquet", "report.tsv", "delimp_report.parquet",   # the quant of record
     "report.log.txt", "report.stats.tsv",                      # what the engine says it did
@@ -180,7 +195,15 @@ LINK_ITEMS = [
 ]
 # `report_xic` is NOT in this list: stage() builds it from find_xic_dirs(), because the parallel
 # chain leaves chromatograms in `xic/t<N>_xic/` rather than `report_xic/` and a plain link would
-# miss every one of them.
+# miss every one of them. Copied when it fits COPY_XIC_MAX_BYTES, else a directory of links.
+
+# Copy budgets, in bytes. Outside a Slurm job (a login node) only small reports are copied; the
+# rest is linked and reported as copy_deferred. Inside a job, anything up to COPY_MAX_BYTES.
+COPY_LOGIN_MAX_BYTES = int(os.environ.get("FRAN_COPY_LOGIN_MAX_BYTES", 2 * 1024 ** 3))
+COPY_MAX_BYTES = int(os.environ.get("FRAN_COPY_MAX_BYTES", 200 * 1024 ** 3))
+# Chromatograms are copied too when they fit (one Core submission's are 15 GB).
+COPY_XIC_MAX_BYTES = int(os.environ.get("FRAN_COPY_XIC_MAX_BYTES", 20 * 1024 ** 3))
+PARTIAL = ".partial"
 #
 # NOT linked, deliberately: `search_provenance.json`. FRAN's scanner lists it as a **Radiant**
 # marker and tests Radiant before DIA-NN, so an entry containing it is detected as Radiant whatever
@@ -317,6 +340,42 @@ def dir_size(path):
             except OSError:
                 pass
     return tot
+
+
+def _remove_entry_item(p):
+    """Remove one item from a drop entry: a link or file is unlinked; a real directory (one we
+    copied or built) is removed whole. rmtree never follows a symlink, so a link inside a copied
+    directory removes only the link."""
+    if os.path.islink(p) or os.path.isfile(p):
+        os.unlink(p)
+    elif os.path.isdir(p):
+        shutil.rmtree(p)
+
+
+def _copy_into_entry(src, dst):
+    """Copy src (a file, or a report directory) to dst through dst.partial and a rename, so the cron
+    never reads a half-written report. Group-writable like everything else under incoming/."""
+    tmp = dst + PARTIAL
+    if os.path.lexists(tmp):
+        _remove_entry_item(tmp)
+    try:
+        if os.path.isdir(src):
+            shutil.copytree(src, tmp, symlinks=False, copy_function=shutil.copyfile)
+            for root, dirs, files in os.walk(tmp):
+                os.chmod(root, 0o2775)
+                for f in files:
+                    os.chmod(os.path.join(root, f), 0o664)
+        else:
+            shutil.copyfile(src, tmp)
+            os.chmod(tmp, 0o664)
+        os.rename(tmp, dst)
+    except BaseException:
+        if os.path.lexists(tmp):
+            try:
+                _remove_entry_item(tmp)
+            except OSError:
+                pass
+        raise
 
 
 def detect_engine(out):
@@ -1539,7 +1598,7 @@ def do_stage(a):
     out, entry = c["search_dir"], c["entry"]
     if a.dry_run:
         return {**c, "staged": False, "dry_run": True,
-                "would_link": c["links"], "would_write": os.path.join(entry, MANIFEST)}
+                "would_copy": c["links"], "would_write": os.path.join(entry, MANIFEST)}
 
     # WHEN it was first handed over, which FRAN's runner uses to take drop entries oldest-first. A
     # re-stage keeps the ORIGINAL time -- otherwise re-staging would push a search to the back of
@@ -1582,12 +1641,12 @@ def do_stage(a):
                 fp = os.path.join(entry, f)
                 if os.path.islink(fp) or os.path.isfile(fp):
                     os.unlink(fp)
-                elif f == "report_xic" and os.path.isdir(fp):
-                    # A real directory of links we built. Clear it too: a re-run that dropped a
-                    # pathological file would otherwise leave that file's trace behind forever.
-                    for g in os.listdir(fp):
-                        os.unlink(os.path.join(fp, g))
-                    os.rmdir(fp)
+                elif os.path.isdir(fp) and (f == "report_xic" or f in LINK_ITEMS
+                                            or f.endswith(PARTIAL)):
+                    # Directories WE built: report_xic/ (links), a copied report directory, or a
+                    # copy an interrupted stage left half-done. Clear them too: a re-run that
+                    # dropped a file would otherwise leave that file's trace behind forever.
+                    _remove_entry_item(fp)
         else:
             os.makedirs(entry, mode=0o2775, exist_ok=True)
         try:
@@ -1601,35 +1660,94 @@ def do_stage(a):
                           f"its owner can run: chmod -R g+w {entry}"}
 
     linked = []
-    # Normalise the chromatograms into ONE `report_xic/` directory of links, whatever layout the
-    # search used. FRAN's diann_xic_to_lance.py defaults to `<dir>/report_xic`, so the parallel
-    # chain's 399 scattered `xic/t<N>_xic/` directories would need special handling at the other
-    # end; flattening them here means the ingest side sees the same shape from every route. Safe
-    # because DIA-NN names each file after its RUN, so there are no collisions across tasks.
-    xf = [x for x in xic_files(out) if not os.path.exists(os.path.join(entry, "report_xic", x[0]))] \
-        if c["xic"]["present"] else []
-    if xf:
-        xdir = os.path.join(entry, "report_xic")
-        os.makedirs(xdir, exist_ok=True)
-        os.chmod(xdir, 0o2775)
-        for name, src in xf:
-            dst = os.path.join(xdir, name)
-            if not os.path.lexists(dst):
-                try:
-                    os.symlink(src, dst)
-                except OSError as e:
-                    c.setdefault("link_errors", []).append(f"report_xic/{name}: {e}")
-        linked.append(f"report_xic/ ({len(xf)} files)")
-
+    # The reports are COPIED (see "Reports are copied" in the module docstring): a link breaks the
+    # moment staff rename the session folder. Over the budget -- a login node, or a huge report --
+    # the item is linked as before and listed in copy_deferred; a failed copy (quota, I/O) also
+    # falls back to a link, so the search is still handed over.
+    copied = []
+    in_job = bool(os.environ.get("SLURM_JOB_ID"))
+    budget = COPY_MAX_BYTES if in_job else COPY_LOGIN_MAX_BYTES
     for item in c["links"]:
         src, dst = os.path.join(out, item), os.path.join(entry, item)
+        size = dir_size(src)
+        if size <= budget:
+            try:
+                _copy_into_entry(src, dst)
+                copied.append(item)
+                budget -= size
+                continue
+            except OSError as e:
+                c.setdefault("copy_errors", []).append(f"{item}: {e}")
+        else:
+            c.setdefault("copy_deferred", []).append(item)
         try:
             os.symlink(src, dst)
             linked.append(item)
         except OSError as e:
-            # One link failing must not abandon the rest: a staged entry missing its log is still
+            # One item failing must not abandon the rest: a staged entry missing its log is still
             # ingestable, and the manifest records exactly what did and did not make it.
             c.setdefault("link_errors", []).append(f"{item}: {e}")
+    # Normalise the chromatograms into ONE `report_xic/` directory, whatever layout the search
+    # used. FRAN's diann_xic_to_lance.py defaults to `<dir>/report_xic`, so the parallel chain's 399
+    # scattered `xic/t<N>_xic/` directories would need special handling at the other end; flattening
+    # them here means the ingest side sees the same shape from every route. Safe because DIA-NN
+    # names each file after its RUN, so there are no collisions across tasks.
+    # COPIED, like the reports, when they fit what is left of the budget and COPY_XIC_MAX_BYTES:
+    # FRAN's nightly fill_diann_xic_lanes.py falls back to this directory when the search folder
+    # has been renamed, which only helps if these are real files. Otherwise links, as before.
+    xf = xic_files(out) if c["xic"]["present"] else []
+    if xf:
+        xdir = os.path.join(entry, "report_xic")
+        xsize = sum(os.path.getsize(src) for _n, src in xf if os.path.exists(src))
+        mode = "copied" if xsize <= min(budget, COPY_XIC_MAX_BYTES) else "linked"
+        build = xdir + PARTIAL if mode == "copied" else xdir
+        if os.path.lexists(build):
+            _remove_entry_item(build)
+        os.makedirs(build, exist_ok=True)
+        os.chmod(build, 0o2775)
+        failed = 0
+        for name, src in xf:
+            dst = os.path.join(build, name)
+            try:
+                if mode == "copied":
+                    shutil.copyfile(src, dst)
+                    os.chmod(dst, 0o664)
+                else:
+                    os.symlink(src, dst)
+            except OSError as e:
+                failed += 1
+                c.setdefault("copy_errors" if mode == "copied" else "link_errors",
+                             []).append(f"report_xic/{name}: {e}")
+        if mode == "copied" and failed:
+            # A partial copy would pair some runs' traces and drop others: link the lot instead.
+            _remove_entry_item(build)
+            mode, build = "linked", xdir
+            os.makedirs(xdir, exist_ok=True)
+            os.chmod(xdir, 0o2775)
+            for name, src in xf:
+                try:
+                    os.symlink(src, os.path.join(xdir, name))
+                except OSError as e:
+                    c.setdefault("link_errors", []).append(f"report_xic/{name}: {e}")
+        if mode == "copied":
+            os.rename(build, xdir)
+            budget -= xsize
+            copied.append(f"report_xic/ ({len(xf)} files)")
+        else:
+            linked.append(f"report_xic/ ({len(xf)} files)")
+            if not failed:
+                c.setdefault("copy_deferred", []).append("report_xic/")
+
+    if c.get("copy_deferred"):
+        where = ("over the copy limit (FRAN_COPY_MAX_BYTES / FRAN_COPY_XIC_MAX_BYTES)" if in_job else
+                 "this is not a Slurm job and it is over the login-node copy limit")
+        c["copy_deferred_detail"] = (
+            f"linked, not copied ({where}): if the search folder is renamed or moved before FRAN "
+            f"ingests it, the entry breaks"
+            + ("." if in_job else ". Re-run this same stage command inside a Slurm job "
+                                  "(srun/sbatch) to copy them."))
+        sys.stderr.write(f"fran_deposit stage: {', '.join(c['copy_deferred'])} "
+                         f"{c['copy_deferred_detail']}\n")
 
     manifest = {
         "fran_manifest_version": 1,
@@ -1659,7 +1777,11 @@ def do_stage(a):
         **{k: c[k] for k in ("fasta_source", "organism_evidence", "organism_unresolved",
                              "organism_warning") if c.get(k)},
         "xic": c["xic"],
+        # `copied`: real copies, which survive a rename of the search folder. `linked`: symlinks
+        # into it (report_xic/, and anything in copy_deferred), which do not.
+        "copied": copied,
         "linked": linked,
+        **({"copy_deferred": c["copy_deferred"]} if c.get("copy_deferred") else {}),
         "staged_by": staged_by,
         # ISO-8601 UTC, the ORIGINAL hand-over time (kept across re-stages); FRAN orders its drop
         # box by this instead of the entry directory's mtime.
@@ -1686,16 +1808,20 @@ def do_stage(a):
     receipt = {"status": "staged", "search_dir": out, "entry": entry, "engine": c["engine"],
                "organism": c.get("organism"), "taxon": c.get("taxon"),
                "search_name": c.get("name"), "staged_at": staged_at, "qc_rule": c.get("qc_rule"),
-               "xic": c["xic"], "linked": linked, "staged_by": c["user"], "fran": FRAN_URL}
-    if c.get("link_errors"):
-        receipt["link_errors"] = c["link_errors"]
+               "xic": c["xic"], "copied": copied, "linked": linked, "staged_by": c["user"],
+               "fran": FRAN_URL}
+    for k in ("link_errors", "copy_errors", "copy_deferred"):
+        if c.get(k):
+            receipt[k] = c[k]
     if c.get("database_ok"):
         receipt["database_ok"] = c["database_ok"]
     write_receipt(out, receipt)
-    return {**c, "staged": True, "entry": entry, "linked": linked,
+    return {**c, "staged": True, "entry": entry, "copied": copied, "linked": linked,
             "manifest": os.path.join(entry, MANIFEST),
             "receipt": os.path.join(out, RECEIPT),
-            "note": "FRAN's ingest cron picks this up on its next scan; nothing was copied.",
+            "note": "FRAN's ingest cron picks this up on its next scan. The reports were copied "
+                    "into the entry, so renaming the search folder later does not break it"
+                    + (" (except copy_deferred)." if c.get("copy_deferred") else "."),
             "then": f"python3 {os.path.abspath(__file__)} verify --out {shlex.quote(out)}"}
 
 
@@ -3426,7 +3552,7 @@ def main():
     ap.add_argument("--database-ok", default=None, metavar="WHY",
                     help="a person has looked at a database `check` could not clear (U/O/B/Z "
                          "residues, no fetch_fasta sidecar) and says why it is real; recorded")
-    ap.add_argument("--dry-run", action="store_true", help="show what would be linked, link nothing")
+    ap.add_argument("--dry-run", action="store_true", help="show what would be copied, write nothing")
     q = ap.add_mutually_exclusive_group()
     q.add_argument("--qc", action="store_true",
                    help="this IS a QC run: never hand it to FRAN (withdraws it if already staged)")

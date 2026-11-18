@@ -1792,8 +1792,9 @@ class ReviewFixTests(unittest.TestCase):
             self.assertEqual(os.stat(out).st_mode & 0o7777, mode)
             self.assertFalse(os.path.islink(entry))
             self.assertTrue(os.path.isdir(entry))
-            self.assertEqual(os.path.realpath(os.path.join(entry, "report.parquet")),
-                             os.path.realpath(os.path.join(out, "report.parquet")))
+            staged = os.path.join(entry, "report.parquet")            # a copy, not a link
+            self.assertFalse(os.path.islink(staged))
+            self.assertEqual(_read(staged, "rb"), before["report.parquet"][1])
             # and a withdrawal refuses to write through a symlink entry
             os.rename(entry, entry + ".real")
             os.symlink(out, entry)

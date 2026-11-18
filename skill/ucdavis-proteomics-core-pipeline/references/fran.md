@@ -13,17 +13,17 @@ user does not have to request it and is not prompted for it; they are *told* it 
 <!-- contents: tests/test_skill_structure.py --toc -->
 **Contents** (section: line)
 - 29: The skill does not ingest anything
-- 40: Who is handed over — and who must never be
-- 120: The three commands
-- 155: Staged is not ingested — `health`
-- 241: Backfill — searches that were never staged
-- 306: What gets linked
-- 368: Pass the organism — it is the one thing only the skill knows
-- 427: Why `check` refuses (stable codes, never an exception)
-- 476: The database guard — no sequence that does not exist may reach FRAN
-- 513: Idempotency
-- 538: Follow-ups
-- 550: 7c. Hand the search to FRAN (step 7c)
+- 52: Who is handed over — and who must never be
+- 132: The three commands
+- 167: Staged is not ingested — `health`
+- 253: Backfill — searches that were never staged
+- 318: What gets linked
+- 380: Pass the organism — it is the one thing only the skill knows
+- 439: Why `check` refuses (stable codes, never an exception)
+- 488: The database guard — no sequence that does not exist may reach FRAN
+- 525: Idempotency
+- 550: Follow-ups
+- 562: 7c. Hand the search to FRAN (step 7c)
 <!-- /contents -->
 
 ## The skill does not ingest anything
@@ -33,9 +33,21 @@ is put the search where that scan will find it:
 
 > **The drop directory is `/quobyte/proteomics-grp/fran/incoming/`** (`FRAN_DROP_DIR`).
 
-So `fran_deposit.py` **stages** — symlinks, never copies — and stops. No database, no
+So `fran_deposit.py` **stages** — copies the reports into a drop entry — and stops. No database, no
 credential, no SLURM job. That is why it works for **every** Core member rather than only
 whoever owns the corpus token.
+
+**Why copies, not links (since 2026-11-17).** Staff rename and tidy session folders after
+delivery (`_reAnlyOxAcetyl` → `-reAnlyOxAcetyl`, `search_noCAM` → `search`). A symlinked report
+then points at nothing, the cron fails the entry 3 times and quarantines it, and nobody is told:
+5 Core searches sat like that for a month. A copy survives the rename, because FRAN reads the
+report from the manifest's `output_dir` while it exists and from the entry otherwise, and the
+nightly chromatogram job (`fill_diann_xic_lanes.py`) falls back to the entry's `report_xic/`.
+Chromatograms are copied too when they are under 20 GB (`FRAN_COPY_XIC_MAX_BYTES`); bigger ones
+are linked.
+Copying is I/O, so outside a Slurm job only reports under 2 GB (`FRAN_COPY_LOGIN_MAX_BYTES`) are
+copied; bigger ones are linked and the result lists them under `copy_deferred`. Re-run the same
+`stage` inside a job to copy them. The job-end hook already stages from inside the search's job.
 
 ## Who is handed over — and who must never be
 
@@ -126,7 +138,7 @@ HIVE-side step. Each prints one JSON object.
 # 1. eligible? (stat only — login-node safe, parses nothing)
 bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/fran_deposit.py check --out <hive search out dir>'
 
-# 2. hand it over (symlinks; instant, regardless of search size)
+# 2. hand it over (copies the reports; run it inside a Slurm job when they are over 2 GB)
 bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/fran_deposit.py stage \
     --out <hive search out dir> --organism "<the organism the USER confirmed>" --taxon <taxid> \
     --name "<analysis name>" [--qc | --not-qc]'
@@ -566,10 +578,9 @@ out (`--no-fran`). The user is told it happened, never prompted for it. A corpus
 with the searches somebody remembered answers "has anyone seen this peptide?" with a *no*
 that is really a *don't know*.
 
-FRAN runs its own ingest cron on HIVE, so the skill does **not** ingest: it symlinks the
-search into FRAN's drop directory (`/quobyte/proteomics-grp/fran/incoming/`) and stops.
-Nothing is copied, no database or credential is involved, and it takes a second whatever the
-size of the search.
+FRAN runs its own ingest cron on HIVE, so the skill does **not** ingest: it copies the
+search's reports into FRAN's drop directory (`/quobyte/proteomics-grp/fran/incoming/`) and
+stops. No database or credential is involved.
 
 **A collaborator's search must never be handed over.** The gate is write permission on that
 directory — it lives inside `/quobyte/proteomics-grp`, so a HIVE account outside the group
